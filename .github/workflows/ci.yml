@@ -3,6 +3,9 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "website/**"
+      - ".github/workflows/website.yml"
   pull_request:
     branches: [main]
 
