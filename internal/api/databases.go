@@ -231,6 +231,61 @@ func (s *Server) handleGetDatabase(c *gin.Context) {
 	errorResponse(c, http.StatusForbidden, "no access to this database")
 }
 
+// validateDemoModeUpdate checks if a database update is allowed in demo mode.
+// Returns an error message if validation fails, empty string if allowed.
+func (s *Server) validateDemoModeUpdate(db *store.Database, req UpdateDatabaseRequest) string {
+	if s.config == nil || !s.config.IsDemoMode() {
+		return ""
+	}
+
+	// No credential changes, no validation needed
+	if req.Username == nil && req.Password == nil && req.Host == nil && req.DatabaseName == nil {
+		return ""
+	}
+
+	target := s.config.GetDemoTarget()
+	if target == nil {
+		return ""
+	}
+
+	// Compute effective values
+	username := db.Username
+	if req.Username != nil {
+		username = *req.Username
+	}
+	host := db.Host
+	if req.Host != nil {
+		host = *req.Host
+	}
+	database := db.DatabaseName
+	if req.DatabaseName != nil {
+		database = *req.DatabaseName
+	}
+
+	errorMsg := fmt.Sprintf("you can only use %s:%s@%s/%s in demo mode", target.Username, target.Password, target.Host, target.Database)
+
+	// If password is being changed, validate full credentials
+	if req.Password != nil {
+		if errMsg := s.config.ValidateDemoTarget(username, *req.Password, host, database); errMsg != "" {
+			return errMsg
+		}
+		return ""
+	}
+
+	// Validate individual fields against demo target
+	if req.Username != nil && username != target.Username {
+		return errorMsg
+	}
+	if req.Host != nil && host != target.Host {
+		return errorMsg
+	}
+	if req.DatabaseName != nil && database != target.Database {
+		return errorMsg
+	}
+
+	return ""
+}
+
 // handleUpdateDatabase updates a database
 func (s *Server) handleUpdateDatabase(c *gin.Context) {
 	uid, err := parseUIDParam(c)
@@ -247,55 +302,14 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 
 	// Check demo mode restrictions if credentials are being updated
 	if s.config != nil && s.config.IsDemoMode() && (req.Username != nil || req.Password != nil || req.Host != nil || req.DatabaseName != nil) {
-		// Get current database to check combined values
 		db, err := s.store.GetDatabaseByUID(c.Request.Context(), uid)
 		if err != nil {
 			errorResponse(c, http.StatusNotFound, "database not found")
 			return
 		}
-
-		// Use new values if provided, otherwise keep existing
-		username := db.Username
-		if req.Username != nil {
-			username = *req.Username
-		}
-		// For password, if not being updated, assume it's valid (we can't decrypt to check)
-		password := ""
-		if req.Password != nil {
-			password = *req.Password
-		}
-		host := db.Host
-		if req.Host != nil {
-			host = *req.Host
-		}
-		database := db.DatabaseName
-		if req.DatabaseName != nil {
-			database = *req.DatabaseName
-		}
-
-		// Only validate if password is being changed (we can't check encrypted existing password)
-		if req.Password != nil {
-			if errMsg := s.config.ValidateDemoTarget(username, password, host, database); errMsg != "" {
-				errorResponse(c, http.StatusForbidden, errMsg)
-				return
-			}
-		} else if req.Username != nil || req.Host != nil || req.DatabaseName != nil {
-			// If only username, host, or database name is being changed, validate against demo target
-			target := s.config.GetDemoTarget()
-			if target != nil {
-				if req.Username != nil && username != target.Username {
-					errorResponse(c, http.StatusForbidden, fmt.Sprintf("you can only use %s:%s@%s/%s in demo mode", target.Username, target.Password, target.Host, target.Database))
-					return
-				}
-				if req.Host != nil && host != target.Host {
-					errorResponse(c, http.StatusForbidden, fmt.Sprintf("you can only use %s:%s@%s/%s in demo mode", target.Username, target.Password, target.Host, target.Database))
-					return
-				}
-				if req.DatabaseName != nil && database != target.Database {
-					errorResponse(c, http.StatusForbidden, fmt.Sprintf("you can only use %s:%s@%s/%s in demo mode", target.Username, target.Password, target.Host, target.Database))
-					return
-				}
-			}
+		if errMsg := s.validateDemoModeUpdate(db, req); errMsg != "" {
+			errorResponse(c, http.StatusForbidden, errMsg)
+			return
 		}
 	}
 

@@ -127,35 +127,48 @@ func (s *Store) ListDatabases(ctx context.Context) ([]Database, error) {
 	return databases, nil
 }
 
+// checkStorageDSNConflict verifies that a database update won't result in matching the storage DSN.
+func (s *Store) checkStorageDSNConflict(ctx context.Context, uid uuid.UUID, updates DatabaseUpdate) error {
+	if updates.Host == nil && updates.Port == nil && updates.DatabaseName == nil {
+		return nil
+	}
+
+	current, err := s.GetDatabaseByUID(ctx, uid)
+	if err != nil {
+		return err
+	}
+
+	host := valueOrDefault(updates.Host, current.Host)
+	port := valueOrDefaultInt(updates.Port, current.Port)
+	databaseName := valueOrDefault(updates.DatabaseName, current.DatabaseName)
+
+	if s.MatchesStorageDSN(host, port, databaseName) {
+		return ErrTargetMatchesStorage
+	}
+	return nil
+}
+
+func valueOrDefault(ptr *string, def string) string {
+	if ptr != nil {
+		return *ptr
+	}
+	return def
+}
+
+func valueOrDefaultInt(ptr *int, def int) int {
+	if ptr != nil {
+		return *ptr
+	}
+	return def
+}
+
 // UpdateDatabase updates a database.
 // Returns ErrTargetMatchesStorage if the update would cause the target to match the DBBat storage database.
 func (s *Store) UpdateDatabase(ctx context.Context, uid uuid.UUID, updates DatabaseUpdate, encryptionKey []byte) error {
 	// Security check: if host, port, or database name are being updated,
 	// verify the resulting configuration doesn't match the storage DSN
-	if updates.Host != nil || updates.Port != nil || updates.DatabaseName != nil {
-		// Get current database to compute the final values
-		current, err := s.GetDatabaseByUID(ctx, uid)
-		if err != nil {
-			return err
-		}
-
-		// Compute effective values after update
-		host := current.Host
-		if updates.Host != nil {
-			host = *updates.Host
-		}
-		port := current.Port
-		if updates.Port != nil {
-			port = *updates.Port
-		}
-		databaseName := current.DatabaseName
-		if updates.DatabaseName != nil {
-			databaseName = *updates.DatabaseName
-		}
-
-		if s.MatchesStorageDSN(host, port, databaseName) {
-			return ErrTargetMatchesStorage
-		}
+	if err := s.checkStorageDSNConflict(ctx, uid, updates); err != nil {
+		return err
 	}
 
 	q := s.db.NewUpdate().
