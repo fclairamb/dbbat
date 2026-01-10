@@ -54,7 +54,7 @@ export const canRevokeAPIKey = (roles: string[] | undefined): boolean => hasAnyR
 /**
  * Get tooltip message explaining why a button is disabled
  */
-export const getDisabledReason = (action: string, roles: string[] | undefined): string => {
+export const getDisabledReason = (action: string, _roles?: string[]): string => {
   const roleMessages: Record<string, string> = {
     'create-user': 'Only administrators can create users',
     'create-database': 'Only administrators can create databases',

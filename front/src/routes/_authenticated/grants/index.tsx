@@ -51,7 +51,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Plus, Ban } from "lucide-react";
 import { toast } from "sonner";
-import { format, formatDistanceToNow } from "date-fns";
+import { format } from "date-fns";
 
 export const Route = createFileRoute("/_authenticated/grants/")({
   component: GrantsPage,

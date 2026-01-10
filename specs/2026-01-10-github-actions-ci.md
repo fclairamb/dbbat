@@ -213,7 +213,7 @@ lint:
         go-version: "1.25"
     - uses: golangci/golangci-lint-action@v9.0.0
       with:
-        version: v2.1
+        version: v2.8
 ```
 
 ### 2. Frontend Job

@@ -18,7 +18,7 @@ const getBaseUrl = () => {
   return "/app/";
 };
 
-export default defineConfig(({ command }) => {
+export default defineConfig(() => {
   const base = getBaseUrl();
 
   return {

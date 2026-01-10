@@ -34,6 +34,7 @@ export const test = base.extend<{ authenticatedPage: Page }>({
     await page.waitForLoadState("domcontentloaded");
 
     // Use the authenticated page
+    // eslint-disable-next-line react-hooks/rules-of-hooks
     await use(page);
   },
 });

@@ -82,7 +82,7 @@ async function waitForServer(url: string, maxRetries: number): Promise<void> {
         console.log("[setup] Server is ready!");
         return;
       }
-    } catch (err) {
+    } catch {
       // Server not ready yet
     }
 

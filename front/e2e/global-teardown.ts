@@ -21,7 +21,7 @@ function execCommand(
   args: string[],
   options: { cwd?: string } = {}
 ): Promise<void> {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve, _reject) => {
     console.log(`[teardown] Running: ${command} ${args.join(" ")}`);
     const proc = spawn(command, args, {
       cwd: options.cwd || PROJECT_ROOT,
@@ -68,8 +68,8 @@ async function killProcess(pid: number): Promise<void> {
       // Process is dead
       console.log(`[teardown] Process ${pid} terminated successfully.`);
     }
-  } catch (err: any) {
-    if (err.code === "ESRCH") {
+  } catch (err: unknown) {
+    if (err instanceof Error && (err as NodeJS.ErrnoException).code === "ESRCH") {
       // Process doesn't exist
       console.log(`[teardown] Process ${pid} not found (already stopped).`);
     } else {
