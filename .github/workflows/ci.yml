@@ -31,33 +31,6 @@ jobs:
           version: v2.8
 
   # ===========================================================================
-  # PR Title Validation - Ensure PR titles follow conventional commits
-  # ===========================================================================
-  pr-title:
-    runs-on: ubuntu-24.04
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: amannn/action-semantic-pull-request@v6.1.1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          scopes: |
-            api
-            auth
-            config
-            crypto
-            db
-            deps
-            docs
-            grants
-            migrations
-            proxy
-            store
-            ui
-            release
-          requireScope: false
-
-  # ===========================================================================
   # Frontend Job - Build React app with Bun
   # ===========================================================================
   frontend:
