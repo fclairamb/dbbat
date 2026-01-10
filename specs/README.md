@@ -1,5 +1,5 @@
-Here are different specifications structured with:
+Specs should be initially written in github issues. And once we are ready
+to implement them, they should be written to the specs directory, re-edited and implemented.
 
-- specs/*.md - the specification that are left to implement
-- specs/past/*.md - the specification that are already implemented
-- specs/ideas/*.md - ideas for future specifications
+All files specs should contain a link to their initial github issue. 
+Something like that: [#4](https://github.com/fclairamb/dbbat/issues/4)

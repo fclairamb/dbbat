@@ -138,7 +138,7 @@ spec:
         image: ghcr.io/fclairamb/dbbat:latest
         ports:
         - name: postgres
-          containerPort: 5432
+          containerPort: 5434
           protocol: TCP
         - name: api
           containerPort: 8080
@@ -155,7 +155,7 @@ spec:
               name: dbbat-key
               key: encryption-key
         - name: DBB_LISTEN_PG
-          value: ":5432"
+          value: ":5434"
         - name: DBB_LISTEN_API
           value: ":8080"
         resources:
@@ -208,7 +208,7 @@ spec:
     app: dbbat
   ports:
   - name: postgres
-    port: 5432
+    port: 5434
     targetPort: postgres
     protocol: TCP
   - name: api
@@ -283,7 +283,7 @@ spec:
 
 ## Exposing the PostgreSQL Proxy
 
-The PostgreSQL proxy port (5432) typically cannot be exposed via standard HTTP Ingress. Options include:
+The PostgreSQL proxy port (5434) typically cannot be exposed via standard HTTP Ingress. Options include:
 
 ### Option 1: LoadBalancer Service
 
@@ -301,7 +301,7 @@ spec:
     app: dbbat
   ports:
   - name: postgres
-    port: 5432
+    port: 5434
     targetPort: postgres
   type: LoadBalancer
 ```
@@ -320,9 +320,9 @@ spec:
     app: dbbat
   ports:
   - name: postgres
-    port: 5432
+    port: 5434
     targetPort: postgres
-    nodePort: 30432  # Access via any node IP:30432
+    nodePort: 30434  # Access via any node IP:30434
   type: NodePort
 ```
 
@@ -338,7 +338,7 @@ metadata:
   name: tcp-services
   namespace: ingress-nginx
 data:
-  "5432": "dbbat/dbbat:5432"
+  "5434": "dbbat/dbbat:5434"
 ```
 
 ## Complete Deployment

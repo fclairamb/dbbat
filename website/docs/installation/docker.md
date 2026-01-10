@@ -11,7 +11,7 @@ The easiest way to run DBBat is with Docker.
 ```bash
 docker run -d \
   --name dbbat \
-  -p 5432:5432 \
+  -p 5434:5434 \
   -p 8080:8080 \
   -e DBB_DSN="postgres://user:pass@host:5432/dbbat" \
   -e DBB_KEY="your-base64-encoded-key" \
@@ -25,7 +25,7 @@ docker run -d \
 | `DBB_DSN` | PostgreSQL DSN for DBBat storage | Yes |
 | `DBB_KEY` | Base64-encoded AES-256 encryption key | One of KEY/KEYFILE |
 | `DBB_KEYFILE` | Path to file containing encryption key | One of KEY/KEYFILE |
-| `DBB_LISTEN_PG` | Proxy listen address (default: `:5432`) | No |
+| `DBB_LISTEN_PG` | Proxy listen address (default: `:5434`) | No |
 | `DBB_LISTEN_API` | REST API listen address (default: `:8080`) | No |
 
 ## Generating an Encryption Key
@@ -38,7 +38,7 @@ openssl rand -base64 32
 
 ## Exposed Ports
 
-- **5432**: PostgreSQL proxy port
+- **5434**: PostgreSQL proxy port
 - **8080**: REST API port
 
 ## Volumes
@@ -48,7 +48,7 @@ For persistent key storage, mount a volume:
 ```bash
 docker run -d \
   --name dbbat \
-  -p 5432:5432 \
+  -p 5434:5434 \
   -p 8080:8080 \
   -e DBB_DSN="postgres://user:pass@host:5432/dbbat" \
   -e DBB_KEYFILE="/keys/dbbat.key" \

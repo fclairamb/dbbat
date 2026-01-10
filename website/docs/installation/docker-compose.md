@@ -29,10 +29,10 @@ services:
     environment:
       DBB_DSN: postgres://dbbat:dbbat@postgres:5432/dbbat?sslmode=disable
       DBB_KEY: ${DBB_KEY:-YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY=}
-      DBB_LISTEN_PG: ":5432"
+      DBB_LISTEN_PG: ":5434"
       DBB_LISTEN_API: ":8080"
     ports:
-      - "5001:5432"  # Proxy port
+      - "5001:5434"  # Proxy port
       - "8080:8080"  # API port
 
 volumes:
