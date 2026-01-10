@@ -13,7 +13,7 @@ bin = "./tmp/dbbat"
 args_bin = ["serve"]
 # Full command with environment variables
 # DBB_REDIRECTS proxies /app/* to the Vite dev server for hot module replacement
-full_bin = "DBB_LISTEN_PG=:5432 DBB_LISTEN_API=:8080 DBB_DSN=postgres://postgres:postgres@localhost:5002/dbbat?sslmode=disable DBB_KEY=MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE= DBB_RUN_MODE=test DBB_REDIRECTS=/app:localhost:5173/app ./tmp/dbbat serve"
+full_bin = "DBB_DSN=postgres://postgres:postgres@localhost:5001/dbbat?sslmode=disable DBB_KEY=MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE= DBB_RUN_MODE=test DBB_REDIRECTS=/app:localhost:5173/app ./tmp/dbbat serve"
 # Watch these file extensions
 include_ext = ["go", "sql"]
 # Exclude directories

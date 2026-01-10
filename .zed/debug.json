@@ -9,7 +9,7 @@
     "env": {
       "DBB_LISTEN_PG": ":5001",
       "DBB_LISTEN_API": ":8080",
-      "DBB_DSN": "postgres://postgres:postgres@localhost:5002/dbbat?sslmode=disable",
+      "DBB_DSN": "postgres://postgres:postgres@localhost:5001/dbbat?sslmode=disable",
       "DBB_KEY": "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=",
     },
   },
