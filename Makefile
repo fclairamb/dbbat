@@ -26,10 +26,10 @@ dev-stop:
 # Build variables for ldflags
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-BUILD_TIME ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+GIT_TIME ?= $(shell TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "unknown")
 LDFLAGS := -X 'github.com/fclairamb/dbbat/internal/version.Version=$(VERSION)' \
            -X 'github.com/fclairamb/dbbat/internal/version.Commit=$(COMMIT)' \
-           -X 'github.com/fclairamb/dbbat/internal/version.BuildTime=$(BUILD_TIME)'
+           -X 'github.com/fclairamb/dbbat/internal/version.GitTime=$(GIT_TIME)'
 
 # Build the binary
 build:

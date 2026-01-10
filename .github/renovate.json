@@ -1,0 +1,17 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "prConcurrentLimit": 2,
+  "prHourlyLimit": 2,
+  "schedule": ["after 10pm"],
+  "packageRules": [
+    {
+      "matchUpdateTypes": ["minor", "patch"],
+      "addLabels": ["automerge"],
+      "automerge": true,
+      "automergeType": "pr",
+      "automergeStrategy": "squash",
+      "platformAutomerge": true
+    }
+  ]
+}

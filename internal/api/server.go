@@ -202,7 +202,7 @@ func (s *Server) handleVersion(c *gin.Context) {
 		"api_version":   "v1",
 		"build_version": version.Version,
 		"build_commit":  version.Commit,
-		"build_time":    version.BuildTime,
+		"git_time":      version.GitTime,
 	})
 }
 
