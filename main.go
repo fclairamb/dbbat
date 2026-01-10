@@ -266,7 +266,7 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	// Provision demo data if in demo mode
 	if cfg.RunMode == config.RunModeDemo {
-		if err := provisionDemoData(ctx, dataStore, cfg.EncryptionKey, logger); err != nil {
+		if err := provisionDemoData(ctx, dataStore, cfg, logger); err != nil {
 			return fmt.Errorf("failed to provision demo data: %w", err)
 		}
 	}
@@ -520,8 +520,19 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	return nil
 }
 
-func provisionDemoData(ctx context.Context, dataStore *store.Store, encryptionKey []byte, logger *slog.Logger) error {
+func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.Config, logger *slog.Logger) error {
 	logger.Info("Demo mode: provisioning demo data...")
+
+	// Get demo target configuration
+	demoTarget := cfg.GetDemoTarget()
+	if demoTarget == nil {
+		demoTarget = &config.DemoTarget{
+			Username: "demo",
+			Password: "demo",
+			Host:     "localhost",
+		}
+	}
+	logger.Info("Demo target", "user", demoTarget.Username, "host", demoTarget.Host)
 
 	// 1. Get admin user and mark password as changed (password is already "admin" from EnsureDefaultAdmin)
 	adminUser, err := dataStore.GetUserByUsername(ctx, "admin")
@@ -581,18 +592,18 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, encryptionKe
 	}
 	logger.Info("Created connector user (username: connector, password: connector)")
 
-	// 4. Create demo_db database configuration
+	// 4. Create demo_db database configuration using demo target
 	demoDB, err := dataStore.CreateDatabase(ctx, &store.Database{
 		Name:         "demo_db",
 		Description:  "Demo database",
-		Host:         "localhost",
+		Host:         demoTarget.Host,
 		Port:         5432,
 		DatabaseName: "demo",
-		Username:     "demo",
-		Password:     "demo",
+		Username:     demoTarget.Username,
+		Password:     demoTarget.Password,
 		SSLMode:      "disable",
 		CreatedBy:    &adminUser.UID,
-	}, encryptionKey)
+	}, cfg.EncryptionKey)
 	if err != nil {
 		return fmt.Errorf("failed to create demo_db database config: %w", err)
 	}

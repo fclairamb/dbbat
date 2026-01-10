@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/knadh/koanf/parsers/json"
@@ -103,10 +102,10 @@ type Config struct {
 	// RunMode controls whether test data is provisioned on startup.
 	RunMode RunMode `koanf:"run_mode"`
 
-	// DemoAllowedHostRegex is a regex pattern for allowed database hosts in demo mode.
-	// Only applies when RunMode is "demo". If empty, all hosts are allowed.
-	// Example: "^(localhost|127\\.0\\.0\\.1|postgres)$"
-	DemoAllowedHostRegex string `koanf:"demo_allowed_host_regex"`
+	// DemoTargetDB specifies the only allowed database target in demo mode.
+	// Format: "user:password@host" (e.g., "demo:demo@localhost")
+	// Only applies when RunMode is "demo". If empty, defaults to "demo:demo@localhost".
+	DemoTargetDB string `koanf:"demo_target_db"`
 
 	// QueryStorage holds query result storage configuration.
 	QueryStorage QueryStorageConfig `koanf:"query_storage"`
@@ -494,27 +493,75 @@ func normalizeBaseURL(baseURL string) string {
 	return baseURL
 }
 
+// DemoTarget holds the parsed demo target database credentials.
+type DemoTarget struct {
+	Username string
+	Password string
+	Host     string
+}
+
+// DefaultDemoTargetDB is the default value for DemoTargetDB.
+const DefaultDemoTargetDB = "demo:demo@localhost"
+
 // IsDemoMode returns true if running in demo mode.
 func (c *Config) IsDemoMode() bool {
 	return c.RunMode == RunModeDemo
 }
 
-// IsHostAllowedInDemo checks if a host is allowed in demo mode.
-// Returns true if not in demo mode, or if no regex is configured, or if the host matches.
-func (c *Config) IsHostAllowedInDemo(host string) bool {
+// GetDemoTarget parses and returns the demo target configuration.
+// Returns nil if not in demo mode.
+func (c *Config) GetDemoTarget() *DemoTarget {
 	if !c.IsDemoMode() {
-		return true
+		return nil
 	}
 
-	if c.DemoAllowedHostRegex == "" {
-		return true
+	targetDB := c.DemoTargetDB
+	if targetDB == "" {
+		targetDB = DefaultDemoTargetDB
 	}
 
-	matched, err := regexp.MatchString(c.DemoAllowedHostRegex, host)
-	if err != nil {
-		slog.Error("Invalid demo_allowed_host_regex", "regex", c.DemoAllowedHostRegex, "error", err)
-		return false
+	return ParseDemoTargetDB(targetDB)
+}
+
+// ParseDemoTargetDB parses a demo target string in format "user:pass@host".
+func ParseDemoTargetDB(s string) *DemoTarget {
+	// Find @ separator
+	atIdx := strings.LastIndex(s, "@")
+	if atIdx == -1 {
+		return nil
 	}
 
-	return matched
+	userPass := s[:atIdx]
+	host := s[atIdx+1:]
+
+	// Find : separator in user:pass
+	colonIdx := strings.Index(userPass, ":")
+	if colonIdx == -1 {
+		return nil
+	}
+
+	return &DemoTarget{
+		Username: userPass[:colonIdx],
+		Password: userPass[colonIdx+1:],
+		Host:     host,
+	}
+}
+
+// ValidateDemoTarget checks if the given credentials match the demo target.
+// Returns an error message if validation fails, or empty string if valid.
+func (c *Config) ValidateDemoTarget(username, password, host string) string {
+	if !c.IsDemoMode() {
+		return ""
+	}
+
+	target := c.GetDemoTarget()
+	if target == nil {
+		return ""
+	}
+
+	if username != target.Username || password != target.Password || host != target.Host {
+		return fmt.Sprintf("you can only use %s:%s@%s in demo mode", target.Username, target.Password, target.Host)
+	}
+
+	return ""
 }

@@ -61,10 +61,12 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		return
 	}
 
-	// Check host restriction in demo mode
-	if s.config != nil && !s.config.IsHostAllowedInDemo(req.Host) {
-		errorResponse(c, http.StatusForbidden, "host not allowed in demo mode")
-		return
+	// Check demo mode restrictions
+	if s.config != nil {
+		if errMsg := s.config.ValidateDemoTarget(req.Username, req.Password, req.Host); errMsg != "" {
+			errorResponse(c, http.StatusForbidden, errMsg)
+			return
+		}
 	}
 
 	// Set default port if not provided
@@ -237,10 +239,33 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		return
 	}
 
-	// Check host restriction in demo mode if host is being updated
-	if req.Host != nil && s.config != nil && !s.config.IsHostAllowedInDemo(*req.Host) {
-		errorResponse(c, http.StatusForbidden, "host not allowed in demo mode")
-		return
+	// Check demo mode restrictions if credentials are being updated
+	if s.config != nil && s.config.IsDemoMode() {
+		// Get current database to check combined values
+		db, err := s.store.GetDatabaseByUID(c.Request.Context(), uid)
+		if err != nil {
+			errorResponse(c, http.StatusNotFound, "database not found")
+			return
+		}
+
+		// Use new values if provided, otherwise keep existing
+		username := db.Username
+		if req.Username != nil {
+			username = *req.Username
+		}
+		password := db.Password
+		if req.Password != nil {
+			password = *req.Password
+		}
+		host := db.Host
+		if req.Host != nil {
+			host = *req.Host
+		}
+
+		if errMsg := s.config.ValidateDemoTarget(username, password, host); errMsg != "" {
+			errorResponse(c, http.StatusForbidden, errMsg)
+			return
+		}
 	}
 
 	updates := store.DatabaseUpdate{
