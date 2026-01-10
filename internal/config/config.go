@@ -103,8 +103,8 @@ type Config struct {
 	RunMode RunMode `koanf:"run_mode"`
 
 	// DemoTargetDB specifies the only allowed database target in demo mode.
-	// Format: "user:password@host" (e.g., "demo:demo@localhost")
-	// Only applies when RunMode is "demo". If empty, defaults to "demo:demo@localhost".
+	// Format: "user:password@host/dbname" (e.g., "demo:demo@localhost/demo")
+	// Only applies when RunMode is "demo". If empty, defaults to "demo:demo@localhost/demo".
 	DemoTargetDB string `koanf:"demo_target_db"`
 
 	// QueryStorage holds query result storage configuration.
@@ -498,10 +498,11 @@ type DemoTarget struct {
 	Username string
 	Password string
 	Host     string
+	Database string
 }
 
 // DefaultDemoTargetDB is the default value for DemoTargetDB.
-const DefaultDemoTargetDB = "demo:demo@localhost"
+const DefaultDemoTargetDB = "demo:demo@localhost/demo"
 
 // IsDemoMode returns true if running in demo mode.
 func (c *Config) IsDemoMode() bool {
@@ -523,7 +524,7 @@ func (c *Config) GetDemoTarget() *DemoTarget {
 	return ParseDemoTargetDB(targetDB)
 }
 
-// ParseDemoTargetDB parses a demo target string in format "user:pass@host".
+// ParseDemoTargetDB parses a demo target string in format "user:pass@host/dbname".
 func ParseDemoTargetDB(s string) *DemoTarget {
 	// Find @ separator
 	atIdx := strings.LastIndex(s, "@")
@@ -532,7 +533,7 @@ func ParseDemoTargetDB(s string) *DemoTarget {
 	}
 
 	userPass := s[:atIdx]
-	host := s[atIdx+1:]
+	hostDB := s[atIdx+1:]
 
 	// Find : separator in user:pass
 	colonIdx := strings.Index(userPass, ":")
@@ -540,16 +541,23 @@ func ParseDemoTargetDB(s string) *DemoTarget {
 		return nil
 	}
 
+	// Find / separator in host/dbname
+	slashIdx := strings.Index(hostDB, "/")
+	if slashIdx == -1 {
+		return nil
+	}
+
 	return &DemoTarget{
 		Username: userPass[:colonIdx],
 		Password: userPass[colonIdx+1:],
-		Host:     host,
+		Host:     hostDB[:slashIdx],
+		Database: hostDB[slashIdx+1:],
 	}
 }
 
 // ValidateDemoTarget checks if the given credentials match the demo target.
 // Returns an error message if validation fails, or empty string if valid.
-func (c *Config) ValidateDemoTarget(username, password, host string) string {
+func (c *Config) ValidateDemoTarget(username, password, host, database string) string {
 	if !c.IsDemoMode() {
 		return ""
 	}
@@ -559,8 +567,8 @@ func (c *Config) ValidateDemoTarget(username, password, host string) string {
 		return ""
 	}
 
-	if username != target.Username || password != target.Password || host != target.Host {
-		return fmt.Sprintf("you can only use %s:%s@%s in demo mode", target.Username, target.Password, target.Host)
+	if username != target.Username || password != target.Password || host != target.Host || database != target.Database {
+		return fmt.Sprintf("you can only use %s:%s@%s/%s in demo mode", target.Username, target.Password, target.Host, target.Database)
 	}
 
 	return ""

@@ -65,7 +65,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 
 	// Check demo mode restrictions
 	if s.config != nil {
-		if errMsg := s.config.ValidateDemoTarget(req.Username, req.Password, req.Host); errMsg != "" {
+		if errMsg := s.config.ValidateDemoTarget(req.Username, req.Password, req.Host, req.DatabaseName); errMsg != "" {
 			errorResponse(c, http.StatusForbidden, errMsg)
 			return
 		}
@@ -246,7 +246,7 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 	}
 
 	// Check demo mode restrictions if credentials are being updated
-	if s.config != nil && s.config.IsDemoMode() && (req.Username != nil || req.Password != nil || req.Host != nil) {
+	if s.config != nil && s.config.IsDemoMode() && (req.Username != nil || req.Password != nil || req.Host != nil || req.DatabaseName != nil) {
 		// Get current database to check combined values
 		db, err := s.store.GetDatabaseByUID(c.Request.Context(), uid)
 		if err != nil {
@@ -268,23 +268,31 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		if req.Host != nil {
 			host = *req.Host
 		}
+		database := db.DatabaseName
+		if req.DatabaseName != nil {
+			database = *req.DatabaseName
+		}
 
 		// Only validate if password is being changed (we can't check encrypted existing password)
 		if req.Password != nil {
-			if errMsg := s.config.ValidateDemoTarget(username, password, host); errMsg != "" {
+			if errMsg := s.config.ValidateDemoTarget(username, password, host, database); errMsg != "" {
 				errorResponse(c, http.StatusForbidden, errMsg)
 				return
 			}
-		} else if req.Username != nil || req.Host != nil {
-			// If only username or host is being changed, validate against demo target
+		} else if req.Username != nil || req.Host != nil || req.DatabaseName != nil {
+			// If only username, host, or database name is being changed, validate against demo target
 			target := s.config.GetDemoTarget()
 			if target != nil {
 				if req.Username != nil && username != target.Username {
-					errorResponse(c, http.StatusForbidden, fmt.Sprintf("you can only use %s:%s@%s in demo mode", target.Username, target.Password, target.Host))
+					errorResponse(c, http.StatusForbidden, fmt.Sprintf("you can only use %s:%s@%s/%s in demo mode", target.Username, target.Password, target.Host, target.Database))
 					return
 				}
 				if req.Host != nil && host != target.Host {
-					errorResponse(c, http.StatusForbidden, fmt.Sprintf("you can only use %s:%s@%s in demo mode", target.Username, target.Password, target.Host))
+					errorResponse(c, http.StatusForbidden, fmt.Sprintf("you can only use %s:%s@%s/%s in demo mode", target.Username, target.Password, target.Host, target.Database))
+					return
+				}
+				if req.DatabaseName != nil && database != target.Database {
+					errorResponse(c, http.StatusForbidden, fmt.Sprintf("you can only use %s:%s@%s/%s in demo mode", target.Username, target.Password, target.Host, target.Database))
 					return
 				}
 			}

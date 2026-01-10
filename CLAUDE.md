@@ -234,7 +234,7 @@ Priority order: CLI flags > Environment variables > Config file > Defaults
 | `DBB_BASE_URL` | Base URL path for the frontend app (default: `/app`) | No |
 | `DBB_REDIRECTS` | Dev redirect rules for proxying to dev servers (see below) | No |
 | `DBB_RUN_MODE` | Run mode: empty (default), `test`, or `demo` | No |
-| `DBB_DEMO_TARGET_DB` | Allowed database target in demo mode (format: `user:pass@host`, default: `demo:demo@localhost`) | No |
+| `DBB_DEMO_TARGET_DB` | Allowed database target in demo mode (format: `user:pass@host/dbname`, default: `demo:demo@localhost/demo`) | No |
 
 ### Test Mode (DBB_RUN_MODE=test)
 
@@ -282,12 +282,12 @@ Demo mode is similar to test mode but designed for public demos:
 DBB_RUN_MODE=demo ./dbbat serve
 ```
 
-By default, only databases using `demo:demo@localhost` credentials are allowed. To customize:
+By default, only databases using `demo:demo@localhost/demo` credentials are allowed. To customize:
 ```bash
-DBB_RUN_MODE=demo DBB_DEMO_TARGET_DB="myuser:mypass@myhost" ./dbbat serve
+DBB_RUN_MODE=demo DBB_DEMO_TARGET_DB="myuser:mypass@myhost/mydb" ./dbbat serve
 ```
 
-Any attempt to create a database with different credentials will return: "you can only use demo:demo@localhost in demo mode"
+Any attempt to create a database with different credentials will return: "you can only use demo:demo@localhost/demo in demo mode"
 
 ### Development Redirects (DBB_REDIRECTS)
 
