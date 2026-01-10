@@ -59,9 +59,11 @@ CREATE TABLE databases (
     ssl_mode TEXT NOT NULL DEFAULT 'prefer',
     created_by UUID REFERENCES users(uid),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ                  -- Soft delete timestamp
 );
 CREATE INDEX idx_databases_name ON databases(name);
+CREATE INDEX idx_databases_deleted_at ON databases(deleted_at) WHERE deleted_at IS NULL;
 
 --bun:split
 

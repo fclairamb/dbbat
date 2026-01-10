@@ -98,6 +98,7 @@ type Database struct {
 	CreatedBy         *uuid.UUID `bun:"created_by,type:uuid" json:"created_by"`
 	CreatedAt         time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 	UpdatedAt         time.Time  `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
+	DeletedAt         *time.Time `bun:"deleted_at,soft_delete" json:"-"`
 }
 
 // DatabaseUpdate represents fields that can be updated

@@ -346,6 +346,15 @@ func (s *Server) handleDeleteDatabase(c *gin.Context) {
 		return
 	}
 
+	// Check demo mode restrictions
+	if s.config != nil && s.config.IsDemoMode() {
+		db, err := s.store.GetDatabaseByUID(c.Request.Context(), uid)
+		if err == nil && db.Name == "demo_db" {
+			errorResponse(c, http.StatusForbidden, "cannot delete the demo database in demo mode")
+			return
+		}
+	}
+
 	if err := s.store.DeleteDatabase(c.Request.Context(), uid); err != nil {
 		s.logger.Error("failed to delete database", "error", err)
 		errorResponse(c, http.StatusInternalServerError, "failed to delete database")
