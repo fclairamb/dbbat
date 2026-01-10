@@ -1,16 +1,16 @@
 [
   {
-    "label": "Run PgLens",
+    "label": "Run DBBat",
     "adapter": "Delve",
     "request": "launch",
     "mode": "debug",
-    "program": "./cmd/pglens",
-    "cwd": "./cmd/pglens",
+    "program": "./cmd/dbbat",
+    "cwd": "./cmd/dbbat",
     "env": {
-      "PGL_LISTEN_ADDR": ":5001",
-      "PGL_API_ADDR": ":8080",
-      "PGL_DSN": "postgres://postgres:postgres@localhost:5002/pglens?sslmode=disable",
-      "PGL_KEY": "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=",
+      "DBB_LISTEN_PG": ":5001",
+      "DBB_LISTEN_API": ":8080",
+      "DBB_DSN": "postgres://postgres:postgres@localhost:5002/dbbat?sslmode=disable",
+      "DBB_KEY": "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=",
     },
   },
 ]
