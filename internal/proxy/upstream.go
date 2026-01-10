@@ -168,8 +168,8 @@ func (s *Session) processUpstreamAuthMessage(
 		// Upstream is ready, save the frontend for later use
 		s.upstreamFrontend = upstreamFrontend
 
-		// Enforce read-only mode at the database level if grant is read-only
-		if s.grant.AccessLevel == "read" {
+		// Enforce read-only mode at the database level if grant has read_only control
+		if s.grant.IsReadOnly() {
 			if err := s.setSessionReadOnly(); err != nil {
 				return false, fmt.Errorf("failed to set read-only mode: %w", err)
 			}

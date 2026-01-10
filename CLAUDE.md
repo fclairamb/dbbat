@@ -23,7 +23,11 @@ A transparent PostgreSQL proxy for query observability, access control, and safe
 
 ### Access Control
 - Grant time-windowed access (starts_at, expires_at) to specific databases
-- Access levels: `read` or `write`
+- Controls-based permissions with granular restrictions:
+  - `read_only`: Enables PostgreSQL session read-only mode and blocks write queries
+  - `block_copy`: Blocks all COPY commands (both TO and FROM)
+  - `block_ddl`: Blocks DDL statements (CREATE, ALTER, DROP, TRUNCATE)
+  - Empty controls array = full write access
 - Optional quotas per grant: max queries, max bytes transferred
 - Revoke access manually or let it expire automatically
 - Full audit log of all access control changes

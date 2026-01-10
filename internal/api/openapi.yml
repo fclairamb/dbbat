@@ -1595,6 +1595,18 @@ components:
           description: SSL mode
 
     # Grant schemas
+    GrantControl:
+      type: string
+      enum:
+        - read_only
+        - block_copy
+        - block_ddl
+      description: |
+        Control types that can be applied to a grant:
+        - `read_only`: Enables PostgreSQL session read-only mode and blocks write queries
+        - `block_copy`: Blocks all COPY commands (both TO and FROM)
+        - `block_ddl`: Blocks DDL statements (CREATE, ALTER, DROP, TRUNCATE)
+
     AccessGrant:
       type: object
       properties:
@@ -1610,10 +1622,11 @@ components:
           type: string
           format: uuid
           description: Database UID
-        access_level:
-          type: string
-          enum: [read, write]
-          description: Access level
+        controls:
+          type: array
+          items:
+            $ref: '#/components/schemas/GrantControl'
+          description: List of controls applied. Empty array means full write access.
         granted_by:
           type: string
           format: uuid
@@ -1662,7 +1675,7 @@ components:
         - uid
         - user_id
         - database_id
-        - access_level
+        - controls
         - granted_by
         - starts_at
         - expires_at
@@ -1679,10 +1692,12 @@ components:
           type: string
           format: uuid
           description: Database UID
-        access_level:
-          type: string
-          enum: [read, write]
-          description: Access level
+        controls:
+          type: array
+          items:
+            $ref: '#/components/schemas/GrantControl'
+          default: []
+          description: List of controls to apply. Empty array means full write access.
         starts_at:
           type: string
           format: date-time
@@ -1702,7 +1717,6 @@ components:
       required:
         - user_id
         - database_id
-        - access_level
         - starts_at
         - expires_at
 

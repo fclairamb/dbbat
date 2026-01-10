@@ -12,10 +12,16 @@ import (
 
 // CreateGrant creates a new access grant
 func (s *Store) CreateGrant(ctx context.Context, grant *Grant) (*Grant, error) {
+	// Ensure Controls is not nil
+	controls := grant.Controls
+	if controls == nil {
+		controls = []string{}
+	}
+
 	result := &AccessGrant{
 		UserID:              grant.UserID,
 		DatabaseID:          grant.DatabaseID,
-		AccessLevel:         grant.AccessLevel,
+		Controls:            controls,
 		GrantedBy:           grant.GrantedBy,
 		StartsAt:            grant.StartsAt,
 		ExpiresAt:           grant.ExpiresAt,

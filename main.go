@@ -488,33 +488,33 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	}
 	logger.Info("Created proxy_target database configuration")
 
-	// 5. Create write grant for connector user
+	// 5. Create write grant for connector user (empty controls = full write access)
 	_, err = dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:      connectorUser.UID,
-		DatabaseID:  targetDB.UID,
-		AccessLevel: "write",
-		GrantedBy:   adminUser.UID,
-		StartsAt:    time.Now(),
-		ExpiresAt:   time.Now().AddDate(10, 0, 0), // 10 years from now
+		UserID:     connectorUser.UID,
+		DatabaseID: targetDB.UID,
+		Controls:   []string{}, // Empty = full write access
+		GrantedBy:  adminUser.UID,
+		StartsAt:   time.Now(),
+		ExpiresAt:  time.Now().AddDate(10, 0, 0), // 10 years from now
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create write grant for connector user: %w", err)
 	}
 	logger.Info("Created write grant for connector user on proxy_target")
 
-	// 6. Create read grant for viewer user
+	// 6. Create read-only grant for viewer user
 	_, err = dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:      viewerUser.UID,
-		DatabaseID:  targetDB.UID,
-		AccessLevel: "read",
-		GrantedBy:   adminUser.UID,
-		StartsAt:    time.Now(),
-		ExpiresAt:   time.Now().AddDate(10, 0, 0), // 10 years from now
+		UserID:     viewerUser.UID,
+		DatabaseID: targetDB.UID,
+		Controls:   []string{store.ControlReadOnly}, // Read-only access
+		GrantedBy:  adminUser.UID,
+		StartsAt:   time.Now(),
+		ExpiresAt:  time.Now().AddDate(10, 0, 0), // 10 years from now
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create read grant for viewer user: %w", err)
+		return fmt.Errorf("failed to create read-only grant for viewer user: %w", err)
 	}
-	logger.Info("Created read grant for viewer user on proxy_target")
+	logger.Info("Created read-only grant for viewer user on proxy_target")
 
 	logger.Info("Test data provisioning complete")
 	return nil
@@ -598,33 +598,33 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, encryptionKe
 	}
 	logger.Info("Created demo_db database configuration")
 
-	// 5. Create write grant for connector user
+	// 5. Create write grant for connector user (empty controls = full write access)
 	_, err = dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:      connectorUser.UID,
-		DatabaseID:  demoDB.UID,
-		AccessLevel: "write",
-		GrantedBy:   adminUser.UID,
-		StartsAt:    time.Now(),
-		ExpiresAt:   time.Now().AddDate(10, 0, 0), // 10 years from now
+		UserID:     connectorUser.UID,
+		DatabaseID: demoDB.UID,
+		Controls:   []string{}, // Empty = full write access
+		GrantedBy:  adminUser.UID,
+		StartsAt:   time.Now(),
+		ExpiresAt:  time.Now().AddDate(10, 0, 0), // 10 years from now
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create write grant for connector user: %w", err)
 	}
 	logger.Info("Created write grant for connector user on demo_db")
 
-	// 6. Create read grant for viewer user
+	// 6. Create read-only grant for viewer user
 	_, err = dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:      viewerUser.UID,
-		DatabaseID:  demoDB.UID,
-		AccessLevel: "read",
-		GrantedBy:   adminUser.UID,
-		StartsAt:    time.Now(),
-		ExpiresAt:   time.Now().AddDate(10, 0, 0), // 10 years from now
+		UserID:     viewerUser.UID,
+		DatabaseID: demoDB.UID,
+		Controls:   []string{store.ControlReadOnly}, // Read-only access
+		GrantedBy:  adminUser.UID,
+		StartsAt:   time.Now(),
+		ExpiresAt:  time.Now().AddDate(10, 0, 0), // 10 years from now
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create read grant for viewer user: %w", err)
+		return fmt.Errorf("failed to create read-only grant for viewer user: %w", err)
 	}
-	logger.Info("Created read grant for viewer user on demo_db")
+	logger.Info("Created read-only grant for viewer user on demo_db")
 
 	logger.Info("Demo data provisioning complete")
 	return nil

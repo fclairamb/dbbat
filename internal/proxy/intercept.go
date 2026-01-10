@@ -46,19 +46,29 @@ func (s *Session) handleQuery(query *pgproto3.Query) error {
 		return err
 	}
 
-	// Always block password changes regardless of access level
+	// Always block password changes regardless of controls
 	if isPasswordChangeQuery(sqlText) {
 		return ErrPasswordChangeNotAllowed
 	}
 
-	// Block attempts to disable read-only mode
-	if s.grant.AccessLevel == "read" && isReadOnlyBypassAttempt(sqlText) {
+	// Control: read_only bypass prevention
+	if s.grant.IsReadOnly() && isReadOnlyBypassAttempt(sqlText) {
 		return ErrReadOnlyBypassAttempt
 	}
 
-	// Check for read-only enforcement (defense-in-depth)
-	if s.grant.AccessLevel == "read" && isWriteQuery(sqlText) {
+	// Control: read_only write prevention (defense-in-depth)
+	if s.grant.IsReadOnly() && isWriteQuery(sqlText) {
 		return ErrWriteNotPermitted
+	}
+
+	// Control: block_ddl (only check if not already read_only, since read_only blocks DDL at PG level)
+	if !s.grant.IsReadOnly() && s.grant.ShouldBlockDDL() && isDDLQuery(sqlText) {
+		return ErrDDLNotPermitted
+	}
+
+	// Control: block_copy
+	if s.grant.ShouldBlockCopy() && isCopyQuery(sqlText) {
+		return ErrCopyNotPermitted
 	}
 
 	// Start tracking query for logging
@@ -75,19 +85,29 @@ func (s *Session) handleQuery(query *pgproto3.Query) error {
 func (s *Session) handleParse(msg *pgproto3.Parse) error {
 	sqlText := msg.Query
 
-	// Always block password changes regardless of access level
+	// Always block password changes regardless of controls
 	if isPasswordChangeQuery(sqlText) {
 		return ErrPasswordChangeNotAllowed
 	}
 
-	// Block attempts to disable read-only mode
-	if s.grant.AccessLevel == "read" && isReadOnlyBypassAttempt(sqlText) {
+	// Control: read_only bypass prevention
+	if s.grant.IsReadOnly() && isReadOnlyBypassAttempt(sqlText) {
 		return ErrReadOnlyBypassAttempt
 	}
 
-	// Check for read-only enforcement at Parse time (defense-in-depth)
-	if s.grant.AccessLevel == "read" && isWriteQuery(sqlText) {
+	// Control: read_only write prevention at Parse time (defense-in-depth)
+	if s.grant.IsReadOnly() && isWriteQuery(sqlText) {
 		return ErrWriteNotPermitted
+	}
+
+	// Control: block_ddl (only check if not already read_only, since read_only blocks DDL at PG level)
+	if !s.grant.IsReadOnly() && s.grant.ShouldBlockDDL() && isDDLQuery(sqlText) {
+		return ErrDDLNotPermitted
+	}
+
+	// Control: block_copy
+	if s.grant.ShouldBlockCopy() && isCopyQuery(sqlText) {
+		return ErrCopyNotPermitted
 	}
 
 	// Store the prepared statement with type OIDs
@@ -202,6 +222,26 @@ func isWriteQuery(sql string) bool {
 	}
 
 	return false
+}
+
+// ddlKeywords contains SQL keywords that indicate DDL operations.
+var ddlKeywords = []string{"CREATE", "ALTER", "DROP", "TRUNCATE"}
+
+// isDDLQuery checks if a query is a DDL operation.
+func isDDLQuery(sql string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(sql))
+	for _, keyword := range ddlKeywords {
+		if strings.HasPrefix(upper, keyword) {
+			return true
+		}
+	}
+	return false
+}
+
+// isCopyQuery checks if a query is a COPY operation.
+func isCopyQuery(sql string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(sql))
+	return strings.HasPrefix(upper, "COPY ")
 }
 
 // isReadOnlyBypassAttempt checks if a query attempts to disable read-only mode.
