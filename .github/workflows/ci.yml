@@ -177,11 +177,24 @@ jobs:
       - name: Start DBBat server
         run: |
           ./bin/dbbat serve &
-          sleep 5
+          echo "Server started in background, waiting for it to be ready..."
+          # Wait for server to be ready (up to 30 seconds)
+          for i in {1..30}; do
+            if curl -s http://localhost:8080/api/v1/health > /dev/null 2>&1; then
+              echo "Server is ready!"
+              break
+            fi
+            echo "Waiting for server... ($i/30)"
+            sleep 1
+          done
+          # Verify the app endpoint is accessible
+          echo "Checking app endpoint..."
+          curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/app/ || true
         env:
           DBB_RUN_MODE: test
           DBB_DSN: postgres://postgres:postgres@localhost:5002/dbbat?sslmode=disable
           DBB_KEY: MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=
+          DBB_RATE_LIMIT_ENABLED: "false"
 
       - name: Run Playwright tests
         run: bun run test:e2e:chromium

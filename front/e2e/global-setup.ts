@@ -8,6 +8,12 @@
  * 4. Starts the dbbat server with DBB_RUN_MODE=test
  * 5. Waits for the server to be ready
  * 6. Stores server process info for teardown
+ *
+ * In CI environments (when CI=true), the setup is skipped because:
+ * - The binary is already built by the CI pipeline
+ * - PostgreSQL is already started by the CI workflow
+ * - The dbbat server is already running
+ * Only server readiness check is performed.
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import { writeFileSync } from "node:fs";
@@ -18,6 +24,9 @@ const PID_FILE = join(import.meta.dirname, ".test-server.pid");
 const SERVER_URL = "http://localhost:8080/app/";
 const MAX_RETRIES = 30; // 30 seconds
 const RETRY_DELAY = 1000; // 1 second
+
+// Check if running in CI environment
+const IS_CI = process.env.CI === "true";
 
 /**
  * Execute a command and return a promise that resolves when it completes.
@@ -99,6 +108,16 @@ async function waitForServer(url: string, maxRetries: number): Promise<void> {
  */
 export default async function globalSetup(): Promise<void> {
   console.log("[setup] Starting global setup for E2E tests...\n");
+
+  // In CI, the server is already started by the CI workflow
+  // We only need to wait for it to be ready
+  if (IS_CI) {
+    console.log("[setup] Running in CI environment - skipping build and server start.\n");
+    console.log("[setup] Waiting for server to be ready...");
+    await waitForServer(SERVER_URL, MAX_RETRIES);
+    console.log("[setup] Global setup completed successfully!\n");
+    return;
+  }
 
   try {
     // Step 1: Build frontend
