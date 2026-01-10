@@ -23,6 +23,7 @@ func TestRateLimiter_Check(t *testing.T) {
 	})
 
 	t.Run("allows requests within limit", func(t *testing.T) {
+		t.Parallel()
 		key := "test:within-limit"
 		limit := 5
 
@@ -49,6 +50,7 @@ func TestRateLimiter_Check(t *testing.T) {
 	})
 
 	t.Run("blocks requests over limit", func(t *testing.T) {
+		t.Parallel()
 		key := "test:over-limit"
 		limit := 5
 
@@ -71,6 +73,7 @@ func TestRateLimiter_Check(t *testing.T) {
 	})
 
 	t.Run("resets after window expires", func(t *testing.T) {
+		t.Parallel()
 		key := "test:reset"
 		limit := 2
 

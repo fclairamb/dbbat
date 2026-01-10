@@ -134,12 +134,22 @@ function LoginPage() {
               data-testid="login-logo"
             />
           </div>
-          {viewState === "password-change" && (
+          {viewState === "login" && (
             <>
               <CardTitle className="text-2xl" data-testid="login-title">
-                Change Password
+                Sign In
               </CardTitle>
               <CardDescription data-testid="login-description">
+                Enter your credentials to access DBBat
+              </CardDescription>
+            </>
+          )}
+          {viewState === "password-change" && (
+            <>
+              <CardTitle className="text-2xl" data-testid="password-change-title">
+                Change Password
+              </CardTitle>
+              <CardDescription data-testid="password-change-description">
                 You must change your password before logging in
               </CardDescription>
             </>

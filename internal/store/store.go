@@ -20,15 +20,15 @@ type Store struct {
 	db *bun.DB
 }
 
-// StoreOptions configures Store creation
-type StoreOptions struct {
+// Options configures Store creation.
+type Options struct {
 	// DropTablesFirst drops all tables before running migrations (for test mode)
 	DropTablesFirst bool
 }
 
 // New creates a new Store instance and runs migrations
-func New(ctx context.Context, dsn string, opts ...StoreOptions) (*Store, error) {
-	var options StoreOptions
+func New(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
+	var options Options
 	if len(opts) > 0 {
 		options = opts[0]
 	}

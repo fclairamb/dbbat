@@ -279,6 +279,8 @@ func (s *Session) getCurrentPendingQuery() *pendingQuery {
 }
 
 // proxyUpstreamToClient proxies messages from upstream to client.
+//
+//nolint:gocognit,cyclop // Protocol handling with many message types inherently has high complexity
 func (s *Session) proxyUpstreamToClient() error {
 	var rowsAffected *int64
 	var queryError *string

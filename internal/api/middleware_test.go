@@ -11,6 +11,7 @@ func TestAuthFailureTracker_CheckRateLimit(t *testing.T) {
 	t.Parallel()
 
 	t.Run("allows first attempts", func(t *testing.T) {
+		t.Parallel()
 		tracker := newAuthFailureTracker()
 		allowed, retryAfter := tracker.checkRateLimit("user1")
 		if !allowed {
@@ -22,6 +23,7 @@ func TestAuthFailureTracker_CheckRateLimit(t *testing.T) {
 	})
 
 	t.Run("allows attempts under threshold", func(t *testing.T) {
+		t.Parallel()
 		tracker := newAuthFailureTracker()
 
 		// Record 2 failures (threshold is 3)
@@ -38,6 +40,7 @@ func TestAuthFailureTracker_CheckRateLimit(t *testing.T) {
 	})
 
 	t.Run("blocks after 3 failures", func(t *testing.T) {
+		t.Parallel()
 		tracker := newAuthFailureTracker()
 
 		// Record 3 failures
@@ -55,6 +58,7 @@ func TestAuthFailureTracker_CheckRateLimit(t *testing.T) {
 	})
 
 	t.Run("blocks with longer delay after more failures", func(t *testing.T) {
+		t.Parallel()
 		tracker := newAuthFailureTracker()
 
 		// Record 5 failures (should get 30 second delay)
@@ -73,6 +77,7 @@ func TestAuthFailureTracker_CheckRateLimit(t *testing.T) {
 	})
 
 	t.Run("resets after successful login", func(t *testing.T) {
+		t.Parallel()
 		tracker := newAuthFailureTracker()
 
 		// Record 5 failures
@@ -100,6 +105,7 @@ func TestAuthFailureTracker_CheckRateLimit(t *testing.T) {
 	})
 
 	t.Run("different users are independent", func(t *testing.T) {
+		t.Parallel()
 		tracker := newAuthFailureTracker()
 
 		// Block user6
@@ -128,6 +134,7 @@ func TestUserHasChangedPassword(t *testing.T) {
 	t.Parallel()
 
 	t.Run("returns false when PasswordChangedAt is nil", func(t *testing.T) {
+		t.Parallel()
 		user := &store.User{
 			PasswordChangedAt: nil,
 		}
@@ -137,6 +144,7 @@ func TestUserHasChangedPassword(t *testing.T) {
 	})
 
 	t.Run("returns true when PasswordChangedAt is set", func(t *testing.T) {
+		t.Parallel()
 		now := time.Now()
 		user := &store.User{
 			PasswordChangedAt: &now,

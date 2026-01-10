@@ -22,7 +22,6 @@ test.describe("Password Change API", () => {
 
     const loginData = await loginResponse.json();
     const token = loginData.token;
-    const adminUid = loginData.user.uid;
 
     // Step 2: Create a temporary test user
     const testUsername = uniqueUsername("testuser");

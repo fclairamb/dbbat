@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -76,9 +77,9 @@ func TestFailedBearerAuth_TokenPrefix(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		token          string
-		wantPrefixLen  int
+		name          string
+		token         string
+		wantPrefixLen int
 	}{
 		{
 			name:          "short token",
@@ -119,6 +120,7 @@ func TestAuditDetailsFormat(t *testing.T) {
 	t.Parallel()
 
 	t.Run("failed login details", func(t *testing.T) {
+		t.Parallel()
 		// Create mock details
 		details := map[string]interface{}{
 			"username":   "testuser",
@@ -150,6 +152,7 @@ func TestAuditDetailsFormat(t *testing.T) {
 	})
 
 	t.Run("failed token auth details", func(t *testing.T) {
+		t.Parallel()
 		// Create mock details
 		details := map[string]interface{}{
 			"token_prefix": "dbb_1234",
@@ -188,9 +191,10 @@ func TestClientIP(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	t.Run("extracts client IP", func(t *testing.T) {
+		t.Parallel()
 		w := httptest.NewRecorder()
 		c, _ := gin.CreateTestContext(w)
-		c.Request = httptest.NewRequest("GET", "/", nil)
+		c.Request = httptest.NewRequest(http.MethodGet, "/", nil)
 		c.Request.RemoteAddr = "192.168.1.100:12345"
 
 		ip := c.ClientIP()

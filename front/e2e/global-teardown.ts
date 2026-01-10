@@ -5,6 +5,10 @@
  * 1. Stops the dbbat server process
  * 2. Stops PostgreSQL via docker-compose
  * 3. Cleans up temporary files
+ *
+ * In CI environments (when CI=true), teardown is skipped because:
+ * - The CI workflow handles stopping services
+ * - We didn't start the server in global-setup
  */
 import { spawn } from "node:child_process";
 import { readFileSync, unlinkSync, existsSync } from "node:fs";
@@ -12,6 +16,9 @@ import { join } from "node:path";
 
 const PROJECT_ROOT = join(import.meta.dirname, "../..");
 const PID_FILE = join(import.meta.dirname, ".test-server.pid");
+
+// Check if running in CI environment
+const IS_CI = process.env.CI === "true";
 
 /**
  * Execute a command and return a promise that resolves when it completes.
@@ -21,7 +28,7 @@ function execCommand(
   args: string[],
   options: { cwd?: string } = {}
 ): Promise<void> {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve, _reject) => {
     console.log(`[teardown] Running: ${command} ${args.join(" ")}`);
     const proc = spawn(command, args, {
       cwd: options.cwd || PROJECT_ROOT,
@@ -68,8 +75,8 @@ async function killProcess(pid: number): Promise<void> {
       // Process is dead
       console.log(`[teardown] Process ${pid} terminated successfully.`);
     }
-  } catch (err: any) {
-    if (err.code === "ESRCH") {
+  } catch (err: unknown) {
+    if (err instanceof Error && (err as NodeJS.ErrnoException).code === "ESRCH") {
       // Process doesn't exist
       console.log(`[teardown] Process ${pid} not found (already stopped).`);
     } else {
@@ -83,6 +90,13 @@ async function killProcess(pid: number): Promise<void> {
  */
 export default async function globalTeardown(): Promise<void> {
   console.log("\n[teardown] Starting global teardown for E2E tests...\n");
+
+  // In CI, the CI workflow handles stopping services
+  if (IS_CI) {
+    console.log("[teardown] Running in CI environment - skipping teardown.\n");
+    console.log("[teardown] CI workflow will handle service cleanup.\n");
+    return;
+  }
 
   try {
     // Step 1: Stop dbbat server

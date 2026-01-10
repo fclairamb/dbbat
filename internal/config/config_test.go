@@ -193,9 +193,8 @@ func TestDefaultValues(t *testing.T) {
 	}
 }
 
+//nolint:paralleltest // Can't use t.Parallel() since we manipulate environment variables
 func TestLoadWithConfigFile(t *testing.T) {
-	// Note: Can't use t.Parallel() since we manipulate environment variables
-
 	// Generate a valid 32-byte key
 	validKey := make([]byte, 32)
 	for i := range validKey {
@@ -344,6 +343,7 @@ func TestDefaultKeyFilePath(t *testing.T) {
 }
 
 func TestLoadOrCreateDefaultKey_CreateNew(t *testing.T) {
+	t.Parallel()
 	// Create a temporary directory to simulate home directory
 	tmpDir := t.TempDir()
 	keyDir := filepath.Join(tmpDir, ".dbbat")
@@ -410,6 +410,7 @@ func TestLoadOrCreateDefaultKey_CreateNew(t *testing.T) {
 }
 
 func TestLoadOrCreateDefaultKey_ReadExisting(t *testing.T) {
+	t.Parallel()
 	// Create a temporary directory with an existing key file
 	tmpDir := t.TempDir()
 	keyDir := filepath.Join(tmpDir, ".dbbat")
@@ -458,6 +459,7 @@ func TestLoadOrCreateDefaultKey_ReadExisting(t *testing.T) {
 }
 
 func TestLoadOrCreateDefaultKey_InvalidBase64(t *testing.T) {
+	t.Parallel()
 	// Create a temporary directory with an invalid key file
 	tmpDir := t.TempDir()
 	keyDir := filepath.Join(tmpDir, ".dbbat")
@@ -486,6 +488,7 @@ func TestLoadOrCreateDefaultKey_InvalidBase64(t *testing.T) {
 }
 
 func TestLoadOrCreateDefaultKey_WrongKeySize(t *testing.T) {
+	t.Parallel()
 	// Create a temporary directory with a wrong-sized key
 	tmpDir := t.TempDir()
 	keyDir := filepath.Join(tmpDir, ".dbbat")

@@ -202,7 +202,7 @@ func (s *Server) handleVersion(c *gin.Context) {
 		"api_version":   "v1",
 		"build_version": version.Version,
 		"build_commit":  version.Commit,
-		"build_time":    version.BuildTime,
+		"git_time":      version.GitTime,
 	})
 }
 
@@ -407,7 +407,7 @@ func (s *Server) proxyToDevServer(c *gin.Context, rule *config.RedirectRule, ori
 	}
 
 	// Handle WebSocket upgrades
-	proxy.ModifyResponse = func(resp *http.Response) error {
+	proxy.ModifyResponse = func(_ *http.Response) error {
 		return nil
 	}
 

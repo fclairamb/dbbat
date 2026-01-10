@@ -3,6 +3,7 @@ package proxy
 import (
 	"crypto/md5"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -11,6 +12,9 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/version"
 )
+
+// ErrUpstreamReadOnlyMode is returned when the upstream fails to set read-only mode.
+var ErrUpstreamReadOnlyMode = errors.New("upstream error setting read-only mode")
 
 // connectUpstream connects to the upstream PostgreSQL server.
 func (s *Session) connectUpstream() error {
@@ -99,6 +103,8 @@ func (s *Session) sendToClient(msg pgproto3.BackendMessage) error {
 
 // processUpstreamAuthMessage processes a single authentication message from upstream.
 // Returns true if authentication is complete.
+//
+//nolint:cyclop // Protocol handling requires a switch with many cases
 func (s *Session) processUpstreamAuthMessage(
 	msg pgproto3.BackendMessage,
 	upstreamFrontend *pgproto3.Frontend,
@@ -293,7 +299,7 @@ func (s *Session) setSessionReadOnly() error {
 			// Session is ready
 			return nil
 		case *pgproto3.ErrorResponse:
-			return fmt.Errorf("upstream error setting read-only mode: %v", msg)
+			return fmt.Errorf("%w: %v", ErrUpstreamReadOnlyMode, msg)
 		default:
 			continue
 		}

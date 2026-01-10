@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -432,14 +433,14 @@ func TestGetQueryRows(t *testing.T) {
 	t.Run("query not found", func(t *testing.T) {
 		nonExistentUID := uuid.New()
 		_, err := store.GetQueryRows(ctx, nonExistentUID, "", 10)
-		if err != ErrQueryNotFound {
+		if !errors.Is(err, ErrQueryNotFound) {
 			t.Errorf("GetQueryRows() error = %v, want ErrQueryNotFound", err)
 		}
 	})
 
 	t.Run("invalid cursor", func(t *testing.T) {
 		_, err := store.GetQueryRows(ctx, created.UID, "invalid-cursor", 10)
-		if err != ErrInvalidCursor {
+		if !errors.Is(err, ErrInvalidCursor) {
 			t.Errorf("GetQueryRows() error = %v, want ErrInvalidCursor", err)
 		}
 	})
@@ -447,7 +448,7 @@ func TestGetQueryRows(t *testing.T) {
 	t.Run("invalid cursor json", func(t *testing.T) {
 		// Valid base64 but invalid JSON
 		_, err := store.GetQueryRows(ctx, created.UID, "bm90LWpzb24=", 10)
-		if err != ErrInvalidCursor {
+		if !errors.Is(err, ErrInvalidCursor) {
 			t.Errorf("GetQueryRows() error = %v, want ErrInvalidCursor", err)
 		}
 	})

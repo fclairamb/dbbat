@@ -1,0 +1,67 @@
+version: 2
+
+project_name: dbbat
+
+before:
+  hooks:
+    # Build frontend before Go build
+    - ./scripts/build-frontend.sh
+
+builds:
+  - id: dbbat
+    main: .
+    binary: dbbat
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    # Windows only on amd64
+    ignore:
+      - goos: windows
+        goarch: arm64
+    ldflags:
+      - -s -w
+      - -X 'github.com/fclairamb/dbbat/internal/version.Version={{ .Version }}'
+      - -X 'github.com/fclairamb/dbbat/internal/version.Commit={{ .ShortCommit }}'
+      - -X 'github.com/fclairamb/dbbat/internal/version.GitTime={{ .CommitDate }}'
+    env:
+      - CGO_ENABLED=0
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE*
+      - README*
+
+checksum:
+  name_template: 'checksums.txt'
+  algorithm: sha256
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - Merge pull request
+      - Merge branch
+
+release:
+  github:
+    owner: fclairamb
+    name: dbbat
+  draft: false
+  prerelease: auto
+  name_template: "v{{ .Version }}"

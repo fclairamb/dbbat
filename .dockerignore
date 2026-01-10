@@ -1,7 +1,41 @@
+# Git
 .git
 .gitignore
+
+# Documentation (not needed in build)
 *.md
+CLAUDE.md
+specs/
+
+# Docker files (avoid recursion)
 docker-compose.yml
 Dockerfile
+Dockerfile.*
 .dockerignore
-CLAUDE
+
+# Dependencies (reinstalled in container)
+front/node_modules
+website/node_modules
+node_modules
+
+# Build artifacts (rebuilt in container)
+bin/
+tmp/
+front/dist
+internal/api/resources
+
+# IDE and editor files
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# Test artifacts
+front/test-results
+front/playwright-report
+
+# Local development
+.air.toml
+.env
+.env.*

@@ -10,8 +10,8 @@ services:
       - "5002:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./docker-init.sql:/docker-entrypoint-initdb.d/init.sql
-      - ./pg_hba.conf:/etc/postgresql/pg_hba.conf
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./docker/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf
     command:
       [
         "postgres",
