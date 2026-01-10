@@ -17,13 +17,13 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6.0.1
+      - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v6.0.0
+      - uses: actions/setup-go@v6.1.0
         with:
           go-version: "1.25"
 
-      - uses: golangci/golangci-lint-action@v9.0.0
+      - uses: golangci/golangci-lint-action@v9.2.0
         with:
           version: v2.8
 
@@ -33,12 +33,12 @@ jobs:
   frontend:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6.0.1
+      - uses: actions/checkout@v6.0.2
 
-      - uses: oven-sh/setup-bun@v2.0.2
+      - uses: oven-sh/setup-bun@v2.1.0
 
       - name: Cache frontend dependencies
-        uses: actions/cache@v5.0.0
+        uses: actions/cache@v5.0.1
         with:
           path: |
             front/node_modules
@@ -75,9 +75,9 @@ jobs:
   test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6.0.1
+      - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v6.0.0
+      - uses: actions/setup-go@v6.1.0
         with:
           go-version: "1.25"
 
@@ -85,7 +85,7 @@ jobs:
         run: go test -race -coverprofile=coverage.out ./...
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v5.5.1
+        uses: codecov/codecov-action@v5.5.2
         with:
           files: coverage.out
         continue-on-error: true # Don't fail if codecov is not configured
@@ -97,16 +97,16 @@ jobs:
     runs-on: ubuntu-24.04
     needs: [frontend]
     steps:
-      - uses: actions/checkout@v6.0.1
+      - uses: actions/checkout@v6.0.2
         with:
           fetch-depth: 0 # Needed for git log to get commit timestamp
 
-      - uses: actions/setup-go@v6.0.0
+      - uses: actions/setup-go@v6.1.0
         with:
           go-version: "1.25"
 
       - name: Download frontend artifacts
-        uses: actions/download-artifact@v6.0.0
+        uses: actions/download-artifact@v7.0.0
         with:
           name: frontend-dist
           path: internal/api/resources/
@@ -135,12 +135,12 @@ jobs:
     runs-on: ubuntu-24.04
     needs: [build]
     steps:
-      - uses: actions/checkout@v6.0.1
+      - uses: actions/checkout@v6.0.2
 
-      - uses: oven-sh/setup-bun@v2.0.2
+      - uses: oven-sh/setup-bun@v2.1.0
 
       - name: Download binary
-        uses: actions/download-artifact@v6.0.0
+        uses: actions/download-artifact@v7.0.0
         with:
           name: dbbat-binary
           path: bin/
@@ -163,7 +163,7 @@ jobs:
           done
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v5.0.0
+        uses: actions/cache@v5.0.1
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ hashFiles('front/bun.lock') }}
