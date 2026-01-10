@@ -47,3 +47,5 @@ internal/api/resources/assets/index-*
 
 # Help charts
 dbbat-*.tgz
+
+bin/
