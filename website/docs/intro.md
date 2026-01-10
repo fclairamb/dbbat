@@ -76,3 +76,4 @@ Client → DBBat (auth + grant check) → Target PostgreSQL
 - [Install DBBat](/docs/installation/docker) using Docker
 - [Configure](/docs/configuration) your environment
 - Learn about [Access Control](/docs/features/access-control)
+
