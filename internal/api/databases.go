@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -240,7 +241,7 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 	}
 
 	// Check demo mode restrictions if credentials are being updated
-	if s.config != nil && s.config.IsDemoMode() {
+	if s.config != nil && s.config.IsDemoMode() && (req.Username != nil || req.Password != nil || req.Host != nil) {
 		// Get current database to check combined values
 		db, err := s.store.GetDatabaseByUID(c.Request.Context(), uid)
 		if err != nil {
@@ -253,7 +254,8 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		if req.Username != nil {
 			username = *req.Username
 		}
-		password := db.Password
+		// For password, if not being updated, assume it's valid (we can't decrypt to check)
+		password := ""
 		if req.Password != nil {
 			password = *req.Password
 		}
@@ -262,9 +264,25 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 			host = *req.Host
 		}
 
-		if errMsg := s.config.ValidateDemoTarget(username, password, host); errMsg != "" {
-			errorResponse(c, http.StatusForbidden, errMsg)
-			return
+		// Only validate if password is being changed (we can't check encrypted existing password)
+		if req.Password != nil {
+			if errMsg := s.config.ValidateDemoTarget(username, password, host); errMsg != "" {
+				errorResponse(c, http.StatusForbidden, errMsg)
+				return
+			}
+		} else if req.Username != nil || req.Host != nil {
+			// If only username or host is being changed, validate against demo target
+			target := s.config.GetDemoTarget()
+			if target != nil {
+				if req.Username != nil && username != target.Username {
+					errorResponse(c, http.StatusForbidden, fmt.Sprintf("you can only use %s:%s@%s in demo mode", target.Username, target.Password, target.Host))
+					return
+				}
+				if req.Host != nil && host != target.Host {
+					errorResponse(c, http.StatusForbidden, fmt.Sprintf("you can only use %s:%s@%s in demo mode", target.Username, target.Password, target.Host))
+					return
+				}
+			}
 		}
 	}
 
