@@ -118,11 +118,11 @@ Separate files: `ci.yml`, `release.yml`, `deploy-website.yml`
 - Harder to share state between workflows
 
 ### Recommendation
-Use **Option A** for CI/testing with a separate `release.yml` for GoReleaser (triggered on tags only). Move the website deployment into the main workflow.
+Use **Option A** for CI/testing with a separate `release.yml` for GoReleaser (triggered on tags only) and a separate `website.yml` for website deployment (triggered on changes to `website/`).
 
 ## GitHub Actions Version Policy
 
-All GitHub Actions are pinned to specific versions (vX.Y.Z) for reproducibility and security. Dependabot will propose updates via PRs.
+All GitHub Actions are pinned to specific versions (vX.Y.Z) for reproducibility and security. Renovate will propose updates via PRs.
 
 ### Action Versions Reference
 
@@ -160,7 +160,7 @@ on:
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                         CI Pipeline                               │
+│                         CI Pipeline (ci.yml)                      │
 ├──────────────────────────────────────────────────────────────────┤
 │                                                                   │
 │  ┌─────────────┐   ┌─────────────┐   ┌──────────────────────┐    │
@@ -180,17 +180,21 @@ on:
 │                    │ (playwright)│                                │
 │                    └─────────────┘                                │
 │                                                                   │
-│  ┌───────────────────────────────────────────────────────────┐   │
-│  │  website-deploy (only on main, when website/** changed)   │   │
-│  └───────────────────────────────────────────────────────────┘   │
-│                                                                   │
 └──────────────────────────────────────────────────────────────────┘
 
-                    Release Pipeline (tags only)
+                    Release Pipeline (release.yml, tags only)
 ┌──────────────────────────────────────────────────────────────────┐
 │  ┌─────────────┐                                                 │
 │  │  release    │←── goreleaser: binaries + containers            │
 │  │  (on v*)    │                                                 │
+│  └─────────────┘                                                 │
+└──────────────────────────────────────────────────────────────────┘
+
+                    Website Pipeline (website.yml, website/** changes)
+┌──────────────────────────────────────────────────────────────────┐
+│  ┌─────────────┐                                                 │
+│  │  deploy     │←── build & deploy to GitHub Pages               │
+│  │  (on main)  │                                                 │
 │  └─────────────┘                                                 │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -461,50 +465,48 @@ e2e-tests:
       run: docker compose down
 ```
 
-### 6. Website Deployment Job
+### 6. Website Deployment Workflow (`.github/workflows/website.yml`)
+
+This is a separate workflow triggered only when `website/` files change:
 
 ```yaml
-website-deploy:
-  runs-on: ubuntu-latest
-  if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-  # Only run if website files changed
-  steps:
-    - uses: actions/checkout@v6.0.1
-      with:
-        fetch-depth: 2
+name: Website
 
-    - name: Check for website changes
-      id: changes
-      run: |
-        if git diff --name-only HEAD~1 HEAD | grep -q '^website/'; then
-          echo "changed=true" >> $GITHUB_OUTPUT
-        else
-          echo "changed=false" >> $GITHUB_OUTPUT
-        fi
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'website/**'
+  workflow_dispatch:
 
-    - uses: oven-sh/setup-bun@v2.0.2
-      if: steps.changes.outputs.changed == 'true'
+permissions:
+  contents: write
 
-    - name: Install dependencies
-      if: steps.changes.outputs.changed == 'true'
-      run: bun install
-      working-directory: website
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6.0.1
 
-    - name: Build website
-      if: steps.changes.outputs.changed == 'true'
-      run: bun run build
-      working-directory: website
+      - uses: oven-sh/setup-bun@v2.0.2
 
-    - name: Deploy to GitHub Pages
-      if: steps.changes.outputs.changed == 'true'
-      uses: JamesIves/github-pages-deploy-action@v4.7.3
-      with:
-        folder: website/build
-        branch: gh-pages
-        clean: true
+      - name: Install dependencies
+        run: bun install
+        working-directory: website
+
+      - name: Build website
+        run: bun run build
+        working-directory: website
+
+      - name: Deploy to GitHub Pages
+        uses: JamesIves/github-pages-deploy-action@v4.7.3
+        with:
+          folder: website/build
+          branch: gh-pages
+          clean: true
 ```
 
-**Alternative:** Use path filters at the workflow level with `paths:` trigger.
+Using `paths:` trigger ensures the workflow only runs when website files are modified, avoiding unnecessary runs.
 
 ## GoReleaser Configuration
 
@@ -744,35 +746,7 @@ security:
       run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 ```
 
-### 5. Dependency Updates with Dependabot
-
-Create `.github/dependabot.yml`:
-
-```yaml
-version: 2
-updates:
-  - package-ecosystem: gomod
-    directory: /
-    schedule:
-      interval: weekly
-
-  - package-ecosystem: npm
-    directory: /front
-    schedule:
-      interval: weekly
-
-  - package-ecosystem: npm
-    directory: /website
-    schedule:
-      interval: weekly
-
-  - package-ecosystem: github-actions
-    directory: /
-    schedule:
-      interval: weekly
-```
-
-### 6. Concurrency Control
+### 5. Concurrency Control
 
 Prevent redundant runs when pushing multiple commits:
 
@@ -782,7 +756,7 @@ concurrency:
   cancel-in-progress: true
 ```
 
-### 7. Branch Protection
+### 6. Branch Protection
 
 After CI is set up, configure branch protection rules for `main`:
 - Require status checks to pass (lint, test, e2e-tests)
@@ -793,8 +767,8 @@ After CI is set up, configure branch protection rules for `main`:
 
 1. `.github/workflows/ci.yml` - Main CI workflow
 2. `.github/workflows/release.yml` - GoReleaser + Docker build workflow
-3. `.goreleaser.yml` - GoReleaser configuration (binaries only)
-4. `.github/dependabot.yml` - Dependency updates (optional)
+3. `.github/workflows/website.yml` - Website deployment workflow
+4. `.goreleaser.yml` - GoReleaser configuration (binaries only)
 
 ## Files Modified
 
@@ -875,4 +849,4 @@ build:
 5. Create release workflow
 6. Test with a test tag (e.g., `v0.0.1-test`)
 7. Remove `website/.github/workflows/deploy.yml`
-8. (Optional) Add Dependabot, security scanning, etc.
+8. (Optional) Add security scanning, etc.

@@ -1,0 +1,202 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ===========================================================================
+  # Lint Job - Go linting with golangci-lint
+  # ===========================================================================
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - uses: actions/setup-go@v6.0.0
+        with:
+          go-version: "1.25"
+
+      - uses: golangci/golangci-lint-action@v9.0.0
+        with:
+          version: v2.1
+
+  # ===========================================================================
+  # Frontend Job - Build React app with Bun
+  # ===========================================================================
+  frontend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - uses: oven-sh/setup-bun@v2.0.2
+
+      - name: Cache frontend dependencies
+        uses: actions/cache@v5.0.0
+        with:
+          path: |
+            front/node_modules
+            ~/.bun/install/cache
+          key: frontend-${{ hashFiles('front/bun.lock') }}
+          restore-keys: frontend-
+
+      - name: Install dependencies
+        run: bun install
+        working-directory: front
+
+      - name: Generate API types
+        run: bun run generate-client
+        working-directory: front
+
+      - name: Lint frontend
+        run: bun run lint
+        working-directory: front
+
+      - name: Build frontend
+        run: bun run build
+        working-directory: front
+
+      - name: Upload frontend artifacts
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: frontend-dist
+          path: front/dist/
+          retention-days: 1
+
+  # ===========================================================================
+  # Test Job - Go unit tests with coverage
+  # ===========================================================================
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - uses: actions/setup-go@v6.0.0
+        with:
+          go-version: "1.25"
+
+      - name: Run tests
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v5.5.1
+        with:
+          files: coverage.out
+        continue-on-error: true # Don't fail if codecov is not configured
+
+  # ===========================================================================
+  # Build Job - Build Go binary with embedded frontend
+  # ===========================================================================
+  build:
+    runs-on: ubuntu-24.04
+    needs: [frontend]
+    steps:
+      - uses: actions/checkout@v6.0.1
+        with:
+          fetch-depth: 0 # Needed for git log to get commit timestamp
+
+      - uses: actions/setup-go@v6.0.0
+        with:
+          go-version: "1.25"
+
+      - name: Download frontend artifacts
+        uses: actions/download-artifact@v6.0.0
+        with:
+          name: frontend-dist
+          path: internal/api/resources/
+
+      - name: Build binary
+        run: |
+          VERSION=${GITHUB_REF_NAME:-dev}
+          COMMIT=${GITHUB_SHA::7}
+          GIT_TIME=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ)
+          go build -ldflags "-X 'github.com/fclairamb/dbbat/internal/version.Version=$VERSION' \
+                            -X 'github.com/fclairamb/dbbat/internal/version.Commit=$COMMIT' \
+                            -X 'github.com/fclairamb/dbbat/internal/version.GitTime=$GIT_TIME'" \
+            -o ./bin/dbbat .
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v6.0.0
+        with:
+          name: dbbat-binary
+          path: bin/dbbat
+          retention-days: 1
+
+  # ===========================================================================
+  # E2E Tests Job - Playwright tests against the built binary
+  # ===========================================================================
+  e2e-tests:
+    runs-on: ubuntu-24.04
+    needs: [build]
+    steps:
+      - uses: actions/checkout@v6.0.1
+
+      - uses: oven-sh/setup-bun@v2.0.2
+
+      - name: Download binary
+        uses: actions/download-artifact@v6.0.0
+        with:
+          name: dbbat-binary
+          path: bin/
+
+      - name: Make binary executable
+        run: chmod +x bin/dbbat
+
+      - name: Start PostgreSQL
+        run: docker compose up -d postgres
+
+      - name: Wait for PostgreSQL
+        run: |
+          for i in {1..30}; do
+            if docker compose exec -T postgres pg_isready -U postgres; then
+              echo "PostgreSQL is ready"
+              break
+            fi
+            echo "Waiting for PostgreSQL... ($i/30)"
+            sleep 2
+          done
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v5.0.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('front/bun.lock') }}
+
+      - name: Install Playwright
+        run: |
+          bun install
+          bunx playwright install --with-deps chromium
+        working-directory: front
+
+      - name: Start DBBat server
+        run: |
+          ./bin/dbbat serve &
+          sleep 5
+        env:
+          DBB_RUN_MODE: test
+          DBB_DSN: postgres://postgres:postgres@localhost:5002/dbbat?sslmode=disable
+          DBB_KEY: MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=
+
+      - name: Run Playwright tests
+        run: bun run test:e2e:chromium
+        working-directory: front
+
+      - name: Upload test artifacts
+        uses: actions/upload-artifact@v6.0.0
+        if: always()
+        with:
+          name: playwright-results
+          path: |
+            front/playwright-report/
+            front/test-results/
+          retention-days: 7
+
+      - name: Stop services
+        if: always()
+        run: docker compose down

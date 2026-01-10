@@ -33,7 +33,7 @@ LDFLAGS := -X 'github.com/fclairamb/dbbat/internal/version.Version=$(VERSION)' \
 
 # Build the binary
 build:
-	go build -ldflags "$(LDFLAGS)" -o ./bin/dbbat ./cmd/dbbat
+	go build -ldflags "$(LDFLAGS)" -o ./bin/dbbat .
 
 # Build frontend
 build-front:
