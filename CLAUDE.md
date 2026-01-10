@@ -204,7 +204,8 @@ Priority order: CLI flags > Environment variables > Config file > Defaults
 | `DBB_KEYFILE` | Path to file containing encryption key | One of KEY/KEYFILE |
 | `DBB_BASE_URL` | Base URL path for the frontend app (default: `/app`) | No |
 | `DBB_REDIRECTS` | Dev redirect rules for proxying to dev servers (see below) | No |
-| `DBB_RUN_MODE` | Run mode: empty (default) or `test` for test mode | No |
+| `DBB_RUN_MODE` | Run mode: empty (default), `test`, or `demo` | No |
+| `DBB_DEMO_ALLOWED_HOST_REGEX` | Regex pattern for allowed database hosts in demo mode | No |
 
 ### Test Mode (DBB_RUN_MODE=test)
 
@@ -236,6 +237,23 @@ DBB_RUN_MODE=test ./dbbat serve
 | `admin` | `admintest` | admin, connector | Full access |
 | `viewer` | `viewer` | viewer | Read-only to proxy_target |
 | `connector` | `connector` | connector | Write to proxy_target |
+
+### Demo Mode (DBB_RUN_MODE=demo)
+
+Demo mode is similar to test mode but designed for public demos:
+
+1. **Wipes all data** - Same as test mode
+2. **Sets admin password** - Changes admin password to `admin` and marks it as changed
+3. **Creates sample users** - Same as test mode (viewer, connector)
+4. **Creates demo database** - `demo_db` pointing to a local demo database
+5. **Restricts database hosts** - When `DBB_DEMO_ALLOWED_HOST_REGEX` is set, only allows creating database configurations with hosts matching the regex
+
+**Example:**
+```bash
+DBB_RUN_MODE=demo DBB_DEMO_ALLOWED_HOST_REGEX="^(localhost|127\\.0\\.0\\.1|postgres)$" ./dbbat serve
+```
+
+This restricts database creation to only allow `localhost`, `127.0.0.1`, or `postgres` as hosts, preventing demo users from connecting to arbitrary external databases.
 
 ### Development Redirects (DBB_REDIRECTS)
 

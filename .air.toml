@@ -6,7 +6,7 @@ tmp_dir = "tmp"
 
 [build]
 # Build command
-cmd = "go build -o ./tmp/dbbat ./cmd/dbbat"
+cmd = "go build -o ./tmp/dbbat"
 # Binary to run
 bin = "./tmp/dbbat"
 # Extra arguments for binary

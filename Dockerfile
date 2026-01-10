@@ -64,7 +64,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build \
     -X 'github.com/fclairamb/dbbat/internal/version.Version=${VERSION}' \
     -X 'github.com/fclairamb/dbbat/internal/version.Commit=${COMMIT}' \
     -X 'github.com/fclairamb/dbbat/internal/version.GitTime=${GIT_TIME}'" \
-    -o dbbat ./cmd/dbbat
+    -o dbbat .
 
 # -----------------------------------------------------------------------------
 # Stage 3: Runtime

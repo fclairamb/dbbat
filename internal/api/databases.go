@@ -61,6 +61,12 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		return
 	}
 
+	// Check host restriction in demo mode
+	if s.config != nil && !s.config.IsHostAllowedInDemo(req.Host) {
+		errorResponse(c, http.StatusForbidden, "host not allowed in demo mode")
+		return
+	}
+
 	// Set default port if not provided
 	if req.Port == 0 {
 		req.Port = 5432
@@ -228,6 +234,12 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 	var req UpdateDatabaseRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		errorResponse(c, http.StatusBadRequest, "invalid request: "+err.Error())
+		return
+	}
+
+	// Check host restriction in demo mode if host is being updated
+	if req.Host != nil && s.config != nil && !s.config.IsHostAllowedInDemo(*req.Host) {
+		errorResponse(c, http.StatusForbidden, "host not allowed in demo mode")
 		return
 	}
 

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/knadh/koanf/parsers/json"
@@ -34,6 +35,8 @@ const (
 	RunModeDefault RunMode = ""
 	// RunModeTest provisions test data on startup.
 	RunModeTest RunMode = "test"
+	// RunModeDemo provisions demo data on startup with additional protections.
+	RunModeDemo RunMode = "demo"
 )
 
 // QueryStorageConfig holds configuration for query result storage.
@@ -99,6 +102,11 @@ type Config struct {
 
 	// RunMode controls whether test data is provisioned on startup.
 	RunMode RunMode `koanf:"run_mode"`
+
+	// DemoAllowedHostRegex is a regex pattern for allowed database hosts in demo mode.
+	// Only applies when RunMode is "demo". If empty, all hosts are allowed.
+	// Example: "^(localhost|127\\.0\\.0\\.1|postgres)$"
+	DemoAllowedHostRegex string `koanf:"demo_allowed_host_regex"`
 
 	// QueryStorage holds query result storage configuration.
 	QueryStorage QueryStorageConfig `koanf:"query_storage"`
@@ -484,4 +492,29 @@ func normalizeBaseURL(baseURL string) string {
 	baseURL = strings.TrimSuffix(baseURL, "/")
 
 	return baseURL
+}
+
+// IsDemoMode returns true if running in demo mode.
+func (c *Config) IsDemoMode() bool {
+	return c.RunMode == RunModeDemo
+}
+
+// IsHostAllowedInDemo checks if a host is allowed in demo mode.
+// Returns true if not in demo mode, or if no regex is configured, or if the host matches.
+func (c *Config) IsHostAllowedInDemo(host string) bool {
+	if !c.IsDemoMode() {
+		return true
+	}
+
+	if c.DemoAllowedHostRegex == "" {
+		return true
+	}
+
+	matched, err := regexp.MatchString(c.DemoAllowedHostRegex, host)
+	if err != nil {
+		slog.Error("Invalid demo_allowed_host_regex", "regex", c.DemoAllowedHostRegex, "error", err)
+		return false
+	}
+
+	return matched
 }
