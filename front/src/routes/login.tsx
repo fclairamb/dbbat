@@ -153,10 +153,17 @@ function LoginPage() {
               data-testid="login-logo"
             />
           </div>
-          {viewState === "login" && isDemo && (
-            <p className="text-sm text-muted-foreground" data-testid="demo-credentials-hint">
-              Demo credentials pre-filled
-            </p>
+          {viewState === "login" && (
+            <>
+              <CardTitle className="text-2xl" data-testid="login-title">
+                Sign in
+              </CardTitle>
+              {isDemo && (
+                <p className="text-sm text-muted-foreground" data-testid="demo-credentials-hint">
+                  Demo credentials pre-filled
+                </p>
+              )}
+            </>
           )}
           {viewState === "password-change" && (
             <>
