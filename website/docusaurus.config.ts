@@ -4,7 +4,8 @@ import type * as Preset from "@docusaurus/preset-classic";
 
 const config: Config = {
   title: "DBBat",
-  tagline: "Give your devs access to prod. Every query logged. Every connection tracked.",
+  tagline:
+    "Give (temporary) accesses to prod databases. Every query logged. Every data saved.",
   favicon: "img/favicon.ico",
 
   url: "https://dbbat.com",
@@ -106,7 +107,7 @@ const config: Config = {
           ],
         },
       ],
-      copyright: `Copyright ${new Date().getFullYear()} DBBat Contributors. Built with Docusaurus.`,
+      copyright: `&copy; DBBat ${new Date().getFullYear()}`,
     },
     prism: {
       theme: prismThemes.github,

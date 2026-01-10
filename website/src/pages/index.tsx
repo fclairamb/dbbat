@@ -44,7 +44,17 @@ function QuickStart() {
         <Heading as="h2">Quick Start</Heading>
         <p>Get DBBat running in seconds with Docker:</p>
         <pre className={styles.codeBlock}>
-          <code>docker run -p 5432:5432 -p 8080:8080 fclairamb/dbbat</code>
+          <code>
+            docker run
+            <br />
+            &nbsp;&nbsp;-p 5432:5432
+            <br />
+            &nbsp;&nbsp;-p 8080:8080
+            <br />
+            &nbsp;&nbsp;-e DBB_DSN=postgres://dbbat:dbbat@pgserver:5432/dbbat
+            <br />
+            &nbsp;&nbsp;ghcr.io/fclairamb/dbbat
+          </code>
         </pre>
         <p>
           <Link to="/docs/installation/docker">

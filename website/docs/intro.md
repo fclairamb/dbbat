@@ -4,14 +4,16 @@ sidebar_position: 1
 
 # Introduction to DBBat
 
-**Give your devs access to prod.**
+DBBat is a transparent PostgreSQL proxy designed for query observability, access control, and safety. 
 
-DBBat is a transparent PostgreSQL proxy designed for query observability, access control, and safety. It sits between your application and PostgreSQL database, providing visibility into all queries while enforcing fine-grained access controls. Every query logged. Every connection tracked.
+It allows to give temporary access to production databases for support, debugging and/or data analysis.
+
+It can be used with a standard SQL client like psql, DBeave, pgAdmin, or even the standard app 
+(though it's not recommended in production).
 
 ## Why DBBat?
 
-Modern applications often need:
-
+Giving access to production databases can be dangerous. DBBat provides:
 - **Query visibility**: Know what queries are being executed, how long they take, and what data they return
 - **Access control**: Grant temporary, limited access to databases for support, debugging, or data analysis
 - **Audit trails**: Maintain a complete record of who accessed what data and when
@@ -57,7 +59,9 @@ Client → DBBat (auth + grant check) → Target PostgreSQL
 
 ## How It Works
 
-1. **Admin creates a user** via the REST API
+Everything described here can be done via the REST API or the web UI.
+
+1. **Admin creates a user**
 2. **Admin configures a target database** (host, port, credentials)
 3. **Admin grants the user access** to the database with time window and optional quotas
 4. **User connects** with psql or any PostgreSQL client using their DBBat credentials
@@ -76,4 +80,3 @@ Client → DBBat (auth + grant check) → Target PostgreSQL
 - [Install DBBat](/docs/installation/docker) using Docker
 - [Configure](/docs/configuration) your environment
 - Learn about [Access Control](/docs/features/access-control)
-
