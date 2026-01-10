@@ -12,10 +12,12 @@ CREATE TABLE users (
     rate_limit_exempt BOOLEAN NOT NULL DEFAULT FALSE,
     password_changed_at TIMESTAMPTZ,              -- NULL means initial password not yet changed
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ                        -- Soft delete timestamp
 );
 CREATE INDEX idx_users_username ON users(username);
 CREATE INDEX idx_users_roles ON users USING GIN(roles);
+CREATE INDEX idx_users_deleted_at ON users(deleted_at) WHERE deleted_at IS NULL;
 
 --bun:split
 

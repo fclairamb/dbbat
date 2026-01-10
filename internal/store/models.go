@@ -28,6 +28,7 @@ type User struct {
 	PasswordChangedAt *time.Time `bun:"password_changed_at" json:"-"`
 	CreatedAt         time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 	UpdatedAt         time.Time  `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
+	DeletedAt         *time.Time `bun:"deleted_at,soft_delete" json:"-"`
 }
 
 // HasChangedPassword returns true if the user has changed their initial password
