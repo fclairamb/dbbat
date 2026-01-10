@@ -90,3 +90,9 @@ Enable and start:
 sudo systemctl enable dbbat
 sudo systemctl start dbbat
 ```
+
+## Next Steps
+
+- [Configure DBBat](/docs/configuration)
+- [Docker installation](/docs/installation/docker)
+- [Kubernetes deployment](/docs/installation/kubernetes)

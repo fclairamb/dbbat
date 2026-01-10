@@ -15,7 +15,7 @@ docker run -d \
   -p 8080:8080 \
   -e DBB_DSN="postgres://user:pass@host:5432/dbbat" \
   -e DBB_KEY="your-base64-encoded-key" \
-  fclairamb/dbbat
+  ghcr.io/fclairamb/dbbat
 ```
 
 ## Environment Variables
@@ -53,7 +53,7 @@ docker run -d \
   -e DBB_DSN="postgres://user:pass@host:5432/dbbat" \
   -e DBB_KEYFILE="/keys/dbbat.key" \
   -v /path/to/keys:/keys:ro \
-  fclairamb/dbbat
+  ghcr.io/fclairamb/dbbat
 ```
 
 ## Health Check
@@ -68,3 +68,4 @@ curl http://localhost:8080/api/health
 
 - [Configure DBBat](/docs/configuration)
 - [Docker Compose setup](/docs/installation/docker-compose)
+- [Kubernetes deployment](/docs/installation/kubernetes)

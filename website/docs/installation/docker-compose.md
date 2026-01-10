@@ -9,8 +9,6 @@ For development and testing, Docker Compose provides an easy way to run DBBat wi
 ## docker-compose.yml
 
 ```yaml
-version: '3.8'
-
 services:
   postgres:
     image: postgres:16-alpine
@@ -25,7 +23,7 @@ services:
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
 
   dbbat:
-    image: fclairamb/dbbat
+    image: ghcr.io/fclairamb/dbbat
     depends_on:
       - postgres
     environment:
@@ -109,3 +107,8 @@ To also remove volumes:
 ```bash
 docker-compose down -v
 ```
+
+## Next Steps
+
+- [Configure DBBat](/docs/configuration)
+- [Kubernetes deployment](/docs/installation/kubernetes)
