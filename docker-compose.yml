@@ -33,12 +33,12 @@ services:
       dockerfile: Dockerfile
     container_name: dbbat-server
     environment:
-      DBB_LISTEN_PG: ":5432"
+      DBB_LISTEN_PG: ":5434"
       DBB_LISTEN_API: ":8080"
       DBB_DSN: "postgres://postgres:postgres@postgres:5432/dbbat?sslmode=disable"
       DBB_KEY: "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=" # base64 encoded 32-byte key: "01234567890123456789012345678901"
     ports:
-      - "5001:5432" # Proxy port
+      - "5001:5434" # Proxy port
       - "8080:8080" # API port
     depends_on:
       postgres:

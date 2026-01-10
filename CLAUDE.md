@@ -197,7 +197,7 @@ Priority order: CLI flags > Environment variables > Config file > Defaults
 ### Environment Variables
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `DBB_LISTEN_PG` | Proxy listen address (default: `:5432`) | No |
+| `DBB_LISTEN_PG` | Proxy listen address (default: `:5434`) | No |
 | `DBB_LISTEN_API` | REST API listen address (default: `:8080`) | No |
 | `DBB_DSN` | PostgreSQL DSN for DBBat storage | Yes |
 | `DBB_KEY` | Base64-encoded AES-256 encryption key | One of KEY/KEYFILE |

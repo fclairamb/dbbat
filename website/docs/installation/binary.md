@@ -48,7 +48,7 @@ DBBat supports YAML configuration files:
 
 ```yaml
 # dbbat.yaml
-listen_addr: ":5432"
+listen_addr: ":5434"
 api_addr: ":8080"
 dsn: "postgres://user:pass@localhost:5432/dbbat"
 ```

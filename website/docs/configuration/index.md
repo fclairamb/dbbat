@@ -18,7 +18,7 @@ Configuration is loaded in this priority order (highest to lowest):
 
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
-| `DBB_LISTEN_PG` | Proxy listen address | `:5432` | No |
+| `DBB_LISTEN_PG` | Proxy listen address | `:5434` | No |
 | `DBB_LISTEN_API` | REST API listen address | `:8080` | No |
 | `DBB_DSN` | PostgreSQL DSN for DBBat storage | - | Yes |
 | `DBB_KEY` | Base64-encoded AES-256 encryption key | - | One of KEY/KEYFILE |
@@ -31,7 +31,7 @@ DBBat supports YAML, JSON, and TOML configuration files.
 ### YAML Example
 
 ```yaml
-listen_pg: ":5432"
+listen_pg: ":5434"
 listen_api: ":8080"
 dsn: "postgres://user:pass@localhost:5432/dbbat?sslmode=require"
 ```

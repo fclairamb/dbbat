@@ -144,7 +144,7 @@ const DefaultBaseURL = "/app"
 // defaultConfig returns a Config with default values.
 func defaultConfig() Config {
 	return Config{
-		ListenPG:  ":5432",
+		ListenPG:  ":5434",
 		ListenAPI: ":8080",
 		BaseURL:   DefaultBaseURL,
 		QueryStorage: QueryStorageConfig{
