@@ -31,23 +31,31 @@ jobs:
           version: v2.8
 
   # ===========================================================================
-  # Commitlint Job - Validate commit messages on PRs
+  # PR Title Validation - Ensure PR titles follow conventional commits
   # ===========================================================================
-  commitlint:
+  pr-title:
     runs-on: ubuntu-24.04
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: amannn/action-semantic-pull-request@v5.5.3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          fetch-depth: 0
-
-      - uses: oven-sh/setup-bun@v2.1.0
-
-      - name: Install dependencies
-        run: bun install
-
-      - name: Validate commit messages
-        run: bunx commitlint --from ${{ github.event.pull_request.base.sha }} --to ${{ github.event.pull_request.head.sha }} --verbose
+          scopes: |
+            api
+            auth
+            config
+            crypto
+            db
+            deps
+            docs
+            grants
+            migrations
+            proxy
+            store
+            ui
+            release
+          requireScope: false
 
   # ===========================================================================
   # Frontend Job - Build React app with Bun
