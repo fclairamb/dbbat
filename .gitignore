@@ -49,3 +49,4 @@ internal/api/resources/assets/index-*
 dbbat-*.tgz
 
 bin/
+tmp/
