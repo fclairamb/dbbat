@@ -1,10 +1,10 @@
-# PgLens - PostgreSQL Observability Proxy
+# DBBat - PostgreSQL Observability Proxy
 
 **Give your devs access to prod.**
 
 A transparent PostgreSQL proxy for query observability, access control, and safety. Every query logged. Every connection tracked.
 
-## Why PgLens?
+## Why DBBat?
 
 **The Problem:**
 - Production databases should not be directly accessible to developers for security and compliance reasons
@@ -13,14 +13,14 @@ A transparent PostgreSQL proxy for query observability, access control, and safe
 
 **The Solution:**
 
-PgLens acts as a monitoring proxy that allows controlled developer access to production databases with:
+DBBat acts as a monitoring proxy that allows controlled developer access to production databases with:
 - **Complete monitoring**: Every query and result is logged with full traceability
 - **Strict limitations**: Time-windowed access, read/write controls, query quotas, and data transfer limits
 - **Full audit trail**: Track who accessed what, when, and what data they retrieved
 - **Encrypted credentials**: Database passwords never exposed to users
 - **Granular access control**: Grant temporary access to specific databases with precise permissions
 
-PgLens gives you the best of both worlds: developers can troubleshoot production issues while you maintain complete visibility and control.
+DBBat gives you the best of both worlds: developers can troubleshoot production issues while you maintain complete visibility and control.
 
 ## Features
 
@@ -47,15 +47,15 @@ docker-compose up -d
 
 # The following services will be available:
 # - PostgreSQL: localhost:5000
-# - PgLens Proxy: localhost:5001
-# - PgLens API: localhost:8080
+# - DBBat Proxy: localhost:5001
+# - DBBat API: localhost:8080
 ```
 
 ### Running Locally
 
-1. **Set up a PostgreSQL database** for PgLens storage:
+1. **Set up a PostgreSQL database** for DBBat storage:
 ```bash
-createdb pglens
+createdb dbbat
 ```
 
 2. **Generate an encryption key** (32 bytes, base64-encoded):
@@ -65,16 +65,16 @@ openssl rand -base64 32
 
 3. **Set environment variables**:
 ```bash
-export PGL_DSN="postgres://user:password@localhost:5432/pglens?sslmode=disable"
-export PGL_KEY="<your-base64-encoded-key>"
-export PGL_LISTEN_ADDR=":5432"
-export PGL_API_ADDR=":8080"
+export DBB_DSN="postgres://user:password@localhost:5432/dbbat?sslmode=disable"
+export DBB_KEY="<your-base64-encoded-key>"
+export DBB_LISTEN_PG=":5432"
+export DBB_LISTEN_API=":8080"
 ```
 
 4. **Build and run**:
 ```bash
-go build -o pglens ./cmd/pglens
-./pglens
+go build -o dbbat ./cmd/dbbat
+./dbbat
 ```
 
 ## Usage
@@ -168,13 +168,13 @@ curl -u admin:admin http://localhost:8080/api/queries?limit=10
 
 | Variable | Description | Required | Default |
 |----------|-------------|----------|---------|
-| `PGL_LISTEN_ADDR` | Proxy listen address | No | `:5432` |
-| `PGL_API_ADDR` | REST API listen address | No | `:8080` |
-| `PGL_DSN` | PostgreSQL DSN for PgLens storage | Yes | - |
-| `PGL_KEY` | Base64-encoded AES-256 encryption key | Yes* | - |
-| `PGL_KEYFILE` | Path to file containing encryption key | Yes* | - |
+| `DBB_LISTEN_PG` | Proxy listen address | No | `:5432` |
+| `DBB_LISTEN_API` | REST API listen address | No | `:8080` |
+| `DBB_DSN` | PostgreSQL DSN for DBBat storage | Yes | - |
+| `DBB_KEY` | Base64-encoded AES-256 encryption key | Yes* | - |
+| `DBB_KEYFILE` | Path to file containing encryption key | Yes* | - |
 
-*Either `PGL_KEY` or `PGL_KEYFILE` must be set.
+*Either `DBB_KEY` or `DBB_KEYFILE` must be set.
 
 ## Development
 
@@ -198,7 +198,7 @@ golangci-lint run
 ## Architecture
 
 ```
-Client → PgLens (auth + grant check) → Target PostgreSQL
+Client → DBBat (auth + grant check) → Target PostgreSQL
 ```
 
 See [CLAUDE.md](CLAUDE.md) for detailed architecture and implementation documentation.

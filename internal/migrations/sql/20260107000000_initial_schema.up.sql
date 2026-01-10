@@ -49,7 +49,7 @@ CREATE INDEX idx_api_keys_key_type ON api_keys(key_type);
 -- Target database configurations
 CREATE TABLE databases (
     uid UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name TEXT NOT NULL UNIQUE,              -- Name used in PgLens connection string
+    name TEXT NOT NULL UNIQUE,              -- Name used in DBBat connection string
     description TEXT,
     host TEXT NOT NULL,
     port INT NOT NULL DEFAULT 5432,
