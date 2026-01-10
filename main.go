@@ -243,6 +243,9 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	logger.Info("Database connection established")
 
+	// Check for database configurations that match the storage DSN
+	checkDatabaseConfigurations(ctx, dataStore, logger)
+
 	// Ensure default admin exists
 	defaultPassword := "admin"
 
@@ -639,4 +642,24 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 
 	logger.Info("Demo data provisioning complete")
 	return nil
+}
+
+// checkDatabaseConfigurations checks if any configured target databases match the storage DSN.
+// Logs a warning for each match found. This handles databases that were configured
+// before the storage DSN validation was added.
+func checkDatabaseConfigurations(ctx context.Context, dataStore *store.Store, logger *slog.Logger) {
+	databases, err := dataStore.ListDatabases(ctx)
+	if err != nil {
+		logger.Warn("failed to check database configurations", "error", err)
+		return
+	}
+
+	for _, db := range databases {
+		if dataStore.MatchesStorageDSN(db.Host, db.Port, db.DatabaseName) {
+			logger.Warn("SECURITY WARNING: database configuration matches storage DSN",
+				"database_name", db.Name,
+				"target", fmt.Sprintf("%s:%d/%s", db.Host, db.Port, db.DatabaseName),
+				"recommendation", "use a separate database for DBBat storage to prevent privilege escalation")
+		}
+	}
 }

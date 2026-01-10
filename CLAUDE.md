@@ -67,6 +67,31 @@ Client → DBBat (auth + grant check) → Target PostgreSQL
 - **Encryption key**: From `DBB_KEY` env var (base64) or `DBB_KEYFILE` env var (path to key file)
 - **Default admin**: Created on first startup with username `admin`, password `admin` (must be changed)
 
+### Storage Database Separation (Required)
+
+**The DBBat storage database must never be configured as a target database.**
+
+DBBat stores sensitive information in its storage database:
+- User password hashes
+- Encrypted database credentials
+- Audit logs of all access control changes
+- Access grants and permissions
+
+If the storage database were accessible through the proxy, users could potentially:
+- View or modify user accounts
+- Access password hashes
+- Tamper with audit logs
+- Escalate their own privileges
+
+**Protections:**
+1. **Configuration-time validation**: DBBat prevents configuring a target database that matches the storage DSN. Attempting to create such a configuration returns an error.
+2. **Startup warnings**: At startup, DBBat checks all existing database configurations and logs a warning for any that match the storage DSN.
+
+**Recommendations:**
+- Use a separate PostgreSQL database for DBBat storage
+- Preferably use a separate PostgreSQL instance entirely
+- The storage database credentials should have no access to target databases
+
 ## Authentication
 
 ### Authentication Flow

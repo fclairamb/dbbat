@@ -14,7 +14,13 @@ import (
 
 // CreateDatabase creates a new database configuration.
 // It uses a transaction to ensure the password is encrypted with AAD bound to the database UID.
+// Returns ErrTargetMatchesStorage if the target database matches the DBBat storage database.
 func (s *Store) CreateDatabase(ctx context.Context, db *Database, encryptionKey []byte) (*Database, error) {
+	// Security check: prevent configuring the storage database as a target
+	if s.MatchesStorageDSN(db.Host, db.Port, db.DatabaseName) {
+		return nil, ErrTargetMatchesStorage
+	}
+
 	plainPassword := db.Password
 
 	result := &Database{
@@ -121,8 +127,37 @@ func (s *Store) ListDatabases(ctx context.Context) ([]Database, error) {
 	return databases, nil
 }
 
-// UpdateDatabase updates a database
+// UpdateDatabase updates a database.
+// Returns ErrTargetMatchesStorage if the update would cause the target to match the DBBat storage database.
 func (s *Store) UpdateDatabase(ctx context.Context, uid uuid.UUID, updates DatabaseUpdate, encryptionKey []byte) error {
+	// Security check: if host, port, or database name are being updated,
+	// verify the resulting configuration doesn't match the storage DSN
+	if updates.Host != nil || updates.Port != nil || updates.DatabaseName != nil {
+		// Get current database to compute the final values
+		current, err := s.GetDatabaseByUID(ctx, uid)
+		if err != nil {
+			return err
+		}
+
+		// Compute effective values after update
+		host := current.Host
+		if updates.Host != nil {
+			host = *updates.Host
+		}
+		port := current.Port
+		if updates.Port != nil {
+			port = *updates.Port
+		}
+		databaseName := current.DatabaseName
+		if updates.DatabaseName != nil {
+			databaseName = *updates.DatabaseName
+		}
+
+		if s.MatchesStorageDSN(host, port, databaseName) {
+			return ErrTargetMatchesStorage
+		}
+	}
+
 	q := s.db.NewUpdate().
 		Model((*Database)(nil)).
 		Where("uid = ?", uid).

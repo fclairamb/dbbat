@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 
@@ -95,6 +96,10 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 
 	result, err := s.store.CreateDatabase(c.Request.Context(), db, s.encryptionKey)
 	if err != nil {
+		if errors.Is(err, store.ErrTargetMatchesStorage) {
+			errorResponse(c, http.StatusBadRequest, "target database cannot match DBBat storage database")
+			return
+		}
 		s.logger.Error("failed to create database", "error", err)
 		errorResponse(c, http.StatusInternalServerError, "failed to create database")
 		return
@@ -297,6 +302,14 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 	}
 
 	if err := s.store.UpdateDatabase(c.Request.Context(), uid, updates, s.encryptionKey); err != nil {
+		if errors.Is(err, store.ErrTargetMatchesStorage) {
+			errorResponse(c, http.StatusBadRequest, "target database cannot match DBBat storage database")
+			return
+		}
+		if errors.Is(err, store.ErrDatabaseNotFound) {
+			errorResponse(c, http.StatusNotFound, "database not found")
+			return
+		}
 		s.logger.Error("failed to update database", "error", err)
 		errorResponse(c, http.StatusInternalServerError, "failed to update database")
 		return
