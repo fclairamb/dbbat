@@ -1,6 +1,8 @@
 # Helm Chart for DBBat
 
-## Status: Ready for Implementation
+## Status: Implemented
+
+**GitHub Issue:** [#7](https://github.com/fclairamb/dbbat/issues/7)
 
 ## Summary
 
@@ -503,12 +505,32 @@ spec:
 
 ## Chart Publishing Workflow
 
+The Helm chart is automatically published to GHCR on every release, alongside container images.
+
+### Publishing Strategy
+
+| Trigger | Chart Version | Container Tag | Published To |
+|---------|--------------|---------------|--------------|
+| Tag `v1.0.0` | `1.0.0` | `1.0.0`, `latest` | `oci://ghcr.io/fclairamb/charts/dbbat` |
+| Tag `v1.0.0-rc.1` | `1.0.0-rc.1` | `1.0.0-rc.1` | `oci://ghcr.io/fclairamb/charts/dbbat` |
+| Commit to `main` | `0.0.0-dev.{sha}` | `edge` | `oci://ghcr.io/fclairamb/charts/dbbat` (test releases) |
+
+**Versioning:**
+- **Stable releases** (`v1.0.0`): Chart version matches tag (without `v` prefix)
+- **Pre-releases** (`v1.0.0-rc.1`): Chart version includes pre-release suffix
+- **Test releases** (commits to `main`): Chart version is `0.0.0-dev.{short-sha}`, appVersion is `edge`
+
+### Integration with Release Workflow
+
 Add to `.github/workflows/release.yml`:
 
 ```yaml
   publish-chart:
     runs-on: ubuntu-latest
     needs: [release]  # After container images are pushed
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v6.0.1
 
@@ -521,18 +543,62 @@ Add to `.github/workflows/release.yml`:
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
 
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            # Strip 'v' prefix from tag
+            VERSION=${GITHUB_REF_NAME#v}
+            APP_VERSION=$VERSION
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "appVersion=$APP_VERSION" >> $GITHUB_OUTPUT
+            echo "is_release=true" >> $GITHUB_OUTPUT
+          else
+            # Development build from main branch
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            VERSION="0.0.0-dev.${SHORT_SHA}"
+            APP_VERSION="edge"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "appVersion=$APP_VERSION" >> $GITHUB_OUTPUT
+            echo "is_release=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update Chart.yaml
+        run: |
+          sed -i "s/^version:.*/version: ${{ steps.version.outputs.version }}/" charts/dbbat/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${{ steps.version.outputs.appVersion }}\"/" charts/dbbat/Chart.yaml
+          cat charts/dbbat/Chart.yaml
+
       - name: Package chart
         run: |
-          # Update appVersion to match release
-          VERSION=${GITHUB_REF_NAME#v}
-          sed -i "s/^appVersion:.*/appVersion: \"$VERSION\"/" charts/dbbat/Chart.yaml
-          sed -i "s/^version:.*/version: $VERSION/" charts/dbbat/Chart.yaml
           helm package charts/dbbat
 
       - name: Push chart to GHCR
         run: |
           helm push dbbat-*.tgz oci://ghcr.io/fclairamb/charts
+
+      - name: Create release note
+        if: steps.version.outputs.is_release == 'true'
+        run: |
+          echo "📦 Helm chart published: oci://ghcr.io/fclairamb/charts/dbbat:${{ steps.version.outputs.version }}"
+          echo ""
+          echo "Install with:"
+          echo "  helm install dbbat oci://ghcr.io/fclairamb/charts/dbbat --version ${{ steps.version.outputs.version }}"
 ```
+
+### Testing Chart Releases
+
+For commits to `main` (test releases), the chart can be installed with:
+
+```bash
+# List available versions
+helm search repo dbbat --versions --devel
+
+# Install development version
+helm install dbbat oci://ghcr.io/fclairamb/charts/dbbat --version 0.0.0-dev.abc1234 --devel
+```
+
+The `--devel` flag is required for installing development versions.
 
 ## Usage Examples
 
@@ -773,9 +839,11 @@ charts/
 4. Implement security templates: serviceaccount, networkpolicy, pdb
 5. Create values.schema.json for validation
 6. Write comprehensive README.md
-7. Add chart publishing to release workflow
+7. Add chart publishing to release workflow (both stable and test releases)
 8. Test deployment on local cluster (kind/minikube)
-9. Test on real Kubernetes cluster
+9. Verify test release publishing on commit to main
+10. Test stable release publishing with a pre-release tag
+11. Test on real Kubernetes cluster
 
 ## Open Questions
 

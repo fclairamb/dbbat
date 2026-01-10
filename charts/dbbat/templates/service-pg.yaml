@@ -1,0 +1,25 @@
+{{- if .Values.service.proxy.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dbbat.fullname" . }}-pg
+  labels:
+    {{- include "dbbat.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy
+  {{- with .Values.service.proxy.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.proxy.type }}
+  ports:
+    - port: {{ .Values.service.proxy.port }}
+      targetPort: postgres
+      protocol: TCP
+      name: postgres
+      {{- if and (eq .Values.service.proxy.type "NodePort") .Values.service.proxy.nodePort }}
+      nodePort: {{ .Values.service.proxy.nodePort }}
+      {{- end }}
+  selector:
+    {{- include "dbbat.selectorLabels" . | nindent 4 }}
+{{- end }}

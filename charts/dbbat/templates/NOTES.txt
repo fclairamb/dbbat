@@ -1,0 +1,63 @@
+Thank you for installing {{ .Chart.Name }}!
+
+Your release is named {{ .Release.Name }}.
+
+To learn more about the release, try:
+
+  $ helm status {{ .Release.Name }} --namespace {{ .Release.Namespace }}
+  $ helm get all {{ .Release.Name }} --namespace {{ .Release.Namespace }}
+
+=============================================================================
+DBBat - PostgreSQL Observability Proxy
+=============================================================================
+
+{{ if .Values.ingress.enabled }}
+The DBBat web UI is available at:
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}{{ $.Values.config.baseUrl }}/
+{{- end }}
+{{ else }}
+To access the web UI, run:
+
+  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "dbbat.name" . }},app.kubernetes.io/instance={{ .Release.Name }}" -o jsonpath="{.items[0].metadata.name}")
+  kubectl port-forward --namespace {{ .Release.Namespace }} $POD_NAME 8080:8080
+
+Then visit: http://localhost:8080{{ .Values.config.baseUrl }}/
+{{ end }}
+
+To access the PostgreSQL proxy:
+{{ if eq .Values.service.proxy.type "LoadBalancer" }}
+  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "dbbat.fullname" . }}-pg -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+  psql -h $SERVICE_IP -p {{ .Values.service.proxy.port }} -U <username> -d <database>
+{{ else if eq .Values.service.proxy.type "NodePort" }}
+  export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "dbbat.fullname" . }}-pg)
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  psql -h $NODE_IP -p $NODE_PORT -U <username> -d <database>
+{{ else }}
+  kubectl port-forward --namespace {{ .Release.Namespace }} svc/{{ include "dbbat.fullname" . }}-pg {{ .Values.service.proxy.port }}:{{ .Values.service.proxy.port }}
+  psql -h localhost -p {{ .Values.service.proxy.port }} -U <username> -d <database>
+{{ end }}
+
+{{ if not .Values.secrets.existingSecret }}
+{{ if not .Values.secrets.encryptionKey }}
+WARNING: No encryption key provided!
+  Please set secrets.encryptionKey or secrets.existingSecret to secure database credentials.
+  Generate a key with: openssl rand -base64 32
+{{ end }}
+{{ end }}
+
+{{ if and (not .Values.postgresql.external.dsn) (not .Values.postgresql.external.host) }}
+WARNING: No PostgreSQL database configured!
+  Please configure postgresql.external.dsn or postgresql.external.host to connect to your database.
+{{ end }}
+
+Default admin credentials:
+  Username: admin
+  Password: admin (CHANGE THIS IMMEDIATELY!)
+
+Next steps:
+1. Change the admin password via the web UI or API
+2. Configure target databases via the REST API
+3. Create users and grant access to databases
+
+For more information, visit: https://github.com/fclairamb/dbbat
