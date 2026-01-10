@@ -1,0 +1,46 @@
+.heroBanner {
+  padding: 4rem 0;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.heroLogo {
+  max-width: 300px;
+  height: auto;
+  margin-bottom: 1rem;
+}
+
+@media screen and (max-width: 996px) {
+  .heroBanner {
+    padding: 2rem;
+  }
+
+  .heroLogo {
+    max-width: 200px;
+  }
+}
+
+.buttons {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.quickStart {
+  padding: 4rem 0;
+  text-align: center;
+  background: var(--ifm-background-surface-color);
+}
+
+.codeBlock {
+  background: var(--ifm-code-background);
+  padding: 1rem 2rem;
+  border-radius: var(--ifm-code-border-radius);
+  display: inline-block;
+  text-align: left;
+  margin: 1rem 0;
+  font-size: 1rem;
+}

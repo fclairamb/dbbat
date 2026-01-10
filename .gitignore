@@ -1,0 +1,46 @@
+# Binaries
+dbbat
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+*.key
+
+# Docker
+docker-compose.override.yml
+
+# Logs
+logs/
+
+# Frontend build artifacts (copied from front/dist/)
+internal/api/resources/index.html
+internal/api/resources/assets/index-*
+
+*.backup

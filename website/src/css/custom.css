@@ -1,0 +1,49 @@
+/**
+ * Any CSS included here will be global. The classic template
+ * bundles Infima by default. Infima is a CSS framework designed to
+ * work well for content-centric websites.
+ */
+
+/* Pink color theme to match the DBBat logo */
+:root {
+  --ifm-color-primary: #e91e8c;
+  --ifm-color-primary-dark: #d41a7e;
+  --ifm-color-primary-darker: #c81877;
+  --ifm-color-primary-darkest: #a41462;
+  --ifm-color-primary-light: #eb3b9a;
+  --ifm-color-primary-lighter: #ed4da3;
+  --ifm-color-primary-lightest: #f17db8;
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(233, 30, 140, 0.1);
+}
+
+/* For readability concerns, you should choose a lighter palette in dark mode. */
+[data-theme="dark"] {
+  --ifm-color-primary: #f17db8;
+  --ifm-color-primary-dark: #ed5fa6;
+  --ifm-color-primary-darker: #eb4d9d;
+  --ifm-color-primary-darkest: #e41e87;
+  --ifm-color-primary-light: #f59bca;
+  --ifm-color-primary-lighter: #f7add3;
+  --ifm-color-primary-lightest: #fcd5e9;
+  --docusaurus-highlighted-code-line-bg: rgba(241, 125, 184, 0.2);
+}
+
+/* Hero section styling */
+.hero--primary {
+  --ifm-hero-background-color: #e91e8c;
+  --ifm-hero-text-color: #ffffff;
+}
+
+/* Links in hero should be visible */
+.hero--primary .button--secondary {
+  color: #e91e8c;
+  border-color: #ffffff;
+  background-color: #ffffff;
+}
+
+.hero--primary .button--secondary:hover {
+  color: #ffffff;
+  background-color: transparent;
+  border-color: #ffffff;
+}

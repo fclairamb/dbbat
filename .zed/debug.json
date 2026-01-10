@@ -1,0 +1,16 @@
+[
+  {
+    "label": "Run PgLens",
+    "adapter": "Delve",
+    "request": "launch",
+    "mode": "debug",
+    "program": "./cmd/pglens",
+    "cwd": "./cmd/pglens",
+    "env": {
+      "PGL_LISTEN_ADDR": ":5001",
+      "PGL_API_ADDR": ":8080",
+      "PGL_DSN": "postgres://postgres:postgres@localhost:5002/pglens?sslmode=disable",
+      "PGL_KEY": "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=",
+    },
+  },
+]
