@@ -1261,11 +1261,17 @@ components:
           format: date-time
           description: Build timestamp
           example: "2026-01-09T12:00:00Z"
+        run_mode:
+          type: string
+          description: |
+            Run mode of the server. Empty string for production, "test" for test mode, "demo" for demo mode.
+          example: ""
       required:
         - api_version
         - build_version
         - build_commit
         - build_time
+        - run_mode
 
     # Auth schemas
     LoginRequest:

@@ -198,11 +198,17 @@ func (s *Server) handleHealth(c *gin.Context) {
 
 // handleVersion returns API and build version information.
 func (s *Server) handleVersion(c *gin.Context) {
+	runMode := ""
+	if s.config != nil {
+		runMode = string(s.config.RunMode)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"api_version":   "v1",
 		"build_version": version.Version,
 		"build_commit":  version.Commit,
-		"git_time":      version.GitTime,
+		"build_time":    version.GitTime,
+		"run_mode":      runMode,
 	})
 }
 

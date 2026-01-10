@@ -13,11 +13,19 @@ import {
   Moon,
   Sun,
   LockKeyhole,
+  Gamepad2,
 } from "lucide-react";
 
 import { useAuth } from "@/contexts/AuthContext";
+import { useVersion } from "@/api/queries";
 import { PasswordChangeDialog } from "@/components/shared/PasswordChangeDialog";
 import { hasRole, canViewQueries, canViewAudit } from "@/lib/permissions";
+import { Badge } from "@/components/ui/badge";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import {
   Sidebar,
   SidebarContent,
@@ -59,7 +67,10 @@ export function AppSidebar() {
   const location = useLocation();
   const { user, logout } = useAuth();
   const { theme, setTheme } = useTheme();
+  const { data: versionInfo } = useVersion();
   const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
+
+  const isDemo = versionInfo?.run_mode === "demo";
 
   // Filter navigation items based on user roles
   const filteredMainNavItems = mainNavItems.filter((item) => {
@@ -171,6 +182,37 @@ export function AppSidebar() {
       </SidebarContent>
 
       <SidebarFooter>
+        {/* Demo mode badge and version */}
+        <div className="flex flex-col items-start gap-1 px-2 pb-2">
+          {isDemo && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Badge className="bg-amber-500 hover:bg-amber-600 text-white cursor-default">
+                  <Gamepad2 className="mr-1 h-3 w-3" />
+                  Demo Mode
+                </Badge>
+              </TooltipTrigger>
+              <TooltipContent side="right">
+                Running in demo mode. Login: admin / admin. Data resets on restart.
+              </TooltipContent>
+            </Tooltip>
+          )}
+          {versionInfo && (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <span className="text-xs text-muted-foreground cursor-default">
+                  v{versionInfo.build_version}
+                </span>
+              </TooltipTrigger>
+              <TooltipContent side="right">
+                v{versionInfo.build_version} ({versionInfo.build_commit})
+              </TooltipContent>
+            </Tooltip>
+          )}
+        </div>
+
+        <SidebarSeparator />
+
         <SidebarMenu>
           <SidebarMenuItem>
             <DropdownMenu>

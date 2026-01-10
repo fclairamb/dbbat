@@ -1,10 +1,12 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useAuth } from "@/contexts/AuthContext";
 import { apiClient } from "@/api/client";
+import { useVersion } from "@/api/queries";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
 import {
   Card,
   CardContent,
@@ -13,7 +15,12 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Loader2, CheckCircle2 } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { Loader2, CheckCircle2, Gamepad2 } from "lucide-react";
 
 export const Route = createFileRoute("/login")({
   component: LoginPage,
@@ -24,6 +31,7 @@ type ViewState = "login" | "password-change";
 function LoginPage() {
   const navigate = useNavigate();
   const { login, isLoading } = useAuth();
+  const { data: versionInfo } = useVersion();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -32,6 +40,16 @@ function LoginPage() {
   const [success, setSuccess] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [viewState, setViewState] = useState<ViewState>("login");
+
+  const isDemo = versionInfo?.run_mode === "demo";
+
+  // Pre-fill credentials in demo mode
+  useEffect(() => {
+    if (isDemo && !username && !password) {
+      setUsername("admin");
+      setPassword("admin");
+    }
+  }, [isDemo, username, password]);
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -124,7 +142,8 @@ function LoginPage() {
 
   return (
     <div className="flex h-screen w-screen items-center justify-center bg-gradient-to-br from-background via-background to-primary/10">
-      <Card className="w-full max-w-md mx-4" data-testid="login-card">
+      <div className="flex flex-col items-center w-full max-w-md mx-4">
+        <Card className="w-full" data-testid="login-card">
         <CardHeader className="text-center">
           <div className="flex justify-center mb-4">
             <img
@@ -134,15 +153,10 @@ function LoginPage() {
               data-testid="login-logo"
             />
           </div>
-          {viewState === "login" && (
-            <>
-              <CardTitle className="text-2xl" data-testid="login-title">
-                Sign In
-              </CardTitle>
-              <CardDescription data-testid="login-description">
-                Enter your credentials to access DBBat
-              </CardDescription>
-            </>
+          {viewState === "login" && isDemo && (
+            <p className="text-sm text-muted-foreground" data-testid="demo-credentials-hint">
+              Demo credentials pre-filled
+            </p>
           )}
           {viewState === "password-change" && (
             <>
@@ -300,6 +314,36 @@ function LoginPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Version and demo mode indicator */}
+      <div className="mt-6 flex flex-col items-center gap-2">
+        {isDemo && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Badge className="bg-amber-500 hover:bg-amber-600 text-white cursor-default">
+                <Gamepad2 className="mr-1 h-3 w-3" />
+                Demo Mode
+              </Badge>
+            </TooltipTrigger>
+            <TooltipContent>
+              Running in demo mode. Login: admin / admin. Data resets on restart.
+            </TooltipContent>
+          </Tooltip>
+        )}
+        {versionInfo && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <span className="text-xs text-muted-foreground cursor-default">
+                v{versionInfo.build_version}
+              </span>
+            </TooltipTrigger>
+            <TooltipContent>
+              v{versionInfo.build_version} ({versionInfo.build_commit})
+            </TooltipContent>
+          </Tooltip>
+        )}
+      </div>
+      </div>
     </div>
   );
 }

@@ -572,6 +572,11 @@ export interface components {
              * @example 2026-01-09T12:00:00Z
              */
             build_time: string;
+            /**
+             * @description Run mode of the server. Empty string for production, "test" for test mode, "demo" for demo mode.
+             * @example
+             */
+            run_mode: string;
         };
         LoginRequest: {
             /** @description Username */
