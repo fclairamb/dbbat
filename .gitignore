@@ -1,5 +1,5 @@
 # Binaries
-dbbat
+/dbbat
 *.exe
 *.exe~
 *.dll
@@ -44,3 +44,6 @@ internal/api/resources/index.html
 internal/api/resources/assets/index-*
 
 *.backup
+
+# Help charts
+dbbat-*.tgz

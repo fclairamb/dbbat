@@ -1,6 +1,8 @@
 # Helm Chart for DBBat
 
-## Status: Draft
+## Status: Implemented
+
+**GitHub Issue:** [#7](https://github.com/fclairamb/dbbat/issues/7)
 
 ## Summary
 
@@ -24,46 +26,18 @@ ghcr.io/fclairamb/dbbat:1.0.0
 
 ## Chart Distribution
 
-### Option A: OCI Registry in GHCR (Recommended)
-
-Store the Helm chart as an OCI artifact in GHCR alongside container images:
+Charts will be stored as OCI artifacts in GHCR alongside container images:
 
 ```bash
 # Install from OCI registry
 helm install dbbat oci://ghcr.io/fclairamb/charts/dbbat --version 1.0.0
 ```
 
-**Pros:**
+**Rationale:**
 - Single registry for both images and charts
 - No additional infrastructure needed
-- Native Helm 3.8+ support
+- Native Helm 3.8+ support (widely adopted since 2022)
 - Versioned alongside the application
-
-**Cons:**
-- Slightly newer Helm feature (3.8+, released 2022)
-- No web-based chart browsing
-
-### Option B: GitHub Pages Helm Repository
-
-Host a traditional Helm repository on GitHub Pages:
-
-```bash
-helm repo add dbbat https://fclairamb.github.io/dbbat/charts
-helm install dbbat dbbat/dbbat
-```
-
-**Pros:**
-- Works with all Helm versions
-- Browseable index.yaml
-- Familiar pattern
-
-**Cons:**
-- Extra build step for index generation
-- Separate hosting concern
-
-### Recommendation
-
-**Use Option A (OCI Registry)** for simplicity. Helm 3.8+ is widely adopted, and keeping charts in GHCR alongside images reduces complexity. Add Option B later if there's demand for legacy Helm support.
 
 ## Chart Structure
 
@@ -81,7 +55,6 @@ charts/
     │   ├── secret.yaml
     │   ├── ingress.yaml
     │   ├── serviceaccount.yaml
-    │   ├── hpa.yaml                  # HorizontalPodAutoscaler (optional)
     │   ├── pdb.yaml                  # PodDisruptionBudget (optional)
     │   ├── networkpolicy.yaml        # Network policies (optional)
     │   └── NOTES.txt
@@ -93,11 +66,7 @@ charts/
 
 ### Decision 1: PostgreSQL Deployment Strategy
 
-DBBat requires PostgreSQL for its internal storage. Three options:
-
-#### Option A: External PostgreSQL Only (Recommended)
-
-Require users to provide an external PostgreSQL DSN. No bundled database.
+DBBat requires PostgreSQL for its internal storage. Users must provide an external PostgreSQL DSN - no bundled database.
 
 ```yaml
 # values.yaml
@@ -113,136 +82,37 @@ postgresql:
     sslMode: "require"
 ```
 
-**Pros:**
-- Simplest chart
+**Rationale:**
+- Simplest chart with no stateful complexity
 - Users manage their own database (RDS, Cloud SQL, managed PostgreSQL)
-- No stateful complexity in the chart
 - Follows "cattle not pets" philosophy
-
-**Cons:**
-- Requires external database before installing
-- More initial setup for testing/development
-
-#### Option B: Bundled PostgreSQL via Subchart
-
-Include Bitnami's PostgreSQL chart as a dependency:
-
-```yaml
-# Chart.yaml
-dependencies:
-  - name: postgresql
-    version: "~15.0"
-    repository: "oci://registry-1.docker.io/bitnamicharts"
-    condition: postgresql.enabled
-```
-
-**Pros:**
-- One-command deployment for testing
-- Good for dev/staging environments
-
-**Cons:**
-- Adds complexity
-- Bundled PostgreSQL rarely appropriate for production
-- Version pinning and security updates for dependency
-
-#### Option C: CloudNativePG Operator Integration
-
-Support CloudNativePG for Kubernetes-native PostgreSQL:
-
-```yaml
-postgresql:
-  cloudnativepg:
-    enabled: true
-    instances: 3
-    storage: 10Gi
-```
-
-**Pros:**
-- Production-grade PostgreSQL on Kubernetes
-- Automated backups, failover, etc.
-
-**Cons:**
-- Requires operator pre-installed
-- Adds complexity
-
-#### Recommendation
-
-**Start with Option A** (external only) for the initial release. Document PostgreSQL setup clearly. Consider adding Option B as an optional subchart for development/testing use cases in a future version.
+- Production deployments should use managed PostgreSQL anyway
 
 ### Decision 2: Secret Management
 
-Three approaches for handling sensitive values:
-
-#### Option A: Inline Secrets (Simple)
-
-Let users specify secrets directly in values:
+Support both inline secrets and external secret references, with external secrets taking precedence:
 
 ```yaml
 secrets:
-  encryptionKey: "base64-encoded-key"
-  databasePassword: "mypassword"
-```
-
-**Pros:**
-- Simple for getting started
-- Works everywhere
-
-**Cons:**
-- Secrets visible in Helm release history
-- Not suitable for GitOps
-
-#### Option B: External Secrets Reference
-
-Reference existing Kubernetes secrets:
-
-```yaml
-secrets:
-  existingSecret: "dbbat-secrets"
-  encryptionKeyKey: "encryption-key"
-  databasePasswordKey: "db-password"
-```
-
-**Pros:**
-- Secrets managed externally (Vault, External Secrets Operator, sealed-secrets)
-- GitOps-friendly
-
-**Cons:**
-- More setup required
-
-#### Option C: Both (Recommended)
-
-Support both patterns with external secrets taking precedence:
-
-```yaml
-secrets:
-  # Option 1: Create secret from values
+  # Option 1: Create secret from values (simple, for getting started)
   encryptionKey: ""      # Base64-encoded AES-256 key
   databasePassword: ""
 
-  # Option 2: Use existing secret (takes precedence)
+  # Option 2: Use existing secret (takes precedence, for production/GitOps)
   existingSecret: ""
   keys:
     encryptionKey: "DBB_KEY"
     databasePassword: "DB_PASSWORD"
 ```
 
-### Decision 3: Ingress for PostgreSQL Proxy
+**Rationale:**
+- Inline secrets are simple for getting started
+- External secrets enable GitOps workflows and integration with Vault, External Secrets Operator, etc.
+- Supporting both provides flexibility without complexity
 
-The PostgreSQL proxy (port 5432) uses TCP, not HTTP. Standard Ingress doesn't support TCP well.
+### Decision 3: PostgreSQL Proxy Service
 
-#### Options for PostgreSQL Access
-
-| Approach | Description | When to Use |
-|----------|-------------|-------------|
-| **LoadBalancer Service** | Cloud-native L4 load balancer | Production on cloud providers |
-| **NodePort** | Expose on node's port | Development, bare metal |
-| **ClusterIP only** | Internal access only | Apps in same cluster connect |
-| **TCP Ingress** | nginx-ingress ConfigMap for TCP | When nginx-ingress is available |
-| **Gateway API TCPRoute** | Modern Kubernetes Gateway API | Future-proof, newer clusters |
-
-#### Recommendation
-
-Default to **ClusterIP** for security. Provide clear documentation for each exposure method. Include a separate `service-pg.yaml` that can be toggled to LoadBalancer/NodePort.
+The PostgreSQL proxy (port 5432) uses TCP, not HTTP. Default to **ClusterIP** for security, with options to change to LoadBalancer or NodePort for external access.
 
 ```yaml
 # values.yaml
@@ -258,38 +128,30 @@ service:
     annotations: {}        # Cloud provider LB annotations
 ```
 
+**Rationale:**
+- ClusterIP is most secure - only accessible within the cluster
+- Users can override to LoadBalancer/NodePort when needed
+- Separate `service-pg.yaml` template provides clear separation from API service
+
 ### Decision 4: Replica Count and Session Handling
 
-DBBat's PostgreSQL proxy maintains TCP connections. Considerations for multiple replicas:
-
-#### Connection Routing
+DBBat's PostgreSQL proxy maintains TCP connections. Multiple replicas are supported for high availability:
 
 - **PostgreSQL connections are long-lived**: Client connects once, issues many queries
 - **No session affinity needed**: Each connection is independent
 - **Load balancing works**: New connections distributed across replicas
-- **In-flight connections survive pod restarts**: Clients reconnect automatically
-
-#### Recommendation
-
-- Default to 1 replica for simplicity
-- Support multiple replicas for high availability
-- No special session affinity needed (PostgreSQL clients handle reconnection)
-- Add PodDisruptionBudget for safe rollouts
+- **Clients handle reconnection**: PostgreSQL clients reconnect automatically on pod restart
 
 ```yaml
 replicaCount: 1
-
-autoscaling:
-  enabled: false
-  minReplicas: 2
-  maxReplicas: 5
-  targetCPUUtilizationPercentage: 70
 
 podDisruptionBudget:
   enabled: false
   minAvailable: 1
   # OR maxUnavailable: 1
 ```
+
+**Note:** HorizontalPodAutoscaler (HPA) is not included. Users who need autoscaling can create their own HPA resource externally.
 
 ## Values Schema
 
@@ -501,16 +363,6 @@ readinessProbe:
   failureThreshold: 3
 
 # =============================================================================
-# Autoscaling
-# =============================================================================
-autoscaling:
-  enabled: false
-  minReplicas: 2
-  maxReplicas: 10
-  targetCPUUtilizationPercentage: 70
-  targetMemoryUtilizationPercentage: 80
-
-# =============================================================================
 # Pod Disruption Budget
 # =============================================================================
 podDisruptionBudget:
@@ -653,12 +505,32 @@ spec:
 
 ## Chart Publishing Workflow
 
+The Helm chart is automatically published to GHCR on every release, alongside container images.
+
+### Publishing Strategy
+
+| Trigger | Chart Version | Container Tag | Published To |
+|---------|--------------|---------------|--------------|
+| Tag `v1.0.0` | `1.0.0` | `1.0.0`, `latest` | `oci://ghcr.io/fclairamb/charts/dbbat` |
+| Tag `v1.0.0-rc.1` | `1.0.0-rc.1` | `1.0.0-rc.1` | `oci://ghcr.io/fclairamb/charts/dbbat` |
+| Commit to `main` | `0.0.0-dev.{sha}` | `edge` | `oci://ghcr.io/fclairamb/charts/dbbat` (test releases) |
+
+**Versioning:**
+- **Stable releases** (`v1.0.0`): Chart version matches tag (without `v` prefix)
+- **Pre-releases** (`v1.0.0-rc.1`): Chart version includes pre-release suffix
+- **Test releases** (commits to `main`): Chart version is `0.0.0-dev.{short-sha}`, appVersion is `edge`
+
+### Integration with Release Workflow
+
 Add to `.github/workflows/release.yml`:
 
 ```yaml
   publish-chart:
     runs-on: ubuntu-latest
     needs: [release]  # After container images are pushed
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v6.0.1
 
@@ -671,18 +543,62 @@ Add to `.github/workflows/release.yml`:
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
 
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            # Strip 'v' prefix from tag
+            VERSION=${GITHUB_REF_NAME#v}
+            APP_VERSION=$VERSION
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "appVersion=$APP_VERSION" >> $GITHUB_OUTPUT
+            echo "is_release=true" >> $GITHUB_OUTPUT
+          else
+            # Development build from main branch
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            VERSION="0.0.0-dev.${SHORT_SHA}"
+            APP_VERSION="edge"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "appVersion=$APP_VERSION" >> $GITHUB_OUTPUT
+            echo "is_release=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update Chart.yaml
+        run: |
+          sed -i "s/^version:.*/version: ${{ steps.version.outputs.version }}/" charts/dbbat/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${{ steps.version.outputs.appVersion }}\"/" charts/dbbat/Chart.yaml
+          cat charts/dbbat/Chart.yaml
+
       - name: Package chart
         run: |
-          # Update appVersion to match release
-          VERSION=${GITHUB_REF_NAME#v}
-          sed -i "s/^appVersion:.*/appVersion: \"$VERSION\"/" charts/dbbat/Chart.yaml
-          sed -i "s/^version:.*/version: $VERSION/" charts/dbbat/Chart.yaml
           helm package charts/dbbat
 
       - name: Push chart to GHCR
         run: |
           helm push dbbat-*.tgz oci://ghcr.io/fclairamb/charts
+
+      - name: Create release note
+        if: steps.version.outputs.is_release == 'true'
+        run: |
+          echo "📦 Helm chart published: oci://ghcr.io/fclairamb/charts/dbbat:${{ steps.version.outputs.version }}"
+          echo ""
+          echo "Install with:"
+          echo "  helm install dbbat oci://ghcr.io/fclairamb/charts/dbbat --version ${{ steps.version.outputs.version }}"
 ```
+
+### Testing Chart Releases
+
+For commits to `main` (test releases), the chart can be installed with:
+
+```bash
+# List available versions
+helm search repo dbbat --versions --devel
+
+# Install development version
+helm install dbbat oci://ghcr.io/fclairamb/charts/dbbat --version 0.0.0-dev.abc1234 --devel
+```
+
+The `--devel` flag is required for installing development versions.
 
 ## Usage Examples
 
@@ -742,11 +658,6 @@ ingress:
     - secretName: dbbat-tls
       hosts:
         - dbbat.example.com
-
-autoscaling:
-  enabled: true
-  minReplicas: 3
-  maxReplicas: 10
 
 podDisruptionBudget:
   enabled: true
@@ -909,7 +820,6 @@ charts/
     │   ├── _helpers.tpl
     │   ├── configmap.yaml
     │   ├── deployment.yaml
-    │   ├── hpa.yaml
     │   ├── ingress.yaml
     │   ├── networkpolicy.yaml
     │   ├── NOTES.txt
@@ -927,12 +837,13 @@ charts/
 2. Implement core templates: deployment, service, configmap, secret
 3. Add ingress and service-pg templates
 4. Implement security templates: serviceaccount, networkpolicy, pdb
-5. Add HPA for autoscaling
-6. Create values.schema.json for validation
-7. Write comprehensive README.md
-8. Add chart publishing to release workflow
-9. Test deployment on local cluster (kind/minikube)
-10. Test on real Kubernetes cluster
+5. Create values.schema.json for validation
+6. Write comprehensive README.md
+7. Add chart publishing to release workflow (both stable and test releases)
+8. Test deployment on local cluster (kind/minikube)
+9. Verify test release publishing on commit to main
+10. Test stable release publishing with a pre-release tag
+11. Test on real Kubernetes cluster
 
 ## Open Questions
 

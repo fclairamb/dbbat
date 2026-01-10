@@ -1,0 +1,49 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dbbat.fullname" . }}
+  labels:
+    {{- include "dbbat.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "dbbat.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow ingress from specified namespaces
+    {{- if .Values.networkPolicy.allowedNamespaces }}
+    {{- range .Values.networkPolicy.allowedNamespaces }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ . }}
+    {{- end }}
+    {{- end }}
+    # Allow ingress from pods with specified labels
+    {{- if .Values.networkPolicy.allowedPodLabels }}
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.networkPolicy.allowedPodLabels | nindent 14 }}
+    {{- end }}
+    # Allow ingress from same namespace
+    - from:
+        - podSelector: {}
+  egress:
+    # Allow all egress (for connecting to target PostgreSQL databases)
+    - to:
+        - podSelector: {}
+    - to:
+        - namespaceSelector: {}
+    # Allow DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+{{- end }}

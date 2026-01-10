@@ -111,3 +111,80 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "**Version:** ${{ steps.mode.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+
+  publish-chart:
+    runs-on: ubuntu-latest
+    needs: [release]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.17.0
+
+      - name: Login to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Determine version
+        id: version
+        run: |
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            # Strip 'v' prefix from tag
+            VERSION=${GITHUB_REF_NAME#v}
+            APP_VERSION=$VERSION
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "appVersion=$APP_VERSION" >> $GITHUB_OUTPUT
+            echo "is_release=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref_name }}" == release-test/* ]]; then
+            # Branch: release-test/v1.2.3 → chart version 1.2.3-test
+            VERSION="${GITHUB_REF_NAME#release-test/v}"
+            APP_VERSION="test-${VERSION}"
+            echo "version=${VERSION}-test" >> $GITHUB_OUTPUT
+            echo "appVersion=$APP_VERSION" >> $GITHUB_OUTPUT
+            echo "is_release=false" >> $GITHUB_OUTPUT
+          else
+            # Development build from main branch
+            SHORT_SHA=$(git rev-parse --short HEAD)
+            VERSION="0.0.0-dev.${SHORT_SHA}"
+            APP_VERSION="edge"
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "appVersion=$APP_VERSION" >> $GITHUB_OUTPUT
+            echo "is_release=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update Chart.yaml
+        run: |
+          sed -i "s/^version:.*/version: ${{ steps.version.outputs.version }}/" charts/dbbat/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${{ steps.version.outputs.appVersion }}\"/" charts/dbbat/Chart.yaml
+          cat charts/dbbat/Chart.yaml
+
+      - name: Package chart
+        run: |
+          helm package charts/dbbat
+
+      - name: Push chart to GHCR
+        run: |
+          helm push dbbat-*.tgz oci://ghcr.io/fclairamb/charts
+
+      - name: Chart release summary
+        run: |
+          echo "## Helm Chart Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📦 **Chart:** \`oci://ghcr.io/fclairamb/charts/dbbat:${{ steps.version.outputs.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [[ "${{ steps.version.outputs.is_release }}" == "true" ]]; then
+            echo "**Install with:**" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+            echo "helm install dbbat oci://ghcr.io/fclairamb/charts/dbbat --version ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "**Install with:**" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+            echo "helm install dbbat oci://ghcr.io/fclairamb/charts/dbbat --version ${{ steps.version.outputs.version }} --devel" >> $GITHUB_STEP_SUMMARY
+            echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          fi

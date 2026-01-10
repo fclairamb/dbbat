@@ -1,0 +1,254 @@
+# =============================================================================
+# DBBat Helm Chart Values
+# =============================================================================
+
+# -- Number of replicas
+replicaCount: 1
+
+image:
+  # -- Container image repository
+  repository: ghcr.io/fclairamb/dbbat
+  # -- Container image pull policy
+  pullPolicy: IfNotPresent
+  # -- Container image tag (defaults to Chart appVersion)
+  tag: ""
+
+# -- Image pull secrets for private registries
+imagePullSecrets: []
+
+# -- Override the chart name
+nameOverride: ""
+# -- Override the full resource name
+fullnameOverride: ""
+
+# =============================================================================
+# Database Configuration
+# =============================================================================
+postgresql:
+  # External PostgreSQL connection settings
+  external:
+    # -- Full DSN (takes precedence over individual settings)
+    # Example: postgres://user:pass@host:5432/dbbat?sslmode=require
+    dsn: ""
+
+    # -- PostgreSQL host (used if dsn is empty)
+    host: ""
+    # -- PostgreSQL port
+    port: 5432
+    # -- Database name
+    database: "dbbat"
+    # -- Database username
+    username: "dbbat"
+    # -- Database password (use secrets.databasePassword for production)
+    password: ""
+    # -- SSL mode: disable, require, verify-ca, verify-full
+    sslMode: "require"
+
+# =============================================================================
+# Secrets
+# =============================================================================
+secrets:
+  # -- AES-256 encryption key (base64-encoded, 32 bytes raw)
+  # Generate with: openssl rand -base64 32
+  encryptionKey: ""
+
+  # -- Database password (if not in DSN or external.password)
+  databasePassword: ""
+
+  # -- Use existing secret instead of creating one
+  # The secret must contain keys specified in secrets.keys
+  existingSecret: ""
+
+  # -- Key names in existingSecret
+  keys:
+    encryptionKey: "DBB_KEY"
+    databasePassword: "DB_PASSWORD"
+    dsn: "DBB_DSN"
+
+# =============================================================================
+# Application Configuration
+# =============================================================================
+config:
+  # -- PostgreSQL proxy listen address
+  listenPg: ":5434"
+  # -- REST API listen address
+  listenApi: ":8080"
+  # -- Base URL for frontend (default: /app)
+  baseUrl: "/app"
+  # -- Run mode: "" (default) or "test" (for testing only!)
+  runMode: ""
+  # -- Path to encryption key file (alternative to secrets.encryptionKey)
+  # Mount a secret as a volume and reference the path here
+  keyFile: ""
+
+# =============================================================================
+# Services
+# =============================================================================
+service:
+  api:
+    # -- API service type
+    type: ClusterIP
+    # -- API service port
+    port: 8080
+    # -- API service annotations
+    annotations: {}
+
+  proxy:
+    # -- Enable PostgreSQL proxy service
+    enabled: true
+    # -- Proxy service type (ClusterIP, NodePort, LoadBalancer)
+    type: ClusterIP
+    # -- Proxy service port
+    port: 5434
+    # -- Fixed NodePort (optional, only for type: NodePort)
+    nodePort: ""
+    # -- Proxy service annotations (e.g., cloud LB configuration)
+    annotations: {}
+    # Example for AWS NLB:
+    #   service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    #   service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+
+# =============================================================================
+# Ingress (HTTP only - for API and Web UI)
+# =============================================================================
+ingress:
+  # -- Enable ingress for API/Web UI
+  enabled: false
+  # -- Ingress class name
+  className: ""
+  # -- Ingress annotations
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # cert-manager.io/cluster-issuer: letsencrypt
+  # -- Ingress hosts
+  hosts:
+    - host: dbbat.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  # -- Ingress TLS configuration
+  tls: []
+  #  - secretName: dbbat-tls
+  #    hosts:
+  #      - dbbat.example.com
+
+# =============================================================================
+# Service Account
+# =============================================================================
+serviceAccount:
+  # -- Create a service account
+  create: true
+  # -- Service account annotations
+  annotations: {}
+  # -- Service account name (generated if not set)
+  name: ""
+  # -- Automount service account token
+  automountServiceAccountToken: false
+
+# =============================================================================
+# Pod Configuration
+# =============================================================================
+podAnnotations: {}
+  # prometheus.io/scrape: "true"
+  # prometheus.io/port: "8080"
+  # prometheus.io/path: "/api/v1/metrics"
+
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# =============================================================================
+# Resources
+# =============================================================================
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+# =============================================================================
+# Probes
+# =============================================================================
+livenessProbe:
+  httpGet:
+    path: /api/v1/health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /api/v1/health
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# =============================================================================
+# Pod Disruption Budget
+# =============================================================================
+podDisruptionBudget:
+  enabled: false
+  # -- Minimum available pods during disruption
+  minAvailable: 1
+  # -- Maximum unavailable pods (alternative to minAvailable)
+  # maxUnavailable: 1
+
+# =============================================================================
+# Node Scheduling
+# =============================================================================
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+  # podAntiAffinity:
+  #   preferredDuringSchedulingIgnoredDuringExecution:
+  #     - weight: 100
+  #       podAffinityTerm:
+  #         labelSelector:
+  #           matchLabels:
+  #             app.kubernetes.io/name: dbbat
+  #         topologyKey: kubernetes.io/hostname
+
+# =============================================================================
+# Network Policy
+# =============================================================================
+networkPolicy:
+  enabled: false
+  # -- Allow ingress from these namespaces
+  allowedNamespaces: []
+  # -- Allow ingress from pods with these labels
+  allowedPodLabels: {}
+
+# =============================================================================
+# Extra Configuration
+# =============================================================================
+# -- Additional environment variables
+extraEnv: []
+  # - name: EXTRA_VAR
+  #   value: "value"
+
+# -- Additional volume mounts
+extraVolumeMounts: []
+
+# -- Additional volumes
+extraVolumes: []
