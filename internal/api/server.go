@@ -407,7 +407,7 @@ func (s *Server) proxyToDevServer(c *gin.Context, rule *config.RedirectRule, ori
 	}
 
 	// Handle WebSocket upgrades
-	proxy.ModifyResponse = func(resp *http.Response) error {
+	proxy.ModifyResponse = func(_ *http.Response) error {
 		return nil
 	}
 

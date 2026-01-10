@@ -28,27 +28,8 @@ func setupLogger(runMode config.RunMode) (*slog.Logger, func()) {
 	var writer io.Writer = os.Stdout
 	var cleanup func()
 
-	// In test mode, also write logs to a file
 	if runMode == config.RunModeTest {
-		logDir := "logs"
-		if err := os.MkdirAll(logDir, 0o755); err != nil {
-			// If we can't create the directory, just log to stdout
-			fmt.Fprintf(os.Stderr, "Warning: failed to create logs directory: %v\n", err)
-		} else {
-			// Create log file with date and time prefix
-			dateTimePrefix := time.Now().Format("2006-01-02_15-04-05")
-			logFileName := filepath.Join(logDir, fmt.Sprintf("%s_dbbat.log", dateTimePrefix))
-
-			logFile, err := os.OpenFile(logFileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to create log file: %v\n", err)
-			} else {
-				writer = io.MultiWriter(os.Stdout, logFile)
-				cleanup = func() {
-					_ = logFile.Close()
-				}
-			}
-		}
+		writer, cleanup = setupTestLogFile()
 	}
 
 	logger := slog.New(slog.NewJSONHandler(writer, &slog.HandlerOptions{
@@ -56,6 +37,26 @@ func setupLogger(runMode config.RunMode) (*slog.Logger, func()) {
 	}))
 
 	return logger, cleanup
+}
+
+// setupTestLogFile creates a log file for test mode and returns a writer and cleanup function.
+func setupTestLogFile() (io.Writer, func()) {
+	logDir := "logs"
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to create logs directory: %v\n", err)
+		return os.Stdout, nil
+	}
+
+	dateTimePrefix := time.Now().Format("2006-01-02_15-04-05")
+	logFileName := filepath.Join(logDir, fmt.Sprintf("%s_dbbat.log", dateTimePrefix))
+
+	logFile, err := os.OpenFile(logFileName, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to create log file: %v\n", err)
+		return os.Stdout, nil
+	}
+
+	return io.MultiWriter(os.Stdout, logFile), func() { _ = logFile.Close() }
 }
 
 // cliFlags holds CLI flag values that will override config.
@@ -222,7 +223,7 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	)
 
 	// Initialize store (with table drop if in test mode)
-	storeOpts := store.StoreOptions{
+	storeOpts := store.Options{
 		DropTablesFirst: cfg.RunMode == config.RunModeTest,
 	}
 	if storeOpts.DropTablesFirst {
@@ -262,7 +263,7 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	// Start API server
 	apiServer := api.NewServer(dataStore, cfg.EncryptionKey, logger, cfg)
 
-	go func() { //nolint:contextcheck // Server startup doesn't need context propagation
+	go func() { //nolint:contextcheck
 		if err := apiServer.Start(cfg.ListenAPI); err != nil {
 			logger.Error("API server error", "error", err)
 			os.Exit(1)

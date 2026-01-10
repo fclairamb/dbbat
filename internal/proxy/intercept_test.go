@@ -1077,7 +1077,7 @@ func TestDecodeColumnValue(t *testing.T) {
 		// Boolean
 		{name: "bool true t", data: []byte("t"), oid: 16, expected: true},
 		{name: "bool true 1", data: []byte("1"), oid: 16, expected: true},
-		{name: "bool true true", data: []byte("true"), oid: 16, expected: true},
+		{name: "bool true word", data: []byte("true"), oid: 16, expected: true},
 		{name: "bool false f", data: []byte("f"), oid: 16, expected: false},
 		{name: "bool false 0", data: []byte("0"), oid: 16, expected: false},
 
@@ -1192,10 +1192,10 @@ func TestConvertDataRow_TypeDecoding(t *testing.T) {
 
 	// Test with various types
 	values := [][]byte{
-		[]byte("42"),      // int
-		[]byte("3.14"),    // float
-		[]byte("t"),       // bool
-		[]byte("hello"),   // text
+		[]byte("42"),    // int
+		[]byte("3.14"),  // float
+		[]byte("t"),     // bool
+		[]byte("hello"), // text
 	}
 	columnNames := []string{"int_col", "float_col", "bool_col", "text_col"}
 	columnOIDs := []uint32{23, 701, 16, 25} // int4, float8, bool, text

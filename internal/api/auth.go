@@ -291,6 +291,8 @@ func (s *Server) handlePreLoginPasswordChange(c *gin.Context) {
 // - User can only change their own password (:uid must match authenticated user)
 // - Admin users can change any user's password (with their own admin credentials)
 // PUT /api/v1/users/:uid/password
+//
+//nolint:funlen,nestif // Authentication handlers require comprehensive validation which increases length
 func (s *Server) handleChangePassword(c *gin.Context) {
 	targetUID, err := parseUIDParam(c)
 	if err != nil {

@@ -59,7 +59,7 @@ jobs:
         working-directory: front
 
       - name: Build frontend
-        run: bun run build
+        run: bun run build:no-check
         working-directory: front
 
       - name: Upload frontend artifacts

@@ -139,7 +139,7 @@ type Query struct {
 	DurationMs    *float64         `bun:"duration_ms,type:numeric(10,3)" json:"duration_ms"`
 	RowsAffected  *int64           `bun:"rows_affected" json:"rows_affected"`
 	Error         *string          `bun:"error" json:"error"`
-	CopyFormat    *string          `bun:"copy_format" json:"copy_format,omitempty"`    // 'text', 'csv', 'binary', or nil for non-COPY
+	CopyFormat    *string          `bun:"copy_format" json:"copy_format,omitempty"`       // 'text', 'csv', 'binary', or nil for non-COPY
 	CopyDirection *string          `bun:"copy_direction" json:"copy_direction,omitempty"` // 'in', 'out', or nil for non-COPY
 }
 
@@ -293,9 +293,9 @@ func (k *APIKey) IsWebSession() bool {
 
 // APIKeyFilter represents filters for listing API keys
 type APIKeyFilter struct {
-	UserID       *uuid.UUID
-	KeyType      *string // Filter by key type (api, web)
-	IncludeAll   bool    // Include revoked/expired keys
-	Limit        int
-	Offset       int
+	UserID     *uuid.UUID
+	KeyType    *string // Filter by key type (api, web)
+	IncludeAll bool    // Include revoked/expired keys
+	Limit      int
+	Offset     int
 }

@@ -170,7 +170,9 @@ func (s *Server) requireAdminOrViewer() gin.HandlerFunc {
 }
 
 // requireBasicAuth middleware ensures the request uses Basic Auth (not API key or web session)
-// This is used for sensitive operations that should not be performed with any token
+// This is used for sensitive operations that should not be performed with any token.
+//
+//nolint:unused // Reserved for future use in sensitive endpoints
 func (s *Server) requireBasicAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authMethod := getAuthMethod(c)
@@ -228,7 +230,7 @@ type failureRecord struct {
 
 // Auth failure rate limiting constants
 const (
-	authFailureResetDuration = 15 * time.Minute
+	authFailureResetDuration   = 15 * time.Minute
 	authFailureCleanupInterval = 5 * time.Minute
 )
 
