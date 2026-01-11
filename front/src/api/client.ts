@@ -31,6 +31,17 @@ export const clearToken = (): void => {
 
 let authMiddleware: ReturnType<typeof apiClient.use> | null = null;
 
+// Handle 401 response by clearing token and redirecting to login
+const handleUnauthorizedResponse = (response: Response): void => {
+  if (response.status === 401) {
+    // Don't redirect if already on login page to avoid infinite loops
+    if (!window.location.pathname.endsWith("/login")) {
+      localStorage.removeItem(TOKEN_KEY);
+      window.location.href = "/app/login?session_expired=true";
+    }
+  }
+};
+
 // Set up Bearer auth middleware
 const setupBearerAuth = (token: string): void => {
   if (authMiddleware) {
@@ -41,6 +52,10 @@ const setupBearerAuth = (token: string): void => {
     onRequest({ request }) {
       request.headers.set("Authorization", `Bearer ${token}`);
       return request;
+    },
+    onResponse({ response }) {
+      handleUnauthorizedResponse(response);
+      return response;
     },
   });
 };
@@ -56,6 +71,10 @@ export const setBasicAuth = (username: string, password: string) => {
     onRequest({ request }) {
       request.headers.set("Authorization", `Basic ${credentials}`);
       return request;
+    },
+    onResponse({ response }) {
+      handleUnauthorizedResponse(response);
+      return response;
     },
   });
 };
