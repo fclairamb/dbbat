@@ -34,6 +34,8 @@ const (
 	RunModeDefault RunMode = ""
 	// RunModeTest provisions test data on startup.
 	RunModeTest RunMode = "test"
+	// RunModeDemo provisions demo data on startup with additional protections.
+	RunModeDemo RunMode = "demo"
 )
 
 // QueryStorageConfig holds configuration for query result storage.
@@ -99,6 +101,11 @@ type Config struct {
 
 	// RunMode controls whether test data is provisioned on startup.
 	RunMode RunMode `koanf:"run_mode"`
+
+	// DemoTargetDB specifies the only allowed database target in demo mode.
+	// Format: "user:password@host/dbname" (e.g., "demo:demo@localhost/demo")
+	// Only applies when RunMode is "demo". If empty, defaults to "demo:demo@localhost/demo".
+	DemoTargetDB string `koanf:"demo_target_db"`
 
 	// QueryStorage holds query result storage configuration.
 	QueryStorage QueryStorageConfig `koanf:"query_storage"`
@@ -484,4 +491,85 @@ func normalizeBaseURL(baseURL string) string {
 	baseURL = strings.TrimSuffix(baseURL, "/")
 
 	return baseURL
+}
+
+// DemoTarget holds the parsed demo target database credentials.
+type DemoTarget struct {
+	Username string
+	Password string
+	Host     string
+	Database string
+}
+
+// DefaultDemoTargetDB is the default value for DemoTargetDB.
+const DefaultDemoTargetDB = "demo:demo@localhost/demo"
+
+// IsDemoMode returns true if running in demo mode.
+func (c *Config) IsDemoMode() bool {
+	return c.RunMode == RunModeDemo
+}
+
+// GetDemoTarget parses and returns the demo target configuration.
+// Returns nil if not in demo mode.
+func (c *Config) GetDemoTarget() *DemoTarget {
+	if !c.IsDemoMode() {
+		return nil
+	}
+
+	targetDB := c.DemoTargetDB
+	if targetDB == "" {
+		targetDB = DefaultDemoTargetDB
+	}
+
+	return ParseDemoTargetDB(targetDB)
+}
+
+// ParseDemoTargetDB parses a demo target string in format "user:pass@host/dbname".
+func ParseDemoTargetDB(s string) *DemoTarget {
+	// Find @ separator
+	atIdx := strings.LastIndex(s, "@")
+	if atIdx == -1 {
+		return nil
+	}
+
+	userPass := s[:atIdx]
+	hostDB := s[atIdx+1:]
+
+	// Find : separator in user:pass
+	colonIdx := strings.Index(userPass, ":")
+	if colonIdx == -1 {
+		return nil
+	}
+
+	// Find / separator in host/dbname
+	slashIdx := strings.Index(hostDB, "/")
+	if slashIdx == -1 {
+		return nil
+	}
+
+	return &DemoTarget{
+		Username: userPass[:colonIdx],
+		Password: userPass[colonIdx+1:],
+		Host:     hostDB[:slashIdx],
+		Database: hostDB[slashIdx+1:],
+	}
+}
+
+// ValidateDemoTarget checks if the given credentials match the demo target.
+// Returns an error message if validation fails, or empty string if valid.
+func (c *Config) ValidateDemoTarget(username, password, host, database string) string {
+	if !c.IsDemoMode() {
+		return ""
+	}
+
+	target := c.GetDemoTarget()
+	if target == nil {
+		return ""
+	}
+
+	if username != target.Username || password != target.Password || host != target.Host || database != target.Database {
+		return fmt.Sprintf("you can only use %s:%s@%s/%s in demo mode", target.Username, target.Password, target.Host, target.Database)
+	}
+
+	return ""
 }

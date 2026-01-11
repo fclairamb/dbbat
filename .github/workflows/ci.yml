@@ -195,7 +195,7 @@ jobs:
           curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/app/ || true
         env:
           DBB_RUN_MODE: test
-          DBB_DSN: postgres://postgres:postgres@localhost:5002/dbbat?sslmode=disable
+          DBB_DSN: postgres://postgres:postgres@localhost:5001/dbbat?sslmode=disable
           DBB_KEY: MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=
           DBB_RATE_LIMIT_ENABLED: "false"
 

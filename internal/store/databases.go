@@ -14,7 +14,13 @@ import (
 
 // CreateDatabase creates a new database configuration.
 // It uses a transaction to ensure the password is encrypted with AAD bound to the database UID.
+// Returns ErrTargetMatchesStorage if the target database matches the DBBat storage database.
 func (s *Store) CreateDatabase(ctx context.Context, db *Database, encryptionKey []byte) (*Database, error) {
+	// Security check: prevent configuring the storage database as a target
+	if s.MatchesStorageDSN(db.Host, db.Port, db.DatabaseName) {
+		return nil, ErrTargetMatchesStorage
+	}
+
 	plainPassword := db.Password
 
 	result := &Database{
@@ -121,8 +127,50 @@ func (s *Store) ListDatabases(ctx context.Context) ([]Database, error) {
 	return databases, nil
 }
 
-// UpdateDatabase updates a database
+// checkStorageDSNConflict verifies that a database update won't result in matching the storage DSN.
+func (s *Store) checkStorageDSNConflict(ctx context.Context, uid uuid.UUID, updates DatabaseUpdate) error {
+	if updates.Host == nil && updates.Port == nil && updates.DatabaseName == nil {
+		return nil
+	}
+
+	current, err := s.GetDatabaseByUID(ctx, uid)
+	if err != nil {
+		return err
+	}
+
+	host := valueOrDefault(updates.Host, current.Host)
+	port := valueOrDefaultInt(updates.Port, current.Port)
+	databaseName := valueOrDefault(updates.DatabaseName, current.DatabaseName)
+
+	if s.MatchesStorageDSN(host, port, databaseName) {
+		return ErrTargetMatchesStorage
+	}
+	return nil
+}
+
+func valueOrDefault(ptr *string, def string) string {
+	if ptr != nil {
+		return *ptr
+	}
+	return def
+}
+
+func valueOrDefaultInt(ptr *int, def int) int {
+	if ptr != nil {
+		return *ptr
+	}
+	return def
+}
+
+// UpdateDatabase updates a database.
+// Returns ErrTargetMatchesStorage if the update would cause the target to match the DBBat storage database.
 func (s *Store) UpdateDatabase(ctx context.Context, uid uuid.UUID, updates DatabaseUpdate, encryptionKey []byte) error {
+	// Security check: if host, port, or database name are being updated,
+	// verify the resulting configuration doesn't match the storage DSN
+	if err := s.checkStorageDSNConflict(ctx, uid, updates); err != nil {
+		return err
+	}
+
 	q := s.db.NewUpdate().
 		Model((*Database)(nil)).
 		Where("uid = ?", uid).

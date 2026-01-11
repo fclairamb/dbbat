@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -61,6 +63,14 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		return
 	}
 
+	// Check demo mode restrictions
+	if s.config != nil {
+		if errMsg := s.config.ValidateDemoTarget(req.Username, req.Password, req.Host, req.DatabaseName); errMsg != "" {
+			errorResponse(c, http.StatusForbidden, errMsg)
+			return
+		}
+	}
+
 	// Set default port if not provided
 	if req.Port == 0 {
 		req.Port = 5432
@@ -86,6 +96,10 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 
 	result, err := s.store.CreateDatabase(c.Request.Context(), db, s.encryptionKey)
 	if err != nil {
+		if errors.Is(err, store.ErrTargetMatchesStorage) {
+			errorResponse(c, http.StatusBadRequest, "target database cannot match DBBat storage database")
+			return
+		}
 		s.logger.Error("failed to create database", "error", err)
 		errorResponse(c, http.StatusInternalServerError, "failed to create database")
 		return
@@ -217,6 +231,61 @@ func (s *Server) handleGetDatabase(c *gin.Context) {
 	errorResponse(c, http.StatusForbidden, "no access to this database")
 }
 
+// validateDemoModeUpdate checks if a database update is allowed in demo mode.
+// Returns an error message if validation fails, empty string if allowed.
+func (s *Server) validateDemoModeUpdate(db *store.Database, req UpdateDatabaseRequest) string {
+	if s.config == nil || !s.config.IsDemoMode() {
+		return ""
+	}
+
+	// No credential changes, no validation needed
+	if req.Username == nil && req.Password == nil && req.Host == nil && req.DatabaseName == nil {
+		return ""
+	}
+
+	target := s.config.GetDemoTarget()
+	if target == nil {
+		return ""
+	}
+
+	// Compute effective values
+	username := db.Username
+	if req.Username != nil {
+		username = *req.Username
+	}
+	host := db.Host
+	if req.Host != nil {
+		host = *req.Host
+	}
+	database := db.DatabaseName
+	if req.DatabaseName != nil {
+		database = *req.DatabaseName
+	}
+
+	errorMsg := fmt.Sprintf("you can only use %s:%s@%s/%s in demo mode", target.Username, target.Password, target.Host, target.Database)
+
+	// If password is being changed, validate full credentials
+	if req.Password != nil {
+		if errMsg := s.config.ValidateDemoTarget(username, *req.Password, host, database); errMsg != "" {
+			return errMsg
+		}
+		return ""
+	}
+
+	// Validate individual fields against demo target
+	if req.Username != nil && username != target.Username {
+		return errorMsg
+	}
+	if req.Host != nil && host != target.Host {
+		return errorMsg
+	}
+	if req.DatabaseName != nil && database != target.Database {
+		return errorMsg
+	}
+
+	return ""
+}
+
 // handleUpdateDatabase updates a database
 func (s *Server) handleUpdateDatabase(c *gin.Context) {
 	uid, err := parseUIDParam(c)
@@ -231,6 +300,19 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		return
 	}
 
+	// Check demo mode restrictions if credentials are being updated
+	if s.config != nil && s.config.IsDemoMode() && (req.Username != nil || req.Password != nil || req.Host != nil || req.DatabaseName != nil) {
+		db, err := s.store.GetDatabaseByUID(c.Request.Context(), uid)
+		if err != nil {
+			errorResponse(c, http.StatusNotFound, "database not found")
+			return
+		}
+		if errMsg := s.validateDemoModeUpdate(db, req); errMsg != "" {
+			errorResponse(c, http.StatusForbidden, errMsg)
+			return
+		}
+	}
+
 	updates := store.DatabaseUpdate{
 		Description:  req.Description,
 		Host:         req.Host,
@@ -242,6 +324,14 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 	}
 
 	if err := s.store.UpdateDatabase(c.Request.Context(), uid, updates, s.encryptionKey); err != nil {
+		if errors.Is(err, store.ErrTargetMatchesStorage) {
+			errorResponse(c, http.StatusBadRequest, "target database cannot match DBBat storage database")
+			return
+		}
+		if errors.Is(err, store.ErrDatabaseNotFound) {
+			errorResponse(c, http.StatusNotFound, "database not found")
+			return
+		}
 		s.logger.Error("failed to update database", "error", err)
 		errorResponse(c, http.StatusInternalServerError, "failed to update database")
 		return
@@ -268,6 +358,15 @@ func (s *Server) handleDeleteDatabase(c *gin.Context) {
 	if err != nil {
 		errorResponse(c, http.StatusBadRequest, "invalid database UID")
 		return
+	}
+
+	// Check demo mode restrictions
+	if s.config != nil && s.config.IsDemoMode() {
+		db, err := s.store.GetDatabaseByUID(c.Request.Context(), uid)
+		if err == nil && db.Name == "demo_db" {
+			errorResponse(c, http.StatusForbidden, "cannot delete the demo database in demo mode")
+			return
+		}
 	}
 
 	if err := s.store.DeleteDatabase(c.Request.Context(), uid); err != nil {

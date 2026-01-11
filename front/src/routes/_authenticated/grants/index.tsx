@@ -49,9 +49,24 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Plus, Ban } from "lucide-react";
 import { toast } from "sonner";
 import { format } from "date-fns";
+
+// Control options with descriptions
+const CONTROLS = [
+  { value: "read_only", label: "Read Only", description: "Enable PostgreSQL read-only mode" },
+  { value: "block_copy", label: "Block COPY", description: "Prevent COPY commands (data export/import)" },
+  { value: "block_ddl", label: "Block DDL", description: "Prevent schema modifications (CREATE, ALTER, DROP)" },
+] as const;
+
+// Helper to format control names for display
+function formatControlName(control: string): string {
+  return control
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
 
 export const Route = createFileRoute("/_authenticated/grants/")({
   component: GrantsPage,
@@ -98,13 +113,23 @@ function GrantsPage() {
       ),
     },
     {
-      key: "access_level",
-      header: "Access",
-      cell: (g) => (
-        <Badge variant={g.access_level === "write" ? "default" : "secondary"}>
-          {g.access_level}
-        </Badge>
-      ),
+      key: "controls",
+      header: "Controls",
+      cell: (g) => {
+        const controls = g.controls || [];
+        if (controls.length === 0) {
+          return <Badge variant="default">Full Access</Badge>;
+        }
+        return (
+          <div className="flex flex-wrap gap-1">
+            {controls.map((control) => (
+              <Badge key={control} variant="secondary">
+                {formatControlName(control)}
+              </Badge>
+            ))}
+          </div>
+        );
+      },
     },
     {
       key: "time_window",
@@ -232,7 +257,7 @@ function CreateGrantDialog({
 }) {
   const [userId, setUserId] = useState("");
   const [databaseId, setDatabaseId] = useState("");
-  const [accessLevel, setAccessLevel] = useState<"read" | "write">("read");
+  const [controls, setControls] = useState<string[]>([]);
   const [startsAt, setStartsAt] = useState(format(new Date(), "yyyy-MM-dd"));
   const [expiresAt, setExpiresAt] = useState(
     format(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), "yyyy-MM-dd")
@@ -253,10 +278,18 @@ function CreateGrantDialog({
     createGrant.mutate({
       user_id: userId,
       database_id: databaseId,
-      access_level: accessLevel,
+      controls: controls,
       starts_at: new Date(startsAt).toISOString(),
       expires_at: new Date(expiresAt).toISOString(),
     });
+  };
+
+  const toggleControl = (controlValue: string) => {
+    setControls((prev) =>
+      prev.includes(controlValue)
+        ? prev.filter((c) => c !== controlValue)
+        : [...prev, controlValue]
+    );
   };
 
   return (
@@ -299,20 +332,33 @@ function CreateGrantDialog({
               </SelectContent>
             </Select>
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="accessLevel">Access Level</Label>
-            <Select
-              value={accessLevel}
-              onValueChange={(v) => setAccessLevel(v as "read" | "write")}
-            >
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="read">Read</SelectItem>
-                <SelectItem value="write">Write</SelectItem>
-              </SelectContent>
-            </Select>
+          <div className="space-y-3">
+            <Label>Access Controls</Label>
+            <p className="text-sm text-muted-foreground">
+              Select restrictions to apply. No selections = full write access.
+            </p>
+            <div className="space-y-2">
+              {CONTROLS.map((control) => (
+                <div key={control.value} className="flex items-start space-x-3">
+                  <Checkbox
+                    id={control.value}
+                    checked={controls.includes(control.value)}
+                    onCheckedChange={() => toggleControl(control.value)}
+                  />
+                  <div className="grid gap-0.5 leading-none">
+                    <Label
+                      htmlFor={control.value}
+                      className="text-sm font-medium cursor-pointer"
+                    >
+                      {control.label}
+                    </Label>
+                    <p className="text-xs text-muted-foreground">
+                      {control.description}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">

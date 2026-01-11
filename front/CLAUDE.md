@@ -214,7 +214,7 @@ docker compose up -d postgres
 # Terminal 2: Build and run server in test mode
 make build-all
 DBB_RUN_MODE=test \
-  DBB_DSN="postgres://postgres:postgres@localhost:5002/dbbat?sslmode=disable" \
+  DBB_DSN="postgres://postgres:postgres@localhost:5001/dbbat?sslmode=disable" \
   DBB_KEY="MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=" \
   ./bin/dbbat serve
 

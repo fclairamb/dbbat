@@ -51,12 +51,12 @@ func TestCreateGrant(t *testing.T) {
 	t.Run("create read grant", func(t *testing.T) {
 		now := time.Now()
 		grant := &Grant{
-			UserID:      user.UID,
-			DatabaseID:  database.UID,
-			AccessLevel: "read",
-			GrantedBy:   admin.UID,
-			StartsAt:    now,
-			ExpiresAt:   now.Add(24 * time.Hour),
+			UserID:     user.UID,
+			DatabaseID: database.UID,
+			Controls:   []string{ControlReadOnly},
+			GrantedBy:  admin.UID,
+			StartsAt:   now,
+			ExpiresAt:  now.Add(24 * time.Hour),
 		}
 
 		created, err := store.CreateGrant(ctx, grant)
@@ -67,8 +67,8 @@ func TestCreateGrant(t *testing.T) {
 		if created.UID == uuid.Nil {
 			t.Error("CreateGrant() grant.UID = uuid.Nil")
 		}
-		if created.AccessLevel != "read" {
-			t.Errorf("CreateGrant() grant.AccessLevel = %q, want %q", created.AccessLevel, "read")
+		if !created.IsReadOnly() {
+			t.Error("CreateGrant() grant should have read_only control")
 		}
 		if created.RevokedAt != nil {
 			t.Error("CreateGrant() grant.RevokedAt should be nil")
@@ -84,7 +84,7 @@ func TestCreateGrant(t *testing.T) {
 		grant := &Grant{
 			UserID:              user2.UID,
 			DatabaseID:          db2.UID,
-			AccessLevel:         "write",
+			Controls:            []string{}, // Empty = full write access
 			GrantedBy:           admin.UID,
 			StartsAt:            now,
 			ExpiresAt:           now.Add(7 * 24 * time.Hour),
@@ -97,8 +97,8 @@ func TestCreateGrant(t *testing.T) {
 			t.Fatalf("CreateGrant() error = %v", err)
 		}
 
-		if created.AccessLevel != "write" {
-			t.Errorf("CreateGrant() grant.AccessLevel = %q, want %q", created.AccessLevel, "write")
+		if len(created.Controls) != 0 {
+			t.Errorf("CreateGrant() grant.Controls should be empty for full write access, got %v", created.Controls)
 		}
 		if created.MaxQueryCounts == nil || *created.MaxQueryCounts != 100 {
 			t.Errorf("CreateGrant() grant.MaxQueryCounts = %v, want %d", created.MaxQueryCounts, 100)
@@ -119,12 +119,12 @@ func TestGetActiveGrant(t *testing.T) {
 	t.Run("active grant exists", func(t *testing.T) {
 		now := time.Now()
 		grant := &Grant{
-			UserID:      user.UID,
-			DatabaseID:  database.UID,
-			AccessLevel: "read",
-			GrantedBy:   admin.UID,
-			StartsAt:    now.Add(-1 * time.Hour), // Started 1 hour ago
-			ExpiresAt:   now.Add(1 * time.Hour),  // Expires in 1 hour
+			UserID:     user.UID,
+			DatabaseID: database.UID,
+			Controls:   []string{ControlReadOnly},
+			GrantedBy:  admin.UID,
+			StartsAt:   now.Add(-1 * time.Hour), // Started 1 hour ago
+			ExpiresAt:  now.Add(1 * time.Hour),  // Expires in 1 hour
 		}
 		created, err := store.CreateGrant(ctx, grant)
 		if err != nil {
@@ -146,12 +146,12 @@ func TestGetActiveGrant(t *testing.T) {
 
 		now := time.Now()
 		grant := &Grant{
-			UserID:      user2.UID,
-			DatabaseID:  db2.UID,
-			AccessLevel: "read",
-			GrantedBy:   admin.UID,
-			StartsAt:    now.Add(-2 * time.Hour), // Started 2 hours ago
-			ExpiresAt:   now.Add(-1 * time.Hour), // Expired 1 hour ago
+			UserID:     user2.UID,
+			DatabaseID: db2.UID,
+			Controls:   []string{ControlReadOnly},
+			GrantedBy:  admin.UID,
+			StartsAt:   now.Add(-2 * time.Hour), // Started 2 hours ago
+			ExpiresAt:  now.Add(-1 * time.Hour), // Expired 1 hour ago
 		}
 		_, err := store.CreateGrant(ctx, grant)
 		if err != nil {
@@ -169,12 +169,12 @@ func TestGetActiveGrant(t *testing.T) {
 
 		now := time.Now()
 		grant := &Grant{
-			UserID:      user3.UID,
-			DatabaseID:  db3.UID,
-			AccessLevel: "read",
-			GrantedBy:   admin.UID,
-			StartsAt:    now.Add(1 * time.Hour), // Starts in 1 hour
-			ExpiresAt:   now.Add(2 * time.Hour), // Expires in 2 hours
+			UserID:     user3.UID,
+			DatabaseID: db3.UID,
+			Controls:   []string{ControlReadOnly},
+			GrantedBy:  admin.UID,
+			StartsAt:   now.Add(1 * time.Hour), // Starts in 1 hour
+			ExpiresAt:  now.Add(2 * time.Hour), // Expires in 2 hours
 		}
 		_, err := store.CreateGrant(ctx, grant)
 		if err != nil {
@@ -204,12 +204,12 @@ func TestGetGrantByUID(t *testing.T) {
 
 	now := time.Now()
 	grant := &Grant{
-		UserID:      user.UID,
-		DatabaseID:  database.UID,
-		AccessLevel: "write",
-		GrantedBy:   admin.UID,
-		StartsAt:    now,
-		ExpiresAt:   now.Add(time.Hour),
+		UserID:     user.UID,
+		DatabaseID: database.UID,
+		Controls:   []string{},
+		GrantedBy:  admin.UID,
+		StartsAt:   now,
+		ExpiresAt:  now.Add(time.Hour),
 	}
 	created, err := store.CreateGrant(ctx, grant)
 	if err != nil {
@@ -222,8 +222,8 @@ func TestGetGrantByUID(t *testing.T) {
 			t.Fatalf("GetGrantByUID() error = %v", err)
 		}
 
-		if found.AccessLevel != "write" {
-			t.Errorf("GetGrantByUID() grant.AccessLevel = %q, want %q", found.AccessLevel, "write")
+		if len(found.Controls) != 0 {
+			t.Errorf("GetGrantByUID() grant.Controls should be empty for full write access, got %v", found.Controls)
 		}
 	})
 
@@ -248,9 +248,9 @@ func TestListGrants(t *testing.T) {
 	// Create grants
 	// Use a time in the past for StartsAt to avoid race conditions with database NOW()
 	grants := []*Grant{
-		{UserID: user1.UID, DatabaseID: db1.UID, AccessLevel: "read", GrantedBy: admin.UID, StartsAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Hour)},
-		{UserID: user1.UID, DatabaseID: db2.UID, AccessLevel: "write", GrantedBy: admin.UID, StartsAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Hour)},
-		{UserID: user2.UID, DatabaseID: db1.UID, AccessLevel: "read", GrantedBy: admin.UID, StartsAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour)}, // Expired
+		{UserID: user1.UID, DatabaseID: db1.UID, Controls: []string{ControlReadOnly}, GrantedBy: admin.UID, StartsAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Hour)},
+		{UserID: user1.UID, DatabaseID: db2.UID, Controls: []string{}, GrantedBy: admin.UID, StartsAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Hour)},
+		{UserID: user2.UID, DatabaseID: db1.UID, Controls: []string{ControlReadOnly}, GrantedBy: admin.UID, StartsAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour)}, // Expired
 	}
 
 	for _, g := range grants {
@@ -320,12 +320,12 @@ func TestRevokeGrant(t *testing.T) {
 
 	now := time.Now()
 	grant := &Grant{
-		UserID:      user.UID,
-		DatabaseID:  database.UID,
-		AccessLevel: "read",
-		GrantedBy:   admin.UID,
-		StartsAt:    now.Add(-time.Hour),
-		ExpiresAt:   now.Add(time.Hour),
+		UserID:     user.UID,
+		DatabaseID: database.UID,
+		Controls:   []string{ControlReadOnly},
+		GrantedBy:  admin.UID,
+		StartsAt:   now.Add(-time.Hour),
+		ExpiresAt:  now.Add(time.Hour),
 	}
 	created, err := store.CreateGrant(ctx, grant)
 	if err != nil {

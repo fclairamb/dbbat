@@ -16,6 +16,20 @@ const (
 	RoleConnector = "connector"
 )
 
+// Control constants for grant restrictions
+const (
+	ControlReadOnly  = "read_only"
+	ControlBlockCopy = "block_copy"
+	ControlBlockDDL  = "block_ddl"
+)
+
+// ValidControls lists all valid control values
+var ValidControls = []string{
+	ControlReadOnly,
+	ControlBlockCopy,
+	ControlBlockDDL,
+}
+
 // User represents a DBBat user
 type User struct {
 	bun.BaseModel `bun:"table:users,alias:u"`
@@ -84,6 +98,7 @@ type Database struct {
 	CreatedBy         *uuid.UUID `bun:"created_by,type:uuid" json:"created_by"`
 	CreatedAt         time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 	UpdatedAt         time.Time  `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
+	DeletedAt         *time.Time `bun:"deleted_at,soft_delete" json:"-"`
 }
 
 // DatabaseUpdate represents fields that can be updated
@@ -186,7 +201,7 @@ type AccessGrant struct {
 	UID                 uuid.UUID  `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
 	UserID              uuid.UUID  `bun:"user_id,notnull,type:uuid" json:"user_id"`
 	DatabaseID          uuid.UUID  `bun:"database_id,notnull,type:uuid" json:"database_id"`
-	AccessLevel         string     `bun:"access_level,notnull" json:"access_level"` // "read" or "write"
+	Controls            []string   `bun:"controls,array" json:"controls"` // Array of controls: read_only, block_copy, block_ddl
 	GrantedBy           uuid.UUID  `bun:"granted_by,notnull,type:uuid" json:"granted_by"`
 	StartsAt            time.Time  `bun:"starts_at,notnull" json:"starts_at"`
 	ExpiresAt           time.Time  `bun:"expires_at,notnull" json:"expires_at"`
@@ -199,6 +214,31 @@ type AccessGrant struct {
 	// Computed fields (not stored in DB)
 	QueryCount       int64 `bun:"-" json:"query_count"`
 	BytesTransferred int64 `bun:"-" json:"bytes_transferred"`
+}
+
+// HasControl checks if the grant has a specific control enabled
+func (g *AccessGrant) HasControl(control string) bool {
+	for _, c := range g.Controls {
+		if c == control {
+			return true
+		}
+	}
+	return false
+}
+
+// IsReadOnly returns true if the grant has read_only control
+func (g *AccessGrant) IsReadOnly() bool {
+	return g.HasControl(ControlReadOnly)
+}
+
+// ShouldBlockCopy returns true if COPY commands should be blocked
+func (g *AccessGrant) ShouldBlockCopy() bool {
+	return g.HasControl(ControlBlockCopy)
+}
+
+// ShouldBlockDDL returns true if DDL commands should be blocked
+func (g *AccessGrant) ShouldBlockDDL() bool {
+	return g.HasControl(ControlBlockDDL)
 }
 
 // Grant is an alias for backward compatibility

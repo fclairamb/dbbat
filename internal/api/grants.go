@@ -15,7 +15,7 @@ import (
 type CreateGrantRequest struct {
 	UserID              uuid.UUID `json:"user_id" binding:"required"`
 	DatabaseID          uuid.UUID `json:"database_id" binding:"required"`
-	AccessLevel         string    `json:"access_level" binding:"required"`
+	Controls            []string  `json:"controls"` // Array of controls: read_only, block_copy, block_ddl
 	StartsAt            time.Time `json:"starts_at" binding:"required"`
 	ExpiresAt           time.Time `json:"expires_at" binding:"required"`
 	MaxQueryCounts      *int64    `json:"max_query_counts"`
@@ -30,10 +30,19 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 		return
 	}
 
-	// Validate access level
-	if req.AccessLevel != "read" && req.AccessLevel != "write" {
-		errorResponse(c, http.StatusBadRequest, "access_level must be 'read' or 'write'")
-		return
+	// Validate controls
+	for _, control := range req.Controls {
+		valid := false
+		for _, validControl := range store.ValidControls {
+			if control == validControl {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			errorResponse(c, http.StatusBadRequest, "invalid control: "+control)
+			return
+		}
 	}
 
 	// Validate time window
@@ -46,7 +55,7 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 	grant := &store.Grant{
 		UserID:              req.UserID,
 		DatabaseID:          req.DatabaseID,
-		AccessLevel:         req.AccessLevel,
+		Controls:            req.Controls,
 		GrantedBy:           currentUser.UID,
 		StartsAt:            req.StartsAt,
 		ExpiresAt:           req.ExpiresAt,
@@ -63,12 +72,12 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 
 	// Log audit event
 	details, _ := json.Marshal(map[string]interface{}{
-		"grant_uid":    result.UID,
-		"user_id":      result.UserID,
-		"database_id":  result.DatabaseID,
-		"access_level": result.AccessLevel,
-		"starts_at":    result.StartsAt,
-		"expires_at":   result.ExpiresAt,
+		"grant_uid":   result.UID,
+		"user_id":     result.UserID,
+		"database_id": result.DatabaseID,
+		"controls":    result.Controls,
+		"starts_at":   result.StartsAt,
+		"expires_at":  result.ExpiresAt,
 	})
 	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
 		EventType:   "grant.created",

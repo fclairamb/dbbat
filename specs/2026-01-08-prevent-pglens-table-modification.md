@@ -1,5 +1,9 @@
 # Prevent PgLens Table Modification via Proxy
 
+> **SUPERSEDED**: This specification has been superseded by `2026-01-10-remove-internal-table-protection.md`.
+> The proposed query-level protection was not implemented. Instead, configuration-time validation
+> prevents the storage database from being configured as a target database.
+
 ## Problem Statement
 
 When a user connects through the PgLens proxy, they could potentially issue SQL queries that modify PgLens internal tables (such as `users`, `access_grants`, `databases`, etc.) if:

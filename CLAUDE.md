@@ -23,7 +23,11 @@ A transparent PostgreSQL proxy for query observability, access control, and safe
 
 ### Access Control
 - Grant time-windowed access (starts_at, expires_at) to specific databases
-- Access levels: `read` or `write`
+- Controls-based permissions with granular restrictions:
+  - `read_only`: Enables PostgreSQL session read-only mode and blocks write queries
+  - `block_copy`: Blocks all COPY commands (both TO and FROM)
+  - `block_ddl`: Blocks DDL statements (CREATE, ALTER, DROP, TRUNCATE)
+  - Empty controls array = full write access
 - Optional quotas per grant: max queries, max bytes transferred
 - Revoke access manually or let it expire automatically
 - Full audit log of all access control changes
@@ -62,6 +66,31 @@ Client → DBBat (auth + grant check) → Target PostgreSQL
 - **Database credentials**: Encrypted with AES-256-GCM
 - **Encryption key**: From `DBB_KEY` env var (base64) or `DBB_KEYFILE` env var (path to key file)
 - **Default admin**: Created on first startup with username `admin`, password `admin` (must be changed)
+
+### Storage Database Separation (Required)
+
+**The DBBat storage database must never be configured as a target database.**
+
+DBBat stores sensitive information in its storage database:
+- User password hashes
+- Encrypted database credentials
+- Audit logs of all access control changes
+- Access grants and permissions
+
+If the storage database were accessible through the proxy, users could potentially:
+- View or modify user accounts
+- Access password hashes
+- Tamper with audit logs
+- Escalate their own privileges
+
+**Protections:**
+1. **Configuration-time validation**: DBBat prevents configuring a target database that matches the storage DSN. Attempting to create such a configuration returns an error.
+2. **Startup warnings**: At startup, DBBat checks all existing database configurations and logs a warning for any that match the storage DSN.
+
+**Recommendations:**
+- Use a separate PostgreSQL database for DBBat storage
+- Preferably use a separate PostgreSQL instance entirely
+- The storage database credentials should have no access to target databases
 
 ## Authentication
 
@@ -204,7 +233,8 @@ Priority order: CLI flags > Environment variables > Config file > Defaults
 | `DBB_KEYFILE` | Path to file containing encryption key | One of KEY/KEYFILE |
 | `DBB_BASE_URL` | Base URL path for the frontend app (default: `/app`) | No |
 | `DBB_REDIRECTS` | Dev redirect rules for proxying to dev servers (see below) | No |
-| `DBB_RUN_MODE` | Run mode: empty (default) or `test` for test mode | No |
+| `DBB_RUN_MODE` | Run mode: empty (default), `test`, or `demo` | No |
+| `DBB_DEMO_TARGET_DB` | Allowed database target in demo mode (format: `user:pass@host/dbname`, default: `demo:demo@localhost/demo`) | No |
 
 ### Test Mode (DBB_RUN_MODE=test)
 
@@ -236,6 +266,28 @@ DBB_RUN_MODE=test ./dbbat serve
 | `admin` | `admintest` | admin, connector | Full access |
 | `viewer` | `viewer` | viewer | Read-only to proxy_target |
 | `connector` | `connector` | connector | Write to proxy_target |
+
+### Demo Mode (DBB_RUN_MODE=demo)
+
+Demo mode is similar to test mode but designed for public demos:
+
+1. **Wipes all data** - Same as test mode
+2. **Sets admin password** - Changes admin password to `admin` and marks it as changed
+3. **Creates sample users** - Same as test mode (viewer, connector)
+4. **Creates demo database** - `demo_db` pointing to the demo target
+5. **Restricts database targets** - Only allows creating database configurations with the exact credentials specified in `DBB_DEMO_TARGET_DB`
+
+**Example:**
+```bash
+DBB_RUN_MODE=demo ./dbbat serve
+```
+
+By default, only databases using `demo:demo@localhost/demo` credentials are allowed. To customize:
+```bash
+DBB_RUN_MODE=demo DBB_DEMO_TARGET_DB="myuser:mypass@myhost/mydb" ./dbbat serve
+```
+
+Any attempt to create a database with different credentials will return: "you can only use demo:demo@localhost/demo in demo mode"
 
 ### Development Redirects (DBB_REDIRECTS)
 

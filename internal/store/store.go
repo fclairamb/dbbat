@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -17,7 +19,8 @@ import (
 
 // Store provides access to the database
 type Store struct {
-	db *bun.DB
+	db         *bun.DB
+	storageDSN string // Parsed storage DSN for security validation
 }
 
 // Options configures Store creation.
@@ -50,7 +53,7 @@ func New(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	s := &Store{db: db}
+	s := &Store{db: db, storageDSN: dsn}
 
 	// Drop all tables first if requested (for test mode)
 	if options.DropTablesFirst {
@@ -210,4 +213,96 @@ func (s *Store) MigrationStatus(ctx context.Context) ([]MigrationInfo, error) {
 	}
 
 	return result, nil
+}
+
+// DSNComponents holds parsed PostgreSQL DSN components for comparison
+type DSNComponents struct {
+	Host     string
+	Port     string
+	Database string
+}
+
+// parsePostgresDSN parses a PostgreSQL DSN and extracts host, port, and database.
+// Supports both URL format (postgres://...) and key-value format (host=... port=...).
+func parsePostgresDSN(dsn string) (*DSNComponents, error) {
+	// Try URL format first
+	if strings.HasPrefix(dsn, "postgres://") || strings.HasPrefix(dsn, "postgresql://") {
+		u, err := url.Parse(dsn)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse DSN URL: %w", err)
+		}
+
+		host := u.Hostname()
+		port := u.Port()
+		if port == "" {
+			port = "5432"
+		}
+
+		database := strings.TrimPrefix(u.Path, "/")
+
+		return &DSNComponents{
+			Host:     normalizeHost(host),
+			Port:     port,
+			Database: database,
+		}, nil
+	}
+
+	// Parse key-value format
+	components := &DSNComponents{
+		Port: "5432", // default
+	}
+
+	// Split on spaces, handling potential quoted values
+	parts := strings.Fields(dsn)
+	for _, part := range parts {
+		idx := strings.Index(part, "=")
+		if idx == -1 {
+			continue
+		}
+		key := strings.ToLower(part[:idx])
+		value := part[idx+1:]
+		// Remove quotes if present
+		value = strings.Trim(value, "'\"")
+
+		switch key {
+		case "host":
+			components.Host = normalizeHost(value)
+		case "port":
+			components.Port = value
+		case "dbname", "database":
+			components.Database = value
+		}
+	}
+
+	return components, nil
+}
+
+// normalizeHost normalizes host names to allow comparison.
+// Treats localhost, 127.0.0.1, and ::1 as equivalent.
+func normalizeHost(host string) string {
+	host = strings.ToLower(host)
+	switch host {
+	case "localhost", "127.0.0.1", "::1":
+		return "localhost"
+	default:
+		return host
+	}
+}
+
+// MatchesStorageDSN checks if a target database configuration matches the storage DSN.
+// Returns true if the target appears to be the same database as DBBat storage.
+func (s *Store) MatchesStorageDSN(host string, port int, databaseName string) bool {
+	storage, err := parsePostgresDSN(s.storageDSN)
+	if err != nil {
+		// If we can't parse the storage DSN, err on the side of caution
+		slog.Warn("failed to parse storage DSN for comparison", "error", err)
+		return false
+	}
+
+	targetPort := fmt.Sprintf("%d", port)
+	targetHost := normalizeHost(host)
+
+	return storage.Host == targetHost &&
+		storage.Port == targetPort &&
+		storage.Database == databaseName
 }

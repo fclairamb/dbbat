@@ -572,6 +572,11 @@ export interface components {
              * @example 2026-01-09T12:00:00Z
              */
             build_time: string;
+            /**
+             * @description Run mode of the server. Empty string for production, "test" for test mode, "demo" for demo mode.
+             * @example
+             */
+            run_mode: string;
         };
         LoginRequest: {
             /** @description Username */
@@ -779,6 +784,14 @@ export interface components {
             /** @description SSL mode */
             ssl_mode?: string;
         };
+        /**
+         * @description Control types that can be applied to a grant:
+         *     - `read_only`: Enables PostgreSQL session read-only mode and blocks write queries
+         *     - `block_copy`: Blocks all COPY commands (both TO and FROM)
+         *     - `block_ddl`: Blocks DDL statements (CREATE, ALTER, DROP, TRUNCATE)
+         * @enum {string}
+         */
+        GrantControl: "read_only" | "block_copy" | "block_ddl";
         AccessGrant: {
             /**
              * Format: uuid
@@ -795,11 +808,8 @@ export interface components {
              * @description Database UID
              */
             database_id: string;
-            /**
-             * @description Access level
-             * @enum {string}
-             */
-            access_level: "read" | "write";
+            /** @description List of controls applied. Empty array means full write access. */
+            controls: components["schemas"]["GrantControl"][];
             /**
              * Format: uuid
              * @description Admin who granted access
@@ -863,10 +873,10 @@ export interface components {
              */
             database_id: string;
             /**
-             * @description Access level
-             * @enum {string}
+             * @description List of controls to apply. Empty array means full write access.
+             * @default []
              */
-            access_level: "read" | "write";
+            controls: components["schemas"]["GrantControl"][];
             /**
              * Format: date-time
              * @description When access starts
@@ -1271,6 +1281,7 @@ export type Database = components['schemas']['Database'];
 export type DatabaseLimited = components['schemas']['DatabaseLimited'];
 export type CreateDatabaseRequest = components['schemas']['CreateDatabaseRequest'];
 export type UpdateDatabaseRequest = components['schemas']['UpdateDatabaseRequest'];
+export type GrantControl = components['schemas']['GrantControl'];
 export type AccessGrant = components['schemas']['AccessGrant'];
 export type CreateGrantRequest = components['schemas']['CreateGrantRequest'];
 export type ApiKey = components['schemas']['APIKey'];

@@ -235,6 +235,78 @@ func TestIsReadOnlyBypassAttempt(t *testing.T) {
 	}
 }
 
+func TestIsDDLQuery(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		sql      string
+		expected bool
+	}{
+		// DDL queries
+		{name: "CREATE TABLE", sql: "CREATE TABLE users (id INT)", expected: true},
+		{name: "CREATE INDEX", sql: "CREATE INDEX idx ON users(name)", expected: true},
+		{name: "ALTER TABLE", sql: "ALTER TABLE users ADD COLUMN name TEXT", expected: true},
+		{name: "DROP TABLE", sql: "DROP TABLE users", expected: true},
+		{name: "DROP INDEX", sql: "DROP INDEX idx", expected: true},
+		{name: "TRUNCATE", sql: "TRUNCATE TABLE users", expected: true},
+		{name: "lowercase create", sql: "create table test (id int)", expected: true},
+		{name: "with whitespace", sql: "  DROP TABLE users", expected: true},
+
+		// Non-DDL queries
+		{name: "SELECT", sql: "SELECT * FROM users", expected: false},
+		{name: "INSERT", sql: "INSERT INTO users (name) VALUES ('test')", expected: false},
+		{name: "UPDATE", sql: "UPDATE users SET name = 'test'", expected: false},
+		{name: "DELETE", sql: "DELETE FROM users", expected: false},
+		{name: "empty string", sql: "", expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := isDDLQuery(tt.sql)
+			if result != tt.expected {
+				t.Errorf("isDDLQuery(%q) = %v, want %v", tt.sql, result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestIsCopyQuery(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		sql      string
+		expected bool
+	}{
+		// COPY queries
+		{name: "COPY TO", sql: "COPY users TO STDOUT", expected: true},
+		{name: "COPY FROM", sql: "COPY users FROM STDIN", expected: true},
+		{name: "COPY with columns", sql: "COPY users (id, name) TO STDOUT", expected: true},
+		{name: "lowercase copy", sql: "copy users to stdout", expected: true},
+		{name: "with whitespace", sql: "  COPY users TO STDOUT", expected: true},
+
+		// Non-COPY queries
+		{name: "SELECT", sql: "SELECT * FROM users", expected: false},
+		{name: "INSERT", sql: "INSERT INTO users (name) VALUES ('test')", expected: false},
+		{name: "SELECT with COPY in string", sql: "SELECT * FROM users WHERE note LIKE '%COPY%'", expected: false},
+		{name: "empty string", sql: "", expected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := isCopyQuery(tt.sql)
+			if result != tt.expected {
+				t.Errorf("isCopyQuery(%q) = %v, want %v", tt.sql, result, tt.expected)
+			}
+		})
+	}
+}
+
 func TestIsPasswordChangeQuery(t *testing.T) {
 	t.Parallel()
 
@@ -569,17 +641,167 @@ func ptr(i int64) *int64 {
 	return &i
 }
 
-// newTestSession creates a session with the given access level for testing.
+// newTestSession creates a session with the given controls for testing.
+// Use "read" for read-only access or "write" for full access.
 func newTestSession(accessLevel string) *Session {
+	var controls []string
+	if accessLevel == "read" {
+		controls = []string{store.ControlReadOnly}
+	} else {
+		controls = []string{} // Empty = full write access
+	}
+
 	return &Session{
 		grant: &store.Grant{
-			AccessLevel: accessLevel,
+			Controls: controls,
 		},
 		extendedState: &extendedQueryState{
 			preparedStatements: make(map[string]*preparedStatement),
 			portals:            make(map[string]*portalState),
 		},
 		logger: slog.Default(),
+	}
+}
+
+// newTestSessionWithControls creates a session with the specified controls for testing.
+func newTestSessionWithControls(controls []string) *Session {
+	return &Session{
+		grant: &store.Grant{
+			Controls: controls,
+		},
+		extendedState: &extendedQueryState{
+			preparedStatements: make(map[string]*preparedStatement),
+			portals:            make(map[string]*portalState),
+		},
+		logger: slog.Default(),
+	}
+}
+
+func TestHandleQuery_BlocksDDL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		controls  []string
+		sql       string
+		expectErr error
+	}{
+		{
+			name:      "block_ddl blocks CREATE TABLE",
+			controls:  []string{store.ControlBlockDDL},
+			sql:       "CREATE TABLE test (id INT)",
+			expectErr: ErrDDLNotPermitted,
+		},
+		{
+			name:      "block_ddl blocks DROP TABLE",
+			controls:  []string{store.ControlBlockDDL},
+			sql:       "DROP TABLE test",
+			expectErr: ErrDDLNotPermitted,
+		},
+		{
+			name:      "block_ddl allows SELECT",
+			controls:  []string{store.ControlBlockDDL},
+			sql:       "SELECT * FROM test",
+			expectErr: nil,
+		},
+		{
+			name:      "block_ddl allows INSERT",
+			controls:  []string{store.ControlBlockDDL},
+			sql:       "INSERT INTO test (name) VALUES ('test')",
+			expectErr: nil,
+		},
+		{
+			name:      "no controls allows DDL",
+			controls:  []string{},
+			sql:       "CREATE TABLE test (id INT)",
+			expectErr: nil,
+		},
+		{
+			name:      "read_only already blocks DDL at PG level, proxy doesn't check",
+			controls:  []string{store.ControlReadOnly},
+			sql:       "CREATE TABLE test (id INT)",
+			expectErr: ErrWriteNotPermitted, // read_only blocks all writes
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := newTestSessionWithControls(tt.controls)
+			err := s.handleQuery(&pgproto3.Query{String: tt.sql})
+
+			if tt.expectErr != nil {
+				if !errors.Is(err, tt.expectErr) {
+					t.Errorf("handleQuery() error = %v, want %v", err, tt.expectErr)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("handleQuery() unexpected error: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleQuery_BlocksCopy(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		controls  []string
+		sql       string
+		expectErr error
+	}{
+		{
+			name:      "block_copy blocks COPY TO",
+			controls:  []string{store.ControlBlockCopy},
+			sql:       "COPY users TO STDOUT",
+			expectErr: ErrCopyNotPermitted,
+		},
+		{
+			name:      "block_copy blocks COPY FROM",
+			controls:  []string{store.ControlBlockCopy},
+			sql:       "COPY users FROM STDIN",
+			expectErr: ErrCopyNotPermitted,
+		},
+		{
+			name:      "block_copy allows SELECT",
+			controls:  []string{store.ControlBlockCopy},
+			sql:       "SELECT * FROM users",
+			expectErr: nil,
+		},
+		{
+			name:      "no controls allows COPY",
+			controls:  []string{},
+			sql:       "COPY users TO STDOUT",
+			expectErr: nil,
+		},
+		{
+			name:      "read_only + block_copy blocks COPY",
+			controls:  []string{store.ControlReadOnly, store.ControlBlockCopy},
+			sql:       "COPY users TO STDOUT",
+			expectErr: ErrCopyNotPermitted,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := newTestSessionWithControls(tt.controls)
+			err := s.handleQuery(&pgproto3.Query{String: tt.sql})
+
+			if tt.expectErr != nil {
+				if !errors.Is(err, tt.expectErr) {
+					t.Errorf("handleQuery() error = %v, want %v", err, tt.expectErr)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("handleQuery() unexpected error: %v", err)
+				}
+			}
+		})
 	}
 }
 
@@ -767,7 +989,7 @@ func TestHandleExecute_QuotaCheck(t *testing.T) {
 	maxQueries := int64(0) // Quota exhausted
 	s := &Session{
 		grant: &store.Grant{
-			AccessLevel:    "write",
+			Controls:       []string{}, // Full write access
 			MaxQueryCounts: &maxQueries,
 			QueryCount:     0,
 		},

@@ -34,7 +34,7 @@ const IS_CI = process.env.CI === "true";
 function execCommand(
   command: string,
   args: string[],
-  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}
+  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     console.log(`[setup] Running: ${command} ${args.join(" ")}`);
@@ -64,7 +64,7 @@ function execCommand(
 function startBackgroundProcess(
   command: string,
   args: string[],
-  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}
+  options: { cwd?: string; env?: NodeJS.ProcessEnv } = {},
 ): ChildProcess {
   console.log(`[setup] Starting: ${command} ${args.join(" ")}`);
   const proc = spawn(command, args, {
@@ -99,7 +99,7 @@ async function waitForServer(url: string, maxRetries: number): Promise<void> {
   }
 
   throw new Error(
-    `Server did not become ready after ${maxRetries * RETRY_DELAY}ms`
+    `Server did not become ready after ${maxRetries * RETRY_DELAY}ms`,
   );
 }
 
@@ -112,7 +112,9 @@ export default async function globalSetup(): Promise<void> {
   // In CI, the server is already started by the CI workflow
   // We only need to wait for it to be ready
   if (IS_CI) {
-    console.log("[setup] Running in CI environment - skipping build and server start.\n");
+    console.log(
+      "[setup] Running in CI environment - skipping build and server start.\n",
+    );
     console.log("[setup] Waiting for server to be ready...");
     await waitForServer(SERVER_URL, MAX_RETRIES);
     console.log("[setup] Global setup completed successfully!\n");
@@ -144,26 +146,25 @@ export default async function globalSetup(): Promise<void> {
 
     // Step 4: Start dbbat server with DBB_RUN_MODE=test
     console.log("[setup] Step 4: Starting dbbat server in test mode...");
-    const serverProcess = startBackgroundProcess(
-      "./bin/dbbat",
-      ["serve"],
-      {
-        cwd: PROJECT_ROOT,
-        env: {
-          ...process.env,
-          DBB_RUN_MODE: "test",
-          DBB_LISTEN_PG: ":5432",
-          DBB_LISTEN_API: ":8080",
-          DBB_DSN: "postgres://postgres:postgres@localhost:5002/dbbat?sslmode=disable",
-          DBB_KEY: "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=", // base64 encoded 32-byte key
-          DBB_RATE_LIMIT_ENABLED: "false", // Disable rate limiting for E2E tests
-        },
-      }
-    );
+    const serverProcess = startBackgroundProcess("./bin/dbbat", ["serve"], {
+      cwd: PROJECT_ROOT,
+      env: {
+        ...process.env,
+        DBB_RUN_MODE: "test",
+        DBB_LISTEN_PG: ":5432",
+        DBB_LISTEN_API: ":8080",
+        DBB_DSN:
+          "postgres://postgres:postgres@localhost:5001/dbbat?sslmode=disable",
+        DBB_KEY: "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=", // base64 encoded 32-byte key
+        DBB_RATE_LIMIT_ENABLED: "false", // Disable rate limiting for E2E tests
+      },
+    });
 
     // Store server PID for teardown
     writeFileSync(PID_FILE, serverProcess.pid!.toString());
-    console.log(`[setup] Server process started with PID ${serverProcess.pid}\n`);
+    console.log(
+      `[setup] Server process started with PID ${serverProcess.pid}\n`,
+    );
 
     // Step 5: Wait for server to be ready
     await waitForServer(SERVER_URL, MAX_RETRIES);

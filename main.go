@@ -222,12 +222,16 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		"run_mode", cfg.RunMode,
 	)
 
-	// Initialize store (with table drop if in test mode)
+	// Initialize store (with table drop if in test or demo mode)
 	storeOpts := store.Options{
-		DropTablesFirst: cfg.RunMode == config.RunModeTest,
+		DropTablesFirst: cfg.RunMode == config.RunModeTest || cfg.RunMode == config.RunModeDemo,
 	}
-	if storeOpts.DropTablesFirst {
+	if cfg.RunMode == config.RunModeTest {
 		logger.Info("Test mode enabled, will drop all tables before migration")
+	}
+	if cfg.RunMode == config.RunModeDemo {
+		logger.Warn("WARNING: Running in DEMO mode. Do not use in production environments.")
+		logger.Info("Demo mode enabled, will drop all tables before migration")
 	}
 
 	dataStore, err := store.New(ctx, cfg.DSN, storeOpts)
@@ -238,6 +242,9 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	defer dataStore.Close()
 
 	logger.Info("Database connection established")
+
+	// Check for database configurations that match the storage DSN
+	checkDatabaseConfigurations(ctx, dataStore, logger)
 
 	// Ensure default admin exists
 	defaultPassword := "admin"
@@ -257,6 +264,13 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	if cfg.RunMode == config.RunModeTest {
 		if err := provisionTestData(ctx, dataStore, cfg.EncryptionKey, logger); err != nil {
 			return fmt.Errorf("failed to provision test data: %w", err)
+		}
+	}
+
+	// Provision demo data if in demo mode
+	if cfg.RunMode == config.RunModeDemo {
+		if err := provisionDemoData(ctx, dataStore, cfg, logger); err != nil {
+			return fmt.Errorf("failed to provision demo data: %w", err)
 		}
 	}
 
@@ -477,34 +491,175 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	}
 	logger.Info("Created proxy_target database configuration")
 
-	// 5. Create write grant for connector user
+	// 5. Create write grant for connector user (empty controls = full write access)
 	_, err = dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:      connectorUser.UID,
-		DatabaseID:  targetDB.UID,
-		AccessLevel: "write",
-		GrantedBy:   adminUser.UID,
-		StartsAt:    time.Now(),
-		ExpiresAt:   time.Now().AddDate(10, 0, 0), // 10 years from now
+		UserID:     connectorUser.UID,
+		DatabaseID: targetDB.UID,
+		Controls:   []string{}, // Empty = full write access
+		GrantedBy:  adminUser.UID,
+		StartsAt:   time.Now(),
+		ExpiresAt:  time.Now().AddDate(10, 0, 0), // 10 years from now
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create write grant for connector user: %w", err)
 	}
 	logger.Info("Created write grant for connector user on proxy_target")
 
-	// 6. Create read grant for viewer user
+	// 6. Create read-only grant for viewer user
 	_, err = dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:      viewerUser.UID,
-		DatabaseID:  targetDB.UID,
-		AccessLevel: "read",
-		GrantedBy:   adminUser.UID,
-		StartsAt:    time.Now(),
-		ExpiresAt:   time.Now().AddDate(10, 0, 0), // 10 years from now
+		UserID:     viewerUser.UID,
+		DatabaseID: targetDB.UID,
+		Controls:   []string{store.ControlReadOnly}, // Read-only access
+		GrantedBy:  adminUser.UID,
+		StartsAt:   time.Now(),
+		ExpiresAt:  time.Now().AddDate(10, 0, 0), // 10 years from now
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create read grant for viewer user: %w", err)
+		return fmt.Errorf("failed to create read-only grant for viewer user: %w", err)
 	}
-	logger.Info("Created read grant for viewer user on proxy_target")
+	logger.Info("Created read-only grant for viewer user on proxy_target")
 
 	logger.Info("Test data provisioning complete")
 	return nil
+}
+
+func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.Config, logger *slog.Logger) error {
+	logger.Info("Demo mode: provisioning demo data...")
+
+	// Get demo target configuration
+	demoTarget := cfg.GetDemoTarget()
+	if demoTarget == nil {
+		demoTarget = &config.DemoTarget{
+			Username: "demo",
+			Password: "demo",
+			Host:     "localhost",
+		}
+	}
+	logger.Info("Demo target", "user", demoTarget.Username, "host", demoTarget.Host)
+
+	// 1. Get admin user and mark password as changed (password is already "admin" from EnsureDefaultAdmin)
+	adminUser, err := dataStore.GetUserByUsername(ctx, "admin")
+	if err != nil {
+		return fmt.Errorf("failed to get admin user: %w", err)
+	}
+
+	// Update admin to mark password as changed so they can log in immediately
+	adminPasswordHash, err := crypto.HashPassword("admin")
+	if err != nil {
+		return fmt.Errorf("failed to hash admin password: %w", err)
+	}
+
+	err = dataStore.UpdateUser(ctx, adminUser.UID, store.UserUpdate{
+		PasswordHash: &adminPasswordHash,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to update admin password: %w", err)
+	}
+	logger.Info("Marked admin password as changed (username: admin, password: admin)")
+
+	// 2. Create viewer user (viewer role only)
+	viewerPasswordHash, err := crypto.HashPassword("viewer")
+	if err != nil {
+		return fmt.Errorf("failed to hash viewer password: %w", err)
+	}
+
+	viewerUser, err := dataStore.CreateUser(ctx, "viewer", viewerPasswordHash, []string{store.RoleViewer})
+	if err != nil {
+		return fmt.Errorf("failed to create viewer user: %w", err)
+	}
+	// Mark password as changed so the user can log in immediately
+	err = dataStore.UpdateUser(ctx, viewerUser.UID, store.UserUpdate{
+		PasswordHash: &viewerPasswordHash,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to mark viewer password as changed: %w", err)
+	}
+	logger.Info("Created viewer user (username: viewer, password: viewer)")
+
+	// 3. Create connector user (connector role only)
+	connectorPasswordHash, err := crypto.HashPassword("connector")
+	if err != nil {
+		return fmt.Errorf("failed to hash connector password: %w", err)
+	}
+
+	connectorUser, err := dataStore.CreateUser(ctx, "connector", connectorPasswordHash, []string{store.RoleConnector})
+	if err != nil {
+		return fmt.Errorf("failed to create connector user: %w", err)
+	}
+	// Mark password as changed so the user can log in immediately
+	err = dataStore.UpdateUser(ctx, connectorUser.UID, store.UserUpdate{
+		PasswordHash: &connectorPasswordHash,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to mark connector password as changed: %w", err)
+	}
+	logger.Info("Created connector user (username: connector, password: connector)")
+
+	// 4. Create demo_db database configuration using demo target
+	demoDB, err := dataStore.CreateDatabase(ctx, &store.Database{
+		Name:         "demo_db",
+		Description:  "Demo database",
+		Host:         demoTarget.Host,
+		Port:         5432,
+		DatabaseName: "demo",
+		Username:     demoTarget.Username,
+		Password:     demoTarget.Password,
+		SSLMode:      "disable",
+		CreatedBy:    &adminUser.UID,
+	}, cfg.EncryptionKey)
+	if err != nil {
+		return fmt.Errorf("failed to create demo_db database config: %w", err)
+	}
+	logger.Info("Created demo_db database configuration")
+
+	// 5. Create write grant for connector user (empty controls = full write access)
+	_, err = dataStore.CreateGrant(ctx, &store.Grant{
+		UserID:     connectorUser.UID,
+		DatabaseID: demoDB.UID,
+		Controls:   []string{}, // Empty = full write access
+		GrantedBy:  adminUser.UID,
+		StartsAt:   time.Now(),
+		ExpiresAt:  time.Now().AddDate(10, 0, 0), // 10 years from now
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create write grant for connector user: %w", err)
+	}
+	logger.Info("Created write grant for connector user on demo_db")
+
+	// 6. Create read-only grant for viewer user
+	_, err = dataStore.CreateGrant(ctx, &store.Grant{
+		UserID:     viewerUser.UID,
+		DatabaseID: demoDB.UID,
+		Controls:   []string{store.ControlReadOnly}, // Read-only access
+		GrantedBy:  adminUser.UID,
+		StartsAt:   time.Now(),
+		ExpiresAt:  time.Now().AddDate(10, 0, 0), // 10 years from now
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create read-only grant for viewer user: %w", err)
+	}
+	logger.Info("Created read-only grant for viewer user on demo_db")
+
+	logger.Info("Demo data provisioning complete")
+	return nil
+}
+
+// checkDatabaseConfigurations checks if any configured target databases match the storage DSN.
+// Logs a warning for each match found. This handles databases that were configured
+// before the storage DSN validation was added.
+func checkDatabaseConfigurations(ctx context.Context, dataStore *store.Store, logger *slog.Logger) {
+	databases, err := dataStore.ListDatabases(ctx)
+	if err != nil {
+		logger.Warn("failed to check database configurations", "error", err)
+		return
+	}
+
+	for _, db := range databases {
+		if dataStore.MatchesStorageDSN(db.Host, db.Port, db.DatabaseName) {
+			logger.Warn("SECURITY WARNING: database configuration matches storage DSN",
+				"database_name", db.Name,
+				"target", fmt.Sprintf("%s:%d/%s", db.Host, db.Port, db.DatabaseName),
+				"recommendation", "use a separate database for DBBat storage to prevent privilege escalation")
+		}
+	}
 }

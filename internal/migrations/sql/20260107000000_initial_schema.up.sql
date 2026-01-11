@@ -59,9 +59,11 @@ CREATE TABLE databases (
     ssl_mode TEXT NOT NULL DEFAULT 'prefer',
     created_by UUID REFERENCES users(uid),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    deleted_at TIMESTAMPTZ                  -- Soft delete timestamp
 );
 CREATE INDEX idx_databases_name ON databases(name);
+CREATE INDEX idx_databases_deleted_at ON databases(deleted_at) WHERE deleted_at IS NULL;
 
 --bun:split
 
@@ -118,7 +120,7 @@ CREATE TABLE access_grants (
     uid UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id UUID NOT NULL REFERENCES users(uid),
     database_id UUID NOT NULL REFERENCES databases(uid),
-    access_level TEXT NOT NULL CHECK (access_level IN ('read', 'write')),
+    controls TEXT[] NOT NULL DEFAULT '{}',  -- Array of control strings: read_only, block_copy, block_ddl
     granted_by UUID NOT NULL REFERENCES users(uid),
     starts_at TIMESTAMPTZ NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
@@ -132,6 +134,7 @@ CREATE TABLE access_grants (
 CREATE INDEX idx_access_grants_user_id ON access_grants(user_id);
 CREATE INDEX idx_access_grants_database_id ON access_grants(database_id);
 CREATE INDEX idx_access_grants_expires_at ON access_grants(expires_at);
+CREATE INDEX idx_access_grants_controls ON access_grants USING GIN(controls);
 -- Note: Can't use NOW() in partial index as it's not IMMUTABLE
 -- Active grant uniqueness is enforced at application level
 CREATE INDEX idx_access_grants_active ON access_grants(user_id, database_id)

@@ -553,3 +553,24 @@ export function useHealth() {
     retry: false,
   });
 }
+
+// ============================================================================
+// Version
+// ============================================================================
+
+export type VersionInfo = components["schemas"]["VersionInfo"];
+
+export function useVersion() {
+  return useQuery({
+    queryKey: ["version"],
+    queryFn: async (): Promise<VersionInfo> => {
+      const response = await apiClient.GET("/version");
+      if (response.error || !response.data) {
+        throw new Error("Failed to fetch version info");
+      }
+      return response.data;
+    },
+    staleTime: 5 * 60 * 1000, // 5 minutes - version info rarely changes
+    retry: false,
+  });
+}
