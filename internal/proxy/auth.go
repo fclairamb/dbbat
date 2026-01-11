@@ -89,8 +89,13 @@ func (s *Session) authenticate() error {
 		return fmt.Errorf("failed to receive password: %w", err)
 	}
 
-	// Verify password
-	valid, err := crypto.VerifyPassword(user.PasswordHash, passwordMsg.Password)
+	// Verify password (using cache if available)
+	var valid bool
+	if s.authCache != nil {
+		valid, err = s.authCache.VerifyPassword(user.UID.String(), passwordMsg.Password, user.PasswordHash)
+	} else {
+		valid, err = crypto.VerifyPassword(user.PasswordHash, passwordMsg.Password)
+	}
 	if err != nil || !valid {
 		s.sendError("authentication failed")
 

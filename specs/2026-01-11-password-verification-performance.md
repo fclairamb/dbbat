@@ -60,6 +60,16 @@ Allow administrators to tune Argon2id parameters via configuration.
 
 **Note**: Individual settings override preset values.
 
+#### 1.2a Automatic Test Mode Configuration
+
+When `DBB_RUN_MODE=test`, the hash preset is automatically set to `minimal` unless explicitly overridden. This ensures fast test execution without requiring manual configuration.
+
+| Run Mode | Default Hash Preset | Can Override |
+|----------|-------------------|--------------|
+| (default) | `default` | Yes |
+| `test` | `minimal` | Yes |
+| `demo` | `default` | Yes |
+
 #### 1.2 Configuration Struct
 
 ```go

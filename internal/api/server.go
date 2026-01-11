@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/store"
 	"github.com/fclairamb/dbbat/internal/version"
@@ -33,14 +34,22 @@ type Server struct {
 	httpServer         *http.Server
 	rateLimiter        *RateLimiter
 	authFailureTracker *authFailureTracker
+	authCache          *cache.AuthCache
 	config             *config.Config
 }
 
 // NewServer creates a new API server.
 func NewServer(dataStore *store.Store, encryptionKey []byte, logger *slog.Logger, cfg *config.Config) *Server {
 	var rateLimiter *RateLimiter
+	var authCache *cache.AuthCache
+
 	if cfg != nil {
 		rateLimiter = NewRateLimiter(cfg.RateLimit)
+		authCache = cache.NewAuthCache(cache.AuthCacheConfig{
+			Enabled:    cfg.AuthCache.Enabled,
+			TTLSeconds: cfg.AuthCache.TTLSeconds,
+			MaxSize:    cfg.AuthCache.MaxSize,
+		})
 	}
 
 	return &Server{
@@ -49,6 +58,7 @@ func NewServer(dataStore *store.Store, encryptionKey []byte, logger *slog.Logger
 		logger:             logger,
 		rateLimiter:        rateLimiter,
 		authFailureTracker: newAuthFailureTracker(),
+		authCache:          authCache,
 		config:             cfg,
 	}
 }
