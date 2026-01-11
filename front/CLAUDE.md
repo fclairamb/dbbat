@@ -399,6 +399,29 @@ function ExamplePage() {
 3. Style with Tailwind CSS utility classes
 4. Export from the component file
 
+### Test IDs
+
+Always add `data-testid` attributes to interactive elements and key UI components to enable reliable E2E testing with Playwright:
+
+- **Forms**: Add `data-testid` to inputs, buttons, and form containers
+- **Buttons**: Add `data-testid` to all clickable actions (e.g., `data-testid="refresh-button"`)
+- **Alerts/Messages**: Add `data-testid` to error messages, success alerts, and notifications
+- **Cards/Containers**: Add `data-testid` to important layout elements
+- **Navigation**: Add `data-testid` to nav links and menu items
+
+Naming convention: Use kebab-case descriptive names (e.g., `login-submit`, `user-create-dialog`, `session-expired-alert`).
+
+Example:
+```tsx
+<Button data-testid="create-user-button" onClick={handleCreate}>
+  Create User
+</Button>
+
+<Alert data-testid="login-error">
+  <AlertDescription>{error}</AlertDescription>
+</Alert>
+```
+
 ### Calling the API
 
 1. Use the `apiClient` from `src/api/client.ts`
