@@ -7,6 +7,7 @@ import (
 	"net"
 	"sync"
 
+	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -16,6 +17,7 @@ type Server struct {
 	store         *store.Store
 	encryptionKey []byte
 	queryStorage  config.QueryStorageConfig
+	authCache     *cache.AuthCache
 	logger        *slog.Logger
 	listener      net.Listener
 	wg            sync.WaitGroup
@@ -29,6 +31,7 @@ func NewServer(
 	dataStore *store.Store,
 	encryptionKey []byte,
 	queryStorage config.QueryStorageConfig,
+	authCache *cache.AuthCache,
 	logger *slog.Logger,
 ) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -37,6 +40,7 @@ func NewServer(
 		store:         dataStore,
 		encryptionKey: encryptionKey,
 		queryStorage:  queryStorage,
+		authCache:     authCache,
 		logger:        logger,
 		shutdown:      make(chan struct{}),
 		ctx:           ctx,
@@ -118,7 +122,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 	s.logger.Debug("New connection", "remote_addr", clientConn.RemoteAddr())
 
-	session := NewSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.queryStorage)
+	session := NewSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.queryStorage, s.authCache)
 	if err := session.Run(); err != nil {
 		s.logger.Error("Session error", "error", err, "remote_addr", clientConn.RemoteAddr())
 	}

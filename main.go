@@ -14,6 +14,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/fclairamb/dbbat/internal/api"
+	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/proxy"
@@ -286,8 +287,15 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	logger.Info("API server started", "addr", cfg.ListenAPI)
 
+	// Create auth cache for proxy server (shared cache config with API)
+	proxyAuthCache := cache.NewAuthCache(cache.AuthCacheConfig{
+		Enabled:    cfg.AuthCache.Enabled,
+		TTLSeconds: cfg.AuthCache.TTLSeconds,
+		MaxSize:    cfg.AuthCache.MaxSize,
+	})
+
 	// Start proxy server
-	proxyServer := proxy.NewServer(dataStore, cfg.EncryptionKey, cfg.QueryStorage, logger)
+	proxyServer := proxy.NewServer(dataStore, cfg.EncryptionKey, cfg.QueryStorage, proxyAuthCache, logger)
 
 	go func() {
 		if err := proxyServer.Start(cfg.ListenPG); err != nil {

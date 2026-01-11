@@ -11,13 +11,18 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
+// DefaultArgon2Time is the default number of iterations.
+const DefaultArgon2Time uint32 = 1
+
+// DefaultArgon2Memory is the default memory in KB (64 MB).
+const DefaultArgon2Memory uint32 = 64 * 1024
+
+// DefaultArgon2Threads is the default parallelism factor.
+const DefaultArgon2Threads uint8 = 4
+
 const (
-	// Argon2id parameters.
-	argon2Time    = 1
-	argon2Memory  = 64 * 1024 // 64 MB
-	argon2Threads = 4
-	argon2KeyLen  = 32
-	saltLength    = 16
+	argon2KeyLen = 32
+	saltLength   = 16
 )
 
 // Hash errors.
@@ -26,8 +31,29 @@ var (
 	ErrUnsupportedHashAlgo = errors.New("unsupported hash algorithm")
 )
 
-// HashPassword generates an Argon2id hash of the password.
+// HashParams holds configurable parameters for password hashing.
+type HashParams struct {
+	MemoryKB uint32 // Memory in KB
+	Time     uint32 // Number of iterations
+	Threads  uint8  // Parallelism factor
+}
+
+// DefaultHashParams returns the default hash parameters.
+func DefaultHashParams() HashParams {
+	return HashParams{
+		MemoryKB: DefaultArgon2Memory,
+		Time:     DefaultArgon2Time,
+		Threads:  DefaultArgon2Threads,
+	}
+}
+
+// HashPassword generates an Argon2id hash of the password using default parameters.
 func HashPassword(password string) (string, error) {
+	return HashPasswordWithParams(password, DefaultHashParams())
+}
+
+// HashPasswordWithParams generates an Argon2id hash of the password using provided parameters.
+func HashPasswordWithParams(password string, params HashParams) (string, error) {
 	// Generate a random salt
 	salt := make([]byte, saltLength)
 	if _, err := rand.Read(salt); err != nil {
@@ -38,9 +64,9 @@ func HashPassword(password string) (string, error) {
 	hash := argon2.IDKey(
 		[]byte(password),
 		salt,
-		argon2Time,
-		argon2Memory,
-		argon2Threads,
+		params.Time,
+		params.MemoryKB,
+		params.Threads,
 		argon2KeyLen,
 	)
 
@@ -51,9 +77,9 @@ func HashPassword(password string) (string, error) {
 	return fmt.Sprintf(
 		"$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
 		argon2.Version,
-		argon2Memory,
-		argon2Time,
-		argon2Threads,
+		params.MemoryKB,
+		params.Time,
+		params.Threads,
 		encodedSalt,
 		encodedHash,
 	), nil
