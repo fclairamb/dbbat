@@ -118,8 +118,14 @@ func (s *Server) handleBasicAuth(c *gin.Context) {
 		return
 	}
 
-	// Verify password
-	valid, err := crypto.VerifyPassword(user.PasswordHash, password)
+	// Verify password (using cache if available)
+	var valid bool
+	if s.authCache != nil {
+		valid, err = s.authCache.VerifyPassword(user.UID.String(), password, user.PasswordHash)
+	} else {
+		// Fallback to direct verification if cache not initialized
+		valid, err = verifyPasswordDirect(user.PasswordHash, password)
+	}
 	if err != nil || !valid {
 		// Record failure AFTER credential verification fails
 		s.authFailureTracker.recordFailure(username)
@@ -341,4 +347,10 @@ func (t *authFailureTracker) resetFailures(username string) {
 // isTestMode returns true if the server is running in test mode
 func (s *Server) isTestMode() bool {
 	return s.config != nil && s.config.RunMode == "test"
+}
+
+// verifyPasswordDirect verifies a password directly without caching.
+// Used as fallback when auth cache is not initialized.
+func verifyPasswordDirect(storedHash, password string) (bool, error) {
+	return crypto.VerifyPassword(storedHash, password)
 }

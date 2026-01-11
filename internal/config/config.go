@@ -65,6 +65,33 @@ type RateLimitConfig struct {
 	Burst int `koanf:"burst"`
 }
 
+// HashConfig holds password hashing configuration.
+type HashConfig struct {
+	// Preset is a named configuration preset (default, low, minimal).
+	Preset string `koanf:"preset"`
+
+	// MemoryMB is the memory parameter in megabytes (1-1024).
+	MemoryMB int `koanf:"memory_mb"`
+
+	// Time is the time/iterations parameter (1-10).
+	Time int `koanf:"time"`
+
+	// Threads is the parallelism parameter (1-16).
+	Threads int `koanf:"threads"`
+}
+
+// AuthCacheConfig holds configuration for authentication caching.
+type AuthCacheConfig struct {
+	// Enabled enables/disables the authentication cache.
+	Enabled bool `koanf:"enabled"`
+
+	// TTLSeconds is the time-to-live for cache entries in seconds.
+	TTLSeconds int `koanf:"ttl_seconds"`
+
+	// MaxSize is the maximum number of cache entries.
+	MaxSize int `koanf:"max_size"`
+}
+
 // RedirectRule represents a path-based redirect for development proxying.
 type RedirectRule struct {
 	// PathPrefix is the path prefix to match (e.g., "/app").
@@ -113,6 +140,12 @@ type Config struct {
 	// RateLimit holds rate limiting configuration.
 	RateLimit RateLimitConfig `koanf:"rate_limit"`
 
+	// Hash holds password hashing configuration.
+	Hash HashConfig `koanf:"hash"`
+
+	// AuthCache holds authentication cache configuration.
+	AuthCache AuthCacheConfig `koanf:"auth_cache"`
+
 	// BaseURL is the base URL path for the frontend app (default: "/app").
 	BaseURL string `koanf:"base_url"`
 
@@ -133,6 +166,20 @@ const (
 	DefaultRateLimitRPM     = 60
 	DefaultRateLimitRPMAnon = 10
 	DefaultRateLimitBurst   = 10
+)
+
+// Default hash settings (matching current argon2id defaults).
+const (
+	DefaultHashMemoryMB = 64
+	DefaultHashTime     = 1
+	DefaultHashThreads  = 4
+)
+
+// Default auth cache settings.
+const (
+	DefaultAuthCacheEnabled    = true
+	DefaultAuthCacheTTLSeconds = 300 // 5 minutes
+	DefaultAuthCacheMaxSize    = 10000
 )
 
 const expectedKeySize = 32
@@ -165,6 +212,16 @@ func defaultConfig() Config {
 			RequestsPerMinuteAnon: DefaultRateLimitRPMAnon,
 			Burst:                 DefaultRateLimitBurst,
 		},
+		Hash: HashConfig{
+			MemoryMB: DefaultHashMemoryMB,
+			Time:     DefaultHashTime,
+			Threads:  DefaultHashThreads,
+		},
+		AuthCache: AuthCacheConfig{
+			Enabled:    DefaultAuthCacheEnabled,
+			TTLSeconds: DefaultAuthCacheTTLSeconds,
+			MaxSize:    DefaultAuthCacheMaxSize,
+		},
 	}
 }
 
@@ -181,6 +238,8 @@ const koanfDelim = "."
 // DBB_LISTEN_PG -> listen_pg
 // DBB_QUERY_STORAGE_MAX_RESULT_ROWS -> query_storage.max_result_rows
 // DBB_RATE_LIMIT_ENABLED -> rate_limit.enabled
+// DBB_HASH_MEMORY_MB -> hash.memory_mb
+// DBB_AUTH_CACHE_ENABLED -> auth_cache.enabled
 func envTransform(s string) string {
 	key := strings.ToLower(strings.TrimPrefix(s, "DBB_"))
 	// Map known prefixes to nested paths
@@ -191,6 +250,14 @@ func envTransform(s string) string {
 	// rate_limit_* -> rate_limit.*
 	if strings.HasPrefix(key, "rate_limit_") {
 		return "rate_limit." + strings.TrimPrefix(key, "rate_limit_")
+	}
+	// hash_* -> hash.*
+	if strings.HasPrefix(key, "hash_") {
+		return "hash." + strings.TrimPrefix(key, "hash_")
+	}
+	// auth_cache_* -> auth_cache.*
+	if strings.HasPrefix(key, "auth_cache_") {
+		return "auth_cache." + strings.TrimPrefix(key, "auth_cache_")
 	}
 	return key
 }
@@ -572,4 +639,60 @@ func (c *Config) ValidateDemoTarget(username, password, host, database string) s
 	}
 
 	return ""
+}
+
+// ResolvedHashParams returns the hash parameters after applying presets.
+// Individual settings override preset values.
+type ResolvedHashParams struct {
+	MemoryKB uint32
+	Time     uint32
+	Threads  uint8
+}
+
+// Hash presets.
+var hashPresets = map[string]ResolvedHashParams{
+	"default": {MemoryKB: 64 * 1024, Time: 1, Threads: 4},
+	"low":     {MemoryKB: 16 * 1024, Time: 2, Threads: 2},
+	"minimal": {MemoryKB: 4 * 1024, Time: 3, Threads: 1},
+}
+
+// GetHashParams returns the resolved hash parameters.
+func (c *Config) GetHashParams() ResolvedHashParams {
+	// Start with default preset
+	params := hashPresets["default"]
+
+	// In test mode, use minimal preset by default for faster test execution
+	if c.RunMode == RunModeTest && c.Hash.Preset == "" {
+		params = hashPresets["minimal"]
+		slog.Debug("using minimal hash preset for test mode")
+	}
+
+	// Apply preset if specified (overrides test mode default)
+	if c.Hash.Preset != "" {
+		if preset, ok := hashPresets[c.Hash.Preset]; ok {
+			params = preset
+		} else {
+			slog.Warn("unknown hash preset, using default", "preset", c.Hash.Preset)
+		}
+	}
+
+	// Override with individual settings if specified
+	if c.Hash.MemoryMB > 0 {
+		params.MemoryKB = uint32(c.Hash.MemoryMB) * 1024
+	}
+	if c.Hash.Time > 0 {
+		params.Time = uint32(c.Hash.Time)
+	}
+	if c.Hash.Threads > 0 {
+		params.Threads = uint8(c.Hash.Threads)
+	}
+
+	// Log warning if using weak parameters
+	if params.MemoryKB < 16*1024 {
+		slog.Warn("using low-security hash parameters",
+			"memory_kb", params.MemoryKB,
+			"recommended_min_kb", 16*1024)
+	}
+
+	return params
 }
