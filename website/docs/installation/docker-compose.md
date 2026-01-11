@@ -70,30 +70,64 @@ Start the services:
 docker-compose up -d
 ```
 
-Create a test user and grant access:
+### Login and Get a Token
+
+```bash
+# Login to get a session token
+TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "admin"}' | jq -r '.token')
+```
+
+### Create a Database Configuration
+
+```bash
+# First, configure the target database
+curl -X POST http://localhost:8080/api/v1/databases \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "target_db",
+    "description": "Target database for testing",
+    "host": "postgres",
+    "port": 5432,
+    "database_name": "target",
+    "username": "dbbat",
+    "password": "dbbat",
+    "ssl_mode": "disable"
+  }'
+```
+
+### Create a Test User and Grant Access
 
 ```bash
 # Create a test user
-curl -u admin:admin -X POST http://localhost:8080/api/users \
+curl -X POST http://localhost:8080/api/v1/users \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"username": "testuser", "password": "testpass", "is_admin": false}'
+  -d '{"username": "testuser", "password": "testpass", "roles": ["connector"]}'
 
-# Create a grant (adjust user_id and database_id as needed)
-curl -u admin:admin -X POST http://localhost:8080/api/grants \
+# Get the user UID and database UID from the responses above, then create a grant
+curl -X POST http://localhost:8080/api/v1/grants \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "user_id": 2,
-    "database_id": 1,
-    "access_level": "write",
+    "user_id": "<user-uid>",
+    "database_id": "<database-uid>",
+    "controls": [],
     "starts_at": "2024-01-01T00:00:00Z",
     "expires_at": "2030-01-01T00:00:00Z"
   }'
 ```
 
-Connect through the proxy:
+:::note
+An empty `controls` array means full write access. Use `["read_only"]` for read-only access.
+:::
+
+### Connect Through the Proxy
 
 ```bash
-PGPASSWORD=testpass psql -h localhost -p 5001 -U testuser -d proxy_target
+PGPASSWORD=testpass psql -h localhost -p 5001 -U testuser -d target_db
 ```
 
 ## Stopping

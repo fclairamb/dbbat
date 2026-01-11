@@ -4,6 +4,14 @@
 
 A transparent PostgreSQL proxy for query observability, access control, and safety. Every query logged. Every connection tracked.
 
+## Documentation
+
+Full documentation is available at **[dbbat.com](https://dbbat.com)**:
+- [Getting Started](https://dbbat.com/docs/intro)
+- [Installation](https://dbbat.com/docs/installation/docker)
+- [Configuration](https://dbbat.com/docs/configuration)
+- [API Reference](https://dbbat.com/docs/api)
+
 ## Why DBBat?
 
 **The Problem:**
@@ -20,174 +28,109 @@ DBBat acts as a monitoring proxy that allows controlled developer access to prod
 - **Encrypted credentials**: Database passwords never exposed to users
 - **Granular access control**: Grant temporary access to specific databases with precise permissions
 
-DBBat gives you the best of both worlds: developers can troubleshoot production issues while you maintain complete visibility and control.
-
 ## Features
 
-- **User Management**: Authenticate users with username/password, admin capabilities
+- **User Management**: Authenticate users with username/password, role-based access control
 - **Database Configuration**: Store target database connections with encrypted credentials
 - **Connection & Query Tracking**: Log all connections and queries with timing and results
-- **Access Control**: Time-windowed access grants with read/write levels and quotas
+- **Access Control**: Time-windowed access grants with controls (`read_only`, `block_copy`, `block_ddl`) and quotas
 - **REST API**: Full API for management and observability
 - **PostgreSQL Proxy**: Transparent proxy with wire protocol support
 
 ## Quick Start
 
-### Prerequisites
+### Running with Docker
 
-- Go 1.21+
-- PostgreSQL 15+
-- Docker & Docker Compose (for testing)
+```bash
+docker run -d \
+  -e DBB_DSN="postgres://user:pass@host:5432/dbbat?sslmode=require" \
+  -p 5434:5434 \
+  -p 8080:8080 \
+  ghcr.io/fclairamb/dbbat
+```
 
 ### Running with Docker Compose
 
-```bash
-# Start the services
-docker-compose up -d
+See [docker-compose installation](https://dbbat.com/docs/installation/docker-compose) for a complete example.
 
-# The following services will be available:
-# - PostgreSQL: localhost:5000
-# - DBBat Proxy: localhost:5001
-# - DBBat API: localhost:8080
+## Usage Example
+
+All API endpoints are under `/api/v1/`. See the [API Reference](https://dbbat.com/docs/api) for complete documentation.
+
+### 1. Login and get a token
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "admin"}' | jq -r '.token')
 ```
 
-### Running Locally
-
-1. **Set up a PostgreSQL database** for DBBat storage:
-```bash
-createdb dbbat
-```
-
-2. **Generate an encryption key** (32 bytes, base64-encoded):
-```bash
-openssl rand -base64 32
-```
-
-3. **Set environment variables**:
-```bash
-export DBB_DSN="postgres://user:password@localhost:5432/dbbat?sslmode=disable"
-export DBB_KEY="<your-base64-encoded-key>"
-export DBB_LISTEN_PG=":5432"
-export DBB_LISTEN_API=":8080"
-```
-
-4. **Build and run**:
-```bash
-go build -o dbbat ./cmd/dbbat
-./dbbat
-```
-
-## Usage
-
-### 1. Create a User
+### 2. Create a User
 
 ```bash
-curl -u admin:admin -X POST http://localhost:8080/api/users \
+curl -X POST http://localhost:8080/api/v1/users \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "username": "john",
-    "password": "secret123",
-    "is_admin": false
+    "username": "developer",
+    "password": "temppass123",
+    "roles": ["connector"]
   }'
 ```
 
-### 2. Configure a Target Database
+### 3. Configure a Target Database
 
 ```bash
-curl -u admin:admin -X POST http://localhost:8080/api/databases \
+curl -X POST http://localhost:8080/api/v1/databases \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "my_database",
+    "name": "production",
     "description": "Production database",
-    "host": "localhost",
+    "host": "db.example.com",
     "port": 5432,
     "database_name": "myapp",
-    "username": "dbuser",
+    "username": "readonly_user",
     "password": "dbpass",
-    "ssl_mode": "prefer"
+    "ssl_mode": "require"
   }'
 ```
 
-### 3. Grant Access
+### 4. Grant Access
 
 ```bash
-curl -u admin:admin -X POST http://localhost:8080/api/grants \
+curl -X POST http://localhost:8080/api/v1/grants \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "user_id": 2,
-    "database_id": 1,
-    "access_level": "read",
+    "user_id": "<user-uid>",
+    "database_id": "<database-uid>",
+    "controls": ["read_only"],
     "starts_at": "2024-01-01T00:00:00Z",
     "expires_at": "2024-12-31T23:59:59Z",
-    "max_queries": 1000,
-    "max_bytes": 10485760
+    "max_query_counts": 1000,
+    "max_bytes_transferred": 10485760
   }'
 ```
 
-### 4. Connect via Proxy
+### 5. Connect via Proxy
 
 ```bash
-psql -h localhost -p 5001 -U john -d my_database
+psql -h localhost -p 5434 -U developer -d production
 ```
-
-### 5. View Query Logs
-
-```bash
-curl -u admin:admin http://localhost:8080/api/queries?limit=10
-```
-
-## API Endpoints
-
-### Users
-- `POST /api/users` - Create user
-- `GET /api/users` - List users
-- `GET /api/users/:id` - Get user
-- `PUT /api/users/:id` - Update user
-- `DELETE /api/users/:id` - Delete user
-
-### Databases
-- `POST /api/databases` - Create database
-- `GET /api/databases` - List databases
-- `GET /api/databases/:id` - Get database
-- `PUT /api/databases/:id` - Update database
-- `DELETE /api/databases/:id` - Delete database
-
-### Grants
-- `POST /api/grants` - Create grant
-- `GET /api/grants` - List grants
-- `GET /api/grants/:id` - Get grant
-- `DELETE /api/grants/:id` - Revoke grant
-
-### Observability
-- `GET /api/connections` - List connections
-- `GET /api/queries` - List queries
-- `GET /api/queries/:id` - Get query with result rows
-- `GET /api/audit` - List audit events
 
 ## Configuration
 
-| Variable | Description | Required | Default |
-|----------|-------------|----------|---------|
-| `DBB_LISTEN_PG` | Proxy listen address | No | `:5432` |
-| `DBB_LISTEN_API` | REST API listen address | No | `:8080` |
-| `DBB_DSN` | PostgreSQL DSN for DBBat storage | Yes | - |
-| `DBB_KEY` | Base64-encoded AES-256 encryption key | Yes* | - |
-| `DBB_KEYFILE` | Path to file containing encryption key | Yes* | - |
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DBB_DSN` | PostgreSQL DSN for DBBat storage | Required |
+| `DBB_LISTEN_PG` | Proxy listen address | `:5434` |
+| `DBB_LISTEN_API` | REST API listen address | `:8080` |
+| `DBB_KEY` | Base64-encoded AES-256 encryption key | Auto-generated |
+| `DBB_KEYFILE` | Path to file containing encryption key | - |
+| `DBB_RUN_MODE` | Run mode: empty, `test`, or `demo` | - |
 
-*Either `DBB_KEY` or `DBB_KEYFILE` must be set.
-
-## Development
-
-```bash
-# Build
-go build ./...
-
-# Test
-go test ./...
-
-# Lint
-golangci-lint run
-```
+See [Configuration](https://dbbat.com/docs/configuration) for all options.
 
 ## Security
 
@@ -198,10 +141,19 @@ golangci-lint run
 ## Architecture
 
 ```
-Client → DBBat (auth + grant check) → Target PostgreSQL
+Client -> DBBat (auth + grant check) -> Target PostgreSQL
 ```
 
-See [CLAUDE.md](CLAUDE.md) for detailed architecture and implementation documentation.
+## Development
+
+```bash
+make dev          # Start dev environment with hot reload
+make test         # Run tests
+make build-app    # Build frontend + backend
+make lint         # Run linter
+```
+
+See [CLAUDE.md](CLAUDE.md) for development documentation.
 
 ## License
 
