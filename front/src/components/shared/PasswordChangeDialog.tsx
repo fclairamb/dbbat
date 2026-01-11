@@ -56,6 +56,7 @@ export function PasswordChangeDialog({
       const response = await apiClient.PUT("/users/{uid}/password", {
         params: { path: { uid: user.uid } },
         body: {
+          username: user.username,
           current_password: currentPassword,
           new_password: newPassword,
         },

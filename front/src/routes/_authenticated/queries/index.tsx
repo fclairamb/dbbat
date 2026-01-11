@@ -98,7 +98,7 @@ function QueriesPage() {
   ];
 
   const clearFilter = () => {
-    navigate({ to: "/queries", search: {} });
+    navigate({ to: "/queries", search: { connection_id: undefined } });
   };
 
   return (

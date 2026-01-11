@@ -258,8 +258,8 @@ function CreateGrantDialog({
   const [userId, setUserId] = useState("");
   const [databaseId, setDatabaseId] = useState("");
   const [controls, setControls] = useState<string[]>([]);
-  const [startsAt, setStartsAt] = useState(format(new Date(), "yyyy-MM-dd"));
-  const [expiresAt, setExpiresAt] = useState(
+  const [startsAt, setStartsAt] = useState(() => format(new Date(), "yyyy-MM-dd"));
+  const [expiresAt, setExpiresAt] = useState(() =>
     format(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), "yyyy-MM-dd")
   );
 
@@ -278,7 +278,7 @@ function CreateGrantDialog({
     createGrant.mutate({
       user_id: userId,
       database_id: databaseId,
-      controls: controls,
+      controls: controls as ("read_only" | "block_copy" | "block_ddl")[],
       starts_at: new Date(startsAt).toISOString(),
       expires_at: new Date(expiresAt).toISOString(),
     });

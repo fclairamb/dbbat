@@ -26,7 +26,7 @@ export function Header() {
     if (match.pathname === "/" && matches.length > 1) continue;
 
     // Get route meta for title
-    const routeMeta = match.routeContext as { title?: string } | undefined;
+    const routeMeta = match.context as { title?: string } | undefined;
     const title = routeMeta?.title || formatPathname(match.pathname);
 
     if (title) {

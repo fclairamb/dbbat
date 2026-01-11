@@ -353,15 +353,18 @@ export function useConnections(filters?: {
 // Queries
 // ============================================================================
 
-export function useQueries(filters?: {
-  connection_id?: string;
-  user_id?: string;
-  database_id?: string;
-  start_time?: string;
-  end_time?: string;
-  limit?: number;
-  offset?: number;
-}) {
+export function useQueries(
+  filters?: {
+    connection_id?: string;
+    user_id?: string;
+    database_id?: string;
+    start_time?: string;
+    end_time?: string;
+    limit?: number;
+    offset?: number;
+  },
+  options?: { enabled?: boolean }
+) {
   return useQuery({
     queryKey: ["queries", filters],
     queryFn: async (): Promise<Query[]> => {
@@ -373,6 +376,7 @@ export function useQueries(filters?: {
       }
       return response.data?.queries || [];
     },
+    enabled: options?.enabled,
   });
 }
 
