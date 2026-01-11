@@ -1,7 +1,7 @@
 services:
   # PostgreSQL database for both DBBat storage and target database
   postgres:
-    image: postgres:15
+    image: postgres:18
     container_name: dbbat-postgres
     environment:
       POSTGRES_USER: postgres
