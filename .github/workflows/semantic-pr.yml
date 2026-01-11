@@ -33,4 +33,5 @@ jobs:
             store
             ui
             release
+            ci
           requireScope: false
