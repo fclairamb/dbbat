@@ -6,6 +6,12 @@ on:
       - "v*"
     branches:
       - "release-test/v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g., v0.0.1)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -19,10 +25,24 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Checkout tag for workflow_dispatch
+        if: github.event_name == 'workflow_dispatch'
+        run: git checkout ${{ inputs.tag }}
+
       - name: Determine release mode
         id: mode
         run: |
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # Manual trigger: use input tag
+            TAG="${{ inputs.tag }}"
+            echo "is_test=false" >> $GITHUB_OUTPUT
+            echo "version=${TAG#v}" >> $GITHUB_OUTPUT
+            echo "docker_tags<<EOF" >> $GITHUB_OUTPUT
+            echo "ghcr.io/fclairamb/dbbat:${TAG#v}" >> $GITHUB_OUTPUT
+            echo "ghcr.io/fclairamb/dbbat:latest" >> $GITHUB_OUTPUT
+            echo "EOF" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+            # Tag push: use tag from ref
             echo "is_test=false" >> $GITHUB_OUTPUT
             echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
             echo "docker_tags<<EOF" >> $GITHUB_OUTPUT
@@ -113,13 +133,17 @@ jobs:
           echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
 
   publish-chart:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: [release]
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v6.0.2
+
+      - name: Checkout tag for workflow_dispatch
+        if: github.event_name == 'workflow_dispatch'
+        run: git checkout ${{ inputs.tag }}
 
       - name: Install Helm
         uses: azure/setup-helm@v4
@@ -133,8 +157,16 @@ jobs:
       - name: Determine version
         id: version
         run: |
-          if [[ "${{ github.ref_type }}" == "tag" ]]; then
-            # Strip 'v' prefix from tag
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # Manual trigger: use input tag
+            TAG="${{ inputs.tag }}"
+            VERSION=${TAG#v}
+            APP_VERSION=$VERSION
+            echo "version=$VERSION" >> $GITHUB_OUTPUT
+            echo "appVersion=$APP_VERSION" >> $GITHUB_OUTPUT
+            echo "is_release=true" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+            # Tag push: use tag from ref
             VERSION=${GITHUB_REF_NAME#v}
             APP_VERSION=$VERSION
             echo "version=$VERSION" >> $GITHUB_OUTPUT
