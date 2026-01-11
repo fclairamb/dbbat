@@ -129,7 +129,7 @@ export default async function globalSetup(): Promise<void> {
 
     // Step 2: Build backend
     console.log("[setup] Step 2: Building backend...");
-    await execCommand("make", ["build"], { cwd: PROJECT_ROOT });
+    await execCommand("make", ["build-binary"], { cwd: PROJECT_ROOT });
     console.log("[setup] Backend built successfully.\n");
 
     // Step 3: Start PostgreSQL with docker-compose
@@ -146,7 +146,7 @@ export default async function globalSetup(): Promise<void> {
 
     // Step 4: Start dbbat server with DBB_RUN_MODE=test
     console.log("[setup] Step 4: Starting dbbat server in test mode...");
-    const serverProcess = startBackgroundProcess("./bin/dbbat", ["serve"], {
+    const serverProcess = startBackgroundProcess("./dbbat", ["serve"], {
       cwd: PROJECT_ROOT,
       env: {
         ...process.env,

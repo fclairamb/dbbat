@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -69,6 +70,7 @@ type Session struct {
 	logger        *slog.Logger
 	ctx           context.Context //nolint:containedctx // Context is needed for the session lifecycle
 	queryStorage  config.QueryStorageConfig
+	authCache     *cache.AuthCache
 
 	// Session state
 	user                   *store.User
@@ -94,6 +96,7 @@ func NewSession(
 	logger *slog.Logger,
 	ctx context.Context, //nolint:revive // Context parameter order is intentional for this factory
 	queryStorage config.QueryStorageConfig,
+	authCache *cache.AuthCache,
 ) *Session {
 	return &Session{
 		clientConn:    clientConn,
@@ -102,6 +105,7 @@ func NewSession(
 		logger:        logger,
 		ctx:           ctx,
 		queryStorage:  queryStorage,
+		authCache:     authCache,
 		extendedState: &extendedQueryState{
 			preparedStatements: make(map[string]*preparedStatement),
 			portals:            make(map[string]*portalState),

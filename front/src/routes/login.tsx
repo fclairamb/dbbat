@@ -20,7 +20,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { Loader2, CheckCircle2, Gamepad2 } from "lucide-react";
+import { Loader2, CheckCircle2, Gamepad2, LogOut } from "lucide-react";
 
 export const Route = createFileRoute("/login")({
   component: LoginPage,
@@ -30,6 +30,8 @@ type ViewState = "login" | "password-change";
 
 function LoginPage() {
   const navigate = useNavigate();
+  // Read session_expired directly from URL to avoid TanStack Router's search param normalization
+  const sessionExpired = new URLSearchParams(window.location.search).get("session_expired") === "true";
   const { login, isLoading } = useAuth();
   const { data: versionInfo } = useVersion();
   const [username, setUsername] = useState("");
@@ -179,6 +181,15 @@ function LoginPage() {
         <CardContent>
           {viewState === "login" ? (
             <form onSubmit={handleLoginSubmit} className="space-y-4">
+              {sessionExpired && (
+                <Alert data-testid="session-expired-alert">
+                  <LogOut className="h-4 w-4" />
+                  <AlertDescription>
+                    Your session has expired. Please sign in again.
+                  </AlertDescription>
+                </Alert>
+              )}
+
               {error && (
                 <Alert variant="destructive" data-testid="login-error">
                   <AlertDescription>{error}</AlertDescription>

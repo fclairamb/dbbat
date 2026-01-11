@@ -54,6 +54,7 @@ export function AdaptiveRefresh({
         onClick={handleManualRefresh}
         disabled={isRefreshing}
         className="gap-2"
+        data-testid="refresh-button"
       >
         <RefreshCw
           className={cn("h-4 w-4", isRefreshing && "animate-spin")}
