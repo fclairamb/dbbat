@@ -61,7 +61,7 @@ docker run -d \
 DBBat exposes a health endpoint:
 
 ```bash
-curl http://localhost:8080/api/health
+curl http://localhost:8080/api/v1/health
 ```
 
 ## Next Steps
