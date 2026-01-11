@@ -205,4 +205,4 @@ See [CLAUDE.md](CLAUDE.md) for detailed architecture and implementation document
 
 ## License
 
-MIT
+AGPL-3.0
