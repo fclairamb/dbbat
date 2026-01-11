@@ -2,8 +2,7 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
   "prConcurrentLimit": 2,
-  "prHourlyLimit": 2,
-  "schedule": ["after 10pm"],
+  "prHourlyLimit": 1,
   "packageRules": [
     {
       "matchUpdateTypes": ["minor", "patch"],
