@@ -92,7 +92,7 @@ func (s *Session) authenticate() error {
 	// Verify password (using cache if available)
 	var valid bool
 	if s.authCache != nil {
-		valid, err = s.authCache.VerifyPassword(user.UID.String(), passwordMsg.Password, user.PasswordHash)
+		valid, err = s.authCache.VerifyPassword(s.ctx, user.UID.String(), passwordMsg.Password, user.PasswordHash)
 	} else {
 		valid, err = crypto.VerifyPassword(user.PasswordHash, passwordMsg.Password)
 	}

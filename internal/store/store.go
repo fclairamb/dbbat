@@ -75,7 +75,7 @@ func New(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
 // Close closes the database connection pool
 func (s *Store) Close() {
 	if err := s.db.Close(); err != nil {
-		slog.Error("failed to close database", "error", err)
+		slog.ErrorContext(context.Background(), "failed to close database", slog.Any("error", err))
 	}
 }
 
@@ -105,9 +105,9 @@ func (s *Store) runMigrations(ctx context.Context) error {
 	}
 
 	if group.IsZero() {
-		slog.Debug("No new migrations to run")
+		slog.DebugContext(ctx, "No new migrations to run")
 	} else {
-		slog.Info("Migrations applied", "group", group.ID, "migrations", len(group.Migrations))
+		slog.InfoContext(ctx, "Migrations applied", slog.Int64("group", group.ID), slog.Int("migrations", len(group.Migrations)))
 	}
 
 	return nil
@@ -132,9 +132,9 @@ func (s *Store) Rollback(ctx context.Context) error {
 	}
 
 	if group.IsZero() {
-		slog.Info("No migrations to rollback")
+		slog.InfoContext(ctx, "No migrations to rollback")
 	} else {
-		slog.Info("Migrations rolled back", "group", group.ID, "migrations", len(group.Migrations))
+		slog.InfoContext(ctx, "Migrations rolled back", slog.Int64("group", group.ID), slog.Int("migrations", len(group.Migrations)))
 	}
 
 	return nil
@@ -187,7 +187,7 @@ func (s *Store) DropAllTables(ctx context.Context) error {
 		}
 	}
 
-	slog.Info("All tables and types dropped for test mode")
+	slog.InfoContext(ctx, "All tables and types dropped for test mode")
 	return nil
 }
 
@@ -295,7 +295,7 @@ func (s *Store) MatchesStorageDSN(host string, port int, databaseName string) bo
 	storage, err := parsePostgresDSN(s.storageDSN)
 	if err != nil {
 		// If we can't parse the storage DSN, err on the side of caution
-		slog.Warn("failed to parse storage DSN for comparison", "error", err)
+		slog.WarnContext(context.Background(), "failed to parse storage DSN for comparison", slog.Any("error", err))
 		return false
 	}
 

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"log/slog"
 	"net/http"
 	"strconv"
 
@@ -103,7 +104,7 @@ func (s *Server) handleLogin(c *gin.Context) {
 	// Create web session
 	apiKey, plainKey, err := s.store.CreateWebSession(ctx, user.UID)
 	if err != nil {
-		s.logger.Error("failed to create web session", "error", err, "user", user.Username)
+		s.logger.ErrorContext(ctx, "failed to create web session", slog.Any("error", err), slog.String("user", user.Username))
 		errorResponse(c, http.StatusInternalServerError, "failed to create session")
 		return
 	}
@@ -148,7 +149,7 @@ func (s *Server) handleLogout(c *gin.Context) {
 	currentUser := getCurrentUser(c)
 	if currentUser != nil {
 		if err := s.store.RevokeAPIKey(c.Request.Context(), apiKey.ID, currentUser.UID); err != nil {
-			s.logger.Error("failed to revoke web session", "error", err)
+			s.logger.ErrorContext(c.Request.Context(), "failed to revoke web session", slog.Any("error", err))
 			// Don't return error - logout should always succeed from client perspective
 		}
 	}
@@ -269,19 +270,19 @@ func (s *Server) handlePreLoginPasswordChange(c *gin.Context) {
 	// Hash new password
 	newHash, err := crypto.HashPassword(req.NewPassword)
 	if err != nil {
-		s.logger.Error("failed to hash password", "error", err)
+		s.logger.ErrorContext(ctx, "failed to hash password", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to change password")
 		return
 	}
 
 	// Update password
 	if err := s.store.UpdateUser(ctx, user.UID, store.UserUpdate{PasswordHash: &newHash}); err != nil {
-		s.logger.Error("failed to update password", "error", err)
+		s.logger.ErrorContext(ctx, "failed to update password", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to change password")
 		return
 	}
 
-	s.logger.Info("pre-login password changed", "user", user.Username, "uid", user.UID)
+	s.logger.InfoContext(ctx, "pre-login password changed", slog.String("user", user.Username), slog.Any("uid", user.UID))
 
 	c.JSON(http.StatusOK, gin.H{"message": "Password changed successfully"})
 }
@@ -420,19 +421,19 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 	// Hash new password
 	newHash, err := crypto.HashPassword(req.NewPassword)
 	if err != nil {
-		s.logger.Error("failed to hash password", "error", err)
+		s.logger.ErrorContext(ctx, "failed to hash password", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to change password")
 		return
 	}
 
 	// Update password
 	if err := s.store.UpdateUser(ctx, targetUID, store.UserUpdate{PasswordHash: &newHash}); err != nil {
-		s.logger.Error("failed to update password", "error", err)
+		s.logger.ErrorContext(ctx, "failed to update password", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to change password")
 		return
 	}
 
-	s.logger.Info("password changed", "auth_user", authUser.Username, "target_user", targetUser.Username, "target_uid", targetUID)
+	s.logger.InfoContext(ctx, "password changed", slog.String("auth_user", authUser.Username), slog.String("target_user", targetUser.Username), slog.Any("target_uid", targetUID))
 
 	c.JSON(http.StatusOK, gin.H{"message": "Password changed successfully"})
 }

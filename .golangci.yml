@@ -162,7 +162,7 @@ linters:
       range-loops: true
       for-loops: false
     sloglint:
-      context: "scope"
+      context: "all"
     unparam:
       check-exported: false
     tagliatelle:
@@ -219,7 +219,6 @@ linters:
           - godot
           - godox
           - gocritic
-          - sloglint
           - tagalign
           - perfsprint
           - gci
@@ -270,6 +269,18 @@ linters:
       - linters:
           - revive
         text: "context-as-argument"
+        path: _test\.go
+      - linters:
+          - contextcheck
+        path: main\.go
+      - linters:
+          - contextcheck
+        path: internal/store/store\.go
+      - linters:
+          - contextcheck
+        path: internal/store/databases\.go
+      - linters:
+          - contextcheck
         path: _test\.go
 formatters:
   enable:

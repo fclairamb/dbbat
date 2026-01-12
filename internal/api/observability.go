@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -51,7 +52,7 @@ func (s *Server) handleListConnections(c *gin.Context) {
 
 	connections, err := s.store.ListConnections(c.Request.Context(), filter)
 	if err != nil {
-		s.logger.Error("failed to list connections", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to list connections", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to list connections")
 		return
 	}
@@ -110,7 +111,7 @@ func (s *Server) handleListQueries(c *gin.Context) {
 
 	queries, err := s.store.ListQueries(c.Request.Context(), filter)
 	if err != nil {
-		s.logger.Error("failed to list queries", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to list queries", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to list queries")
 		return
 	}
@@ -128,7 +129,7 @@ func (s *Server) handleGetQuery(c *gin.Context) {
 
 	query, err := s.store.GetQuery(c.Request.Context(), uid)
 	if err != nil {
-		s.logger.Error("failed to get query", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to get query", slog.Any("error", err))
 		errorResponse(c, http.StatusNotFound, "query not found")
 		return
 	}
@@ -185,7 +186,7 @@ func (s *Server) handleListAudit(c *gin.Context) {
 
 	events, err := s.store.ListAuditEvents(c.Request.Context(), filter)
 	if err != nil {
-		s.logger.Error("failed to list audit events", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to list audit events", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to list audit events")
 		return
 	}
@@ -229,7 +230,7 @@ func (s *Server) handleGetQueryRows(c *gin.Context) {
 			errorResponse(c, http.StatusBadRequest, "invalid_cursor")
 			return
 		}
-		s.logger.Error("failed to get query rows", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to get query rows", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to get query rows")
 		return
 	}

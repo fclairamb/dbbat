@@ -135,7 +135,7 @@ func (s *Session) Run() error {
 
 	conn, err := s.store.CreateConnection(s.ctx, s.user.UID, s.database.UID, sourceIP)
 	if err != nil {
-		s.logger.Error("failed to create connection record", "error", err)
+		s.logger.ErrorContext(s.ctx, "failed to create connection record", slog.Any("error", err))
 	} else {
 		s.connectionUID = conn.UID
 	}
@@ -181,7 +181,7 @@ func (s *Session) proxyClientToUpstream() error {
 			return fmt.Errorf("failed to receive from client: %w", err)
 		}
 
-		s.logger.Info("received message from client", "message", msg)
+		s.logger.InfoContext(s.ctx, "received message from client", slog.Any("message", msg))
 
 		// Handle query interception for Simple and Extended Query Protocols
 		var interceptErr error
@@ -205,12 +205,12 @@ func (s *Session) proxyClientToUpstream() error {
 		case *pgproto3.CopyDone:
 			// Client finished sending COPY data
 			if s.copyState != nil && s.copyState.direction == "in" {
-				s.logger.Info("COPY IN done (from client)", "total_bytes", s.copyState.totalBytes, "truncated", s.copyState.truncated)
+				s.logger.InfoContext(s.ctx, "COPY IN done (from client)", slog.Int64("total_bytes", s.copyState.totalBytes), slog.Bool("truncated", s.copyState.truncated))
 			}
 		case *pgproto3.CopyFail:
 			// Client aborted COPY
 			if s.copyState != nil {
-				s.logger.Warn("COPY failed", "message", m.Message)
+				s.logger.WarnContext(s.ctx, "COPY failed", slog.String("message", m.Message))
 				s.copyState = nil
 			}
 		}
@@ -240,13 +240,13 @@ func (s *Session) sendQueryError(queryErr error) {
 
 	errBuf, encodeErr := errMsg.Encode(nil)
 	if encodeErr != nil {
-		s.logger.Error("failed to encode error message", "error", encodeErr)
+		s.logger.ErrorContext(s.ctx, "failed to encode error message", slog.Any("error", encodeErr))
 
 		return
 	}
 
 	if _, err := s.clientConn.Write(errBuf); err != nil {
-		s.logger.Error("failed to write error to client", "error", err)
+		s.logger.ErrorContext(s.ctx, "failed to write error to client", slog.Any("error", err))
 
 		return
 	}
@@ -255,13 +255,13 @@ func (s *Session) sendQueryError(queryErr error) {
 
 	readyBuf, encodeErr := readyMsg.Encode(nil)
 	if encodeErr != nil {
-		s.logger.Error("failed to encode ready message", "error", encodeErr)
+		s.logger.ErrorContext(s.ctx, "failed to encode ready message", slog.Any("error", encodeErr))
 
 		return
 	}
 
 	if _, err := s.clientConn.Write(readyBuf); err != nil {
-		s.logger.Error("failed to write ready to client", "error", err)
+		s.logger.ErrorContext(s.ctx, "failed to write ready to client", slog.Any("error", err))
 	}
 }
 
@@ -350,11 +350,11 @@ func (s *Session) proxyUpstreamToClient() error {
 					// Limits exceeded - discard all captured rows and stop capturing
 					query.truncated = true
 					query.capturedRows = nil // Discard all previously captured rows
-					s.logger.Warn("result capture refused - limits exceeded",
-						"rows_captured", query.rowNumber,
-						"bytes_captured", query.capturedBytes,
-						"max_rows", s.queryStorage.MaxResultRows,
-						"max_bytes", s.queryStorage.MaxResultBytes)
+					s.logger.WarnContext(s.ctx, "result capture refused - limits exceeded",
+						slog.Int("rows_captured", query.rowNumber),
+						slog.Int64("bytes_captured", query.capturedBytes),
+						slog.Int("max_rows", s.queryStorage.MaxResultRows),
+						slog.Int64("max_bytes", s.queryStorage.MaxResultBytes))
 				} else {
 					row := s.convertDataRow(m.Values, query.columnNames, query.columnOIDs)
 					query.capturedRows = append(query.capturedRows, row)
@@ -373,7 +373,7 @@ func (s *Session) proxyUpstreamToClient() error {
 			if s.currentQuery != nil {
 				s.copyState.columnNames = parseCopyColumnNames(s.currentQuery.sql)
 			}
-			s.logger.Info("COPY OUT started", "format", m.OverallFormat)
+			s.logger.InfoContext(s.ctx, "COPY OUT started", slog.Int("format", int(m.OverallFormat)))
 
 		case *pgproto3.CopyInResponse:
 			// Server is ready for a COPY FROM operation (receiving data from client)
@@ -385,7 +385,7 @@ func (s *Session) proxyUpstreamToClient() error {
 			if s.currentQuery != nil {
 				s.copyState.columnNames = parseCopyColumnNames(s.currentQuery.sql)
 			}
-			s.logger.Info("COPY IN started", "format", m.OverallFormat)
+			s.logger.InfoContext(s.ctx, "COPY IN started", slog.Int("format", int(m.OverallFormat)))
 
 		case *pgproto3.CopyData:
 			// Server sending COPY data to client (COPY TO)
@@ -397,7 +397,7 @@ func (s *Session) proxyUpstreamToClient() error {
 		case *pgproto3.CopyDone:
 			// COPY operation complete - finalize capture
 			if s.copyState != nil && s.copyState.direction == "out" {
-				s.logger.Info("COPY OUT done", "total_bytes", s.copyState.totalBytes, "truncated", s.copyState.truncated)
+				s.logger.InfoContext(s.ctx, "COPY OUT done", slog.Int64("total_bytes", s.copyState.totalBytes), slog.Bool("truncated", s.copyState.truncated))
 			}
 
 		case *pgproto3.ReadyForQuery:
@@ -425,13 +425,13 @@ func (s *Session) proxyUpstreamToClient() error {
 func (s *Session) cleanup() {
 	if s.connectionUID != uuid.Nil {
 		if err := s.store.CloseConnection(s.ctx, s.connectionUID); err != nil {
-			s.logger.Error("failed to close connection record", "error", err)
+			s.logger.ErrorContext(s.ctx, "failed to close connection record", slog.Any("error", err))
 		}
 	}
 
 	if s.upstreamConn != nil {
 		if err := s.upstreamConn.Close(); err != nil {
-			s.logger.Error("failed to close upstream connection", "error", err)
+			s.logger.ErrorContext(s.ctx, "failed to close upstream connection", slog.Any("error", err))
 		}
 	}
 }
@@ -446,13 +446,13 @@ func (s *Session) sendError(message string) {
 
 	buf, err := errMsg.Encode(nil)
 	if err != nil {
-		s.logger.Error("failed to encode error message", "error", err)
+		s.logger.ErrorContext(s.ctx, "failed to encode error message", slog.Any("error", err))
 
 		return
 	}
 
 	if _, err := s.clientConn.Write(buf); err != nil {
-		s.logger.Error("failed to write error to client", "error", err)
+		s.logger.ErrorContext(s.ctx, "failed to write error to client", slog.Any("error", err))
 	}
 }
 

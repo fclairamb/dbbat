@@ -56,7 +56,7 @@ func (s *Server) Start(addr string) error {
 	}
 
 	s.listener = listener
-	s.logger.Info("Proxy server listening", "addr", addr)
+	s.logger.InfoContext(s.ctx, "Proxy server listening", slog.String("addr", addr))
 
 	// Accept connections
 	for {
@@ -66,7 +66,7 @@ func (s *Server) Start(addr string) error {
 			case <-s.shutdown:
 				return nil
 			default:
-				s.logger.Error("failed to accept connection", "error", err)
+				s.logger.ErrorContext(s.ctx, "failed to accept connection", slog.Any("error", err))
 
 				continue
 			}
@@ -88,7 +88,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	if s.listener != nil {
 		if err := s.listener.Close(); err != nil {
-			s.logger.Error("failed to close listener", "error", err)
+			s.logger.ErrorContext(ctx, "failed to close listener", slog.Any("error", err))
 		}
 	}
 
@@ -102,11 +102,11 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 	select {
 	case <-done:
-		s.logger.Info("Proxy server shutdown complete")
+		s.logger.InfoContext(ctx, "Proxy server shutdown complete")
 
 		return nil
 	case <-ctx.Done():
-		s.logger.Warn("Proxy server shutdown timeout")
+		s.logger.WarnContext(ctx, "Proxy server shutdown timeout")
 
 		return ctx.Err()
 	}
@@ -116,14 +116,14 @@ func (s *Server) Shutdown(ctx context.Context) error {
 func (s *Server) handleConnection(clientConn net.Conn) {
 	defer func() {
 		if err := clientConn.Close(); err != nil {
-			s.logger.Error("failed to close client connection", "error", err)
+			s.logger.ErrorContext(s.ctx, "failed to close client connection", slog.Any("error", err))
 		}
 	}()
 
-	s.logger.Debug("New connection", "remote_addr", clientConn.RemoteAddr())
+	s.logger.DebugContext(s.ctx, "New connection", slog.Any("remote_addr", clientConn.RemoteAddr()))
 
 	session := NewSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.queryStorage, s.authCache)
 	if err := session.Run(); err != nil {
-		s.logger.Error("Session error", "error", err, "remote_addr", clientConn.RemoteAddr())
+		s.logger.ErrorContext(s.ctx, "Session error", slog.Any("error", err), slog.Any("remote_addr", clientConn.RemoteAddr()))
 	}
 }

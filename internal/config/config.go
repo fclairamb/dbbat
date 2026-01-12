@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
@@ -152,6 +153,10 @@ type Config struct {
 	// Redirects contains dev redirect rules parsed from DBB_REDIRECTS env var.
 	// Not loaded from config file, parsed from environment only.
 	Redirects []RedirectRule `koanf:"-"`
+
+	// LogLevel controls the logging verbosity (debug, info, warn, error).
+	// Default is "info".
+	LogLevel string `koanf:"log_level"`
 }
 
 // Default query storage limits.
@@ -195,12 +200,16 @@ const (
 // DefaultBaseURL is the default base URL path for the frontend.
 const DefaultBaseURL = "/app"
 
+// DefaultLogLevel is the default log level.
+const DefaultLogLevel = "info"
+
 // defaultConfig returns a Config with default values.
 func defaultConfig() Config {
 	return Config{
 		ListenPG:  ":5434",
 		ListenAPI: ":8080",
 		BaseURL:   DefaultBaseURL,
+		LogLevel:  DefaultLogLevel,
 		QueryStorage: QueryStorageConfig{
 			MaxResultRows:  DefaultMaxResultRows,
 			MaxResultBytes: DefaultMaxResultBytes,
@@ -449,9 +458,9 @@ func generateAndSaveDefaultKey(keyPath string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to write key file %s: %w", keyPath, err)
 	}
 
-	slog.Warn("generated new encryption key",
-		"path", keyPath,
-		"warning", "losing this key means encrypted credentials cannot be recovered")
+	slog.WarnContext(context.Background(), "generated new encryption key",
+		slog.String("path", keyPath),
+		slog.String("warning", "losing this key means encrypted credentials cannot be recovered"))
 
 	return key, nil
 }
@@ -476,7 +485,7 @@ func parseRedirects(value string) []RedirectRule {
 
 		rule, ok := parseRedirectRule(part)
 		if !ok {
-			slog.Warn("Invalid redirect rule, skipping", "rule", part)
+			slog.WarnContext(context.Background(), "Invalid redirect rule, skipping", slog.String("rule", part))
 
 			continue
 		}
@@ -485,14 +494,14 @@ func parseRedirects(value string) []RedirectRule {
 	}
 
 	if len(rules) > 0 {
-		slog.Info("Loaded redirect rules", "count", len(rules))
+		slog.InfoContext(context.Background(), "Loaded redirect rules", slog.Int("count", len(rules)))
 
 		for i := range rules {
 			r := &rules[i]
-			slog.Debug("Redirect rule",
-				"pathPrefix", r.PathPrefix,
-				"targetHost", r.TargetHost,
-				"targetPath", r.TargetPath)
+			slog.DebugContext(context.Background(), "Redirect rule",
+				slog.String("pathPrefix", r.PathPrefix),
+				slog.String("targetHost", r.TargetHost),
+				slog.String("targetPath", r.TargetPath))
 		}
 	}
 
@@ -664,7 +673,7 @@ func (c *Config) GetHashParams() ResolvedHashParams {
 	// In test mode, use minimal preset by default for faster test execution
 	if c.RunMode == RunModeTest && c.Hash.Preset == "" {
 		params = hashPresets["minimal"]
-		slog.Debug("using minimal hash preset for test mode")
+		slog.DebugContext(context.Background(), "using minimal hash preset for test mode")
 	}
 
 	// Apply preset if specified (overrides test mode default)
@@ -672,7 +681,7 @@ func (c *Config) GetHashParams() ResolvedHashParams {
 		if preset, ok := hashPresets[c.Hash.Preset]; ok {
 			params = preset
 		} else {
-			slog.Warn("unknown hash preset, using default", "preset", c.Hash.Preset)
+			slog.WarnContext(context.Background(), "unknown hash preset, using default", slog.String("preset", c.Hash.Preset))
 		}
 	}
 
@@ -689,10 +698,31 @@ func (c *Config) GetHashParams() ResolvedHashParams {
 
 	// Log warning if using weak parameters
 	if params.MemoryKB < 16*1024 {
-		slog.Warn("using low-security hash parameters",
-			"memory_kb", params.MemoryKB,
-			"recommended_min_kb", 16*1024)
+		slog.WarnContext(context.Background(), "using low-security hash parameters",
+			slog.Any("memory_kb", params.MemoryKB),
+			slog.Int("recommended_min_kb", 16*1024))
 	}
 
 	return params
+}
+
+// ParseLogLevel parses a log level string and returns the corresponding slog.Level.
+// Supported values (case-insensitive): debug, info, warn, warning, error.
+// Returns slog.LevelInfo for invalid values.
+func ParseLogLevel(level string) slog.Level {
+	switch strings.ToLower(level) {
+	case "debug":
+		return slog.LevelDebug
+	case "info":
+		return slog.LevelInfo
+	case "warn", "warning":
+		return slog.LevelWarn
+	case "error":
+		return slog.LevelError
+	default:
+		slog.WarnContext(context.Background(), "invalid log level, using default",
+			slog.String("level", level),
+			slog.String("default", DefaultLogLevel))
+		return slog.LevelInfo
+	}
 }
