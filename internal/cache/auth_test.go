@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -26,7 +27,7 @@ func TestAuthCache_VerifyPassword(t *testing.T) {
 	userID := "user-123"
 
 	// First verification should miss cache
-	valid, err := cache.VerifyPassword(userID, password, hash)
+	valid, err := cache.VerifyPassword(context.Background(), userID, password, hash)
 	if err != nil {
 		t.Fatalf("VerifyPassword failed: %v", err)
 	}
@@ -40,7 +41,7 @@ func TestAuthCache_VerifyPassword(t *testing.T) {
 	}
 
 	// Second verification should hit cache
-	valid, err = cache.VerifyPassword(userID, password, hash)
+	valid, err = cache.VerifyPassword(context.Background(), userID, password, hash)
 	if err != nil {
 		t.Fatalf("VerifyPassword failed: %v", err)
 	}
@@ -72,7 +73,7 @@ func TestAuthCache_WrongPassword(t *testing.T) {
 	userID := "user-123"
 
 	// Wrong password should not be valid
-	valid, err := cache.VerifyPassword(userID, "wrongpassword", hash)
+	valid, err := cache.VerifyPassword(context.Background(), userID, "wrongpassword", hash)
 	if err != nil {
 		t.Fatalf("VerifyPassword failed: %v", err)
 	}
@@ -81,7 +82,7 @@ func TestAuthCache_WrongPassword(t *testing.T) {
 	}
 
 	// Wrong password should still be cached (as invalid)
-	valid, err = cache.VerifyPassword(userID, "wrongpassword", hash)
+	valid, err = cache.VerifyPassword(context.Background(), userID, "wrongpassword", hash)
 	if err != nil {
 		t.Fatalf("VerifyPassword failed: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestAuthCache_PasswordChange(t *testing.T) {
 	userID := "user-123"
 
 	// Verify old password
-	valid, err := cache.VerifyPassword(userID, oldPassword, oldHash)
+	valid, err := cache.VerifyPassword(context.Background(), userID, oldPassword, oldHash)
 	if err != nil {
 		t.Fatalf("VerifyPassword failed: %v", err)
 	}
@@ -130,7 +131,7 @@ func TestAuthCache_PasswordChange(t *testing.T) {
 	}
 
 	// Old password with new hash should be invalid (cache key includes hash prefix)
-	valid, err = cache.VerifyPassword(userID, oldPassword, newHash)
+	valid, err = cache.VerifyPassword(context.Background(), userID, oldPassword, newHash)
 	if err != nil {
 		t.Fatalf("VerifyPassword failed: %v", err)
 	}
@@ -139,7 +140,7 @@ func TestAuthCache_PasswordChange(t *testing.T) {
 	}
 
 	// New password with new hash should be valid
-	valid, err = cache.VerifyPassword(userID, newPassword, newHash)
+	valid, err = cache.VerifyPassword(context.Background(), userID, newPassword, newHash)
 	if err != nil {
 		t.Fatalf("VerifyPassword failed: %v", err)
 	}
@@ -166,7 +167,7 @@ func TestAuthCache_Disabled(t *testing.T) {
 	userID := "user-123"
 
 	// Should work without caching
-	valid, err := cache.VerifyPassword(userID, password, hash)
+	valid, err := cache.VerifyPassword(context.Background(), userID, password, hash)
 	if err != nil {
 		t.Fatalf("VerifyPassword failed: %v", err)
 	}
@@ -196,7 +197,7 @@ func TestAuthCache_MaxSize(t *testing.T) {
 		hash, _ := crypto.HashPassword(password)
 		userID := string(rune('a' + i))
 
-		_, err := cache.VerifyPassword(userID, password, hash)
+		_, err := cache.VerifyPassword(context.Background(), userID, password, hash)
 		if err != nil {
 			t.Fatalf("VerifyPassword failed: %v", err)
 		}
@@ -227,13 +228,13 @@ func TestAuthCache_TTLExpiry(t *testing.T) {
 	userID := "user-123"
 
 	// First call - cache miss
-	_, err = cache.VerifyPassword(userID, password, hash)
+	_, err = cache.VerifyPassword(context.Background(), userID, password, hash)
 	if err != nil {
 		t.Fatalf("VerifyPassword failed: %v", err)
 	}
 
 	// Second call - cache hit
-	_, err = cache.VerifyPassword(userID, password, hash)
+	_, err = cache.VerifyPassword(context.Background(), userID, password, hash)
 	if err != nil {
 		t.Fatalf("VerifyPassword failed: %v", err)
 	}
@@ -247,7 +248,7 @@ func TestAuthCache_TTLExpiry(t *testing.T) {
 	time.Sleep(1100 * time.Millisecond)
 
 	// Third call - cache miss (expired)
-	_, err = cache.VerifyPassword(userID, password, hash)
+	_, err = cache.VerifyPassword(context.Background(), userID, password, hash)
 	if err != nil {
 		t.Fatalf("VerifyPassword failed: %v", err)
 	}
@@ -306,7 +307,7 @@ func TestAuthCache_VerifyKey(t *testing.T) {
 	keyID := "key-uuid-123"
 
 	// First verification should miss cache
-	valid, err := cache.VerifyKey(keyID, apiKey, hash)
+	valid, err := cache.VerifyKey(context.Background(), keyID, apiKey, hash)
 	if err != nil {
 		t.Fatalf("VerifyKey failed: %v", err)
 	}
@@ -320,7 +321,7 @@ func TestAuthCache_VerifyKey(t *testing.T) {
 	}
 
 	// Second verification should hit cache
-	valid, err = cache.VerifyKey(keyID, apiKey, hash)
+	valid, err = cache.VerifyKey(context.Background(), keyID, apiKey, hash)
 	if err != nil {
 		t.Fatalf("VerifyKey failed: %v", err)
 	}
@@ -352,7 +353,7 @@ func TestAuthCache_VerifyKey_WrongKey(t *testing.T) {
 	keyID := "key-uuid-123"
 
 	// Wrong key should not be valid
-	valid, err := cache.VerifyKey(keyID, "dbb_wrongkey123456789012345678901", hash)
+	valid, err := cache.VerifyKey(context.Background(), keyID, "dbb_wrongkey123456789012345678901", hash)
 	if err != nil {
 		t.Fatalf("VerifyKey failed: %v", err)
 	}
@@ -361,7 +362,7 @@ func TestAuthCache_VerifyKey_WrongKey(t *testing.T) {
 	}
 
 	// Wrong key should still be cached (as invalid)
-	valid, err = cache.VerifyKey(keyID, "dbb_wrongkey123456789012345678901", hash)
+	valid, err = cache.VerifyKey(context.Background(), keyID, "dbb_wrongkey123456789012345678901", hash)
 	if err != nil {
 		t.Fatalf("VerifyKey failed: %v", err)
 	}
@@ -393,7 +394,7 @@ func TestAuthCache_VerifyKey_Disabled(t *testing.T) {
 	keyID := "key-uuid-123"
 
 	// Should work without caching
-	valid, err := cache.VerifyKey(keyID, apiKey, hash)
+	valid, err := cache.VerifyKey(context.Background(), keyID, apiKey, hash)
 	if err != nil {
 		t.Fatalf("VerifyKey failed: %v", err)
 	}
@@ -431,7 +432,7 @@ func TestAuthCache_VerifyKey_DifferentKeys(t *testing.T) {
 	})
 
 	// Verify both keys
-	valid, err := cache.VerifyKey("key-1", apiKey1, hash1)
+	valid, err := cache.VerifyKey(context.Background(), "key-1", apiKey1, hash1)
 	if err != nil {
 		t.Fatalf("VerifyKey failed: %v", err)
 	}
@@ -439,7 +440,7 @@ func TestAuthCache_VerifyKey_DifferentKeys(t *testing.T) {
 		t.Error("expected API key 1 to be valid")
 	}
 
-	valid, err = cache.VerifyKey("key-2", apiKey2, hash2)
+	valid, err = cache.VerifyKey(context.Background(), "key-2", apiKey2, hash2)
 	if err != nil {
 		t.Fatalf("VerifyKey failed: %v", err)
 	}
@@ -454,8 +455,8 @@ func TestAuthCache_VerifyKey_DifferentKeys(t *testing.T) {
 	}
 
 	// Verify again - should be cache hits
-	_, _ = cache.VerifyKey("key-1", apiKey1, hash1)
-	_, _ = cache.VerifyKey("key-2", apiKey2, hash2)
+	_, _ = cache.VerifyKey(context.Background(), "key-1", apiKey1, hash1)
+	_, _ = cache.VerifyKey(context.Background(), "key-2", apiKey2, hash2)
 
 	hits, misses, _ = cache.Stats()
 	if hits != 2 || misses != 2 {

@@ -192,7 +192,7 @@ func (s *Store) VerifyAPIKey(ctx context.Context, plainKey string) (*APIKey, err
 	// Verify the key hash (use cache if available)
 	var valid bool
 	if s.authCache != nil {
-		valid, err = s.authCache.VerifyKey(apiKey.ID.String(), plainKey, apiKey.KeyHash)
+		valid, err = s.authCache.VerifyKey(ctx, apiKey.ID.String(), plainKey, apiKey.KeyHash)
 	} else {
 		valid, err = crypto.VerifyPassword(apiKey.KeyHash, plainKey)
 	}

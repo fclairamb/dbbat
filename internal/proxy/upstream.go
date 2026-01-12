@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 
@@ -145,7 +146,7 @@ func (s *Session) processUpstreamAuthMessage(
 	case *pgproto3.ParameterStatus:
 		// Buffer ParameterStatus messages - they must come after AuthenticationOk
 		// Make a copy since pgproto3 reuses the same struct
-		s.logger.Debug("received ParameterStatus from upstream", "name", typedMsg.Name, "value", typedMsg.Value)
+		s.logger.DebugContext(s.ctx, "received ParameterStatus from upstream", slog.String("name", typedMsg.Name), slog.String("value", typedMsg.Value))
 		paramCopy := &pgproto3.ParameterStatus{
 			Name:  typedMsg.Name,
 			Value: typedMsg.Value,
@@ -181,9 +182,9 @@ func (s *Session) processUpstreamAuthMessage(
 		}
 
 		// Forward buffered ParameterStatus messages
-		s.logger.Debug("forwarding ParameterStatus messages to client", "count", len(s.bufferedParamStatus))
+		s.logger.DebugContext(s.ctx, "forwarding ParameterStatus messages to client", slog.Int("count", len(s.bufferedParamStatus)))
 		for _, ps := range s.bufferedParamStatus {
-			s.logger.Debug("forwarding ParameterStatus", "name", ps.Name, "value", ps.Value)
+			s.logger.DebugContext(s.ctx, "forwarding ParameterStatus", slog.String("name", ps.Name), slog.String("value", ps.Value))
 			if err := s.sendToClient(ps); err != nil {
 				return false, fmt.Errorf("failed to forward parameter status: %w", err)
 			}
@@ -210,13 +211,13 @@ func (s *Session) processUpstreamAuthMessage(
 	case *pgproto3.ErrorResponse:
 		// Forward error to client
 		if err := s.sendToClient(typedMsg); err != nil {
-			s.logger.Error("failed to forward error to client", "error", err)
+			s.logger.ErrorContext(s.ctx, "failed to forward error to client", slog.Any("error", err))
 		}
 
 		return false, fmt.Errorf("%w: %s", ErrUpstreamAuthFailed, typedMsg.Message)
 
 	default:
-		s.logger.Warn("unexpected message during upstream auth", "type", fmt.Sprintf("%T", typedMsg))
+		s.logger.WarnContext(s.ctx, "unexpected message during upstream auth", slog.String("type", fmt.Sprintf("%T", typedMsg)))
 
 		return false, nil
 	}

@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -65,7 +66,7 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 
 	result, err := s.store.CreateGrant(c.Request.Context(), grant)
 	if err != nil {
-		s.logger.Error("failed to create grant", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to create grant", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to create grant")
 		return
 	}
@@ -118,7 +119,7 @@ func (s *Server) handleListGrants(c *gin.Context) {
 
 	grants, err := s.store.ListGrants(c.Request.Context(), filter)
 	if err != nil {
-		s.logger.Error("failed to list grants", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to list grants", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to list grants")
 		return
 	}
@@ -138,7 +139,7 @@ func (s *Server) handleGetGrant(c *gin.Context) {
 
 	grant, err := s.store.GetGrantByUID(c.Request.Context(), uid)
 	if err != nil {
-		s.logger.Error("failed to get grant", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to get grant", slog.Any("error", err))
 		errorResponse(c, http.StatusNotFound, "grant not found")
 		return
 	}
@@ -164,7 +165,7 @@ func (s *Server) handleRevokeGrant(c *gin.Context) {
 
 	currentUser := getCurrentUser(c)
 	if err := s.store.RevokeGrant(c.Request.Context(), uid, currentUser.UID); err != nil {
-		s.logger.Error("failed to revoke grant", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to revoke grant", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to revoke grant")
 		return
 	}

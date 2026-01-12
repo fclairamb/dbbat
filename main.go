@@ -25,7 +25,7 @@ const shutdownTimeout = 30 * time.Second
 
 // setupLogger creates the logger, optionally writing to a file in test mode.
 // Returns the logger and a cleanup function to close the log file (if any).
-func setupLogger(runMode config.RunMode) (*slog.Logger, func()) {
+func setupLogger(runMode config.RunMode, level slog.Level) (*slog.Logger, func()) {
 	var writer io.Writer = os.Stdout
 	var cleanup func()
 
@@ -34,7 +34,7 @@ func setupLogger(runMode config.RunMode) (*slog.Logger, func()) {
 	}
 
 	logger := slog.New(slog.NewJSONHandler(writer, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level: level,
 	}))
 
 	return logger, cleanup
@@ -68,6 +68,7 @@ type cliFlags struct {
 	key        string
 	keyFile    string
 	configFile string
+	logLevel   string
 }
 
 func main() {
@@ -116,6 +117,12 @@ func CmdRun() {
 				Usage:       "Path to config file (YAML, JSON, or TOML)",
 				Destination: &flags.configFile,
 			},
+			&cli.StringFlag{
+				Name:        "log-level",
+				Usage:       "Log level (debug, info, warn, error)",
+				Sources:     cli.EnvVars("DBB_LOG_LEVEL"),
+				Destination: &flags.logLevel,
+			},
 		},
 		Commands: []*cli.Command{
 			{
@@ -161,11 +168,11 @@ func CmdRun() {
 
 	// Use a basic logger for CLI errors (before config is loaded)
 	basicLogger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level: slog.LevelInfo,
 	}))
 
 	if err := cmd.Run(context.Background(), os.Args); err != nil {
-		basicLogger.Error("Application error", "error", err)
+		basicLogger.ErrorContext(context.Background(), "Application error", slog.Any("error", err))
 		os.Exit(1)
 	}
 }
@@ -191,6 +198,9 @@ func buildCLIOverrides(flags *cliFlags) func(*config.Config) {
 		if flags.configFile != "" {
 			cfg.ConfigFile = flags.configFile
 		}
+		if flags.logLevel != "" {
+			cfg.LogLevel = flags.logLevel
+		}
 	}
 }
 
@@ -209,18 +219,20 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	// Setup logger with run mode from config
-	logger, logCleanup := setupLogger(cfg.RunMode)
+	// Setup logger with run mode and log level from config
+	logLevel := config.ParseLogLevel(cfg.LogLevel)
+	logger, logCleanup := setupLogger(cfg.RunMode, logLevel)
 	if logCleanup != nil {
 		defer logCleanup()
 	}
 	slog.SetDefault(logger)
 
-	logger.Info("Starting DBBat")
-	logger.Info("Configuration loaded",
-		"proxy_addr", cfg.ListenPG,
-		"api_addr", cfg.ListenAPI,
-		"run_mode", cfg.RunMode,
+	logger.InfoContext(ctx, "Starting DBBat")
+	logger.InfoContext(ctx, "Configuration loaded",
+		slog.String("proxy_addr", cfg.ListenPG),
+		slog.String("api_addr", cfg.ListenAPI),
+		slog.Any("run_mode", cfg.RunMode),
+		slog.String("log_level", cfg.LogLevel),
 	)
 
 	// Initialize store (with table drop if in test or demo mode)
@@ -228,11 +240,11 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		DropTablesFirst: cfg.RunMode == config.RunModeTest || cfg.RunMode == config.RunModeDemo,
 	}
 	if cfg.RunMode == config.RunModeTest {
-		logger.Info("Test mode enabled, will drop all tables before migration")
+		logger.InfoContext(ctx, "Test mode enabled, will drop all tables before migration")
 	}
 	if cfg.RunMode == config.RunModeDemo {
-		logger.Warn("WARNING: Running in DEMO mode. Do not use in production environments.")
-		logger.Info("Demo mode enabled, will drop all tables before migration")
+		logger.WarnContext(ctx, "WARNING: Running in DEMO mode. Do not use in production environments.")
+		logger.InfoContext(ctx, "Demo mode enabled, will drop all tables before migration")
 	}
 
 	dataStore, err := store.New(ctx, cfg.DSN, storeOpts)
@@ -242,7 +254,7 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	defer dataStore.Close()
 
-	logger.Info("Database connection established")
+	logger.InfoContext(ctx, "Database connection established")
 
 	// Check for database configurations that match the storage DSN
 	checkDatabaseConfigurations(ctx, dataStore, logger)
@@ -259,7 +271,7 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		return fmt.Errorf("failed to ensure default admin: %w", err)
 	}
 
-	logger.Info("Default admin user ensured (username: admin, password: admin)")
+	logger.InfoContext(ctx, "Default admin user ensured (username: admin, password: admin)")
 
 	// Provision test data if in test mode
 	if cfg.RunMode == config.RunModeTest {
@@ -278,14 +290,14 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	// Start API server
 	apiServer := api.NewServer(dataStore, cfg.EncryptionKey, logger, cfg)
 
-	go func() { //nolint:contextcheck
+	go func() {
 		if err := apiServer.Start(cfg.ListenAPI); err != nil {
-			logger.Error("API server error", "error", err)
+			logger.ErrorContext(context.Background(), "API server error", slog.Any("error", err))
 			os.Exit(1)
 		}
 	}()
 
-	logger.Info("API server started", "addr", cfg.ListenAPI)
+	logger.InfoContext(ctx, "API server started", slog.String("addr", cfg.ListenAPI))
 
 	// Create auth cache for proxy server (shared cache config with API)
 	proxyAuthCache := cache.NewAuthCache(cache.AuthCacheConfig{
@@ -299,35 +311,35 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	go func() {
 		if err := proxyServer.Start(cfg.ListenPG); err != nil {
-			logger.Error("Proxy server error", "error", err)
+			logger.ErrorContext(context.Background(), "Proxy server error", slog.Any("error", err))
 			os.Exit(1)
 		}
 	}()
 
-	logger.Info("Proxy server started", "addr", cfg.ListenPG)
+	logger.InfoContext(ctx, "Proxy server started", slog.String("addr", cfg.ListenPG))
 
 	// Wait for shutdown signal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	<-sigChan
-	logger.Info("Shutdown signal received, gracefully shutting down...")
+	logger.InfoContext(ctx, "Shutdown signal received, gracefully shutting down...")
 
 	// Graceful shutdown with timeout - use fresh context since main context may be canceled
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
 	// Shutdown API server
-	if err := apiServer.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck // Intentionally fresh context for shutdown
-		logger.Error("API server shutdown error", "error", err)
+	if err := apiServer.Shutdown(shutdownCtx); err != nil {
+		logger.ErrorContext(shutdownCtx, "API server shutdown error", slog.Any("error", err))
 	}
 
 	// Shutdown proxy server
-	if err := proxyServer.Shutdown(shutdownCtx); err != nil { //nolint:contextcheck // Intentionally fresh context for shutdown
-		logger.Error("Proxy server shutdown error", "error", err)
+	if err := proxyServer.Shutdown(shutdownCtx); err != nil {
+		logger.ErrorContext(shutdownCtx, "Proxy server shutdown error", slog.Any("error", err))
 	}
 
-	logger.Info("Shutdown complete")
+	logger.InfoContext(shutdownCtx, "Shutdown complete")
 	return nil
 }
 
@@ -337,13 +349,14 @@ func runMigrate(ctx context.Context, flags *cliFlags) error {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	logger, logCleanup := setupLogger(cfg.RunMode)
+	logLevel := config.ParseLogLevel(cfg.LogLevel)
+	logger, logCleanup := setupLogger(cfg.RunMode, logLevel)
 	if logCleanup != nil {
 		defer logCleanup()
 	}
 	slog.SetDefault(logger)
 
-	logger.Info("Running migrations")
+	logger.InfoContext(ctx, "Running migrations")
 
 	dataStore, err := store.New(ctx, cfg.DSN)
 	if err != nil {
@@ -355,7 +368,7 @@ func runMigrate(ctx context.Context, flags *cliFlags) error {
 		return fmt.Errorf("migration failed: %w", err)
 	}
 
-	logger.Info("Migrations completed successfully")
+	logger.InfoContext(ctx, "Migrations completed successfully")
 	return nil
 }
 
@@ -365,13 +378,14 @@ func runRollback(ctx context.Context, flags *cliFlags) error {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	logger, logCleanup := setupLogger(cfg.RunMode)
+	logLevel := config.ParseLogLevel(cfg.LogLevel)
+	logger, logCleanup := setupLogger(cfg.RunMode, logLevel)
 	if logCleanup != nil {
 		defer logCleanup()
 	}
 	slog.SetDefault(logger)
 
-	logger.Info("Rolling back migrations")
+	logger.InfoContext(ctx, "Rolling back migrations")
 
 	dataStore, err := store.New(ctx, cfg.DSN)
 	if err != nil {
@@ -383,7 +397,7 @@ func runRollback(ctx context.Context, flags *cliFlags) error {
 		return fmt.Errorf("rollback failed: %w", err)
 	}
 
-	logger.Info("Rollback completed successfully")
+	logger.InfoContext(ctx, "Rollback completed successfully")
 	return nil
 }
 
@@ -393,7 +407,8 @@ func runMigrationStatus(ctx context.Context, flags *cliFlags) error {
 		return fmt.Errorf("failed to load configuration: %w", err)
 	}
 
-	logger, logCleanup := setupLogger(cfg.RunMode)
+	logLevel := config.ParseLogLevel(cfg.LogLevel)
+	logger, logCleanup := setupLogger(cfg.RunMode, logLevel)
 	if logCleanup != nil {
 		defer logCleanup()
 	}
@@ -410,20 +425,20 @@ func runMigrationStatus(ctx context.Context, flags *cliFlags) error {
 		return fmt.Errorf("failed to get migration status: %w", err)
 	}
 
-	logger.Info("Migration status")
+	logger.InfoContext(ctx, "Migration status")
 	for _, m := range migrationInfos {
 		status := "pending"
 		if !m.MigratedAt.IsZero() {
 			status = fmt.Sprintf("applied at %s", m.MigratedAt.Format(time.RFC3339))
 		}
-		logger.Info("Migration", "name", m.Name, "status", status)
+		logger.InfoContext(ctx, "Migration", slog.String("name", m.Name), slog.String("status", status))
 	}
 
 	return nil
 }
 
 func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKey []byte, logger *slog.Logger) error {
-	logger.Info("Test mode: provisioning test data...")
+	logger.InfoContext(ctx, "Test mode: provisioning test data...")
 
 	// 1. Update admin password to "admintest" and mark as changed
 	adminUser, err := dataStore.GetUserByUsername(ctx, "admin")
@@ -442,7 +457,7 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	if err != nil {
 		return fmt.Errorf("failed to update admin password: %w", err)
 	}
-	logger.Info("Updated admin password to 'admintest'")
+	logger.InfoContext(ctx, "Updated admin password to 'admintest'")
 
 	// 2. Create viewer user (viewer role only)
 	viewerPasswordHash, err := crypto.HashPassword("viewer")
@@ -461,7 +476,7 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	if err != nil {
 		return fmt.Errorf("failed to mark viewer password as changed: %w", err)
 	}
-	logger.Info("Created viewer user (username: viewer, password: viewer)")
+	logger.InfoContext(ctx, "Created viewer user (username: viewer, password: viewer)")
 
 	// 3. Create connector user (connector role only)
 	connectorPasswordHash, err := crypto.HashPassword("connector")
@@ -480,7 +495,7 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	if err != nil {
 		return fmt.Errorf("failed to mark connector password as changed: %w", err)
 	}
-	logger.Info("Created connector user (username: connector, password: connector)")
+	logger.InfoContext(ctx, "Created connector user (username: connector, password: connector)")
 
 	// 4. Create proxy_target database configuration
 	targetDB, err := dataStore.CreateDatabase(ctx, &store.Database{
@@ -497,7 +512,7 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	if err != nil {
 		return fmt.Errorf("failed to create proxy_target database config: %w", err)
 	}
-	logger.Info("Created proxy_target database configuration")
+	logger.InfoContext(ctx, "Created proxy_target database configuration")
 
 	// 5. Create write grant for connector user (empty controls = full write access)
 	_, err = dataStore.CreateGrant(ctx, &store.Grant{
@@ -511,7 +526,7 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	if err != nil {
 		return fmt.Errorf("failed to create write grant for connector user: %w", err)
 	}
-	logger.Info("Created write grant for connector user on proxy_target")
+	logger.InfoContext(ctx, "Created write grant for connector user on proxy_target")
 
 	// 6. Create read-only grant for viewer user
 	_, err = dataStore.CreateGrant(ctx, &store.Grant{
@@ -525,14 +540,14 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	if err != nil {
 		return fmt.Errorf("failed to create read-only grant for viewer user: %w", err)
 	}
-	logger.Info("Created read-only grant for viewer user on proxy_target")
+	logger.InfoContext(ctx, "Created read-only grant for viewer user on proxy_target")
 
-	logger.Info("Test data provisioning complete")
+	logger.InfoContext(ctx, "Test data provisioning complete")
 	return nil
 }
 
 func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.Config, logger *slog.Logger) error {
-	logger.Info("Demo mode: provisioning demo data...")
+	logger.InfoContext(ctx, "Demo mode: provisioning demo data...")
 
 	// Get demo target configuration
 	demoTarget := cfg.GetDemoTarget()
@@ -543,7 +558,7 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 			Host:     "localhost",
 		}
 	}
-	logger.Info("Demo target", "user", demoTarget.Username, "host", demoTarget.Host)
+	logger.InfoContext(ctx, "Demo target", slog.String("user", demoTarget.Username), slog.String("host", demoTarget.Host))
 
 	// 1. Get admin user and mark password as changed (password is already "admin" from EnsureDefaultAdmin)
 	adminUser, err := dataStore.GetUserByUsername(ctx, "admin")
@@ -563,7 +578,7 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	if err != nil {
 		return fmt.Errorf("failed to update admin password: %w", err)
 	}
-	logger.Info("Marked admin password as changed (username: admin, password: admin)")
+	logger.InfoContext(ctx, "Marked admin password as changed (username: admin, password: admin)")
 
 	// 2. Create viewer user (viewer role only)
 	viewerPasswordHash, err := crypto.HashPassword("viewer")
@@ -582,7 +597,7 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	if err != nil {
 		return fmt.Errorf("failed to mark viewer password as changed: %w", err)
 	}
-	logger.Info("Created viewer user (username: viewer, password: viewer)")
+	logger.InfoContext(ctx, "Created viewer user (username: viewer, password: viewer)")
 
 	// 3. Create connector user (connector role only)
 	connectorPasswordHash, err := crypto.HashPassword("connector")
@@ -601,7 +616,7 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	if err != nil {
 		return fmt.Errorf("failed to mark connector password as changed: %w", err)
 	}
-	logger.Info("Created connector user (username: connector, password: connector)")
+	logger.InfoContext(ctx, "Created connector user (username: connector, password: connector)")
 
 	// 4. Create demo_db database configuration using demo target
 	demoDB, err := dataStore.CreateDatabase(ctx, &store.Database{
@@ -618,7 +633,7 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	if err != nil {
 		return fmt.Errorf("failed to create demo_db database config: %w", err)
 	}
-	logger.Info("Created demo_db database configuration")
+	logger.InfoContext(ctx, "Created demo_db database configuration")
 
 	// 5. Create write grant for connector user (empty controls = full write access)
 	_, err = dataStore.CreateGrant(ctx, &store.Grant{
@@ -632,7 +647,7 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	if err != nil {
 		return fmt.Errorf("failed to create write grant for connector user: %w", err)
 	}
-	logger.Info("Created write grant for connector user on demo_db")
+	logger.InfoContext(ctx, "Created write grant for connector user on demo_db")
 
 	// 6. Create read-only grant for viewer user
 	_, err = dataStore.CreateGrant(ctx, &store.Grant{
@@ -646,9 +661,9 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	if err != nil {
 		return fmt.Errorf("failed to create read-only grant for viewer user: %w", err)
 	}
-	logger.Info("Created read-only grant for viewer user on demo_db")
+	logger.InfoContext(ctx, "Created read-only grant for viewer user on demo_db")
 
-	logger.Info("Demo data provisioning complete")
+	logger.InfoContext(ctx, "Demo data provisioning complete")
 	return nil
 }
 
@@ -658,16 +673,16 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 func checkDatabaseConfigurations(ctx context.Context, dataStore *store.Store, logger *slog.Logger) {
 	databases, err := dataStore.ListDatabases(ctx)
 	if err != nil {
-		logger.Warn("failed to check database configurations", "error", err)
+		logger.WarnContext(ctx, "failed to check database configurations", slog.Any("error", err))
 		return
 	}
 
 	for _, db := range databases {
 		if dataStore.MatchesStorageDSN(db.Host, db.Port, db.DatabaseName) {
-			logger.Warn("SECURITY WARNING: database configuration matches storage DSN",
-				"database_name", db.Name,
-				"target", fmt.Sprintf("%s:%d/%s", db.Host, db.Port, db.DatabaseName),
-				"recommendation", "use a separate database for DBBat storage to prevent privilege escalation")
+			logger.WarnContext(ctx, "SECURITY WARNING: database configuration matches storage DSN",
+				slog.String("database_name", db.Name),
+				slog.String("target", fmt.Sprintf("%s:%d/%s", db.Host, db.Port, db.DatabaseName)),
+				slog.String("recommendation", "use a separate database for DBBat storage to prevent privilege escalation"))
 		}
 	}
 }

@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"log/slog"
@@ -49,9 +50,9 @@ func NewAuthCache(cfg AuthCacheConfig) *AuthCache {
 		// Start background cleanup goroutine
 		go cache.cleanupLoop()
 
-		slog.Info("auth cache enabled",
-			"ttl_seconds", cfg.TTLSeconds,
-			"max_size", cfg.MaxSize)
+		slog.InfoContext(context.Background(), "auth cache enabled",
+			slog.Int("ttl_seconds", cfg.TTLSeconds),
+			slog.Int("max_size", cfg.MaxSize))
 	}
 
 	return cache
@@ -75,7 +76,7 @@ func computeKey(userID, password, storedHash string) string {
 
 // VerifyPassword verifies a password, using cache if available.
 // userID should be a unique identifier for the user (e.g., UID).
-func (c *AuthCache) VerifyPassword(userID, password, storedHash string) (bool, error) {
+func (c *AuthCache) VerifyPassword(ctx context.Context, userID, password, storedHash string) (bool, error) {
 	if !c.enabled {
 		return crypto.VerifyPassword(storedHash, password)
 	}
@@ -91,7 +92,7 @@ func (c *AuthCache) VerifyPassword(userID, password, storedHash string) (bool, e
 		c.hits++
 		c.mu.Unlock()
 
-		slog.Debug("auth cache hit", "user_id", userID)
+		slog.DebugContext(ctx, "auth cache hit", slog.String("user_id", userID))
 
 		return entry.valid, nil
 	}
@@ -102,7 +103,7 @@ func (c *AuthCache) VerifyPassword(userID, password, storedHash string) (bool, e
 	c.misses++
 	c.mu.Unlock()
 
-	slog.Debug("auth cache miss", "user_id", userID)
+	slog.DebugContext(ctx, "auth cache miss", slog.String("user_id", userID))
 
 	valid, err := crypto.VerifyPassword(storedHash, password)
 	if err != nil {
@@ -204,7 +205,7 @@ func computeKeyHash(plainKey string) string {
 // VerifyKey verifies a key hash, using cache if available.
 // keyID is used for logging only.
 // This method is suitable for API keys and web session keys.
-func (c *AuthCache) VerifyKey(keyID, plainKey, storedHash string) (bool, error) {
+func (c *AuthCache) VerifyKey(ctx context.Context, keyID, plainKey, storedHash string) (bool, error) {
 	if !c.enabled {
 		return crypto.VerifyPassword(storedHash, plainKey)
 	}
@@ -220,7 +221,7 @@ func (c *AuthCache) VerifyKey(keyID, plainKey, storedHash string) (bool, error) 
 		c.hits++
 		c.mu.Unlock()
 
-		slog.Debug("auth cache hit", "auth_type", "api_key", "key_id", keyID)
+		slog.DebugContext(ctx, "auth cache hit", slog.String("auth_type", "api_key"), slog.String("key_id", keyID))
 
 		return entry.valid, nil
 	}
@@ -231,7 +232,7 @@ func (c *AuthCache) VerifyKey(keyID, plainKey, storedHash string) (bool, error) 
 	c.misses++
 	c.mu.Unlock()
 
-	slog.Debug("auth cache miss", "auth_type", "api_key", "key_id", keyID)
+	slog.DebugContext(ctx, "auth cache miss", slog.String("auth_type", "api_key"), slog.String("key_id", keyID))
 
 	valid, err := crypto.VerifyPassword(storedHash, plainKey)
 	if err != nil {

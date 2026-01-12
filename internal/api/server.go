@@ -84,7 +84,7 @@ func (s *Server) Start(addr string) error {
 		IdleTimeout:  httpIdleTimeout,
 	}
 
-	s.logger.Info("Starting API server", "addr", addr)
+	s.logger.InfoContext(context.Background(), "Starting API server", slog.String("addr", addr))
 
 	return s.httpServer.ListenAndServe()
 }
@@ -273,13 +273,13 @@ func (s *Server) loggingMiddleware() gin.HandlerFunc {
 		latency := time.Since(start)
 		statusCode := c.Writer.Status()
 
-		s.logger.Info("API request",
-			"method", c.Request.Method,
-			"path", path,
-			"query", query,
-			"status", statusCode,
-			"latency", latency,
-			"client_ip", c.ClientIP(),
+		s.logger.InfoContext(c.Request.Context(), "API request",
+			slog.String("method", c.Request.Method),
+			slog.String("path", path),
+			slog.String("query", query),
+			slog.Int("status", statusCode),
+			slog.Duration("latency", latency),
+			slog.String("client_ip", c.ClientIP()),
 		)
 	}
 }
@@ -324,14 +324,14 @@ func (s *Server) setupFrontendRoutes(router *gin.Engine) {
 	// Strip the "resources" prefix from the embedded FS
 	frontendContent, err := fs.Sub(frontendFS, "resources")
 	if err != nil {
-		s.logger.Error("Failed to create sub-filesystem for frontend", "error", err)
+		s.logger.ErrorContext(context.Background(), "Failed to create sub-filesystem for frontend", slog.Any("error", err))
 		return
 	}
 
 	// Pre-read index.html for SPA fallback
 	indexHTML, err := fs.ReadFile(frontendContent, "index.html")
 	if err != nil {
-		s.logger.Error("Failed to read index.html", "error", err)
+		s.logger.ErrorContext(context.Background(), "Failed to read index.html", slog.Any("error", err))
 		return
 	}
 
@@ -405,10 +405,10 @@ func (s *Server) proxyToDevServer(c *gin.Context, rule *config.RedirectRule, ori
 		newPath = newPath[1:]
 	}
 
-	s.logger.Debug("Proxying request to dev server",
-		"originalPath", originalPath,
-		"targetHost", rule.TargetHost,
-		"newPath", newPath,
+	s.logger.DebugContext(c.Request.Context(), "Proxying request to dev server",
+		slog.String("originalPath", originalPath),
+		slog.String("targetHost", rule.TargetHost),
+		slog.String("newPath", newPath),
 	)
 
 	targetURL := &url.URL{

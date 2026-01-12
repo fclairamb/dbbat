@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"regexp"
 	"strconv"
@@ -176,7 +177,7 @@ func (s *Session) handleExecute(msg *pgproto3.Execute) error {
 	// Look up the portal
 	portal := s.extendedState.portals[msg.Portal]
 	if portal == nil {
-		s.logger.Warn("execute for unknown portal", "portal", msg.Portal)
+		s.logger.WarnContext(s.ctx, "execute for unknown portal", slog.String("portal", msg.Portal))
 		return nil
 	}
 
@@ -186,7 +187,7 @@ func (s *Session) handleExecute(msg *pgproto3.Execute) error {
 	if stmt != nil {
 		sqlText = stmt.sql
 	} else {
-		s.logger.Warn("execute for unknown statement", "portal", msg.Portal, "stmt", portal.stmtName)
+		s.logger.WarnContext(s.ctx, "execute for unknown statement", slog.String("portal", msg.Portal), slog.String("stmt", portal.stmtName))
 	}
 
 	// Queue the query for logging (will be popped on CommandComplete)
@@ -323,7 +324,7 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 	go func() {
 		createdQuery, err := s.store.CreateQuery(s.ctx, query)
 		if err != nil {
-			s.logger.Error("failed to log query", "error", err)
+			s.logger.ErrorContext(s.ctx, "failed to log query", slog.Any("error", err))
 			return
 		}
 
@@ -335,13 +336,13 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 			}
 
 			if err := s.store.StoreQueryRows(s.ctx, createdQuery.UID, capturedRows); err != nil {
-				s.logger.Error("failed to store query rows", "error", err)
+				s.logger.ErrorContext(s.ctx, "failed to store query rows", slog.Any("error", err))
 			}
 		}
 
 		// Update connection stats
 		if err := s.store.IncrementConnectionStats(s.ctx, s.connectionUID, bytesTransferred); err != nil {
-			s.logger.Error("failed to increment connection stats", "error", err)
+			s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
 		}
 	}()
 
@@ -472,9 +473,9 @@ func (s *Session) captureCopyData(data []byte) {
 	if s.copyState.totalBytes+dataSize > s.queryStorage.MaxResultBytes {
 		s.copyState.truncated = true
 		s.copyState.dataChunks = nil // Discard captured data
-		s.logger.Warn("COPY data capture truncated - byte limit exceeded",
-			"total_bytes", s.copyState.totalBytes,
-			"max_bytes", s.queryStorage.MaxResultBytes)
+		s.logger.WarnContext(s.ctx, "COPY data capture truncated - byte limit exceeded",
+			slog.Int64("total_bytes", s.copyState.totalBytes),
+			slog.Int64("max_bytes", s.queryStorage.MaxResultBytes))
 		return
 	}
 
@@ -558,9 +559,9 @@ func (s *Session) parseCopyDataToRows() []store.QueryRow {
 
 		// Check max rows limit
 		if len(rows) >= s.queryStorage.MaxResultRows {
-			s.logger.Warn("COPY row capture truncated - row limit exceeded",
-				"rows_captured", len(rows),
-				"max_rows", s.queryStorage.MaxResultRows)
+			s.logger.WarnContext(s.ctx, "COPY row capture truncated - row limit exceeded",
+				slog.Int("rows_captured", len(rows)),
+				slog.Int("max_rows", s.queryStorage.MaxResultRows))
 			break
 		}
 
@@ -585,7 +586,7 @@ func (s *Session) parseCopyDataToRows() []store.QueryRow {
 
 		jsonData, err := json.Marshal(rowData)
 		if err != nil {
-			s.logger.Error("failed to marshal COPY row", "error", err, "row", i)
+			s.logger.ErrorContext(s.ctx, "failed to marshal COPY row", slog.Any("error", err), slog.Int("row", i))
 			continue
 		}
 
