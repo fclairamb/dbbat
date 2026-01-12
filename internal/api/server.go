@@ -50,6 +50,9 @@ func NewServer(dataStore *store.Store, encryptionKey []byte, logger *slog.Logger
 			TTLSeconds: cfg.AuthCache.TTLSeconds,
 			MaxSize:    cfg.AuthCache.MaxSize,
 		})
+
+		// Share auth cache with store for API key verification
+		dataStore.SetAuthCache(authCache)
 	}
 
 	return &Server{
