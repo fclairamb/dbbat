@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -41,7 +42,7 @@ func (s *Server) handleCreateAPIKey(c *gin.Context) {
 	// Create API key
 	apiKey, plainKey, err := s.store.CreateAPIKey(c.Request.Context(), currentUser.UID, req.Name, req.ExpiresAt)
 	if err != nil {
-		s.logger.Error("failed to create API key", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to create API key", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to create API key")
 		return
 	}
@@ -102,7 +103,7 @@ func (s *Server) handleListAPIKeys(c *gin.Context) {
 
 	keys, err := s.store.ListAPIKeys(c.Request.Context(), filter)
 	if err != nil {
-		s.logger.Error("failed to list API keys", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to list API keys", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to list API keys")
 		return
 	}
@@ -120,7 +121,7 @@ func (s *Server) handleGetAPIKey(c *gin.Context) {
 
 	apiKey, err := s.store.GetAPIKeyByID(c.Request.Context(), id)
 	if err != nil {
-		s.logger.Error("failed to get API key", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to get API key", slog.Any("error", err))
 		errorResponse(c, http.StatusNotFound, "API key not found")
 		return
 	}
@@ -149,7 +150,7 @@ func (s *Server) handleRevokeAPIKey(c *gin.Context) {
 	// Get the key first to check permissions and for audit logging
 	apiKey, err := s.store.GetAPIKeyByID(c.Request.Context(), id)
 	if err != nil {
-		s.logger.Error("failed to get API key", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to get API key", slog.Any("error", err))
 		errorResponse(c, http.StatusNotFound, "API key not found")
 		return
 	}
@@ -161,7 +162,7 @@ func (s *Server) handleRevokeAPIKey(c *gin.Context) {
 	}
 
 	if err := s.store.RevokeAPIKey(c.Request.Context(), id, currentUser.UID); err != nil {
-		s.logger.Error("failed to revoke API key", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to revoke API key", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to revoke API key")
 		return
 	}

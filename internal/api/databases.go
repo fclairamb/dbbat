@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -100,7 +101,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 			errorResponse(c, http.StatusBadRequest, "target database cannot match DBBat storage database")
 			return
 		}
-		s.logger.Error("failed to create database", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to create database", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to create database")
 		return
 	}
@@ -126,7 +127,7 @@ func (s *Server) handleListDatabases(c *gin.Context) {
 
 	databases, err := s.store.ListDatabases(c.Request.Context())
 	if err != nil {
-		s.logger.Error("failed to list databases", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to list databases", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to list databases")
 		return
 	}
@@ -159,7 +160,7 @@ func (s *Server) handleListDatabases(c *gin.Context) {
 			ActiveOnly: true,
 		})
 		if err != nil {
-			s.logger.Error("failed to list grants", "error", err)
+			s.logger.ErrorContext(c.Request.Context(), "failed to list grants", slog.Any("error", err))
 			errorResponse(c, http.StatusInternalServerError, "failed to list databases")
 			return
 		}
@@ -200,7 +201,7 @@ func (s *Server) handleGetDatabase(c *gin.Context) {
 
 	db, err := s.store.GetDatabaseByUID(c.Request.Context(), uid)
 	if err != nil {
-		s.logger.Error("failed to get database", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to get database", slog.Any("error", err))
 		errorResponse(c, http.StatusNotFound, "database not found")
 		return
 	}
@@ -332,7 +333,7 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 			errorResponse(c, http.StatusNotFound, "database not found")
 			return
 		}
-		s.logger.Error("failed to update database", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to update database", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to update database")
 		return
 	}
@@ -370,7 +371,7 @@ func (s *Server) handleDeleteDatabase(c *gin.Context) {
 	}
 
 	if err := s.store.DeleteDatabase(c.Request.Context(), uid); err != nil {
-		s.logger.Error("failed to delete database", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to delete database", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to delete database")
 		return
 	}

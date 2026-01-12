@@ -112,6 +112,7 @@ make clean            # Clean build artifacts
 | `DBB_KEY` | Base64-encoded AES-256 encryption key | No |
 | `DBB_KEYFILE` | Path to file containing encryption key | No |
 | `DBB_RUN_MODE` | Run mode: empty, `test`, or `demo` | No |
+| `DBB_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` (default: `info`) | No |
 
 Note: If no encryption key is provided, one is created at `~/.dbbat/key`.
 

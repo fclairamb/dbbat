@@ -121,7 +121,7 @@ func (s *Server) handleBasicAuth(c *gin.Context) {
 	// Verify password (using cache if available)
 	var valid bool
 	if s.authCache != nil {
-		valid, err = s.authCache.VerifyPassword(user.UID.String(), password, user.PasswordHash)
+		valid, err = s.authCache.VerifyPassword(c.Request.Context(), user.UID.String(), password, user.PasswordHash)
 	} else {
 		// Fallback to direct verification if cache not initialized
 		valid, err = verifyPasswordDirect(user.PasswordHash, password)

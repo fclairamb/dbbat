@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -34,7 +35,7 @@ func (s *Server) handleCreateUser(c *gin.Context) {
 	// Hash password
 	passwordHash, err := crypto.HashPassword(req.Password)
 	if err != nil {
-		s.logger.Error("failed to hash password", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to hash password", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to create user")
 		return
 	}
@@ -42,7 +43,7 @@ func (s *Server) handleCreateUser(c *gin.Context) {
 	// Create user
 	user, err := s.store.CreateUser(c.Request.Context(), req.Username, passwordHash, req.Roles)
 	if err != nil {
-		s.logger.Error("failed to create user", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to create user", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to create user")
 		return
 	}
@@ -72,7 +73,7 @@ func (s *Server) handleListUsers(c *gin.Context) {
 	if currentUser.IsAdmin() || currentUser.IsViewer() {
 		users, err := s.store.ListUsers(c.Request.Context())
 		if err != nil {
-			s.logger.Error("failed to list users", "error", err)
+			s.logger.ErrorContext(c.Request.Context(), "failed to list users", slog.Any("error", err))
 			errorResponse(c, http.StatusInternalServerError, "failed to list users")
 			return
 		}
@@ -94,7 +95,7 @@ func (s *Server) handleGetUser(c *gin.Context) {
 
 	user, err := s.store.GetUserByUID(c.Request.Context(), uid)
 	if err != nil {
-		s.logger.Error("failed to get user", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to get user", slog.Any("error", err))
 		errorResponse(c, http.StatusNotFound, "user not found")
 		return
 	}
@@ -144,7 +145,7 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 	if req.Password != nil {
 		passwordHash, err := crypto.HashPassword(*req.Password)
 		if err != nil {
-			s.logger.Error("failed to hash password", "error", err)
+			s.logger.ErrorContext(c.Request.Context(), "failed to hash password", slog.Any("error", err))
 			errorResponse(c, http.StatusInternalServerError, "failed to update user")
 			return
 		}
@@ -152,7 +153,7 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 	}
 
 	if err := s.store.UpdateUser(c.Request.Context(), uid, updates); err != nil {
-		s.logger.Error("failed to update user", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to update user", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to update user")
 		return
 	}
@@ -188,7 +189,7 @@ func (s *Server) handleDeleteUser(c *gin.Context) {
 	}
 
 	if err := s.store.DeleteUser(c.Request.Context(), uid); err != nil {
-		s.logger.Error("failed to delete user", "error", err)
+		s.logger.ErrorContext(c.Request.Context(), "failed to delete user", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to delete user")
 		return
 	}
