@@ -14,13 +14,15 @@ import (
 	"github.com/uptrace/bun/driver/pgdriver"
 	"github.com/uptrace/bun/migrate"
 
+	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/migrations"
 )
 
 // Store provides access to the database
 type Store struct {
 	db         *bun.DB
-	storageDSN string // Parsed storage DSN for security validation
+	storageDSN string           // Parsed storage DSN for security validation
+	authCache  *cache.AuthCache // Optional auth cache for API key verification
 }
 
 // Options configures Store creation.
@@ -87,6 +89,11 @@ func (s *Store) Health(ctx context.Context) error {
 // DB returns the underlying bun.DB for advanced operations
 func (s *Store) DB() *bun.DB {
 	return s.db
+}
+
+// SetAuthCache sets the authentication cache for API key verification.
+func (s *Store) SetAuthCache(authCache *cache.AuthCache) {
+	s.authCache = authCache
 }
 
 // runMigrations runs the database schema migrations

@@ -287,3 +287,201 @@ func TestComputeKey(t *testing.T) {
 		t.Error("different hash prefix should produce different key")
 	}
 }
+
+func TestAuthCache_VerifyKey(t *testing.T) {
+	t.Parallel()
+
+	// Create a test API key and hash it
+	apiKey := "dbb_k7x9m2p4q8r1s5t3u6v0w2y4z7a9b1c3"
+	hash, err := crypto.HashPassword(apiKey)
+	if err != nil {
+		t.Fatalf("failed to hash API key: %v", err)
+	}
+
+	cache := NewAuthCache(AuthCacheConfig{
+		Enabled:    true,
+		TTLSeconds: 60,
+		MaxSize:    100,
+	})
+
+	keyID := "key-uuid-123"
+
+	// First verification should miss cache
+	valid, err := cache.VerifyKey(context.Background(), keyID, apiKey, hash)
+	if err != nil {
+		t.Fatalf("VerifyKey failed: %v", err)
+	}
+	if !valid {
+		t.Error("expected API key to be valid")
+	}
+
+	hits, misses, _ := cache.Stats()
+	if hits != 0 || misses != 1 {
+		t.Errorf("expected 0 hits, 1 miss; got %d hits, %d misses", hits, misses)
+	}
+
+	// Second verification should hit cache
+	valid, err = cache.VerifyKey(context.Background(), keyID, apiKey, hash)
+	if err != nil {
+		t.Fatalf("VerifyKey failed: %v", err)
+	}
+	if !valid {
+		t.Error("expected API key to be valid")
+	}
+
+	hits, misses, _ = cache.Stats()
+	if hits != 1 || misses != 1 {
+		t.Errorf("expected 1 hit, 1 miss; got %d hits, %d misses", hits, misses)
+	}
+}
+
+func TestAuthCache_VerifyKey_WrongKey(t *testing.T) {
+	t.Parallel()
+
+	apiKey := "dbb_correctkey12345678901234567890"
+	hash, err := crypto.HashPassword(apiKey)
+	if err != nil {
+		t.Fatalf("failed to hash API key: %v", err)
+	}
+
+	cache := NewAuthCache(AuthCacheConfig{
+		Enabled:    true,
+		TTLSeconds: 60,
+		MaxSize:    100,
+	})
+
+	keyID := "key-uuid-123"
+
+	// Wrong key should not be valid
+	valid, err := cache.VerifyKey(context.Background(), keyID, "dbb_wrongkey123456789012345678901", hash)
+	if err != nil {
+		t.Fatalf("VerifyKey failed: %v", err)
+	}
+	if valid {
+		t.Error("expected wrong API key to be invalid")
+	}
+
+	// Wrong key should still be cached (as invalid)
+	valid, err = cache.VerifyKey(context.Background(), keyID, "dbb_wrongkey123456789012345678901", hash)
+	if err != nil {
+		t.Fatalf("VerifyKey failed: %v", err)
+	}
+	if valid {
+		t.Error("expected wrong API key to still be invalid")
+	}
+
+	hits, misses, _ := cache.Stats()
+	if hits != 1 || misses != 1 {
+		t.Errorf("expected 1 hit, 1 miss; got %d hits, %d misses", hits, misses)
+	}
+}
+
+func TestAuthCache_VerifyKey_Disabled(t *testing.T) {
+	t.Parallel()
+
+	apiKey := "dbb_testkey123456789012345678901234"
+	hash, err := crypto.HashPassword(apiKey)
+	if err != nil {
+		t.Fatalf("failed to hash API key: %v", err)
+	}
+
+	cache := NewAuthCache(AuthCacheConfig{
+		Enabled:    false,
+		TTLSeconds: 60,
+		MaxSize:    100,
+	})
+
+	keyID := "key-uuid-123"
+
+	// Should work without caching
+	valid, err := cache.VerifyKey(context.Background(), keyID, apiKey, hash)
+	if err != nil {
+		t.Fatalf("VerifyKey failed: %v", err)
+	}
+	if !valid {
+		t.Error("expected API key to be valid")
+	}
+
+	// Stats should show no hits/misses since cache is disabled
+	hits, misses, size := cache.Stats()
+	if hits != 0 || misses != 0 || size != 0 {
+		t.Errorf("expected 0 hits, 0 misses, 0 size; got %d hits, %d misses, %d size", hits, misses, size)
+	}
+}
+
+func TestAuthCache_VerifyKey_DifferentKeys(t *testing.T) {
+	t.Parallel()
+
+	// Two different API keys
+	apiKey1 := "dbb_firstkey12345678901234567890ab"
+	apiKey2 := "dbb_secondkey234567890123456789abc"
+
+	hash1, err := crypto.HashPassword(apiKey1)
+	if err != nil {
+		t.Fatalf("failed to hash API key 1: %v", err)
+	}
+	hash2, err := crypto.HashPassword(apiKey2)
+	if err != nil {
+		t.Fatalf("failed to hash API key 2: %v", err)
+	}
+
+	cache := NewAuthCache(AuthCacheConfig{
+		Enabled:    true,
+		TTLSeconds: 60,
+		MaxSize:    100,
+	})
+
+	// Verify both keys
+	valid, err := cache.VerifyKey(context.Background(), "key-1", apiKey1, hash1)
+	if err != nil {
+		t.Fatalf("VerifyKey failed: %v", err)
+	}
+	if !valid {
+		t.Error("expected API key 1 to be valid")
+	}
+
+	valid, err = cache.VerifyKey(context.Background(), "key-2", apiKey2, hash2)
+	if err != nil {
+		t.Fatalf("VerifyKey failed: %v", err)
+	}
+	if !valid {
+		t.Error("expected API key 2 to be valid")
+	}
+
+	// Both should be cache misses
+	hits, misses, size := cache.Stats()
+	if hits != 0 || misses != 2 || size != 2 {
+		t.Errorf("expected 0 hits, 2 misses, 2 size; got %d hits, %d misses, %d size", hits, misses, size)
+	}
+
+	// Verify again - should be cache hits
+	_, _ = cache.VerifyKey(context.Background(), "key-1", apiKey1, hash1)
+	_, _ = cache.VerifyKey(context.Background(), "key-2", apiKey2, hash2)
+
+	hits, misses, _ = cache.Stats()
+	if hits != 2 || misses != 2 {
+		t.Errorf("expected 2 hits, 2 misses; got %d hits, %d misses", hits, misses)
+	}
+}
+
+func TestComputeKeyHash(t *testing.T) {
+	t.Parallel()
+
+	// Same key should produce same hash
+	hash1 := computeKeyHash("dbb_testkey12345678901234567890ab")
+	hash2 := computeKeyHash("dbb_testkey12345678901234567890ab")
+	if hash1 != hash2 {
+		t.Error("same key should produce same hash")
+	}
+
+	// Different keys should produce different hashes
+	hash3 := computeKeyHash("dbb_otherkey12345678901234567890ab")
+	if hash1 == hash3 {
+		t.Error("different keys should produce different hashes")
+	}
+
+	// Hash should be deterministic
+	if len(hash1) != 64 { // SHA-256 produces 64 hex chars
+		t.Errorf("expected hash length of 64, got %d", len(hash1))
+	}
+}

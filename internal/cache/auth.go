@@ -193,3 +193,53 @@ func (c *AuthCache) Clear() {
 func (c *AuthCache) Enabled() bool {
 	return c.enabled
 }
+
+// computeKeyHash generates a cache key from plaintext key only.
+// API keys are unique high-entropy strings, so no additional context needed.
+func computeKeyHash(plainKey string) string {
+	hash := sha256.Sum256([]byte(plainKey))
+
+	return hex.EncodeToString(hash[:])
+}
+
+// VerifyKey verifies a key hash, using cache if available.
+// keyID is used for logging only.
+// This method is suitable for API keys and web session keys.
+func (c *AuthCache) VerifyKey(ctx context.Context, keyID, plainKey, storedHash string) (bool, error) {
+	if !c.enabled {
+		return crypto.VerifyPassword(storedHash, plainKey)
+	}
+
+	cacheKey := computeKeyHash(plainKey)
+
+	// Check cache
+	c.mu.RLock()
+	entry, found := c.entries[cacheKey]
+	if found && time.Since(entry.timestamp) < c.ttl {
+		c.mu.RUnlock()
+		c.mu.Lock()
+		c.hits++
+		c.mu.Unlock()
+
+		slog.DebugContext(ctx, "auth cache hit", slog.String("auth_type", "api_key"), slog.String("key_id", keyID))
+
+		return entry.valid, nil
+	}
+	c.mu.RUnlock()
+
+	// Cache miss - verify key
+	c.mu.Lock()
+	c.misses++
+	c.mu.Unlock()
+
+	slog.DebugContext(ctx, "auth cache miss", slog.String("auth_type", "api_key"), slog.String("key_id", keyID))
+
+	valid, err := crypto.VerifyPassword(storedHash, plainKey)
+	if err != nil {
+		return false, err
+	}
+
+	c.set(cacheKey, valid)
+
+	return valid, nil
+}
