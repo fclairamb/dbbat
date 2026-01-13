@@ -126,9 +126,9 @@ test.describe("Access Grants Management", () => {
     if (await createButton.isVisible()) {
       await createButton.click();
 
-      // Wait for dialog to open and animations to settle
+      // Wait for dialog to open and all animations to fully complete
       await authenticatedPage.waitForSelector('[role="dialog"]');
-      await authenticatedPage.waitForTimeout(300);
+      await authenticatedPage.waitForTimeout(500);
 
       // Verify datetime-local inputs are present
       const startsAtInput = authenticatedPage.locator(
@@ -141,10 +141,10 @@ test.describe("Access Grants Management", () => {
       await expect(startsAtInput).toBeVisible();
       await expect(expiresAtInput).toBeVisible();
 
-      // Take screenshot of the dialog only
-      const dialog = authenticatedPage.locator('[role="dialog"]');
-      await dialog.screenshot({
+      // Take full page screenshot with animations disabled for clean capture
+      await authenticatedPage.screenshot({
         path: "test-results/screenshots/grants-datetime-inputs.png",
+        fullPage: true,
         animations: "disabled",
       });
     }
