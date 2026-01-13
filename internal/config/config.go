@@ -14,7 +14,7 @@ import (
 	"github.com/knadh/koanf/parsers/json"
 	"github.com/knadh/koanf/parsers/toml/v2"
 	"github.com/knadh/koanf/parsers/yaml"
-	"github.com/knadh/koanf/providers/env"
+	"github.com/knadh/koanf/providers/env/v2"
 	"github.com/knadh/koanf/providers/file"
 	"github.com/knadh/koanf/providers/structs"
 	"github.com/knadh/koanf/v2"
@@ -249,26 +249,26 @@ const koanfDelim = "."
 // DBB_RATE_LIMIT_ENABLED -> rate_limit.enabled
 // DBB_HASH_MEMORY_MB -> hash.memory_mb
 // DBB_AUTH_CACHE_ENABLED -> auth_cache.enabled
-func envTransform(s string) string {
-	key := strings.ToLower(strings.TrimPrefix(s, "DBB_"))
+func envTransform(k, v string) (string, any) {
+	key := strings.ToLower(strings.TrimPrefix(k, "DBB_"))
 	// Map known prefixes to nested paths
 	// query_storage_* -> query_storage.*
 	if strings.HasPrefix(key, "query_storage_") {
-		return "query_storage." + strings.TrimPrefix(key, "query_storage_")
+		return "query_storage." + strings.TrimPrefix(key, "query_storage_"), v
 	}
 	// rate_limit_* -> rate_limit.*
 	if strings.HasPrefix(key, "rate_limit_") {
-		return "rate_limit." + strings.TrimPrefix(key, "rate_limit_")
+		return "rate_limit." + strings.TrimPrefix(key, "rate_limit_"), v
 	}
 	// hash_* -> hash.*
 	if strings.HasPrefix(key, "hash_") {
-		return "hash." + strings.TrimPrefix(key, "hash_")
+		return "hash." + strings.TrimPrefix(key, "hash_"), v
 	}
 	// auth_cache_* -> auth_cache.*
 	if strings.HasPrefix(key, "auth_cache_") {
-		return "auth_cache." + strings.TrimPrefix(key, "auth_cache_")
+		return "auth_cache." + strings.TrimPrefix(key, "auth_cache_"), v
 	}
-	return key
+	return key, v
 }
 
 // Load reads configuration from environment variables and optional config file.
@@ -286,7 +286,7 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 	if configPath == "" {
 		// Load env vars first just to check for DBB_CONFIG
 		envK := koanf.New(koanfDelim)
-		if err := envK.Load(env.Provider("DBB_", koanfDelim, envTransform), nil); err == nil {
+		if err := envK.Load(env.Provider(koanfDelim, env.Opt{Prefix: "DBB_", TransformFunc: envTransform}), nil); err == nil {
 			configPath = envK.String("config")
 		}
 	}
@@ -299,7 +299,7 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 	}
 
 	// 4. Load environment variables (DBB_ prefix) - these override config file values
-	if err := k.Load(env.Provider("DBB_", koanfDelim, envTransform), nil); err != nil {
+	if err := k.Load(env.Provider(koanfDelim, env.Opt{Prefix: "DBB_", TransformFunc: envTransform}), nil); err != nil {
 		return nil, fmt.Errorf("failed to load environment variables: %w", err)
 	}
 
