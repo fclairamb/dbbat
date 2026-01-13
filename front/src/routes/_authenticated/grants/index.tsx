@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import {
   useGrants,
@@ -218,12 +218,13 @@ function GrantsPage() {
                   Create Grant
                 </PermissionButton>
               </DialogTrigger>
-              <CreateGrantDialog
-                open={isCreateOpen}
-                users={users ?? []}
-                databases={databases ?? []}
-                onClose={() => setIsCreateOpen(false)}
-              />
+              {isCreateOpen && (
+                <CreateGrantDialog
+                  users={users ?? []}
+                  databases={databases ?? []}
+                  onClose={() => setIsCreateOpen(false)}
+                />
+              )}
             </Dialog>
           </div>
         }
@@ -248,12 +249,10 @@ function GrantsPage() {
 }
 
 function CreateGrantDialog({
-  open,
   users,
   databases,
   onClose,
 }: {
-  open: boolean;
   users: { uid: string; username: string }[];
   databases: { uid: string; name: string }[];
   onClose: () => void;
@@ -271,21 +270,6 @@ function CreateGrantDialog({
     future.setSeconds(0, 0);
     return formatDateTimeLocal(future);
   });
-
-  // Reset state when dialog closes so it's fresh when reopened
-  useEffect(() => {
-    if (!open) {
-      setUserId("");
-      setDatabaseId("");
-      setControls([]);
-      const now = new Date();
-      now.setSeconds(0, 0);
-      setStartsAt(formatDateTimeLocal(now));
-      const future = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-      future.setSeconds(0, 0);
-      setExpiresAt(formatDateTimeLocal(future));
-    }
-  }, [open]);
 
   const createGrant = useCreateGrant({
     onSuccess: () => {
