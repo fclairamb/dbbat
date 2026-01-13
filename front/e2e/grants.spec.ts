@@ -111,4 +111,94 @@ test.describe("Access Grants Management", () => {
     const content = await authenticatedPage.textContent("body");
     expect(content).toBeTruthy();
   });
+
+  test("should have datetime-local inputs in create grant dialog", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("grants");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    // Click create button
+    const createButton = authenticatedPage.getByRole("button", {
+      name: /create|add|new|grant/i,
+    });
+
+    if (await createButton.isVisible()) {
+      await createButton.click();
+
+      // Wait for dialog to open and all animations to fully complete
+      await authenticatedPage.waitForSelector('[role="dialog"]');
+      await authenticatedPage.waitForTimeout(500);
+
+      // Verify datetime-local inputs are present
+      const startsAtInput = authenticatedPage.locator(
+        'input[type="datetime-local"]#startsAt'
+      );
+      const expiresAtInput = authenticatedPage.locator(
+        'input[type="datetime-local"]#expiresAt'
+      );
+
+      await expect(startsAtInput).toBeVisible();
+      await expect(expiresAtInput).toBeVisible();
+
+      // Take full page screenshot with animations disabled for clean capture
+      await authenticatedPage.screenshot({
+        path: "test-results/screenshots/grants-datetime-inputs.png",
+        fullPage: true,
+        animations: "disabled",
+      });
+    }
+  });
+
+  test("should default start time to approximately current time", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("grants");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    // Click create button
+    const createButton = authenticatedPage.getByRole("button", {
+      name: /create|add|new|grant/i,
+    });
+
+    if (await createButton.isVisible()) {
+      await createButton.click();
+
+      // Wait for dialog to open
+      await authenticatedPage.waitForSelector('[role="dialog"]');
+
+      // Get the starts_at input value
+      const startsAtInput = authenticatedPage.locator(
+        'input[type="datetime-local"]#startsAt'
+      );
+      const startsAtValue = await startsAtInput.inputValue();
+
+      // Verify it's a valid datetime-local format (YYYY-MM-DDTHH:mm)
+      expect(startsAtValue).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
+
+      // Verify the date portion is today
+      const today = new Date().toISOString().split("T")[0];
+      expect(startsAtValue.split("T")[0]).toBe(today);
+    }
+  });
+
+  test("should display grants with time information", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("grants");
+    await authenticatedPage.waitForLoadState("networkidle");
+    // Wait for any animations to settle
+    await authenticatedPage.waitForTimeout(300);
+
+    // Take screenshot showing grant list with time information
+    await authenticatedPage.screenshot({
+      path: "test-results/screenshots/grants-list-with-time.png",
+      fullPage: true,
+      animations: "disabled",
+    });
+
+    // Verify the page shows time information (format: "at HH:mm")
+    const content = await authenticatedPage.textContent("body");
+    expect(content).toMatch(/at \d{2}:\d{2}/);
+  });
 });
