@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import {
   useGrants,
@@ -52,7 +52,7 @@ import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Plus, Ban } from "lucide-react";
 import { toast } from "sonner";
-import { format } from "date-fns";
+import { formatDateTimeLocal, formatDateTime } from "@/lib/date-utils";
 
 // Control options with descriptions
 const CONTROLS = [
@@ -136,9 +136,9 @@ function GrantsPage() {
       header: "Time Window",
       cell: (g) => (
         <div className="text-sm">
-          <div>{format(new Date(g.starts_at), "MMM d, yyyy")}</div>
+          <div>{formatDateTime(g.starts_at)}</div>
           <div className="text-muted-foreground">
-            to {format(new Date(g.expires_at), "MMM d, yyyy")}
+            to {formatDateTime(g.expires_at)}
           </div>
         </div>
       ),
@@ -219,6 +219,7 @@ function GrantsPage() {
                 </PermissionButton>
               </DialogTrigger>
               <CreateGrantDialog
+                open={isCreateOpen}
                 users={users ?? []}
                 databases={databases ?? []}
                 onClose={() => setIsCreateOpen(false)}
@@ -247,10 +248,12 @@ function GrantsPage() {
 }
 
 function CreateGrantDialog({
+  open,
   users,
   databases,
   onClose,
 }: {
+  open: boolean;
   users: { uid: string; username: string }[];
   databases: { uid: string; name: string }[];
   onClose: () => void;
@@ -258,10 +261,31 @@ function CreateGrantDialog({
   const [userId, setUserId] = useState("");
   const [databaseId, setDatabaseId] = useState("");
   const [controls, setControls] = useState<string[]>([]);
-  const [startsAt, setStartsAt] = useState(() => format(new Date(), "yyyy-MM-dd"));
-  const [expiresAt, setExpiresAt] = useState(() =>
-    format(new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), "yyyy-MM-dd")
-  );
+  const [startsAt, setStartsAt] = useState(() => {
+    const now = new Date();
+    now.setSeconds(0, 0);
+    return formatDateTimeLocal(now);
+  });
+  const [expiresAt, setExpiresAt] = useState(() => {
+    const future = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    future.setSeconds(0, 0);
+    return formatDateTimeLocal(future);
+  });
+
+  // Reset state when dialog closes so it's fresh when reopened
+  useEffect(() => {
+    if (!open) {
+      setUserId("");
+      setDatabaseId("");
+      setControls([]);
+      const now = new Date();
+      now.setSeconds(0, 0);
+      setStartsAt(formatDateTimeLocal(now));
+      const future = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+      future.setSeconds(0, 0);
+      setExpiresAt(formatDateTimeLocal(future));
+    }
+  }, [open]);
 
   const createGrant = useCreateGrant({
     onSuccess: () => {
@@ -362,24 +386,31 @@ function CreateGrantDialog({
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
-              <Label htmlFor="startsAt">Starts At</Label>
+              <Label htmlFor="startsAt">Start Date & Time</Label>
               <Input
                 id="startsAt"
-                type="date"
+                type="datetime-local"
                 value={startsAt}
                 onChange={(e) => setStartsAt(e.target.value)}
                 required
               />
+              <p className="text-xs text-muted-foreground">
+                Displayed in your local timezone
+              </p>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="expiresAt">Expires At</Label>
+              <Label htmlFor="expiresAt">Expiration Date & Time</Label>
               <Input
                 id="expiresAt"
-                type="date"
+                type="datetime-local"
                 value={expiresAt}
+                min={startsAt}
                 onChange={(e) => setExpiresAt(e.target.value)}
                 required
               />
+              <p className="text-xs text-muted-foreground">
+                Displayed in your local timezone
+              </p>
             </div>
           </div>
         </div>
