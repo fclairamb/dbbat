@@ -57,7 +57,7 @@ jobs:
             echo "docker_tags=ghcr.io/fclairamb/dbbat:test-${VERSION}" >> $GITHUB_OUTPUT
           fi
 
-      - uses: actions/setup-go@v6.1.0
+      - uses: actions/setup-go@v6.2.0
         with:
           go-version: "1.25"
 
