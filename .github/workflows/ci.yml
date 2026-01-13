@@ -22,7 +22,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v6.1.0
+      - uses: actions/setup-go@v6.2.0
         with:
           go-version: "1.25"
 
@@ -80,7 +80,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - uses: actions/setup-go@v6.1.0
+      - uses: actions/setup-go@v6.2.0
         with:
           go-version: "1.25"
 
@@ -104,7 +104,7 @@ jobs:
         with:
           fetch-depth: 0 # Needed for git log to get commit timestamp
 
-      - uses: actions/setup-go@v6.1.0
+      - uses: actions/setup-go@v6.2.0
         with:
           go-version: "1.25"
 
