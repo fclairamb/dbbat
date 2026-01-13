@@ -201,11 +201,11 @@ export function AppSidebar() {
             <Tooltip>
               <TooltipTrigger asChild>
                 <span className="text-xs text-muted-foreground cursor-default">
-                  {versionInfo.build_version}
+                  v{versionInfo.build_version}
                 </span>
               </TooltipTrigger>
               <TooltipContent side="right">
-                {versionInfo.build_version} ({versionInfo.build_commit})
+                v{versionInfo.build_version} ({versionInfo.build_commit})
               </TooltipContent>
             </Tooltip>
           )}
