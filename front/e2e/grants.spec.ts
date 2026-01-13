@@ -126,8 +126,9 @@ test.describe("Access Grants Management", () => {
     if (await createButton.isVisible()) {
       await createButton.click();
 
-      // Wait for dialog to open
+      // Wait for dialog to open and animations to settle
       await authenticatedPage.waitForSelector('[role="dialog"]');
+      await authenticatedPage.waitForTimeout(300);
 
       // Verify datetime-local inputs are present
       const startsAtInput = authenticatedPage.locator(
@@ -140,9 +141,11 @@ test.describe("Access Grants Management", () => {
       await expect(startsAtInput).toBeVisible();
       await expect(expiresAtInput).toBeVisible();
 
-      // Take screenshot of the datetime inputs
-      await authenticatedPage.screenshot({
+      // Take screenshot of the dialog only
+      const dialog = authenticatedPage.locator('[role="dialog"]');
+      await dialog.screenshot({
         path: "test-results/screenshots/grants-datetime-inputs.png",
+        animations: "disabled",
       });
     }
   });
@@ -184,11 +187,14 @@ test.describe("Access Grants Management", () => {
   }) => {
     await authenticatedPage.goto("grants");
     await authenticatedPage.waitForLoadState("networkidle");
+    // Wait for any animations to settle
+    await authenticatedPage.waitForTimeout(300);
 
     // Take screenshot showing grant list with time information
     await authenticatedPage.screenshot({
       path: "test-results/screenshots/grants-list-with-time.png",
       fullPage: true,
+      animations: "disabled",
     });
 
     // Verify the page shows time information (format: "at HH:mm")
