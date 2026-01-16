@@ -41,7 +41,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2.1.2
 
       - name: Cache frontend dependencies
-        uses: actions/cache@v5.0.1
+        uses: actions/cache@v5.0.2
         with:
           path: |
             front/node_modules
@@ -166,7 +166,7 @@ jobs:
           done
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v5.0.1
+        uses: actions/cache@v5.0.2
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ hashFiles('front/bun.lock') }}
