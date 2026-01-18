@@ -18,7 +18,7 @@ require (
 	github.com/uptrace/bun v1.2.16
 	github.com/uptrace/bun/dialect/pgdialect v1.2.16
 	github.com/uptrace/bun/driver/pgdriver v1.2.16
-	github.com/urfave/cli/v3 v3.6.1
+	github.com/urfave/cli/v3 v3.6.2
 	golang.org/x/crypto v0.47.0
 )
 
