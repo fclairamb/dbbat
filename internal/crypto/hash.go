@@ -14,8 +14,8 @@ import (
 // DefaultArgon2Time is the default number of iterations.
 const DefaultArgon2Time uint32 = 1
 
-// DefaultArgon2Memory is the default memory in KB (64 MB).
-const DefaultArgon2Memory uint32 = 64 * 1024
+// DefaultArgon2Memory is the default memory in KB (8 MB).
+const DefaultArgon2Memory uint32 = 8 * 1024
 
 // DefaultArgon2Threads is the default parallelism factor.
 const DefaultArgon2Threads uint8 = 4
