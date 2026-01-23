@@ -237,6 +237,34 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/users/{uid}/reset-password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description User UID */
+                uid: components["parameters"]["UserUID"];
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Reset user password (admin only)
+         * @description Allows administrators to reset any user's password without knowing the current password.
+         *
+         *     **Important**: This endpoint requires web session authentication (Bearer token from login).
+         *     API keys cannot use this endpoint.
+         *
+         *     The user's `password_change_required` flag is cleared after the reset.
+         */
+        post: operations["resetPassword"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/databases": {
         parameters: {
             query?: never;
@@ -665,6 +693,14 @@ export interface components {
             /**
              * Format: password
              * @description New password (minimum 8 characters)
+             */
+            new_password: string;
+        };
+        /** @description Request for admin password reset (web session required) */
+        ResetPasswordRequest: {
+            /**
+             * Format: password
+             * @description New password for the user (minimum 8 characters)
              */
             new_password: string;
         };
@@ -1274,6 +1310,7 @@ export type MeResponse = components['schemas']['MeResponse'];
 export type SessionInfo = components['schemas']['SessionInfo'];
 export type ChangePasswordRequest = components['schemas']['ChangePasswordRequest'];
 export type PreLoginPasswordChangeRequest = components['schemas']['PreLoginPasswordChangeRequest'];
+export type ResetPasswordRequest = components['schemas']['ResetPasswordRequest'];
 export type User = components['schemas']['User'];
 export type CreateUserRequest = components['schemas']['CreateUserRequest'];
 export type UpdateUserRequest = components['schemas']['UpdateUserRequest'];
@@ -1697,6 +1734,59 @@ export interface operations {
             };
             404: components["responses"]["NotFound"];
             429: components["responses"]["AuthRateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    resetPassword: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description User UID */
+                uid: components["parameters"]["UserUID"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResetPasswordRequest"];
+            };
+        };
+        responses: {
+            /** @description Password reset successfully */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            /** @description Invalid request or weak password */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"] | {
+                        /** @enum {string} */
+                        error: "weak_password";
+                        message: string;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Not authorized (non-admin or API key authentication) */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
         };
     };
