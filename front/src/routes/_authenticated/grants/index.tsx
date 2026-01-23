@@ -77,6 +77,30 @@ function formatBytes(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 }
 
+// Helper to format duration in human-readable format
+function formatDuration(ms: number): string {
+  if (ms <= 0) return "0 minutes";
+
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  const parts: string[] = [];
+
+  if (days > 0) {
+    parts.push(`${days} day${days !== 1 ? "s" : ""}`);
+  }
+  if (hours % 24 > 0) {
+    parts.push(`${hours % 24} hour${hours % 24 !== 1 ? "s" : ""}`);
+  }
+  if (minutes % 60 > 0 && days === 0) {
+    parts.push(`${minutes % 60} minute${minutes % 60 !== 1 ? "s" : ""}`);
+  }
+
+  return parts.length > 0 ? parts.join(", ") : "less than a minute";
+}
+
 export const Route = createFileRoute("/_authenticated/grants/")({
   component: GrantsPage,
 });
@@ -279,13 +303,21 @@ function CreateGrantDialog({
     return formatDateTimeLocal(now);
   });
   const [expiresAt, setExpiresAt] = useState(() => {
-    const future = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    const future = new Date(Date.now() + 2 * 60 * 60 * 1000); // 2 hours default
     future.setSeconds(0, 0);
     return formatDateTimeLocal(future);
   });
   const [maxQueries, setMaxQueries] = useState<string>("");
   const [maxBytesValue, setMaxBytesValue] = useState<string>("");
   const [bytesUnit, setBytesUnit] = useState<"MB" | "GB">("MB");
+
+  // Compute duration and validation
+  const startsAtDate = new Date(startsAt);
+  const expiresAtDate = new Date(expiresAt);
+  const now = new Date();
+  const effectiveStart = startsAtDate > now ? startsAtDate : now;
+  const durationMs = expiresAtDate.getTime() - effectiveStart.getTime();
+  const isValidTimeRange = expiresAtDate > startsAtDate;
 
   const createGrant = useCreateGrant({
     onSuccess: () => {
@@ -434,34 +466,40 @@ function CreateGrantDialog({
               </div>
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="startsAt">Start Date & Time</Label>
-              <Input
-                id="startsAt"
-                type="datetime-local"
-                value={startsAt}
-                onChange={(e) => setStartsAt(e.target.value)}
-                required
-              />
-              <p className="text-xs text-muted-foreground">
-                Displayed in your local timezone
-              </p>
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="startsAt">Start Date & Time</Label>
+                <Input
+                  id="startsAt"
+                  type="datetime-local"
+                  value={startsAt}
+                  onChange={(e) => setStartsAt(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="expiresAt">Expiration Date & Time</Label>
+                <Input
+                  id="expiresAt"
+                  type="datetime-local"
+                  value={expiresAt}
+                  min={startsAt}
+                  onChange={(e) => setExpiresAt(e.target.value)}
+                  required
+                  className={!isValidTimeRange ? "border-destructive" : ""}
+                />
+              </div>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="expiresAt">Expiration Date & Time</Label>
-              <Input
-                id="expiresAt"
-                type="datetime-local"
-                value={expiresAt}
-                min={startsAt}
-                onChange={(e) => setExpiresAt(e.target.value)}
-                required
-              />
-              <p className="text-xs text-muted-foreground">
-                Displayed in your local timezone
+            {!isValidTimeRange ? (
+              <p className="text-sm text-destructive">
+                Expiration must be after start time
               </p>
-            </div>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                Duration: {formatDuration(durationMs)}
+              </p>
+            )}
           </div>
         </div>
         <DialogFooter>
@@ -470,7 +508,7 @@ function CreateGrantDialog({
           </Button>
           <Button
             type="submit"
-            disabled={createGrant.isPending || !userId || !databaseId}
+            disabled={createGrant.isPending || !userId || !databaseId || !isValidTimeRange}
           >
             Create
           </Button>
