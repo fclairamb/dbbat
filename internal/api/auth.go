@@ -473,14 +473,20 @@ func (s *Server) handleResetPassword(c *gin.Context) {
 		return
 	}
 
-	// 5. Parse request body
+	// 5. Prevent self-reset (admins must use the regular password change endpoint for themselves)
+	if currentUser.UID == targetUID {
+		errorResponse(c, http.StatusForbidden, "cannot reset your own password; use the password change endpoint instead")
+		return
+	}
+
+	// 6. Parse request body
 	var req ResetPasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		errorResponse(c, http.StatusBadRequest, "new_password is required")
 		return
 	}
 
-	// 6. Validate password length
+	// 7. Validate password length
 	if len(req.NewPassword) < minPasswordLength {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "weak_password",
@@ -491,14 +497,14 @@ func (s *Server) handleResetPassword(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	// 7. Get target user
+	// 8. Get target user
 	targetUser, err := s.store.GetUserByUID(ctx, targetUID)
 	if err != nil {
 		errorResponse(c, http.StatusNotFound, "user not found")
 		return
 	}
 
-	// 8. Hash new password
+	// 9. Hash new password
 	hashedPassword, err := crypto.HashPassword(req.NewPassword)
 	if err != nil {
 		s.logger.ErrorContext(ctx, "failed to hash password", slog.Any("error", err))
@@ -506,14 +512,14 @@ func (s *Server) handleResetPassword(c *gin.Context) {
 		return
 	}
 
-	// 9. Update password (this clears password_change_required since password is being set)
+	// 10. Update password (this clears password_change_required since password is being set)
 	if err := s.store.UpdateUser(ctx, targetUID, store.UserUpdate{PasswordHash: &hashedPassword}); err != nil {
 		s.logger.ErrorContext(ctx, "failed to update password", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to reset password")
 		return
 	}
 
-	// 10. Log the action
+	// 11. Log the action
 	s.logger.InfoContext(ctx, "password reset by admin",
 		slog.String("admin_user", currentUser.Username),
 		slog.String("target_user", targetUser.Username),

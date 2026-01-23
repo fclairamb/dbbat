@@ -67,19 +67,27 @@ POST /api/v1/users/:uid/reset-password
 |--------|-----------|
 | 400 | Invalid request body or password too short |
 | 401 | Missing or invalid Bearer token |
-| 403 | Non-admin user or API key authentication |
+| 403 | Non-admin user, API key authentication, or self-reset attempt |
 | 404 | Target user not found |
 
 ### Endpoint Behavior
 
 1. Validate Bearer token is from web session (not API key)
 2. Verify authenticated user has admin role
-3. Validate target user exists
-4. Validate new password meets requirements (minimum length)
-5. Hash new password with Argon2id
-6. Update user's password in database
-7. Clear `password_change_required` flag for target user
-8. Log audit event
+3. **Prevent self-reset**: Admins cannot reset their own password via this endpoint (must use the regular password change endpoint instead)
+4. Validate target user exists
+5. Validate new password meets requirements (minimum length)
+6. Hash new password with Argon2id
+7. Update user's password in database
+8. Clear `password_change_required` flag for target user
+9. Log audit event
+
+### Self-Reset Prevention
+
+Administrators cannot use this endpoint to reset their own password. This is intentional:
+- The reset-password endpoint is designed for resetting OTHER users' passwords without knowing the current password
+- For self password changes, admins should use the regular `PUT /users/:uid/password` endpoint which requires the current password
+- This prevents accidental password changes and maintains the audit trail distinction between "admin reset another user" and "user changed their own password"
 
 ### Why POST instead of PUT
 

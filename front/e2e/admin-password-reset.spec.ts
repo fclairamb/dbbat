@@ -161,6 +161,42 @@ test.describe("Admin Password Reset", () => {
     expect(resetResponse.status()).toBe(404);
   });
 
+  test("admin cannot reset their own password via reset-password endpoint", async ({
+    request,
+  }) => {
+    // Step 1: Login as admin
+    const loginResponse = await request.post(`${API_BASE}/auth/login`, {
+      data: { username: "admin", password: "admintest" },
+    });
+    expect(loginResponse.status()).toBe(200);
+    const { token } = await loginResponse.json();
+
+    // Step 2: Get admin's UID
+    const meResponse = await request.get(`${API_BASE}/auth/me`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    expect(meResponse.status()).toBe(200);
+    const adminUser = await meResponse.json();
+
+    // Step 3: Try to reset own password
+    const resetResponse = await request.post(
+      `${API_BASE}/users/${adminUser.uid}/reset-password`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+        data: { new_password: "newAdminPassword123" },
+      }
+    );
+
+    // Should be forbidden
+    expect(resetResponse.status()).toBe(403);
+
+    // Check error message
+    const errorData = await resetResponse.json();
+    expect(errorData.error).toBe(
+      "cannot reset your own password; use the password change endpoint instead"
+    );
+  });
+
   test("admin can reset password via UI", async ({ page }) => {
     const testUsername = uniqueUsername("uireset");
     const initialPassword = "initialPassword123";
