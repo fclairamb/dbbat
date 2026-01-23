@@ -188,6 +188,21 @@ func (s *Server) handleDeleteUser(c *gin.Context) {
 		return
 	}
 
+	// In demo mode, prevent deleting the admin user
+	if s.config != nil && s.config.IsDemoMode() {
+		userToDelete, err := s.store.GetUserByUID(c.Request.Context(), uid)
+		if err != nil {
+			s.logger.ErrorContext(c.Request.Context(), "failed to get user", slog.Any("error", err))
+			errorResponse(c, http.StatusNotFound, "user not found")
+			return
+		}
+
+		if userToDelete.Username == "admin" {
+			errorResponse(c, http.StatusForbidden, "cannot delete admin user in demo mode")
+			return
+		}
+	}
+
 	if err := s.store.DeleteUser(c.Request.Context(), uid); err != nil {
 		s.logger.ErrorContext(c.Request.Context(), "failed to delete user", slog.Any("error", err))
 		errorResponse(c, http.StatusInternalServerError, "failed to delete user")
