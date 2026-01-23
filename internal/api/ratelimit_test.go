@@ -164,8 +164,8 @@ func TestRateLimiter_PreAuthMiddleware(t *testing.T) {
 		}
 
 		// Check headers
-		if w.Header().Get("X-RateLimit-Limit") != "3" {
-			t.Errorf("X-RateLimit-Limit = %q, want %q", w.Header().Get("X-RateLimit-Limit"), "3")
+		if w.Header().Get("X-Ratelimit-Limit") != "3" {
+			t.Errorf("X-Ratelimit-Limit = %q, want %q", w.Header().Get("X-Ratelimit-Limit"), "3")
 		}
 	}
 
@@ -269,7 +269,7 @@ func TestRateLimiter_ResponseFormat(t *testing.T) {
 
 	// Check all required headers are present
 	requiredHeaders := []string{
-		"X-RateLimit-Limit",
+		"X-Ratelimit-Limit",
 		"X-RateLimit-Remaining",
 		"X-RateLimit-Reset",
 		"Retry-After",
