@@ -151,7 +151,7 @@ export default async function globalSetup(): Promise<void> {
       env: {
         ...process.env,
         DBB_RUN_MODE: "test",
-        DBB_LISTEN_PG: ":5432",
+        DBB_LISTEN_PG: ":5434",
         DBB_LISTEN_API: ":8080",
         DBB_DSN:
           "postgres://postgres:postgres@localhost:5001/dbbat?sslmode=disable",

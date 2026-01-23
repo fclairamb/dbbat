@@ -68,6 +68,15 @@ function formatControlName(control: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+// Helper to format bytes in human-readable format
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+}
+
 export const Route = createFileRoute("/_authenticated/grants/")({
   component: GrantsPage,
 });
@@ -161,10 +170,14 @@ function GrantsPage() {
       key: "usage",
       header: "Usage",
       cell: (g) => (
-        <div className="text-sm">
+        <div className="text-sm space-y-1">
           <div>
             {g.query_count ?? 0}
             {g.max_query_counts && ` / ${g.max_query_counts}`} queries
+          </div>
+          <div className="text-muted-foreground">
+            {formatBytes(g.bytes_transferred ?? 0)}
+            {g.max_bytes_transferred && ` / ${formatBytes(g.max_bytes_transferred)}`}
           </div>
         </div>
       ),
@@ -270,6 +283,9 @@ function CreateGrantDialog({
     future.setSeconds(0, 0);
     return formatDateTimeLocal(future);
   });
+  const [maxQueries, setMaxQueries] = useState<string>("");
+  const [maxBytesValue, setMaxBytesValue] = useState<string>("");
+  const [bytesUnit, setBytesUnit] = useState<"MB" | "GB">("MB");
 
   const createGrant = useCreateGrant({
     onSuccess: () => {
@@ -283,12 +299,20 @@ function CreateGrantDialog({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+
+    // Convert bytes unit to actual bytes
+    const maxBytesTransferred = maxBytesValue
+      ? parseInt(maxBytesValue) * (bytesUnit === "GB" ? 1024 * 1024 * 1024 : 1024 * 1024)
+      : undefined;
+
     createGrant.mutate({
       user_id: userId,
       database_id: databaseId,
       controls: controls as ("read_only" | "block_copy" | "block_ddl")[],
       starts_at: new Date(startsAt).toISOString(),
       expires_at: new Date(expiresAt).toISOString(),
+      max_query_counts: maxQueries ? parseInt(maxQueries) : undefined,
+      max_bytes_transferred: maxBytesTransferred,
     });
   };
 
@@ -366,6 +390,48 @@ function CreateGrantDialog({
                   </div>
                 </div>
               ))}
+            </div>
+          </div>
+          <div className="space-y-3">
+            <Label>Quotas (Optional)</Label>
+            <p className="text-sm text-muted-foreground">
+              Set limits on usage. Leave empty for unlimited.
+            </p>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="maxQueries">Max Queries</Label>
+                <Input
+                  id="maxQueries"
+                  type="number"
+                  min="1"
+                  placeholder="Unlimited"
+                  value={maxQueries}
+                  onChange={(e) => setMaxQueries(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="maxBytes">Max Data Transfer</Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="maxBytes"
+                    type="number"
+                    min="1"
+                    placeholder="Unlimited"
+                    value={maxBytesValue}
+                    onChange={(e) => setMaxBytesValue(e.target.value)}
+                    className="flex-1"
+                  />
+                  <Select value={bytesUnit} onValueChange={(v) => setBytesUnit(v as "MB" | "GB")}>
+                    <SelectTrigger className="w-20">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="MB">MB</SelectItem>
+                      <SelectItem value="GB">GB</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
             </div>
           </div>
           <div className="grid grid-cols-2 gap-4">
