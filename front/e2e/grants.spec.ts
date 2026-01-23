@@ -202,3 +202,128 @@ test.describe("Access Grants Management", () => {
     expect(content).toMatch(/at \d{2}:\d{2}/);
   });
 });
+
+test.describe("Grant Quota Management", () => {
+  test("should show quota fields in create grant dialog", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("grants");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    // Click create button
+    const createButton = authenticatedPage.getByRole("button", {
+      name: /create|add|new|grant/i,
+    });
+    await createButton.click();
+
+    // Wait for dialog to open
+    await authenticatedPage.waitForSelector('[role="dialog"]');
+
+    // Verify quota fields are present
+    await expect(authenticatedPage.getByLabel(/max queries/i)).toBeVisible();
+    await expect(authenticatedPage.getByLabel(/max data transfer/i)).toBeVisible();
+
+    // Take screenshot
+    await authenticatedPage.screenshot({
+      path: "test-results/screenshots/grants-create-with-quotas.png",
+    });
+  });
+
+  test("should accept quota values when creating grant", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("grants");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    // Click create button
+    const createButton = authenticatedPage.getByRole("button", {
+      name: /create|add|new|grant/i,
+    });
+    await createButton.click();
+
+    // Wait for dialog to open
+    await authenticatedPage.waitForSelector('[role="dialog"]');
+
+    // Fill quota fields
+    const maxQueriesInput = authenticatedPage.getByLabel(/max queries/i);
+    await maxQueriesInput.fill("1000");
+
+    const maxBytesInput = authenticatedPage.getByLabel(/max data transfer/i);
+    await maxBytesInput.fill("500");
+
+    // Take screenshot with filled quotas
+    await authenticatedPage.screenshot({
+      path: "test-results/screenshots/grants-create-quotas-filled.png",
+    });
+
+    // Verify input values
+    await expect(maxQueriesInput).toHaveValue("1000");
+    await expect(maxBytesInput).toHaveValue("500");
+  });
+
+  test("should display quota usage in grant list", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("grants");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    // Take screenshot showing grant list with quota usage
+    await authenticatedPage.screenshot({
+      path: "test-results/screenshots/grants-list-quota-usage.png",
+      fullPage: true,
+    });
+
+    // Verify usage column is present (shows queries and bytes)
+    const content = await authenticatedPage.textContent("body");
+    expect(content?.toLowerCase()).toMatch(/queries|usage/);
+  });
+
+  test("quota fields should have unlimited placeholder", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("grants");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    // Click create button
+    const createButton = authenticatedPage.getByRole("button", {
+      name: /create|add|new|grant/i,
+    });
+    await createButton.click();
+
+    // Wait for dialog to open
+    await authenticatedPage.waitForSelector('[role="dialog"]');
+
+    // Verify quota fields have placeholder indicating unlimited
+    const maxQueriesInput = authenticatedPage.getByLabel(/max queries/i);
+    const maxBytesInput = authenticatedPage.getByLabel(/max data transfer/i);
+
+    // Check placeholders indicate unlimited (fields should be empty by default)
+    await expect(maxQueriesInput).toHaveAttribute("placeholder", /unlimited/i);
+    await expect(maxBytesInput).toHaveAttribute("placeholder", /unlimited/i);
+  });
+
+  test("should have unit selector for data transfer", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("grants");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    // Click create button
+    const createButton = authenticatedPage.getByRole("button", {
+      name: /create|add|new|grant/i,
+    });
+    await createButton.click();
+
+    // Wait for dialog to open
+    await authenticatedPage.waitForSelector('[role="dialog"]');
+
+    // Verify unit selector is present (MB/GB)
+    const formContent = await authenticatedPage.textContent('[role="dialog"]');
+    expect(formContent).toMatch(/MB|GB/);
+
+    // Take screenshot
+    await authenticatedPage.screenshot({
+      path: "test-results/screenshots/grants-create-unit-selector.png",
+    });
+  });
+});

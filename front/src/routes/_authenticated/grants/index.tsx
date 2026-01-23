@@ -68,6 +68,39 @@ function formatControlName(control: string): string {
     .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
+// Helper to format bytes in human-readable format
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return "0 B";
+  const k = 1024;
+  const sizes = ["B", "KB", "MB", "GB", "TB"];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
+}
+
+// Helper to format duration in human-readable format
+function formatDuration(ms: number): string {
+  if (ms <= 0) return "0 minutes";
+
+  const seconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  const parts: string[] = [];
+
+  if (days > 0) {
+    parts.push(`${days} day${days !== 1 ? "s" : ""}`);
+  }
+  if (hours % 24 > 0) {
+    parts.push(`${hours % 24} hour${hours % 24 !== 1 ? "s" : ""}`);
+  }
+  if (minutes % 60 > 0 && days === 0) {
+    parts.push(`${minutes % 60} minute${minutes % 60 !== 1 ? "s" : ""}`);
+  }
+
+  return parts.length > 0 ? parts.join(", ") : "less than a minute";
+}
+
 export const Route = createFileRoute("/_authenticated/grants/")({
   component: GrantsPage,
 });
@@ -161,10 +194,14 @@ function GrantsPage() {
       key: "usage",
       header: "Usage",
       cell: (g) => (
-        <div className="text-sm">
+        <div className="text-sm space-y-1">
           <div>
             {g.query_count ?? 0}
             {g.max_query_counts && ` / ${g.max_query_counts}`} queries
+          </div>
+          <div className="text-muted-foreground">
+            {formatBytes(g.bytes_transferred ?? 0)}
+            {g.max_bytes_transferred && ` / ${formatBytes(g.max_bytes_transferred)}`}
           </div>
         </div>
       ),
@@ -266,10 +303,21 @@ function CreateGrantDialog({
     return formatDateTimeLocal(now);
   });
   const [expiresAt, setExpiresAt] = useState(() => {
-    const future = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+    const future = new Date(Date.now() + 2 * 60 * 60 * 1000); // 2 hours default
     future.setSeconds(0, 0);
     return formatDateTimeLocal(future);
   });
+  const [maxQueries, setMaxQueries] = useState<string>("");
+  const [maxBytesValue, setMaxBytesValue] = useState<string>("");
+  const [bytesUnit, setBytesUnit] = useState<"MB" | "GB">("MB");
+
+  // Compute duration and validation
+  const startsAtDate = new Date(startsAt);
+  const expiresAtDate = new Date(expiresAt);
+  const now = new Date();
+  const effectiveStart = startsAtDate > now ? startsAtDate : now;
+  const durationMs = expiresAtDate.getTime() - effectiveStart.getTime();
+  const isValidTimeRange = expiresAtDate > startsAtDate;
 
   const createGrant = useCreateGrant({
     onSuccess: () => {
@@ -283,12 +331,20 @@ function CreateGrantDialog({
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+
+    // Convert bytes unit to actual bytes
+    const maxBytesTransferred = maxBytesValue
+      ? parseInt(maxBytesValue) * (bytesUnit === "GB" ? 1024 * 1024 * 1024 : 1024 * 1024)
+      : undefined;
+
     createGrant.mutate({
       user_id: userId,
       database_id: databaseId,
       controls: controls as ("read_only" | "block_copy" | "block_ddl")[],
       starts_at: new Date(startsAt).toISOString(),
       expires_at: new Date(expiresAt).toISOString(),
+      max_query_counts: maxQueries ? parseInt(maxQueries) : undefined,
+      max_bytes_transferred: maxBytesTransferred,
     });
   };
 
@@ -368,34 +424,82 @@ function CreateGrantDialog({
               ))}
             </div>
           </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <Label htmlFor="startsAt">Start Date & Time</Label>
-              <Input
-                id="startsAt"
-                type="datetime-local"
-                value={startsAt}
-                onChange={(e) => setStartsAt(e.target.value)}
-                required
-              />
-              <p className="text-xs text-muted-foreground">
-                Displayed in your local timezone
-              </p>
+          <div className="space-y-3">
+            <Label>Quotas (Optional)</Label>
+            <p className="text-sm text-muted-foreground">
+              Set limits on usage. Leave empty for unlimited.
+            </p>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="maxQueries">Max Queries</Label>
+                <Input
+                  id="maxQueries"
+                  type="number"
+                  min="1"
+                  placeholder="Unlimited"
+                  value={maxQueries}
+                  onChange={(e) => setMaxQueries(e.target.value)}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="maxBytes">Max Data Transfer</Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="maxBytes"
+                    type="number"
+                    min="1"
+                    placeholder="Unlimited"
+                    value={maxBytesValue}
+                    onChange={(e) => setMaxBytesValue(e.target.value)}
+                    className="flex-1"
+                  />
+                  <Select value={bytesUnit} onValueChange={(v) => setBytesUnit(v as "MB" | "GB")}>
+                    <SelectTrigger className="w-20">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="MB">MB</SelectItem>
+                      <SelectItem value="GB">GB</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
             </div>
-            <div className="space-y-2">
-              <Label htmlFor="expiresAt">Expiration Date & Time</Label>
-              <Input
-                id="expiresAt"
-                type="datetime-local"
-                value={expiresAt}
-                min={startsAt}
-                onChange={(e) => setExpiresAt(e.target.value)}
-                required
-              />
-              <p className="text-xs text-muted-foreground">
-                Displayed in your local timezone
-              </p>
+          </div>
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor="startsAt">Start Date & Time</Label>
+                <Input
+                  id="startsAt"
+                  type="datetime-local"
+                  value={startsAt}
+                  onChange={(e) => setStartsAt(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="expiresAt">Expiration Date & Time</Label>
+                <Input
+                  id="expiresAt"
+                  type="datetime-local"
+                  value={expiresAt}
+                  min={startsAt}
+                  onChange={(e) => setExpiresAt(e.target.value)}
+                  required
+                  className={!isValidTimeRange ? "border-destructive" : ""}
+                />
+              </div>
             </div>
+            {!isValidTimeRange ? (
+              <p className="text-sm text-destructive">
+                Expiration must be after start time
+              </p>
+            ) : (
+              <p className="text-sm text-muted-foreground">
+                Duration: {formatDuration(durationMs)}
+              </p>
+            )}
           </div>
         </div>
         <DialogFooter>
@@ -404,7 +508,7 @@ function CreateGrantDialog({
           </Button>
           <Button
             type="submit"
-            disabled={createGrant.isPending || !userId || !databaseId}
+            disabled={createGrant.isPending || !userId || !databaseId || !isValidTimeRange}
           >
             Create
           </Button>
