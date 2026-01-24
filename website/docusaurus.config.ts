@@ -58,6 +58,16 @@ const config: Config = {
           label: "Documentation",
         },
         {
+          to: "/docs/changelog",
+          label: "Changelog",
+          position: "left",
+        },
+        {
+          href: "https://demo.dbbat.com",
+          label: "Demo",
+          position: "right",
+        },
+        {
           href: "https://github.com/fclairamb/dbbat",
           label: "GitHub",
           position: "right",
@@ -94,6 +104,19 @@ const config: Config = {
             {
               label: "GitHub Discussions",
               href: "https://github.com/fclairamb/dbbat/discussions",
+            },
+          ],
+        },
+        {
+          title: "Resources",
+          items: [
+            {
+              label: "Changelog",
+              to: "/docs/changelog",
+            },
+            {
+              label: "Live Demo",
+              href: "https://demo.dbbat.com",
             },
           ],
         },

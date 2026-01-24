@@ -27,13 +27,64 @@ function HomepageHeader() {
           </Link>
           <Link
             className="button button--secondary button--lg"
+            href="https://demo.dbbat.com"
+          >
+            Try Demo
+          </Link>
+          <Link
+            className="button button--secondary button--lg"
             href="https://github.com/fclairamb/dbbat"
           >
             View on GitHub
           </Link>
         </div>
+        <p className={styles.demoCredentials}>
+          Demo login: <code>admin</code> / <code>admin</code>
+        </p>
       </div>
     </header>
+  );
+}
+
+const screenshots = [
+  {
+    src: "/img/screenshots/screenshot-dashboard.png",
+    alt: "Dashboard showing recent connections and activity",
+    caption: "Dashboard",
+  },
+  {
+    src: "/img/screenshots/screenshot-queries.png",
+    alt: "Query log with SQL details and execution times",
+    caption: "Query Logging",
+  },
+  {
+    src: "/img/screenshots/screenshot-grants.png",
+    alt: "Grant management with time-based access controls",
+    caption: "Access Control",
+  },
+];
+
+function Screenshots() {
+  return (
+    <section className={styles.screenshots}>
+      <div className="container">
+        <Heading as="h2">See it in Action</Heading>
+        <p>
+          Explore the DBBat interface for managing database access and monitoring
+          queries.
+        </p>
+        <div className={styles.screenshotsGrid}>
+          {screenshots.map((screenshot) => (
+            <figure key={screenshot.src} className={styles.screenshotCard}>
+              <a href={screenshot.src} target="_blank" rel="noopener noreferrer">
+                <img src={screenshot.src} alt={screenshot.alt} loading="lazy" />
+              </a>
+              <figcaption>{screenshot.caption}</figcaption>
+            </figure>
+          ))}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -76,6 +127,7 @@ export default function Home(): JSX.Element {
       <HomepageHeader />
       <main>
         <HomepageFeatures />
+        <Screenshots />
         <QuickStart />
       </main>
     </Layout>
