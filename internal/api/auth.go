@@ -437,3 +437,93 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "Password changed successfully"})
 }
+
+// ResetPasswordRequest represents the request body for admin password reset
+type ResetPasswordRequest struct {
+	NewPassword string `json:"new_password" binding:"required"`
+}
+
+// handleResetPassword allows admins to reset any user's password via web token
+// This endpoint requires web session authentication (not API keys)
+// POST /api/v1/users/:uid/reset-password
+func (s *Server) handleResetPassword(c *gin.Context) {
+	// 1. Get current user from context
+	currentUser := getCurrentUser(c)
+	if currentUser == nil {
+		errorResponse(c, http.StatusUnauthorized, "authentication required")
+		return
+	}
+
+	// 2. Verify web session (not API key)
+	if isAPIKeyAuth(c) {
+		errorResponse(c, http.StatusForbidden, "web session required for password reset")
+		return
+	}
+
+	// 3. Verify admin role
+	if !currentUser.IsAdmin() {
+		errorResponse(c, http.StatusForbidden, "admin access required")
+		return
+	}
+
+	// 4. Get target user UID
+	targetUID, err := parseUIDParam(c)
+	if err != nil {
+		errorResponse(c, http.StatusBadRequest, "invalid user ID")
+		return
+	}
+
+	// 5. Prevent self-reset (admins must use the regular password change endpoint for themselves)
+	if currentUser.UID == targetUID {
+		errorResponse(c, http.StatusForbidden, "cannot reset your own password; use the password change endpoint instead")
+		return
+	}
+
+	// 6. Parse request body
+	var req ResetPasswordRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		errorResponse(c, http.StatusBadRequest, "new_password is required")
+		return
+	}
+
+	// 7. Validate password length
+	if len(req.NewPassword) < minPasswordLength {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "weak_password",
+			"message": "Password must be at least 8 characters",
+		})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// 8. Get target user
+	targetUser, err := s.store.GetUserByUID(ctx, targetUID)
+	if err != nil {
+		errorResponse(c, http.StatusNotFound, "user not found")
+		return
+	}
+
+	// 9. Hash new password
+	hashedPassword, err := crypto.HashPassword(req.NewPassword)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "failed to hash password", slog.Any("error", err))
+		errorResponse(c, http.StatusInternalServerError, "failed to reset password")
+		return
+	}
+
+	// 10. Update password (this clears password_change_required since password is being set)
+	if err := s.store.UpdateUser(ctx, targetUID, store.UserUpdate{PasswordHash: &hashedPassword}); err != nil {
+		s.logger.ErrorContext(ctx, "failed to update password", slog.Any("error", err))
+		errorResponse(c, http.StatusInternalServerError, "failed to reset password")
+		return
+	}
+
+	// 11. Log the action
+	s.logger.InfoContext(ctx, "password reset by admin",
+		slog.String("admin_user", currentUser.Username),
+		slog.String("target_user", targetUser.Username),
+		slog.Any("target_uid", targetUID))
+
+	c.JSON(http.StatusOK, gin.H{"message": "Password reset successfully"})
+}

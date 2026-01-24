@@ -156,6 +156,8 @@ func (s *Server) setupRouter() *gin.Engine {
 			users.PUT("/:uid", s.handleUpdateUser)
 			// Note: PUT /:uid/password is registered separately (uses credential auth, not Bearer)
 			users.DELETE("/:uid", s.requireAdmin(), s.handleDeleteUser)
+			// Admin password reset (requires web session, not API key)
+			users.POST("/:uid/reset-password", s.requireAdmin(), s.handleResetPassword)
 
 			// Database endpoints
 			databases := authenticated.Group("/databases")

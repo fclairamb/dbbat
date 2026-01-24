@@ -45,6 +45,7 @@ export const canDeleteUser = (roles: string[] | undefined): boolean => hasRole(r
 export const canDeleteDatabase = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canUpdateUser = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canUpdateDatabase = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
+export const canResetPassword = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 
 // API Key permissions (admin or connector, but not viewer-only)
 export const canCreateAPIKey = (roles: string[] | undefined): boolean => hasAnyRole(roles, ['admin', 'connector']);
@@ -66,6 +67,7 @@ export const getDisabledReason = (action: string, _roles?: string[]): string => 
     'delete-database': 'Only administrators can delete databases',
     'update-user': 'Only administrators can update users',
     'update-database': 'Only administrators can update databases',
+    'reset-password': 'Only administrators can reset passwords',
   };
 
   return roleMessages[action] || 'You do not have permission for this action';
@@ -86,6 +88,7 @@ export const getActionTooltip = (action: string): string => {
     'delete-database': 'Delete this database',
     'update-user': 'Update user details',
     'update-database': 'Update database configuration',
+    'reset-password': 'Reset this user\'s password',
   };
 
   return actionMessages[action] || 'Perform this action';

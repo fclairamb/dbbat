@@ -267,6 +267,12 @@ linters:
           - paralleltest
         path: internal/store/.*_test\.go
       - linters:
+          - paralleltest
+        path: internal/api/password_reset_test\.go
+      - linters:
+          - canonicalheader
+        path: internal/api/ratelimit_test\.go
+      - linters:
           - revive
         text: "context-as-argument"
         path: _test\.go
