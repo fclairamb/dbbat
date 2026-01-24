@@ -1,0 +1,20 @@
+name: Auto-update PRs
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  auto-update:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - uses: castastrophe/actions-pr-auto-update@v2.0.1
+        with:
+          token: ${{ secrets.CI_PAT }}
+          include_labels: autoupdate, automerge
+          limit: 2
