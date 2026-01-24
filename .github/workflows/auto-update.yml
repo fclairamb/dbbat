@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - uses: castastrophe/actions-pr-auto-update@v2.0.1
+      - uses: castastrophe/actions-pr-auto-update@v2.0.0
         with:
           token: ${{ secrets.CI_PAT }}
           include_labels: autoupdate, automerge
