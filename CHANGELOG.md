@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0](https://github.com/fclairamb/dbbat/compare/v0.2.0...v0.3.0) (2026-01-24)
+
+
+### Features
+
+* **api:** add admin password reset endpoint ([#51](https://github.com/fclairamb/dbbat/issues/51)) ([529fc92](https://github.com/fclairamb/dbbat/commit/529fc92da65b8e1ffe831d06530a93493b4c4602))
+* **ui:** add quota fields to grant creation form ([#49](https://github.com/fclairamb/dbbat/issues/49)) ([626fa90](https://github.com/fclairamb/dbbat/commit/626fa90e74ac4de7d4be0970a63cf0fc1ffbc234))
+
+
+### Bug Fixes
+
+* **deps:** update dependency lucide-react to ^0.563.0 ([#48](https://github.com/fclairamb/dbbat/issues/48)) ([e7ca0b6](https://github.com/fclairamb/dbbat/commit/e7ca0b664b943bc1489f9685c0984f9a783adbe4))
+* **deps:** update module github.com/knadh/koanf/v2 to v2.3.1 ([#52](https://github.com/fclairamb/dbbat/issues/52)) ([8b26ec9](https://github.com/fclairamb/dbbat/commit/8b26ec9259873c239c611ba4f1cffc948f524bd8))
+* **deps:** update module github.com/urfave/cli/v3 to v3.6.2 ([#46](https://github.com/fclairamb/dbbat/issues/46)) ([32684fe](https://github.com/fclairamb/dbbat/commit/32684fed5d6e94b04c7715c104f08a4bfde66f8a))
+* reduce argon2id memory and protect admin in demo mode ([#50](https://github.com/fclairamb/dbbat/issues/50)) ([fc90f6d](https://github.com/fclairamb/dbbat/commit/fc90f6d34581042e22bedc6d846c8bf31299fe64))
+* **test:** remove flaky toBeDisabled assertions in E2E tests ([#54](https://github.com/fclairamb/dbbat/issues/54)) ([2dc8e1a](https://github.com/fclairamb/dbbat/commit/2dc8e1a4d01bcd396bba4cd01923488a7060e81f))
+
 ## [0.2.0](https://github.com/fclairamb/dbbat/compare/v0.1.0...v0.2.0) (2026-01-13)
 
 
