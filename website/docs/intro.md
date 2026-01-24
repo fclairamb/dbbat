@@ -75,6 +75,16 @@ Everything described here can be done via the REST API or the web UI.
 - **Encryption key**: From environment variable or key file
 - **Default admin**: Created on first startup (username: `admin`, password: `admin`)
 
+## Try the Demo
+
+Experience DBBat without any setup. Our demo instance is available at:
+
+**[demo.dbbat.com](https://demo.dbbat.com)**
+
+- Login: `admin` / `admin`
+- Data resets periodically
+- Explore all features freely
+
 ## Next Steps
 
 - [Install DBBat](/docs/installation/docker) using Docker
