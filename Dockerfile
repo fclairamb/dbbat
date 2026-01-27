@@ -16,7 +16,7 @@
 # -----------------------------------------------------------------------------
 # Builds the React frontend using Bun. The output (dist/) will be embedded
 # into the Go binary in the next stage.
-FROM oven/bun:1.3.6 AS frontend
+FROM oven/bun:1.3.7 AS frontend
 
 WORKDIR /app/front
 
