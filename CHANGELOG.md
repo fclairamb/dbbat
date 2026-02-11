@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.3.1](https://github.com/fclairamb/dbbat/compare/v0.3.0...v0.3.1) (2026-02-11)
+
+
+### Bug Fixes
+
+* **ci:** autoupdate ([#57](https://github.com/fclairamb/dbbat/issues/57)) ([bb9b9ad](https://github.com/fclairamb/dbbat/commit/bb9b9ad913fbaab67750a9d44783b24106bed175))
+* **deps:** update dependency openapi-fetch to ^0.16.0 ([#68](https://github.com/fclairamb/dbbat/issues/68)) ([567412d](https://github.com/fclairamb/dbbat/commit/567412dca3ea95ad2ea2cfca6e70004e18cccc6f))
+* **deps:** update module github.com/knadh/koanf/v2 to v2.3.2 ([#59](https://github.com/fclairamb/dbbat/issues/59)) ([9b57552](https://github.com/fclairamb/dbbat/commit/9b575525abe7887f3f524c46e28d10573d4269a5))
+* **deps:** update module golang.org/x/crypto to v0.48.0 ([#69](https://github.com/fclairamb/dbbat/issues/69)) ([ff7856b](https://github.com/fclairamb/dbbat/commit/ff7856b26c426b6dfbba678f2327ef34c67d8e9a))
+
 ## [0.3.0](https://github.com/fclairamb/dbbat/compare/v0.2.0...v0.3.0) (2026-01-24)
 
 
