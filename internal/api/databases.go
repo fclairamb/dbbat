@@ -15,38 +15,44 @@ import (
 
 // CreateDatabaseRequest represents the request to create a database
 type CreateDatabaseRequest struct {
-	Name         string `json:"name" binding:"required"`
-	Description  string `json:"description"`
-	Host         string `json:"host" binding:"required"`
-	Port         int    `json:"port"`
-	DatabaseName string `json:"database_name" binding:"required"`
-	Username     string `json:"username" binding:"required"`
-	Password     string `json:"password" binding:"required"`
-	SSLMode      string `json:"ssl_mode"`
+	Name              string `json:"name" binding:"required"`
+	Description       string `json:"description"`
+	Host              string `json:"host" binding:"required"`
+	Port              int    `json:"port"`
+	DatabaseName      string `json:"database_name"`
+	Username          string `json:"username" binding:"required"`
+	Password          string `json:"password" binding:"required"`
+	SSLMode           string `json:"ssl_mode"`
+	Protocol          string `json:"protocol"`
+	OracleServiceName string `json:"oracle_service_name"`
 }
 
 // UpdateDatabaseRequest represents the request to update a database
 type UpdateDatabaseRequest struct {
-	Description  *string `json:"description"`
-	Host         *string `json:"host"`
-	Port         *int    `json:"port"`
-	DatabaseName *string `json:"database_name"`
-	Username     *string `json:"username"`
-	Password     *string `json:"password"`
-	SSLMode      *string `json:"ssl_mode"`
+	Description       *string `json:"description"`
+	Host              *string `json:"host"`
+	Port              *int    `json:"port"`
+	DatabaseName      *string `json:"database_name"`
+	Username          *string `json:"username"`
+	Password          *string `json:"password"`
+	SSLMode           *string `json:"ssl_mode"`
+	Protocol          *string `json:"protocol"`
+	OracleServiceName *string `json:"oracle_service_name"`
 }
 
 // DatabaseResponse represents a database with full details (admin only)
 type DatabaseResponse struct {
-	UID          uuid.UUID  `json:"uid"`
-	Name         string     `json:"name"`
-	Description  string     `json:"description"`
-	Host         string     `json:"host,omitempty"`
-	Port         int        `json:"port,omitempty"`
-	DatabaseName string     `json:"database_name,omitempty"`
-	Username     string     `json:"username,omitempty"`
-	SSLMode      string     `json:"ssl_mode,omitempty"`
-	CreatedBy    *uuid.UUID `json:"created_by,omitempty"`
+	UID               uuid.UUID  `json:"uid"`
+	Name              string     `json:"name"`
+	Description       string     `json:"description"`
+	Host              string     `json:"host,omitempty"`
+	Port              int        `json:"port,omitempty"`
+	DatabaseName      string     `json:"database_name,omitempty"`
+	Username          string     `json:"username,omitempty"`
+	SSLMode           string     `json:"ssl_mode,omitempty"`
+	Protocol          string     `json:"protocol,omitempty"`
+	OracleServiceName string     `json:"oracle_service_name,omitempty"`
+	CreatedBy         *uuid.UUID `json:"created_by,omitempty"`
 }
 
 // DatabaseLimitedResponse represents a database with limited info (non-admin)
@@ -72,27 +78,67 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		}
 	}
 
-	// Set default port if not provided
-	if req.Port == 0 {
-		req.Port = 5432
+	// Validate and default protocol
+	if req.Protocol == "" {
+		req.Protocol = store.ProtocolPostgreSQL
 	}
 
-	// Set default SSL mode if not provided
-	if req.SSLMode == "" {
-		req.SSLMode = "prefer"
+	if req.Protocol != store.ProtocolPostgreSQL && req.Protocol != store.ProtocolOracle {
+		errorResponse(c, http.StatusBadRequest, "protocol must be 'postgresql' or 'oracle'")
+		return
+	}
+
+	// Protocol-aware defaults
+	if req.Port == 0 {
+		switch req.Protocol {
+		case store.ProtocolOracle:
+			req.Port = 1521
+		default:
+			req.Port = 5432
+		}
+	}
+
+	// Validate required fields per protocol
+	switch req.Protocol {
+	case store.ProtocolOracle:
+		if req.OracleServiceName == "" && req.DatabaseName == "" {
+			errorResponse(c, http.StatusBadRequest, "oracle_service_name or database_name is required for Oracle databases")
+			return
+		}
+
+		if req.OracleServiceName == "" {
+			req.OracleServiceName = req.DatabaseName
+		}
+	default:
+		if req.DatabaseName == "" {
+			errorResponse(c, http.StatusBadRequest, "database_name is required for PostgreSQL databases")
+			return
+		}
+
+		if req.SSLMode == "" {
+			req.SSLMode = "prefer"
+		}
 	}
 
 	currentUser := getCurrentUser(c)
+
+	var oracleServiceName *string
+	if req.OracleServiceName != "" {
+		oracleServiceName = &req.OracleServiceName
+	}
+
 	db := &store.Database{
-		Name:         req.Name,
-		Description:  req.Description,
-		Host:         req.Host,
-		Port:         req.Port,
-		DatabaseName: req.DatabaseName,
-		Username:     req.Username,
-		Password:     req.Password,
-		SSLMode:      req.SSLMode,
-		CreatedBy:    &currentUser.UID,
+		Name:              req.Name,
+		Description:       req.Description,
+		Host:              req.Host,
+		Port:              req.Port,
+		DatabaseName:      req.DatabaseName,
+		Username:          req.Username,
+		Password:          req.Password,
+		SSLMode:           req.SSLMode,
+		Protocol:          req.Protocol,
+		OracleServiceName: oracleServiceName,
+		CreatedBy:         &currentUser.UID,
 	}
 
 	result, err := s.store.CreateDatabase(c.Request.Context(), db, s.encryptionKey)
@@ -315,13 +361,15 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 	}
 
 	updates := store.DatabaseUpdate{
-		Description:  req.Description,
-		Host:         req.Host,
-		Port:         req.Port,
-		DatabaseName: req.DatabaseName,
-		Username:     req.Username,
-		Password:     req.Password,
-		SSLMode:      req.SSLMode,
+		Description:       req.Description,
+		Host:              req.Host,
+		Port:              req.Port,
+		DatabaseName:      req.DatabaseName,
+		Username:          req.Username,
+		Password:          req.Password,
+		SSLMode:           req.SSLMode,
+		Protocol:          req.Protocol,
+		OracleServiceName: req.OracleServiceName,
 	}
 
 	if err := s.store.UpdateDatabase(c.Request.Context(), uid, updates, s.encryptionKey); err != nil {
@@ -392,16 +440,23 @@ func (s *Server) handleDeleteDatabase(c *gin.Context) {
 
 // toDatabaseResponse converts a Database to a DatabaseResponse (admin only, without password)
 func toDatabaseResponse(db *store.Database) DatabaseResponse {
+	var oracleServiceName string
+	if db.OracleServiceName != nil {
+		oracleServiceName = *db.OracleServiceName
+	}
+
 	return DatabaseResponse{
-		UID:          db.UID,
-		Name:         db.Name,
-		Description:  db.Description,
-		Host:         db.Host,
-		Port:         db.Port,
-		DatabaseName: db.DatabaseName,
-		Username:     db.Username,
-		SSLMode:      db.SSLMode,
-		CreatedBy:    db.CreatedBy,
+		UID:               db.UID,
+		Name:              db.Name,
+		Description:       db.Description,
+		Host:              db.Host,
+		Port:              db.Port,
+		DatabaseName:      db.DatabaseName,
+		Username:          db.Username,
+		SSLMode:           db.SSLMode,
+		Protocol:          db.Protocol,
+		OracleServiceName: oracleServiceName,
+		CreatedBy:         db.CreatedBy,
 	}
 }
 
