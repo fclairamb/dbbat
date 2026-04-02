@@ -97,6 +97,25 @@ func (s *Store) GetDatabaseByName(ctx context.Context, name string) (*Database, 
 	return db, nil
 }
 
+// GetDatabaseByOracleServiceName retrieves an Oracle database by its service name.
+func (s *Store) GetDatabaseByOracleServiceName(ctx context.Context, serviceName string) (*Database, error) {
+	db := new(Database)
+	err := s.db.NewSelect().
+		Model(db).
+		Where("oracle_service_name = ?", serviceName).
+		Where("protocol = ?", ProtocolOracle).
+		Scan(ctx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrDatabaseNotFound
+		}
+
+		return nil, fmt.Errorf("failed to get database by oracle service name: %w", err)
+	}
+
+	return db, nil
+}
+
 // GetDatabaseByUID retrieves a database by UID
 func (s *Store) GetDatabaseByUID(ctx context.Context, uid uuid.UUID) (*Database, error) {
 	db := new(Database)

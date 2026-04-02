@@ -99,12 +99,15 @@ func (s *session) run() error {
 
 	s.logger = s.logger.With("service_name", s.serviceName)
 
-	// Step 3: Look up database in store
+	// Step 3: Look up database in store (by name first, then by oracle_service_name)
 	db, err := s.store.GetDatabaseByName(s.ctx, s.serviceName)
 	if err != nil {
-		s.sendRefuse("database not found")
+		db, err = s.store.GetDatabaseByOracleServiceName(s.ctx, s.serviceName)
+		if err != nil {
+			s.sendRefuse("database not found")
 
-		return fmt.Errorf("%w: %s: %w", ErrDatabaseNotFound, s.serviceName, err)
+			return fmt.Errorf("%w: %s: %w", ErrDatabaseNotFound, s.serviceName, err)
+		}
 	}
 
 	s.database = db
