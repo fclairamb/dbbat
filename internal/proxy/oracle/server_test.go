@@ -9,10 +9,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/fclairamb/dbbat/internal/config"
 )
 
 func TestOracleServer_StartsAndAcceptsConnections(t *testing.T) {
-	srv := NewServer(nil, nil, nil, slog.Default())
+	t.Parallel()
+
+	srv := NewServer(nil, nil, nil, config.QueryStorageConfig{}, slog.Default())
 	go func() { _ = srv.Start(":0") }()
 	defer func() { _ = srv.Shutdown(t.Context()) }()
 
@@ -21,11 +25,13 @@ func TestOracleServer_StartsAndAcceptsConnections(t *testing.T) {
 
 	conn, err := net.Dial("tcp", srv.Addr().String())
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 }
 
 func TestOracleServer_GracefulShutdown(t *testing.T) {
-	srv := NewServer(nil, nil, nil, slog.Default())
+	t.Parallel()
+
+	srv := NewServer(nil, nil, nil, config.QueryStorageConfig{}, slog.Default())
 	go func() { _ = srv.Start(":0") }()
 
 	require.Eventually(t, func() bool { return srv.Addr() != nil }, time.Second, 10*time.Millisecond)
@@ -34,7 +40,7 @@ func TestOracleServer_GracefulShutdown(t *testing.T) {
 	require.NoError(t, err)
 
 	// Close the client connection first so the session goroutine doesn't block
-	conn.Close()
+	_ = conn.Close()
 
 	// Give the session goroutine time to see the close
 	time.Sleep(50 * time.Millisecond)
@@ -44,7 +50,9 @@ func TestOracleServer_GracefulShutdown(t *testing.T) {
 }
 
 func TestOracleServer_ConcurrentConnections(t *testing.T) {
-	srv := NewServer(nil, nil, nil, slog.Default())
+	t.Parallel()
+
+	srv := NewServer(nil, nil, nil, config.QueryStorageConfig{}, slog.Default())
 	go func() { _ = srv.Start(":0") }()
 	defer func() { _ = srv.Shutdown(t.Context()) }()
 
@@ -57,7 +65,7 @@ func TestOracleServer_ConcurrentConnections(t *testing.T) {
 			defer wg.Done()
 			conn, err := net.Dial("tcp", srv.Addr().String())
 			if err == nil {
-				conn.Close()
+				_ = conn.Close()
 			}
 		}()
 	}

@@ -1,6 +1,7 @@
 package oracle
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -63,9 +64,11 @@ func buildTNSConnect(serviceName string) []byte {
 }
 
 func TestSession_ReceiveConnect_ParsesServiceName(t *testing.T) {
+	t.Parallel()
+
 	client, proxyEnd := net.Pipe()
-	defer client.Close()
-	defer proxyEnd.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = proxyEnd.Close() }()
 
 	go func() {
 		pkt := encodeTNSPacket(TNSPacketTypeConnect, buildTNSConnect("TESTDB"))
@@ -83,9 +86,11 @@ func TestSession_ReceiveConnect_ParsesServiceName(t *testing.T) {
 }
 
 func TestSession_SendRefuse(t *testing.T) {
+	t.Parallel()
+
 	client, proxyEnd := net.Pipe()
-	defer client.Close()
-	defer proxyEnd.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = proxyEnd.Close() }()
 
 	s := &session{clientConn: proxyEnd}
 
@@ -100,19 +105,21 @@ func TestSession_SendRefuse(t *testing.T) {
 }
 
 func TestSession_RawRelay(t *testing.T) {
+	t.Parallel()
+
 	// Set up a simple echo server as "upstream"
 	upstreamListener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer upstreamListener.Close()
+	defer func() { _ = upstreamListener.Close() }()
 
 	go func() {
 		conn, err := upstreamListener.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
-		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 		// Echo: read a TNS packet and send it back
 		pkt, err := readTNSPacket(conn)
@@ -124,7 +131,7 @@ func TestSession_RawRelay(t *testing.T) {
 
 	// Create client and proxy sides
 	client, proxyEnd := net.Pipe()
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	upstreamConn, err := net.Dial("tcp", upstreamListener.Addr().String())
 	require.NoError(t, err)
@@ -132,6 +139,9 @@ func TestSession_RawRelay(t *testing.T) {
 	s := &session{
 		clientConn:   proxyEnd,
 		upstreamConn: upstreamConn,
+		ctx:          context.Background(),
+		logger:       testLogger(),
+		tracker:      newOracleQueryTracker(),
 	}
 
 	go func() {
@@ -144,30 +154,32 @@ func TestSession_RawRelay(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should get it echoed back
-	client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
 	pkt, err := readTNSPacket(client)
 	require.NoError(t, err)
 	assert.Equal(t, TNSPacketTypeData, pkt.Type)
 	assert.Equal(t, testPayload, pkt.Payload)
 
 	// Close client to unblock the relay goroutine
-	client.Close()
+	_ = client.Close()
 }
 
 func TestSession_ConnectToUpstream_ForwardsAndRelays(t *testing.T) {
+	t.Parallel()
+
 	// Simulate an upstream Oracle that receives TNS Connect → sends TNS Accept
 	upstreamListener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer upstreamListener.Close()
+	defer func() { _ = upstreamListener.Close() }()
 
 	go func() {
 		conn, err := upstreamListener.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
-		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 		if _, err = readTNSPacket(conn); err != nil {
 			return
@@ -185,9 +197,9 @@ func TestSession_ConnectToUpstream_ForwardsAndRelays(t *testing.T) {
 	// Connect to upstream
 	upstreamConn, err := net.Dial("tcp", upstreamListener.Addr().String())
 	require.NoError(t, err)
-	defer upstreamConn.Close()
+	defer func() { _ = upstreamConn.Close() }()
 
-	upstreamConn.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = upstreamConn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	// Forward connect (parse first to verify, then send raw)
 	pkt, err := parseTNSHeader(connectData[:8])
@@ -205,19 +217,21 @@ func TestSession_ConnectToUpstream_ForwardsAndRelays(t *testing.T) {
 }
 
 func TestSession_UpstreamRefuse_ForwardedToClient(t *testing.T) {
+	t.Parallel()
+
 	// Upstream that immediately refuses
 	upstreamListener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer upstreamListener.Close()
+	defer func() { _ = upstreamListener.Close() }()
 
 	go func() {
 		conn, err := upstreamListener.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
-		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 		_, _ = readTNSPacket(conn)
 
@@ -230,7 +244,7 @@ func TestSession_UpstreamRefuse_ForwardedToClient(t *testing.T) {
 	// Use TCP listener pair instead of net.Pipe to avoid synchronous blocking
 	clientListener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer clientListener.Close()
+	defer func() { _ = clientListener.Close() }()
 
 	// Client goroutine: sends Connect, reads response
 	type clientResult struct {
@@ -245,9 +259,9 @@ func TestSession_UpstreamRefuse_ForwardedToClient(t *testing.T) {
 			resultCh <- clientResult{err: err}
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 
-		conn.SetDeadline(time.Now().Add(5 * time.Second))
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 		// Send connect
 		_, _ = conn.Write(encodeTNSPacket(TNSPacketTypeConnect, buildTNSConnect("TESTDB")))
@@ -260,9 +274,9 @@ func TestSession_UpstreamRefuse_ForwardedToClient(t *testing.T) {
 	// Accept the "client" connection (this is the proxy side)
 	proxyEnd, err := clientListener.Accept()
 	require.NoError(t, err)
-	defer proxyEnd.Close()
+	defer func() { _ = proxyEnd.Close() }()
 
-	proxyEnd.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = proxyEnd.SetDeadline(time.Now().Add(5 * time.Second))
 
 	// Read connect from client
 	connectPkt, err := readTNSPacket(proxyEnd)
@@ -271,9 +285,9 @@ func TestSession_UpstreamRefuse_ForwardedToClient(t *testing.T) {
 	// Connect to upstream and forward
 	upstreamConn, err := net.Dial("tcp", upstreamListener.Addr().String())
 	require.NoError(t, err)
-	defer upstreamConn.Close()
+	defer func() { _ = upstreamConn.Close() }()
 
-	upstreamConn.SetDeadline(time.Now().Add(5 * time.Second))
+	_ = upstreamConn.SetDeadline(time.Now().Add(5 * time.Second))
 
 	_ = writeTNSPacket(upstreamConn, connectPkt)
 
@@ -293,6 +307,8 @@ func TestSession_UpstreamRefuse_ForwardedToClient(t *testing.T) {
 }
 
 func TestBuildTNSConnect_Parseable(t *testing.T) {
+	t.Parallel()
+
 	// Verify our test helper builds valid connect packets
 	payload := buildTNSConnect("MYDB")
 	connectStr := extractConnectString(payload)
@@ -300,6 +316,8 @@ func TestBuildTNSConnect_Parseable(t *testing.T) {
 }
 
 func TestBuildTNSConnect_DifferentServiceNames(t *testing.T) {
+	t.Parallel()
+
 	for _, name := range []string{"ORCL", "PROD_DB", "my_service_123"} {
 		payload := buildTNSConnect(name)
 		connectStr := extractConnectString(payload)

@@ -763,6 +763,13 @@ export interface components {
             /** @description SSL mode (disable, prefer, require, etc.) */
             ssl_mode?: string;
             /**
+             * @description Database protocol
+             * @enum {string}
+             */
+            protocol?: "postgresql" | "oracle";
+            /** @description Oracle SERVICE_NAME (Oracle only) */
+            oracle_service_name?: string;
+            /**
              * Format: uuid
              * @description User who created this configuration
              */
@@ -793,7 +800,7 @@ export interface components {
              */
             port: number;
             /** @description Target database name */
-            database_name: string;
+            database_name?: string;
             /** @description Target database username */
             username: string;
             /** @description Target database password (encrypted at rest) */
@@ -803,6 +810,14 @@ export interface components {
              * @default prefer
              */
             ssl_mode: string;
+            /**
+             * @description Database protocol
+             * @default postgresql
+             * @enum {string}
+             */
+            protocol: "postgresql" | "oracle";
+            /** @description Oracle SERVICE_NAME (required for Oracle) */
+            oracle_service_name?: string;
         };
         UpdateDatabaseRequest: {
             /** @description Description */
@@ -819,6 +834,13 @@ export interface components {
             password?: string;
             /** @description SSL mode */
             ssl_mode?: string;
+            /**
+             * @description Database protocol
+             * @enum {string}
+             */
+            protocol?: "postgresql" | "oracle";
+            /** @description Oracle SERVICE_NAME */
+            oracle_service_name?: string;
         };
         /**
          * @description Control types that can be applied to a grant:

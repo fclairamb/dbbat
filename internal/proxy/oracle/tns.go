@@ -8,9 +8,10 @@ import (
 	"net"
 )
 
-// TNS packet type codes.
+// TNSPacketType represents a TNS packet type code.
 type TNSPacketType byte
 
+// TNS packet type codes.
 const (
 	TNSPacketTypeConnect  TNSPacketType = 1
 	TNSPacketTypeAccept   TNSPacketType = 2

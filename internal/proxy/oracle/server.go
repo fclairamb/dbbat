@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/fclairamb/dbbat/internal/cache"
+	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -16,7 +17,9 @@ type Server struct {
 	store         *store.Store
 	encryptionKey []byte
 	authCache     *cache.AuthCache
+	queryStorage  config.QueryStorageConfig
 	logger        *slog.Logger
+	mu            sync.Mutex
 	listener      net.Listener
 	listenAddr    string
 	wg            sync.WaitGroup
@@ -30,6 +33,7 @@ func NewServer(
 	dataStore *store.Store,
 	encryptionKey []byte,
 	authCache *cache.AuthCache,
+	queryStorage config.QueryStorageConfig,
 	logger *slog.Logger,
 ) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -38,6 +42,7 @@ func NewServer(
 		store:         dataStore,
 		encryptionKey: encryptionKey,
 		authCache:     authCache,
+		queryStorage:  queryStorage,
 		logger:        logger.With("component", "oracle-proxy"),
 		shutdown:      make(chan struct{}),
 		ctx:           ctx,
@@ -52,8 +57,10 @@ func (s *Server) Start(addr string) error {
 		return fmt.Errorf("failed to listen: %w", err)
 	}
 
+	s.mu.Lock()
 	s.listener = listener
 	s.listenAddr = addr
+	s.mu.Unlock()
 	s.logger.InfoContext(s.ctx, "Oracle proxy server listening", slog.String("addr", addr))
 
 	for {
@@ -110,6 +117,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // Addr returns the listener address, useful for tests with ":0" port.
 func (s *Server) Addr() net.Addr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.listener != nil {
 		return s.listener.Addr()
 	}
@@ -133,7 +143,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 	s.logger.DebugContext(s.ctx, "New Oracle connection", slog.Any("remote_addr", clientConn.RemoteAddr()))
 
-	session := newSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.authCache)
+	session := newSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.authCache, s.queryStorage)
 	if err := session.run(); err != nil {
 		s.logger.ErrorContext(s.ctx, "Oracle session error",
 			slog.Any("error", err),
