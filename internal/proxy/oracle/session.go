@@ -73,7 +73,7 @@ func (s *session) run() error {
 	if connectPkt.Type != TNSPacketTypeConnect {
 		s.sendRefuse("expected TNS Connect packet")
 
-		return fmt.Errorf("expected Connect packet, got %s", connectPkt.Type)
+		return fmt.Errorf("%w: got %s", ErrExpectedConnectPacket, connectPkt.Type)
 	}
 
 	// Step 2: Parse connect descriptor to find target database
@@ -94,7 +94,7 @@ func (s *session) run() error {
 	if s.serviceName == "" {
 		s.sendRefuse("missing SERVICE_NAME in connect descriptor")
 
-		return fmt.Errorf("no SERVICE_NAME in connect descriptor")
+		return ErrNoServiceName
 	}
 
 	s.logger = s.logger.With("service_name", s.serviceName)
@@ -138,7 +138,7 @@ func (s *session) run() error {
 		// Forward the refusal to client
 		_ = writeTNSPacket(s.clientConn, upstreamResp)
 
-		return fmt.Errorf("upstream refused connection")
+		return ErrUpstreamRefused
 	}
 
 	// Forward the Accept to client

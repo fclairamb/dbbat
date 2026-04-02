@@ -320,20 +320,7 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	logger.InfoContext(ctx, "Proxy server started", slog.String("addr", cfg.ListenPG))
 
 	// Start Oracle proxy server (if configured)
-	var oracleServer *oracle.Server
-
-	if cfg.ListenOracle != "" {
-		oracleServer = oracle.NewServer(dataStore, cfg.EncryptionKey, proxyAuthCache, cfg.QueryStorage, logger)
-
-		go func() {
-			if err := oracleServer.Start(cfg.ListenOracle); err != nil {
-				logger.ErrorContext(context.Background(), "Oracle proxy server error", slog.Any("error", err))
-				os.Exit(1)
-			}
-		}()
-
-		logger.InfoContext(ctx, "Oracle proxy server started", slog.String("addr", cfg.ListenOracle))
-	}
+	oracleServer := startOracleProxy(ctx, cfg, dataStore, proxyAuthCache, logger)
 
 	// Wait for shutdown signal
 	sigChan := make(chan os.Signal, 1)
@@ -365,6 +352,25 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	logger.InfoContext(shutdownCtx, "Shutdown complete")
 	return nil
+}
+
+func startOracleProxy(ctx context.Context, cfg *config.Config, dataStore *store.Store, authCache *cache.AuthCache, logger *slog.Logger) *oracle.Server {
+	if cfg.ListenOracle == "" {
+		return nil
+	}
+
+	srv := oracle.NewServer(dataStore, cfg.EncryptionKey, authCache, cfg.QueryStorage, logger)
+
+	go func() {
+		if err := srv.Start(cfg.ListenOracle); err != nil {
+			logger.ErrorContext(context.Background(), "Oracle proxy server error", slog.Any("error", err))
+			os.Exit(1)
+		}
+	}()
+
+	logger.InfoContext(ctx, "Oracle proxy server started", slog.String("addr", cfg.ListenOracle))
+
+	return srv
 }
 
 func runMigrate(ctx context.Context, flags *cliFlags) error {
