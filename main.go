@@ -322,35 +322,39 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	// Start Oracle proxy server (if configured)
 	oracleServer := startOracleProxy(ctx, cfg, dataStore, proxyAuthCache, logger)
 
-	// Wait for shutdown signal
+	// Wait for shutdown signal and gracefully stop all servers
+	servers := []shutdownable{apiServer, proxyServer}
+	if oracleServer != nil {
+		servers = append(servers, oracleServer)
+	}
+
+	return awaitShutdown(ctx, logger, servers...)
+}
+
+// shutdownable is implemented by servers that support graceful shutdown.
+type shutdownable interface {
+	Shutdown(ctx context.Context) error
+}
+
+// awaitShutdown waits for an OS interrupt signal and then gracefully shuts down all servers.
+func awaitShutdown(ctx context.Context, logger *slog.Logger, servers ...shutdownable) error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	<-sigChan
 	logger.InfoContext(ctx, "Shutdown signal received, gracefully shutting down...")
 
-	// Graceful shutdown with timeout - use fresh context since main context may be canceled
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
-	// Shutdown API server
-	if err := apiServer.Shutdown(shutdownCtx); err != nil {
-		logger.ErrorContext(shutdownCtx, "API server shutdown error", slog.Any("error", err))
-	}
-
-	// Shutdown proxy server
-	if err := proxyServer.Shutdown(shutdownCtx); err != nil {
-		logger.ErrorContext(shutdownCtx, "Proxy server shutdown error", slog.Any("error", err))
-	}
-
-	// Shutdown Oracle proxy server
-	if oracleServer != nil {
-		if err := oracleServer.Shutdown(shutdownCtx); err != nil {
-			logger.ErrorContext(shutdownCtx, "Oracle proxy server shutdown error", slog.Any("error", err))
+	for _, srv := range servers {
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			logger.ErrorContext(shutdownCtx, "server shutdown error", slog.Any("error", err))
 		}
 	}
 
 	logger.InfoContext(shutdownCtx, "Shutdown complete")
+
 	return nil
 }
 

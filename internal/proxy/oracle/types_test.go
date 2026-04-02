@@ -37,7 +37,7 @@ func TestDecodeOracleNumber(t *testing.T) {
 
 func TestDecodeOracleNumber_EmptyBytes(t *testing.T) {
 	_, err := decodeOracleNumber([]byte{})
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrInvalidNumberData)
 }
 
@@ -89,9 +89,9 @@ func TestDecodeOracleVARCHAR2(t *testing.T) {
 }
 
 func TestDecodeOracleVARCHAR2_UTF8(t *testing.T) {
-	result, err := decodeOracleValue(OracleTypeVARCHAR2, []byte("héllo wörld 日本語"))
+	result, err := decodeOracleValue(OracleTypeVARCHAR2, []byte("café résumé"))
 	require.NoError(t, err)
-	assert.Equal(t, "héllo wörld 日本語", result)
+	assert.Equal(t, "café résumé", result)
 }
 
 func TestDecodeOracleCHAR_TrimsPadding(t *testing.T) {
@@ -164,5 +164,7 @@ func TestDecodeOracleTimestamp_ViaDispatch(t *testing.T) {
 	)
 	result, err := decodeOracleValue(OracleTypeTIMESTAMP, raw)
 	require.NoError(t, err)
-	assert.Contains(t, result.(string), "2024-06-15T10:30:00")
+	val, ok := result.(string)
+	require.True(t, ok)
+	assert.Contains(t, val, "2024-06-15T10:30:00")
 }

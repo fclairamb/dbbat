@@ -19,7 +19,7 @@ const (
 
 // handleAuthPhase relays TTC negotiation and authentication between client and upstream,
 // intercepting the AUTH phase to extract the username and check grants.
-func (s *session) handleAuthPhase() error {
+func (s *session) handleAuthPhase() error { //nolint:gocognit,nestif // auth flow has inherent complexity from protocol negotiation
 	// Relay packets until auth is complete.
 	// The flow is:
 	// 1. Set Protocol (client → upstream, upstream → client)
@@ -241,8 +241,8 @@ func isPlausibleUsername(s string) bool {
 
 	// Oracle usernames: letters, digits, underscores, $, #
 	for _, c := range s {
-		if !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-			(c >= '0' && c <= '9') || c == '_' || c == '$' || c == '#') {
+		if !(c >= 'A' && c <= 'Z') && !(c >= 'a' && c <= 'z') &&
+			!(c >= '0' && c <= '9') && c != '_' && c != '$' && c != '#' {
 			return false
 		}
 	}

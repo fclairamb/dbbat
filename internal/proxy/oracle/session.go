@@ -249,6 +249,9 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 		if err == nil {
 			s.handleOCLOSE(cursorID)
 		}
+
+	default:
+		// Other TTC functions are forwarded as-is
 	}
 
 	return false

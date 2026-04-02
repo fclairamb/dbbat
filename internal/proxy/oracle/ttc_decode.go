@@ -287,7 +287,7 @@ type OFETCHResult struct {
 // Real Oracle TTC encoding uses variable-length integers extensively.
 
 const (
-	oall8MinPayloadSize = 8  // func(1) + options(4) + cursor(2) + sql_len(1)
+	oall8MinPayloadSize = 8 // func(1) + options(4) + cursor(2) + sql_len(1)
 	oall8LenShort       = 0xFE
 	oall8LenLong        = 0xFF
 )

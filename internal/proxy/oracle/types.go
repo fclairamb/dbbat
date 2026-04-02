@@ -13,35 +13,31 @@ import (
 
 // Oracle data type codes.
 const (
-	OracleTypeVARCHAR2  uint8 = 1
-	OracleTypeNUMBER    uint8 = 2
-	OracleTypeDATE      uint8 = 12
-	OracleTypeRAW       uint8 = 23
-	OracleTypeCHAR      uint8 = 96
-	OracleTypeBINFLOAT  uint8 = 100
-	OracleTypeBINDOUBLE uint8 = 101
-	OracleTypeCLOB      uint8 = 112
-	OracleTypeBLOB      uint8 = 113
-	OracleTypeTIMESTAMP uint8 = 180
-	OracleTypeTIMESTAMP_TZ   uint8 = 181
-	OracleTypeTIMESTAMP_LTZ  uint8 = 231
+	OracleTypeVARCHAR2     uint8 = 1
+	OracleTypeNUMBER       uint8 = 2
+	OracleTypeDATE         uint8 = 12
+	OracleTypeRAW          uint8 = 23
+	OracleTypeCHAR         uint8 = 96
+	OracleTypeBINFLOAT     uint8 = 100
+	OracleTypeBINDOUBLE    uint8 = 101
+	OracleTypeCLOB         uint8 = 112
+	OracleTypeBLOB         uint8 = 113
+	OracleTypeTIMESTAMP    uint8 = 180
+	OracleTypeTIMESTAMPTZ  uint8 = 181
+	OracleTypeTIMESTAMPLTZ uint8 = 231
 )
 
 // Type decoding errors.
 var (
-	ErrInvalidDateLength      = errors.New("Oracle DATE requires exactly 7 bytes")
-	ErrInvalidTimestampLength = errors.New("Oracle TIMESTAMP requires at least 11 bytes")
-	ErrInvalidNumberData      = errors.New("Oracle NUMBER data is empty")
+	ErrInvalidDateLength      = errors.New("oracle DATE requires exactly 7 bytes")
+	ErrInvalidTimestampLength = errors.New("oracle TIMESTAMP requires at least 11 bytes")
+	ErrInvalidNumberData      = errors.New("oracle NUMBER data is empty")
 )
 
 // decodeOracleValue dispatches decoding based on the Oracle type code.
 // Returns nil for nil/empty data (NULL values).
 func decodeOracleValue(typeCode uint8, data []byte) (interface{}, error) {
-	if data == nil {
-		return nil, nil
-	}
-
-	if len(data) == 0 {
+	if len(data) == 0 { //nolint:nilnil // nil/empty data means SQL NULL — returning nil,nil is intentional
 		return nil, nil
 	}
 
@@ -70,7 +66,7 @@ func decodeOracleValue(typeCode uint8, data []byte) (interface{}, error) {
 			return nil, fmt.Errorf("%w: BINARY_DOUBLE requires 8 bytes, got %d", ErrInvalidFloatLength, len(data))
 		}
 		return math.Float64frombits(binary.BigEndian.Uint64(data)), nil
-	case OracleTypeTIMESTAMP, OracleTypeTIMESTAMP_TZ, OracleTypeTIMESTAMP_LTZ:
+	case OracleTypeTIMESTAMP, OracleTypeTIMESTAMPTZ, OracleTypeTIMESTAMPLTZ:
 		t, err := decodeOracleTimestamp(data)
 		if err != nil {
 			return nil, err

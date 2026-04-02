@@ -7,32 +7,38 @@ import (
 )
 
 func TestParseServiceName_Standard(t *testing.T) {
+	t.Parallel()
 	desc := `(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db.example.com)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ORCL)))`
 	assert.Equal(t, "ORCL", parseServiceName(desc))
 }
 
 func TestParseServiceName_CaseInsensitive(t *testing.T) {
+	t.Parallel()
 	desc := `(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db)(PORT=1521))(CONNECT_DATA=(service_name=mydb)))`
 	assert.Equal(t, "mydb", parseServiceName(desc))
 }
 
 func TestParseServiceName_WithSpaces(t *testing.T) {
+	t.Parallel()
 	desc := `(DESCRIPTION = (CONNECT_DATA = (SERVICE_NAME = PROD_DB )))`
 	assert.Equal(t, "PROD_DB", parseServiceName(desc))
 }
 
 func TestParseServiceName_MissingServiceName(t *testing.T) {
+	t.Parallel()
 	desc := `(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db)(PORT=1521))(CONNECT_DATA=(SID=ORCL)))`
-	assert.Equal(t, "", parseServiceName(desc))
+	assert.Empty(t, parseServiceName(desc))
 }
 
 func TestParseSID_Fallback(t *testing.T) {
+	t.Parallel()
 	desc := `(DESCRIPTION=(CONNECT_DATA=(SID=MYDB)))`
-	assert.Equal(t, "", parseServiceName(desc))
+	assert.Empty(t, parseServiceName(desc))
 	assert.Equal(t, "MYDB", parseSID(desc))
 }
 
 func TestParseServiceName_MultipleAddresses(t *testing.T) {
+	t.Parallel()
 	desc := `(DESCRIPTION=
         (ADDRESS_LIST=
             (ADDRESS=(PROTOCOL=TCP)(HOST=rac1)(PORT=1521))
@@ -42,18 +48,22 @@ func TestParseServiceName_MultipleAddresses(t *testing.T) {
 }
 
 func TestParseServiceName_EZConnect(t *testing.T) {
+	t.Parallel()
 	assert.Equal(t, "ORCL", parseServiceNameEZConnect("db.example.com:1521/ORCL"))
 }
 
 func TestParseServiceName_EZConnect_NoPort(t *testing.T) {
+	t.Parallel()
 	assert.Equal(t, "ORCL", parseServiceNameEZConnect("db.example.com/ORCL"))
 }
 
 func TestParseServiceName_EZConnect_NoSlash(t *testing.T) {
-	assert.Equal(t, "", parseServiceNameEZConnect("db.example.com:1521"))
+	t.Parallel()
+	assert.Empty(t, parseServiceNameEZConnect("db.example.com:1521"))
 }
 
 func TestParseConnectDescriptor_Full(t *testing.T) {
+	t.Parallel()
 	desc := `(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db.prod)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=FINDB)(CID=(PROGRAM=sqlplus)(HOST=workstation)(USER=jdoe))))`
 	cd := parseConnectDescriptor(desc)
 	assert.Equal(t, "FINDB", cd.ServiceName)
@@ -64,17 +74,20 @@ func TestParseConnectDescriptor_Full(t *testing.T) {
 }
 
 func TestParseConnectDescriptor_Empty(t *testing.T) {
+	t.Parallel()
 	cd := parseConnectDescriptor("")
-	assert.Equal(t, "", cd.ServiceName)
+	assert.Empty(t, cd.ServiceName)
 }
 
 func TestParseConnectDescriptor_MalformedParens(t *testing.T) {
+	t.Parallel()
 	desc := `(DESCRIPTION=(CONNECT_DATA=(SERVICE_NAME=OK)`
 	cd := parseConnectDescriptor(desc)
 	assert.Equal(t, "OK", cd.ServiceName)
 }
 
 func TestExtractConnectString_WithParen(t *testing.T) {
+	t.Parallel()
 	// Simulate a payload that just contains a descriptor
 	payload := []byte("garbage(DESCRIPTION=(CONNECT_DATA=(SERVICE_NAME=TEST)))")
 	s := findDescriptorInPayload(payload)
@@ -82,6 +95,7 @@ func TestExtractConnectString_WithParen(t *testing.T) {
 }
 
 func TestExtractConnectString_Empty(t *testing.T) {
+	t.Parallel()
 	s := findDescriptorInPayload([]byte{})
-	assert.Equal(t, "", s)
+	assert.Empty(t, s)
 }

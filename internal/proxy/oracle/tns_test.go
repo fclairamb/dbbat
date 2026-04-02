@@ -54,7 +54,7 @@ func TestTNSPacket_ParseHeader_UnknownType(t *testing.T) {
 func TestTNSPacket_Encode(t *testing.T) {
 	payload := []byte("hello")
 	encoded := encodeTNSPacket(TNSPacketTypeData, payload)
-	assert.Equal(t, 8+len(payload), len(encoded))
+	assert.Len(t, encoded, 8+len(payload))
 	assert.Equal(t, byte(0x00), encoded[0])
 	assert.Equal(t, byte(0x0D), encoded[1]) // length = 13
 	assert.Equal(t, byte(0x06), encoded[4]) // type = Data
@@ -72,7 +72,7 @@ func TestTNSPacket_RoundTrip(t *testing.T) {
 
 func TestTNSPacket_ZeroLengthPayload(t *testing.T) {
 	encoded := encodeTNSPacket(TNSPacketTypeResend, nil)
-	assert.Equal(t, 8, len(encoded))
+	assert.Len(t, encoded, 8)
 }
 
 func TestTNSPacket_MaxSDU(t *testing.T) {
@@ -94,8 +94,8 @@ func TestTNSPacketType_String(t *testing.T) {
 
 func TestTNSPacket_ReadFromConn(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	go func() {
 		raw := encodeTNSPacket(TNSPacketTypeConnect, []byte("connect-data"))
@@ -110,8 +110,8 @@ func TestTNSPacket_ReadFromConn(t *testing.T) {
 
 func TestTNSPacket_ReadFromConn_PartialWrites(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	go func() {
 		raw := encodeTNSPacket(TNSPacketTypeData, []byte("payload"))
@@ -130,7 +130,7 @@ func TestTNSPacket_ReadFromConn_EOF(t *testing.T) {
 	client, server := net.Pipe()
 	go func() {
 		_, _ = client.Write([]byte{0x00, 0x20}) // partial header
-		client.Close()
+		_ = client.Close()
 	}()
 
 	_, err := readTNSPacket(server)
@@ -139,8 +139,8 @@ func TestTNSPacket_ReadFromConn_EOF(t *testing.T) {
 
 func TestTNSPacket_MultiplePackets(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	types := []TNSPacketType{TNSPacketTypeConnect, TNSPacketTypeData, TNSPacketTypeMarker}
 	go func() {
@@ -159,8 +159,8 @@ func TestTNSPacket_MultiplePackets(t *testing.T) {
 
 func TestTNSPacket_WriteThenRead(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	original := &TNSPacket{
 		Type:    TNSPacketTypeData,

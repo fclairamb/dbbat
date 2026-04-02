@@ -214,31 +214,34 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string, bytesTr
 
 	// Log asynchronously to not block proxy
 	if s.store != nil {
-		go func() {
-			createdQuery, err := s.store.CreateQuery(s.ctx, query)
-			if err != nil {
-				s.logger.ErrorContext(s.ctx, "failed to log query", slog.Any("error", err))
-				return
-			}
-
-			// Store captured result rows
-			if len(capturedRows) > 0 {
-				if err := s.store.StoreQueryRows(s.ctx, createdQuery.UID, capturedRows); err != nil {
-					s.logger.ErrorContext(s.ctx, "failed to store query rows", slog.Any("error", err))
-				}
-			}
-
-			// Update connection stats
-			if err := s.store.IncrementConnectionStats(s.ctx, s.connectionUID, bytesTransferred); err != nil {
-				s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
-			}
-		}()
+		go s.persistQuery(query, capturedRows, bytesTransferred)
 	}
 
 	// Update local grant state for in-session quota checks
 	if s.grant != nil {
 		s.grant.QueryCount++
 		s.grant.BytesTransferred += bytesTransferred
+	}
+}
+
+// persistQuery stores a completed query and its rows in the database.
+func (s *session) persistQuery(query *store.Query, capturedRows []store.QueryRow, bytesTransferred int64) {
+	createdQuery, err := s.store.CreateQuery(s.ctx, query)
+	if err != nil {
+		s.logger.ErrorContext(s.ctx, "failed to log query", slog.Any("error", err))
+		return
+	}
+
+	// Store captured result rows
+	if len(capturedRows) > 0 {
+		if err := s.store.StoreQueryRows(s.ctx, createdQuery.UID, capturedRows); err != nil {
+			s.logger.ErrorContext(s.ctx, "failed to store query rows", slog.Any("error", err))
+		}
+	}
+
+	// Update connection stats
+	if err := s.store.IncrementConnectionStats(s.ctx, s.connectionUID, bytesTransferred); err != nil {
+		s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
 	}
 }
 
@@ -251,7 +254,8 @@ func (s *session) writeTTCError(oraErrorCode int, message string) error {
 	// [sequence number: 1 byte] [error code: 4 bytes BE]
 	// [cursor ID: 2 bytes] [row count: 4 bytes]
 	// [error flag: 2 bytes] [error message length: 2 bytes] [error message]
-	var buf []byte
+	errMsg := fmt.Sprintf("ORA-%05d: %s", oraErrorCode, message)
+	buf := make([]byte, 0, 18+len(errMsg))
 
 	// Data flags
 	buf = append(buf, 0x00, 0x00)
@@ -277,7 +281,6 @@ func (s *session) writeTTCError(oraErrorCode int, message string) error {
 	buf = append(buf, 0x00, 0x01)
 
 	// Error message: ORA-NNNNN: message
-	errMsg := fmt.Sprintf("ORA-%05d: %s", oraErrorCode, message)
 	msgLen := make([]byte, 2)
 	binary.BigEndian.PutUint16(msgLen, uint16(len(errMsg)))
 	buf = append(buf, msgLen...)
@@ -395,4 +398,3 @@ func (s *session) checkQuotas() error {
 
 	return nil
 }
-

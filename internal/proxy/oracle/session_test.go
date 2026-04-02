@@ -155,7 +155,7 @@ func TestSession_RawRelay(t *testing.T) {
 	assert.Equal(t, testPayload, pkt.Payload)
 
 	// Close client to unblock the relay goroutine
-	client.Close()
+	_ = client.Close()
 }
 
 func TestSession_ConnectToUpstream_ForwardsAndRelays(t *testing.T) {

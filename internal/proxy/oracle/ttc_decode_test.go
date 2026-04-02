@@ -12,7 +12,7 @@ import (
 
 // buildOALL8 creates a well-formed OALL8 TTC payload for testing.
 func buildOALL8(sql string, binds []string, cursorID uint16) []byte {
-	var buf []byte
+	buf := make([]byte, 0, 64)
 
 	// Function code
 	buf = append(buf, byte(TTCFuncOALL8))
@@ -75,7 +75,7 @@ func buildOALL8WithNulls(sql string, binds []interface{}, cursorID uint16) []byt
 
 // buildOALL8WithBinaryBind creates an OALL8 payload with a binary bind value.
 func buildOALL8WithBinaryBind(sql string, binaryVal []byte, cursorID uint16) []byte {
-	var buf []byte
+	buf := make([]byte, 0, 64)
 
 	buf = append(buf, byte(TTCFuncOALL8))
 	buf = append(buf, 0x00, 0x00, 0x00, 0x00) // options
@@ -373,7 +373,7 @@ func buildTTCResponse(cols []columnDef, rows [][]interface{}) []byte {
 
 // buildTTCErrorResponse creates a TTC error response payload.
 func buildTTCErrorResponse(errCode int, errMsg string) []byte {
-	var buf []byte
+	buf := make([]byte, 0, 64)
 
 	// Function code (Response)
 	buf = append(buf, byte(TTCFuncResponse))
@@ -405,9 +405,9 @@ func buildTTCResponseWithMoreData(moreData bool) []byte {
 	buf = append(buf, byte(TTCFuncResponse))
 	buf = append(buf, 0x01)
 	buf = append(buf, 0x00, 0x00, 0x00, 0x00) // no error
-	buf = append(buf, 0x00, 0x01)              // cursor
+	buf = append(buf, 0x00, 0x01)             // cursor
 	buf = append(buf, 0x00, 0x00, 0x00, 0x00) // row count
-	buf = append(buf, 0x00, 0x00)              // error flag
+	buf = append(buf, 0x00, 0x00)             // error flag
 
 	// Column count = 0
 	buf = append(buf, 0x00, 0x00)

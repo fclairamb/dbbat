@@ -13,6 +13,7 @@ import "fmt"
 //	3       ...   Function-specific payload
 type TTCFunctionCode byte
 
+// TTC function codes for Oracle's Two-Task Common protocol.
 const (
 	TTCFuncSetProtocol  TTCFunctionCode = 0x01 // OSETPRO — session init
 	TTCFuncSetDataTypes TTCFunctionCode = 0x02 // ODTYPES — session init
