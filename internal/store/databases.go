@@ -24,16 +24,18 @@ func (s *Store) CreateDatabase(ctx context.Context, db *Database, encryptionKey 
 	plainPassword := db.Password
 
 	result := &Database{
-		Name:         db.Name,
-		Description:  db.Description,
-		Host:         db.Host,
-		Port:         db.Port,
-		DatabaseName: db.DatabaseName,
-		Username:     db.Username,
-		SSLMode:      db.SSLMode,
-		CreatedBy:    db.CreatedBy,
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
+		Name:              db.Name,
+		Description:       db.Description,
+		Host:              db.Host,
+		Port:              db.Port,
+		DatabaseName:      db.DatabaseName,
+		Username:          db.Username,
+		SSLMode:           db.SSLMode,
+		Protocol:          db.Protocol,
+		OracleServiceName: db.OracleServiceName,
+		CreatedBy:         db.CreatedBy,
+		CreatedAt:         time.Now(),
+		UpdatedAt:         time.Now(),
 	}
 
 	// Use a transaction to insert with a placeholder, get UID, then update with real encrypted password
@@ -207,6 +209,14 @@ func (s *Store) UpdateDatabase(ctx context.Context, uid uuid.UUID, updates Datab
 
 	if updates.SSLMode != nil {
 		q = q.Set("ssl_mode = ?", *updates.SSLMode)
+	}
+
+	if updates.Protocol != nil {
+		q = q.Set("protocol = ?", *updates.Protocol)
+	}
+
+	if updates.OracleServiceName != nil {
+		q = q.Set("oracle_service_name = ?", *updates.OracleServiceName)
 	}
 
 	result, err := q.Exec(ctx)
