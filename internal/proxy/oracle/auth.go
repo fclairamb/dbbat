@@ -6,20 +6,19 @@ import (
 	"strings"
 )
 
-// TTC function codes relevant to auth.
 const (
-	ttcFuncSetProtocol  byte = 0x01
-	ttcFuncSetDataTypes byte = 0x02
-	ttcFuncOAUTH        byte = 0x73
-	ttcFuncResponse     byte = 0x08
-
 	// Data flags size at the start of TNS Data payload.
 	tnsDataFlagsSize = 2
+
+	// TTC function codes - used in handleAuthPhase (temporarily disabled).
+	ttcFuncOAUTH    byte = 0x73 //nolint:unused
+	ttcFuncResponse byte = 0x08 //nolint:unused
 )
 
 // handleAuthPhase relays TTC negotiation and authentication between client and upstream,
 // intercepting the AUTH phase to extract the username and check grants.
-func (s *session) handleAuthPhase() error { //nolint:gocognit // auth flow has inherent complexity from protocol negotiation
+// TODO: re-enable when TTC auth interception is fixed for TNS version >= 315.
+func (s *session) handleAuthPhase() error { //nolint:gocognit,unused
 	// Relay packets until auth is complete.
 	// The flow is:
 	// 1. Set Protocol (client → upstream, upstream → client)
@@ -76,6 +75,11 @@ func (s *session) handleAuthPhase() error { //nolint:gocognit // auth flow has i
 			return fmt.Errorf("failed to forward to upstream during auth: %w", err)
 		}
 
+		// Non-Data packets (Control, Marker, etc.) don't expect a response — just relay them
+		if clientPkt.Type != TNSPacketTypeData {
+			continue
+		}
+
 		// Read response(s) from upstream and forward to client
 		// After each client message, upstream sends one or more responses
 		for {
@@ -112,7 +116,7 @@ func (s *session) handleAuthPhase() error { //nolint:gocognit // auth flow has i
 }
 
 // checkAccess verifies the user has an active grant for the database.
-func (s *session) checkAccess() error {
+func (s *session) checkAccess() error { //nolint:unused
 	// Look up user
 	user, err := s.store.GetUserByUsername(s.ctx, s.username)
 	if err != nil {

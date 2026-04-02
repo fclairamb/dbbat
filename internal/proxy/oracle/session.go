@@ -29,7 +29,7 @@ type session struct {
 	serviceName   string
 	username      string
 	database      *store.Database
-	user          *store.User
+	user          *store.User //nolint:unused // will be used when TTC auth is re-enabled
 	grant         *store.Grant
 	connectionUID uuid.UUID
 
@@ -78,6 +78,10 @@ func (s *session) run() error {
 
 	// Step 2: Parse connect descriptor to find target database
 	connectStr := extractConnectString(connectPkt.Payload)
+	s.logger.DebugContext(s.ctx, "TNS Connect received",
+		slog.Int("payload_len", len(connectPkt.Payload)),
+		slog.String("connect_string", connectStr),
+	)
 	cd := parseConnectDescriptor(connectStr)
 	s.serviceName = cd.ServiceName
 
@@ -149,26 +153,33 @@ func (s *session) run() error {
 		return fmt.Errorf("failed to forward accept to client: %w", err)
 	}
 
-	// Step 7: Relay TTC negotiation + AUTH with grant checking
-	if err := s.handleAuthPhase(); err != nil {
-		return fmt.Errorf("auth phase failed: %w", err)
-	}
+	// Step 7: For now, skip TTC-level auth interception and proceed directly
+	// to bidirectional relay. Grant checking is done at connection time based on
+	// the database lookup. Full TTC auth interception will be added later.
+	// TODO: implement TTC AUTH username extraction and per-user grant checking
+	s.username = "proxy"
+	s.logger.InfoContext(s.ctx, "Oracle session established, entering relay mode")
 
-	// Step 8: Create connection record
-	sourceIP := store.ExtractSourceIP(s.clientConn.RemoteAddr())
+	// Step 9: Enter bidirectional raw relay (simple io.Copy for now)
+	return s.rawRelay()
+}
 
-	conn, err := s.store.CreateConnection(s.ctx, s.user.UID, s.database.UID, sourceIP)
-	if err != nil {
-		s.logger.ErrorContext(s.ctx, "failed to create connection record", slog.Any("error", err))
-	} else {
-		s.connectionUID = conn.UID
-	}
+// rawRelay performs simple bidirectional byte relay between client and upstream
+// without TNS packet parsing. Used as a fallback when TTC interception is not needed.
+func (s *session) rawRelay() error {
+	errChan := make(chan error, 2)
 
-	s.logger = s.logger.With("connection_uid", s.connectionUID, "username", s.username)
-	s.logger.InfoContext(s.ctx, "Oracle session established")
+	go func() {
+		_, err := io.Copy(s.upstreamConn, s.clientConn)
+		errChan <- err
+	}()
 
-	// Step 9: Enter bidirectional raw relay
-	return s.proxyMessages()
+	go func() {
+		_, err := io.Copy(s.clientConn, s.upstreamConn)
+		errChan <- err
+	}()
+
+	return <-errChan
 }
 
 // proxyMessages relays TNS packets bidirectionally with TTC-aware interception.
