@@ -225,7 +225,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
         protocol === "postgresql" ? databaseName : oracleServiceName,
       username,
       password,
-      ssl_mode: protocol === "postgresql" ? sslMode : undefined,
+      ssl_mode: protocol === "postgresql" ? sslMode : "",
       protocol: protocol as "postgresql" | "oracle",
       oracle_service_name:
         protocol === "oracle" ? oracleServiceName : undefined,

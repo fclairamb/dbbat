@@ -212,8 +212,8 @@ func defaultConfig() Config {
 		ListenPG:     ":5434",
 		ListenAPI:    ":4200",
 		ListenOracle: ":1522",
-		BaseURL:   DefaultBaseURL,
-		LogLevel:  DefaultLogLevel,
+		BaseURL:      DefaultBaseURL,
+		LogLevel:     DefaultLogLevel,
 		QueryStorage: QueryStorageConfig{
 			MaxResultRows:  DefaultMaxResultRows,
 			MaxResultBytes: DefaultMaxResultBytes,

@@ -188,8 +188,8 @@ func TestDefaultValues(t *testing.T) {
 		t.Errorf("Load() ListenPG = %v, want :5434", cfg.ListenPG)
 	}
 
-	if cfg.ListenAPI != ":8080" {
-		t.Errorf("Load() ListenAPI = %v, want :8080", cfg.ListenAPI)
+	if cfg.ListenAPI != ":4200" {
+		t.Errorf("Load() ListenAPI = %v, want :4200", cfg.ListenAPI)
 	}
 }
 
