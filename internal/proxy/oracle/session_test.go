@@ -1,6 +1,7 @@
 package oracle
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -132,6 +133,9 @@ func TestSession_RawRelay(t *testing.T) {
 	s := &session{
 		clientConn:   proxyEnd,
 		upstreamConn: upstreamConn,
+		ctx:          context.Background(),
+		logger:       testLogger(),
+		tracker:      newOracleQueryTracker(),
 	}
 
 	go func() {

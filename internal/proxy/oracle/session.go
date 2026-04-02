@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/cache"
+	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -31,6 +32,10 @@ type session struct {
 	user          *store.User
 	grant         *store.Grant
 	connectionUID uuid.UUID
+
+	// Query tracking
+	tracker      *oracleQueryTracker
+	queryStorage config.QueryStorageConfig
 }
 
 // newSession creates a new Oracle proxy session.
@@ -41,6 +46,7 @@ func newSession(
 	logger *slog.Logger,
 	ctx context.Context, //nolint:revive
 	authCache *cache.AuthCache,
+	queryStorage config.QueryStorageConfig,
 ) *session {
 	return &session{
 		clientConn:    clientConn,
@@ -49,6 +55,8 @@ func newSession(
 		logger:        logger,
 		ctx:           ctx,
 		authCache:     authCache,
+		tracker:       newOracleQueryTracker(),
+		queryStorage:  queryStorage,
 	}
 }
 
@@ -160,44 +168,169 @@ func (s *session) run() error {
 	return s.proxyMessages()
 }
 
-// proxyMessages relays TNS packets bidirectionally between client and upstream.
+// proxyMessages relays TNS packets bidirectionally with TTC-aware interception.
 func (s *session) proxyMessages() error {
 	errChan := make(chan error, 2)
 
-	// Client → Upstream
+	// Client → Upstream (with query interception)
 	go func() {
-		errChan <- s.relay(s.clientConn, s.upstreamConn, "client->upstream")
+		errChan <- s.clientToUpstream()
 	}()
 
-	// Upstream → Client
+	// Upstream → Client (with response interception)
 	go func() {
-		errChan <- s.relay(s.upstreamConn, s.clientConn, "upstream->client")
+		errChan <- s.upstreamToClient()
 	}()
 
 	// Wait for either direction to close
 	return <-errChan
 }
 
-// relay copies raw bytes from src to dst. This is a simple TCP relay for Phase 1.
-func (s *session) relay(src, dst net.Conn, direction string) error {
-	buf := make([]byte, 32*1024)
-
+// clientToUpstream reads TNS packets from the client, intercepts Data packets
+// for TTC-level query interception, and forwards to upstream.
+func (s *session) clientToUpstream() error {
 	for {
-		n, err := src.Read(buf)
-		if n > 0 {
-			if _, writeErr := dst.Write(buf[:n]); writeErr != nil {
-				return fmt.Errorf("%s write error: %w", direction, writeErr)
-			}
-		}
-
+		pkt, err := readTNSPacket(s.clientConn)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
 				return nil
 			}
 
-			return fmt.Errorf("%s read error: %w", direction, err)
+			return fmt.Errorf("client read error: %w", err)
+		}
+
+		// Only intercept Data packets
+		if pkt.Type == TNSPacketTypeData && len(pkt.Payload) >= ttcDataFlagsSize+1 {
+			if blocked := s.interceptClientMessage(pkt); blocked {
+				continue // Don't forward — error already sent to client
+			}
+		}
+
+		// Forward to upstream
+		if err := writeTNSPacket(s.upstreamConn, pkt); err != nil {
+			return fmt.Errorf("upstream write error: %w", err)
 		}
 	}
+}
+
+// interceptClientMessage examines a TNS Data packet from the client.
+// Returns true if the packet was blocked (error sent to client), false if it should be forwarded.
+func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
+	funcCode, err := parseTTCFunctionCode(pkt.Payload)
+	if err != nil {
+		return false
+	}
+
+	s.logger.DebugContext(s.ctx, "TTC message", slog.String("func", funcCode.String()))
+
+	ttcPayload := extractTTCPayload(pkt.Payload)
+	if ttcPayload == nil {
+		return false
+	}
+
+	switch funcCode {
+	case TTCFuncOALL8:
+		// Check quotas first
+		if err := s.checkQuotas(); err != nil {
+			_ = s.sendOracleError(err)
+			return true
+		}
+
+		if err := s.handleOALL8(ttcPayload); err != nil {
+			_ = s.sendOracleError(err)
+			return true
+		}
+
+	case TTCFuncOFETCH:
+		s.handleOFETCH(ttcPayload)
+
+	case TTCFuncOCLOSE:
+		cursorID, err := decodeCursorIDFromOCLOSE(ttcPayload)
+		if err == nil {
+			s.handleOCLOSE(cursorID)
+		}
+	}
+
+	return false
+}
+
+// upstreamToClient reads TNS packets from upstream, intercepts Data packets
+// for response tracking and row capture, and forwards to the client.
+func (s *session) upstreamToClient() error {
+	for {
+		pkt, err := readTNSPacket(s.upstreamConn)
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+
+			return fmt.Errorf("upstream read error: %w", err)
+		}
+
+		// Track bytes transferred
+		bytesTransferred := int64(len(pkt.Payload))
+
+		// Intercept Data packets for response handling
+		if pkt.Type == TNSPacketTypeData && len(pkt.Payload) >= ttcDataFlagsSize+1 {
+			funcCode, fcErr := parseTTCFunctionCode(pkt.Payload)
+			if fcErr == nil && funcCode == TTCFuncResponse {
+				ttcPayload := extractTTCPayload(pkt.Payload)
+				if ttcPayload != nil {
+					s.handleResponse(ttcPayload, bytesTransferred)
+				}
+			}
+		}
+
+		// Forward to client
+		if err := writeTNSPacket(s.clientConn, pkt); err != nil {
+			return fmt.Errorf("client write error: %w", err)
+		}
+	}
+}
+
+// handleResponse processes a TTC response, capturing rows and completing queries.
+func (s *session) handleResponse(ttcPayload []byte, bytesTransferred int64) {
+	resp, err := decodeTTCResponse(ttcPayload)
+	if err != nil {
+		// Fall back to basic parsing
+		errStr := parseResponseError(ttcPayload)
+		rowsAffected := parseResponseRowsAffected(ttcPayload)
+		s.completeQuery(rowsAffected, errStr, bytesTransferred)
+
+		return
+	}
+
+	// Store column definitions in the pending cursor for multi-fetch
+	if s.tracker.pendingQuery != nil && s.tracker.pendingQuery.cursor != nil && len(resp.Columns) > 0 {
+		s.tracker.pendingQuery.cursor.columns = resp.Columns
+	}
+
+	// Capture rows
+	if s.tracker.pendingQuery != nil {
+		columns := resp.Columns
+		if len(columns) == 0 && s.tracker.pendingQuery.cursor != nil {
+			columns = s.tracker.pendingQuery.cursor.columns
+		}
+
+		for _, row := range resp.Rows {
+			s.captureRow(columns, row)
+		}
+	}
+
+	// If error or no more data, complete the query
+	if resp.IsError {
+		errMsg := resp.ErrorMessage
+		s.completeQuery(nil, &errMsg, bytesTransferred)
+	} else if !resp.MoreData {
+		var rowsAffected *int64
+		if resp.RowCount > 0 {
+			rc := int64(resp.RowCount)
+			rowsAffected = &rc
+		}
+
+		s.completeQuery(rowsAffected, nil, bytesTransferred)
+	}
+	// If MoreData is true, we wait for the next OFETCH response
 }
 
 // sendRefuse sends a TNS Refuse packet to the client.

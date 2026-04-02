@@ -58,6 +58,10 @@ test-e2e:
 	@echo "Running E2E tests..."
 	@cd front && bun run test:e2e
 
+# Run Oracle integration tests (requires Docker)
+test-e2e-oracle:
+	go test -tags integration -v -timeout 15m ./internal/proxy/oracle/...
+
 # Run linter
 lint:
 	golangci-lint run

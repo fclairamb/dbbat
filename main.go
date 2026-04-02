@@ -323,7 +323,7 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	var oracleServer *oracle.Server
 
 	if cfg.ListenOracle != "" {
-		oracleServer = oracle.NewServer(dataStore, cfg.EncryptionKey, proxyAuthCache, logger)
+		oracleServer = oracle.NewServer(dataStore, cfg.EncryptionKey, proxyAuthCache, cfg.QueryStorage, logger)
 
 		go func() {
 			if err := oracleServer.Start(cfg.ListenOracle); err != nil {
