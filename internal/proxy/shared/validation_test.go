@@ -61,8 +61,8 @@ func TestValidateQuery_CaseInsensitive(t *testing.T) {
 	t.Parallel()
 
 	grant := &store.Grant{Controls: []string{store.ControlReadOnly}}
-	assert.Error(t, ValidateQuery("insert INTO t VALUES (1)", grant))
-	assert.Error(t, ValidateQuery("  INSERT INTO t VALUES (1)  ", grant))
+	require.Error(t, ValidateQuery("insert INTO t VALUES (1)", grant))
+	require.Error(t, ValidateQuery("  INSERT INTO t VALUES (1)  ", grant))
 }
 
 func TestValidateQuery_CommentBypass(t *testing.T) {
