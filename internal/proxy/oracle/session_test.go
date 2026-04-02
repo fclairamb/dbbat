@@ -64,6 +64,8 @@ func buildTNSConnect(serviceName string) []byte {
 }
 
 func TestSession_ReceiveConnect_ParsesServiceName(t *testing.T) {
+	t.Parallel()
+
 	client, proxyEnd := net.Pipe()
 	defer func() { _ = client.Close() }()
 	defer func() { _ = proxyEnd.Close() }()
@@ -84,6 +86,8 @@ func TestSession_ReceiveConnect_ParsesServiceName(t *testing.T) {
 }
 
 func TestSession_SendRefuse(t *testing.T) {
+	t.Parallel()
+
 	client, proxyEnd := net.Pipe()
 	defer func() { _ = client.Close() }()
 	defer func() { _ = proxyEnd.Close() }()
@@ -101,6 +105,8 @@ func TestSession_SendRefuse(t *testing.T) {
 }
 
 func TestSession_RawRelay(t *testing.T) {
+	t.Parallel()
+
 	// Set up a simple echo server as "upstream"
 	upstreamListener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -159,6 +165,8 @@ func TestSession_RawRelay(t *testing.T) {
 }
 
 func TestSession_ConnectToUpstream_ForwardsAndRelays(t *testing.T) {
+	t.Parallel()
+
 	// Simulate an upstream Oracle that receives TNS Connect → sends TNS Accept
 	upstreamListener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -209,6 +217,8 @@ func TestSession_ConnectToUpstream_ForwardsAndRelays(t *testing.T) {
 }
 
 func TestSession_UpstreamRefuse_ForwardedToClient(t *testing.T) {
+	t.Parallel()
+
 	// Upstream that immediately refuses
 	upstreamListener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -297,6 +307,8 @@ func TestSession_UpstreamRefuse_ForwardedToClient(t *testing.T) {
 }
 
 func TestBuildTNSConnect_Parseable(t *testing.T) {
+	t.Parallel()
+
 	// Verify our test helper builds valid connect packets
 	payload := buildTNSConnect("MYDB")
 	connectStr := extractConnectString(payload)
@@ -304,6 +316,8 @@ func TestBuildTNSConnect_Parseable(t *testing.T) {
 }
 
 func TestBuildTNSConnect_DifferentServiceNames(t *testing.T) {
+	t.Parallel()
+
 	for _, name := range []string{"ORCL", "PROD_DB", "my_service_123"} {
 		payload := buildTNSConnect(name)
 		connectStr := extractConnectString(payload)

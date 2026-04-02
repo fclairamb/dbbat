@@ -14,6 +14,8 @@ import (
 )
 
 func TestOracleServer_StartsAndAcceptsConnections(t *testing.T) {
+	t.Parallel()
+
 	srv := NewServer(nil, nil, nil, config.QueryStorageConfig{}, slog.Default())
 	go func() { _ = srv.Start(":0") }()
 	defer func() { _ = srv.Shutdown(t.Context()) }()
@@ -27,6 +29,8 @@ func TestOracleServer_StartsAndAcceptsConnections(t *testing.T) {
 }
 
 func TestOracleServer_GracefulShutdown(t *testing.T) {
+	t.Parallel()
+
 	srv := NewServer(nil, nil, nil, config.QueryStorageConfig{}, slog.Default())
 	go func() { _ = srv.Start(":0") }()
 
@@ -46,6 +50,8 @@ func TestOracleServer_GracefulShutdown(t *testing.T) {
 }
 
 func TestOracleServer_ConcurrentConnections(t *testing.T) {
+	t.Parallel()
+
 	srv := NewServer(nil, nil, nil, config.QueryStorageConfig{}, slog.Default())
 	go func() { _ = srv.Start(":0") }()
 	defer func() { _ = srv.Shutdown(t.Context()) }()

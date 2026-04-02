@@ -37,8 +37,8 @@ var (
 // decodeOracleValue dispatches decoding based on the Oracle type code.
 // Returns nil for nil/empty data (NULL values).
 func decodeOracleValue(typeCode uint8, data []byte) (interface{}, error) {
-	if len(data) == 0 { //nolint:nilnil // nil/empty data means SQL NULL — returning nil,nil is intentional
-		return nil, nil
+	if len(data) == 0 {
+		return nil, nil //nolint:nilnil // nil/empty data means SQL NULL — returning nil,nil is intentional
 	}
 
 	switch typeCode {

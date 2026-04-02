@@ -228,7 +228,7 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 		return false
 	}
 
-	switch funcCode {
+	switch funcCode { //nolint:exhaustive // only intercepting specific TTC functions, rest pass through
 	case TTCFuncOALL8:
 		// Check quotas first
 		if err := s.checkQuotas(); err != nil {

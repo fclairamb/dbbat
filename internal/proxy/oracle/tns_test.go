@@ -11,6 +11,8 @@ import (
 )
 
 func TestTNSPacket_ParseHeader(t *testing.T) {
+	t.Parallel()
+
 	raw := []byte{0x00, 0x2A, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00}
 	pkt, err := parseTNSHeader(raw)
 	require.NoError(t, err)
@@ -19,11 +21,15 @@ func TestTNSPacket_ParseHeader(t *testing.T) {
 }
 
 func TestTNSPacket_ParseHeader_TooShort(t *testing.T) {
+	t.Parallel()
+
 	_, err := parseTNSHeader([]byte{0x00, 0x0A})
 	assert.ErrorIs(t, err, ErrTNSHeaderTooShort)
 }
 
 func TestTNSPacket_ParseHeader_AllTypes(t *testing.T) {
+	t.Parallel()
+
 	for _, tt := range []struct {
 		code byte
 		want TNSPacketType
@@ -45,6 +51,8 @@ func TestTNSPacket_ParseHeader_AllTypes(t *testing.T) {
 }
 
 func TestTNSPacket_ParseHeader_UnknownType(t *testing.T) {
+	t.Parallel()
+
 	raw := []byte{0x00, 0x08, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00}
 	pkt, err := parseTNSHeader(raw)
 	require.NoError(t, err)
@@ -52,6 +60,8 @@ func TestTNSPacket_ParseHeader_UnknownType(t *testing.T) {
 }
 
 func TestTNSPacket_Encode(t *testing.T) {
+	t.Parallel()
+
 	payload := []byte("hello")
 	encoded := encodeTNSPacket(TNSPacketTypeData, payload)
 	assert.Len(t, encoded, 8+len(payload))
@@ -62,6 +72,8 @@ func TestTNSPacket_Encode(t *testing.T) {
 }
 
 func TestTNSPacket_RoundTrip(t *testing.T) {
+	t.Parallel()
+
 	original := TNSPacket{Type: TNSPacketTypeConnect, Payload: []byte("test-connect-data")}
 	encoded := encodeTNSPacket(original.Type, original.Payload)
 	parsed, err := parseTNSHeader(encoded[:8])
@@ -71,11 +83,15 @@ func TestTNSPacket_RoundTrip(t *testing.T) {
 }
 
 func TestTNSPacket_ZeroLengthPayload(t *testing.T) {
+	t.Parallel()
+
 	encoded := encodeTNSPacket(TNSPacketTypeResend, nil)
 	assert.Len(t, encoded, 8)
 }
 
 func TestTNSPacket_MaxSDU(t *testing.T) {
+	t.Parallel()
+
 	payload := make([]byte, 32767-8)
 	encoded := encodeTNSPacket(TNSPacketTypeData, payload)
 	parsed, err := parseTNSHeader(encoded[:8])
@@ -84,6 +100,8 @@ func TestTNSPacket_MaxSDU(t *testing.T) {
 }
 
 func TestTNSPacketType_String(t *testing.T) {
+	t.Parallel()
+
 	assert.Equal(t, "Connect", TNSPacketTypeConnect.String())
 	assert.Equal(t, "Data", TNSPacketTypeData.String())
 	assert.Equal(t, "Refuse", TNSPacketTypeRefuse.String())
@@ -93,6 +111,8 @@ func TestTNSPacketType_String(t *testing.T) {
 // --- I/O tests with net.Pipe ---
 
 func TestTNSPacket_ReadFromConn(t *testing.T) {
+	t.Parallel()
+
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
 	defer func() { _ = server.Close() }()
@@ -109,6 +129,8 @@ func TestTNSPacket_ReadFromConn(t *testing.T) {
 }
 
 func TestTNSPacket_ReadFromConn_PartialWrites(t *testing.T) {
+	t.Parallel()
+
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
 	defer func() { _ = server.Close() }()
@@ -127,6 +149,8 @@ func TestTNSPacket_ReadFromConn_PartialWrites(t *testing.T) {
 }
 
 func TestTNSPacket_ReadFromConn_EOF(t *testing.T) {
+	t.Parallel()
+
 	client, server := net.Pipe()
 	go func() {
 		_, _ = client.Write([]byte{0x00, 0x20}) // partial header
@@ -138,6 +162,8 @@ func TestTNSPacket_ReadFromConn_EOF(t *testing.T) {
 }
 
 func TestTNSPacket_MultiplePackets(t *testing.T) {
+	t.Parallel()
+
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
 	defer func() { _ = server.Close() }()
@@ -158,6 +184,8 @@ func TestTNSPacket_MultiplePackets(t *testing.T) {
 }
 
 func TestTNSPacket_WriteThenRead(t *testing.T) {
+	t.Parallel()
+
 	client, server := net.Pipe()
 	defer func() { _ = client.Close() }()
 	defer func() { _ = server.Close() }()

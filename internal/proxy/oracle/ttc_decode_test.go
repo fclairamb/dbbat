@@ -45,7 +45,7 @@ func buildOALL8(sql string, binds []string, cursorID uint16) []byte {
 
 // buildOALL8WithNulls creates an OALL8 payload with mixed NULL and non-NULL binds.
 func buildOALL8WithNulls(sql string, binds []interface{}, cursorID uint16) []byte {
-	var buf []byte
+	buf := make([]byte, 0, 64)
 
 	buf = append(buf, byte(TTCFuncOALL8))
 	buf = append(buf, 0x00, 0x00, 0x00, 0x00) // options
@@ -128,6 +128,8 @@ func encodeVarLen(val uint32) []byte {
 }
 
 func TestDecodeOALL8_SimpleSELECT(t *testing.T) {
+	t.Parallel()
+
 	payload := buildOALL8("SELECT * FROM employees WHERE id = :1", []string{"42"}, 7)
 	result, err := decodeOALL8(payload)
 	require.NoError(t, err)
@@ -137,6 +139,8 @@ func TestDecodeOALL8_SimpleSELECT(t *testing.T) {
 }
 
 func TestDecodeOALL8_NoBinds(t *testing.T) {
+	t.Parallel()
+
 	payload := buildOALL8("SELECT SYSDATE FROM DUAL", nil, 1)
 	result, err := decodeOALL8(payload)
 	require.NoError(t, err)
@@ -145,6 +149,8 @@ func TestDecodeOALL8_NoBinds(t *testing.T) {
 }
 
 func TestDecodeOALL8_MultipleBinds(t *testing.T) {
+	t.Parallel()
+
 	sql := "INSERT INTO t (a, b, c) VALUES (:1, :2, :3)"
 	binds := []string{"hello", "42", "2024-01-15"}
 	payload := buildOALL8(sql, binds, 3)
@@ -155,6 +161,8 @@ func TestDecodeOALL8_MultipleBinds(t *testing.T) {
 }
 
 func TestDecodeOALL8_PLSQLBlock(t *testing.T) {
+	t.Parallel()
+
 	sql := "BEGIN my_package.do_something(:1, :2); END;"
 	payload := buildOALL8(sql, []string{"arg1", "arg2"}, 5)
 	result, err := decodeOALL8(payload)
@@ -164,6 +172,8 @@ func TestDecodeOALL8_PLSQLBlock(t *testing.T) {
 }
 
 func TestDecodeOALL8_DECLAREBlock(t *testing.T) {
+	t.Parallel()
+
 	sql := "DECLARE v NUMBER; BEGIN SELECT 1 INTO v FROM DUAL; END;"
 	payload := buildOALL8(sql, nil, 5)
 	result, err := decodeOALL8(payload)
@@ -172,6 +182,8 @@ func TestDecodeOALL8_DECLAREBlock(t *testing.T) {
 }
 
 func TestDecodeOALL8_LargeSQL(t *testing.T) {
+	t.Parallel()
+
 	sql := "SELECT " + strings.Repeat("col, ", 1000) + "col FROM t"
 	payload := buildOALL8(sql, nil, 10)
 	result, err := decodeOALL8(payload)
@@ -180,12 +192,16 @@ func TestDecodeOALL8_LargeSQL(t *testing.T) {
 }
 
 func TestDecodeOALL8_EmptySQL(t *testing.T) {
+	t.Parallel()
+
 	payload := buildOALL8("", nil, 1)
 	_, err := decodeOALL8(payload)
 	assert.ErrorIs(t, err, ErrEmptySQL)
 }
 
 func TestDecodeOALL8_UnicodeSQL(t *testing.T) {
+	t.Parallel()
+
 	sql := "SELECT * FROM données WHERE nom = :1"
 	payload := buildOALL8(sql, []string{"Éric"}, 2)
 	result, err := decodeOALL8(payload)
@@ -195,6 +211,8 @@ func TestDecodeOALL8_UnicodeSQL(t *testing.T) {
 }
 
 func TestDecodeOALL8_NullBindValue(t *testing.T) {
+	t.Parallel()
+
 	payload := buildOALL8WithNulls("UPDATE t SET col = :1 WHERE id = :2", []interface{}{nil, 42}, 3)
 	result, err := decodeOALL8(payload)
 	require.NoError(t, err)
@@ -203,6 +221,8 @@ func TestDecodeOALL8_NullBindValue(t *testing.T) {
 }
 
 func TestDecodeOALL8_BinaryBindValue(t *testing.T) {
+	t.Parallel()
+
 	payload := buildOALL8WithBinaryBind("INSERT INTO t (raw_col) VALUES (:1)", []byte{0xDE, 0xAD, 0xBE, 0xEF}, 4)
 	result, err := decodeOALL8(payload)
 	require.NoError(t, err)
@@ -210,11 +230,15 @@ func TestDecodeOALL8_BinaryBindValue(t *testing.T) {
 }
 
 func TestDecodeOALL8_CorruptPayload(t *testing.T) {
+	t.Parallel()
+
 	_, err := decodeOALL8([]byte{0x0E, 0x00, 0x01})
 	assert.Error(t, err)
 }
 
 func TestDecodeOALL8_ExtendedLengthShort(t *testing.T) {
+	t.Parallel()
+
 	// SQL longer than 253 bytes — uses 0xFE + uint16 encoding
 	sql := strings.Repeat("X", 300)
 	payload := buildOALL8(sql, nil, 1)
@@ -224,6 +248,8 @@ func TestDecodeOALL8_ExtendedLengthShort(t *testing.T) {
 }
 
 func TestDecodeOALL8_ExtendedLengthLong(t *testing.T) {
+	t.Parallel()
+
 	// SQL longer than 65535 bytes — uses 0xFF + uint32 encoding
 	sql := strings.Repeat("Y", 70000)
 	payload := buildOALL8(sql, nil, 1)
@@ -233,6 +259,8 @@ func TestDecodeOALL8_ExtendedLengthLong(t *testing.T) {
 }
 
 func TestDecodeOALL8_FuzzInputs(t *testing.T) {
+	t.Parallel()
+
 	// Ensure various random-ish payloads don't panic
 	inputs := [][]byte{
 		nil,
@@ -252,6 +280,8 @@ func TestDecodeOALL8_FuzzInputs(t *testing.T) {
 }
 
 func TestDecodeOFETCH(t *testing.T) {
+	t.Parallel()
+
 	payload := buildOFETCH(7, 100)
 	result, err := decodeOFETCH(payload)
 	require.NoError(t, err)
@@ -260,11 +290,15 @@ func TestDecodeOFETCH(t *testing.T) {
 }
 
 func TestDecodeOFETCH_TooShort(t *testing.T) {
+	t.Parallel()
+
 	_, err := decodeOFETCH([]byte{0x11, 0x00})
 	assert.ErrorIs(t, err, ErrOFETCHTooShort)
 }
 
 func TestDecodeOFETCH_LargeFetchSize(t *testing.T) {
+	t.Parallel()
+
 	payload := buildOFETCH(1, 10000)
 	result, err := decodeOFETCH(payload)
 	require.NoError(t, err)
@@ -272,6 +306,8 @@ func TestDecodeOFETCH_LargeFetchSize(t *testing.T) {
 }
 
 func TestDecodeVarLen(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		input    []byte
@@ -287,6 +323,8 @@ func TestDecodeVarLen(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			val, read, err := decodeVarLen(tt.input)
 			require.NoError(t, err)
 			assert.Equal(t, tt.wantVal, val)
@@ -296,6 +334,8 @@ func TestDecodeVarLen(t *testing.T) {
 }
 
 func TestIsPLSQL(t *testing.T) {
+	t.Parallel()
+
 	assert.True(t, (&OALL8Result{SQL: "BEGIN proc; END;"}).IsPLSQL())
 	assert.True(t, (&OALL8Result{SQL: "DECLARE v NUMBER; BEGIN NULL; END;"}).IsPLSQL())
 	assert.True(t, (&OALL8Result{SQL: "  begin proc; end;  "}).IsPLSQL())
@@ -307,7 +347,7 @@ func TestIsPLSQL(t *testing.T) {
 
 // buildTTCResponse creates a TTC response payload with column definitions and rows.
 func buildTTCResponse(cols []columnDef, rows [][]interface{}) []byte {
-	var buf []byte
+	buf := make([]byte, 0, 128)
 
 	// Function code (Response)
 	buf = append(buf, byte(TTCFuncResponse))
@@ -400,7 +440,7 @@ func buildTTCErrorResponse(errCode int, errMsg string) []byte {
 
 // buildTTCResponseWithMoreData creates a TTC response with the more-data flag set.
 func buildTTCResponseWithMoreData(moreData bool) []byte {
-	var buf []byte
+	buf := make([]byte, 0, 32)
 
 	buf = append(buf, byte(TTCFuncResponse))
 	buf = append(buf, 0x01)
@@ -423,6 +463,8 @@ func buildTTCResponseWithMoreData(moreData bool) []byte {
 }
 
 func TestDecodeTTCResponse_ColumnDefinitions(t *testing.T) {
+	t.Parallel()
+
 	resp := buildTTCResponse(
 		[]columnDef{
 			{Name: "ID", TypeCode: OracleTypeNUMBER, Size: 22},
@@ -443,6 +485,8 @@ func TestDecodeTTCResponse_ColumnDefinitions(t *testing.T) {
 }
 
 func TestDecodeTTCResponse_WithRows(t *testing.T) {
+	t.Parallel()
+
 	resp := buildTTCResponse(
 		[]columnDef{{Name: "ID", TypeCode: OracleTypeVARCHAR2}, {Name: "NAME", TypeCode: OracleTypeVARCHAR2}},
 		[][]interface{}{{"1", "Alice"}, {"2", "Bob"}},
@@ -453,6 +497,8 @@ func TestDecodeTTCResponse_WithRows(t *testing.T) {
 }
 
 func TestDecodeTTCResponse_ErrorResponse(t *testing.T) {
+	t.Parallel()
+
 	resp := buildTTCErrorResponse(942, "ORA-00942: table or view does not exist")
 	result, err := decodeTTCResponse(resp)
 	require.NoError(t, err)
@@ -462,6 +508,8 @@ func TestDecodeTTCResponse_ErrorResponse(t *testing.T) {
 }
 
 func TestDecodeTTCResponse_MoreDataFlag(t *testing.T) {
+	t.Parallel()
+
 	resp := buildTTCResponseWithMoreData(true)
 	result, err := decodeTTCResponse(resp)
 	require.NoError(t, err)
@@ -469,6 +517,8 @@ func TestDecodeTTCResponse_MoreDataFlag(t *testing.T) {
 }
 
 func TestDecodeTTCResponse_NoMoreData(t *testing.T) {
+	t.Parallel()
+
 	resp := buildTTCResponseWithMoreData(false)
 	result, err := decodeTTCResponse(resp)
 	require.NoError(t, err)
@@ -476,6 +526,8 @@ func TestDecodeTTCResponse_NoMoreData(t *testing.T) {
 }
 
 func TestDecodeTTCResponse_SuccessNoError(t *testing.T) {
+	t.Parallel()
+
 	resp := buildTTCResponse(nil, nil)
 	result, err := decodeTTCResponse(resp)
 	require.NoError(t, err)
@@ -484,12 +536,16 @@ func TestDecodeTTCResponse_SuccessNoError(t *testing.T) {
 }
 
 func TestDecodeTTCResponse_TooShort(t *testing.T) {
+	t.Parallel()
+
 	_, err := decodeTTCResponse([]byte{0x08, 0x01})
 	assert.Error(t, err)
 }
 
 func TestDecodeColumnDef(t *testing.T) {
-	var data []byte
+	t.Parallel()
+
+	data := make([]byte, 0, 32)
 	data = append(data, encodeVarLen(4)...)
 	data = append(data, []byte("NAME")...)
 	data = append(data, OracleTypeVARCHAR2)

@@ -21,6 +21,7 @@ func buildTTCDataPayload(funcCode byte, extra []byte) []byte {
 }
 
 func TestParseTTCFunctionCode(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		payload []byte
@@ -39,6 +40,8 @@ func TestParseTTCFunctionCode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			fc, err := parseTTCFunctionCode(tt.payload)
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, fc)
@@ -47,16 +50,19 @@ func TestParseTTCFunctionCode(t *testing.T) {
 }
 
 func TestParseTTCFunctionCode_EmptyPayload(t *testing.T) {
+	t.Parallel()
 	_, err := parseTTCFunctionCode([]byte{})
 	assert.ErrorIs(t, err, ErrTTCPayloadTooShort)
 }
 
 func TestParseTTCFunctionCode_TooShort(t *testing.T) {
+	t.Parallel()
 	_, err := parseTTCFunctionCode([]byte{0x00, 0x00}) // only flags, no func code
 	assert.ErrorIs(t, err, ErrTTCPayloadTooShort)
 }
 
 func TestParseTTCFunctionCode_DataFlagsPrefixed(t *testing.T) {
+	t.Parallel()
 	payload := []byte{0x00, 0x00, 0x0E} // flags=0, func=OALL8
 	fc, err := parseTTCFunctionCode(payload)
 	require.NoError(t, err)
@@ -64,6 +70,7 @@ func TestParseTTCFunctionCode_DataFlagsPrefixed(t *testing.T) {
 }
 
 func TestParseTTCFunctionCode_UnknownCode(t *testing.T) {
+	t.Parallel()
 	payload := buildTTCDataPayload(0xFE, nil)
 	fc, err := parseTTCFunctionCode(payload)
 	require.NoError(t, err)
@@ -72,6 +79,7 @@ func TestParseTTCFunctionCode_UnknownCode(t *testing.T) {
 }
 
 func TestTTCFunctionCode_Stringer(t *testing.T) {
+	t.Parallel()
 	assert.Equal(t, "OALL8", TTCFuncOALL8.String())
 	assert.Equal(t, "OFETCH", TTCFuncOFETCH.String())
 	assert.Equal(t, "OCLOSE", TTCFuncOCLOSE.String())
@@ -82,6 +90,7 @@ func TestTTCFunctionCode_Stringer(t *testing.T) {
 }
 
 func TestTTCFunctionCode_IsKnown(t *testing.T) {
+	t.Parallel()
 	knownCodes := []TTCFunctionCode{
 		TTCFuncSetProtocol, TTCFuncSetDataTypes, TTCFuncOOPEN, TTCFuncOCLOSE,
 		TTCFuncResponse, TTCFuncOMarker, TTCFuncOVersion, TTCFuncOALL8,
@@ -95,6 +104,7 @@ func TestTTCFunctionCode_IsKnown(t *testing.T) {
 }
 
 func TestExtractTTCPayload(t *testing.T) {
+	t.Parallel()
 	payload := buildTTCDataPayload(0x0E, []byte{0xAA, 0xBB})
 	ttcPayload := extractTTCPayload(payload)
 	require.NotNil(t, ttcPayload)
@@ -104,6 +114,7 @@ func TestExtractTTCPayload(t *testing.T) {
 }
 
 func TestExtractTTCPayload_TooShort(t *testing.T) {
+	t.Parallel()
 	assert.Nil(t, extractTTCPayload([]byte{0x00}))
 	assert.Nil(t, extractTTCPayload(nil))
 }

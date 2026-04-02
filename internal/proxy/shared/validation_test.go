@@ -76,8 +76,8 @@ func TestValidateQuery_PasswordChange(t *testing.T) {
 	t.Parallel()
 
 	grant := &store.Grant{} // No restrictions
-	assert.ErrorIs(t, ValidateQuery("ALTER USER bob PASSWORD 'secret'", grant), ErrPasswordChangeBlocked)
-	assert.ErrorIs(t, ValidateQuery("ALTER ROLE admin PASSWORD 'secret'", grant), ErrPasswordChangeBlocked)
+	require.ErrorIs(t, ValidateQuery("ALTER USER bob PASSWORD 'secret'", grant), ErrPasswordChangeBlocked)
+	require.ErrorIs(t, ValidateQuery("ALTER ROLE admin PASSWORD 'secret'", grant), ErrPasswordChangeBlocked)
 	assert.NoError(t, ValidateQuery("ALTER TABLE t ADD (col NUMBER)", grant))
 }
 
@@ -123,6 +123,6 @@ func TestValidateOracleQuery_CombinesSharedAndOracleChecks(t *testing.T) {
 	t.Parallel()
 
 	grant := &store.Grant{Controls: []string{store.ControlReadOnly}}
-	assert.ErrorIs(t, ValidateOracleQuery("INSERT INTO t VALUES (1)", grant), ErrReadOnlyViolation)
-	assert.ErrorIs(t, ValidateOracleQuery("SELECT UTL_HTTP.REQUEST('x') FROM DUAL", grant), ErrOraclePatternBlocked)
+	require.ErrorIs(t, ValidateOracleQuery("INSERT INTO t VALUES (1)", grant), ErrReadOnlyViolation)
+	require.ErrorIs(t, ValidateOracleQuery("SELECT UTL_HTTP.REQUEST('x') FROM DUAL", grant), ErrOraclePatternBlocked)
 }

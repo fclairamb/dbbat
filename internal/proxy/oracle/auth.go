@@ -19,7 +19,7 @@ const (
 
 // handleAuthPhase relays TTC negotiation and authentication between client and upstream,
 // intercepting the AUTH phase to extract the username and check grants.
-func (s *session) handleAuthPhase() error { //nolint:gocognit,nestif // auth flow has inherent complexity from protocol negotiation
+func (s *session) handleAuthPhase() error { //nolint:gocognit // auth flow has inherent complexity from protocol negotiation
 	// Relay packets until auth is complete.
 	// The flow is:
 	// 1. Set Protocol (client → upstream, upstream → client)
@@ -43,7 +43,7 @@ func (s *session) handleAuthPhase() error { //nolint:gocognit,nestif // auth flo
 		}
 
 		// Only inspect Data packets
-		if clientPkt.Type == TNSPacketTypeData && len(clientPkt.Payload) > tnsDataFlagsSize {
+		if clientPkt.Type == TNSPacketTypeData && len(clientPkt.Payload) > tnsDataFlagsSize { //nolint:nestif
 			funcCode := clientPkt.Payload[tnsDataFlagsSize]
 
 			// If this is an AUTH message and we haven't extracted the username yet
@@ -241,8 +241,8 @@ func isPlausibleUsername(s string) bool {
 
 	// Oracle usernames: letters, digits, underscores, $, #
 	for _, c := range s {
-		if !(c >= 'A' && c <= 'Z') && !(c >= 'a' && c <= 'z') &&
-			!(c >= '0' && c <= '9') && c != '_' && c != '$' && c != '#' {
+		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') &&
+			(c < '0' || c > '9') && c != '_' && c != '$' && c != '#' {
 			return false
 		}
 	}
