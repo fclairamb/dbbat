@@ -129,7 +129,7 @@ func decodeTTCResponse(payload []byte) (*TTCResponse, error) {
 // Returns the column definition and the number of bytes consumed.
 func decodeColumnDef(data []byte) (columnDef, int, error) {
 	if len(data) < 1 {
-		return columnDef{}, 0, fmt.Errorf("column def too short")
+		return columnDef{}, 0, ErrColumnDefTooShort
 	}
 
 	offset := 0
@@ -143,7 +143,7 @@ func decodeColumnDef(data []byte) (columnDef, int, error) {
 	offset += bytesRead
 
 	if offset+int(nameLen) > len(data) {
-		return columnDef{}, 0, fmt.Errorf("column name exceeds payload")
+		return columnDef{}, 0, ErrColumnNameTruncated
 	}
 
 	name := string(data[offset : offset+int(nameLen)])
@@ -151,7 +151,7 @@ func decodeColumnDef(data []byte) (columnDef, int, error) {
 
 	// Type code (1 byte)
 	if offset >= len(data) {
-		return columnDef{}, 0, fmt.Errorf("no type code")
+		return columnDef{}, 0, ErrNoTypeCode
 	}
 
 	typeCode := data[offset]
@@ -199,7 +199,7 @@ func decodeColumnDef(data []byte) (columnDef, int, error) {
 // Each column value is encoded as: length (varlen) + value bytes.
 func decodeRow(data []byte, columns []columnDef) ([]interface{}, int, error) {
 	if len(data) == 0 {
-		return nil, 0, fmt.Errorf("empty row data")
+		return nil, 0, ErrEmptyRowData
 	}
 
 	row := make([]interface{}, len(columns))
@@ -223,7 +223,7 @@ func decodeRow(data []byte, columns []columnDef) ([]interface{}, int, error) {
 		}
 
 		if offset+int(valLen) > len(data) {
-			return nil, 0, fmt.Errorf("row value exceeds payload")
+			return nil, 0, ErrRowValueTruncated
 		}
 
 		valBytes := data[offset : offset+int(valLen)]

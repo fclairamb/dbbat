@@ -62,12 +62,12 @@ func decodeOracleValue(typeCode uint8, data []byte) (interface{}, error) {
 		return hex.EncodeToString(data), nil
 	case OracleTypeBINFLOAT:
 		if len(data) < 4 {
-			return nil, fmt.Errorf("BINARY_FLOAT requires 4 bytes, got %d", len(data))
+			return nil, fmt.Errorf("%w: BINARY_FLOAT requires 4 bytes, got %d", ErrInvalidFloatLength, len(data))
 		}
 		return math.Float32frombits(binary.BigEndian.Uint32(data)), nil
 	case OracleTypeBINDOUBLE:
 		if len(data) < 8 {
-			return nil, fmt.Errorf("BINARY_DOUBLE requires 8 bytes, got %d", len(data))
+			return nil, fmt.Errorf("%w: BINARY_DOUBLE requires 8 bytes, got %d", ErrInvalidFloatLength, len(data))
 		}
 		return math.Float64frombits(binary.BigEndian.Uint64(data)), nil
 	case OracleTypeTIMESTAMP, OracleTypeTIMESTAMP_TZ, OracleTypeTIMESTAMP_LTZ:

@@ -4,11 +4,14 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
 func TestValidateQuery_ReadOnly_BlocksWrites(t *testing.T) {
+	t.Parallel()
+
 	grant := &store.Grant{Controls: []string{store.ControlReadOnly}}
 	blocked := []string{
 		"INSERT INTO t VALUES (1)", "UPDATE t SET x = 1", "DELETE FROM t WHERE id = 1",
@@ -17,11 +20,13 @@ func TestValidateQuery_ReadOnly_BlocksWrites(t *testing.T) {
 		"ALTER TABLE t ADD (col VARCHAR2(100))", "GRANT SELECT ON t TO u", "REVOKE SELECT ON t FROM u",
 	}
 	for _, sql := range blocked {
-		assert.ErrorIs(t, ValidateQuery(sql, grant), ErrReadOnlyViolation, "should block: %s", sql)
+		require.ErrorIs(t, ValidateQuery(sql, grant), ErrReadOnlyViolation, "should block: %s", sql)
 	}
 }
 
 func TestValidateQuery_ReadOnly_AllowsReads(t *testing.T) {
+	t.Parallel()
+
 	grant := &store.Grant{Controls: []string{store.ControlReadOnly}}
 	allowed := []string{
 		"SELECT * FROM t", "SELECT 1 FROM DUAL",
@@ -29,11 +34,13 @@ func TestValidateQuery_ReadOnly_AllowsReads(t *testing.T) {
 		"EXPLAIN PLAN FOR SELECT * FROM t", "  select * from t  ",
 	}
 	for _, sql := range allowed {
-		assert.NoError(t, ValidateQuery(sql, grant), "should allow: %s", sql)
+		require.NoError(t, ValidateQuery(sql, grant), "should allow: %s", sql)
 	}
 }
 
 func TestValidateQuery_BlockDDL(t *testing.T) {
+	t.Parallel()
+
 	grant := &store.Grant{Controls: []string{store.ControlBlockDDL}}
 	blocked := []string{
 		"CREATE TABLE t (id NUMBER)", "ALTER TABLE t ADD (col NUMBER)", "DROP TABLE t",
@@ -43,28 +50,31 @@ func TestValidateQuery_BlockDDL(t *testing.T) {
 	allowed := []string{"INSERT INTO t VALUES (1)", "SELECT * FROM t", "UPDATE t SET x = 1"}
 
 	for _, sql := range blocked {
-		assert.ErrorIs(t, ValidateQuery(sql, grant), ErrDDLBlocked, "should block: %s", sql)
+		require.ErrorIs(t, ValidateQuery(sql, grant), ErrDDLBlocked, "should block: %s", sql)
 	}
 	for _, sql := range allowed {
-		assert.NoError(t, ValidateQuery(sql, grant), "should allow: %s", sql)
+		require.NoError(t, ValidateQuery(sql, grant), "should allow: %s", sql)
 	}
 }
 
 func TestValidateQuery_CaseInsensitive(t *testing.T) {
+	t.Parallel()
+
 	grant := &store.Grant{Controls: []string{store.ControlReadOnly}}
 	assert.Error(t, ValidateQuery("insert INTO t VALUES (1)", grant))
 	assert.Error(t, ValidateQuery("  INSERT INTO t VALUES (1)  ", grant))
 }
 
 func TestValidateQuery_CommentBypass(t *testing.T) {
+	t.Parallel()
+
 	grant := &store.Grant{Controls: []string{store.ControlReadOnly}}
-	// Note: our validation checks the prefix, so SQL starting with a comment
-	// followed by a write will not be caught by prefix matching. This is
-	// defense-in-depth — Oracle/PG enforce read-only at the engine level too.
 	assert.NoError(t, ValidateQuery("/* harmless */ INSERT INTO t VALUES (1)", grant))
 }
 
 func TestValidateQuery_PasswordChange(t *testing.T) {
+	t.Parallel()
+
 	grant := &store.Grant{} // No restrictions
 	assert.ErrorIs(t, ValidateQuery("ALTER USER bob PASSWORD 'secret'", grant), ErrPasswordChangeBlocked)
 	assert.ErrorIs(t, ValidateQuery("ALTER ROLE admin PASSWORD 'secret'", grant), ErrPasswordChangeBlocked)
@@ -72,6 +82,8 @@ func TestValidateQuery_PasswordChange(t *testing.T) {
 }
 
 func TestValidateOracleQuery_BlocksDangerousPatterns(t *testing.T) {
+	t.Parallel()
+
 	grant := &store.Grant{} // No restrictions — patterns always blocked
 	blocked := []struct{ sql, reason string }{
 		{"ALTER SYSTEM SET open_cursors=1000", "system config"},
@@ -86,12 +98,15 @@ func TestValidateOracleQuery_BlocksDangerousPatterns(t *testing.T) {
 	}
 	for _, tt := range blocked {
 		t.Run(tt.reason, func(t *testing.T) {
+			t.Parallel()
 			assert.ErrorIs(t, ValidateOracleQuery(tt.sql, grant), ErrOraclePatternBlocked)
 		})
 	}
 }
 
 func TestValidateOracleQuery_AllowsSafePLSQL(t *testing.T) {
+	t.Parallel()
+
 	grant := &store.Grant{} // No restrictions
 	allowed := []string{
 		"BEGIN my_pkg.read_data(:1, :2); END;",
@@ -100,14 +115,14 @@ func TestValidateOracleQuery_AllowsSafePLSQL(t *testing.T) {
 		"SELECT * FROM employees",
 	}
 	for _, sql := range allowed {
-		assert.NoError(t, ValidateOracleQuery(sql, grant), "should allow: %s", sql)
+		require.NoError(t, ValidateOracleQuery(sql, grant), "should allow: %s", sql)
 	}
 }
 
 func TestValidateOracleQuery_CombinesSharedAndOracleChecks(t *testing.T) {
-	// Read-only grant should still block writes via shared validation
+	t.Parallel()
+
 	grant := &store.Grant{Controls: []string{store.ControlReadOnly}}
 	assert.ErrorIs(t, ValidateOracleQuery("INSERT INTO t VALUES (1)", grant), ErrReadOnlyViolation)
-	// And Oracle patterns should also be blocked
 	assert.ErrorIs(t, ValidateOracleQuery("SELECT UTL_HTTP.REQUEST('x') FROM DUAL", grant), ErrOraclePatternBlocked)
 }

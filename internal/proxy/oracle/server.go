@@ -19,6 +19,7 @@ type Server struct {
 	authCache     *cache.AuthCache
 	queryStorage  config.QueryStorageConfig
 	logger        *slog.Logger
+	mu            sync.Mutex
 	listener      net.Listener
 	listenAddr    string
 	wg            sync.WaitGroup
@@ -56,8 +57,10 @@ func (s *Server) Start(addr string) error {
 		return fmt.Errorf("failed to listen: %w", err)
 	}
 
+	s.mu.Lock()
 	s.listener = listener
 	s.listenAddr = addr
+	s.mu.Unlock()
 	s.logger.InfoContext(s.ctx, "Oracle proxy server listening", slog.String("addr", addr))
 
 	for {
@@ -114,6 +117,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // Addr returns the listener address, useful for tests with ":0" port.
 func (s *Server) Addr() net.Addr {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.listener != nil {
 		return s.listener.Addr()
 	}
