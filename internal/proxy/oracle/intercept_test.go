@@ -211,7 +211,7 @@ func TestCursorReuse(t *testing.T) {
 	s.handleOCLOSE(5)
 
 	// Reuse cursor 5 with different query
-	s.handleOALL8(buildOALL8("SELECT 2 FROM DUAL", nil, 5))
+	_ = s.handleOALL8(buildOALL8("SELECT 2 FROM DUAL", nil, 5))
 	assert.Equal(t, "SELECT 2 FROM DUAL", s.tracker.cursors[5].sql)
 }
 
@@ -237,8 +237,8 @@ func TestCompleteQuery_SetsDuration(t *testing.T) {
 
 func TestWriteTTCError(t *testing.T) {
 	client, proxyEnd := net.Pipe()
-	defer client.Close()
-	defer proxyEnd.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = proxyEnd.Close() }()
 
 	s := &session{
 		clientConn: proxyEnd,
