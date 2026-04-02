@@ -108,6 +108,9 @@ type Config struct {
 	// Proxy listen address.
 	ListenPG string `koanf:"listen_pg"`
 
+	// Oracle proxy listen address (empty = disabled).
+	ListenOracle string `koanf:"listen_ora"`
+
 	// REST API listen address.
 	ListenAPI string `koanf:"listen_api"`
 

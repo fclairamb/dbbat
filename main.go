@@ -18,6 +18,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/proxy"
+	"github.com/fclairamb/dbbat/internal/proxy/oracle"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -318,6 +319,22 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	logger.InfoContext(ctx, "Proxy server started", slog.String("addr", cfg.ListenPG))
 
+	// Start Oracle proxy server (if configured)
+	var oracleServer *oracle.Server
+
+	if cfg.ListenOracle != "" {
+		oracleServer = oracle.NewServer(dataStore, cfg.EncryptionKey, proxyAuthCache, logger)
+
+		go func() {
+			if err := oracleServer.Start(cfg.ListenOracle); err != nil {
+				logger.ErrorContext(context.Background(), "Oracle proxy server error", slog.Any("error", err))
+				os.Exit(1)
+			}
+		}()
+
+		logger.InfoContext(ctx, "Oracle proxy server started", slog.String("addr", cfg.ListenOracle))
+	}
+
 	// Wait for shutdown signal
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -337,6 +354,13 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	// Shutdown proxy server
 	if err := proxyServer.Shutdown(shutdownCtx); err != nil {
 		logger.ErrorContext(shutdownCtx, "Proxy server shutdown error", slog.Any("error", err))
+	}
+
+	// Shutdown Oracle proxy server
+	if oracleServer != nil {
+		if err := oracleServer.Shutdown(shutdownCtx); err != nil {
+			logger.ErrorContext(shutdownCtx, "Oracle proxy server shutdown error", slog.Any("error", err))
+		}
 	}
 
 	logger.InfoContext(shutdownCtx, "Shutdown complete")

@@ -81,6 +81,12 @@ type UserUpdate struct {
 	Roles        []string
 }
 
+// Protocol constants for database connections
+const (
+	ProtocolPostgreSQL = "postgresql"
+	ProtocolOracle     = "oracle"
+)
+
 // Database represents a target database configuration
 type Database struct {
 	bun.BaseModel `bun:"table:databases,alias:d"`
@@ -95,6 +101,8 @@ type Database struct {
 	Password          string     `bun:"-" json:"-"`                          // Decrypted, not stored
 	PasswordEncrypted []byte     `bun:"password_encrypted,notnull" json:"-"` // Encrypted form
 	SSLMode           string     `bun:"ssl_mode,notnull,default:'prefer'" json:"ssl_mode"`
+	Protocol          string     `bun:"protocol,notnull,default:'postgresql'" json:"protocol"`
+	OracleServiceName *string    `bun:"oracle_service_name" json:"oracle_service_name,omitempty"`
 	CreatedBy         *uuid.UUID `bun:"created_by,type:uuid" json:"created_by"`
 	CreatedAt         time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 	UpdatedAt         time.Time  `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
@@ -103,13 +111,15 @@ type Database struct {
 
 // DatabaseUpdate represents fields that can be updated
 type DatabaseUpdate struct {
-	Description  *string
-	Host         *string
-	Port         *int
-	DatabaseName *string
-	Username     *string
-	Password     *string // Plaintext password to encrypt
-	SSLMode      *string
+	Description       *string
+	Host              *string
+	Port              *int
+	DatabaseName      *string
+	Username          *string
+	Password          *string // Plaintext password to encrypt
+	SSLMode           *string
+	Protocol          *string
+	OracleServiceName *string
 }
 
 // Connection represents a connection through the proxy
