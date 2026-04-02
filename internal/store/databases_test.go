@@ -95,6 +95,130 @@ func TestCreateDatabase(t *testing.T) {
 	})
 }
 
+func TestCreateDatabase_Protocols(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+	key := testEncryptionKey()
+
+	t.Run("postgresql default", func(t *testing.T) {
+		db := &Database{
+			Name:         "pg-db",
+			Host:         "localhost",
+			Port:         5432,
+			DatabaseName: "mydb",
+			Username:     "pguser",
+			Password:     "pgpass",
+			SSLMode:      "prefer",
+		}
+		created, err := store.CreateDatabase(ctx, db, key)
+		if err != nil {
+			t.Fatalf("CreateDatabase() error = %v", err)
+		}
+		if created.Protocol != ProtocolPostgreSQL {
+			t.Errorf("Protocol = %q, want %q", created.Protocol, ProtocolPostgreSQL)
+		}
+
+		found, err := store.GetDatabaseByUID(ctx, created.UID)
+		if err != nil {
+			t.Fatalf("GetDatabaseByUID() error = %v", err)
+		}
+		if found.Protocol != ProtocolPostgreSQL {
+			t.Errorf("Protocol after read = %q, want %q", found.Protocol, ProtocolPostgreSQL)
+		}
+	})
+
+	t.Run("postgresql explicit", func(t *testing.T) {
+		db := &Database{
+			Name:         "pg-db-explicit",
+			Host:         "localhost",
+			Port:         5432,
+			DatabaseName: "mydb2",
+			Username:     "pguser",
+			Password:     "pgpass",
+			SSLMode:      "prefer",
+			Protocol:     ProtocolPostgreSQL,
+		}
+		created, err := store.CreateDatabase(ctx, db, key)
+		if err != nil {
+			t.Fatalf("CreateDatabase() error = %v", err)
+		}
+		if created.Protocol != ProtocolPostgreSQL {
+			t.Errorf("Protocol = %q, want %q", created.Protocol, ProtocolPostgreSQL)
+		}
+	})
+
+	t.Run("oracle", func(t *testing.T) {
+		serviceName := "ORCL"
+		db := &Database{
+			Name:              "ora-db",
+			Host:              "oracle-host",
+			Port:              1521,
+			Username:          "orauser",
+			Password:          "orapass",
+			Protocol:          ProtocolOracle,
+			OracleServiceName: &serviceName,
+		}
+		created, err := store.CreateDatabase(ctx, db, key)
+		if err != nil {
+			t.Fatalf("CreateDatabase() error = %v", err)
+		}
+		if created.Protocol != ProtocolOracle {
+			t.Errorf("Protocol = %q, want %q", created.Protocol, ProtocolOracle)
+		}
+		if created.OracleServiceName == nil || *created.OracleServiceName != "ORCL" {
+			t.Errorf("OracleServiceName = %v, want %q", created.OracleServiceName, "ORCL")
+		}
+
+		found, err := store.GetDatabaseByUID(ctx, created.UID)
+		if err != nil {
+			t.Fatalf("GetDatabaseByUID() error = %v", err)
+		}
+		if found.Protocol != ProtocolOracle {
+			t.Errorf("Protocol after read = %q, want %q", found.Protocol, ProtocolOracle)
+		}
+		if found.OracleServiceName == nil || *found.OracleServiceName != "ORCL" {
+			t.Errorf("OracleServiceName after read = %v, want %q", found.OracleServiceName, "ORCL")
+		}
+	})
+
+	t.Run("update protocol", func(t *testing.T) {
+		db := &Database{
+			Name:         "update-proto",
+			Host:         "localhost",
+			Port:         5432,
+			DatabaseName: "mydb",
+			Username:     "user",
+			Password:     "pass",
+			Protocol:     ProtocolPostgreSQL,
+		}
+		created, err := store.CreateDatabase(ctx, db, key)
+		if err != nil {
+			t.Fatalf("CreateDatabase() error = %v", err)
+		}
+
+		newProto := ProtocolOracle
+		serviceName := "TEST01"
+		err = store.UpdateDatabase(ctx, created.UID, DatabaseUpdate{
+			Protocol:          &newProto,
+			OracleServiceName: &serviceName,
+		}, key)
+		if err != nil {
+			t.Fatalf("UpdateDatabase() error = %v", err)
+		}
+
+		found, err := store.GetDatabaseByUID(ctx, created.UID)
+		if err != nil {
+			t.Fatalf("GetDatabaseByUID() error = %v", err)
+		}
+		if found.Protocol != ProtocolOracle {
+			t.Errorf("Protocol after update = %q, want %q", found.Protocol, ProtocolOracle)
+		}
+		if found.OracleServiceName == nil || *found.OracleServiceName != "TEST01" {
+			t.Errorf("OracleServiceName after update = %v, want %q", found.OracleServiceName, "TEST01")
+		}
+	})
+}
+
 func TestGetDatabaseByName(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
