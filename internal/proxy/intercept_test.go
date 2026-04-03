@@ -68,26 +68,15 @@ func TestIsWriteQuery(t *testing.T) {
 func TestWriteKeywords(t *testing.T) {
 	t.Parallel()
 
-	// Ensure all expected keywords are in the list
+	// Ensure all expected write keywords are detected by isWriteQuery
 	expectedKeywords := []string{
 		"INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE",
 		"CREATE", "ALTER", "GRANT", "REVOKE",
 	}
 
-	if len(writeKeywords) != len(expectedKeywords) {
-		t.Errorf("writeKeywords length = %d, want %d", len(writeKeywords), len(expectedKeywords))
-	}
-
 	for _, kw := range expectedKeywords {
-		found := false
-		for _, wk := range writeKeywords {
-			if wk == kw {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("writeKeywords missing %q", kw)
+		if !isWriteQuery(kw + " something") {
+			t.Errorf("isWriteQuery(%q) should return true", kw+" something")
 		}
 	}
 }

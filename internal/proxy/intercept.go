@@ -14,14 +14,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
-
-// Write keywords that should be blocked for read-only grants.
-var writeKeywords = []string{
-	"INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE",
-	"CREATE", "ALTER", "GRANT", "REVOKE",
-}
 
 // readOnlyBypassPatterns contains regex patterns that detect attempts to disable read-only mode.
 var readOnlyBypassPatterns = []*regexp.Regexp{
@@ -214,29 +209,12 @@ func (s *Session) handleClose(msg *pgproto3.Close) {
 
 // isWriteQuery checks if a query is a write operation.
 func isWriteQuery(sql string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(sql))
-
-	for _, keyword := range writeKeywords {
-		if strings.HasPrefix(upper, keyword) {
-			return true
-		}
-	}
-
-	return false
+	return shared.IsWriteQuery(sql)
 }
-
-// ddlKeywords contains SQL keywords that indicate DDL operations.
-var ddlKeywords = []string{"CREATE", "ALTER", "DROP", "TRUNCATE"}
 
 // isDDLQuery checks if a query is a DDL operation.
 func isDDLQuery(sql string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(sql))
-	for _, keyword := range ddlKeywords {
-		if strings.HasPrefix(upper, keyword) {
-			return true
-		}
-	}
-	return false
+	return shared.IsDDLQuery(sql)
 }
 
 // isCopyQuery checks if a query is a COPY operation.
@@ -257,17 +235,8 @@ func isReadOnlyBypassAttempt(sql string) bool {
 }
 
 // isPasswordChangeQuery checks if a query attempts to modify user/role passwords.
-// This blocks: ALTER USER/ROLE ... PASSWORD, ALTER USER/ROLE ... ENCRYPTED PASSWORD
 func isPasswordChangeQuery(sql string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(sql))
-
-	// Check for ALTER USER or ALTER ROLE with PASSWORD
-	if (strings.HasPrefix(upper, "ALTER USER") || strings.HasPrefix(upper, "ALTER ROLE")) &&
-		strings.Contains(upper, "PASSWORD") {
-		return true
-	}
-
-	return false
+	return shared.IsPasswordChangeQuery(sql)
 }
 
 // parseRowsAffected extracts the row count from a CommandComplete message tag.

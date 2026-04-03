@@ -75,6 +75,24 @@ function DatabasesPage() {
       cell: (db) => <span className="font-medium">{db.name}</span>,
     },
     {
+      key: "protocol",
+      header: "Type",
+      cell: (db) =>
+        isFullDatabase(db) ? (
+          <span
+            className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
+              db.protocol === "oracle"
+                ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                : "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
+            }`}
+          >
+            {db.protocol === "oracle" ? "Oracle" : "PostgreSQL"}
+          </span>
+        ) : (
+          <span className="text-muted-foreground">-</span>
+        ),
+    },
+    {
       key: "description",
       header: "Description",
       cell: (db) => (
@@ -98,7 +116,11 @@ function DatabasesPage() {
       header: "Database",
       cell: (db) =>
         isFullDatabase(db) ? (
-          <span className="font-mono text-sm">{db.database_name}</span>
+          <span className="font-mono text-sm">
+            {db.protocol === "oracle"
+              ? db.oracle_service_name || db.database_name
+              : db.database_name}
+          </span>
         ) : (
           <span className="text-muted-foreground">-</span>
         ),
@@ -107,7 +129,7 @@ function DatabasesPage() {
       key: "ssl_mode",
       header: "SSL",
       cell: (db) =>
-        isFullDatabase(db) ? (
+        isFullDatabase(db) && db.protocol !== "oracle" ? (
           <span className="text-sm">{db.ssl_mode}</span>
         ) : (
           <span className="text-muted-foreground">-</span>
@@ -171,11 +193,13 @@ function DatabasesPage() {
 }
 
 function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
+  const [protocol, setProtocol] = useState("postgresql");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [host, setHost] = useState("");
   const [port, setPort] = useState("5432");
   const [databaseName, setDatabaseName] = useState("");
+  const [oracleServiceName, setOracleServiceName] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [sslMode, setSslMode] = useState("prefer");
@@ -197,10 +221,14 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
       description: description || undefined,
       host,
       port: parseInt(port, 10),
-      database_name: databaseName,
+      database_name:
+        protocol === "postgresql" ? databaseName : oracleServiceName,
       username,
       password,
-      ssl_mode: sslMode,
+      ssl_mode: protocol === "postgresql" ? sslMode : "",
+      protocol: protocol as "postgresql" | "oracle",
+      oracle_service_name:
+        protocol === "oracle" ? oracleServiceName : undefined,
     });
   };
 
@@ -214,6 +242,28 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-4 max-h-[60vh] overflow-y-auto">
+          <div className="space-y-2">
+            <Label htmlFor="protocol">Protocol</Label>
+            <Select
+              value={protocol}
+              onValueChange={(val) => {
+                setProtocol(val);
+                if (val === "oracle" && port === "5432") {
+                  setPort("1521");
+                } else if (val === "postgresql" && port === "1521") {
+                  setPort("5432");
+                }
+              }}
+            >
+              <SelectTrigger>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="postgresql">PostgreSQL</SelectItem>
+                <SelectItem value="oracle">Oracle</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
           <div className="space-y-2">
             <Label htmlFor="name">Name</Label>
             <Input
@@ -255,23 +305,37 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               />
             </div>
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="databaseName">Database Name</Label>
-            <Input
-              id="databaseName"
-              value={databaseName}
-              onChange={(e) => setDatabaseName(e.target.value)}
-              placeholder="myapp"
-              required
-            />
-          </div>
+          {protocol === "postgresql" && (
+            <div className="space-y-2">
+              <Label htmlFor="databaseName">Database Name</Label>
+              <Input
+                id="databaseName"
+                value={databaseName}
+                onChange={(e) => setDatabaseName(e.target.value)}
+                placeholder="myapp"
+                required
+              />
+            </div>
+          )}
+          {protocol === "oracle" && (
+            <div className="space-y-2">
+              <Label htmlFor="oracleServiceName">Service Name</Label>
+              <Input
+                id="oracleServiceName"
+                value={oracleServiceName}
+                onChange={(e) => setOracleServiceName(e.target.value)}
+                placeholder="ORCL"
+                required
+              />
+            </div>
+          )}
           <div className="space-y-2">
             <Label htmlFor="username">Username</Label>
             <Input
               id="username"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              placeholder="postgres"
+              placeholder={protocol === "oracle" ? "SYSTEM" : "postgres"}
               required
             />
           </div>
@@ -285,21 +349,23 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               required
             />
           </div>
-          <div className="space-y-2">
-            <Label htmlFor="sslMode">SSL Mode</Label>
-            <Select value={sslMode} onValueChange={setSslMode}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="disable">Disable</SelectItem>
-                <SelectItem value="prefer">Prefer</SelectItem>
-                <SelectItem value="require">Require</SelectItem>
-                <SelectItem value="verify-ca">Verify CA</SelectItem>
-                <SelectItem value="verify-full">Verify Full</SelectItem>
-              </SelectContent>
-            </Select>
-          </div>
+          {protocol === "postgresql" && (
+            <div className="space-y-2">
+              <Label htmlFor="sslMode">SSL Mode</Label>
+              <Select value={sslMode} onValueChange={setSslMode}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="disable">Disable</SelectItem>
+                  <SelectItem value="prefer">Prefer</SelectItem>
+                  <SelectItem value="require">Require</SelectItem>
+                  <SelectItem value="verify-ca">Verify CA</SelectItem>
+                  <SelectItem value="verify-full">Verify Full</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+          )}
         </div>
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onClose}>

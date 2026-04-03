@@ -18,6 +18,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/proxy"
+	"github.com/fclairamb/dbbat/internal/proxy/oracle"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -318,29 +319,62 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	logger.InfoContext(ctx, "Proxy server started", slog.String("addr", cfg.ListenPG))
 
-	// Wait for shutdown signal
+	// Start Oracle proxy server (if configured)
+	oracleServer := startOracleProxy(ctx, cfg, dataStore, proxyAuthCache, logger)
+
+	// Wait for shutdown signal and gracefully stop all servers
+	servers := []shutdownable{apiServer, proxyServer}
+	if oracleServer != nil {
+		servers = append(servers, oracleServer)
+	}
+
+	return awaitShutdown(ctx, logger, servers...)
+}
+
+// shutdownable is implemented by servers that support graceful shutdown.
+type shutdownable interface {
+	Shutdown(ctx context.Context) error
+}
+
+// awaitShutdown waits for an OS interrupt signal and then gracefully shuts down all servers.
+func awaitShutdown(ctx context.Context, logger *slog.Logger, servers ...shutdownable) error {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	<-sigChan
 	logger.InfoContext(ctx, "Shutdown signal received, gracefully shutting down...")
 
-	// Graceful shutdown with timeout - use fresh context since main context may be canceled
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 
-	// Shutdown API server
-	if err := apiServer.Shutdown(shutdownCtx); err != nil {
-		logger.ErrorContext(shutdownCtx, "API server shutdown error", slog.Any("error", err))
-	}
-
-	// Shutdown proxy server
-	if err := proxyServer.Shutdown(shutdownCtx); err != nil {
-		logger.ErrorContext(shutdownCtx, "Proxy server shutdown error", slog.Any("error", err))
+	for _, srv := range servers {
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			logger.ErrorContext(shutdownCtx, "server shutdown error", slog.Any("error", err))
+		}
 	}
 
 	logger.InfoContext(shutdownCtx, "Shutdown complete")
+
 	return nil
+}
+
+func startOracleProxy(ctx context.Context, cfg *config.Config, dataStore *store.Store, authCache *cache.AuthCache, logger *slog.Logger) *oracle.Server {
+	if cfg.ListenOracle == "" {
+		return nil
+	}
+
+	srv := oracle.NewServer(dataStore, cfg.EncryptionKey, authCache, cfg.QueryStorage, logger)
+
+	go func() {
+		if err := srv.Start(cfg.ListenOracle); err != nil {
+			logger.ErrorContext(context.Background(), "Oracle proxy server error", slog.Any("error", err))
+			os.Exit(1)
+		}
+	}()
+
+	logger.InfoContext(ctx, "Oracle proxy server started", slog.String("addr", cfg.ListenOracle))
+
+	return srv
 }
 
 func runMigrate(ctx context.Context, flags *cliFlags) error {

@@ -108,6 +108,9 @@ type Config struct {
 	// Proxy listen address.
 	ListenPG string `koanf:"listen_pg"`
 
+	// Oracle proxy listen address (empty = disabled).
+	ListenOracle string `koanf:"listen_ora"`
+
 	// REST API listen address.
 	ListenAPI string `koanf:"listen_api"`
 
@@ -206,10 +209,11 @@ const DefaultLogLevel = "info"
 // defaultConfig returns a Config with default values.
 func defaultConfig() Config {
 	return Config{
-		ListenPG:  ":5434",
-		ListenAPI: ":8080",
-		BaseURL:   DefaultBaseURL,
-		LogLevel:  DefaultLogLevel,
+		ListenPG:     ":5434",
+		ListenAPI:    ":8080",
+		ListenOracle: ":1522",
+		BaseURL:      DefaultBaseURL,
+		LogLevel:     DefaultLogLevel,
 		QueryStorage: QueryStorageConfig{
 			MaxResultRows:  DefaultMaxResultRows,
 			MaxResultBytes: DefaultMaxResultBytes,

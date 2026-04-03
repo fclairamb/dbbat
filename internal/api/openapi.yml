@@ -1585,6 +1585,13 @@ components:
         ssl_mode:
           type: string
           description: SSL mode (disable, prefer, require, etc.)
+        protocol:
+          type: string
+          enum: [postgresql, oracle]
+          description: Database protocol
+        oracle_service_name:
+          type: string
+          description: Oracle SERVICE_NAME (Oracle only)
         created_by:
           type: string
           format: uuid
@@ -1641,10 +1648,17 @@ components:
           type: string
           default: prefer
           description: SSL mode
+        protocol:
+          type: string
+          enum: [postgresql, oracle]
+          default: postgresql
+          description: Database protocol
+        oracle_service_name:
+          type: string
+          description: Oracle SERVICE_NAME (required for Oracle)
       required:
         - name
         - host
-        - database_name
         - username
         - password
 
@@ -1672,6 +1686,13 @@ components:
         ssl_mode:
           type: string
           description: SSL mode
+        protocol:
+          type: string
+          enum: [postgresql, oracle]
+          description: Database protocol
+        oracle_service_name:
+          type: string
+          description: Oracle SERVICE_NAME
 
     # Grant schemas
     GrantControl:
