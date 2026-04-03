@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -28,23 +27,21 @@ type UpdateUserRequest struct {
 func (s *Server) handleCreateUser(c *gin.Context) {
 	var req CreateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid request: "+err.Error())
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid request: "+err.Error())
 		return
 	}
 
 	// Hash password
 	passwordHash, err := crypto.HashPassword(req.Password)
 	if err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to hash password", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to create user")
+		writeInternalError(c, s.logger, err, "failed to hash password")
 		return
 	}
 
 	// Create user
 	user, err := s.store.CreateUser(c.Request.Context(), req.Username, passwordHash, req.Roles)
 	if err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to create user", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to create user")
+		writeInternalError(c, s.logger, err, "failed to create user")
 		return
 	}
 
@@ -73,8 +70,7 @@ func (s *Server) handleListUsers(c *gin.Context) {
 	if currentUser.IsAdmin() || currentUser.IsViewer() {
 		users, err := s.store.ListUsers(c.Request.Context())
 		if err != nil {
-			s.logger.ErrorContext(c.Request.Context(), "failed to list users", slog.Any("error", err))
-			errorResponse(c, http.StatusInternalServerError, "failed to list users")
+			writeInternalError(c, s.logger, err, "failed to list users")
 			return
 		}
 		successResponse(c, gin.H{"users": users})
@@ -89,14 +85,13 @@ func (s *Server) handleListUsers(c *gin.Context) {
 func (s *Server) handleGetUser(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid user UID")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid user UID")
 		return
 	}
 
 	user, err := s.store.GetUserByUID(c.Request.Context(), uid)
 	if err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to get user", slog.Any("error", err))
-		errorResponse(c, http.StatusNotFound, "user not found")
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "user not found")
 		return
 	}
 
@@ -107,19 +102,19 @@ func (s *Server) handleGetUser(c *gin.Context) {
 func (s *Server) handleUpdateUser(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid user UID")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid user UID")
 		return
 	}
 
 	var req UpdateUserRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid request: "+err.Error())
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid request: "+err.Error())
 		return
 	}
 
 	// API keys cannot change passwords (security restriction)
 	if req.Password != nil && isAPIKeyAuth(c) {
-		errorResponse(c, http.StatusForbidden, "password changes require password authentication")
+		writeError(c, http.StatusForbidden, ErrCodeForbidden, "password changes require password authentication")
 		return
 	}
 
@@ -128,11 +123,11 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 	// Non-admins can only update their own password
 	if !currentUser.IsAdmin() {
 		if uid != currentUser.UID {
-			errorResponse(c, http.StatusForbidden, "can only update your own user")
+			writeError(c, http.StatusForbidden, ErrCodeForbidden, "can only update your own user")
 			return
 		}
 		if len(req.Roles) > 0 {
-			errorResponse(c, http.StatusForbidden, "cannot change roles")
+			writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot change roles")
 			return
 		}
 	}
@@ -145,16 +140,14 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 	if req.Password != nil {
 		passwordHash, err := crypto.HashPassword(*req.Password)
 		if err != nil {
-			s.logger.ErrorContext(c.Request.Context(), "failed to hash password", slog.Any("error", err))
-			errorResponse(c, http.StatusInternalServerError, "failed to update user")
+			writeInternalError(c, s.logger, err, "failed to hash password")
 			return
 		}
 		updates.PasswordHash = &passwordHash
 	}
 
 	if err := s.store.UpdateUser(c.Request.Context(), uid, updates); err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to update user", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to update user")
+		writeInternalError(c, s.logger, err, "failed to update user")
 		return
 	}
 
@@ -176,7 +169,7 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 func (s *Server) handleDeleteUser(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid user UID")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid user UID")
 		return
 	}
 
@@ -184,7 +177,7 @@ func (s *Server) handleDeleteUser(c *gin.Context) {
 
 	// Prevent deleting yourself
 	if uid == currentUser.UID {
-		errorResponse(c, http.StatusBadRequest, "cannot delete your own user")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "cannot delete your own user")
 		return
 	}
 
@@ -192,20 +185,18 @@ func (s *Server) handleDeleteUser(c *gin.Context) {
 	if s.config != nil && s.config.IsDemoMode() {
 		userToDelete, err := s.store.GetUserByUID(c.Request.Context(), uid)
 		if err != nil {
-			s.logger.ErrorContext(c.Request.Context(), "failed to get user", slog.Any("error", err))
-			errorResponse(c, http.StatusNotFound, "user not found")
+			writeError(c, http.StatusNotFound, ErrCodeNotFound, "user not found")
 			return
 		}
 
 		if userToDelete.Username == "admin" {
-			errorResponse(c, http.StatusForbidden, "cannot delete admin user in demo mode")
+			writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot delete admin user in demo mode")
 			return
 		}
 	}
 
 	if err := s.store.DeleteUser(c.Request.Context(), uid); err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to delete user", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to delete user")
+		writeInternalError(c, s.logger, err, "failed to delete user")
 		return
 	}
 

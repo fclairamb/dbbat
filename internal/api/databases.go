@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -66,14 +65,14 @@ type DatabaseLimitedResponse struct {
 func (s *Server) handleCreateDatabase(c *gin.Context) {
 	var req CreateDatabaseRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid request: "+err.Error())
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid request: "+err.Error())
 		return
 	}
 
 	// Check demo mode restrictions
 	if s.config != nil {
 		if errMsg := s.config.ValidateDemoTarget(req.Username, req.Password, req.Host, req.DatabaseName); errMsg != "" {
-			errorResponse(c, http.StatusForbidden, errMsg)
+			writeError(c, http.StatusForbidden, ErrCodeForbidden, errMsg)
 			return
 		}
 	}
@@ -84,7 +83,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 	}
 
 	if req.Protocol != store.ProtocolPostgreSQL && req.Protocol != store.ProtocolOracle {
-		errorResponse(c, http.StatusBadRequest, "protocol must be 'postgresql' or 'oracle'")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "protocol must be 'postgresql' or 'oracle'")
 		return
 	}
 
@@ -102,7 +101,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 	switch req.Protocol {
 	case store.ProtocolOracle:
 		if req.OracleServiceName == "" && req.DatabaseName == "" {
-			errorResponse(c, http.StatusBadRequest, "oracle_service_name or database_name is required for Oracle databases")
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "oracle_service_name or database_name is required for Oracle databases")
 			return
 		}
 
@@ -111,7 +110,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		}
 	default:
 		if req.DatabaseName == "" {
-			errorResponse(c, http.StatusBadRequest, "database_name is required for PostgreSQL databases")
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "database_name is required for PostgreSQL databases")
 			return
 		}
 
@@ -144,11 +143,10 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 	result, err := s.store.CreateDatabase(c.Request.Context(), db, s.encryptionKey)
 	if err != nil {
 		if errors.Is(err, store.ErrTargetMatchesStorage) {
-			errorResponse(c, http.StatusBadRequest, "target database cannot match DBBat storage database")
+			writeError(c, http.StatusBadRequest, ErrCodeTargetMatchesSelf, "target database cannot match DBBat storage database")
 			return
 		}
-		s.logger.ErrorContext(c.Request.Context(), "failed to create database", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to create database")
+		writeInternalError(c, s.logger, err, "failed to create database")
 		return
 	}
 
@@ -173,8 +171,7 @@ func (s *Server) handleListDatabases(c *gin.Context) {
 
 	databases, err := s.store.ListDatabases(c.Request.Context())
 	if err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to list databases", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to list databases")
+		writeInternalError(c, s.logger, err, "failed to list databases")
 		return
 	}
 
@@ -206,8 +203,7 @@ func (s *Server) handleListDatabases(c *gin.Context) {
 			ActiveOnly: true,
 		})
 		if err != nil {
-			s.logger.ErrorContext(c.Request.Context(), "failed to list grants", slog.Any("error", err))
-			errorResponse(c, http.StatusInternalServerError, "failed to list databases")
+			writeInternalError(c, s.logger, err, "failed to list databases")
 			return
 		}
 
@@ -239,7 +235,7 @@ func (s *Server) handleListDatabases(c *gin.Context) {
 func (s *Server) handleGetDatabase(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid database UID")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid database UID")
 		return
 	}
 
@@ -247,8 +243,7 @@ func (s *Server) handleGetDatabase(c *gin.Context) {
 
 	db, err := s.store.GetDatabaseByUID(c.Request.Context(), uid)
 	if err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to get database", slog.Any("error", err))
-		errorResponse(c, http.StatusNotFound, "database not found")
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
 		return
 	}
 
@@ -268,14 +263,14 @@ func (s *Server) handleGetDatabase(c *gin.Context) {
 	if currentUser.IsConnector() {
 		grant, err := s.store.GetActiveGrant(c.Request.Context(), currentUser.UID, uid)
 		if err != nil || grant == nil {
-			errorResponse(c, http.StatusForbidden, "no access to this database")
+			writeError(c, http.StatusForbidden, ErrCodeForbidden, "no access to this database")
 			return
 		}
 		successResponse(c, toDatabaseLimitedResponse(db))
 		return
 	}
 
-	errorResponse(c, http.StatusForbidden, "no access to this database")
+	writeError(c, http.StatusForbidden, ErrCodeForbidden, "no access to this database")
 }
 
 // validateDemoModeUpdate checks if a database update is allowed in demo mode.
@@ -337,13 +332,13 @@ func (s *Server) validateDemoModeUpdate(db *store.Database, req UpdateDatabaseRe
 func (s *Server) handleUpdateDatabase(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid database UID")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid database UID")
 		return
 	}
 
 	var req UpdateDatabaseRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid request: "+err.Error())
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid request: "+err.Error())
 		return
 	}
 
@@ -351,11 +346,11 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 	if s.config != nil && s.config.IsDemoMode() && (req.Username != nil || req.Password != nil || req.Host != nil || req.DatabaseName != nil) {
 		db, err := s.store.GetDatabaseByUID(c.Request.Context(), uid)
 		if err != nil {
-			errorResponse(c, http.StatusNotFound, "database not found")
+			writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
 			return
 		}
 		if errMsg := s.validateDemoModeUpdate(db, req); errMsg != "" {
-			errorResponse(c, http.StatusForbidden, errMsg)
+			writeError(c, http.StatusForbidden, ErrCodeForbidden, errMsg)
 			return
 		}
 	}
@@ -374,15 +369,14 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 
 	if err := s.store.UpdateDatabase(c.Request.Context(), uid, updates, s.encryptionKey); err != nil {
 		if errors.Is(err, store.ErrTargetMatchesStorage) {
-			errorResponse(c, http.StatusBadRequest, "target database cannot match DBBat storage database")
+			writeError(c, http.StatusBadRequest, ErrCodeTargetMatchesSelf, "target database cannot match DBBat storage database")
 			return
 		}
 		if errors.Is(err, store.ErrDatabaseNotFound) {
-			errorResponse(c, http.StatusNotFound, "database not found")
+			writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
 			return
 		}
-		s.logger.ErrorContext(c.Request.Context(), "failed to update database", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to update database")
+		writeInternalError(c, s.logger, err, "failed to update database")
 		return
 	}
 
@@ -405,7 +399,7 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 func (s *Server) handleDeleteDatabase(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid database UID")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid database UID")
 		return
 	}
 
@@ -413,14 +407,13 @@ func (s *Server) handleDeleteDatabase(c *gin.Context) {
 	if s.config != nil && s.config.IsDemoMode() {
 		db, err := s.store.GetDatabaseByUID(c.Request.Context(), uid)
 		if err == nil && db.Name == "demo_db" {
-			errorResponse(c, http.StatusForbidden, "cannot delete the demo database in demo mode")
+			writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot delete the demo database in demo mode")
 			return
 		}
 	}
 
 	if err := s.store.DeleteDatabase(c.Request.Context(), uid); err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to delete database", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to delete database")
+		writeInternalError(c, s.logger, err, "failed to delete database")
 		return
 	}
 

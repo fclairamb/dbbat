@@ -62,36 +62,40 @@ func TestParseUIDParam(t *testing.T) {
 	}
 }
 
-func TestErrorResponse(t *testing.T) {
+func TestWriteError(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
 		name     string
-		code     int
+		status   int
+		code     ErrorCode
 		message  string
 		wantCode int
 		wantBody string
 	}{
 		{
 			name:     "bad request",
-			code:     http.StatusBadRequest,
+			status:   http.StatusBadRequest,
+			code:     ErrCodeValidationError,
 			message:  "invalid input",
 			wantCode: http.StatusBadRequest,
-			wantBody: `{"error":"invalid input"}`,
+			wantBody: `{"code":"VALIDATION_ERROR","message":"invalid input"}`,
 		},
 		{
 			name:     "not found",
-			code:     http.StatusNotFound,
+			status:   http.StatusNotFound,
+			code:     ErrCodeNotFound,
 			message:  "resource not found",
 			wantCode: http.StatusNotFound,
-			wantBody: `{"error":"resource not found"}`,
+			wantBody: `{"code":"NOT_FOUND","message":"resource not found"}`,
 		},
 		{
-			name:     "internal server error",
-			code:     http.StatusInternalServerError,
-			message:  "something went wrong",
-			wantCode: http.StatusInternalServerError,
-			wantBody: `{"error":"something went wrong"}`,
+			name:     "forbidden",
+			status:   http.StatusForbidden,
+			code:     ErrCodeForbidden,
+			message:  "access denied",
+			wantCode: http.StatusForbidden,
+			wantBody: `{"code":"FORBIDDEN","message":"access denied"}`,
 		},
 	}
 
@@ -102,14 +106,14 @@ func TestErrorResponse(t *testing.T) {
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
 
-			errorResponse(c, tt.code, tt.message)
+			writeError(c, tt.status, tt.code, tt.message)
 
 			if w.Code != tt.wantCode {
-				t.Errorf("errorResponse() status code = %d, want %d", w.Code, tt.wantCode)
+				t.Errorf("writeError() status code = %d, want %d", w.Code, tt.wantCode)
 			}
 
 			if w.Body.String() != tt.wantBody {
-				t.Errorf("errorResponse() body = %s, want %s", w.Body.String(), tt.wantBody)
+				t.Errorf("writeError() body = %s, want %s", w.Body.String(), tt.wantBody)
 			}
 		})
 	}

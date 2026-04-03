@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -33,7 +32,7 @@ type CreateAPIKeyResponse struct {
 func (s *Server) handleCreateAPIKey(c *gin.Context) {
 	var req CreateAPIKeyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid request: "+err.Error())
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid request: "+err.Error())
 		return
 	}
 
@@ -42,8 +41,7 @@ func (s *Server) handleCreateAPIKey(c *gin.Context) {
 	// Create API key
 	apiKey, plainKey, err := s.store.CreateAPIKey(c.Request.Context(), currentUser.UID, req.Name, req.ExpiresAt)
 	if err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to create API key", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to create API key")
+		writeInternalError(c, s.logger, err, "failed to create API key")
 		return
 	}
 
@@ -94,7 +92,7 @@ func (s *Server) handleListAPIKeys(c *gin.Context) {
 		if userIDStr := c.Query("user_id"); userIDStr != "" {
 			userID, err := uuid.Parse(userIDStr)
 			if err != nil {
-				errorResponse(c, http.StatusBadRequest, "invalid user_id")
+				writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid user_id")
 				return
 			}
 			filter.UserID = &userID
@@ -103,8 +101,7 @@ func (s *Server) handleListAPIKeys(c *gin.Context) {
 
 	keys, err := s.store.ListAPIKeys(c.Request.Context(), filter)
 	if err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to list API keys", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to list API keys")
+		writeInternalError(c, s.logger, err, "failed to list API keys")
 		return
 	}
 
@@ -115,21 +112,20 @@ func (s *Server) handleListAPIKeys(c *gin.Context) {
 func (s *Server) handleGetAPIKey(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid API key ID")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid API key ID")
 		return
 	}
 
 	apiKey, err := s.store.GetAPIKeyByID(c.Request.Context(), id)
 	if err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to get API key", slog.Any("error", err))
-		errorResponse(c, http.StatusNotFound, "API key not found")
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "API key not found")
 		return
 	}
 
 	// Non-admins can only see their own keys
 	currentUser := getCurrentUser(c)
 	if !currentUser.IsAdmin() && apiKey.UserID != currentUser.UID {
-		errorResponse(c, http.StatusForbidden, "access denied")
+		writeError(c, http.StatusForbidden, ErrCodeForbidden, "access denied")
 		return
 	}
 
@@ -141,7 +137,7 @@ func (s *Server) handleGetAPIKey(c *gin.Context) {
 func (s *Server) handleRevokeAPIKey(c *gin.Context) {
 	id, err := uuid.Parse(c.Param("id"))
 	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid API key ID")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid API key ID")
 		return
 	}
 
@@ -150,20 +146,18 @@ func (s *Server) handleRevokeAPIKey(c *gin.Context) {
 	// Get the key first to check permissions and for audit logging
 	apiKey, err := s.store.GetAPIKeyByID(c.Request.Context(), id)
 	if err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to get API key", slog.Any("error", err))
-		errorResponse(c, http.StatusNotFound, "API key not found")
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "API key not found")
 		return
 	}
 
 	// Non-admins can only revoke their own keys
 	if !currentUser.IsAdmin() && apiKey.UserID != currentUser.UID {
-		errorResponse(c, http.StatusForbidden, "access denied")
+		writeError(c, http.StatusForbidden, ErrCodeForbidden, "access denied")
 		return
 	}
 
 	if err := s.store.RevokeAPIKey(c.Request.Context(), id, currentUser.UID); err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to revoke API key", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to revoke API key")
+		writeInternalError(c, s.logger, err, "failed to revoke API key")
 		return
 	}
 
