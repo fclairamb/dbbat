@@ -342,6 +342,40 @@ func (k *APIKey) IsWebSession() bool {
 	return k.KeyType == KeyTypeWeb
 }
 
+// Identity provider constants
+const (
+	IdentityTypeSlack = "slack"
+)
+
+// UserIdentity represents a link between a user and an external identity provider
+type UserIdentity struct {
+	bun.BaseModel `bun:"table:user_identities,alias:ui"`
+
+	UID         uuid.UUID       `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	UserID      uuid.UUID       `bun:"user_id,notnull,type:uuid" json:"user_id"`
+	Provider    string          `bun:"provider,notnull" json:"provider"`
+	ProviderID  string          `bun:"provider_id,notnull" json:"provider_id"`
+	Email       string          `bun:"email" json:"email,omitempty"`
+	DisplayName string          `bun:"display_name" json:"display_name,omitempty"`
+	Metadata    json.RawMessage `bun:"metadata,type:jsonb" json:"metadata,omitempty"`
+	CreatedAt   time.Time       `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	UpdatedAt   time.Time       `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
+	DeletedAt   *time.Time      `bun:"deleted_at,soft_delete" json:"-"`
+}
+
+// OAuthState represents a temporary OAuth state for CSRF protection
+type OAuthState struct {
+	bun.BaseModel `bun:"table:oauth_states,alias:os"`
+
+	UID         uuid.UUID       `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	State       string          `bun:"state,notnull,unique" json:"state"`
+	Provider    string          `bun:"provider,notnull" json:"provider"`
+	RedirectURL string          `bun:"redirect_url" json:"redirect_url,omitempty"`
+	Metadata    json.RawMessage `bun:"metadata,type:jsonb" json:"metadata,omitempty"`
+	ExpiresAt   time.Time       `bun:"expires_at,notnull" json:"expires_at"`
+	CreatedAt   time.Time       `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+}
+
 // APIKeyFilter represents filters for listing API keys
 type APIKeyFilter struct {
 	UserID     *uuid.UUID
