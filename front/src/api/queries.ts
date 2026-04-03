@@ -24,6 +24,22 @@ export type CreateAPIKeyResponse =
   components["schemas"]["CreateAPIKeyResponse"];
 
 // ============================================================================
+// Auth Providers
+// ============================================================================
+
+export function useAuthProviders() {
+  return useQuery({
+    queryKey: ["auth-providers"],
+    queryFn: async () => {
+      const { data, error } = await apiClient.GET("/auth/providers");
+      if (error) throw error;
+      return data?.providers ?? [];
+    },
+    staleTime: 5 * 60 * 1000, // Cache for 5 minutes
+  });
+}
+
+// ============================================================================
 // Users
 // ============================================================================
 
