@@ -23,7 +23,103 @@ Implement the backend OAuth 2.0 flow for "Sign in with Slack". Users click a but
 
 - Slack bot commands (`@dbbat grant`, etc.) — separate feature
 - Admin UI for managing identities — future enhancement
-- Multiple OAuth providers (Google, GitHub) — future; architecture supports it
+
+---
+
+## OAuth Provider Abstraction
+
+While Slack is the first provider, the implementation uses an **OAuth provider interface** so that adding Google, GitHub, Microsoft, etc. later requires only implementing the interface — no changes to the callback handler, user resolution, or session creation logic. This pattern is borrowed from solidping's multi-provider auth system.
+
+### Provider Interface
+
+**File**: `internal/auth/oauth.go`
+
+```go
+package auth
+
+// OAuthProvider defines the contract for OAuth identity providers.
+type OAuthProvider interface {
+    // Name returns the provider identifier (e.g., "slack", "google").
+    Name() string
+
+    // AuthorizeURL builds the URL to redirect the user to for authorization.
+    AuthorizeURL(state, redirectURI string) string
+
+    // ExchangeCode exchanges an authorization code for user information.
+    // This handles both the token exchange and user profile fetch.
+    ExchangeCode(ctx context.Context, code, redirectURI string) (*OAuthUser, error)
+}
+
+// OAuthUser represents the normalized user info returned by any OAuth provider.
+type OAuthUser struct {
+    ProviderID  string // Provider-specific user ID (e.g., Slack "U013ZGBT0SJ")
+    Email       string
+    DisplayName string
+    TeamID      string // Provider-specific team/org (optional)
+    TeamName    string // Team display name (optional)
+    AvatarURL   string // Profile picture URL (optional)
+    RawData     json.RawMessage // Full provider response for metadata
+}
+```
+
+### Provider Registration
+
+**File**: `internal/api/server.go`
+
+```go
+// In Server struct:
+type Server struct {
+    // ... existing fields ...
+    oauthProviders map[string]auth.OAuthProvider // "slack" → SlackProvider
+}
+
+// During setup:
+if s.config.SlackAuth.Enabled() {
+    slackProvider := slack.NewProvider(s.config.SlackAuth)
+    s.oauthProviders["slack"] = slackProvider
+}
+
+// Routes — one pair per registered provider:
+for name, provider := range s.oauthProviders {
+    p := provider // capture
+    auth.GET("/"+name, s.handleOAuthAuthorize(p))
+    auth.GET("/"+name+"/callback", s.handleOAuthCallback(p))
+}
+```
+
+### Generic Handlers
+
+The authorize and callback handlers are **provider-agnostic** — they work with any `OAuthProvider`:
+
+```go
+func (s *Server) handleOAuthAuthorize(provider auth.OAuthProvider) gin.HandlerFunc {
+    return func(c *gin.Context) {
+        state := generateRandomState()
+        redirectURI := s.buildCallbackURL(provider.Name())
+        _ = s.store.CreateOAuthState(ctx, &store.OAuthState{
+            State: state, Provider: provider.Name(), ...
+        })
+        c.Redirect(http.StatusFound, provider.AuthorizeURL(state, redirectURI))
+    }
+}
+
+func (s *Server) handleOAuthCallback(provider auth.OAuthProvider) gin.HandlerFunc {
+    return func(c *gin.Context) {
+        // 1. Validate state
+        // 2. provider.ExchangeCode(ctx, code, redirectURI)
+        // 3. findOrCreateUser(ctx, provider.Name(), oauthUser)
+        // 4. Create web session
+        // 5. Redirect to app
+    }
+}
+```
+
+This means adding a second provider (e.g., Google) later requires:
+1. Implement `auth.OAuthProvider` (~50 lines)
+2. Add config fields
+3. Register in server setup
+
+No new handlers, no new routes, no changes to user resolution.
 
 ---
 
@@ -316,44 +412,41 @@ func (s *Server) generateUniqueUsername(ctx context.Context, slackUser *SlackUse
 }
 ```
 
-## Slack OIDC Client
+## Slack Provider Implementation
 
-**File**: `internal/auth/slack/client.go`
+**File**: `internal/auth/slack/provider.go`
 
-A minimal HTTP client for Slack's OpenID Connect endpoints. No Slack SDK dependency needed.
+Implements `auth.OAuthProvider` using Slack's OpenID Connect endpoints. No Slack SDK dependency — just HTTP calls.
 
 ```go
-type Client struct {
+// Provider implements auth.OAuthProvider for Slack OIDC.
+type Provider struct {
     clientID     string
     clientSecret string
+    teamID       string // Optional workspace restriction
     httpClient   *http.Client
 }
 
-type TokenResponse struct {
-    AccessToken string `json:"access_token"`
-    IDToken     string `json:"id_token"`
-    TokenType   string `json:"token_type"`
+func NewProvider(cfg config.SlackAuthConfig) *Provider
+
+// Name returns "slack".
+func (p *Provider) Name() string { return "slack" }
+
+// AuthorizeURL builds the Slack OIDC authorization URL.
+func (p *Provider) AuthorizeURL(state, redirectURI string) string {
+    // https://slack.com/openid/connect/authorize?
+    //   response_type=code&client_id=...&scope=openid email profile
+    //   &redirect_uri=...&state=...&team=... (if configured)
 }
 
-type UserInfo struct {
-    Sub       string `json:"sub"`          // Slack user ID (e.g., "U013ZGBT0SJ")
-    Name      string `json:"name"`         // Display name
-    Email     string `json:"email"`
-    Picture   string `json:"picture"`      // Avatar URL
-    TeamID    string `json:"https://slack.com/team_id"`
-    TeamName  string `json:"https://slack.com/team_name"`
+// ExchangeCode exchanges the authorization code for user info.
+// Calls token endpoint, then userinfo endpoint, returns normalized OAuthUser.
+func (p *Provider) ExchangeCode(ctx context.Context, code, redirectURI string) (*auth.OAuthUser, error) {
+    // 1. POST https://slack.com/api/openid.connect.token
+    // 2. GET https://slack.com/api/openid.connect.userInfo
+    // 3. Check team restriction
+    // 4. Return normalized OAuthUser
 }
-
-// ExchangeCode exchanges an authorization code for tokens.
-// POST https://slack.com/api/openid.connect.token
-func (c *Client) ExchangeCode(ctx context.Context, code, redirectURI string) (*TokenResponse, error)
-
-// GetUserInfo fetches the authenticated user's profile.
-// GET https://slack.com/api/openid.connect.userInfo
-func (c *Client) GetUserInfo(ctx context.Context, accessToken string) (*UserInfo, error)
-
-// AuthorizeURL builds the Slack authorization URL.
-func (c *Client) AuthorizeURL(state, redirectURI, teamID string) string
 ```
 
 **Endpoints used:**
@@ -521,11 +614,12 @@ func TestSlackAuthFlow(t *testing.T) {
 
 | File | Type | Description |
 |------|------|-------------|
-| `internal/auth/slack/client.go` | New | Slack OIDC client (token exchange, user info) |
-| `internal/auth/slack/client_test.go` | New | Client tests with httptest mocks |
-| `internal/api/slack_auth.go` | New | OAuth handlers (authorize, callback, providers) |
-| `internal/api/slack_auth_test.go` | New | Integration tests for OAuth flow |
-| `internal/api/server.go` | Modified | Register Slack auth routes |
+| `internal/auth/oauth.go` | New | `OAuthProvider` interface + `OAuthUser` struct |
+| `internal/auth/slack/provider.go` | New | Slack OIDC provider implementing `OAuthProvider` |
+| `internal/auth/slack/provider_test.go` | New | Provider tests with httptest mocks |
+| `internal/api/oauth.go` | New | Generic OAuth handlers (authorize, callback, providers) |
+| `internal/api/oauth_test.go` | New | Integration tests for OAuth flow |
+| `internal/api/server.go` | Modified | Register OAuth providers + routes |
 | `internal/config/config.go` | Modified | Add `SlackAuthConfig` |
 | `internal/store/users.go` | Modified | Add `GetUserByEmail` |
 
@@ -555,4 +649,4 @@ To use "Sign in with Slack", create a Slack app at https://api.slack.com/apps:
 
 ## Estimated Size
 
-~300 lines Slack client + ~250 lines handlers + ~100 lines config + ~300 lines tests = **~950 lines total**
+~80 lines OAuth interface + ~200 lines Slack provider + ~200 lines generic handlers + ~100 lines config + ~300 lines tests = **~880 lines total**
