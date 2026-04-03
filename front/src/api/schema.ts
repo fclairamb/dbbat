@@ -1180,42 +1180,19 @@ export interface components {
              */
             created_at: string;
         };
+        /** @description Standard error response */
         Error: {
-            /** @description Error message */
-            error: string;
-        };
-        RateLimitError: {
-            /** @example rate_limit_exceeded */
-            error: string;
-            /** @example Too many requests. Please retry after 60 seconds. */
-            message: string;
-            /** @description Seconds until retry is allowed */
-            retry_after: number;
-        };
-        /** @description Returned when user hasn't changed their initial password */
-        PasswordChangeRequiredError: {
             /**
-             * @example password_change_required
+             * @description Machine-readable error code
              * @enum {string}
              */
-            error: "password_change_required";
-            /** @example You must change your password before accessing the API */
+            code: "INTERNAL_ERROR" | "VALIDATION_ERROR" | "NOT_FOUND" | "UNAUTHORIZED" | "FORBIDDEN" | "INVALID_CREDENTIALS" | "PASSWORD_CHANGE_REQUIRED" | "WEAK_PASSWORD" | "RATE_LIMITED" | "DUPLICATE_NAME" | "TARGET_MATCHES_SELF" | "GRANT_EXPIRED" | "QUOTA_EXCEEDED";
+            /** @description Human-readable error message */
             message: string;
-        };
-        /** @description Returned when too many failed login attempts */
-        AuthRateLimitedError: {
-            /**
-             * @example auth_rate_limited
-             * @enum {string}
-             */
-            error: "auth_rate_limited";
-            /** @example Too many failed login attempts. Try again in 30 seconds. */
-            message: string;
-            /**
-             * @description Seconds until retry is allowed
-             * @example 30
-             */
-            retry_after: number;
+            /** @description Additional context */
+            detail?: string;
+            /** @description Seconds until retry (rate-limited responses only) */
+            retry_after?: number;
         };
         MessageResponse: {
             /** @description Success message */
@@ -1249,7 +1226,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["AuthRateLimitedError"];
+                "application/json": components["schemas"]["Error"];
             };
         };
         /** @description Insufficient permissions or password change required */
@@ -1258,7 +1235,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["Error"] | components["schemas"]["PasswordChangeRequiredError"];
+                "application/json": components["schemas"]["Error"];
             };
         };
         /** @description User must change their initial password before accessing the API */
@@ -1267,7 +1244,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["PasswordChangeRequiredError"];
+                "application/json": components["schemas"]["Error"];
             };
         };
         /** @description Resource not found */
@@ -1293,7 +1270,7 @@ export interface components {
                 [name: string]: unknown;
             };
             content: {
-                "application/json": components["schemas"]["RateLimitError"];
+                "application/json": components["schemas"]["Error"];
             };
         };
         /** @description Internal server error */
@@ -1354,9 +1331,6 @@ export type QueryRow = components['schemas']['QueryRow'];
 export type QueryRowsResponse = components['schemas']['QueryRowsResponse'];
 export type AuditEvent = components['schemas']['AuditEvent'];
 export type Error = components['schemas']['Error'];
-export type RateLimitError = components['schemas']['RateLimitError'];
-export type PasswordChangeRequiredError = components['schemas']['PasswordChangeRequiredError'];
-export type AuthRateLimitedError = components['schemas']['AuthRateLimitedError'];
 export type MessageResponse = components['schemas']['MessageResponse'];
 export type ResponseBadRequest = components['responses']['BadRequest'];
 export type ResponseUnauthorized = components['responses']['Unauthorized'];
@@ -1464,7 +1438,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["PasswordChangeRequiredError"];
+                    "application/json": components["schemas"]["Error"];
                 };
             };
             429: components["responses"]["AuthRateLimited"];

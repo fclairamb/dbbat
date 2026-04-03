@@ -26,7 +26,7 @@ info:
     ## Password Change Requirement
 
     Users must change their initial password before logging in.
-    Login attempts from users who haven't changed their password will receive a `403 Forbidden` response with error code `password_change_required`.
+    Login attempts from users who haven't changed their password will receive a `403 Forbidden` response with error code `PASSWORD_CHANGE_REQUIRED`.
     Users must then call `PUT /auth/password` with their username and credentials to change their password before they can log in.
 
     ## Rate Limiting
@@ -166,7 +166,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PasswordChangeRequiredError'
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/AuthRateLimited'
 
@@ -2127,64 +2127,37 @@ components:
     # Common schemas
     Error:
       type: object
+      description: Standard error response
       properties:
-        error:
+        code:
           type: string
-          description: Error message
-      required:
-        - error
-
-    RateLimitError:
-      type: object
-      properties:
-        error:
-          type: string
-          example: rate_limit_exceeded
+          description: Machine-readable error code
+          enum:
+            - INTERNAL_ERROR
+            - VALIDATION_ERROR
+            - NOT_FOUND
+            - UNAUTHORIZED
+            - FORBIDDEN
+            - INVALID_CREDENTIALS
+            - PASSWORD_CHANGE_REQUIRED
+            - WEAK_PASSWORD
+            - RATE_LIMITED
+            - DUPLICATE_NAME
+            - TARGET_MATCHES_SELF
+            - GRANT_EXPIRED
+            - QUOTA_EXCEEDED
         message:
           type: string
-          example: Too many requests. Please retry after 60 seconds.
+          description: Human-readable error message
+        detail:
+          type: string
+          description: Additional context
         retry_after:
           type: integer
-          description: Seconds until retry is allowed
+          description: Seconds until retry (rate-limited responses only)
       required:
-        - error
+        - code
         - message
-        - retry_after
-
-    PasswordChangeRequiredError:
-      type: object
-      description: Returned when user hasn't changed their initial password
-      properties:
-        error:
-          type: string
-          enum: [password_change_required]
-          example: password_change_required
-        message:
-          type: string
-          example: You must change your password before accessing the API
-      required:
-        - error
-        - message
-
-    AuthRateLimitedError:
-      type: object
-      description: Returned when too many failed login attempts
-      properties:
-        error:
-          type: string
-          enum: [auth_rate_limited]
-          example: auth_rate_limited
-        message:
-          type: string
-          example: Too many failed login attempts. Try again in 30 seconds.
-        retry_after:
-          type: integer
-          description: Seconds until retry is allowed
-          example: 30
-      required:
-        - error
-        - message
-        - retry_after
 
     MessageResponse:
       type: object
@@ -2220,23 +2193,21 @@ components:
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/AuthRateLimitedError'
+            $ref: '#/components/schemas/Error'
 
     Forbidden:
       description: Insufficient permissions or password change required
       content:
         application/json:
           schema:
-            oneOf:
-              - $ref: '#/components/schemas/Error'
-              - $ref: '#/components/schemas/PasswordChangeRequiredError'
+            $ref: '#/components/schemas/Error'
 
     PasswordChangeRequired:
       description: User must change their initial password before accessing the API
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/PasswordChangeRequiredError'
+            $ref: '#/components/schemas/Error'
 
     NotFound:
       description: Resource not found
@@ -2267,7 +2238,7 @@ components:
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/RateLimitError'
+            $ref: '#/components/schemas/Error'
 
     InternalError:
       description: Internal server error

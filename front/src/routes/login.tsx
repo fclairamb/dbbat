@@ -65,8 +65,8 @@ function LoginPage() {
     } catch (err) {
       const errorMessage =
         err instanceof Error ? err.message : "Login failed";
-      // Check if this is a password_change_required error
-      if (errorMessage === "password_change_required") {
+      // Check if this is a PASSWORD_CHANGE_REQUIRED error
+      if (errorMessage === "PASSWORD_CHANGE_REQUIRED") {
         setViewState("password-change");
         setError(null);
       } else {

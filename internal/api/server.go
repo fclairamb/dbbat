@@ -286,11 +286,6 @@ func (s *Server) loggingMiddleware() gin.HandlerFunc {
 	}
 }
 
-// errorResponse sends an error response.
-func errorResponse(c *gin.Context, code int, message string) {
-	c.JSON(code, gin.H{"error": message})
-}
-
 // successResponse sends a success response.
 func successResponse(c *gin.Context, data any) {
 	c.JSON(http.StatusOK, data)

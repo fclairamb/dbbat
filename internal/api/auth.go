@@ -3,7 +3,6 @@ package api
 import (
 	"log/slog"
 	"net/http"
-	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -52,7 +51,7 @@ type MeResponse struct {
 func (s *Server) handleLogin(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid request: username and password required")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid request: username and password required")
 		return
 	}
 
@@ -60,12 +59,7 @@ func (s *Server) handleLogin(c *gin.Context) {
 	// Skip rate limiting in test mode
 	if !s.isTestMode() {
 		if allowed, retryAfter := s.authFailureTracker.checkRateLimit(req.Username); !allowed {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-			c.JSON(http.StatusTooManyRequests, gin.H{
-				"error":       ErrCodeAuthRateLimited,
-				"message":     "Too many failed login attempts. Try again later.",
-				"retry_after": retryAfter,
-			})
+			writeRateLimited(c, retryAfter)
 			return
 		}
 	}
@@ -76,7 +70,7 @@ func (s *Server) handleLogin(c *gin.Context) {
 	user, err := s.store.GetUserByUsername(ctx, req.Username)
 	if err != nil {
 		s.authFailureTracker.recordFailure(req.Username)
-		errorResponse(c, http.StatusUnauthorized, "invalid credentials")
+		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "invalid credentials")
 		return
 	}
 
@@ -84,7 +78,7 @@ func (s *Server) handleLogin(c *gin.Context) {
 	valid, err := crypto.VerifyPassword(user.PasswordHash, req.Password)
 	if err != nil || !valid {
 		s.authFailureTracker.recordFailure(req.Username)
-		errorResponse(c, http.StatusUnauthorized, "invalid credentials")
+		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "invalid credentials")
 		return
 	}
 
@@ -94,18 +88,14 @@ func (s *Server) handleLogin(c *gin.Context) {
 	// Check if password change is required BEFORE creating a session
 	// Users with unchanged passwords cannot login - they must change password first
 	if !user.HasChangedPassword() {
-		c.JSON(http.StatusForbidden, gin.H{
-			"error":   ErrCodePasswordChangeRequired,
-			"message": "You must change your password before logging in",
-		})
+		writeError(c, http.StatusForbidden, ErrCodePasswordChangeRequired, "You must change your password before logging in")
 		return
 	}
 
 	// Create web session
 	apiKey, plainKey, err := s.store.CreateWebSession(ctx, user.UID)
 	if err != nil {
-		s.logger.ErrorContext(ctx, "failed to create web session", slog.Any("error", err), slog.String("user", user.Username))
-		errorResponse(c, http.StatusInternalServerError, "failed to create session")
+		writeInternalError(c, s.logger, err, "failed to create web session")
 		return
 	}
 
@@ -162,7 +152,7 @@ func (s *Server) handleLogout(c *gin.Context) {
 func (s *Server) handleMe(c *gin.Context) {
 	currentUser := getCurrentUser(c)
 	if currentUser == nil {
-		errorResponse(c, http.StatusUnauthorized, "not authenticated")
+		writeError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "not authenticated")
 		return
 	}
 
@@ -213,7 +203,7 @@ const minPasswordLength = 8
 func (s *Server) handlePreLoginPasswordChange(c *gin.Context) {
 	var req PreLoginPasswordChangeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errorResponse(c, http.StatusBadRequest, "username, current_password, and new_password are required")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "username, current_password, and new_password are required")
 		return
 	}
 
@@ -221,12 +211,7 @@ func (s *Server) handlePreLoginPasswordChange(c *gin.Context) {
 	// Skip rate limiting in test mode
 	if !s.isTestMode() {
 		if allowed, retryAfter := s.authFailureTracker.checkRateLimit(req.Username); !allowed {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-			c.JSON(http.StatusTooManyRequests, gin.H{
-				"error":       ErrCodeAuthRateLimited,
-				"message":     "Too many failed attempts. Try again later.",
-				"retry_after": retryAfter,
-			})
+			writeRateLimited(c, retryAfter)
 			return
 		}
 	}
@@ -237,10 +222,7 @@ func (s *Server) handlePreLoginPasswordChange(c *gin.Context) {
 	user, err := s.store.GetUserByUsername(ctx, req.Username)
 	if err != nil {
 		s.authFailureTracker.recordFailure(req.Username)
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error":   "invalid_credentials",
-			"message": "Invalid username or current password",
-		})
+		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "Invalid username or current password")
 		return
 	}
 
@@ -248,10 +230,7 @@ func (s *Server) handlePreLoginPasswordChange(c *gin.Context) {
 	valid, err := crypto.VerifyPassword(user.PasswordHash, req.CurrentPassword)
 	if err != nil || !valid {
 		s.authFailureTracker.recordFailure(req.Username)
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error":   "invalid_credentials",
-			"message": "Invalid username or current password",
-		})
+		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "Invalid username or current password")
 		return
 	}
 
@@ -260,25 +239,20 @@ func (s *Server) handlePreLoginPasswordChange(c *gin.Context) {
 
 	// Validate new password strength
 	if len(req.NewPassword) < minPasswordLength {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "weak_password",
-			"message": "Password must be at least 8 characters",
-		})
+		writeError(c, http.StatusBadRequest, ErrCodeWeakPassword, "Password must be at least 8 characters")
 		return
 	}
 
 	// Hash new password
 	newHash, err := crypto.HashPassword(req.NewPassword)
 	if err != nil {
-		s.logger.ErrorContext(ctx, "failed to hash password", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to change password")
+		writeInternalError(c, s.logger, err, "failed to hash password")
 		return
 	}
 
 	// Update password
 	if err := s.store.UpdateUser(ctx, user.UID, store.UserUpdate{PasswordHash: &newHash}); err != nil {
-		s.logger.ErrorContext(ctx, "failed to update password", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to change password")
+		writeInternalError(c, s.logger, err, "failed to update password")
 		return
 	}
 
@@ -293,17 +267,17 @@ func (s *Server) handlePreLoginPasswordChange(c *gin.Context) {
 // - Admin users can change any user's password (with their own admin credentials)
 // PUT /api/v1/users/:uid/password
 //
-//nolint:funlen,nestif // Authentication handlers require comprehensive validation which increases length
+//nolint:nestif // Authentication handlers require comprehensive validation
 func (s *Server) handleChangePassword(c *gin.Context) {
 	targetUID, err := parseUIDParam(c)
 	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid user ID")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid user ID")
 		return
 	}
 
 	var req ChangePasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errorResponse(c, http.StatusBadRequest, "current_password and new_password are required")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "current_password and new_password are required")
 		return
 	}
 
@@ -322,12 +296,7 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 		// Check rate limit BEFORE verifying credentials
 		if !s.isTestMode() {
 			if allowed, retryAfter := s.authFailureTracker.checkRateLimit(rateLimitKey); !allowed {
-				c.Header("Retry-After", strconv.Itoa(retryAfter))
-				c.JSON(http.StatusTooManyRequests, gin.H{
-					"error":       ErrCodeAuthRateLimited,
-					"message":     "Too many failed attempts. Try again later.",
-					"retry_after": retryAfter,
-				})
+				writeRateLimited(c, retryAfter)
 				return
 			}
 		}
@@ -336,10 +305,7 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 		authUser, err = s.store.GetUserByUsername(ctx, req.Username)
 		if err != nil {
 			s.authFailureTracker.recordFailure(rateLimitKey)
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"error":   "invalid_credentials",
-				"message": "Invalid username or current password",
-			})
+			writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "Invalid username or current password")
 			return
 		}
 	} else {
@@ -349,12 +315,7 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 		// Check rate limit BEFORE verifying credentials
 		if !s.isTestMode() {
 			if allowed, retryAfter := s.authFailureTracker.checkRateLimit(rateLimitKey); !allowed {
-				c.Header("Retry-After", strconv.Itoa(retryAfter))
-				c.JSON(http.StatusTooManyRequests, gin.H{
-					"error":       ErrCodeAuthRateLimited,
-					"message":     "Too many failed attempts. Try again later.",
-					"retry_after": retryAfter,
-				})
+				writeRateLimited(c, retryAfter)
 				return
 			}
 		}
@@ -363,10 +324,7 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 		authUser, err = s.store.GetUserByUID(ctx, targetUID)
 		if err != nil {
 			s.authFailureTracker.recordFailure(rateLimitKey)
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"error":   "invalid_credentials",
-				"message": "Invalid current password",
-			})
+			writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "Invalid current password")
 			return
 		}
 	}
@@ -375,10 +333,7 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 	valid, err := crypto.VerifyPassword(authUser.PasswordHash, req.CurrentPassword)
 	if err != nil || !valid {
 		s.authFailureTracker.recordFailure(rateLimitKey)
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error":   "invalid_credentials",
-			"message": "Invalid current password",
-		})
+		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "Invalid current password")
 		return
 	}
 
@@ -393,7 +348,7 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 	} else {
 		targetUser, err = s.store.GetUserByUID(ctx, targetUID)
 		if err != nil {
-			errorResponse(c, http.StatusNotFound, "user not found")
+			writeError(c, http.StatusNotFound, ErrCodeNotFound, "user not found")
 			return
 		}
 	}
@@ -402,34 +357,26 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 	// - Users can only change their own password
 	// - Admins can change any user's password
 	if authUser.UID != targetUID && !authUser.IsAdmin() {
-		c.JSON(http.StatusForbidden, gin.H{
-			"error":   "forbidden",
-			"message": "You can only change your own password",
-		})
+		writeError(c, http.StatusForbidden, ErrCodeForbidden, "You can only change your own password")
 		return
 	}
 
 	// Validate new password strength
 	if len(req.NewPassword) < minPasswordLength {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "weak_password",
-			"message": "Password must be at least 8 characters",
-		})
+		writeError(c, http.StatusBadRequest, ErrCodeWeakPassword, "Password must be at least 8 characters")
 		return
 	}
 
 	// Hash new password
 	newHash, err := crypto.HashPassword(req.NewPassword)
 	if err != nil {
-		s.logger.ErrorContext(ctx, "failed to hash password", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to change password")
+		writeInternalError(c, s.logger, err, "failed to hash password")
 		return
 	}
 
 	// Update password
 	if err := s.store.UpdateUser(ctx, targetUID, store.UserUpdate{PasswordHash: &newHash}); err != nil {
-		s.logger.ErrorContext(ctx, "failed to update password", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to change password")
+		writeInternalError(c, s.logger, err, "failed to update password")
 		return
 	}
 
@@ -450,48 +397,45 @@ func (s *Server) handleResetPassword(c *gin.Context) {
 	// 1. Get current user from context
 	currentUser := getCurrentUser(c)
 	if currentUser == nil {
-		errorResponse(c, http.StatusUnauthorized, "authentication required")
+		writeError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required")
 		return
 	}
 
 	// 2. Verify web session (not API key)
 	if isAPIKeyAuth(c) {
-		errorResponse(c, http.StatusForbidden, "web session required for password reset")
+		writeError(c, http.StatusForbidden, ErrCodeForbidden, "web session required for password reset")
 		return
 	}
 
 	// 3. Verify admin role
 	if !currentUser.IsAdmin() {
-		errorResponse(c, http.StatusForbidden, "admin access required")
+		writeError(c, http.StatusForbidden, ErrCodeForbidden, "admin access required")
 		return
 	}
 
 	// 4. Get target user UID
 	targetUID, err := parseUIDParam(c)
 	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid user ID")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid user ID")
 		return
 	}
 
 	// 5. Prevent self-reset (admins must use the regular password change endpoint for themselves)
 	if currentUser.UID == targetUID {
-		errorResponse(c, http.StatusForbidden, "cannot reset your own password; use the password change endpoint instead")
+		writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot reset your own password; use the password change endpoint instead")
 		return
 	}
 
 	// 6. Parse request body
 	var req ResetPasswordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errorResponse(c, http.StatusBadRequest, "new_password is required")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "new_password is required")
 		return
 	}
 
 	// 7. Validate password length
 	if len(req.NewPassword) < minPasswordLength {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "weak_password",
-			"message": "Password must be at least 8 characters",
-		})
+		writeError(c, http.StatusBadRequest, ErrCodeWeakPassword, "Password must be at least 8 characters")
 		return
 	}
 
@@ -500,22 +444,20 @@ func (s *Server) handleResetPassword(c *gin.Context) {
 	// 8. Get target user
 	targetUser, err := s.store.GetUserByUID(ctx, targetUID)
 	if err != nil {
-		errorResponse(c, http.StatusNotFound, "user not found")
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "user not found")
 		return
 	}
 
 	// 9. Hash new password
 	hashedPassword, err := crypto.HashPassword(req.NewPassword)
 	if err != nil {
-		s.logger.ErrorContext(ctx, "failed to hash password", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to reset password")
+		writeInternalError(c, s.logger, err, "failed to hash password")
 		return
 	}
 
 	// 10. Update password (this clears password_change_required since password is being set)
 	if err := s.store.UpdateUser(ctx, targetUID, store.UserUpdate{PasswordHash: &hashedPassword}); err != nil {
-		s.logger.ErrorContext(ctx, "failed to update password", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to reset password")
+		writeInternalError(c, s.logger, err, "failed to update password")
 		return
 	}
 
