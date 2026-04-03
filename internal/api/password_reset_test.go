@@ -211,9 +211,8 @@ func TestResetPassword_SelfResetForbidden(t *testing.T) {
 		t.Fatalf("failed to parse response: %v", err)
 	}
 
-	expectedError := "cannot reset your own password; use the password change endpoint instead"
-	if response["error"] != expectedError {
-		t.Errorf("expected error message %q, got %q", expectedError, response["error"])
+	if response["code"] != "FORBIDDEN" {
+		t.Errorf("expected error code %q, got %q", "FORBIDDEN", response["code"])
 	}
 }
 
@@ -351,8 +350,8 @@ func TestResetPassword_WeakPasswordRejected(t *testing.T) {
 		t.Fatalf("failed to parse response: %v", err)
 	}
 
-	if response["error"] != "weak_password" {
-		t.Errorf("expected error 'weak_password', got %q", response["error"])
+	if response["code"] != "WEAK_PASSWORD" {
+		t.Errorf("expected error code 'WEAK_PASSWORD', got %q", response["code"])
 	}
 }
 

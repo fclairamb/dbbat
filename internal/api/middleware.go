@@ -11,7 +11,6 @@ import (
 	"github.com/fclairamb/dbbat/internal/crypto"
 )
 
-
 // Auth context keys
 const (
 	contextKeyUser       = "current_user"

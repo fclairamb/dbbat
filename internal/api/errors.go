@@ -18,35 +18,46 @@ var (
 type ErrorCode string
 
 const (
-	// General errors.
-	ErrCodeInternalError   ErrorCode = "INTERNAL_ERROR"
+	// ErrCodeInternalError indicates an unexpected server error.
+	ErrCodeInternalError ErrorCode = "INTERNAL_ERROR"
+	// ErrCodeValidationError indicates invalid input.
 	ErrCodeValidationError ErrorCode = "VALIDATION_ERROR"
-	ErrCodeNotFound        ErrorCode = "NOT_FOUND"
-
-	// Auth errors.
-	ErrCodeUnauthorized           ErrorCode = "UNAUTHORIZED"
-	ErrCodeForbidden              ErrorCode = "FORBIDDEN"
-	ErrCodeInvalidCredentials     ErrorCode = "INVALID_CREDENTIALS"
+	// ErrCodeNotFound indicates the requested resource was not found.
+	ErrCodeNotFound ErrorCode = "NOT_FOUND"
+	// ErrCodeUnauthorized indicates authentication is required.
+	ErrCodeUnauthorized ErrorCode = "UNAUTHORIZED"
+	// ErrCodeForbidden indicates insufficient permissions.
+	ErrCodeForbidden ErrorCode = "FORBIDDEN"
+	// ErrCodeInvalidCredentials indicates wrong username or password.
+	ErrCodeInvalidCredentials ErrorCode = "INVALID_CREDENTIALS"
+	// ErrCodePasswordChangeRequired indicates the user must change their password.
 	ErrCodePasswordChangeRequired ErrorCode = "PASSWORD_CHANGE_REQUIRED"
-	ErrCodeWeakPassword           ErrorCode = "WEAK_PASSWORD"
-	ErrCodeRateLimited            ErrorCode = "RATE_LIMITED"
-
-	// OAuth errors (for future Slack auth).
-	ErrCodeOAuthFailed         ErrorCode = "OAUTH_FAILED"
-	ErrCodeOAuthStateMismatch  ErrorCode = "OAUTH_STATE_MISMATCH"
-	ErrCodeOAuthProviderError  ErrorCode = "OAUTH_PROVIDER_ERROR"
-	ErrCodeOAuthUserNotLinked  ErrorCode = "OAUTH_USER_NOT_LINKED"
+	// ErrCodeWeakPassword indicates the password does not meet requirements.
+	ErrCodeWeakPassword ErrorCode = "WEAK_PASSWORD"
+	// ErrCodeRateLimited indicates too many requests.
+	ErrCodeRateLimited ErrorCode = "RATE_LIMITED"
+	// ErrCodeOAuthFailed indicates an OAuth authentication failure.
+	ErrCodeOAuthFailed ErrorCode = "OAUTH_FAILED"
+	// ErrCodeOAuthStateMismatch indicates an invalid or expired OAuth state.
+	ErrCodeOAuthStateMismatch ErrorCode = "OAUTH_STATE_MISMATCH"
+	// ErrCodeOAuthProviderError indicates the OAuth provider returned an error.
+	ErrCodeOAuthProviderError ErrorCode = "OAUTH_PROVIDER_ERROR"
+	// ErrCodeOAuthUserNotLinked indicates no account is linked to the OAuth identity.
+	ErrCodeOAuthUserNotLinked ErrorCode = "OAUTH_USER_NOT_LINKED"
+	// ErrCodeOAuthWrongWorkspace indicates the wrong OAuth workspace was used.
 	ErrCodeOAuthWrongWorkspace ErrorCode = "OAUTH_WRONG_WORKSPACE"
-
-	// Resource errors.
-	ErrCodeDuplicateName     ErrorCode = "DUPLICATE_NAME"
+	// ErrCodeDuplicateName indicates a resource with that name already exists.
+	ErrCodeDuplicateName ErrorCode = "DUPLICATE_NAME"
+	// ErrCodeTargetMatchesSelf indicates the target matches the storage database.
 	ErrCodeTargetMatchesSelf ErrorCode = "TARGET_MATCHES_SELF"
-	ErrCodeGrantExpired      ErrorCode = "GRANT_EXPIRED"
-	ErrCodeQuotaExceeded     ErrorCode = "QUOTA_EXCEEDED"
+	// ErrCodeGrantExpired indicates the access grant has expired.
+	ErrCodeGrantExpired ErrorCode = "GRANT_EXPIRED"
+	// ErrCodeQuotaExceeded indicates a usage quota was exceeded.
+	ErrCodeQuotaExceeded ErrorCode = "QUOTA_EXCEEDED"
 )
 
-// APIError is the standard error response structure.
-type APIError struct {
+// ErrorBody is the standard error response structure.
+type ErrorBody struct {
 	Code       ErrorCode `json:"code"`
 	Message    string    `json:"message"`
 	Detail     string    `json:"detail,omitempty"`
@@ -55,25 +66,16 @@ type APIError struct {
 
 // writeError sends a structured error response.
 func writeError(c *gin.Context, status int, code ErrorCode, message string) {
-	c.JSON(status, APIError{
+	c.JSON(status, ErrorBody{
 		Code:    code,
 		Message: message,
-	})
-}
-
-// writeErrorDetail sends a structured error with additional detail.
-func writeErrorDetail(c *gin.Context, status int, code ErrorCode, message, detail string) {
-	c.JSON(status, APIError{
-		Code:    code,
-		Message: message,
-		Detail:  detail,
 	})
 }
 
 // writeRateLimited sends a 429 response with retry information.
 func writeRateLimited(c *gin.Context, retryAfter int) {
 	c.Header("Retry-After", strconv.Itoa(retryAfter))
-	c.JSON(http.StatusTooManyRequests, APIError{
+	c.JSON(http.StatusTooManyRequests, ErrorBody{
 		Code:       ErrCodeRateLimited,
 		Message:    "Too many requests. Try again later.",
 		RetryAfter: retryAfter,
@@ -84,7 +86,7 @@ func writeRateLimited(c *gin.Context, retryAfter int) {
 // The actual error is never sent to the client.
 func writeInternalError(c *gin.Context, logger *slog.Logger, err error, ctx string) {
 	logger.ErrorContext(c.Request.Context(), ctx, slog.Any("error", err))
-	c.JSON(http.StatusInternalServerError, APIError{
+	c.JSON(http.StatusInternalServerError, ErrorBody{
 		Code:    ErrCodeInternalError,
 		Message: "An internal error occurred. Please try again.",
 	})

@@ -33,7 +33,7 @@ export function useUsers() {
     queryFn: async (): Promise<User[]> => {
       const response = await apiClient.GET("/users");
       if (response.error) {
-        throw new Error(response.error.error || "Failed to load users");
+        throw new Error(response.error.message || "Failed to load users");
       }
       return response.data?.users || [];
     },
@@ -48,7 +48,7 @@ export function useUser(uid: string) {
         params: { path: { uid } },
       });
       if (response.error || !response.data) {
-        throw new Error(response.error?.error || "Failed to load user");
+        throw new Error(response.error?.message || "Failed to load user");
       }
       return response.data;
     },
@@ -68,7 +68,7 @@ export function useCreateUser(options?: {
         body: userData,
       });
       if (response.error || !response.data) {
-        throw new Error(response.error?.error || "Failed to create user");
+        throw new Error(response.error?.message || "Failed to create user");
       }
       return response.data;
     },
@@ -96,7 +96,7 @@ export function useUpdateUser(
         body: userData,
       });
       if (response.error) {
-        throw new Error(response.error.error || "Failed to update user");
+        throw new Error(response.error.message || "Failed to update user");
       }
     },
     onSuccess: () => {
@@ -120,7 +120,7 @@ export function useDeleteUser(options?: {
         params: { path: { uid } },
       });
       if (response.error) {
-        throw new Error(response.error.error || "Failed to delete user");
+        throw new Error(response.error.message || "Failed to delete user");
       }
     },
     onSuccess: () => {
@@ -141,7 +141,7 @@ export function useDatabases() {
     queryFn: async (): Promise<(Database | DatabaseLimited)[]> => {
       const response = await apiClient.GET("/databases");
       if (response.error) {
-        throw new Error(response.error.error || "Failed to load databases");
+        throw new Error(response.error.message || "Failed to load databases");
       }
       return response.data?.databases || [];
     },
@@ -156,7 +156,7 @@ export function useDatabase(uid: string) {
         params: { path: { uid } },
       });
       if (response.error || !response.data) {
-        throw new Error(response.error?.error || "Failed to load database");
+        throw new Error(response.error?.message || "Failed to load database");
       }
       return response.data;
     },
@@ -176,7 +176,7 @@ export function useCreateDatabase(options?: {
         body: data,
       });
       if (response.error || !response.data) {
-        throw new Error(response.error?.error || "Failed to create database");
+        throw new Error(response.error?.message || "Failed to create database");
       }
       return response.data;
     },
@@ -204,7 +204,7 @@ export function useUpdateDatabase(
         body: data,
       });
       if (response.error) {
-        throw new Error(response.error.error || "Failed to update database");
+        throw new Error(response.error.message || "Failed to update database");
       }
     },
     onSuccess: () => {
@@ -228,7 +228,7 @@ export function useDeleteDatabase(options?: {
         params: { path: { uid } },
       });
       if (response.error) {
-        throw new Error(response.error.error || "Failed to delete database");
+        throw new Error(response.error.message || "Failed to delete database");
       }
     },
     onSuccess: () => {
@@ -255,7 +255,7 @@ export function useGrants(filters?: {
         params: { query: filters },
       });
       if (response.error) {
-        throw new Error(response.error.error || "Failed to load grants");
+        throw new Error(response.error.message || "Failed to load grants");
       }
       return response.data?.grants || [];
     },
@@ -270,7 +270,7 @@ export function useGrant(uid: string) {
         params: { path: { uid } },
       });
       if (response.error || !response.data) {
-        throw new Error(response.error?.error || "Failed to load grant");
+        throw new Error(response.error?.message || "Failed to load grant");
       }
       return response.data;
     },
@@ -290,7 +290,7 @@ export function useCreateGrant(options?: {
         body: data,
       });
       if (response.error || !response.data) {
-        throw new Error(response.error?.error || "Failed to create grant");
+        throw new Error(response.error?.message || "Failed to create grant");
       }
       return response.data;
     },
@@ -314,7 +314,7 @@ export function useRevokeGrant(options?: {
         params: { path: { uid } },
       });
       if (response.error) {
-        throw new Error(response.error.error || "Failed to revoke grant");
+        throw new Error(response.error.message || "Failed to revoke grant");
       }
     },
     onSuccess: () => {
@@ -342,7 +342,7 @@ export function useConnections(filters?: {
         params: { query: filters },
       });
       if (response.error) {
-        throw new Error(response.error.error || "Failed to load connections");
+        throw new Error(response.error.message || "Failed to load connections");
       }
       return response.data?.connections || [];
     },
@@ -372,7 +372,7 @@ export function useQueries(
         params: { query: filters },
       });
       if (response.error) {
-        throw new Error(response.error.error || "Failed to load queries");
+        throw new Error(response.error.message || "Failed to load queries");
       }
       return response.data?.queries || [];
     },
@@ -388,7 +388,7 @@ export function useQueryDetails(uid: string) {
         params: { path: { uid } },
       });
       if (response.error || !response.data) {
-        throw new Error(response.error?.error || "Failed to load query");
+        throw new Error(response.error?.message || "Failed to load query");
       }
       return response.data;
     },
@@ -418,7 +418,7 @@ export function useQueryRows(
         },
       });
       if (response.error || !response.data) {
-        throw new Error(response.error?.error || "Failed to load query rows");
+        throw new Error(response.error?.message || "Failed to load query rows");
       }
       return response.data as QueryRowsResult;
     },
@@ -446,7 +446,7 @@ export function useAuditEvents(filters?: {
         params: { query: filters },
       });
       if (response.error) {
-        throw new Error(response.error.error || "Failed to load audit events");
+        throw new Error(response.error.message || "Failed to load audit events");
       }
       return response.data?.audit_events || [];
     },
@@ -468,7 +468,7 @@ export function useAPIKeys(filters?: {
         params: { query: filters },
       });
       if (response.error) {
-        throw new Error(response.error.error || "Failed to load API keys");
+        throw new Error(response.error.message || "Failed to load API keys");
       }
       return response.data?.keys || [];
     },
@@ -483,7 +483,7 @@ export function useAPIKey(id: string) {
         params: { path: { id } },
       });
       if (response.error || !response.data) {
-        throw new Error(response.error?.error || "Failed to load API key");
+        throw new Error(response.error?.message || "Failed to load API key");
       }
       return response.data;
     },
@@ -505,7 +505,7 @@ export function useCreateAPIKey(options?: {
         body: data,
       });
       if (response.error || !response.data) {
-        throw new Error(response.error?.error || "Failed to create API key");
+        throw new Error(response.error?.message || "Failed to create API key");
       }
       return response.data;
     },
@@ -529,7 +529,7 @@ export function useRevokeAPIKey(options?: {
         params: { path: { id } },
       });
       if (response.error) {
-        throw new Error(response.error.error || "Failed to revoke API key");
+        throw new Error(response.error.message || "Failed to revoke API key");
       }
     },
     onSuccess: () => {
@@ -550,7 +550,7 @@ export function useHealth() {
     queryFn: async () => {
       const response = await apiClient.GET("/health");
       if (response.error) {
-        throw new Error(response.error.error || "Service unhealthy");
+        throw new Error(response.error.message || "Service unhealthy");
       }
       return response.data;
     },
