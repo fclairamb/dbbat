@@ -103,6 +103,20 @@ type RedirectRule struct {
 	TargetPath string
 }
 
+// SlackAuthConfig holds Slack OAuth configuration.
+type SlackAuthConfig struct {
+	ClientID        string `koanf:"slack_client_id"`
+	ClientSecret    string `koanf:"slack_client_secret"`
+	TeamID          string `koanf:"slack_team_id"`
+	AutoCreateUsers bool   `koanf:"slack_auto_create_users"`
+	DefaultRole     string `koanf:"slack_default_role"`
+}
+
+// Enabled returns true if Slack OAuth is configured with both client ID and secret.
+func (c SlackAuthConfig) Enabled() bool {
+	return c.ClientID != "" && c.ClientSecret != ""
+}
+
 // Config holds the application configuration.
 type Config struct {
 	// Proxy listen address.
@@ -160,6 +174,9 @@ type Config struct {
 	// LogLevel controls the logging verbosity (debug, info, warn, error).
 	// Default is "info".
 	LogLevel string `koanf:"log_level"`
+
+	// SlackAuth holds Slack OAuth configuration.
+	SlackAuth SlackAuthConfig `koanf:"slack_auth"`
 }
 
 // Default query storage limits.
@@ -235,6 +252,10 @@ func defaultConfig() Config {
 			TTLSeconds: DefaultAuthCacheTTLSeconds,
 			MaxSize:    DefaultAuthCacheMaxSize,
 		},
+		SlackAuth: SlackAuthConfig{
+			AutoCreateUsers: true,
+			DefaultRole:     "connector",
+		},
 	}
 }
 
@@ -271,6 +292,10 @@ func envTransform(k, v string) (string, any) {
 	// auth_cache_* -> auth_cache.*
 	if strings.HasPrefix(key, "auth_cache_") {
 		return "auth_cache." + strings.TrimPrefix(key, "auth_cache_"), v
+	}
+	// slack_auth_* -> slack_auth.*
+	if strings.HasPrefix(key, "slack_auth_") {
+		return "slack_auth." + strings.TrimPrefix(key, "slack_auth_"), v
 	}
 	return key, v
 }
