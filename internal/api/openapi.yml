@@ -261,6 +261,75 @@ paths:
         '429':
           $ref: '#/components/responses/AuthRateLimited'
 
+  /auth/providers:
+    get:
+      tags:
+        - Auth
+      summary: List authentication providers
+      description: Returns enabled authentication methods. Used by the frontend to show login options.
+      operationId: listAuthProviders
+      security: []
+      responses:
+        '200':
+          description: List of auth providers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  providers:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        type:
+                          type: string
+                          enum: [password, slack]
+                        enabled:
+                          type: boolean
+                        authorize_url:
+                          type: string
+                          description: URL to initiate OAuth flow (only for OAuth providers)
+
+  /auth/slack:
+    get:
+      tags:
+        - Auth
+      summary: Initiate Slack OAuth login
+      description: Redirects to Slack's authorization page. After approval, Slack redirects back to the callback endpoint.
+      operationId: initiateSlackAuth
+      security: []
+      parameters:
+        - in: query
+          name: redirect
+          schema:
+            type: string
+          description: URL to redirect to after successful login
+      responses:
+        '302':
+          description: Redirect to Slack authorization
+
+  /auth/slack/callback:
+    get:
+      tags:
+        - Auth
+      summary: Slack OAuth callback
+      description: Handles the redirect from Slack after authorization. Creates or links user, creates session, redirects to app.
+      operationId: slackAuthCallback
+      security: []
+      parameters:
+        - in: query
+          name: code
+          schema:
+            type: string
+        - in: query
+          name: state
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to app with session token
+
   /users:
     post:
       tags:
