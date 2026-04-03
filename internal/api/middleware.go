@@ -2,7 +2,6 @@ package api
 
 import (
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -12,11 +11,6 @@ import (
 	"github.com/fclairamb/dbbat/internal/crypto"
 )
 
-// Error codes for API responses
-const (
-	ErrCodePasswordChangeRequired = "password_change_required"
-	ErrCodeAuthRateLimited        = "auth_rate_limited"
-)
 
 // Auth context keys
 const (
@@ -51,7 +45,7 @@ func (s *Server) handleBearerAuth(c *gin.Context, token string) {
 	// Verify the API key
 	apiKey, err := s.store.VerifyAPIKey(ctx, token)
 	if err != nil {
-		errorResponse(c, http.StatusUnauthorized, "invalid API key")
+		writeError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "invalid API key")
 		c.Abort()
 		return
 	}
@@ -59,7 +53,7 @@ func (s *Server) handleBearerAuth(c *gin.Context, token string) {
 	// Get the user associated with the API key
 	user, err := s.store.GetUserByUID(ctx, apiKey.UserID)
 	if err != nil {
-		errorResponse(c, http.StatusUnauthorized, "user not found")
+		writeError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "user not found")
 		c.Abort()
 		return
 	}
@@ -87,7 +81,7 @@ func (s *Server) handleBasicAuth(c *gin.Context) {
 	username, password, ok := c.Request.BasicAuth()
 	if !ok {
 		c.Header("WWW-Authenticate", `Basic realm="DBBat"`)
-		errorResponse(c, http.StatusUnauthorized, "authentication required")
+		writeError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required")
 		c.Abort()
 		return
 	}
@@ -96,12 +90,7 @@ func (s *Server) handleBasicAuth(c *gin.Context) {
 	// Skip rate limiting in test mode
 	if !s.isTestMode() {
 		if allowed, retryAfter := s.authFailureTracker.checkRateLimit(username); !allowed {
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-			c.JSON(http.StatusTooManyRequests, gin.H{
-				"error":       ErrCodeAuthRateLimited,
-				"message":     "Too many failed login attempts. Try again in " + strconv.Itoa(retryAfter) + " seconds.",
-				"retry_after": retryAfter,
-			})
+			writeRateLimited(c, retryAfter)
 			c.Abort()
 			return
 		}
@@ -113,7 +102,7 @@ func (s *Server) handleBasicAuth(c *gin.Context) {
 		// Record failure AFTER credential verification fails
 		s.authFailureTracker.recordFailure(username)
 		c.Header("WWW-Authenticate", `Basic realm="DBBat"`)
-		errorResponse(c, http.StatusUnauthorized, "invalid credentials")
+		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "invalid credentials")
 		c.Abort()
 		return
 	}
@@ -130,7 +119,7 @@ func (s *Server) handleBasicAuth(c *gin.Context) {
 		// Record failure AFTER credential verification fails
 		s.authFailureTracker.recordFailure(username)
 		c.Header("WWW-Authenticate", `Basic realm="DBBat"`)
-		errorResponse(c, http.StatusUnauthorized, "invalid credentials")
+		writeError(c, http.StatusUnauthorized, ErrCodeInvalidCredentials, "invalid credentials")
 		c.Abort()
 		return
 	}
@@ -149,7 +138,7 @@ func (s *Server) requireRole(role string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		user := getCurrentUser(c)
 		if user == nil || !user.HasRole(role) {
-			errorResponse(c, http.StatusForbidden, role+" access required")
+			writeError(c, http.StatusForbidden, ErrCodeForbidden, role+" access required")
 			c.Abort()
 			return
 		}
@@ -167,7 +156,7 @@ func (s *Server) requireAdminOrViewer() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		user := getCurrentUser(c)
 		if user == nil || (!user.IsAdmin() && !user.IsViewer()) {
-			errorResponse(c, http.StatusForbidden, "admin or viewer access required")
+			writeError(c, http.StatusForbidden, ErrCodeForbidden, "admin or viewer access required")
 			c.Abort()
 			return
 		}
@@ -183,7 +172,7 @@ func (s *Server) requireBasicAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authMethod := getAuthMethod(c)
 		if authMethod != authMethodBasic {
-			errorResponse(c, http.StatusForbidden, "this operation requires password authentication")
+			writeError(c, http.StatusForbidden, ErrCodeForbidden, "this operation requires password authentication")
 			c.Abort()
 			return
 		}
@@ -197,7 +186,7 @@ func (s *Server) requireWebSessionOrBasicAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authMethod := getAuthMethod(c)
 		if authMethod != authMethodBasic && authMethod != authMethodWebSession {
-			errorResponse(c, http.StatusForbidden, "API keys cannot perform this operation")
+			writeError(c, http.StatusForbidden, ErrCodeForbidden, "API keys cannot perform this operation")
 			c.Abort()
 			return
 		}
