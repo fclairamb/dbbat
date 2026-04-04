@@ -14,6 +14,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/fclairamb/dbbat/internal/auth"
+	"github.com/fclairamb/dbbat/internal/auth/slack"
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/store"
@@ -36,6 +38,7 @@ type Server struct {
 	authFailureTracker *authFailureTracker
 	authCache          *cache.AuthCache
 	config             *config.Config
+	oauthProviders     map[string]auth.OAuthProvider
 }
 
 // NewServer creates a new API server.
@@ -55,6 +58,17 @@ func NewServer(dataStore *store.Store, encryptionKey []byte, logger *slog.Logger
 		dataStore.SetAuthCache(authCache)
 	}
 
+	// Initialize OAuth providers
+	oauthProviders := make(map[string]auth.OAuthProvider)
+	if cfg != nil && cfg.SlackAuth.Enabled() {
+		oauthProviders["slack"] = slack.NewProvider(
+			cfg.SlackAuth.ClientID,
+			cfg.SlackAuth.ClientSecret,
+			cfg.SlackAuth.TeamID,
+		)
+		logger.InfoContext(context.Background(), "Slack OAuth provider enabled")
+	}
+
 	return &Server{
 		store:              dataStore,
 		encryptionKey:      encryptionKey,
@@ -63,6 +77,7 @@ func NewServer(dataStore *store.Store, encryptionKey []byte, logger *slog.Logger
 		authFailureTracker: newAuthFailureTracker(),
 		authCache:          authCache,
 		config:             cfg,
+		oauthProviders:     oauthProviders,
 	}
 }
 
@@ -129,6 +144,13 @@ func (s *Server) setupRouter() *gin.Engine {
 		auth := v1.Group("/auth")
 		auth.POST("/login", s.handleLogin)
 		auth.PUT("/password", s.handlePreLoginPasswordChange)
+		auth.GET("/providers", s.handleAuthProviders)
+
+		// OAuth provider routes (unauthenticated)
+		for name := range s.oauthProviders {
+			auth.GET("/"+name, s.handleOAuthAuthorize(name))
+			auth.GET("/"+name+"/callback", s.handleOAuthCallback(name))
+		}
 
 		// Password change endpoint uses credential auth from body (not Bearer token)
 		v1.PUT("/users/:uid/password", s.handleChangePassword)
@@ -284,11 +306,6 @@ func (s *Server) loggingMiddleware() gin.HandlerFunc {
 			slog.String("client_ip", c.ClientIP()),
 		)
 	}
-}
-
-// errorResponse sends an error response.
-func errorResponse(c *gin.Context, code int, message string) {
-	c.JSON(code, gin.H{"error": message})
 }
 
 // successResponse sends a success response.

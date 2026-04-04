@@ -199,7 +199,7 @@ test.describe("Password Change API", () => {
 
     expect(changePasswordResponse.status()).toBe(401);
     const errorData = await changePasswordResponse.json();
-    expect(errorData.error).toBe("invalid_credentials");
+    expect(errorData.code).toBe("INVALID_CREDENTIALS");
 
     // Step 4: Clean up
     const deleteResponse = await request.delete(

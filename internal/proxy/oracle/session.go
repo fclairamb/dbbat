@@ -153,33 +153,33 @@ func (s *session) run() error {
 		return fmt.Errorf("failed to forward accept to client: %w", err)
 	}
 
-	// Step 7: For now, skip TTC-level auth interception and proceed directly
-	// to bidirectional relay. Grant checking is done at connection time based on
-	// the database lookup. Full TTC auth interception will be added later.
+	// Step 7: Skip TTC-level auth interception for now.
 	// TODO: implement TTC AUTH username extraction and per-user grant checking
 	s.username = "proxy"
-	s.logger.InfoContext(s.ctx, "Oracle session established, entering relay mode")
 
-	// Step 9: Enter bidirectional raw relay (simple io.Copy for now)
-	return s.rawRelay()
-}
+	// Step 8: Create connection record (best-effort)
+	// Without TTC auth interception, we don't know the dbbat user.
+	// Use a placeholder approach: find a user with an active grant for this database.
+	sourceIP := store.ExtractSourceIP(s.clientConn.RemoteAddr())
+	if s.store != nil {
+		grants, _ := s.store.ListGrants(s.ctx, store.GrantFilter{
+			DatabaseID: &s.database.UID,
+			ActiveOnly: true,
+		})
+		if len(grants) > 0 {
+			s.grant = &grants[0]
+			conn, err := s.store.CreateConnection(s.ctx, grants[0].UserID, s.database.UID, sourceIP)
+			if err == nil {
+				s.connectionUID = conn.UID
+			}
+		}
+	}
 
-// rawRelay performs simple bidirectional byte relay between client and upstream
-// without TNS packet parsing. Used as a fallback when TTC interception is not needed.
-func (s *session) rawRelay() error {
-	errChan := make(chan error, 2)
+	s.logger.InfoContext(s.ctx, "Oracle session established, entering proxy mode",
+		slog.Any("connection_uid", s.connectionUID))
 
-	go func() {
-		_, err := io.Copy(s.upstreamConn, s.clientConn)
-		errChan <- err
-	}()
-
-	go func() {
-		_, err := io.Copy(s.clientConn, s.upstreamConn)
-		errChan <- err
-	}()
-
-	return <-errChan
+	// Step 9: Enter bidirectional TNS relay with query interception
+	return s.proxyMessages()
 }
 
 // proxyMessages relays TNS packets bidirectionally with TTC-aware interception.
@@ -243,8 +243,27 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 	}
 
 	switch funcCode { //nolint:exhaustive // only intercepting specific TTC functions, rest pass through
+	case TTCFuncPiggyback:
+		// v315+ piggyback: check sub-operation to determine action
+		if IsPiggybackExecSQL(ttcPayload) {
+			if err := s.checkQuotas(); err != nil {
+				_ = s.sendOracleError(err)
+				return true
+			}
+
+			if err := s.handlePiggybackExec(ttcPayload); err != nil {
+				_ = s.sendOracleError(err)
+				return true
+			}
+		} else if IsPiggybackClose(ttcPayload) {
+			// Sub-op 0x09 = close cursor
+			if len(ttcPayload) > 2 {
+				s.handleOCLOSE(uint16(ttcPayload[2]))
+			}
+		}
+
 	case TTCFuncOALL8:
-		// Check quotas first
+		// Legacy OALL8 (pre-v315)
 		if err := s.checkQuotas(); err != nil {
 			_ = s.sendOracleError(err)
 			return true
@@ -258,7 +277,7 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 	case TTCFuncOFETCH:
 		s.handleOFETCH(ttcPayload)
 
-	case TTCFuncOCLOSE:
+	case TTCFuncOCLOSE, TTCFuncOClosev2:
 		cursorID, err := decodeCursorIDFromOCLOSE(ttcPayload)
 		if err == nil {
 			s.handleOCLOSE(cursorID)
@@ -289,13 +308,7 @@ func (s *session) upstreamToClient() error {
 
 		// Intercept Data packets for response handling
 		if pkt.Type == TNSPacketTypeData && len(pkt.Payload) >= ttcDataFlagsSize+1 {
-			funcCode, fcErr := parseTTCFunctionCode(pkt.Payload)
-			if fcErr == nil && funcCode == TTCFuncResponse {
-				ttcPayload := extractTTCPayload(pkt.Payload)
-				if ttcPayload != nil {
-					s.handleResponse(ttcPayload, bytesTransferred)
-				}
-			}
+			s.interceptUpstreamMessage(pkt, bytesTransferred)
 		}
 
 		// Forward to client
@@ -305,14 +318,34 @@ func (s *session) upstreamToClient() error {
 	}
 }
 
+// interceptUpstreamMessage handles response interception from upstream.
+func (s *session) interceptUpstreamMessage(pkt *TNSPacket, bytesTransferred int64) {
+	funcCode, err := parseTTCFunctionCode(pkt.Payload)
+	if err != nil {
+		return
+	}
+
+	ttcPayload := extractTTCPayload(pkt.Payload)
+	if ttcPayload == nil {
+		return
+	}
+
+	switch funcCode { //nolint:exhaustive // only handling response-related codes
+	case TTCFuncQueryResult:
+		s.handleQueryResultV2(ttcPayload, bytesTransferred)
+	case TTCFuncResponse:
+		s.handleResponse(ttcPayload, bytesTransferred)
+	}
+}
+
 // handleResponse processes a TTC response, capturing rows and completing queries.
 func (s *session) handleResponse(ttcPayload []byte, bytesTransferred int64) {
 	resp, err := decodeTTCResponse(ttcPayload)
 	if err != nil {
-		// Fall back to basic parsing
-		errStr := parseResponseError(ttcPayload)
-		rowsAffected := parseResponseRowsAffected(ttcPayload)
-		s.completeQuery(rowsAffected, errStr, bytesTransferred)
+		// v315+ responses may not follow the legacy format — just complete as successful
+		if s.tracker.pendingQuery != nil {
+			s.completeQuery(nil, nil, bytesTransferred)
+		}
 
 		return
 	}

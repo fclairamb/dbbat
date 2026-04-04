@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 
 	"github.com/fclairamb/dbbat/internal/cache"
@@ -90,8 +91,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	close(s.shutdown)
 	s.cancel()
 
-	if s.listener != nil {
-		if err := s.listener.Close(); err != nil {
+	s.mu.Lock()
+	listener := s.listener
+	s.mu.Unlock()
+
+	if listener != nil {
+		if err := listener.Close(); err != nil {
 			s.logger.ErrorContext(ctx, "failed to close listener", slog.Any("error", err))
 		}
 	}
@@ -145,8 +150,15 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 	session := newSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.authCache, s.queryStorage)
 	if err := session.run(); err != nil {
-		s.logger.ErrorContext(s.ctx, "Oracle session error",
-			slog.Any("error", err),
-			slog.Any("remote_addr", clientConn.RemoteAddr()))
+		// Health check probes (NLB, etc.) connect and immediately close — log at debug level
+		errStr := err.Error()
+		if strings.Contains(errStr, "failed to read connect packet") || strings.Contains(errStr, "EOF") {
+			s.logger.DebugContext(s.ctx, "Oracle connection closed early (likely health check)",
+				slog.Any("remote_addr", clientConn.RemoteAddr()))
+		} else {
+			s.logger.ErrorContext(s.ctx, "Oracle session error",
+				slog.Any("error", err),
+				slog.Any("remote_addr", clientConn.RemoteAddr()))
+		}
 	}
 }

@@ -1,8 +1,10 @@
 import { useState, useEffect } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useAuth } from "@/contexts/AuthContext";
+import { storeToken } from "@/api/client";
 import { apiClient } from "@/api/client";
-import { useVersion } from "@/api/queries";
+import { useVersion, useAuthProviders } from "@/api/queries";
+import { SlackIcon } from "@/components/ui/slack-icon";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,12 +30,34 @@ export const Route = createFileRoute("/login")({
 
 type ViewState = "login" | "password-change";
 
+function oauthErrorMessage(code: string): string {
+  switch (code) {
+    case "slack_denied":
+      return "Slack authorization was cancelled.";
+    case "invalid_state":
+      return "Login session expired. Please try again.";
+    case "wrong_workspace":
+      return "Your Slack workspace is not authorized for this instance.";
+    case "token_exchange_failed":
+    case "user_info_failed":
+      return "Failed to complete Slack login. Please try again.";
+    case "user_creation_failed":
+      return "Failed to create your account. Contact an administrator.";
+    case "slack_not_linked":
+      return "No account is linked to your Slack identity. Contact an administrator.";
+    default:
+      return "An error occurred during login. Please try again.";
+  }
+}
+
 function LoginPage() {
   const navigate = useNavigate();
   // Read session_expired directly from URL to avoid TanStack Router's search param normalization
   const sessionExpired = new URLSearchParams(window.location.search).get("session_expired") === "true";
-  const { login, isLoading } = useAuth();
+  const { login, isLoading, refreshUser } = useAuth();
   const { data: versionInfo } = useVersion();
+  const { data: providers } = useAuthProviders();
+  const slackProvider = providers?.find((p) => p.type === "slack" && p.enabled);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -44,6 +68,32 @@ function LoginPage() {
   const [viewState, setViewState] = useState<ViewState>("login");
 
   const isDemo = versionInfo?.run_mode === "demo";
+
+  // Handle OAuth callback token
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("token");
+    if (token) {
+      // Remove token from URL immediately (security: don't leave in browser history)
+      window.history.replaceState({}, "", window.location.pathname);
+
+      // Store token and redirect to app
+      storeToken(token);
+      refreshUser().then(() => {
+        navigate({ to: "/" });
+      });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Handle OAuth error from callback
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const oauthError = params.get("error");
+    if (oauthError) {
+      window.history.replaceState({}, "", window.location.pathname);
+      setError(oauthErrorMessage(oauthError));
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Pre-fill credentials in demo mode
   useEffect(() => {
@@ -65,8 +115,8 @@ function LoginPage() {
     } catch (err) {
       const errorMessage =
         err instanceof Error ? err.message : "Login failed";
-      // Check if this is a password_change_required error
-      if (errorMessage === "password_change_required") {
+      // Check if this is a PASSWORD_CHANGE_REQUIRED error
+      if (errorMessage === "PASSWORD_CHANGE_REQUIRED") {
         setViewState("password-change");
         setError(null);
       } else {
@@ -329,6 +379,34 @@ function LoginPage() {
                 </Button>
               </div>
             </form>
+          )}
+
+          {/* Slack OAuth button */}
+          {slackProvider && (
+            <>
+              <div className="relative my-4">
+                <div className="absolute inset-0 flex items-center">
+                  <span className="w-full border-t" />
+                </div>
+                <div className="relative flex justify-center text-xs uppercase">
+                  <span className="bg-background px-2 text-muted-foreground">
+                    Or continue with
+                  </span>
+                </div>
+              </div>
+
+              <Button
+                variant="outline"
+                className="w-full"
+                onClick={() => {
+                  window.location.href = slackProvider.authorize_url!;
+                }}
+                data-testid="slack-login-button"
+              >
+                <SlackIcon className="mr-2 h-4 w-4" />
+                Sign in with Slack
+              </Button>
+            </>
           )}
         </CardContent>
       </Card>

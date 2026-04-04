@@ -14,4 +14,6 @@ var (
 	ErrQueryNotFound        = errors.New("query not found")
 	ErrInvalidCursor        = errors.New("invalid cursor")
 	ErrTargetMatchesStorage = errors.New("target database cannot match DBBat storage database")
+	ErrIdentityNotFound     = errors.New("identity not found")
+	ErrOAuthStateNotFound   = errors.New("oauth state not found")
 )

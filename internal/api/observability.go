@@ -2,7 +2,6 @@ package api
 
 import (
 	"errors"
-	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
@@ -52,8 +51,7 @@ func (s *Server) handleListConnections(c *gin.Context) {
 
 	connections, err := s.store.ListConnections(c.Request.Context(), filter)
 	if err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to list connections", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to list connections")
+		writeInternalError(c, s.logger, err, "failed to list connections")
 		return
 	}
 
@@ -111,8 +109,7 @@ func (s *Server) handleListQueries(c *gin.Context) {
 
 	queries, err := s.store.ListQueries(c.Request.Context(), filter)
 	if err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to list queries", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to list queries")
+		writeInternalError(c, s.logger, err, "failed to list queries")
 		return
 	}
 
@@ -123,14 +120,13 @@ func (s *Server) handleListQueries(c *gin.Context) {
 func (s *Server) handleGetQuery(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid query UID")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid query UID")
 		return
 	}
 
 	query, err := s.store.GetQuery(c.Request.Context(), uid)
 	if err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to get query", slog.Any("error", err))
-		errorResponse(c, http.StatusNotFound, "query not found")
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "query not found")
 		return
 	}
 
@@ -186,8 +182,7 @@ func (s *Server) handleListAudit(c *gin.Context) {
 
 	events, err := s.store.ListAuditEvents(c.Request.Context(), filter)
 	if err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to list audit events", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to list audit events")
+		writeInternalError(c, s.logger, err, "failed to list audit events")
 		return
 	}
 
@@ -198,7 +193,7 @@ func (s *Server) handleListAudit(c *gin.Context) {
 func (s *Server) handleGetQueryRows(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid query UID")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid query UID")
 		return
 	}
 
@@ -210,11 +205,11 @@ func (s *Server) handleGetQueryRows(c *gin.Context) {
 	if limitStr := c.Query("limit"); limitStr != "" {
 		val, err := strconv.Atoi(limitStr)
 		if err != nil || val < 1 {
-			errorResponse(c, http.StatusBadRequest, "invalid_limit")
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid limit")
 			return
 		}
 		if val > store.MaxQueryRowsLimit {
-			errorResponse(c, http.StatusBadRequest, "invalid_limit")
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid limit")
 			return
 		}
 		limit = val
@@ -223,15 +218,14 @@ func (s *Server) handleGetQueryRows(c *gin.Context) {
 	result, err := s.store.GetQueryRows(c.Request.Context(), uid, cursor, limit)
 	if err != nil {
 		if errors.Is(err, store.ErrQueryNotFound) {
-			errorResponse(c, http.StatusNotFound, "query_not_found")
+			writeError(c, http.StatusNotFound, ErrCodeNotFound, "query not found")
 			return
 		}
 		if errors.Is(err, store.ErrInvalidCursor) {
-			errorResponse(c, http.StatusBadRequest, "invalid_cursor")
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid cursor")
 			return
 		}
-		s.logger.ErrorContext(c.Request.Context(), "failed to get query rows", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to get query rows")
+		writeInternalError(c, s.logger, err, "failed to get query rows")
 		return
 	}
 

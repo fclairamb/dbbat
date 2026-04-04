@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"time"
 
@@ -27,7 +26,7 @@ type CreateGrantRequest struct {
 func (s *Server) handleCreateGrant(c *gin.Context) {
 	var req CreateGrantRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid request: "+err.Error())
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid request: "+err.Error())
 		return
 	}
 
@@ -41,14 +40,14 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 			}
 		}
 		if !valid {
-			errorResponse(c, http.StatusBadRequest, "invalid control: "+control)
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid control: "+control)
 			return
 		}
 	}
 
 	// Validate time window
 	if !req.StartsAt.Before(req.ExpiresAt) {
-		errorResponse(c, http.StatusBadRequest, "starts_at must be before expires_at")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "starts_at must be before expires_at")
 		return
 	}
 
@@ -66,8 +65,7 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 
 	result, err := s.store.CreateGrant(c.Request.Context(), grant)
 	if err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to create grant", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to create grant")
+		writeInternalError(c, s.logger, err, "failed to create grant")
 		return
 	}
 
@@ -119,8 +117,7 @@ func (s *Server) handleListGrants(c *gin.Context) {
 
 	grants, err := s.store.ListGrants(c.Request.Context(), filter)
 	if err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to list grants", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to list grants")
+		writeInternalError(c, s.logger, err, "failed to list grants")
 		return
 	}
 
@@ -131,7 +128,7 @@ func (s *Server) handleListGrants(c *gin.Context) {
 func (s *Server) handleGetGrant(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid grant UID")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid grant UID")
 		return
 	}
 
@@ -139,15 +136,14 @@ func (s *Server) handleGetGrant(c *gin.Context) {
 
 	grant, err := s.store.GetGrantByUID(c.Request.Context(), uid)
 	if err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to get grant", slog.Any("error", err))
-		errorResponse(c, http.StatusNotFound, "grant not found")
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant not found")
 		return
 	}
 
 	// Connector can only see their own grants
 	if !currentUser.IsAdmin() && !currentUser.IsViewer() {
 		if grant.UserID != currentUser.UID {
-			errorResponse(c, http.StatusForbidden, "no access to this grant")
+			writeError(c, http.StatusForbidden, ErrCodeForbidden, "no access to this grant")
 			return
 		}
 	}
@@ -159,14 +155,13 @@ func (s *Server) handleGetGrant(c *gin.Context) {
 func (s *Server) handleRevokeGrant(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
-		errorResponse(c, http.StatusBadRequest, "invalid grant UID")
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid grant UID")
 		return
 	}
 
 	currentUser := getCurrentUser(c)
 	if err := s.store.RevokeGrant(c.Request.Context(), uid, currentUser.UID); err != nil {
-		s.logger.ErrorContext(c.Request.Context(), "failed to revoke grant", slog.Any("error", err))
-		errorResponse(c, http.StatusInternalServerError, "failed to revoke grant")
+		writeInternalError(c, s.logger, err, "failed to revoke grant")
 		return
 	}
 

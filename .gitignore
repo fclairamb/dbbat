@@ -1,10 +1,6 @@
 # Binaries
 /dbbat
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
+*.priv*
 
 # Test binary, built with `go test -c`
 *.test

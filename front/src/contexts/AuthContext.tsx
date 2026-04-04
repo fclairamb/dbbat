@@ -118,8 +118,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (response.error || !response.data) {
         // Extract error code from response for password_change_required detection
-        const errorData = response.error as { error?: string; message?: string };
-        throw new Error(errorData?.error || "Login failed");
+        const errorData = response.error as {
+          code?: string;
+          message?: string;
+        };
+        throw new Error(errorData?.code || "Login failed");
       }
 
       const data = response.data;

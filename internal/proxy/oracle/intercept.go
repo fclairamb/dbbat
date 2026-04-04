@@ -89,6 +89,69 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 	return nil
 }
 
+// handlePiggybackExec intercepts a v315+ piggyback execute-with-SQL message.
+func (s *session) handlePiggybackExec(ttcPayload []byte) error {
+	result, err := decodePiggybackExecSQL(ttcPayload)
+	if err != nil {
+		s.logger.DebugContext(s.ctx, "failed to decode piggyback exec", slog.Any("error", err))
+		return nil // Don't block on decode failure
+	}
+
+	s.logger.InfoContext(s.ctx, "query intercepted",
+		slog.String("sql", truncateSQL(result.SQL, 200)),
+	)
+
+	// Access control check
+	if s.grant != nil {
+		if err := shared.ValidateOracleQuery(result.SQL, s.grant); err != nil {
+			s.logger.WarnContext(s.ctx, "query blocked by access control",
+				slog.String("sql", truncateSQL(result.SQL, 200)),
+				slog.Any("error", err),
+			)
+			return err
+		}
+	}
+
+	// Track as pending query
+	cursor := &trackedCursor{
+		sql:      result.SQL,
+		parsedAt: time.Now(),
+	}
+	s.tracker.pendingQuery = &pendingOracleQuery{
+		cursor:    cursor,
+		startTime: time.Now(),
+	}
+
+	return nil
+}
+
+// handleQueryResultV2 processes a v315+ QueryResult (func=0x10) response.
+// Extracts column names and row values, stores them as query results.
+func (s *session) handleQueryResultV2(ttcPayload []byte, bytesTransferred int64) {
+	result := decodeQueryResultV2(ttcPayload)
+
+	if result != nil && len(result.Columns) > 0 && len(result.Rows) > 0 {
+		// Build column definitions for row capture
+		columns := make([]columnDef, len(result.Columns))
+		for i, name := range result.Columns {
+			columns[i] = columnDef{Name: name}
+		}
+
+		// Capture each row
+		for _, row := range result.Rows {
+			values := make([]interface{}, len(row))
+			for i, v := range row {
+				values[i] = v
+			}
+
+			s.captureRow(columns, values)
+		}
+	}
+
+	// Complete the query as successful
+	s.completeQuery(nil, nil, bytesTransferred)
+}
+
 // handleOFETCH intercepts an OFETCH message: links the fetch to its cursor.
 func (s *session) handleOFETCH(ttcPayload []byte) {
 	result, err := decodeOFETCH(ttcPayload)
