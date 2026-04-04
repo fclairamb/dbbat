@@ -207,6 +207,8 @@ func (s *Server) setupRouter() *gin.Engine {
 			// Observability endpoints
 			// Connections: admin/viewer see all, connector sees own only (filtered in handler)
 			authenticated.GET("/connections", s.handleListConnections)
+			authenticated.GET("/connections/:uid/dump", s.requireAdminOrViewer(), s.handleGetConnectionDump)
+			authenticated.DELETE("/connections/:uid/dump", s.requireAdmin(), s.handleDeleteConnectionDump)
 			// Queries: admin/viewer only
 			authenticated.GET("/queries", s.requireAdminOrViewer(), s.handleListQueries)
 			authenticated.GET("/queries/:uid", s.requireAdminOrViewer(), s.handleGetQuery)

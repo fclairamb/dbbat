@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"path/filepath"
 
 	"github.com/google/uuid"
 
@@ -36,6 +37,10 @@ type session struct {
 	// Query tracking
 	tracker      *oracleQueryTracker
 	queryStorage config.QueryStorageConfig
+
+	// Dump
+	dumpConfig config.OracleDumpConfig
+	dump       *DumpWriter
 }
 
 // newSession creates a new Oracle proxy session.
@@ -47,6 +52,7 @@ func newSession(
 	ctx context.Context, //nolint:revive
 	authCache *cache.AuthCache,
 	queryStorage config.QueryStorageConfig,
+	dumpConfig config.OracleDumpConfig,
 ) *session {
 	return &session{
 		clientConn:    clientConn,
@@ -57,6 +63,7 @@ func newSession(
 		authCache:     authCache,
 		tracker:       newOracleQueryTracker(),
 		queryStorage:  queryStorage,
+		dumpConfig:    dumpConfig,
 	}
 }
 
@@ -178,7 +185,19 @@ func (s *session) run() error {
 	s.logger.InfoContext(s.ctx, "Oracle session established, entering proxy mode",
 		slog.Any("connection_uid", s.connectionUID))
 
-	// Step 9: Enter bidirectional TNS relay with query interception
+	// Step 9: Initialize dump writer if configured
+	if s.dumpConfig.Dir != "" && s.connectionUID != uuid.Nil {
+		dumpPath := filepath.Join(s.dumpConfig.Dir, s.connectionUID.String()+dumpFileExt)
+
+		dw, err := NewDumpWriter(dumpPath, s.connectionUID, s.serviceName, upstreamAddr, s.dumpConfig.MaxSize)
+		if err != nil {
+			s.logger.WarnContext(s.ctx, "failed to create dump writer", slog.Any("error", err))
+		} else {
+			s.dump = dw
+		}
+	}
+
+	// Step 10: Enter bidirectional TNS relay with query interception
 	return s.proxyMessages()
 }
 
@@ -211,6 +230,11 @@ func (s *session) clientToUpstream() error {
 			}
 
 			return fmt.Errorf("client read error: %w", err)
+		}
+
+		// Dump client->upstream packet
+		if s.dump != nil {
+			_ = s.dump.WritePacket(DumpDirClientToServer, pkt.Raw)
 		}
 
 		// Only intercept Data packets
@@ -311,6 +335,18 @@ func (s *session) upstreamToClient() error {
 			s.interceptUpstreamMessage(pkt, bytesTransferred)
 		}
 
+		// Also check for ORA-01403 in ANY data packet (multi-packet results)
+		if pkt.Type == TNSPacketTypeData && s.tracker.pendingQuery != nil {
+			if findBytes(pkt.Payload, []byte("ORA-01403")) >= 0 {
+				s.completeQuery(nil, nil, bytesTransferred)
+			}
+		}
+
+		// Dump upstream->client packet
+		if s.dump != nil {
+			_ = s.dump.WritePacket(DumpDirServerToClient, pkt.Raw)
+		}
+
 		// Forward to client
 		if err := writeTNSPacket(s.clientConn, pkt); err != nil {
 			return fmt.Errorf("client write error: %w", err)
@@ -335,18 +371,25 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket, bytesTransferred int6
 		s.handleQueryResultV2(ttcPayload, bytesTransferred)
 	case TTCFuncResponse:
 		s.handleResponse(ttcPayload, bytesTransferred)
+	default:
+		// Continuation packets (func=0x06 and others) may contain row data
+		// for multi-packet result sets. Try to extract rows if we have a pending query.
+		if s.tracker.pendingQuery != nil && s.tracker.pendingQuery.cursor != nil {
+			columns := s.tracker.pendingQuery.cursor.columns
+			if len(columns) > 0 {
+				s.captureRowsFromContinuation(pkt.Payload, columns)
+			}
+		}
 	}
 }
 
-// handleResponse processes a TTC response, capturing rows and completing queries.
+// handleResponse processes a legacy TTC Response (func=0x08).
+// In v315+, most responses don't follow the legacy format so we skip them.
+// Query completion is handled by handleQueryResultV2 for func=0x10.
 func (s *session) handleResponse(ttcPayload []byte, bytesTransferred int64) {
 	resp, err := decodeTTCResponse(ttcPayload)
 	if err != nil {
-		// v315+ responses may not follow the legacy format — just complete as successful
-		if s.tracker.pendingQuery != nil {
-			s.completeQuery(nil, nil, bytesTransferred)
-		}
-
+		// v315+ auth/negotiation responses don't follow legacy format — ignore
 		return
 	}
 
@@ -399,6 +442,12 @@ func (s *session) sendRefuse(reason string) {
 
 // cleanup closes upstream connection and updates records.
 func (s *session) cleanup() {
+	if s.dump != nil {
+		if err := s.dump.Close(); err != nil {
+			s.logger.ErrorContext(s.ctx, "failed to close dump writer", slog.Any("error", err))
+		}
+	}
+
 	if s.connectionUID != uuid.Nil {
 		if err := s.store.CloseConnection(s.ctx, s.connectionUID); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to close connection record", slog.Any("error", err))

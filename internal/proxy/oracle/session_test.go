@@ -51,9 +51,11 @@ func buildTNSConnect(serviceName string) []byte {
 	// connect data length
 	payload[16] = byte(descLen >> 8)
 	payload[17] = byte(descLen)
-	// connect data offset (26)
-	payload[18] = 0x00
-	payload[19] = 0x1A
+	// connect data offset (34 from packet start = 26 from payload start)
+	// TNS spec: offset is from start of full packet (including 8-byte header)
+	connectDataOffsetFromPacket := 26 + tnsHeaderSize // 34
+	payload[18] = byte(connectDataOffsetFromPacket >> 8)
+	payload[19] = byte(connectDataOffsetFromPacket)
 	// max receivable connect data
 	payload[22] = 0x08
 	payload[23] = 0x00

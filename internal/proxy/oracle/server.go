@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
@@ -19,6 +20,7 @@ type Server struct {
 	encryptionKey []byte
 	authCache     *cache.AuthCache
 	queryStorage  config.QueryStorageConfig
+	dumpConfig    config.OracleDumpConfig
 	logger        *slog.Logger
 	mu            sync.Mutex
 	listener      net.Listener
@@ -35,6 +37,7 @@ func NewServer(
 	encryptionKey []byte,
 	authCache *cache.AuthCache,
 	queryStorage config.QueryStorageConfig,
+	dumpConfig config.OracleDumpConfig,
 	logger *slog.Logger,
 ) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -44,6 +47,7 @@ func NewServer(
 		encryptionKey: encryptionKey,
 		authCache:     authCache,
 		queryStorage:  queryStorage,
+		dumpConfig:    dumpConfig,
 		logger:        logger.With("component", "oracle-proxy"),
 		shutdown:      make(chan struct{}),
 		ctx:           ctx,
@@ -63,6 +67,11 @@ func (s *Server) Start(addr string) error {
 	s.listenAddr = addr
 	s.mu.Unlock()
 	s.logger.InfoContext(s.ctx, "Oracle proxy server listening", slog.String("addr", addr))
+
+	// Start dump cleanup goroutine if dumps are enabled
+	if s.dumpConfig.Dir != "" {
+		go s.runDumpCleanup()
+	}
 
 	for {
 		conn, err := listener.Accept()
@@ -148,7 +157,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 	s.logger.DebugContext(s.ctx, "New Oracle connection", slog.Any("remote_addr", clientConn.RemoteAddr()))
 
-	session := newSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.authCache, s.queryStorage)
+	session := newSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.authCache, s.queryStorage, s.dumpConfig)
 	if err := session.run(); err != nil {
 		// Health check probes (NLB, etc.) connect and immediately close — log at debug level
 		errStr := err.Error()
@@ -159,6 +168,33 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 			s.logger.ErrorContext(s.ctx, "Oracle session error",
 				slog.Any("error", err),
 				slog.Any("remote_addr", clientConn.RemoteAddr()))
+		}
+	}
+}
+
+const dumpCleanupInterval = 1 * time.Hour
+
+// runDumpCleanup periodically cleans up old dump files.
+func (s *Server) runDumpCleanup() {
+	retention, err := time.ParseDuration(s.dumpConfig.Retention)
+	if err != nil {
+		retention = 24 * time.Hour
+	}
+
+	ticker := time.NewTicker(dumpCleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			deleted, err := CleanupOldDumps(s.dumpConfig.Dir, retention)
+			if err != nil {
+				s.logger.ErrorContext(s.ctx, "dump cleanup failed", slog.Any("error", err))
+			} else if deleted > 0 {
+				s.logger.InfoContext(s.ctx, "cleaned up old dumps", slog.Int("deleted", deleted))
+			}
+		case <-s.shutdown:
+			return
 		}
 	}
 }

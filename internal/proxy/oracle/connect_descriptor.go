@@ -93,13 +93,22 @@ func extractConnectString(payload []byte) string {
 	connectDataLen := int(payload[16])<<8 | int(payload[17])
 	connectDataOffset := int(payload[18])<<8 | int(payload[19])
 
-	if connectDataOffset > 0 && connectDataOffset < len(payload) {
-		end := connectDataOffset + connectDataLen
-		if end > len(payload) {
-			end = len(payload)
-		}
+	// The offset can be interpreted two ways depending on TNS version:
+	// - Old TNS: offset from start of full packet (subtract tnsHeaderSize for payload index)
+	// - New TNS (v315+): offset happens to match because extended data is appended
+	// Try both: first the raw offset (works for v315+), then adjusted (works for old TNS).
+	for _, payloadOffset := range []int{connectDataOffset, connectDataOffset - tnsHeaderSize} {
+		if payloadOffset >= 0 && payloadOffset < len(payload) {
+			end := payloadOffset + connectDataLen
+			if end > len(payload) {
+				end = len(payload)
+			}
 
-		return string(payload[connectDataOffset:end])
+			candidate := string(payload[payloadOffset:end])
+			if strings.Contains(candidate, "DESCRIPTION") || strings.Contains(candidate, "SERVICE_NAME") {
+				return candidate
+			}
+		}
 	}
 
 	// Fallback: scan for parenthesized descriptor

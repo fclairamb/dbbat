@@ -363,21 +363,53 @@ func decodePiggybackExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 		return nil, fmt.Errorf("%w: piggyback exec needs at least 52 bytes, got %d", ErrOALL8TooShort, len(ttcPayload))
 	}
 
-	// Try the known offset (50) first — this works for Oracle 19c with oracledb/JDBC thin
-	sql, err := extractSQLAtOffset(ttcPayload, 50)
-	if err == nil && sql != "" {
-		return &OALL8Result{SQL: sql}, nil
-	}
-
-	// Fallback: scan a range around the expected offset for a length-prefixed SQL string
-	for offset := 40; offset < 60 && offset < len(ttcPayload)-1; offset++ {
+	// Strategy: scan the payload for SQL text. Different Oracle client drivers
+	// (oracledb thin, JDBC thin) place the SQL at slightly different offsets
+	// (50-54 typically). We scan a range and validate the extracted text.
+	for offset := 40; offset < 70 && offset < len(ttcPayload)-1; offset++ {
 		sql, scanErr := extractSQLAtOffset(ttcPayload, offset)
 		if scanErr == nil && sql != "" {
 			return &OALL8Result{SQL: sql}, nil
 		}
 	}
 
+	// Last resort: find SQL keywords directly in the payload
+	sql := findSQLInPayload(ttcPayload)
+	if sql != "" {
+		return &OALL8Result{SQL: sql}, nil
+	}
+
 	return nil, fmt.Errorf("%w: could not find SQL text in piggyback exec payload", ErrEmptySQL)
+}
+
+// findSQLInPayload scans the raw payload for SQL text by looking for SQL keywords.
+// Used as a fallback when length-prefix decoding fails.
+func findSQLInPayload(payload []byte) string {
+	keywords := []string{
+		"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
+		"ALTER", "BEGIN", "DECLARE", "WITH", "MERGE", "CALL",
+	}
+
+	for _, kw := range keywords {
+		kwBytes := []byte(kw)
+		idx := findBytes(payload, kwBytes)
+		if idx < 0 {
+			continue
+		}
+
+		// Found a keyword — extract until we hit a non-SQL byte
+		// SQL ends at a null byte, or at the end of printable ASCII
+		end := idx
+		for end < len(payload) && payload[end] >= 0x0A && payload[end] <= 0x7E {
+			end++
+		}
+
+		if end > idx+2 {
+			return strings.TrimSpace(string(payload[idx:end]))
+		}
+	}
+
+	return ""
 }
 
 // extractSQLAtOffset tries to read a length-prefixed SQL string at the given offset.
@@ -438,9 +470,13 @@ func decodeQueryResultV2(ttcPayload []byte) *QueryResultV2 {
 	}
 
 	// Phase 1: Find column names
-	// Column names appear as length-prefixed UPPERCASE ASCII strings
-	// They're typically in the first ~60% of the payload
-	columnArea := ttcPayload[:min(len(ttcPayload)*70/100, len(ttcPayload))]
+	// Column names appear in the area BEFORE the 0x06 0x22 row data marker
+	markerIdx := findBytes(ttcPayload, []byte{0x06, 0x22})
+	columnArea := ttcPayload
+	if markerIdx > 0 {
+		columnArea = ttcPayload[:markerIdx]
+	}
+
 	result.Columns = scanColumnNames(columnArea)
 
 	if len(result.Columns) == 0 {
@@ -485,8 +521,9 @@ func scanColumnNames(data []byte) []string {
 
 // isOracleColumnName checks if bytes look like an Oracle column name.
 // Column names are uppercase ASCII with letters, digits, underscores, $, #.
+// Minimum 2 chars to avoid false positives from random bytes.
 func isOracleColumnName(b []byte) bool {
-	if len(b) < 1 || len(b) > 128 {
+	if len(b) < 2 || len(b) > 128 {
 		return false
 	}
 
@@ -495,19 +532,15 @@ func isOracleColumnName(b []byte) bool {
 		return false
 	}
 
-	allUpper := true
-
 	for _, c := range b {
 		if isUpperLetter(c) || (c >= '0' && c <= '9') || c == '_' || c == '$' || c == '#' {
 			continue
 		}
 
-		allUpper = false
-
-		break
+		return false
 	}
 
-	return allUpper
+	return true
 }
 
 func isUpperLetter(c byte) bool {
@@ -536,32 +569,34 @@ func skipColumnMetadata(data []byte) int {
 
 // scanRowValues extracts row values from the payload.
 // Each row contains `numCols` length-prefixed values.
-func scanRowValues(data []byte, numCols int) [][]string { //nolint:gocognit,cyclop // TTC binary parsing inherently complex
-	var rows [][]string
-
-	// Find the row data area by looking for the pattern after column definitions.
-	// Row data typically starts after a sequence like 0x06 0x22 0x01 (data descriptor).
-	rowStart := findRowDataStart(data, numCols)
-	if rowStart < 0 {
+//
+// Row data layout (after the 0x06 0x22 marker + descriptor):
+//
+//	[0x07]                  — separator before first row
+//	[len1] [val1]           — first column value
+//	[len2] [val2]           — second column value (0x00 = NULL)
+//	...
+//	[0x07]                  — separator between rows
+//	[len1] [val1] ...       — next row
+//	[0x08] [0x01] [0x06]    — end-of-rows footer
+func scanRowValues(data []byte, numCols int) [][]string {
+	rowStart := findRowDataStart(data)
+	if rowStart < 0 || numCols == 0 {
 		return nil
 	}
 
+	var rows [][]string
 	offset := rowStart
+	endOfData := len(data)
 	maxRows := 100
 
-	// Find the ORA-01403 marker to know where row data ends
-	endOfData := findBytes(data, []byte("ORA-01403"))
-	if endOfData < 0 {
-		endOfData = len(data)
-	}
-
-	for len(rows) < maxRows && offset < endOfData-2 {
+	for len(rows) < maxRows && offset < endOfData {
 		row := make([]string, 0, numCols)
-		validRow := true
+		valid := true
 
 		for col := 0; col < numCols; col++ {
 			if offset >= endOfData {
-				validRow = false
+				valid = false
 				break
 			}
 
@@ -573,87 +608,64 @@ func scanRowValues(data []byte, numCols int) [][]string { //nolint:gocognit,cycl
 				continue
 			}
 
-			// Sanity check: value length should be reasonable
 			if valLen > 4000 || offset+valLen > endOfData {
-				validRow = false
+				valid = false
 				break
 			}
 
 			valBytes := data[offset : offset+valLen]
 			offset += valLen
 
-			// Try to decode as readable value
 			row = append(row, decodeOracleRawValue(valBytes))
 		}
 
-		if !validRow || len(row) != numCols {
+		if !valid || len(row) != numCols {
 			break
 		}
 
 		rows = append(rows, row)
 
-		// After a row, there's a row trailer (marker 0x08 + metadata bytes).
-		// If no 0x08 marker, we've reached the end of row data.
-		if offset >= endOfData || data[offset] != 0x08 {
+		// After a row, expect either:
+		// - 0x08 0x01 0x06: end-of-rows footer → stop
+		// - 0x07: row separator → continue to next row
+		// - anything else: stop
+		if offset >= endOfData {
 			break
 		}
 
-		// Check if this is the end-of-rows footer (0x08 0x01 0x06) or another row.
-		// The pattern 0x08 0x01 0x06 0x04 indicates end of rows (cursor metadata).
-		if offset+3 <= endOfData && data[offset+1] == 0x01 && data[offset+2] == 0x06 {
-			break // End of rows footer
+		if data[offset] == 0x08 {
+			break // Footer (0x08 0x01 0x06) or end of data
 		}
 
-		// Skip the row trailer to find the start of the next row.
-		offset++ // skip 0x08
-
-		// Skip trailer metadata bytes (variable length, typically 6-10 bytes)
-		// Look for the next readable value that starts a new row.
-		found := false
-		for i := 0; i < 20 && offset+i < endOfData; i++ {
-			nextLen := int(data[offset+i])
-			if nextLen >= 1 && nextLen <= 128 && offset+i+1+nextLen <= endOfData {
-				candidate := data[offset+i+1 : offset+i+1+nextLen]
-				if isReadableASCII(candidate) || (nextLen <= 21 && candidate[0] >= 0x80) {
-					offset += i
-					found = true
-
-					break
-				}
-			}
+		if data[offset] == 0x07 {
+			offset++ // Skip row separator, continue to next row
+			continue
 		}
 
-		if !found {
-			break
-		}
+		break // Unknown byte — stop
 	}
 
 	return rows
 }
 
 // findRowDataStart locates where row data begins in the response.
-func findRowDataStart(data []byte, _ int) int {
-	// Look for the pattern 0x06 0x22 which appears before row data
+// Finds the 0x06 0x22 marker, skips the descriptor, and positions
+// after the 0x07 separator that precedes the first row.
+func findRowDataStart(data []byte) int {
 	marker := []byte{0x06, 0x22}
 	idx := findBytes(data, marker)
 	if idx < 0 {
 		return -1
 	}
 
-	// Skip past the marker and the row descriptor
-	offset := idx + 2
-
-	// Skip descriptor bytes until we reach the actual values
-	// Pattern: 0x01 0x0N 0x00 0x01 0x02 0x00 0x00 0x00 0x07
-	for offset < len(data)-1 {
+	// Skip past the marker + descriptor to find the 0x07 before first row
+	for offset := idx + 2; offset < len(data)-1; offset++ {
 		if data[offset] == 0x07 {
-			offset++
-			break
+			return offset + 1 // Start reading values after the 0x07
 		}
-		offset++
 	}
 
-	return offset
+	return -1
 }
 
 // decodeOracleRawValue converts raw Oracle bytes to a readable string.
@@ -663,6 +675,11 @@ func decodeOracleRawValue(b []byte) string {
 		return string(b)
 	}
 
+	// Try as Oracle DATE (7 bytes: century, year, month, day, hour, min, sec)
+	if dt, ok := decodeOracleDateToString(b); ok {
+		return dt
+	}
+
 	// Try as Oracle NUMBER
 	if num, ok := decodeOracleNumberToString(b); ok {
 		return num
@@ -670,6 +687,40 @@ func decodeOracleRawValue(b []byte) string {
 
 	// Fallback: hex representation
 	return hex.EncodeToString(b)
+}
+
+// decodeOracleDateToString converts Oracle DATE format (7 bytes) to ISO string.
+// Format: [century] [year] [month] [day] [hour+1] [minute+1] [second+1]
+// Century and year: (century-100)*100 + (year-100) = actual year
+func decodeOracleDateToString(b []byte) (string, bool) {
+	if len(b) != 7 {
+		return "", false
+	}
+
+	century := int(b[0])
+	year := int(b[1])
+	month := int(b[2])
+	day := int(b[3])
+	hour := int(b[4]) - 1
+	minute := int(b[5]) - 1
+	second := int(b[6]) - 1
+
+	// Sanity checks
+	if century < 100 || century > 200 || year < 100 || year > 200 {
+		return "", false
+	}
+
+	if month < 1 || month > 12 || day < 1 || day > 31 {
+		return "", false
+	}
+
+	if hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59 {
+		return "", false
+	}
+
+	fullYear := (century-100)*100 + (year - 100)
+
+	return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", fullYear, month, day, hour, minute, second), true
 }
 
 // isReadableASCII checks if all bytes are printable ASCII.

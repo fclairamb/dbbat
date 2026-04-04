@@ -90,6 +90,29 @@ func (s *Store) StoreQueryRows(ctx context.Context, queryUID uuid.UUID, rows []Q
 	return nil
 }
 
+// UpdateQueryCompletion updates a query with duration, rows affected, and error.
+func (s *Store) UpdateQueryCompletion(ctx context.Context, uid uuid.UUID, durationMs *float64, rowsAffected *int64, queryError *string) error {
+	q := s.db.NewUpdate().
+		Model((*Query)(nil)).
+		Where("uid = ?", uid)
+
+	if durationMs != nil {
+		q = q.Set("duration_ms = ?", *durationMs)
+	}
+
+	if rowsAffected != nil {
+		q = q.Set("rows_affected = ?", *rowsAffected)
+	}
+
+	if queryError != nil {
+		q = q.Set("error = ?", *queryError)
+	}
+
+	_, err := q.Exec(ctx)
+
+	return err
+}
+
 // ListQueries retrieves queries with optional filters
 func (s *Store) ListQueries(ctx context.Context, filter QueryFilter) ([]Query, error) {
 	var queries []Query
