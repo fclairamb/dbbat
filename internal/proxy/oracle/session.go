@@ -308,26 +308,33 @@ func (s *session) upstreamToClient() error {
 
 		// Intercept Data packets for response handling
 		if pkt.Type == TNSPacketTypeData && len(pkt.Payload) >= ttcDataFlagsSize+1 {
-			funcCode, fcErr := parseTTCFunctionCode(pkt.Payload)
-			if fcErr == nil {
-				switch funcCode { //nolint:exhaustive // only handling response-related codes
-				case TTCFuncQueryResult:
-					// v315+ query result — complete the pending query as successful
-					s.completeQuery(nil, nil, bytesTransferred)
-				case TTCFuncResponse:
-					// Legacy response format — try to parse error/rows
-					ttcPayload := extractTTCPayload(pkt.Payload)
-					if ttcPayload != nil {
-						s.handleResponse(ttcPayload, bytesTransferred)
-					}
-				}
-			}
+			s.interceptUpstreamMessage(pkt, bytesTransferred)
 		}
 
 		// Forward to client
 		if err := writeTNSPacket(s.clientConn, pkt); err != nil {
 			return fmt.Errorf("client write error: %w", err)
 		}
+	}
+}
+
+// interceptUpstreamMessage handles response interception from upstream.
+func (s *session) interceptUpstreamMessage(pkt *TNSPacket, bytesTransferred int64) {
+	funcCode, err := parseTTCFunctionCode(pkt.Payload)
+	if err != nil {
+		return
+	}
+
+	ttcPayload := extractTTCPayload(pkt.Payload)
+	if ttcPayload == nil {
+		return
+	}
+
+	switch funcCode { //nolint:exhaustive // only handling response-related codes
+	case TTCFuncQueryResult:
+		s.handleQueryResultV2(ttcPayload, bytesTransferred)
+	case TTCFuncResponse:
+		s.handleResponse(ttcPayload, bytesTransferred)
 	}
 }
 

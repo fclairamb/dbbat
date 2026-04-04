@@ -125,6 +125,33 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 	return nil
 }
 
+// handleQueryResultV2 processes a v315+ QueryResult (func=0x10) response.
+// Extracts column names and row values, stores them as query results.
+func (s *session) handleQueryResultV2(ttcPayload []byte, bytesTransferred int64) {
+	result := decodeQueryResultV2(ttcPayload)
+
+	if result != nil && len(result.Columns) > 0 && len(result.Rows) > 0 {
+		// Build column definitions for row capture
+		columns := make([]columnDef, len(result.Columns))
+		for i, name := range result.Columns {
+			columns[i] = columnDef{Name: name}
+		}
+
+		// Capture each row
+		for _, row := range result.Rows {
+			values := make([]interface{}, len(row))
+			for i, v := range row {
+				values[i] = v
+			}
+
+			s.captureRow(columns, values)
+		}
+	}
+
+	// Complete the query as successful
+	s.completeQuery(nil, nil, bytesTransferred)
+}
+
 // handleOFETCH intercepts an OFETCH message: links the fetch to its cursor.
 func (s *session) handleOFETCH(ttcPayload []byte) {
 	result, err := decodeOFETCH(ttcPayload)

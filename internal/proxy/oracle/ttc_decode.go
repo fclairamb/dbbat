@@ -409,6 +409,345 @@ func extractSQLAtOffset(data []byte, offset int) (string, error) {
 	return sqlText, nil
 }
 
+// QueryResultV2 contains parsed data from a v315+ TTC QueryResult (func=0x10).
+type QueryResultV2 struct {
+	Columns []string
+	Rows    [][]string
+	NoData  bool // true if ORA-01403 (normal end-of-data)
+}
+
+// decodeQueryResultV2 extracts column names and row values from a v315+
+// QueryResult (func=0x10) payload. Uses a scanning approach since the
+// exact binary format has many variable-length fields.
+//
+// Strategy:
+//  1. Scan for column names: length-prefixed uppercase ASCII strings
+//     in the first half of the payload (column definition area)
+//  2. Scan for row values: length-prefixed data after the column area
+//  3. Detect ORA-01403 as end-of-data (not an error)
+func decodeQueryResultV2(ttcPayload []byte) *QueryResultV2 {
+	if len(ttcPayload) < 20 {
+		return nil
+	}
+
+	result := &QueryResultV2{}
+
+	// Check for ORA-01403 (no data found) — this is a normal end-of-data marker
+	if idx := findBytes(ttcPayload, []byte("ORA-01403")); idx >= 0 {
+		result.NoData = true
+	}
+
+	// Phase 1: Find column names
+	// Column names appear as length-prefixed UPPERCASE ASCII strings
+	// They're typically in the first ~60% of the payload
+	columnArea := ttcPayload[:min(len(ttcPayload)*70/100, len(ttcPayload))]
+	result.Columns = scanColumnNames(columnArea)
+
+	if len(result.Columns) == 0 {
+		return result
+	}
+
+	// Phase 2: Find row values
+	// Row values appear after the column definitions. We look for a marker
+	// pattern that separates column defs from row data.
+	// The row data area starts roughly after the column definitions.
+	result.Rows = scanRowValues(ttcPayload, len(result.Columns))
+
+	return result
+}
+
+// scanColumnNames finds length-prefixed column names in the payload.
+// Column names in Oracle are uppercase ASCII identifiers.
+func scanColumnNames(data []byte) []string {
+	var columns []string
+	i := 30 // Skip the header area
+
+	for i < len(data)-1 {
+		nameLen := int(data[i])
+		if nameLen < 1 || nameLen > 128 || i+1+nameLen > len(data) {
+			i++
+			continue
+		}
+
+		candidate := data[i+1 : i+1+nameLen]
+		if isOracleColumnName(candidate) {
+			columns = append(columns, string(candidate))
+			i += 1 + nameLen
+			// Skip past column metadata (type info, etc.) — at least a few bytes
+			i += skipColumnMetadata(data[i:])
+		} else {
+			i++
+		}
+	}
+
+	return columns
+}
+
+// isOracleColumnName checks if bytes look like an Oracle column name.
+// Column names are uppercase ASCII with letters, digits, underscores, $, #.
+func isOracleColumnName(b []byte) bool {
+	if len(b) < 1 || len(b) > 128 {
+		return false
+	}
+
+	// First char must be a letter
+	if !isUpperLetter(b[0]) {
+		return false
+	}
+
+	allUpper := true
+
+	for _, c := range b {
+		if isUpperLetter(c) || (c >= '0' && c <= '9') || c == '_' || c == '$' || c == '#' {
+			continue
+		}
+
+		allUpper = false
+
+		break
+	}
+
+	return allUpper
+}
+
+func isUpperLetter(c byte) bool {
+	return c >= 'A' && c <= 'Z'
+}
+
+// skipColumnMetadata skips past the metadata bytes following a column name.
+// Returns the number of bytes to skip.
+func skipColumnMetadata(data []byte) int {
+	// Column metadata includes type code, size, precision, scale, nullable flag, etc.
+	// These are variable-length but typically 10-30 bytes.
+	// We scan forward looking for the next length-prefixed column name or the row data marker.
+	for i := 0; i < min(40, len(data)); i++ {
+		if i+1 < len(data) {
+			nameLen := int(data[i])
+			if nameLen >= 1 && nameLen <= 128 && i+1+nameLen <= len(data) {
+				if isOracleColumnName(data[i+1 : i+1+nameLen]) {
+					return i
+				}
+			}
+		}
+	}
+
+	return 0
+}
+
+// scanRowValues extracts row values from the payload.
+// Each row contains `numCols` length-prefixed values.
+func scanRowValues(data []byte, numCols int) [][]string { //nolint:gocognit,cyclop // TTC binary parsing inherently complex
+	var rows [][]string
+
+	// Find the row data area by looking for the pattern after column definitions.
+	// Row data typically starts after a sequence like 0x06 0x22 0x01 (data descriptor).
+	rowStart := findRowDataStart(data, numCols)
+	if rowStart < 0 {
+		return nil
+	}
+
+	offset := rowStart
+	maxRows := 100
+
+	// Find the ORA-01403 marker to know where row data ends
+	endOfData := findBytes(data, []byte("ORA-01403"))
+	if endOfData < 0 {
+		endOfData = len(data)
+	}
+
+	for len(rows) < maxRows && offset < endOfData-2 {
+		row := make([]string, 0, numCols)
+		validRow := true
+
+		for col := 0; col < numCols; col++ {
+			if offset >= endOfData {
+				validRow = false
+				break
+			}
+
+			valLen := int(data[offset])
+			offset++
+
+			if valLen == 0 {
+				row = append(row, "") // NULL
+				continue
+			}
+
+			// Sanity check: value length should be reasonable
+			if valLen > 4000 || offset+valLen > endOfData {
+				validRow = false
+				break
+			}
+
+			valBytes := data[offset : offset+valLen]
+			offset += valLen
+
+			// Try to decode as readable value
+			row = append(row, decodeOracleRawValue(valBytes))
+		}
+
+		if !validRow || len(row) != numCols {
+			break
+		}
+
+		rows = append(rows, row)
+
+		// After a row, there's a row trailer (marker 0x08 + metadata bytes).
+		// If no 0x08 marker, we've reached the end of row data.
+		if offset >= endOfData || data[offset] != 0x08 {
+			break
+		}
+
+		// Check if this is the end-of-rows footer (0x08 0x01 0x06) or another row.
+		// The pattern 0x08 0x01 0x06 0x04 indicates end of rows (cursor metadata).
+		if offset+3 <= endOfData && data[offset+1] == 0x01 && data[offset+2] == 0x06 {
+			break // End of rows footer
+		}
+
+		// Skip the row trailer to find the start of the next row.
+		offset++ // skip 0x08
+
+		// Skip trailer metadata bytes (variable length, typically 6-10 bytes)
+		// Look for the next readable value that starts a new row.
+		found := false
+		for i := 0; i < 20 && offset+i < endOfData; i++ {
+			nextLen := int(data[offset+i])
+			if nextLen >= 1 && nextLen <= 128 && offset+i+1+nextLen <= endOfData {
+				candidate := data[offset+i+1 : offset+i+1+nextLen]
+				if isReadableASCII(candidate) || (nextLen <= 21 && candidate[0] >= 0x80) {
+					offset += i
+					found = true
+
+					break
+				}
+			}
+		}
+
+		if !found {
+			break
+		}
+	}
+
+	return rows
+}
+
+// findRowDataStart locates where row data begins in the response.
+func findRowDataStart(data []byte, _ int) int {
+	// Look for the pattern 0x06 0x22 which appears before row data
+	marker := []byte{0x06, 0x22}
+	idx := findBytes(data, marker)
+	if idx < 0 {
+		return -1
+	}
+
+	// Skip past the marker and the row descriptor
+	offset := idx + 2
+
+	// Skip descriptor bytes until we reach the actual values
+	// Pattern: 0x01 0x0N 0x00 0x01 0x02 0x00 0x00 0x00 0x07
+	for offset < len(data)-1 {
+		if data[offset] == 0x07 {
+			offset++
+			break
+		}
+		offset++
+	}
+
+	return offset
+}
+
+// decodeOracleRawValue converts raw Oracle bytes to a readable string.
+func decodeOracleRawValue(b []byte) string {
+	// Try as readable ASCII first
+	if isReadableASCII(b) {
+		return string(b)
+	}
+
+	// Try as Oracle NUMBER
+	if num, ok := decodeOracleNumberToString(b); ok {
+		return num
+	}
+
+	// Fallback: hex representation
+	return hex.EncodeToString(b)
+}
+
+// isReadableASCII checks if all bytes are printable ASCII.
+func isReadableASCII(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+
+	for _, c := range b {
+		if c < 0x20 || c > 0x7E {
+			return false
+		}
+	}
+
+	return true
+}
+
+// decodeOracleNumberToString converts Oracle NUMBER format to a string.
+// Oracle NUMBER: [exponent byte] [mantissa digits...]
+// Exponent byte: value - 193 gives the power of 100
+// Each mantissa byte: value - 1 gives a two-digit number (00-99)
+func decodeOracleNumberToString(b []byte) (string, bool) {
+	if len(b) < 2 {
+		return "", false
+	}
+
+	exp := int(b[0])
+
+	// Check for zero
+	if exp == 128 && len(b) == 1 {
+		return "0", true
+	}
+
+	// Positive numbers: exponent >= 193
+	if exp < 193 || exp > 213 {
+		return "", false // Not a simple positive number
+	}
+
+	// Convert mantissa digits
+	power := exp - 193
+	var result int64
+
+	for i := 1; i < len(b); i++ {
+		digit := int64(b[i]) - 1
+		if digit < 0 || digit > 99 {
+			return "", false
+		}
+
+		result = result*100 + digit
+	}
+
+	// Apply power of 100
+	for i := len(b) - 2; i < power; i++ {
+		result *= 100
+	}
+
+	return fmt.Sprintf("%d", result), true
+}
+
+// findBytes finds the first occurrence of pattern in data.
+func findBytes(data, pattern []byte) int {
+	for i := 0; i <= len(data)-len(pattern); i++ {
+		match := true
+		for j := range pattern {
+			if data[i+j] != pattern[j] {
+				match = false
+				break
+			}
+		}
+
+		if match {
+			return i
+		}
+	}
+
+	return -1
+}
+
 // looksLikeSQL returns true if the string appears to be SQL text.
 func looksLikeSQL(s string) bool {
 	if len(s) < 2 {
