@@ -10,22 +10,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestCreateUserIdentity(t *testing.T) {
+func TestCreateUserIdentity(t *testing.T) { //nolint:tparallel // subtests share parent data
 	t.Parallel()
 
-	store := setupTestStore(t)
+	store := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
+	suffix := uuid.NewString()[:8]
 
-	user, err := store.CreateUser(ctx, "identity-user", "hash", []string{RoleViewer})
+	user, err := store.CreateUser(ctx, "identity-user-"+suffix, "hash", []string{RoleViewer})
 	require.NoError(t, err)
 
 	t.Run("create identity", func(t *testing.T) {
-		t.Parallel()
-
 		identity := &UserIdentity{
 			UserID:      user.UID,
 			Provider:    IdentityTypeSlack,
-			ProviderID:  "U12345",
+			ProviderID:  "U12345-" + suffix,
 			Email:       "user@example.com",
 			DisplayName: "Test User",
 			Metadata:    json.RawMessage(`{"team_id":"T123"}`),
@@ -35,7 +34,7 @@ func TestCreateUserIdentity(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotEqual(t, uuid.Nil, created.UID)
 		assert.Equal(t, IdentityTypeSlack, created.Provider)
-		assert.Equal(t, "U12345", created.ProviderID)
+		assert.Equal(t, "U12345-"+suffix, created.ProviderID)
 		assert.Equal(t, "user@example.com", created.Email)
 		assert.Equal(t, "Test User", created.DisplayName)
 		assert.False(t, created.CreatedAt.IsZero())
@@ -43,26 +42,25 @@ func TestCreateUserIdentity(t *testing.T) {
 	})
 }
 
-func TestGetUserIdentity(t *testing.T) {
+func TestGetUserIdentity(t *testing.T) { //nolint:tparallel // subtests share parent data
 	t.Parallel()
 
-	store := setupTestStore(t)
+	store := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
+	suffix := uuid.NewString()[:8]
 
-	user, err := store.CreateUser(ctx, "get-identity-user", "hash", []string{RoleViewer})
+	user, err := store.CreateUser(ctx, "get-identity-user-"+suffix, "hash", []string{RoleViewer})
 	require.NoError(t, err)
 
 	identity := &UserIdentity{
 		UserID:     user.UID,
 		Provider:   IdentityTypeSlack,
-		ProviderID: "U99999",
+		ProviderID: "U99999-" + suffix,
 	}
 	created, err := store.CreateUserIdentity(ctx, identity)
 	require.NoError(t, err)
 
 	t.Run("existing identity", func(t *testing.T) {
-		t.Parallel()
-
 		found, err := store.GetUserIdentity(ctx, created.UID)
 		require.NoError(t, err)
 		assert.Equal(t, created.UID, found.UID)
@@ -71,25 +69,22 @@ func TestGetUserIdentity(t *testing.T) {
 	})
 
 	t.Run("non-existing identity", func(t *testing.T) {
-		t.Parallel()
-
 		_, err := store.GetUserIdentity(ctx, uuid.New())
 		assert.ErrorIs(t, err, ErrIdentityNotFound)
 	})
 }
 
-func TestGetUserIdentities(t *testing.T) {
+func TestGetUserIdentities(t *testing.T) { //nolint:tparallel // subtests share parent data
 	t.Parallel()
 
-	store := setupTestStore(t)
+	store := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
+	suffix := uuid.NewString()[:8]
 
-	user, err := store.CreateUser(ctx, "list-identity-user", "hash", []string{RoleViewer})
+	user, err := store.CreateUser(ctx, "list-identity-user-"+suffix, "hash", []string{RoleViewer})
 	require.NoError(t, err)
 
 	t.Run("empty list", func(t *testing.T) {
-		t.Parallel()
-
 		emptyUser, err := store.CreateUser(ctx, "list-identity-empty-"+uuid.NewString()[:8], "hash", []string{RoleViewer})
 		require.NoError(t, err)
 
@@ -99,7 +94,7 @@ func TestGetUserIdentities(t *testing.T) {
 	})
 
 	// Create two identities
-	for _, pid := range []string{"U001", "U002"} {
+	for _, pid := range []string{"U001-" + suffix, "U002-" + suffix} {
 		_, err := store.CreateUserIdentity(ctx, &UserIdentity{
 			UserID:     user.UID,
 			Provider:   IdentityTypeSlack,
@@ -109,60 +104,60 @@ func TestGetUserIdentities(t *testing.T) {
 	}
 
 	t.Run("with identities", func(t *testing.T) {
-		t.Parallel()
-
 		identities, err := store.GetUserIdentities(ctx, user.UID)
 		require.NoError(t, err)
 		assert.Len(t, identities, 2)
 	})
 }
 
-func TestGetUserByIdentity(t *testing.T) {
+func TestGetUserByIdentity(t *testing.T) { //nolint:tparallel // subtests share parent data
 	t.Parallel()
 
-	store := setupTestStore(t)
+	store := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
+	suffix := uuid.NewString()[:8]
 
-	user, err := store.CreateUser(ctx, "lookup-by-identity", "hash", []string{RoleViewer})
+	user, err := store.CreateUser(ctx, "lookup-by-identity-"+suffix, "hash", []string{RoleViewer})
 	require.NoError(t, err)
+
+	providerID := "ULOOKUP-" + suffix
 
 	_, err = store.CreateUserIdentity(ctx, &UserIdentity{
 		UserID:     user.UID,
 		Provider:   IdentityTypeSlack,
-		ProviderID: "ULOOKUP",
+		ProviderID: providerID,
 	})
 	require.NoError(t, err)
 
 	t.Run("existing identity", func(t *testing.T) {
-		t.Parallel()
-
-		found, err := store.GetUserByIdentity(ctx, IdentityTypeSlack, "ULOOKUP")
+		found, err := store.GetUserByIdentity(ctx, IdentityTypeSlack, providerID)
 		require.NoError(t, err)
 		assert.Equal(t, user.UID, found.UID)
-		assert.Equal(t, "lookup-by-identity", found.Username)
+		assert.Equal(t, "lookup-by-identity-"+suffix, found.Username)
 	})
 
 	t.Run("non-existing identity", func(t *testing.T) {
-		t.Parallel()
-
 		_, err := store.GetUserByIdentity(ctx, IdentityTypeSlack, "NONEXISTENT")
 		assert.ErrorIs(t, err, ErrIdentityNotFound)
 	})
 }
 
-func TestDeleteUserIdentity(t *testing.T) {
+func TestDeleteUserIdentity(t *testing.T) { //nolint:tparallel // subtests share parent data
 	t.Parallel()
 
-	store := setupTestStore(t)
+	store := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
+	suffix := uuid.NewString()[:8]
 
-	user, err := store.CreateUser(ctx, "delete-identity-user", "hash", []string{RoleViewer})
+	user, err := store.CreateUser(ctx, "delete-identity-user-"+suffix, "hash", []string{RoleViewer})
 	require.NoError(t, err)
+
+	providerID := "UDELETE-" + suffix
 
 	identity, err := store.CreateUserIdentity(ctx, &UserIdentity{
 		UserID:     user.UID,
 		Provider:   IdentityTypeSlack,
-		ProviderID: "UDELETE",
+		ProviderID: providerID,
 	})
 	require.NoError(t, err)
 
@@ -176,8 +171,6 @@ func TestDeleteUserIdentity(t *testing.T) {
 	})
 
 	t.Run("delete non-existing identity", func(t *testing.T) {
-		t.Parallel()
-
 		err := store.DeleteUserIdentity(ctx, uuid.New())
 		assert.ErrorIs(t, err, ErrIdentityNotFound)
 	})
@@ -187,7 +180,7 @@ func TestDeleteUserIdentity(t *testing.T) {
 		newIdentity, err := store.CreateUserIdentity(ctx, &UserIdentity{
 			UserID:     user.UID,
 			Provider:   IdentityTypeSlack,
-			ProviderID: "UDELETE",
+			ProviderID: providerID,
 		})
 		require.NoError(t, err)
 		assert.NotEqual(t, identity.UID, newIdentity.UID)

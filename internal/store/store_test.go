@@ -53,6 +53,28 @@ func setupPostgresContainer(t *testing.T) string {
 	return testDSN
 }
 
+// setupTestStoreNoCleanup creates a Store for testing without deleting existing data.
+// Use this for tests that create unique data and don't need a clean slate.
+// This avoids the race where one test's cleanup cascades and deletes another
+// parallel test's data (e.g., DELETE FROM users cascading to user_identities).
+func setupTestStoreNoCleanup(t *testing.T) *Store {
+	t.Helper()
+
+	dsn := setupPostgresContainer(t)
+	ctx := context.Background()
+
+	store, err := New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	t.Cleanup(func() {
+		store.Close()
+	})
+
+	return store
+}
+
 // setupTestStore creates a Store for testing and cleans up tables.
 func setupTestStore(t *testing.T) *Store {
 	t.Helper()
@@ -72,17 +94,17 @@ func setupTestStore(t *testing.T) *Store {
 		"connections",
 		"access_grants",
 		"audit_log",
-		"oauth_states",
-		"user_identities",
 		"databases",
+		"user_identities",
+		"oauth_states",
+		"api_keys",
 		"users",
 	}
 
 	for _, table := range cleanupTables {
 		_, err := store.db.ExecContext(ctx, "DELETE FROM "+table)
 		if err != nil {
-			// Table may not exist if migration hasn't created it yet — ignore
-			t.Logf("cleanup table %s: %v (may be expected)", table, err)
+			continue // Table may not exist or FK constraints from parallel tests
 		}
 	}
 

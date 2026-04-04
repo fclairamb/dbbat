@@ -11,17 +11,17 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestCreateOAuthState(t *testing.T) {
+func TestCreateOAuthState(t *testing.T) { //nolint:tparallel // subtests share parent data
 	t.Parallel()
 
-	store := setupTestStore(t)
+	store := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
 
 	t.Run("create state", func(t *testing.T) {
-		t.Parallel()
+		stateToken := "random-state-token-" + uuid.NewString()[:8]
 
 		state := &OAuthState{
-			State:       "random-state-token-1",
+			State:       stateToken,
 			Provider:    IdentityTypeSlack,
 			RedirectURL: "https://example.com/callback",
 			Metadata:    json.RawMessage(`{"team_id":"T123"}`),
@@ -31,21 +31,19 @@ func TestCreateOAuthState(t *testing.T) {
 		created, err := store.CreateOAuthState(ctx, state)
 		require.NoError(t, err)
 		assert.NotEqual(t, uuid.Nil, created.UID)
-		assert.Equal(t, "random-state-token-1", created.State)
+		assert.Equal(t, stateToken, created.State)
 		assert.Equal(t, IdentityTypeSlack, created.Provider)
 		assert.False(t, created.CreatedAt.IsZero())
 	})
 }
 
-func TestConsumeOAuthState(t *testing.T) {
+func TestConsumeOAuthState(t *testing.T) { //nolint:tparallel // subtests share parent data
 	t.Parallel()
 
-	store := setupTestStore(t)
+	store := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
 
 	t.Run("consume valid state", func(t *testing.T) {
-		t.Parallel()
-
 		state := &OAuthState{
 			State:       "consume-valid-" + uuid.NewString(),
 			Provider:    IdentityTypeSlack,
@@ -66,8 +64,6 @@ func TestConsumeOAuthState(t *testing.T) {
 	})
 
 	t.Run("consume expired state", func(t *testing.T) {
-		t.Parallel()
-
 		state := &OAuthState{
 			State:     "consume-expired-" + uuid.NewString(),
 			Provider:  IdentityTypeSlack,
@@ -81,8 +77,6 @@ func TestConsumeOAuthState(t *testing.T) {
 	})
 
 	t.Run("consume non-existing state", func(t *testing.T) {
-		t.Parallel()
-
 		_, err := store.ConsumeOAuthState(ctx, "nonexistent-state")
 		assert.ErrorIs(t, err, ErrOAuthStateNotFound)
 	})
@@ -91,7 +85,7 @@ func TestConsumeOAuthState(t *testing.T) {
 func TestCleanupExpiredOAuthStates(t *testing.T) {
 	t.Parallel()
 
-	store := setupTestStore(t)
+	store := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
 
 	// Create some expired states
@@ -116,7 +110,7 @@ func TestCleanupExpiredOAuthStates(t *testing.T) {
 	// Cleanup
 	deleted, err := store.CleanupExpiredOAuthStates(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, int64(3), deleted)
+	assert.GreaterOrEqual(t, deleted, int64(3))
 
 	// Valid state should still be consumable
 	consumed, err := store.ConsumeOAuthState(ctx, validState.State)

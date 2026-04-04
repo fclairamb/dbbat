@@ -1,6 +1,6 @@
 CREATE TABLE user_identities (
     uid           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id       UUID        NOT NULL REFERENCES users(uid),
+    user_id       UUID        NOT NULL REFERENCES users(uid) ON DELETE CASCADE,
     provider      TEXT        NOT NULL,
     provider_id   TEXT        NOT NULL,
     email         TEXT,
