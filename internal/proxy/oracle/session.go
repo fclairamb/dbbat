@@ -309,10 +309,17 @@ func (s *session) upstreamToClient() error {
 		// Intercept Data packets for response handling
 		if pkt.Type == TNSPacketTypeData && len(pkt.Payload) >= ttcDataFlagsSize+1 {
 			funcCode, fcErr := parseTTCFunctionCode(pkt.Payload)
-			if fcErr == nil && (funcCode == TTCFuncResponse || funcCode == TTCFuncQueryResult) {
-				ttcPayload := extractTTCPayload(pkt.Payload)
-				if ttcPayload != nil {
-					s.handleResponse(ttcPayload, bytesTransferred)
+			if fcErr == nil {
+				switch funcCode { //nolint:exhaustive // only handling response-related codes
+				case TTCFuncQueryResult:
+					// v315+ query result — complete the pending query as successful
+					s.completeQuery(nil, nil, bytesTransferred)
+				case TTCFuncResponse:
+					// Legacy response format — try to parse error/rows
+					ttcPayload := extractTTCPayload(pkt.Payload)
+					if ttcPayload != nil {
+						s.handleResponse(ttcPayload, bytesTransferred)
+					}
 				}
 			}
 		}
@@ -328,10 +335,10 @@ func (s *session) upstreamToClient() error {
 func (s *session) handleResponse(ttcPayload []byte, bytesTransferred int64) {
 	resp, err := decodeTTCResponse(ttcPayload)
 	if err != nil {
-		// Fall back to basic parsing
-		errStr := parseResponseError(ttcPayload)
-		rowsAffected := parseResponseRowsAffected(ttcPayload)
-		s.completeQuery(rowsAffected, errStr, bytesTransferred)
+		// v315+ responses may not follow the legacy format — just complete as successful
+		if s.tracker.pendingQuery != nil {
+			s.completeQuery(nil, nil, bytesTransferred)
+		}
 
 		return
 	}
