@@ -2,7 +2,10 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -230,4 +233,66 @@ func (s *Server) handleGetQueryRows(c *gin.Context) {
 	}
 
 	successResponse(c, result)
+}
+
+const dumpFileExt = ".dbbat-dump"
+
+// handleGetConnectionDump downloads the raw TNS dump for a connection.
+func (s *Server) handleGetConnectionDump(c *gin.Context) {
+	uid, err := parseUIDParam(c)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid connection UID")
+		return
+	}
+
+	dumpDir := ""
+	if s.config != nil {
+		dumpDir = s.config.OracleDump.Dir
+	}
+
+	if dumpDir == "" {
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "dumps are not enabled")
+		return
+	}
+
+	dumpPath := filepath.Join(dumpDir, uid.String()+dumpFileExt)
+	if _, err := os.Stat(dumpPath); os.IsNotExist(err) {
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "no dump available for this connection")
+		return
+	}
+
+	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, uid, dumpFileExt))
+	c.File(dumpPath)
+}
+
+// handleDeleteConnectionDump deletes the dump file for a connection.
+func (s *Server) handleDeleteConnectionDump(c *gin.Context) {
+	uid, err := parseUIDParam(c)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid connection UID")
+		return
+	}
+
+	dumpDir := ""
+	if s.config != nil {
+		dumpDir = s.config.OracleDump.Dir
+	}
+
+	if dumpDir == "" {
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "dumps are not enabled")
+		return
+	}
+
+	dumpPath := filepath.Join(dumpDir, uid.String()+dumpFileExt)
+	if _, err := os.Stat(dumpPath); os.IsNotExist(err) {
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "no dump available for this connection")
+		return
+	}
+
+	if err := os.Remove(dumpPath); err != nil {
+		writeInternalError(c, s.logger, err, "failed to delete dump")
+		return
+	}
+
+	c.Status(http.StatusNoContent)
 }
