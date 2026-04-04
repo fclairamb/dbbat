@@ -1,6 +1,6 @@
-# DBBat - PostgreSQL Observability Proxy
+# DBBat - Database Observability Proxy
 
-A transparent PostgreSQL proxy for query observability, access control, and safety. Every query logged. Every connection tracked.
+A transparent database proxy for query observability, access control, and safety. Supports PostgreSQL and Oracle. Every query logged. Every connection tracked.
 
 ## Semantic Versioning
 
@@ -42,7 +42,8 @@ PR titles MUST follow the conventional commit format:
 - **Language**: Go
 - **Storage**: PostgreSQL
 - **ORM**: `uptrace/bun` with SQL migrations
-- **Proxy**: PostgreSQL wire protocol via `jackc/pgx/v5`
+- **Proxy**: PostgreSQL wire protocol via `jackc/pgx/v5`, Oracle TNS/TTC protocol
+- **Oracle docs**: See `docs/oracle.md` for TNS/TTC protocol details
 - **API**: `gin-gonic/gin` with OpenAPI 3.0 docs
 - **CLI**: `urfave/cli/v3`
 - **Config**: `knadh/koanf`
@@ -61,7 +62,9 @@ dbbat/
 │   ├── store/               # Database models and CRUD operations
 │   ├── api/                 # REST API handlers and middleware
 │   │   └── openapi.yml      # OpenAPI 3.0 specification
-│   └── proxy/               # PostgreSQL proxy (auth, upstream, query interception)
+│   ├── proxy/               # PostgreSQL proxy (auth, upstream, query interception)
+│   │   └── oracle/          # Oracle TNS/TTC proxy (see docs/oracle.md)
+│   └── auth/                # OAuth provider abstraction (Slack, etc.)
 ├── front/                   # React frontend (see front/CLAUDE.md)
 ├── docker-compose.yml
 └── go.mod
@@ -113,6 +116,7 @@ make clean            # Clean build artifacts
 | `DBB_KEYFILE` | Path to file containing encryption key | No |
 | `DBB_RUN_MODE` | Run mode: empty, `test`, or `demo` | No |
 | `DBB_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` (default: `info`) | No |
+| `DBB_LISTEN_ORA` | Oracle proxy listen address (default: `:1522`) | No |
 
 Note: If no encryption key is provided, one is created at `~/.dbbat/key`.
 
@@ -145,6 +149,7 @@ Use `--bun:split` directive to split multiple statements.
 ### Connection Flow
 ```
 Client → DBBat (auth + grant check) → Target PostgreSQL
+Client → DBBat (service name lookup) → Target Oracle
 ```
 
 ### Access Control
