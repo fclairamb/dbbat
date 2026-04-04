@@ -13,6 +13,8 @@ import (
 )
 
 func TestDumpWriter_WritesHeader(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test"+dumpFileExt)
 	uid := uuid.New()
@@ -23,7 +25,7 @@ func TestDumpWriter_WritesHeader(t *testing.T) {
 
 	r, err := OpenDump(path)
 	require.NoError(t, err)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	assert.Equal(t, uint16(dumpVersion), r.Header.Version)
 	assert.Equal(t, uid, r.Header.SessionUID)
@@ -33,6 +35,8 @@ func TestDumpWriter_WritesHeader(t *testing.T) {
 }
 
 func TestDumpWriter_WritePacket(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test"+dumpFileExt)
 
@@ -45,13 +49,13 @@ func TestDumpWriter_WritePacket(t *testing.T) {
 
 	r, err := OpenDump(path)
 	require.NoError(t, err)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	pkt, err := r.ReadPacket()
 	require.NoError(t, err)
 	assert.Equal(t, DumpDirClientToServer, pkt.Direction)
 	assert.Equal(t, data, pkt.Data)
-	assert.True(t, pkt.RelativeNs >= 0)
+	assert.GreaterOrEqual(t, pkt.RelativeNs, int64(0))
 
 	// Next read should hit EOF marker
 	_, err = r.ReadPacket()
@@ -59,6 +63,8 @@ func TestDumpWriter_WritePacket(t *testing.T) {
 }
 
 func TestDumpWriter_MaxSize(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test"+dumpFileExt)
 
@@ -75,7 +81,7 @@ func TestDumpWriter_MaxSize(t *testing.T) {
 
 	r, err := OpenDump(path)
 	require.NoError(t, err)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	// Should only get one packet
 	_, err = r.ReadPacket()
@@ -86,6 +92,8 @@ func TestDumpWriter_MaxSize(t *testing.T) {
 }
 
 func TestDumpWriter_RoundTrip(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test"+dumpFileExt)
 	uid := uuid.New()
@@ -111,7 +119,7 @@ func TestDumpWriter_RoundTrip(t *testing.T) {
 
 	r, err := OpenDump(path)
 	require.NoError(t, err)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	assert.Equal(t, uid, r.Header.SessionUID)
 	assert.Equal(t, "PROD_SVC", r.Header.ServiceName)
@@ -132,6 +140,8 @@ func TestDumpWriter_RoundTrip(t *testing.T) {
 }
 
 func TestDumpReader_InvalidFile(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bad"+dumpFileExt)
 	require.NoError(t, os.WriteFile(path, []byte("this is not a dump file!!"), 0o644))
@@ -141,16 +151,17 @@ func TestDumpReader_InvalidFile(t *testing.T) {
 }
 
 func TestCleanupOldDumps(t *testing.T) {
+	t.Parallel()
+
 	dir := t.TempDir()
 
 	// Create some "old" dump files
-	for i := range 3 {
+	for range 3 {
 		name := filepath.Join(dir, uuid.New().String()+dumpFileExt)
 		require.NoError(t, os.WriteFile(name, []byte("fake"), 0o644))
 		// Set mod time to 2 hours ago
 		old := time.Now().Add(-2 * time.Hour)
 		require.NoError(t, os.Chtimes(name, old, old))
-		_ = i
 	}
 
 	// Create a recent dump file

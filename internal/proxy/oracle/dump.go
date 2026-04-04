@@ -56,8 +56,8 @@ func NewDumpWriter(path string, sessionUID uuid.UUID, serviceName, upstreamAddr 
 	}
 
 	if err := w.writeHeader(sessionUID, serviceName, upstreamAddr, now); err != nil {
-		f.Close()
-		os.Remove(path)
+		_ = f.Close()
+		_ = os.Remove(path)
 
 		return nil, err
 	}
@@ -220,7 +220,7 @@ func OpenDump(path string) (*DumpReader, error) {
 	r := &DumpReader{file: f}
 
 	if err := r.readHeader(); err != nil {
-		f.Close()
+		_ = f.Close()
 
 		return nil, err
 	}
