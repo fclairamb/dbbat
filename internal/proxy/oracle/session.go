@@ -338,15 +338,13 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket, bytesTransferred int6
 	}
 }
 
-// handleResponse processes a TTC response, capturing rows and completing queries.
+// handleResponse processes a legacy TTC Response (func=0x08).
+// In v315+, most responses don't follow the legacy format so we skip them.
+// Query completion is handled by handleQueryResultV2 for func=0x10.
 func (s *session) handleResponse(ttcPayload []byte, bytesTransferred int64) {
 	resp, err := decodeTTCResponse(ttcPayload)
 	if err != nil {
-		// v315+ responses may not follow the legacy format — just complete as successful
-		if s.tracker.pendingQuery != nil {
-			s.completeQuery(nil, nil, bytesTransferred)
-		}
-
+		// v315+ auth/negotiation responses don't follow legacy format — ignore
 		return
 	}
 

@@ -130,6 +130,14 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 func (s *session) handleQueryResultV2(ttcPayload []byte, bytesTransferred int64) {
 	result := decodeQueryResultV2(ttcPayload)
 
+	if result != nil {
+		s.logger.DebugContext(s.ctx, "QueryResult decoded",
+			slog.Int("columns", len(result.Columns)),
+			slog.Int("rows", len(result.Rows)),
+			slog.Bool("no_data", result.NoData),
+		)
+	}
+
 	if result != nil && len(result.Columns) > 0 && len(result.Rows) > 0 {
 		// Build column definitions for row capture
 		columns := make([]columnDef, len(result.Columns))
