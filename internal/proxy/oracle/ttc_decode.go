@@ -363,21 +363,53 @@ func decodePiggybackExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 		return nil, fmt.Errorf("%w: piggyback exec needs at least 52 bytes, got %d", ErrOALL8TooShort, len(ttcPayload))
 	}
 
-	// Try the known offset (50) first — this works for Oracle 19c with oracledb/JDBC thin
-	sql, err := extractSQLAtOffset(ttcPayload, 50)
-	if err == nil && sql != "" {
-		return &OALL8Result{SQL: sql}, nil
-	}
-
-	// Fallback: scan a range around the expected offset for a length-prefixed SQL string
-	for offset := 40; offset < 60 && offset < len(ttcPayload)-1; offset++ {
+	// Strategy: scan the payload for SQL text. Different Oracle client drivers
+	// (oracledb thin, JDBC thin) place the SQL at slightly different offsets
+	// (50-54 typically). We scan a range and validate the extracted text.
+	for offset := 40; offset < 70 && offset < len(ttcPayload)-1; offset++ {
 		sql, scanErr := extractSQLAtOffset(ttcPayload, offset)
 		if scanErr == nil && sql != "" {
 			return &OALL8Result{SQL: sql}, nil
 		}
 	}
 
+	// Last resort: find SQL keywords directly in the payload
+	sql := findSQLInPayload(ttcPayload)
+	if sql != "" {
+		return &OALL8Result{SQL: sql}, nil
+	}
+
 	return nil, fmt.Errorf("%w: could not find SQL text in piggyback exec payload", ErrEmptySQL)
+}
+
+// findSQLInPayload scans the raw payload for SQL text by looking for SQL keywords.
+// Used as a fallback when length-prefix decoding fails.
+func findSQLInPayload(payload []byte) string {
+	keywords := []string{
+		"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
+		"ALTER", "BEGIN", "DECLARE", "WITH", "MERGE", "CALL",
+	}
+
+	for _, kw := range keywords {
+		kwBytes := []byte(kw)
+		idx := findBytes(payload, kwBytes)
+		if idx < 0 {
+			continue
+		}
+
+		// Found a keyword — extract until we hit a non-SQL byte
+		// SQL ends at a null byte, or at the end of printable ASCII
+		end := idx
+		for end < len(payload) && payload[end] >= 0x0A && payload[end] <= 0x7E {
+			end++
+		}
+
+		if end > idx+2 {
+			return strings.TrimSpace(string(payload[idx:end]))
+		}
+	}
+
+	return ""
 }
 
 // extractSQLAtOffset tries to read a length-prefixed SQL string at the given offset.
