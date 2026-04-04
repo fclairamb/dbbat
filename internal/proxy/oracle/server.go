@@ -90,8 +90,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	close(s.shutdown)
 	s.cancel()
 
-	if s.listener != nil {
-		if err := s.listener.Close(); err != nil {
+	s.mu.Lock()
+	listener := s.listener
+	s.mu.Unlock()
+
+	if listener != nil {
+		if err := listener.Close(); err != nil {
 			s.logger.ErrorContext(ctx, "failed to close listener", slog.Any("error", err))
 		}
 	}

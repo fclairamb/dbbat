@@ -132,7 +132,7 @@ test.describe("Admin Password Reset", () => {
 
       expect(resetResponse.status()).toBe(400);
       const errorData = await resetResponse.json();
-      expect(errorData.error).toBe("weak_password");
+      expect(errorData.code).toBe("WEAK_PASSWORD");
     } finally {
       // Cleanup
       await request.delete(`${API_BASE}/users/${testUser.uid}`, {
@@ -192,9 +192,7 @@ test.describe("Admin Password Reset", () => {
 
     // Check error message
     const errorData = await resetResponse.json();
-    expect(errorData.error).toBe(
-      "cannot reset your own password; use the password change endpoint instead"
-    );
+    expect(errorData.code).toBe("FORBIDDEN");
   });
 
   test("admin can reset password via UI", async ({ page }) => {
