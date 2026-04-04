@@ -93,13 +93,16 @@ func extractConnectString(payload []byte) string {
 	connectDataLen := int(payload[16])<<8 | int(payload[17])
 	connectDataOffset := int(payload[18])<<8 | int(payload[19])
 
-	if connectDataOffset > 0 && connectDataOffset < len(payload) {
-		end := connectDataOffset + connectDataLen
+	// The offset is from the start of the full TNS packet (including 8-byte header).
+	// Since payload starts after the header, subtract tnsHeaderSize.
+	payloadOffset := connectDataOffset - tnsHeaderSize
+	if payloadOffset >= 0 && payloadOffset < len(payload) {
+		end := payloadOffset + connectDataLen
 		if end > len(payload) {
 			end = len(payload)
 		}
 
-		return string(payload[connectDataOffset:end])
+		return string(payload[payloadOffset:end])
 	}
 
 	// Fallback: scan for parenthesized descriptor
