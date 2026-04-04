@@ -156,32 +156,10 @@ func (s *session) run() error {
 	// Step 7: Skip TTC-level auth interception for now.
 	// TODO: implement TTC AUTH username extraction and per-user grant checking
 	s.username = "proxy"
-	s.logger.InfoContext(s.ctx, "Oracle session established, entering relay mode")
+	s.logger.InfoContext(s.ctx, "Oracle session established, entering proxy mode")
 
-	// Step 8: Enter bidirectional relay.
-	// Use raw relay (io.Copy) since TNS-parsed relay (proxyMessages) breaks during
-	// TTC negotiation phase with modern Oracle clients. Query interception via
-	// proxyMessages needs further work on TTC protocol handling.
-	return s.rawRelay()
-}
-
-// rawRelay performs bidirectional byte relay between client and upstream.
-// This bypasses TNS packet parsing which breaks with TTC negotiation on modern clients.
-// TODO: implement TNS-aware relay that handles TTC auth negotiation properly.
-func (s *session) rawRelay() error {
-	errChan := make(chan error, 2)
-
-	go func() {
-		_, err := io.Copy(s.upstreamConn, s.clientConn)
-		errChan <- err
-	}()
-
-	go func() {
-		_, err := io.Copy(s.clientConn, s.upstreamConn)
-		errChan <- err
-	}()
-
-	return <-errChan
+	// Step 8: Enter bidirectional TNS relay with query interception
+	return s.proxyMessages()
 }
 
 // proxyMessages relays TNS packets bidirectionally with TTC-aware interception.

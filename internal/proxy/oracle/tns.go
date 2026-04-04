@@ -103,8 +103,11 @@ func encodeTNSPacket(typ TNSPacketType, payload []byte) []byte {
 }
 
 // readTNSPacket reads a complete TNS packet from a connection.
-// For TNS Connect packets (type 1) with version >= 315, the connect data
-// is appended after the initial header packet and must be read separately.
+// Handles both legacy (2-byte length) and v315+ (4-byte length) packet formats.
+//
+// In TNS v315+, packets after Connect/Accept use a 4-byte length at bytes 0-3
+// (the 2-byte length field reads as 0x0000). Connect packets still use the legacy
+// 2-byte format but may have extended connect data appended after the header.
 func readTNSPacket(conn net.Conn) (*TNSPacket, error) {
 	// Read the 8-byte header
 	header := make([]byte, tnsHeaderSize)
@@ -117,17 +120,30 @@ func readTNSPacket(conn net.Conn) (*TNSPacket, error) {
 		return nil, err
 	}
 
-	if pkt.Length < tnsHeaderSize {
-		// Header-only packet (no payload)
+	// Determine packet length: 2-byte (legacy) or 4-byte (v315+)
+	var packetLen int
+	if pkt.Length > 0 {
+		// Legacy format: 2-byte length at bytes 0-1
+		packetLen = int(pkt.Length)
+	} else {
+		// v315+ format: 4-byte length at bytes 0-3
+		packetLen = int(binary.BigEndian.Uint32(header[0:4]))
+	}
+
+	if packetLen < tnsHeaderSize {
+		// Header-only packet (e.g., Resend with length=8)
+		pkt.Raw = make([]byte, tnsHeaderSize)
+		copy(pkt.Raw, header)
+
 		return pkt, nil
 	}
 
-	if pkt.Length > maxTNSPacketSize {
-		return nil, fmt.Errorf("%w: %d bytes", ErrTNSPacketTooLarge, pkt.Length)
+	if packetLen > maxTNSPacketSize {
+		return nil, fmt.Errorf("%w: %d bytes", ErrTNSPacketTooLarge, packetLen)
 	}
 
-	// Read the initial payload
-	payloadLen := int(pkt.Length) - tnsHeaderSize
+	// Read the payload
+	payloadLen := packetLen - tnsHeaderSize
 	if payloadLen > 0 {
 		pkt.Payload = make([]byte, payloadLen)
 		if _, err := io.ReadFull(conn, pkt.Payload); err != nil {
@@ -135,16 +151,17 @@ func readTNSPacket(conn net.Conn) (*TNSPacket, error) {
 		}
 	}
 
-	// Store the raw bytes read so far
-	pkt.Raw = make([]byte, 0, tnsHeaderSize+len(pkt.Payload))
+	// Store raw bytes for forwarding
+	pkt.Raw = make([]byte, 0, packetLen)
 	pkt.Raw = append(pkt.Raw, header...)
 	pkt.Raw = append(pkt.Raw, pkt.Payload...)
 
-	// For Connect packets with TNS version >= 315, the header length only covers
-	// the metadata portion. The connect data is appended after and may be larger
-	// than the declared connect_data_length. We need to read all remaining data.
-	if err := readExtendedConnectData(conn, pkt); err != nil {
-		return nil, err
+	// For Connect packets with extended data (TNS v315+), the declared header length
+	// only covers the metadata. The connect data is appended after.
+	if pkt.Type == TNSPacketTypeConnect {
+		if err := readExtendedConnectData(conn, pkt); err != nil {
+			return nil, err
+		}
 	}
 
 	return pkt, nil
@@ -153,27 +170,37 @@ func readTNSPacket(conn net.Conn) (*TNSPacket, error) {
 // readExtendedConnectData reads additional connect data for TNS Connect packets
 // where the header length only covers the metadata (TNS version >= 315).
 func readExtendedConnectData(conn net.Conn, pkt *TNSPacket) error {
-	if pkt.Type != TNSPacketTypeConnect || len(pkt.Payload) < 20 {
+	if len(pkt.Payload) < 20 {
 		return nil
 	}
 
 	connectDataOffset := int(binary.BigEndian.Uint16(pkt.Payload[18:20]))
-	if connectDataOffset-tnsHeaderSize < len(pkt.Payload) {
-		return nil
+	payloadNeeded := connectDataOffset - tnsHeaderSize
+	if payloadNeeded < len(pkt.Payload) {
+		return nil // Connect data fits within what we already read
 	}
 
-	buf := make([]byte, maxTNSPacketSize)
-
-	n, readErr := conn.Read(buf)
-	if n > 0 {
-		pkt.Payload = append(pkt.Payload, buf[:n]...)
-		pkt.Raw = append(pkt.Raw, buf[:n]...)
-		pkt.Length = uint16(tnsHeaderSize + len(pkt.Payload))
+	// Read the first 2 bytes to get the actual size of the extended data
+	sizeBuf := make([]byte, 2)
+	if _, err := io.ReadFull(conn, sizeBuf); err != nil {
+		return fmt.Errorf("failed to read extended connect data size: %w", err)
 	}
 
-	if readErr != nil && !errors.Is(readErr, io.EOF) && n == 0 {
-		return fmt.Errorf("failed to read TNS connect data: %w", readErr)
+	extendedLen := int(binary.BigEndian.Uint16(sizeBuf))
+	if extendedLen < 2 || extendedLen > maxTNSPacketSize {
+		return fmt.Errorf("%w: %d", ErrTNSPacketTooLarge, extendedLen)
 	}
+
+	// Read the remaining extended data (extendedLen includes the 2-byte size field)
+	remaining := make([]byte, extendedLen-2)
+	if _, err := io.ReadFull(conn, remaining); err != nil {
+		return fmt.Errorf("failed to read extended connect data: %w", err)
+	}
+
+	pkt.Payload = append(pkt.Payload, sizeBuf...)
+	pkt.Payload = append(pkt.Payload, remaining...)
+	pkt.Raw = append(pkt.Raw, sizeBuf...)
+	pkt.Raw = append(pkt.Raw, remaining...)
 
 	return nil
 }
