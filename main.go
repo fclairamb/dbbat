@@ -363,7 +363,7 @@ func startOracleProxy(ctx context.Context, cfg *config.Config, dataStore *store.
 		return nil
 	}
 
-	srv := oracle.NewServer(dataStore, cfg.EncryptionKey, authCache, cfg.QueryStorage, logger)
+	srv := oracle.NewServer(dataStore, cfg.EncryptionKey, authCache, cfg.QueryStorage, cfg.OracleDump, logger)
 
 	go func() {
 		if err := srv.Start(cfg.ListenOracle); err != nil {
