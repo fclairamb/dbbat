@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -28,12 +30,13 @@ type oracleQueryTracker struct {
 
 // pendingOracleQuery tracks a query in progress (between OALL8/OFETCH and response).
 type pendingOracleQuery struct {
-	cursor        *trackedCursor
-	startTime     time.Time
-	capturedBytes int64
-	capturedRows  []store.QueryRow
-	rowNumber     int
-	truncated     bool
+	cursor         *trackedCursor
+	startTime      time.Time
+	capturedBytes  int64
+	rowNumber      int
+	truncated      bool
+	queryUID       uuid.UUID // Set after query record is created in DB
+	queryPersisted bool      // True after query record is created
 }
 
 // newOracleQueryTracker creates a new query tracker.
@@ -127,25 +130,27 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 
 // handleQueryResultV2 processes a v315+ QueryResult (func=0x10) response.
 // Extracts column names and row values, stores them as query results.
+// For large result sets, rows arrive across multiple response packets.
+// We accumulate rows until we see ORA-01403 (no data found) which signals end of data.
 func (s *session) handleQueryResultV2(ttcPayload []byte, bytesTransferred int64) {
 	result := decodeQueryResultV2(ttcPayload)
-
-	if result != nil {
-		s.logger.DebugContext(s.ctx, "QueryResult decoded",
-			slog.Int("columns", len(result.Columns)),
-			slog.Int("rows", len(result.Rows)),
-			slog.Bool("no_data", result.NoData),
-		)
+	if result == nil {
+		return
 	}
 
-	if result != nil && len(result.Columns) > 0 && len(result.Rows) > 0 {
-		// Build column definitions for row capture
+	// Store column definitions from the first response (they only appear once)
+	if s.tracker.pendingQuery != nil && s.tracker.pendingQuery.cursor != nil && len(result.Columns) > 0 {
 		columns := make([]columnDef, len(result.Columns))
 		for i, name := range result.Columns {
 			columns[i] = columnDef{Name: name}
 		}
 
-		// Capture each row
+		s.tracker.pendingQuery.cursor.columns = columns
+	}
+
+	// Capture rows using stored column definitions
+	if s.tracker.pendingQuery != nil && s.tracker.pendingQuery.cursor != nil {
+		columns := s.tracker.pendingQuery.cursor.columns
 		for _, row := range result.Rows {
 			values := make([]interface{}, len(row))
 			for i, v := range row {
@@ -156,8 +161,157 @@ func (s *session) handleQueryResultV2(ttcPayload []byte, bytesTransferred int64)
 		}
 	}
 
-	// Complete the query as successful
-	s.completeQuery(nil, nil, bytesTransferred)
+	// Only complete the query when we see the end-of-data marker (ORA-01403)
+	if result.NoData {
+		s.completeQuery(nil, nil, bytesTransferred)
+	}
+}
+
+// captureRowsFromContinuation extracts row data from continuation packets
+// in multi-packet result sets. Continuation packets (func=0x06) contain:
+// [func(1)] [header(~12 bytes)] [row data: len+val pairs separated by 0x07]
+//
+// The row data uses the same length-prefixed format as QueryResult but
+// without column definitions or the 0x06 0x22 marker.
+func (s *session) captureRowsFromContinuation(payload []byte, columns []columnDef) { //nolint:gocognit,cyclop // TTC binary parsing
+	numCols := len(columns)
+	if numCols == 0 || len(payload) < 15 {
+		return
+	}
+
+	// Skip the TNS data flags (already stripped in extractTTCPayload),
+	// then the func code + header. The header varies in length.
+	// Scan for the first valid row by trying different start offsets.
+	for startOffset := 10; startOffset < 25 && startOffset < len(payload)-numCols; startOffset++ {
+		// Try to read one row at this offset
+		offset := startOffset
+		row := make([]string, 0, numCols)
+		valid := true
+
+		for col := 0; col < numCols; col++ {
+			if offset >= len(payload) {
+				valid = false
+				break
+			}
+
+			valLen := int(payload[offset])
+			offset++
+
+			if valLen == 0 {
+				row = append(row, "")
+				continue
+			}
+
+			if valLen > 4000 || offset+valLen > len(payload) {
+				valid = false
+				break
+			}
+
+			valBytes := payload[offset : offset+valLen]
+			offset += valLen
+			decoded := decodeOracleRawValue(valBytes)
+
+			// Validate: first column of first row should look reasonable
+			if col == 0 && len(row) == 0 && !isReasonableValue(decoded) {
+				valid = false
+				break
+			}
+
+			row = append(row, decoded)
+		}
+
+		if !valid || len(row) != numCols {
+			continue
+		}
+
+		// Found valid row data! Capture this row and continue scanning.
+		s.captureRowValues(columns, row)
+
+		// Read remaining rows
+		endOfData := len(payload)
+		if idx := findBytes(payload, []byte("ORA-01403")); idx >= 0 {
+			endOfData = idx
+		}
+
+		for offset < endOfData {
+			if payload[offset] == 0x08 {
+				break // End of rows
+			}
+
+			if payload[offset] == 0x07 {
+				offset++ // Row separator
+			}
+
+			row = make([]string, 0, numCols)
+			valid = true
+
+			for col := 0; col < numCols; col++ {
+				if offset >= endOfData {
+					valid = false
+					break
+				}
+
+				valLen := int(payload[offset])
+				offset++
+
+				if valLen == 0 {
+					row = append(row, "")
+					continue
+				}
+
+				if valLen > 4000 || offset+valLen > endOfData {
+					valid = false
+					break
+				}
+
+				row = append(row, decodeOracleRawValue(payload[offset:offset+valLen]))
+				offset += valLen
+			}
+
+			if !valid || len(row) != numCols {
+				break
+			}
+
+			s.captureRowValues(columns, row)
+		}
+
+		return // Done
+	}
+}
+
+// captureRowValues converts string values to interface{} and captures the row.
+func (s *session) captureRowValues(columns []columnDef, row []string) {
+	values := make([]interface{}, len(row))
+	for i, v := range row {
+		values[i] = v
+	}
+
+	s.captureRow(columns, values)
+}
+
+// isReasonableValue checks if a decoded value looks like real data (not header bytes).
+func isReasonableValue(s string) bool {
+	if len(s) == 0 {
+		return true // NULL is OK
+	}
+
+	// Reject hex-encoded values (likely misinterpreted header bytes)
+	if len(s) > 4 && len(s)%2 == 0 {
+		allHex := true
+		for _, c := range s {
+			isHexChar := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
+			if !isHexChar {
+				allHex = false
+				break
+			}
+		}
+
+		if allHex {
+			return false
+		}
+	}
+
+	return true
 }
 
 // handleOFETCH intercepts an OFETCH message: links the fetch to its cursor.
@@ -188,16 +342,25 @@ func (s *session) handleOCLOSE(cursorID uint16) {
 	delete(s.tracker.cursors, cursorID)
 }
 
-// captureRow captures a single row of results from an Oracle response.
-// Rows are stored as JSON objects with column names as keys.
+// captureRow captures a single row and streams it to the database immediately.
+// No rows are buffered in memory.
 func (s *session) captureRow(columns []columnDef, values []interface{}) {
 	pending := s.tracker.pendingQuery
-	if pending == nil || pending.truncated {
+	if pending == nil || pending.truncated || s.store == nil {
 		return
 	}
 
 	if !s.queryStorage.StoreResults {
 		return
+	}
+
+	// Ensure the query record exists in the database
+	if !pending.queryPersisted {
+		s.persistQueryRecord()
+	}
+
+	if pending.queryUID == uuid.Nil {
+		return // Query record creation failed
 	}
 
 	rowData := make(map[string]interface{})
@@ -210,7 +373,6 @@ func (s *session) captureRow(columns []columnDef, values []interface{}) {
 		}
 
 		if val != nil {
-			// Estimate size from string representation
 			valStr := fmt.Sprintf("%v", val)
 			rowSize += int64(len(valStr))
 		}
@@ -222,32 +384,56 @@ func (s *session) captureRow(columns []columnDef, values []interface{}) {
 	if pending.rowNumber >= s.queryStorage.MaxResultRows ||
 		pending.capturedBytes+rowSize > s.queryStorage.MaxResultBytes {
 		pending.truncated = true
-		pending.capturedRows = nil
-
-		s.logger.WarnContext(s.ctx, "result capture refused - limits exceeded",
-			slog.Int("rows_captured", pending.rowNumber),
-			slog.Int64("bytes_captured", pending.capturedBytes),
-			slog.Int("max_rows", s.queryStorage.MaxResultRows),
-			slog.Int64("max_bytes", s.queryStorage.MaxResultBytes))
 
 		return
 	}
 
 	jsonData, err := json.Marshal(rowData)
 	if err != nil {
-		s.logger.WarnContext(s.ctx, "failed to marshal row data", slog.Any("error", err))
 		return
 	}
 
-	pending.capturedRows = append(pending.capturedRows, store.QueryRow{
+	pending.rowNumber++
+	pending.capturedBytes += rowSize
+
+	// Stream row directly to database
+	row := store.QueryRow{
+		RowNumber:    pending.rowNumber,
 		RowData:      jsonData,
 		RowSizeBytes: rowSize,
-	})
-	pending.capturedBytes += rowSize
-	pending.rowNumber++
+	}
+
+	if err := s.store.StoreQueryRows(s.ctx, pending.queryUID, []store.QueryRow{row}); err != nil {
+		s.logger.WarnContext(s.ctx, "failed to stream row", slog.Any("error", err))
+	}
 }
 
-// completeQuery logs a completed query to the store and updates connection stats.
+// persistQueryRecord creates the query record in the database before streaming rows.
+func (s *session) persistQueryRecord() {
+	pending := s.tracker.pendingQuery
+	if pending == nil || pending.queryPersisted || pending.cursor == nil {
+		return
+	}
+
+	pending.queryPersisted = true
+
+	query := &store.Query{
+		ConnectionID: s.connectionUID,
+		SQLText:      pending.cursor.sql,
+		ExecutedAt:   pending.startTime,
+	}
+
+	created, err := s.store.CreateQuery(s.ctx, query)
+	if err != nil {
+		s.logger.ErrorContext(s.ctx, "failed to create query record", slog.Any("error", err))
+		return
+	}
+
+	pending.queryUID = created.UID
+}
+
+// completeQuery finalizes a query record with duration and updates connection stats.
+// Rows have already been streamed to the database during capture.
 func (s *session) completeQuery(rowsAffected *int64, queryError *string, bytesTransferred int64) {
 	pending := s.tracker.pendingQuery
 	if pending == nil || pending.cursor == nil {
@@ -258,34 +444,31 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string, bytesTr
 
 	duration := float64(time.Since(pending.startTime).Milliseconds())
 
-	var params *store.QueryParameters
-	if len(pending.cursor.bindValues) > 0 {
-		params = &store.QueryParameters{
-			Values: pending.cursor.bindValues,
+	// If the query record was already created (rows were streamed), update it.
+	// Otherwise, create it now (no-result queries like DML).
+	if pending.queryPersisted && pending.queryUID != uuid.Nil {
+		// Update with duration, error, rows affected
+		go s.finalizeQuery(pending.queryUID, &duration, rowsAffected, queryError, bytesTransferred)
+	} else if s.store != nil {
+		// Create the query record (no rows to stream)
+		query := &store.Query{
+			ConnectionID: s.connectionUID,
+			SQLText:      pending.cursor.sql,
+			ExecutedAt:   pending.startTime,
+			DurationMs:   &duration,
+			RowsAffected: rowsAffected,
+			Error:        queryError,
 		}
-	}
 
-	query := &store.Query{
-		ConnectionID: s.connectionUID,
-		SQLText:      pending.cursor.sql,
-		Parameters:   params,
-		ExecutedAt:   pending.startTime,
-		DurationMs:   &duration,
-		RowsAffected: rowsAffected,
-		Error:        queryError,
-	}
+		go func() {
+			if _, err := s.store.CreateQuery(s.ctx, query); err != nil {
+				s.logger.ErrorContext(s.ctx, "failed to log query", slog.Any("error", err))
+			}
 
-	// Capture rows if not truncated
-	capturedRows := pending.capturedRows
-
-	// Assign row numbers
-	for i := range capturedRows {
-		capturedRows[i].RowNumber = i + 1
-	}
-
-	// Log asynchronously to not block proxy
-	if s.store != nil {
-		go s.persistQuery(query, capturedRows, bytesTransferred)
+			if err := s.store.IncrementConnectionStats(s.ctx, s.connectionUID, bytesTransferred); err != nil {
+				s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
+			}
+		}()
 	}
 
 	// Update local grant state for in-session quota checks
@@ -295,22 +478,12 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string, bytesTr
 	}
 }
 
-// persistQuery stores a completed query and its rows in the database.
-func (s *session) persistQuery(query *store.Query, capturedRows []store.QueryRow, bytesTransferred int64) {
-	createdQuery, err := s.store.CreateQuery(s.ctx, query)
-	if err != nil {
-		s.logger.ErrorContext(s.ctx, "failed to log query", slog.Any("error", err))
-		return
+// finalizeQuery updates a query record with completion data (duration, error).
+func (s *session) finalizeQuery(queryUID uuid.UUID, duration *float64, rowsAffected *int64, queryError *string, bytesTransferred int64) {
+	if err := s.store.UpdateQueryCompletion(s.ctx, queryUID, duration, rowsAffected, queryError); err != nil {
+		s.logger.ErrorContext(s.ctx, "failed to finalize query", slog.Any("error", err))
 	}
 
-	// Store captured result rows
-	if len(capturedRows) > 0 {
-		if err := s.store.StoreQueryRows(s.ctx, createdQuery.UID, capturedRows); err != nil {
-			s.logger.ErrorContext(s.ctx, "failed to store query rows", slog.Any("error", err))
-		}
-	}
-
-	// Update connection stats
 	if err := s.store.IncrementConnectionStats(s.ctx, s.connectionUID, bytesTransferred); err != nil {
 		s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
 	}

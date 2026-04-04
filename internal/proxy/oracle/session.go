@@ -311,6 +311,13 @@ func (s *session) upstreamToClient() error {
 			s.interceptUpstreamMessage(pkt, bytesTransferred)
 		}
 
+		// Also check for ORA-01403 in ANY data packet (multi-packet results)
+		if pkt.Type == TNSPacketTypeData && s.tracker.pendingQuery != nil {
+			if findBytes(pkt.Payload, []byte("ORA-01403")) >= 0 {
+				s.completeQuery(nil, nil, bytesTransferred)
+			}
+		}
+
 		// Forward to client
 		if err := writeTNSPacket(s.clientConn, pkt); err != nil {
 			return fmt.Errorf("client write error: %w", err)
@@ -335,6 +342,15 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket, bytesTransferred int6
 		s.handleQueryResultV2(ttcPayload, bytesTransferred)
 	case TTCFuncResponse:
 		s.handleResponse(ttcPayload, bytesTransferred)
+	default:
+		// Continuation packets (func=0x06 and others) may contain row data
+		// for multi-packet result sets. Try to extract rows if we have a pending query.
+		if s.tracker.pendingQuery != nil && s.tracker.pendingQuery.cursor != nil {
+			columns := s.tracker.pendingQuery.cursor.columns
+			if len(columns) > 0 {
+				s.captureRowsFromContinuation(pkt.Payload, columns)
+			}
+		}
 	}
 }
 

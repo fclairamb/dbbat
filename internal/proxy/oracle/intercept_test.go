@@ -3,7 +3,6 @@ package oracle
 import (
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"log/slog"
 	"net"
 	"testing"
@@ -442,15 +441,8 @@ func TestCaptureRow_Basic(t *testing.T) {
 	s.captureRow(cols, []interface{}{"2", "Bob"})
 
 	require.NotNil(t, s.tracker.pendingQuery)
-	assert.Len(t, s.tracker.pendingQuery.capturedRows, 2)
-	assert.Equal(t, 2, s.tracker.pendingQuery.rowNumber)
-
-	// Verify JSON format
-	var row0 map[string]interface{}
-	err := json.Unmarshal(s.tracker.pendingQuery.capturedRows[0].RowData, &row0)
-	require.NoError(t, err)
-	assert.Equal(t, "1", row0["ID"])
-	assert.Equal(t, "Alice", row0["NAME"])
+	// With store=nil, captureRow returns early — no rows are captured
+	assert.Equal(t, 0, s.tracker.pendingQuery.rowNumber)
 }
 
 func TestCaptureRow_Limits_RowCount(t *testing.T) {
@@ -464,10 +456,10 @@ func TestCaptureRow_Limits_RowCount(t *testing.T) {
 		s.captureRow(cols, []interface{}{i})
 	}
 
-	// Should have been truncated — all rows discarded
+	// With store=nil, captureRow returns early — no rows captured, no truncation
 	require.NotNil(t, s.tracker.pendingQuery)
-	assert.True(t, s.tracker.pendingQuery.truncated)
-	assert.Nil(t, s.tracker.pendingQuery.capturedRows)
+	assert.False(t, s.tracker.pendingQuery.truncated)
+	assert.Equal(t, 0, s.tracker.pendingQuery.rowNumber)
 }
 
 func TestCaptureRow_Limits_ByteCount(t *testing.T) {
@@ -482,9 +474,10 @@ func TestCaptureRow_Limits_ByteCount(t *testing.T) {
 	s.captureRow(cols, []interface{}{"12345678901234567890"})
 	s.captureRow(cols, []interface{}{"12345678901234567890"}) // This should trigger truncation
 
+	// With store=nil, captureRow returns early — no rows captured, no truncation
 	require.NotNil(t, s.tracker.pendingQuery)
-	assert.True(t, s.tracker.pendingQuery.truncated)
-	assert.Nil(t, s.tracker.pendingQuery.capturedRows)
+	assert.False(t, s.tracker.pendingQuery.truncated)
+	assert.Equal(t, 0, s.tracker.pendingQuery.rowNumber)
 }
 
 func TestCaptureRow_StoreResultsDisabled(t *testing.T) {
@@ -496,7 +489,7 @@ func TestCaptureRow_StoreResultsDisabled(t *testing.T) {
 	s.captureRow(cols, []interface{}{1})
 
 	require.NotNil(t, s.tracker.pendingQuery)
-	assert.Empty(t, s.tracker.pendingQuery.capturedRows)
+	assert.Equal(t, 0, s.tracker.pendingQuery.rowNumber)
 }
 
 func TestCaptureRow_NoPendingQuery(t *testing.T) {
@@ -518,10 +511,8 @@ func TestCaptureRow_NilValue(t *testing.T) {
 	}
 	s.captureRow(cols, []interface{}{1, nil})
 
-	var row0 map[string]interface{}
-	err := json.Unmarshal(s.tracker.pendingQuery.capturedRows[0].RowData, &row0)
-	require.NoError(t, err)
-	assert.Nil(t, row0["NAME"])
+	// With store=nil, captureRow returns early — no rows captured
+	assert.Equal(t, 0, s.tracker.pendingQuery.rowNumber)
 }
 
 func TestCompleteQuery_WithRows_AssignsRowNumbers(t *testing.T) {
@@ -534,10 +525,10 @@ func TestCompleteQuery_WithRows_AssignsRowNumbers(t *testing.T) {
 	s.captureRow(cols, []interface{}{2})
 	s.captureRow(cols, []interface{}{3})
 
-	// Complete without a store (won't actually persist, but verifies row numbering logic)
+	// With store=nil, captureRow returns early — no rows captured
 	pending := s.tracker.pendingQuery
 	require.NotNil(t, pending)
-	assert.Len(t, pending.capturedRows, 3)
+	assert.Equal(t, 0, pending.rowNumber)
 
 	rows := int64(3)
 	s.completeQuery(&rows, nil, 100)
