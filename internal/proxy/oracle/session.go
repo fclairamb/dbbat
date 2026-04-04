@@ -153,33 +153,13 @@ func (s *session) run() error {
 		return fmt.Errorf("failed to forward accept to client: %w", err)
 	}
 
-	// Step 7: For now, skip TTC-level auth interception and proceed directly
-	// to bidirectional relay. Grant checking is done at connection time based on
-	// the database lookup. Full TTC auth interception will be added later.
+	// Step 7: Skip TTC-level auth interception for now.
 	// TODO: implement TTC AUTH username extraction and per-user grant checking
 	s.username = "proxy"
-	s.logger.InfoContext(s.ctx, "Oracle session established, entering relay mode")
+	s.logger.InfoContext(s.ctx, "Oracle session established, entering proxy mode")
 
-	// Step 9: Enter bidirectional raw relay (simple io.Copy for now)
-	return s.rawRelay()
-}
-
-// rawRelay performs simple bidirectional byte relay between client and upstream
-// without TNS packet parsing. Used as a fallback when TTC interception is not needed.
-func (s *session) rawRelay() error {
-	errChan := make(chan error, 2)
-
-	go func() {
-		_, err := io.Copy(s.upstreamConn, s.clientConn)
-		errChan <- err
-	}()
-
-	go func() {
-		_, err := io.Copy(s.clientConn, s.upstreamConn)
-		errChan <- err
-	}()
-
-	return <-errChan
+	// Step 8: Enter bidirectional TNS relay with query interception
+	return s.proxyMessages()
 }
 
 // proxyMessages relays TNS packets bidirectionally with TTC-aware interception.
