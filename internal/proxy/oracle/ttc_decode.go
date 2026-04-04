@@ -344,6 +344,101 @@ func decodeOALL8(ttcPayload []byte) (*OALL8Result, error) {
 	}, nil
 }
 
+// decodePiggybackExecSQL extracts SQL text from a v315+ piggyback execute message.
+//
+// The TTC payload layout for func=0x03, sub=0x5e:
+//
+//	Offset  Field
+//	[0]     0x03 (function code)
+//	[1]     0x5e (sub-operation: execute with SQL)
+//	[2-49]  cursor options, flags, parameters (fixed size for common cases)
+//	[50]    SQL length (varlen encoding: 1 byte if < 0xFE, etc.)
+//	[51+]   SQL text (UTF-8)
+//
+// This function scans for the SQL text by looking for a length-prefixed readable
+// string in the expected region. This is more robust than assuming a fixed offset,
+// since the exact layout may vary by Oracle version.
+func decodePiggybackExecSQL(ttcPayload []byte) (*OALL8Result, error) {
+	if len(ttcPayload) < 52 {
+		return nil, fmt.Errorf("%w: piggyback exec needs at least 52 bytes, got %d", ErrOALL8TooShort, len(ttcPayload))
+	}
+
+	// Try the known offset (50) first — this works for Oracle 19c with oracledb/JDBC thin
+	sql, err := extractSQLAtOffset(ttcPayload, 50)
+	if err == nil && sql != "" {
+		return &OALL8Result{SQL: sql}, nil
+	}
+
+	// Fallback: scan a range around the expected offset for a length-prefixed SQL string
+	for offset := 40; offset < 60 && offset < len(ttcPayload)-1; offset++ {
+		sql, scanErr := extractSQLAtOffset(ttcPayload, offset)
+		if scanErr == nil && sql != "" {
+			return &OALL8Result{SQL: sql}, nil
+		}
+	}
+
+	return nil, fmt.Errorf("%w: could not find SQL text in piggyback exec payload", ErrEmptySQL)
+}
+
+// extractSQLAtOffset tries to read a length-prefixed SQL string at the given offset.
+// Returns the SQL text, bytes consumed, and error.
+func extractSQLAtOffset(data []byte, offset int) (string, error) {
+	if offset >= len(data) {
+		return "", ErrOALL8TooShort
+	}
+
+	sqlLen, bytesRead, err := decodeVarLen(data[offset:])
+	if err != nil || sqlLen == 0 || sqlLen > 32768 {
+		return "", ErrEmptySQL
+	}
+
+	sqlStart := offset + bytesRead
+	sqlEnd := sqlStart + int(sqlLen)
+
+	if sqlEnd > len(data) {
+		return "", ErrSQLLengthInvalid
+	}
+
+	sqlText := string(data[sqlStart:sqlEnd])
+
+	// Validate that it looks like SQL (starts with a keyword or is mostly printable)
+	if !looksLikeSQL(sqlText) {
+		return "", ErrEmptySQL
+	}
+
+	return sqlText, nil
+}
+
+// looksLikeSQL returns true if the string appears to be SQL text.
+func looksLikeSQL(s string) bool {
+	if len(s) < 2 {
+		return false
+	}
+
+	upper := strings.ToUpper(s)
+	sqlKeywords := []string{
+		"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
+		"ALTER", "TRUNCATE", "MERGE", "CALL", "BEGIN", "DECLARE", "WITH", "GRANT", "REVOKE",
+		"EXPLAIN", "SET", "COMMIT", "ROLLBACK", "SAVEPOINT", "LOCK", "COMMENT",
+	}
+
+	for _, kw := range sqlKeywords {
+		if strings.HasPrefix(upper, kw) {
+			return true
+		}
+	}
+
+	// Also accept if mostly printable ASCII
+	printable := 0
+	for _, c := range s {
+		if c >= 0x20 && c < 0x7F {
+			printable++
+		}
+	}
+
+	return float64(printable)/float64(len(s)) > 0.9
+}
+
 // decodeVarLen decodes a variable-length integer used in TTC.
 // Returns the value and the number of bytes consumed.
 func decodeVarLen(data []byte) (uint32, int, error) {

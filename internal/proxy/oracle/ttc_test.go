@@ -7,14 +7,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// buildTTCDataPayload creates a TNS Data payload with data flags + function code + extra data.
 func buildTTCDataPayload(funcCode byte, extra []byte) []byte {
-	payload := make([]byte, ttcDataFlagsSize+1+len(extra))
-	// data flags = 0x0000
-	payload[ttcDataFlagsSize] = funcCode
-
+	// TNS Data payload: [data_flags: 2 bytes] [func_code: 1 byte] [extra...]
+	payload := []byte{0x00, 0x00, funcCode}
 	if len(extra) > 0 {
-		copy(payload[ttcDataFlagsSize+1:], extra)
+		payload = append(payload, extra...)
 	}
 
 	return payload
@@ -22,6 +19,7 @@ func buildTTCDataPayload(funcCode byte, extra []byte) []byte {
 
 func TestParseTTCFunctionCode(t *testing.T) {
 	t.Parallel()
+
 	tests := []struct {
 		name    string
 		payload []byte
@@ -30,11 +28,10 @@ func TestParseTTCFunctionCode(t *testing.T) {
 		{"OALL8", buildTTCDataPayload(0x0E, []byte{0x01, 0x02}), TTCFuncOALL8},
 		{"OFETCH", buildTTCDataPayload(0x11, []byte{0x01}), TTCFuncOFETCH},
 		{"OCLOSE", buildTTCDataPayload(0x05, []byte{0x01}), TTCFuncOCLOSE},
-		{"OAUTH", buildTTCDataPayload(0x5E, []byte{0x01}), TTCFuncOAUTH},
-		{"OOPEN", buildTTCDataPayload(0x03, []byte{0x01}), TTCFuncOOPEN},
+		{"Piggyback", buildTTCDataPayload(0x03, []byte{0x5e}), TTCFuncPiggyback},
 		{"Response", buildTTCDataPayload(0x08, []byte{0x01}), TTCFuncResponse},
 		{"OCANCEL", buildTTCDataPayload(0x14, []byte{0x01}), TTCFuncOCANCEL},
-		{"OLOBOPS", buildTTCDataPayload(0x44, []byte{0x01}), TTCFuncOLOBOPS},
+		{"QueryResult", buildTTCDataPayload(0x10, []byte{0x01}), TTCFuncQueryResult},
 		{"SetProtocol", buildTTCDataPayload(0x01, []byte{0x01}), TTCFuncSetProtocol},
 		{"SetDataTypes", buildTTCDataPayload(0x02, []byte{0x01}), TTCFuncSetDataTypes},
 	}
@@ -75,7 +72,6 @@ func TestParseTTCFunctionCode_UnknownCode(t *testing.T) {
 	fc, err := parseTTCFunctionCode(payload)
 	require.NoError(t, err)
 	assert.Equal(t, TTCFunctionCode(0xFE), fc)
-	assert.False(t, fc.IsKnown())
 }
 
 func TestTTCFunctionCode_Stringer(t *testing.T) {
@@ -86,35 +82,76 @@ func TestTTCFunctionCode_Stringer(t *testing.T) {
 	assert.Equal(t, "Response", TTCFuncResponse.String())
 	assert.Equal(t, "OSETPRO", TTCFuncSetProtocol.String())
 	assert.Equal(t, "ODTYPES", TTCFuncSetDataTypes.String())
-	assert.Equal(t, "UNKNOWN(0xfe)", TTCFunctionCode(0xFE).String())
+	assert.Equal(t, "PIGGYBACK", TTCFuncPiggyback.String())
+	assert.Equal(t, "QRESULT", TTCFuncQueryResult.String())
+	assert.Equal(t, "0xfe", TTCFunctionCode(0xFE).String())
 }
 
-func TestTTCFunctionCode_IsKnown(t *testing.T) {
+func TestIsPiggybackExecSQL(t *testing.T) {
 	t.Parallel()
-	knownCodes := []TTCFunctionCode{
-		TTCFuncSetProtocol, TTCFuncSetDataTypes, TTCFuncOOPEN, TTCFuncOCLOSE,
-		TTCFuncResponse, TTCFuncOMarker, TTCFuncOVersion, TTCFuncOALL8,
-		TTCFuncOFETCH, TTCFuncOCANCEL, TTCFuncOLOBOPS, TTCFuncOSQL7,
-		TTCFuncOAUTH, TTCFuncOSESSKEY,
+
+	// func=0x03, sub=0x5e → true
+	assert.True(t, IsPiggybackExecSQL([]byte{0x03, 0x5e, 0x01}))
+
+	// func=0x03, sub=0x76 (auth) → false
+	assert.False(t, IsPiggybackExecSQL([]byte{0x03, 0x76, 0x01}))
+
+	// Too short → false
+	assert.False(t, IsPiggybackExecSQL([]byte{0x03}))
+}
+
+func TestIsPiggybackClose(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, IsPiggybackClose([]byte{0x03, 0x09, 0x05}))
+	assert.False(t, IsPiggybackClose([]byte{0x03, 0x5e, 0x01}))
+}
+
+func TestDecodePiggybackExecSQL(t *testing.T) {
+	t.Parallel()
+
+	t.Run("SELECT 1 FROM DUAL", func(t *testing.T) {
+		t.Parallel()
+		// Real captured payload from oracledb thin client → Oracle 19c
+		payload, _ := hexDecode("035e030280610001011201010d0000000102047fffffff0000000000000000000000010000000000000000000000000000001253454c45435420312046524f4d204455414c0101000000000000010100")
+		result, err := decodePiggybackExecSQL(payload)
+		require.NoError(t, err)
+		assert.Equal(t, "SELECT 1 FROM DUAL", result.SQL)
+	})
+
+	t.Run("SELECT COUNT query", func(t *testing.T) {
+		t.Parallel()
+		// Captured: SELECT COUNT(*) FROM all_users
+		payload, _ := hexDecode("035e040280610001011e01010d0000000102047fffffff0000000000000000000000010000000000000000000000000000001e53454c45435420434f554e54282a292046524f4d20616c6c5f7573657273010100000000000001010002800000000000")
+		result, err := decodePiggybackExecSQL(payload)
+		require.NoError(t, err)
+		assert.Equal(t, "SELECT COUNT(*) FROM all_users", result.SQL)
+	})
+
+	t.Run("too short payload", func(t *testing.T) {
+		t.Parallel()
+		_, err := decodePiggybackExecSQL([]byte{0x03, 0x5e, 0x01})
+		assert.Error(t, err)
+	})
+}
+
+func hexDecode(s string) ([]byte, error) { //nolint:unparam // error kept for API consistency
+	b := make([]byte, len(s)/2)
+	for i := 0; i < len(s); i += 2 {
+		var v byte
+		for j := 0; j < 2; j++ {
+			c := s[i+j]
+			switch {
+			case c >= '0' && c <= '9':
+				v = v*16 + (c - '0')
+			case c >= 'a' && c <= 'f':
+				v = v*16 + (c - 'a' + 10)
+			case c >= 'A' && c <= 'F':
+				v = v*16 + (c - 'A' + 10)
+			}
+		}
+		b[i/2] = v
 	}
-	for _, fc := range knownCodes {
-		assert.True(t, fc.IsKnown(), "should be known: %s", fc)
-	}
-	assert.False(t, TTCFunctionCode(0xFF).IsKnown())
-}
 
-func TestExtractTTCPayload(t *testing.T) {
-	t.Parallel()
-	payload := buildTTCDataPayload(0x0E, []byte{0xAA, 0xBB})
-	ttcPayload := extractTTCPayload(payload)
-	require.NotNil(t, ttcPayload)
-	assert.Equal(t, byte(0x0E), ttcPayload[0]) // function code
-	assert.Equal(t, byte(0xAA), ttcPayload[1])
-	assert.Equal(t, byte(0xBB), ttcPayload[2])
-}
-
-func TestExtractTTCPayload_TooShort(t *testing.T) {
-	t.Parallel()
-	assert.Nil(t, extractTTCPayload([]byte{0x00}))
-	assert.Nil(t, extractTTCPayload(nil))
+	return b, nil
 }

@@ -89,6 +89,42 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 	return nil
 }
 
+// handlePiggybackExec intercepts a v315+ piggyback execute-with-SQL message.
+func (s *session) handlePiggybackExec(ttcPayload []byte) error {
+	result, err := decodePiggybackExecSQL(ttcPayload)
+	if err != nil {
+		s.logger.DebugContext(s.ctx, "failed to decode piggyback exec", slog.Any("error", err))
+		return nil // Don't block on decode failure
+	}
+
+	s.logger.InfoContext(s.ctx, "query intercepted",
+		slog.String("sql", truncateSQL(result.SQL, 200)),
+	)
+
+	// Access control check
+	if s.grant != nil {
+		if err := shared.ValidateOracleQuery(result.SQL, s.grant); err != nil {
+			s.logger.WarnContext(s.ctx, "query blocked by access control",
+				slog.String("sql", truncateSQL(result.SQL, 200)),
+				slog.Any("error", err),
+			)
+			return err
+		}
+	}
+
+	// Track as pending query
+	cursor := &trackedCursor{
+		sql:      result.SQL,
+		parsedAt: time.Now(),
+	}
+	s.tracker.pendingQuery = &pendingOracleQuery{
+		cursor:    cursor,
+		startTime: time.Now(),
+	}
+
+	return nil
+}
+
 // handleOFETCH intercepts an OFETCH message: links the fetch to its cursor.
 func (s *session) handleOFETCH(ttcPayload []byte) {
 	result, err := decodeOFETCH(ttcPayload)

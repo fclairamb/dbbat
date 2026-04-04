@@ -14,21 +14,28 @@ import "fmt"
 type TTCFunctionCode byte
 
 // TTC function codes for Oracle's Two-Task Common protocol.
+// In modern Oracle (v315+), function 0x03 is a generic "piggyback" that
+// carries sub-operations (auth, execute, close, etc.) identified by byte 1.
 const (
 	TTCFuncSetProtocol  TTCFunctionCode = 0x01 // OSETPRO — session init
 	TTCFuncSetDataTypes TTCFunctionCode = 0x02 // ODTYPES — session init
-	TTCFuncOOPEN        TTCFunctionCode = 0x03 // OOPEN — open cursor
-	TTCFuncOCLOSE       TTCFunctionCode = 0x05 // OCLOSE — close cursor
+	TTCFuncPiggyback    TTCFunctionCode = 0x03 // Generic piggyback (sub-op at byte 1)
+	TTCFuncOCLOSE       TTCFunctionCode = 0x05 // OCLOSE — close cursor (legacy)
 	TTCFuncResponse     TTCFunctionCode = 0x08 // Server response
-	TTCFuncOMarker      TTCFunctionCode = 0x09 // OMARKER — break/reset
+	TTCFuncOClosev2     TTCFunctionCode = 0x09 // OCLOSE — close cursor (v315+)
 	TTCFuncOVersion     TTCFunctionCode = 0x0B // OVERSION — version request
-	TTCFuncOALL8        TTCFunctionCode = 0x0E // OALL8 — parse+execute (primary query message)
+	TTCFuncOALL8        TTCFunctionCode = 0x0E // OALL8 — parse+execute (legacy)
+	TTCFuncQueryResult  TTCFunctionCode = 0x10 // Query result with row data
 	TTCFuncOFETCH       TTCFunctionCode = 0x11 // OFETCH — fetch rows
 	TTCFuncOCANCEL      TTCFunctionCode = 0x14 // OCANCEL — cancel query
-	TTCFuncOLOBOPS      TTCFunctionCode = 0x44 // OLOBOPS — LOB operations
-	TTCFuncOSQL7        TTCFunctionCode = 0x47 // OSQL7 — legacy SQL
-	TTCFuncOAUTH        TTCFunctionCode = 0x5E // OAUTH — authentication
-	TTCFuncOSESSKEY     TTCFunctionCode = 0x73 // OSESSKEY — session key exchange
+)
+
+// Piggyback sub-operation codes (byte 1 when func=0x03).
+const (
+	PiggybackSubClose   byte = 0x09 // Close cursor
+	PiggybackSubExecSQL byte = 0x5e // Execute with SQL (OALL8 equivalent)
+	PiggybackSubAuth1   byte = 0x76 // AUTH Phase 1
+	PiggybackSubAuth2   byte = 0x73 // AUTH Phase 2
 )
 
 // ttcDataFlagsSize is the size of the data flags prefix in a TNS Data payload.
@@ -61,44 +68,37 @@ func (fc TTCFunctionCode) String() string {
 		return "OSETPRO"
 	case TTCFuncSetDataTypes:
 		return "ODTYPES"
-	case TTCFuncOOPEN:
-		return "OOPEN"
+	case TTCFuncPiggyback:
+		return "PIGGYBACK"
 	case TTCFuncOCLOSE:
 		return "OCLOSE"
 	case TTCFuncResponse:
 		return "Response"
-	case TTCFuncOMarker:
-		return "OMARKER"
+	case TTCFuncOClosev2:
+		return "OCLOSEv2"
 	case TTCFuncOVersion:
 		return "OVERSION"
 	case TTCFuncOALL8:
 		return "OALL8"
+	case TTCFuncQueryResult:
+		return "QRESULT"
 	case TTCFuncOFETCH:
 		return "OFETCH"
 	case TTCFuncOCANCEL:
 		return "OCANCEL"
-	case TTCFuncOLOBOPS:
-		return "OLOBOPS"
-	case TTCFuncOSQL7:
-		return "OSQL7"
-	case TTCFuncOAUTH:
-		return "OAUTH"
-	case TTCFuncOSESSKEY:
-		return "OSESSKEY"
 	default:
-		return fmt.Sprintf("UNKNOWN(0x%02x)", byte(fc))
+		return fmt.Sprintf("0x%02x", byte(fc))
 	}
 }
 
-// IsKnown returns true if this function code is a recognized TTC function.
-func (fc TTCFunctionCode) IsKnown() bool {
-	switch fc {
-	case TTCFuncSetProtocol, TTCFuncSetDataTypes, TTCFuncOOPEN, TTCFuncOCLOSE,
-		TTCFuncResponse, TTCFuncOMarker, TTCFuncOVersion, TTCFuncOALL8,
-		TTCFuncOFETCH, TTCFuncOCANCEL, TTCFuncOLOBOPS, TTCFuncOSQL7,
-		TTCFuncOAUTH, TTCFuncOSESSKEY:
-		return true
-	default:
-		return false
-	}
+// IsPiggybackExecSQL checks if a piggyback payload is an execute-with-SQL message.
+func IsPiggybackExecSQL(ttcPayload []byte) bool {
+	// ttcPayload starts at the function code byte
+	// [0] = 0x03 (piggyback), [1] = sub-op
+	return len(ttcPayload) > 1 && ttcPayload[1] == PiggybackSubExecSQL
+}
+
+// IsPiggybackClose checks if a piggyback payload is a close cursor message.
+func IsPiggybackClose(ttcPayload []byte) bool {
+	return len(ttcPayload) > 1 && ttcPayload[1] == PiggybackSubClose
 }
