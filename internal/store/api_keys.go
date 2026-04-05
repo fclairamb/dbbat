@@ -102,6 +102,41 @@ func (s *Store) CreateAPIKey(ctx context.Context, userID uuid.UUID, name string,
 	return apiKey, plainKey, nil
 }
 
+// CreateAPIKeyWithValue creates an API key with a specific plaintext value.
+// Used for test mode provisioning where stable, predictable keys are needed.
+func (s *Store) CreateAPIKeyWithValue(ctx context.Context, userID uuid.UUID, name string, plainKey string, expiresAt *time.Time) (*APIKey, error) {
+	if len(plainKey) < APIKeyPrefixLength {
+		return nil, fmt.Errorf("key too short: must be at least %d characters", APIKeyPrefixLength)
+	}
+
+	prefix := plainKey[:APIKeyPrefixLength]
+
+	keyHash, err := crypto.HashPassword(plainKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash API key: %w", err)
+	}
+
+	apiKey := &APIKey{
+		UserID:    userID,
+		Name:      name,
+		KeyHash:   keyHash,
+		KeyPrefix: prefix,
+		KeyType:   KeyTypeAPI,
+		ExpiresAt: expiresAt,
+		CreatedAt: time.Now(),
+	}
+
+	_, err = s.db.NewInsert().
+		Model(apiKey).
+		Returning("*").
+		Exec(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create API key: %w", err)
+	}
+
+	return apiKey, nil
+}
+
 // CreateWebSession creates a new web session key for a user
 // Web sessions have a fixed 1-hour expiration and use the web_ prefix
 // Returns the created APIKey and the plain text key (only shown once)
