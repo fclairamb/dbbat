@@ -592,6 +592,23 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	}
 	logger.InfoContext(ctx, "Created read-only grant for viewer user on proxy_target")
 
+	// 7. Create stable API keys for test users
+	testKeys := []struct {
+		user *store.User
+		name string
+		key  string
+	}{
+		{adminUser, "admin-test-key", "dbb_admin_key"},
+		{connectorUser, "connector-test-key", "dbb_connector_key"},
+		{viewerUser, "viewer-test-key", "dbb_viewer_key"},
+	}
+	for _, tk := range testKeys {
+		if _, err := dataStore.CreateAPIKeyWithValue(ctx, tk.user.UID, tk.name, tk.key, nil); err != nil {
+			return fmt.Errorf("failed to create test API key for %s: %w", tk.user.Username, err)
+		}
+		logger.InfoContext(ctx, "Created test API key", slog.String("user", tk.user.Username), slog.String("key", tk.key))
+	}
+
 	logger.InfoContext(ctx, "Test data provisioning complete")
 	return nil
 }
