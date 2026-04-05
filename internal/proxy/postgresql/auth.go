@@ -1,11 +1,14 @@
 package postgresql
 
 import (
+	"context"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/store"
 )
 
 // authenticate performs DBBat authentication.
@@ -89,6 +92,19 @@ func (s *Session) authenticate() error {
 		return fmt.Errorf("failed to receive password: %w", err)
 	}
 
+	// Try API key authentication if password looks like an API key
+	if isAPIKey(passwordMsg.Password) {
+		if err := s.authenticateWithAPIKey(passwordMsg.Password); err != nil {
+			s.sendError("authentication failed")
+
+			return ErrInvalidPassword
+		}
+
+		s.authenticated = true
+
+		return nil
+	}
+
 	// Verify password (using cache if available)
 	var valid bool
 	if s.authCache != nil {
@@ -103,6 +119,30 @@ func (s *Session) authenticate() error {
 	}
 
 	s.authenticated = true
+
+	return nil
+}
+
+// isAPIKey checks if a password looks like a dbbat API key.
+func isAPIKey(password string) bool {
+	return len(password) >= store.APIKeyPrefixLength &&
+		strings.HasPrefix(password, store.APIKeyPrefix)
+}
+
+// authenticateWithAPIKey verifies the password as an API key and checks ownership.
+func (s *Session) authenticateWithAPIKey(apiKey string) error {
+	verified, err := s.store.VerifyAPIKey(s.ctx, apiKey)
+	if err != nil {
+		return fmt.Errorf("API key verification failed: %w", err)
+	}
+
+	// Ensure the API key belongs to the user from the StartupMessage
+	if verified.UserID != s.user.UID {
+		return fmt.Errorf("API key does not belong to user %s", s.user.Username)
+	}
+
+	// Increment usage asynchronously
+	go s.store.IncrementAPIKeyUsage(context.Background(), verified.ID)
 
 	return nil
 }
