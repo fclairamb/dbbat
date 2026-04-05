@@ -1,30 +1,43 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useAuditEvents, useUsers, type AuditEvent } from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { AdaptiveRefresh } from "@/components/shared/AdaptiveRefresh";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
-import { Button } from "@/components/ui/button";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { useState, useRef, useCallback } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { canViewAudit } from "@/lib/permissions";
 import { AccessDenied } from "@/components/shared/AccessDenied";
 
+const DEFAULT_PAGE_SIZE = 50;
+const PAGE_SIZE_OPTIONS = [25, 50, 100];
+
 export const Route = createFileRoute("/_authenticated/audit/")({
+  validateSearch: (search: Record<string, unknown>) => ({
+    before: search.before as string | undefined,
+    size: search.size ? Number(search.size) : DEFAULT_PAGE_SIZE,
+  }),
   component: AuditPage,
 });
 
 function AuditPage() {
   const { user } = useAuth();
-  const { data: events, isLoading, refetch } = useAuditEvents({ limit: 100 });
+  const { before, size } = Route.useSearch();
+  const { data: events, isLoading, refetch } = useAuditEvents({
+    before,
+    limit: size,
+  });
   const { data: users } = useUsers();
+
+  const isFirstPage = !before;
 
   const previousFirstUid = useRef<string | null>(null);
 
@@ -43,7 +56,6 @@ function AuditPage() {
     return { hasNewData };
   }, [refetch]);
 
-  // Check if user has viewer role
   if (!canViewAudit(user?.roles)) {
     return <AccessDenied requiredRole="viewer" />;
   }
@@ -108,16 +120,21 @@ function AuditPage() {
     },
   ];
 
+  const lastUid = events && events.length > 0 ? events[events.length - 1].uid : undefined;
+  const hasMore = events && events.length >= size;
+
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Audit Log"
+        title="Audit Logs"
         description="View system activity and changes"
         actions={
-          <AdaptiveRefresh
-            onRefresh={handleRefresh}
-            storageKey="dbbat.autoRefresh.audit"
-          />
+          isFirstPage ? (
+            <AdaptiveRefresh
+              onRefresh={handleRefresh}
+              storageKey="dbbat.autoRefresh.audit"
+            />
+          ) : undefined
         }
       />
 
@@ -128,6 +145,54 @@ function AuditPage() {
         rowKey={(e) => e.uid}
         emptyMessage="No audit events found"
       />
+
+      {/* Pagination */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <span>Rows per page:</span>
+          {PAGE_SIZE_OPTIONS.map((opt) => (
+            <Button
+              key={opt}
+              variant={opt === size ? "secondary" : "ghost"}
+              size="sm"
+              className="h-7 px-2"
+              asChild
+            >
+              <Link
+                to="/audit"
+                search={{ before: undefined, size: opt }}
+              >
+                {opt}
+              </Link>
+            </Button>
+          ))}
+        </div>
+
+        <div className="flex items-center gap-2">
+          {!isFirstPage && (
+            <Button variant="outline" size="sm" asChild>
+              <Link
+                to="/audit"
+                search={{ before: undefined, size }}
+              >
+                <ChevronLeft className="h-4 w-4 mr-1" />
+                Newer
+              </Link>
+            </Button>
+          )}
+          {hasMore && lastUid && (
+            <Button variant="outline" size="sm" asChild>
+              <Link
+                to="/audit"
+                search={{ before: lastUid, size }}
+              >
+                Older
+                <ChevronRight className="h-4 w-4 ml-1" />
+              </Link>
+            </Button>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

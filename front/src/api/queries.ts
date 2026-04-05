@@ -348,6 +348,7 @@ export function useRevokeGrant(options?: {
 export function useConnections(filters?: {
   user_id?: string;
   database_id?: string;
+  before?: string;
   limit?: number;
   offset?: number;
 }) {
@@ -355,7 +356,7 @@ export function useConnections(filters?: {
     queryKey: ["connections", filters],
     queryFn: async (): Promise<Connection[]> => {
       const response = await apiClient.GET("/connections", {
-        params: { query: filters },
+        params: { query: filters as Record<string, unknown> },
       });
       if (response.error) {
         throw new Error(response.error.message || "Failed to load connections");
@@ -376,6 +377,7 @@ export function useQueries(
     database_id?: string;
     start_time?: string;
     end_time?: string;
+    before?: string;
     limit?: number;
     offset?: number;
   },
@@ -385,7 +387,7 @@ export function useQueries(
     queryKey: ["queries", filters],
     queryFn: async (): Promise<Query[]> => {
       const response = await apiClient.GET("/queries", {
-        params: { query: filters },
+        params: { query: filters as Record<string, unknown> },
       });
       if (response.error) {
         throw new Error(response.error.message || "Failed to load queries");
@@ -452,6 +454,7 @@ export function useAuditEvents(filters?: {
   performed_by?: string;
   start_time?: string;
   end_time?: string;
+  before?: string;
   limit?: number;
   offset?: number;
 }) {
@@ -459,7 +462,7 @@ export function useAuditEvents(filters?: {
     queryKey: ["audit", filters],
     queryFn: async (): Promise<AuditEvent[]> => {
       const response = await apiClient.GET("/audit", {
-        params: { query: filters },
+        params: { query: filters as Record<string, unknown> },
       });
       if (response.error) {
         throw new Error(response.error.message || "Failed to load audit events");
