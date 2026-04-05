@@ -396,13 +396,6 @@ func (s *session) upstreamToClient() error {
 			s.interceptUpstreamMessage(pkt, bytesTransferred)
 		}
 
-		// Also check for ORA-01403 in ANY data packet (multi-packet results)
-		if pkt.Type == TNSPacketTypeData && s.tracker.pendingQuery != nil {
-			if findBytes(pkt.Payload, []byte("ORA-01403")) >= 0 {
-				s.completeQuery(nil, nil, bytesTransferred)
-			}
-		}
-
 		// Dump upstream->client packet
 		if s.dump != nil {
 			_ = s.dump.WritePacket(dump.DirServerToClient, pkt.Raw)
@@ -432,10 +425,48 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket, bytesTransferred int6
 		s.handleQueryResultV2(ttcPayload, bytesTransferred)
 	case TTCFuncResponse:
 		s.handleResponse(ttcPayload, bytesTransferred)
-	default:
-		// Continuation packets (func=0x06) contain additional rows, but Oracle
-		// uses column-level compression (only changed values are sent) which
-		// requires column type information to decode correctly. Skipped for now.
+	case TTCFuncContinuation:
+		s.handleContinuation(ttcPayload, bytesTransferred)
+	}
+}
+
+// handleContinuation processes continuation packets (func=0x06) containing
+// additional rows in multi-packet result sets.
+//
+// Oracle uses column-level compression: only columns whose values changed
+// from the previous row are transmitted. A bitmask descriptor after each
+// row (0x15 [flag] [count] [bitmask] 0x07) indicates which columns will
+// have new values in the NEXT row. Columns not in the bitmask retain their
+// previous values.
+func (s *session) handleContinuation(ttcPayload []byte, bytesTransferred int64) {
+	if s.tracker.pendingQuery == nil || s.tracker.pendingQuery.cursor == nil {
+		return
+	}
+
+	columns := s.tracker.pendingQuery.cursor.columns
+	numCols := len(columns)
+
+	if numCols > 0 {
+		rows := parseContinuationRows(ttcPayload, numCols, s.tracker.pendingQuery.lastRow)
+
+		for _, row := range rows {
+			s.captureRow(columns, row)
+
+			// Update lastRow for cross-packet tracking
+			strRow := make([]string, len(row))
+			for i, v := range row {
+				if v != nil {
+					strRow[i] = fmt.Sprintf("%v", v)
+				}
+			}
+
+			s.tracker.pendingQuery.lastRow = strRow
+		}
+	}
+
+	// Check for ORA-01403 (no data found) which signals end of data
+	if findBytes(ttcPayload, []byte("ORA-01403")) >= 0 {
+		s.completeQuery(nil, nil, bytesTransferred)
 	}
 }
 

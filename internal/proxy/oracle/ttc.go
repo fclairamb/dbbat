@@ -21,6 +21,7 @@ const (
 	TTCFuncSetDataTypes TTCFunctionCode = 0x02 // ODTYPES — session init
 	TTCFuncPiggyback    TTCFunctionCode = 0x03 // Generic piggyback (sub-op at byte 1)
 	TTCFuncOCLOSE       TTCFunctionCode = 0x05 // OCLOSE — close cursor (legacy)
+	TTCFuncContinuation TTCFunctionCode = 0x06 // Continuation data (multi-packet result rows)
 	TTCFuncResponse     TTCFunctionCode = 0x08 // Server response
 	TTCFuncOClosev2     TTCFunctionCode = 0x09 // OCLOSE — close cursor (v315+)
 	TTCFuncOVersion     TTCFunctionCode = 0x0B // OVERSION — version request
@@ -79,6 +80,8 @@ func (fc TTCFunctionCode) String() string {
 		return "PIGGYBACK"
 	case TTCFuncOCLOSE:
 		return "OCLOSE"
+	case TTCFuncContinuation:
+		return "CONTINUATION"
 	case TTCFuncResponse:
 		return "Response"
 	case TTCFuncOClosev2:

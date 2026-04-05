@@ -111,7 +111,7 @@ make clean            # Clean build artifacts
 |----------|-------------|----------|
 | `DBB_DSN` | PostgreSQL DSN for DBBat storage | Yes |
 | `DBB_LISTEN_PG` | Proxy listen address (default: `:5434`) | No |
-| `DBB_LISTEN_API` | REST API listen address (default: `:8080`) | No |
+| `DBB_LISTEN_API` | REST API listen address (default: `:4200`) | No |
 | `DBB_KEY` | Base64-encoded AES-256 encryption key | No |
 | `DBB_KEYFILE` | Path to file containing encryption key | No |
 | `DBB_RUN_MODE` | Run mode: empty, `test`, or `demo` | No |

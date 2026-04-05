@@ -810,6 +810,174 @@ func decodeOracleNumberToString(b []byte) (string, bool) {
 	return fmt.Sprintf("%d", result), true
 }
 
+// continuationDescriptorMarker (0x15) appears after each row in a continuation
+// packet. It is followed by a descriptor that encodes which columns have new
+// values in the NEXT row: [flag] [count] [bitmask] then 0x07.
+const continuationDescriptorMarker = 0x15
+
+// parseContinuationRows decodes rows from a TTC continuation packet (func=0x06).
+//
+// Oracle's continuation format uses column-level compression:
+//   - A header bitmask (at header_end-2) indicates which columns have new values
+//     in the first row of the packet.
+//   - After each row, a descriptor (0x15 [flag] [count] [bitmask] 0x07) indicates
+//     which columns have new values in the NEXT row.
+//   - Columns not in the bitmask retain their values from the previous row.
+//
+// The prevRow parameter provides the last row from the previous packet (or the
+// QueryResult) so that unchanged columns can be filled in correctly.
+func parseContinuationRows(payload []byte, numCols int, prevRow []string) [][]interface{} {
+	if numCols == 0 || len(payload) < 15 {
+		return nil
+	}
+
+	// Find the first 0x07 in the header area (marks start of row data).
+	headerEnd := -1
+	for i := 1; i < 25 && i < len(payload); i++ {
+		if payload[i] == 0x07 {
+			headerEnd = i
+			break
+		}
+	}
+
+	if headerEnd < 0 {
+		return nil
+	}
+
+	// Parse header bitmask to determine which columns are sent in the first row.
+	// The bitmask is at headerEnd-2 (the byte before the trailing 0x00 before 0x07).
+	activeCols := allColumns(numCols)
+	if headerEnd >= 3 {
+		bitmask := payload[headerEnd-2]
+		if cols := bitmaskToColumns(bitmask, numCols); len(cols) > 0 {
+			activeCols = cols
+		}
+	}
+
+	// Initialize previous row values from the provided lastRow.
+	prev := make([]string, numCols)
+	if len(prevRow) == numCols {
+		copy(prev, prevRow)
+	}
+
+	offset := headerEnd + 1
+	var rows [][]interface{}
+
+	for offset < len(payload) {
+		if payload[offset] == 0x08 {
+			break
+		}
+
+		// Check for ORA-01403 end marker
+		if offset+9 <= len(payload) && string(payload[offset:offset+9]) == "ORA-01403" {
+			break
+		}
+
+		// Read values for active columns; inactive columns keep previous values.
+		row := make([]interface{}, numCols)
+		for i := range numCols {
+			row[i] = prev[i] // Default: previous value
+		}
+
+		valid := true
+
+		for _, col := range activeCols {
+			if offset >= len(payload) {
+				valid = false
+
+				break
+			}
+
+			valLen := int(payload[offset])
+			offset++
+
+			if valLen == 0 {
+				row[col] = ""
+				prev[col] = ""
+
+				continue
+			}
+
+			if valLen > 4000 || offset+valLen > len(payload) {
+				valid = false
+
+				break
+			}
+
+			decoded := decodeOracleRawValue(payload[offset : offset+valLen])
+			row[col] = decoded
+			prev[col] = decoded
+			offset += valLen
+		}
+
+		if !valid {
+			break
+		}
+
+		rows = append(rows, row)
+
+		// Parse the descriptor after the row to determine active columns for the next row.
+		if offset >= len(payload) {
+			break
+		}
+
+		if payload[offset] == continuationDescriptorMarker {
+			offset++ // skip 0x15
+
+			// Read descriptor bytes until 0x07 or 0x08.
+			var desc []byte
+			for offset < len(payload) && payload[offset] != 0x07 && payload[offset] != 0x08 {
+				desc = append(desc, payload[offset])
+				offset++
+			}
+
+			// Descriptor format: [flag] [count] [bitmask]
+			// The bitmask is at index 2 (for ≤8 columns).
+			if len(desc) >= 3 {
+				activeCols = bitmaskToColumns(desc[2], numCols)
+			} else {
+				activeCols = allColumns(numCols)
+			}
+
+			// Skip 0x07 separator
+			if offset < len(payload) && payload[offset] == 0x07 {
+				offset++
+			}
+		} else if payload[offset] == 0x07 {
+			offset++
+			activeCols = allColumns(numCols) // Simple separator: all columns in next row
+		} else {
+			break // Unknown byte — stop
+		}
+	}
+
+	return rows
+}
+
+// bitmaskToColumns converts a column bitmask to a sorted slice of column indices.
+// Bit 0 = column 0, bit 1 = column 1, etc.
+func bitmaskToColumns(bitmask byte, numCols int) []int {
+	var cols []int
+
+	for bit := range numCols {
+		if bitmask&(1<<bit) != 0 {
+			cols = append(cols, bit)
+		}
+	}
+
+	return cols
+}
+
+// allColumns returns a slice [0, 1, 2, ..., n-1].
+func allColumns(n int) []int {
+	cols := make([]int, n)
+	for i := range n {
+		cols[i] = i
+	}
+
+	return cols
+}
+
 // findBytes finds the first occurrence of pattern in data.
 func findBytes(data, pattern []byte) int {
 	for i := 0; i <= len(data)-len(pattern); i++ {

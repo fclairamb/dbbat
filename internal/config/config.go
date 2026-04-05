@@ -248,7 +248,7 @@ const DefaultLogLevel = "info"
 func defaultConfig() Config {
 	return Config{
 		ListenPG:     ":5434",
-		ListenAPI:    ":8080",
+		ListenAPI:    ":4200",
 		ListenOracle: ":1522",
 		BaseURL:      DefaultBaseURL,
 		LogLevel:     DefaultLogLevel,
