@@ -99,7 +99,11 @@ func (s *Store) ListConnections(ctx context.Context, filter ConnectionFilter) ([
 		q = q.Where("database_id = ?", *filter.DatabaseID)
 	}
 
-	q = q.Order("connected_at DESC")
+	if filter.BeforeUID != nil {
+		q = q.Where("uid < ?", *filter.BeforeUID)
+	}
+
+	q = q.Order("uid DESC")
 
 	if filter.Limit > 0 {
 		q = q.Limit(filter.Limit)
