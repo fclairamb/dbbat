@@ -503,16 +503,17 @@ func (s *session) handleResponse(ttcPayload []byte, bytesTransferred int64) {
 	// If MoreData is true, we wait for the next OFETCH response
 }
 
-// sendRefuse sends a TNS Refuse packet to the client with a properly
-// formatted Oracle descriptor so JDBC clients can parse the error.
+// sendRefuse sends a TNS Redirect packet carrying an Oracle error descriptor.
+// Oracle listeners use Redirect (type 4) — not Refuse (type 3) — to report
+// errors like ORA-12514 to JDBC and thin clients.
 func (s *session) sendRefuse(oraCode uint16, reason string) {
 	pkt := &TNSPacket{
-		Type:    TNSPacketTypeRefuse,
-		Payload: buildRefusePayload(oraCode, reason),
+		Type:    TNSPacketTypeRedirect,
+		Payload: buildErrorRedirectPayload(oraCode, reason),
 	}
 
 	if err := writeTNSPacket(s.clientConn, pkt); err != nil {
-		s.logger.ErrorContext(s.ctx, "failed to send refuse", slog.Any("error", err))
+		s.logger.ErrorContext(s.ctx, "failed to send error redirect", slog.Any("error", err))
 	}
 }
 

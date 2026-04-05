@@ -15,19 +15,30 @@ const (
 	ORA12541 uint16 = 12541 // TNS:no listener
 )
 
-// buildRefusePayload constructs a properly formatted TNS Refuse payload.
-// Real Oracle Refuse packets have: [user_reason:2][system_reason:2][descriptor...]
-// The descriptor is an Oracle-style parenthesized string.
-func buildRefusePayload(oraCode uint16, reason string) []byte {
+// buildErrorRedirectPayload constructs a TNS Redirect payload that carries
+// an Oracle error descriptor. Oracle uses Redirect (type 4) — not Refuse
+// (type 3) — to report listener errors like ORA-12514 to JDBC/thin clients.
+//
+// The captured wire format from a real Oracle 19c listener is:
+//
+//	[data_len_hi:1] [0x00] [desc_len_hi:1] [desc_len_lo:1] [descriptor...]
+//
+// where the descriptor is an Oracle-style parenthesized string.
+func buildErrorRedirectPayload(oraCode uint16, reason string) []byte {
 	descriptor := fmt.Sprintf(
-		"(DESCRIPTION=(ERR=%d)(VSNNUM=0)(ERROR_STACK=(ERROR=(CODE=%d)(EMFI=4)(ARGS='(%s)'))))",
+		"(DESCRIPTION=(TMP=)(VSNNUM=0)(ERR=%d)(ERROR_STACK=(ERROR=(CODE=%d)(EMFI=4)(ARGS='(%s)'))))",
 		oraCode, oraCode, reason,
 	)
 
-	payload := make([]byte, 4+len(descriptor))
-	binary.BigEndian.PutUint16(payload[0:2], 0x0004) // User reason: user error
-	binary.BigEndian.PutUint16(payload[2:4], 0x0000) // System reason: none
-	copy(payload[4:], descriptor)
+	descBytes := []byte(descriptor)
+	descLen := len(descBytes)
+
+	// Redirect payload: [2 bytes header] [2 bytes desc length BE] [descriptor]
+	payload := make([]byte, 4+descLen)
+	payload[0] = byte((descLen + 4) >> 8) // data length high
+	payload[1] = 0x00
+	binary.BigEndian.PutUint16(payload[2:4], uint16(descLen)) // descriptor length
+	copy(payload[4:], descBytes)
 
 	return payload
 }

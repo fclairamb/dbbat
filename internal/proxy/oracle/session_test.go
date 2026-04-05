@@ -102,11 +102,12 @@ func TestSession_SendRefuse(t *testing.T) {
 
 	pkt, err := readTNSPacket(client)
 	require.NoError(t, err)
-	assert.Equal(t, TNSPacketTypeRefuse, pkt.Type)
-	// Verify structured payload: 4-byte header + Oracle descriptor
-	assert.True(t, len(pkt.Payload) > 4, "payload should have 4-byte header + descriptor")
-	assert.Contains(t, string(pkt.Payload[4:]), "ERR=12514")
-	assert.Contains(t, string(pkt.Payload[4:]), "test error reason")
+	assert.Equal(t, TNSPacketTypeRedirect, pkt.Type)
+	// Verify structured payload contains Oracle descriptor with error code
+	assert.True(t, len(pkt.Payload) > 4, "payload should have header + descriptor")
+	payloadStr := string(pkt.Payload)
+	assert.Contains(t, payloadStr, "ERR=12514")
+	assert.Contains(t, payloadStr, "test error reason")
 }
 
 func TestSession_RawRelay(t *testing.T) {
