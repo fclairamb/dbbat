@@ -1,4 +1,4 @@
-package proxy
+package postgresql
 
 // Proxy failure reasons
 const (

@@ -1,4 +1,4 @@
-package proxy
+package postgresql
 
 import (
 	"strings"
