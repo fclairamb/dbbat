@@ -433,14 +433,8 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket, bytesTransferred int6
 	case TTCFuncResponse:
 		s.handleResponse(ttcPayload, bytesTransferred)
 	default:
-		// Continuation packets (func=0x06 and others) may contain row data
-		// for multi-packet result sets. Try to extract rows if we have a pending query.
-		if s.tracker.pendingQuery != nil && s.tracker.pendingQuery.cursor != nil {
-			columns := s.tracker.pendingQuery.cursor.columns
-			if len(columns) > 0 {
-				s.captureRowsFromContinuation(pkt.Payload, columns)
-			}
-		}
+		// Row capture from continuation packets is disabled — the TTC binary
+		// format cannot be reliably decoded without a full protocol implementation.
 	}
 }
 
@@ -459,17 +453,7 @@ func (s *session) handleResponse(ttcPayload []byte, bytesTransferred int64) {
 		s.tracker.pendingQuery.cursor.columns = resp.Columns
 	}
 
-	// Capture rows
-	if s.tracker.pendingQuery != nil {
-		columns := resp.Columns
-		if len(columns) == 0 && s.tracker.pendingQuery.cursor != nil {
-			columns = s.tracker.pendingQuery.cursor.columns
-		}
-
-		for _, row := range resp.Rows {
-			s.captureRow(columns, row)
-		}
-	}
+	// Row capture disabled — TTC binary row format cannot be reliably decoded.
 
 	// If error or no more data, complete the query
 	if resp.IsError {

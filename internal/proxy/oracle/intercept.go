@@ -185,18 +185,10 @@ func (s *session) handleQueryResultV2(ttcPayload []byte, bytesTransferred int64)
 		s.tracker.pendingQuery.cursor.columns = columns
 	}
 
-	// Capture rows using stored column definitions
-	if s.tracker.pendingQuery != nil && s.tracker.pendingQuery.cursor != nil {
-		columns := s.tracker.pendingQuery.cursor.columns
-		for _, row := range result.Rows {
-			values := make([]interface{}, len(row))
-			for i, v := range row {
-				values[i] = v
-			}
-
-			s.captureRow(columns, values)
-		}
-	}
+	// Row capture from TTC binary is disabled: the TTC row format has variable-length
+	// fields that the parser cannot reliably decode without a full protocol implementation.
+	// Misaligned column boundaries produce corrupted row data. SQL text, duration, and
+	// error tracking still work correctly.
 
 	// Only complete the query when we see the end-of-data marker (ORA-01403)
 	if result.NoData {
