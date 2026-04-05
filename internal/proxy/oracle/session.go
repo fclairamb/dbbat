@@ -433,8 +433,9 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket, bytesTransferred int6
 	case TTCFuncResponse:
 		s.handleResponse(ttcPayload, bytesTransferred)
 	default:
-		// Row capture from continuation packets is disabled — the TTC binary
-		// format cannot be reliably decoded without a full protocol implementation.
+		// Continuation packets (func=0x06) contain additional rows, but Oracle
+		// uses column-level compression (only changed values are sent) which
+		// requires column type information to decode correctly. Skipped for now.
 	}
 }
 

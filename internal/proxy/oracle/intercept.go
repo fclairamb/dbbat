@@ -37,6 +37,7 @@ type pendingOracleQuery struct {
 	truncated      bool
 	queryUID       uuid.UUID // Set after query record is created in DB
 	queryPersisted bool      // True after query record is created
+	lastRow        []string  // Last captured row values (for continuation packet duplicate tracking)
 }
 
 // newOracleQueryTracker creates a new query tracker.
@@ -192,8 +193,7 @@ func (s *session) handleQueryResultV2(ttcPayload []byte, bytesTransferred int64)
 		s.tracker.pendingQuery.cursor.columns = columns
 	}
 
-	// Capture rows from the first QueryResult response.
-	// This is reliable because the column definitions and row data are in the same packet.
+	// Capture rows from the QueryResult response.
 	if s.tracker.pendingQuery != nil && s.tracker.pendingQuery.cursor != nil {
 		columns := s.tracker.pendingQuery.cursor.columns
 		for _, row := range result.Rows {
@@ -204,6 +204,11 @@ func (s *session) handleQueryResultV2(ttcPayload []byte, bytesTransferred int64)
 
 			s.captureRow(columns, values)
 		}
+
+		// Store last row for continuation packet duplicate tracking
+		if len(result.Rows) > 0 {
+			s.tracker.pendingQuery.lastRow = result.Rows[len(result.Rows)-1]
+		}
 	}
 
 	// Only complete the query when we see the end-of-data marker (ORA-01403)
@@ -212,115 +217,115 @@ func (s *session) handleQueryResultV2(ttcPayload []byte, bytesTransferred int64)
 	}
 }
 
+// continuationDupMarker is the byte that indicates "remaining columns are
+// duplicated from the previous row" in Oracle TTC continuation packets.
+const continuationDupMarker = 0x15
+
 // captureRowsFromContinuation extracts row data from continuation packets
 // in multi-packet result sets. Continuation packets (func=0x06) contain:
-// [func(1)] [header(~12 bytes)] [row data: len+val pairs separated by 0x07]
 //
-// The row data uses the same length-prefixed format as QueryResult but
-// without column definitions or the 0x06 0x22 marker.
-func (s *session) captureRowsFromContinuation(payload []byte, columns []columnDef) { //nolint:gocognit,cyclop // TTC binary parsing
+//	[func(1)] [header(~12 bytes)] [0x07] [row data...] [0x07] [row data...] [0x08]
+//
+// Oracle uses row data compression: when column values are identical to the
+// previous row, a marker byte (0x15) replaces the remaining columns, followed
+// by filler bytes until the next row separator (0x07) or end marker (0x08).
+func (s *session) captureRowsFromContinuation(payload []byte, columns []columnDef) {
 	numCols := len(columns)
 	if numCols == 0 || len(payload) < 15 {
 		return
 	}
 
-	// Skip the TNS data flags (already stripped in extractTTCPayload),
-	// then the func code + header. The header varies in length.
-	// Scan for the first valid row by trying different start offsets.
-	for startOffset := 10; startOffset < 25 && startOffset < len(payload)-numCols; startOffset++ {
-		// Try to read one row at this offset
-		offset := startOffset
-		row := make([]string, 0, numCols)
+	// Find the first 0x07 separator in the header area (marks start of row data)
+	offset := -1
+	for i := 1; i < 20 && i < len(payload); i++ {
+		if payload[i] == 0x07 {
+			offset = i + 1
+			break
+		}
+	}
+
+	if offset < 0 {
+		return
+	}
+
+	// Previous row values for duplicate detection.
+	// Initialize from the last captured row if available, or empty.
+	prevRow := make([]string, numCols)
+	if s.tracker.pendingQuery != nil && s.tracker.pendingQuery.cursor != nil {
+		if lastRow := s.tracker.pendingQuery.lastRow; len(lastRow) == numCols {
+			copy(prevRow, lastRow)
+		}
+	}
+
+	endOfData := len(payload)
+	if idx := findBytes(payload, []byte("ORA-01403")); idx >= 0 {
+		endOfData = idx
+	}
+
+	for offset < endOfData {
+		if payload[offset] == 0x08 {
+			break // End marker
+		}
+
+		row := make([]string, numCols)
+		copy(row, prevRow)
 		valid := true
 
 		for col := 0; col < numCols; col++ {
-			if offset >= len(payload) {
+			if offset >= endOfData {
 				valid = false
 				break
 			}
 
-			valLen := int(payload[offset])
+			b := payload[offset]
+
+			if b == continuationDupMarker {
+				// Remaining columns duplicated from previous row (already copied).
+				// Skip filler bytes until the next 0x07 or 0x08.
+				offset++
+				for offset < endOfData && payload[offset] != 0x07 && payload[offset] != 0x08 {
+					offset++
+				}
+
+				break
+			}
+
+			// Normal length-prefixed value
+			valLen := int(b)
 			offset++
 
 			if valLen == 0 {
-				row = append(row, "")
+				row[col] = ""
+
 				continue
 			}
 
-			if valLen > 4000 || offset+valLen > len(payload) {
+			if valLen > 4000 || offset+valLen > endOfData {
 				valid = false
+
 				break
 			}
 
-			valBytes := payload[offset : offset+valLen]
+			row[col] = decodeOracleRawValue(payload[offset : offset+valLen])
 			offset += valLen
-			decoded := decodeOracleRawValue(valBytes)
-
-			// Validate: first column of first row should look reasonable
-			if col == 0 && len(row) == 0 && !isReasonableValue(decoded) {
-				valid = false
-				break
-			}
-
-			row = append(row, decoded)
 		}
 
-		if !valid || len(row) != numCols {
-			continue
+		if !valid {
+			break
 		}
 
-		// Found valid row data! Capture this row and continue scanning.
 		s.captureRowValues(columns, row)
+		copy(prevRow, row)
 
-		// Read remaining rows
-		endOfData := len(payload)
-		if idx := findBytes(payload, []byte("ORA-01403")); idx >= 0 {
-			endOfData = idx
+		// Store last row for cross-packet duplicate tracking
+		if s.tracker.pendingQuery != nil && s.tracker.pendingQuery.cursor != nil {
+			s.tracker.pendingQuery.lastRow = row
 		}
 
-		for offset < endOfData {
-			if payload[offset] == 0x08 {
-				break // End of rows
-			}
-
-			if payload[offset] == 0x07 {
-				offset++ // Row separator
-			}
-
-			row = make([]string, 0, numCols)
-			valid = true
-
-			for col := 0; col < numCols; col++ {
-				if offset >= endOfData {
-					valid = false
-					break
-				}
-
-				valLen := int(payload[offset])
-				offset++
-
-				if valLen == 0 {
-					row = append(row, "")
-					continue
-				}
-
-				if valLen > 4000 || offset+valLen > endOfData {
-					valid = false
-					break
-				}
-
-				row = append(row, decodeOracleRawValue(payload[offset:offset+valLen]))
-				offset += valLen
-			}
-
-			if !valid || len(row) != numCols {
-				break
-			}
-
-			s.captureRowValues(columns, row)
+		// Row separator
+		if offset < endOfData && payload[offset] == 0x07 {
+			offset++
 		}
-
-		return // Done
 	}
 }
 
