@@ -80,7 +80,7 @@ func (s *session) upstreamConnect() error {
 	}
 
 	if resp.Type != TNSPacketTypeAccept {
-		return fmt.Errorf("unexpected upstream response type: %s", resp.Type)
+		return fmt.Errorf("%w: got %s for upstream connect", ErrUnexpectedPacketType, resp.Type)
 	}
 
 	return nil
@@ -110,7 +110,7 @@ func (s *session) sendUpstreamConnect(connectPkt *TNSPacket) (*TNSPacket, error)
 		return resp, nil
 	}
 
-	return nil, fmt.Errorf("exceeded maximum resend attempts (%d)", maxResendAttempts)
+	return nil, ErrMaxResendExceeded
 }
 
 // upstreamNegotiate handles Set Protocol and Set Data Types exchange with upstream.
@@ -134,7 +134,7 @@ func (s *session) upstreamNegotiate() error {
 	}
 
 	if resp.Type != TNSPacketTypeData {
-		return fmt.Errorf("expected Data packet for Set Protocol response, got %s", resp.Type)
+		return fmt.Errorf("%w: got %s for upstream Set Protocol", ErrUnexpectedPacketType, resp.Type)
 	}
 
 	// Send Set Data Types request
@@ -155,7 +155,7 @@ func (s *session) upstreamNegotiate() error {
 	}
 
 	if resp.Type != TNSPacketTypeData {
-		return fmt.Errorf("expected Data packet for Set Data Types response, got %s", resp.Type)
+		return fmt.Errorf("%w: got %s for upstream Set Data Types", ErrUnexpectedPacketType, resp.Type)
 	}
 
 	return nil
@@ -187,7 +187,7 @@ func (s *session) upstreamO5Logon() error {
 	}
 
 	if challengeResp.Type != TNSPacketTypeData {
-		return fmt.Errorf("expected Data packet for AUTH challenge, got %s", challengeResp.Type)
+		return fmt.Errorf("%w: got %s for upstream AUTH challenge", ErrUnexpectedPacketType, challengeResp.Type)
 	}
 
 	// Parse the challenge to extract AUTH_SESSKEY and AUTH_VFR_DATA
@@ -222,21 +222,35 @@ func (s *session) upstreamO5Logon() error {
 	}
 
 	if authResp.Type != TNSPacketTypeData {
-		return fmt.Errorf("unexpected AUTH response type: %s", authResp.Type)
+		return fmt.Errorf("%w: got %s for upstream AUTH response", ErrUnexpectedPacketType, authResp.Type)
 	}
 
 	// Check if auth succeeded (response func code 0x08 with return code 0)
-	if len(authResp.Payload) > ttcDataFlagsSize+2 {
-		funcCode := authResp.Payload[ttcDataFlagsSize]
-		if funcCode == byte(TTCFuncResponse) {
-			// Check return code at offset 3-4
-			if len(authResp.Payload) > ttcDataFlagsSize+3 {
-				retCode := authResp.Payload[ttcDataFlagsSize+2]
-				if retCode != 0 {
-					return ErrAuthFailed
-				}
-			}
-		}
+	if err := checkUpstreamAuthResponse(authResp.Payload); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// checkUpstreamAuthResponse checks if the upstream AUTH response indicates success.
+func checkUpstreamAuthResponse(payload []byte) error {
+	if len(payload) <= ttcDataFlagsSize+2 {
+		return nil // Too short to contain error info, assume success
+	}
+
+	funcCode := payload[ttcDataFlagsSize]
+	if funcCode != byte(TTCFuncResponse) {
+		return nil // Not a response packet
+	}
+
+	if len(payload) <= ttcDataFlagsSize+3 {
+		return nil
+	}
+
+	retCode := payload[ttcDataFlagsSize+2]
+	if retCode != 0 {
+		return ErrAuthFailed
 	}
 
 	return nil
@@ -244,51 +258,53 @@ func (s *session) upstreamO5Logon() error {
 
 // parseUpstreamAuthChallenge extracts AUTH_SESSKEY and AUTH_VFR_DATA from the upstream's
 // AUTH challenge response.
-func parseUpstreamAuthChallenge(tnsDataPayload []byte) (encSessKey, authVfrData string, err error) {
+func parseUpstreamAuthChallenge(tnsDataPayload []byte) (string, string, error) {
 	if len(tnsDataPayload) < ttcDataFlagsSize+3 {
-		return "", "", fmt.Errorf("AUTH challenge payload too short")
+		return "", "", ErrAuthPhase1TooShort
 	}
 
 	// Parse key-value pairs from the response
 	offset := ttcDataFlagsSize + 2 // Skip data flags + response func code + sequence
 	if offset >= len(tnsDataPayload) {
-		return "", "", fmt.Errorf("AUTH challenge: no data after header")
+		return "", "", ErrAuthPhase1NoData
 	}
 
 	pairs := parseTTCKVPairs(tnsDataPayload[offset:])
 
+	var sessKey, vfrData string
+
 	for _, p := range pairs {
 		switch p.Key {
 		case authKeySessKey:
-			encSessKey = p.Value
+			sessKey = p.Value
 		case authKeyVfrData:
-			authVfrData = p.Value
+			vfrData = p.Value
 		}
 	}
 
-	if encSessKey == "" {
-		return "", "", fmt.Errorf("AUTH challenge: missing AUTH_SESSKEY")
+	if sessKey == "" {
+		return "", "", ErrAuthPhase2MissingSessKey
 	}
 
-	if authVfrData == "" {
-		return "", "", fmt.Errorf("AUTH challenge: missing AUTH_VFR_DATA")
+	if vfrData == "" {
+		return "", "", ErrAuthPhase2MissingPassword
 	}
 
-	return encSessKey, authVfrData, nil
+	return sessKey, vfrData, nil
 }
 
 // generateO5LogonClientResponse generates the client-side O5LOGON auth response.
 // This mirrors what an Oracle client does: derive verifier from password+salt,
 // decrypt server session key, generate client session key, encrypt password.
-func generateO5LogonClientResponse(password, encServerSessKey, authVfrData string) (clientEncSessKey, encPassword string, err error) {
+func generateO5LogonClientResponse(password, encServerSessKey, authVfrData string) (string, string, error) {
 	// Extract salt from AUTH_VFR_DATA (remove verifier type suffix "6949")
 	if len(authVfrData) < len(o5LogonVerifierType)+2 {
-		return "", "", fmt.Errorf("AUTH_VFR_DATA too short: %d", len(authVfrData))
+		return "", "", ErrAuthPhase1TooShort
 	}
 
 	saltHex := authVfrData[:len(authVfrData)-len(o5LogonVerifierType)]
 
-	salt, err := hexDecode(saltHex)
+	salt, err := hexDecodeBytes(saltHex)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to decode salt from AUTH_VFR_DATA: %w", err)
 	}
@@ -298,7 +314,7 @@ func generateO5LogonClientResponse(password, encServerSessKey, authVfrData strin
 
 	// Decrypt server session key
 	decKey := deriveAESKey(verifierKey)
-	encServerSessKeyBytes, err := hexDecode(encServerSessKey)
+	encServerSessKeyBytes, err := hexDecodeBytes(encServerSessKey)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to decode server session key: %w", err)
 	}
@@ -329,7 +345,9 @@ func generateO5LogonClientResponse(password, encServerSessKey, authVfrData strin
 		return "", "", fmt.Errorf("failed to generate password prefix: %w", err)
 	}
 
-	passwordPayload := append(prefix, []byte(password)...)
+	passwordPayload := make([]byte, 0, len(prefix)+len(password))
+	passwordPayload = append(passwordPayload, prefix...)
+	passwordPayload = append(passwordPayload, []byte(password)...)
 	encPasswordBytes, err := aes192CBCEncrypt(combinedKey, passwordPayload)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to encrypt password: %w", err)
@@ -373,7 +391,11 @@ func buildTNSConnect(connectDescriptor string) []byte {
 	header[25] = 0x41 // flag1
 	// Remaining bytes are zero (trace info, padding, etc.)
 
-	return append(header, descriptorBytes...)
+	result := make([]byte, 0, len(header)+len(descriptorBytes))
+	result = append(result, header...)
+	result = append(result, descriptorBytes...)
+
+	return result
 }
 
 // buildClientSetProtocol constructs a client Set Protocol request.
@@ -401,14 +423,14 @@ func buildClientSetDataTypes() []byte {
 // buildClientAuthPhase1 constructs a TTC AUTH Phase 1 message.
 // This is func=0x03 (piggyback), sub=0x76 (AUTH1), with the username.
 func buildClientAuthPhase1(username string) []byte {
-	payload := []byte{
+	payload := make([]byte, 0, 6+len(username))
+	payload = append(payload,
 		0x00, 0x00, // data flags
-		0x03,                     // func = piggyback
-		PiggybackSubAuth1,        // sub-op = AUTH Phase 1
-		byte(len(username)),      // username length
-	}
+		0x03,                // func = piggyback
+		PiggybackSubAuth1,   // sub-op = AUTH Phase 1
+		byte(len(username)), // username length
+	)
 	payload = append(payload, []byte(username)...)
-	// Logon mode flags
 	payload = append(payload, 0x01) // AUTH_MODE_LOGON
 
 	return payload
@@ -417,12 +439,13 @@ func buildClientAuthPhase1(username string) []byte {
 // buildClientAuthPhase2 constructs a TTC AUTH Phase 2 message.
 // Contains the encrypted client session key and encrypted password.
 func buildClientAuthPhase2(username, clientEncSessKey, encPassword string) []byte {
-	payload := []byte{
+	payload := make([]byte, 0, 6+len(username)+len(clientEncSessKey)+len(encPassword)+50)
+	payload = append(payload,
 		0x00, 0x00, // data flags
 		0x03,                // func = piggyback
 		PiggybackSubAuth2,   // sub-op = AUTH Phase 2
 		byte(len(username)), // username length
-	}
+	)
 	payload = append(payload, []byte(username)...)
 
 	// Key-value pairs count
@@ -435,11 +458,4 @@ func buildClientAuthPhase2(username, clientEncSessKey, encPassword string) []byt
 	payload = append(payload, encodeTTCKVPair(authKeyPassword, encPassword)...)
 
 	return payload
-}
-
-// hexDecode is a convenience wrapper for hex.DecodeString that handles
-// both upper and lower case hex strings.
-func hexDecode(s string) ([]byte, error) {
-	// import uses are at the top of the file
-	return hexDecodeBytes(s)
 }

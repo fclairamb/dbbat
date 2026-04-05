@@ -3,9 +3,9 @@ package oracle
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/md5"  //nolint:gosec // O5LOGON protocol requires MD5
+	"crypto/md5"
 	"crypto/rand"
-	"crypto/sha1" //nolint:gosec // O5LOGON protocol requires SHA-1
+	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -14,7 +14,7 @@ import (
 )
 
 const (
-	o5LogonSaltLength       = 10
+	o5LogonSaltLength        = 10
 	o5LogonVerifierKeyLength = 24 // SHA-1 (20 bytes) zero-padded to 24
 	o5LogonSessionKeyLength  = 48
 	o5LogonVerifierType      = "6949" // SHA-1 based verifier
@@ -32,7 +32,7 @@ type O5LogonServer struct {
 // GenerateO5LogonVerifier creates salt + verifier key from a plaintext password.
 // Called at API key creation time; the results are stored in the database.
 // Delegates to the crypto package for the core computation.
-func GenerateO5LogonVerifier(password string) (salt, verifierKey []byte, err error) {
+func GenerateO5LogonVerifier(password string) ([]byte, []byte, error) {
 	return dbbcrypto.GenerateO5LogonVerifier(password)
 }
 
@@ -52,10 +52,10 @@ func NewO5LogonServer(salt, verifierKey []byte) *O5LogonServer {
 
 // GenerateChallenge produces the AUTH_SESSKEY and AUTH_VFR_DATA for the client.
 // Returns hex-encoded encrypted server session key and auth verifier data.
-func (s *O5LogonServer) GenerateChallenge() (encServerSessKey string, authVfrData string, err error) {
+func (s *O5LogonServer) GenerateChallenge() (string, string, error) {
 	// Generate random server session key
 	s.serverSessionKey = make([]byte, o5LogonSessionKeyLength)
-	if _, err = rand.Read(s.serverSessionKey); err != nil {
+	if _, err := rand.Read(s.serverSessionKey); err != nil {
 		return "", "", fmt.Errorf("failed to generate server session key: %w", err)
 	}
 
@@ -68,12 +68,12 @@ func (s *O5LogonServer) GenerateChallenge() (encServerSessKey string, authVfrDat
 		return "", "", fmt.Errorf("failed to encrypt server session key: %w", err)
 	}
 
-	encServerSessKey = strings.ToUpper(hex.EncodeToString(encrypted))
+	encSessKey := strings.ToUpper(hex.EncodeToString(encrypted))
 
 	// AUTH_VFR_DATA = hex(salt) + verifier type suffix
-	authVfrData = strings.ToUpper(hex.EncodeToString(s.salt)) + o5LogonVerifierType
+	vfrData := strings.ToUpper(hex.EncodeToString(s.salt)) + o5LogonVerifierType
 
-	return encServerSessKey, authVfrData, nil
+	return encSessKey, vfrData, nil
 }
 
 // DecryptPassword extracts the plaintext password from the client's AUTH Phase 2.
@@ -110,7 +110,7 @@ func (s *O5LogonServer) DecryptPassword(encClientSessKey, encPassword string) (s
 
 	// Strip the 16-byte random prefix
 	if len(decryptedPassword) <= o5LogonPasswordPrefixLen {
-		return "", fmt.Errorf("decrypted password too short")
+		return "", ErrDecryptedPasswordTooShort
 	}
 
 	// Remove random prefix and any null padding
@@ -124,7 +124,7 @@ func (s *O5LogonServer) DecryptPassword(encClientSessKey, encPassword string) (s
 // deriveAESKey derives a 24-byte AES-192 key from the verifier key.
 // Uses the first 24 bytes of SHA-1(verifier_key), zero-padded.
 func deriveAESKey(verifierKey []byte) []byte {
-	h := sha1.New() //nolint:gosec // O5LOGON protocol requires SHA-1
+	h := sha1.New()
 	h.Write(verifierKey)
 	hash := h.Sum(nil) // 20 bytes
 
@@ -137,7 +137,7 @@ func deriveAESKey(verifierKey []byte) []byte {
 // deriveCombinedKey derives the password encryption key from both session keys.
 // combined_key = MD5(server_session_key || client_session_key), zero-padded to 24 bytes.
 func deriveCombinedKey(serverKey, clientKey []byte) []byte {
-	h := md5.New() //nolint:gosec // O5LOGON protocol requires MD5
+	h := md5.New()
 	h.Write(serverKey)
 	h.Write(clientKey)
 	hash := h.Sum(nil) // 16 bytes
@@ -178,7 +178,7 @@ func aes192CBCDecrypt(key, ciphertext []byte) ([]byte, error) {
 	}
 
 	if len(ciphertext)%aes.BlockSize != 0 {
-		return nil, fmt.Errorf("ciphertext is not a multiple of block size")
+		return nil, ErrCiphertextNotAligned
 	}
 
 	// Use zero IV (as per O5LOGON protocol)
@@ -211,17 +211,17 @@ func pkcs7Pad(data []byte, blockSize int) []byte {
 // pkcs7Unpad removes PKCS#7 padding from decrypted data.
 func pkcs7Unpad(data []byte) ([]byte, error) {
 	if len(data) == 0 {
-		return nil, fmt.Errorf("empty data")
+		return nil, ErrInvalidPadding
 	}
 
 	padding := int(data[len(data)-1])
 	if padding == 0 || padding > aes.BlockSize || padding > len(data) {
-		return nil, fmt.Errorf("invalid padding value: %d", padding)
+		return nil, ErrInvalidPadding
 	}
 
 	for i := len(data) - padding; i < len(data); i++ {
 		if data[i] != byte(padding) {
-			return nil, fmt.Errorf("invalid padding byte at position %d", i)
+			return nil, ErrInvalidPadding
 		}
 	}
 

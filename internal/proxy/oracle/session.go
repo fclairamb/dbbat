@@ -32,7 +32,7 @@ type session struct {
 	serviceName   string
 	username      string
 	database      *store.Database
-	user          *store.User //nolint:unused // will be used when TTC auth is re-enabled
+	user          *store.User
 	grant         *store.Grant
 	connectionUID uuid.UUID
 
@@ -72,7 +72,7 @@ func newSession(
 // run executes the full session lifecycle with terminated authentication.
 // dbbat authenticates the client (O5LOGON server-side), then authenticates
 // to the upstream Oracle server (O5LOGON client-side) with stored credentials.
-func (s *session) run() error { //nolint:funlen
+func (s *session) run() error {
 	defer s.cleanup()
 
 	// Phase 1: Receive TNS Connect from client and parse service name
@@ -198,7 +198,7 @@ func (s *session) handleClientNegotiation() error {
 	}
 
 	if setProt.Type != TNSPacketTypeData {
-		return fmt.Errorf("expected Data packet for Set Protocol, got %s", setProt.Type)
+		return fmt.Errorf("%w: got %s for Set Protocol", ErrUnexpectedPacketType, setProt.Type)
 	}
 
 	// Send Set Protocol response
@@ -214,7 +214,7 @@ func (s *session) handleClientNegotiation() error {
 	}
 
 	if setDT.Type != TNSPacketTypeData {
-		return fmt.Errorf("expected Data packet for Set Data Types, got %s", setDT.Type)
+		return fmt.Errorf("%w: got %s for Set Data Types", ErrUnexpectedPacketType, setDT.Type)
 	}
 
 	// Send Set Data Types response
@@ -237,7 +237,7 @@ func (s *session) authenticateClient() error {
 	}
 
 	if phase1Pkt.Type != TNSPacketTypeData {
-		return fmt.Errorf("expected Data packet for AUTH Phase 1, got %s", phase1Pkt.Type)
+		return fmt.Errorf("%w: got %s for AUTH Phase 1", ErrUnexpectedPacketType, phase1Pkt.Type)
 	}
 
 	// Extract username from AUTH Phase 1
@@ -300,7 +300,7 @@ func (s *session) authenticateClient() error {
 	}
 
 	if phase2Pkt.Type != TNSPacketTypeData {
-		return fmt.Errorf("expected Data packet for AUTH Phase 2, got %s", phase2Pkt.Type)
+		return fmt.Errorf("%w: got %s for AUTH Phase 2", ErrUnexpectedPacketType, phase2Pkt.Type)
 	}
 
 	// Parse AUTH Phase 2 to get encrypted password
@@ -344,8 +344,8 @@ func (s *session) authenticateClient() error {
 
 // o5LogonVerifierData holds decrypted O5LOGON verifier data for a user's API key.
 type o5LogonVerifierData struct {
-	O5LogonSalt        []byte
-	decryptedVerifier  []byte
+	O5LogonSalt       []byte
+	decryptedVerifier []byte
 }
 
 // loadO5LogonVerifier finds and decrypts the O5LOGON verifier for a user.
@@ -418,7 +418,7 @@ func (s *session) readUpstreamConnectResponse(connectPkt *TNSPacket) (*TNSPacket
 
 	s.sendRefuse(ORA12535, "too many resend attempts")
 
-	return nil, fmt.Errorf("exceeded maximum resend attempts (%d)", maxResendAttempts)
+	return nil, ErrMaxResendExceeded
 }
 
 // proxyMessages relays TNS packets bidirectionally with TTC-aware interception.

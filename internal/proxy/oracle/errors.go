@@ -91,4 +91,17 @@ var (
 	ErrRowValueTruncated = errors.New("row value exceeds payload")
 	// ErrInvalidFloatLength indicates float data has an unexpected length.
 	ErrInvalidFloatLength = errors.New("invalid float data length")
+
+	// O5LOGON and TTC auth errors.
+	ErrDecryptedPasswordTooShort = errors.New("decrypted password too short")
+	ErrCiphertextNotAligned      = errors.New("ciphertext is not a multiple of block size")
+	ErrInvalidPadding            = errors.New("invalid PKCS7 padding")
+	ErrAuthPhase1TooShort        = errors.New("AUTH Phase 1 payload too short")
+	ErrAuthPhase1NoData          = errors.New("AUTH Phase 1: no data after sub-op")
+	ErrAuthPhase1BadUsername     = errors.New("AUTH Phase 1: invalid username length")
+	ErrAuthPhase2TooShort        = errors.New("AUTH Phase 2 payload too short")
+	ErrAuthPhase2MissingSessKey  = errors.New("AUTH Phase 2: missing AUTH_SESSKEY")
+	ErrAuthPhase2MissingPassword = errors.New("AUTH Phase 2: missing AUTH_PASSWORD")
+	ErrUnexpectedPacketType      = errors.New("unexpected TNS packet type")
+	ErrMaxResendExceeded         = errors.New("exceeded maximum resend attempts")
 )

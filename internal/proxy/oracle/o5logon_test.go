@@ -11,6 +11,7 @@ import (
 )
 
 func TestO5Logon_VerifierGeneration(t *testing.T) {
+	t.Parallel()
 	salt, verifier, err := GenerateO5LogonVerifier("test_password")
 	require.NoError(t, err)
 	assert.Len(t, salt, o5LogonSaltLength)
@@ -18,6 +19,7 @@ func TestO5Logon_VerifierGeneration(t *testing.T) {
 }
 
 func TestO5Logon_VerifierDeterministic(t *testing.T) {
+	t.Parallel()
 	// Same password + salt should produce the same verifier
 	salt := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
 	key1 := deriveVerifierKey("test_password", salt)
@@ -30,6 +32,7 @@ func TestO5Logon_VerifierDeterministic(t *testing.T) {
 }
 
 func TestO5Logon_RoundTrip(t *testing.T) {
+	t.Parallel()
 	password := "dbb_test1234abcdefghijklmnopqrs"
 
 	// Generate verifier from known password
@@ -58,6 +61,7 @@ func TestO5Logon_RoundTrip(t *testing.T) {
 }
 
 func TestO5Logon_WrongPassword(t *testing.T) {
+	t.Parallel()
 	correctPassword := "dbb_correct_password_12345678"
 	wrongPassword := "dbb_wrong_password_123456789"
 
@@ -84,6 +88,7 @@ func TestO5Logon_WrongPassword(t *testing.T) {
 }
 
 func TestO5Logon_MultipleRoundTrips(t *testing.T) {
+	t.Parallel()
 	// Test that each challenge produces different encrypted values
 	password := "dbb_test_key_123456789012345"
 	salt, verifierKey, err := GenerateO5LogonVerifier(password)
@@ -102,6 +107,7 @@ func TestO5Logon_MultipleRoundTrips(t *testing.T) {
 }
 
 func TestO5Logon_AES192CBC_RoundTrip(t *testing.T) {
+	t.Parallel()
 	key := make([]byte, 24) // AES-192
 	_, err := rand.Read(key)
 	require.NoError(t, err)
@@ -119,6 +125,7 @@ func TestO5Logon_AES192CBC_RoundTrip(t *testing.T) {
 }
 
 func TestTrimNullBytes(t *testing.T) {
+	t.Parallel()
 	assert.Equal(t, []byte("hello"), trimNullBytes([]byte("hello\x00\x00\x00")))
 	assert.Equal(t, []byte("hello"), trimNullBytes([]byte("hello")))
 	assert.Nil(t, trimNullBytes([]byte{0, 0, 0}))
@@ -126,7 +133,7 @@ func TestTrimNullBytes(t *testing.T) {
 
 // simulateO5LogonClient simulates the Oracle client-side O5LOGON authentication.
 // This mirrors what go-ora's auth_object.go does on the client side.
-func simulateO5LogonClient(t *testing.T, password, encServerSessKey, authVfrData string) (clientEncSessKey, clientEncPassword string) {
+func simulateO5LogonClient(t *testing.T, password, encServerSessKey, authVfrData string) (string, string) {
 	t.Helper()
 
 	// Extract salt from AUTH_VFR_DATA (remove verifier type suffix)
@@ -162,18 +169,18 @@ func simulateO5LogonClient(t *testing.T, password, encServerSessKey, authVfrData
 	_, err = rand.Read(prefix)
 	require.NoError(t, err)
 
-	passwordPayload := append(prefix, []byte(password)...)
+	passwordPayload := make([]byte, 0, len(prefix)+len(password))
+	passwordPayload = append(passwordPayload, prefix...)
+	passwordPayload = append(passwordPayload, []byte(password)...)
 	encPasswordBytes, err := aes192CBCEncrypt(combinedKey, passwordPayload)
 	require.NoError(t, err)
 
-	clientEncSessKey = strings.ToUpper(hex.EncodeToString(encClientSessKeyBytes))
-	clientEncPassword = strings.ToUpper(hex.EncodeToString(encPasswordBytes))
-
-	return clientEncSessKey, clientEncPassword
+	return strings.ToUpper(hex.EncodeToString(encClientSessKeyBytes)),
+		strings.ToUpper(hex.EncodeToString(encPasswordBytes))
 }
 
 // simulateO5LogonClientRaw is like simulateO5LogonClient but returns errors instead of failing.
-func simulateO5LogonClientRaw(password, encServerSessKey, authVfrData string) (clientEncSessKey, clientEncPassword string, err error) {
+func simulateO5LogonClientRaw(password, encServerSessKey, authVfrData string) (string, string, error) {
 	saltHex := authVfrData[:len(authVfrData)-len(o5LogonVerifierType)]
 	salt, err := hex.DecodeString(saltHex)
 	if err != nil {
@@ -210,7 +217,9 @@ func simulateO5LogonClientRaw(password, encServerSessKey, authVfrData string) (c
 		return "", "", err
 	}
 
-	passwordPayload := append(prefix, []byte(password)...)
+	passwordPayload := make([]byte, 0, len(prefix)+len(password))
+	passwordPayload = append(passwordPayload, prefix...)
+	passwordPayload = append(passwordPayload, []byte(password)...)
 	encPasswordBytes, err := aes192CBCEncrypt(combinedKey, passwordPayload)
 	if err != nil {
 		return "", "", err

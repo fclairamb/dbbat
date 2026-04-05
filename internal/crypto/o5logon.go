@@ -2,7 +2,7 @@ package crypto
 
 import (
 	"crypto/rand"
-	"crypto/sha1" //nolint:gosec // O5LOGON protocol requires SHA-1
+	"crypto/sha1" // O5LOGON protocol requires SHA-1
 	"fmt"
 )
 
@@ -17,20 +17,20 @@ const (
 // This is used at API key creation time to store O5LOGON verifier data for Oracle proxy auth.
 //
 // verifier_key = SHA1(password || salt), zero-padded to 24 bytes.
-func GenerateO5LogonVerifier(password string) (salt, verifierKey []byte, err error) {
-	salt = make([]byte, O5LogonSaltLength)
-	if _, err = rand.Read(salt); err != nil {
+func GenerateO5LogonVerifier(password string) ([]byte, []byte, error) {
+	salt := make([]byte, O5LogonSaltLength)
+	if _, err := rand.Read(salt); err != nil {
 		return nil, nil, fmt.Errorf("failed to generate salt: %w", err)
 	}
 
-	verifierKey = DeriveO5LogonVerifierKey(password, salt)
+	verifierKey := DeriveO5LogonVerifierKey(password, salt)
 
 	return salt, verifierKey, nil
 }
 
 // DeriveO5LogonVerifierKey computes the O5LOGON verifier key from password and salt.
 func DeriveO5LogonVerifierKey(password string, salt []byte) []byte {
-	h := sha1.New() //nolint:gosec // O5LOGON protocol requires SHA-1
+	h := sha1.New() // O5LOGON protocol requires SHA-1
 	h.Write([]byte(password))
 	h.Write(salt)
 	hash := h.Sum(nil) // 20 bytes

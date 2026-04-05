@@ -2,15 +2,14 @@ package oracle
 
 import (
 	"encoding/binary"
-	"fmt"
 	"strings"
 )
 
 // TTC AUTH key names used in Oracle authentication messages.
 const (
 	authKeyUsername = "AUTH_TERMINAL"
-	authKeySessKey = "AUTH_SESSKEY"
-	authKeyVfrData = "AUTH_VFR_DATA"
+	authKeySessKey  = "AUTH_SESSKEY"
+	authKeyVfrData  = "AUTH_VFR_DATA"
 	authKeyPassword = "AUTH_PASSWORD"
 )
 
@@ -31,16 +30,16 @@ type authKVPair struct {
 //	[2] = username length (1 byte for short strings)
 //	[3..] = username bytes
 //	... followed by logon mode and key-value pairs
-func parseAuthPhase1(tnsDataPayload []byte) (username string, err error) {
+func parseAuthPhase1(tnsDataPayload []byte) (string, error) {
 	if len(tnsDataPayload) < ttcDataFlagsSize+3 {
-		return "", fmt.Errorf("AUTH Phase 1 payload too short: %d bytes", len(tnsDataPayload))
+		return "", ErrAuthPhase1TooShort
 	}
 
 	// Skip data flags (2 bytes) + func code (0x03) + sub-op (0x76)
 	offset := ttcDataFlagsSize + 2
 
 	if offset >= len(tnsDataPayload) {
-		return "", fmt.Errorf("AUTH Phase 1: no data after sub-op")
+		return "", ErrAuthPhase1NoData
 	}
 
 	// Read username length
@@ -48,10 +47,10 @@ func parseAuthPhase1(tnsDataPayload []byte) (username string, err error) {
 	offset++
 
 	if usernameLen == 0 || offset+usernameLen > len(tnsDataPayload) {
-		return "", fmt.Errorf("AUTH Phase 1: invalid username length %d", usernameLen)
+		return "", ErrAuthPhase1BadUsername
 	}
 
-	username = string(tnsDataPayload[offset : offset+usernameLen])
+	username := string(tnsDataPayload[offset : offset+usernameLen])
 
 	return strings.ToUpper(username), nil
 }
@@ -141,9 +140,9 @@ func buildTTCAuthResponse(pairs []authKVPair, errCode int, errMsg string) []byte
 // The message contains key-value pairs including:
 //   - AUTH_SESSKEY: encrypted client session key (hex string)
 //   - AUTH_PASSWORD: encrypted password (hex string)
-func parseAuthPhase2(tnsDataPayload []byte) (clientSessKey, encPassword string, err error) {
+func parseAuthPhase2(tnsDataPayload []byte) (string, string, error) {
 	if len(tnsDataPayload) < ttcDataFlagsSize+4 {
-		return "", "", fmt.Errorf("AUTH Phase 2 payload too short: %d bytes", len(tnsDataPayload))
+		return "", "", ErrAuthPhase2TooShort
 	}
 
 	// Skip data flags (2 bytes) + func code (0x03) + sub-op (0x73)
@@ -152,24 +151,26 @@ func parseAuthPhase2(tnsDataPayload []byte) (clientSessKey, encPassword string, 
 	// Parse key-value pairs from the remaining payload
 	pairs := parseTTCKVPairs(tnsDataPayload[offset:])
 
+	var sessKey, password string
+
 	for _, p := range pairs {
 		switch strings.ToUpper(p.Key) {
 		case authKeySessKey:
-			clientSessKey = p.Value
+			sessKey = p.Value
 		case authKeyPassword:
-			encPassword = p.Value
+			password = p.Value
 		}
 	}
 
-	if clientSessKey == "" {
-		return "", "", fmt.Errorf("AUTH Phase 2: missing AUTH_SESSKEY")
+	if sessKey == "" {
+		return "", "", ErrAuthPhase2MissingSessKey
 	}
 
-	if encPassword == "" {
-		return "", "", fmt.Errorf("AUTH Phase 2: missing AUTH_PASSWORD")
+	if password == "" {
+		return "", "", ErrAuthPhase2MissingPassword
 	}
 
-	return clientSessKey, encPassword, nil
+	return sessKey, password, nil
 }
 
 // encodeTTCString encodes a string with Oracle TTC length prefix.
@@ -189,9 +190,11 @@ func encodeTTCString(s string) []byte {
 
 // encodeTTCKVPair encodes a key-value pair for TTC AUTH messages.
 func encodeTTCKVPair(key, value string) []byte {
-	var buf []byte
-	buf = append(buf, encodeTTCString(key)...)
-	buf = append(buf, encodeTTCString(value)...)
+	keyBytes := encodeTTCString(key)
+	valueBytes := encodeTTCString(value)
+	buf := make([]byte, 0, len(keyBytes)+len(valueBytes))
+	buf = append(buf, keyBytes...)
+	buf = append(buf, valueBytes...)
 
 	return buf
 }
