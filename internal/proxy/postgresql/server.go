@@ -1,4 +1,4 @@
-package proxy
+package postgresql
 
 import (
 	"context"
@@ -6,9 +6,11 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -17,6 +19,7 @@ type Server struct {
 	store         *store.Store
 	encryptionKey []byte
 	queryStorage  config.QueryStorageConfig
+	dumpConfig    config.DumpConfig
 	authCache     *cache.AuthCache
 	logger        *slog.Logger
 	listener      net.Listener
@@ -31,6 +34,7 @@ func NewServer(
 	dataStore *store.Store,
 	encryptionKey []byte,
 	queryStorage config.QueryStorageConfig,
+	dumpConfig config.DumpConfig,
 	authCache *cache.AuthCache,
 	logger *slog.Logger,
 ) *Server {
@@ -40,6 +44,7 @@ func NewServer(
 		store:         dataStore,
 		encryptionKey: encryptionKey,
 		queryStorage:  queryStorage,
+		dumpConfig:    dumpConfig,
 		authCache:     authCache,
 		logger:        logger,
 		shutdown:      make(chan struct{}),
@@ -57,6 +62,11 @@ func (s *Server) Start(addr string) error {
 
 	s.listener = listener
 	s.logger.InfoContext(s.ctx, "Proxy server listening", slog.String("addr", addr))
+
+	// Start dump cleanup goroutine if dumps are enabled
+	if s.dumpConfig.Dir != "" {
+		go s.runDumpCleanup()
+	}
 
 	// Accept connections
 	for {
@@ -122,8 +132,35 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 	s.logger.DebugContext(s.ctx, "New connection", slog.Any("remote_addr", clientConn.RemoteAddr()))
 
-	session := NewSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.queryStorage, s.authCache)
+	session := NewSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.queryStorage, s.dumpConfig, s.authCache)
 	if err := session.Run(); err != nil {
 		s.logger.ErrorContext(s.ctx, "Session error", slog.Any("error", err), slog.Any("remote_addr", clientConn.RemoteAddr()))
+	}
+}
+
+const dumpCleanupInterval = 1 * time.Hour
+
+// runDumpCleanup periodically cleans up old dump files.
+func (s *Server) runDumpCleanup() {
+	retention, err := time.ParseDuration(s.dumpConfig.Retention)
+	if err != nil {
+		retention = 24 * time.Hour
+	}
+
+	ticker := time.NewTicker(dumpCleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
+			if err != nil {
+				s.logger.ErrorContext(s.ctx, "dump cleanup failed", slog.Any("error", err))
+			} else if deleted > 0 {
+				s.logger.InfoContext(s.ctx, "cleaned up old dumps", slog.Int("deleted", deleted))
+			}
+		case <-s.shutdown:
+			return
+		}
 	}
 }

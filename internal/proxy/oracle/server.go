@@ -11,6 +11,7 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -20,7 +21,7 @@ type Server struct {
 	encryptionKey []byte
 	authCache     *cache.AuthCache
 	queryStorage  config.QueryStorageConfig
-	dumpConfig    config.OracleDumpConfig
+	dumpConfig    config.DumpConfig
 	logger        *slog.Logger
 	mu            sync.Mutex
 	listener      net.Listener
@@ -37,7 +38,7 @@ func NewServer(
 	encryptionKey []byte,
 	authCache *cache.AuthCache,
 	queryStorage config.QueryStorageConfig,
-	dumpConfig config.OracleDumpConfig,
+	dumpConfig config.DumpConfig,
 	logger *slog.Logger,
 ) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -187,7 +188,7 @@ func (s *Server) runDumpCleanup() {
 	for {
 		select {
 		case <-ticker.C:
-			deleted, err := CleanupOldDumps(s.dumpConfig.Dir, retention)
+			deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
 			if err != nil {
 				s.logger.ErrorContext(s.ctx, "dump cleanup failed", slog.Any("error", err))
 			} else if deleted > 0 {

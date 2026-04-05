@@ -117,9 +117,9 @@ make clean            # Clean build artifacts
 | `DBB_RUN_MODE` | Run mode: empty, `test`, or `demo` | No |
 | `DBB_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` (default: `info`) | No |
 | `DBB_LISTEN_ORA` | Oracle proxy listen address (default: `:1522`) | No |
-| `DBB_ORACLE_DUMP_DIR` | Directory for Oracle TNS dump files (empty = disabled) | No |
-| `DBB_ORACLE_DUMP_MAX_SIZE` | Max dump file size per session in bytes (default: 10MB) | No |
-| `DBB_ORACLE_DUMP_RETENTION` | Auto-delete dumps older than this (default: `24h`) | No |
+| `DBB_DUMP_DIR` | Directory for session dump files (empty = disabled) | No |
+| `DBB_DUMP_MAX_SIZE` | Max dump file size per session in bytes (default: 10MB) | No |
+| `DBB_DUMP_RETENTION` | Auto-delete dumps older than this (default: `24h`) | No |
 
 Note: If no encryption key is provided, one is created at `~/.dbbat/key`.
 

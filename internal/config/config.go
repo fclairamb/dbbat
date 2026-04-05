@@ -117,8 +117,8 @@ func (c SlackAuthConfig) Enabled() bool {
 	return c.ClientID != "" && c.ClientSecret != ""
 }
 
-// OracleDumpConfig holds configuration for Oracle session TNS packet dumps.
-type OracleDumpConfig struct {
+// DumpConfig holds configuration for session packet dumps.
+type DumpConfig struct {
 	// Dir is the directory for dump files. Empty = disabled.
 	Dir string `koanf:"dir"`
 
@@ -129,10 +129,10 @@ type OracleDumpConfig struct {
 	Retention string `koanf:"retention"`
 }
 
-// Default Oracle dump settings.
+// Default dump settings.
 const (
-	DefaultOracleDumpMaxSize   = 10 * 1024 * 1024 // 10MB
-	DefaultOracleDumpRetention = "24h"
+	DefaultDumpMaxSize   = 10 * 1024 * 1024 // 10MB
+	DefaultDumpRetention = "24h"
 )
 
 // Config holds the application configuration.
@@ -196,8 +196,8 @@ type Config struct {
 	// SlackAuth holds Slack OAuth configuration.
 	SlackAuth SlackAuthConfig `koanf:"slack_auth"`
 
-	// OracleDump holds Oracle session dump configuration.
-	OracleDump OracleDumpConfig `koanf:"oracle_dump"`
+	// Dump holds session packet dump configuration.
+	Dump DumpConfig `koanf:"dump"`
 }
 
 // Default query storage limits.
@@ -277,9 +277,9 @@ func defaultConfig() Config {
 			AutoCreateUsers: true,
 			DefaultRole:     "connector",
 		},
-		OracleDump: OracleDumpConfig{
-			MaxSize:   DefaultOracleDumpMaxSize,
-			Retention: DefaultOracleDumpRetention,
+		Dump: DumpConfig{
+			MaxSize:   DefaultDumpMaxSize,
+			Retention: DefaultDumpRetention,
 		},
 	}
 }
@@ -322,9 +322,9 @@ func envTransform(k, v string) (string, any) {
 	if strings.HasPrefix(key, "slack_auth_") {
 		return "slack_auth." + strings.TrimPrefix(key, "slack_auth_"), v
 	}
-	// oracle_dump_* -> oracle_dump.*
-	if strings.HasPrefix(key, "oracle_dump_") {
-		return "oracle_dump." + strings.TrimPrefix(key, "oracle_dump_"), v
+	// dump_* -> dump.*
+	if strings.HasPrefix(key, "dump_") {
+		return "dump." + strings.TrimPrefix(key, "dump_"), v
 	}
 	return key, v
 }

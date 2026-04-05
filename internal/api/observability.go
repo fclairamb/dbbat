@@ -247,7 +247,7 @@ func (s *Server) handleGetConnectionDump(c *gin.Context) {
 
 	dumpDir := ""
 	if s.config != nil {
-		dumpDir = s.config.OracleDump.Dir
+		dumpDir = s.config.Dump.Dir
 	}
 
 	if dumpDir == "" {
@@ -275,7 +275,7 @@ func (s *Server) handleDeleteConnectionDump(c *gin.Context) {
 
 	dumpDir := ""
 	if s.config != nil {
-		dumpDir = s.config.OracleDump.Dir
+		dumpDir = s.config.Dump.Dir
 	}
 
 	if dumpDir == "" {

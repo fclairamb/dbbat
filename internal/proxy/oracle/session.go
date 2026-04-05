@@ -8,11 +8,13 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -39,8 +41,8 @@ type session struct {
 	queryStorage config.QueryStorageConfig
 
 	// Dump
-	dumpConfig config.OracleDumpConfig
-	dump       *DumpWriter
+	dumpConfig config.DumpConfig
+	dump       *dump.Writer
 }
 
 // newSession creates a new Oracle proxy session.
@@ -52,7 +54,7 @@ func newSession(
 	ctx context.Context, //nolint:revive
 	authCache *cache.AuthCache,
 	queryStorage config.QueryStorageConfig,
-	dumpConfig config.OracleDumpConfig,
+	dumpConfig config.DumpConfig,
 ) *session {
 	return &session{
 		clientConn:    clientConn,
@@ -187,9 +189,17 @@ func (s *session) run() error {
 
 	// Step 9: Initialize dump writer if configured
 	if s.dumpConfig.Dir != "" && s.connectionUID != uuid.Nil {
-		dumpPath := filepath.Join(s.dumpConfig.Dir, s.connectionUID.String()+dumpFileExt)
+		dumpPath := filepath.Join(s.dumpConfig.Dir, s.connectionUID.String()+dump.FileExt)
 
-		dw, err := NewDumpWriter(dumpPath, s.connectionUID, s.serviceName, upstreamAddr, s.dumpConfig.MaxSize)
+		dw, err := dump.NewWriter(dumpPath, dump.Header{
+			SessionID: s.connectionUID.String(),
+			Protocol:  dump.ProtocolOracle,
+			StartTime: time.Now(),
+			Connection: map[string]any{
+				"service_name":  s.serviceName,
+				"upstream_addr": upstreamAddr,
+			},
+		}, s.dumpConfig.MaxSize)
 		if err != nil {
 			s.logger.WarnContext(s.ctx, "failed to create dump writer", slog.Any("error", err))
 		} else {
@@ -234,7 +244,7 @@ func (s *session) clientToUpstream() error {
 
 		// Dump client->upstream packet
 		if s.dump != nil {
-			_ = s.dump.WritePacket(DumpDirClientToServer, pkt.Raw)
+			_ = s.dump.WritePacket(dump.DirClientToServer, pkt.Raw)
 		}
 
 		// Only intercept Data packets
@@ -344,7 +354,7 @@ func (s *session) upstreamToClient() error {
 
 		// Dump upstream->client packet
 		if s.dump != nil {
-			_ = s.dump.WritePacket(DumpDirServerToClient, pkt.Raw)
+			_ = s.dump.WritePacket(dump.DirServerToClient, pkt.Raw)
 		}
 
 		// Forward to client

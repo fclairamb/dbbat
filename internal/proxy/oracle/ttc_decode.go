@@ -805,7 +805,7 @@ func looksLikeSQL(s string) bool {
 		return false
 	}
 
-	upper := strings.ToUpper(s)
+	upper := strings.ToUpper(strings.TrimSpace(s))
 	sqlKeywords := []string{
 		"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
 		"ALTER", "TRUNCATE", "MERGE", "CALL", "BEGIN", "DECLARE", "WITH", "GRANT", "REVOKE",
@@ -818,15 +818,7 @@ func looksLikeSQL(s string) bool {
 		}
 	}
 
-	// Also accept if mostly printable ASCII
-	printable := 0
-	for _, c := range s {
-		if c >= 0x20 && c < 0x7F {
-			printable++
-		}
-	}
-
-	return float64(printable)/float64(len(s)) > 0.9
+	return false
 }
 
 // decodeVarLen decodes a variable-length integer used in TTC.

@@ -17,7 +17,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
-	"github.com/fclairamb/dbbat/internal/proxy"
+	"github.com/fclairamb/dbbat/internal/proxy/postgresql"
 	"github.com/fclairamb/dbbat/internal/proxy/oracle"
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -308,7 +308,7 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	})
 
 	// Start proxy server
-	proxyServer := proxy.NewServer(dataStore, cfg.EncryptionKey, cfg.QueryStorage, proxyAuthCache, logger)
+	proxyServer := postgresql.NewServer(dataStore, cfg.EncryptionKey, cfg.QueryStorage, cfg.Dump, proxyAuthCache, logger)
 
 	go func() {
 		if err := proxyServer.Start(cfg.ListenPG); err != nil {
@@ -363,7 +363,7 @@ func startOracleProxy(ctx context.Context, cfg *config.Config, dataStore *store.
 		return nil
 	}
 
-	srv := oracle.NewServer(dataStore, cfg.EncryptionKey, authCache, cfg.QueryStorage, cfg.OracleDump, logger)
+	srv := oracle.NewServer(dataStore, cfg.EncryptionKey, authCache, cfg.QueryStorage, cfg.Dump, logger)
 
 	go func() {
 		if err := srv.Start(cfg.ListenOracle); err != nil {
