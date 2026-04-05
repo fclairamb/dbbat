@@ -197,6 +197,7 @@ jobs:
           DBB_RUN_MODE: test
           DBB_DSN: postgres://postgres:postgres@localhost:5001/dbbat?sslmode=disable
           DBB_KEY: MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=
+          DBB_LISTEN_API: ":8080"
           DBB_RATE_LIMIT_ENABLED: "false"
 
       - name: Run Playwright tests
