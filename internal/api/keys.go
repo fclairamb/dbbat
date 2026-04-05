@@ -39,7 +39,7 @@ func (s *Server) handleCreateAPIKey(c *gin.Context) {
 	currentUser := getCurrentUser(c)
 
 	// Create API key
-	apiKey, plainKey, err := s.store.CreateAPIKey(c.Request.Context(), currentUser.UID, req.Name, req.ExpiresAt)
+	apiKey, plainKey, err := s.store.CreateAPIKey(c.Request.Context(), currentUser.UID, req.Name, req.ExpiresAt, s.encryptionKey)
 	if err != nil {
 		writeInternalError(c, s.logger, err, "failed to create API key")
 		return

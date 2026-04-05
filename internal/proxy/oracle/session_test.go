@@ -10,9 +10,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// buildTNSConnect builds a TNS Connect packet payload with the given service name
+// buildTestTNSConnect builds a TNS Connect packet payload with the given service name
 // embedded in a connect descriptor.
-func buildTNSConnect(serviceName string) []byte {
+func buildTestTNSConnect(serviceName string) []byte {
 	// Build a minimal connect descriptor
 	desc := "(DESCRIPTION=(CONNECT_DATA=(SERVICE_NAME=" + serviceName + ")))"
 
@@ -73,7 +73,7 @@ func TestSession_ReceiveConnect_ParsesServiceName(t *testing.T) {
 	defer func() { _ = proxyEnd.Close() }()
 
 	go func() {
-		pkt := encodeTNSPacket(TNSPacketTypeConnect, buildTNSConnect("TESTDB"))
+		pkt := encodeTNSPacket(TNSPacketTypeConnect, buildTestTNSConnect("TESTDB"))
 		_, _ = client.Write(pkt)
 	}()
 
@@ -198,7 +198,7 @@ func TestSession_ConnectToUpstream_ForwardsAndRelays(t *testing.T) {
 	}()
 
 	// Build the connect packet upfront (no goroutine needed)
-	connectData := encodeTNSPacket(TNSPacketTypeConnect, buildTNSConnect("TESTDB"))
+	connectData := encodeTNSPacket(TNSPacketTypeConnect, buildTestTNSConnect("TESTDB"))
 
 	// Connect to upstream
 	upstreamConn, err := net.Dial("tcp", upstreamListener.Addr().String())
@@ -270,7 +270,7 @@ func TestSession_UpstreamRefuse_ForwardedToClient(t *testing.T) {
 		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
 
 		// Send connect
-		_, _ = conn.Write(encodeTNSPacket(TNSPacketTypeConnect, buildTNSConnect("TESTDB")))
+		_, _ = conn.Write(encodeTNSPacket(TNSPacketTypeConnect, buildTestTNSConnect("TESTDB")))
 
 		// Read response
 		resp, err := readTNSPacket(conn)
@@ -316,7 +316,7 @@ func TestBuildTNSConnect_Parseable(t *testing.T) {
 	t.Parallel()
 
 	// Verify our test helper builds valid connect packets
-	payload := buildTNSConnect("MYDB")
+	payload := buildTestTNSConnect("MYDB")
 	connectStr := extractConnectString(payload)
 	assert.Equal(t, "MYDB", parseServiceName(connectStr))
 }
@@ -325,7 +325,7 @@ func TestBuildTNSConnect_DifferentServiceNames(t *testing.T) {
 	t.Parallel()
 
 	for _, name := range []string{"ORCL", "PROD_DB", "my_service_123"} {
-		payload := buildTNSConnect(name)
+		payload := buildTestTNSConnect(name)
 		connectStr := extractConnectString(payload)
 		assert.Equal(t, name, parseServiceName(connectStr), "service name %s", name)
 	}

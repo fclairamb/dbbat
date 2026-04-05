@@ -316,10 +316,12 @@ type APIKey struct {
 	KeyType      string     `bun:"key_type,notnull,default:'api'" json:"key_type"`
 	ExpiresAt    *time.Time `bun:"expires_at" json:"expires_at"`
 	LastUsedAt   *time.Time `bun:"last_used_at" json:"last_used_at"`
-	RequestCount int64      `bun:"request_count,notnull,default:0" json:"request_count"`
-	CreatedAt    time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
-	RevokedAt    *time.Time `bun:"revoked_at" json:"revoked_at"`
-	RevokedBy    *uuid.UUID `bun:"revoked_by,type:uuid" json:"revoked_by"`
+	RequestCount    int64      `bun:"request_count,notnull,default:0" json:"request_count"`
+	CreatedAt       time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	RevokedAt       *time.Time `bun:"revoked_at" json:"revoked_at"`
+	RevokedBy       *uuid.UUID `bun:"revoked_by,type:uuid" json:"revoked_by"`
+	O5LogonSalt     []byte     `bun:"o5logon_salt" json:"-"`
+	O5LogonVerifier []byte     `bun:"o5logon_verifier" json:"-"` // encrypted with dbbat master key
 }
 
 // IsExpired returns true if the API key has expired
