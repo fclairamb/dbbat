@@ -69,13 +69,14 @@ func newSession(
 	}
 }
 
-// run executes the full session lifecycle with terminated authentication.
-// dbbat authenticates the client (O5LOGON server-side), then authenticates
-// to the upstream Oracle server (O5LOGON client-side) with stored credentials.
+// run executes the full session lifecycle.
+// Currently uses passthrough mode: forwards all traffic including auth to upstream.
+// TODO: switch to terminated auth (O5LOGON) once TTC negotiation responses are validated
+// with real Oracle clients (see authenticateClient / upstreamAuth methods).
 func (s *session) run() error {
 	defer s.cleanup()
 
-	// Phase 1: Receive TNS Connect from client and parse service name
+	// Step 1: Receive TNS Connect from client
 	connectPkt, err := readTNSPacket(s.clientConn)
 	if err != nil {
 		return fmt.Errorf("failed to read connect packet: %w", err)
@@ -87,6 +88,7 @@ func (s *session) run() error {
 		return fmt.Errorf("%w: got %s", ErrExpectedConnectPacket, connectPkt.Type)
 	}
 
+	// Step 2: Parse connect descriptor to find target database
 	connectStr := extractConnectString(connectPkt.Payload)
 	s.logger.DebugContext(s.ctx, "TNS Connect received",
 		slog.Int("payload_len", len(connectPkt.Payload)),
@@ -111,7 +113,7 @@ func (s *session) run() error {
 
 	s.logger = s.logger.With("service_name", s.serviceName)
 
-	// Look up database in store
+	// Step 3: Look up database in store (by name first, then by oracle_service_name)
 	db, err := s.store.GetDatabaseByName(s.ctx, s.serviceName)
 	if err != nil {
 		db, err = s.store.GetDatabaseByOracleServiceName(s.ctx, s.serviceName)
@@ -124,47 +126,66 @@ func (s *session) run() error {
 
 	s.database = db
 
-	// Phase 2: Send TNS Accept to client (dbbat acts as Oracle server)
-	acceptBytes := buildTNSAccept()
-	if _, err := s.clientConn.Write(acceptBytes); err != nil {
-		return fmt.Errorf("failed to send Accept to client: %w", err)
-	}
-
-	// Phase 3: Handle TTC negotiation with client (Set Protocol + Set Data Types)
-	if err := s.handleClientNegotiation(); err != nil {
-		return fmt.Errorf("client negotiation failed: %w", err)
-	}
-
-	// Phase 4: Authenticate client with O5LOGON
-	if err := s.authenticateClient(); err != nil {
-		s.sendRefuse(ORA01017, "authentication failed")
-
-		return fmt.Errorf("%w: %w", ErrClientAuthFailed, err)
-	}
-
-	s.logger.InfoContext(s.ctx, "client authenticated",
-		slog.String("username", s.username))
-
-	// Phase 5: Connect to upstream Oracle and authenticate with stored credentials
-	if err := s.upstreamAuth(); err != nil {
-		return fmt.Errorf("upstream auth failed: %w", err)
-	}
-
-	// Phase 6: Create connection record
+	// Step 4: Connect to upstream Oracle
 	upstreamAddr := net.JoinHostPort(db.Host, fmt.Sprintf("%d", db.Port))
-	sourceIP := store.ExtractSourceIP(s.clientConn.RemoteAddr())
 
-	if s.user != nil {
-		conn, err := s.store.CreateConnection(s.ctx, s.user.UID, s.database.UID, sourceIP)
-		if err == nil {
-			s.connectionUID = conn.UID
+	s.upstreamConn, err = net.Dial("tcp", upstreamAddr)
+	if err != nil {
+		s.sendRefuse(ORA12541, "cannot reach upstream database")
+
+		return fmt.Errorf("failed to connect to upstream %s: %w", upstreamAddr, err)
+	}
+
+	// Step 5: Forward the original Connect packet to upstream
+	if err := writeTNSPacket(s.upstreamConn, connectPkt); err != nil {
+		s.sendRefuse(ORA12541, "upstream connection failed")
+
+		return fmt.Errorf("failed to forward connect to upstream: %w", err)
+	}
+
+	// Step 6: Read upstream response and handle Resend loop
+	upstreamResp, err := s.readUpstreamConnectResponse(connectPkt)
+	if err != nil {
+		return err
+	}
+
+	if upstreamResp.Type == TNSPacketTypeRefuse {
+		_ = writeTNSPacket(s.clientConn, upstreamResp)
+
+		return ErrUpstreamRefused
+	}
+
+	// Forward the response (Accept or Redirect) to client as-is
+	if err := writeTNSPacket(s.clientConn, upstreamResp); err != nil {
+		return fmt.Errorf("failed to forward upstream response to client: %w", err)
+	}
+
+	if upstreamResp.Type != TNSPacketTypeAccept {
+		return nil
+	}
+
+	// Step 7: Passthrough mode — use placeholder user from grant
+	s.username = "proxy"
+
+	sourceIP := store.ExtractSourceIP(s.clientConn.RemoteAddr())
+	if s.store != nil {
+		grants, _ := s.store.ListGrants(s.ctx, store.GrantFilter{
+			DatabaseID: &s.database.UID,
+			ActiveOnly: true,
+		})
+		if len(grants) > 0 {
+			s.grant = &grants[0]
+			conn, err := s.store.CreateConnection(s.ctx, grants[0].UserID, s.database.UID, sourceIP)
+			if err == nil {
+				s.connectionUID = conn.UID
+			}
 		}
 	}
 
 	s.logger.InfoContext(s.ctx, "Oracle session established, entering proxy mode",
 		slog.Any("connection_uid", s.connectionUID))
 
-	// Phase 7: Initialize dump writer if configured
+	// Step 8: Initialize dump writer if configured
 	if s.dumpConfig.Dir != "" && s.connectionUID != uuid.Nil {
 		dumpPath := filepath.Join(s.dumpConfig.Dir, s.connectionUID.String()+dump.FileExt)
 
@@ -184,7 +205,7 @@ func (s *session) run() error {
 		}
 	}
 
-	// Phase 8: Enter bidirectional TNS relay with query interception
+	// Step 9: Enter bidirectional TNS relay with query interception
 	return s.proxyMessages()
 }
 
