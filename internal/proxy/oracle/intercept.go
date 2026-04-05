@@ -146,7 +146,7 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 
 // handleJDBCExec intercepts a JDBC execute-with-SQL message (func=0x11, sub=0x69).
 func (s *session) handleJDBCExec(ttcPayload []byte) {
-	result, err := decodeJDBCExecSQL(ttcPayload)
+	result, err := decodeExecSQL(ttcPayload)
 	if err != nil {
 		s.logger.DebugContext(s.ctx, "failed to decode JDBC exec", slog.Any("error", err))
 		return

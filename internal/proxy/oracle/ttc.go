@@ -38,8 +38,12 @@ const (
 	PiggybackSubAuth2   byte = 0x73 // AUTH Phase 2
 )
 
-// JDBC sub-operation code for func=0x11 execute-with-SQL.
-const jdbcExecSubOp byte = 0x69
+// Execute-with-SQL sub-operation codes for func=0x11.
+// Different Oracle client drivers use different sub-ops.
+const (
+	execSubOpJDBC   byte = 0x69 // DBeaver, JDBC thin driver
+	execSubOpPython byte = 0x98 // Python oracledb thin driver
+)
 
 // ttcDataFlagsSize is the size of the data flags prefix in a TNS Data payload.
 const ttcDataFlagsSize = 2
@@ -106,8 +110,17 @@ func IsPiggybackClose(ttcPayload []byte) bool {
 	return len(ttcPayload) > 1 && ttcPayload[1] == PiggybackSubClose
 }
 
-// IsJDBCExecSQL checks if a func=0x11 payload is a JDBC execute-with-SQL message
-// (sub-op 0x69) rather than a plain OFETCH.
-func IsJDBCExecSQL(ttcPayload []byte) bool {
-	return len(ttcPayload) > 1 && ttcPayload[1] == jdbcExecSubOp
+// IsExecSQL checks if a func=0x11 payload is an execute-with-SQL message
+// rather than a plain OFETCH. Different clients use different sub-ops.
+func IsExecSQL(ttcPayload []byte) bool {
+	if len(ttcPayload) < 2 {
+		return false
+	}
+
+	switch ttcPayload[1] {
+	case execSubOpJDBC, execSubOpPython:
+		return true
+	default:
+		return false
+	}
 }

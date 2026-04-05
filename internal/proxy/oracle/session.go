@@ -351,7 +351,7 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 	case TTCFuncOFETCH:
 		// JDBC thin driver reuses func=0x11 with sub-op 0x69 for execute-with-SQL.
 		// Distinguish from plain OFETCH by checking the sub-operation byte.
-		if IsJDBCExecSQL(ttcPayload) {
+		if IsExecSQL(ttcPayload) {
 			if err := s.checkQuotas(); err != nil {
 				_ = s.sendOracleError(err)
 				return true
