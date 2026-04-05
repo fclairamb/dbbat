@@ -24,7 +24,7 @@ jobs:
 
       - uses: actions/setup-go@v6.2.0
         with:
-          go-version: "1.25"
+          go-version: "1.26"
 
       - uses: golangci/golangci-lint-action@v9.2.0
         with:
@@ -82,7 +82,7 @@ jobs:
 
       - uses: actions/setup-go@v6.2.0
         with:
-          go-version: "1.25"
+          go-version: "1.26"
 
       - name: Run tests
         run: go test -race -coverprofile=coverage.out ./...
@@ -106,7 +106,7 @@ jobs:
 
       - uses: actions/setup-go@v6.2.0
         with:
-          go-version: "1.25"
+          go-version: "1.26"
 
       - name: Download frontend artifacts
         uses: actions/download-artifact@v7.0.0
