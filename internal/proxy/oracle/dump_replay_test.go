@@ -2,6 +2,7 @@ package oracle
 
 import (
 	"encoding/binary"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -38,7 +39,7 @@ func loadTestDump(t *testing.T, name string) *testDump {
 	for {
 		pkt, err := r.ReadPacket()
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 			require.NoError(t, err, "reading packet from %s", name)
@@ -136,8 +137,8 @@ func TestDumpReplay_PacketDirections(t *testing.T) {
 				}
 			}
 
-			assert.Greater(t, clientToServer, 0, "should have client->server packets")
-			assert.Greater(t, serverToClient, 0, "should have server->client packets")
+			assert.Positive(t, clientToServer, "should have client->server packets")
+			assert.Positive(t, serverToClient, "should have server->client packets")
 		})
 	}
 }
@@ -343,6 +344,7 @@ func TestDumpReplay_PiggybackExecSQL(t *testing.T) {
 					} else {
 						t.Logf("OALL8 decode failed at packet %d: %v", i, err)
 					}
+				default: // other function codes not relevant here
 				}
 			}
 
@@ -556,6 +558,7 @@ func TestDumpReplay_QueryResultParsing(t *testing.T) {
 							t.Logf("QueryResult rows: %d", len(result.Rows))
 						}
 					}
+				default: // other function codes not relevant here
 				}
 			}
 
@@ -610,6 +613,7 @@ func TestDumpReplay_NoTNSParsePanics(t *testing.T) {
 					if IsPiggybackExecSQL(ttcPayload) {
 						_, _ = decodePiggybackExecSQL(ttcPayload)
 					}
+				default: // other function codes not relevant here
 				}
 			}
 		})
@@ -731,6 +735,7 @@ func extractAllSQL(t *testing.T, td *testDump) []string {
 					sql = result.SQL
 				}
 			}
+		default: // other function codes not relevant here
 		}
 
 		if sql != "" {

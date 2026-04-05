@@ -246,7 +246,7 @@ func TestReader_ExtraJSONFields(t *testing.T) {
 
 	got := r.Header()
 	assert.Equal(t, "custom_value", got.Connection["custom_field"])
-	assert.Equal(t, float64(42), got.Connection["numeric_field"])
+	assert.InDelta(t, float64(42), got.Connection["numeric_field"], 0)
 }
 
 func TestCleanupOldFiles(t *testing.T) {
@@ -319,7 +319,7 @@ func TestWriter_ConcurrentWrites(t *testing.T) {
 	for {
 		_, err := r.ReadPacket()
 		if err != nil {
-			assert.ErrorIs(t, err, io.EOF)
+			require.ErrorIs(t, err, io.EOF)
 			break
 		}
 		count++

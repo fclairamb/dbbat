@@ -2,6 +2,7 @@ package dump
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 )
@@ -29,7 +30,7 @@ func Anonymise(inputPath, outputPath string) error {
 
 	for {
 		pkt, err := reader.ReadPacket()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 

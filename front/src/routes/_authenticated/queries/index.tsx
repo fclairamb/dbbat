@@ -104,7 +104,7 @@ function QueriesPage() {
   ];
 
   const lastUid = queries && queries.length > 0 ? queries[queries.length - 1].uid : undefined;
-  const firstUid = queries && queries.length > 0 ? queries[0].uid : undefined;
+  const _firstUid = queries && queries.length > 0 ? queries[0].uid : undefined;
   const hasMore = queries && queries.length >= size;
 
   return (

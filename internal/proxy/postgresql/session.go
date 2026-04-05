@@ -7,12 +7,11 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgproto3"
-
-	"path/filepath"
 
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"

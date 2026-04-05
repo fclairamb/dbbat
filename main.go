@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -734,10 +735,12 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	return nil
 }
 
+var errDumpAnonymiseUsage = errors.New("usage: dbbat dump anonymise <input-file> [output-file]")
+
 func runDumpAnonymise(cmd *cli.Command) error {
 	args := cmd.Args()
 	if args.Len() < 1 {
-		return fmt.Errorf("usage: dbbat dump anonymise <input-file> [output-file]")
+		return errDumpAnonymiseUsage
 	}
 
 	inputPath := args.Get(0)
@@ -752,7 +755,7 @@ func runDumpAnonymise(cmd *cli.Command) error {
 		return fmt.Errorf("anonymise failed: %w", err)
 	}
 
-	fmt.Printf("Anonymised dump written to %s\n", outputPath)
+	slog.Info("Anonymised dump written", "path", outputPath)
 
 	return nil
 }

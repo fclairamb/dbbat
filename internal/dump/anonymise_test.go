@@ -1,6 +1,7 @@
 package dump
 
 import (
+	"errors"
 	"io"
 	"path/filepath"
 	"testing"
@@ -145,7 +146,7 @@ func TestAnonymise_OracleTestdata(t *testing.T) {
 			count := 0
 			for {
 				_, err := r.ReadPacket()
-				if err == io.EOF {
+				if errors.Is(err, io.EOF) {
 					break
 				}
 
@@ -154,7 +155,7 @@ func TestAnonymise_OracleTestdata(t *testing.T) {
 				count++
 			}
 
-			assert.Greater(t, count, 0, "should have at least one packet")
+			assert.Positive(t, count, "should have at least one packet")
 		})
 	}
 }
