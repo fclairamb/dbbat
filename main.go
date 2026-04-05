@@ -17,8 +17,9 @@ import (
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
-	"github.com/fclairamb/dbbat/internal/proxy/postgresql"
+	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/oracle"
+	"github.com/fclairamb/dbbat/internal/proxy/postgresql"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -156,6 +157,21 @@ func CmdRun() {
 						Usage: "Show migration status",
 						Action: func(ctx context.Context, _ *cli.Command) error {
 							return runMigrationStatus(ctx, flags)
+						},
+					},
+				},
+			},
+			{
+				Name:  "dump",
+				Usage: "Dump file commands",
+				Commands: []*cli.Command{
+					{
+						Name:      "anonymise",
+						Aliases:   []string{"anonymize"},
+						Usage:     "Create an anonymised copy of a dump file (strips connection metadata)",
+						ArgsUsage: "<input-file> [output-file]",
+						Action: func(_ context.Context, cmd *cli.Command) error {
+							return runDumpAnonymise(cmd)
 						},
 					},
 				},
@@ -698,6 +714,29 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	logger.InfoContext(ctx, "Created read-only grant for viewer user on demo_db")
 
 	logger.InfoContext(ctx, "Demo data provisioning complete")
+	return nil
+}
+
+func runDumpAnonymise(cmd *cli.Command) error {
+	args := cmd.Args()
+	if args.Len() < 1 {
+		return fmt.Errorf("usage: dbbat dump anonymise <input-file> [output-file]")
+	}
+
+	inputPath := args.Get(0)
+
+	outputPath := args.Get(1)
+	if outputPath == "" {
+		ext := filepath.Ext(inputPath)
+		outputPath = inputPath[:len(inputPath)-len(ext)] + ".anonymised" + ext
+	}
+
+	if err := dump.Anonymise(inputPath, outputPath); err != nil {
+		return fmt.Errorf("anonymise failed: %w", err)
+	}
+
+	fmt.Printf("Anonymised dump written to %s\n", outputPath)
+
 	return nil
 }
 
