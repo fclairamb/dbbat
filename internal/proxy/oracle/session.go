@@ -32,8 +32,8 @@ type session struct {
 	serviceName   string
 	username      string
 	database      *store.Database
-	user  *store.User //nolint:unused // used when O5LOGON terminated auth is activated
-	grant *store.Grant
+	user          *store.User //nolint:unused // used when O5LOGON terminated auth is activated
+	grant         *store.Grant
 	connectionUID uuid.UUID
 
 	// Query tracking

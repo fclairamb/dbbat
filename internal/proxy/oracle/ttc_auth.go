@@ -7,10 +7,10 @@ import (
 
 // TTC AUTH key names used in Oracle authentication messages.
 const (
-	authKeyUsername = "AUTH_TERMINAL"  //nolint:unused // used when O5LOGON terminated auth is activated
-	authKeySessKey  = "AUTH_SESSKEY"   //nolint:unused // used when O5LOGON terminated auth is activated
-	authKeyVfrData  = "AUTH_VFR_DATA"  //nolint:unused // used when O5LOGON terminated auth is activated
-	authKeyPassword = "AUTH_PASSWORD"  //nolint:unused // used when O5LOGON terminated auth is activated
+	authKeyUsername = "AUTH_TERMINAL" //nolint:unused // used when O5LOGON terminated auth is activated
+	authKeySessKey  = "AUTH_SESSKEY"  //nolint:unused // used when O5LOGON terminated auth is activated
+	authKeyVfrData  = "AUTH_VFR_DATA" //nolint:unused // used when O5LOGON terminated auth is activated
+	authKeyPassword = "AUTH_PASSWORD" //nolint:unused // used when O5LOGON terminated auth is activated
 )
 
 // authKVPair represents a key-value pair in a TTC AUTH message.
