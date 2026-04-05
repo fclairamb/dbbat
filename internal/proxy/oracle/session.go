@@ -80,7 +80,7 @@ func (s *session) run() error {
 	}
 
 	if connectPkt.Type != TNSPacketTypeConnect {
-		s.sendRefuse("expected TNS Connect packet")
+		s.sendRefuse(ORA12520, "expected TNS Connect packet")
 
 		return fmt.Errorf("%w: got %s", ErrExpectedConnectPacket, connectPkt.Type)
 	}
@@ -105,7 +105,7 @@ func (s *session) run() error {
 	}
 
 	if s.serviceName == "" {
-		s.sendRefuse("missing SERVICE_NAME in connect descriptor")
+		s.sendRefuse(ORA12505, "missing SERVICE_NAME in connect descriptor")
 
 		return ErrNoServiceName
 	}
@@ -117,7 +117,7 @@ func (s *session) run() error {
 	if err != nil {
 		db, err = s.store.GetDatabaseByOracleServiceName(s.ctx, s.serviceName)
 		if err != nil {
-			s.sendRefuse("database not found")
+			s.sendRefuse(ORA12514, "database not found")
 
 			return fmt.Errorf("%w: %s: %w", ErrDatabaseNotFound, s.serviceName, err)
 		}
@@ -130,14 +130,14 @@ func (s *session) run() error {
 
 	s.upstreamConn, err = net.Dial("tcp", upstreamAddr)
 	if err != nil {
-		s.sendRefuse("cannot reach upstream database")
+		s.sendRefuse(ORA12541, "cannot reach upstream database")
 
 		return fmt.Errorf("failed to connect to upstream %s: %w", upstreamAddr, err)
 	}
 
 	// Step 5: Forward the original Connect packet to upstream
 	if err := writeTNSPacket(s.upstreamConn, connectPkt); err != nil {
-		s.sendRefuse("upstream connection failed")
+		s.sendRefuse(ORA12541, "upstream connection failed")
 
 		return fmt.Errorf("failed to forward connect to upstream: %w", err)
 	}
@@ -228,7 +228,7 @@ func (s *session) readUpstreamConnectResponse(connectPkt *TNSPacket) (*TNSPacket
 	for attempt := range maxResendAttempts {
 		resp, err := readTNSPacket(s.upstreamConn)
 		if err != nil {
-			s.sendRefuse("upstream did not respond")
+			s.sendRefuse(ORA12535, "upstream did not respond")
 
 			return nil, fmt.Errorf("failed to read upstream response: %w", err)
 		}
@@ -246,7 +246,7 @@ func (s *session) readUpstreamConnectResponse(connectPkt *TNSPacket) (*TNSPacket
 		}
 	}
 
-	s.sendRefuse("too many resend attempts")
+	s.sendRefuse(ORA12535, "too many resend attempts")
 
 	return nil, fmt.Errorf("exceeded maximum resend attempts (%d)", maxResendAttempts)
 }
@@ -503,13 +503,12 @@ func (s *session) handleResponse(ttcPayload []byte, bytesTransferred int64) {
 	// If MoreData is true, we wait for the next OFETCH response
 }
 
-// sendRefuse sends a TNS Refuse packet to the client.
-func (s *session) sendRefuse(reason string) {
-	// TNS Refuse payload: just the reason string for now
-	// Real Oracle Refuse has a more structured format, but clients handle raw text too
+// sendRefuse sends a TNS Refuse packet to the client with a properly
+// formatted Oracle descriptor so JDBC clients can parse the error.
+func (s *session) sendRefuse(oraCode uint16, reason string) {
 	pkt := &TNSPacket{
 		Type:    TNSPacketTypeRefuse,
-		Payload: []byte(reason),
+		Payload: buildRefusePayload(oraCode, reason),
 	}
 
 	if err := writeTNSPacket(s.clientConn, pkt); err != nil {

@@ -97,13 +97,16 @@ func TestSession_SendRefuse(t *testing.T) {
 	s := &session{clientConn: proxyEnd}
 
 	go func() {
-		s.sendRefuse("test error reason")
+		s.sendRefuse(ORA12514, "test error reason")
 	}()
 
 	pkt, err := readTNSPacket(client)
 	require.NoError(t, err)
 	assert.Equal(t, TNSPacketTypeRefuse, pkt.Type)
-	assert.Contains(t, string(pkt.Payload), "test error reason")
+	// Verify structured payload: 4-byte header + Oracle descriptor
+	assert.True(t, len(pkt.Payload) > 4, "payload should have 4-byte header + descriptor")
+	assert.Contains(t, string(pkt.Payload[4:]), "ERR=12514")
+	assert.Contains(t, string(pkt.Payload[4:]), "test error reason")
 }
 
 func TestSession_RawRelay(t *testing.T) {

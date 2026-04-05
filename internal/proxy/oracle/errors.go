@@ -1,6 +1,36 @@
 package oracle
 
-import "errors"
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+)
+
+// ORA error codes for TNS Refuse packets.
+const (
+	ORA12505 uint16 = 12505 // TNS:listener does not currently know of SID
+	ORA12514 uint16 = 12514 // TNS:listener does not currently know of service
+	ORA12520 uint16 = 12520 // TNS:listener could not find available handler
+	ORA12535 uint16 = 12535 // TNS:operation timed out
+	ORA12541 uint16 = 12541 // TNS:no listener
+)
+
+// buildRefusePayload constructs a properly formatted TNS Refuse payload.
+// Real Oracle Refuse packets have: [user_reason:2][system_reason:2][descriptor...]
+// The descriptor is an Oracle-style parenthesized string.
+func buildRefusePayload(oraCode uint16, reason string) []byte {
+	descriptor := fmt.Sprintf(
+		"(DESCRIPTION=(ERR=%d)(VSNNUM=0)(ERROR_STACK=(ERROR=(CODE=%d)(EMFI=4)(ARGS='(%s)'))))",
+		oraCode, oraCode, reason,
+	)
+
+	payload := make([]byte, 4+len(descriptor))
+	binary.BigEndian.PutUint16(payload[0:2], 0x0004) // User reason: user error
+	binary.BigEndian.PutUint16(payload[2:4], 0x0000) // System reason: none
+	copy(payload[4:], descriptor)
+
+	return payload
+}
 
 // Oracle proxy errors.
 var (
