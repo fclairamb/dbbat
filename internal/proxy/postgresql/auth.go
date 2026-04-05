@@ -133,16 +133,16 @@ func isAPIKey(password string) bool {
 func (s *Session) authenticateWithAPIKey(apiKey string) error {
 	verified, err := s.store.VerifyAPIKey(s.ctx, apiKey)
 	if err != nil {
-		return fmt.Errorf("API key verification failed: %w", err)
+		return fmt.Errorf("%w: %w", ErrAPIKeyVerifyFailed, err)
 	}
 
 	// Ensure the API key belongs to the user from the StartupMessage
 	if verified.UserID != s.user.UID {
-		return fmt.Errorf("API key does not belong to user %s", s.user.Username)
+		return ErrAPIKeyOwnerMismatch
 	}
 
 	// Increment usage asynchronously
-	go s.store.IncrementAPIKeyUsage(context.Background(), verified.ID)
+	go func() { _ = s.store.IncrementAPIKeyUsage(context.Background(), verified.ID) }()
 
 	return nil
 }

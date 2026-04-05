@@ -32,6 +32,7 @@ var (
 	ErrAPIKeyNotFound = errors.New("API key not found")
 	ErrAPIKeyRevoked  = errors.New("API key has been revoked")
 	ErrAPIKeyExpired  = errors.New("API key has expired")
+	ErrAPIKeyTooShort = errors.New("API key too short")
 )
 
 // generateKey generates a new random key with the given prefix
@@ -106,7 +107,7 @@ func (s *Store) CreateAPIKey(ctx context.Context, userID uuid.UUID, name string,
 // Used for test mode provisioning where stable, predictable keys are needed.
 func (s *Store) CreateAPIKeyWithValue(ctx context.Context, userID uuid.UUID, name string, plainKey string, expiresAt *time.Time) (*APIKey, error) {
 	if len(plainKey) < APIKeyPrefixLength {
-		return nil, fmt.Errorf("key too short: must be at least %d characters", APIKeyPrefixLength)
+		return nil, ErrAPIKeyTooShort
 	}
 
 	prefix := plainKey[:APIKeyPrefixLength]
