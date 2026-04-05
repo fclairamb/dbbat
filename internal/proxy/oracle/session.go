@@ -32,8 +32,8 @@ type session struct {
 	serviceName   string
 	username      string
 	database      *store.Database
-	user          *store.User
-	grant         *store.Grant
+	user  *store.User //nolint:unused // used when O5LOGON terminated auth is activated
+	grant *store.Grant
 	connectionUID uuid.UUID
 
 	// Query tracking
@@ -245,7 +245,7 @@ func (s *session) rewriteConnectForUpstream(connectPkt *TNSPacket) *TNSPacket {
 
 // handleClientNegotiation handles the TTC Set Protocol and Set Data Types exchange
 // with the client. dbbat acts as Oracle server, responding with hardcoded templates.
-func (s *session) handleClientNegotiation() error {
+func (s *session) handleClientNegotiation() error { //nolint:unused // used when O5LOGON terminated auth is activated
 	// Read Set Protocol from client
 	setProt, err := readTNSPacket(s.clientConn)
 	if err != nil {
@@ -284,7 +284,7 @@ func (s *session) handleClientNegotiation() error {
 // authenticateClient performs O5LOGON server-side authentication.
 // The client sends AUTH Phase 1 (username), dbbat sends a challenge,
 // the client sends AUTH Phase 2 (encrypted password), dbbat decrypts and verifies.
-func (s *session) authenticateClient() error {
+func (s *session) authenticateClient() error { //nolint:unused // used when O5LOGON terminated auth is activated
 	// Receive AUTH Phase 1 from client
 	phase1Pkt, err := readTNSPacket(s.clientConn)
 	if err != nil {
@@ -398,14 +398,14 @@ func (s *session) authenticateClient() error {
 }
 
 // o5LogonVerifierData holds decrypted O5LOGON verifier data for a user's API key.
-type o5LogonVerifierData struct {
+type o5LogonVerifierData struct { //nolint:unused // used when O5LOGON terminated auth is activated
 	O5LogonSalt       []byte
 	decryptedVerifier []byte
 }
 
 // loadO5LogonVerifier finds and decrypts the O5LOGON verifier for a user.
 // Returns the first valid API key with an O5LOGON verifier.
-func (s *session) loadO5LogonVerifier(userID uuid.UUID) (*o5LogonVerifierData, error) {
+func (s *session) loadO5LogonVerifier(userID uuid.UUID) (*o5LogonVerifierData, error) { //nolint:unused // used when O5LOGON terminated auth is activated
 	keys, err := s.store.ListAPIKeys(s.ctx, store.APIKeyFilter{
 		UserID:  &userID,
 		KeyType: strPtr(store.KeyTypeAPI),
@@ -439,7 +439,7 @@ func (s *session) loadO5LogonVerifier(userID uuid.UUID) (*o5LogonVerifierData, e
 }
 
 // strPtr returns a pointer to the given string.
-func strPtr(s string) *string {
+func strPtr(s string) *string { //nolint:unused // used when O5LOGON terminated auth is activated
 	return &s
 }
 

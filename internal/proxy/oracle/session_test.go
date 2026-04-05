@@ -104,7 +104,7 @@ func TestSession_SendRefuse(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, TNSPacketTypeRedirect, pkt.Type)
 	// Verify structured payload contains Oracle descriptor with error code
-	assert.True(t, len(pkt.Payload) > 4, "payload should have header + descriptor")
+	assert.Greater(t, len(pkt.Payload), 4, "payload should have header + descriptor")
 	payloadStr := string(pkt.Payload)
 	assert.Contains(t, payloadStr, "ERR=12514")
 	assert.Contains(t, payloadStr, "test error reason")

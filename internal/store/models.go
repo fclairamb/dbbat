@@ -308,14 +308,14 @@ const (
 type APIKey struct {
 	bun.BaseModel `bun:"table:api_keys,alias:ak"`
 
-	ID           uuid.UUID  `bun:"id,pk,type:uuid,default:gen_random_uuid()" json:"id"`
-	UserID       uuid.UUID  `bun:"user_id,notnull,type:uuid" json:"user_id"`
-	Name         string     `bun:"name,notnull" json:"name"`
-	KeyHash      string     `bun:"key_hash,notnull" json:"-"`
-	KeyPrefix    string     `bun:"key_prefix,notnull" json:"key_prefix"`
-	KeyType      string     `bun:"key_type,notnull,default:'api'" json:"key_type"`
-	ExpiresAt    *time.Time `bun:"expires_at" json:"expires_at"`
-	LastUsedAt   *time.Time `bun:"last_used_at" json:"last_used_at"`
+	ID              uuid.UUID  `bun:"id,pk,type:uuid,default:gen_random_uuid()" json:"id"`
+	UserID          uuid.UUID  `bun:"user_id,notnull,type:uuid" json:"user_id"`
+	Name            string     `bun:"name,notnull" json:"name"`
+	KeyHash         string     `bun:"key_hash,notnull" json:"-"`
+	KeyPrefix       string     `bun:"key_prefix,notnull" json:"key_prefix"`
+	KeyType         string     `bun:"key_type,notnull,default:'api'" json:"key_type"`
+	ExpiresAt       *time.Time `bun:"expires_at" json:"expires_at"`
+	LastUsedAt      *time.Time `bun:"last_used_at" json:"last_used_at"`
 	RequestCount    int64      `bun:"request_count,notnull,default:0" json:"request_count"`
 	CreatedAt       time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 	RevokedAt       *time.Time `bun:"revoked_at" json:"revoked_at"`

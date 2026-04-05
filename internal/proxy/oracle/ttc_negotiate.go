@@ -4,15 +4,15 @@ import "encoding/binary"
 
 // TNS Accept packet fields.
 const (
-	tnsAcceptVersion      = 0x013C // Version 316
-	tnsAcceptServiceFlags = 0x0000
-	tnsAcceptSDUSize      = 0x2000 // 8192 bytes
-	tnsAcceptTDUSize      = 0xFFFF // 65535 bytes
+	tnsAcceptVersion      = 0x013C //nolint:unused // Version 316, used when O5LOGON terminated auth is activated
+	tnsAcceptServiceFlags = 0x0000 //nolint:unused // used when O5LOGON terminated auth is activated
+	tnsAcceptSDUSize      = 0x2000 //nolint:unused // 8192 bytes, used when O5LOGON terminated auth is activated
+	tnsAcceptTDUSize      = 0xFFFF //nolint:unused // 65535 bytes, used when O5LOGON terminated auth is activated
 )
 
 // buildTNSAccept crafts a TNS Accept packet for the client.
 // This is sent by dbbat (acting as Oracle server) in response to the client's Connect.
-func buildTNSAccept() []byte {
+func buildTNSAccept() []byte { //nolint:unused // used when O5LOGON terminated auth is activated
 	// Accept header (24 bytes after TNS header):
 	// Version (2) + Service Options (2) + SDU (2) + TDU (2) + unused (16)
 	acceptPayload := make([]byte, 24)
@@ -34,7 +34,7 @@ func buildTNSAccept() []byte {
 //   - Protocol version negotiation data
 //
 // This is a minimal response captured from a real Oracle 19c server.
-func buildSetProtocolResponse() []byte {
+func buildSetProtocolResponse() []byte { //nolint:unused // used when O5LOGON terminated auth is activated
 	// Minimal Set Protocol response:
 	// data_flags(2) + func_code(1) + protocol_data
 	payload := []byte{
@@ -62,7 +62,7 @@ func buildSetProtocolResponse() []byte {
 //
 // The response contains the server's supported data types and their representations.
 // This is a minimal response that satisfies Oracle thin clients.
-func buildSetDataTypesResponse() []byte {
+func buildSetDataTypesResponse() []byte { //nolint:unused // used when O5LOGON terminated auth is activated
 	// Set Data Types response — minimal response accepted by Oracle thin clients.
 	// Format: data_flags(2) + func_code(1) + type_rep_count + type_rep_data
 	payload := []byte{

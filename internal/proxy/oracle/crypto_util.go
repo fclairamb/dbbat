@@ -10,20 +10,20 @@ import (
 )
 
 // cryptoRandRead reads random bytes from crypto/rand.
-var cryptoRandRead = rand.Read
+var cryptoRandRead = rand.Read //nolint:unused // used when O5LOGON terminated auth is activated
 
 // hexDecodeBytes decodes a hex string (case-insensitive) to bytes.
-func hexDecodeBytes(s string) ([]byte, error) {
+func hexDecodeBytes(s string) ([]byte, error) { //nolint:unused // used when O5LOGON terminated auth is activated
 	return hex.DecodeString(strings.ToLower(s))
 }
 
 // hexEncode encodes bytes to an uppercase hex string.
-func hexEncode(b []byte) string {
+func hexEncode(b []byte) string { //nolint:unused // used when O5LOGON terminated auth is activated
 	return strings.ToUpper(hex.EncodeToString(b))
 }
 
 // encryptO5LogonVerifier encrypts an O5LOGON verifier key with the dbbat master key.
-func encryptO5LogonVerifier(verifierKey, encryptionKey []byte, keyPrefix string) ([]byte, error) {
+func encryptO5LogonVerifier(verifierKey, encryptionKey []byte, keyPrefix string) ([]byte, error) { //nolint:unused // used when O5LOGON terminated auth is activated
 	aad := crypto.APIKeyAAD(keyPrefix)
 
 	encrypted, err := crypto.Encrypt(verifierKey, encryptionKey, aad)
@@ -35,7 +35,7 @@ func encryptO5LogonVerifier(verifierKey, encryptionKey []byte, keyPrefix string)
 }
 
 // decryptO5LogonVerifier decrypts an O5LOGON verifier key with the dbbat master key.
-func decryptO5LogonVerifier(encVerifier, encryptionKey []byte, keyPrefix string) ([]byte, error) {
+func decryptO5LogonVerifier(encVerifier, encryptionKey []byte, keyPrefix string) ([]byte, error) { //nolint:unused // used when O5LOGON terminated auth is activated
 	aad := crypto.APIKeyAAD(keyPrefix)
 
 	decrypted, err := crypto.Decrypt(encVerifier, encryptionKey, aad)

@@ -17,7 +17,7 @@ import (
 //  4. Set Data Types exchange
 //  5. O5LOGON authentication with stored credentials
 //  6. Enter relay mode (handled by caller)
-func (s *session) upstreamAuth() error {
+func (s *session) upstreamAuth() error { //nolint:unused // used when O5LOGON terminated auth is activated
 	// Step 1: Connect to upstream
 	upstreamAddr := net.JoinHostPort(s.database.Host, fmt.Sprintf("%d", s.database.Port))
 	var err error
@@ -50,7 +50,7 @@ func (s *session) upstreamAuth() error {
 }
 
 // upstreamConnect sends a TNS Connect packet and handles Accept/Resend/Refuse.
-func (s *session) upstreamConnect() error {
+func (s *session) upstreamConnect() error { //nolint:unused // used when O5LOGON terminated auth is activated
 	// Build TNS Connect descriptor
 	serviceName := s.database.DatabaseName
 	if s.database.OracleServiceName != nil && *s.database.OracleServiceName != "" {
@@ -87,7 +87,7 @@ func (s *session) upstreamConnect() error {
 }
 
 // sendUpstreamConnect sends the Connect packet and handles Resend loops.
-func (s *session) sendUpstreamConnect(connectPkt *TNSPacket) (*TNSPacket, error) {
+func (s *session) sendUpstreamConnect(connectPkt *TNSPacket) (*TNSPacket, error) { //nolint:unused // used when O5LOGON terminated auth is activated
 	if err := writeTNSPacket(s.upstreamConn, connectPkt); err != nil {
 		return nil, fmt.Errorf("failed to send connect: %w", err)
 	}
@@ -115,7 +115,7 @@ func (s *session) sendUpstreamConnect(connectPkt *TNSPacket) (*TNSPacket, error)
 
 // upstreamNegotiate handles Set Protocol and Set Data Types exchange with upstream.
 // dbbat acts as Oracle client, sending the requests and processing responses.
-func (s *session) upstreamNegotiate() error {
+func (s *session) upstreamNegotiate() error { //nolint:unused // used when O5LOGON terminated auth is activated
 	// Send Set Protocol request
 	setProtocolPayload := buildClientSetProtocol()
 	setProtocolPkt := &TNSPacket{
@@ -163,7 +163,7 @@ func (s *session) upstreamNegotiate() error {
 
 // upstreamO5Logon performs client-side O5LOGON authentication with the upstream Oracle server.
 // This uses the stored database credentials (username/password).
-func (s *session) upstreamO5Logon() error {
+func (s *session) upstreamO5Logon() error { //nolint:unused // used when O5LOGON terminated auth is activated
 	// Decrypt the database password
 	if err := s.database.DecryptPassword(s.encryptionKey); err != nil {
 		return fmt.Errorf("failed to decrypt database password: %w", err)
@@ -234,7 +234,7 @@ func (s *session) upstreamO5Logon() error {
 }
 
 // checkUpstreamAuthResponse checks if the upstream AUTH response indicates success.
-func checkUpstreamAuthResponse(payload []byte) error {
+func checkUpstreamAuthResponse(payload []byte) error { //nolint:unused // used when O5LOGON terminated auth is activated
 	if len(payload) <= ttcDataFlagsSize+2 {
 		return nil // Too short to contain error info, assume success
 	}
@@ -258,7 +258,7 @@ func checkUpstreamAuthResponse(payload []byte) error {
 
 // parseUpstreamAuthChallenge extracts AUTH_SESSKEY and AUTH_VFR_DATA from the upstream's
 // AUTH challenge response.
-func parseUpstreamAuthChallenge(tnsDataPayload []byte) (string, string, error) {
+func parseUpstreamAuthChallenge(tnsDataPayload []byte) (string, string, error) { //nolint:unused // used when O5LOGON terminated auth is activated
 	if len(tnsDataPayload) < ttcDataFlagsSize+3 {
 		return "", "", ErrAuthPhase1TooShort
 	}
@@ -296,7 +296,7 @@ func parseUpstreamAuthChallenge(tnsDataPayload []byte) (string, string, error) {
 // generateO5LogonClientResponse generates the client-side O5LOGON auth response.
 // This mirrors what an Oracle client does: derive verifier from password+salt,
 // decrypt server session key, generate client session key, encrypt password.
-func generateO5LogonClientResponse(password, encServerSessKey, authVfrData string) (string, string, error) {
+func generateO5LogonClientResponse(password, encServerSessKey, authVfrData string) (string, string, error) { //nolint:unused // used when O5LOGON terminated auth is activated
 	// Extract salt from AUTH_VFR_DATA (remove verifier type suffix "6949")
 	if len(authVfrData) < len(o5LogonVerifierType)+2 {
 		return "", "", ErrAuthPhase1TooShort
@@ -357,7 +357,7 @@ func generateO5LogonClientResponse(password, encServerSessKey, authVfrData strin
 }
 
 // buildTNSConnect constructs the TNS Connect packet payload.
-func buildTNSConnect(connectDescriptor string) []byte {
+func buildTNSConnect(connectDescriptor string) []byte { //nolint:unused // used when O5LOGON terminated auth is activated
 	// TNS Connect header is 58 bytes, followed by the connect descriptor.
 	// This is a simplified version — real Connect packets have many more fields.
 	descriptorBytes := []byte(connectDescriptor)
@@ -399,7 +399,7 @@ func buildTNSConnect(connectDescriptor string) []byte {
 }
 
 // buildClientSetProtocol constructs a client Set Protocol request.
-func buildClientSetProtocol() []byte {
+func buildClientSetProtocol() []byte { //nolint:unused // used when O5LOGON terminated auth is activated
 	return []byte{
 		0x00, 0x00, // data flags
 		byte(TTCFuncSetProtocol), // 0x01
@@ -411,7 +411,7 @@ func buildClientSetProtocol() []byte {
 }
 
 // buildClientSetDataTypes constructs a client Set Data Types request.
-func buildClientSetDataTypes() []byte {
+func buildClientSetDataTypes() []byte { //nolint:unused // used when O5LOGON terminated auth is activated
 	return []byte{
 		0x00, 0x00, // data flags
 		byte(TTCFuncSetDataTypes), // 0x02
@@ -422,7 +422,7 @@ func buildClientSetDataTypes() []byte {
 
 // buildClientAuthPhase1 constructs a TTC AUTH Phase 1 message.
 // This is func=0x03 (piggyback), sub=0x76 (AUTH1), with the username.
-func buildClientAuthPhase1(username string) []byte {
+func buildClientAuthPhase1(username string) []byte { //nolint:unused // used when O5LOGON terminated auth is activated
 	payload := make([]byte, 0, 6+len(username))
 	payload = append(payload,
 		0x00, 0x00, // data flags
@@ -438,7 +438,7 @@ func buildClientAuthPhase1(username string) []byte {
 
 // buildClientAuthPhase2 constructs a TTC AUTH Phase 2 message.
 // Contains the encrypted client session key and encrypted password.
-func buildClientAuthPhase2(username, clientEncSessKey, encPassword string) []byte {
+func buildClientAuthPhase2(username, clientEncSessKey, encPassword string) []byte { //nolint:unused // used when O5LOGON terminated auth is activated
 	payload := make([]byte, 0, 6+len(username)+len(clientEncSessKey)+len(encPassword)+50)
 	payload = append(payload,
 		0x00, 0x00, // data flags
