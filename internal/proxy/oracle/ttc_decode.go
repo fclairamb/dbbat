@@ -827,7 +827,7 @@ const continuationDescriptorMarker = 0x15
 // The prevRow parameter provides the last row from the previous packet (or the
 // QueryResult) so that unchanged columns can be filled in correctly.
 //
-//nolint:gocognit,nestif // Binary protocol parser requires many branches for different field types and markers.
+//nolint:gocognit,nestif,cyclop // Binary protocol parser requires many branches for different field types and markers.
 func parseContinuationRows(payload []byte, numCols int, prevRow []string) [][]interface{} {
 	if numCols == 0 || len(payload) < 15 {
 		return nil
@@ -923,7 +923,8 @@ func parseContinuationRows(payload []byte, numCols int, prevRow []string) [][]in
 			break
 		}
 
-		if payload[offset] == continuationDescriptorMarker {
+		switch payload[offset] {
+		case continuationDescriptorMarker:
 			offset++ // skip 0x15
 
 			// Read descriptor bytes until 0x07 or 0x08.
@@ -945,10 +946,10 @@ func parseContinuationRows(payload []byte, numCols int, prevRow []string) [][]in
 			if offset < len(payload) && payload[offset] == 0x07 {
 				offset++
 			}
-		} else if payload[offset] == 0x07 {
+		case 0x07:
 			offset++
 			activeCols = allColumns(numCols) // Simple separator: all columns in next row
-		} else {
+		default:
 			break // Unknown byte — stop
 		}
 	}

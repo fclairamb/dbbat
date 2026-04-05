@@ -755,7 +755,7 @@ func runDumpAnonymise(cmd *cli.Command) error {
 		return fmt.Errorf("anonymise failed: %w", err)
 	}
 
-	slog.Info("Anonymised dump written", "path", outputPath)
+	slog.InfoContext(context.Background(), "Anonymised dump written", "path", outputPath)
 
 	return nil
 }

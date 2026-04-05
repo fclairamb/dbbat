@@ -323,7 +323,7 @@ func TestDumpReplay_PiggybackExecSQL(t *testing.T) {
 					continue
 				}
 
-				switch fc {
+				switch fc { //nolint:exhaustive // only handling relevant function codes
 				case TTCFuncPiggyback:
 					if IsPiggybackExecSQL(ttcPayload) {
 						piggybackExecCount++
@@ -490,7 +490,7 @@ func TestDumpReplay_AllClientPacketsArePiggyback(t *testing.T) {
 			t.Logf("Client TTC function codes: %v", funcCodeCounts)
 
 			// v315+ clients should primarily use piggyback (0x03)
-			assert.Greater(t, funcCodeCounts[TTCFuncPiggyback], 0,
+			assert.Positive(t, funcCodeCounts[TTCFuncPiggyback],
 				"v315+ client should use piggyback messages")
 		})
 	}
@@ -531,7 +531,7 @@ func TestDumpReplay_QueryResultParsing(t *testing.T) {
 					continue
 				}
 
-				switch fc {
+				switch fc { //nolint:exhaustive // only handling relevant function codes
 				case TTCFuncResponse:
 					responseCount++
 					resp, err := decodeTTCResponse(ttcPayload)
@@ -566,7 +566,7 @@ func TestDumpReplay_QueryResultParsing(t *testing.T) {
 				responseCount, queryResultCount, columnsFound, rowsFound)
 
 			// Every session gets at least some server responses
-			assert.Greater(t, responseCount+queryResultCount, 0,
+			assert.Positive(t, responseCount+queryResultCount,
 				"should find at least one response or query result")
 		})
 	}
@@ -600,7 +600,7 @@ func TestDumpReplay_NoTNSParsePanics(t *testing.T) {
 				}
 
 				// Exercise all decoders — none should panic
-				switch fc {
+				switch fc { //nolint:exhaustive // only handling relevant function codes
 				case TTCFuncOALL8:
 					_, _ = decodeOALL8(ttcPayload)
 				case TTCFuncOFETCH:
@@ -715,7 +715,7 @@ func extractAllSQL(t *testing.T, td *testDump) []string {
 
 		var sql string
 
-		switch fc {
+		switch fc { //nolint:exhaustive // only handling relevant function codes
 		case TTCFuncPiggyback:
 			if IsPiggybackExecSQL(ttcPayload) {
 				result, err := decodePiggybackExecSQL(ttcPayload)
@@ -773,7 +773,7 @@ func TestDumpReplay_V315PacketFormat(t *testing.T) {
 
 			t.Logf("Legacy (2-byte length): %d, v315+ (4-byte length): %d", legacyCount, v315Count)
 			// Modern clients should use v315+ format for most packets
-			assert.Greater(t, legacyCount+v315Count, 0, "should have some packets")
+			assert.Positive(t, legacyCount+v315Count, "should have some packets")
 		})
 	}
 }
