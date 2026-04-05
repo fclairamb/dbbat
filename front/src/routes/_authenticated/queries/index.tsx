@@ -1,32 +1,39 @@
 import { useRef, useCallback } from "react";
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useQueries, type Query } from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { AdaptiveRefresh } from "@/components/shared/AdaptiveRefresh";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { X } from "lucide-react";
+import { X, ChevronLeft, ChevronRight } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { useAuth } from "@/contexts/AuthContext";
 import { canViewQueries } from "@/lib/permissions";
 import { AccessDenied } from "@/components/shared/AccessDenied";
 
+const DEFAULT_PAGE_SIZE = 50;
+const PAGE_SIZE_OPTIONS = [25, 50, 100];
+
 export const Route = createFileRoute("/_authenticated/queries/")({
   validateSearch: (search: Record<string, unknown>) => ({
     connection_id: search.connection_id as string | undefined,
+    before: search.before as string | undefined,
+    size: search.size ? Number(search.size) : DEFAULT_PAGE_SIZE,
   }),
   component: QueriesPage,
 });
 
 function QueriesPage() {
-  const navigate = useNavigate();
   const { user } = useAuth();
-  const { connection_id } = Route.useSearch();
+  const { connection_id, before, size } = Route.useSearch();
   const { data: queries, isLoading, refetch } = useQueries({
     connection_id,
-    limit: 100,
+    before,
+    limit: size,
   });
+
+  const isFirstPage = !before;
 
   const previousFirstUid = useRef<string | null>(null);
 
@@ -45,7 +52,6 @@ function QueriesPage() {
     return { hasNewData };
   }, [refetch]);
 
-  // Check if user has viewer role
   if (!canViewQueries(user?.roles)) {
     return <AccessDenied requiredRole="viewer" />;
   }
@@ -97,9 +103,9 @@ function QueriesPage() {
     },
   ];
 
-  const clearFilter = () => {
-    navigate({ to: "/queries", search: { connection_id: undefined } });
-  };
+  const lastUid = queries && queries.length > 0 ? queries[queries.length - 1].uid : undefined;
+  const firstUid = queries && queries.length > 0 ? queries[0].uid : undefined;
+  const hasMore = queries && queries.length >= size;
 
   return (
     <div className="space-y-6">
@@ -108,10 +114,12 @@ function QueriesPage() {
         description="View executed query history"
         actions={
           <div className="flex items-center gap-4">
-            <AdaptiveRefresh
-              onRefresh={handleRefresh}
-              storageKey="dbbat.autoRefresh.queries"
-            />
+            {isFirstPage && (
+              <AdaptiveRefresh
+                onRefresh={handleRefresh}
+                storageKey="dbbat.autoRefresh.queries"
+              />
+            )}
             {connection_id && (
               <Badge variant="secondary" className="gap-1">
                 Filtered by connection
@@ -119,9 +127,11 @@ function QueriesPage() {
                   variant="ghost"
                   size="sm"
                   className="h-4 w-4 p-0 hover:bg-transparent"
-                  onClick={clearFilter}
+                  asChild
                 >
-                  <X className="h-3 w-3" />
+                  <Link to="/queries" search={{ before: undefined, size, connection_id: undefined }}>
+                    <X className="h-3 w-3" />
+                  </Link>
                 </Button>
               </Badge>
             )}
@@ -135,8 +145,56 @@ function QueriesPage() {
         isLoading={isLoading}
         rowKey={(q) => q.uid}
         emptyMessage="No queries recorded"
-        onRowClick={(q) => navigate({ to: "/queries/$uid", params: { uid: q.uid } })}
+        rowHref={(q) => `/queries/${q.uid}`}
       />
+
+      {/* Pagination */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <span>Rows per page:</span>
+          {PAGE_SIZE_OPTIONS.map((opt) => (
+            <Button
+              key={opt}
+              variant={opt === size ? "secondary" : "ghost"}
+              size="sm"
+              className="h-7 px-2"
+              asChild
+            >
+              <Link
+                to="/queries"
+                search={{ connection_id, before: undefined, size: opt }}
+              >
+                {opt}
+              </Link>
+            </Button>
+          ))}
+        </div>
+
+        <div className="flex items-center gap-2">
+          {!isFirstPage && (
+            <Button variant="outline" size="sm" asChild>
+              <Link
+                to="/queries"
+                search={{ connection_id, before: undefined, size }}
+              >
+                <ChevronLeft className="h-4 w-4 mr-1" />
+                Newer
+              </Link>
+            </Button>
+          )}
+          {hasMore && lastUid && (
+            <Button variant="outline" size="sm" asChild>
+              <Link
+                to="/queries"
+                search={{ connection_id, before: lastUid, size }}
+              >
+                Older
+                <ChevronRight className="h-4 w-4 ml-1" />
+              </Link>
+            </Button>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

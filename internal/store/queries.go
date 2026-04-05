@@ -145,7 +145,11 @@ func (s *Store) ListQueries(ctx context.Context, filter QueryFilter) ([]Query, e
 		q = q.Where("q.executed_at <= ?", *filter.EndTime)
 	}
 
-	q = q.Order("q.executed_at DESC")
+	if filter.BeforeUID != nil {
+		q = q.Where("q.uid < ?", *filter.BeforeUID)
+	}
+
+	q = q.Order("q.uid DESC")
 
 	if filter.Limit > 0 {
 		q = q.Limit(filter.Limit)

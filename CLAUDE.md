@@ -95,6 +95,10 @@ make demo             # Build and run in demo mode
 make clean            # Clean build artifacts
 ```
 
+## Development Sessions
+
+**Never kill the running dbbat instance.** It is started beforehand with `make dev` which provides live reload (Air). Restarting it would break the dev workflow. The test mode credentials are `admin`/`admintest`.
+
 ## CLI Commands
 
 ```bash

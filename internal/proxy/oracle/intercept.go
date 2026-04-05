@@ -347,6 +347,12 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string, bytesTr
 
 	duration := float64(time.Since(pending.startTime).Milliseconds())
 
+	// Use captured row count as rows_affected if not provided by the caller.
+	if rowsAffected == nil && pending.rowNumber > 0 {
+		rc := int64(pending.rowNumber)
+		rowsAffected = &rc
+	}
+
 	// If the query record was already created (rows were streamed), update it.
 	// Otherwise, create it now (no-result queries like DML).
 	if pending.queryPersisted && pending.queryUID != uuid.Nil {
