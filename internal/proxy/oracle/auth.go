@@ -58,7 +58,7 @@ func (s *session) handleAuthPhase() error { //nolint:gocognit,unused
 
 					// Check grants before relaying to upstream
 					if err := s.checkAccess(); err != nil {
-						s.sendRefuse(err.Error())
+						s.sendRefuse(ORA12514, err.Error())
 
 						return err
 					}

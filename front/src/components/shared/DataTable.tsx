@@ -1,3 +1,4 @@
+import { Link } from "@tanstack/react-router";
 import {
   Table,
   TableBody,
@@ -22,6 +23,7 @@ interface DataTableProps<T> {
   isLoading?: boolean;
   emptyMessage?: string;
   onRowClick?: (item: T) => void;
+  rowHref?: (item: T) => string;
   rowKey: (item: T) => string;
   className?: string;
 }
@@ -32,6 +34,7 @@ export function DataTable<T>({
   isLoading,
   emptyMessage = "No data found.",
   onRowClick,
+  rowHref,
   rowKey,
   className,
 }: DataTableProps<T>) {
@@ -105,19 +108,32 @@ export function DataTable<T>({
           </TableRow>
         </TableHeader>
         <TableBody>
-          {data.map((item) => (
-            <TableRow
-              key={rowKey(item)}
-              className={onRowClick ? "cursor-pointer" : undefined}
-              onClick={() => onRowClick?.(item)}
-            >
-              {columns.map((col) => (
-                <TableCell key={col.key} className={col.className}>
-                  {col.cell(item)}
-                </TableCell>
-              ))}
-            </TableRow>
-          ))}
+          {data.map((item) => {
+            const href = rowHref?.(item);
+            const isClickable = !!href || !!onRowClick;
+            return (
+              <TableRow
+                key={rowKey(item)}
+                className={cn(isClickable && "cursor-pointer", href && "relative")}
+                onClick={!href && onRowClick ? () => onRowClick(item) : undefined}
+              >
+                {columns.map((col, colIdx) => (
+                  <TableCell key={col.key} className={col.className}>
+                    {colIdx === 0 && href ? (
+                      <Link
+                        to={href}
+                        className="after:absolute after:inset-0"
+                      >
+                        {col.cell(item)}
+                      </Link>
+                    ) : (
+                      col.cell(item)
+                    )}
+                  </TableCell>
+                ))}
+              </TableRow>
+            );
+          })}
         </TableBody>
       </Table>
     </div>

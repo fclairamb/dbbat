@@ -33,6 +33,12 @@ func (s *Server) handleListConnections(c *gin.Context) {
 		}
 	}
 
+	if before := c.Query("before"); before != "" {
+		if uid, err := uuid.Parse(before); err == nil {
+			filter.BeforeUID = &uid
+		}
+	}
+
 	if limit := c.Query("limit"); limit != "" {
 		if val, err := strconv.Atoi(limit); err == nil {
 			filter.Limit = val
@@ -93,6 +99,12 @@ func (s *Server) handleListQueries(c *gin.Context) {
 	if endTime := c.Query("end_time"); endTime != "" {
 		if t, err := time.Parse(time.RFC3339, endTime); err == nil {
 			filter.EndTime = &t
+		}
+	}
+
+	if before := c.Query("before"); before != "" {
+		if uid, err := uuid.Parse(before); err == nil {
+			filter.BeforeUID = &uid
 		}
 	}
 
@@ -166,6 +178,12 @@ func (s *Server) handleListAudit(c *gin.Context) {
 	if endTime := c.Query("end_time"); endTime != "" {
 		if t, err := time.Parse(time.RFC3339, endTime); err == nil {
 			filter.EndTime = &t
+		}
+	}
+
+	if before := c.Query("before"); before != "" {
+		if uid, err := uuid.Parse(before); err == nil {
+			filter.BeforeUID = &uid
 		}
 	}
 
@@ -247,7 +265,7 @@ func (s *Server) handleGetConnectionDump(c *gin.Context) {
 
 	dumpDir := ""
 	if s.config != nil {
-		dumpDir = s.config.OracleDump.Dir
+		dumpDir = s.config.Dump.Dir
 	}
 
 	if dumpDir == "" {
@@ -275,7 +293,7 @@ func (s *Server) handleDeleteConnectionDump(c *gin.Context) {
 
 	dumpDir := ""
 	if s.config != nil {
-		dumpDir = s.config.OracleDump.Dir
+		dumpDir = s.config.Dump.Dir
 	}
 
 	if dumpDir == "" {

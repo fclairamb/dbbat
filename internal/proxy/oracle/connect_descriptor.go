@@ -126,6 +126,49 @@ func findDescriptorInPayload(payload []byte) string {
 	return s[start:]
 }
 
+// rewriteServiceName replaces the SERVICE_NAME value in a TNS Connect packet.
+// Uses same-length replacement (padding shorter names with spaces, or truncating longer
+// names to fit) to preserve the exact packet structure and all length fields.
+func rewriteServiceName(pkt *TNSPacket, oldName, newName string) *TNSPacket {
+	// Pad or truncate the new name to match the old name's length,
+	// so no length fields need updating anywhere in the packet.
+	paddedName := newName
+	if len(paddedName) < len(oldName) {
+		// Pad with closing paren + reopen to maintain descriptor structure.
+		// Actually, Oracle descriptors tolerate trailing spaces in values.
+		// Use exact padding: "TEST01    " to match "abynonprod" length.
+		paddedName = paddedName + strings.Repeat(" ", len(oldName)-len(paddedName))
+	} else if len(paddedName) > len(oldName) {
+		// Truncate (unlikely in practice but safe)
+		paddedName = paddedName[:len(oldName)]
+	}
+
+	re := regexp.MustCompile(`(?i)(SERVICE_NAME\s*=\s*)` + regexp.QuoteMeta(oldName))
+
+	// Replace in Payload
+	oldPayloadStr := string(pkt.Payload)
+	newPayloadStr := re.ReplaceAllString(oldPayloadStr, "${1}"+paddedName)
+
+	if newPayloadStr == oldPayloadStr {
+		return pkt
+	}
+
+	result := &TNSPacket{
+		Type:    pkt.Type,
+		Flags:   pkt.Flags,
+		Payload: []byte(newPayloadStr),
+	}
+
+	// Replace in Raw bytes too (same-length, so all headers stay valid)
+	if len(pkt.Raw) > 0 {
+		oldRawStr := string(pkt.Raw)
+		newRawStr := re.ReplaceAllString(oldRawStr, "${1}"+paddedName)
+		result.Raw = []byte(newRawStr)
+	}
+
+	return result
+}
+
 // extractField extracts a named field value from a descriptor using a compiled regex.
 func extractField(descriptor string, re *regexp.Regexp) string {
 	m := re.FindStringSubmatch(descriptor)

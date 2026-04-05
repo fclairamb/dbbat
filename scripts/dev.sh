@@ -6,6 +6,13 @@ set -e
 
 echo "Starting DBBat development environment..."
 
+# Kill any process already listening on port 4200
+if lsof -i :4200 -t >/dev/null 2>&1; then
+    echo "Killing existing process on port 4200..."
+    lsof -i :4200 -t | xargs kill 2>/dev/null || true
+    sleep 1
+fi
+
 # Start PostgreSQL if not running
 echo "Ensuring PostgreSQL is running..."
 docker compose up -d postgres
@@ -45,8 +52,8 @@ echo "  DBBat Development Environment"
 echo "========================================"
 echo ""
 echo "  Frontend (Vite):  http://localhost:5173/app/"
-echo "  Backend (API):    http://localhost:8080/api/"
-echo "  App (proxied):    http://localhost:8080/app/"
+echo "  Backend (API):    http://localhost:4200/api/"
+echo "  App (proxied):    http://localhost:4200/app/"
 echo ""
 echo "  Press Ctrl+C to stop all servers"
 echo "========================================"

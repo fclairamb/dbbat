@@ -141,6 +141,7 @@ type Connection struct {
 type ConnectionFilter struct {
 	UserID     *uuid.UUID
 	DatabaseID *uuid.UUID
+	BeforeUID  *uuid.UUID // Cursor: return connections with UID < this value
 	Limit      int
 	Offset     int
 }
@@ -200,6 +201,7 @@ type QueryFilter struct {
 	DatabaseID   *uuid.UUID
 	StartTime    *time.Time
 	EndTime      *time.Time
+	BeforeUID    *uuid.UUID // Cursor: return queries with UID < this value (for stable pagination)
 	Limit        int
 	Offset       int
 }
@@ -283,6 +285,7 @@ type AuditFilter struct {
 	PerformedBy *uuid.UUID
 	StartTime   *time.Time
 	EndTime     *time.Time
+	BeforeUID   *uuid.UUID // Cursor: return events with UID < this value
 	Limit       int
 	Offset      int
 }
@@ -305,18 +308,20 @@ const (
 type APIKey struct {
 	bun.BaseModel `bun:"table:api_keys,alias:ak"`
 
-	ID           uuid.UUID  `bun:"id,pk,type:uuid,default:gen_random_uuid()" json:"id"`
-	UserID       uuid.UUID  `bun:"user_id,notnull,type:uuid" json:"user_id"`
-	Name         string     `bun:"name,notnull" json:"name"`
-	KeyHash      string     `bun:"key_hash,notnull" json:"-"`
-	KeyPrefix    string     `bun:"key_prefix,notnull" json:"key_prefix"`
-	KeyType      string     `bun:"key_type,notnull,default:'api'" json:"key_type"`
-	ExpiresAt    *time.Time `bun:"expires_at" json:"expires_at"`
-	LastUsedAt   *time.Time `bun:"last_used_at" json:"last_used_at"`
-	RequestCount int64      `bun:"request_count,notnull,default:0" json:"request_count"`
-	CreatedAt    time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
-	RevokedAt    *time.Time `bun:"revoked_at" json:"revoked_at"`
-	RevokedBy    *uuid.UUID `bun:"revoked_by,type:uuid" json:"revoked_by"`
+	ID              uuid.UUID  `bun:"id,pk,type:uuid,default:gen_random_uuid()" json:"id"`
+	UserID          uuid.UUID  `bun:"user_id,notnull,type:uuid" json:"user_id"`
+	Name            string     `bun:"name,notnull" json:"name"`
+	KeyHash         string     `bun:"key_hash,notnull" json:"-"`
+	KeyPrefix       string     `bun:"key_prefix,notnull" json:"key_prefix"`
+	KeyType         string     `bun:"key_type,notnull,default:'api'" json:"key_type"`
+	ExpiresAt       *time.Time `bun:"expires_at" json:"expires_at"`
+	LastUsedAt      *time.Time `bun:"last_used_at" json:"last_used_at"`
+	RequestCount    int64      `bun:"request_count,notnull,default:0" json:"request_count"`
+	CreatedAt       time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	RevokedAt       *time.Time `bun:"revoked_at" json:"revoked_at"`
+	RevokedBy       *uuid.UUID `bun:"revoked_by,type:uuid" json:"revoked_by"`
+	O5LogonSalt     []byte     `bun:"o5logon_salt" json:"-"`
+	O5LogonVerifier []byte     `bun:"o5logon_verifier" json:"-"` // encrypted with dbbat master key
 }
 
 // IsExpired returns true if the API key has expired

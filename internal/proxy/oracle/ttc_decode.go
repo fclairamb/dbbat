@@ -382,6 +382,36 @@ func decodePiggybackExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 	return nil, fmt.Errorf("%w: could not find SQL text in piggyback exec payload", ErrEmptySQL)
 }
 
+// decodeExecSQL extracts SQL text from an execute-with-SQL message (func=0x11).
+//
+// Different Oracle client drivers use func=0x11 with different sub-operations:
+//   - DBeaver/JDBC thin: sub=0x69, SQL at TTC offset 57-63
+//   - Python oracledb thin: sub=0x98, SQL at TTC offset 63-67
+//
+// The SQL is preceded by a run of zero bytes and its length is encoded with
+// the standard varlen encoding.
+func decodeExecSQL(ttcPayload []byte) (*OALL8Result, error) {
+	if len(ttcPayload) < 30 {
+		return nil, fmt.Errorf("%w: exec needs at least 30 bytes, got %d", ErrOALL8TooShort, len(ttcPayload))
+	}
+
+	// Scan for SQL text at known offsets across client drivers.
+	for offset := 50; offset <= 75 && offset < len(ttcPayload)-1; offset++ {
+		sql, err := extractSQLAtOffset(ttcPayload, offset)
+		if err == nil && sql != "" {
+			return &OALL8Result{SQL: sql}, nil
+		}
+	}
+
+	// Fallback: find SQL keywords directly
+	sql := findSQLInPayload(ttcPayload)
+	if sql != "" {
+		return &OALL8Result{SQL: sql}, nil
+	}
+
+	return nil, fmt.Errorf("%w: could not find SQL text in JDBC exec payload", ErrEmptySQL)
+}
+
 // findSQLInPayload scans the raw payload for SQL text by looking for SQL keywords.
 // Used as a fallback when length-prefix decoding fails.
 func findSQLInPayload(payload []byte) string {
@@ -780,6 +810,178 @@ func decodeOracleNumberToString(b []byte) (string, bool) {
 	return fmt.Sprintf("%d", result), true
 }
 
+// continuationDescriptorMarker (0x15) appears after each row in a continuation
+// packet. It is followed by a descriptor that encodes which columns have new
+// values in the NEXT row: [flag] [count] [bitmask] then 0x07.
+const continuationDescriptorMarker = 0x15
+
+// parseContinuationRows decodes rows from a TTC continuation packet (func=0x06).
+//
+// Oracle's continuation format uses column-level compression:
+//   - A header bitmask (at header_end-2) indicates which columns have new values
+//     in the first row of the packet.
+//   - After each row, a descriptor (0x15 [flag] [count] [bitmask] 0x07) indicates
+//     which columns have new values in the NEXT row.
+//   - Columns not in the bitmask retain their values from the previous row.
+//
+// The prevRow parameter provides the last row from the previous packet (or the
+// QueryResult) so that unchanged columns can be filled in correctly.
+//
+//nolint:gocognit,cyclop // Binary protocol parser requires many branches for different field types and markers.
+func parseContinuationRows(payload []byte, numCols int, prevRow []string) [][]interface{} {
+	if numCols == 0 || len(payload) < 15 {
+		return nil
+	}
+
+	// Find the first 0x07 in the header area (marks start of row data).
+	headerEnd := -1
+	for i := 1; i < 25 && i < len(payload); i++ {
+		if payload[i] == 0x07 {
+			headerEnd = i
+			break
+		}
+	}
+
+	if headerEnd < 0 {
+		return nil
+	}
+
+	// Parse header bitmask to determine which columns are sent in the first row.
+	// The bitmask is at headerEnd-2 (the byte before the trailing 0x00 before 0x07).
+	activeCols := allColumns(numCols)
+	if headerEnd >= 3 {
+		bitmask := payload[headerEnd-2]
+		if cols := bitmaskToColumns(bitmask, numCols); len(cols) > 0 {
+			activeCols = cols
+		}
+	}
+
+	// Initialize previous row values from the provided lastRow.
+	prev := make([]string, numCols)
+	if len(prevRow) == numCols {
+		copy(prev, prevRow)
+	}
+
+	offset := headerEnd + 1
+	var rows [][]interface{}
+
+rowLoop:
+	for offset < len(payload) {
+		if payload[offset] == 0x08 {
+			break
+		}
+
+		// Check for ORA-01403 end marker
+		if offset+9 <= len(payload) && string(payload[offset:offset+9]) == "ORA-01403" {
+			break
+		}
+
+		// Read values for active columns; inactive columns keep previous values.
+		row := make([]interface{}, numCols)
+		for i := range numCols {
+			row[i] = prev[i] // Default: previous value
+		}
+
+		valid := true
+
+		for _, col := range activeCols {
+			if offset >= len(payload) {
+				valid = false
+
+				break
+			}
+
+			valLen := int(payload[offset])
+			offset++
+
+			if valLen == 0 {
+				row[col] = ""
+				prev[col] = ""
+
+				continue
+			}
+
+			if valLen > 4000 || offset+valLen > len(payload) {
+				valid = false
+
+				break
+			}
+
+			decoded := decodeOracleRawValue(payload[offset : offset+valLen])
+			row[col] = decoded
+			prev[col] = decoded
+			offset += valLen
+		}
+
+		if !valid {
+			break
+		}
+
+		rows = append(rows, row)
+
+		// Parse the descriptor after the row to determine active columns for the next row.
+		if offset >= len(payload) {
+			break
+		}
+
+		switch payload[offset] {
+		case continuationDescriptorMarker:
+			offset++ // skip 0x15
+
+			// Read descriptor bytes until 0x07 or 0x08.
+			var desc []byte
+			for offset < len(payload) && payload[offset] != 0x07 && payload[offset] != 0x08 {
+				desc = append(desc, payload[offset])
+				offset++
+			}
+
+			// Descriptor format: [flag] [count] [bitmask]
+			// The bitmask is at index 2 (for ≤8 columns).
+			if len(desc) >= 3 {
+				activeCols = bitmaskToColumns(desc[2], numCols)
+			} else {
+				activeCols = allColumns(numCols)
+			}
+
+			// Skip 0x07 separator
+			if offset < len(payload) && payload[offset] == 0x07 {
+				offset++
+			}
+		case 0x07:
+			offset++
+			activeCols = allColumns(numCols) // Simple separator: all columns in next row
+		default:
+			break rowLoop // Unknown byte — stop
+		}
+	}
+
+	return rows
+}
+
+// bitmaskToColumns converts a column bitmask to a sorted slice of column indices.
+// Bit 0 = column 0, bit 1 = column 1, etc.
+func bitmaskToColumns(bitmask byte, numCols int) []int {
+	var cols []int
+
+	for bit := range numCols {
+		if bitmask&(1<<bit) != 0 {
+			cols = append(cols, bit)
+		}
+	}
+
+	return cols
+}
+
+// allColumns returns a slice [0, 1, 2, ..., n-1].
+func allColumns(n int) []int {
+	cols := make([]int, n)
+	for i := range n {
+		cols[i] = i
+	}
+
+	return cols
+}
+
 // findBytes finds the first occurrence of pattern in data.
 func findBytes(data, pattern []byte) int {
 	for i := 0; i <= len(data)-len(pattern); i++ {
@@ -805,7 +1007,7 @@ func looksLikeSQL(s string) bool {
 		return false
 	}
 
-	upper := strings.ToUpper(s)
+	upper := strings.ToUpper(strings.TrimSpace(s))
 	sqlKeywords := []string{
 		"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
 		"ALTER", "TRUNCATE", "MERGE", "CALL", "BEGIN", "DECLARE", "WITH", "GRANT", "REVOKE",
@@ -818,15 +1020,7 @@ func looksLikeSQL(s string) bool {
 		}
 	}
 
-	// Also accept if mostly printable ASCII
-	printable := 0
-	for _, c := range s {
-		if c >= 0x20 && c < 0x7F {
-			printable++
-		}
-	}
-
-	return float64(printable)/float64(len(s)) > 0.9
+	return false
 }
 
 // decodeVarLen decodes a variable-length integer used in TTC.

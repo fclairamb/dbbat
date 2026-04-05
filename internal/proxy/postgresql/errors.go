@@ -1,4 +1,4 @@
-package proxy
+package postgresql
 
 import "errors"
 
@@ -18,4 +18,6 @@ var (
 
 	ErrSASLAuthNotSupported = errors.New("SASL authentication not yet supported")
 	ErrUpstreamAuthFailed   = errors.New("upstream authentication failed")
+	ErrAPIKeyOwnerMismatch  = errors.New("API key does not belong to user")
+	ErrAPIKeyVerifyFailed   = errors.New("API key verification failed")
 )

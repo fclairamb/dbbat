@@ -22,7 +22,7 @@ import { join } from "node:path";
 const PROJECT_ROOT = join(import.meta.dirname, "../..");
 const PID_FILE = join(import.meta.dirname, ".test-server.pid");
 const SERVER_URL = "http://localhost:8080/app/";
-const MAX_RETRIES = 30; // 30 seconds
+const MAX_RETRIES = 60; // 60 seconds
 const RETRY_DELAY = 1000; // 1 second
 
 // Check if running in CI environment

@@ -1,9 +1,11 @@
+import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useQueryDetails, useQueryRows } from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { PageLoader, LoadingSpinner } from "@/components/shared/LoadingSpinner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Table,
   TableBody,
@@ -12,10 +14,14 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { ChevronLeft, ChevronRight, ChevronsLeft } from "lucide-react";
 import { format } from "date-fns";
 import { useAuth } from "@/contexts/AuthContext";
 import { canViewQueries } from "@/lib/permissions";
 import { AccessDenied } from "@/components/shared/AccessDenied";
+
+const DEFAULT_PAGE_SIZE = 100;
+const PAGE_SIZE_OPTIONS = [50, 100, 500];
 
 export const Route = createFileRoute("/_authenticated/queries/$uid")({
   component: QueryDetailPage,
@@ -25,9 +31,44 @@ function QueryDetailPage() {
   const { user } = useAuth();
   const { uid } = Route.useParams();
   const { data: query, isLoading: isLoadingQuery } = useQueryDetails(uid);
-  const { data: rowsData, isLoading: isLoadingRows } = useQueryRows(uid);
 
-  // Check if user has viewer role
+  // Rows pagination state (local, not URL-based)
+  const [cursor, setCursor] = useState<string | undefined>();
+  const [cursorStack, setCursorStack] = useState<string[]>([]);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+
+  const { data: rowsData, isLoading: isLoadingRows } = useQueryRows(uid, {
+    cursor,
+    limit: pageSize,
+  });
+
+  const goNext = () => {
+    if (rowsData?.next_cursor) {
+      setCursorStack((prev) => [...prev, cursor ?? ""]);
+      setCursor(rowsData.next_cursor);
+    }
+  };
+
+  const goPrevious = () => {
+    setCursorStack((prev) => {
+      const next = [...prev];
+      const prevCursor = next.pop();
+      setCursor(prevCursor || undefined);
+      return next;
+    });
+  };
+
+  const goFirst = () => {
+    setCursorStack([]);
+    setCursor(undefined);
+  };
+
+  const changePageSize = (newSize: number) => {
+    setPageSize(newSize);
+    setCursor(undefined);
+    setCursorStack([]);
+  };
+
   if (!canViewQueries(user?.roles)) {
     return <AccessDenied requiredRole="viewer" />;
   }
@@ -43,6 +84,13 @@ function QueryDetailPage() {
       </div>
     );
   }
+
+  // Compute row position indicator
+  const firstRowNum = rowsData?.rows?.[0]?.row_number;
+  const lastRowNum = rowsData?.rows?.[rowsData.rows.length - 1]?.row_number;
+  const totalRows = rowsData?.total_rows ?? 0;
+  const hasPrevious = cursorStack.length > 0;
+  const hasNext = rowsData?.has_more ?? false;
 
   return (
     <div className="space-y-6">
@@ -136,7 +184,7 @@ function QueryDetailPage() {
         <CardHeader>
           <CardTitle>
             Result Rows
-            {rowsData && ` (${rowsData.total_rows})`}
+            {totalRows > 0 && ` (${totalRows})`}
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -145,36 +193,88 @@ function QueryDetailPage() {
               <LoadingSpinner />
             </div>
           ) : rowsData && rowsData.rows.length > 0 ? (
-            <div className="overflow-x-auto">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead className="w-16">#</TableHead>
-                    {Object.keys(rowsData.rows[0].row_data).map((key) => (
-                      <TableHead key={key}>{key}</TableHead>
-                    ))}
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {rowsData.rows.map((row) => (
-                    <TableRow key={row.row_number}>
-                      <TableCell className="text-muted-foreground">
-                        {row.row_number}
-                      </TableCell>
-                      {Object.values(row.row_data).map((value, i) => (
-                        <TableCell key={i} className="font-mono text-sm">
-                          {formatValue(value)}
-                        </TableCell>
+            <div className="space-y-4">
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead className="w-16">#</TableHead>
+                      {Object.keys(rowsData.rows[0].row_data).map((key) => (
+                        <TableHead key={key}>{key}</TableHead>
                       ))}
                     </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {rowsData.rows.map((row) => (
+                      <TableRow key={row.row_number}>
+                        <TableCell className="text-muted-foreground">
+                          {row.row_number}
+                        </TableCell>
+                        {Object.values(row.row_data).map((value, i) => (
+                          <TableCell key={i} className="font-mono text-sm">
+                            {formatValue(value)}
+                          </TableCell>
+                        ))}
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+
+              {/* Pagination controls */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <span>Rows per page:</span>
+                  {PAGE_SIZE_OPTIONS.map((opt) => (
+                    <Button
+                      key={opt}
+                      variant={opt === pageSize ? "secondary" : "ghost"}
+                      size="sm"
+                      className="h-7 px-2"
+                      onClick={() => changePageSize(opt)}
+                    >
+                      {opt}
+                    </Button>
                   ))}
-                </TableBody>
-              </Table>
-              {rowsData.has_more && (
-                <div className="text-center text-muted-foreground text-sm mt-4">
-                  Showing {rowsData.rows.length} of {rowsData.total_rows} rows
                 </div>
-              )}
+
+                <div className="flex items-center gap-4">
+                  {firstRowNum != null && lastRowNum != null && totalRows > 0 && (
+                    <span className="text-sm text-muted-foreground">
+                      Rows {firstRowNum}-{lastRowNum} of {totalRows}
+                    </span>
+                  )}
+
+                  <div className="flex items-center gap-1">
+                    {hasPrevious && (
+                      <>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={goFirst}
+                          title="First page"
+                        >
+                          <ChevronsLeft className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={goPrevious}
+                        >
+                          <ChevronLeft className="h-4 w-4 mr-1" />
+                          Previous
+                        </Button>
+                      </>
+                    )}
+                    {hasNext && (
+                      <Button variant="outline" size="sm" onClick={goNext}>
+                        Next
+                        <ChevronRight className="h-4 w-4 ml-1" />
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              </div>
             </div>
           ) : (
             <div className="text-center text-muted-foreground py-4">

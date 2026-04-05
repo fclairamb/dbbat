@@ -21,6 +21,7 @@ const (
 	TTCFuncSetDataTypes TTCFunctionCode = 0x02 // ODTYPES — session init
 	TTCFuncPiggyback    TTCFunctionCode = 0x03 // Generic piggyback (sub-op at byte 1)
 	TTCFuncOCLOSE       TTCFunctionCode = 0x05 // OCLOSE — close cursor (legacy)
+	TTCFuncContinuation TTCFunctionCode = 0x06 // Continuation data (multi-packet result rows)
 	TTCFuncResponse     TTCFunctionCode = 0x08 // Server response
 	TTCFuncOClosev2     TTCFunctionCode = 0x09 // OCLOSE — close cursor (v315+)
 	TTCFuncOVersion     TTCFunctionCode = 0x0B // OVERSION — version request
@@ -36,6 +37,13 @@ const (
 	PiggybackSubExecSQL byte = 0x5e // Execute with SQL (OALL8 equivalent)
 	PiggybackSubAuth1   byte = 0x76 // AUTH Phase 1
 	PiggybackSubAuth2   byte = 0x73 // AUTH Phase 2
+)
+
+// Execute-with-SQL sub-operation codes for func=0x11.
+// Different Oracle client drivers use different sub-ops.
+const (
+	execSubOpJDBC   byte = 0x69 // DBeaver, JDBC thin driver
+	execSubOpPython byte = 0x98 // Python oracledb thin driver
 )
 
 // ttcDataFlagsSize is the size of the data flags prefix in a TNS Data payload.
@@ -72,6 +80,8 @@ func (fc TTCFunctionCode) String() string {
 		return "PIGGYBACK"
 	case TTCFuncOCLOSE:
 		return "OCLOSE"
+	case TTCFuncContinuation:
+		return "CONTINUATION"
 	case TTCFuncResponse:
 		return "Response"
 	case TTCFuncOClosev2:
@@ -101,4 +111,19 @@ func IsPiggybackExecSQL(ttcPayload []byte) bool {
 // IsPiggybackClose checks if a piggyback payload is a close cursor message.
 func IsPiggybackClose(ttcPayload []byte) bool {
 	return len(ttcPayload) > 1 && ttcPayload[1] == PiggybackSubClose
+}
+
+// IsExecSQL checks if a func=0x11 payload is an execute-with-SQL message
+// rather than a plain OFETCH. Different clients use different sub-ops.
+func IsExecSQL(ttcPayload []byte) bool {
+	if len(ttcPayload) < 2 {
+		return false
+	}
+
+	switch ttcPayload[1] {
+	case execSubOpJDBC, execSubOpPython:
+		return true
+	default:
+		return false
+	}
 }

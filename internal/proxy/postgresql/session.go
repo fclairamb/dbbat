@@ -1,4 +1,4 @@
-package proxy
+package postgresql
 
 import (
 	"context"
@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -70,6 +72,8 @@ type Session struct {
 	logger        *slog.Logger
 	ctx           context.Context //nolint:containedctx // Context is needed for the session lifecycle
 	queryStorage  config.QueryStorageConfig
+	dumpConfig    config.DumpConfig
+	dumpWriter    *dump.Writer
 	authCache     *cache.AuthCache
 
 	// Session state
@@ -96,6 +100,7 @@ func NewSession(
 	logger *slog.Logger,
 	ctx context.Context, //nolint:revive // Context parameter order is intentional for this factory
 	queryStorage config.QueryStorageConfig,
+	dumpConfig config.DumpConfig,
 	authCache *cache.AuthCache,
 ) *Session {
 	return &Session{
@@ -105,6 +110,7 @@ func NewSession(
 		logger:        logger,
 		ctx:           ctx,
 		queryStorage:  queryStorage,
+		dumpConfig:    dumpConfig,
 		authCache:     authCache,
 		extendedState: &extendedQueryState{
 			preparedStatements: make(map[string]*preparedStatement),
@@ -141,6 +147,32 @@ func (s *Session) Run() error {
 	}
 
 	s.logger = s.logger.With("connection_uid", s.connectionUID)
+
+	// Initialize dump writer if configured
+	if s.dumpConfig.Dir != "" && s.connectionUID != uuid.Nil {
+		dumpPath := filepath.Join(s.dumpConfig.Dir, s.connectionUID.String()+dump.FileExt)
+
+		dw, err := dump.NewWriter(dumpPath, dump.Header{
+			SessionID: s.connectionUID.String(),
+			Protocol:  dump.ProtocolPostgreSQL,
+			StartTime: time.Now(),
+			Connection: map[string]any{
+				"database":      s.database.DatabaseName,
+				"user":          s.user.Username,
+				"upstream_addr": net.JoinHostPort(s.database.Host, fmt.Sprintf("%d", s.database.Port)),
+			},
+		}, s.dumpConfig.MaxSize)
+		if err != nil {
+			s.logger.WarnContext(s.ctx, "failed to create dump writer", slog.Any("error", err))
+		} else {
+			s.dumpWriter = dw
+			// Wrap connections to capture traffic during the proxy phase
+			clientTap := dump.NewTapConn(s.clientConn, dw, dump.DirClientToServer, dump.DirServerToClient)
+			upstreamTap := dump.NewTapConn(s.upstreamConn, dw, dump.DirServerToClient, dump.DirClientToServer)
+			s.clientBackend = pgproto3.NewBackend(clientTap, clientTap)
+			s.upstreamFrontend = pgproto3.NewFrontend(upstreamTap, upstreamTap)
+		}
+	}
 
 	// Proxy messages
 	return s.proxyMessages()
@@ -423,6 +455,12 @@ func (s *Session) proxyUpstreamToClient() error {
 
 // cleanup closes connections and updates records.
 func (s *Session) cleanup() {
+	if s.dumpWriter != nil {
+		if err := s.dumpWriter.Close(); err != nil {
+			s.logger.ErrorContext(s.ctx, "failed to close dump writer", slog.Any("error", err))
+		}
+	}
+
 	if s.connectionUID != uuid.Nil {
 		if err := s.store.CloseConnection(s.ctx, s.connectionUID); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to close connection record", slog.Any("error", err))

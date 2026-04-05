@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -20,7 +22,7 @@ type Server struct {
 	encryptionKey []byte
 	authCache     *cache.AuthCache
 	queryStorage  config.QueryStorageConfig
-	dumpConfig    config.OracleDumpConfig
+	dumpConfig    config.DumpConfig
 	logger        *slog.Logger
 	mu            sync.Mutex
 	listener      net.Listener
@@ -37,7 +39,7 @@ func NewServer(
 	encryptionKey []byte,
 	authCache *cache.AuthCache,
 	queryStorage config.QueryStorageConfig,
-	dumpConfig config.OracleDumpConfig,
+	dumpConfig config.DumpConfig,
 	logger *slog.Logger,
 ) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -66,11 +68,16 @@ func (s *Server) Start(addr string) error {
 	s.listener = listener
 	s.listenAddr = addr
 	s.mu.Unlock()
-	s.logger.InfoContext(s.ctx, "Oracle proxy server listening", slog.String("addr", addr))
+	s.logger.InfoContext(s.ctx, "Oracle proxy server listening", slog.String("addr", addr),
+		slog.String("dump_dir", s.dumpConfig.Dir))
 
 	// Start dump cleanup goroutine if dumps are enabled
 	if s.dumpConfig.Dir != "" {
-		go s.runDumpCleanup()
+		if err := os.MkdirAll(s.dumpConfig.Dir, 0o755); err != nil {
+			s.logger.ErrorContext(s.ctx, "failed to create dump directory", slog.String("dir", s.dumpConfig.Dir), slog.Any("error", err))
+		} else {
+			go s.runDumpCleanup()
+		}
 	}
 
 	for {
@@ -187,7 +194,7 @@ func (s *Server) runDumpCleanup() {
 	for {
 		select {
 		case <-ticker.C:
-			deleted, err := CleanupOldDumps(s.dumpConfig.Dir, retention)
+			deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
 			if err != nil {
 				s.logger.ErrorContext(s.ctx, "dump cleanup failed", slog.Any("error", err))
 			} else if deleted > 0 {

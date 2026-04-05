@@ -32,6 +32,7 @@ var (
 	ErrAPIKeyNotFound = errors.New("API key not found")
 	ErrAPIKeyRevoked  = errors.New("API key has been revoked")
 	ErrAPIKeyExpired  = errors.New("API key has expired")
+	ErrAPIKeyTooShort = errors.New("API key too short")
 )
 
 // generateKey generates a new random key with the given prefix
@@ -66,9 +67,11 @@ func generateWebKey() (string, string, error) {
 	return generateKey(WebKeyPrefix)
 }
 
-// CreateAPIKey creates a new API key for a user
-// Returns the created APIKey and the plain text key (only shown once)
-func (s *Store) CreateAPIKey(ctx context.Context, userID uuid.UUID, name string, expiresAt *time.Time) (*APIKey, string, error) {
+// CreateAPIKey creates a new API key for a user.
+// Returns the created APIKey and the plain text key (only shown once).
+// If encryptionKey is provided (non-nil), an O5LOGON verifier is computed
+// and stored for Oracle proxy authentication.
+func (s *Store) CreateAPIKey(ctx context.Context, userID uuid.UUID, name string, expiresAt *time.Time, encryptionKey ...[]byte) (*APIKey, string, error) {
 	// Generate the key
 	plainKey, prefix, err := generateAPIKey()
 	if err != nil {
@@ -91,6 +94,13 @@ func (s *Store) CreateAPIKey(ctx context.Context, userID uuid.UUID, name string,
 		CreatedAt: time.Now(),
 	}
 
+	// Generate O5LOGON verifier if encryption key is available
+	if len(encryptionKey) > 0 && len(encryptionKey[0]) > 0 {
+		if err := apiKey.computeO5LogonVerifier(plainKey, encryptionKey[0]); err != nil {
+			return nil, "", err
+		}
+	}
+
 	_, err = s.db.NewInsert().
 		Model(apiKey).
 		Returning("*").
@@ -100,6 +110,69 @@ func (s *Store) CreateAPIKey(ctx context.Context, userID uuid.UUID, name string,
 	}
 
 	return apiKey, plainKey, nil
+}
+
+// CreateAPIKeyWithValue creates an API key with a specific plaintext value.
+// Used for test mode provisioning where stable, predictable keys are needed.
+// If encryptionKey is provided, an O5LOGON verifier is computed and stored.
+func (s *Store) CreateAPIKeyWithValue(ctx context.Context, userID uuid.UUID, name string, plainKey string, expiresAt *time.Time, encryptionKey ...[]byte) (*APIKey, error) {
+	if len(plainKey) < APIKeyPrefixLength {
+		return nil, ErrAPIKeyTooShort
+	}
+
+	prefix := plainKey[:APIKeyPrefixLength]
+
+	keyHash, err := crypto.HashPassword(plainKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash API key: %w", err)
+	}
+
+	apiKey := &APIKey{
+		UserID:    userID,
+		Name:      name,
+		KeyHash:   keyHash,
+		KeyPrefix: prefix,
+		KeyType:   KeyTypeAPI,
+		ExpiresAt: expiresAt,
+		CreatedAt: time.Now(),
+	}
+
+	// Generate O5LOGON verifier if encryption key is available
+	if len(encryptionKey) > 0 && len(encryptionKey[0]) > 0 {
+		if err := apiKey.computeO5LogonVerifier(plainKey, encryptionKey[0]); err != nil {
+			return nil, err
+		}
+	}
+
+	_, err = s.db.NewInsert().
+		Model(apiKey).
+		Returning("*").
+		Exec(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create API key: %w", err)
+	}
+
+	return apiKey, nil
+}
+
+// computeO5LogonVerifier generates and encrypts O5LOGON verifier data for an API key.
+func (k *APIKey) computeO5LogonVerifier(plainKey string, encryptionKey []byte) error {
+	salt, verifierKey, err := crypto.GenerateO5LogonVerifier(plainKey)
+	if err != nil {
+		return fmt.Errorf("failed to generate O5LOGON verifier: %w", err)
+	}
+
+	// Encrypt verifier key with dbbat master key
+	aad := crypto.APIKeyAAD(k.KeyPrefix)
+	encVerifier, err := crypto.Encrypt(verifierKey, encryptionKey, aad)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt O5LOGON verifier: %w", err)
+	}
+
+	k.O5LogonSalt = salt
+	k.O5LogonVerifier = encVerifier
+
+	return nil
 }
 
 // CreateWebSession creates a new web session key for a user

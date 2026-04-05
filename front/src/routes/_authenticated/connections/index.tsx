@@ -1,24 +1,38 @@
-import { useState, useRef, useCallback } from "react";
-import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useRef, useCallback } from "react";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useConnections, useUsers, useDatabases, type Connection } from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { AdaptiveRefresh } from "@/components/shared/AdaptiveRefresh";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
+import { ChevronLeft, ChevronRight } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 
+const DEFAULT_PAGE_SIZE = 50;
+const PAGE_SIZE_OPTIONS = [25, 50, 100];
+
 export const Route = createFileRoute("/_authenticated/connections/")({
+  validateSearch: (search: Record<string, unknown>) => ({
+    before: search.before as string | undefined,
+    size: search.size ? Number(search.size) : DEFAULT_PAGE_SIZE,
+    active: search.active === true || search.active === "true" ? true : undefined,
+  }),
   component: ConnectionsPage,
 });
 
 function ConnectionsPage() {
-  const navigate = useNavigate();
-  const [showActive, setShowActive] = useState(false);
-  const { data: connections, isLoading, refetch } = useConnections({ limit: 100 });
+  const { before, size, active } = Route.useSearch();
+  const { data: connections, isLoading, refetch } = useConnections({
+    before,
+    limit: size,
+  });
   const { data: users } = useUsers();
   const { data: databases } = useDatabases();
+
+  const isFirstPage = !before;
 
   const previousFirstUid = useRef<string | null>(null);
 
@@ -42,7 +56,7 @@ function ConnectionsPage() {
   const getDbName = (uid: string) =>
     databases?.find((d) => d.uid === uid)?.name ?? uid;
 
-  const filteredConnections = showActive
+  const filteredConnections = active
     ? connections?.filter((c) => !c.disconnected_at)
     : connections;
 
@@ -119,6 +133,9 @@ function ConnectionsPage() {
     },
   ];
 
+  const lastUid = connections && connections.length > 0 ? connections[connections.length - 1].uid : undefined;
+  const hasMore = connections && connections.length >= size;
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -126,15 +143,24 @@ function ConnectionsPage() {
         description="View proxy connection history"
         actions={
           <div className="flex items-center gap-4">
-            <AdaptiveRefresh
-              onRefresh={handleRefresh}
-              storageKey="dbbat.autoRefresh.connections"
-            />
+            {isFirstPage && (
+              <AdaptiveRefresh
+                onRefresh={handleRefresh}
+                storageKey="dbbat.autoRefresh.connections"
+              />
+            )}
             <div className="flex items-center gap-2">
               <Switch
                 id="showActive"
-                checked={showActive}
-                onCheckedChange={setShowActive}
+                checked={!!active}
+                onCheckedChange={(checked) => {
+                  // Navigate to update the search param
+                  window.location.search = new URLSearchParams({
+                    ...(before ? { before } : {}),
+                    size: String(size),
+                    ...(checked ? { active: "true" } : {}),
+                  }).toString();
+                }}
               />
               <Label htmlFor="showActive">Active only</Label>
             </div>
@@ -148,10 +174,56 @@ function ConnectionsPage() {
         isLoading={isLoading}
         rowKey={(c) => c.uid}
         emptyMessage="No connections found"
-        onRowClick={(c) =>
-          navigate({ to: "/queries", search: { connection_id: c.uid } })
-        }
+        rowHref={(c) => `/queries?connection_id=${c.uid}`}
       />
+
+      {/* Pagination */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <span>Rows per page:</span>
+          {PAGE_SIZE_OPTIONS.map((opt) => (
+            <Button
+              key={opt}
+              variant={opt === size ? "secondary" : "ghost"}
+              size="sm"
+              className="h-7 px-2"
+              asChild
+            >
+              <Link
+                to="/connections"
+                search={{ before: undefined, size: opt, active }}
+              >
+                {opt}
+              </Link>
+            </Button>
+          ))}
+        </div>
+
+        <div className="flex items-center gap-2">
+          {!isFirstPage && (
+            <Button variant="outline" size="sm" asChild>
+              <Link
+                to="/connections"
+                search={{ before: undefined, size, active }}
+              >
+                <ChevronLeft className="h-4 w-4 mr-1" />
+                Newer
+              </Link>
+            </Button>
+          )}
+          {hasMore && lastUid && (
+            <Button variant="outline" size="sm" asChild>
+              <Link
+                to="/connections"
+                search={{ before: lastUid, size, active }}
+              >
+                Older
+                <ChevronRight className="h-4 w-4 ml-1" />
+              </Link>
+            </Button>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

@@ -93,3 +93,10 @@ func Decrypt(ciphertext []byte, key []byte, aad []byte) ([]byte, error) {
 func DatabaseAAD(databaseUID string) []byte {
 	return []byte(fmt.Sprintf("database:%s", databaseUID))
 }
+
+// APIKeyAAD returns the AAD for encrypting API key O5LOGON verifiers.
+// This binds the ciphertext to a specific API key prefix, preventing
+// verifier transplant attacks.
+func APIKeyAAD(keyPrefix string) []byte {
+	return []byte(fmt.Sprintf("apikey:%s", keyPrefix))
+}

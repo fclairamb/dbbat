@@ -37,6 +37,7 @@ type pendingOracleQuery struct {
 	truncated      bool
 	queryUID       uuid.UUID // Set after query record is created in DB
 	queryPersisted bool      // True after query record is created
+	lastRow        []string  // Last captured row values (for continuation packet duplicate tracking)
 }
 
 // newOracleQueryTracker creates a new query tracker.
@@ -74,6 +75,9 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 		}
 	}
 
+	// Complete previous query if still pending (sets duration)
+	s.flushPendingQuery()
+
 	// Track the cursor
 	cursor := &trackedCursor{
 		cursorID:   result.CursorID,
@@ -83,13 +87,22 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 	}
 	s.tracker.cursors[result.CursorID] = cursor
 
-	// Start pending query
+	// Start pending query and persist immediately
 	s.tracker.pendingQuery = &pendingOracleQuery{
 		cursor:    cursor,
 		startTime: time.Now(),
 	}
+	s.persistQueryRecord()
 
 	return nil
+}
+
+// flushPendingQuery completes any outstanding query that hasn't been finalized.
+// Called before starting a new query to ensure the previous one is persisted.
+func (s *session) flushPendingQuery() {
+	if s.tracker.pendingQuery != nil {
+		s.completeQuery(nil, nil, 0)
+	}
 }
 
 // handlePiggybackExec intercepts a v315+ piggyback execute-with-SQL message.
@@ -115,7 +128,10 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 		}
 	}
 
-	// Track as pending query
+	// Complete previous query if still pending (sets duration)
+	s.flushPendingQuery()
+
+	// Track as pending query and persist immediately
 	cursor := &trackedCursor{
 		sql:      result.SQL,
 		parsedAt: time.Now(),
@@ -124,8 +140,37 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 		cursor:    cursor,
 		startTime: time.Now(),
 	}
+	s.persistQueryRecord()
 
 	return nil
+}
+
+// handleJDBCExec intercepts a JDBC execute-with-SQL message (func=0x11, sub=0x69).
+func (s *session) handleJDBCExec(ttcPayload []byte) {
+	result, err := decodeExecSQL(ttcPayload)
+	if err != nil {
+		s.logger.DebugContext(s.ctx, "failed to decode JDBC exec", slog.Any("error", err))
+		return
+	}
+
+	s.logger.InfoContext(s.ctx, "query intercepted",
+		slog.String("sql", truncateSQL(result.SQL, 200)),
+		slog.String("source", "jdbc"),
+	)
+
+	// Complete previous query if still pending (sets duration)
+	s.flushPendingQuery()
+
+	// Track as pending query and persist immediately
+	cursor := &trackedCursor{
+		sql:      result.SQL,
+		parsedAt: time.Now(),
+	}
+	s.tracker.pendingQuery = &pendingOracleQuery{
+		cursor:    cursor,
+		startTime: time.Now(),
+	}
+	s.persistQueryRecord()
 }
 
 // handleQueryResultV2 processes a v315+ QueryResult (func=0x10) response.
@@ -148,7 +193,7 @@ func (s *session) handleQueryResultV2(ttcPayload []byte, bytesTransferred int64)
 		s.tracker.pendingQuery.cursor.columns = columns
 	}
 
-	// Capture rows using stored column definitions
+	// Capture rows from the QueryResult response.
 	if s.tracker.pendingQuery != nil && s.tracker.pendingQuery.cursor != nil {
 		columns := s.tracker.pendingQuery.cursor.columns
 		for _, row := range result.Rows {
@@ -159,159 +204,17 @@ func (s *session) handleQueryResultV2(ttcPayload []byte, bytesTransferred int64)
 
 			s.captureRow(columns, values)
 		}
+
+		// Store last row for continuation packet duplicate tracking
+		if len(result.Rows) > 0 {
+			s.tracker.pendingQuery.lastRow = result.Rows[len(result.Rows)-1]
+		}
 	}
 
 	// Only complete the query when we see the end-of-data marker (ORA-01403)
 	if result.NoData {
 		s.completeQuery(nil, nil, bytesTransferred)
 	}
-}
-
-// captureRowsFromContinuation extracts row data from continuation packets
-// in multi-packet result sets. Continuation packets (func=0x06) contain:
-// [func(1)] [header(~12 bytes)] [row data: len+val pairs separated by 0x07]
-//
-// The row data uses the same length-prefixed format as QueryResult but
-// without column definitions or the 0x06 0x22 marker.
-func (s *session) captureRowsFromContinuation(payload []byte, columns []columnDef) { //nolint:gocognit,cyclop // TTC binary parsing
-	numCols := len(columns)
-	if numCols == 0 || len(payload) < 15 {
-		return
-	}
-
-	// Skip the TNS data flags (already stripped in extractTTCPayload),
-	// then the func code + header. The header varies in length.
-	// Scan for the first valid row by trying different start offsets.
-	for startOffset := 10; startOffset < 25 && startOffset < len(payload)-numCols; startOffset++ {
-		// Try to read one row at this offset
-		offset := startOffset
-		row := make([]string, 0, numCols)
-		valid := true
-
-		for col := 0; col < numCols; col++ {
-			if offset >= len(payload) {
-				valid = false
-				break
-			}
-
-			valLen := int(payload[offset])
-			offset++
-
-			if valLen == 0 {
-				row = append(row, "")
-				continue
-			}
-
-			if valLen > 4000 || offset+valLen > len(payload) {
-				valid = false
-				break
-			}
-
-			valBytes := payload[offset : offset+valLen]
-			offset += valLen
-			decoded := decodeOracleRawValue(valBytes)
-
-			// Validate: first column of first row should look reasonable
-			if col == 0 && len(row) == 0 && !isReasonableValue(decoded) {
-				valid = false
-				break
-			}
-
-			row = append(row, decoded)
-		}
-
-		if !valid || len(row) != numCols {
-			continue
-		}
-
-		// Found valid row data! Capture this row and continue scanning.
-		s.captureRowValues(columns, row)
-
-		// Read remaining rows
-		endOfData := len(payload)
-		if idx := findBytes(payload, []byte("ORA-01403")); idx >= 0 {
-			endOfData = idx
-		}
-
-		for offset < endOfData {
-			if payload[offset] == 0x08 {
-				break // End of rows
-			}
-
-			if payload[offset] == 0x07 {
-				offset++ // Row separator
-			}
-
-			row = make([]string, 0, numCols)
-			valid = true
-
-			for col := 0; col < numCols; col++ {
-				if offset >= endOfData {
-					valid = false
-					break
-				}
-
-				valLen := int(payload[offset])
-				offset++
-
-				if valLen == 0 {
-					row = append(row, "")
-					continue
-				}
-
-				if valLen > 4000 || offset+valLen > endOfData {
-					valid = false
-					break
-				}
-
-				row = append(row, decodeOracleRawValue(payload[offset:offset+valLen]))
-				offset += valLen
-			}
-
-			if !valid || len(row) != numCols {
-				break
-			}
-
-			s.captureRowValues(columns, row)
-		}
-
-		return // Done
-	}
-}
-
-// captureRowValues converts string values to interface{} and captures the row.
-func (s *session) captureRowValues(columns []columnDef, row []string) {
-	values := make([]interface{}, len(row))
-	for i, v := range row {
-		values[i] = v
-	}
-
-	s.captureRow(columns, values)
-}
-
-// isReasonableValue checks if a decoded value looks like real data (not header bytes).
-func isReasonableValue(s string) bool {
-	if len(s) == 0 {
-		return true // NULL is OK
-	}
-
-	// Reject hex-encoded values (likely misinterpreted header bytes)
-	if len(s) > 4 && len(s)%2 == 0 {
-		allHex := true
-		for _, c := range s {
-			isHexChar := (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')
-			if !isHexChar {
-				allHex = false
-				break
-			}
-		}
-
-		if allHex {
-			return false
-		}
-	}
-
-	return true
 }
 
 // handleOFETCH intercepts an OFETCH message: links the fetch to its cursor.
@@ -411,7 +314,7 @@ func (s *session) captureRow(columns []columnDef, values []interface{}) {
 // persistQueryRecord creates the query record in the database before streaming rows.
 func (s *session) persistQueryRecord() {
 	pending := s.tracker.pendingQuery
-	if pending == nil || pending.queryPersisted || pending.cursor == nil {
+	if pending == nil || pending.queryPersisted || pending.cursor == nil || s.store == nil {
 		return
 	}
 
@@ -443,6 +346,12 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string, bytesTr
 	s.tracker.pendingQuery = nil
 
 	duration := float64(time.Since(pending.startTime).Milliseconds())
+
+	// Use captured row count as rows_affected if not provided by the caller.
+	if rowsAffected == nil && pending.rowNumber > 0 {
+		rc := int64(pending.rowNumber)
+		rowsAffected = &rc
+	}
 
 	// If the query record was already created (rows were streamed), update it.
 	// Otherwise, create it now (no-result queries like DML).
