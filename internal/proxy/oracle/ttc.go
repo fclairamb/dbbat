@@ -38,6 +38,9 @@ const (
 	PiggybackSubAuth2   byte = 0x73 // AUTH Phase 2
 )
 
+// JDBC sub-operation code for func=0x11 execute-with-SQL.
+const jdbcExecSubOp byte = 0x69
+
 // ttcDataFlagsSize is the size of the data flags prefix in a TNS Data payload.
 const ttcDataFlagsSize = 2
 
@@ -101,4 +104,10 @@ func IsPiggybackExecSQL(ttcPayload []byte) bool {
 // IsPiggybackClose checks if a piggyback payload is a close cursor message.
 func IsPiggybackClose(ttcPayload []byte) bool {
 	return len(ttcPayload) > 1 && ttcPayload[1] == PiggybackSubClose
+}
+
+// IsJDBCExecSQL checks if a func=0x11 payload is a JDBC execute-with-SQL message
+// (sub-op 0x69) rather than a plain OFETCH.
+func IsJDBCExecSQL(ttcPayload []byte) bool {
+	return len(ttcPayload) > 1 && ttcPayload[1] == jdbcExecSubOp
 }

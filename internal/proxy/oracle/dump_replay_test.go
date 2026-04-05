@@ -730,6 +730,13 @@ func extractAllSQL(t *testing.T, td *testDump) []string {
 			if err == nil && result != nil {
 				sql = result.SQL
 			}
+		case TTCFuncOFETCH:
+			if IsJDBCExecSQL(ttcPayload) {
+				result, err := decodeJDBCExecSQL(ttcPayload)
+				if err == nil && result != nil {
+					sql = result.SQL
+				}
+			}
 		}
 
 		if sql != "" {

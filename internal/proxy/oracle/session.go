@@ -142,24 +142,31 @@ func (s *session) run() error {
 		return fmt.Errorf("failed to forward connect to upstream: %w", err)
 	}
 
-	// Step 6: Read upstream response (Accept, Refuse, or Redirect)
-	upstreamResp, err := readTNSPacket(s.upstreamConn)
+	// Step 6: Read upstream response and handle Resend loop.
+	// Oracle may respond with Resend (type 11) asking us to retransmit.
+	// Redirect (type 4) and Accept (type 2) are forwarded to the client as-is.
+	upstreamResp, err := s.readUpstreamConnectResponse(connectPkt)
 	if err != nil {
-		s.sendRefuse("upstream did not respond")
-
-		return fmt.Errorf("failed to read upstream response: %w", err)
+		return err
 	}
 
 	if upstreamResp.Type == TNSPacketTypeRefuse {
-		// Forward the refusal to client
 		_ = writeTNSPacket(s.clientConn, upstreamResp)
 
 		return ErrUpstreamRefused
 	}
 
-	// Forward the Accept to client
+	// Forward the response (Accept or Redirect) to client as-is.
+	// For Redirect: the client handles it natively by reconnecting.
+	// For Accept: the session continues into proxy mode.
 	if err := writeTNSPacket(s.clientConn, upstreamResp); err != nil {
-		return fmt.Errorf("failed to forward accept to client: %w", err)
+		return fmt.Errorf("failed to forward upstream response to client: %w", err)
+	}
+
+	// If the upstream sent a Redirect, the client will close this connection
+	// and reconnect directly to the target. We're done.
+	if upstreamResp.Type != TNSPacketTypeAccept {
+		return nil
 	}
 
 	// Step 7: Skip TTC-level auth interception for now.
@@ -209,6 +216,39 @@ func (s *session) run() error {
 
 	// Step 10: Enter bidirectional TNS relay with query interception
 	return s.proxyMessages()
+}
+
+// maxResendAttempts limits the number of Resend retries to prevent infinite loops.
+const maxResendAttempts = 3
+
+// readUpstreamConnectResponse reads the upstream response to a Connect packet,
+// handling Resend (type 11) by retransmitting. Returns the final response
+// (Accept, Refuse, Redirect, or other).
+func (s *session) readUpstreamConnectResponse(connectPkt *TNSPacket) (*TNSPacket, error) {
+	for attempt := range maxResendAttempts {
+		resp, err := readTNSPacket(s.upstreamConn)
+		if err != nil {
+			s.sendRefuse("upstream did not respond")
+
+			return nil, fmt.Errorf("failed to read upstream response: %w", err)
+		}
+
+		if resp.Type != TNSPacketTypeResend {
+			return resp, nil
+		}
+
+		// Oracle wants us to resend the Connect on the same connection.
+		s.logger.DebugContext(s.ctx, "upstream sent Resend, retrying",
+			slog.Int("attempt", attempt+1))
+
+		if err := writeTNSPacket(s.upstreamConn, connectPkt); err != nil {
+			return nil, fmt.Errorf("failed to resend connect: %w", err)
+		}
+	}
+
+	s.sendRefuse("too many resend attempts")
+
+	return nil, fmt.Errorf("exceeded maximum resend attempts (%d)", maxResendAttempts)
 }
 
 // proxyMessages relays TNS packets bidirectionally with TTC-aware interception.
@@ -309,7 +349,18 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 		}
 
 	case TTCFuncOFETCH:
-		s.handleOFETCH(ttcPayload)
+		// JDBC thin driver reuses func=0x11 with sub-op 0x69 for execute-with-SQL.
+		// Distinguish from plain OFETCH by checking the sub-operation byte.
+		if IsJDBCExecSQL(ttcPayload) {
+			if err := s.checkQuotas(); err != nil {
+				_ = s.sendOracleError(err)
+				return true
+			}
+
+			s.handleJDBCExec(ttcPayload)
+		} else {
+			s.handleOFETCH(ttcPayload)
+		}
 
 	case TTCFuncOCLOSE, TTCFuncOClosev2:
 		cursorID, err := decodeCursorIDFromOCLOSE(ttcPayload)

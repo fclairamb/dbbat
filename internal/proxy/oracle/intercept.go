@@ -128,6 +128,43 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 	return nil
 }
 
+// handleJDBCExec intercepts a JDBC execute-with-SQL message (func=0x11, sub=0x69).
+func (s *session) handleJDBCExec(ttcPayload []byte) {
+	result, err := decodeJDBCExecSQL(ttcPayload)
+	if err != nil {
+		s.logger.DebugContext(s.ctx, "failed to decode JDBC exec", slog.Any("error", err))
+		return
+	}
+
+	s.logger.InfoContext(s.ctx, "query intercepted",
+		slog.String("sql", truncateSQL(result.SQL, 200)),
+		slog.String("source", "jdbc"),
+	)
+
+	// Access control check
+	if s.grant != nil {
+		if err := shared.ValidateOracleQuery(result.SQL, s.grant); err != nil {
+			s.logger.WarnContext(s.ctx, "query blocked by access control",
+				slog.String("sql", truncateSQL(result.SQL, 200)),
+				slog.Any("error", err),
+			)
+			// Note: we don't return an error here because the packet has already
+			// been forwarded in the non-blocking path. Access control blocking for
+			// JDBC exec would need to be handled in interceptClientMessage.
+		}
+	}
+
+	// Track as pending query
+	cursor := &trackedCursor{
+		sql:      result.SQL,
+		parsedAt: time.Now(),
+	}
+	s.tracker.pendingQuery = &pendingOracleQuery{
+		cursor:    cursor,
+		startTime: time.Now(),
+	}
+}
+
 // handleQueryResultV2 processes a v315+ QueryResult (func=0x10) response.
 // Extracts column names and row values, stores them as query results.
 // For large result sets, rows arrive across multiple response packets.

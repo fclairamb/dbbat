@@ -382,6 +382,49 @@ func decodePiggybackExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 	return nil, fmt.Errorf("%w: could not find SQL text in piggyback exec payload", ErrEmptySQL)
 }
 
+// decodeJDBCExecSQL extracts SQL text from a JDBC execute message (func=0x11, sub=0x69).
+//
+// JDBC thin driver uses function code 0x11 with sub-operation 0x69 for SQL execution.
+// The layout embeds a piggyback-like sub-header (0x03 0x5e) and places the SQL at
+// a consistent offset. The SQL is preceded by a block of zero bytes and its length
+// is encoded with the standard varlen encoding.
+//
+// Observed layout (TTC payload, starting from func code byte):
+//
+//	[0]     0x11 (function code)
+//	[1]     0x69 (sub-operation: JDBC execute)
+//	[2]     sequence number
+//	[3..7]  flags (01 01 01 01 01 or variants)
+//	[8]     0x03 (embedded piggyback marker)
+//	[9]     0x5e (embedded execute sub-op)
+//	[10..N] cursor options, flags, bind metadata
+//	[N+1]   SQL length (varlen encoded)
+//	[N+2..] SQL text (UTF-8)
+//
+// SQL is found at TTC offset 57 (no binds) or 63 (with bind parameters).
+func decodeJDBCExecSQL(ttcPayload []byte) (*OALL8Result, error) {
+	if len(ttcPayload) < 30 {
+		return nil, fmt.Errorf("%w: JDBC exec needs at least 30 bytes, got %d", ErrOALL8TooShort, len(ttcPayload))
+	}
+
+	// Scan for SQL text at the known offsets where JDBC places it.
+	// The SQL is preceded by a run of zero bytes and a varlen length prefix.
+	for _, offset := range []int{55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70} {
+		sql, err := extractSQLAtOffset(ttcPayload, offset)
+		if err == nil && sql != "" {
+			return &OALL8Result{SQL: sql}, nil
+		}
+	}
+
+	// Fallback: find SQL keywords directly
+	sql := findSQLInPayload(ttcPayload)
+	if sql != "" {
+		return &OALL8Result{SQL: sql}, nil
+	}
+
+	return nil, fmt.Errorf("%w: could not find SQL text in JDBC exec payload", ErrEmptySQL)
+}
+
 // findSQLInPayload scans the raw payload for SQL text by looking for SQL keywords.
 // Used as a fallback when length-prefix decoding fails.
 func findSQLInPayload(payload []byte) string {

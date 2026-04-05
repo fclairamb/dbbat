@@ -135,3 +135,28 @@ func (w *Writer) Close() error {
 
 	return w.file.Close()
 }
+
+// writePacketRaw writes a packet with a pre-encoded timestamp (for dump transformation).
+func (w *Writer) writePacketRaw(relativeNsBuf []byte, direction byte, data []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	frameTotal := int64(packetFrameSize + len(data))
+
+	var buf [packetFrameSize]byte
+	copy(buf[:8], relativeNsBuf)
+	buf[8] = direction
+	binary.BigEndian.PutUint32(buf[9:13], uint32(len(data)))
+
+	if _, err := w.file.Write(buf[:]); err != nil {
+		return fmt.Errorf("write packet frame: %w", err)
+	}
+
+	if _, err := w.file.Write(data); err != nil {
+		return fmt.Errorf("write packet data: %w", err)
+	}
+
+	w.written += frameTotal
+
+	return nil
+}
