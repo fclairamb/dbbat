@@ -32,6 +32,7 @@ var (
 	ErrAPIKeyNotFound = errors.New("API key not found")
 	ErrAPIKeyRevoked  = errors.New("API key has been revoked")
 	ErrAPIKeyExpired  = errors.New("API key has expired")
+	ErrAPIKeyTooShort = errors.New("API key too short")
 )
 
 // generateKey generates a new random key with the given prefix
@@ -100,6 +101,41 @@ func (s *Store) CreateAPIKey(ctx context.Context, userID uuid.UUID, name string,
 	}
 
 	return apiKey, plainKey, nil
+}
+
+// CreateAPIKeyWithValue creates an API key with a specific plaintext value.
+// Used for test mode provisioning where stable, predictable keys are needed.
+func (s *Store) CreateAPIKeyWithValue(ctx context.Context, userID uuid.UUID, name string, plainKey string, expiresAt *time.Time) (*APIKey, error) {
+	if len(plainKey) < APIKeyPrefixLength {
+		return nil, ErrAPIKeyTooShort
+	}
+
+	prefix := plainKey[:APIKeyPrefixLength]
+
+	keyHash, err := crypto.HashPassword(plainKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash API key: %w", err)
+	}
+
+	apiKey := &APIKey{
+		UserID:    userID,
+		Name:      name,
+		KeyHash:   keyHash,
+		KeyPrefix: prefix,
+		KeyType:   KeyTypeAPI,
+		ExpiresAt: expiresAt,
+		CreatedAt: time.Now(),
+	}
+
+	_, err = s.db.NewInsert().
+		Model(apiKey).
+		Returning("*").
+		Exec(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create API key: %w", err)
+	}
+
+	return apiKey, nil
 }
 
 // CreateWebSession creates a new web session key for a user
