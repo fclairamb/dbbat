@@ -603,7 +603,7 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 		{viewerUser, "viewer-test-key", "dbb_viewer_key"},
 	}
 	for _, tk := range testKeys {
-		if _, err := dataStore.CreateAPIKeyWithValue(ctx, tk.user.UID, tk.name, tk.key, nil); err != nil {
+		if _, err := dataStore.CreateAPIKeyWithValue(ctx, tk.user.UID, tk.name, tk.key, nil, encryptionKey); err != nil {
 			return fmt.Errorf("failed to create test API key for %s: %w", tk.user.Username, err)
 		}
 		logger.InfoContext(ctx, "Created test API key", slog.String("user", tk.user.Username), slog.String("key", tk.key))

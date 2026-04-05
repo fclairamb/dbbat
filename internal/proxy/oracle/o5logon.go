@@ -3,12 +3,14 @@ package oracle
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/md5" //nolint:gosec // O5LOGON protocol requires MD5
+	"crypto/md5"  //nolint:gosec // O5LOGON protocol requires MD5
 	"crypto/rand"
 	"crypto/sha1" //nolint:gosec // O5LOGON protocol requires SHA-1
 	"encoding/hex"
 	"fmt"
 	"strings"
+
+	dbbcrypto "github.com/fclairamb/dbbat/internal/crypto"
 )
 
 const (
@@ -29,30 +31,15 @@ type O5LogonServer struct {
 
 // GenerateO5LogonVerifier creates salt + verifier key from a plaintext password.
 // Called at API key creation time; the results are stored in the database.
+// Delegates to the crypto package for the core computation.
 func GenerateO5LogonVerifier(password string) (salt, verifierKey []byte, err error) {
-	salt = make([]byte, o5LogonSaltLength)
-	if _, err = rand.Read(salt); err != nil {
-		return nil, nil, fmt.Errorf("failed to generate salt: %w", err)
-	}
-
-	verifierKey = deriveVerifierKey(password, salt)
-
-	return salt, verifierKey, nil
+	return dbbcrypto.GenerateO5LogonVerifier(password)
 }
 
 // deriveVerifierKey computes the O5LOGON verifier key from password and salt.
-// verifier_key = SHA1(password || salt), zero-padded to 24 bytes.
+// Delegates to the crypto package.
 func deriveVerifierKey(password string, salt []byte) []byte {
-	h := sha1.New() //nolint:gosec // O5LOGON protocol requires SHA-1
-	h.Write([]byte(password))
-	h.Write(salt)
-	hash := h.Sum(nil) // 20 bytes
-
-	// Zero-pad to 24 bytes for AES-192
-	key := make([]byte, o5LogonVerifierKeyLength)
-	copy(key, hash)
-
-	return key
+	return dbbcrypto.DeriveO5LogonVerifierKey(password, salt)
 }
 
 // NewO5LogonServer creates a server from stored verifier data.
