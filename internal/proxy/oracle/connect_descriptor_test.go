@@ -99,3 +99,70 @@ func TestExtractConnectString_Empty(t *testing.T) {
 	s := findDescriptorInPayload([]byte{})
 	assert.Empty(t, s)
 }
+
+func TestRewriteServiceName(t *testing.T) {
+	t.Parallel()
+
+	desc := `(DESCRIPTION=(CONNECT_DATA=(SERVICE_NAME=abynonprod))(ADDRESS=(PROTOCOL=TCP)(HOST=localhost)(PORT=1522)))`
+	// Build a minimal payload with the descriptor at offset 26
+	payload := make([]byte, 26+len(desc))
+	payload[16] = byte(len(desc) >> 8) // connect data length
+	payload[17] = byte(len(desc))
+	payload[18] = 0      // connect data offset (high)
+	payload[19] = 26 + 8 // offset from packet start (payload offset 26 + 8-byte TNS header = 34)
+	copy(payload[26:], desc)
+
+	pkt := &TNSPacket{Type: TNSPacketTypeConnect, Payload: payload}
+
+	rewritten := rewriteServiceName(pkt, "abynonprod", "TEST01")
+
+	newDesc := string(rewritten.Payload[26:])
+	assert.Contains(t, newDesc, "SERVICE_NAME=TEST01")
+	assert.NotContains(t, newDesc, "abynonprod")
+	// Raw should be nil so writeTNSPacket re-encodes
+	assert.Nil(t, rewritten.Raw)
+}
+
+func TestRewriteServiceName_NoChange(t *testing.T) {
+	t.Parallel()
+
+	pkt := &TNSPacket{
+		Type:    TNSPacketTypeConnect,
+		Payload: []byte("(DESCRIPTION=(CONNECT_DATA=(SERVICE_NAME=TEST01)))"),
+	}
+
+	// Same name — should return original packet
+	result := rewriteServiceName(pkt, "TEST01", "TEST01")
+	assert.Equal(t, pkt, result)
+}
+
+func TestRewriteServiceName_CaseInsensitive(t *testing.T) {
+	t.Parallel()
+
+	pkt := &TNSPacket{
+		Type:    TNSPacketTypeConnect,
+		Payload: []byte("(DESCRIPTION=(CONNECT_DATA=(service_name=mydb)))"),
+	}
+
+	result := rewriteServiceName(pkt, "mydb", "PROD")
+	assert.Contains(t, string(result.Payload), "PROD")
+	assert.NotContains(t, string(result.Payload), "mydb")
+}
+
+func TestRewriteServiceName_PadsShorterName(t *testing.T) {
+	t.Parallel()
+
+	pkt := &TNSPacket{
+		Type:    TNSPacketTypeConnect,
+		Payload: []byte("(DESCRIPTION=(CONNECT_DATA=(SERVICE_NAME=abynonprod)))"),
+		Raw:     []byte("HEADER(DESCRIPTION=(CONNECT_DATA=(SERVICE_NAME=abynonprod)))"),
+	}
+
+	result := rewriteServiceName(pkt, "abynonprod", "TEST01")
+	// TEST01 (6 chars) padded to 10 chars to match abynonprod length
+	assert.Contains(t, string(result.Payload), "TEST01")
+	assert.NotContains(t, string(result.Payload), "abynonprod")
+	// Same length preserved
+	assert.Len(t, result.Payload, len(pkt.Payload))
+	assert.Len(t, result.Raw, len(pkt.Raw))
+}

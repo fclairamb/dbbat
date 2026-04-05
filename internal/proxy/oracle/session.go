@@ -88,46 +88,19 @@ func (s *session) run() error {
 		return fmt.Errorf("%w: got %s", ErrExpectedConnectPacket, connectPkt.Type)
 	}
 
-	// Step 2: Parse connect descriptor to find target database
-	connectStr := extractConnectString(connectPkt.Payload)
-	s.logger.DebugContext(s.ctx, "TNS Connect received",
-		slog.Int("payload_len", len(connectPkt.Payload)),
-		slog.String("connect_string", connectStr),
-	)
-	cd := parseConnectDescriptor(connectStr)
-	s.serviceName = cd.ServiceName
-
-	if s.serviceName == "" {
-		s.serviceName = parseServiceNameEZConnect(connectStr)
+	// Step 2: Parse service name and resolve database
+	if err := s.resolveDatabase(connectPkt.Payload); err != nil {
+		return err
 	}
 
-	if s.serviceName == "" {
-		s.serviceName = cd.SID
-	}
-
-	if s.serviceName == "" {
-		s.sendRefuse(ORA12505, "missing SERVICE_NAME in connect descriptor")
-
-		return ErrNoServiceName
-	}
-
-	s.logger = s.logger.With("service_name", s.serviceName)
-
-	// Step 3: Look up database in store (by name first, then by oracle_service_name)
-	db, err := s.store.GetDatabaseByName(s.ctx, s.serviceName)
-	if err != nil {
-		db, err = s.store.GetDatabaseByOracleServiceName(s.ctx, s.serviceName)
-		if err != nil {
-			s.sendRefuse(ORA12514, "database not found")
-
-			return fmt.Errorf("%w: %s: %w", ErrDatabaseNotFound, s.serviceName, err)
-		}
-	}
-
-	s.database = db
+	// Step 3: Rewrite SERVICE_NAME in Connect packet for upstream
+	connectPkt = s.rewriteConnectForUpstream(connectPkt)
 
 	// Step 4: Connect to upstream Oracle
-	upstreamAddr := net.JoinHostPort(db.Host, fmt.Sprintf("%d", db.Port))
+	upstreamAddr := net.JoinHostPort(s.database.Host, fmt.Sprintf("%d", s.database.Port))
+	s.logger.InfoContext(s.ctx, "connecting to upstream Oracle",
+		slog.String("addr", upstreamAddr),
+		slog.String("database", s.database.Name))
 
 	s.upstreamConn, err = net.Dial("tcp", upstreamAddr)
 	if err != nil {
@@ -136,7 +109,7 @@ func (s *session) run() error {
 		return fmt.Errorf("failed to connect to upstream %s: %w", upstreamAddr, err)
 	}
 
-	// Step 5: Forward the original Connect packet to upstream
+	// Step 6: Forward the rewritten Connect packet to upstream
 	if err := writeTNSPacket(s.upstreamConn, connectPkt); err != nil {
 		s.sendRefuse(ORA12541, "upstream connection failed")
 
@@ -207,6 +180,67 @@ func (s *session) run() error {
 
 	// Step 9: Enter bidirectional TNS relay with query interception
 	return s.proxyMessages()
+}
+
+// resolveDatabase parses the service name from the Connect payload and looks up the database.
+func (s *session) resolveDatabase(connectPayload []byte) error {
+	connectStr := extractConnectString(connectPayload)
+	s.logger.DebugContext(s.ctx, "TNS Connect received",
+		slog.Int("payload_len", len(connectPayload)),
+		slog.String("connect_string", connectStr),
+	)
+
+	cd := parseConnectDescriptor(connectStr)
+	s.serviceName = cd.ServiceName
+
+	if s.serviceName == "" {
+		s.serviceName = parseServiceNameEZConnect(connectStr)
+	}
+
+	if s.serviceName == "" {
+		s.serviceName = cd.SID
+	}
+
+	if s.serviceName == "" {
+		s.sendRefuse(ORA12505, "missing SERVICE_NAME in connect descriptor")
+
+		return ErrNoServiceName
+	}
+
+	s.logger = s.logger.With("service_name", s.serviceName)
+
+	db, err := s.store.GetDatabaseByName(s.ctx, s.serviceName)
+	if err != nil {
+		db, err = s.store.GetDatabaseByOracleServiceName(s.ctx, s.serviceName)
+		if err != nil {
+			s.sendRefuse(ORA12514, "database not found")
+
+			return fmt.Errorf("%w: %s: %w", ErrDatabaseNotFound, s.serviceName, err)
+		}
+	}
+
+	s.database = db
+
+	return nil
+}
+
+// rewriteConnectForUpstream rewrites the SERVICE_NAME in the Connect packet
+// to match the upstream Oracle listener's expected service name.
+func (s *session) rewriteConnectForUpstream(connectPkt *TNSPacket) *TNSPacket {
+	upstreamServiceName := s.database.DatabaseName
+	if s.database.OracleServiceName != nil && *s.database.OracleServiceName != "" {
+		upstreamServiceName = *s.database.OracleServiceName
+	}
+
+	if upstreamServiceName == "" || upstreamServiceName == s.serviceName {
+		return connectPkt
+	}
+
+	s.logger.DebugContext(s.ctx, "rewrote SERVICE_NAME for upstream",
+		slog.String("from", s.serviceName),
+		slog.String("to", upstreamServiceName))
+
+	return rewriteServiceName(connectPkt, s.serviceName, upstreamServiceName)
 }
 
 // handleClientNegotiation handles the TTC Set Protocol and Set Data Types exchange
