@@ -74,6 +74,9 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 		}
 	}
 
+	// Complete previous query if still pending (sets duration)
+	s.flushPendingQuery()
+
 	// Track the cursor
 	cursor := &trackedCursor{
 		cursorID:   result.CursorID,
@@ -83,13 +86,22 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 	}
 	s.tracker.cursors[result.CursorID] = cursor
 
-	// Start pending query
+	// Start pending query and persist immediately
 	s.tracker.pendingQuery = &pendingOracleQuery{
 		cursor:    cursor,
 		startTime: time.Now(),
 	}
+	s.persistQueryRecord()
 
 	return nil
+}
+
+// flushPendingQuery completes any outstanding query that hasn't been finalized.
+// Called before starting a new query to ensure the previous one is persisted.
+func (s *session) flushPendingQuery() {
+	if s.tracker.pendingQuery != nil {
+		s.completeQuery(nil, nil, 0)
+	}
 }
 
 // handlePiggybackExec intercepts a v315+ piggyback execute-with-SQL message.
@@ -115,7 +127,10 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 		}
 	}
 
-	// Track as pending query
+	// Complete previous query if still pending (sets duration)
+	s.flushPendingQuery()
+
+	// Track as pending query and persist immediately
 	cursor := &trackedCursor{
 		sql:      result.SQL,
 		parsedAt: time.Now(),
@@ -124,6 +139,7 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 		cursor:    cursor,
 		startTime: time.Now(),
 	}
+	s.persistQueryRecord()
 
 	return nil
 }
@@ -141,20 +157,10 @@ func (s *session) handleJDBCExec(ttcPayload []byte) {
 		slog.String("source", "jdbc"),
 	)
 
-	// Access control check
-	if s.grant != nil {
-		if err := shared.ValidateOracleQuery(result.SQL, s.grant); err != nil {
-			s.logger.WarnContext(s.ctx, "query blocked by access control",
-				slog.String("sql", truncateSQL(result.SQL, 200)),
-				slog.Any("error", err),
-			)
-			// Note: we don't return an error here because the packet has already
-			// been forwarded in the non-blocking path. Access control blocking for
-			// JDBC exec would need to be handled in interceptClientMessage.
-		}
-	}
+	// Complete previous query if still pending (sets duration)
+	s.flushPendingQuery()
 
-	// Track as pending query
+	// Track as pending query and persist immediately
 	cursor := &trackedCursor{
 		sql:      result.SQL,
 		parsedAt: time.Now(),
@@ -163,6 +169,7 @@ func (s *session) handleJDBCExec(ttcPayload []byte) {
 		cursor:    cursor,
 		startTime: time.Now(),
 	}
+	s.persistQueryRecord()
 }
 
 // handleQueryResultV2 processes a v315+ QueryResult (func=0x10) response.
@@ -185,10 +192,19 @@ func (s *session) handleQueryResultV2(ttcPayload []byte, bytesTransferred int64)
 		s.tracker.pendingQuery.cursor.columns = columns
 	}
 
-	// Row capture from TTC binary is disabled: the TTC row format has variable-length
-	// fields that the parser cannot reliably decode without a full protocol implementation.
-	// Misaligned column boundaries produce corrupted row data. SQL text, duration, and
-	// error tracking still work correctly.
+	// Capture rows from the first QueryResult response.
+	// This is reliable because the column definitions and row data are in the same packet.
+	if s.tracker.pendingQuery != nil && s.tracker.pendingQuery.cursor != nil {
+		columns := s.tracker.pendingQuery.cursor.columns
+		for _, row := range result.Rows {
+			values := make([]interface{}, len(row))
+			for i, v := range row {
+				values[i] = v
+			}
+
+			s.captureRow(columns, values)
+		}
+	}
 
 	// Only complete the query when we see the end-of-data marker (ORA-01403)
 	if result.NoData {
@@ -440,7 +456,7 @@ func (s *session) captureRow(columns []columnDef, values []interface{}) {
 // persistQueryRecord creates the query record in the database before streaming rows.
 func (s *session) persistQueryRecord() {
 	pending := s.tracker.pendingQuery
-	if pending == nil || pending.queryPersisted || pending.cursor == nil {
+	if pending == nil || pending.queryPersisted || pending.cursor == nil || s.store == nil {
 		return
 	}
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -67,11 +68,16 @@ func (s *Server) Start(addr string) error {
 	s.listener = listener
 	s.listenAddr = addr
 	s.mu.Unlock()
-	s.logger.InfoContext(s.ctx, "Oracle proxy server listening", slog.String("addr", addr))
+	s.logger.InfoContext(s.ctx, "Oracle proxy server listening", slog.String("addr", addr),
+		slog.String("dump_dir", s.dumpConfig.Dir))
 
 	// Start dump cleanup goroutine if dumps are enabled
 	if s.dumpConfig.Dir != "" {
-		go s.runDumpCleanup()
+		if err := os.MkdirAll(s.dumpConfig.Dir, 0o755); err != nil {
+			s.logger.ErrorContext(s.ctx, "failed to create dump directory", slog.String("dir", s.dumpConfig.Dir), slog.Any("error", err))
+		} else {
+			go s.runDumpCleanup()
+		}
 	}
 
 	for {

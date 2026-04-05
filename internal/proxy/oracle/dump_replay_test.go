@@ -89,30 +89,24 @@ func parseTNSFromDumpPacket(data []byte) (*TNSPacket, error) {
 }
 
 // TestDumpReplay_Headers validates dump file headers are correctly read.
+// Note: testdata dumps are anonymised — connection metadata is stripped.
 func TestDumpReplay_Headers(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name        string
-		file        string
-		serviceName string
-	}{
-		{"python_thin", "python_thin.dbbat-dump", "TEST01"},
-		{"go_ora", "go_ora.dbbat-dump", "TEST01"},
-		{"dbeaver", "dbeaver.dbbat-dump", "TEST01"},
-		{"dbeaver_init", "dbeaver_init.dbbat-dump", "TEST01"},
+	tests := []string{
+		"python_thin.dbbat-dump",
+		"go_ora.dbbat-dump",
+		"dbeaver.dbbat-dump",
+		"dbeaver_init.dbbat-dump",
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, file := range tests {
+		t.Run(file, func(t *testing.T) {
 			t.Parallel()
 
-			td := loadTestDump(t, tt.file)
+			td := loadTestDump(t, file)
 			assert.Equal(t, dump.ProtocolOracle, td.Header.Protocol, "protocol")
-			assert.Equal(t, tt.serviceName, td.Header.Connection["service_name"], "service name")
-			upstreamAddr, _ := td.Header.Connection["upstream_addr"].(string)
-			assert.Contains(t, upstreamAddr, "oracle-abynonprod.db.stonal.io", "upstream addr")
-			assert.False(t, td.Header.StartTime.IsZero(), "start time")
+			assert.NotEmpty(t, td.Header.SessionID, "session ID")
 			assert.NotEmpty(t, td.Packets, "should have packets")
 		})
 	}
