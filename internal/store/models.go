@@ -141,6 +141,7 @@ type Connection struct {
 type ConnectionFilter struct {
 	UserID     *uuid.UUID
 	DatabaseID *uuid.UUID
+	BeforeUID  *uuid.UUID // Cursor: return connections with UID < this value
 	Limit      int
 	Offset     int
 }
@@ -200,6 +201,7 @@ type QueryFilter struct {
 	DatabaseID   *uuid.UUID
 	StartTime    *time.Time
 	EndTime      *time.Time
+	BeforeUID    *uuid.UUID // Cursor: return queries with UID < this value (for stable pagination)
 	Limit        int
 	Offset       int
 }
@@ -283,6 +285,7 @@ type AuditFilter struct {
 	PerformedBy *uuid.UUID
 	StartTime   *time.Time
 	EndTime     *time.Time
+	BeforeUID   *uuid.UUID // Cursor: return events with UID < this value
 	Limit       int
 	Offset      int
 }

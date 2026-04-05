@@ -51,7 +51,11 @@ func (s *Store) ListAuditEvents(ctx context.Context, filter AuditFilter) ([]Audi
 		q = q.Where("created_at <= ?", *filter.EndTime)
 	}
 
-	q = q.Order("created_at DESC")
+	if filter.BeforeUID != nil {
+		q = q.Where("uid < ?", *filter.BeforeUID)
+	}
+
+	q = q.Order("uid DESC")
 
 	if filter.Limit > 0 {
 		q = q.Limit(filter.Limit)
