@@ -82,16 +82,16 @@ const AuthenticatedQueriesUidRoute = AuthenticatedQueriesUidRouteImport.update({
 } as any)
 
 export interface FileRoutesByFullPath {
-  '/login': typeof LoginRoute
   '/': typeof AuthenticatedIndexRoute
+  '/login': typeof LoginRoute
   '/queries/$uid': typeof AuthenticatedQueriesUidRoute
-  '/api-keys': typeof AuthenticatedApiKeysIndexRoute
-  '/audit': typeof AuthenticatedAuditIndexRoute
-  '/connections': typeof AuthenticatedConnectionsIndexRoute
-  '/databases': typeof AuthenticatedDatabasesIndexRoute
-  '/grants': typeof AuthenticatedGrantsIndexRoute
-  '/queries': typeof AuthenticatedQueriesIndexRoute
-  '/users': typeof AuthenticatedUsersIndexRoute
+  '/api-keys/': typeof AuthenticatedApiKeysIndexRoute
+  '/audit/': typeof AuthenticatedAuditIndexRoute
+  '/connections/': typeof AuthenticatedConnectionsIndexRoute
+  '/databases/': typeof AuthenticatedDatabasesIndexRoute
+  '/grants/': typeof AuthenticatedGrantsIndexRoute
+  '/queries/': typeof AuthenticatedQueriesIndexRoute
+  '/users/': typeof AuthenticatedUsersIndexRoute
 }
 export interface FileRoutesByTo {
   '/login': typeof LoginRoute
@@ -122,16 +122,16 @@ export interface FileRoutesById {
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    | '/login'
     | '/'
+    | '/login'
     | '/queries/$uid'
-    | '/api-keys'
-    | '/audit'
-    | '/connections'
-    | '/databases'
-    | '/grants'
-    | '/queries'
-    | '/users'
+    | '/api-keys/'
+    | '/audit/'
+    | '/connections/'
+    | '/databases/'
+    | '/grants/'
+    | '/queries/'
+    | '/users/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/login'
@@ -176,7 +176,7 @@ declare module '@tanstack/react-router' {
     '/_authenticated': {
       id: '/_authenticated'
       path: ''
-      fullPath: ''
+      fullPath: '/'
       preLoaderRoute: typeof AuthenticatedRouteImport
       parentRoute: typeof rootRouteImport
     }
@@ -190,49 +190,49 @@ declare module '@tanstack/react-router' {
     '/_authenticated/users/': {
       id: '/_authenticated/users/'
       path: '/users'
-      fullPath: '/users'
+      fullPath: '/users/'
       preLoaderRoute: typeof AuthenticatedUsersIndexRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/queries/': {
       id: '/_authenticated/queries/'
       path: '/queries'
-      fullPath: '/queries'
+      fullPath: '/queries/'
       preLoaderRoute: typeof AuthenticatedQueriesIndexRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/grants/': {
       id: '/_authenticated/grants/'
       path: '/grants'
-      fullPath: '/grants'
+      fullPath: '/grants/'
       preLoaderRoute: typeof AuthenticatedGrantsIndexRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/databases/': {
       id: '/_authenticated/databases/'
       path: '/databases'
-      fullPath: '/databases'
+      fullPath: '/databases/'
       preLoaderRoute: typeof AuthenticatedDatabasesIndexRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/connections/': {
       id: '/_authenticated/connections/'
       path: '/connections'
-      fullPath: '/connections'
+      fullPath: '/connections/'
       preLoaderRoute: typeof AuthenticatedConnectionsIndexRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/audit/': {
       id: '/_authenticated/audit/'
       path: '/audit'
-      fullPath: '/audit'
+      fullPath: '/audit/'
       preLoaderRoute: typeof AuthenticatedAuditIndexRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/api-keys/': {
       id: '/_authenticated/api-keys/'
       path: '/api-keys'
-      fullPath: '/api-keys'
+      fullPath: '/api-keys/'
       preLoaderRoute: typeof AuthenticatedApiKeysIndexRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
