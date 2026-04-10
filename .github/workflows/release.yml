@@ -92,7 +92,7 @@ jobs:
         run: echo "time=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
 
       - name: Build and push container images
-        uses: docker/build-push-action@v7.0.0
+        uses: docker/build-push-action@v7.1.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
