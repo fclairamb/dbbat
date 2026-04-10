@@ -66,7 +66,7 @@ jobs:
         working-directory: front
 
       - name: Upload frontend artifacts
-        uses: actions/upload-artifact@v7.0.0
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: frontend-dist
           path: front/dist/
@@ -125,7 +125,7 @@ jobs:
             -o ./bin/dbbat .
 
       - name: Upload binary
-        uses: actions/upload-artifact@v7.0.0
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: dbbat-binary
           path: bin/dbbat
@@ -205,7 +205,7 @@ jobs:
         working-directory: front
 
       - name: Upload test artifacts
-        uses: actions/upload-artifact@v7.0.0
+        uses: actions/upload-artifact@v7.0.1
         if: always()
         with:
           name: playwright-results
