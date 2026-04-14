@@ -105,11 +105,11 @@ type RedirectRule struct {
 
 // SlackAuthConfig holds Slack OAuth configuration.
 type SlackAuthConfig struct {
-	ClientID        string `koanf:"slack_client_id"`
-	ClientSecret    string `koanf:"slack_client_secret"`
-	TeamID          string `koanf:"slack_team_id"`
-	AutoCreateUsers bool   `koanf:"slack_auto_create_users"`
-	DefaultRole     string `koanf:"slack_default_role"`
+	ClientID        string `koanf:"client_id"`
+	ClientSecret    string `koanf:"client_secret"`
+	TeamID          string `koanf:"team_id"`
+	AutoCreateUsers bool   `koanf:"auto_create_users"`
+	DefaultRole     string `koanf:"default_role"`
 }
 
 // Enabled returns true if Slack OAuth is configured with both client ID and secret.
