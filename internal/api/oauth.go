@@ -172,7 +172,7 @@ func (s *Server) handleOAuthCallback(providerName string) gin.HandlerFunc {
 		if s.config != nil && s.config.BaseURL != "" {
 			baseURL = s.config.BaseURL
 		}
-		c.Redirect(http.StatusFound, baseURL+"/?token="+plainKey)
+		c.Redirect(http.StatusFound, baseURL+"/login?token="+plainKey)
 	}
 }
 
