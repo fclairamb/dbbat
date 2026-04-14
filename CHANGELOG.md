@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/fclairamb/dbbat/compare/v0.5.0...v0.5.1) (2026-04-14)
+
+
+### Bug Fixes
+
+* **config:** remove redundant slack_ prefix from SlackAuthConfig koanf tags ([#101](https://github.com/fclairamb/dbbat/issues/101)) ([e3882cd](https://github.com/fclairamb/dbbat/commit/e3882cd926b93378ea61acd2eb401a35e62354fa))
+
 ## [0.5.0](https://github.com/fclairamb/dbbat/compare/v0.4.0...v0.5.0) (2026-04-14)
 
 
