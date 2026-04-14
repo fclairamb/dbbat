@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.2](https://github.com/fclairamb/dbbat/compare/v0.5.1...v0.5.2) (2026-04-14)
+
+
+### Bug Fixes
+
+* **auth:** redirect OAuth callback to /login route instead of root ([#103](https://github.com/fclairamb/dbbat/issues/103)) ([842b5ba](https://github.com/fclairamb/dbbat/commit/842b5ba1bb9484f60949057cb249a08a360617ba))
+
 ## [0.5.1](https://github.com/fclairamb/dbbat/compare/v0.5.0...v0.5.1) (2026-04-14)
 
 
