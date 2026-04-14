@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.5.0](https://github.com/fclairamb/dbbat/compare/v0.4.0...v0.5.0) (2026-04-14)
+
+
+### Features
+
+* **proxy:** API key auth for PG proxy, Oracle auth, and Oracle SERVICE_NAME handling rewrite ([#79](https://github.com/fclairamb/dbbat/issues/79)) ([83858a1](https://github.com/fclairamb/dbbat/commit/83858a136648ca866ef4906fbc79c170ae2dfa4b))
+
+
+### Bug Fixes
+
+* **deps:** update dependency zod to v4 ([#91](https://github.com/fclairamb/dbbat/issues/91)) ([c92061a](https://github.com/fclairamb/dbbat/commit/c92061a03fe38e373f9d5199435c5f3f8e87b864))
+* **deps:** update docusaurus monorepo to v3.10.0 ([#89](https://github.com/fclairamb/dbbat/issues/89)) ([a6c417c](https://github.com/fclairamb/dbbat/commit/a6c417c9fdffcaa5dd59f1c8beceefe6ded3a0d2))
+* **deps:** update module golang.org/x/crypto to v0.50.0 ([#93](https://github.com/fclairamb/dbbat/issues/93)) ([13a91fa](https://github.com/fclairamb/dbbat/commit/13a91fade65ee4ea68719980a39bb9eae458b148))
+* **deps:** update testcontainers-go monorepo to v0.41.0 ([#88](https://github.com/fclairamb/dbbat/issues/88)) ([79fecd7](https://github.com/fclairamb/dbbat/commit/79fecd78ee8a2c0498f5275597a687feedb1d159))
+* **deps:** update testcontainers-go monorepo to v0.42.0 ([#94](https://github.com/fclairamb/dbbat/issues/94)) ([9977e30](https://github.com/fclairamb/dbbat/commit/9977e30b9a60afd6a6e2745de0bd285b921ec9a5))
+
 ## [0.4.0](https://github.com/fclairamb/dbbat/compare/v0.3.0...v0.4.0) (2026-04-04)
 
 
