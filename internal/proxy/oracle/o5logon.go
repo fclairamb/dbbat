@@ -212,7 +212,7 @@ func aes192CBCDecrypt(key, ciphertext []byte) ([]byte, error) {
 }
 
 // pkcs7Pad applies PKCS#7 padding to the data.
-func pkcs7Pad(data []byte, blockSize int) []byte {
+func pkcs7Pad(data []byte, blockSize int) []byte { //nolint:unparam
 	padding := blockSize - len(data)%blockSize
 	padText := make([]byte, padding)
 	for i := range padText {

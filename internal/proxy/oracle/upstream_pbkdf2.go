@@ -125,8 +125,8 @@ func generatePBKDF2ClientResponse(password string, ch *upstreamAuthChallenge) (_
 		return nil, fmt.Errorf("failed to encrypt password: %w", err)
 	}
 
-	// 7. Encrypt speedy key (no padding for 18453)
-	encSpeedyKey, err := encryptOraclePassword(speedyKey, combinedKey)
+	// 7. Encrypt speedy key (truncated — padding=false for 18453 speedy key)
+	encSpeedyKey, err := encryptOraclePasswordTruncated(speedyKey, combinedKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt speedy key: %w", err)
 	}
@@ -227,6 +227,33 @@ func encryptOraclePassword(data, key []byte) ([]byte, error) {
 	mode.CryptBlocks(ciphertext, padded)
 
 	return ciphertext, nil
+}
+
+// encryptOraclePasswordTruncated encrypts with random prefix but truncates to originalLen (padding=false).
+func encryptOraclePasswordTruncated(data, key []byte) ([]byte, error) {
+	prefix := make([]byte, 16)
+	if _, err := rand.Read(prefix); err != nil {
+		return nil, err
+	}
+
+	payload := make([]byte, 0, len(prefix)+len(data))
+	payload = append(payload, prefix...)
+	payload = append(payload, data...)
+	originalLen := len(payload)
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	padded := pkcs7Pad(payload, aes.BlockSize)
+
+	iv := make([]byte, aes.BlockSize)
+	mode := cipher.NewCBCEncrypter(block, iv)
+	ciphertext := make([]byte, len(padded))
+	mode.CryptBlocks(ciphertext, padded)
+
+	return ciphertext[:originalLen], nil
 }
 
 // checkUpstreamAuthResponse checks if the upstream AUTH response indicates success.
