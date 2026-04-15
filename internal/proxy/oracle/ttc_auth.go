@@ -365,28 +365,8 @@ func readCLR(buf []byte) ([]byte, int) {
 // encodeTTCString encodes a string with Oracle TTC length prefix.
 // Short strings (< 254 bytes): 1-byte length prefix.
 // Long strings (>= 254 bytes): 0xFE marker + 2-byte BE length.
-func encodeTTCString(s string) []byte {
-	data := []byte(s)
-	if len(data) < 254 {
-		return append([]byte{byte(len(data))}, data...)
-	}
-
-	buf := []byte{0xFE}
-	buf = binary.BigEndian.AppendUint16(buf, uint16(len(data)))
-
-	return append(buf, data...)
-}
 
 // encodeTTCKVPair encodes a key-value pair for TTC AUTH messages.
-func encodeTTCKVPair(key, value string) []byte {
-	keyBytes := encodeTTCString(key)
-	valueBytes := encodeTTCString(value)
-	buf := make([]byte, 0, len(keyBytes)+len(valueBytes))
-	buf = append(buf, keyBytes...)
-	buf = append(buf, valueBytes...)
-
-	return buf
-}
 
 // parseTTCKVPairs parses TTC key-value pairs from a payload.
 // This is a best-effort parser — TTC encoding is complex and client-specific.

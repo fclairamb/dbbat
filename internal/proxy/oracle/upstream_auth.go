@@ -177,11 +177,6 @@ func (s *session) sendUpstreamConnect(connectPkt *TNSPacket) (*TNSPacket, error)
 }
 
 // writeV315Data writes a TTC payload as a v315+ TNS Data packet to the upstream connection.
-func (s *session) writeV315Data(payload []byte) error {
-	_, err := s.upstreamConn.Write(encodeV315DataPacket(payload))
-
-	return err
-}
 
 // upstreamNegotiate handles Set Protocol and Set Data Types exchange with upstream.
 // All post-Accept packets use v315+ format (4-byte length).
@@ -262,22 +257,24 @@ func (s *session) upstreamO5Logon() error { // Decrypt the database password
 		return fmt.Errorf("%w: got %s for upstream AUTH challenge", ErrUnexpectedPacketType, challengeResp.Type)
 	}
 
-	// Parse the challenge to extract AUTH_SESSKEY and AUTH_VFR_DATA
-	encServerSessKey, authVfrData, err := parseUpstreamAuthChallenge(challengeResp.Payload)
+	// Parse all AUTH_ KV pairs from the challenge
+	challenge := parseUpstreamAuthKVPairs(challengeResp.Payload)
+
+	s.logger.DebugContext(s.ctx, "upstream AUTH challenge",
+		slog.Int("sesskey_len", len(challenge.sessKey)),
+		slog.Int("salt_len", len(challenge.salt)),
+		slog.String("pbkdf2_csk_salt", challenge.pbkdf2CskSalt),
+		slog.Int("pbkdf2_vgen_count", challenge.pbkdf2VgenCount))
+
+	// Generate PBKDF2 client response (Oracle 19c uses verifier type 18453)
+	resp, err := generatePBKDF2ClientResponse(s.database.Password, &challenge)
 	if err != nil {
-		return fmt.Errorf("failed to parse AUTH challenge: %w", err)
+		return fmt.Errorf("failed to generate PBKDF2 response: %w", err)
 	}
 
-	// Generate client-side O5LOGON response
-	clientEncSessKey, encPassword, err := generateO5LogonClientResponse(
-		s.database.Password, encServerSessKey, authVfrData,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to generate O5LOGON response: %w", err)
-	}
-
-	// AUTH Phase 2: send encrypted password (v315+ format)
-	if err := s.writeV315Data(buildClientAuthPhase2(s.database.Username, clientEncSessKey, encPassword)); err != nil {
+	// AUTH Phase 2: send encrypted session key, password, and speedy key
+	phase2 := buildUpstreamAuthPhase2(s.database.Username, resp)
+	if _, err := s.upstreamConn.Write(encodeV315DataPacket(phase2)); err != nil {
 		return fmt.Errorf("failed to send AUTH Phase 2: %w", err)
 	}
 
@@ -300,125 +297,13 @@ func (s *session) upstreamO5Logon() error { // Decrypt the database password
 }
 
 // checkUpstreamAuthResponse checks if the upstream AUTH response indicates success.
-func checkUpstreamAuthResponse(payload []byte) error {
-	if len(payload) <= ttcDataFlagsSize+2 {
-		return nil // Too short to contain error info, assume success
-	}
-
-	funcCode := payload[ttcDataFlagsSize]
-	if funcCode != byte(TTCFuncResponse) {
-		return nil // Not a response packet
-	}
-
-	if len(payload) <= ttcDataFlagsSize+3 {
-		return nil
-	}
-
-	retCode := payload[ttcDataFlagsSize+2]
-	if retCode != 0 {
-		return ErrAuthFailed
-	}
-
-	return nil
-}
 
 // parseUpstreamAuthChallenge extracts AUTH_SESSKEY and AUTH_VFR_DATA from the upstream's
 // AUTH challenge response.
-func parseUpstreamAuthChallenge(tnsDataPayload []byte) (string, string, error) {
-	if len(tnsDataPayload) < ttcDataFlagsSize+3 {
-		return "", "", ErrAuthPhase1TooShort
-	}
-
-	// Skip data flags + response func code, then scan for AUTH_ KV pairs using proper DLC+CLR
-	offset := ttcDataFlagsSize + 2
-	if offset >= len(tnsDataPayload) {
-		return "", "", ErrAuthPhase1NoData
-	}
-
-	pairs := scanTTCKeyValPairs(tnsDataPayload[offset:])
-
-	var sessKey, vfrData string
-
-	for _, p := range pairs {
-		switch p.Key {
-		case authKeySessKey:
-			sessKey = p.Value
-		case authKeyVfrData:
-			vfrData = p.Value
-		}
-	}
-
-	if sessKey == "" {
-		return "", "", ErrAuthPhase2MissingSessKey
-	}
-
-	if vfrData == "" {
-		return "", "", ErrAuthPhase2MissingPassword
-	}
-
-	return sessKey, vfrData, nil
-}
 
 // generateO5LogonClientResponse generates the client-side O5LOGON auth response.
 // This mirrors what an Oracle client does: derive verifier from password+salt,
 // decrypt server session key, generate client session key, encrypt password.
-func generateO5LogonClientResponse(password, encServerSessKey, authVfrData string) (string, string, error) {
-	// AUTH_VFR_DATA is the hex-encoded salt (verifier type is in the KV flag, not the value)
-	if len(authVfrData) < 2 {
-		return "", "", ErrAuthPhase1TooShort
-	}
-
-	salt, err := hexDecodeBytes(authVfrData)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to decode salt from AUTH_VFR_DATA: %w", err)
-	}
-
-	// Derive verifier key from password + salt
-	verifierKey := deriveVerifierKey(password, salt)
-
-	// Decrypt server session key
-	decKey := deriveAESKey(verifierKey)
-	encServerSessKeyBytes, err := hexDecodeBytes(encServerSessKey)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to decode server session key: %w", err)
-	}
-
-	serverSessionKey, err := aes192CBCDecrypt(decKey, encServerSessKeyBytes)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to decrypt server session key: %w", err)
-	}
-
-	// Generate client session key
-	clientSessKeyBytes := make([]byte, o5LogonSessionKeyLength)
-	if _, err := cryptoRandRead(clientSessKeyBytes); err != nil {
-		return "", "", fmt.Errorf("failed to generate client session key: %w", err)
-	}
-
-	// Encrypt client session key
-	encClientSessKeyBytes, err := aes192CBCEncrypt(decKey, clientSessKeyBytes)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to encrypt client session key: %w", err)
-	}
-
-	// Derive combined key
-	combinedKey := deriveCombinedKey(serverSessionKey, clientSessKeyBytes)
-
-	// Encrypt password: random_prefix(16 bytes) + password
-	prefix := make([]byte, o5LogonPasswordPrefixLen)
-	if _, err := cryptoRandRead(prefix); err != nil {
-		return "", "", fmt.Errorf("failed to generate password prefix: %w", err)
-	}
-
-	passwordPayload := make([]byte, 0, len(prefix)+len(password))
-	passwordPayload = append(passwordPayload, prefix...)
-	passwordPayload = append(passwordPayload, []byte(password)...)
-	encPasswordBytes, err := aes192CBCEncrypt(combinedKey, passwordPayload)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to encrypt password: %w", err)
-	}
-
-	return hexEncode(encClientSessKeyBytes), hexEncode(encPasswordBytes), nil
-}
 
 // buildTNSConnect constructs the TNS Connect packet payload.
 
@@ -432,24 +317,3 @@ func generateO5LogonClientResponse(password, encServerSessKey, authVfrData strin
 
 // buildClientAuthPhase2 constructs a TTC AUTH Phase 2 message.
 // Contains the encrypted client session key and encrypted password.
-func buildClientAuthPhase2(username, clientEncSessKey, encPassword string) []byte {
-	payload := make([]byte, 0, 6+len(username)+len(clientEncSessKey)+len(encPassword)+50)
-	payload = append(payload,
-		0x00, 0x00, // data flags
-		0x03,                // func = piggyback
-		PiggybackSubAuth2,   // sub-op = AUTH Phase 2
-		byte(len(username)), // username length
-	)
-	payload = append(payload, []byte(username)...)
-
-	// Key-value pairs count
-	payload = append(payload, 0x02)
-
-	// AUTH_SESSKEY
-	payload = append(payload, encodeTTCKVPair(authKeySessKey, clientEncSessKey)...)
-
-	// AUTH_PASSWORD
-	payload = append(payload, encodeTTCKVPair(authKeyPassword, encPassword)...)
-
-	return payload
-}
