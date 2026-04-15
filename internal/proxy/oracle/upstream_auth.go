@@ -48,26 +48,37 @@ func (s *session) upstreamAuth() error { // Step 1: Connect to upstream
 	return nil
 }
 
-// upstreamConnect sends a TNS Connect packet and handles Accept/Resend/Refuse.
-func (s *session) upstreamConnect() error { // Build TNS Connect descriptor
+// upstreamConnect sends a TNS Connect packet using the captured header from a real thin client.
+func (s *session) upstreamConnect() error {
 	serviceName := s.database.DatabaseName
 	if s.database.OracleServiceName != nil && *s.database.OracleServiceName != "" {
 		serviceName = *s.database.OracleServiceName
 	}
 
-	connectDescriptor := fmt.Sprintf(
+	desc := []byte(fmt.Sprintf(
 		"(DESCRIPTION=(CONNECT_DATA=(SERVICE_NAME=%s)(CID=(PROGRAM=dbbat)(HOST=dbbat)(USER=dbbat)))(ADDRESS=(PROTOCOL=TCP)(HOST=%s)(PORT=%d)))",
 		serviceName, s.database.Host, s.database.Port,
-	)
+	))
 
-	connectPayload := buildTNSConnect(connectDescriptor)
-	connectPkt := &TNSPacket{
-		Type:    TNSPacketTypeConnect,
-		Payload: connectPayload,
-		Raw:     encodeTNSPacket(TNSPacketTypeConnect, connectPayload),
-	}
+	// Build Connect using captured header. The header bytes after the 8-byte TNS header
+	// contain version 319, SDU 8192, and correct flags. We update data length and offset.
+	hdr := make([]byte, len(capturedConnectHeader))
+	copy(hdr, capturedConnectHeader)
+	headerLen := 8 + len(hdr) // TNS header + Connect header
+	binary.BigEndian.PutUint16(hdr[16:18], uint16(len(desc)))
+	binary.BigEndian.PutUint16(hdr[18:20], uint16(headerLen))
 
-	// Send Connect and handle response (with Resend loop)
+	totalLen := headerLen + len(desc)
+	raw := make([]byte, 0, totalLen)
+	// TNS header (8 bytes) — bytes 0-1 = TOTAL packet length (pre-v315 format)
+	raw = append(raw, byte(totalLen>>8), byte(totalLen), 0x00, 0x00) // length + checksum
+	raw = append(raw, byte(TNSPacketTypeConnect), 0x00, 0x00, 0x00)  // type + reserved
+	raw = append(raw, hdr...)
+	raw = append(raw, desc...)
+
+	connectPkt := &TNSPacket{Type: TNSPacketTypeConnect, Raw: raw}
+	s.logger.DebugContext(s.ctx, "upstream: sending TNS Connect", slog.Int("raw_len", len(raw)), slog.Int("desc_len", len(desc)))
+
 	resp, err := s.sendUpstreamConnect(connectPkt)
 	if err != nil {
 		return err
@@ -82,6 +93,54 @@ func (s *session) upstreamConnect() error { // Build TNS Connect descriptor
 	}
 
 	return nil
+}
+
+// buildUpstreamAuthPhase1 builds a TTC AUTH Phase 1 message matching the real thin client format.
+// Includes AUTH_TERMINAL, AUTH_PROGRAM_NM, AUTH_MACHINE, AUTH_PID, AUTH_SID metadata.
+func buildUpstreamAuthPhase1(username string) []byte {
+	// Preamble: data_flags(2) + func(0x03) + sub(0x76) + TTC-encoded fields + username
+	buf := make([]byte, 0, 256)
+	buf = append(buf, 0x00, 0x00) // data flags
+	buf = append(buf, 0x03)       // func = piggyback
+	buf = append(buf, 0x76)       // sub = AUTH Phase 1
+
+	// Preamble fields (from captured packet): logon mode, auth type flags
+	buf = append(buf, 0x01, 0x01, 0x01, 0x03, 0x01, 0x01, 0x01, 0x01)
+
+	// Username length + username
+	buf = append(buf, byte(len(username)))
+	buf = append(buf, 0x01, 0x01)
+	buf = append(buf, byte(len(username)))
+	buf = append(buf, []byte(username)...)
+
+	// AUTH_ key-value pairs using the TTC DLC+CLR encoding
+	kvs := []struct{ k, v string }{
+		{"AUTH_TERMINAL", "unknown"},
+		{"AUTH_PROGRAM_NM", "dbbat"},
+		{"AUTH_MACHINE", "dbbat"},
+		{"AUTH_PID", "1"},
+		{"AUTH_SID", "dbbat"},
+	}
+
+	for _, kv := range kvs {
+		buf = append(buf, ttcCompressedUint(uint64(len(kv.k)))...)
+		buf = append(buf, ttcClr([]byte(kv.k))...)
+		buf = append(buf, ttcCompressedUint(uint64(len(kv.v)))...)
+		buf = append(buf, ttcClr([]byte(kv.v))...)
+		buf = append(buf, 0x00) // null terminator between pairs
+	}
+
+	return buf
+}
+
+// capturedConnectHeader (76 bytes) — Connect-specific header captured from python-oracledb thin.
+// Fields at offsets 16-17 (data length) and 18-19 (data offset) are updated dynamically.
+var capturedConnectHeader = []byte{
+	0x01, 0x3f, 0x01, 0x2c, 0x04, 0x01, 0x20, 0x00, 0x20, 0x00, 0x4f, 0x98, 0x00, 0x00, 0x00, 0x01,
+	0x00, 0xee, 0x00, 0x4a, 0x00, 0x00, 0x00, 0x00, 0x84, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x01, 0x00, 0xf8, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00,
 }
 
 // sendUpstreamConnect sends the Connect packet and handles Resend loops.
@@ -128,6 +187,12 @@ func (s *session) upstreamNegotiate() error {
 	// Send Set Protocol + Set Data Types using captured packets from the real
 	// python-oracledb thin client. The raw packets include the v315+ TNS header.
 	// This is the same approach as the server-side negotiation — replay real Oracle traffic.
+	// Send Marker (type 12) then Set Protocol — matching real thin client sequence
+	capturedMarker := []byte{0x00, 0x00, 0x00, 0x0b, 0x0c, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02}
+	if _, err := s.upstreamConn.Write(capturedMarker); err != nil {
+		return fmt.Errorf("failed to send Marker: %w", err)
+	}
+
 	s.logger.DebugContext(s.ctx, "upstream: sending Set Protocol")
 	if _, err := s.upstreamConn.Write(capturedClientSetProtocol); err != nil {
 		return fmt.Errorf("failed to send Set Protocol: %w", err)
@@ -174,8 +239,10 @@ func (s *session) upstreamO5Logon() error { // Decrypt the database password
 		return fmt.Errorf("failed to decrypt database password: %w", err)
 	}
 
-	// AUTH Phase 1: send username (v315+ format)
-	if err := s.writeV315Data(buildClientAuthPhase1(s.database.Username)); err != nil {
+	// AUTH Phase 1: send username with AUTH_ metadata KV pairs.
+	// Uses captured template format — username is replaced, other fields use fixed values.
+	phase1 := buildUpstreamAuthPhase1(s.database.Username)
+	if _, err := s.upstreamConn.Write(encodeV315DataPacket(phase1)); err != nil {
 		return fmt.Errorf("failed to send AUTH Phase 1: %w", err)
 	}
 
@@ -348,45 +415,6 @@ func generateO5LogonClientResponse(password, encServerSessKey, authVfrData strin
 }
 
 // buildTNSConnect constructs the TNS Connect packet payload.
-func buildTNSConnect(connectDescriptor string) []byte { // TNS Connect header is 58 bytes, followed by the connect descriptor.
-	// This is a simplified version — real Connect packets have many more fields.
-	descriptorBytes := []byte(connectDescriptor)
-	headerLen := 58
-
-	header := make([]byte, headerLen)
-	// Version (2 bytes) — TNS 315
-	binary.BigEndian.PutUint16(header[0:2], 315)
-	// Compatible version (2 bytes)
-	binary.BigEndian.PutUint16(header[2:4], 300)
-	// Service options (2 bytes)
-	binary.BigEndian.PutUint16(header[4:6], 0)
-	// SDU size (2 bytes) — 8192
-	binary.BigEndian.PutUint16(header[6:8], 8192)
-	// TDU size (2 bytes) — 65535
-	binary.BigEndian.PutUint16(header[8:10], 65535)
-	// Protocol characteristics (2 bytes)
-	binary.BigEndian.PutUint16(header[10:12], 0x8001)
-	// Max packets before ACK (2 bytes)
-	binary.BigEndian.PutUint16(header[12:14], 0)
-	// Byte order/endianness (2 bytes)
-	binary.BigEndian.PutUint16(header[14:16], 1)
-	// Data length (2 bytes) — connect descriptor length
-	binary.BigEndian.PutUint16(header[16:18], uint16(len(descriptorBytes)))
-	// Data offset (2 bytes) — offset from start of connect header to descriptor
-	binary.BigEndian.PutUint16(header[18:20], uint16(headerLen))
-	// Max receivable connect data (4 bytes)
-	binary.BigEndian.PutUint32(header[20:24], 0)
-	// Connect flags 0 and 1 (2 bytes)
-	header[24] = 0x41 // flag0
-	header[25] = 0x41 // flag1
-	// Remaining bytes are zero (trace info, padding, etc.)
-
-	result := make([]byte, 0, len(header)+len(descriptorBytes))
-	result = append(result, header...)
-	result = append(result, descriptorBytes...)
-
-	return result
-}
 
 // buildClientSetProtocol constructs a client Set Protocol request.
 // Format: data_flags(2) + func(0x01) + version(0x06) + compat(0x00) + platform_string + null.
@@ -395,19 +423,6 @@ func buildTNSConnect(connectDescriptor string) []byte { // TNS Connect header is
 
 // buildClientAuthPhase1 constructs a TTC AUTH Phase 1 message.
 // This is func=0x03 (piggyback), sub=0x76 (AUTH1), with the username.
-func buildClientAuthPhase1(username string) []byte {
-	payload := make([]byte, 0, 6+len(username))
-	payload = append(payload,
-		0x00, 0x00, // data flags
-		0x03,                // func = piggyback
-		PiggybackSubAuth1,   // sub-op = AUTH Phase 1
-		byte(len(username)), // username length
-	)
-	payload = append(payload, []byte(username)...)
-	payload = append(payload, 0x01) // AUTH_MODE_LOGON
-
-	return payload
-}
 
 // buildClientAuthPhase2 constructs a TTC AUTH Phase 2 message.
 // Contains the encrypted client session key and encrypted password.
