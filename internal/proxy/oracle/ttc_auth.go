@@ -70,45 +70,46 @@ func isPrintableASCII(b []byte) bool {
 // The challenge contains AUTH_SESSKEY and AUTH_VFR_DATA key-value pairs that the
 // client uses for O5LOGON authentication.
 func buildAuthChallenge(encServerSessKey, authVfrData string) []byte {
-	buf := []byte{
-		0x00, 0x00, // data flags
-		byte(TTCFuncResponse), // 0x08
-	}
-
-	// Number of KV pairs (compressed uint)
-	buf = append(buf, ttcCompressedUint(2)...)
-
-	// AUTH_SESSKEY
+	buf := make([]byte, 0, 256)
+	buf = append(buf, 0x00, 0x00, byte(TTCFuncResponse)) // data flags + 0x08
+	buf = append(buf, ttcCompressedUint(2)...)           // 2 KV pairs
 	buf = append(buf, ttcKeyVal(authKeySessKey, encServerSessKey, 1)...)
-	// AUTH_VFR_DATA
-	buf = append(buf, ttcKeyVal(authKeyVfrData, authVfrData, 0)...)
+	buf = append(buf, ttcKeyVal(authKeyVfrData, authVfrData, o5LogonVerifierTypeNum)...)
+
+	return buf
+}
+
+// buildAuthChallengeEndMarker builds the end-of-response (message code 4) that
+// must follow the AUTH challenge. Clients read message codes in a loop and exit
+// on code 4. This is sent as part of the same TNS Data packet or as a separate one.
+// The bytes after code 4 are a minimal Summary structure captured from Oracle 19c.
+func buildAuthChallengeEndMarker() []byte {
+	// Message code 4 + minimal summary fields that NewSummary reads.
+	// These must align with the TTC capabilities negotiated in Set Protocol.
+	// Captured from the AUTH challenge tail of Oracle 19c.
+	// Message code 4 (end of call) + minimal Summary structure.
+	// All fields are zero (compressed int = 0x00), which is safe for any TTC version/capability combo.
+	// We send 64 zero bytes after code 4 to ensure NewSummary has enough data regardless
+	// of which conditional fields are enabled.
+	buf := make([]byte, 256)
+	buf[0] = 0x04 // message code 4
+	// Remaining 255 zero bytes provide enough data for NewSummary to read
+	// all conditional fields (RetCode, CurRowNumber, Flags, error messages, etc.)
+	// regardless of TTC version and capability flags.
 
 	return buf
 }
 
 // buildAuthOK constructs the TTC AUTH success response.
 func buildAuthOK() []byte {
-	buf := []byte{
-		0x00, 0x00, // data flags
-		byte(TTCFuncResponse), // 0x08
-	}
-	// return code = 0 (compressed uint)
-	buf = append(buf, 0x00)
-	// pair count = 0
-	buf = append(buf, 0x00)
-
-	return buf
+	return []byte{0x00, 0x00, byte(TTCFuncResponse), 0x00, 0x00}
 }
 
 // buildAuthFailed constructs the TTC AUTH failure response with an ORA error code.
 func buildAuthFailed(oraCode int, message string) []byte {
-	buf := []byte{
-		0x00, 0x00, // data flags
-		byte(TTCFuncResponse), // 0x08
-	}
-	// return code (compressed uint)
+	buf := make([]byte, 0, 3+8+len(message)+2)
+	buf = append(buf, 0x00, 0x00, byte(TTCFuncResponse))
 	buf = append(buf, ttcCompressedUint(uint64(oraCode))...)
-	// error message (CLR-encoded)
 	buf = append(buf, ttcClr([]byte(message))...)
 
 	return buf
@@ -116,8 +117,8 @@ func buildAuthFailed(oraCode int, message string) []byte {
 
 // ttcKeyVal encodes a key-value pair using Oracle's TTC wire format.
 // Matches go-ora's PutKeyVal: PutUint(keyLen) + PutClr(key) + PutUint(valLen) + PutClr(val) + PutInt(flag).
-func ttcKeyVal(key, value string, flag uint8) []byte {
-	var buf []byte
+func ttcKeyVal(key, value string, flag int) []byte {
+	buf := make([]byte, 0, len(key)+len(value)+20)
 	keyBytes := []byte(key)
 	valBytes := []byte(value)
 
@@ -338,16 +339,4 @@ func isAuthKey(key string) bool {
 	default:
 		return strings.HasPrefix(key, "AUTH_")
 	}
-}
-
-// encodeVarUint encodes an unsigned integer in Oracle's variable-length format.
-func encodeVarUint(v uint32) []byte {
-	if v < 254 {
-		return []byte{byte(v)}
-	}
-
-	buf := []byte{0xFE}
-	buf = binary.BigEndian.AppendUint32(buf, v)
-
-	return buf
 }

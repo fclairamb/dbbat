@@ -15,12 +15,6 @@ func buildTNSAccept() []byte {
 	return append([]byte(nil), capturedTNSAccept...)
 }
 
-// buildPostAcceptNotification returns the type-14 packet Oracle sends after Accept.
-// Oracle thin clients expect this notification before the Set Protocol exchange.
-func buildPostAcceptNotification() []byte {
-	return append([]byte(nil), capturedPostAcceptNotification...)
-}
-
 // buildSetProtocolResponse returns the Set Protocol (OSETPRO) response
 // captured from Oracle 19c. Contains platform identification ("x86_64/Linux 2.4.xx"),
 // character set negotiation (AL32UTF8), and protocol capability flags.
@@ -41,11 +35,6 @@ var capturedTNSAccept = []byte{
 	0x00, 0x2d, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x3e, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00,
 	0x01, 0x00, 0x00, 0x00, 0x00, 0x2d, 0xc5, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
-}
-
-// capturedPostAcceptNotification (10 bytes) — type-14 (0x0e) packet sent after Accept.
-var capturedPostAcceptNotification = []byte{
-	0x00, 0x00, 0x00, 0x0a, 0x0e, 0x20, 0x00, 0x00, 0x00, 0x09,
 }
 
 // capturedSetProtocolResponse (191 bytes) — TTC Set Protocol response from Oracle 19c.

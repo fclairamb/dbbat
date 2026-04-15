@@ -292,14 +292,13 @@ func parseUpstreamAuthChallenge(tnsDataPayload []byte) (string, string, error) {
 // generateO5LogonClientResponse generates the client-side O5LOGON auth response.
 // This mirrors what an Oracle client does: derive verifier from password+salt,
 // decrypt server session key, generate client session key, encrypt password.
-func generateO5LogonClientResponse(password, encServerSessKey, authVfrData string) (string, string, error) { // Extract salt from AUTH_VFR_DATA (remove verifier type suffix "6949")
-	if len(authVfrData) < len(o5LogonVerifierType)+2 {
+func generateO5LogonClientResponse(password, encServerSessKey, authVfrData string) (string, string, error) {
+	// AUTH_VFR_DATA is the hex-encoded salt (verifier type is in the KV flag, not the value)
+	if len(authVfrData) < 2 {
 		return "", "", ErrAuthPhase1TooShort
 	}
 
-	saltHex := authVfrData[:len(authVfrData)-len(o5LogonVerifierType)]
-
-	salt, err := hexDecodeBytes(saltHex)
+	salt, err := hexDecodeBytes(authVfrData)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to decode salt from AUTH_VFR_DATA: %w", err)
 	}

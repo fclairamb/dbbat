@@ -93,13 +93,11 @@ func (s *session) run() error {
 		return err
 	}
 
-	// Step 3: Send TNS Accept + post-accept notification (dbbat acts as Oracle server)
+	// Step 3: Send TNS Accept (dbbat acts as Oracle server)
+	// Note: Real Oracle also sends a type-14 post-accept notification, but some clients
+	// (e.g., go-ora) don't handle it. We skip it — thin clients work without it.
 	if _, err := s.clientConn.Write(buildTNSAccept()); err != nil {
 		return fmt.Errorf("failed to send TNS Accept: %w", err)
-	}
-
-	if _, err := s.clientConn.Write(buildPostAcceptNotification()); err != nil {
-		return fmt.Errorf("failed to send post-accept notification: %w", err)
 	}
 
 	// Step 4: TTC negotiation with client (Marker + Set Protocol + Set Data Types)
@@ -329,7 +327,14 @@ func (s *session) authenticateClient() error {
 	}
 
 	// Send AUTH challenge to client
+	s.logger.DebugContext(s.ctx, "sending AUTH challenge",
+		slog.Int("sesskey_len", len(encSessKey)),
+		slog.Int("vfrdata_len", len(vfrData)))
 	challengePayload := buildAuthChallenge(encSessKey, vfrData)
+	challengePayload = append(challengePayload, buildAuthChallengeEndMarker()...)
+	s.logger.DebugContext(s.ctx, "AUTH challenge payload",
+		slog.Int("len", len(challengePayload)),
+		slog.String("hex_head", fmt.Sprintf("%x", challengePayload[:min(len(challengePayload), 60)])))
 	challengePkt := &TNSPacket{
 		Type:    TNSPacketTypeData,
 		Payload: challengePayload,
@@ -345,11 +350,18 @@ func (s *session) authenticateClient() error {
 		return fmt.Errorf("failed to read AUTH Phase 2: %w", err)
 	}
 
+	s.logger.DebugContext(s.ctx, "AUTH Phase 2 packet received",
+		slog.String("type", phase2Pkt.Type.String()),
+		slog.Int("payload_len", len(phase2Pkt.Payload)))
+
 	if phase2Pkt.Type != TNSPacketTypeData {
 		return fmt.Errorf("%w: got %s for AUTH Phase 2", ErrUnexpectedPacketType, phase2Pkt.Type)
 	}
 
 	// Parse AUTH Phase 2 to get encrypted password
+	s.logger.DebugContext(s.ctx, "AUTH Phase 2 payload",
+		slog.Int("len", len(phase2Pkt.Payload)),
+		slog.String("hex_head", fmt.Sprintf("%x", phase2Pkt.Payload[:min(len(phase2Pkt.Payload), 60)])))
 	clientSessKey, encPassword, err := parseAuthPhase2(phase2Pkt.Payload)
 	if err != nil {
 		return fmt.Errorf("failed to parse AUTH Phase 2: %w", err)

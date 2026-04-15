@@ -15,9 +15,10 @@ import (
 
 const (
 	o5LogonSaltLength        = 10
-	o5LogonVerifierKeyLength = 24 // SHA-1 (20 bytes) zero-padded to 24
-	o5LogonSessionKeyLength  = 48
-	o5LogonVerifierType      = "6949" // SHA-1 based verifier
+	o5LogonVerifierKeyLength = 24     // SHA-1 (20 bytes) zero-padded to 24
+	o5LogonSessionKeyLength  = 32     // produces 64 hex chars after AES-192-CBC (2 blocks, no padding needed)
+	o5LogonVerifierType      = "6949" // SHA-1 based verifier (legacy, used in value suffix)
+	o5LogonVerifierTypeNum   = 6949   // Verifier type sent as KV pair flag
 	o5LogonPasswordPrefixLen = 16     // Random prefix prepended to password by client
 )
 
@@ -70,8 +71,9 @@ func (s *O5LogonServer) GenerateChallenge() (string, string, error) {
 
 	encSessKey := strings.ToUpper(hex.EncodeToString(encrypted))
 
-	// AUTH_VFR_DATA = hex(salt) + verifier type suffix
-	vfrData := strings.ToUpper(hex.EncodeToString(s.salt)) + o5LogonVerifierType
+	// AUTH_VFR_DATA = hex(salt). The verifier type (6949) is sent as the
+	// KV pair flag, not as a value suffix (go-ora reads VerifierType from the flag).
+	vfrData := strings.ToUpper(hex.EncodeToString(s.salt))
 
 	return encSessKey, vfrData, nil
 }
@@ -149,22 +151,26 @@ func deriveCombinedKey(serverKey, clientKey []byte) []byte {
 }
 
 // aes192CBCEncrypt encrypts data using AES-192-CBC with a zero IV.
-// PKCS7 padding is applied.
+// If the input is block-aligned, no padding is added (matching Oracle's behavior
+// for session key encryption). Otherwise, PKCS7 padding is applied.
 func aes192CBCEncrypt(key, plaintext []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
 
-	// Apply PKCS7 padding
-	padded := pkcs7Pad(plaintext, aes.BlockSize)
+	// For block-aligned data (like session keys): encrypt directly, no padding.
+	// For non-aligned data (like passwords): apply PKCS7 padding.
+	data := plaintext
+	if len(plaintext)%aes.BlockSize != 0 {
+		data = pkcs7Pad(plaintext, aes.BlockSize)
+	}
 
-	// Use zero IV (as per O5LOGON protocol)
 	iv := make([]byte, aes.BlockSize)
 	mode := cipher.NewCBCEncrypter(block, iv)
 
-	ciphertext := make([]byte, len(padded))
-	mode.CryptBlocks(ciphertext, padded)
+	ciphertext := make([]byte, len(data))
+	mode.CryptBlocks(ciphertext, data)
 
 	return ciphertext, nil
 }
@@ -188,10 +194,10 @@ func aes192CBCDecrypt(key, ciphertext []byte) ([]byte, error) {
 	plaintext := make([]byte, len(ciphertext))
 	mode.CryptBlocks(plaintext, ciphertext)
 
-	// Strip PKCS7 padding
-	plaintext, err = pkcs7Unpad(plaintext)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unpad: %w", err)
+	// Try to strip PKCS7 padding if present. If the last byte doesn't look like
+	// valid PKCS7 padding, return the plaintext as-is (block-aligned data may not be padded).
+	if unpadded, err := pkcs7Unpad(plaintext); err == nil {
+		return unpadded, nil
 	}
 
 	return plaintext, nil
