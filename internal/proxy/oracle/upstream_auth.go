@@ -111,41 +111,50 @@ func (s *session) sendUpstreamConnect(connectPkt *TNSPacket) (*TNSPacket, error)
 	return nil, ErrMaxResendExceeded
 }
 
-// upstreamNegotiate handles Set Protocol and Set Data Types exchange with upstream.
-// dbbat acts as Oracle client, sending the requests and processing responses.
-func (s *session) upstreamNegotiate() error { // Send Set Protocol request
-	setProtocolPayload := buildClientSetProtocol()
-	setProtocolPkt := &TNSPacket{
-		Type:    TNSPacketTypeData,
-		Payload: setProtocolPayload,
-	}
+// writeV315Data writes a TTC payload as a v315+ TNS Data packet to the upstream connection.
+func (s *session) writeV315Data(payload []byte) error {
+	_, err := s.upstreamConn.Write(encodeV315DataPacket(payload))
 
-	if err := writeTNSPacket(s.upstreamConn, setProtocolPkt); err != nil {
+	return err
+}
+
+// upstreamNegotiate handles Set Protocol and Set Data Types exchange with upstream.
+// All post-Accept packets use v315+ format (4-byte length).
+// The sequence matches what Oracle thin clients do:
+//  1. Send Marker packet (type 12)
+//  2. Send Set Protocol (Data)
+//  3. Read responses (skip non-Data packets like type-14 notifications)
+func (s *session) upstreamNegotiate() error {
+	// Send Set Protocol + Set Data Types using captured packets from the real
+	// python-oracledb thin client. The raw packets include the v315+ TNS header.
+	// This is the same approach as the server-side negotiation — replay real Oracle traffic.
+	s.logger.DebugContext(s.ctx, "upstream: sending Set Protocol")
+	if _, err := s.upstreamConn.Write(capturedClientSetProtocol); err != nil {
 		return fmt.Errorf("failed to send Set Protocol: %w", err)
 	}
 
-	// Read Set Protocol response
-	resp, err := readTNSPacket(s.upstreamConn)
-	if err != nil {
-		return fmt.Errorf("failed to read Set Protocol response: %w", err)
+	s.logger.DebugContext(s.ctx, "upstream: waiting for Set Protocol response")
+	// Read responses — skip non-Data packets (type-14 notifications, etc.)
+	var resp *TNSPacket
+	var err error
+
+	for {
+		resp, err = readTNSPacket(s.upstreamConn)
+		if err != nil {
+			return fmt.Errorf("failed to read Set Protocol response: %w", err)
+		}
+
+		if resp.Type == TNSPacketTypeData {
+			break
+		}
+
+		s.logger.DebugContext(s.ctx, "upstream: skipping non-Data packet", slog.String("type", resp.Type.String()))
 	}
 
-	if resp.Type != TNSPacketTypeData {
-		return fmt.Errorf("%w: got %s for upstream Set Protocol", ErrUnexpectedPacketType, resp.Type)
-	}
-
-	// Send Set Data Types request
-	setDataTypesPayload := buildClientSetDataTypes()
-	setDataTypesPkt := &TNSPacket{
-		Type:    TNSPacketTypeData,
-		Payload: setDataTypesPayload,
-	}
-
-	if err := writeTNSPacket(s.upstreamConn, setDataTypesPkt); err != nil {
+	if _, err := s.upstreamConn.Write(capturedClientSetDataTypes); err != nil {
 		return fmt.Errorf("failed to send Set Data Types: %w", err)
 	}
 
-	// Read Set Data Types response
 	resp, err = readTNSPacket(s.upstreamConn)
 	if err != nil {
 		return fmt.Errorf("failed to read Set Data Types response: %w", err)
@@ -165,14 +174,8 @@ func (s *session) upstreamO5Logon() error { // Decrypt the database password
 		return fmt.Errorf("failed to decrypt database password: %w", err)
 	}
 
-	// AUTH Phase 1: send username
-	phase1Payload := buildClientAuthPhase1(s.database.Username)
-	phase1Pkt := &TNSPacket{
-		Type:    TNSPacketTypeData,
-		Payload: phase1Payload,
-	}
-
-	if err := writeTNSPacket(s.upstreamConn, phase1Pkt); err != nil {
+	// AUTH Phase 1: send username (v315+ format)
+	if err := s.writeV315Data(buildClientAuthPhase1(s.database.Username)); err != nil {
 		return fmt.Errorf("failed to send AUTH Phase 1: %w", err)
 	}
 
@@ -200,14 +203,8 @@ func (s *session) upstreamO5Logon() error { // Decrypt the database password
 		return fmt.Errorf("failed to generate O5LOGON response: %w", err)
 	}
 
-	// AUTH Phase 2: send encrypted password
-	phase2Payload := buildClientAuthPhase2(s.database.Username, clientEncSessKey, encPassword)
-	phase2Pkt := &TNSPacket{
-		Type:    TNSPacketTypeData,
-		Payload: phase2Payload,
-	}
-
-	if err := writeTNSPacket(s.upstreamConn, phase2Pkt); err != nil {
+	// AUTH Phase 2: send encrypted password (v315+ format)
+	if err := s.writeV315Data(buildClientAuthPhase2(s.database.Username, clientEncSessKey, encPassword)); err != nil {
 		return fmt.Errorf("failed to send AUTH Phase 2: %w", err)
 	}
 
@@ -392,26 +389,9 @@ func buildTNSConnect(connectDescriptor string) []byte { // TNS Connect header is
 }
 
 // buildClientSetProtocol constructs a client Set Protocol request.
-func buildClientSetProtocol() []byte {
-	return []byte{
-		0x00, 0x00, // data flags
-		byte(TTCFuncSetProtocol), // 0x01
-		// Client protocol negotiation request
-		0x06,       // protocol version
-		0x00,       // compatibility
-		0x00, 0x00, // options
-	}
-}
+// Format: data_flags(2) + func(0x01) + version(0x06) + compat(0x00) + platform_string + null.
 
 // buildClientSetDataTypes constructs a client Set Data Types request.
-func buildClientSetDataTypes() []byte {
-	return []byte{
-		0x00, 0x00, // data flags
-		byte(TTCFuncSetDataTypes), // 0x02
-		// Minimal type representation request
-		0x00, // type count (empty = accept server defaults)
-	}
-}
 
 // buildClientAuthPhase1 constructs a TTC AUTH Phase 1 message.
 // This is func=0x03 (piggyback), sub=0x76 (AUTH1), with the username.
