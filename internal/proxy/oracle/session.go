@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -92,13 +93,16 @@ func (s *session) run() error {
 		return err
 	}
 
-	// Step 3: Send TNS Accept to client (dbbat acts as Oracle server)
-	acceptPkt := buildTNSAccept()
-	if _, err := s.clientConn.Write(acceptPkt); err != nil {
+	// Step 3: Send TNS Accept + post-accept notification (dbbat acts as Oracle server)
+	if _, err := s.clientConn.Write(buildTNSAccept()); err != nil {
 		return fmt.Errorf("failed to send TNS Accept: %w", err)
 	}
 
-	// Step 4: TTC negotiation with client (Set Protocol + Set Data Types)
+	if _, err := s.clientConn.Write(buildPostAcceptNotification()); err != nil {
+		return fmt.Errorf("failed to send post-accept notification: %w", err)
+	}
+
+	// Step 4: TTC negotiation with client (Marker + Set Protocol + Set Data Types)
 	if err := s.handleClientNegotiation(); err != nil {
 		return fmt.Errorf("client negotiation failed: %w", err)
 	}
@@ -211,26 +215,42 @@ func (s *session) resolveDatabase(connectPayload []byte) error {
 	return nil
 }
 
-// handleClientNegotiation handles the TTC Set Protocol and Set Data Types exchange
-// with the client. dbbat acts as Oracle server, responding with hardcoded templates.
+// handleClientNegotiation handles the TTC negotiation exchange with the client.
+// After receiving Accept + post-accept notification, Oracle thin clients send:
+//  1. Marker packet (type 12) — consumed and discarded
+//  2. Set Protocol request (Data packet, func=0x01) — we respond with captured template
+//  3. Set Data Types request (Data packet, func=0x02) — we respond with captured template
+//
+// All responses are raw captured packets from Oracle 19c, written directly to the wire.
 func (s *session) handleClientNegotiation() error {
-	// Read Set Protocol from client
-	setProt, err := readTNSPacket(s.clientConn)
+	// Read client's first packet — expect Marker (type 12) from thin clients
+	firstPkt, err := readTNSPacket(s.clientConn)
 	if err != nil {
-		return fmt.Errorf("failed to read Set Protocol: %w", err)
+		return fmt.Errorf("failed to read first negotiation packet: %w", err)
 	}
 
-	if setProt.Type != TNSPacketTypeData {
-		return fmt.Errorf("%w: got %s for Set Protocol", ErrUnexpectedPacketType, setProt.Type)
+	s.logger.DebugContext(s.ctx, "negotiation: first packet", slog.String("type", firstPkt.Type.String()), slog.Int("len", len(firstPkt.Payload)))
+
+	// Consume non-Data packets until we get the Set Protocol request.
+	// Different clients send different preambles (Marker, Control, etc.) before Set Protocol.
+	for firstPkt.Type != TNSPacketTypeData {
+		s.logger.DebugContext(s.ctx, "negotiation: skipping packet", slog.String("type", firstPkt.Type.String()))
+		firstPkt, err = readTNSPacket(s.clientConn)
+		if err != nil {
+			return fmt.Errorf("failed to read Set Protocol: %w", err)
+		}
+
+		s.logger.DebugContext(s.ctx, "negotiation: next packet", slog.String("type", firstPkt.Type.String()), slog.Int("len", len(firstPkt.Payload)))
 	}
 
-	// Send Set Protocol response
-	setProtResp := buildSetProtocolResponse()
-	if _, err := s.clientConn.Write(setProtResp); err != nil {
+	// Send Set Protocol response (raw captured packet including TNS header)
+	s.logger.DebugContext(s.ctx, "negotiation: sending Set Protocol response", slog.Int("len", len(buildSetProtocolResponse())))
+	if _, err := s.clientConn.Write(buildSetProtocolResponse()); err != nil {
 		return fmt.Errorf("failed to send Set Protocol response: %w", err)
 	}
 
 	// Read Set Data Types from client
+	s.logger.DebugContext(s.ctx, "negotiation: waiting for Set Data Types")
 	setDT, err := readTNSPacket(s.clientConn)
 	if err != nil {
 		return fmt.Errorf("failed to read Set Data Types: %w", err)
@@ -240,9 +260,8 @@ func (s *session) handleClientNegotiation() error {
 		return fmt.Errorf("%w: got %s for Set Data Types", ErrUnexpectedPacketType, setDT.Type)
 	}
 
-	// Send Set Data Types response
-	setDTResp := buildSetDataTypesResponse()
-	if _, err := s.clientConn.Write(setDTResp); err != nil {
+	// Send Set Data Types response (raw captured packet including TNS header)
+	if _, err := s.clientConn.Write(buildSetDataTypesResponse()); err != nil {
 		return fmt.Errorf("failed to send Set Data Types response: %w", err)
 	}
 
@@ -264,15 +283,19 @@ func (s *session) authenticateClient() error {
 	}
 
 	// Extract username from AUTH Phase 1
+	s.logger.DebugContext(s.ctx, "AUTH Phase 1 payload",
+		slog.Int("len", len(phase1Pkt.Payload)),
+		slog.String("hex_head", fmt.Sprintf("%x", phase1Pkt.Payload[:min(len(phase1Pkt.Payload), 40)])))
 	username, err := parseAuthPhase1(phase1Pkt.Payload)
 	if err != nil {
 		return fmt.Errorf("failed to parse AUTH Phase 1: %w", err)
 	}
 
-	s.username = username
+	// Oracle clients uppercase usernames — normalize to lowercase for dbbat lookup
+	s.username = strings.ToLower(username)
 
 	// Look up dbbat user
-	user, err := s.store.GetUserByUsername(s.ctx, username)
+	user, err := s.store.GetUserByUsername(s.ctx, s.username)
 	if err != nil {
 		return fmt.Errorf("%w: %s", ErrUserNotFound, username)
 	}
