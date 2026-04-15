@@ -5,7 +5,7 @@ name: Image
 
 on:
   push:
-    branches: [main]
+    branches: ["*"]
 
 jobs:
   check:
