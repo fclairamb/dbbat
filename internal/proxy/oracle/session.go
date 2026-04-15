@@ -123,6 +123,12 @@ func (s *session) run() error {
 		return fmt.Errorf("upstream auth failed: %w", err)
 	}
 
+	// Step 6b: Send AUTH OK to client NOW — upstream is ready, relay can start immediately
+	authOKRaw := encodeV315DataPacket(buildAuthOK())
+	if _, err := s.clientConn.Write(authOKRaw); err != nil {
+		return fmt.Errorf("failed to send AUTH OK: %w", err)
+	}
+
 	// Step 7: Record connection
 	sourceIP := store.ExtractSourceIP(s.clientConn.RemoteAddr())
 	conn, err := s.store.CreateConnection(s.ctx, s.user.UID, s.database.UID, sourceIP)
@@ -402,11 +408,8 @@ func (s *session) authenticateClient() error {
 	// Increment usage asynchronously
 	go func() { _ = s.store.IncrementAPIKeyUsage(context.Background(), apiKey.ID) }()
 
-	// Send AUTH OK to client (v315+ format)
-	authOKRaw := encodeV315DataPacket(buildAuthOK())
-	if _, err := s.clientConn.Write(authOKRaw); err != nil {
-		return fmt.Errorf("failed to send AUTH OK: %w", err)
-	}
+	// NOTE: AUTH OK is NOT sent here. It's sent in run() AFTER upstream auth completes,
+	// so the relay can immediately forward go-ora's post-auth messages to upstream.
 
 	return nil
 }

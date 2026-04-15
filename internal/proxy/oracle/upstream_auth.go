@@ -267,16 +267,21 @@ func (s *session) upstreamO5Logon() error { // Decrypt the database password
 		slog.Int("pbkdf2_vgen_count", challenge.pbkdf2VgenCount))
 
 	// Generate PBKDF2 client response (Oracle 19c uses verifier type 18453)
+	s.logger.DebugContext(s.ctx, "upstream: computing PBKDF2 response")
 	resp, err := generatePBKDF2ClientResponse(s.database.Password, &challenge)
 	if err != nil {
 		return fmt.Errorf("failed to generate PBKDF2 response: %w", err)
 	}
+
+	s.logger.DebugContext(s.ctx, "upstream: PBKDF2 response computed, sending AUTH Phase 2")
 
 	// AUTH Phase 2: send encrypted session key, password, and speedy key
 	phase2 := buildUpstreamAuthPhase2(s.database.Username, resp)
 	if _, err := s.upstreamConn.Write(encodeV315DataPacket(phase2)); err != nil {
 		return fmt.Errorf("failed to send AUTH Phase 2: %w", err)
 	}
+
+	s.logger.DebugContext(s.ctx, "upstream: AUTH Phase 2 sent, waiting for response")
 
 	// Read AUTH response
 	authResp, err := readTNSPacket(s.upstreamConn)

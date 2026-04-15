@@ -66,7 +66,12 @@ func parseUpstreamAuthKVPairs(tnsDataPayload []byte) upstreamAuthChallenge {
 
 // generatePBKDF2ClientResponse implements the Oracle 12c/18453 PBKDF2 auth client-side.
 // This matches go-ora's auth_object.go for verifierType == 18453.
-func generatePBKDF2ClientResponse(password string, ch *upstreamAuthChallenge) (*pbkdf2AuthResponse, error) {
+func generatePBKDF2ClientResponse(password string, ch *upstreamAuthChallenge) (_ *pbkdf2AuthResponse, retErr error) {
+	defer func() {
+		if r := recover(); r != nil {
+			retErr = fmt.Errorf("%w: %v", ErrAuthFailed, r)
+		}
+	}()
 	// 1. Derive verifier key from password + salt using PBKDF2-HMAC-SHA512
 	salt, err := hex.DecodeString(ch.salt)
 	if err != nil {
@@ -247,33 +252,50 @@ func checkUpstreamAuthResponse(payload []byte) error {
 	return nil
 }
 
-// buildUpstreamAuthPhase2 builds the AUTH Phase 2 message for PBKDF2 auth.
+// buildUpstreamAuthPhase2 builds the AUTH Phase 2 message using the exact format
+// captured from python-oracledb thin. Preamble from captured AUTH Phase 2:
+// 00 00 03 73 02 01 01 03 02 01 01 01 01 <num_kvs> 01 01 <username_len> <username> <kvs...>
 func buildUpstreamAuthPhase2(username string, resp *pbkdf2AuthResponse) []byte {
 	u := []byte(username)
-	buf := make([]byte, 0, 512)
+	buf := make([]byte, 0, 1024)
 
-	// Header: data_flags(2) + func(0x03) + sub(0x73=AUTH Phase 2)
-	buf = append(buf, 0x00, 0x00, 0x03, 0x73)
+	// Header + preamble (matching captured format exactly)
+	buf = append(buf, 0x00, 0x00, 0x03, 0x73)       // data_flags + func + sub
+	buf = append(buf, 0x02, 0x01, 0x01, 0x03)       // preamble pt1
+	buf = append(buf, 0x02, 0x01, 0x01, 0x01, 0x01) // preamble pt2
+	buf = append(buf, 0x08)                         // number of KV pairs (matching real client)
+	buf = append(buf, 0x01, 0x01)                   // preamble flags
+	buf = append(buf, byte(len(u)))                 // username CLR length
+	buf = append(buf, u...)                         // username
 
-	// Preamble (same structure as Phase 1 but with sub=0x73)
-	buf = append(buf, 0x02, 0x01, 0x01, 0x01, 0x03, 0x02, 0x01, 0x01)
-	buf = append(buf, 0x01, 0x01, 0x0e, 0x01, 0x01)
-	buf = append(buf, byte(len(u)))
-	buf = append(buf, u...)
-
-	// KV pairs: AUTH_SESSKEY, AUTH_PASSWORD, AUTH_PBKDF2_SPEEDY_KEY
-	kvs := []struct{ k, v string }{
-		{"AUTH_SESSKEY", resp.encClientSessKey},
-		{"AUTH_PASSWORD", resp.encPassword},
-		{"AUTH_PBKDF2_SPEEDY_KEY", resp.encSpeedyKey},
+	// KV pairs using DLC+CLR encoding — order and count matches captured Phase 2
+	type kv struct {
+		k    string
+		v    string
+		flag int
 	}
 
-	for _, kv := range kvs {
-		buf = append(buf, ttcCompressedUint(uint64(len(kv.k)))...)
-		buf = append(buf, ttcClr([]byte(kv.k))...)
-		buf = append(buf, ttcCompressedUint(uint64(len(kv.v)))...)
-		buf = append(buf, ttcClr([]byte(kv.v))...)
-		buf = append(buf, 0x00) // flag
+	kvs := []kv{
+		{"AUTH_SESSKEY", resp.encClientSessKey, 1},
+		{"AUTH_PBKDF2_SPEEDY_KEY", resp.encSpeedyKey, 0},
+		{"AUTH_PASSWORD", resp.encPassword, 0},
+		{"AUTH_NEWPASSWORD", "", 0},
+		{"AUTH_TERMINAL", "dbbat", 0},
+		{"AUTH_PROGRAM_NM", "dbbat", 0},
+		{"AUTH_MACHINE", "dbbat", 0},
+		{"AUTH_PID", "1", 0},
+	}
+
+	for _, pair := range kvs {
+		buf = append(buf, ttcCompressedUint(uint64(len(pair.k)))...)
+		buf = append(buf, ttcClr([]byte(pair.k))...)
+		if pair.v == "" {
+			buf = append(buf, 0x00) // empty value DLC
+		} else {
+			buf = append(buf, ttcCompressedUint(uint64(len(pair.v)))...)
+			buf = append(buf, ttcClr([]byte(pair.v))...)
+		}
+		buf = append(buf, ttcCompressedUint(uint64(pair.flag))...)
 	}
 
 	return buf
