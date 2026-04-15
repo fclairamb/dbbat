@@ -7,14 +7,14 @@ import (
 
 // TTC AUTH key names used in Oracle authentication messages.
 const (
-	authKeyUsername = "AUTH_TERMINAL" //nolint:unused // used when O5LOGON terminated auth is activated
-	authKeySessKey  = "AUTH_SESSKEY"  //nolint:unused // used when O5LOGON terminated auth is activated
-	authKeyVfrData  = "AUTH_VFR_DATA" //nolint:unused // used when O5LOGON terminated auth is activated
-	authKeyPassword = "AUTH_PASSWORD" //nolint:unused // used when O5LOGON terminated auth is activated
+	authKeyUsername = "AUTH_TERMINAL"
+	authKeySessKey  = "AUTH_SESSKEY"
+	authKeyVfrData  = "AUTH_VFR_DATA"
+	authKeyPassword = "AUTH_PASSWORD"
 )
 
 // authKVPair represents a key-value pair in a TTC AUTH message.
-type authKVPair struct { //nolint:unused // used when O5LOGON terminated auth is activated
+type authKVPair struct {
 	Key   string
 	Value string
 }
@@ -30,7 +30,7 @@ type authKVPair struct { //nolint:unused // used when O5LOGON terminated auth is
 //	[2] = username length (1 byte for short strings)
 //	[3..] = username bytes
 //	... followed by logon mode and key-value pairs
-func parseAuthPhase1(tnsDataPayload []byte) (string, error) { //nolint:unused // used when O5LOGON terminated auth is activated
+func parseAuthPhase1(tnsDataPayload []byte) (string, error) {
 	if len(tnsDataPayload) < ttcDataFlagsSize+3 {
 		return "", ErrAuthPhase1TooShort
 	}
@@ -68,7 +68,7 @@ func parseAuthPhase1(tnsDataPayload []byte) (string, error) { //nolint:unused //
 //   - Each key: length-prefixed string
 //   - Each value: length-prefixed string
 //   - Pairs are structured as a counted list
-func buildAuthChallenge(encServerSessKey, authVfrData string) []byte { //nolint:unused // used when O5LOGON terminated auth is activated
+func buildAuthChallenge(encServerSessKey, authVfrData string) []byte {
 	pairs := []authKVPair{
 		{Key: authKeySessKey, Value: encServerSessKey},
 		{Key: authKeyVfrData, Value: authVfrData},
@@ -78,12 +78,12 @@ func buildAuthChallenge(encServerSessKey, authVfrData string) []byte { //nolint:
 }
 
 // buildAuthOK constructs the TTC AUTH success response.
-func buildAuthOK() []byte { //nolint:unused // used when O5LOGON terminated auth is activated
+func buildAuthOK() []byte {
 	return buildTTCAuthResponse(nil, 0, "")
 }
 
 // buildAuthFailed constructs the TTC AUTH failure response with an ORA error code.
-func buildAuthFailed(oraCode int, message string) []byte { //nolint:unused // used when O5LOGON terminated auth is activated
+func buildAuthFailed(oraCode int, message string) []byte {
 	return buildTTCAuthResponse(nil, oraCode, message)
 }
 
@@ -98,8 +98,7 @@ func buildAuthFailed(oraCode int, message string) []byte { //nolint:unused // us
 //	[4-5] return code (0 = success, error code otherwise)
 //	[6..] key-value count + pairs (if any)
 //	      or error message (if error)
-func buildTTCAuthResponse(pairs []authKVPair, errCode int, errMsg string) []byte { //nolint:unused // used when O5LOGON terminated auth is activated
-	// Start with data flags + response function code
+func buildTTCAuthResponse(pairs []authKVPair, errCode int, errMsg string) []byte { // Start with data flags + response function code
 	buf := []byte{
 		0x00, 0x00, // data flags
 		byte(TTCFuncResponse), // 0x08
@@ -140,7 +139,7 @@ func buildTTCAuthResponse(pairs []authKVPair, errCode int, errMsg string) []byte
 // The message contains key-value pairs including:
 //   - AUTH_SESSKEY: encrypted client session key (hex string)
 //   - AUTH_PASSWORD: encrypted password (hex string)
-func parseAuthPhase2(tnsDataPayload []byte) (string, string, error) { //nolint:unused // used when O5LOGON terminated auth is activated
+func parseAuthPhase2(tnsDataPayload []byte) (string, string, error) {
 	if len(tnsDataPayload) < ttcDataFlagsSize+4 {
 		return "", "", ErrAuthPhase2TooShort
 	}
@@ -176,7 +175,7 @@ func parseAuthPhase2(tnsDataPayload []byte) (string, string, error) { //nolint:u
 // encodeTTCString encodes a string with Oracle TTC length prefix.
 // Short strings (< 254 bytes): 1-byte length prefix.
 // Long strings (>= 254 bytes): 0xFE marker + 2-byte BE length.
-func encodeTTCString(s string) []byte { //nolint:unused // used when O5LOGON terminated auth is activated
+func encodeTTCString(s string) []byte {
 	data := []byte(s)
 	if len(data) < 254 {
 		return append([]byte{byte(len(data))}, data...)
@@ -189,7 +188,7 @@ func encodeTTCString(s string) []byte { //nolint:unused // used when O5LOGON ter
 }
 
 // encodeTTCKVPair encodes a key-value pair for TTC AUTH messages.
-func encodeTTCKVPair(key, value string) []byte { //nolint:unused // used when O5LOGON terminated auth is activated
+func encodeTTCKVPair(key, value string) []byte {
 	keyBytes := encodeTTCString(key)
 	valueBytes := encodeTTCString(value)
 	buf := make([]byte, 0, len(keyBytes)+len(valueBytes))
@@ -201,7 +200,7 @@ func encodeTTCKVPair(key, value string) []byte { //nolint:unused // used when O5
 
 // parseTTCKVPairs parses TTC key-value pairs from a payload.
 // This is a best-effort parser — TTC encoding is complex and client-specific.
-func parseTTCKVPairs(payload []byte) []authKVPair { //nolint:unused // used when O5LOGON terminated auth is activated
+func parseTTCKVPairs(payload []byte) []authKVPair {
 	var pairs []authKVPair
 	offset := 0
 
@@ -241,7 +240,7 @@ func parseTTCKVPairs(payload []byte) []authKVPair { //nolint:unused // used when
 
 // readTTCString reads a TTC length-prefixed string from the payload at the given offset.
 // Returns the string and the new offset after reading.
-func readTTCString(payload []byte, offset int) (string, int) { //nolint:unused // used when O5LOGON terminated auth is activated
+func readTTCString(payload []byte, offset int) (string, int) {
 	if offset >= len(payload) {
 		return "", offset
 	}
@@ -273,7 +272,7 @@ func readTTCString(payload []byte, offset int) (string, int) { //nolint:unused /
 }
 
 // isAuthKey checks if a key name is a known Oracle AUTH key.
-func isAuthKey(key string) bool { //nolint:unused // used when O5LOGON terminated auth is activated
+func isAuthKey(key string) bool {
 	switch key {
 	case "AUTH_TERMINAL", "AUTH_PROGRAM_NM", "AUTH_MACHINE", "AUTH_PID",
 		"AUTH_SID", "AUTH_SESSKEY", "AUTH_VFR_DATA", "AUTH_PASSWORD",
@@ -287,7 +286,7 @@ func isAuthKey(key string) bool { //nolint:unused // used when O5LOGON terminate
 }
 
 // encodeVarUint encodes an unsigned integer in Oracle's variable-length format.
-func encodeVarUint(v uint32) []byte { //nolint:unused // used when O5LOGON terminated auth is activated
+func encodeVarUint(v uint32) []byte {
 	if v < 254 {
 		return []byte{byte(v)}
 	}

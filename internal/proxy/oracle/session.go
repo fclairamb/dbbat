@@ -32,7 +32,7 @@ type session struct {
 	serviceName   string
 	username      string
 	database      *store.Database
-	user          *store.User //nolint:unused // used when O5LOGON terminated auth is activated
+	user          *store.User
 	grant         *store.Grant
 	connectionUID uuid.UUID
 
@@ -69,10 +69,9 @@ func newSession(
 	}
 }
 
-// run executes the full session lifecycle.
-// Currently uses passthrough mode: forwards all traffic including auth to upstream.
-// TODO: switch to terminated auth (O5LOGON) once TTC negotiation responses are validated
-// with real Oracle clients (see authenticateClient / upstreamAuth methods).
+// run executes the full session lifecycle with terminated authentication.
+// dbbat acts as an Oracle server toward the client (O5LOGON auth with API key)
+// and as an Oracle client toward the upstream database (stored credentials).
 func (s *session) run() error {
 	defer s.cleanup()
 
@@ -93,70 +92,45 @@ func (s *session) run() error {
 		return err
 	}
 
-	// Step 3: Rewrite SERVICE_NAME in Connect packet for upstream
-	connectPkt = s.rewriteConnectForUpstream(connectPkt)
+	// Step 3: Send TNS Accept to client (dbbat acts as Oracle server)
+	acceptPkt := buildTNSAccept()
+	if _, err := s.clientConn.Write(acceptPkt); err != nil {
+		return fmt.Errorf("failed to send TNS Accept: %w", err)
+	}
 
-	// Step 4: Connect to upstream Oracle
-	upstreamAddr := net.JoinHostPort(s.database.Host, fmt.Sprintf("%d", s.database.Port))
-	s.logger.InfoContext(s.ctx, "connecting to upstream Oracle",
-		slog.String("addr", upstreamAddr),
+	// Step 4: TTC negotiation with client (Set Protocol + Set Data Types)
+	if err := s.handleClientNegotiation(); err != nil {
+		return fmt.Errorf("client negotiation failed: %w", err)
+	}
+
+	// Step 5: Authenticate client via O5LOGON (API key as Oracle password)
+	if err := s.authenticateClient(); err != nil {
+		s.logger.WarnContext(s.ctx, "client authentication failed", slog.Any("error", err))
+		s.sendAuthFailed(ORA01017, "invalid username/password; logon denied")
+
+		return fmt.Errorf("%w: %w", ErrClientAuthFailed, err)
+	}
+
+	s.logger.InfoContext(s.ctx, "client authenticated",
+		slog.String("username", s.username),
 		slog.String("database", s.database.Name))
 
-	s.upstreamConn, err = net.Dial("tcp", upstreamAddr)
-	if err != nil {
-		s.sendRefuse(ORA12541, "cannot reach upstream database")
-
-		return fmt.Errorf("failed to connect to upstream %s: %w", upstreamAddr, err)
+	// Step 6: Connect to upstream Oracle and authenticate with stored credentials
+	if err := s.upstreamAuth(); err != nil {
+		return fmt.Errorf("upstream auth failed: %w", err)
 	}
 
-	// Step 6: Forward the rewritten Connect packet to upstream
-	if err := writeTNSPacket(s.upstreamConn, connectPkt); err != nil {
-		s.sendRefuse(ORA12541, "upstream connection failed")
-
-		return fmt.Errorf("failed to forward connect to upstream: %w", err)
-	}
-
-	// Step 6: Read upstream response and handle Resend loop
-	upstreamResp, err := s.readUpstreamConnectResponse(connectPkt)
-	if err != nil {
-		return err
-	}
-
-	if upstreamResp.Type == TNSPacketTypeRefuse {
-		_ = writeTNSPacket(s.clientConn, upstreamResp)
-
-		return ErrUpstreamRefused
-	}
-
-	// Forward the response (Accept or Redirect) to client as-is
-	if err := writeTNSPacket(s.clientConn, upstreamResp); err != nil {
-		return fmt.Errorf("failed to forward upstream response to client: %w", err)
-	}
-
-	if upstreamResp.Type != TNSPacketTypeAccept {
-		return nil
-	}
-
-	// Step 7: Passthrough mode — use placeholder user from grant
-	s.username = "proxy"
-
+	// Step 7: Record connection
 	sourceIP := store.ExtractSourceIP(s.clientConn.RemoteAddr())
-	if s.store != nil {
-		grants, _ := s.store.ListGrants(s.ctx, store.GrantFilter{
-			DatabaseID: &s.database.UID,
-			ActiveOnly: true,
-		})
-		if len(grants) > 0 {
-			s.grant = &grants[0]
-			conn, err := s.store.CreateConnection(s.ctx, grants[0].UserID, s.database.UID, sourceIP)
-			if err == nil {
-				s.connectionUID = conn.UID
-			}
-		}
+	conn, err := s.store.CreateConnection(s.ctx, s.user.UID, s.database.UID, sourceIP)
+	if err == nil {
+		s.connectionUID = conn.UID
 	}
 
+	upstreamAddr := net.JoinHostPort(s.database.Host, fmt.Sprintf("%d", s.database.Port))
 	s.logger.InfoContext(s.ctx, "Oracle session established, entering proxy mode",
-		slog.Any("connection_uid", s.connectionUID))
+		slog.Any("connection_uid", s.connectionUID),
+		slog.String("upstream", upstreamAddr))
 
 	// Step 8: Initialize dump writer if configured
 	if s.dumpConfig.Dir != "" && s.connectionUID != uuid.Nil {
@@ -180,6 +154,19 @@ func (s *session) run() error {
 
 	// Step 9: Enter bidirectional TNS relay with query interception
 	return s.proxyMessages()
+}
+
+// sendAuthFailed sends an ORA-01017 style auth failure to the client.
+func (s *session) sendAuthFailed(oraCode uint16, message string) {
+	payload := buildAuthFailed(int(oraCode), message)
+	pkt := &TNSPacket{
+		Type:    TNSPacketTypeData,
+		Payload: payload,
+	}
+
+	if err := writeTNSPacket(s.clientConn, pkt); err != nil {
+		s.logger.ErrorContext(s.ctx, "failed to send auth failed", slog.Any("error", err))
+	}
 }
 
 // resolveDatabase parses the service name from the Connect payload and looks up the database.
@@ -224,28 +211,9 @@ func (s *session) resolveDatabase(connectPayload []byte) error {
 	return nil
 }
 
-// rewriteConnectForUpstream rewrites the SERVICE_NAME in the Connect packet
-// to match the upstream Oracle listener's expected service name.
-func (s *session) rewriteConnectForUpstream(connectPkt *TNSPacket) *TNSPacket {
-	upstreamServiceName := s.database.DatabaseName
-	if s.database.OracleServiceName != nil && *s.database.OracleServiceName != "" {
-		upstreamServiceName = *s.database.OracleServiceName
-	}
-
-	if upstreamServiceName == "" || upstreamServiceName == s.serviceName {
-		return connectPkt
-	}
-
-	s.logger.DebugContext(s.ctx, "rewrote SERVICE_NAME for upstream",
-		slog.String("from", s.serviceName),
-		slog.String("to", upstreamServiceName))
-
-	return rewriteServiceName(connectPkt, s.serviceName, upstreamServiceName)
-}
-
 // handleClientNegotiation handles the TTC Set Protocol and Set Data Types exchange
 // with the client. dbbat acts as Oracle server, responding with hardcoded templates.
-func (s *session) handleClientNegotiation() error { //nolint:unused // used when O5LOGON terminated auth is activated
+func (s *session) handleClientNegotiation() error {
 	// Read Set Protocol from client
 	setProt, err := readTNSPacket(s.clientConn)
 	if err != nil {
@@ -284,7 +252,7 @@ func (s *session) handleClientNegotiation() error { //nolint:unused // used when
 // authenticateClient performs O5LOGON server-side authentication.
 // The client sends AUTH Phase 1 (username), dbbat sends a challenge,
 // the client sends AUTH Phase 2 (encrypted password), dbbat decrypts and verifies.
-func (s *session) authenticateClient() error { //nolint:unused // used when O5LOGON terminated auth is activated
+func (s *session) authenticateClient() error {
 	// Receive AUTH Phase 1 from client
 	phase1Pkt, err := readTNSPacket(s.clientConn)
 	if err != nil {
@@ -398,14 +366,14 @@ func (s *session) authenticateClient() error { //nolint:unused // used when O5LO
 }
 
 // o5LogonVerifierData holds decrypted O5LOGON verifier data for a user's API key.
-type o5LogonVerifierData struct { //nolint:unused // used when O5LOGON terminated auth is activated
+type o5LogonVerifierData struct {
 	O5LogonSalt       []byte
 	decryptedVerifier []byte
 }
 
 // loadO5LogonVerifier finds and decrypts the O5LOGON verifier for a user.
 // Returns the first valid API key with an O5LOGON verifier.
-func (s *session) loadO5LogonVerifier(userID uuid.UUID) (*o5LogonVerifierData, error) { //nolint:unused // used when O5LOGON terminated auth is activated
+func (s *session) loadO5LogonVerifier(userID uuid.UUID) (*o5LogonVerifierData, error) {
 	keys, err := s.store.ListAPIKeys(s.ctx, store.APIKeyFilter{
 		UserID:  &userID,
 		KeyType: strPtr(store.KeyTypeAPI),
@@ -439,42 +407,12 @@ func (s *session) loadO5LogonVerifier(userID uuid.UUID) (*o5LogonVerifierData, e
 }
 
 // strPtr returns a pointer to the given string.
-func strPtr(s string) *string { //nolint:unused // used when O5LOGON terminated auth is activated
+func strPtr(s string) *string {
 	return &s
 }
 
 // maxResendAttempts limits the number of Resend retries to prevent infinite loops.
 const maxResendAttempts = 3
-
-// readUpstreamConnectResponse reads the upstream response to a Connect packet,
-// handling Resend (type 11) by retransmitting. Returns the final response
-// (Accept, Refuse, Redirect, or other).
-func (s *session) readUpstreamConnectResponse(connectPkt *TNSPacket) (*TNSPacket, error) {
-	for attempt := range maxResendAttempts {
-		resp, err := readTNSPacket(s.upstreamConn)
-		if err != nil {
-			s.sendRefuse(ORA12535, "upstream did not respond")
-
-			return nil, fmt.Errorf("failed to read upstream response: %w", err)
-		}
-
-		if resp.Type != TNSPacketTypeResend {
-			return resp, nil
-		}
-
-		// Oracle wants us to resend the Connect on the same connection.
-		s.logger.DebugContext(s.ctx, "upstream sent Resend, retrying",
-			slog.Int("attempt", attempt+1))
-
-		if err := writeTNSPacket(s.upstreamConn, connectPkt); err != nil {
-			return nil, fmt.Errorf("failed to resend connect: %w", err)
-		}
-	}
-
-	s.sendRefuse(ORA12535, "too many resend attempts")
-
-	return nil, ErrMaxResendExceeded
-}
 
 // proxyMessages relays TNS packets bidirectionally with TTC-aware interception.
 func (s *session) proxyMessages() error {

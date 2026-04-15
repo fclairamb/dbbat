@@ -488,7 +488,7 @@ func TestOracleSession_APIKeyAuth_WrongKey(t *testing.T) {
 
 ## Acceptance Criteria
 
-1. `sqlplus orauser/dbb_xxx@//localhost:1522/TESTDB` connects through dbbat to upstream Oracle
+1. `python-oracledb` (thin) connecting as `orauser/dbb_xxx@//localhost:1522/TESTDB` authenticates through dbbat to upstream Oracle
 2. The upstream Oracle session uses the stored database credentials (not the API key)
 3. If no grant exists → ORA-01017 authentication error
 4. If API key is revoked/expired → authentication error
@@ -560,3 +560,30 @@ func TestOracleSession_APIKeyAuth_WrongKey(t *testing.T) {
 2. **TNS Accept crafting**: The Accept packet must be valid enough for all clients. Mitigation: use a real captured Accept as template.
 3. **Set Data Types**: Large static response (~200 bytes). Mitigation: capture from real Oracle and replay verbatim.
 4. **O5LOGON crypto correctness**: Must match what Oracle clients expect. Mitigation: extensive round-trip tests with go-ora as the reference client implementation.
+5. **Multi-key ambiguity**: `loadO5LogonVerifier()` picks the first valid API key with an O5LOGON verifier. O5LOGON is a challenge-response protocol — the challenge is derived from one specific key's verifier, so only that key's plaintext will decrypt correctly. If a user has multiple API keys, only the first one (by list order) works for Oracle auth. The others will fail with a garbled decryption. Mitigation: document this behavior; in practice users will have one active API key. A future enhancement could include a key-hint mechanism (e.g., key prefix in the connect descriptor).
+
+---
+
+## Implementation Status (updated 2026-04-15)
+
+### Code: COMPLETE — Activation: PENDING
+
+All code described in this spec has been implemented and merged. Every function is present but annotated with `//nolint:unused` because `session.run()` still uses **passthrough mode** (forwards auth directly to upstream Oracle).
+
+**What works today (passthrough mode):**
+- Client connects using real Oracle credentials (upstream user/password)
+- SERVICE_NAME rewrite works (e.g., `abyla_glh` → `MUTU01`)
+- Query interception and logging work
+- No per-user access control — the proxy picks the first active grant for the database
+
+**What's missing to activate terminated auth:**
+- Switch `session.run()` from passthrough to the terminated auth flow (the code exists, it just needs to replace the current passthrough block)
+- Validate hardcoded TTC negotiation responses with real Oracle thin clients (python-oracledb, JDBC thin, go-ora)
+- Verify that API keys created after the O5LOGON migration have valid verifiers
+
+**Files with unused code ready for activation:**
+- `session.go`: `handleClientNegotiation()`, `authenticateClient()`, `loadO5LogonVerifier()`
+- `upstream_auth.go`: `upstreamAuth()`, `upstreamConnect()`, `upstreamNegotiate()`, `upstreamO5Logon()`
+- `ttc_negotiate.go`: `buildTNSAccept()`, `buildSetProtocolResponse()`, `buildSetDataTypesResponse()`
+- `ttc_auth.go`: all parse/build functions
+- `crypto_util.go`: encrypt/decrypt verifier helpers
