@@ -139,14 +139,13 @@ var capturedAuthPhase1Suffix = []byte{
 	0x01, 0x05, 0x05, 0x64, 0x62, 0x62, 0x61, 0x74, 0x00,
 }
 
-// capturedConnectHeader (76 bytes) — Connect-specific header captured from python-oracledb thin.
+// capturedConnectHeader (62 bytes) — Connect-specific header captured from go-ora.
 // Fields at offsets 16-17 (data length) and 18-19 (data offset) are updated dynamically.
 var capturedConnectHeader = []byte{
-	0x01, 0x3f, 0x01, 0x2c, 0x04, 0x01, 0x20, 0x00, 0x20, 0x00, 0x4f, 0x98, 0x00, 0x00, 0x00, 0x01,
-	0x00, 0xee, 0x00, 0x4a, 0x00, 0x00, 0x00, 0x00, 0x84, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x01, 0x3d, 0x01, 0x2c, 0x08, 0x01, 0xff, 0xff, 0xff, 0xff, 0x4f, 0x98, 0x00, 0x00, 0x00, 0x01,
+	0x00, 0xfd, 0x00, 0x46, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x00, 0x01, 0x00, 0xf8, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 }
 
 // sendUpstreamConnect sends the Connect packet and handles Resend loops.
@@ -188,21 +187,26 @@ func (s *session) upstreamNegotiate() error {
 	// Send Set Protocol + Set Data Types using captured packets from the real
 	// python-oracledb thin client. The raw packets include the v315+ TNS header.
 	// This is the same approach as the server-side negotiation — replay real Oracle traffic.
-	// Send Marker (type 12) then Set Protocol — matching real thin client sequence
-	capturedMarker := []byte{0x00, 0x00, 0x00, 0x0b, 0x0c, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02}
-	if _, err := s.upstreamConn.Write(capturedMarker); err != nil {
-		return fmt.Errorf("failed to send Marker: %w", err)
+	// Step 1: Data Integrity Negotiation (go-ora sends this before Set Protocol)
+	if _, err := s.upstreamConn.Write(capturedDataIntegrityRequest); err != nil {
+		return fmt.Errorf("failed to send Data Integrity request: %w", err)
 	}
 
-	s.logger.DebugContext(s.ctx, "upstream: sending Set Protocol")
+	// Read Data Integrity response
+	diResp, err := readTNSPacket(s.upstreamConn)
+	if err != nil {
+		return fmt.Errorf("failed to read Data Integrity response: %w", err)
+	}
+
+	s.logger.DebugContext(s.ctx, "upstream: Data Integrity negotiated", slog.String("type", diResp.Type.String()))
+
+	// Step 2: Set Protocol
 	if _, err := s.upstreamConn.Write(capturedClientSetProtocol); err != nil {
 		return fmt.Errorf("failed to send Set Protocol: %w", err)
 	}
 
-	s.logger.DebugContext(s.ctx, "upstream: waiting for Set Protocol response")
-	// Read responses — skip non-Data packets (type-14 notifications, etc.)
+	// Read Set Protocol response — skip non-Data packets (type-14, etc.)
 	var resp *TNSPacket
-	var err error
 
 	for {
 		resp, err = readTNSPacket(s.upstreamConn)
@@ -261,10 +265,11 @@ func (s *session) upstreamO5Logon() error { // Decrypt the database password
 	challenge := parseUpstreamAuthKVPairs(challengeResp.Payload)
 
 	s.logger.DebugContext(s.ctx, "upstream AUTH challenge",
-		slog.Int("sesskey_len", len(challenge.sessKey)),
-		slog.Int("salt_len", len(challenge.salt)),
-		slog.String("pbkdf2_csk_salt", challenge.pbkdf2CskSalt),
-		slog.Int("pbkdf2_vgen_count", challenge.pbkdf2VgenCount))
+		slog.String("sesskey", challenge.sessKey),
+		slog.String("salt", challenge.salt),
+		slog.String("csk_salt", challenge.pbkdf2CskSalt),
+		slog.Int("vgen", challenge.pbkdf2VgenCount),
+		slog.Int("sder", challenge.pbkdf2SderCount))
 
 	// Generate PBKDF2 client response (Oracle 19c uses verifier type 18453)
 	s.logger.DebugContext(s.ctx, "upstream: computing PBKDF2 response")
