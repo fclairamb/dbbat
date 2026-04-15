@@ -2,6 +2,7 @@ package oracle
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -156,6 +157,19 @@ func (s *session) run() error {
 
 	// Step 9: Enter bidirectional TNS relay with query interception
 	return s.proxyMessages()
+}
+
+// encodeV315DataPacket wraps a TTC payload in a v315+ TNS Data packet.
+// v315+ format: 4-byte BE total length + type(0x06) + 3 reserved bytes + payload.
+func encodeV315DataPacket(payload []byte) []byte {
+	totalLen := 8 + len(payload) // 4(len) + 1(type) + 3(reserved) + payload
+	buf := make([]byte, totalLen)
+	binary.BigEndian.PutUint32(buf[0:4], uint32(totalLen))
+	buf[4] = byte(TNSPacketTypeData) // 0x06
+	// buf[5:8] = 0x00, 0x00, 0x00 (reserved)
+	copy(buf[8:], payload)
+
+	return buf
 }
 
 // sendAuthFailed sends an ORA-01017 style auth failure to the client.
@@ -335,12 +349,10 @@ func (s *session) authenticateClient() error {
 	s.logger.DebugContext(s.ctx, "AUTH challenge payload",
 		slog.Int("len", len(challengePayload)),
 		slog.String("hex_head", fmt.Sprintf("%x", challengePayload[:min(len(challengePayload), 60)])))
-	challengePkt := &TNSPacket{
-		Type:    TNSPacketTypeData,
-		Payload: challengePayload,
-	}
-
-	if err := writeTNSPacket(s.clientConn, challengePkt); err != nil {
+	// Write as raw v315+ TNS Data packet (4-byte length header, not 2-byte)
+	// After Accept, all packets must use v315+ format.
+	challengeRaw := encodeV315DataPacket(challengePayload)
+	if _, err := s.clientConn.Write(challengeRaw); err != nil {
 		return fmt.Errorf("failed to send AUTH challenge: %w", err)
 	}
 
@@ -373,6 +385,10 @@ func (s *session) authenticateClient() error {
 		return fmt.Errorf("failed to decrypt password: %w", err)
 	}
 
+	s.logger.DebugContext(s.ctx, "decrypted password from O5LOGON",
+		slog.Int("len", len(plainPassword)),
+		slog.String("prefix", plainPassword[:min(len(plainPassword), 10)]))
+
 	// Verify the decrypted password as an API key
 	apiKey, err := s.store.VerifyAPIKey(s.ctx, plainPassword)
 	if err != nil {
@@ -386,14 +402,9 @@ func (s *session) authenticateClient() error {
 	// Increment usage asynchronously
 	go func() { _ = s.store.IncrementAPIKeyUsage(context.Background(), apiKey.ID) }()
 
-	// Send AUTH OK to client
-	authOKPayload := buildAuthOK()
-	authOKPkt := &TNSPacket{
-		Type:    TNSPacketTypeData,
-		Payload: authOKPayload,
-	}
-
-	if err := writeTNSPacket(s.clientConn, authOKPkt); err != nil {
+	// Send AUTH OK to client (v315+ format)
+	authOKRaw := encodeV315DataPacket(buildAuthOK())
+	if _, err := s.clientConn.Write(authOKRaw); err != nil {
 		return fmt.Errorf("failed to send AUTH OK: %w", err)
 	}
 

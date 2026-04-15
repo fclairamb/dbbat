@@ -191,22 +191,21 @@ func ttcClr(data []byte) []byte {
 
 // parseAuthPhase2 extracts the client session key and encrypted password from AUTH Phase 2.
 // AUTH Phase 2 is sent as func=0x03, sub=0x73 (PiggybackSubAuth2).
-//
-// The message contains key-value pairs including:
-//   - AUTH_SESSKEY: encrypted client session key (hex string)
-//   - AUTH_PASSWORD: encrypted password (hex string)
+// Uses proper TTC DLC+CLR decoding (matching go-ora's GetKeyVal format).
 func parseAuthPhase2(tnsDataPayload []byte) (string, string, error) {
 	if len(tnsDataPayload) < ttcDataFlagsSize+4 {
 		return "", "", ErrAuthPhase2TooShort
 	}
 
-	// Skip data flags (2 bytes) + func code (0x03) + sub-op (0x73)
-	offset := ttcDataFlagsSize + 2
-
-	// Parse key-value pairs from the remaining payload
-	pairs := parseTTCKVPairs(tnsDataPayload[offset:])
+	// Skip data flags (2) + func code (0x03) + sub-op (0x73) + preamble
+	// The preamble has variable-length fields before the KV pairs.
+	// We scan for the first AUTH_ key using DLC-aware parsing.
+	payload := tnsDataPayload[ttcDataFlagsSize+2:]
 
 	var sessKey, password string
+
+	// Scan through payload for AUTH_ KV pairs using DLC+CLR decoding
+	pairs := scanTTCKeyValPairs(payload)
 
 	for _, p := range pairs {
 		switch strings.ToUpper(p.Key) {
@@ -226,6 +225,141 @@ func parseAuthPhase2(tnsDataPayload []byte) (string, string, error) {
 	}
 
 	return sessKey, password, nil
+}
+
+// scanTTCKeyValPairs scans a TTC payload for AUTH_ key-value pairs using DLC+CLR decoding.
+// Format per pair: compressed_int(keyLen) + CLR(key) + compressed_int(valLen) + CLR(val) + compressed_int(flag).
+func scanTTCKeyValPairs(payload []byte) []authKVPair {
+	var pairs []authKVPair
+
+	for offset := 0; offset < len(payload)-4; {
+		kLen, kLenSize := readCompressedInt(payload[offset:])
+		if kLenSize == 0 || kLen <= 0 || kLen > 128 || offset+kLenSize >= len(payload) {
+			offset++
+
+			continue
+		}
+
+		clrKey, clrKeySize := readCLR(payload[offset+kLenSize:])
+		if clrKeySize == 0 || len(clrKey) == 0 {
+			offset++
+
+			continue
+		}
+
+		keyStr := strings.ToUpper(string(clrKey))
+		if !strings.HasPrefix(keyStr, "AUTH_") {
+			offset++
+
+			continue
+		}
+
+		key, val, consumed := readKVValue(payload[offset+kLenSize+clrKeySize:])
+		if consumed == 0 {
+			offset++
+
+			continue
+		}
+
+		_ = key // DLC length, not used
+		pairs = append(pairs, authKVPair{Key: keyStr, Value: string(val)})
+		offset += kLenSize + clrKeySize + consumed
+	}
+
+	return pairs
+}
+
+// readKVValue reads the value DLC + CLR + flag from a KV pair.
+// Returns the DLC length, CLR data, and total bytes consumed.
+func readKVValue(buf []byte) (int, []byte, int) {
+	vLen, vLenSize := readCompressedInt(buf)
+	if vLenSize == 0 || vLen < 0 {
+		return 0, nil, 0
+	}
+
+	clrVal, clrValSize := readCLR(buf[vLenSize:])
+	if clrValSize == 0 {
+		return 0, nil, 0
+	}
+
+	flagOffset := vLenSize + clrValSize
+	_, flagSize := readCompressedInt(buf[flagOffset:])
+
+	total := flagOffset + flagSize
+	if total == flagOffset {
+		total++
+	}
+
+	return vLen, clrVal, total
+}
+
+// readCompressedInt reads a TTC compressed integer from the buffer.
+// Returns the value and the number of bytes consumed.
+func readCompressedInt(buf []byte) (int, int) {
+	if len(buf) == 0 {
+		return 0, 0
+	}
+
+	size := int(buf[0])
+	if size == 0 {
+		return 0, 1
+	}
+
+	if size > 8 || 1+size > len(buf) {
+		return 0, 0
+	}
+
+	val := 0
+	for i := 1; i <= size; i++ {
+		val = val<<8 | int(buf[i])
+	}
+
+	return val, 1 + size
+}
+
+// readCLR reads TTC CLR-encoded data from the buffer.
+// Returns the data and total bytes consumed (including length prefix).
+func readCLR(buf []byte) ([]byte, int) {
+	if len(buf) == 0 {
+		return nil, 0
+	}
+
+	first := buf[0]
+	if first == 0 || first == 0xFF || first == 0xFD {
+		return nil, 1
+	}
+
+	if first == 0xFE {
+		// Chunked: 0xFE + (chunkLen + chunk)* + 0x00
+		var data []byte
+
+		offset := 1
+		for offset < len(buf) {
+			chunkLen := int(buf[offset])
+			offset++
+
+			if chunkLen == 0 {
+				break
+			}
+
+			if offset+chunkLen > len(buf) {
+				return nil, 0
+			}
+
+			data = append(data, buf[offset:offset+chunkLen]...)
+			offset += chunkLen
+		}
+
+		return data, offset
+	}
+
+	// Short form: 1-byte length + data
+	dataLen := int(first)
+	if 1+dataLen > len(buf) {
+		return nil, 0
+	}
+
+	return buf[1 : 1+dataLen], 1 + dataLen
 }
 
 // encodeTTCString encodes a string with Oracle TTC length prefix.
