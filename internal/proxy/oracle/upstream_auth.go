@@ -95,42 +95,48 @@ func (s *session) upstreamConnect() error {
 	return nil
 }
 
-// buildUpstreamAuthPhase1 builds a TTC AUTH Phase 1 message matching the real thin client format.
-// Includes AUTH_TERMINAL, AUTH_PROGRAM_NM, AUTH_MACHINE, AUTH_PID, AUTH_SID metadata.
+// buildUpstreamAuthPhase1 builds a TTC AUTH Phase 1 message using the exact format
+// captured from python-oracledb thin. The preamble has a fixed 12-byte structure
+// with username length at offsets 3 and 11. The suffix contains AUTH_ KV pairs.
 func buildUpstreamAuthPhase1(username string) []byte {
-	// Preamble: data_flags(2) + func(0x03) + sub(0x76) + TTC-encoded fields + username
-	buf := make([]byte, 0, 256)
-	buf = append(buf, 0x00, 0x00) // data flags
-	buf = append(buf, 0x03)       // func = piggyback
-	buf = append(buf, 0x76)       // sub = AUTH Phase 1
+	u := []byte(username)
+	buf := make([]byte, 0, 16+len(u)+len(capturedAuthPhase1Suffix))
 
-	// Preamble fields (from captured packet): logon mode, auth type flags
-	buf = append(buf, 0x01, 0x01, 0x01, 0x03, 0x01, 0x01, 0x01, 0x01)
+	// Header: data_flags(2) + func(0x03) + sub(0x76)
+	buf = append(buf, 0x00, 0x00, 0x03, 0x76)
 
-	// Username length + username
-	buf = append(buf, byte(len(username)))
-	buf = append(buf, 0x01, 0x01)
-	buf = append(buf, byte(len(username)))
-	buf = append(buf, []byte(username)...)
+	// Preamble (12 bytes): captured template with username length at positions 3 and 11
+	preamble := []byte{0x01, 0x01, 0x01, byte(len(u)), 0x01, 0x01, 0x01, 0x01, 0x05, 0x01, 0x01, byte(len(u))}
+	buf = append(buf, preamble...)
 
-	// AUTH_ key-value pairs using the TTC DLC+CLR encoding
-	kvs := []struct{ k, v string }{
-		{"AUTH_TERMINAL", "unknown"},
-		{"AUTH_PROGRAM_NM", "dbbat"},
-		{"AUTH_MACHINE", "dbbat"},
-		{"AUTH_PID", "1"},
-		{"AUTH_SID", "dbbat"},
-	}
+	// Username
+	buf = append(buf, u...)
 
-	for _, kv := range kvs {
-		buf = append(buf, ttcCompressedUint(uint64(len(kv.k)))...)
-		buf = append(buf, ttcClr([]byte(kv.k))...)
-		buf = append(buf, ttcCompressedUint(uint64(len(kv.v)))...)
-		buf = append(buf, ttcClr([]byte(kv.v))...)
-		buf = append(buf, 0x00) // null terminator between pairs
-	}
+	// AUTH_ KV pairs suffix (captured from real thin client, with dbbat-specific values)
+	buf = append(buf, capturedAuthPhase1Suffix...)
 
 	return buf
+}
+
+// capturedAuthPhase1Suffix contains the AUTH_ key-value pairs after the username.
+// Matches the TTC DLC+CLR encoding from a real python-oracledb thin AUTH Phase 1.
+// Values are dbbat-specific (AUTH_TERMINAL=dbbat, AUTH_PROGRAM_NM=dbbat, etc.)
+var capturedAuthPhase1Suffix = []byte{
+	// AUTH_TERMINAL = "dbbat"
+	0x01, 0x0d, 0x0d, 0x41, 0x55, 0x54, 0x48, 0x5f, 0x54, 0x45, 0x52, 0x4d, 0x49, 0x4e, 0x41, 0x4c,
+	0x01, 0x05, 0x05, 0x64, 0x62, 0x62, 0x61, 0x74, 0x00,
+	// AUTH_PROGRAM_NM = "dbbat"
+	0x01, 0x0f, 0x0f, 0x41, 0x55, 0x54, 0x48, 0x5f, 0x50, 0x52, 0x4f, 0x47, 0x52, 0x41, 0x4d, 0x5f,
+	0x4e, 0x4d, 0x01, 0x05, 0x05, 0x64, 0x62, 0x62, 0x61, 0x74, 0x00,
+	// AUTH_MACHINE = "dbbat"
+	0x01, 0x0c, 0x0c, 0x41, 0x55, 0x54, 0x48, 0x5f, 0x4d, 0x41, 0x43, 0x48, 0x49, 0x4e, 0x45,
+	0x01, 0x05, 0x05, 0x64, 0x62, 0x62, 0x61, 0x74, 0x00,
+	// AUTH_PID = "1"
+	0x01, 0x08, 0x08, 0x41, 0x55, 0x54, 0x48, 0x5f, 0x50, 0x49, 0x44,
+	0x01, 0x01, 0x01, 0x31, 0x00,
+	// AUTH_SID = "dbbat"
+	0x01, 0x08, 0x08, 0x41, 0x55, 0x54, 0x48, 0x5f, 0x53, 0x49, 0x44,
+	0x01, 0x05, 0x05, 0x64, 0x62, 0x62, 0x61, 0x74, 0x00,
 }
 
 // capturedConnectHeader (76 bytes) — Connect-specific header captured from python-oracledb thin.
@@ -323,13 +329,13 @@ func parseUpstreamAuthChallenge(tnsDataPayload []byte) (string, string, error) {
 		return "", "", ErrAuthPhase1TooShort
 	}
 
-	// Parse key-value pairs from the response
-	offset := ttcDataFlagsSize + 2 // Skip data flags + response func code + sequence
+	// Skip data flags + response func code, then scan for AUTH_ KV pairs using proper DLC+CLR
+	offset := ttcDataFlagsSize + 2
 	if offset >= len(tnsDataPayload) {
 		return "", "", ErrAuthPhase1NoData
 	}
 
-	pairs := parseTTCKVPairs(tnsDataPayload[offset:])
+	pairs := scanTTCKeyValPairs(tnsDataPayload[offset:])
 
 	var sessKey, vfrData string
 

@@ -390,87 +390,8 @@ func encodeTTCKVPair(key, value string) []byte {
 
 // parseTTCKVPairs parses TTC key-value pairs from a payload.
 // This is a best-effort parser — TTC encoding is complex and client-specific.
-func parseTTCKVPairs(payload []byte) []authKVPair {
-	var pairs []authKVPair
-	offset := 0
-
-	// Skip initial bytes (logon mode, flags, etc.) until we find key-value pairs.
-	// The format varies, but we look for well-known key names.
-	for offset < len(payload)-2 {
-		// Try to read a length-prefixed string
-		key, newOffset := readTTCString(payload, offset)
-		if key == "" || newOffset <= offset {
-			offset++
-
-			continue
-		}
-
-		// Check if this looks like a known AUTH key
-		upperKey := strings.ToUpper(key)
-		if !isAuthKey(upperKey) {
-			offset++
-
-			continue
-		}
-
-		// Read the value
-		value, valueOffset := readTTCString(payload, newOffset)
-		if valueOffset <= newOffset {
-			offset++
-
-			continue
-		}
-
-		pairs = append(pairs, authKVPair{Key: upperKey, Value: value})
-		offset = valueOffset
-	}
-
-	return pairs
-}
 
 // readTTCString reads a TTC length-prefixed string from the payload at the given offset.
 // Returns the string and the new offset after reading.
-func readTTCString(payload []byte, offset int) (string, int) {
-	if offset >= len(payload) {
-		return "", offset
-	}
-
-	strLen := int(payload[offset])
-	offset++
-
-	if strLen == 0 {
-		return "", offset
-	}
-
-	// Long string marker
-	if strLen == 0xFE {
-		if offset+2 > len(payload) {
-			return "", offset
-		}
-
-		strLen = int(binary.BigEndian.Uint16(payload[offset : offset+2]))
-		offset += 2
-	}
-
-	if offset+strLen > len(payload) {
-		return "", offset
-	}
-
-	s := string(payload[offset : offset+strLen])
-
-	return s, offset + strLen
-}
 
 // isAuthKey checks if a key name is a known Oracle AUTH key.
-func isAuthKey(key string) bool {
-	switch key {
-	case "AUTH_TERMINAL", "AUTH_PROGRAM_NM", "AUTH_MACHINE", "AUTH_PID",
-		"AUTH_SID", "AUTH_SESSKEY", "AUTH_VFR_DATA", "AUTH_PASSWORD",
-		"AUTH_ACL", "AUTH_ALTER_SESSION", "AUTH_LOGON_AS_SYSDBA",
-		"AUTH_LOGON_AS_SYSOPER", "AUTH_INITIAL_CLIENT_ROLE",
-		"AUTH_SVR_RESPONSE", "AUTH_VERSION_NO", "AUTH_STATUS":
-		return true
-	default:
-		return strings.HasPrefix(key, "AUTH_")
-	}
-}
