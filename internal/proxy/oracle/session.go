@@ -38,6 +38,9 @@ type session struct {
 	grant         *store.Grant
 	connectionUID uuid.UUID
 
+	// Upstream go-ora connection (kept alive to prevent GC)
+	goOraConn interface{ Close() error }
+
 	// Query tracking
 	tracker      *oracleQueryTracker
 	queryStorage config.QueryStorageConfig
@@ -461,7 +464,6 @@ func strPtr(s string) *string {
 }
 
 // maxResendAttempts limits the number of Resend retries to prevent infinite loops.
-const maxResendAttempts = 3
 
 // proxyMessages relays TNS packets bidirectionally with TTC-aware interception.
 func (s *session) proxyMessages() error {
@@ -743,7 +745,11 @@ func (s *session) cleanup() {
 		}
 	}
 
-	if s.upstreamConn != nil {
+	if s.goOraConn != nil {
+		if err := s.goOraConn.Close(); err != nil {
+			s.logger.ErrorContext(s.ctx, "failed to close go-ora connection", slog.Any("error", err))
+		}
+	} else if s.upstreamConn != nil {
 		if err := s.upstreamConn.Close(); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to close upstream connection", slog.Any("error", err))
 		}
