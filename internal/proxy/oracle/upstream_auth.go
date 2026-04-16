@@ -91,4 +91,3 @@ func extractGoOraConn(conn *goora.Connection) net.Conn {
 
 	return rawConn
 }
-

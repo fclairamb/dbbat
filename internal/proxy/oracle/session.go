@@ -126,9 +126,10 @@ func (s *session) run() error {
 		return fmt.Errorf("upstream auth failed: %w", err)
 	}
 
-	// Step 6b: Send AUTH OK to client NOW — upstream is ready, relay can start immediately
-	authOKRaw := encodeV315DataPacket(buildAuthOK())
-	if _, err := s.clientConn.Write(authOKRaw); err != nil {
+	// Step 6b: Send the full AUTH OK + session properties response to client.
+	// This is a captured response from Oracle 19c that includes AUTH_VERSION_STRING,
+	// session properties, and the code-4 end marker that go-ora expects.
+	if _, err := s.clientConn.Write(capturedAuthOKResponse); err != nil {
 		return fmt.Errorf("failed to send AUTH OK: %w", err)
 	}
 

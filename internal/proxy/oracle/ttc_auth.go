@@ -101,9 +101,6 @@ func buildAuthChallengeEndMarker() []byte {
 }
 
 // buildAuthOK constructs the TTC AUTH success response.
-func buildAuthOK() []byte {
-	return []byte{0x00, 0x00, byte(TTCFuncResponse), 0x00, 0x00}
-}
 
 // buildAuthFailed constructs the TTC AUTH failure response with an ORA error code.
 func buildAuthFailed(oraCode int, message string) []byte {
