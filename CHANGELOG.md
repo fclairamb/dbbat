@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/fclairamb/dbbat/compare/v0.6.0...v0.6.1) (2026-04-19)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/jackc/pgx/v5 to v5.9.2 ([#108](https://github.com/fclairamb/dbbat/issues/108)) ([b837285](https://github.com/fclairamb/dbbat/commit/b837285f589cba224177cbd51fe523e31d995ec1))
+
 ## [0.6.0](https://github.com/fclairamb/dbbat/compare/v0.5.2...v0.6.0) (2026-04-15)
 
 
