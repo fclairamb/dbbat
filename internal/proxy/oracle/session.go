@@ -97,20 +97,19 @@ func (s *session) run() error {
 		return err
 	}
 
-	// Step 3: Send TNS Accept (dbbat acts as Oracle server)
-	// Note: Real Oracle also sends a type-14 post-accept notification, but some clients
-	// (e.g., go-ora) don't handle it. We skip it — thin clients work without it.
-	if _, err := s.clientConn.Write(buildTNSAccept()); err != nil {
-		return fmt.Errorf("failed to send TNS Accept: %w", err)
-	}
-
-	// Step 4: TTC negotiation with client (Marker + Set Protocol + Set Data Types)
-	if err := s.handleClientNegotiation(); err != nil {
-		return fmt.Errorf("client negotiation failed: %w", err)
+	// Step 3+4: Transparent pre-auth relay.
+	// Proxy TNS Accept + Set Protocol + Set Data Types through to the real upstream
+	// so each client (go-ora, python-oracledb, dbeaver, sqlplus 23c…) receives a
+	// server response tailored to its own capability/datatype registration.
+	// The relay returns the client's AUTH Phase 1 packet (not forwarded) so dbbat
+	// can perform terminated O5LOGON authentication with its own user store.
+	phase1Pkt, err := s.relayPreAuthNegotiation(connectPkt)
+	if err != nil {
+		return fmt.Errorf("pre-auth relay failed: %w", err)
 	}
 
 	// Step 5: Authenticate client via O5LOGON (API key as Oracle password)
-	if err := s.authenticateClient(); err != nil {
+	if err := s.authenticateClient(phase1Pkt); err != nil {
 		s.logger.WarnContext(s.ctx, "client authentication failed", slog.Any("error", err))
 		s.sendAuthFailed(ORA01017, "invalid username/password; logon denied")
 
@@ -293,15 +292,27 @@ func (s *session) handleClientNegotiation() error {
 // authenticateClient performs O5LOGON server-side authentication.
 // The client sends AUTH Phase 1 (username), dbbat sends a challenge,
 // the client sends AUTH Phase 2 (encrypted password), dbbat decrypts and verifies.
-func (s *session) authenticateClient() error {
-	// Receive AUTH Phase 1 from client
-	phase1Pkt, err := readTNSPacket(s.clientConn)
-	if err != nil {
-		return fmt.Errorf("failed to read AUTH Phase 1: %w", err)
-	}
+// phase1Pkt may be nil (legacy path) or pre-read from the transparent pre-auth relay.
+func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
+	if phase1Pkt == nil {
+		pkt, err := readTNSPacket(s.clientConn)
+		if err != nil {
+			return fmt.Errorf("failed to read AUTH Phase 1: %w", err)
+		}
 
-	if phase1Pkt.Type != TNSPacketTypeData {
-		return fmt.Errorf("%w: got %s for AUTH Phase 1", ErrUnexpectedPacketType, phase1Pkt.Type)
+		for pkt.Type != TNSPacketTypeData {
+			s.logger.DebugContext(s.ctx, "AUTH Phase 1: skipping non-Data packet",
+				slog.String("type", pkt.Type.String()),
+				slog.Int("len", len(pkt.Payload)),
+				slog.String("hex", fmt.Sprintf("%x", pkt.Payload[:min(len(pkt.Payload), 40)])))
+
+			pkt, err = readTNSPacket(s.clientConn)
+			if err != nil {
+				return fmt.Errorf("failed to read AUTH Phase 1: %w", err)
+			}
+		}
+
+		phase1Pkt = pkt
 	}
 
 	// Extract username from AUTH Phase 1
@@ -366,19 +377,45 @@ func (s *session) authenticateClient() error {
 		return fmt.Errorf("failed to send AUTH challenge: %w", err)
 	}
 
-	// Receive AUTH Phase 2 from client
+	// Receive AUTH Phase 2 from client.
+	// Some clients (sqlplus 23c) send Marker packets (break / reset) before AUTH Phase 2.
+	// Oracle's OOB break protocol requires the server to respond with a reset marker.
 	phase2Pkt, err := readTNSPacket(s.clientConn)
 	if err != nil {
 		return fmt.Errorf("failed to read AUTH Phase 2: %w", err)
 	}
 
+	sawBreak := false
+
+	for phase2Pkt.Type != TNSPacketTypeData {
+		s.logger.DebugContext(s.ctx, "AUTH Phase 2: non-Data packet",
+			slog.String("type", phase2Pkt.Type.String()),
+			slog.Int("len", len(phase2Pkt.Payload)),
+			slog.String("hex", fmt.Sprintf("%x", phase2Pkt.Payload[:min(len(phase2Pkt.Payload), 40)])))
+
+		if isBreakMarker(phase2Pkt) {
+			sawBreak = true
+		}
+
+		if isResetMarker(phase2Pkt) && sawBreak {
+			if _, err := s.clientConn.Write(buildResetMarker()); err != nil {
+				return fmt.Errorf("failed to send reset marker: %w", err)
+			}
+
+			s.logger.DebugContext(s.ctx, "AUTH Phase 2: responded to break with reset marker")
+
+			sawBreak = false
+		}
+
+		phase2Pkt, err = readTNSPacket(s.clientConn)
+		if err != nil {
+			return fmt.Errorf("failed to read AUTH Phase 2: %w", err)
+		}
+	}
+
 	s.logger.DebugContext(s.ctx, "AUTH Phase 2 packet received",
 		slog.String("type", phase2Pkt.Type.String()),
 		slog.Int("payload_len", len(phase2Pkt.Payload)))
-
-	if phase2Pkt.Type != TNSPacketTypeData {
-		return fmt.Errorf("%w: got %s for AUTH Phase 2", ErrUnexpectedPacketType, phase2Pkt.Type)
-	}
 
 	// Parse AUTH Phase 2 to get encrypted password
 	s.logger.DebugContext(s.ctx, "AUTH Phase 2 payload",
