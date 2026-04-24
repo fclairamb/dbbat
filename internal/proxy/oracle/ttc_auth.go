@@ -19,13 +19,31 @@ type authKVPair struct {
 	Value string
 }
 
+// knownAuthKeys are TTC AUTH key names that must not be returned as the username.
+// Different clients serialize the username at different offsets; the parser skips
+// any match on these well-known keys and keeps scanning.
+var knownAuthKeys = map[string]bool{
+	authKeyUsername: true, // "AUTH_TERMINAL"
+	authKeySessKey:  true, // "AUTH_SESSKEY"
+	authKeyVfrData:  true, // "AUTH_VFR_DATA"
+	authKeyPassword: true, // "AUTH_PASSWORD"
+	"AUTH_PROGRAM_NM":    true,
+	"AUTH_MACHINE":       true,
+	"AUTH_PID":           true,
+	"AUTH_SID":           true,
+	"AUTH_ACL":           true,
+	"AUTH_ALTER_SESSION": true,
+	"AUTH_LOGICAL_SESSION_ID": true,
+}
+
 // parseAuthPhase1 extracts the username from a TTC AUTH Phase 1 message.
 // AUTH Phase 1 is sent as func=0x03, sub=0x76 (PiggybackSubAuth1).
 //
 // The wire format has a variable-length preamble of TTC-encoded fields (logon mode,
 // auth flags) before the username. The username is a length-prefixed string that
-// appears before the first AUTH_* key-value pair. We scan for it by looking for
-// a length prefix (2+) followed by that many printable ASCII characters.
+// appears before the first AUTH_* key-value pair. We scan for length-prefixed
+// printable ASCII strings and skip any that match a known AUTH_* key name, since
+// some clients (e.g. SQLcl JDBC thin) serialize AUTH_TERMINAL before the username.
 func parseAuthPhase1(tnsDataPayload []byte) (string, error) {
 	if len(tnsDataPayload) < ttcDataFlagsSize+4 {
 		return "", ErrAuthPhase1TooShort
@@ -34,19 +52,51 @@ func parseAuthPhase1(tnsDataPayload []byte) (string, error) {
 	// Skip data flags (2 bytes) + func code (0x03) + sub-op (0x76)
 	payload := tnsDataPayload[ttcDataFlagsSize+2:]
 
-	// Scan for the first length-prefixed string that looks like a username.
-	// The preamble contains small values (0x01, 0x05, etc.) — the username
-	// is the first string with length >= 2 where all bytes are printable ASCII.
-	for i := 0; i < len(payload)-2 && i < 64; i++ {
+	// SQLcl / JDBC thin encodes the username via TTC chunked format:
+	//   0x01 <L>    — compressed int giving length L
+	//   0x01 0x01   — chunk metadata (one chunk, chunk-header)
+	//   <L bytes>   — username
+	// This pattern sits before any AUTH_* key/value pair. Scan for it first.
+	for i := 0; i+4 < len(payload); i++ {
+		if payload[i] != 0x01 || payload[i+2] != 0x01 || payload[i+3] != 0x01 {
+			continue
+		}
+
+		strLen := int(payload[i+1])
+		if strLen < 2 || strLen > 32 || i+4+strLen > len(payload) {
+			continue
+		}
+
+		candidate := payload[i+4 : i+4+strLen]
+		if !isPrintableASCII(candidate) {
+			continue
+		}
+
+		name := strings.ToUpper(string(candidate))
+		if !knownAuthKeys[name] {
+			return name, nil
+		}
+	}
+
+	// Fallback: scan for any length-prefixed printable ASCII string, skipping
+	// known AUTH_* keys. This covers sqlplus's direct-length-prefix format.
+	for i := 0; i < len(payload)-2; i++ {
 		strLen := int(payload[i])
 		if strLen < 2 || strLen > 128 || i+1+strLen > len(payload) {
 			continue
 		}
 
 		candidate := payload[i+1 : i+1+strLen]
-		if isPrintableASCII(candidate) {
-			return strings.ToUpper(string(candidate)), nil
+		if !isPrintableASCII(candidate) {
+			continue
 		}
+
+		name := strings.ToUpper(string(candidate))
+		if knownAuthKeys[name] {
+			continue
+		}
+
+		return name, nil
 	}
 
 	return "", ErrAuthPhase1BadUsername
@@ -213,6 +263,17 @@ func parseAuthPhase2(tnsDataPayload []byte) (string, string, error) {
 		}
 	}
 
+	// Fallback: some clients (SQLcl / JDBC thin) encode the preamble in a way
+	// that confuses the DLC+CLR state machine. Do a byte-level search for the
+	// literal key names and parse DLC(len) + len bytes that follow.
+	if sessKey == "" {
+		sessKey = findKVByKeyBytes(payload, []byte(authKeySessKey))
+	}
+
+	if password == "" {
+		password = findKVByKeyBytes(payload, []byte(authKeyPassword))
+	}
+
 	if sessKey == "" {
 		return "", "", ErrAuthPhase2MissingSessKey
 	}
@@ -222,6 +283,53 @@ func parseAuthPhase2(tnsDataPayload []byte) (string, string, error) {
 	}
 
 	return sessKey, password, nil
+}
+
+// findKVByKeyBytes searches payload for a TTC AUTH_* key name and returns the value
+// that follows. Expected layout: <DLC(valLen)> <CLR(val)>, starting immediately after
+// the key's last byte. CLR is either <len><bytes> for short values or 0xFE<chunks>
+// for long values.
+func findKVByKeyBytes(payload, key []byte) string {
+	idx := indexOf(payload, key)
+	if idx < 0 {
+		return ""
+	}
+
+	// After the key name, skip DLC (valLen) compressed int.
+	tail := payload[idx+len(key):]
+
+	_, dlcSize := readCompressedInt(tail)
+	if dlcSize == 0 || dlcSize >= len(tail) {
+		return ""
+	}
+
+	val, _ := readCLR(tail[dlcSize:])
+
+	return string(val)
+}
+
+// indexOf is a simple byte-slice search.
+func indexOf(haystack, needle []byte) int {
+	if len(needle) == 0 {
+		return 0
+	}
+
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		match := true
+		for j := 0; j < len(needle); j++ {
+			if haystack[i+j] != needle[j] {
+				match = false
+
+				break
+			}
+		}
+
+		if match {
+			return i
+		}
+	}
+
+	return -1
 }
 
 // scanTTCKeyValPairs scans a TTC payload for AUTH_ key-value pairs using DLC+CLR decoding.
