@@ -82,26 +82,28 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		req.Protocol = store.ProtocolPostgreSQL
 	}
 
-	if req.Protocol != store.ProtocolPostgreSQL && req.Protocol != store.ProtocolOracle {
-		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "protocol must be 'postgresql' or 'oracle'")
+	if !isSupportedProtocol(req.Protocol) {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
+			"protocol must be one of: postgresql, oracle, mysql")
 		return
 	}
 
-	// Protocol-aware defaults
+	// Port is required (the SQL default was dropped in the MySQL phase 1 migration).
+	// Surface a protocol-aware suggestion in the error so the user knows the
+	// conventional default for their chosen protocol.
 	if req.Port == 0 {
-		switch req.Protocol {
-		case store.ProtocolOracle:
-			req.Port = 1521
-		default:
-			req.Port = 5432
-		}
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
+			fmt.Sprintf("port is required (suggested default for %s: %d)",
+				req.Protocol, defaultPortFor(req.Protocol)))
+		return
 	}
 
 	// Validate required fields per protocol
 	switch req.Protocol {
 	case store.ProtocolOracle:
 		if req.OracleServiceName == "" && req.DatabaseName == "" {
-			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "oracle_service_name or database_name is required for Oracle databases")
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError,
+				"oracle_service_name or database_name is required for Oracle databases")
 			return
 		}
 
@@ -110,7 +112,8 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		}
 	default:
 		if req.DatabaseName == "" {
-			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "database_name is required for PostgreSQL databases")
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError,
+				"database_name is required for "+req.Protocol+" databases")
 			return
 		}
 
@@ -459,5 +462,33 @@ func toDatabaseLimitedResponse(db *store.Database) DatabaseLimitedResponse {
 		UID:         db.UID,
 		Name:        db.Name,
 		Description: db.Description,
+	}
+}
+
+// isSupportedProtocol reports whether the given protocol is one the proxy
+// can serve. Kept as a helper so the create + update paths share one source
+// of truth for the enum.
+func isSupportedProtocol(protocol string) bool {
+	switch protocol {
+	case store.ProtocolPostgreSQL, store.ProtocolOracle, store.ProtocolMySQL:
+		return true
+	default:
+		return false
+	}
+}
+
+// defaultPortFor returns the conventional default TCP port for each protocol.
+// Used only to suggest a value in API error messages — the API itself never
+// auto-fills the port silently.
+func defaultPortFor(protocol string) int {
+	switch protocol {
+	case store.ProtocolPostgreSQL:
+		return 5432
+	case store.ProtocolOracle:
+		return 1521
+	case store.ProtocolMySQL:
+		return 3306
+	default:
+		return 0
 	}
 }
