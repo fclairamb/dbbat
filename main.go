@@ -19,6 +19,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/dump"
+	"github.com/fclairamb/dbbat/internal/proxy/mysql"
 	"github.com/fclairamb/dbbat/internal/proxy/oracle"
 	"github.com/fclairamb/dbbat/internal/proxy/postgresql"
 	"github.com/fclairamb/dbbat/internal/store"
@@ -339,10 +340,16 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	// Start Oracle proxy server (if configured)
 	oracleServer := startOracleProxy(ctx, cfg, dataStore, proxyAuthCache, logger)
 
+	// Start MySQL proxy server (if configured)
+	mysqlServer := startMySQLProxy(ctx, cfg, dataStore, proxyAuthCache, logger)
+
 	// Wait for shutdown signal and gracefully stop all servers
 	servers := []shutdownable{apiServer, proxyServer}
 	if oracleServer != nil {
 		servers = append(servers, oracleServer)
+	}
+	if mysqlServer != nil {
+		servers = append(servers, mysqlServer)
 	}
 
 	return awaitShutdown(ctx, logger, servers...)
@@ -390,6 +397,25 @@ func startOracleProxy(ctx context.Context, cfg *config.Config, dataStore *store.
 	}()
 
 	logger.InfoContext(ctx, "Oracle proxy server started", slog.String("addr", cfg.ListenOracle))
+
+	return srv
+}
+
+func startMySQLProxy(ctx context.Context, cfg *config.Config, dataStore *store.Store, authCache *cache.AuthCache, logger *slog.Logger) *mysql.Server {
+	if cfg.ListenMySQL == "" {
+		return nil
+	}
+
+	srv := mysql.NewServer(dataStore, cfg.EncryptionKey, cfg.QueryStorage, cfg.Dump, authCache, logger)
+
+	go func() {
+		if err := srv.Start(cfg.ListenMySQL); err != nil {
+			logger.ErrorContext(context.Background(), "MySQL proxy server error", slog.Any("error", err))
+			os.Exit(1)
+		}
+	}()
+
+	logger.InfoContext(ctx, "MySQL proxy server started", slog.String("addr", cfg.ListenMySQL))
 
 	return srv
 }
