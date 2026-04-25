@@ -44,12 +44,12 @@ func (h *handler) UseDB(dbName string) error {
 	syntheticSQL := "USE " + dbName
 
 	if dbName == h.session.database.Name || dbName == h.session.database.DatabaseName {
-		h.recordQuery(syntheticSQL, nil, time.Now(), nil, nil)
+		h.recordQuery(syntheticSQL, nil, time.Now(), nil, nil, 0, nil)
 
 		return nil
 	}
 
-	h.recordQuery(syntheticSQL, nil, time.Now(), nil, ptrErrString(ErrSwitchDatabaseDenied))
+	h.recordQuery(syntheticSQL, nil, time.Now(), nil, nil, 0, ptrErrString(ErrSwitchDatabaseDenied))
 
 	return ErrSwitchDatabaseDenied
 }
@@ -78,12 +78,12 @@ func (h *handler) HandleStmtPrepare(query string) (int, int, any, error) {
 	stmt, err := h.session.upstreamConn.Prepare(query)
 	if err != nil {
 		errStr := err.Error()
-		h.recordQuery(syntheticSQL, nil, start, nil, &errStr)
+		h.recordQuery(syntheticSQL, nil, start, nil, nil, 0, &errStr)
 
 		return 0, 0, nil, err
 	}
 
-	h.recordQuery(syntheticSQL, nil, start, nil, nil)
+	h.recordQuery(syntheticSQL, nil, start, nil, nil, 0, nil)
 
 	return stmt.ParamNum(), stmt.ColumnNum(), stmt, nil
 }
@@ -127,7 +127,8 @@ func (h *handler) HandleOtherCommand(cmd byte, _ []byte) error {
 }
 
 // runIntercepted is the common path for COM_QUERY and COM_STMT_EXECUTE.
-// It checks quotas, validates the SQL, executes, then records the outcome.
+// It checks quotas, validates the SQL, executes, captures result rows, then
+// records the outcome (single async query log row + StoreQueryRows).
 func (h *handler) runIntercepted(
 	sql string,
 	params *store.QueryParameters,
@@ -137,14 +138,14 @@ func (h *handler) runIntercepted(
 
 	if err := checkQuotas(s.grant); err != nil {
 		errStr := err.Error()
-		h.recordQuery(sql, params, time.Now(), nil, &errStr)
+		h.recordQuery(sql, params, time.Now(), nil, nil, 0, &errStr)
 
 		return nil, err
 	}
 
 	if err := shared.ValidateMySQLQuery(sql, s.grant); err != nil {
 		errStr := err.Error()
-		h.recordQuery(sql, params, time.Now(), nil, &errStr)
+		h.recordQuery(sql, params, time.Now(), nil, nil, 0, &errStr)
 
 		return nil, err
 	}
@@ -153,7 +154,7 @@ func (h *handler) runIntercepted(
 	result, err := exec()
 	if err != nil {
 		errStr := err.Error()
-		h.recordQuery(sql, params, start, nil, &errStr)
+		h.recordQuery(sql, params, start, nil, nil, 0, &errStr)
 
 		return result, err
 	}
@@ -165,22 +166,28 @@ func (h *handler) runIntercepted(
 		rowsAffected = &ra
 	}
 
-	h.recordQuery(sql, params, start, rowsAffected, nil)
+	capturedRows, totalBytes, _ := h.captureRows(result)
+
+	h.recordQuery(sql, params, start, capturedRows, rowsAffected, totalBytes, nil)
 
 	return result, nil
 }
 
 // recordQuery inserts a single query log row (asynchronously) with all
-// completion fields populated. Updates the session's grant counters so
-// in-session quota checks reflect work just done.
+// completion fields populated, then stores any captured result rows and
+// bumps connection stats. Updates the session's grant counters so in-session
+// quota checks reflect work just done.
 //
-// Phase 2 doesn't track bytes_transferred — Phase 3 (result row capture)
-// will compute it from row sizes and reintroduce it as a parameter.
+// capturedRows / bytesTransferred are 0/nil for non-SELECT queries, validation
+// failures, and synthetic USE/PREPARE entries — captureRows returns nil for
+// any result without a Resultset.
 func (h *handler) recordQuery(
 	sql string,
 	params *store.QueryParameters,
 	start time.Time,
+	capturedRows []store.QueryRow,
 	rowsAffected *int64,
+	bytesTransferred int64,
 	queryError *string,
 ) {
 	s := h.session
@@ -202,13 +209,29 @@ func (h *handler) recordQuery(
 	}
 
 	go func() {
-		if _, err := s.server.store.CreateQuery(s.ctx, record); err != nil {
+		created, err := s.server.store.CreateQuery(s.ctx, record)
+		if err != nil {
 			s.logger.ErrorContext(s.ctx, "create query log failed", slog.Any("error", err))
+
+			return
+		}
+
+		if len(capturedRows) > 0 {
+			if err := s.server.store.StoreQueryRows(s.ctx, created.UID, capturedRows); err != nil {
+				s.logger.ErrorContext(s.ctx, "store query rows failed", slog.Any("error", err))
+			}
+		}
+
+		if bytesTransferred > 0 {
+			if err := s.server.store.IncrementConnectionStats(s.ctx, s.connection.UID, bytesTransferred); err != nil {
+				s.logger.DebugContext(s.ctx, "increment connection stats failed", slog.Any("error", err))
+			}
 		}
 	}()
 
-	// In-session quota counter so the next checkQuotas() reflects this query.
+	// In-session quota counters so the next checkQuotas() reflects this query.
 	s.grant.QueryCount++
+	s.grant.BytesTransferred += bytesTransferred
 }
 
 // stringifyArgs converts MySQL prepared-statement args into store.QueryParameters.
