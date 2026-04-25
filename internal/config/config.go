@@ -143,6 +143,9 @@ type Config struct {
 	// Oracle proxy listen address (empty = disabled).
 	ListenOracle string `koanf:"listen_ora"`
 
+	// MySQL proxy listen address (empty = disabled).
+	ListenMySQL string `koanf:"listen_mysql"`
+
 	// REST API listen address.
 	ListenAPI string `koanf:"listen_api"`
 
@@ -250,6 +253,7 @@ func defaultConfig() Config {
 		ListenPG:     ":5434",
 		ListenAPI:    ":4200",
 		ListenOracle: ":1522",
+		ListenMySQL:  ":3307",
 		BaseURL:      DefaultBaseURL,
 		LogLevel:     DefaultLogLevel,
 		QueryStorage: QueryStorageConfig{
