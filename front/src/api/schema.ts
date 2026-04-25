@@ -826,7 +826,7 @@ export interface components {
              * @description Database protocol
              * @enum {string}
              */
-            protocol?: "postgresql" | "oracle";
+            protocol?: "postgresql" | "oracle" | "mysql";
             /** @description Oracle SERVICE_NAME (Oracle only) */
             oracle_service_name?: string;
             /**
@@ -875,7 +875,7 @@ export interface components {
              * @default postgresql
              * @enum {string}
              */
-            protocol: "postgresql" | "oracle";
+            protocol: "postgresql" | "oracle" | "mysql";
             /** @description Oracle SERVICE_NAME (required for Oracle) */
             oracle_service_name?: string;
         };
@@ -898,7 +898,7 @@ export interface components {
              * @description Database protocol
              * @enum {string}
              */
-            protocol?: "postgresql" | "oracle";
+            protocol?: "postgresql" | "oracle" | "mysql";
             /** @description Oracle SERVICE_NAME */
             oracle_service_name?: string;
         };
