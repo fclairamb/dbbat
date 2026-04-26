@@ -2,6 +2,8 @@ package mysql
 
 import (
 	"context"
+	"crypto/rsa"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
@@ -30,6 +32,12 @@ type Server struct {
 	// Shared go-mysql server config used for every accepted connection.
 	gomysqlServer *gomysqlserver.Server
 
+	// tlsConfig and rsaPrivateKey support client-facing TLS termination
+	// and the caching_sha2_password full-auth path. Both are nil when TLS
+	// is explicitly disabled in config.
+	tlsConfig     *tls.Config
+	rsaPrivateKey *rsa.PrivateKey
+
 	listener net.Listener
 	wg       sync.WaitGroup
 	shutdown chan struct{}
@@ -44,8 +52,14 @@ func NewServer(
 	queryStorage config.QueryStorageConfig,
 	dumpConfig config.DumpConfig,
 	authCache *cache.AuthCache,
+	mysqlConfig config.MySQLConfig,
 	logger *slog.Logger,
-) *Server {
+) (*Server, error) {
+	tlsConfig, rsaKey, err := loadTLSAndRSA(mysqlConfig)
+	if err != nil {
+		return nil, fmt.Errorf("MySQL proxy TLS setup: %w", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s := &Server{
@@ -54,14 +68,16 @@ func NewServer(
 		queryStorage:  queryStorage,
 		dumpConfig:    dumpConfig,
 		authCache:     authCache,
+		tlsConfig:     tlsConfig,
+		rsaPrivateKey: rsaKey,
 		logger:        logger,
 		shutdown:      make(chan struct{}),
 		ctx:           ctx,
 		cancel:        cancel,
 	}
-	s.gomysqlServer = newGoMySQLServer(s)
+	s.gomysqlServer = newGoMySQLServer(s, tlsConfig, rsaKey)
 
-	return s
+	return s, nil
 }
 
 // Start starts the proxy server.

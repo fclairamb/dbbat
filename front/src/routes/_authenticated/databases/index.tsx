@@ -59,18 +59,20 @@ function isFullDatabase(db: DatabaseItem): db is Database {
   return "host" in db;
 }
 
-type Protocol = "postgresql" | "oracle" | "mysql";
+type Protocol = "postgresql" | "oracle" | "mysql" | "mariadb";
 
 const PROTOCOL_LABEL: Record<Protocol, string> = {
   postgresql: "PostgreSQL",
   oracle: "Oracle",
   mysql: "MySQL",
+  mariadb: "MariaDB",
 };
 
 const PROTOCOL_DEFAULT_PORT: Record<Protocol, string> = {
   postgresql: "5432",
   oracle: "1521",
   mysql: "3306",
+  mariadb: "3306",
 };
 
 const PROTOCOL_BADGE_CLASS: Record<Protocol, string> = {
@@ -78,12 +80,15 @@ const PROTOCOL_BADGE_CLASS: Record<Protocol, string> = {
   oracle: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
   mysql:
     "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+  mariadb:
+    "bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-400",
 };
 
 const PROTOCOL_USERNAME_PLACEHOLDER: Record<Protocol, string> = {
   postgresql: "postgres",
   oracle: "SYSTEM",
   mysql: "root",
+  mariadb: "root",
 };
 
 function DatabasesPage() {
@@ -293,6 +298,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
                 <SelectItem value="postgresql">PostgreSQL</SelectItem>
                 <SelectItem value="oracle">Oracle</SelectItem>
                 <SelectItem value="mysql">MySQL</SelectItem>
+                <SelectItem value="mariadb">MariaDB</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -344,7 +350,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
                 id="databaseName"
                 value={databaseName}
                 onChange={(e) => setDatabaseName(e.target.value)}
-                placeholder={protocol === "mysql" ? "mydb" : "myapp"}
+                placeholder={protocol === "mysql" || protocol === "mariadb" ? "mydb" : "myapp"}
                 required
               />
             </div>

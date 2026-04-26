@@ -2,6 +2,8 @@ package mysql
 
 import (
 	"context"
+	"crypto/rsa"
+	"crypto/tls"
 	"log/slog"
 	"strings"
 
@@ -12,50 +14,89 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
-// newGoMySQLServer builds the shared go-mysql server config for all incoming
-// connections. We advertise mysql_clear_password as the default auth method so
-// the client sends the password in cleartext (verified against the user's
-// Argon2id hash from the DBBat store, the same way the PostgreSQL proxy does).
+// newGoMySQLServer builds the shared go-mysql server config.
 //
-// TLS is disabled in v1 — the proxy refuses SSL Request packets. Deploy on a
-// private network. caching_sha2_password and TLS termination are tracked as
-// v2 follow-ups in docs/mysql.md.
-func newGoMySQLServer(s *Server) *gomysqlserver.Server {
+// We advertise caching_sha2_password as the default auth plugin (matching
+// MySQL 8.x), with full-auth driven manually by dbbatAuthProvider so we can
+// verify the resulting cleartext against Argon2id.
+//
+// TLS termination is enabled when tlsConfig is non-nil — the library handles
+// the SSL Request packet upgrade transparently. The RSA private key (if any)
+// is reused for caching_sha2_password's public-key-retrieval path on non-TLS
+// connections.
+func newGoMySQLServer(s *Server, tlsConfig *tls.Config, rsaKey *rsa.PrivateKey) *gomysqlserver.Server {
 	return gomysqlserver.NewServerWithAuth(
 		"8.4.0-dbbat",
 		gomysql.DEFAULT_COLLATION_ID,
-		gomysql.AUTH_CLEAR_PASSWORD,
-		nil, // no RSA key (only needed for caching_sha2/sha256)
-		nil, // no TLS — refuse SSL Request from clients
+		gomysql.AUTH_CACHING_SHA2_PASSWORD,
+		rsaKey,
+		tlsConfig,
 		&dbbatAuthProvider{server: s},
 	)
 }
 
-// dbbatAuthProvider verifies the cleartext password (or API key) the client
-// sends as auth_response against the DBBat user store.
-//
-// It is shared across all sessions for a given Server instance. It carries
-// no per-session state — username comes from the *gomysqlserver.Conn.
+// dbbatAuthProvider verifies the password (or API key) the client sends as
+// auth_response against the DBBat user store. It's shared across all
+// sessions and stateless — username comes from the *gomysqlserver.Conn.
 type dbbatAuthProvider struct {
 	server *Server
 }
 
+// Validate is called by the library to confirm we know how to handle the
+// requested plugin. We support caching_sha2_password (the default) and
+// mysql_clear_password (legacy fallback for clients that explicitly pin to
+// it). mysql_native_password is not supported because we cannot derive the
+// scramble hash from an Argon2id stored password.
 func (p *dbbatAuthProvider) Validate(plugin string) bool {
-	return plugin == gomysql.AUTH_CLEAR_PASSWORD
+	switch plugin {
+	case gomysql.AUTH_CACHING_SHA2_PASSWORD, gomysql.AUTH_CLEAR_PASSWORD:
+		return true
+	default:
+		return false
+	}
 }
 
+// Authenticate is called by go-mysql once the client has sent its initial
+// auth response. We dispatch on the negotiated plugin; both supported
+// plugins ultimately yield a cleartext password we verify against Argon2id.
 func (p *dbbatAuthProvider) Authenticate(c *gomysqlserver.Conn, plugin string, authData []byte) error {
-	if plugin != gomysql.AUTH_CLEAR_PASSWORD {
-		return ErrUnsupportedAuthPlugin
-	}
-
-	password := string(authData)
-	// mysql_clear_password may be null-terminated; strip the trailing NUL.
-	password = strings.TrimRight(password, "\x00")
-
 	username := c.GetUser()
 
-	// API key path: prefix-match before falling back to user password.
+	password, err := p.extractPlaintext(c, plugin, authData)
+	if err != nil {
+		return err
+	}
+
+	return p.verifyCredentials(username, password)
+}
+
+// extractPlaintext recovers the cleartext password (or API key) from the
+// client's auth response, driving the protocol-specific exchange where
+// needed (RSA key retrieval for non-TLS caching_sha2).
+func (p *dbbatAuthProvider) extractPlaintext(c *gomysqlserver.Conn, plugin string, authData []byte) (string, error) {
+	switch plugin {
+	case gomysql.AUTH_CLEAR_PASSWORD:
+		// mysql_clear_password sends the cleartext NUL-terminated.
+		return trimTrailingNUL(string(authData)), nil
+
+	case gomysql.AUTH_CACHING_SHA2_PASSWORD:
+		// Empty auth_data means an empty password — verify against Argon2id
+		// of "". driveCachingSha2FullAuth would otherwise wait for a
+		// non-existent follow-up packet.
+		if len(authData) == 0 {
+			return "", nil
+		}
+
+		return driveCachingSha2FullAuth(c, p.server.rsaPrivateKey)
+
+	default:
+		return "", ErrUnsupportedAuthPlugin
+	}
+}
+
+// verifyCredentials checks the cleartext against the user's Argon2id hash,
+// or interprets it as an API key when it carries the dbb_ prefix.
+func (p *dbbatAuthProvider) verifyCredentials(username, password string) error {
 	if isAPIKey(password) {
 		return p.authenticateAPIKey(username, password)
 	}
@@ -65,14 +106,18 @@ func (p *dbbatAuthProvider) Authenticate(c *gomysqlserver.Conn, plugin string, a
 		return gomysqlserver.ErrAccessDenied
 	}
 
-	var valid bool
+	var (
+		valid bool
+		verr  error
+	)
+
 	if p.server.authCache != nil {
-		valid, err = p.server.authCache.VerifyPassword(p.server.ctx, user.UID.String(), password, user.PasswordHash)
+		valid, verr = p.server.authCache.VerifyPassword(p.server.ctx, user.UID.String(), password, user.PasswordHash)
 	} else {
-		valid, err = crypto.VerifyPassword(user.PasswordHash, password)
+		valid, verr = crypto.VerifyPassword(user.PasswordHash, password)
 	}
 
-	if err != nil || !valid {
+	if verr != nil || !valid {
 		return gomysqlserver.ErrAccessDenied
 	}
 
@@ -102,10 +147,13 @@ func isAPIKey(password string) bool {
 }
 
 // dbbatAuthHandler is the per-connection AuthenticationHandler. It hands the
-// library a placeholder credential after verifying the user exists, so the
-// library proceeds with the AUTH_CLEAR_PASSWORD flow that our authProvider
-// actually verifies. After the password check passes, OnAuthSuccess looks up
-// the database and grant.
+// library a placeholder credential after verifying the user exists, then
+// looks up the database and grant once auth completes.
+//
+// The placeholder credential carries AuthPluginName = caching_sha2_password
+// to match the server default and short-circuit the library's
+// AuthSwitchRequest path. dbbatAuthProvider.Authenticate does the real
+// verification against Argon2id.
 type dbbatAuthHandler struct {
 	session *Session
 }
@@ -113,20 +161,20 @@ type dbbatAuthHandler struct {
 func (h *dbbatAuthHandler) GetCredential(username string) (gomysqlserver.Credential, bool, error) {
 	user, err := h.session.server.store.GetUserByUsername(h.session.ctx, username)
 	if err != nil {
-		// Treat any lookup failure as "user not found" — go-mysql will respond
-		// with ER_NO_SUCH_USER. We deliberately do not propagate the underlying
-		// store error to avoid leaking schema/connectivity details to clients.
+		// Any lookup failure is reported to the client as ER_NO_SUCH_USER.
+		// Underlying store errors are deliberately swallowed to avoid
+		// leaking schema/connectivity details across the handshake.
 		return gomysqlserver.Credential{}, false, nil //nolint:nilerr // intentional: hide store errors as not-found
 	}
 
 	h.session.user = user
 
-	// The Passwords field is required to be non-empty by the library, but its
-	// content is never used — our dbbatAuthProvider.Authenticate does the real
-	// verification against the Argon2id hash.
+	// Passwords must be non-empty for the library to treat the user as
+	// existing; the value itself is unused (our authProvider verifies the
+	// real Argon2id hash).
 	return gomysqlserver.Credential{
 		Passwords:      []string{""},
-		AuthPluginName: gomysql.AUTH_CLEAR_PASSWORD,
+		AuthPluginName: gomysql.AUTH_CACHING_SHA2_PASSWORD,
 	}, true, nil
 }
 
@@ -142,7 +190,7 @@ func (h *dbbatAuthHandler) OnAuthSuccess(_ *gomysqlserver.Conn) error {
 		return ErrDatabaseNotFound
 	}
 
-	if db.Protocol != store.ProtocolMySQL {
+	if !store.IsMySQLFamily(db.Protocol) {
 		return ErrDatabaseNotFound
 	}
 

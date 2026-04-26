@@ -86,7 +86,17 @@ const (
 	ProtocolPostgreSQL = "postgresql"
 	ProtocolOracle     = "oracle"
 	ProtocolMySQL      = "mysql"
+	ProtocolMariaDB    = "mariadb"
 )
+
+// IsMySQLFamily reports whether the given protocol speaks the MySQL wire
+// protocol. The MySQL proxy serves both — they share the same listener,
+// auth plugins, and wire-protocol handling. The distinction matters mostly
+// for upstream connection setup (server version banner, auth plugin
+// negotiation) and for UI labeling.
+func IsMySQLFamily(protocol string) bool {
+	return protocol == ProtocolMySQL || protocol == ProtocolMariaDB
+}
 
 // Database represents a target database configuration
 type Database struct {

@@ -406,7 +406,11 @@ func startMySQLProxy(ctx context.Context, cfg *config.Config, dataStore *store.S
 		return nil
 	}
 
-	srv := mysql.NewServer(dataStore, cfg.EncryptionKey, cfg.QueryStorage, cfg.Dump, authCache, logger)
+	srv, err := mysql.NewServer(dataStore, cfg.EncryptionKey, cfg.QueryStorage, cfg.Dump, authCache, cfg.MySQL, logger)
+	if err != nil {
+		logger.ErrorContext(ctx, "MySQL proxy server init failed", slog.Any("error", err))
+		os.Exit(1)
+	}
 
 	go func() {
 		if err := srv.Start(cfg.ListenMySQL); err != nil {
@@ -415,7 +419,9 @@ func startMySQLProxy(ctx context.Context, cfg *config.Config, dataStore *store.S
 		}
 	}()
 
-	logger.InfoContext(ctx, "MySQL proxy server started", slog.String("addr", cfg.ListenMySQL))
+	logger.InfoContext(ctx, "MySQL proxy server started",
+		slog.String("addr", cfg.ListenMySQL),
+		slog.Bool("tls", !cfg.MySQL.TLS.Disable))
 
 	return srv
 }

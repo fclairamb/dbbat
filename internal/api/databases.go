@@ -470,7 +470,7 @@ func toDatabaseLimitedResponse(db *store.Database) DatabaseLimitedResponse {
 // of truth for the enum.
 func isSupportedProtocol(protocol string) bool {
 	switch protocol {
-	case store.ProtocolPostgreSQL, store.ProtocolOracle, store.ProtocolMySQL:
+	case store.ProtocolPostgreSQL, store.ProtocolOracle, store.ProtocolMySQL, store.ProtocolMariaDB:
 		return true
 	default:
 		return false
@@ -486,7 +486,7 @@ func defaultPortFor(protocol string) int {
 		return 5432
 	case store.ProtocolOracle:
 		return 1521
-	case store.ProtocolMySQL:
+	case store.ProtocolMySQL, store.ProtocolMariaDB:
 		return 3306
 	default:
 		return 0

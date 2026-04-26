@@ -135,6 +135,33 @@ const (
 	DefaultDumpRetention = "24h"
 )
 
+// MySQLConfig holds configuration specific to the MySQL proxy.
+type MySQLConfig struct {
+	// TLS holds TLS server-termination settings for the proxy. When enabled,
+	// the proxy advertises CLIENT_SSL and accepts SSL Request packets from
+	// clients, terminating the TLS session at the proxy. Required for clean
+	// caching_sha2_password full-auth (cleartext password over TLS).
+	TLS TLSConfig `koanf:"tls"`
+}
+
+// TLSConfig holds TLS server-side termination settings.
+//
+// When CertFile and KeyFile are both empty (and Disable is false), the
+// proxy auto-generates a self-signed certificate at startup. This is
+// suitable for development; production deployments should provide a real
+// certificate.
+type TLSConfig struct {
+	// CertFile is the path to a PEM-encoded server certificate.
+	CertFile string `koanf:"cert_file"`
+
+	// KeyFile is the path to a PEM-encoded server private key.
+	KeyFile string `koanf:"key_file"`
+
+	// Disable turns off TLS termination entirely. When true, SSL Request
+	// packets from clients are refused and connections stay plaintext.
+	Disable bool `koanf:"disable"`
+}
+
 // Config holds the application configuration.
 type Config struct {
 	// Proxy listen address.
@@ -201,6 +228,9 @@ type Config struct {
 
 	// Dump holds session packet dump configuration.
 	Dump DumpConfig `koanf:"dump"`
+
+	// MySQL holds MySQL proxy specific configuration.
+	MySQL MySQLConfig `koanf:"mysql"`
 }
 
 // Default query storage limits.
@@ -329,6 +359,10 @@ func envTransform(k, v string) (string, any) {
 	// dump_* -> dump.*
 	if strings.HasPrefix(key, "dump_") {
 		return "dump." + strings.TrimPrefix(key, "dump_"), v
+	}
+	// mysql_tls_* -> mysql.tls.*
+	if strings.HasPrefix(key, "mysql_tls_") {
+		return "mysql.tls." + strings.TrimPrefix(key, "mysql_tls_"), v
 	}
 	return key, v
 }

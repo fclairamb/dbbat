@@ -1656,7 +1656,7 @@ components:
           description: SSL mode (disable, prefer, require, etc.)
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql]
+          enum: [postgresql, oracle, mysql, mariadb]
           description: Database protocol
         oracle_service_name:
           type: string
@@ -1719,7 +1719,7 @@ components:
           description: SSL mode
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql]
+          enum: [postgresql, oracle, mysql, mariadb]
           default: postgresql
           description: Database protocol
         oracle_service_name:
@@ -1757,7 +1757,7 @@ components:
           description: SSL mode
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql]
+          enum: [postgresql, oracle, mysql, mariadb]
           description: Database protocol
         oracle_service_name:
           type: string

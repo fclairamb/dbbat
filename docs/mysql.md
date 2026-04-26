@@ -16,38 +16,53 @@ Why not roll our own (the Oracle approach)?
 Why not Vitess `vitess.io/vitess/go/mysql`?
 - Apache 2.0 and arguably the most battle-tested implementation, but pulls in a large dep tree (gRPC, etcd client, Vitess types). Not worth the bloat for our use case.
 
-## Auth Strategy: Termination via `mysql_native_password`
+## Auth Strategy: `caching_sha2_password` (default), `mysql_clear_password` (legacy)
 
 DBBat **terminates** authentication on the proxy side, the same way the PostgreSQL proxy does. The client's password is verified against the DBBat user store (Argon2id hashes) — never against upstream MySQL. DBBat then re-authenticates to upstream using the database's stored, encrypted credentials.
 
-### Auth plugin: `mysql_native_password` (only, for v1)
+### Default plugin: `caching_sha2_password`
 
-DBBat advertises `mysql_native_password` as the server's default auth plugin during the initial handshake. This is a SHA1-based challenge-response that all major MySQL clients support as a fallback.
+DBBat advertises `caching_sha2_password` as the server's default auth plugin during the initial handshake. This matches MySQL 8.0+ and works out of the box with every modern client.
 
-**Why not `caching_sha2_password`** (the MySQL 8.0 default)?
-- It requires either a TLS-encrypted connection or an RSA key exchange to transport the cleartext password. The RSA path means DBBat would need to maintain a public/private RSA keypair and implement OAEP padding for first-time auth.
-- Most clients fall back gracefully when the server advertises a different plugin.
-- v2 follow-up: implement `caching_sha2_password` with full RSA key exchange.
+Because dbbat stores passwords as Argon2id hashes — not MySQL's `SHA256(SHA256(PASSWORD))` — we cannot perform the fast-auth scramble validation. Every login takes the **full-auth** path:
 
-### Client compatibility
+1. Server advertises `caching_sha2_password`.
+2. Client sends a scramble in `HandshakeResponse41`.
+3. Server immediately replies with `AuthMoreData{0x04}` (full auth required).
+4. Client sends the cleartext password — over TLS if the connection is secure, RSA-OAEP encrypted otherwise.
+5. Server verifies the cleartext against the user's Argon2id hash.
 
-- **mysql CLI** (8.x): works out of the box; may print "auth method mysql_native_password is not the recommended one" — harmless.
-- **MySQL Connector/J (JDBC)**: works; may need `allowPublicKeyRetrieval=true` to be explicit.
-- **mysql2 (Node.js)**: works; may need `authPlugins: { mysql_native_password: ... }` if pinned to caching_sha2.
-- **PyMySQL**: works.
-- **DBeaver**: works against `mysql_native_password`-only servers.
+The fast-auth cache is left empty by design. The performance cost is one extra round-trip per connection; the security gain is that we never store a plaintext-derived hash.
+
+### Fallback plugin: `mysql_clear_password`
+
+Clients that explicitly pin their auth plugin to `mysql_clear_password` (legacy drivers, some embedded systems) are accepted. The cleartext is verified against Argon2id the same way.
+
+### `mysql_native_password` not supported
+
+`mysql_native_password` requires the server to derive a SHA1-based hash from the stored password. Argon2id is one-way, so we cannot produce that hash; instead of advertising it and silently breaking on AuthSwitch, the proxy explicitly does not support it. All major drivers fall back to `caching_sha2_password` automatically.
 
 ### API key auth (proxy-side)
 
-The PG proxy accepts DBBat API keys (prefix `dbb_`) as the password. The MySQL proxy does the same: when the proxy receives a password starting with the API key prefix, it verifies it as an API key instead of a user password.
+The PG proxy accepts DBBat API keys (prefix `dbb_`) as the password. The MySQL proxy does the same: when the proxy receives a "password" starting with the API key prefix, it verifies it as an API key instead of a user password.
 
-## TLS Handling: Plaintext-Only (v1)
+## TLS Handling: Termination at the Proxy
 
-DBBat refuses the client's `SSL Request` packet during handshake. This matches the PostgreSQL proxy's current behavior. Deployments must put DBBat on a private network (VPN, VPC, kube-internal).
+DBBat **terminates TLS** at the proxy. When a client sends an `SSLRequest` packet during the handshake, the proxy upgrades the connection to TLS before reading credentials. Inside the TLS tunnel, the same handshake flow proceeds.
 
-Upstream connections **may** use TLS — the existing `databases.ssl_mode` column controls this. The proxy honors the upstream SSL mode regardless of what the client sees.
+Configuration (env vars, all optional):
 
-v2 follow-up: terminate TLS at the proxy with a server cert, accept `SSL Request` from clients.
+| Var | Description |
+|-----|-------------|
+| `DBB_MYSQL_TLS_DISABLE` | When `true`, the proxy refuses `SSLRequest` and stays plaintext-only. Default `false`. |
+| `DBB_MYSQL_TLS_CERT_FILE` | Path to PEM-encoded server cert. |
+| `DBB_MYSQL_TLS_KEY_FILE` | Path to PEM-encoded server key. Must be RSA for the non-TLS `caching_sha2` RSA-public-key path to work. |
+
+If both cert/key paths are empty (and TLS isn't disabled), the proxy auto-generates a self-signed certificate and a fresh RSA-2048 keypair at startup. The same RSA key is reused for the `caching_sha2_password` public-key-retrieval path.
+
+For production, supply a real certificate via the env vars. For development, the auto-generated cert is fine — clients will need `--ssl-mode=DISABLED` or the equivalent skip-verify option (or trust the cert).
+
+Upstream connections **may** use TLS independently — the existing `databases.ssl_mode` column controls upstream encryption. The proxy honors the upstream SSL mode regardless of the client-side TLS state.
 
 ## Connection Flow
 
@@ -61,26 +76,36 @@ v2 follow-up: terminate TLS at the proxy with a server cert, accept `SSL Request
     │──────────────────────────────>│                                 │
     │                               │                                 │
     │  2. Handshake v10             │                                 │
-    │     (auth plugin: native)     │                                 │
+    │     (auth plugin: caching_sha2)                                 │
     │<──────────────────────────────│                                 │
     │                               │                                 │
-    │  3. HandshakeResponse41       │                                 │
-    │     (user, db, auth_resp)     │                                 │
+    │  3. (optional) SSLRequest     │                                 │
+    │──────────────────────────────>│ TLS upgrade                     │
+    │<══════════════════════════════│                                 │
+    │                               │                                 │
+    │  4. HandshakeResponse41       │                                 │
+    │     (user, db, scramble)      │                                 │
     │──────────────────────────────>│                                 │
+    │                               │                                 │
+    │  5. AuthMoreData{0x04}        │                                 │
+    │<──────────────────────────────│                                 │
+    │                               │                                 │
+    │  6. cleartext password (TLS)  │                                 │
+    │     OR RSA-encrypted (no TLS) │                                 │
+    │──────────────────────────────>│ verify against Argon2id          │
+    │                               │ (or API key)                    │
     │                               │                                 │
     │                               │  Look up user                   │
     │                               │  Look up database (by db_name)  │
     │                               │  Check active grant             │
-    │                               │  Verify password (Argon2id)     │
-    │                               │  OR verify API key              │
     │                               │                                 │
-    │                               │  4. Connect to upstream         │
+    │                               │  7. Connect to upstream         │
     │                               │     (using stored creds)        │
     │                               │──────────────────────────────>│
-    │                               │  5. Upstream handshake +        │
+    │                               │  8. Upstream handshake +        │
     │                               │     auth complete               │
     │                               │<─────────────────────────────>│
-    │  6. OK packet                 │                                 │
+    │  9. OK packet                 │                                 │
     │<──────────────────────────────│                                 │
     │                               │                                 │
     │      === Command phase ===                                      │
@@ -94,6 +119,20 @@ v2 follow-up: terminate TLS at the proxy with a server cert, accept `SSL Request
 ```
 
 The proxy is transparent for command-phase traffic — packets are forwarded with inspection, never altered. Auth is fully terminated; the upstream sees DBBat as the client.
+
+## MariaDB Support
+
+MariaDB is supported as a distinct protocol value (`mariadb`) alongside `mysql`. Both speak the MySQL wire protocol on the listener, so they share the same proxy code path; the distinction matters for:
+
+- **UI labeling** — the database picker, badges, and placeholders show "MariaDB" explicitly.
+- **Default port** — same as MySQL (3306) but surfaced separately for clarity.
+- **Upstream auth negotiation** — the go-mysql client handles MariaDB's auth plugin negotiation transparently when connecting upstream. MariaDB 10.4+ defaults to `mysql_native_password` (not `caching_sha2_password`), so this just works.
+
+### MariaDB-specific notes
+
+- **`ed25519` auth plugin (MariaDB only):** the upstream client supports ed25519 for upstream connections if the MariaDB server is configured for it. The proxy itself never advertises ed25519 to clients.
+- **`STMT_BULK_EXECUTE` (MariaDB-only command, 0x1A):** not supported. Currently falls into `HandleOtherCommand` and is refused. Clients that issue it (e.g., MariaDB Connector/J in batch-rewrite mode) need to disable batch rewriting.
+- **Type representations:** mostly identical to MySQL. Edge cases (DECIMAL precision, JSON variants) inherit whatever go-mysql produces.
 
 ## Read-Only Enforcement
 
@@ -117,6 +156,7 @@ Always blocked, regardless of grant controls (even for non-read-only grants):
 | `COM_SHUTDOWN` | Database shutdown |
 | `COM_PROCESS_KILL` | Kills other sessions |
 | `COM_DEBUG` | Server diagnostics, requires SUPER |
+| `STMT_BULK_EXECUTE` (MariaDB) | Not supported by go-mysql server side; refused |
 
 `COM_INIT_DB` (USE database) is allowed but logged — it changes session state we want visibility into.
 
@@ -124,9 +164,9 @@ Always blocked, regardless of grant controls (even for non-read-only grants):
 
 No new MySQL-specific columns. The existing `databases` table fields are sufficient:
 - `host`, `port`, `database_name`, `username`, `password_encrypted`, `ssl_mode` — all generic
-- `protocol` — extended to accept `mysql`
+- `protocol` — accepts `mysql` and `mariadb`
 
-The `port` column SQL default of `5432` (PG-centric) is dropped in this work; ports are validated as required at the API layer with protocol-aware suggested defaults (5432/1521/3306).
+The `port` column SQL default of `5432` (PG-centric) was dropped; ports are validated as required at the API layer with protocol-aware suggested defaults (5432/1521/3306).
 
 ## Query Logging
 
@@ -146,16 +186,25 @@ Same model as PG/Oracle — every command is logged in the `queries` table with 
 
 **Phase 3 (v1):** Text-protocol result rows from `COM_QUERY` are captured up to `query_storage.max_result_rows` / `max_result_bytes` (same limits as PG). Rows are stored in the `query_rows` table as JSONB.
 
-**v2 follow-up:** Binary-protocol rows from `COM_STMT_EXECUTE` require parsing each column according to its type code (24+ MySQL types). Deferred to a follow-up spec.
+**Future:** Binary-protocol rows from `COM_STMT_EXECUTE` require parsing each column according to its type code (24+ MySQL types). Deferred to a follow-up spec.
 
-## Known Limitations (v1)
+## Implementation Notes
 
-- **`caching_sha2_password` not supported** as the proxy-advertised auth plugin. Clients must accept `mysql_native_password` (default fallback for all major drivers).
-- **No client-side TLS termination.** Proxy-to-client traffic is plaintext; deploy on a private network.
-- **MariaDB untested.** The wire protocol is mostly compatible but MariaDB diverges on auth (`ed25519`), the `STMT_BULK_EXECUTE` command, and some type representations. Treat as best-effort.
+### Reflection-based access to `Conn.salt`
+
+The `caching_sha2_password` non-TLS RSA path needs the 20-byte challenge salt that go-mysql generates when it builds the initial handshake. The library exposes no public accessor, so `cachingsha2.go:readConnSalt` uses `reflect` + `unsafe` to read the unexported `salt` field on `*server.Conn`.
+
+A self-test (`cachingsha2_test.go:TestReadConnSalt_FieldExists`) fails loudly if the field is renamed or removed in a future go-mysql release. This pins behavior to the dependency version in `go.mod`.
+
+If the test fails after a `go.mod` upgrade: either pin go-mysql back, or extend the patch to expose `Salt()` upstream and remove the reflection.
+
+## Known Limitations
+
 - **Binary-protocol result row capture** (prepared statement EXECUTE results) not yet implemented — SQL text and parameters are logged, but rows aren't captured. Text protocol works fully.
 - **Stored procedure multi-result-sets:** only the first result set is captured.
 - **`COM_FIELD_LIST`** (deprecated since 5.7) is forwarded but not specially logged.
+- **MariaDB `STMT_BULK_EXECUTE`** is refused (clients need to disable batch rewriting).
+- **`mysql_native_password`** is intentionally not supported — all modern clients negotiate `caching_sha2_password` instead.
 
 ## Testing
 
@@ -177,5 +226,6 @@ Tested clients (CI matrix):
 | Go | go-sql-driver/mysql | full coverage |
 | MySQL CLI | mysql 8.x | manual smoke test |
 | Python | PyMySQL | manual smoke test |
+| MariaDB CLI | mariadb 10.x | manual smoke test |
 
 For protocol debugging, set `DBB_LOG_LEVEL=debug` to see incoming MySQL commands and forwarded packets.
