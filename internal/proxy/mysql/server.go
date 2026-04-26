@@ -116,6 +116,17 @@ func (s *Server) Start(addr string) error {
 	}
 }
 
+// Addr returns the listener's bound address, or nil if the server has not
+// started accepting connections yet. Useful in tests that pass ":0" for the
+// listen address and need to discover the OS-assigned port.
+func (s *Server) Addr() net.Addr {
+	if s.listener == nil {
+		return nil
+	}
+
+	return s.listener.Addr()
+}
+
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
 	close(s.shutdown)
