@@ -7,10 +7,13 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"path/filepath"
+	"time"
 
 	gomysqlclient "github.com/go-mysql-org/go-mysql/client"
 	gomysqlserver "github.com/go-mysql-org/go-mysql/server"
 
+	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -35,6 +38,9 @@ type Session struct {
 
 	// DBBat connection record (insert on connect, close on disconnect).
 	connection *store.Connection
+
+	// Optional packet dump for the post-auth phase (matches PG behavior).
+	dumpWriter *dump.Writer
 
 	logger *slog.Logger
 	ctx    context.Context //nolint:containedctx // Session-scoped context
@@ -78,6 +84,9 @@ func (s *Session) Run() error {
 	}
 
 	defer s.recordDisconnect()
+
+	s.startDumpIfConfigured()
+	defer s.closeDump()
 
 	s.logger.InfoContext(s.ctx, "MySQL session ready",
 		slog.String("user", s.user.Username),
@@ -132,4 +141,66 @@ func (s *Session) recordDisconnect() {
 			slog.Any("connection_id", s.connection.UID),
 			slog.Any("error", err))
 	}
+}
+
+// startDumpIfConfigured opens a packet-dump file for this session and tees the
+// underlying client connection through it. We only capture the post-auth phase
+// (matching the PG proxy) — the dump is wired up after recordConnection has
+// run, so the auth handshake is already done by the time bytes start flowing
+// through the tap.
+//
+// For TLS-upgraded connections the library has already replaced
+// c.Conn.Conn with a *tls.Conn before this point; the tap will see TLS
+// records (encrypted application data), which is fine — the dump captures
+// timing and packet boundaries even when payload is opaque.
+func (s *Session) startDumpIfConfigured() {
+	if s.server.dumpConfig.Dir == "" || s.connection == nil || s.serverConn == nil {
+		return
+	}
+
+	dumpPath := filepath.Join(s.server.dumpConfig.Dir, s.connection.UID.String()+dump.FileExt)
+
+	dw, err := dump.NewWriter(dumpPath, dump.Header{
+		SessionID: s.connection.UID.String(),
+		Protocol:  dump.ProtocolMySQL,
+		StartTime: time.Now(),
+		Connection: map[string]any{
+			"database":      s.database.DatabaseName,
+			"user":          s.user.Username,
+			"upstream_addr": net.JoinHostPort(s.database.Host, fmt.Sprintf("%d", s.database.Port)),
+			"protocol":      s.database.Protocol,
+		},
+	}, s.server.dumpConfig.MaxSize)
+	if err != nil {
+		s.logger.WarnContext(s.ctx, "MySQL dump writer create failed", slog.Any("error", err))
+
+		return
+	}
+
+	s.dumpWriter = dw
+
+	// Replace the underlying net.Conn on the live packet.Conn with a tap.
+	// Subsequent reads/writes from go-mysql go through the tap; the buffered
+	// reader inside packet.Conn ultimately calls the embedded conn's Read,
+	// which now hits our tap.
+	if s.serverConn.Conn != nil {
+		s.serverConn.Conn.Conn = dump.NewTapConn(
+			s.serverConn.Conn.Conn,
+			dw,
+			dump.DirClientToServer,
+			dump.DirServerToClient,
+		)
+	}
+}
+
+func (s *Session) closeDump() {
+	if s.dumpWriter == nil {
+		return
+	}
+
+	if err := s.dumpWriter.Close(); err != nil {
+		s.logger.WarnContext(s.ctx, "MySQL dump writer close failed", slog.Any("error", err))
+	}
+
+	s.dumpWriter = nil
 }

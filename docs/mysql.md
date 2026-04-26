@@ -214,7 +214,10 @@ If the test fails after a `go.mod` upgrade: either pin go-mysql back, or extend 
 - **`COM_FIELD_LIST`** (deprecated since 5.7) is forwarded but not specially logged.
 - **MariaDB `STMT_BULK_EXECUTE`** is refused (clients need to disable batch rewriting).
 - **`mysql_native_password`** is intentionally not supported — all modern clients negotiate `caching_sha2_password` instead.
-- **Session packet dumps** (`DBB_DUMP_DIR`) are not yet wired up for the MySQL proxy. PG and Oracle dump session traffic; MySQL does not.
+
+## Session Packet Dumps
+
+When `DBB_DUMP_DIR` is set, the MySQL proxy writes a per-session `.dbbat-dump` file containing the post-auth command-phase byte stream (matching the PG and Oracle proxies). The filename is the connection UID. Wiring is in `session.go: startDumpIfConfigured` — it swaps the underlying `net.Conn` on the live `packet.Conn` for a `dump.TapConn` after `recordConnection` runs, so the auth handshake itself is never captured. For TLS-upgraded connections the tap sees TLS records, which still preserves timing and packet boundaries.
 
 ## Testing
 
