@@ -126,3 +126,48 @@ func TestValidateOracleQuery_CombinesSharedAndOracleChecks(t *testing.T) {
 	require.ErrorIs(t, ValidateOracleQuery("INSERT INTO t VALUES (1)", grant), ErrReadOnlyViolation)
 	require.ErrorIs(t, ValidateOracleQuery("SELECT UTL_HTTP.REQUEST('x') FROM DUAL", grant), ErrOraclePatternBlocked)
 }
+
+func TestValidateMySQLQuery_BlocksDangerousPatterns(t *testing.T) {
+	t.Parallel()
+
+	grant := &store.Grant{} // no grant restrictions — patterns always blocked
+	blocked := []struct{ sql, reason string }{
+		{"LOAD DATA INFILE '/tmp/x.csv' INTO TABLE t", "server-side file read"},
+		{"LOAD DATA LOCAL INFILE '/etc/passwd' INTO TABLE t", "client-side exfiltration"},
+		{"SELECT * FROM t INTO OUTFILE '/tmp/out.csv'", "server-side file write"},
+		{"SELECT col FROM t INTO DUMPFILE '/tmp/d.bin'", "binary file write"},
+		{"SET GLOBAL max_connections = 1000", "server-wide config change"},
+		{"SET PASSWORD FOR 'bob' = 'secret'", "password change"},
+	}
+	for _, tt := range blocked {
+		t.Run(tt.reason, func(t *testing.T) {
+			t.Parallel()
+			assert.ErrorIs(t, ValidateMySQLQuery(tt.sql, grant), ErrMySQLPatternBlocked)
+		})
+	}
+}
+
+func TestValidateMySQLQuery_AllowsSafeQueries(t *testing.T) {
+	t.Parallel()
+
+	grant := &store.Grant{} // no restrictions
+	allowed := []string{
+		"SELECT * FROM users",
+		"SELECT REPLACE(name, 'old', 'new') FROM t", // REPLACE() function, not REPLACE INTO
+		"SET SESSION sql_mode = 'STRICT_TRANS_TABLES'",
+		"SELECT NOW()",
+		"SHOW TABLES",
+	}
+	for _, sql := range allowed {
+		require.NoError(t, ValidateMySQLQuery(sql, grant), "should allow: %s", sql)
+	}
+}
+
+func TestValidateMySQLQuery_CombinesSharedAndMySQLChecks(t *testing.T) {
+	t.Parallel()
+
+	grant := &store.Grant{Controls: []string{store.ControlReadOnly}}
+	require.ErrorIs(t, ValidateMySQLQuery("INSERT INTO t VALUES (1)", grant), ErrReadOnlyViolation)
+	require.ErrorIs(t, ValidateMySQLQuery("REPLACE INTO t VALUES (1)", grant), ErrReadOnlyViolation)
+	require.ErrorIs(t, ValidateMySQLQuery("LOAD DATA INFILE '/x' INTO TABLE t", grant), ErrMySQLPatternBlocked)
+}
