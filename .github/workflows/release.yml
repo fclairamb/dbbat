@@ -79,7 +79,7 @@ jobs:
       # GoReleaser: Build and release binaries
       # In test mode, --snapshot builds everything but doesn't publish a GitHub release
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@v7.2.0
+        uses: goreleaser/goreleaser-action@v7.2.1
         with:
           version: "~> v2"
           args: release --clean ${{ steps.mode.outputs.is_test == 'true' && '--snapshot' || '' }}
