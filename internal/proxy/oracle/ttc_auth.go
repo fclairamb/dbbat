@@ -23,16 +23,16 @@ type authKVPair struct {
 // Different clients serialize the username at different offsets; the parser skips
 // any match on these well-known keys and keeps scanning.
 var knownAuthKeys = map[string]bool{
-	authKeyUsername: true, // "AUTH_TERMINAL"
-	authKeySessKey:  true, // "AUTH_SESSKEY"
-	authKeyVfrData:  true, // "AUTH_VFR_DATA"
-	authKeyPassword: true, // "AUTH_PASSWORD"
-	"AUTH_PROGRAM_NM":    true,
-	"AUTH_MACHINE":       true,
-	"AUTH_PID":           true,
-	"AUTH_SID":           true,
-	"AUTH_ACL":           true,
-	"AUTH_ALTER_SESSION": true,
+	authKeyUsername:           true, // "AUTH_TERMINAL"
+	authKeySessKey:            true, // "AUTH_SESSKEY"
+	authKeyVfrData:            true, // "AUTH_VFR_DATA"
+	authKeyPassword:           true, // "AUTH_PASSWORD"
+	"AUTH_PROGRAM_NM":         true,
+	"AUTH_MACHINE":            true,
+	"AUTH_PID":                true,
+	"AUTH_SID":                true,
+	"AUTH_ACL":                true,
+	"AUTH_ALTER_SESSION":      true,
 	"AUTH_LOGICAL_SESSION_ID": true,
 }
 

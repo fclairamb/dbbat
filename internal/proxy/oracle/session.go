@@ -426,6 +426,12 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 		return fmt.Errorf("failed to parse AUTH Phase 2: %w", err)
 	}
 
+	s.logger.DebugContext(s.ctx, "AUTH Phase 2 parsed",
+		slog.Int("client_sesskey_len", len(clientSessKey)),
+		slog.Int("enc_password_len", len(encPassword)),
+		slog.String("client_sesskey", clientSessKey),
+		slog.String("enc_password", encPassword))
+
 	// Decrypt the password (should be an API key)
 	plainPassword, err := o5.DecryptPassword(clientSessKey, encPassword)
 	if err != nil {
@@ -486,6 +492,10 @@ func (s *session) loadO5LogonVerifier(userID uuid.UUID) (*o5LogonVerifierData, e
 
 			continue
 		}
+
+		s.logger.InfoContext(s.ctx, "O5LOGON verifier loaded — only this API key works for Oracle login",
+			slog.String("key_prefix", keys[i].KeyPrefix),
+			slog.String("key_id", keys[i].ID.String()))
 
 		return &o5LogonVerifierData{
 			O5LogonSalt:       keys[i].O5LogonSalt,
