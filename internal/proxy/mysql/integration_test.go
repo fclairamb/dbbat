@@ -350,6 +350,62 @@ func TestIntegration_QueryAndCapture(t *testing.T) {
 	assert.True(t, found, "expected SELECT 1 to be logged in queries table")
 }
 
+// TestIntegration_PreparedStatement_BinaryRowCapture exercises the binary
+// protocol path (COM_STMT_PREPARE + COM_STMT_EXECUTE) through the proxy and
+// verifies the captured rows match what the client received.
+//
+// go-sql-driver/mysql uses binary protocol for any query with bind args.
+// Without InterpolateParams, this test forces COM_STMT_EXECUTE rather than
+// inline-substituted COM_QUERY.
+func TestIntegration_PreparedStatement_BinaryRowCapture(t *testing.T) {
+	ctx := context.Background()
+
+	f := setupFixture(ctx, t, mysqlImage(), store.ProtocolMySQL)
+	db := f.dialTLS()
+	defer db.Close()
+
+	stmt, err := db.PrepareContext(ctx, "SELECT ? + ?, ?")
+	require.NoError(t, err)
+	defer stmt.Close()
+
+	var sum int
+
+	var label string
+
+	require.NoError(t, stmt.QueryRowContext(ctx, 7, 35, "binary").Scan(&sum, &label))
+	assert.Equal(t, 42, sum)
+	assert.Equal(t, "binary", label)
+
+	// Allow async write to land.
+	time.Sleep(300 * time.Millisecond)
+
+	queries, err := f.store.ListQueries(ctx, store.QueryFilter{Limit: 50})
+	require.NoError(t, err)
+
+	var executeQuery *store.Query
+
+	for i := range queries {
+		if strings.Contains(queries[i].SQLText, "SELECT ? + ?, ?") &&
+			!strings.HasPrefix(queries[i].SQLText, "PREPARE:") {
+			executeQuery = &queries[i]
+
+			break
+		}
+	}
+
+	require.NotNil(t, executeQuery, "expected COM_STMT_EXECUTE entry in queries log")
+
+	result, err := f.store.GetQueryRows(ctx, executeQuery.UID, "", 10)
+	require.NoError(t, err)
+	require.NotEmpty(t, result.Rows, "binary-protocol rows must be captured")
+
+	t.Logf("captured row: %s", string(result.Rows[0].RowData))
+	assert.Contains(t, string(result.Rows[0].RowData), "42",
+		"captured row should include the computed sum")
+	assert.Contains(t, string(result.Rows[0].RowData), "binary",
+		"captured row should include the string literal")
+}
+
 // TestIntegration_ReadOnlyGrant_BlocksWrite verifies that a grant with
 // read_only control rejects an INSERT statement at the proxy layer.
 func TestIntegration_ReadOnlyGrant_BlocksWrite(t *testing.T) {

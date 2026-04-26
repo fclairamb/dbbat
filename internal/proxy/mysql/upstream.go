@@ -8,6 +8,7 @@ import (
 	"strconv"
 
 	gomysqlclient "github.com/go-mysql-org/go-mysql/client"
+	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 
 	"github.com/fclairamb/dbbat/internal/version"
 )
@@ -50,8 +51,10 @@ func (s *Session) connectUpstream() error {
 }
 
 // applyUpstreamOptions configures the upstream client connection: TLS mode
-// from the database's ssl_mode column, and a connection attribute identifying
-// dbbat as the application.
+// from the database's ssl_mode column, a connection attribute identifying
+// dbbat as the application, and explicit refusal of CLIENT_LOCAL_FILES so a
+// compromised upstream cannot ask the proxy to upload arbitrary files via
+// `LOAD DATA LOCAL INFILE` mid-query.
 func (s *Session) applyUpstreamOptions(c *gomysqlclient.Conn) error {
 	switch s.database.SSLMode {
 	case "require":
@@ -62,6 +65,14 @@ func (s *Session) applyUpstreamOptions(c *gomysqlclient.Conn) error {
 		// plaintext upstream — also the path for "prefer"/"allow" since the
 		// client doesn't currently negotiate opportunistic TLS for MySQL
 	}
+
+	// Defense-in-depth: refuse the LOCAL INFILE capability on the upstream
+	// connection. The shared SQL validator already blocks the keyword in
+	// inbound client SQL, but a malicious upstream could still issue a
+	// LOCAL_INFILE_REQUEST (0xFB) packet as part of any query response — and
+	// the go-mysql client would happily read the file from the proxy host's
+	// filesystem unless we opt out at handshake time.
+	c.UnsetCapability(gomysql.CLIENT_LOCAL_FILES)
 
 	c.SetAttributes(map[string]string{
 		"program_name": "dbbat-" + version.Version,
