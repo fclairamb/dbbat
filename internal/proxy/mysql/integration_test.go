@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -110,6 +111,12 @@ const fixturePass = "dbbattest"
 func setupFixture(ctx context.Context, t *testing.T, mysqlImage, dbProtocol string) *fixture {
 	t.Helper()
 
+	return setupFixtureWithDumpDir(ctx, t, mysqlImage, dbProtocol, "")
+}
+
+func setupFixtureWithDumpDir(ctx context.Context, t *testing.T, mysqlImage, dbProtocol, dumpDir string) *fixture {
+	t.Helper()
+
 	upstreamContainer, upstreamHost, upstreamPort := runMySQLContainer(ctx, t, mysqlImage)
 	t.Cleanup(func() { _ = upstreamContainer.Terminate(context.Background()) })
 
@@ -180,7 +187,16 @@ func setupFixture(ctx context.Context, t *testing.T, mysqlImage, dbProtocol stri
 		MaxResultBytes: 1 * 1024 * 1024,
 	}
 
-	proxy, err := NewServer(dataStore, encryptionKey, queryStorage, config.DumpConfig{},
+	dumpCfg := config.DumpConfig{}
+	if dumpDir != "" {
+		dumpCfg = config.DumpConfig{
+			Dir:       dumpDir,
+			MaxSize:   config.DefaultDumpMaxSize,
+			Retention: config.DefaultDumpRetention,
+		}
+	}
+
+	proxy, err := NewServer(dataStore, encryptionKey, queryStorage, dumpCfg,
 		nil, config.MySQLConfig{}, slog.Default())
 	require.NoError(t, err)
 
@@ -458,6 +474,50 @@ func TestIntegration_LoadDataInfile_Blocked(t *testing.T) {
 
 	_, err := db.ExecContext(ctx, "LOAD DATA INFILE '/etc/passwd' INTO TABLE t")
 	require.Error(t, err, "LOAD DATA INFILE must be refused")
+}
+
+// TestIntegration_SessionDump verifies that when DBB_DUMP_DIR is configured
+// the MySQL session writes a per-connection dump file containing post-auth
+// command-phase traffic.
+func TestIntegration_SessionDump(t *testing.T) {
+	ctx := context.Background()
+
+	dumpDir := t.TempDir()
+
+	f := setupFixtureWithDumpDir(ctx, t, mysqlImage(), store.ProtocolMySQL, dumpDir)
+	db := f.dialTLS()
+
+	require.NoError(t, db.PingContext(ctx))
+
+	var n int
+	require.NoError(t, db.QueryRowContext(ctx, "SELECT 99").Scan(&n))
+	assert.Equal(t, 99, n)
+
+	require.NoError(t, db.Close())
+
+	// Allow the proxy to flush + close the dump.
+	time.Sleep(300 * time.Millisecond)
+
+	entries, err := os.ReadDir(dumpDir)
+	require.NoError(t, err)
+
+	var dumpFile string
+
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".dbbat-dump") {
+			dumpFile = filepath.Join(dumpDir, e.Name())
+
+			break
+		}
+	}
+
+	require.NotEmpty(t, dumpFile, "expected a .dbbatdump file in %s", dumpDir)
+
+	stat, err := os.Stat(dumpFile)
+	require.NoError(t, err)
+	assert.Greater(t, stat.Size(), int64(0), "dump file should not be empty after a query round-trip")
+
+	t.Logf("dump file: %s (%d bytes)", dumpFile, stat.Size())
 }
 
 // TestIntegration_MariaDB exercises the same proxy path with a MariaDB
