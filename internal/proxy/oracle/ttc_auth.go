@@ -236,9 +236,16 @@ func ttcClr(data []byte) []byte {
 	return buf
 }
 
-// parseAuthPhase2 extracts the client session key and encrypted password from AUTH Phase 2.
+// parseAuthPhase2 extracts the client session key and (optionally) encrypted password
+// from AUTH Phase 2.
 // AUTH Phase 2 is sent as func=0x03, sub=0x73 (PiggybackSubAuth2).
 // Uses proper TTC DLC+CLR decoding (matching go-ora's GetKeyVal format).
+//
+// password is empty for clients that do not send AUTH_PASSWORD content (e.g. SQLcl and
+// the modern Oracle JDBC thin driver). In that mode, the password verification happens
+// implicitly via the AUTH_SESSKEY exchange — the server proves password knowledge by
+// returning AUTH_SVR_RESPONSE encrypted with the combined session key, and the client
+// validates it locally.
 func parseAuthPhase2(tnsDataPayload []byte) (string, string, error) {
 	if len(tnsDataPayload) < ttcDataFlagsSize+4 {
 		return "", "", ErrAuthPhase2TooShort
@@ -276,10 +283,6 @@ func parseAuthPhase2(tnsDataPayload []byte) (string, string, error) {
 
 	if sessKey == "" {
 		return "", "", ErrAuthPhase2MissingSessKey
-	}
-
-	if password == "" {
-		return "", "", ErrAuthPhase2MissingPassword
 	}
 
 	return sessKey, password, nil

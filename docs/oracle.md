@@ -228,9 +228,13 @@ For debugging, enable `DBB_LOG_LEVEL=debug` to see TTC function codes and SQL ex
 
 ### SQLcl and sqlplus
 
-These two Oracle-shipped clients reach AUTH but do not yet complete authentication through dbbat:
+These two Oracle-shipped clients reach AUTH but do not yet complete a full session through dbbat:
 
-- **SQLcl** uses a newer O5LOGON variant that sends an empty `AUTH_PASSWORD`. Password verification relies entirely on the client's `AUTH_SESSKEY` value, which dbbat doesn't yet validate against the stored verifier.
+- **SQLcl 23c+** uses an O5LOGON variant where `AUTH_PASSWORD` is sent with an empty value. dbbat now parses this and authenticates the client against the loaded API key (the proof of password knowledge in this variant is implicit — the client validates `AUTH_SVR_RESPONSE` from the server). The handshake reaches "Oracle session established", but SQLcl then rejects the captured AUTH OK response with ORA-17401 — likely because it expects the server to dynamically encrypt `AUTH_SVR_RESPONSE` with the negotiated combined session key, which dbbat doesn't yet do.
 - **sqlplus 23c** initiates Oracle Native Services (NS) negotiation via OOB break/reset markers after the AUTH challenge. dbbat doesn't implement the NS protocol layer, so sqlplus errors with ORA-12630.
 
 For now, use the supported thin-driver clients in the table above. Full support for SQLcl and sqlplus is tracked separately.
+
+### Per-user O5LOGON key
+
+dbbat picks the first API key with an O5LOGON verifier when generating the AUTH challenge — see the `O5LOGON verifier loaded` info log. That specific key (and only that one) is the password your Oracle client must supply: the salt sent in the challenge is bound to it, so any other API key fails to decrypt. Multi-key support is not yet implemented.

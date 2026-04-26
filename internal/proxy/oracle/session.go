@@ -432,20 +432,36 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 		slog.String("client_sesskey", clientSessKey),
 		slog.String("enc_password", encPassword))
 
-	// Decrypt the password (should be an API key)
-	plainPassword, err := o5.DecryptPassword(clientSessKey, encPassword)
-	if err != nil {
-		return fmt.Errorf("failed to decrypt password: %w", err)
-	}
+	var apiKey *store.APIKey
 
-	s.logger.DebugContext(s.ctx, "decrypted password from O5LOGON",
-		slog.Int("len", len(plainPassword)),
-		slog.String("prefix", plainPassword[:min(len(plainPassword), 10)]))
+	if encPassword == "" {
+		// Empty AUTH_PASSWORD path (SQLcl / Oracle JDBC thin 23c+).
+		// The client never sends the password text — proof of password knowledge is
+		// implicit: if the wrong key were typed, the client would fail to validate
+		// our subsequent AUTH_SVR_RESPONSE marker (encrypted with combined_key) and
+		// disconnect. Trust the loaded verifier's API key as the one in use.
+		s.logger.InfoContext(s.ctx, "AUTH Phase 2: empty AUTH_PASSWORD — using loaded verifier's API key",
+			slog.String("key_id", verifier.apiKeyID.String()))
 
-	// Verify the decrypted password as an API key
-	apiKey, err := s.store.VerifyAPIKey(s.ctx, plainPassword)
-	if err != nil {
-		return fmt.Errorf("API key verification failed: %w", err)
+		apiKey, err = s.store.GetAPIKeyByID(s.ctx, verifier.apiKeyID)
+		if err != nil {
+			return fmt.Errorf("failed to load API key by ID: %w", err)
+		}
+	} else {
+		// Standard path: decrypt the password text and look it up.
+		plainPassword, derr := o5.DecryptPassword(clientSessKey, encPassword)
+		if derr != nil {
+			return fmt.Errorf("failed to decrypt password: %w", derr)
+		}
+
+		s.logger.DebugContext(s.ctx, "decrypted password from O5LOGON",
+			slog.Int("len", len(plainPassword)),
+			slog.String("prefix", plainPassword[:min(len(plainPassword), 10)]))
+
+		apiKey, err = s.store.VerifyAPIKey(s.ctx, plainPassword)
+		if err != nil {
+			return fmt.Errorf("API key verification failed: %w", err)
+		}
 	}
 
 	if apiKey.UserID != user.UID {
@@ -462,9 +478,13 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 }
 
 // o5LogonVerifierData holds decrypted O5LOGON verifier data for a user's API key.
+// apiKeyID is the UUID of the API key whose verifier was used. Needed for the
+// empty-AUTH_PASSWORD path (SQLcl / JDBC thin), where dbbat trusts the loaded
+// key as the one the client must have authenticated with.
 type o5LogonVerifierData struct {
 	O5LogonSalt       []byte
 	decryptedVerifier []byte
+	apiKeyID          uuid.UUID
 }
 
 // loadO5LogonVerifier finds and decrypts the O5LOGON verifier for a user.
@@ -500,6 +520,7 @@ func (s *session) loadO5LogonVerifier(userID uuid.UUID) (*o5LogonVerifierData, e
 		return &o5LogonVerifierData{
 			O5LogonSalt:       keys[i].O5LogonSalt,
 			decryptedVerifier: decrypted,
+			apiKeyID:          keys[i].ID,
 		}, nil
 	}
 
