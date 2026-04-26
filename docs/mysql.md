@@ -184,9 +184,12 @@ Same model as PG/Oracle — every command is logged in the `queries` table with 
 
 ## Result Row Capture
 
-**Phase 3 (v1):** Text-protocol result rows from `COM_QUERY` are captured up to `query_storage.max_result_rows` / `max_result_bytes` (same limits as PG). Rows are stored in the `query_rows` table as JSONB.
+Result rows from both protocol paths are captured up to `query_storage.max_result_rows` / `max_result_bytes` (same limits as PG):
 
-**Future:** Binary-protocol rows from `COM_STMT_EXECUTE` require parsing each column according to its type code (24+ MySQL types). Deferred to a follow-up spec.
+- **Text protocol** (`COM_QUERY`): rows arrive as `[]byte` per column and are encoded as UTF-8 strings or base64'd `$bytes`/`$type` markers for binary blobs.
+- **Binary protocol** (`COM_STMT_EXECUTE`): go-mysql's high-level `Result.Resultset` decodes each column according to its type code before we see it, so the same `captureRows` path serializes both. Numeric columns become JSON numbers, JSON columns are parsed if valid, blobs are base64-marked, everything else is a string.
+
+Rows are stored in the `query_rows` table as JSONB.
 
 ## Implementation Notes
 
@@ -198,13 +201,20 @@ A self-test (`cachingsha2_test.go:TestReadConnSalt_FieldExists`) fails loudly if
 
 If the test fails after a `go.mod` upgrade: either pin go-mysql back, or extend the patch to expose `Salt()` upstream and remove the reflection.
 
+## LOCAL INFILE Defense-in-Depth
+
+`LOAD DATA LOCAL INFILE` is the MySQL feature that lets a server *ask* a connected client to upload an arbitrary local file. A compromised upstream server can issue this request mid-query against any client — including a proxy. Two layers prevent that:
+
+1. **SQL regex** (shared with PG/Oracle) refuses the keyword in inbound client queries.
+2. **Capability opt-out**: when the proxy connects upstream it explicitly clears `CLIENT_LOCAL_FILES` from the negotiated capabilities (`upstream.go: c.UnsetCapability(...)`). The upstream then never advertises the feature on this connection, so even a compromised server cannot request a LOCAL INFILE upload through the proxy.
+
 ## Known Limitations
 
-- **Binary-protocol result row capture** (prepared statement EXECUTE results) not yet implemented — SQL text and parameters are logged, but rows aren't captured. Text protocol works fully.
 - **Stored procedure multi-result-sets:** only the first result set is captured.
 - **`COM_FIELD_LIST`** (deprecated since 5.7) is forwarded but not specially logged.
 - **MariaDB `STMT_BULK_EXECUTE`** is refused (clients need to disable batch rewriting).
 - **`mysql_native_password`** is intentionally not supported — all modern clients negotiate `caching_sha2_password` instead.
+- **Session packet dumps** (`DBB_DUMP_DIR`) are not yet wired up for the MySQL proxy. PG and Oracle dump session traffic; MySQL does not.
 
 ## Testing
 
