@@ -217,23 +217,41 @@ The Oracle proxy has been tested with:
 
 | Client | Library | Status |
 |--------|---------|--------|
-| Python | oracledb (thin mode) | SQL + rows work |
-| Java | ojdbc11 (JDBC thin) | SQL works, row capture partial |
-| Go | go-ora | SQL works |
-| DBeaver | JDBC thin via ojdbc | Connects, SQL logged, row capture partial |
-| SQLcl | JDBC thin (Oracle 23c) | Not yet supported — see below |
+| Go | go-ora | SQL + rows work end-to-end |
+| Python | oracledb (thin mode) | Authenticates, fails at AUTH OK with DPY-4035 — see below |
+| Java | ojdbc11 (JDBC thin) | SQL works, row capture partial (older tests) |
+| DBeaver | JDBC thin via ojdbc | Connects, SQL logged, row capture partial (older tests) |
+| SQLcl | JDBC thin (Oracle 23c) | Authenticates, fails at AUTH OK with ORA-17401 — see below |
 | sqlplus | OCI (Oracle 23c) | Not yet supported — see below |
 
 For debugging, enable `DBB_LOG_LEVEL=debug` to see TTC function codes and SQL extraction details.
 
-### SQLcl and sqlplus
+### Authentication path
 
-These two Oracle-shipped clients reach AUTH but do not yet complete a full session through dbbat:
+The proxy negotiates TNS Connect / Accept / Set Protocol / Set Data Types in a transparent
+relay to the upstream Oracle, then takes over once the client sends `AUTH Phase 1`. The
+relay strips the `customHash` flag (caps[4]&0x20) from the upstream's Set Protocol
+response — without that, modern clients switch to a PBKDF2 combined-key derivation that
+dbbat's O5LOGON server doesn't implement and AUTH_PASSWORD ends up decrypting to garbage.
 
-- **SQLcl 23c+** uses an O5LOGON variant where `AUTH_PASSWORD` is sent with an empty value. dbbat now parses this and authenticates the client against the loaded API key (the proof of password knowledge in this variant is implicit — the client validates `AUTH_SVR_RESPONSE` from the server). The handshake reaches "Oracle session established", but SQLcl then rejects the captured AUTH OK response with ORA-17401 — likely because it expects the server to dynamically encrypt `AUTH_SVR_RESPONSE` with the negotiated combined session key, which dbbat doesn't yet do.
-- **sqlplus 23c** initiates Oracle Native Services (NS) negotiation via OOB break/reset markers after the AUTH challenge. dbbat doesn't implement the NS protocol layer, so sqlplus errors with ORA-12630.
+### Known client limitations
 
-For now, use the supported thin-driver clients in the table above. Full support for SQLcl and sqlplus is tracked separately.
+- **Python `oracledb` (thin)**: authenticates successfully against dbbat (visible in logs)
+  and reaches "Oracle session established". The client then rejects the captured AUTH OK
+  response with `DPY-4035: invalid server response to connection request`. The captured
+  response was taken from a real Oracle 19c session, so its session-specific fields
+  (instance metadata, `AUTH_SVR_RESPONSE`, etc.) don't match the new session's combined
+  key. Fixing this needs a dynamic AUTH OK builder.
+- **SQLcl 23c+** sends `AUTH_PASSWORD` with an empty value when its negotiated mode wants
+  it. dbbat parses this and trusts the loaded API key as proof. The handshake reaches
+  "Oracle session established", but SQLcl rejects the captured AUTH OK with `ORA-17401`
+  — same root cause as the python issue.
+- **sqlplus 23c** initiates Oracle Native Services (NS) negotiation via OOB break/reset
+  markers after the AUTH challenge. dbbat doesn't implement the NS protocol layer, so
+  sqlplus errors with `ORA-12630`.
+
+For now, use `go-ora` (or older thin-driver clients) end-to-end; the rest reach AUTH
+but not query execution.
 
 ### Per-user O5LOGON key
 
