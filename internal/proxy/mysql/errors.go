@@ -28,4 +28,10 @@ var (
 	ErrQueryLimitExceeded = errors.New("query count limit exceeded for this grant")
 	// ErrDataLimitExceeded — the grant's max_bytes_transferred quota has been reached.
 	ErrDataLimitExceeded = errors.New("data transfer limit exceeded for this grant")
+	// ErrCachingSha2NeedsRSA — non-TLS caching_sha2 client tried full auth but no RSA key is configured.
+	ErrCachingSha2NeedsRSA = errors.New("non-TLS caching_sha2_password requires an RSA key (configure mysql.tls or send password over TLS)")
+	// ErrSaltFieldMissing — go-mysql library moved or removed the unexported Conn.salt field; readConnSalt cannot proceed.
+	ErrSaltFieldMissing = errors.New("go-mysql Conn.salt field not found (library version mismatch?)")
+	// ErrSaltFieldUnexpectedType — go-mysql library changed Conn.salt to a non-[]byte type.
+	ErrSaltFieldUnexpectedType = errors.New("go-mysql Conn.salt field has unexpected type")
 )

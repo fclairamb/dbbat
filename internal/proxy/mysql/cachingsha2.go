@@ -3,11 +3,10 @@ package mysql
 import (
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha1" //nolint:gosec // SHA-1 is mandated by MySQL's caching_sha2 OAEP padding.
+	"crypto/sha1"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
-	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -53,7 +52,7 @@ func driveCachingSha2FullAuth(c *gomysqlserver.Conn, rsaKey *rsa.PrivateKey) (st
 	// Non-TLS: client may request the public key first (single 0x02 byte).
 	if len(authData) == 1 && authData[0] == 0x02 {
 		if rsaKey == nil {
-			return "", errors.New("non-TLS caching_sha2_password requires an RSA key (configure mysql.tls or send password over TLS)")
+			return "", ErrCachingSha2NeedsRSA
 		}
 
 		if err := writeAuthMoreDataPubkey(c, rsaKey); err != nil {
@@ -67,7 +66,7 @@ func driveCachingSha2FullAuth(c *gomysqlserver.Conn, rsaKey *rsa.PrivateKey) (st
 	}
 
 	if rsaKey == nil {
-		return "", errors.New("non-TLS caching_sha2_password requires an RSA key")
+		return "", ErrCachingSha2NeedsRSA
 	}
 
 	salt, err := readConnSalt(c)
@@ -83,9 +82,11 @@ func driveCachingSha2FullAuth(c *gomysqlserver.Conn, rsaKey *rsa.PrivateKey) (st
 	return plain, nil
 }
 
+// packetHeaderSize is the 4-byte length+sequence header WritePacket fills in.
+const packetHeaderSize = 4
+
 func writeAuthMoreDataFullAuth(c *gomysqlserver.Conn) error {
-	// 4-byte placeholder header (filled in by WritePacket) + body.
-	data := make([]byte, 4, 6) //nolint:mnd // 4 header bytes + 2 body bytes.
+	data := make([]byte, packetHeaderSize, packetHeaderSize+2)
 	data = append(data, gomysql.MORE_DATE_HEADER, gomysql.CACHE_SHA2_FULL_AUTH)
 
 	return c.WritePacket(data)
@@ -99,7 +100,7 @@ func writeAuthMoreDataPubkey(c *gomysqlserver.Conn, key *rsa.PrivateKey) error {
 
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: derBytes})
 
-	data := make([]byte, 4, 5+len(pemBytes)) //nolint:mnd // 4 header bytes + body.
+	data := make([]byte, packetHeaderSize, packetHeaderSize+1+len(pemBytes))
 	data = append(data, gomysql.MORE_DATE_HEADER)
 	data = append(data, pemBytes...)
 
@@ -162,14 +163,14 @@ func readConnSalt(c *gomysqlserver.Conn) ([]byte, error) {
 
 	field := v.FieldByName("salt")
 	if !field.IsValid() {
-		return nil, errors.New("go-mysql Conn.salt field not found (library version mismatch?)")
+		return nil, ErrSaltFieldMissing
 	}
 
 	if field.Kind() != reflect.Slice || field.Type().Elem().Kind() != reflect.Uint8 {
-		return nil, errors.New("go-mysql Conn.salt field has unexpected type")
+		return nil, ErrSaltFieldUnexpectedType
 	}
 
-	saltSlice := *(*[]byte)(unsafe.Pointer(field.UnsafeAddr())) //nolint:gosec // documented unsafe access; see func docstring.
+	saltSlice := *(*[]byte)(unsafe.Pointer(field.UnsafeAddr()))
 
 	out := make([]byte, len(saltSlice))
 	copy(out, saltSlice)

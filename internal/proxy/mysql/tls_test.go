@@ -98,10 +98,10 @@ func TestTrimTrailingNUL(t *testing.T) {
 	t.Parallel()
 
 	cases := map[string]string{
-		"hunter2":      "hunter2",
-		"hunter2\x00":  "hunter2",
-		"\x00":         "",
-		"":             "",
+		"hunter2":       "hunter2",
+		"hunter2\x00":   "hunter2",
+		"\x00":          "",
+		"":              "",
 		"a\x00\x00\x00": "a",
 	}
 
