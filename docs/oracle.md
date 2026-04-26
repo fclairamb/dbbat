@@ -221,5 +221,16 @@ The Oracle proxy has been tested with:
 | Java | ojdbc11 (JDBC thin) | SQL works, row capture partial |
 | Go | go-ora | SQL works |
 | DBeaver | JDBC thin via ojdbc | Connects, SQL logged, row capture partial |
+| SQLcl | JDBC thin (Oracle 23c) | Not yet supported — see below |
+| sqlplus | OCI (Oracle 23c) | Not yet supported — see below |
 
 For debugging, enable `DBB_LOG_LEVEL=debug` to see TTC function codes and SQL extraction details.
+
+### SQLcl and sqlplus
+
+These two Oracle-shipped clients reach AUTH but do not yet complete authentication through dbbat:
+
+- **SQLcl** uses a newer O5LOGON variant that sends an empty `AUTH_PASSWORD`. Password verification relies entirely on the client's `AUTH_SESSKEY` value, which dbbat doesn't yet validate against the stored verifier.
+- **sqlplus 23c** initiates Oracle Native Services (NS) negotiation via OOB break/reset markers after the AUTH challenge. dbbat doesn't implement the NS protocol layer, so sqlplus errors with ORA-12630.
+
+For now, use the supported thin-driver clients in the table above. Full support for SQLcl and sqlplus is tracked separately.
