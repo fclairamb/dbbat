@@ -42,7 +42,11 @@ func (s *session) upstreamGoOraAuth() error {
 		return fmt.Errorf("failed to decrypt database password: %w", err)
 	}
 
-	dsn := fmt.Sprintf("oracle://%s:%s@%s/%s",
+	// SERVER+LOCATION=UTC short-circuits go-ora's post-auth `SELECT SYSTIMESTAMP FROM DUAL`
+	// in getDBServerTimeZone. Without this, that query has scanned into a time.Time which
+	// has unexported fields — go-ora's reflection-based Scan path panics with
+	// "reflect.Value.Interface: cannot return value obtained from unexported field or method".
+	dsn := fmt.Sprintf("oracle://%s:%s@%s/%s?SERVER+LOCATION=UTC",
 		s.database.Username, s.database.Password,
 		net.JoinHostPort(s.database.Host, fmt.Sprintf("%d", s.database.Port)), serviceName)
 
@@ -50,6 +54,11 @@ func (s *session) upstreamGoOraAuth() error {
 	if err != nil {
 		return fmt.Errorf("go-ora NewConnection: %w", err)
 	}
+
+	// Pre-set NLSData.Language so go-ora skips its post-auth GetNLS PL/SQL block
+	// (the same reflective binding path that panics). Any non-empty value works —
+	// dbbat only needs the authenticated raw conn for relay, not NLS metadata.
+	conn.NLSData.Language = "AMERICAN"
 
 	if err := conn.OpenWithContext(s.ctx); err != nil {
 		return fmt.Errorf("go-ora Open: %w", err)
