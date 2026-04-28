@@ -44,10 +44,8 @@ func TestO5Logon_RoundTrip(t *testing.T) {
 	encSessKey, vfrData, err := server.GenerateChallenge()
 	require.NoError(t, err)
 
-	// Verify AUTH_VFR_DATA format: hex(salt) + "6949"
-	assert.True(t, strings.HasSuffix(vfrData, o5LogonVerifierType))
-	saltHex := vfrData[:len(vfrData)-len(o5LogonVerifierType)]
-	decodedSalt, err := hex.DecodeString(saltHex)
+	// Verify AUTH_VFR_DATA format: hex(salt) — verifier type is sent as KV flag, not suffix
+	decodedSalt, err := hex.DecodeString(vfrData)
 	require.NoError(t, err)
 	assert.Equal(t, salt, decodedSalt)
 
@@ -137,8 +135,7 @@ func simulateO5LogonClient(t *testing.T, password, encServerSessKey, authVfrData
 	t.Helper()
 
 	// Extract salt from AUTH_VFR_DATA (remove verifier type suffix)
-	saltHex := authVfrData[:len(authVfrData)-len(o5LogonVerifierType)]
-	salt, err := hex.DecodeString(saltHex)
+	salt, err := hex.DecodeString(authVfrData)
 	require.NoError(t, err)
 
 	// Client derives verifier key from password + salt (same as server)
@@ -181,8 +178,7 @@ func simulateO5LogonClient(t *testing.T, password, encServerSessKey, authVfrData
 
 // simulateO5LogonClientRaw is like simulateO5LogonClient but returns errors instead of failing.
 func simulateO5LogonClientRaw(password, encServerSessKey, authVfrData string) (string, string, error) {
-	saltHex := authVfrData[:len(authVfrData)-len(o5LogonVerifierType)]
-	salt, err := hex.DecodeString(saltHex)
+	salt, err := hex.DecodeString(authVfrData)
 	if err != nil {
 		return "", "", err
 	}

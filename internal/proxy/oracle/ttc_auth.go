@@ -19,138 +19,247 @@ type authKVPair struct {
 	Value string
 }
 
+// knownAuthKeys are TTC AUTH key names that must not be returned as the username.
+// Different clients serialize the username at different offsets; the parser skips
+// any match on these well-known keys and keeps scanning.
+var knownAuthKeys = map[string]bool{
+	authKeyUsername:           true, // "AUTH_TERMINAL"
+	authKeySessKey:            true, // "AUTH_SESSKEY"
+	authKeyVfrData:            true, // "AUTH_VFR_DATA"
+	authKeyPassword:           true, // "AUTH_PASSWORD"
+	"AUTH_PROGRAM_NM":         true,
+	"AUTH_MACHINE":            true,
+	"AUTH_PID":                true,
+	"AUTH_SID":                true,
+	"AUTH_ACL":                true,
+	"AUTH_ALTER_SESSION":      true,
+	"AUTH_LOGICAL_SESSION_ID": true,
+}
+
 // parseAuthPhase1 extracts the username from a TTC AUTH Phase 1 message.
 // AUTH Phase 1 is sent as func=0x03, sub=0x76 (PiggybackSubAuth1).
-// The message contains the username and a logon mode.
 //
-// Wire format (after TNS Data flags):
-//
-//	[0] = 0x03 (piggyback)
-//	[1] = 0x76 (AUTH Phase 1 sub-op)
-//	[2] = username length (1 byte for short strings)
-//	[3..] = username bytes
-//	... followed by logon mode and key-value pairs
+// The wire format has a variable-length preamble of TTC-encoded fields (logon mode,
+// auth flags) before the username. The username is a length-prefixed string that
+// appears before the first AUTH_* key-value pair. We scan for length-prefixed
+// printable ASCII strings and skip any that match a known AUTH_* key name, since
+// some clients (e.g. SQLcl JDBC thin) serialize AUTH_TERMINAL before the username.
 func parseAuthPhase1(tnsDataPayload []byte) (string, error) {
-	if len(tnsDataPayload) < ttcDataFlagsSize+3 {
+	if len(tnsDataPayload) < ttcDataFlagsSize+4 {
 		return "", ErrAuthPhase1TooShort
 	}
 
 	// Skip data flags (2 bytes) + func code (0x03) + sub-op (0x76)
-	offset := ttcDataFlagsSize + 2
+	payload := tnsDataPayload[ttcDataFlagsSize+2:]
 
-	if offset >= len(tnsDataPayload) {
-		return "", ErrAuthPhase1NoData
+	// SQLcl / JDBC thin encodes the username via TTC chunked format:
+	//   0x01 <L>    — compressed int giving length L
+	//   0x01 0x01   — chunk metadata (one chunk, chunk-header)
+	//   <L bytes>   — username
+	// This pattern sits before any AUTH_* key/value pair. Scan for it first.
+	for i := 0; i+4 < len(payload); i++ {
+		if payload[i] != 0x01 || payload[i+2] != 0x01 || payload[i+3] != 0x01 {
+			continue
+		}
+
+		strLen := int(payload[i+1])
+		if strLen < 2 || strLen > 32 || i+4+strLen > len(payload) {
+			continue
+		}
+
+		candidate := payload[i+4 : i+4+strLen]
+		if !isPrintableASCII(candidate) {
+			continue
+		}
+
+		name := strings.ToUpper(string(candidate))
+		if !knownAuthKeys[name] {
+			return name, nil
+		}
 	}
 
-	// Read username length
-	usernameLen := int(tnsDataPayload[offset])
-	offset++
+	// Fallback: scan for any length-prefixed printable ASCII string, skipping
+	// known AUTH_* keys. This covers sqlplus's direct-length-prefix format.
+	for i := 0; i < len(payload)-2; i++ {
+		strLen := int(payload[i])
+		if strLen < 2 || strLen > 128 || i+1+strLen > len(payload) {
+			continue
+		}
 
-	if usernameLen == 0 || offset+usernameLen > len(tnsDataPayload) {
-		return "", ErrAuthPhase1BadUsername
+		candidate := payload[i+1 : i+1+strLen]
+		if !isPrintableASCII(candidate) {
+			continue
+		}
+
+		name := strings.ToUpper(string(candidate))
+		if knownAuthKeys[name] {
+			continue
+		}
+
+		return name, nil
 	}
 
-	username := string(tnsDataPayload[offset : offset+usernameLen])
-
-	return strings.ToUpper(username), nil
+	return "", ErrAuthPhase1BadUsername
 }
 
-// buildAuthChallenge constructs the TTC AUTH challenge response.
-// This is sent by the server after AUTH Phase 1 to challenge the client.
+// isPrintableASCII checks if all bytes are printable ASCII (letters, digits, _, $, #).
+func isPrintableASCII(b []byte) bool {
+	for _, c := range b {
+		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') &&
+			(c < '0' || c > '9') && c != '_' && c != '$' && c != '#' {
+			return false
+		}
+	}
+
+	return true
+}
+
+// buildAuthChallenge constructs the TTC AUTH challenge response using Oracle's
+// TTC wire encoding (compressed uint + CLR encoding).
 //
-// Wire format (TNS Data payload):
-//
-//	[0-1] = 0x0000 (data flags)
-//	[2]   = 0x08 (TTC Response func code)
-//	[3..] = key-value pairs: AUTH_SESSKEY, AUTH_VFR_DATA
-//
-// The key-value pairs use Oracle's TTC encoding:
-//   - Each key: length-prefixed string
-//   - Each value: length-prefixed string
-//   - Pairs are structured as a counted list
+// The challenge contains AUTH_SESSKEY and AUTH_VFR_DATA key-value pairs that the
+// client uses for O5LOGON authentication.
 func buildAuthChallenge(encServerSessKey, authVfrData string) []byte {
-	pairs := []authKVPair{
-		{Key: authKeySessKey, Value: encServerSessKey},
-		{Key: authKeyVfrData, Value: authVfrData},
-	}
-
-	return buildTTCAuthResponse(pairs, 0, "")
-}
-
-// buildAuthOK constructs the TTC AUTH success response.
-func buildAuthOK() []byte {
-	return buildTTCAuthResponse(nil, 0, "")
-}
-
-// buildAuthFailed constructs the TTC AUTH failure response with an ORA error code.
-func buildAuthFailed(oraCode int, message string) []byte {
-	return buildTTCAuthResponse(nil, oraCode, message)
-}
-
-// buildTTCAuthResponse constructs a TTC Response message with optional key-value pairs and error.
-// This is the server's response format for AUTH exchanges.
-//
-// The TTC Response (func=0x08) format:
-//
-//	[0-1] data flags (0x0000)
-//	[2]   func code (0x08 = Response)
-//	[3]   sequence number
-//	[4-5] return code (0 = success, error code otherwise)
-//	[6..] key-value count + pairs (if any)
-//	      or error message (if error)
-func buildTTCAuthResponse(pairs []authKVPair, errCode int, errMsg string) []byte { // Start with data flags + response function code
-	buf := []byte{
-		0x00, 0x00, // data flags
-		byte(TTCFuncResponse), // 0x08
-		0x00,                  // sequence
-	}
-
-	if errCode != 0 {
-		// Error response: return code + error message
-		buf = append(buf, encodeVarUint(uint32(errCode))...)
-		buf = append(buf, encodeTTCString(errMsg)...)
-
-		return buf
-	}
-
-	// Success: return code = 0
-	buf = append(buf, 0x00, 0x00) // return code = 0
-
-	if len(pairs) == 0 {
-		// No key-value pairs (AUTH OK with no data)
-		buf = append(buf, 0x00) // pair count = 0
-
-		return buf
-	}
-
-	// Key-value pairs count
-	buf = append(buf, byte(len(pairs)))
-
-	for _, p := range pairs {
-		buf = append(buf, encodeTTCKVPair(p.Key, p.Value)...)
-	}
+	buf := make([]byte, 0, 256)
+	buf = append(buf, 0x00, 0x00, byte(TTCFuncResponse)) // data flags + 0x08
+	buf = append(buf, ttcCompressedUint(2)...)           // 2 KV pairs
+	buf = append(buf, ttcKeyVal(authKeySessKey, encServerSessKey, 1)...)
+	buf = append(buf, ttcKeyVal(authKeyVfrData, authVfrData, o5LogonVerifierTypeNum)...)
 
 	return buf
 }
 
-// parseAuthPhase2 extracts the client session key and encrypted password from AUTH Phase 2.
+// buildAuthChallengeEndMarker builds the end-of-response (message code 4) that
+// must follow the AUTH challenge. Clients read message codes in a loop and exit
+// on code 4. This is sent as part of the same TNS Data packet or as a separate one.
+// The bytes after code 4 are a minimal Summary structure captured from Oracle 19c.
+func buildAuthChallengeEndMarker() []byte {
+	// Message code 4 + minimal summary fields that NewSummary reads.
+	// These must align with the TTC capabilities negotiated in Set Protocol.
+	// Captured from the AUTH challenge tail of Oracle 19c.
+	// Message code 4 (end of call) + minimal Summary structure.
+	// All fields are zero (compressed int = 0x00), which is safe for any TTC version/capability combo.
+	// We send 64 zero bytes after code 4 to ensure NewSummary has enough data regardless
+	// of which conditional fields are enabled.
+	buf := make([]byte, 256)
+	buf[0] = 0x04 // message code 4
+	// Remaining 255 zero bytes provide enough data for NewSummary to read
+	// all conditional fields (RetCode, CurRowNumber, Flags, error messages, etc.)
+	// regardless of TTC version and capability flags.
+
+	return buf
+}
+
+// buildAuthOK constructs the TTC AUTH success response.
+
+// buildAuthFailed constructs the TTC AUTH failure response with an ORA error code.
+func buildAuthFailed(oraCode int, message string) []byte {
+	buf := make([]byte, 0, 3+8+len(message)+2)
+	buf = append(buf, 0x00, 0x00, byte(TTCFuncResponse))
+	buf = append(buf, ttcCompressedUint(uint64(oraCode))...)
+	buf = append(buf, ttcClr([]byte(message))...)
+
+	return buf
+}
+
+// ttcKeyVal encodes a key-value pair using Oracle's TTC wire format.
+// Matches go-ora's PutKeyVal: PutUint(keyLen) + PutClr(key) + PutUint(valLen) + PutClr(val) + PutInt(flag).
+func ttcKeyVal(key, value string, flag int) []byte {
+	buf := make([]byte, 0, len(key)+len(value)+20)
+	keyBytes := []byte(key)
+	valBytes := []byte(value)
+
+	buf = append(buf, ttcCompressedUint(uint64(len(keyBytes)))...)
+	buf = append(buf, ttcClr(keyBytes)...)
+	buf = append(buf, ttcCompressedUint(uint64(len(valBytes)))...)
+	buf = append(buf, ttcClr(valBytes)...)
+	buf = append(buf, ttcCompressedUint(uint64(flag))...)
+
+	return buf
+}
+
+// ttcCompressedUint encodes a uint as a compressed TTC integer.
+// Zero = single 0x00. Otherwise: 1-byte count + big-endian bytes (no leading zeros).
+func ttcCompressedUint(n uint64) []byte {
+	if n == 0 {
+		return []byte{0x00}
+	}
+
+	tmp := make([]byte, 8)
+	binary.BigEndian.PutUint64(tmp, n)
+
+	start := 0
+	for start < len(tmp) && tmp[start] == 0 {
+		start++
+	}
+
+	trimmed := tmp[start:]
+	result := make([]byte, 1+len(trimmed))
+	result[0] = byte(len(trimmed))
+	copy(result[1:], trimmed)
+
+	return result
+}
+
+// ttcClr encodes data in Oracle's CLR (Chunked Length-prefixed Raw) format.
+// Short: 1-byte len + data. Long (>=252): 0xFE + chunked + 0x00 terminator.
+func ttcClr(data []byte) []byte {
+	if len(data) == 0 {
+		return []byte{0x00}
+	}
+
+	if len(data) < 0xFC {
+		buf := make([]byte, 1+len(data))
+		buf[0] = byte(len(data))
+		copy(buf[1:], data)
+
+		return buf
+	}
+
+	var buf []byte
+	buf = append(buf, 0xFE)
+
+	chunkSize := 252
+	for i := 0; i < len(data); i += chunkSize {
+		end := i + chunkSize
+		if end > len(data) {
+			end = len(data)
+		}
+
+		chunk := data[i:end]
+		buf = append(buf, byte(len(chunk)))
+		buf = append(buf, chunk...)
+	}
+
+	buf = append(buf, 0x00)
+
+	return buf
+}
+
+// parseAuthPhase2 extracts the client session key and (optionally) encrypted password
+// from AUTH Phase 2.
 // AUTH Phase 2 is sent as func=0x03, sub=0x73 (PiggybackSubAuth2).
+// Uses proper TTC DLC+CLR decoding (matching go-ora's GetKeyVal format).
 //
-// The message contains key-value pairs including:
-//   - AUTH_SESSKEY: encrypted client session key (hex string)
-//   - AUTH_PASSWORD: encrypted password (hex string)
+// password is empty for clients that do not send AUTH_PASSWORD content (e.g. SQLcl and
+// the modern Oracle JDBC thin driver). In that mode, the password verification happens
+// implicitly via the AUTH_SESSKEY exchange — the server proves password knowledge by
+// returning AUTH_SVR_RESPONSE encrypted with the combined session key, and the client
+// validates it locally.
 func parseAuthPhase2(tnsDataPayload []byte) (string, string, error) {
 	if len(tnsDataPayload) < ttcDataFlagsSize+4 {
 		return "", "", ErrAuthPhase2TooShort
 	}
 
-	// Skip data flags (2 bytes) + func code (0x03) + sub-op (0x73)
-	offset := ttcDataFlagsSize + 2
-
-	// Parse key-value pairs from the remaining payload
-	pairs := parseTTCKVPairs(tnsDataPayload[offset:])
+	// Skip data flags (2) + func code (0x03) + sub-op (0x73) + preamble
+	// The preamble has variable-length fields before the KV pairs.
+	// We scan for the first AUTH_ key using DLC-aware parsing.
+	payload := tnsDataPayload[ttcDataFlagsSize+2:]
 
 	var sessKey, password string
+
+	// Scan through payload for AUTH_ KV pairs using DLC+CLR decoding
+	pairs := scanTTCKeyValPairs(payload)
 
 	for _, p := range pairs {
 		switch strings.ToUpper(p.Key) {
@@ -161,138 +270,216 @@ func parseAuthPhase2(tnsDataPayload []byte) (string, string, error) {
 		}
 	}
 
+	// Fallback: some clients (SQLcl / JDBC thin) encode the preamble in a way
+	// that confuses the DLC+CLR state machine. Do a byte-level search for the
+	// literal key names and parse DLC(len) + len bytes that follow.
 	if sessKey == "" {
-		return "", "", ErrAuthPhase2MissingSessKey
+		sessKey = findKVByKeyBytes(payload, []byte(authKeySessKey))
 	}
 
 	if password == "" {
-		return "", "", ErrAuthPhase2MissingPassword
+		password = findKVByKeyBytes(payload, []byte(authKeyPassword))
+	}
+
+	if sessKey == "" {
+		return "", "", ErrAuthPhase2MissingSessKey
 	}
 
 	return sessKey, password, nil
 }
 
-// encodeTTCString encodes a string with Oracle TTC length prefix.
-// Short strings (< 254 bytes): 1-byte length prefix.
-// Long strings (>= 254 bytes): 0xFE marker + 2-byte BE length.
-func encodeTTCString(s string) []byte {
-	data := []byte(s)
-	if len(data) < 254 {
-		return append([]byte{byte(len(data))}, data...)
+// findKVByKeyBytes searches payload for a TTC AUTH_* key name and returns the value
+// that follows. Expected layout: <DLC(valLen)> <CLR(val)>, starting immediately after
+// the key's last byte. CLR is either <len><bytes> for short values or 0xFE<chunks>
+// for long values.
+func findKVByKeyBytes(payload, key []byte) string {
+	idx := indexOf(payload, key)
+	if idx < 0 {
+		return ""
 	}
 
-	buf := []byte{0xFE}
-	buf = binary.BigEndian.AppendUint16(buf, uint16(len(data)))
+	// After the key name, skip DLC (valLen) compressed int.
+	tail := payload[idx+len(key):]
 
-	return append(buf, data...)
+	_, dlcSize := readCompressedInt(tail)
+	if dlcSize == 0 || dlcSize >= len(tail) {
+		return ""
+	}
+
+	val, _ := readCLR(tail[dlcSize:])
+
+	return string(val)
 }
 
-// encodeTTCKVPair encodes a key-value pair for TTC AUTH messages.
-func encodeTTCKVPair(key, value string) []byte {
-	keyBytes := encodeTTCString(key)
-	valueBytes := encodeTTCString(value)
-	buf := make([]byte, 0, len(keyBytes)+len(valueBytes))
-	buf = append(buf, keyBytes...)
-	buf = append(buf, valueBytes...)
+// indexOf is a simple byte-slice search.
+func indexOf(haystack, needle []byte) int {
+	if len(needle) == 0 {
+		return 0
+	}
 
-	return buf
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		match := true
+		for j := 0; j < len(needle); j++ {
+			if haystack[i+j] != needle[j] {
+				match = false
+
+				break
+			}
+		}
+
+		if match {
+			return i
+		}
+	}
+
+	return -1
 }
 
-// parseTTCKVPairs parses TTC key-value pairs from a payload.
-// This is a best-effort parser — TTC encoding is complex and client-specific.
-func parseTTCKVPairs(payload []byte) []authKVPair {
+// scanTTCKeyValPairs scans a TTC payload for AUTH_ key-value pairs using DLC+CLR decoding.
+// Format per pair: compressed_int(keyLen) + CLR(key) + compressed_int(valLen) + CLR(val) + compressed_int(flag).
+func scanTTCKeyValPairs(payload []byte) []authKVPair {
 	var pairs []authKVPair
-	offset := 0
 
-	// Skip initial bytes (logon mode, flags, etc.) until we find key-value pairs.
-	// The format varies, but we look for well-known key names.
-	for offset < len(payload)-2 {
-		// Try to read a length-prefixed string
-		key, newOffset := readTTCString(payload, offset)
-		if key == "" || newOffset <= offset {
+	for offset := 0; offset < len(payload)-4; {
+		kLen, kLenSize := readCompressedInt(payload[offset:])
+		if kLenSize == 0 || kLen <= 0 || kLen > 128 || offset+kLenSize >= len(payload) {
 			offset++
 
 			continue
 		}
 
-		// Check if this looks like a known AUTH key
-		upperKey := strings.ToUpper(key)
-		if !isAuthKey(upperKey) {
+		clrKey, clrKeySize := readCLR(payload[offset+kLenSize:])
+		if clrKeySize == 0 || len(clrKey) == 0 {
 			offset++
 
 			continue
 		}
 
-		// Read the value
-		value, valueOffset := readTTCString(payload, newOffset)
-		if valueOffset <= newOffset {
+		keyStr := strings.ToUpper(string(clrKey))
+		if !strings.HasPrefix(keyStr, "AUTH_") {
 			offset++
 
 			continue
 		}
 
-		pairs = append(pairs, authKVPair{Key: upperKey, Value: value})
-		offset = valueOffset
+		key, val, consumed := readKVValue(payload[offset+kLenSize+clrKeySize:])
+		if consumed == 0 {
+			offset++
+
+			continue
+		}
+
+		_ = key // DLC length, not used
+		pairs = append(pairs, authKVPair{Key: keyStr, Value: string(val)})
+		offset += kLenSize + clrKeySize + consumed
 	}
 
 	return pairs
 }
 
-// readTTCString reads a TTC length-prefixed string from the payload at the given offset.
-// Returns the string and the new offset after reading.
-func readTTCString(payload []byte, offset int) (string, int) {
-	if offset >= len(payload) {
-		return "", offset
+// readKVValue reads the value DLC + CLR + flag from a KV pair.
+// Returns the DLC length, CLR data, and total bytes consumed.
+func readKVValue(buf []byte) (int, []byte, int) {
+	vLen, vLenSize := readCompressedInt(buf)
+	if vLenSize == 0 || vLen < 0 {
+		return 0, nil, 0
 	}
 
-	strLen := int(payload[offset])
-	offset++
-
-	if strLen == 0 {
-		return "", offset
+	clrVal, clrValSize := readCLR(buf[vLenSize:])
+	if clrValSize == 0 {
+		return 0, nil, 0
 	}
 
-	// Long string marker
-	if strLen == 0xFE {
-		if offset+2 > len(payload) {
-			return "", offset
+	flagOffset := vLenSize + clrValSize
+	_, flagSize := readCompressedInt(buf[flagOffset:])
+
+	total := flagOffset + flagSize
+	if total == flagOffset {
+		total++
+	}
+
+	return vLen, clrVal, total
+}
+
+// readCompressedInt reads a TTC compressed integer from the buffer.
+// Returns the value and the number of bytes consumed.
+func readCompressedInt(buf []byte) (int, int) {
+	if len(buf) == 0 {
+		return 0, 0
+	}
+
+	size := int(buf[0])
+	if size == 0 {
+		return 0, 1
+	}
+
+	if size > 8 || 1+size > len(buf) {
+		return 0, 0
+	}
+
+	val := 0
+	for i := 1; i <= size; i++ {
+		val = val<<8 | int(buf[i])
+	}
+
+	return val, 1 + size
+}
+
+// readCLR reads TTC CLR-encoded data from the buffer.
+// Returns the data and total bytes consumed (including length prefix).
+func readCLR(buf []byte) ([]byte, int) {
+	if len(buf) == 0 {
+		return nil, 0
+	}
+
+	first := buf[0]
+	if first == 0 || first == 0xFF || first == 0xFD {
+		return nil, 1
+	}
+
+	if first == 0xFE {
+		// Chunked: 0xFE + (chunkLen + chunk)* + 0x00
+		var data []byte
+
+		offset := 1
+		for offset < len(buf) {
+			chunkLen := int(buf[offset])
+			offset++
+
+			if chunkLen == 0 {
+				break
+			}
+
+			if offset+chunkLen > len(buf) {
+				return nil, 0
+			}
+
+			data = append(data, buf[offset:offset+chunkLen]...)
+			offset += chunkLen
 		}
 
-		strLen = int(binary.BigEndian.Uint16(payload[offset : offset+2]))
-		offset += 2
+		return data, offset
 	}
 
-	if offset+strLen > len(payload) {
-		return "", offset
+	// Short form: 1-byte length + data
+	dataLen := int(first)
+	if 1+dataLen > len(buf) {
+		return nil, 0
 	}
 
-	s := string(payload[offset : offset+strLen])
-
-	return s, offset + strLen
+	return buf[1 : 1+dataLen], 1 + dataLen
 }
+
+// encodeTTCString encodes a string with Oracle TTC length prefix.
+// Short strings (< 254 bytes): 1-byte length prefix.
+// Long strings (>= 254 bytes): 0xFE marker + 2-byte BE length.
+
+// encodeTTCKVPair encodes a key-value pair for TTC AUTH messages.
+
+// parseTTCKVPairs parses TTC key-value pairs from a payload.
+// This is a best-effort parser — TTC encoding is complex and client-specific.
+
+// readTTCString reads a TTC length-prefixed string from the payload at the given offset.
+// Returns the string and the new offset after reading.
 
 // isAuthKey checks if a key name is a known Oracle AUTH key.
-func isAuthKey(key string) bool {
-	switch key {
-	case "AUTH_TERMINAL", "AUTH_PROGRAM_NM", "AUTH_MACHINE", "AUTH_PID",
-		"AUTH_SID", "AUTH_SESSKEY", "AUTH_VFR_DATA", "AUTH_PASSWORD",
-		"AUTH_ACL", "AUTH_ALTER_SESSION", "AUTH_LOGON_AS_SYSDBA",
-		"AUTH_LOGON_AS_SYSOPER", "AUTH_INITIAL_CLIENT_ROLE",
-		"AUTH_SVR_RESPONSE", "AUTH_VERSION_NO", "AUTH_STATUS":
-		return true
-	default:
-		return strings.HasPrefix(key, "AUTH_")
-	}
-}
-
-// encodeVarUint encodes an unsigned integer in Oracle's variable-length format.
-func encodeVarUint(v uint32) []byte {
-	if v < 254 {
-		return []byte{byte(v)}
-	}
-
-	buf := []byte{0xFE}
-	buf = binary.BigEndian.AppendUint32(buf, v)
-
-	return buf
-}

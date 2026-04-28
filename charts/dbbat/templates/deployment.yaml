@@ -43,6 +43,11 @@ spec:
             - name: postgres
               containerPort: 5434
               protocol: TCP
+            {{- if .Values.service.oracle.enabled }}
+            - name: oracle
+              containerPort: {{ .Values.service.oracle.port }}
+              protocol: TCP
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "dbbat.fullname" . }}

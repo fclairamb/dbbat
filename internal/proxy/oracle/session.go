@@ -2,12 +2,14 @@ package oracle
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -35,6 +37,9 @@ type session struct {
 	user          *store.User
 	grant         *store.Grant
 	connectionUID uuid.UUID
+
+	// Upstream go-ora connection (kept alive to prevent GC)
+	goOraConn interface{ Close() error }
 
 	// Query tracking
 	tracker      *oracleQueryTracker
@@ -92,19 +97,19 @@ func (s *session) run() error {
 		return err
 	}
 
-	// Step 3: Send TNS Accept to client (dbbat acts as Oracle server)
-	acceptPkt := buildTNSAccept()
-	if _, err := s.clientConn.Write(acceptPkt); err != nil {
-		return fmt.Errorf("failed to send TNS Accept: %w", err)
-	}
-
-	// Step 4: TTC negotiation with client (Set Protocol + Set Data Types)
-	if err := s.handleClientNegotiation(); err != nil {
-		return fmt.Errorf("client negotiation failed: %w", err)
+	// Step 3+4: Transparent pre-auth relay.
+	// Proxy TNS Accept + Set Protocol + Set Data Types through to the real upstream
+	// so each client (go-ora, python-oracledb, dbeaver, sqlplus 23c…) receives a
+	// server response tailored to its own capability/datatype registration.
+	// The relay returns the client's AUTH Phase 1 packet (not forwarded) so dbbat
+	// can perform terminated O5LOGON authentication with its own user store.
+	phase1Pkt, err := s.relayPreAuthNegotiation(connectPkt)
+	if err != nil {
+		return fmt.Errorf("pre-auth relay failed: %w", err)
 	}
 
 	// Step 5: Authenticate client via O5LOGON (API key as Oracle password)
-	if err := s.authenticateClient(); err != nil {
+	if err := s.authenticateClient(phase1Pkt); err != nil {
 		s.logger.WarnContext(s.ctx, "client authentication failed", slog.Any("error", err))
 		s.sendAuthFailed(ORA01017, "invalid username/password; logon denied")
 
@@ -118,6 +123,13 @@ func (s *session) run() error {
 	// Step 6: Connect to upstream Oracle and authenticate with stored credentials
 	if err := s.upstreamAuth(); err != nil {
 		return fmt.Errorf("upstream auth failed: %w", err)
+	}
+
+	// Step 6b: Send the full AUTH OK + session properties response to client.
+	// This is a captured response from Oracle 19c that includes AUTH_VERSION_STRING,
+	// session properties, and the code-4 end marker that go-ora expects.
+	if _, err := s.clientConn.Write(capturedAuthOKResponse); err != nil {
+		return fmt.Errorf("failed to send AUTH OK: %w", err)
 	}
 
 	// Step 7: Record connection
@@ -154,6 +166,19 @@ func (s *session) run() error {
 
 	// Step 9: Enter bidirectional TNS relay with query interception
 	return s.proxyMessages()
+}
+
+// encodeV315DataPacket wraps a TTC payload in a v315+ TNS Data packet.
+// v315+ format: 4-byte BE total length + type(0x06) + 3 reserved bytes + payload.
+func encodeV315DataPacket(payload []byte) []byte {
+	totalLen := 8 + len(payload) // 4(len) + 1(type) + 3(reserved) + payload
+	buf := make([]byte, totalLen)
+	binary.BigEndian.PutUint32(buf[0:4], uint32(totalLen))
+	buf[4] = byte(TNSPacketTypeData) // 0x06
+	// buf[5:8] = 0x00, 0x00, 0x00 (reserved)
+	copy(buf[8:], payload)
+
+	return buf
 }
 
 // sendAuthFailed sends an ORA-01017 style auth failure to the client.
@@ -211,68 +236,137 @@ func (s *session) resolveDatabase(connectPayload []byte) error {
 	return nil
 }
 
-// handleClientNegotiation handles the TTC Set Protocol and Set Data Types exchange
-// with the client. dbbat acts as Oracle server, responding with hardcoded templates.
-func (s *session) handleClientNegotiation() error {
-	// Read Set Protocol from client
-	setProt, err := readTNSPacket(s.clientConn)
+// readPhase1Packet returns the AUTH Phase 1 packet, reading from the client when
+// not already provided by the pre-auth relay. Non-Data packets sent before Phase 1
+// are silently consumed.
+func (s *session) readPhase1Packet(phase1Pkt *TNSPacket) (*TNSPacket, error) {
+	if phase1Pkt != nil {
+		return phase1Pkt, nil
+	}
+
+	pkt, err := readTNSPacket(s.clientConn)
 	if err != nil {
-		return fmt.Errorf("failed to read Set Protocol: %w", err)
+		return nil, fmt.Errorf("failed to read AUTH Phase 1: %w", err)
 	}
 
-	if setProt.Type != TNSPacketTypeData {
-		return fmt.Errorf("%w: got %s for Set Protocol", ErrUnexpectedPacketType, setProt.Type)
+	for pkt.Type != TNSPacketTypeData {
+		s.logger.DebugContext(s.ctx, "AUTH Phase 1: skipping non-Data packet",
+			slog.String("type", pkt.Type.String()),
+			slog.Int("len", len(pkt.Payload)),
+			slog.String("hex", fmt.Sprintf("%x", pkt.Payload[:min(len(pkt.Payload), 40)])))
+
+		pkt, err = readTNSPacket(s.clientConn)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read AUTH Phase 1: %w", err)
+		}
 	}
 
-	// Send Set Protocol response
-	setProtResp := buildSetProtocolResponse()
-	if _, err := s.clientConn.Write(setProtResp); err != nil {
-		return fmt.Errorf("failed to send Set Protocol response: %w", err)
-	}
+	return pkt, nil
+}
 
-	// Read Set Data Types from client
-	setDT, err := readTNSPacket(s.clientConn)
+// readPhase2Packet returns the AUTH Phase 2 Data packet from the client. sqlplus 23c
+// emits OOB break/reset markers before AUTH Phase 2; we honor the protocol by
+// replying with a reset marker, then keep reading.
+func (s *session) readPhase2Packet() (*TNSPacket, error) {
+	phase2Pkt, err := readTNSPacket(s.clientConn)
 	if err != nil {
-		return fmt.Errorf("failed to read Set Data Types: %w", err)
+		return nil, fmt.Errorf("failed to read AUTH Phase 2: %w", err)
 	}
 
-	if setDT.Type != TNSPacketTypeData {
-		return fmt.Errorf("%w: got %s for Set Data Types", ErrUnexpectedPacketType, setDT.Type)
+	sawBreak := false
+
+	for phase2Pkt.Type != TNSPacketTypeData {
+		s.logger.DebugContext(s.ctx, "AUTH Phase 2: non-Data packet",
+			slog.String("type", phase2Pkt.Type.String()),
+			slog.Int("len", len(phase2Pkt.Payload)),
+			slog.String("hex", fmt.Sprintf("%x", phase2Pkt.Payload[:min(len(phase2Pkt.Payload), 40)])))
+
+		if isBreakMarker(phase2Pkt) {
+			sawBreak = true
+		}
+
+		if isResetMarker(phase2Pkt) && sawBreak {
+			if _, err := s.clientConn.Write(buildResetMarker()); err != nil {
+				return nil, fmt.Errorf("failed to send reset marker: %w", err)
+			}
+
+			s.logger.DebugContext(s.ctx, "AUTH Phase 2: responded to break with reset marker")
+
+			sawBreak = false
+		}
+
+		phase2Pkt, err = readTNSPacket(s.clientConn)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read AUTH Phase 2: %w", err)
+		}
 	}
 
-	// Send Set Data Types response
-	setDTResp := buildSetDataTypesResponse()
-	if _, err := s.clientConn.Write(setDTResp); err != nil {
-		return fmt.Errorf("failed to send Set Data Types response: %w", err)
+	return phase2Pkt, nil
+}
+
+// resolveAPIKeyFromPhase2 returns the API key that authenticated the client.
+//
+// Two paths:
+//   - encPassword == "" (SQLcl / JDBC thin 23c+): the client doesn't send the
+//     password text. Proof of knowledge is implicit — if the wrong key were typed,
+//     the client would fail to validate our AUTH_SVR_RESPONSE marker and
+//     disconnect. We trust the loaded verifier's API key as the one in use.
+//   - encPassword non-empty (standard): decrypt with the negotiated combined key
+//     and look up the recovered plaintext as an API key.
+func (s *session) resolveAPIKeyFromPhase2(o5 *O5LogonServer, verifier *o5LogonVerifierData, clientSessKey, encPassword string) (*store.APIKey, error) {
+	if encPassword == "" {
+		s.logger.InfoContext(s.ctx, "AUTH Phase 2: empty AUTH_PASSWORD — using loaded verifier's API key",
+			slog.String("key_id", verifier.apiKeyID.String()))
+
+		apiKey, err := s.store.GetAPIKeyByID(s.ctx, verifier.apiKeyID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load API key by ID: %w", err)
+		}
+
+		return apiKey, nil
 	}
 
-	return nil
+	plainPassword, err := o5.DecryptPassword(clientSessKey, encPassword)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decrypt password: %w", err)
+	}
+
+	s.logger.DebugContext(s.ctx, "decrypted password from O5LOGON",
+		slog.Int("len", len(plainPassword)),
+		slog.String("prefix", plainPassword[:min(len(plainPassword), 10)]))
+
+	apiKey, err := s.store.VerifyAPIKey(s.ctx, plainPassword)
+	if err != nil {
+		return nil, fmt.Errorf("API key verification failed: %w", err)
+	}
+
+	return apiKey, nil
 }
 
 // authenticateClient performs O5LOGON server-side authentication.
 // The client sends AUTH Phase 1 (username), dbbat sends a challenge,
 // the client sends AUTH Phase 2 (encrypted password), dbbat decrypts and verifies.
-func (s *session) authenticateClient() error {
-	// Receive AUTH Phase 1 from client
-	phase1Pkt, err := readTNSPacket(s.clientConn)
+// phase1Pkt may be nil (legacy path) or pre-read from the transparent pre-auth relay.
+func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
+	phase1Pkt, err := s.readPhase1Packet(phase1Pkt)
 	if err != nil {
-		return fmt.Errorf("failed to read AUTH Phase 1: %w", err)
-	}
-
-	if phase1Pkt.Type != TNSPacketTypeData {
-		return fmt.Errorf("%w: got %s for AUTH Phase 1", ErrUnexpectedPacketType, phase1Pkt.Type)
+		return err
 	}
 
 	// Extract username from AUTH Phase 1
+	s.logger.DebugContext(s.ctx, "AUTH Phase 1 payload",
+		slog.Int("len", len(phase1Pkt.Payload)),
+		slog.String("hex_head", fmt.Sprintf("%x", phase1Pkt.Payload[:min(len(phase1Pkt.Payload), 40)])))
 	username, err := parseAuthPhase1(phase1Pkt.Payload)
 	if err != nil {
 		return fmt.Errorf("failed to parse AUTH Phase 1: %w", err)
 	}
 
-	s.username = username
+	// Oracle clients uppercase usernames — normalize to lowercase for dbbat lookup
+	s.username = strings.ToLower(username)
 
 	// Look up dbbat user
-	user, err := s.store.GetUserByUsername(s.ctx, username)
+	user, err := s.store.GetUserByUsername(s.ctx, s.username)
 	if err != nil {
 		return fmt.Errorf("%w: %s", ErrUserNotFound, username)
 	}
@@ -306,42 +400,48 @@ func (s *session) authenticateClient() error {
 	}
 
 	// Send AUTH challenge to client
+	s.logger.DebugContext(s.ctx, "sending AUTH challenge",
+		slog.Int("sesskey_len", len(encSessKey)),
+		slog.Int("vfrdata_len", len(vfrData)))
 	challengePayload := buildAuthChallenge(encSessKey, vfrData)
-	challengePkt := &TNSPacket{
-		Type:    TNSPacketTypeData,
-		Payload: challengePayload,
-	}
-
-	if err := writeTNSPacket(s.clientConn, challengePkt); err != nil {
+	challengePayload = append(challengePayload, buildAuthChallengeEndMarker()...)
+	s.logger.DebugContext(s.ctx, "AUTH challenge payload",
+		slog.Int("len", len(challengePayload)),
+		slog.String("hex_head", fmt.Sprintf("%x", challengePayload[:min(len(challengePayload), 60)])))
+	// Write as raw v315+ TNS Data packet (4-byte length header, not 2-byte)
+	// After Accept, all packets must use v315+ format.
+	challengeRaw := encodeV315DataPacket(challengePayload)
+	if _, err := s.clientConn.Write(challengeRaw); err != nil {
 		return fmt.Errorf("failed to send AUTH challenge: %w", err)
 	}
 
-	// Receive AUTH Phase 2 from client
-	phase2Pkt, err := readTNSPacket(s.clientConn)
+	phase2Pkt, err := s.readPhase2Packet()
 	if err != nil {
-		return fmt.Errorf("failed to read AUTH Phase 2: %w", err)
+		return err
 	}
 
-	if phase2Pkt.Type != TNSPacketTypeData {
-		return fmt.Errorf("%w: got %s for AUTH Phase 2", ErrUnexpectedPacketType, phase2Pkt.Type)
-	}
+	s.logger.DebugContext(s.ctx, "AUTH Phase 2 packet received",
+		slog.String("type", phase2Pkt.Type.String()),
+		slog.Int("payload_len", len(phase2Pkt.Payload)))
 
 	// Parse AUTH Phase 2 to get encrypted password
+	s.logger.DebugContext(s.ctx, "AUTH Phase 2 payload",
+		slog.Int("len", len(phase2Pkt.Payload)),
+		slog.String("hex_head", fmt.Sprintf("%x", phase2Pkt.Payload[:min(len(phase2Pkt.Payload), 60)])))
 	clientSessKey, encPassword, err := parseAuthPhase2(phase2Pkt.Payload)
 	if err != nil {
 		return fmt.Errorf("failed to parse AUTH Phase 2: %w", err)
 	}
 
-	// Decrypt the password (should be an API key)
-	plainPassword, err := o5.DecryptPassword(clientSessKey, encPassword)
-	if err != nil {
-		return fmt.Errorf("failed to decrypt password: %w", err)
-	}
+	s.logger.DebugContext(s.ctx, "AUTH Phase 2 parsed",
+		slog.Int("client_sesskey_len", len(clientSessKey)),
+		slog.Int("enc_password_len", len(encPassword)),
+		slog.String("client_sesskey", clientSessKey),
+		slog.String("enc_password", encPassword))
 
-	// Verify the decrypted password as an API key
-	apiKey, err := s.store.VerifyAPIKey(s.ctx, plainPassword)
+	apiKey, err := s.resolveAPIKeyFromPhase2(o5, verifier, clientSessKey, encPassword)
 	if err != nil {
-		return fmt.Errorf("API key verification failed: %w", err)
+		return err
 	}
 
 	if apiKey.UserID != user.UID {
@@ -351,24 +451,20 @@ func (s *session) authenticateClient() error {
 	// Increment usage asynchronously
 	go func() { _ = s.store.IncrementAPIKeyUsage(context.Background(), apiKey.ID) }()
 
-	// Send AUTH OK to client
-	authOKPayload := buildAuthOK()
-	authOKPkt := &TNSPacket{
-		Type:    TNSPacketTypeData,
-		Payload: authOKPayload,
-	}
-
-	if err := writeTNSPacket(s.clientConn, authOKPkt); err != nil {
-		return fmt.Errorf("failed to send AUTH OK: %w", err)
-	}
+	// NOTE: AUTH OK is NOT sent here. It's sent in run() AFTER upstream auth completes,
+	// so the relay can immediately forward go-ora's post-auth messages to upstream.
 
 	return nil
 }
 
 // o5LogonVerifierData holds decrypted O5LOGON verifier data for a user's API key.
+// apiKeyID is the UUID of the API key whose verifier was used. Needed for the
+// empty-AUTH_PASSWORD path (SQLcl / JDBC thin), where dbbat trusts the loaded
+// key as the one the client must have authenticated with.
 type o5LogonVerifierData struct {
 	O5LogonSalt       []byte
 	decryptedVerifier []byte
+	apiKeyID          uuid.UUID
 }
 
 // loadO5LogonVerifier finds and decrypts the O5LOGON verifier for a user.
@@ -397,9 +493,14 @@ func (s *session) loadO5LogonVerifier(userID uuid.UUID) (*o5LogonVerifierData, e
 			continue
 		}
 
+		s.logger.InfoContext(s.ctx, "O5LOGON verifier loaded — only this API key works for Oracle login",
+			slog.String("key_prefix", keys[i].KeyPrefix),
+			slog.String("key_id", keys[i].ID.String()))
+
 		return &o5LogonVerifierData{
 			O5LogonSalt:       keys[i].O5LogonSalt,
 			decryptedVerifier: decrypted,
+			apiKeyID:          keys[i].ID,
 		}, nil
 	}
 
@@ -412,7 +513,6 @@ func strPtr(s string) *string {
 }
 
 // maxResendAttempts limits the number of Resend retries to prevent infinite loops.
-const maxResendAttempts = 3
 
 // proxyMessages relays TNS packets bidirectionally with TTC-aware interception.
 func (s *session) proxyMessages() error {
@@ -694,7 +794,11 @@ func (s *session) cleanup() {
 		}
 	}
 
-	if s.upstreamConn != nil {
+	if s.goOraConn != nil {
+		if err := s.goOraConn.Close(); err != nil {
+			s.logger.ErrorContext(s.ctx, "failed to close go-ora connection", slog.Any("error", err))
+		}
+	} else if s.upstreamConn != nil {
 		if err := s.upstreamConn.Close(); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to close upstream connection", slog.Any("error", err))
 		}

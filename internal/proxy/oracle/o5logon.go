@@ -5,7 +5,6 @@ import (
 	"crypto/cipher"
 	"crypto/md5"
 	"crypto/rand"
-	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
 	"strings"
@@ -15,9 +14,10 @@ import (
 
 const (
 	o5LogonSaltLength        = 10
-	o5LogonVerifierKeyLength = 24 // SHA-1 (20 bytes) zero-padded to 24
-	o5LogonSessionKeyLength  = 48
-	o5LogonVerifierType      = "6949" // SHA-1 based verifier
+	o5LogonVerifierKeyLength = 24     // SHA-1 (20 bytes) zero-padded to 24
+	o5LogonSessionKeyLength  = 48     // 48 bytes needed for non-customHash key derivation (XOR bytes 16-39)
+	o5LogonVerifierType      = "6949" // SHA-1 based verifier (legacy, used in value suffix)
+	o5LogonVerifierTypeNum   = 6949   // Verifier type sent as KV pair flag
 	o5LogonPasswordPrefixLen = 16     // Random prefix prepended to password by client
 )
 
@@ -62,16 +62,17 @@ func (s *O5LogonServer) GenerateChallenge() (string, string, error) {
 	// Derive encryption key from verifier key
 	encKey := deriveAESKey(s.verifierKey)
 
-	// Encrypt server session key with AES-192-CBC
-	encrypted, err := aes192CBCEncrypt(encKey, s.serverSessionKey)
+	// Encrypt server session key with AES-192-CBC (truncated to original length)
+	encrypted, err := aes192CBCEncryptTruncated(encKey, s.serverSessionKey)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to encrypt server session key: %w", err)
 	}
 
 	encSessKey := strings.ToUpper(hex.EncodeToString(encrypted))
 
-	// AUTH_VFR_DATA = hex(salt) + verifier type suffix
-	vfrData := strings.ToUpper(hex.EncodeToString(s.salt)) + o5LogonVerifierType
+	// AUTH_VFR_DATA = hex(salt). The verifier type (6949) is sent as the
+	// KV pair flag, not as a value suffix (go-ora reads VerifierType from the flag).
+	vfrData := strings.ToUpper(hex.EncodeToString(s.salt))
 
 	return encSessKey, vfrData, nil
 }
@@ -121,45 +122,47 @@ func (s *O5LogonServer) DecryptPassword(encClientSessKey, encPassword string) (s
 	return string(password), nil
 }
 
-// deriveAESKey derives a 24-byte AES-192 key from the verifier key.
-// Uses the first 24 bytes of SHA-1(verifier_key), zero-padded.
+// deriveAESKey returns the verifier key zero-padded to 24 bytes for use as AES-192 key.
+// The verifier key is already SHA1(password + salt) = 20 bytes; we just pad to 24.
+// go-ora uses the verifier key directly (no additional hashing).
 func deriveAESKey(verifierKey []byte) []byte {
-	h := sha1.New()
-	h.Write(verifierKey)
-	hash := h.Sum(nil) // 20 bytes
-
 	key := make([]byte, o5LogonVerifierKeyLength)
-	copy(key, hash)
+	copy(key, verifierKey)
 
 	return key
 }
 
 // deriveCombinedKey derives the password encryption key from both session keys.
-// combined_key = MD5(server_session_key || client_session_key), zero-padded to 24 bytes.
+// Matches go-ora's non-customHash O5LOGON (6949) path:
+// XOR server[16:40] ^ client[16:40], then MD5(first_16) + MD5(last_8), truncated to 24 bytes.
 func deriveCombinedKey(serverKey, clientKey []byte) []byte {
-	h := md5.New()
-	h.Write(serverKey)
-	h.Write(clientKey)
-	hash := h.Sum(nil) // 16 bytes
+	start := 16
+	buffer := make([]byte, 24)
 
-	key := make([]byte, o5LogonVerifierKeyLength)
-	copy(key, hash)
+	for i := range 24 {
+		buffer[i] = serverKey[i+start] ^ clientKey[i+start]
+	}
 
-	return key
+	h1 := md5.New()
+	h1.Write(buffer[:16])
+	ret := h1.Sum(nil) // 16 bytes
+
+	h2 := md5.New()
+	h2.Write(buffer[16:])
+	ret = append(ret, h2.Sum(nil)...) // 32 bytes total
+
+	return ret[:24] // truncate to 24 bytes for AES-192
 }
 
-// aes192CBCEncrypt encrypts data using AES-192-CBC with a zero IV.
-// PKCS7 padding is applied.
+// aes192CBCEncrypt encrypts data using AES-192-CBC with a zero IV and PKCS7 padding.
 func aes192CBCEncrypt(key, plaintext []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create cipher: %w", err)
 	}
 
-	// Apply PKCS7 padding
 	padded := pkcs7Pad(plaintext, aes.BlockSize)
 
-	// Use zero IV (as per O5LOGON protocol)
 	iv := make([]byte, aes.BlockSize)
 	mode := cipher.NewCBCEncrypter(block, iv)
 
@@ -167,6 +170,17 @@ func aes192CBCEncrypt(key, plaintext []byte) ([]byte, error) {
 	mode.CryptBlocks(ciphertext, padded)
 
 	return ciphertext, nil
+}
+
+// aes192CBCEncryptTruncated encrypts with PKCS7 padding then truncates to the original
+// input length. Matches go-ora's encryptSessionKey behavior for O5LOGON session keys.
+func aes192CBCEncryptTruncated(key, plaintext []byte) ([]byte, error) {
+	ciphertext, err := aes192CBCEncrypt(key, plaintext)
+	if err != nil {
+		return nil, err
+	}
+
+	return ciphertext[:len(plaintext)], nil
 }
 
 // aes192CBCDecrypt decrypts data using AES-192-CBC with a zero IV.
@@ -188,10 +202,10 @@ func aes192CBCDecrypt(key, ciphertext []byte) ([]byte, error) {
 	plaintext := make([]byte, len(ciphertext))
 	mode.CryptBlocks(plaintext, ciphertext)
 
-	// Strip PKCS7 padding
-	plaintext, err = pkcs7Unpad(plaintext)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unpad: %w", err)
+	// Try to strip PKCS7 padding if present. If the last byte doesn't look like
+	// valid PKCS7 padding, return the plaintext as-is (block-aligned data may not be padded).
+	if unpadded, err := pkcs7Unpad(plaintext); err == nil {
+		return unpadded, nil
 	}
 
 	return plaintext, nil

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -154,6 +155,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 		if r := recover(); r != nil {
 			s.logger.ErrorContext(s.ctx, "Oracle session panic",
 				slog.Any("panic", r),
+				slog.String("stack", string(debug.Stack())),
 				slog.Any("remote_addr", clientConn.RemoteAddr()))
 		}
 

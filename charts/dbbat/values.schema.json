@@ -189,6 +189,34 @@
               "description": "Service annotations"
             }
           }
+        },
+        "oracle": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "description": "Enable Oracle proxy service"
+            },
+            "type": {
+              "type": "string",
+              "enum": ["ClusterIP", "NodePort", "LoadBalancer"],
+              "description": "Service type"
+            },
+            "port": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "description": "Service port"
+            },
+            "nodePort": {
+              "type": ["integer", "string"],
+              "description": "Fixed NodePort"
+            },
+            "annotations": {
+              "type": "object",
+              "description": "Service annotations"
+            }
+          }
         }
       }
     },

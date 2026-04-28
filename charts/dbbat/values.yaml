@@ -108,6 +108,22 @@ service:
     #   service.beta.kubernetes.io/aws-load-balancer-type: nlb
     #   service.beta.kubernetes.io/aws-load-balancer-scheme: internal
 
+  oracle:
+    # -- Enable Oracle proxy service (TNS/TTC)
+    enabled: false
+    # -- Oracle service type (ClusterIP, NodePort, LoadBalancer)
+    type: ClusterIP
+    # -- Oracle service port (default Oracle TNS port is 1521; proxy defaults to 1522)
+    port: 1522
+    # -- Fixed NodePort (optional, only for type: NodePort)
+    nodePort: ""
+    # -- Oracle service annotations (e.g., cloud LB configuration)
+    annotations: {}
+    # Example for AWS NLB:
+    #   service.beta.kubernetes.io/aws-load-balancer-type: nlb
+    #   service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    #   service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+
 # =============================================================================
 # Ingress (HTTP only - for API and Web UI)
 # =============================================================================
