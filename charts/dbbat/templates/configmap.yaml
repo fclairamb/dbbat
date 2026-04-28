@@ -7,6 +7,9 @@ metadata:
 data:
   DBB_LISTEN_PG: {{ .Values.config.listenPg | quote }}
   DBB_LISTEN_API: {{ .Values.config.listenApi | quote }}
+  {{- if .Values.service.oracle.enabled }}
+  DBB_LISTEN_ORA: {{ printf ":%d" (int .Values.service.oracle.port) | quote }}
+  {{- end }}
   DBB_BASE_URL: {{ .Values.config.baseUrl | quote }}
   {{- if .Values.config.runMode }}
   DBB_RUN_MODE: {{ .Values.config.runMode | quote }}

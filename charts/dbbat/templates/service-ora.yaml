@@ -1,0 +1,25 @@
+{{- if .Values.service.oracle.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dbbat.fullname" . }}-ora
+  labels:
+    {{- include "dbbat.labels" . | nindent 4 }}
+    app.kubernetes.io/component: proxy-oracle
+  {{- with .Values.service.oracle.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.oracle.type }}
+  ports:
+    - port: {{ .Values.service.oracle.port }}
+      targetPort: oracle
+      protocol: TCP
+      name: oracle
+      {{- if and (eq .Values.service.oracle.type "NodePort") .Values.service.oracle.nodePort }}
+      nodePort: {{ .Values.service.oracle.nodePort }}
+      {{- end }}
+  selector:
+    {{- include "dbbat.selectorLabels" . | nindent 4 }}
+{{- end }}
