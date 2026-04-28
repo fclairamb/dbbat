@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/fclairamb/dbbat/compare/v0.5.2...v0.6.0) (2026-04-15)
+
+
+### Features
+
+* **proxy:** activate Oracle terminated auth with O5LOGON and API keys ([#105](https://github.com/fclairamb/dbbat/issues/105)) ([d90d64e](https://github.com/fclairamb/dbbat/commit/d90d64e9da0a88907cbeb1b6dd2f5a9fdbf55395))
+
 ## [0.5.2](https://github.com/fclairamb/dbbat/compare/v0.5.1...v0.5.2) (2026-04-14)
 
 

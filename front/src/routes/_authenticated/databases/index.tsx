@@ -59,6 +59,38 @@ function isFullDatabase(db: DatabaseItem): db is Database {
   return "host" in db;
 }
 
+type Protocol = "postgresql" | "oracle" | "mysql" | "mariadb";
+
+const PROTOCOL_LABEL: Record<Protocol, string> = {
+  postgresql: "PostgreSQL",
+  oracle: "Oracle",
+  mysql: "MySQL",
+  mariadb: "MariaDB",
+};
+
+const PROTOCOL_DEFAULT_PORT: Record<Protocol, string> = {
+  postgresql: "5432",
+  oracle: "1521",
+  mysql: "3306",
+  mariadb: "3306",
+};
+
+const PROTOCOL_BADGE_CLASS: Record<Protocol, string> = {
+  postgresql: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
+  oracle: "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+  mysql:
+    "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+  mariadb:
+    "bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-400",
+};
+
+const PROTOCOL_USERNAME_PLACEHOLDER: Record<Protocol, string> = {
+  postgresql: "postgres",
+  oracle: "SYSTEM",
+  mysql: "root",
+  mariadb: "root",
+};
+
 function DatabasesPage() {
   const { user } = useAuth();
   const { data: databases, isLoading } = useDatabases();
@@ -77,20 +109,23 @@ function DatabasesPage() {
     {
       key: "protocol",
       header: "Type",
-      cell: (db) =>
-        isFullDatabase(db) ? (
+      cell: (db) => {
+        if (!isFullDatabase(db)) {
+          return <span className="text-muted-foreground">-</span>;
+        }
+        const proto = db.protocol as Protocol | undefined;
+        const klass =
+          (proto && PROTOCOL_BADGE_CLASS[proto]) ??
+          "bg-gray-100 text-gray-700 dark:bg-gray-900/30 dark:text-gray-400";
+        const label = (proto && PROTOCOL_LABEL[proto]) ?? db.protocol;
+        return (
           <span
-            className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${
-              db.protocol === "oracle"
-                ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
-                : "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400"
-            }`}
+            className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${klass}`}
           >
-            {db.protocol === "oracle" ? "Oracle" : "PostgreSQL"}
+            {label}
           </span>
-        ) : (
-          <span className="text-muted-foreground">-</span>
-        ),
+        );
+      },
     },
     {
       key: "description",
@@ -130,7 +165,7 @@ function DatabasesPage() {
       header: "SSL",
       cell: (db) =>
         isFullDatabase(db) && db.protocol !== "oracle" ? (
-          <span className="text-sm">{db.ssl_mode}</span>
+          <span className="text-sm">{db.ssl_mode || "-"}</span>
         ) : (
           <span className="text-muted-foreground">-</span>
         ),
@@ -193,11 +228,11 @@ function DatabasesPage() {
 }
 
 function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
-  const [protocol, setProtocol] = useState("postgresql");
+  const [protocol, setProtocol] = useState<Protocol>("postgresql");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [host, setHost] = useState("");
-  const [port, setPort] = useState("5432");
+  const [port, setPort] = useState(PROTOCOL_DEFAULT_PORT.postgresql);
   const [databaseName, setDatabaseName] = useState("");
   const [oracleServiceName, setOracleServiceName] = useState("");
   const [username, setUsername] = useState("");
@@ -222,11 +257,11 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
       host,
       port: parseInt(port, 10),
       database_name:
-        protocol === "postgresql" ? databaseName : oracleServiceName,
+        protocol === "oracle" ? oracleServiceName : databaseName,
       username,
       password,
-      ssl_mode: protocol === "postgresql" ? sslMode : "",
-      protocol: protocol as "postgresql" | "oracle",
+      ssl_mode: protocol === "oracle" ? "" : sslMode,
+      protocol,
       oracle_service_name:
         protocol === "oracle" ? oracleServiceName : undefined,
     });
@@ -247,11 +282,12 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
             <Select
               value={protocol}
               onValueChange={(val) => {
-                setProtocol(val);
-                if (val === "oracle" && port === "5432") {
-                  setPort("1521");
-                } else if (val === "postgresql" && port === "1521") {
-                  setPort("5432");
+                const next = val as Protocol;
+                setProtocol(next);
+                // Auto-cycle the port when the user hasn't customised it away
+                // from one of the conventional defaults.
+                if (Object.values(PROTOCOL_DEFAULT_PORT).includes(port)) {
+                  setPort(PROTOCOL_DEFAULT_PORT[next]);
                 }
               }}
             >
@@ -261,6 +297,8 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               <SelectContent>
                 <SelectItem value="postgresql">PostgreSQL</SelectItem>
                 <SelectItem value="oracle">Oracle</SelectItem>
+                <SelectItem value="mysql">MySQL</SelectItem>
+                <SelectItem value="mariadb">MariaDB</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -305,14 +343,14 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               />
             </div>
           </div>
-          {protocol === "postgresql" && (
+          {protocol !== "oracle" && (
             <div className="space-y-2">
               <Label htmlFor="databaseName">Database Name</Label>
               <Input
                 id="databaseName"
                 value={databaseName}
                 onChange={(e) => setDatabaseName(e.target.value)}
-                placeholder="myapp"
+                placeholder={protocol === "mysql" || protocol === "mariadb" ? "mydb" : "myapp"}
                 required
               />
             </div>
@@ -335,7 +373,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               id="username"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              placeholder={protocol === "oracle" ? "SYSTEM" : "postgres"}
+              placeholder={PROTOCOL_USERNAME_PLACEHOLDER[protocol]}
               required
             />
           </div>
@@ -349,7 +387,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               required
             />
           </div>
-          {protocol === "postgresql" && (
+          {protocol !== "oracle" && (
             <div className="space-y-2">
               <Label htmlFor="sslMode">SSL Mode</Label>
               <Select value={sslMode} onValueChange={setSslMode}>

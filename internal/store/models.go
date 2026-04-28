@@ -85,7 +85,18 @@ type UserUpdate struct {
 const (
 	ProtocolPostgreSQL = "postgresql"
 	ProtocolOracle     = "oracle"
+	ProtocolMySQL      = "mysql"
+	ProtocolMariaDB    = "mariadb"
 )
+
+// IsMySQLFamily reports whether the given protocol speaks the MySQL wire
+// protocol. The MySQL proxy serves both — they share the same listener,
+// auth plugins, and wire-protocol handling. The distinction matters mostly
+// for upstream connection setup (server version banner, auth plugin
+// negotiation) and for UI labeling.
+func IsMySQLFamily(protocol string) bool {
+	return protocol == ProtocolMySQL || protocol == ProtocolMariaDB
+}
 
 // Database represents a target database configuration
 type Database struct {
@@ -95,7 +106,7 @@ type Database struct {
 	Name              string     `bun:"name,notnull,unique" json:"name"`
 	Description       string     `bun:"description" json:"description"`
 	Host              string     `bun:"host,notnull" json:"host"`
-	Port              int        `bun:"port,notnull,default:5432" json:"port"`
+	Port              int        `bun:"port,notnull" json:"port"`
 	DatabaseName      string     `bun:"database_name,notnull" json:"database_name"`
 	Username          string     `bun:"username,notnull" json:"username"`
 	Password          string     `bun:"-" json:"-"`                          // Decrypted, not stored

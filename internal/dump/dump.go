@@ -27,6 +27,7 @@ const (
 const (
 	ProtocolOracle     = "oracle"
 	ProtocolPostgreSQL = "postgresql"
+	ProtocolMySQL      = "mysql"
 )
 
 // Packet frame size: 8 (relativeNs) + 1 (direction) + 4 (length).
