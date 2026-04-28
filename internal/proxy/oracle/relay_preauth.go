@@ -81,9 +81,9 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, er
 // response and clears bit 5 (0x20) of caps[4] — the customHash flag that switches
 // modern clients to a PBKDF2 combined-key derivation dbbat doesn't implement.
 //
-// The block is preceded by `2a 06 01 01 01` (length+meta tags). caps[4] sits one
+// The block is preceded by `2a 06 01 01 01` (length+meta tags); caps[4] sits one
 // byte after that prefix. Verified against captured Oracle 19c traffic where
-// caps[4] = 0x6f and the comment in capturedSetProtocolResponse calls it out.
+// caps[4] = 0x6f.
 func stripCustomHashFlag(raw []byte) ([]byte, bool) {
 	marker := []byte{0x2a, 0x06, 0x01, 0x01, 0x01}
 
@@ -108,50 +108,47 @@ func stripCustomHashFlag(raw []byte) ([]byte, bool) {
 	return mutated, true
 }
 
-// relayUpstreamResponses reads zero or more response packets from upstream and
-// forwards them to the client, stopping when the upstream has no immediately
-// pending data. It uses short read deadlines to detect quiescence without
-// blocking the relay indefinitely.
+// relayUpstreamResponses reads one response packet from upstream and forwards it
+// to the client. The pre-auth phase is strictly request/response, so a single
+// read is sufficient. Read deadlines bound the wait so we don't block on a
+// silent upstream.
 func relayUpstreamResponses(s *session, upstream net.Conn) error {
-	for {
-		if err := upstream.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-			return fmt.Errorf("set upstream read deadline: %w", err)
-		}
-
-		pkt, err := readTNSPacket(upstream)
-		if err != nil {
-			return fmt.Errorf("read upstream response: %w", err)
-		}
-
-		if err := upstream.SetReadDeadline(time.Time{}); err != nil {
-			return fmt.Errorf("clear upstream read deadline: %w", err)
-		}
-
-		raw := pkt.Raw
-
-		// Set Protocol responses carry ServerCompileTimeCaps. caps[4]&0x20 enables
-		// a customHash (PBKDF2) combined-key derivation in modern Oracle clients
-		// (go-ora, JDBC thin, SQLcl). dbbat's O5LOGON server uses the simpler MD5
-		// XOR derivation; if we forward the bit set, the client's combined key
-		// won't match dbbat's and the AUTH_PASSWORD decryption produces garbage.
-		// Stripping the bit forces matching MD5 behavior on both sides.
-		if mutated, ok := stripCustomHashFlag(raw); ok {
-			s.logger.DebugContext(s.ctx, "pre-auth relay: stripped customHash flag from Set Protocol response")
-
-			raw = mutated
-		}
-
-		s.logger.DebugContext(s.ctx, "pre-auth relay: upstream→client",
-			slog.String("type", pkt.Type.String()),
-			slog.Int("len", len(raw)))
-
-		if _, err := s.clientConn.Write(raw); err != nil {
-			return fmt.Errorf("forward upstream packet to client: %w", err)
-		}
-
-		// One request = one response in the pre-auth phase.
-		return nil
+	if err := upstream.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return fmt.Errorf("set upstream read deadline: %w", err)
 	}
+
+	pkt, err := readTNSPacket(upstream)
+	if err != nil {
+		return fmt.Errorf("read upstream response: %w", err)
+	}
+
+	if err := upstream.SetReadDeadline(time.Time{}); err != nil {
+		return fmt.Errorf("clear upstream read deadline: %w", err)
+	}
+
+	raw := pkt.Raw
+
+	// Set Protocol responses carry ServerCompileTimeCaps. caps[4]&0x20 enables
+	// a customHash (PBKDF2) combined-key derivation in modern Oracle clients
+	// (go-ora, JDBC thin, SQLcl). dbbat's O5LOGON server uses the simpler MD5
+	// XOR derivation; if we forward the bit set, the client's combined key
+	// won't match dbbat's and the AUTH_PASSWORD decryption produces garbage.
+	// Stripping the bit forces matching MD5 behavior on both sides.
+	if mutated, ok := stripCustomHashFlag(raw); ok {
+		s.logger.DebugContext(s.ctx, "pre-auth relay: stripped customHash flag from Set Protocol response")
+
+		raw = mutated
+	}
+
+	s.logger.DebugContext(s.ctx, "pre-auth relay: upstream→client",
+		slog.String("type", pkt.Type.String()),
+		slog.Int("len", len(raw)))
+
+	if _, err := s.clientConn.Write(raw); err != nil {
+		return fmt.Errorf("forward upstream packet to client: %w", err)
+	}
+
+	return nil
 }
 
 // dialUpstreamWithRedirect opens a TCP connection to the upstream Oracle, sends the
@@ -203,6 +200,7 @@ func dialUpstreamWithRedirect(s *session, addr string, connectPkt *TNSPacket) (n
 			}
 		}
 
+		//nolint:exhaustive // pre-auth only expects Accept or Redirect; everything else is rejected via default.
 		switch pkt.Type {
 		case TNSPacketTypeAccept:
 			return conn, pkt, nil
@@ -226,7 +224,7 @@ func dialUpstreamWithRedirect(s *session, addr string, connectPkt *TNSPacket) (n
 		}
 	}
 
-	return nil, nil, fmt.Errorf("upstream: too many redirects (>%d)", maxRedirects)
+	return nil, nil, fmt.Errorf("%w: %d", ErrUpstreamTooManyRedirects, maxRedirects)
 }
 
 // parseRedirect extracts the new host/port and the updated connect descriptor from
@@ -247,7 +245,7 @@ func parseRedirect(redirectPayload []byte, originalConnect *TNSPacket) (string, 
 	host, port := extractRedirectHostPort(desc)
 
 	if host == "" || port == 0 {
-		return "", nil, fmt.Errorf("redirect: could not extract HOST/PORT from %q", desc)
+		return "", nil, fmt.Errorf("%w: %q", ErrRedirectMissingHostPort, desc)
 	}
 
 	// Build a new Connect packet containing the redirected descriptor so the final

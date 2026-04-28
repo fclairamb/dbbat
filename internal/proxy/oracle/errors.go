@@ -104,4 +104,6 @@ var (
 	ErrAuthPhase2MissingPassword = errors.New("AUTH Phase 2: missing AUTH_PASSWORD")
 	ErrUnexpectedPacketType      = errors.New("unexpected TNS packet type")
 	ErrMaxResendExceeded         = errors.New("exceeded maximum resend attempts")
+	ErrUpstreamTooManyRedirects  = errors.New("upstream: too many redirects")
+	ErrRedirectMissingHostPort   = errors.New("redirect: could not extract HOST/PORT from descriptor")
 )
