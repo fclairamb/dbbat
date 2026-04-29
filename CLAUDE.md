@@ -1,6 +1,6 @@
 # DBBat - Database Observability Proxy
 
-A transparent database proxy for query observability, access control, and safety. Supports PostgreSQL and Oracle. Every query logged. Every connection tracked.
+A transparent database proxy for query observability, access control, and safety. Supports **PostgreSQL**, **Oracle**, and **MySQL/MariaDB**. Every query logged. Every connection tracked.
 
 ## Semantic Versioning
 
@@ -27,7 +27,7 @@ PR titles MUST follow the conventional commit format:
 | `ci` | CI configuration | None |
 | `chore` | Other changes (deps, tooling) | None |
 
-**Scopes** (optional): `api`, `auth`, `config`, `crypto`, `db`, `deps`, `docs`, `grants`, `migrations`, `proxy`, `store`, `ui`, `release`
+**Scopes** (optional): `api`, `auth`, `config`, `crypto`, `db`, `deps`, `docs`, `dump`, `grants`, `migrations`, `mysql`, `oracle`, `proxy`, `store`, `ui`, `release`
 
 **Breaking Changes:** Add `!` after type/scope or include `BREAKING CHANGE:` in body for major version bumps.
 
@@ -42,30 +42,40 @@ PR titles MUST follow the conventional commit format:
 - **Language**: Go
 - **Storage**: PostgreSQL
 - **ORM**: `uptrace/bun` with SQL migrations
-- **Proxy**: PostgreSQL wire protocol via `jackc/pgx/v5`, Oracle TNS/TTC protocol
-- **Oracle docs**: See `docs/oracle.md` for TNS/TTC protocol details
+- **Proxies**:
+  - PostgreSQL wire protocol via `jackc/pgx/v5`
+  - Oracle TNS/TTC (hand-rolled) — see `docs/oracle.md`
+  - MySQL/MariaDB via `go-mysql-org/go-mysql` (server + client) — see `docs/mysql.md`
 - **API**: `gin-gonic/gin` with OpenAPI 3.0 docs
 - **CLI**: `urfave/cli/v3`
 - **Config**: `knadh/koanf`
 - **Logging**: `log/slog`
 - **Frontend**: React 19 + TypeScript + Vite (see `front/CLAUDE.md`)
+- **Dump format**: Protocol-agnostic binary capture (`docs/dump-format.md`)
 
 ## Project Structure
 
 ```
 dbbat/
-├── cmd/dbbat/main.go        # Entry point with CLI commands
+├── main.go                  # Entry point with CLI commands (serve, db, dump)
 ├── internal/
-│   ├── config/              # Environment config loading
+│   ├── config/              # koanf-based config loading (env, file, CLI)
 │   ├── crypto/              # Password hashing (Argon2id) + AES-256-GCM encryption
 │   ├── migrations/sql/      # SQL migration files (up/down)
 │   ├── store/               # Database models and CRUD operations
+│   ├── cache/               # Auth cache shared by API + proxies
+│   ├── dump/                # Session packet dump format (read/write/anonymise)
 │   ├── api/                 # REST API handlers and middleware
 │   │   └── openapi.yml      # OpenAPI 3.0 specification
-│   ├── proxy/               # PostgreSQL proxy (auth, upstream, query interception)
-│   │   └── oracle/          # Oracle TNS/TTC proxy (see docs/oracle.md)
+│   ├── proxy/
+│   │   ├── shared/          # Auth, query interception shared across protocols
+│   │   ├── postgresql/      # PostgreSQL wire protocol proxy
+│   │   ├── oracle/          # Oracle TNS/TTC proxy (see docs/oracle.md)
+│   │   └── mysql/           # MySQL/MariaDB proxy (see docs/mysql.md)
 │   └── auth/                # OAuth provider abstraction (Slack, etc.)
 ├── front/                   # React frontend (see front/CLAUDE.md)
+├── website/                 # Docusaurus site for dbbat.com
+├── docs/                    # Protocol-level technical notes (oracle, mysql, dump format)
 ├── docker-compose.yml
 └── go.mod
 ```
@@ -102,11 +112,12 @@ make clean            # Clean build artifacts
 ## CLI Commands
 
 ```bash
-./dbbat              # Start server (default command)
-./dbbat serve        # Start server explicitly
-./dbbat db migrate   # Run pending migrations
-./dbbat db rollback  # Rollback last migration group
-./dbbat db status    # Show migration status
+./dbbat                            # Start server (default command)
+./dbbat serve                      # Start server explicitly
+./dbbat db migrate                 # Run pending migrations
+./dbbat db rollback                # Rollback last migration group
+./dbbat db status                  # Show migration status
+./dbbat dump anonymise <in> [out]  # Strip session metadata from a .dbbat-dump
 ```
 
 ## Environment Variables
@@ -114,16 +125,20 @@ make clean            # Clean build artifacts
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `DBB_DSN` | PostgreSQL DSN for DBBat storage | Yes |
-| `DBB_LISTEN_PG` | Proxy listen address (default: `:5434`) | No |
+| `DBB_LISTEN_PG` | PostgreSQL proxy listen address (default: `:5434`) | No |
+| `DBB_LISTEN_ORA` | Oracle proxy listen address (default: `:1522`; empty disables) | No |
+| `DBB_LISTEN_MYSQL` | MySQL/MariaDB proxy listen address (default: `:3307`; empty disables) | No |
 | `DBB_LISTEN_API` | REST API listen address (default: `:4200`) | No |
 | `DBB_KEY` | Base64-encoded AES-256 encryption key | No |
 | `DBB_KEYFILE` | Path to file containing encryption key | No |
 | `DBB_RUN_MODE` | Run mode: empty, `test`, or `demo` | No |
 | `DBB_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` (default: `info`) | No |
-| `DBB_LISTEN_ORA` | Oracle proxy listen address (default: `:1522`) | No |
 | `DBB_DUMP_DIR` | Directory for session dump files (empty = disabled) | No |
 | `DBB_DUMP_MAX_SIZE` | Max dump file size per session in bytes (default: 10MB) | No |
 | `DBB_DUMP_RETENTION` | Auto-delete dumps older than this (default: `24h`) | No |
+| `DBB_MYSQL_TLS_DISABLE` | Refuse TLS upgrade on the MySQL listener (default: `false`) | No |
+| `DBB_MYSQL_TLS_CERT_FILE` | PEM cert for MySQL TLS termination (auto self-signed if empty) | No |
+| `DBB_MYSQL_TLS_KEY_FILE` | PEM RSA key for MySQL TLS termination (auto-generated if empty) | No |
 
 Note: If no encryption key is provided, one is created at `~/.dbbat/key`.
 
@@ -156,17 +171,21 @@ Use `--bun:split` directive to split multiple statements.
 ### Connection Flow
 ```
 Client → DBBat (auth + grant check) → Target PostgreSQL
-Client → DBBat (service name lookup) → Target Oracle
+Client → DBBat (service-name lookup, O5LOGON proxy auth) → Target Oracle
+Client → DBBat (caching_sha2_password / TLS termination) → Target MySQL/MariaDB
 ```
 
+The same auth + grant + query-logging pipeline runs across all three protocols (`internal/proxy/shared`).
+
 ### Access Control
-- Time-windowed grants (starts_at, expires_at)
-- Controls: `read_only`, `block_copy`, `block_ddl`
-- Optional quotas: max queries, max bytes
+- Time-windowed grants (`starts_at`, `expires_at`)
+- Controls: `read_only`, `block_copy`, `block_ddl` (combinable; empty = full write)
+- Optional quotas: `max_query_counts`, `max_bytes_transferred`
 
 ### Security
 - User passwords: Argon2id hashed
-- Database credentials: AES-256-GCM encrypted
+- Database credentials: AES-256-GCM encrypted (AAD-bound to the database UID)
+- API keys: encrypted blobs, prefix `dbb_`; cannot create/revoke other keys
 - Default admin: `admin`/`admin` (must change on first login)
 
 ## API Documentation

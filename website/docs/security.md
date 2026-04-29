@@ -109,7 +109,7 @@ Grants control which users can connect to which databases through the proxy.
 | `expires_at` | Grant automatically expires after this time |
 | `max_query_counts` | Maximum queries allowed (quota) |
 | `max_bytes_transferred` | Maximum data transfer allowed (quota) |
-| `access_level` | `read` or `write` |
+| `controls` | Combination of `read_only`, `block_copy`, `block_ddl`. Empty = full write access. |
 
 **Recommendation**: Always set all constraints. Time-limited grants with quotas minimize blast radius if credentials are compromised.
 
@@ -124,28 +124,32 @@ Grants control which users can connect to which databases through the proxy.
 
 ## Read-Only Mode
 
-When a grant has `access_level: read`, DBBat enforces read-only access through **defense in depth**.
+When a grant has `read_only` in its `controls`, DBBat enforces read-only access through **defense in depth**.
 
-### Layer 1: Query Inspection
+### Layer 1: Query Inspection (all engines)
 
 Queries are inspected and blocked if they match write patterns:
 
-- **DML**: `INSERT`, `UPDATE`, `DELETE`, `MERGE`
+- **DML**: `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `REPLACE`
 - **DDL**: `CREATE`, `ALTER`, `DROP`, `TRUNCATE`
 - **DCL**: `GRANT`, `REVOKE`
-- **Other**: `COPY FROM`, `CALL` (procedures)
+- **Other**: `COPY FROM` (PG), `CALL` (procedures), `LOAD DATA`, `SELECT … INTO OUTFILE`, `SELECT … INTO DUMPFILE` (MySQL)
 
-### Layer 2: PostgreSQL Session Setting
+### Layer 2: Engine-level session flag
 
-At connection establishment, DBBat sets:
+- **PostgreSQL** — at connection establishment, DBBat sets:
 
-```sql
-SET SESSION default_transaction_read_only = on;
-```
+  ```sql
+  SET SESSION default_transaction_read_only = on;
+  ```
 
-PostgreSQL itself then blocks any write operation, regardless of SQL syntax.
+  PostgreSQL then blocks any write regardless of SQL syntax.
 
-### Layer 3: Bypass Prevention
+- **MySQL/MariaDB** — `SET SESSION TRANSACTION READ ONLY` only applies to the *next* transaction and is trivially bypassable, so DBBat does **not** rely on it. Layer 1 (regex inspection) is the active control. **Recommendation**: also `GRANT SELECT` only to the upstream MySQL user.
+
+- **Oracle** — same as MySQL: regex inspection only. The defensive recommendation is to grant `CREATE SESSION` + `SELECT` privileges to the upstream Oracle user, nothing more.
+
+### Layer 3: Bypass Prevention (PostgreSQL)
 
 Attempts to disable read-only mode are blocked:
 
@@ -159,10 +163,17 @@ Attempts to disable read-only mode are blocked:
 Read-only mode is **defense in depth for trusted users**, not a security boundary against malicious actors:
 
 - Regex-based inspection may miss edge cases
-- New PostgreSQL syntax could bypass detection
+- New SQL syntax could bypass detection
 - Functions with `SECURITY DEFINER` might execute writes
 
-**For untrusted access**: Create a dedicated PostgreSQL user with `GRANT SELECT` only.
+**For untrusted access**: also restrict the upstream database user to read-only privileges.
+
+## MySQL `LOCAL INFILE` Defense
+
+`LOAD DATA LOCAL INFILE` lets a MySQL server *ask* a connected client to upload an arbitrary local file. A compromised upstream server could issue this request mid-query against any client. DBBat blocks it on two layers:
+
+1. **SQL regex** refuses the keyword in inbound client queries.
+2. **Capability opt-out**: when the proxy connects upstream it explicitly clears `CLIENT_LOCAL_FILES` from the negotiated capabilities. The upstream then never advertises the feature on this connection, so even a compromised server cannot request a `LOCAL INFILE` upload through the proxy.
 
 ## Audit Trail
 
@@ -209,10 +220,9 @@ DBBat supports PostgreSQL SSL modes for upstream connections:
 
 ### Client Connections
 
-DBBat accepts plain PostgreSQL protocol connections. For encryption:
-
-- Deploy behind a TLS-terminating load balancer, or
-- Use network-level encryption (VPN, private network)
+- **PostgreSQL listener**: plain protocol only. Deploy behind a TLS-terminating load balancer, a VPN, or a private network.
+- **Oracle listener**: plain TNS only. Same recommendation.
+- **MySQL listener**: TLS termination is built in. Configure `DBB_MYSQL_TLS_CERT_FILE` / `DBB_MYSQL_TLS_KEY_FILE` (PEM-encoded) for production. If unset, the proxy auto-generates a self-signed cert and an RSA-2048 keypair at startup — fine for development, not for production. `DBB_MYSQL_TLS_DISABLE=true` refuses TLS and stays plaintext-only.
 
 ## Security Checklist
 
@@ -228,14 +238,17 @@ DBBat accepts plain PostgreSQL protocol connections. For encryption:
 
 - [ ] Use time-limited grants (hours/days, not years)
 - [ ] Set query and byte quotas on all grants
-- [ ] Prefer `read` access level unless writes are required
+- [ ] Prefer `read_only` (and `block_ddl` / `block_copy` where useful) unless writes are required
 - [ ] Review audit logs regularly
 - [ ] Rotate API keys periodically
 - [ ] Monitor for blocked query attempts
 
 ### For Target Databases
 
-- [ ] Use dedicated PostgreSQL user for DBBat upstream connections
+- [ ] Use a dedicated upstream user for each target (PostgreSQL, Oracle, MySQL/MariaDB)
 - [ ] Grant minimum required privileges to that user
-- [ ] For read-only grants, use PostgreSQL user with only SELECT privileges
-- [ ] Enable PostgreSQL logging as additional audit layer
+- [ ] For read-only grants, also restrict the upstream user to read-only privileges
+  - PostgreSQL: `GRANT SELECT` only
+  - MySQL/MariaDB: `GRANT SELECT ON db.* TO 'dbbat_ro'@'%'`
+  - Oracle: `CREATE SESSION` + `SELECT` privileges only
+- [ ] Enable engine-level audit logging as an additional layer

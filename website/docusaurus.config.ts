@@ -5,7 +5,7 @@ import type * as Preset from "@docusaurus/preset-classic";
 const config: Config = {
   title: "DBBat",
   tagline:
-    "Give (temporary) accesses to prod databases. Every query logged. Every data saved.",
+    "Give (temporary) access to your PostgreSQL, Oracle, MySQL & MariaDB databases. Every query logged. Every result captured.",
   favicon: "img/favicon.ico",
 
   url: "https://dbbat.com",

@@ -93,16 +93,24 @@ function QuickStart() {
     <section className={styles.quickStart}>
       <div className="container">
         <Heading as="h2">Quick Start</Heading>
-        <p>Get DBBat running in seconds with Docker:</p>
+        <p>
+          Get DBBat running in seconds with Docker — one container fronts
+          PostgreSQL, Oracle, and MySQL/MariaDB:
+        </p>
         <pre className={styles.codeBlock}>
           <code>
             docker run
             <br />
-            &nbsp;&nbsp;-p 5432:5432
+            &nbsp;&nbsp;-p 5434:5434&nbsp;&nbsp;# PostgreSQL proxy
             <br />
-            &nbsp;&nbsp;-p 8080:8080
+            &nbsp;&nbsp;-p 1522:1522&nbsp;&nbsp;# Oracle proxy
             <br />
-            &nbsp;&nbsp;-e DBB_DSN=postgres://dbbat:dbbat@pgserver:5432/dbbat
+            &nbsp;&nbsp;-p 3307:3307&nbsp;&nbsp;# MySQL / MariaDB proxy
+            <br />
+            &nbsp;&nbsp;-p 4200:4200&nbsp;&nbsp;# REST API + web UI
+            <br />
+            &nbsp;&nbsp;-e
+            DBB_DSN=postgres://dbbat:dbbat@pgserver:5432/dbbat
             <br />
             &nbsp;&nbsp;ghcr.io/fclairamb/dbbat
           </code>
@@ -121,8 +129,8 @@ export default function Home(): JSX.Element {
   const { siteConfig } = useDocusaurusContext();
   return (
     <Layout
-      title={`${siteConfig.title} - PostgreSQL Observability Proxy`}
-      description="Give your devs access to prod. A PostgreSQL proxy with full query logging and access control."
+      title={`${siteConfig.title} - Database Observability Proxy`}
+      description="Give your devs (temporary) access to prod. PostgreSQL, Oracle, and MySQL/MariaDB proxy with full query logging, fine-grained access control, and session capture."
     >
       <HomepageHeader />
       <main>

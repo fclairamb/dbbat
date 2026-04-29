@@ -4,21 +4,22 @@ sidebar_position: 1
 
 # Access Control
 
-DBBat provides fine-grained access control through grants. A grant gives a user permission to access a specific database for a limited time with optional quotas.
+DBBat provides fine-grained access control through **grants**. A grant gives a user permission to access a specific database for a limited time, optionally with one or more controls and quotas.
 
 ## Creating a Grant
 
 ```bash
-curl -u admin:admin -X POST http://localhost:8080/api/grants \
+curl -X POST http://localhost:4200/api/v1/grants \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "user_id": 2,
-    "database_id": 1,
-    "access_level": "read",
+    "user_id": "550e8400-e29b-41d4-a716-446655440000",
+    "database_id": "660e8400-e29b-41d4-a716-446655440000",
+    "controls": ["read_only"],
     "starts_at": "2024-01-15T09:00:00Z",
     "expires_at": "2024-01-15T18:00:00Z",
-    "max_queries": 1000,
-    "max_bytes": 104857600
+    "max_query_counts": 1000,
+    "max_bytes_transferred": 104857600
   }'
 ```
 
@@ -26,32 +27,53 @@ curl -u admin:admin -X POST http://localhost:8080/api/grants \
 
 | Field | Type | Description | Required |
 |-------|------|-------------|----------|
-| `user_id` | integer | ID of the user | Yes |
-| `database_id` | integer | ID of the database configuration | Yes |
-| `access_level` | string | `read` or `write` | Yes |
+| `user_id` | UUID | UID of the user | Yes |
+| `database_id` | UUID | UID of the database configuration | Yes |
+| `controls` | array | Combination of `read_only`, `block_copy`, `block_ddl`. Empty = full write access. | No (default: `[]`) |
 | `starts_at` | datetime | When the grant becomes active | Yes |
-| `expires_at` | datetime | When the grant expires | Yes |
-| `max_queries` | integer | Maximum number of queries allowed | No |
-| `max_bytes` | integer | Maximum bytes transferred | No |
+| `expires_at` | datetime | When the grant expires (must be after `starts_at`) | Yes |
+| `max_query_counts` | integer | Maximum number of queries allowed | No |
+| `max_bytes_transferred` | integer | Maximum bytes transferred (response size) | No |
 
-## Access Levels
+The grant model is the same across all engines (PostgreSQL, Oracle, MySQL/MariaDB).
 
-### Read
+## Controls
 
-Read-only access prevents any write operations:
-- `SELECT` queries are allowed
-- `INSERT`, `UPDATE`, `DELETE`, `DROP`, `TRUNCATE`, `CREATE`, `ALTER`, `GRANT`, `REVOKE` are blocked
+Controls are **independent** and **combinable**. A grant with `["read_only", "block_copy", "block_ddl"]` enforces all three. An empty array allows full write access — including DDL, COPY, and writes — within the grant's time window.
 
-### Write
+### `read_only`
 
-Full read/write access allows all query types.
+Blocks every operation that mutates data, in **defense-in-depth**:
+
+- **Layer 1 — SQL inspection** (all engines): regex blocks `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `REPLACE`, `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `GRANT`, `REVOKE`, plus `COPY FROM` (PostgreSQL) and `LOAD DATA` / `SELECT … INTO OUTFILE` (MySQL).
+- **Layer 2 — engine session flag**:
+  - **PostgreSQL**: `SET SESSION default_transaction_read_only = on` at session start.
+  - **MySQL/MariaDB**: regex inspection only — `SET SESSION TRANSACTION READ ONLY` only applies to the *next* transaction in MySQL and is trivially bypassable.
+  - **Oracle**: regex inspection only.
+- **Layer 3 — bypass prevention** (PostgreSQL): attempts to disable read-only mode are blocked (`SET default_transaction_read_only = off`, `RESET …`, `SET SESSION AUTHORIZATION`, `SET ROLE`).
+
+`read_only` is defense in depth for **trusted users**, not a security boundary against malicious actors. For untrusted access, also limit privileges on the upstream database user (e.g. PostgreSQL `GRANT SELECT` only).
+
+### `block_copy`
+
+Blocks all bulk file-touching operations:
+
+- **PostgreSQL**: `COPY … TO` and `COPY … FROM` (both directions).
+- **MySQL/MariaDB**: `LOAD DATA INFILE`, `SELECT … INTO OUTFILE`, `SELECT … INTO DUMPFILE`. Note that `LOAD DATA LOCAL INFILE` is **always** refused (see the MySQL notes).
+
+### `block_ddl`
+
+Blocks schema changes: `CREATE`, `ALTER`, `DROP`, `TRUNCATE`.
+
+Useful when you need write access (for support intervention, data fixes) but want to prevent accidental schema drift.
 
 ## Time Windows
 
 Grants are only active within their time window:
-- Before `starts_at`: Connection refused
-- Between `starts_at` and `expires_at`: Access granted
-- After `expires_at`: Connection refused
+
+- Before `starts_at`: connection refused
+- Between `starts_at` and `expires_at`: access granted
+- After `expires_at`: connection refused
 
 This is useful for:
 - Support engineers who need temporary access
@@ -62,64 +84,65 @@ This is useful for:
 
 ### Query Quota
 
-Limit the number of queries a user can execute:
+Limit the number of queries a grant can execute:
 
 ```json
-{
-  "max_queries": 100
-}
+{ "max_query_counts": 100 }
 ```
 
 When exceeded, subsequent queries return an error.
 
 ### Data Transfer Quota
 
-Limit the amount of data transferred:
+Limit the volume of data returned through the proxy:
 
 ```json
-{
-  "max_bytes": 104857600
-}
+{ "max_bytes_transferred": 104857600 }
 ```
 
-When exceeded, subsequent queries return an error. This is calculated based on the response size from the database.
+When exceeded, subsequent queries return an error. The byte counter accumulates response sizes from the upstream database.
+
+Counters (`query_count`, `bytes_transferred`) are exposed on the grant object so admins can see usage in real time.
 
 ## Revoking Grants
 
 Manually revoke a grant before expiration:
 
 ```bash
-curl -u admin:admin -X DELETE http://localhost:8080/api/grants/1
+curl -X DELETE http://localhost:4200/api/v1/grants/$GRANT_UID \
+  -H "Authorization: Bearer $TOKEN"
 ```
+
+The grant record is preserved for audit (with `revoked_at` and `revoked_by` populated); only new connections are refused.
 
 ## Listing Grants
 
 List all grants:
 
 ```bash
-curl -u admin:admin http://localhost:8080/api/grants
+curl -H "Authorization: Bearer $TOKEN" http://localhost:4200/api/v1/grants
 ```
 
-Filter by user:
+Filter by user, database, or active state:
 
 ```bash
-curl -u admin:admin "http://localhost:8080/api/grants?user_id=2"
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:4200/api/v1/grants?user_id=$USER_UID&active_only=true"
+
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:4200/api/v1/grants?database_id=$DB_UID"
 ```
 
-Filter by database:
-
-```bash
-curl -u admin:admin "http://localhost:8080/api/grants?database_id=1"
-```
+Connectors only see their own grants; admins and viewers see all.
 
 ## Audit Trail
 
 All grant operations are logged in the audit log:
-- Grant creation (who granted, to whom, which database)
+- Grant creation (who granted, to whom, which database, what controls and quotas)
 - Grant revocation (who revoked, when)
 
 View the audit log:
 
 ```bash
-curl -u admin:admin http://localhost:8080/api/audit
+curl -H "Authorization: Bearer $TOKEN" http://localhost:4200/api/v1/audit
 ```

@@ -6,12 +6,27 @@ sidebar_position: 4
 
 Deploy DBBat on Kubernetes with a Deployment, Service, and Ingress.
 
+A Helm chart is also maintained in-tree under [`charts/`](https://github.com/fclairamb/dbbat/tree/main/charts) — the manifests below show what the chart produces, in case you want to apply them directly.
+
 ## Prerequisites
 
 - Kubernetes cluster (1.19+)
 - kubectl configured
 - PostgreSQL database accessible from the cluster
 - Ingress controller installed (e.g., nginx-ingress, traefik)
+
+## Listeners
+
+DBBat exposes four listeners by default. Each can be disabled by setting the matching environment variable to an empty string.
+
+| Listener | Default port | Env var |
+|----------|-------------|---------|
+| PostgreSQL proxy | `5434` | `DBB_LISTEN_PG` |
+| Oracle proxy | `1522` | `DBB_LISTEN_ORA` |
+| MySQL/MariaDB proxy | `3307` | `DBB_LISTEN_MYSQL` |
+| REST API + web UI | `4200` | `DBB_LISTEN_API` |
+
+The wire protocols (PostgreSQL, Oracle TNS, MySQL) generally cannot share an HTTP Ingress — see "Exposing the proxy listeners" below for the options.
 
 ## Encryption Key Management
 
@@ -140,8 +155,14 @@ spec:
         - name: postgres
           containerPort: 5434
           protocol: TCP
+        - name: oracle
+          containerPort: 1522
+          protocol: TCP
+        - name: mysql
+          containerPort: 3307
+          protocol: TCP
         - name: api
-          containerPort: 8080
+          containerPort: 4200
           protocol: TCP
         env:
         - name: DBB_DSN
@@ -156,8 +177,12 @@ spec:
               key: encryption-key
         - name: DBB_LISTEN_PG
           value: ":5434"
+        - name: DBB_LISTEN_ORA
+          value: ":1522"
+        - name: DBB_LISTEN_MYSQL
+          value: ":3307"
         - name: DBB_LISTEN_API
-          value: ":8080"
+          value: ":4200"
         resources:
           requests:
             memory: "32Mi"
@@ -211,8 +236,16 @@ spec:
     port: 5434
     targetPort: postgres
     protocol: TCP
+  - name: oracle
+    port: 1522
+    targetPort: oracle
+    protocol: TCP
+  - name: mysql
+    port: 3307
+    targetPort: mysql
+    protocol: TCP
   - name: api
-    port: 8080
+    port: 4200
     targetPort: api
     protocol: TCP
   type: ClusterIP
@@ -281,9 +314,9 @@ spec:
               name: api
 ```
 
-## Exposing the PostgreSQL Proxy
+## Exposing the Proxy Listeners
 
-The PostgreSQL proxy port (5434) typically cannot be exposed via standard HTTP Ingress. Options include:
+The proxy listeners (PostgreSQL `5434`, Oracle `1522`, MySQL/MariaDB `3307`) cannot be exposed via a standard HTTP Ingress — they speak TCP/wire protocols, not HTTP. Options:
 
 ### Option 1: LoadBalancer Service
 
@@ -292,7 +325,7 @@ The PostgreSQL proxy port (5434) typically cannot be exposed via standard HTTP I
 apiVersion: v1
 kind: Service
 metadata:
-  name: dbbat-postgres
+  name: dbbat-proxies
   namespace: dbbat
   labels:
     app: dbbat
@@ -303,6 +336,12 @@ spec:
   - name: postgres
     port: 5434
     targetPort: postgres
+  - name: oracle
+    port: 1522
+    targetPort: oracle
+  - name: mysql
+    port: 3307
+    targetPort: mysql
   type: LoadBalancer
 ```
 
@@ -313,7 +352,7 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: dbbat-postgres
+  name: dbbat-proxies
   namespace: dbbat
 spec:
   selector:
@@ -322,7 +361,15 @@ spec:
   - name: postgres
     port: 5434
     targetPort: postgres
-    nodePort: 30434  # Access via any node IP:30434
+    nodePort: 30434
+  - name: oracle
+    port: 1522
+    targetPort: oracle
+    nodePort: 31522
+  - name: mysql
+    port: 3307
+    targetPort: mysql
+    nodePort: 33307
   type: NodePort
 ```
 
@@ -339,6 +386,8 @@ metadata:
   namespace: ingress-nginx
 data:
   "5434": "dbbat/dbbat:5434"
+  "1522": "dbbat/dbbat:1522"
+  "3307": "dbbat/dbbat:3307"
 ```
 
 ## Complete Deployment
@@ -364,8 +413,8 @@ kubectl get ingress -n dbbat
 kubectl logs -n dbbat -l app=dbbat
 
 # Test health endpoint
-kubectl port-forward -n dbbat svc/dbbat 8080:8080
-curl http://localhost:8080/api/v1/health
+kubectl port-forward -n dbbat svc/dbbat 4200:4200
+curl http://localhost:4200/api/v1/health
 ```
 
 ## High Availability Considerations
@@ -382,7 +431,7 @@ For production deployments:
 metadata:
   annotations:
     prometheus.io/scrape: "true"
-    prometheus.io/port: "8080"
+    prometheus.io/port: "4200"
     prometheus.io/path: "/api/v1/health"
 ```
 

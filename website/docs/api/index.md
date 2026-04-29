@@ -11,8 +11,10 @@ DBBat provides a comprehensive REST API for managing users, databases, grants, a
 All API endpoints are versioned under `/api/v1/`:
 
 ```
-http://localhost:8080/api/v1
+http://localhost:4200/api/v1
 ```
+
+(The default API listen address is `:4200` — `DBB_LISTEN_API`. Adjust the host/port to your deployment.)
 
 ## OpenAPI Specification
 
@@ -30,7 +32,7 @@ The API supports two authentication methods:
 HTTP Basic Authentication using username and password:
 
 ```bash
-curl -u username:password http://localhost:8080/api/v1/users
+curl -u username:password http://localhost:4200/api/v1/users
 ```
 
 ### Bearer Token
@@ -38,7 +40,7 @@ curl -u username:password http://localhost:8080/api/v1/users
 API key or web session token authentication:
 
 ```bash
-curl -H "Authorization: Bearer <token>" http://localhost:8080/api/v1/users
+curl -H "Authorization: Bearer <token>" http://localhost:4200/api/v1/users
 ```
 
 :::note
@@ -92,7 +94,7 @@ Rate-limited authentication attempts receive a `429 Too Many Requests` response 
 List endpoints support pagination with `limit` and `offset` parameters:
 
 ```bash
-curl -u admin:password "http://localhost:8080/api/v1/queries?limit=100&offset=0"
+curl -u admin:password "http://localhost:4200/api/v1/queries?limit=100&offset=0"
 ```
 
 | Parameter | Default | Min | Max | Description |
@@ -463,6 +465,7 @@ Creates a new database configuration. **Requires admin role.**
 {
   "name": "production-main",
   "description": "Main production database",
+  "protocol": "postgresql",
   "host": "db.example.com",
   "port": 5432,
   "database_name": "myapp",
@@ -472,6 +475,8 @@ Creates a new database configuration. **Requires admin role.**
 }
 ```
 
+`protocol` accepts `postgresql` (default), `oracle`, `mysql`, or `mariadb`. For Oracle, also provide `oracle_service_name` so TNS clients can route by service name.
+
 **Response:**
 
 ```json
@@ -479,11 +484,13 @@ Creates a new database configuration. **Requires admin role.**
   "uid": "550e8400-e29b-41d4-a716-446655440000",
   "name": "production-main",
   "description": "Main production database",
+  "protocol": "postgresql",
   "host": "db.example.com",
   "port": 5432,
   "database_name": "myapp",
   "username": "app_user",
   "ssl_mode": "require",
+  "oracle_service_name": null,
   "created_by": "660e8400-e29b-41d4-a716-446655440000"
 }
 ```
@@ -498,7 +505,7 @@ Returns a list of database configurations. Response varies by role:
 
 | Role | Response |
 |------|----------|
-| Admin | Full details (host, port, database_name, username, ssl_mode) |
+| Admin | Full details (host, port, database_name, username, ssl_mode, protocol, oracle_service_name) |
 | Viewer | Limited info (uid, name, description) |
 | Connector | Only databases with active grants (limited info) |
 
@@ -554,13 +561,23 @@ Creates a new access grant for a user to a database. **Requires admin role.**
 {
   "user_id": "550e8400-e29b-41d4-a716-446655440000",
   "database_id": "660e8400-e29b-41d4-a716-446655440000",
-  "access_level": "read",
+  "controls": ["read_only"],
   "starts_at": "2024-01-01T00:00:00Z",
   "expires_at": "2024-12-31T23:59:59Z",
   "max_query_counts": 10000,
   "max_bytes_transferred": 1073741824
 }
 ```
+
+`controls` is an array. Each element is one of:
+
+| Value | Effect |
+|-------|--------|
+| `read_only` | SQL inspection blocks writes; PostgreSQL also sets `default_transaction_read_only = on`. |
+| `block_copy` | Blocks `COPY` (PostgreSQL) and `LOAD DATA` / `SELECT … INTO OUTFILE` (MySQL). |
+| `block_ddl` | Blocks `CREATE`, `ALTER`, `DROP`, `TRUNCATE`. |
+
+An empty `controls` array (or omitting the field) grants full write access within the time window.
 
 **Response:**
 
@@ -569,7 +586,7 @@ Creates a new access grant for a user to a database. **Requires admin role.**
   "uid": "770e8400-e29b-41d4-a716-446655440000",
   "user_id": "550e8400-e29b-41d4-a716-446655440000",
   "database_id": "660e8400-e29b-41d4-a716-446655440000",
-  "access_level": "read",
+  "controls": ["read_only"],
   "granted_by": "880e8400-e29b-41d4-a716-446655440000",
   "starts_at": "2024-01-01T00:00:00Z",
   "expires_at": "2024-12-31T23:59:59Z",
