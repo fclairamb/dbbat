@@ -10,13 +10,13 @@ type FeatureItem = {
 
 const FeatureList: FeatureItem[] = [
   {
-    title: "Transparent Proxy",
+    title: "Multi-Engine Proxy",
     emoji: "🔌",
     description: (
       <>
-        Connect any PostgreSQL client through DBBat without code changes.
-        Standard PostgreSQL wire protocol support means zero application
-        modifications required.
+        PostgreSQL, Oracle, and MySQL/MariaDB on independent listeners. Connect
+        any standard client — psql, sqlplus, mysql, DBeaver, your ORM — without
+        application changes.
       </>
     ),
   },
@@ -25,30 +25,31 @@ const FeatureList: FeatureItem[] = [
     emoji: "🔍",
     description: (
       <>
-        Track every query with full SQL text, execution time, rows affected, and
-        optional result data capture. Gain complete visibility into database
-        activity.
+        Track every query with full SQL text, parameters, execution time, rows
+        affected, and optional result-data capture. Text and binary protocols
+        decoded the same way.
       </>
     ),
   },
   {
-    title: "Access Control",
+    title: "Granular Access Control",
     emoji: "🔐",
     description: (
       <>
-        Grant time-windowed access with read/write permissions. Set quotas on
-        queries and data transfer. Automatically expire or manually revoke
-        access.
+        Time-windowed grants with combinable controls — <code>read_only</code>,{" "}
+        <code>block_copy</code>, <code>block_ddl</code> — plus per-grant quotas
+        on queries and bytes transferred.
       </>
     ),
   },
   {
-    title: "User Management",
+    title: "User & API Key Management",
     emoji: "👥",
     description: (
       <>
-        Create users with their own credentials separate from database
-        credentials. Admin users can manage all resources and grants.
+        Local users with <code>admin</code>, <code>viewer</code>, and{" "}
+        <code>connector</code> roles. Optional Slack sign-in. API keys for
+        programmatic access — and they cannot create or revoke other keys.
       </>
     ),
   },
@@ -58,17 +59,51 @@ const FeatureList: FeatureItem[] = [
     description: (
       <>
         Passwords hashed with Argon2id, database credentials encrypted with
-        AES-256-GCM. Full audit logging of all access control changes.
+        AES-256-GCM and bound to the database UID. Append-only audit log of
+        every administrative change.
       </>
     ),
   },
   {
-    title: "REST API",
+    title: "Defense in Depth",
+    emoji: "🧱",
+    description: (
+      <>
+        Read-only enforced via SQL inspection <em>and</em> engine-level session
+        flags. MySQL <code>LOCAL INFILE</code> opted out of the upstream
+        capabilities. PostgreSQL session bypass attempts blocked.
+      </>
+    ),
+  },
+  {
+    title: "Session Packet Dumps",
+    emoji: "📼",
+    description: (
+      <>
+        Optional per-session binary capture of the post-auth command stream.
+        Same <code>.dbbat-dump</code> format across all protocols, with a CLI
+        anonymiser for safe sharing.
+      </>
+    ),
+  },
+  {
+    title: "REST API + Web UI",
     emoji: "🌐",
     description: (
       <>
-        Full-featured REST API with OpenAPI documentation. Manage users,
-        databases, grants, and view connections and queries programmatically.
+        Full OpenAPI 3.0 spec served at <code>/api/docs</code>. React frontend
+        embedded in the binary at <code>/app</code> for managing users,
+        databases, grants, and browsing query history.
+      </>
+    ),
+  },
+  {
+    title: "Single Binary",
+    emoji: "📦",
+    description: (
+      <>
+        One Go binary backed by PostgreSQL. Distroless Docker image, Helm chart,
+        Kubernetes-friendly. Stateless beyond its store — replicas welcome.
       </>
     ),
   },

@@ -30,18 +30,24 @@ services:
       DBB_DSN: postgres://dbbat:dbbat@postgres:5432/dbbat?sslmode=disable
       DBB_KEY: ${DBB_KEY:-YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY=}
       DBB_LISTEN_PG: ":5434"
-      DBB_LISTEN_API: ":8080"
+      DBB_LISTEN_ORA: ":1522"
+      DBB_LISTEN_MYSQL: ":3307"
+      DBB_LISTEN_API: ":4200"
     ports:
-      - "5001:5434"  # Proxy port
-      - "8080:8080"  # API port
+      - "5001:5434"   # PostgreSQL proxy
+      - "1522:1522"   # Oracle proxy
+      - "3307:3307"   # MySQL / MariaDB proxy
+      - "4200:4200"   # REST API + web UI
 
 volumes:
   postgres_data:
 ```
 
+Drop any `DBB_LISTEN_*`/port pair you don't need — set the variable to an empty string to disable that proxy entirely.
+
 ## Initial Setup Script (init.sql)
 
-Create a `init.sql` file to set up a sample target database:
+Create an `init.sql` file to set up a sample target database:
 
 ```sql
 -- Create a target database for testing
@@ -67,28 +73,38 @@ INSERT INTO test_data (name, value) VALUES
 Start the services:
 
 ```bash
-docker-compose up -d
+docker compose up -d
 ```
 
 ### Login and Get a Token
 
 ```bash
-# Login to get a session token
-TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+TOKEN=$(curl -s -X POST http://localhost:4200/api/v1/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username": "admin", "password": "admin"}' | jq -r '.token')
 ```
 
-### Create a Database Configuration
+:::note
+On first start the default admin password is flagged as requiring change. Call `PUT /api/v1/auth/password` to set a real password before logging in:
 
 ```bash
-# First, configure the target database
-curl -X POST http://localhost:8080/api/v1/databases \
+curl -X PUT http://localhost:4200/api/v1/auth/password \
+  -H "Content-Type: application/json" \
+  -d '{"username":"admin","current_password":"admin","new_password":"NewSecurePass!"}'
+```
+:::
+
+### Configure a Target Database
+
+```bash
+# PostgreSQL target
+curl -X POST http://localhost:4200/api/v1/databases \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "target_db",
     "description": "Target database for testing",
+    "protocol": "postgresql",
     "host": "postgres",
     "port": 5432,
     "database_name": "target",
@@ -98,48 +114,67 @@ curl -X POST http://localhost:8080/api/v1/databases \
   }'
 ```
 
+For Oracle add `"protocol": "oracle"` plus `"oracle_service_name": "ORCL"`. For MySQL/MariaDB use `"protocol": "mysql"` (or `"mariadb"`) and port `3306`.
+
 ### Create a Test User and Grant Access
 
 ```bash
-# Create a test user
-curl -X POST http://localhost:8080/api/v1/users \
+# Create the user
+USER_UID=$(curl -s -X POST http://localhost:4200/api/v1/users \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"username": "testuser", "password": "testpass", "roles": ["connector"]}'
+  -d '{"username": "testuser", "password": "testpass", "roles": ["connector"]}' \
+  | jq -r '.uid')
 
-# Get the user UID and database UID from the responses above, then create a grant
-curl -X POST http://localhost:8080/api/v1/grants \
+# Activate the user (one-time pre-login password set)
+curl -X PUT http://localhost:4200/api/v1/auth/password \
+  -H "Content-Type: application/json" \
+  -d '{"username":"testuser","current_password":"testpass","new_password":"newtestpass"}'
+
+# Get the database UID
+DB_UID=$(curl -s -H "Authorization: Bearer $TOKEN" \
+  http://localhost:4200/api/v1/databases | jq -r '.databases[0].uid')
+
+# Create a grant (empty controls = full write access)
+curl -X POST http://localhost:4200/api/v1/grants \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "<user-uid>",
-    "database_id": "<database-uid>",
-    "controls": [],
-    "starts_at": "2024-01-01T00:00:00Z",
-    "expires_at": "2030-01-01T00:00:00Z"
-  }'
+  -d "{
+    \"user_id\": \"$USER_UID\",
+    \"database_id\": \"$DB_UID\",
+    \"controls\": [],
+    \"starts_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
+    \"expires_at\": \"2030-01-01T00:00:00Z\"
+  }"
 ```
 
 :::note
-An empty `controls` array means full write access. Use `["read_only"]` for read-only access.
+An empty `controls` array means full write access. Use `["read_only"]` for read-only access, or combine `["read_only", "block_copy", "block_ddl"]`.
 :::
 
 ### Connect Through the Proxy
 
 ```bash
-PGPASSWORD=testpass psql -h localhost -p 5001 -U testuser -d target_db
+# PostgreSQL
+PGPASSWORD=newtestpass psql -h localhost -p 5001 -U testuser -d target_db
+
+# MySQL / MariaDB (against a MySQL target)
+mysql -h 127.0.0.1 -P 3307 -u testuser -p target_db
+
+# Oracle (against an Oracle target — using go-ora-style easy connect)
+# user/pass@//localhost:1522/target_db
 ```
 
 ## Stopping
 
 ```bash
-docker-compose down
+docker compose down
 ```
 
 To also remove volumes:
 
 ```bash
-docker-compose down -v
+docker compose down -v
 ```
 
 ## Next Steps

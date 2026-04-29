@@ -197,7 +197,7 @@ curl -X POST http://localhost:8080/api/v1/grants \
   -d "{
     \"user_id\": \"$USER_UID\",
     \"database_id\": \"$DB_UID\",
-    \"access_level\": \"read\",
+    \"controls\": [\"read_only\"],
     \"starts_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
     \"expires_at\": \"$(date -u -d '+24 hours' +%Y-%m-%dT%H:%M:%SZ)\",
     \"max_query_counts\": 1000
