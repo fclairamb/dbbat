@@ -19,6 +19,7 @@ jobs:
   # ===========================================================================
   lint:
     runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please-')
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -35,6 +36,7 @@ jobs:
   # ===========================================================================
   frontend:
     runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please-')
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -77,6 +79,7 @@ jobs:
   # ===========================================================================
   test:
     runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please-')
     steps:
       - uses: actions/checkout@v6.0.2
 
@@ -99,6 +102,7 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     needs: [frontend]
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please-')
     steps:
       - uses: actions/checkout@v6.0.2
         with:
@@ -137,6 +141,7 @@ jobs:
   e2e-tests:
     runs-on: ubuntu-24.04
     needs: [build]
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please-')
     steps:
       - uses: actions/checkout@v6.0.2
 
