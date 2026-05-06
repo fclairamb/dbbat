@@ -36,8 +36,8 @@ func TestNegotiateSSL_DisabledRespondsN(t *testing.T) {
 	t.Parallel()
 
 	clientSide, serverSide := net.Pipe()
-	defer serverSide.Close()
-	defer clientSide.Close()
+	defer func() { _ = serverSide.Close() }()
+	defer func() { _ = clientSide.Close() }()
 
 	go func() {
 		_, _ = clientSide.Write(makeSSLRequest())
@@ -75,8 +75,8 @@ func TestNegotiateSSL_EnabledUpgrades(t *testing.T) {
 	}
 
 	clientSide, serverSide := net.Pipe()
-	defer serverSide.Close()
-	defer clientSide.Close()
+	defer func() { _ = serverSide.Close() }()
+	defer func() { _ = clientSide.Close() }()
 
 	clientErrCh := make(chan error, 1)
 	go func() {
@@ -96,7 +96,7 @@ func TestNegotiateSSL_EnabledUpgrades(t *testing.T) {
 			return
 		}
 
-		clientTLS := tls.Client(clientSide, &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // self-signed test cert by design
+		clientTLS := tls.Client(clientSide, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
 		clientErrCh <- clientTLS.Handshake()
 	}()
 
@@ -133,8 +133,8 @@ func TestNegotiateSSL_NoSSLRequestPassesThrough(t *testing.T) {
 	t.Parallel()
 
 	clientSide, serverSide := net.Pipe()
-	defer serverSide.Close()
-	defer clientSide.Close()
+	defer func() { _ = serverSide.Close() }()
+	defer func() { _ = clientSide.Close() }()
 
 	// Build a regular StartupMessage shape: length=N (>8), version=196608 (3.0).
 	// negotiateSSL should treat this as "not SSLRequest" and leave bytes in place.

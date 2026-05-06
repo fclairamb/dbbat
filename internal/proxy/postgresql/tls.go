@@ -29,7 +29,7 @@ var ErrTLSConfigInvalid = errors.New("postgresql tls: cert_file and key_file mus
 //   - exactly one set:            return ErrTLSConfigInvalid.
 func loadTLS(cfg config.PGConfig) (*tls.Config, error) {
 	if cfg.TLS.Disable {
-		return nil, nil
+		return nil, nil //nolint:nilnil // nil signals "TLS off" to caller, like MySQL's loadTLSAndRSA
 	}
 
 	switch {
