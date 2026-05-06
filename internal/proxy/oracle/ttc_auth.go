@@ -39,24 +39,96 @@ var knownAuthKeys = map[string]bool{
 // parseAuthPhase1 extracts the username from a TTC AUTH Phase 1 message.
 // AUTH Phase 1 is sent as func=0x03, sub=0x76 (PiggybackSubAuth1).
 //
-// The wire format has a variable-length preamble of TTC-encoded fields (logon mode,
-// auth flags) before the username. The username is a length-prefixed string that
-// appears before the first AUTH_* key-value pair. We scan for length-prefixed
-// printable ASCII strings and skip any that match a known AUTH_* key name, since
-// some clients (e.g. SQLcl JDBC thin) serialize AUTH_TERMINAL before the username.
+// Wire layout shared across go-ora, python-oracledb thin, and JDBC thin / SQLcl:
+//
+//	[03 76 b0 b1]                            -- piggyback header (b0/b1 vary by client)
+//	[compressed-int user_id_len]             -- length of the username
+//	[compressed-int logon_mode]              -- typically 0x01 (NoNewPass)
+//	[01 01 05 01 01]                         -- 5-byte magic
+//	[user_id_len bytes username]             -- bare username (SQLcl)
+//	  OR
+//	[1-byte CLR length, user_id_len bytes]   -- CLR-encoded username (go-ora)
+//	[KV pairs ...]
+//
+// We parse the structured fields to extract user_id_len, then accept the
+// next user_id_len printable-ASCII bytes as the username. If the first byte
+// after the magic equals user_id_len we treat it as a CLR length prefix and
+// skip it (the go-ora style); otherwise we read the bytes directly (SQLcl).
 func parseAuthPhase1(tnsDataPayload []byte) (string, error) {
 	if len(tnsDataPayload) < ttcDataFlagsSize+4 {
 		return "", ErrAuthPhase1TooShort
 	}
 
-	// Skip data flags (2 bytes) + func code (0x03) + sub-op (0x76)
-	payload := tnsDataPayload[ttcDataFlagsSize+2:]
+	// Skip data flags (2 bytes) + func code (0x03) + sub-op (0x76) + 2-byte trailer.
+	if len(tnsDataPayload) < ttcDataFlagsSize+4 {
+		return "", ErrAuthPhase1TooShort
+	}
 
-	// SQLcl / JDBC thin encodes the username via TTC chunked format:
-	//   0x01 <L>    — compressed int giving length L
-	//   0x01 0x01   — chunk metadata (one chunk, chunk-header)
-	//   <L bytes>   — username
-	// This pattern sits before any AUTH_* key/value pair. Scan for it first.
+	payload := tnsDataPayload[ttcDataFlagsSize+4:]
+
+	// Read user_id_len (compressed-int).
+	userIDLen, n := readCompressedInt(payload)
+	if n == 0 || userIDLen <= 0 || userIDLen > 128 {
+		return parseAuthPhase1Fallback(tnsDataPayload[ttcDataFlagsSize+2:])
+	}
+
+	payload = payload[n:]
+
+	// Skip logon_mode (compressed-int, ignored).
+	_, n = readCompressedInt(payload)
+	if n == 0 {
+		return parseAuthPhase1Fallback(tnsDataPayload[ttcDataFlagsSize+2:])
+	}
+
+	payload = payload[n:]
+
+	// Skip the 5-byte magic.
+	const magicLen = 5
+	if len(payload) < magicLen {
+		return parseAuthPhase1Fallback(tnsDataPayload[ttcDataFlagsSize+2:])
+	}
+
+	payload = payload[magicLen:]
+
+	if name, ok := readUsernameAtOffset(payload, userIDLen); ok {
+		return name, nil
+	}
+
+	// Some clients prefix the username with its CLR length again; tolerate.
+	if len(payload) > 0 && int(payload[0]) == userIDLen {
+		if name, ok := readUsernameAtOffset(payload[1:], userIDLen); ok {
+			return name, nil
+		}
+	}
+
+	return parseAuthPhase1Fallback(tnsDataPayload[ttcDataFlagsSize+2:])
+}
+
+// readUsernameAtOffset returns the next userIDLen bytes as a username if they
+// are all printable ASCII identifier characters; ok=false otherwise.
+func readUsernameAtOffset(payload []byte, userIDLen int) (string, bool) {
+	if userIDLen <= 0 || userIDLen > len(payload) {
+		return "", false
+	}
+
+	candidate := payload[:userIDLen]
+	if !isPrintableASCII(candidate) {
+		return "", false
+	}
+
+	name := strings.ToUpper(string(candidate))
+	if knownAuthKeys[name] {
+		return "", false
+	}
+
+	return name, true
+}
+
+// parseAuthPhase1Fallback retains the original heuristic scan for clients
+// whose Phase 1 layout deviates from the documented one (sqlplus's
+// direct-length-prefix format and unusual proxy_auth modes). Unchanged from
+// the previous implementation.
+func parseAuthPhase1Fallback(payload []byte) (string, error) {
 	for i := 0; i+4 < len(payload); i++ {
 		if payload[i] != 0x01 || payload[i+2] != 0x01 || payload[i+3] != 0x01 {
 			continue
@@ -78,8 +150,6 @@ func parseAuthPhase1(tnsDataPayload []byte) (string, error) {
 		}
 	}
 
-	// Fallback: scan for any length-prefixed printable ASCII string, skipping
-	// known AUTH_* keys. This covers sqlplus's direct-length-prefix format.
 	for i := 0; i < len(payload)-2; i++ {
 		strLen := int(payload[i])
 		if strLen < 2 || strLen > 128 || i+1+strLen > len(payload) {
