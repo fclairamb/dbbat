@@ -510,64 +510,115 @@ func (s *Session) sendError(message string) {
 	}
 }
 
-// pgSSLRequestCode is the magic version number that identifies an
-// SSLRequest startup packet (PostgreSQL: 80877103 = 0x04D2_162F).
-const pgSSLRequestCode = 80877103
-
-// negotiateSSL handles the optional SSLRequest preamble that PG clients send
-// before the real StartupMessage. The TLS upgrade has to happen here — once
-// pgproto3.NewBackend captures the plaintext conn, wrapping clientConn would
-// leave the backend reading from the wrong side.
+// Magic version numbers that identify the optional pre-StartupMessage frames
+// PostgreSQL clients can send.
 //
-// The negotiation consumes bytes from the client even when the client did
-// not send SSLRequest, so we use a bufio.Reader as our consumed stream and
-// peek the first 8 bytes (length + version). If they are the SSLRequest
-// signature, those 8 bytes are discarded; otherwise they remain available
-// to receiveStartupMessage.
+//	pgSSLRequestCode    — TLS upgrade probe.
+//	pgGSSEncRequestCode — Kerberos/GSSAPI encryption probe (libpq 17 sends
+//	                      this by default with gssencmode=prefer).
+const (
+	pgSSLRequestCode    = 80877103
+	pgGSSEncRequestCode = 80877104
+)
+
+// maxStartupNegotiationRounds caps how many SSL/GSS denials we'll loop through
+// before giving up. A real client does at most two (GSS then SSL); three is
+// the bound where a misbehaving or malicious client gets cut off.
+const maxStartupNegotiationRounds = 3
+
+// negotiateSSL handles any optional SSL/GSS encryption probes a PG client
+// sends before the real StartupMessage. The upgrade has to happen here — once
+// pgproto3.NewBackend captures the conn, wrapping clientConn would leave the
+// backend reading from the wrong side.
+//
+// libpq 17 with default settings sends GSSEncRequest, then SSLRequest, then
+// the StartupMessage. Both probes get a 'N' refusal byte unless the proxy
+// can speak that encryption (only TLS today). The loop bounds at
+// maxStartupNegotiationRounds so a buggy client looping SSL/GSS forever
+// can't pin a goroutine.
 func (s *Session) negotiateSSL() error {
-	header, err := s.clientReader.Peek(8)
-	if err != nil {
-		return fmt.Errorf("peek startup header: %w", err)
+	for round := 0; round < maxStartupNegotiationRounds; round++ {
+		header, err := s.clientReader.Peek(8)
+		if err != nil {
+			return fmt.Errorf("peek startup header: %w", err)
+		}
+
+		length := int(header[0])<<24 | int(header[1])<<16 | int(header[2])<<8 | int(header[3])
+		if length != 8 {
+			// Not a length-8 negotiation frame — leave the bytes for
+			// receiveStartupMessage to parse as a real StartupMessage
+			// (or whatever frame the client actually sent).
+			return nil
+		}
+
+		version := int(header[4])<<24 | int(header[5])<<16 | int(header[6])<<8 | int(header[7])
+		switch version {
+		case pgSSLRequestCode:
+			done, err := s.handleSSLRequest()
+			if err != nil {
+				return err
+			}
+			if done {
+				return nil
+			}
+		case pgGSSEncRequestCode:
+			if err := s.handleGSSRequest(); err != nil {
+				return err
+			}
+		default:
+			// Length-8 with an unknown magic is malformed; surface a clear
+			// error rather than letting receiveStartupMessage stall on a
+			// truncated parse.
+			return fmt.Errorf("%w: 0x%08x", ErrUnknownStartupMagic, version)
+		}
 	}
 
-	length := int(header[0])<<24 | int(header[1])<<16 | int(header[2])<<8 | int(header[3])
-	if length != 8 {
-		return nil // Not an SSLRequest; receiveStartupMessage handles the rest.
-	}
+	return ErrTooManyNegotiationRounds
+}
 
-	version := int(header[4])<<24 | int(header[5])<<16 | int(header[6])<<8 | int(header[7])
-	if version != pgSSLRequestCode {
-		return nil // Could be GSSEncRequest or unknown — leave for the next reader.
-	}
-
-	// Consume the 8 SSLRequest bytes — we recognized the request.
+// handleSSLRequest consumes the 8-byte SSLRequest, either denies it ('N',
+// returns done=false to allow another round e.g. GSS-then-SSL on a libpq
+// client whose order we're not strict about) or accepts it ('S', runs the
+// handshake, returns done=true because the client only ever sends the real
+// StartupMessage after a successful TLS upgrade).
+func (s *Session) handleSSLRequest() (bool, error) {
 	if _, err := s.clientReader.Discard(8); err != nil {
-		return fmt.Errorf("discard SSLRequest: %w", err)
+		return false, fmt.Errorf("discard SSLRequest: %w", err)
 	}
 
 	if s.tlsConfig == nil {
-		// TLS disabled or not configured: refuse the upgrade and stay
-		// plaintext — preserves the pre-existing behavior.
 		if _, err := s.clientConn.Write([]byte{'N'}); err != nil {
-			return fmt.Errorf("write SSL deny: %w", err)
+			return false, fmt.Errorf("write SSL deny: %w", err)
 		}
-		return nil
+		return false, nil
 	}
 
-	// Accept the upgrade: send 'S', then run the TLS handshake on the raw
-	// conn. After this, clientConn is the TLS-wrapped conn and clientReader
-	// is rebuilt over it so subsequent reads see the decrypted stream.
 	if _, err := s.clientConn.Write([]byte{'S'}); err != nil {
-		return fmt.Errorf("write SSL accept: %w", err)
+		return false, fmt.Errorf("write SSL accept: %w", err)
 	}
 
 	tlsConn := tls.Server(s.clientConn, s.tlsConfig)
 	if err := tlsConn.HandshakeContext(s.ctx); err != nil {
-		return fmt.Errorf("TLS handshake: %w", err)
+		return false, fmt.Errorf("TLS handshake: %w", err)
 	}
 
 	s.clientConn = tlsConn
 	s.clientReader = bufio.NewReader(tlsConn)
+	return true, nil
+}
+
+// handleGSSRequest consumes the 8-byte GSSEncRequest and refuses with 'N'.
+// dbbat doesn't terminate Kerberos, so the client falls back to the next
+// negotiation step (typically SSLRequest, then plain StartupMessage).
+func (s *Session) handleGSSRequest() error {
+	if _, err := s.clientReader.Discard(8); err != nil {
+		return fmt.Errorf("discard GSSEncRequest: %w", err)
+	}
+
+	if _, err := s.clientConn.Write([]byte{'N'}); err != nil {
+		return fmt.Errorf("write GSS deny: %w", err)
+	}
+
 	return nil
 }
 
