@@ -44,10 +44,10 @@ func TestCanonicalizeUsername(t *testing.T) {
 			want:        "user",
 		},
 		{
-			name:        "whitespace-only display name falls back to user via empty post-strip",
+			name:        "whitespace-only display name falls back to user",
 			displayName: "   ",
 			email:       "",
-			want:        "user", // spaces become dots, regex strips them, empty → "user"
+			want:        "user",
 		},
 		{
 			name:        "email fallback when display empty",
@@ -63,9 +63,11 @@ func TestCanonicalizeUsername(t *testing.T) {
 		},
 
 		// Non-Latin scripts should fall through to the regex strip and the
-		// fallback path (no panic, no empty username escaping).
+		// fallback path (no panic, no empty username escaping). The CJK cases
+		// are present intentionally to exercise the fallback path.
 		{
-			name:        "CJK display name with email fallback",
+			name: "CJK display name with email fallback",
+			//nolint:gosmopolitan // testing CJK fallback is the point
 			displayName: "山田太郎",
 			email:       "yamada@example.com",
 			// CJK strips to empty → falls back to "user" in canonicalize.
@@ -79,7 +81,8 @@ func TestCanonicalizeUsername(t *testing.T) {
 			want:        "user",
 		},
 		{
-			name:        "All non-Latin and no email at all",
+			name: "all non-Latin and no email at all",
+			//nolint:gosmopolitan // testing CJK fallback is the point
 			displayName: "山田",
 			email:       "",
 			want:        "user",
