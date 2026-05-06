@@ -116,3 +116,11 @@ Promote `golang.org/x/text` to a direct dependency (run `go mod tidy` after the 
 1. `make test` — new unit tests pass.
 2. `make lint` — no new warnings.
 3. Manual: in dev mode (`make dev`), point the Slack OAuth provider at a test workspace with a user whose display name contains an accent. Complete the OAuth flow and check `GET /api/v1/users` — the new user's `username` field should contain the folded form (e.g. `melanie.samedi`).
+
+## Implementation Plan
+
+1. **Add `accentFold` transform** in `internal/api/oauth.go` next to `usernameRegexp`. Use the chain `norm.NFD → runes.Remove(runes.In(unicode.Mn)) → norm.NFC` from `golang.org/x/text/{runes,transform,unicode/norm}`.
+2. **Apply the fold** in `generateUniqueUsername`, right after `strings.ToLower` and before the regex strip: `base, _, _ = transform.String(accentFold, base)`.
+3. **Promote `golang.org/x/text`** to a direct dependency via `go mod tidy` after the import lands.
+4. **Create `internal/api/oauth_test.go`** with table-driven tests for `generateUniqueUsername`, covering all acceptance criteria. Use a mock or in-memory store to avoid the uniqueness-collision path in unit tests; focus on the canonicalization output.
+5. **QA**: `make test`, `make lint`, `make build-binary`. Confirm the existing oauth flow still compiles and no regressions.
