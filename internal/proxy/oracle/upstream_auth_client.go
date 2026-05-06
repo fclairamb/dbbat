@@ -80,7 +80,7 @@ func (s *session) runUpstreamClientAuth() error {
 	}
 
 	if authResp.OracleErr != 0 {
-		return fmt.Errorf("upstream AUTH Phase 1 rejected: ORA-%05d %s", authResp.OracleErr, authResp.OracleErrText)
+		return fmt.Errorf("%w: ORA-%05d %s", ErrUpstreamAuthPhase1Rejected, authResp.OracleErr, authResp.OracleErrText)
 	}
 
 	sec, err := buildSecretsFromPhase1Response(authResp, s.upstreamCustomHash)
@@ -103,7 +103,7 @@ func (s *session) runUpstreamClientAuth() error {
 	}
 
 	if finalResp.OracleErr != 0 {
-		return fmt.Errorf("upstream AUTH Phase 2 rejected: ORA-%05d %s", finalResp.OracleErr, finalResp.OracleErrText)
+		return fmt.Errorf("%w: ORA-%05d %s", ErrUpstreamAuthPhase2Rejected, finalResp.OracleErr, finalResp.OracleErrText)
 	}
 
 	s.logger.InfoContext(s.ctx, "upstream Oracle AUTH complete on relay-phase socket",
@@ -172,19 +172,14 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, error) {
 
 		buf = append(buf, pkt.Payload[ttcDataFlagsSize:]...)
 
-		done, err := parseAuthMessageStream(buf, resp)
-		if err != nil {
-			return nil, err
-		}
-
-		if done {
+		if parseAuthMessageStream(buf, resp) {
 			return resp, nil
 		}
 	}
 }
 
-// parseAuthMessageStream walks a TTC byte stream and returns done=true when
-// an end-of-call message code (4 or 9) is observed.
+// parseAuthMessageStream walks a TTC byte stream and returns true when an
+// end-of-call message code (4 or 9) is observed.
 //
 // Codes:
 //
@@ -192,9 +187,9 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, error) {
 //	0x04 / 0x09       end-of-call (with a Summary structure)
 //	0x0F              warning (skipped)
 //
-// The function is tolerant: when it cannot decode a region it returns
-// done=false so the caller reads more bytes.
-func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse) (bool, error) {
+// The function is tolerant: when it cannot decode a region it returns false
+// so the caller reads more bytes.
+func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse) bool {
 	pos := 0
 
 	for pos < len(buf) {
@@ -205,7 +200,7 @@ func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse) (bool, error
 		case 0x08:
 			n, ok := parseAuthKVDictionary(buf[pos:], resp)
 			if !ok {
-				return false, nil
+				return false
 			}
 
 			pos += n
@@ -213,21 +208,21 @@ func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse) (bool, error
 		case 0x04, 0x09:
 			parseAuthSummary(buf[pos:], resp)
 
-			return true, nil
+			return true
 
 		case 0x0F:
 			if pos+6 > len(buf) {
-				return false, nil
+				return false
 			}
 
 			pos += 6
 
 		default:
-			return false, nil
+			return false
 		}
 	}
 
-	return false, nil
+	return false
 }
 
 // parseAuthKVDictionary parses a TTC AUTH KV dictionary that follows a 0x08
@@ -243,26 +238,35 @@ func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse) (int, bool) {
 	pos := dictLenSize
 
 	for i := 0; i < dictLen; i++ {
-		key, value, valueFlag, consumed, ok := readAuthKVPair(buf[pos:])
+		pair, ok := readAuthKVPair(buf[pos:])
 		if !ok {
 			return 0, false
 		}
 
-		pos += consumed
-		recordAuthProperty(string(key), string(value), valueFlag, resp)
+		pos += pair.Consumed
+		recordAuthProperty(string(pair.Key), string(pair.Value), pair.Flag, resp)
 	}
 
 	return pos, true
 }
 
+// authKVPairResult is the parsed form of a single TTC AUTH KV pair.
+type authKVPairResult struct {
+	Key      []byte
+	Value    []byte
+	Flag     int
+	Consumed int
+}
+
 // readAuthKVPair reads keyLen + keyCLR + valueLen + valueCLR + flag, mirroring
-// session.GetKeyVal in go-ora.
-func readAuthKVPair(buf []byte) (key, value []byte, flag, consumed int, ok bool) {
+// session.GetKeyVal in go-ora. ok=false signals the buffer is truncated.
+func readAuthKVPair(buf []byte) (authKVPairResult, bool) {
 	pos := 0
+	out := authKVPairResult{}
 
 	keyLen, n := readCompressedInt(buf[pos:])
 	if n == 0 {
-		return nil, nil, 0, 0, false
+		return authKVPairResult{}, false
 	}
 
 	pos += n
@@ -270,16 +274,16 @@ func readAuthKVPair(buf []byte) (key, value []byte, flag, consumed int, ok bool)
 	if keyLen > 0 {
 		k, kn := readCLR(buf[pos:])
 		if kn == 0 {
-			return nil, nil, 0, 0, false
+			return authKVPairResult{}, false
 		}
 
-		key = k
+		out.Key = k
 		pos += kn
 	}
 
 	vLen, vn := readCompressedInt(buf[pos:])
 	if vn == 0 {
-		return nil, nil, 0, 0, false
+		return authKVPairResult{}, false
 	}
 
 	pos += vn
@@ -287,24 +291,23 @@ func readAuthKVPair(buf []byte) (key, value []byte, flag, consumed int, ok bool)
 	if vLen > 0 {
 		v, vClrN := readCLR(buf[pos:])
 		if vClrN == 0 {
-			return nil, nil, 0, 0, false
+			return authKVPairResult{}, false
 		}
 
-		value = v
+		out.Value = v
 		pos += vClrN
 	}
 
 	flagVal, fn := readCompressedInt(buf[pos:])
 	if fn == 0 {
-		return nil, nil, 0, 0, false
+		return authKVPairResult{}, false
 	}
 
 	pos += fn
-	flag = flagVal
-	consumed = pos
-	ok = true
+	out.Flag = flagVal
+	out.Consumed = pos
 
-	return
+	return out, true
 }
 
 // recordAuthProperty stores a parsed KV pair in the response. Specific keys
@@ -551,9 +554,11 @@ func hexNibble(b byte) (byte, error) {
 
 // errors specific to the upstream AUTH client.
 var (
-	ErrUpstreamConnNotSet        = errors.New("upstream connection not set before AUTH")
-	ErrPhase1MissingSessKey      = errors.New("AUTH Phase 1 response: missing AUTH_SESSKEY")
-	ErrPhase1MissingVerifierData = errors.New("AUTH Phase 1 response: missing AUTH_VFR_DATA")
-	ErrInvalidHex                = errors.New("invalid hex character")
-	ErrInvalidHexLength          = errors.New("invalid hex string length")
+	ErrUpstreamConnNotSet         = errors.New("upstream connection not set before AUTH")
+	ErrPhase1MissingSessKey       = errors.New("AUTH Phase 1 response: missing AUTH_SESSKEY")
+	ErrPhase1MissingVerifierData  = errors.New("AUTH Phase 1 response: missing AUTH_VFR_DATA")
+	ErrInvalidHex                 = errors.New("invalid hex character")
+	ErrInvalidHexLength           = errors.New("invalid hex string length")
+	ErrUpstreamAuthPhase1Rejected = errors.New("upstream AUTH Phase 1 rejected")
+	ErrUpstreamAuthPhase2Rejected = errors.New("upstream AUTH Phase 2 rejected")
 )

@@ -7,7 +7,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
-	"io"
 	"log/slog"
 	"net"
 	"strings"
@@ -158,13 +157,8 @@ func TestPhase1ResponseParserHappyPath(t *testing.T) {
 
 	stream := buildSyntheticAuthPhase1Response(encServerKey, salt, csk, "8192", "10", VerifierType18453)
 
-	done, err := parseAuthMessageStream(stream, resp)
-	if err != nil {
-		t.Fatalf("parseAuthMessageStream: %v", err)
-	}
-
-	if !done {
-		t.Fatalf("parseAuthMessageStream returned done=false on a complete stream")
+	if !parseAuthMessageStream(stream, resp) {
+		t.Fatalf("parseAuthMessageStream returned false on a complete stream")
 	}
 
 	if resp.encServerSessKey != encServerKey {
@@ -207,21 +201,11 @@ func TestPhase1ResponseParserSplitAcrossPackets(t *testing.T) {
 
 	half := len(stream) / 2
 
-	done, err := parseAuthMessageStream(stream[:half], resp)
-	if err != nil {
-		t.Fatalf("parseAuthMessageStream first half: %v", err)
+	if parseAuthMessageStream(stream[:half], resp) {
+		t.Fatalf("parseAuthMessageStream returned true on partial stream")
 	}
 
-	if done {
-		t.Fatalf("parseAuthMessageStream returned done=true on partial stream")
-	}
-
-	done, err = parseAuthMessageStream(stream, resp)
-	if err != nil {
-		t.Fatalf("parseAuthMessageStream full: %v", err)
-	}
-
-	if !done {
+	if !parseAuthMessageStream(stream, resp) {
 		t.Fatalf("parseAuthMessageStream did not finish on full stream")
 	}
 }
@@ -231,19 +215,18 @@ func TestPhase1ResponseParserSplitAcrossPackets(t *testing.T) {
 func TestPhase1ResponseSurfacesOracleError(t *testing.T) {
 	t.Parallel()
 
-	stream := []byte{0x04}
-	stream = append(stream, ttcCompressedUint(1017)...)
-	stream = append(stream, []byte("ORA-01017 invalid username/password\x00")...)
+	codeBytes := ttcCompressedUint(1017)
+	msg := []byte("ORA-01017 invalid username/password\x00")
+
+	stream := make([]byte, 0, 1+len(codeBytes)+len(msg))
+	stream = append(stream, 0x04)
+	stream = append(stream, codeBytes...)
+	stream = append(stream, msg...)
 
 	resp := &upstreamAuthResponse{properties: map[string]string{}}
 
-	done, err := parseAuthMessageStream(stream, resp)
-	if err != nil {
-		t.Fatalf("parseAuthMessageStream: %v", err)
-	}
-
-	if !done {
-		t.Fatalf("parseAuthMessageStream not done")
+	if !parseAuthMessageStream(stream, resp) {
+		t.Fatalf("parseAuthMessageStream did not finish on a complete stream")
 	}
 
 	if resp.OracleErr != 1017 {
@@ -262,8 +245,8 @@ func TestRunUpstreamClientAuthHandshake(t *testing.T) {
 
 	clientPipe, serverPipe := net.Pipe()
 
-	defer clientPipe.Close()
-	defer serverPipe.Close()
+	defer func() { _ = clientPipe.Close() }()
+	defer func() { _ = serverPipe.Close() }()
 
 	username := "ADMIN"
 	password := "ScriptedPassword!"
@@ -275,7 +258,7 @@ func TestRunUpstreamClientAuthHandshake(t *testing.T) {
 
 	go scriptedSrv.run()
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+	logger := slog.New(slog.DiscardHandler)
 
 	encryptionKey := bytes.Repeat([]byte{0x99}, 32)
 
@@ -426,8 +409,10 @@ func (s *scriptedAuthServer) handle() error {
 		return errPasswordRoundTrip
 	}
 
-	endStream := []byte{0x04}
-	endStream = append(endStream, ttcCompressedUint(0)...)
+	zero := ttcCompressedUint(0)
+	endStream := make([]byte, 0, 1+len(zero)+32)
+	endStream = append(endStream, 0x04)
+	endStream = append(endStream, zero...)
 	endStream = append(endStream, bytes.Repeat([]byte{0x00}, 32)...)
 
 	return writeAsTNSDataPacket(s.conn, endStream)
@@ -467,8 +452,6 @@ func writeAsTNSDataPacket(conn net.Conn, body []byte) error {
 // dictionary message containing the standard AUTH_SESSKEY / AUTH_VFR_DATA /
 // AUTH_PBKDF2_* pairs, followed by an end-of-call code 4 with retCode=0.
 func buildSyntheticAuthPhase1Response(encServerKey, salt, csk, vgen, sder string, verifierType int) []byte {
-	buf := []byte{0x08}
-
 	pairs := []struct {
 		key, value string
 		flag       int
@@ -483,6 +466,8 @@ func buildSyntheticAuthPhase1Response(encServerKey, salt, csk, vgen, sder string
 	dictLenBuf := make([]byte, 2)
 	binary.BigEndian.PutUint16(dictLenBuf, uint16(len(pairs)))
 
+	buf := make([]byte, 0, 256)
+	buf = append(buf, 0x08)
 	buf = append(buf, dictLenBuf...)
 
 	for _, p := range pairs {

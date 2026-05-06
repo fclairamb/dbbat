@@ -104,26 +104,38 @@ func aesCBCDecryptZeroIV(key, ciphertext []byte, stripPadding bool) ([]byte, err
 	output := make([]byte, len(ciphertext))
 	dec.CryptBlocks(output, ciphertext)
 
-	if stripPadding && len(output) > 0 {
-		num := int(output[len(output)-1])
-		if num > 0 && num <= blk.BlockSize() {
-			ok := true
+	if !stripPadding {
+		return output, nil
+	}
 
-			for x := len(output) - num; x < len(output); x++ {
-				if output[x] != byte(num) {
-					ok = false
+	stripped, ok := stripPKCS5Padding(output, blk.BlockSize())
+	if !ok {
+		return output, nil
+	}
 
-					break
-				}
-			}
+	return stripped, nil
+}
 
-			if ok {
-				return output[:len(output)-num], nil
-			}
+// stripPKCS5Padding removes PKCS#5 / PKCS#7 padding when the final byte
+// describes a valid pad length. ok=false signals invalid padding so the caller
+// can return the raw plaintext untouched.
+func stripPKCS5Padding(data []byte, blockSize int) ([]byte, bool) {
+	if len(data) == 0 {
+		return data, false
+	}
+
+	num := int(data[len(data)-1])
+	if num <= 0 || num > blockSize {
+		return data, false
+	}
+
+	for x := len(data) - num; x < len(data); x++ {
+		if data[x] != byte(num) {
+			return data, false
 		}
 	}
 
-	return output, nil
+	return data[:len(data)-num], true
 }
 
 // upstreamAuthSecrets is the negotiated state from AUTH Phase 1.
@@ -305,12 +317,14 @@ func derivePasswordEncKey(sec *upstreamAuthSecrets) ([]byte, error) {
 
 // encryptOraclePassword prepends 16 random bytes to the data, then encrypts.
 func encryptOraclePassword(data, key []byte, keepPadding bool) ([]byte, error) {
-	prefix := make([]byte, 16)
-	if _, err := rand.Read(prefix); err != nil {
+	plaintext := make([]byte, 16+len(data))
+	if _, err := rand.Read(plaintext[:16]); err != nil {
 		return nil, fmt.Errorf("rand password prefix: %w", err)
 	}
 
-	return aesCBCEncryptZeroIV(key, append(prefix, data...), keepPadding)
+	copy(plaintext[16:], data)
+
+	return aesCBCEncryptZeroIV(key, plaintext, keepPadding)
 }
 
 // encodedSalt returns the salt as an uppercase hex string without re-decoding
