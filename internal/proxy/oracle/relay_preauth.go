@@ -17,9 +17,13 @@ import (
 // which is returned to the caller (not forwarded) so dbbat can perform
 // terminated O5LOGON authentication.
 //
-// The upstream socket is closed after the relay completes — dbbat opens a fresh
-// go-ora session for the actual authenticated relay in upstreamAuth().
-func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, error) {
+// The upstream socket is returned to the caller (not closed). After dbbat
+// completes O5LOGON with the client, it runs an O5LOGON CLIENT against this
+// same socket using stored database credentials. Reusing the relay-phase
+// socket keeps the negotiated TTC capability levels aligned between the
+// client and upstream — closing it and opening a fresh go-ora session would
+// shift the upstream cap level and cause ORA-03120 on the first user query.
+func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, net.Conn, error) {
 	initialAddr := net.JoinHostPort(s.database.Host, fmt.Sprintf("%d", s.database.Port))
 
 	// Rewrite SERVICE_NAME in the Connect descriptor to the real upstream Oracle
@@ -39,28 +43,30 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, er
 
 	upstream, acceptPkt, err := dialUpstreamWithRedirect(s, initialAddr, upstreamConnect)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
-	defer func() { _ = upstream.Close() }()
 
 	s.logger.DebugContext(s.ctx, "pre-auth relay: forwarding Accept to client", slog.Int("len", len(acceptPkt.Raw)))
 
 	if _, err := s.clientConn.Write(acceptPkt.Raw); err != nil {
-		return nil, fmt.Errorf("forward Accept to client: %w", err)
+		_ = upstream.Close()
+
+		return nil, nil, fmt.Errorf("forward Accept to client: %w", err)
 	}
 
 	for {
 		clientPkt, err := readTNSPacket(s.clientConn)
 		if err != nil {
-			return nil, fmt.Errorf("read client packet during pre-auth relay: %w", err)
+			_ = upstream.Close()
+
+			return nil, nil, fmt.Errorf("read client packet during pre-auth relay: %w", err)
 		}
 
 		if isAuthPhase1(clientPkt) {
 			s.logger.DebugContext(s.ctx, "pre-auth relay: detected AUTH Phase 1, ending relay",
 				slog.Int("len", len(clientPkt.Payload)))
 
-			return clientPkt, nil
+			return clientPkt, upstream, nil
 		}
 
 		s.logger.DebugContext(s.ctx, "pre-auth relay: client→upstream",
@@ -68,11 +74,15 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, er
 			slog.Int("len", len(clientPkt.Raw)))
 
 		if _, err := upstream.Write(clientPkt.Raw); err != nil {
-			return nil, fmt.Errorf("forward client packet to upstream: %w", err)
+			_ = upstream.Close()
+
+			return nil, nil, fmt.Errorf("forward client packet to upstream: %w", err)
 		}
 
 		if err := relayUpstreamResponses(s, upstream); err != nil {
-			return nil, err
+			_ = upstream.Close()
+
+			return nil, nil, err
 		}
 	}
 }
@@ -108,6 +118,25 @@ func stripCustomHashFlag(raw []byte) ([]byte, bool) {
 	return mutated, true
 }
 
+// observeCustomHashFlag reports whether the Set Protocol response carries
+// caps[4]&0x20 (customHash). Used to remember the upstream's true cap level
+// before we mutate the bytes for the client.
+func observeCustomHashFlag(raw []byte) bool {
+	marker := []byte{0x2a, 0x06, 0x01, 0x01, 0x01}
+
+	idx := bytes.Index(raw, marker)
+	if idx < 0 {
+		return false
+	}
+
+	caps4Off := idx + len(marker)
+	if caps4Off >= len(raw) {
+		return false
+	}
+
+	return raw[caps4Off]&0x20 != 0
+}
+
 // relayUpstreamResponses reads one response packet from upstream and forwards it
 // to the client. The pre-auth phase is strictly request/response, so a single
 // read is sufficient. Read deadlines bound the wait so we don't block on a
@@ -133,7 +162,15 @@ func relayUpstreamResponses(s *session, upstream net.Conn) error {
 	// (go-ora, JDBC thin, SQLcl). dbbat's O5LOGON server uses the simpler MD5
 	// XOR derivation; if we forward the bit set, the client's combined key
 	// won't match dbbat's and the AUTH_PASSWORD decryption produces garbage.
-	// Stripping the bit forces matching MD5 behavior on both sides.
+	// Stripping the bit forces matching MD5 behavior on the client side.
+	//
+	// We still record the original bit on the session so the upstream-as-client
+	// AUTH path uses the modern PBKDF2 derivation that the upstream actually
+	// negotiated.
+	if observeCustomHashFlag(raw) {
+		s.upstreamCustomHash = true
+	}
+
 	if mutated, ok := stripCustomHashFlag(raw); ok {
 		s.logger.DebugContext(s.ctx, "pre-auth relay: stripped customHash flag from Set Protocol response")
 
