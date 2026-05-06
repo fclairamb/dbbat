@@ -20,4 +20,10 @@ var (
 	ErrUpstreamAuthFailed   = errors.New("upstream authentication failed")
 	ErrAPIKeyOwnerMismatch  = errors.New("API key does not belong to user")
 	ErrAPIKeyVerifyFailed   = errors.New("API key verification failed")
+
+	// Startup negotiation errors. SSL/GSS encryption probes are length-8
+	// frames with a magic version code; anything else of that shape is
+	// rejected, and runaway clients are bounded by the round limit.
+	ErrUnknownStartupMagic      = errors.New("unknown length-8 startup magic")
+	ErrTooManyNegotiationRounds = errors.New("too many SSL/GSS negotiation rounds")
 )
