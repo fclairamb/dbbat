@@ -144,6 +144,15 @@ type MySQLConfig struct {
 	TLS TLSConfig `koanf:"tls"`
 }
 
+// PGConfig holds configuration specific to the PostgreSQL proxy.
+type PGConfig struct {
+	// TLS holds TLS server-termination settings for the proxy. When enabled,
+	// the proxy responds 'S' to SSLRequest and terminates TLS at the proxy.
+	// Without this, clients with sslmode=prefer silently fall back to
+	// plaintext and credentials travel over the wire in the clear.
+	TLS TLSConfig `koanf:"tls"`
+}
+
 // TLSConfig holds TLS server-side termination settings.
 //
 // When CertFile and KeyFile are both empty (and Disable is false), the
@@ -231,6 +240,9 @@ type Config struct {
 
 	// MySQL holds MySQL proxy specific configuration.
 	MySQL MySQLConfig `koanf:"mysql"`
+
+	// PG holds PostgreSQL proxy specific configuration.
+	PG PGConfig `koanf:"pg"`
 }
 
 // Default query storage limits.
@@ -363,6 +375,10 @@ func envTransform(k, v string) (string, any) {
 	// mysql_tls_* -> mysql.tls.*
 	if strings.HasPrefix(key, "mysql_tls_") {
 		return "mysql.tls." + strings.TrimPrefix(key, "mysql_tls_"), v
+	}
+	// pg_tls_* -> pg.tls.*
+	if strings.HasPrefix(key, "pg_tls_") {
+		return "pg.tls." + strings.TrimPrefix(key, "pg_tls_"), v
 	}
 	return key, v
 }
