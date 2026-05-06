@@ -2,6 +2,7 @@ package postgresql
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
@@ -23,11 +24,16 @@ type Server struct {
 	dumpConfig    config.DumpConfig
 	authCache     *cache.AuthCache
 	logger        *slog.Logger
-	listener      net.Listener
-	wg            sync.WaitGroup
-	shutdown      chan struct{}
-	ctx           context.Context //nolint:containedctx // Context is needed for the server lifecycle
-	cancel        context.CancelFunc
+
+	// tlsConfig terminates client TLS at the proxy. nil when TLS is
+	// disabled — sessions then refuse SSLRequest with 'N' as before.
+	tlsConfig *tls.Config
+
+	listener net.Listener
+	wg       sync.WaitGroup
+	shutdown chan struct{}
+	ctx      context.Context //nolint:containedctx // Context is needed for the server lifecycle
+	cancel   context.CancelFunc
 }
 
 // NewServer creates a new proxy server.
@@ -37,8 +43,14 @@ func NewServer(
 	queryStorage config.QueryStorageConfig,
 	dumpConfig config.DumpConfig,
 	authCache *cache.AuthCache,
+	pgConfig config.PGConfig,
 	logger *slog.Logger,
-) *Server {
+) (*Server, error) {
+	tlsConfig, err := loadTLS(pgConfig)
+	if err != nil {
+		return nil, fmt.Errorf("PostgreSQL proxy TLS setup: %w", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Server{
@@ -47,11 +59,12 @@ func NewServer(
 		queryStorage:  queryStorage,
 		dumpConfig:    dumpConfig,
 		authCache:     authCache,
+		tlsConfig:     tlsConfig,
 		logger:        logger,
 		shutdown:      make(chan struct{}),
 		ctx:           ctx,
 		cancel:        cancel,
-	}
+	}, nil
 }
 
 // Start starts the proxy server.
@@ -137,7 +150,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 	s.logger.DebugContext(s.ctx, "New connection", slog.Any("remote_addr", clientConn.RemoteAddr()))
 
-	session := NewSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.queryStorage, s.dumpConfig, s.authCache)
+	session := NewSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.queryStorage, s.dumpConfig, s.authCache, s.tlsConfig)
 	if err := session.Run(); err != nil {
 		s.logger.ErrorContext(s.ctx, "Session error", slog.Any("error", err), slog.Any("remote_addr", clientConn.RemoteAddr()))
 	}
