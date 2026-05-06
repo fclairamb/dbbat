@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/binary"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -18,6 +19,14 @@ func makeSSLRequest() []byte {
 	buf := make([]byte, 8)
 	binary.BigEndian.PutUint32(buf[0:4], 8)
 	binary.BigEndian.PutUint32(buf[4:8], pgSSLRequestCode)
+	return buf
+}
+
+// makeGSSEncRequest builds the 8-byte PG GSSEncRequest preamble.
+func makeGSSEncRequest() []byte {
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint32(buf[0:4], 8)
+	binary.BigEndian.PutUint32(buf[4:8], pgGSSEncRequestCode)
 	return buf
 }
 
@@ -39,8 +48,16 @@ func TestNegotiateSSL_DisabledRespondsN(t *testing.T) {
 	defer func() { _ = serverSide.Close() }()
 	defer func() { _ = clientSide.Close() }()
 
+	// SSLRequest, then a real StartupMessage shape so the negotiation
+	// loop can exit on the length>8 condition. Real clients always
+	// follow a deny with a StartupMessage (or another probe).
+	startup := make([]byte, 8)
+	binary.BigEndian.PutUint32(startup[0:4], 32)
+	binary.BigEndian.PutUint32(startup[4:8], 196608)
+
 	go func() {
 		_, _ = clientSide.Write(makeSSLRequest())
+		_, _ = clientSide.Write(startup)
 	}()
 
 	s := minimalSession(serverSide, nil)
@@ -182,5 +199,169 @@ func TestLoadTLS_FromConfig_RoundTrip(t *testing.T) {
 	}
 	if tlsConf.MinVersion != tls.VersionTLS12 {
 		t.Errorf("MinVersion = %d, want %d", tlsConf.MinVersion, tls.VersionTLS12)
+	}
+}
+
+func TestNegotiateSSL_GSSRefusedWithN(t *testing.T) {
+	t.Parallel()
+
+	clientSide, serverSide := net.Pipe()
+	defer func() { _ = serverSide.Close() }()
+	defer func() { _ = clientSide.Close() }()
+
+	// libpq 17 default flow: GSSEncRequest, SSLRequest, StartupMessage.
+	// Each probe gets 'N'; the StartupMessage is what makes the loop exit.
+	startup := make([]byte, 8)
+	binary.BigEndian.PutUint32(startup[0:4], 32)
+	binary.BigEndian.PutUint32(startup[4:8], 196608)
+
+	go func() {
+		_, _ = clientSide.Write(makeGSSEncRequest())
+		_, _ = clientSide.Write(makeSSLRequest())
+		_, _ = clientSide.Write(startup)
+	}()
+
+	s := minimalSession(serverSide, nil)
+
+	doneCh := make(chan error, 1)
+	go func() { doneCh <- s.negotiateSSL() }()
+
+	resp := make([]byte, 2)
+	if _, err := io.ReadFull(clientSide, resp); err != nil {
+		t.Fatalf("read responses: %v", err)
+	}
+	if resp[0] != 'N' || resp[1] != 'N' {
+		t.Errorf("got %q, want \"NN\" (GSS deny then SSL deny)", resp)
+	}
+
+	select {
+	case err := <-doneCh:
+		if err != nil {
+			t.Errorf("negotiateSSL: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("negotiateSSL hung")
+	}
+}
+
+func TestNegotiateSSL_GSSAloneRefusedWithN(t *testing.T) {
+	t.Parallel()
+
+	clientSide, serverSide := net.Pipe()
+	defer func() { _ = serverSide.Close() }()
+	defer func() { _ = clientSide.Close() }()
+
+	// Single GSS frame followed by a regular StartupMessage shape — the
+	// negotiation should refuse GSS and stop, leaving the StartupMessage
+	// bytes untouched in clientReader.
+	startup := make([]byte, 8)
+	binary.BigEndian.PutUint32(startup[0:4], 32)
+	binary.BigEndian.PutUint32(startup[4:8], 196608) // protocol v3.0
+
+	go func() {
+		_, _ = clientSide.Write(makeGSSEncRequest())
+		// Only the first 8 bytes of the StartupMessage — enough for the
+		// peek loop to see length=32 and exit.
+		_, _ = clientSide.Write(startup)
+	}()
+
+	s := minimalSession(serverSide, nil)
+
+	doneCh := make(chan error, 1)
+	go func() { doneCh <- s.negotiateSSL() }()
+
+	resp := make([]byte, 1)
+	if _, err := io.ReadFull(clientSide, resp); err != nil {
+		t.Fatalf("read GSS deny: %v", err)
+	}
+	if resp[0] != 'N' {
+		t.Errorf("got %q, want 'N'", resp[0])
+	}
+
+	select {
+	case err := <-doneCh:
+		if err != nil {
+			t.Fatalf("negotiateSSL: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("negotiateSSL hung")
+	}
+
+	// StartupMessage header should still be readable.
+	got, err := s.clientReader.Peek(8)
+	if err != nil {
+		t.Fatalf("peek startup: %v", err)
+	}
+	if string(got) != string(startup) {
+		t.Errorf("startup bytes consumed: got %x, want %x", got, startup)
+	}
+}
+
+func TestNegotiateSSL_TooManyRoundsBounded(t *testing.T) {
+	t.Parallel()
+
+	clientSide, serverSide := net.Pipe()
+	defer func() { _ = serverSide.Close() }()
+	defer func() { _ = clientSide.Close() }()
+
+	// Send more GSS frames than the round cap. The server should refuse
+	// the first few, then return ErrTooManyNegotiationRounds without
+	// reading further.
+	go func() {
+		for i := 0; i < maxStartupNegotiationRounds+2; i++ {
+			_, _ = clientSide.Write(makeGSSEncRequest())
+		}
+	}()
+
+	// Drain refusal bytes in a goroutine so the server's writes don't
+	// block the pipe.
+	go func() {
+		buf := make([]byte, maxStartupNegotiationRounds)
+		_, _ = io.ReadFull(clientSide, buf)
+	}()
+
+	s := minimalSession(serverSide, nil)
+
+	doneCh := make(chan error, 1)
+	go func() { doneCh <- s.negotiateSSL() }()
+
+	select {
+	case err := <-doneCh:
+		if !errors.Is(err, ErrTooManyNegotiationRounds) {
+			t.Errorf("got %v, want ErrTooManyNegotiationRounds", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("negotiateSSL hung past the round cap")
+	}
+}
+
+func TestNegotiateSSL_UnknownLength8MagicErrors(t *testing.T) {
+	t.Parallel()
+
+	clientSide, serverSide := net.Pipe()
+	defer func() { _ = serverSide.Close() }()
+	defer func() { _ = clientSide.Close() }()
+
+	// Length-8 frame with an unrecognized magic — neither SSL nor GSS.
+	// Should return ErrUnknownStartupMagic instead of stalling on a
+	// half-decoded StartupMessage.
+	bogus := make([]byte, 8)
+	binary.BigEndian.PutUint32(bogus[0:4], 8)
+	binary.BigEndian.PutUint32(bogus[4:8], 0xDEADBEEF)
+
+	go func() { _, _ = clientSide.Write(bogus) }()
+
+	s := minimalSession(serverSide, nil)
+
+	doneCh := make(chan error, 1)
+	go func() { doneCh <- s.negotiateSSL() }()
+
+	select {
+	case err := <-doneCh:
+		if !errors.Is(err, ErrUnknownStartupMagic) {
+			t.Errorf("got %v, want ErrUnknownStartupMagic", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("negotiateSSL hung on unknown magic")
 	}
 }
