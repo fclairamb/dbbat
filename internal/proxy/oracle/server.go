@@ -60,6 +60,11 @@ func NewServer(
 
 // Start starts the Oracle proxy server.
 func (s *Server) Start(addr string) error {
+	// Reserve a wg slot for Start's lifetime so Shutdown's wg.Wait never sees
+	// a zero counter racing with the wg.Add for an in-flight accepted conn.
+	s.wg.Add(1)
+	defer s.wg.Done()
+
 	listener, err := net.Listen("tcp", addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen: %w", err)
