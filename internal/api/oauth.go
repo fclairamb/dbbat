@@ -15,6 +15,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"golang.org/x/text/runes"
+	"golang.org/x/text/transform"
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/fclairamb/dbbat/internal/auth"
 	"github.com/fclairamb/dbbat/internal/crypto"
@@ -313,10 +316,27 @@ func (s *Server) buildCallbackURL(r *http.Request, providerName string) string {
 // usernameRegexp matches characters that are NOT safe for usernames.
 var usernameRegexp = regexp.MustCompile(`[^a-z0-9._-]`)
 
-// generateUniqueUsername creates a username from a display name or email.
-// It sanitizes the input and appends a short suffix if the name is already taken.
-func (s *Server) generateUniqueUsername(ctx context.Context, displayName, email string) string {
-	// Start with display name, fall back to email local part
+// foldAccents decomposes accented characters to base + combining mark, drops
+// the marks, then recomposes — so `é` becomes `e` rather than being stripped
+// by usernameRegexp. Letters that don't decompose (`ø`, `ß`, CJK, etc.) fall
+// through to the regex strip and the email/`"user"` fallback path.
+//
+// transform.Chain returns a stateful transformer, so we build a fresh chain
+// per call rather than sharing one — username generation is not a hot path.
+func foldAccents(s string) string {
+	t := transform.Chain(
+		norm.NFD,
+		runes.Remove(runes.In(unicode.Mn)),
+		norm.NFC,
+	)
+	out, _, _ := transform.String(t, s)
+	return out
+}
+
+// canonicalizeUsername produces the deterministic username base from a display
+// name and an email fallback. No uniqueness check, no store access — pure
+// string canonicalization, so it's safe to call from tests.
+func canonicalizeUsername(displayName, email string) string {
 	base := displayName
 	if base == "" && email != "" {
 		parts := strings.SplitN(email, "@", 2)
@@ -326,8 +346,8 @@ func (s *Server) generateUniqueUsername(ctx context.Context, displayName, email 
 		base = "user"
 	}
 
-	// Normalize: lowercase, replace spaces with dots, strip unsafe chars
 	base = strings.ToLower(base)
+	base = foldAccents(base)
 	base = strings.Map(func(r rune) rune {
 		if unicode.IsSpace(r) {
 			return '.'
@@ -336,21 +356,38 @@ func (s *Server) generateUniqueUsername(ctx context.Context, displayName, email 
 	}, base)
 	base = usernameRegexp.ReplaceAllString(base, "")
 
-	// Trim to reasonable length
 	if len(base) > 30 {
 		base = base[:30]
 	}
-	if base == "" {
+	if !hasUsernameContent(base) {
 		base = "user"
 	}
+	return base
+}
 
-	// Try the base name first
-	candidate := base
-	if _, err := s.store.GetUserByUsername(ctx, candidate); errors.Is(err, store.ErrUserNotFound) {
-		return candidate
+// hasUsernameContent reports whether s has at least one alphanumeric byte.
+// Catches all-punctuation results like "..." that come from dot-mapping a
+// whitespace-only display name — they would otherwise sneak past the empty
+// check and land in the user list as gibberish.
+func hasUsernameContent(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			return true
+		}
+	}
+	return false
+}
+
+// generateUniqueUsername creates a username from a display name or email.
+// It sanitizes the input and appends a short suffix if the name is already taken.
+func (s *Server) generateUniqueUsername(ctx context.Context, displayName, email string) string {
+	base := canonicalizeUsername(displayName, email)
+
+	if _, err := s.store.GetUserByUsername(ctx, base); errors.Is(err, store.ErrUserNotFound) {
+		return base
 	}
 
-	// Append random suffix
 	suffix := make([]byte, 4)
 	_, _ = rand.Read(suffix)
 	return base + "." + hex.EncodeToString(suffix)
