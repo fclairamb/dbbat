@@ -1,44 +1,46 @@
 #!/usr/bin/env python3
 """Replay and analyze a .dbbat-dump file."""
 
+import json
 import struct
 import sys
-import uuid
 
 
 def read_dump(path):
     with open(path, "rb") as f:
-        # Read header
+        # File header: 16 magic + 2 version
         magic = f.read(16)
         assert magic[:10] == b"DBBAT_DUMP", f"Invalid magic: {magic[:10]}"
         version = struct.unpack(">H", f.read(2))[0]
-        session_uid = uuid.UUID(bytes=f.read(16))
-        svc_len = f.read(1)[0]
-        service = f.read(svc_len).decode()
-        up_len = f.read(1)[0]
-        upstream = f.read(up_len).decode()
-        start_ns = struct.unpack(">q", f.read(8))[0]
+        if version != 2:
+            raise SystemExit(f"unsupported dump format version {version} (expected 2)")
+
+        # JSON header: 4-byte BE length + JSON bytes
+        header_len = struct.unpack(">I", f.read(4))[0]
+        header = json.loads(f.read(header_len))
 
         print(f"Version:  {version}")
-        print(f"Session:  {session_uid}")
-        print(f"Service:  {service}")
-        print(f"Upstream: {upstream}")
+        print(f"Session:  {header.get('session_id')}")
+        print(f"Protocol: {header.get('protocol')}")
+        for k, v in (header.get("connection") or {}).items():
+            print(f"  {k}: {v}")
         print()
 
-        # Read packets
+        # Read packets: 8 relativeNs + 1 direction + 4 length + length bytes
         n = 0
         total_c2s = 0
         total_s2c = 0
         while True:
             rel_ns = struct.unpack(">q", f.read(8))[0]
             direction = f.read(1)[0]
-            if direction == 0xFF:
-                break
             length = struct.unpack(">I", f.read(4))[0]
+            if direction == 0xFF:
+                print(f"\nEOF marker at {rel_ns / 1_000_000:.2f}ms")
+                break
             data = f.read(length)
             n += 1
 
-            dir_str = "C\u2192S" if direction == 0 else "S\u2192C"
+            dir_str = "C→S" if direction == 0 else "S→C"
             if direction == 0:
                 total_c2s += length
             else:
@@ -52,8 +54,8 @@ def read_dump(path):
             )
 
         print(f"\nTotal: {n} packets")
-        print(f"  Client\u2192Server: {total_c2s:,} bytes")
-        print(f"  Server\u2192Client: {total_s2c:,} bytes")
+        print(f"  Client→Server: {total_c2s:,} bytes")
+        print(f"  Server→Client: {total_s2c:,} bytes")
 
 
 if __name__ == "__main__":
