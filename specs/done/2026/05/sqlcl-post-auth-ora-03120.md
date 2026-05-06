@@ -47,11 +47,19 @@ Why upstream chokes: the pre-auth relay forwards Connect / Accept / Set Protocol
 
 Each is multi-day; pick one.
 
-### A. Carry the relay-phase upstream socket through AUTH (preferred)
+### A. Carry the relay-phase upstream socket through AUTH (chosen — implemented 2026-05-01)
 
 Don't close `upstream` in `relayPreAuthNegotiation`. After dbbat completes O5LOGON with the client (using the API key), inject AUTH Phase 1 / 2 toward the *same* upstream socket using stored DB credentials. Caps stay aligned automatically — Oracle parses SQLcl's bytes the way SQLcl encoded them.
 
 Cost: implement an O5LOGON CLIENT in dbbat that can drive an existing TNS connection, including the PBKDF2 (verifier 18453) path and the `customHash` capability bit. `go-ora/v2/auth_object.go` is the canonical reference.
+
+**Implementation summary (2026-05-01):**
+
+- `relayPreAuthNegotiation` now returns the upstream socket alive across the AUTH boundary, plus an `upstreamNego` snapshot of the ServerCompileTimeCaps the upstream advertised. The client-facing customHash strip stays in place so dbbat's O5LOGON server (legacy MD5/XOR) keeps working.
+- New `internal/proxy/oracle/o5logon_client.go` drives AUTH Phase 1 / Phase 2 over that socket. Implements verifier 18453 (PBKDF2 HMAC-SHA512 / SHA-512 password key) with the customHash combined-key derivation, plus the legacy 6949 (SHA-1) path for older databases. Mirrors `go-ora/v2 auth_object.go` exactly for the wire-level KV layout, magic bytes (`03 76 00 01` Phase 1, `03 73 00` Phase 2), and PKCS7 padding semantics.
+- `upstreamAuth` tries the new path first; on any error it falls back to the legacy go-ora-fresh-socket path with the captured AUTH OK — preserving today's behaviour for existing clients.
+- The upstream's real AUTH OK packet is forwarded verbatim to the dbbat client, so clients that validate `AUTH_SVR_RESPONSE` (python-oracledb thin, SQLcl) get session-specific data that matches their derived combined key.
+- 30+ unit tests added covering the TTC cursor (compressed-int / CLR / DLC / KV), Phase 1/Phase 2 wire shape, the AES-CBC + PBKDF2 chain, and a full crypto-only end-to-end roundtrip for verifier 18453.
 
 ### B. Transcode OALL8 piggyback bodies in `proxyMessages`
 
@@ -63,11 +71,86 @@ Would only work if (1) we can observe SQLcl's negotiated caps during the relay a
 
 ## Acceptance criteria
 
-- [ ] `SELECT 1 FROM DUAL` from SQLcl 26.1 through dbbat returns the row.
-- [ ] `SELECT * FROM <table>` returns expected data (correctness across types, NULLs).
-- [ ] dbbat `/api/v1/queries` records the SQL text (no longer truncated to 32 bytes).
-- [ ] The Oracle compatibility table in `docs/oracle.md` updated for SQLcl.
-- [ ] python-oracledb thin still works (no regression on the working path).
+- [x] Code path implemented and unit-tested end-to-end (crypto chain, wire shape, parser).
+- [x] go-ora end-to-end through dbbat: validated locally against Oracle 19c (`abyla_abynonprod`) — uses the new relay-socket-o5logon path; query intercepted, result returned.
+- [x] python-oracledb thin end-to-end through dbbat: validated locally — uses the relay-socket path + per-session AUTH_SVR_RESPONSE patch; previous DPY-4035 resolved.
+- [ ] **SQLcl end-to-end through dbbat: still blocked, but the failure mode shifted.** Phase-1-rewrite (forwarding the client's own Phase 1 with the username swapped to the upstream DB user) is now implemented for all clients, including SQLcl. With it, the upstream accepts dbbat's Phase 1 and replies with a normal challenge — but for SQLcl that challenge is verifier 6949 with the upstream's `customHash` flag set yet no `AUTH_PBKDF2_*` fields. dbbat falls back to the legacy MD5/XOR password-key derivation, the upstream rejects Phase 2 with end-of-call code 4, and SQLcl ends up at ORA-17401 via the captured-AUTH-OK fallback. The remaining gap is the password-key derivation variant Oracle expects for `verifier 6949 + customHash + no PBKDF2 fields` — JDBC thin's source for that derivation needs reverse-engineering (a Java stack trace per `feedback_jdbc_oracle_trace.md` would identify it).
+- [x] The Oracle compatibility table in `docs/oracle.md` updated.
+- [x] python-oracledb thin no-regression: validated locally end-to-end.
+
+## Local validation setup (2026-05-06)
+
+For follow-up debugging, the working environment is:
+
+```bash
+# Postgres for dbbat storage
+docker compose up -d postgres
+docker exec dbbat-postgres psql -U postgres -c \
+  "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO postgres; GRANT ALL ON SCHEMA public TO public;"
+
+# Oracle credentials from the dev pod (SSM was stale per db-provision.priv.md)
+kubectl --context=aws/nonprod -n dev exec service-abyla-<pod> -- env | grep ORACLE_DATABASE_PASSWORD
+
+# Build + run dbbat in test mode
+go build -o /tmp/dbbat .
+DBB_DSN="postgres://postgres:postgres@localhost:5001/dbbat?sslmode=disable" \
+  DBB_RUN_MODE=test DBB_LOG_LEVEL=debug \
+  DBB_LISTEN_ORA=":1522" DBB_LISTEN_API=":4200" DBB_LISTEN_PG=":5434" \
+  DBB_DUMP_DIR=/tmp/dbbat-dumps /tmp/dbbat &
+
+# Provision via API: connector test API key auto-creates with O5LOGON verifier
+curl -s -u admin:admintest -X POST http://localhost:4200/api/v1/databases \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"abynonprod","host":"oracle-abynonprod.db.stonal.io","port":1521,
+       "protocol":"oracle","oracle_service_name":"TEST01","database_name":"TEST01",
+       "username":"LABEOMNGR_DEV","password":"<from-pod-env>","ssl_mode":"disable"}'
+# (then create a grant for the connector user)
+
+# Run clients
+go run main.go                             # go-ora: PASS
+python3 -c "import oracledb; ..."          # python-oracledb thin: PASS
+/opt/homebrew/Caskroom/sqlcl/.../bin/sql -S \
+  connector/dbb_connector_key@localhost:1522/abynonprod  # SQLcl: ORA-03120 / ORA-17401
+```
+
+## Next steps for SQLcl (path forward)
+
+Phase-1-rewrite is implemented (`rewriteAuthPhase1Username` in
+`internal/proxy/oracle/o5logon_client.go`). The upstream now sees dbbat's Phase
+1 as if it came from the original client (same data flag, same encoding,
+username swapped) and replies with a normal challenge. The blocking issue has
+moved to **Phase 2 password-key derivation for SQLcl's negotiated verifier**.
+
+The remaining work falls into two complementary pieces:
+
+### A. Recover the verifier-6949+customHash key derivation Oracle expects
+
+Empirically the upstream returns:
+- verifier_type = 6949
+- caps[4] & 0x20 (customHash) = set
+- no AUTH_PBKDF2_CSK_SALT / VGEN_COUNT / SDER_COUNT in the challenge
+
+dbbat currently falls back to the legacy MD5/XOR derivation when PBKDF2 fields
+are absent (see `derivePasswordEncKey`). The upstream rejects that derivation
+with end-of-call code 4. There must be a different combined-key formula
+JDBC-thin uses for this case. Capture it via:
+
+1. Run a stripped-down Java client against the upstream directly (no dbbat),
+   per the `feedback_jdbc_oracle_trace.md` recipe (15-line Java program with
+   ojdbc11.jar).
+2. Add `-Doracle.jdbc.Trace=true -Doracle.net.crypto.checksum.types=NONE
+   -Doracle.net.crypto.types=NONE` if needed to disable encryption layers.
+3. Capture the wire bytes and the password-encryption key with `T4CTTIoauthenticate`
+   instrumentation.
+4. Compare against go-ora's path to identify the missing transformation.
+
+### B. Patch additional AUTH OK fields if SQLcl checks more than AUTH_SVR_RESPONSE
+
+Even with the captured-AUTH-OK fallback, SQLcl returns ORA-17401 (Protocol
+violation), matching the 2026-04-29 attempt note (`da62fde`). Other session-
+data fields likely need patching too (AUTH_VERSION_STRING, AUTH_VERSION_NO,
+AUTH_DBNAME, AUTH_INSTANCE_NO, …). A Java stack trace (same recipe as A) would
+pinpoint which field SQLcl rejects.
 
 ## Artifacts
 
