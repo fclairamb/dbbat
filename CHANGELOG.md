@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.7.0](https://github.com/fclairamb/dbbat/compare/v0.6.0...v0.7.0) (2026-05-06)
+
+
+### Features
+
+* **proxy:** add MySQL/MariaDB proxy with caching_sha2_password and TLS ([#112](https://github.com/fclairamb/dbbat/issues/112)) ([b916818](https://github.com/fclairamb/dbbat/commit/b916818e9ae3eec205d32db62d016265599b2a0f))
+* **proxy:** harden MySQL upstream against LOCAL INFILE + verify binary row capture ([#115](https://github.com/fclairamb/dbbat/issues/115)) ([4a17b6f](https://github.com/fclairamb/dbbat/commit/4a17b6f135959d60ce1edb645e3bc31e4b2c0406))
+* **proxy:** Oracle terminated auth — go-ora end-to-end working ([#118](https://github.com/fclairamb/dbbat/issues/118)) ([3a27833](https://github.com/fclairamb/dbbat/commit/3a278333936aadbc8180fc8d5d52cd443c1ff90f))
+* **proxy:** wire up MySQL session packet dumps ([#116](https://github.com/fclairamb/dbbat/issues/116)) ([f7a81b8](https://github.com/fclairamb/dbbat/commit/f7a81b87b9693aef8caa7a5b3ec342ef93502a5f))
+
+
+### Bug Fixes
+
+* **deps:** update docusaurus monorepo to v3.10.1 ([#122](https://github.com/fclairamb/dbbat/issues/122)) ([102bd08](https://github.com/fclairamb/dbbat/commit/102bd08f83e099b7204482f30f23e578a210dec1))
+* **deps:** update module github.com/go-mysql-org/go-mysql to v1.15.0 ([#128](https://github.com/fclairamb/dbbat/issues/128)) ([ad6b2a3](https://github.com/fclairamb/dbbat/commit/ad6b2a338fbb6d56d40969561c8427dd55a2649b))
+* **deps:** update module github.com/go-sql-driver/mysql to v1.10.0 ([#132](https://github.com/fclairamb/dbbat/issues/132)) ([14be368](https://github.com/fclairamb/dbbat/commit/14be3682a8fed488fe4d5994a63e15068f179298))
+* **deps:** update module github.com/jackc/pgx/v5 to v5.9.2 ([#108](https://github.com/fclairamb/dbbat/issues/108)) ([b837285](https://github.com/fclairamb/dbbat/commit/b837285f589cba224177cbd51fe523e31d995ec1))
+* **proxy:** keep relay socket through AUTH so SQLcl avoids ORA-03120 ([#129](https://github.com/fclairamb/dbbat/issues/129)) ([a23c060](https://github.com/fclairamb/dbbat/commit/a23c0607bfbcd188c402e47e7499809d52c4feca))
+
 ## [0.6.0](https://github.com/fclairamb/dbbat/compare/v0.5.2...v0.6.0) (2026-04-15)
 
 

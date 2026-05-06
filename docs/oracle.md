@@ -221,7 +221,7 @@ The Oracle proxy has been tested with:
 | Python | oracledb (thin mode) | Authenticates, fails at AUTH OK with DPY-4035 — see below |
 | Java | ojdbc11 (JDBC thin) | SQL works, row capture partial (older tests) |
 | DBeaver | JDBC thin via ojdbc | Connects, SQL logged, row capture partial (older tests) |
-| SQLcl | JDBC thin (Oracle 23c) | Authenticates, fails at AUTH OK with ORA-17401 — see below |
+| SQLcl | JDBC thin (Oracle 23c+) | SQL works end-to-end |
 | sqlplus | OCI (Oracle 23c) | Not yet supported — see below |
 
 For debugging, enable `DBB_LOG_LEVEL=debug` to see TTC function codes and SQL extraction details.
@@ -229,10 +229,30 @@ For debugging, enable `DBB_LOG_LEVEL=debug` to see TTC function codes and SQL ex
 ### Authentication path
 
 The proxy negotiates TNS Connect / Accept / Set Protocol / Set Data Types in a transparent
-relay to the upstream Oracle, then takes over once the client sends `AUTH Phase 1`. The
-relay strips the `customHash` flag (caps[4]&0x20) from the upstream's Set Protocol
-response — without that, modern clients switch to a PBKDF2 combined-key derivation that
-dbbat's O5LOGON server doesn't implement and AUTH_PASSWORD ends up decrypting to garbage.
+relay to the upstream Oracle, then takes over once the client sends `AUTH Phase 1`. Two
+things happen at that boundary:
+
+1. **The relay-phase upstream socket is kept open** through the AUTH boundary. After dbbat
+   completes O5LOGON with the client (using the API key as the Oracle password), it runs
+   an O5LOGON CLIENT — the inverse role — against the *same* upstream socket using stored
+   database credentials. Reusing the socket keeps the TTC compile-time capability levels
+   aligned end-to-end. Closing it and opening a fresh go-ora session would shift the
+   upstream's view of caps; caps-rich drivers like SQLcl JDBC thin 23.x would then have
+   their OALL8 messages parsed at the wrong level and Oracle would respond with two TNS
+   Marker (interrupt) packets followed by `ORA-03120: two-task conversion routine: integer
+   overflow`.
+2. **The relay strips the `customHash` flag** (`caps[4]&0x20`) from the upstream's Set
+   Protocol response **as it is forwarded to the client**. Without that strip, modern
+   clients switch to a PBKDF2 combined-key derivation that dbbat's O5LOGON server doesn't
+   implement, and `AUTH_PASSWORD` decrypts to garbage. The bit is preserved on the
+   server-as-client AUTH path (recorded into `session.upstreamCustomHash` before stripping),
+   so dbbat's outgoing AUTH messages use the modern PBKDF2 / verifier-18453 derivation
+   that real 19c expects.
+
+The upstream-as-client path supports both the legacy SHA-1 / verifier 6949 derivation and
+the modern HMAC-SHA512 / verifier 18453 path with `customHash` enabled. It mirrors the
+algorithms in `go-ora/v2/auth_object.go` but does not depend on go-ora at runtime — it
+runs against the raw `net.Conn` returned by the pre-auth relay.
 
 ### Known client limitations
 
@@ -242,16 +262,12 @@ dbbat's O5LOGON server doesn't implement and AUTH_PASSWORD ends up decrypting to
   response was taken from a real Oracle 19c session, so its session-specific fields
   (instance metadata, `AUTH_SVR_RESPONSE`, etc.) don't match the new session's combined
   key. Fixing this needs a dynamic AUTH OK builder.
-- **SQLcl 23c+** sends `AUTH_PASSWORD` with an empty value when its negotiated mode wants
-  it. dbbat parses this and trusts the loaded API key as proof. The handshake reaches
-  "Oracle session established", but SQLcl rejects the captured AUTH OK with `ORA-17401`
-  — same root cause as the python issue.
 - **sqlplus 23c** initiates Oracle Native Services (NS) negotiation via OOB break/reset
   markers after the AUTH challenge. dbbat doesn't implement the NS protocol layer, so
   sqlplus errors with `ORA-12630`.
 
-For now, use `go-ora` (or older thin-driver clients) end-to-end; the rest reach AUTH
-but not query execution.
+For now, `go-ora` and SQLcl 23c+ work end-to-end; the rest reach AUTH but not query
+execution.
 
 ### Per-user O5LOGON key
 

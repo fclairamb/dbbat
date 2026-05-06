@@ -81,3 +81,63 @@ Would only work if (1) we can observe SQLcl's negotiated caps during the relay a
 - `specs/todos/sqlcl-client-validation.md` — predecessor blocker (auth itself); resolved 2026-04-29 by the PBKDF2 / customHash work in `43ef6ea` and `aecb032`.
 - `~/.claude/projects/-Users-florent-code-fclairamb-dbbat/memory/feedback_oracle_pbkdf2.md` — PBKDF2 reference notes.
 - `~/.claude/projects/-Users-florent-code-fclairamb-dbbat/memory/feedback_sqlcl_post_auth.md` — short-form summary of the misread + correct diagnosis.
+
+## Implementation Plan
+
+Going with **Path A**: keep the relay-phase upstream socket alive through AUTH, then run an O5LOGON CLIENT on it as the database user. Caps stay aligned automatically.
+
+### 1. Wire the relay socket through to upstreamAuth
+
+- Change `relayPreAuthNegotiation` to return `(*TNSPacket, net.Conn, bool, error)` — the AUTH Phase 1 packet, the still-open upstream socket, and a `customHash` bit observed in the Set Protocol response (caps[4]&0x20 before stripping). Drop the `defer upstream.Close()`.
+- Update `session.run` to receive these and store the upstream socket on `s.upstreamConn` before calling `upstreamAuth`.
+- Track customHash as a field on `session` so the AUTH client can switch between the legacy 6949 path and the modern 18453/PBKDF2 path.
+
+### 2. Implement Oracle AUTH-as-client crypto
+
+New file `internal/proxy/oracle/upstream_auth_client.go` with helpers that mirror `go-ora/v2/auth_object.go`:
+
+- `pbkdf2SpeedyKey(buffer, key, turns)` — HMAC-SHA512 chained over the buffer, XORing intermediates (matches `generateSpeedyKey` lines 323–339 of `auth_object.go`).
+- `derivePBKDF2VerifierKey(password, salt, vgenCount)` — `key = SHA512(speedyKey || salt)[:32]` for verifier 18453.
+- `decryptServerSessKey` / `encryptClientSessKey` — AES-CBC with zero IV, padding off for 18453 (truncate to original length on encrypt).
+- `derivePasswordEncKey` — for customHash + 18453, HMAC-SHA512 chain over hex(client||server) with key=pbkdf2ChkSalt for sderCount turns; truncate to 32 bytes.
+- `encryptPassword(password, key, padding)` — prepend 16 random bytes, AES-CBC encrypt, optionally truncate.
+
+### 3. Implement Oracle AUTH-as-client wire path
+
+Same file, but the protocol layer:
+
+- `buildClientAuthPhase1(username, mode)` — TTC body: `03 76 00 01` + compressed userLen + compressed mode (NoNewPass) + `01 01 05 01 01` + CLR(username) + KV pairs (`AUTH_TERMINAL`, `AUTH_PROGRAM_NM`, `AUTH_MACHINE`, `AUTH_PID`, `AUTH_SID`).
+- `parseAuthPhase1Response(payload)` — read TTC message codes; on `0x08`, read 4-byte BE dictLen and consume that many KV pairs; capture `AUTH_SESSKEY`, `AUTH_VFR_DATA` (and its flag → VerifierType), `AUTH_PBKDF2_CSK_SALT`, `AUTH_PBKDF2_VGEN_COUNT`, `AUTH_PBKDF2_SDER_COUNT`. Stop on code 4 or 9 (end of response).
+- `buildClientAuthPhase2(authObj, username, mode)` — TTC body: `03 73 00` + `01` + 4-byte BE userLen + 4-byte BE mode (with `UserAndPass|NoNewPass`) + `01` + 4-byte BE pairCount + `01 01` + CLR(username) + KV pairs starting with `AUTH_SESSKEY` (encrypted client session key, flag=1), then `AUTH_PASSWORD`, optionally `AUTH_PBKDF2_SPEEDY_KEY`, then the standard `AUTH_TERMINAL` etc. plus an `AUTH_ALTER_SESSION` with NLS settings.
+- `parseAuthPhase2Response(payload)` — loop on TTC message codes; on code 8, read dictLen and KV pairs (we mostly ignore them but skipping their bytes is needed); detect ORA error codes if message code != 4/9; succeed when we see code 4 or 9.
+
+### 4. New `runUpstreamClientAuth(s)` function
+
+- Top-level orchestrator: build phase 1, write as TNS Data, read upstream packet, parse phase 1 response, compute keys (handle VerifierType 6949 OR 18453 to be defensive), build phase 2, write, read responses, return success or wrap an Oracle error.
+- Reuse the existing `encodeV315DataPacket` for framing and `readTNSPacket` for upstream reads.
+- Multi-packet / continuation responses: keep reading TNS packets until we see code 4 or 9 in any of them.
+
+### 5. Replace upstream auth wiring
+
+- Replace `upstreamGoOraAuth` / `extractGoOraConn` with `runUpstreamClientAuth(s)`.
+- Drop `s.goOraConn` (no more reflection-based unsafe access). Cleanup just closes `s.upstreamConn`.
+- Remove the `goora` dependency on the auth path. The library is still imported elsewhere — leave the dependency.
+
+### 6. Tests
+
+- `upstream_auth_client_test.go`:
+  - Unit: `pbkdf2SpeedyKey` against a hand-computed vector from `auth_object.go`.
+  - Unit: AES key derivation for verifier 18453 against a captured (salt, password, vgen) tuple if available, otherwise a synthetic one.
+  - Unit: `buildClientAuthPhase1` produces a byte sequence matching the documented preamble.
+  - Round-trip: `buildClientAuthPhase2` followed by re-parsing on the dbbat server side recovers AUTH_SESSKEY (proves we and our own server agree on the format).
+- Smoke test using a fake upstream that mimics Oracle's AUTH response: verifies our parser walks the message stream correctly.
+
+### 7. Documentation
+
+- `docs/oracle.md`: update the compatibility table to mark SQLcl 26.1 as working end-to-end; note the new auth-on-relay-socket flow under "Authentication path"; remove the SQLcl ORA-17401 / ORA-03120 known-limitation paragraphs.
+- Bump the related "Authentication path" section so the customHash strip is described as client-facing only (we keep the upstream socket's view of customHash intact for our own AUTH).
+
+### 8. Regression check
+
+- Run `make test` (covers unit + testcontainer Oracle integration).
+- Confirm python-oracledb thin still works through the new flow — its existing integration test path doesn't change because dbbat-side caps are unchanged.
