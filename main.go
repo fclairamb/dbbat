@@ -326,7 +326,11 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	})
 
 	// Start proxy server
-	proxyServer := postgresql.NewServer(dataStore, cfg.EncryptionKey, cfg.QueryStorage, cfg.Dump, proxyAuthCache, logger)
+	proxyServer, err := postgresql.NewServer(dataStore, cfg.EncryptionKey, cfg.QueryStorage, cfg.Dump, proxyAuthCache, cfg.PG, logger)
+	if err != nil {
+		logger.ErrorContext(ctx, "PostgreSQL proxy server init failed", slog.Any("error", err))
+		os.Exit(1)
+	}
 
 	go func() {
 		if err := proxyServer.Start(cfg.ListenPG); err != nil {
@@ -335,7 +339,9 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		}
 	}()
 
-	logger.InfoContext(ctx, "Proxy server started", slog.String("addr", cfg.ListenPG))
+	logger.InfoContext(ctx, "Proxy server started",
+		slog.String("addr", cfg.ListenPG),
+		slog.Bool("tls", !cfg.PG.TLS.Disable))
 
 	// Start Oracle proxy server (if configured)
 	oracleServer := startOracleProxy(ctx, cfg, dataStore, proxyAuthCache, logger)

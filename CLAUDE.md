@@ -139,6 +139,9 @@ make clean            # Clean build artifacts
 | `DBB_MYSQL_TLS_DISABLE` | Refuse TLS upgrade on the MySQL listener (default: `false`) | No |
 | `DBB_MYSQL_TLS_CERT_FILE` | PEM cert for MySQL TLS termination (auto self-signed if empty) | No |
 | `DBB_MYSQL_TLS_KEY_FILE` | PEM RSA key for MySQL TLS termination (auto-generated if empty) | No |
+| `DBB_PG_TLS_DISABLE` | Refuse TLS upgrade on the PostgreSQL listener (default: `false`) | No |
+| `DBB_PG_TLS_CERT_FILE` | PEM cert for PostgreSQL TLS termination (auto self-signed if empty) | No |
+| `DBB_PG_TLS_KEY_FILE` | PEM key for PostgreSQL TLS termination (auto-generated if empty) | No |
 
 Note: If no encryption key is provided, one is created at `~/.dbbat/key`.
 

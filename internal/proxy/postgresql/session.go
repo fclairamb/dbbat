@@ -1,7 +1,9 @@
 package postgresql
 
 import (
+	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -66,6 +68,7 @@ type extendedQueryState struct {
 // Session represents a proxy session.
 type Session struct {
 	clientConn    net.Conn
+	clientReader  *bufio.Reader // Buffered reader over clientConn so SSL detection can peek the first 4 bytes.
 	upstreamConn  net.Conn
 	store         *store.Store
 	encryptionKey []byte
@@ -75,6 +78,7 @@ type Session struct {
 	dumpConfig    config.DumpConfig
 	dumpWriter    *dump.Writer
 	authCache     *cache.AuthCache
+	tlsConfig     *tls.Config // nil when TLS is disabled
 
 	// Session state
 	user                   *store.User
@@ -102,9 +106,11 @@ func NewSession(
 	queryStorage config.QueryStorageConfig,
 	dumpConfig config.DumpConfig,
 	authCache *cache.AuthCache,
+	tlsConfig *tls.Config,
 ) *Session {
 	return &Session{
 		clientConn:    clientConn,
+		clientReader:  bufio.NewReader(clientConn),
 		store:         dataStore,
 		encryptionKey: encryptionKey,
 		logger:        logger,
@@ -112,6 +118,7 @@ func NewSession(
 		queryStorage:  queryStorage,
 		dumpConfig:    dumpConfig,
 		authCache:     authCache,
+		tlsConfig:     tlsConfig,
 		extendedState: &extendedQueryState{
 			preparedStatements: make(map[string]*preparedStatement),
 			portals:            make(map[string]*portalState),
@@ -123,8 +130,17 @@ func NewSession(
 func (s *Session) Run() error {
 	defer s.cleanup()
 
-	// Create backend for client (we're the server to the client)
-	s.clientBackend = pgproto3.NewBackend(s.clientConn, s.clientConn)
+	// Negotiate TLS before constructing the backend — wrapping clientConn
+	// after the backend is built would leave the backend reading from the
+	// plaintext side.
+	if err := s.negotiateSSL(); err != nil {
+		return fmt.Errorf("SSL negotiation failed: %w", err)
+	}
+
+	// Create backend for client (we're the server to the client). Read side
+	// uses the buffered reader so any bytes peeked during negotiation are
+	// still in scope.
+	s.clientBackend = pgproto3.NewBackend(s.clientReader, s.clientConn)
 
 	// Authenticate
 	if err := s.authenticate(); err != nil {
@@ -494,46 +510,136 @@ func (s *Session) sendError(message string) {
 	}
 }
 
-// receiveStartupMessage receives the startup message from the client.
+// Magic version numbers that identify the optional pre-StartupMessage frames
+// PostgreSQL clients can send.
+//
+//	pgSSLRequestCode    — TLS upgrade probe.
+//	pgGSSEncRequestCode — Kerberos/GSSAPI encryption probe (libpq 17 sends
+//	                      this by default with gssencmode=prefer).
+const (
+	pgSSLRequestCode    = 80877103
+	pgGSSEncRequestCode = 80877104
+)
+
+// maxStartupNegotiationRounds caps how many SSL/GSS denials we'll loop through
+// before giving up. A real client does at most two (GSS then SSL); three is
+// the bound where a misbehaving or malicious client gets cut off.
+const maxStartupNegotiationRounds = 3
+
+// negotiateSSL handles any optional SSL/GSS encryption probes a PG client
+// sends before the real StartupMessage. The upgrade has to happen here — once
+// pgproto3.NewBackend captures the conn, wrapping clientConn would leave the
+// backend reading from the wrong side.
+//
+// libpq 17 with default settings sends GSSEncRequest, then SSLRequest, then
+// the StartupMessage. Both probes get a 'N' refusal byte unless the proxy
+// can speak that encryption (only TLS today). The loop bounds at
+// maxStartupNegotiationRounds so a buggy client looping SSL/GSS forever
+// can't pin a goroutine.
+func (s *Session) negotiateSSL() error {
+	for round := 0; round < maxStartupNegotiationRounds; round++ {
+		header, err := s.clientReader.Peek(8)
+		if err != nil {
+			return fmt.Errorf("peek startup header: %w", err)
+		}
+
+		length := int(header[0])<<24 | int(header[1])<<16 | int(header[2])<<8 | int(header[3])
+		if length != 8 {
+			// Not a length-8 negotiation frame — leave the bytes for
+			// receiveStartupMessage to parse as a real StartupMessage
+			// (or whatever frame the client actually sent).
+			return nil
+		}
+
+		version := int(header[4])<<24 | int(header[5])<<16 | int(header[6])<<8 | int(header[7])
+		switch version {
+		case pgSSLRequestCode:
+			done, err := s.handleSSLRequest()
+			if err != nil {
+				return err
+			}
+			if done {
+				return nil
+			}
+		case pgGSSEncRequestCode:
+			if err := s.handleGSSRequest(); err != nil {
+				return err
+			}
+		default:
+			// Length-8 with an unknown magic is malformed; surface a clear
+			// error rather than letting receiveStartupMessage stall on a
+			// truncated parse.
+			return fmt.Errorf("%w: 0x%08x", ErrUnknownStartupMagic, version)
+		}
+	}
+
+	return ErrTooManyNegotiationRounds
+}
+
+// handleSSLRequest consumes the 8-byte SSLRequest, either denies it ('N',
+// returns done=false to allow another round e.g. GSS-then-SSL on a libpq
+// client whose order we're not strict about) or accepts it ('S', runs the
+// handshake, returns done=true because the client only ever sends the real
+// StartupMessage after a successful TLS upgrade).
+func (s *Session) handleSSLRequest() (bool, error) {
+	if _, err := s.clientReader.Discard(8); err != nil {
+		return false, fmt.Errorf("discard SSLRequest: %w", err)
+	}
+
+	if s.tlsConfig == nil {
+		if _, err := s.clientConn.Write([]byte{'N'}); err != nil {
+			return false, fmt.Errorf("write SSL deny: %w", err)
+		}
+		return false, nil
+	}
+
+	if _, err := s.clientConn.Write([]byte{'S'}); err != nil {
+		return false, fmt.Errorf("write SSL accept: %w", err)
+	}
+
+	tlsConn := tls.Server(s.clientConn, s.tlsConfig)
+	if err := tlsConn.HandshakeContext(s.ctx); err != nil {
+		return false, fmt.Errorf("TLS handshake: %w", err)
+	}
+
+	s.clientConn = tlsConn
+	s.clientReader = bufio.NewReader(tlsConn)
+	return true, nil
+}
+
+// handleGSSRequest consumes the 8-byte GSSEncRequest and refuses with 'N'.
+// dbbat doesn't terminate Kerberos, so the client falls back to the next
+// negotiation step (typically SSLRequest, then plain StartupMessage).
+func (s *Session) handleGSSRequest() error {
+	if _, err := s.clientReader.Discard(8); err != nil {
+		return fmt.Errorf("discard GSSEncRequest: %w", err)
+	}
+
+	if _, err := s.clientConn.Write([]byte{'N'}); err != nil {
+		return fmt.Errorf("write GSS deny: %w", err)
+	}
+
+	return nil
+}
+
+// receiveStartupMessage receives the startup message from the client. By the
+// time this is called, negotiateSSL has already consumed any SSLRequest
+// preamble — the bytes here are guaranteed to be the StartupMessage proper.
 func (s *Session) receiveStartupMessage() (pgproto3.FrontendMessage, error) {
-	// Read message length (4 bytes)
 	lengthBuf := make([]byte, 4)
-	if _, err := io.ReadFull(s.clientConn, lengthBuf); err != nil {
+	if _, err := io.ReadFull(s.clientReader, lengthBuf); err != nil {
 		return nil, err
 	}
 
 	length := int(lengthBuf[0])<<24 | int(lengthBuf[1])<<16 | int(lengthBuf[2])<<8 | int(lengthBuf[3])
 
-	// Check for SSLRequest
-	if length == 8 {
-		// Read protocol version
-		versionBuf := make([]byte, 4)
-		if _, err := io.ReadFull(s.clientConn, versionBuf); err != nil {
-			return nil, err
-		}
-
-		version := int(versionBuf[0])<<24 | int(versionBuf[1])<<16 | int(versionBuf[2])<<8 | int(versionBuf[3])
-
-		const sslRequestCode = 80877103
-		if version == sslRequestCode {
-			// Deny SSL
-			if _, err := s.clientConn.Write([]byte{'N'}); err != nil {
-				return nil, fmt.Errorf("failed to deny SSL: %w", err)
-			}
-			// Read actual startup message
-			return s.receiveStartupMessage()
-		}
-	}
-
-	// Read the rest of the message
 	msgBuf := make([]byte, length)
 	copy(msgBuf, lengthBuf)
 
-	if _, err := io.ReadFull(s.clientConn, msgBuf[4:]); err != nil {
+	if _, err := io.ReadFull(s.clientReader, msgBuf[4:]); err != nil {
 		return nil, err
 	}
 
-	// Parse startup message
 	startup := &pgproto3.StartupMessage{}
 	if err := startup.Decode(msgBuf[4:]); err != nil {
 		return nil, err
@@ -542,29 +648,27 @@ func (s *Session) receiveStartupMessage() (pgproto3.FrontendMessage, error) {
 	return startup, nil
 }
 
-// receivePasswordMessage receives a password message from the client.
+// receivePasswordMessage receives a password message from the client. Reads
+// go through clientReader so any bytes pipelined by the client during the
+// startup phase are still seen here.
 func (s *Session) receivePasswordMessage() (*pgproto3.PasswordMessage, error) {
-	// Read message type (1 byte)
 	typeBuf := make([]byte, 1)
-	if _, err := io.ReadFull(s.clientConn, typeBuf); err != nil {
+	if _, err := io.ReadFull(s.clientReader, typeBuf); err != nil {
 		return nil, err
 	}
 
-	// Read message length (4 bytes)
 	lengthBuf := make([]byte, 4)
-	if _, err := io.ReadFull(s.clientConn, lengthBuf); err != nil {
+	if _, err := io.ReadFull(s.clientReader, lengthBuf); err != nil {
 		return nil, err
 	}
 
 	length := int(lengthBuf[0])<<24 | int(lengthBuf[1])<<16 | int(lengthBuf[2])<<8 | int(lengthBuf[3])
 
-	// Read the password data
 	dataBuf := make([]byte, length-4)
-	if _, err := io.ReadFull(s.clientConn, dataBuf); err != nil {
+	if _, err := io.ReadFull(s.clientReader, dataBuf); err != nil {
 		return nil, err
 	}
 
-	// Parse password message
 	password := &pgproto3.PasswordMessage{}
 	// Null-terminated password string
 	password.Password = string(dataBuf[:len(dataBuf)-1])
