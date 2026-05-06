@@ -5,7 +5,7 @@ go 1.25.5
 require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-mysql-org/go-mysql v1.15.0
-	github.com/go-sql-driver/mysql v1.9.3
+	github.com/go-sql-driver/mysql v1.10.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/knadh/koanf/parsers/json v1.0.0
