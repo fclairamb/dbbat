@@ -38,8 +38,12 @@ type session struct {
 	grant         *store.Grant
 	connectionUID uuid.UUID
 
-	// Upstream go-ora connection (kept alive to prevent GC)
-	goOraConn interface{ Close() error }
+	// upstreamCustomHash records whether the upstream's Set Protocol response
+	// had caps[4]&0x20 set (customHash). Captured during the pre-auth relay
+	// before we strip the bit for the client. The upstream AUTH client uses it
+	// to switch between the legacy 6949 / MD5-XOR path and the modern 18453 /
+	// PBKDF2 path.
+	upstreamCustomHash bool
 
 	// Query tracking
 	tracker      *oracleQueryTracker
@@ -101,12 +105,16 @@ func (s *session) run() error {
 	// Proxy TNS Accept + Set Protocol + Set Data Types through to the real upstream
 	// so each client (go-ora, python-oracledb, dbeaver, sqlplus 23c…) receives a
 	// server response tailored to its own capability/datatype registration.
-	// The relay returns the client's AUTH Phase 1 packet (not forwarded) so dbbat
-	// can perform terminated O5LOGON authentication with its own user store.
-	phase1Pkt, err := s.relayPreAuthNegotiation(connectPkt)
+	// The relay returns the client's AUTH Phase 1 packet (not forwarded) AND the
+	// still-open upstream socket. Reusing that socket through AUTH keeps the TTC
+	// capability levels aligned end-to-end so OALL8 from caps-rich clients (SQLcl
+	// JDBC thin) parses correctly upstream.
+	phase1Pkt, upstreamConn, err := s.relayPreAuthNegotiation(connectPkt)
 	if err != nil {
 		return fmt.Errorf("pre-auth relay failed: %w", err)
 	}
+
+	s.upstreamConn = upstreamConn
 
 	// Step 5: Authenticate client via O5LOGON (API key as Oracle password)
 	if err := s.authenticateClient(phase1Pkt); err != nil {
@@ -120,7 +128,8 @@ func (s *session) run() error {
 		slog.String("username", s.username),
 		slog.String("database", s.database.Name))
 
-	// Step 6: Connect to upstream Oracle and authenticate with stored credentials
+	// Step 6: Authenticate to upstream Oracle on the relay-phase socket using
+	// stored database credentials.
 	if err := s.upstreamAuth(); err != nil {
 		return fmt.Errorf("upstream auth failed: %w", err)
 	}
@@ -794,11 +803,7 @@ func (s *session) cleanup() {
 		}
 	}
 
-	if s.goOraConn != nil {
-		if err := s.goOraConn.Close(); err != nil {
-			s.logger.ErrorContext(s.ctx, "failed to close go-ora connection", slog.Any("error", err))
-		}
-	} else if s.upstreamConn != nil {
+	if s.upstreamConn != nil {
 		if err := s.upstreamConn.Close(); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to close upstream connection", slog.Any("error", err))
 		}

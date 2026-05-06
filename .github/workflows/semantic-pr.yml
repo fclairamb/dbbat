@@ -27,8 +27,12 @@ jobs:
             db
             deps
             docs
+            dump
             grants
             migrations
+            mysql
+            oracle
+            postgresql
             proxy
             store
             ui
