@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.8.0](https://github.com/fclairamb/dbbat/compare/v0.7.0...v0.8.0) (2026-05-06)
+
+
+### Features
+
+* **proxy:** PostgreSQL TLS termination ([#131](https://github.com/fclairamb/dbbat/issues/131)) ([8c76c00](https://github.com/fclairamb/dbbat/commit/8c76c00530244dd6fb50f98b7d9c324747e223a5))
+
+
+### Bug Fixes
+
+* **api:** fold accents in Slack OAuth username generation ([#130](https://github.com/fclairamb/dbbat/issues/130)) ([08b7fd7](https://github.com/fclairamb/dbbat/commit/08b7fd7b89fd0b853433574c52893e9a5861c19a))
+* **oracle:** use user_id_len for structured Phase 1 username parsing ([#134](https://github.com/fclairamb/dbbat/issues/134)) ([5593564](https://github.com/fclairamb/dbbat/commit/5593564e81e274cfa7a9674722967459a4f695db))
+
 ## [0.7.0](https://github.com/fclairamb/dbbat/compare/v0.6.0...v0.7.0) (2026-05-06)
 
 
