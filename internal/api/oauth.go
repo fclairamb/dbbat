@@ -15,6 +15,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"golang.org/x/text/runes"
+	"golang.org/x/text/transform"
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/fclairamb/dbbat/internal/auth"
 	"github.com/fclairamb/dbbat/internal/crypto"
@@ -313,6 +316,16 @@ func (s *Server) buildCallbackURL(r *http.Request, providerName string) string {
 // usernameRegexp matches characters that are NOT safe for usernames.
 var usernameRegexp = regexp.MustCompile(`[^a-z0-9._-]`)
 
+// accentFold decomposes accented characters to base + combining mark, drops the
+// marks, then recomposes — so `é` becomes `e` rather than being stripped by
+// usernameRegexp. Letters that don't decompose (`ø`, `ß`, CJK, etc.) fall
+// through to the regex strip and the email/`"user"` fallback path.
+var accentFold = transform.Chain(
+	norm.NFD,
+	runes.Remove(runes.In(unicode.Mn)),
+	norm.NFC,
+)
+
 // generateUniqueUsername creates a username from a display name or email.
 // It sanitizes the input and appends a short suffix if the name is already taken.
 func (s *Server) generateUniqueUsername(ctx context.Context, displayName, email string) string {
@@ -326,8 +339,9 @@ func (s *Server) generateUniqueUsername(ctx context.Context, displayName, email 
 		base = "user"
 	}
 
-	// Normalize: lowercase, replace spaces with dots, strip unsafe chars
+	// Normalize: lowercase, fold accents, replace spaces with dots, strip unsafe chars
 	base = strings.ToLower(base)
+	base, _, _ = transform.String(accentFold, base)
 	base = strings.Map(func(r rune) rune {
 		if unicode.IsSpace(r) {
 			return '.'
