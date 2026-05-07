@@ -98,6 +98,69 @@ Validated locally against Oracle 19c (`oracle-abynonprod.db.stonal.io`):
 
 The SQLcl path forward is now just **Phase-1 forwarding** (not the broader "find the right verifier-6949+customHash derivation" rabbit hole that the original spec sketched). Picking up that work means: capture SQLcl's Phase 1 from the relay handoff (already available as `phase1Pkt`), locate the username field, splice in the upstream DB user, write the modified packet to the upstream socket. The Phase 2 path is unchanged because dbbat continues to drive Phase 2 with its own crypto.
 
+## Update 2026-05-07 (later): Phase-1 forwarding shipped, SQLcl still blocked — back to verifier-6949+customHash
+
+Phase-1 forwarding landed in #138 (`internal/proxy/oracle/phase1_forward.go`,
+`rewriteAuthPhase1Username`) and works: the upstream now accepts SQLcl's
+Phase 1 wire shape (with the username swapped to the upstream DB user)
+and returns a normal challenge. python-oracledb thin and go-ora are
+unaffected (no regression).
+
+But the **rabbit hole the earlier update declared closed turned out to be
+the actual root cause for SQLcl**:
+
+| Captured upstream Phase 1 response | Verifier | Outcome |
+|------------------------------------|----------|---------|
+| 363 bytes — includes `AUTH_PBKDF2_CSK_SALT` / `_VGEN_COUNT` / `_SDER_COUNT` | 18453 | dbbat completes Phase 2; upstream returns AUTH OK; client rejects (next layer) |
+| 261 bytes — no `AUTH_PBKDF2_*` fields | 6949 with `customHash=true` | dbbat's `derivePasswordEncKey` runs PBKDF2 with an empty `pbkdf2ChkSalt` → wrong key → upstream rejects Phase 2 with two TNS Markers (interrupt + reset) and RSTs the connection |
+
+The same upstream / same DB user returns verifier 6949 most of the time
+and verifier 18453 occasionally; the trigger has not been pinned down
+(possibly tied to whether ANO / TLS handshake bits ride along — JDBC
+thin's `anoEnabled=true` may switch it). Both cases need to work end-to-end.
+
+For the verifier-18453 path, SQLcl gets to AUTH OK validation. Captured
+JDBC stack via the ojdbc11 harness is `T4CTTIfun.receive:1048` →
+`T4CTTIfun.doRPC:237` → `T4CTTIoauthenticate.doOAUTH:547` —
+JDBC's protocol-violation default case — but no FINEST trace lines
+reveal which message-code byte trips it. python-oracledb thin accepts
+the same forwarded AUTH OK without complaint.
+
+For the verifier-6949+customHash+no-PBKDF2 path, JDBC source / bytecode
+reverse-engineering (`T4CTTIoauthenticate.doOAUTHWithO5Logon` is the
+target method) is the unblocker. Whatever combined-key derivation JDBC
+uses in this case, dbbat (and go-ora v2 — both implement the same
+algorithm) does not. `~/go/pkg/mod/github.com/sijms/go-ora/v2@v2.9.0/auth_object.go`
+line 460 onwards is the canonical reference for the path dbbat copies;
+the divergence from JDBC must live in the `customHash & verifier=6949 & no PBKDF2 fields` corner.
+
+### Reproducing today
+
+```bash
+# Build + run dbbat in test mode (DBB_LOG_LEVEL=debug surfaces every
+# upstream AUTH packet's hex_full so you can compare verifier-18453 and
+# verifier-6949 traces side by side)
+go build -o /tmp/dbbat .
+DBB_DSN="postgres://postgres:postgres@localhost:5001/dbbat?sslmode=disable" \
+  DBB_RUN_MODE=test DBB_LOG_LEVEL=debug \
+  DBB_LISTEN_ORA=":1522" DBB_LISTEN_API=":4200" DBB_LISTEN_PG=":5434" \
+  /tmp/dbbat &
+
+# Provision (admin/admintest, oracle-abynonprod, LABEOMNGR_DEV)
+# Then drive each client:
+go run /tmp/gooracheck.go             # PASS
+python3 -c "import oracledb; ..."     # PASS
+sql -S connector/dbb_connector_key@localhost:1522/abynonprod   # FAIL (ORA-17401)
+
+# Bytecode reverse-engineering recipe for the JDBC handler:
+mkdir -p /tmp/jdbc-extract && cd /tmp/jdbc-extract
+JDBC=/opt/homebrew/Caskroom/sqlcl/26.1.0.086.1709/sqlcl/lib/ojdbc11.jar
+jar xf $JDBC oracle/jdbc/driver/T4CTTIoauthenticate.class
+javap -c -p oracle/jdbc/driver/T4CTTIoauthenticate.class > /tmp/oauth.javap
+# doOAUTHWithO5Logon at line 1746 is where the password-key derivation
+# happens; cross-reference against oracle/jdbc/util/Hash.class etc.
+```
+
 ## Local validation setup (2026-05-06)
 
 For follow-up debugging, the working environment is:
