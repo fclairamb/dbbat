@@ -441,8 +441,18 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 		return fmt.Errorf("failed to load O5LOGON verifier: %w", err)
 	}
 
-	// Generate O5LOGON challenge
+	// Generate O5LOGON challenge. When the upstream's Set Protocol response
+	// had caps[4]&0x20 set, we run customHash mode: the challenge advertises
+	// AUTH_PBKDF2_CSK_SALT / VGEN_COUNT / SDER_COUNT and DecryptPassword
+	// uses the PBKDF2 combined-key derivation. This keeps the customHash
+	// bit on for the client (no strip needed in the relay) so the upstream
+	// doesn't downgrade to verifier 6949 with no PBKDF2 fields when the
+	// client advertises modern caps in subsequent packets.
 	o5 := NewO5LogonServer(verifier.O5LogonSalt, verifier.decryptedVerifier)
+	if s.upstreamCustomHash {
+		o5.EnableCustomHash()
+	}
+
 	encSessKey, vfrData, err := o5.GenerateChallenge()
 	if err != nil {
 		return fmt.Errorf("failed to generate O5LOGON challenge: %w", err)
@@ -451,8 +461,9 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	// Send AUTH challenge to client
 	s.logger.DebugContext(s.ctx, "sending AUTH challenge",
 		slog.Int("sesskey_len", len(encSessKey)),
-		slog.Int("vfrdata_len", len(vfrData)))
-	challengePayload := buildAuthChallenge(encSessKey, vfrData)
+		slog.Int("vfrdata_len", len(vfrData)),
+		slog.Bool("custom_hash", o5.CustomHashEnabled()))
+	challengePayload := buildAuthChallenge(encSessKey, vfrData, o5.PBKDF2ChkSalt(), o5.PBKDF2VgenCount(), o5.PBKDF2SderCount())
 	challengePayload = append(challengePayload, buildAuthChallengeEndMarker()...)
 	s.logger.DebugContext(s.ctx, "AUTH challenge payload",
 		slog.Int("len", len(challengePayload)),

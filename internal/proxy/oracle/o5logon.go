@@ -19,6 +19,20 @@ const (
 	o5LogonVerifierType      = "6949" // SHA-1 based verifier (legacy, used in value suffix)
 	o5LogonVerifierTypeNum   = 6949   // Verifier type sent as KV pair flag
 	o5LogonPasswordPrefixLen = 16     // Random prefix prepended to password by client
+
+	// o5LogonPbkdf2ChkSaltLen is the length of AUTH_PBKDF2_CSK_SALT in bytes
+	// (32-character hex on the wire). go-ora rejects values whose hex form is
+	// any other length (`network.NewOracleError(28041)`), so this is fixed.
+	o5LogonPbkdf2ChkSaltLen = 16
+
+	// Iteration counts advertised in AUTH_PBKDF2_VGEN_COUNT / SDER_COUNT.
+	// Matches what real Oracle 19c sends and what go-ora's auth_object.go
+	// clamps to. dbbat-as-server doesn't actually iterate VGEN itself (the
+	// verifier_key is precomputed in legacy 6949 form at API key creation
+	// time), but advertising 4096 keeps clients from clamping to a different
+	// minimum which would mismatch our derivation if they cached the value.
+	o5LogonDefaultPbkdf2VgenCount = 4096
+	o5LogonDefaultPbkdf2SderCount = 3
 )
 
 // O5LogonServer implements server-side O5LOGON authentication.
@@ -28,9 +42,28 @@ type O5LogonServer struct {
 	verifierKey      []byte // 24-byte key derived from password+salt
 	serverSessionKey []byte // 48-byte random (generated per auth)
 
-	// CombinedKey is set by DecryptPassword to MD5(serverSessKey || clientSessKey)
-	// derived from both session keys after a successful Phase 2. It is the AES key
-	// the client expects for AUTH_SVR_RESPONSE in the AUTH OK forwarded back.
+	// customHash, when true, has GenerateChallenge advertise AUTH_PBKDF2_*
+	// fields and DecryptPassword switch to the PBKDF2-derived combined-key
+	// path. Mirrors the customHash branch dbbat already implements on the
+	// upstream-as-client side; matches what real Oracle 19c does on the
+	// wire when caps[4]&0x20 is set in the Set Protocol response. Without
+	// this we have to strip the bit before forwarding to the client and
+	// the upstream then downgrades to verifier 6949 with no PBKDF2 fields,
+	// breaking SQLcl Phase 2.
+	customHash bool
+
+	// pbkdf2ChkSalt is generated per session when customHash is true, sent
+	// as AUTH_PBKDF2_CSK_SALT in the challenge, and reused in
+	// DecryptPassword to derive the combined key.
+	pbkdf2ChkSalt []byte
+
+	pbkdf2VgenCount int
+	pbkdf2SderCount int
+
+	// CombinedKey is set by DecryptPassword to the negotiated combined key
+	// — either MD5/XOR (legacy) or the PBKDF2-customHash derivation. It is
+	// the AES key the client expects for AUTH_SVR_RESPONSE in the AUTH OK
+	// forwarded back.
 	CombinedKey []byte
 }
 
@@ -50,18 +83,61 @@ func deriveVerifierKey(password string, salt []byte) []byte {
 // NewO5LogonServer creates a server from stored verifier data.
 func NewO5LogonServer(salt, verifierKey []byte) *O5LogonServer {
 	return &O5LogonServer{
-		salt:        salt,
-		verifierKey: verifierKey,
+		salt:            salt,
+		verifierKey:     verifierKey,
+		pbkdf2VgenCount: o5LogonDefaultPbkdf2VgenCount,
+		pbkdf2SderCount: o5LogonDefaultPbkdf2SderCount,
 	}
 }
 
+// EnableCustomHash switches the server into customHash mode. GenerateChallenge
+// will then advertise per-session AUTH_PBKDF2_CSK_SALT / VGEN_COUNT / SDER_COUNT
+// fields and DecryptPassword will use the PBKDF2-customHash combined-key
+// derivation. Used when the upstream's Set Protocol response had caps[4]&0x20
+// set — keeping the bit on the client side avoids the verifier-6949 downgrade
+// that real Oracle emits when the client signals "no customHash support".
+func (s *O5LogonServer) EnableCustomHash() {
+	s.customHash = true
+}
+
+// CustomHashEnabled reports whether the server is in customHash mode. Used by
+// the challenge builder to decide whether to include AUTH_PBKDF2_* fields.
+func (s *O5LogonServer) CustomHashEnabled() bool {
+	return s.customHash
+}
+
+// PBKDF2ChkSalt returns the per-session salt as an uppercase hex string.
+// Empty until GenerateChallenge has run in customHash mode.
+func (s *O5LogonServer) PBKDF2ChkSalt() string {
+	return strings.ToUpper(hex.EncodeToString(s.pbkdf2ChkSalt))
+}
+
+// PBKDF2VgenCount returns the verifier-generation iteration count advertised
+// in the challenge as AUTH_PBKDF2_VGEN_COUNT.
+func (s *O5LogonServer) PBKDF2VgenCount() int { return s.pbkdf2VgenCount }
+
+// PBKDF2SderCount returns the session-key-derivation iteration count
+// advertised in the challenge as AUTH_PBKDF2_SDER_COUNT.
+func (s *O5LogonServer) PBKDF2SderCount() int { return s.pbkdf2SderCount }
+
 // GenerateChallenge produces the AUTH_SESSKEY and AUTH_VFR_DATA for the client.
 // Returns hex-encoded encrypted server session key and auth verifier data.
+//
+// In customHash mode it also generates a fresh AUTH_PBKDF2_CSK_SALT (accessible
+// via PBKDF2ChkSalt) so the caller can include the matching KV fields in the
+// Phase 1 challenge sent on the wire.
 func (s *O5LogonServer) GenerateChallenge() (string, string, error) {
 	// Generate random server session key
 	s.serverSessionKey = make([]byte, o5LogonSessionKeyLength)
 	if _, err := rand.Read(s.serverSessionKey); err != nil {
 		return "", "", fmt.Errorf("failed to generate server session key: %w", err)
+	}
+
+	if s.customHash {
+		s.pbkdf2ChkSalt = make([]byte, o5LogonPbkdf2ChkSaltLen)
+		if _, err := rand.Read(s.pbkdf2ChkSalt); err != nil {
+			return "", "", fmt.Errorf("failed to generate AUTH_PBKDF2_CSK_SALT: %w", err)
+		}
 	}
 
 	// Derive encryption key from verifier key
@@ -84,7 +160,15 @@ func (s *O5LogonServer) GenerateChallenge() (string, string, error) {
 
 // DecryptPassword extracts the plaintext password from the client's AUTH Phase 2.
 // The client encrypts: random_prefix(16 bytes) + password using AES-192-CBC
-// with a key derived from MD5(server_session_key || client_session_key).
+// with a combined key derived from both session keys.
+//
+// In customHash mode the server attempts both the customHash combined-key
+// derivation (matching go-ora and JDBC, where the server-advertised customHash
+// bit and the AUTH_PBKDF2_* fields are honored) and the legacy MD5/XOR path
+// (matching python-oracledb thin, which always picks legacy when the
+// session_key is 48 bytes regardless of caps[4]&0x20). The first candidate
+// that yields a printable plaintext password wins. Out of customHash mode,
+// only the legacy path is tried.
 //
 // Side-effect: on success, the negotiated combined key is stored on the
 // receiver as CombinedKey so callers can reuse it (e.g. to encrypt
@@ -104,32 +188,75 @@ func (s *O5LogonServer) DecryptPassword(encClientSessKey, encPassword string) (s
 		return "", fmt.Errorf("failed to decrypt client session key: %w", err)
 	}
 
-	// Derive combined key from both session keys
-	combinedKey := deriveCombinedKey(s.serverSessionKey, clientSessionKey)
-	s.CombinedKey = combinedKey
-
-	// Decode and decrypt the password
 	encPasswordBytes, err := hex.DecodeString(encPassword)
 	if err != nil {
 		return "", fmt.Errorf("failed to decode encrypted password: %w", err)
 	}
 
-	decryptedPassword, err := aes192CBCDecrypt(combinedKey, encPasswordBytes)
+	candidates := s.combinedKeyCandidates(clientSessionKey)
+
+	for _, key := range candidates {
+		password, ok := tryDecryptPasswordWithKey(key, encPasswordBytes)
+		if !ok {
+			continue
+		}
+
+		s.CombinedKey = key
+
+		return password, nil
+	}
+
+	return "", ErrDecryptedPasswordTooShort
+}
+
+// combinedKeyCandidates returns the combined-key derivations to try, in order
+// of likelihood for the current mode.
+//
+//   - customHash mode: customHash PBKDF2 derivation first (go-ora, JDBC), then
+//     legacy MD5/XOR (python-oracledb thin's verifier-6949 path is hard-coded
+//     to legacy regardless of customHash advertisement).
+//   - non-customHash mode: legacy only.
+func (s *O5LogonServer) combinedKeyCandidates(clientSessionKey []byte) [][]byte {
+	legacy := deriveCombinedKey(s.serverSessionKey, clientSessionKey)
+
+	if !s.customHash {
+		return [][]byte{legacy}
+	}
+
+	// customHash branch mirrors derivePasswordEncKey in upstream_auth_crypto.go:
+	// for verifier 6949 + customHash, joined = clientSessionKey[:24] ||
+	// serverSessionKey[:24], then chained HMAC-SHA512 over hex(joined) keyed
+	// with pbkdf2ChkSalt for sderCount turns, truncated to 24 bytes.
+	joined := append(append([]byte{}, clientSessionKey[:24]...), s.serverSessionKey[:24]...)
+	hexJoined := strings.ToUpper(hex.EncodeToString(joined))
+	customHashKey := pbkdf2SpeedyKey(s.pbkdf2ChkSalt, []byte(hexJoined), s.pbkdf2SderCount)[:24]
+
+	return [][]byte{customHashKey, legacy}
+}
+
+// tryDecryptPasswordWithKey attempts AES-192-CBC decryption of the encrypted
+// password with the supplied combined key. Returns the recovered password
+// (with prefix and null padding stripped) plus ok=true on success. ok=false
+// signals the candidate key produced an obviously wrong plaintext (too short
+// or non-printable).
+func tryDecryptPasswordWithKey(key, encPasswordBytes []byte) (string, bool) {
+	plaintext, err := aes192CBCDecrypt(key, encPasswordBytes)
 	if err != nil {
-		return "", fmt.Errorf("failed to decrypt password: %w", err)
+		return "", false
 	}
 
-	// Strip the 16-byte random prefix
-	if len(decryptedPassword) <= o5LogonPasswordPrefixLen {
-		return "", ErrDecryptedPasswordTooShort
+	if len(plaintext) <= o5LogonPasswordPrefixLen {
+		return "", false
 	}
 
-	// Remove random prefix and any null padding
-	password := decryptedPassword[o5LogonPasswordPrefixLen:]
-	// Trim null bytes from the end (PKCS padding remnants)
+	password := plaintext[o5LogonPasswordPrefixLen:]
 	password = trimNullBytes(password)
 
-	return string(password), nil
+	if len(password) == 0 || !isPrintableASCII(password) {
+		return "", false
+	}
+
+	return string(password), true
 }
 
 // deriveAESKey returns the verifier key zero-padded to 24 bytes for use as AES-192 key.

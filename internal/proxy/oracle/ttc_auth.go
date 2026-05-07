@@ -2,15 +2,19 @@ package oracle
 
 import (
 	"encoding/binary"
+	"strconv"
 	"strings"
 )
 
 // TTC AUTH key names used in Oracle authentication messages.
 const (
-	authKeyUsername = "AUTH_TERMINAL"
-	authKeySessKey  = "AUTH_SESSKEY"
-	authKeyVfrData  = "AUTH_VFR_DATA"
-	authKeyPassword = "AUTH_PASSWORD"
+	authKeyUsername        = "AUTH_TERMINAL"
+	authKeySessKey         = "AUTH_SESSKEY"
+	authKeyVfrData         = "AUTH_VFR_DATA"
+	authKeyPassword        = "AUTH_PASSWORD"
+	authKeyPbkdf2CskSalt   = "AUTH_PBKDF2_CSK_SALT"
+	authKeyPbkdf2VgenCount = "AUTH_PBKDF2_VGEN_COUNT"
+	authKeyPbkdf2SderCount = "AUTH_PBKDF2_SDER_COUNT"
 )
 
 // authKVPair represents a key-value pair in a TTC AUTH message.
@@ -187,14 +191,29 @@ func isPrintableASCII(b []byte) bool {
 // buildAuthChallenge constructs the TTC AUTH challenge response using Oracle's
 // TTC wire encoding (compressed uint + CLR encoding).
 //
-// The challenge contains AUTH_SESSKEY and AUTH_VFR_DATA key-value pairs that the
-// client uses for O5LOGON authentication.
-func buildAuthChallenge(encServerSessKey, authVfrData string) []byte {
+// In customHash mode (pbkdf2ChkSaltHex non-empty), three extra KV pairs are
+// included: AUTH_PBKDF2_CSK_SALT plus AUTH_PBKDF2_VGEN_COUNT and
+// AUTH_PBKDF2_SDER_COUNT. Together they tell the client to derive the
+// combined key via PBKDF2 (matching what real Oracle 19c sends when
+// caps[4]&0x20 is set in the Set Protocol response).
+func buildAuthChallenge(encServerSessKey, authVfrData, pbkdf2ChkSaltHex string, vgenCount, sderCount int) []byte {
+	pairs := 2
+
+	if pbkdf2ChkSaltHex != "" {
+		pairs += 3
+	}
+
 	buf := make([]byte, 0, 256)
 	buf = append(buf, 0x00, 0x00, byte(TTCFuncResponse)) // data flags + 0x08
-	buf = append(buf, ttcCompressedUint(2)...)           // 2 KV pairs
+	buf = append(buf, ttcCompressedUint(uint64(pairs))...)
 	buf = append(buf, ttcKeyVal(authKeySessKey, encServerSessKey, 1)...)
 	buf = append(buf, ttcKeyVal(authKeyVfrData, authVfrData, o5LogonVerifierTypeNum)...)
+
+	if pbkdf2ChkSaltHex != "" {
+		buf = append(buf, ttcKeyVal(authKeyPbkdf2CskSalt, pbkdf2ChkSaltHex, 0)...)
+		buf = append(buf, ttcKeyVal(authKeyPbkdf2VgenCount, strconv.Itoa(vgenCount), 0)...)
+		buf = append(buf, ttcKeyVal(authKeyPbkdf2SderCount, strconv.Itoa(sderCount), 0)...)
+	}
 
 	return buf
 }

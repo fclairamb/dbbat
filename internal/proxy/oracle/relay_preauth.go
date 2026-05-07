@@ -87,37 +87,6 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 	}
 }
 
-// stripCustomHashFlag scans for the ServerCompileTimeCaps block in a Set Protocol
-// response and clears bit 5 (0x20) of caps[4] — the customHash flag that switches
-// modern clients to a PBKDF2 combined-key derivation dbbat doesn't implement.
-//
-// The block is preceded by `2a 06 01 01 01` (length+meta tags); caps[4] sits one
-// byte after that prefix. Verified against captured Oracle 19c traffic where
-// caps[4] = 0x6f.
-func stripCustomHashFlag(raw []byte) ([]byte, bool) {
-	marker := []byte{0x2a, 0x06, 0x01, 0x01, 0x01}
-
-	idx := bytes.Index(raw, marker)
-	if idx < 0 {
-		return raw, false
-	}
-
-	caps4Off := idx + len(marker)
-	if caps4Off >= len(raw) {
-		return raw, false
-	}
-
-	if raw[caps4Off]&0x20 == 0 {
-		return raw, false
-	}
-
-	mutated := make([]byte, len(raw))
-	copy(mutated, raw)
-	mutated[caps4Off] &^= 0x20
-
-	return mutated, true
-}
-
 // observeCustomHashFlag reports whether the Set Protocol response carries
 // caps[4]&0x20 (customHash). Used to remember the upstream's true cap level
 // before we mutate the bytes for the client.
@@ -159,22 +128,18 @@ func relayUpstreamResponses(s *session, upstream net.Conn) error {
 
 	// Set Protocol responses carry ServerCompileTimeCaps. caps[4]&0x20 enables
 	// a customHash (PBKDF2) combined-key derivation in modern Oracle clients
-	// (go-ora, JDBC thin, SQLcl). dbbat's O5LOGON server uses the simpler MD5
-	// XOR derivation; if we forward the bit set, the client's combined key
-	// won't match dbbat's and the AUTH_PASSWORD decryption produces garbage.
-	// Stripping the bit forces matching MD5 behavior on the client side.
+	// (go-ora, JDBC thin, SQLcl). dbbat's O5LOGON server now implements that
+	// derivation too (see EnableCustomHash on O5LogonServer), so we forward
+	// the bit unchanged: dbbat-as-server, the client, and the upstream all
+	// agree on customHash mode. Previously we stripped the bit to match
+	// dbbat's legacy-only server, which made the upstream emit verifier 6949
+	// with no PBKDF2 fields when the client subsequently advertised "no
+	// customHash support" — and broke SQLcl Phase 2 derivation.
 	//
-	// We still record the original bit on the session so the upstream-as-client
-	// AUTH path uses the modern PBKDF2 derivation that the upstream actually
-	// negotiated.
+	// We still record the bit on the session so authenticateClient can
+	// switch the O5LOGON server into customHash mode for this connection.
 	if observeCustomHashFlag(raw) {
 		s.upstreamCustomHash = true
-	}
-
-	if mutated, ok := stripCustomHashFlag(raw); ok {
-		s.logger.DebugContext(s.ctx, "pre-auth relay: stripped customHash flag from Set Protocol response")
-
-		raw = mutated
 	}
 
 	s.logger.DebugContext(s.ctx, "pre-auth relay: upstream→client",
