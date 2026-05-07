@@ -1,7 +1,6 @@
 package oracle
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -74,7 +73,7 @@ func (s *session) runUpstreamClientAuth() error {
 		return fmt.Errorf("write upstream AUTH Phase 1: %w", err)
 	}
 
-	authResp, err := s.readUpstreamAuthMessages()
+	authResp, _, err := s.readUpstreamAuthMessages()
 	if err != nil {
 		return fmt.Errorf("read upstream AUTH Phase 1 response: %w", err)
 	}
@@ -97,7 +96,7 @@ func (s *session) runUpstreamClientAuth() error {
 		return fmt.Errorf("write upstream AUTH Phase 2: %w", err)
 	}
 
-	finalResp, err := s.readUpstreamAuthMessages()
+	finalResp, finalRaw, err := s.readUpstreamAuthMessages()
 	if err != nil {
 		return fmt.Errorf("read upstream AUTH Phase 2 response: %w", err)
 	}
@@ -105,6 +104,8 @@ func (s *session) runUpstreamClientAuth() error {
 	if finalResp.OracleErr != 0 {
 		return fmt.Errorf("%w: ORA-%05d %s", ErrUpstreamAuthPhase2Rejected, finalResp.OracleErr, finalResp.OracleErrText)
 	}
+
+	s.upstreamAuthOKResponse = finalRaw
 
 	s.logger.InfoContext(s.ctx, "upstream Oracle AUTH complete on relay-phase socket",
 		slog.String("user", s.database.Username),
@@ -122,6 +123,10 @@ func (s *session) writeUpstreamData(body []byte) error {
 	payload = append(payload, body...)
 
 	pkt := encodeV315DataPacket(payload)
+
+	s.logger.DebugContext(s.ctx, "upstream AUTH: writing packet",
+		slog.Int("pkt_len", len(pkt)),
+		slog.Int("body_len", len(body)))
 
 	if _, err := s.upstreamConn.Write(pkt); err != nil {
 		return fmt.Errorf("upstream write: %w", err)
@@ -147,16 +152,28 @@ type upstreamAuthResponse struct {
 // readUpstreamAuthMessages reads TNS Data packets from upstream until an
 // end-of-call message code (4 or 9) appears. Multiple Data packets may
 // carry pieces of the same TTC stream.
-func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, error) {
+//
+// The last raw Data packet read is returned alongside the parsed response.
+// Callers (notably runUpstreamClientAuth's Phase 2 read) reuse it as the
+// AUTH OK packet forwarded to the client after AUTH_SVR_RESPONSE patching.
+func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, error) {
 	resp := &upstreamAuthResponse{properties: make(map[string]string)}
 
-	var buf []byte
+	var (
+		buf     []byte
+		lastRaw []byte
+	)
 
 	for {
 		pkt, err := readTNSPacket(s.upstreamConn)
 		if err != nil {
-			return nil, fmt.Errorf("read upstream packet: %w", err)
+			return nil, nil, fmt.Errorf("read upstream packet: %w", err)
 		}
+
+		s.logger.DebugContext(s.ctx, "upstream AUTH: received packet",
+			slog.String("type", pkt.Type.String()),
+			slog.Int("raw_len", len(pkt.Raw)),
+			slog.Int("payload_len", len(pkt.Payload)))
 
 		if pkt.Type != TNSPacketTypeData {
 			s.logger.DebugContext(s.ctx, "upstream AUTH: skipping non-Data packet",
@@ -170,22 +187,30 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, error) {
 			continue
 		}
 
+		lastRaw = pkt.Raw
 		buf = append(buf, pkt.Payload[ttcDataFlagsSize:]...)
 
 		if parseAuthMessageStream(buf, resp) {
-			return resp, nil
+			return resp, lastRaw, nil
 		}
 	}
 }
 
-// parseAuthMessageStream walks a TTC byte stream and returns true when an
-// end-of-call message code (4 or 9) is observed.
+// parseAuthMessageStream walks a TTC byte stream and returns true when the
+// AUTH response is sufficiently complete: either after consuming a 0x08
+// dictionary (which carries the entire Phase 1 challenge or Phase 2 session
+// properties) or after seeing an explicit end-of-call code 0x04 / 0x09 with
+// an Oracle error.
 //
 // Codes:
 //
-//	0x08              dictionary (KV pairs)
-//	0x04 / 0x09       end-of-call (with a Summary structure)
-//	0x0F              warning (skipped)
+//	0x08              dictionary (KV pairs) — terminal: contains everything
+//	                  we need for Phase 1 (AUTH_SESSKEY + AUTH_VFR_DATA +
+//	                  AUTH_PBKDF2_*) or Phase 2 (AUTH_VERSION_STRING + ...).
+//	0x04 / 0x09       end-of-call (with a Summary structure). Auth flows use
+//	                  this only when the upstream rejects (no preceding 0x08)
+//	                  or as a trailing marker after a dict (already handled).
+//	0x0F              warning (6 bytes, skipped).
 //
 // The function is tolerant: when it cannot decode a region it returns false
 // so the caller reads more bytes.
@@ -198,12 +223,11 @@ func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse) bool {
 
 		switch msgCode {
 		case 0x08:
-			n, ok := parseAuthKVDictionary(buf[pos:], resp)
-			if !ok {
+			if _, ok := parseAuthKVDictionary(buf[pos:], resp); !ok {
 				return false
 			}
 
-			pos += n
+			return true
 
 		case 0x04, 0x09:
 			parseAuthSummary(buf[pos:], resp)
@@ -227,15 +251,17 @@ func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse) bool {
 
 // parseAuthKVDictionary parses a TTC AUTH KV dictionary that follows a 0x08
 // message code. Returns ok=false when the dictionary is truncated.
+//
+// The dictionary length is a TTC compressed integer, matching go-ora's
+// session.GetInt(2, bigEndian=true, compress=true). A 1-byte size prefix is
+// followed by `size` big-endian bytes encoding the count of KV pairs.
 func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse) (int, bool) {
-	const dictLenSize = 2
-
-	if len(buf) < dictLenSize {
+	dictLen, n := readCompressedInt(buf)
+	if n == 0 {
 		return 0, false
 	}
 
-	dictLen := int(binary.BigEndian.Uint16(buf[:dictLenSize]))
-	pos := dictLenSize
+	pos := n
 
 	for i := 0; i < dictLen; i++ {
 		pair, ok := readAuthKVPair(buf[pos:])
@@ -336,25 +362,29 @@ func recordAuthProperty(key, value string, flag int, resp *upstreamAuthResponse)
 
 // parseAuthSummary walks the Summary structure that follows a code 4 / 9
 // message, extracting any embedded ORA-* error. Best-effort.
+//
+// The Summary's first compressed int is EndOfCallStatus (not the Oracle
+// error code). For Phase 1 challenge responses Oracle returns EndOfCallStatus
+// non-zero with RetCode=0, which is not an error. Only set OracleErr when an
+// "ORA-NNNNN" string is actually present in the buffer (matching go-ora's
+// HasError behavior).
 func parseAuthSummary(buf []byte, resp *upstreamAuthResponse) {
-	const minSummaryLen = 6
-
-	if len(buf) < minSummaryLen {
+	idx := indexOf(buf, []byte("ORA-"))
+	if idx < 0 {
 		return
 	}
 
-	retCode, _ := readCompressedInt(buf)
-	if retCode != 0 {
-		resp.OracleErr = retCode
+	end := idx
+	for end < len(buf) && buf[end] != 0x00 && buf[end] != 0x0A {
+		end++
 	}
 
-	if idx := indexOf(buf, []byte("ORA-")); idx >= 0 {
-		end := idx
-		for end < len(buf) && buf[end] != 0x00 && buf[end] != 0x0A {
-			end++
-		}
+	resp.OracleErrText = string(buf[idx:end])
 
-		resp.OracleErrText = string(buf[idx:end])
+	if end-idx >= 4+5 {
+		if code, err := strconv.Atoi(string(buf[idx+4 : idx+4+5])); err == nil {
+			resp.OracleErr = code
+		}
 	}
 }
 

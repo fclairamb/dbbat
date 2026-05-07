@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha512"
-	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"log/slog"
@@ -463,12 +462,9 @@ func buildSyntheticAuthPhase1Response(encServerKey, salt, csk, vgen, sder string
 		{"AUTH_PBKDF2_SDER_COUNT", sder, 0},
 	}
 
-	dictLenBuf := make([]byte, 2)
-	binary.BigEndian.PutUint16(dictLenBuf, uint16(len(pairs)))
-
 	buf := make([]byte, 0, 256)
 	buf = append(buf, 0x08)
-	buf = append(buf, dictLenBuf...)
+	buf = append(buf, ttcCompressedUint(uint64(len(pairs)))...)
 
 	for _, p := range pairs {
 		buf = append(buf, ttcKeyVal(p.key, p.value, p.flag)...)
