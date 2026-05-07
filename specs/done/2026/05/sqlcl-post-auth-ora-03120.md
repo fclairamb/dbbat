@@ -202,6 +202,57 @@ When the upstream *does* return verifier 18453, dbbat completes both phases and 
 - `/tmp/jdbc-finest.log` — JDBC trace at FINEST level. Note the trace doesn't surface byte-level message codes; only packet sizes.
 - `/tmp/JdbcTest.java` — minimal harness that bypasses the SQLcl wrapper's `JAVA_TOOL_OPTIONS` swallow.
 
+## Update 2026-05-07 (wire-trace baseline)
+
+Direct JDBC `LABEOMNGR_DEV` → `oracle-abynonprod:1521` (no dbbat) works
+end-to-end. Captured via a tiny Go TCP sniffer (60-line program forwarding
+:1530 → 1521 with hex-dump on every read):
+
+```
+C->S len=185 (Phase 1)
+  data_flags=0x0800
+  ttc=03 76 01 01
+  user_id_len=13, mode=1, magic=01 01 05 01 01
+  username (bare, no CLR prefix): LABEOMNGR_DEV
+  KV pairs: AUTH_TERMINAL=unknown, AUTH_PROGRAM_NM=SourceLauncher,
+            AUTH_MACHINE=Florents-MacBook-Air.local, AUTH_PID=1234,
+            AUTH_SID=florent
+S->C len=370 (Phase 1 challenge)
+  verifier_type=18453 (flag 0x4815 on AUTH_VFR_DATA)
+  AUTH_PBKDF2_CSK_SALT, _VGEN_COUNT, _SDER_COUNT all present
+  → modern PBKDF2 path; both go-ora and JDBC-internal succeed
+```
+
+Compared against dbbat-mediated SQLcl traffic (logged via dbbat's
+`upstream AUTH: forwarding rewritten client Phase 1` debug):
+
+| Source | Phase 1 body len | Upstream verifier |
+|--------|------------------|-------------------|
+| Direct JDBC | 177 (185 minus 8 TNS) | 18453 |
+| SQLcl conn #1/#2 through dbbat | 188 / 192 | 18453 |
+| SQLcl conn #3+ through dbbat | 162-173 | 6949 (no PBKDF2 fields) |
+
+So SQLcl's *first* connection is rich enough to draw verifier 18453, but
+later connections in the same process send a shorter Phase 1 whose
+trimmed KV-pair set drops a marker the upstream needs to keep emitting
+PBKDF2 fields. The shorter Phase 1 is something SQLcl itself produces —
+not a dbbat side-effect — but the precise KV pair that differs between
+the 192-byte and 162-byte forms hasn't been pinned down yet (would need
+a side-by-side dbbat-side hex dump of both forms; the existing debug
+log only records the first 40 bytes).
+
+Concrete next steps:
+
+1. Re-add a temporary `hex_full` log line in `relay_preauth.go` so the
+   complete `phase1Pkt.Payload` lands in the debug log. Drive SQLcl
+   through dbbat 3+ times in one process, diff the captured Phase 1s,
+   identify the dropped KV pair.
+2. Once the trigger KV pair is known, make `rewriteAuthPhase1Username`
+   inject it back when missing (or let the upstream see the client's
+   first-connection Phase 1 verbatim) to consistently get verifier 18453.
+3. Then return to instrumenting JDBC's `processRPA` to identify the
+   AUTH OK field that trips ORA-17401 even on the verifier-18453 path.
+
 ## Local validation setup (2026-05-06)
 
 For follow-up debugging, the working environment is:
