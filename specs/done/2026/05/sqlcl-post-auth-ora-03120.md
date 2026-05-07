@@ -161,6 +161,47 @@ javap -c -p oracle/jdbc/driver/T4CTTIoauthenticate.class > /tmp/oauth.javap
 # happens; cross-reference against oracle/jdbc/util/Hash.class etc.
 ```
 
+## Update 2026-05-07 (JDBC bytecode disassembly)
+
+Disassembly of `oracle.security.o5logon.O5Logon` (which `T4CTTIoauthenticate.doOAUTHWithO5Logon` delegates the crypto to) reveals two distinct code paths gated by `O5Logon.use_O7L_MR`:
+
+### Modern path (`use_O7L_MR=true`, default)
+
+`O5Logon.buildO5LogonKey` runs **standard `PBKDF2WithHmacSHA512`** via `javax.crypto.spec.PBEKeySpec`:
+
+- input chars: hex(`session_key[0:keyLen]` || `KB[0:keyLen]`) where keyLen is 16/24/32 depending on verifier (2361/6949/18453)
+- input salt: `AUTH_PBKDF2_CSK_SALT` (hex-decoded)
+- iteration count: `AUTH_PBKDF2_SDER_COUNT`
+- key length: `keyLen * 8` bits
+
+This matches go-ora's hand-rolled `pbkdf2SpeedyKey` (and dbbat's copy) — they implement the same PBKDF2 chain. So the modern path is byte-for-byte interoperable when the upstream supplies AUTH_PBKDF2_CSK_SALT / VGEN / SDER fields.
+
+### Legacy path (`use_O7L_MR=false`)
+
+For verifier 6949 (label 340 in the disassembly): XOR `session_key[off:off+24]` with `KB[off:off+24]`, then `MD5(buf[0:16]) || MD5(buf[16:24])` truncated to 24 bytes. Identical to go-ora's non-customHash 6949 branch.
+
+### `use_O7L_MR` initialization
+
+`T4CConnection.<init>` defaults `isO7L_MRExposed=true` (constant `iconst_1`), and `T4CTTIoauthenticate.lazyLoadO5LogonHelper` passes that flag through to `new O5Logon(...)`. **JDBC always takes the modern path on first construction**; no toggle was found that downgrades to legacy at runtime.
+
+Conclusion: the verifier-6949+customHash+no-PBKDF2-fields case is not actually reachable from JDBC against a vanilla Oracle 19c — JDBC would fail Phase 2 with `iter=0` from `PBEKeySpec` if it ever encountered it. The fact that **dbbat sees this challenge** means something about dbbat's pre-auth relay or Phase 1 forwarding is causing the upstream to return a degraded challenge. Likely culprits:
+
+1. **Set Protocol customHash strip is leaking upstream**. dbbat strips caps[4]&0x20 from the Set Protocol response forwarded *to the client*. If the upstream's view of the negotiation is somehow downgraded too (it shouldn't be — only the client-facing copy is mutated), the server may emit verifier 6949 without PBKDF2 fields because it thinks the peer doesn't support customHash.
+2. **Set Data Types caps mismatch**. SQLcl's Phase 1 sometimes negotiates a smaller TTC cap level (we observed `original_body_len=162` for the verifier-6949 cases vs `192` for verifier-18453). The shorter Phase 1 lacks one or more KV pairs that signal "I support PBKDF2"; the upstream then falls back to verifier 6949.
+3. **Some session-state oddity in the upstream**, possibly tied to ANO/encryption negotiation or to repeat-connection caching.
+
+(Tested: forcing the customHash branch to fall through to legacy MD5/XOR when `pbkdf2ChkSalt` is empty does NOT fix this — the upstream still rejects Phase 2 with TNS Markers. So the upstream is genuinely expecting PBKDF2-derived keys; it's just not telling us the salt/iter to use. Dropping back to legacy isn't the answer.)
+
+### What still trips JDBC after both phases complete
+
+When the upstream *does* return verifier 18453, dbbat completes both phases and forwards the AUTH OK with patched AUTH_SVR_RESPONSE. python-oracledb thin accepts this; SQLcl JDBC thin still throws ORA-17401 at `T4CTTIfun.receive:1048`. The disassembly shows that method's tableswitch handles message codes 1, 2, 4, 6, 7, 8, 9, 11, 12, 13, 14, 15, 16, 19, 21, 23, 25, 27, 28, 33 and routes everything else to the protocol-violation default. The bytes dbbat forwards contain only 0x08 (dictionary), 0x17 (server-network-info, decimal 23 — handled), and 0x04 (end-of-call) — all permitted. The rejection must therefore be inside one of the case handlers, not at the dispatch byte itself. Suspected next step: instrument JDBC's `processRPA` (the case-8 handler) to see which AUTH_* property it can't validate.
+
+### Reproduction artifacts
+
+- `/tmp/oauth.javap`, `/tmp/o5logon.javap`, `/tmp/t4cconn.javap` — disassembly of the relevant JDBC classes (regenerate from `ojdbc11.jar` per the recipe above).
+- `/tmp/jdbc-finest.log` — JDBC trace at FINEST level. Note the trace doesn't surface byte-level message codes; only packet sizes.
+- `/tmp/JdbcTest.java` — minimal harness that bypasses the SQLcl wrapper's `JAVA_TOOL_OPTIONS` swallow.
+
 ## Local validation setup (2026-05-06)
 
 For follow-up debugging, the working environment is:
