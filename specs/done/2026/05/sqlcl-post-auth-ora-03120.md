@@ -253,6 +253,39 @@ Concrete next steps:
 3. Then return to instrumenting JDBC's `processRPA` to identify the
    AUTH OK field that trips ORA-17401 even on the verifier-18453 path.
 
+## Update 2026-05-07 (root cause: customHash strip)
+
+The previous "next step #1" was executed and falsified the SQLcl-emits-different-Phase-1s hypothesis. Five back-to-back SQLcl invocations all produced byte-identical 164-byte Phase 1s (5 KV pairs, structurally equivalent to JDBC-direct's), and the upstream consistently returned the **degraded verifier 6949** challenge for each one.
+
+The root cause is upstream's response to the **customHash-stripped Set Protocol** that dbbat forwards to the client. With a temporary `DBB_ORACLE_KEEP_CUSTOMHASH=1` toggle that skips the strip, the same SQLcl Phase 1 traffic now draws verifier 18453 from the upstream. The flow:
+
+1. Upstream's Set Protocol response carries `caps[4]&0x20=1` (customHash).
+2. dbbat strips it before forwarding to client (so dbbat-as-server's legacy MD5/XOR combined-key derivation matches what the client computes).
+3. Client (JDBC / SQLcl) reads `caps[4]&0x20=0` and adjusts subsequent capability advertisements (Set Data Types and the Phase 1 it sends through dbbat).
+4. Upstream — which never saw the strip — observes a client signaling "no customHash support" and falls back to a verifier the legacy client can handle. That's verifier 6949 with no `AUTH_PBKDF2_*` fields.
+5. dbbat now drives Phase 2 against verifier 6949 with `customHash=true` (the original observed bit). `derivePasswordEncKey` PBKDF2s with an empty `pbkdf2ChkSalt` → wrong key → upstream rejects with TNS Markers.
+
+Confirmed empirically: with the strip disabled, **Phase 1 challenge from upstream is verifier 18453** (370-byte response with `AUTH_PBKDF2_CSK_SALT` / `_VGEN_COUNT` / `_SDER_COUNT`); SQLcl reaches Phase 2 successfully. The new failure mode is dbbat's Phase 2 body (871 bytes) not matching what the upstream wants — JDBC-direct sends a 1195-byte Phase 2 with more KV pairs (`AUTH_CONNECT_STRING` and others). So the verifier-6949 rabbit hole was real but not the *only* gap.
+
+### Why simply removing the strip isn't the fix
+
+Tested against all three clients with `DBB_ORACLE_KEEP_CUSTOMHASH=1`:
+
+| Client | Result |
+|--------|--------|
+| go-ora | **regresses** — go-ora's `generatePasswordEncKey` runs the customHash branch with whatever `pbkdf2ChkSalt` is in scope (empty for verifier 6949 challenges from dbbat-as-server) and derives the wrong combined key. dbbat decrypts the password with its own legacy derivation; the keys mismatch and AUTH_PASSWORD is garbage. |
+| python-oracledb thin | works | python-oracledb falls back gracefully when the customHash combined-key derivation fails — likely retries with legacy. |
+| SQLcl / JDBC | progresses past the verifier-6949 trap; now blocked at Phase 2 KV-pair gap (and subsequently the AUTH OK validation that python-oracledb tolerates). |
+
+So the customHash strip is required for go-ora compatibility, which means **the fix is to teach dbbat-as-server the customHash mode** (advertise `AUTH_PBKDF2_CSK_SALT` / `_VGEN_COUNT` / `_SDER_COUNT` in the Phase 1 challenge dbbat sends to the client, and use the matching combined-key derivation for AUTH_PASSWORD decryption) — not to skip the strip. With customHash supported on dbbat's server side, no strip is needed, the upstream sees a customHash-aware client, and verifier 18453 flows naturally.
+
+### Updated next steps
+
+1. **Implement customHash mode in dbbat's O5LOGON server** (`internal/proxy/oracle/o5logon.go`). Generate a per-session `pbkdf2ChkSalt` (random 16 bytes), pick `pbkdf2VgenCount` (default 4096) and `pbkdf2SderCount` (default 3), include them in the Phase 1 challenge, and use the customHash combined-key derivation when decrypting `AUTH_PASSWORD`. Mirror the algorithm dbbat already implements on the upstream-as-client side (`upstream_auth_crypto.go`'s customHash branch).
+2. **Drop the customHash strip** once (1) lands. The `DBB_ORACLE_KEEP_CUSTOMHASH=1` toggle becomes the default behavior.
+3. **Close the Phase 2 KV-pair gap** by either (a) adding the missing KV pairs to `buildClientAuthPhase2` (notably `AUTH_CONNECT_STRING`) or (b) doing Phase 2 forwarding analogous to Phase 1 — splice fresh `AUTH_SESSKEY` / `AUTH_PASSWORD` / `AUTH_PBKDF2_SPEEDY_KEY` into the client's actual Phase 2 packet, leave the rest verbatim.
+4. **Then** return to investigating JDBC's AUTH OK validation in `processRPA` if it still trips after (1)-(3).
+
 ## Local validation setup (2026-05-06)
 
 For follow-up debugging, the working environment is:
