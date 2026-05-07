@@ -61,7 +61,7 @@ func rewriteAuthPhase1Username(body []byte, newUsername string) ([]byte, error) 
 
 	rest = rest[magicLen:]
 
-	hasCLRPrefix, usernameBytes := detectUsernameEncoding(rest, userLen)
+	hasCLRPrefix := detectUsernameEncoding(rest, userLen)
 
 	consumed := userLen
 	if hasCLRPrefix {
@@ -96,25 +96,23 @@ func rewriteAuthPhase1Username(body []byte, newUsername string) ([]byte, error) 
 	out = append(out, []byte(newUsername)...)
 	out = append(out, tail...)
 
-	_ = usernameBytes // sole purpose of detectUsernameEncoding's second return is documentation
-
 	return out, nil
 }
 
-// detectUsernameEncoding determines whether the Phase 1 body uses the
-// CLR-prefixed form (1-byte length followed by username) or the bare form
-// (raw bytes). Returns (hasPrefix, usernameBytes). The usernameBytes return
-// is informational; callers replace the field wholesale.
-func detectUsernameEncoding(rest []byte, userLen int) (bool, []byte) {
+// detectUsernameEncoding determines whether the buffer's username field uses
+// the CLR-prefixed form (1-byte length followed by username) or the bare form
+// (raw bytes). Used by both Phase 1 and Phase 2 forwarders to splice in a new
+// username while preserving the client's original encoding.
+func detectUsernameEncoding(rest []byte, userLen int) bool {
 	if len(rest) >= userLen+1 && int(rest[0]) == userLen && isPrintableASCII(rest[1:1+userLen]) {
-		return true, rest[1 : 1+userLen]
+		return true
 	}
 
 	if len(rest) >= userLen && isPrintableASCII(rest[:userLen]) {
-		return false, rest[:userLen]
+		return false
 	}
 
-	return false, nil
+	return false
 }
 
 // ErrAuthPhase1Rewrite signals a Phase 1 body that does not match the

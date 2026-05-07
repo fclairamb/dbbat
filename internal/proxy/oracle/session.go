@@ -65,6 +65,16 @@ type session struct {
 	// directly from the client connection.
 	clientAuthPhase1Pkt *TNSPacket
 
+	// clientAuthPhase2Pkt is the AUTH Phase 2 packet the client sent. dbbat
+	// reuses its wire-shape (with username + AUTH_SESSKEY/AUTH_PASSWORD/
+	// AUTH_PBKDF2_SPEEDY_KEY values swapped) when driving Phase 2 against the
+	// upstream socket. This carries the client-specific KV pairs the upstream
+	// conditions its AUTH OK on — notably AUTH_CONNECT_STRING, AUTH_COPYRIGHT,
+	// AUTH_ACL, and the SESSION_CLIENT_DRIVER_NAME / VERSION pair that JDBC
+	// thin sends. Without forwarding, dbbat's hand-built Phase 2 omits those
+	// and JDBC trips ORA-17401 in T4CTTIfun.receive.
+	clientAuthPhase2Pkt *TNSPacket
+
 	// Query tracking
 	tracker      *oracleQueryTracker
 	queryStorage config.QueryStorageConfig
@@ -479,6 +489,8 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	if err != nil {
 		return err
 	}
+
+	s.clientAuthPhase2Pkt = phase2Pkt
 
 	s.logger.DebugContext(s.ctx, "AUTH Phase 2 packet received",
 		slog.String("type", phase2Pkt.Type.String()),
