@@ -57,6 +57,14 @@ type session struct {
 	// AUTH OK forwarded to the client after AUTH_SVR_RESPONSE patching.
 	upstreamAuthOKResponse []byte
 
+	// clientAuthPhase1Pkt is the actual AUTH Phase 1 packet the client (SQLcl,
+	// go-ora, python-oracledb) sent during pre-auth relay. dbbat reuses its
+	// wire-shape (with the username swapped to the upstream DB user) when
+	// driving Phase 1 against the upstream socket so the TTC-cap-conditioned
+	// upstream parser accepts it. nil for legacy paths that read Phase 1
+	// directly from the client connection.
+	clientAuthPhase1Pkt *TNSPacket
+
 	// Query tracking
 	tracker      *oracleQueryTracker
 	queryStorage config.QueryStorageConfig
@@ -127,6 +135,7 @@ func (s *session) run() error {
 	}
 
 	s.upstreamConn = upstreamConn
+	s.clientAuthPhase1Pkt = phase1Pkt
 
 	// Step 5: Authenticate client via O5LOGON (API key as Oracle password)
 	if err := s.authenticateClient(phase1Pkt); err != nil {

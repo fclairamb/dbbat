@@ -68,8 +68,7 @@ func (s *session) runUpstreamClientAuth() error {
 	password := s.database.Password
 	mode := uint32(logonModeNoNewPass)
 
-	phase1 := buildClientAuthPhase1(username, identity, mode)
-	if err := s.writeUpstreamData(phase1); err != nil {
+	if err := s.sendUpstreamAuthPhase1(username, identity, mode); err != nil {
 		return fmt.Errorf("write upstream AUTH Phase 1: %w", err)
 	}
 
@@ -111,6 +110,66 @@ func (s *session) runUpstreamClientAuth() error {
 		slog.String("user", s.database.Username),
 		slog.Int("verifier_type", sec.verifierType),
 		slog.Bool("custom_hash", sec.customHash))
+
+	return nil
+}
+
+// sendUpstreamAuthPhase1 writes the upstream-facing AUTH Phase 1 packet.
+//
+// When the relay handed us the client's actual Phase 1 packet, we forward
+// it with only the username field swapped to the upstream DB user
+// (rewriteAuthPhase1Username) and the original data-flag bits preserved.
+// Reusing the client's wire shape — flags, TTC trailer, KV-pair set —
+// keeps the upstream's TTC-cap-conditioned parser happy (clients negotiate
+// caps differently; SQLcl's JDBC thin Set Data Types is substantially
+// richer than go-ora's, and a hand-built go-ora-style Phase 1 fed to a
+// SQLcl-conditioned upstream draws a TNS Marker (interrupt + reset) pair
+// followed by a 60-second silence ending in RST).
+//
+// When phase1Pkt is unavailable (legacy non-relay path / tests) we fall
+// back to the synthetic builder with `00 00` data flags.
+func (s *session) sendUpstreamAuthPhase1(username string, identity driverIdentity, mode uint32) error {
+	if s.clientAuthPhase1Pkt == nil || len(s.clientAuthPhase1Pkt.Payload) <= ttcDataFlagsSize {
+		return s.writeUpstreamData(buildClientAuthPhase1(username, identity, mode))
+	}
+
+	clientPayload := s.clientAuthPhase1Pkt.Payload
+	dataFlags := clientPayload[:ttcDataFlagsSize]
+	clientBody := clientPayload[ttcDataFlagsSize:]
+
+	rewritten, err := rewriteAuthPhase1Username(clientBody, username)
+	if err != nil {
+		s.logger.WarnContext(s.ctx, "Phase 1 rewrite failed; falling back to synthetic Phase 1",
+			slog.Any("error", err))
+
+		return s.writeUpstreamData(buildClientAuthPhase1(username, identity, mode))
+	}
+
+	s.logger.DebugContext(s.ctx, "upstream AUTH: forwarding rewritten client Phase 1",
+		slog.Int("original_body_len", len(clientBody)),
+		slog.Int("rewritten_body_len", len(rewritten)),
+		slog.String("upstream_user", username))
+
+	full := make([]byte, 0, ttcDataFlagsSize+len(rewritten))
+	full = append(full, dataFlags...)
+	full = append(full, rewritten...)
+
+	return s.writeUpstreamPayload(full)
+}
+
+// writeUpstreamPayload writes a v315+ TNS Data packet whose payload is given
+// in full (including the leading 2 data-flag bytes). Used by Phase 1
+// forwarding so the client's data-flag bits are preserved verbatim.
+func (s *session) writeUpstreamPayload(payload []byte) error {
+	pkt := encodeV315DataPacket(payload)
+
+	s.logger.DebugContext(s.ctx, "upstream AUTH: writing packet (preserved flags)",
+		slog.Int("pkt_len", len(pkt)),
+		slog.Int("payload_len", len(payload)))
+
+	if _, err := s.upstreamConn.Write(pkt); err != nil {
+		return fmt.Errorf("upstream write: %w", err)
+	}
 
 	return nil
 }
