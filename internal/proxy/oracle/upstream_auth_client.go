@@ -90,8 +90,7 @@ func (s *session) runUpstreamClientAuth() error {
 		return fmt.Errorf("derive upstream auth secrets: %w", err)
 	}
 
-	phase2 := buildClientAuthPhase2(username, identity, sec, mode|logonModeUserAndPass)
-	if err := s.writeUpstreamData(phase2); err != nil {
+	if err := s.sendUpstreamAuthPhase2(username, identity, sec, mode|logonModeUserAndPass); err != nil {
 		return fmt.Errorf("write upstream AUTH Phase 2: %w", err)
 	}
 
@@ -146,6 +145,52 @@ func (s *session) sendUpstreamAuthPhase1(username string, identity driverIdentit
 	}
 
 	s.logger.DebugContext(s.ctx, "upstream AUTH: forwarding rewritten client Phase 1",
+		slog.Int("original_body_len", len(clientBody)),
+		slog.Int("rewritten_body_len", len(rewritten)),
+		slog.String("upstream_user", username))
+
+	full := make([]byte, 0, ttcDataFlagsSize+len(rewritten))
+	full = append(full, dataFlags...)
+	full = append(full, rewritten...)
+
+	return s.writeUpstreamPayload(full)
+}
+
+// sendUpstreamAuthPhase2 writes the upstream-facing AUTH Phase 2 packet.
+//
+// When the relay handed us the client's actual Phase 2 packet, we forward
+// it with the username swapped to the upstream DB user and AUTH_SESSKEY /
+// AUTH_PASSWORD / AUTH_PBKDF2_SPEEDY_KEY values replaced with the upstream-
+// derived ones (rewriteAuthPhase2). All other KV pairs — AUTH_CONNECT_STRING,
+// AUTH_COPYRIGHT, AUTH_ACL, AUTH_ALTER_SESSION, the SESSION_CLIENT_DRIVER_*
+// triplet — pass through verbatim.
+//
+// This matters because the upstream's AUTH OK is conditioned on the client's
+// Phase 2 KV-pair set: JDBC thin sends a richer set than go-ora, and a
+// hand-built go-ora-style Phase 2 forwarded to a JDBC-conditioned upstream
+// produces an AUTH OK that JDBC's T4CTTIfun.receive default-cases on
+// (ORA-17401 protocol violation).
+//
+// When clientAuthPhase2Pkt is unavailable (legacy non-relay path / tests) we
+// fall back to the synthetic builder.
+func (s *session) sendUpstreamAuthPhase2(username string, identity driverIdentity, sec *upstreamAuthSecrets, mode uint32) error {
+	if s.clientAuthPhase2Pkt == nil || len(s.clientAuthPhase2Pkt.Payload) <= ttcDataFlagsSize {
+		return s.writeUpstreamData(buildClientAuthPhase2(username, identity, sec, mode))
+	}
+
+	clientPayload := s.clientAuthPhase2Pkt.Payload
+	dataFlags := clientPayload[:ttcDataFlagsSize]
+	clientBody := clientPayload[ttcDataFlagsSize:]
+
+	rewritten, err := rewriteAuthPhase2(clientBody, username, sec)
+	if err != nil {
+		s.logger.WarnContext(s.ctx, "Phase 2 rewrite failed; falling back to synthetic Phase 2",
+			slog.Any("error", err))
+
+		return s.writeUpstreamData(buildClientAuthPhase2(username, identity, sec, mode))
+	}
+
+	s.logger.DebugContext(s.ctx, "upstream AUTH: forwarding rewritten client Phase 2",
 		slog.Int("original_body_len", len(clientBody)),
 		slog.Int("rewritten_body_len", len(rewritten)),
 		slog.String("upstream_user", username))
