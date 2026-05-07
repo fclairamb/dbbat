@@ -41,49 +41,66 @@ import (
 //
 // The rewritten body is returned as a fresh slice; the input is not mutated.
 func rewriteAuthPhase2(body []byte, newUsername string, sec *upstreamAuthSecrets) ([]byte, error) {
+	hdr, err := parseAuthPhase2Header(body)
+	if err != nil {
+		return nil, err
+	}
+
+	rewrittenPairs, err := rewritePhase2KVPairs(body[hdr.usernameEnd:], hdr.pairCount, sec)
+	if err != nil {
+		return nil, err
+	}
+
+	return assembleAuthPhase2(body, hdr, newUsername, rewrittenPairs), nil
+}
+
+// authPhase2Header captures the byte boundaries needed to splice in a new
+// username and KV-pair set.
+type authPhase2Header struct {
+	hasUsername  bool
+	hasCLRPrefix bool
+	modeStart    int
+	modeSize     int
+	pairCount    int
+	usernameEnd  int
+}
+
+// parseAuthPhase2Header walks the Phase 2 preamble — header bytes, has-username
+// flag, user_id_len, mode, pair_count, marker, and username field — returning
+// the offsets needed to reassemble the body.
+func parseAuthPhase2Header(body []byte) (authPhase2Header, error) {
 	const headerLen = 3 // [03 73 b0]
 
+	out := authPhase2Header{}
+
 	if len(body) < headerLen+1 {
-		return nil, fmt.Errorf("%w: body too short for header", ErrAuthPhase2Rewrite)
+		return out, fmt.Errorf("%w: body too short for header", ErrAuthPhase2Rewrite)
 	}
 
 	if body[0] != byte(TTCFuncPiggyback) || body[1] != PiggybackSubAuth2 {
-		return nil, fmt.Errorf("%w: not a Phase 2 piggyback", ErrAuthPhase2Rewrite)
+		return out, fmt.Errorf("%w: not a Phase 2 piggyback", ErrAuthPhase2Rewrite)
 	}
 
 	pos := headerLen
-	hasUsername := body[pos] == 0x01
+	out.hasUsername = body[pos] == 0x01
 	pos++
 
-	var userLen int
-
-	if hasUsername {
-		ul, n := readCompressedInt(body[pos:])
-		if n == 0 || ul <= 0 || ul > 128 {
-			return nil, fmt.Errorf("%w: invalid user_id_len", ErrAuthPhase2Rewrite)
-		}
-
-		userLen = ul
-		pos += n
-	} else {
-		// has-username==0 layout uses [00 00] in place of the [01 user_id_len].
-		if len(body) < pos+1 {
-			return nil, fmt.Errorf("%w: truncated zero user marker", ErrAuthPhase2Rewrite)
-		}
-
-		pos++
+	userLen, err := readPhase2UserLen(body, &pos, out.hasUsername)
+	if err != nil {
+		return out, err
 	}
 
 	_, modeSize := readCompressedInt(body[pos:])
 	if modeSize == 0 {
-		return nil, fmt.Errorf("%w: missing mode", ErrAuthPhase2Rewrite)
+		return out, fmt.Errorf("%w: missing mode", ErrAuthPhase2Rewrite)
 	}
 
-	modeStart := pos
+	out.modeStart = pos
+	out.modeSize = modeSize
 	pos += modeSize
 
 	if pos >= len(body) {
-		return nil, fmt.Errorf("%w: truncated after mode", ErrAuthPhase2Rewrite)
+		return out, fmt.Errorf("%w: truncated after mode", ErrAuthPhase2Rewrite)
 	}
 
 	// Skip 1-byte padding (always 0x01).
@@ -91,69 +108,85 @@ func rewriteAuthPhase2(body []byte, newUsername string, sec *upstreamAuthSecrets
 
 	pairCount, pairCountSize := readCompressedInt(body[pos:])
 	if pairCountSize == 0 || pairCount < 0 {
-		return nil, fmt.Errorf("%w: invalid pair_count", ErrAuthPhase2Rewrite)
+		return out, fmt.Errorf("%w: invalid pair_count", ErrAuthPhase2Rewrite)
 	}
 
+	out.pairCount = pairCount
 	pos += pairCountSize
 
 	if pos+2 > len(body) {
-		return nil, fmt.Errorf("%w: truncated 0x01 0x01 marker", ErrAuthPhase2Rewrite)
+		return out, fmt.Errorf("%w: truncated 0x01 0x01 marker", ErrAuthPhase2Rewrite)
 	}
 
 	// Skip 0x01 0x01.
 	pos += 2
 
-	usernameEnd := pos
-	hasCLRPrefix := false
+	out.usernameEnd = pos
 
-	if hasUsername {
-		hasCLRPrefix, _ = detectUsernameEncoding(body[pos:], userLen)
+	if out.hasUsername {
+		out.hasCLRPrefix = detectUsernameEncoding(body[pos:], userLen)
 
 		consumed := userLen
-		if hasCLRPrefix {
+		if out.hasCLRPrefix {
 			consumed = userLen + 1
 		}
 
 		if len(body) < pos+consumed {
-			return nil, fmt.Errorf("%w: username field truncated", ErrAuthPhase2Rewrite)
+			return out, fmt.Errorf("%w: username field truncated", ErrAuthPhase2Rewrite)
 		}
 
-		usernameEnd = pos + consumed
+		out.usernameEnd = pos + consumed
 	}
 
-	// Walk and rewrite KV pairs.
-	rewrittenPairs, err := rewritePhase2KVPairs(body[usernameEnd:], pairCount, sec)
-	if err != nil {
-		return nil, err
+	return out, nil
+}
+
+// readPhase2UserLen advances pos past the user_id_len field and returns the
+// length value (0 when hasUsername is false, in which case it skips a single
+// padding byte instead).
+func readPhase2UserLen(body []byte, pos *int, hasUsername bool) (int, error) {
+	if !hasUsername {
+		if len(body) < *pos+1 {
+			return 0, fmt.Errorf("%w: truncated zero user marker", ErrAuthPhase2Rewrite)
+		}
+
+		*pos++
+
+		return 0, nil
 	}
 
-	// Reassemble the body.
+	ul, n := readCompressedInt(body[*pos:])
+	if n == 0 || ul <= 0 || ul > 128 {
+		return 0, fmt.Errorf("%w: invalid user_id_len", ErrAuthPhase2Rewrite)
+	}
+
+	*pos += n
+
+	return ul, nil
+}
+
+// assembleAuthPhase2 builds the rewritten body with the new username and
+// pre-rewritten KV pairs, preserving the original header / mode / marker bytes.
+func assembleAuthPhase2(body []byte, hdr authPhase2Header, newUsername string, rewrittenPairs []byte) []byte {
+	const headerLen = 3
+
 	out := make([]byte, 0, len(body)+len(newUsername))
-
-	// Header [03 73 b0] — preserve b0 verbatim (varies by client).
 	out = append(out, body[:headerLen]...)
 
-	if hasUsername {
-		// has-username flag.
+	if hdr.hasUsername {
 		out = append(out, 0x01)
 		out = append(out, ttcCompressedUint(uint64(len(newUsername)))...)
 	} else {
 		out = append(out, 0x00, 0x00)
 	}
 
-	// Mode (verbatim — same NoNewPass | UserAndPass bits).
-	out = append(out, body[modeStart:modeStart+modeSize]...)
-
-	// 0x01 byte after mode.
+	out = append(out, body[hdr.modeStart:hdr.modeStart+hdr.modeSize]...)
 	out = append(out, 0x01)
-	// Pair count (verbatim).
-	out = append(out, ttcCompressedUint(uint64(pairCount))...)
-	// 0x01 0x01 marker.
+	out = append(out, ttcCompressedUint(uint64(hdr.pairCount))...)
 	out = append(out, 0x01, 0x01)
 
-	// Username — preserve original encoding (bare for JDBC, CLR-prefixed for go-ora).
-	if hasUsername {
-		if hasCLRPrefix {
+	if hdr.hasUsername {
+		if hdr.hasCLRPrefix {
 			out = append(out, byte(len(newUsername)))
 		}
 
@@ -162,7 +195,7 @@ func rewriteAuthPhase2(body []byte, newUsername string, sec *upstreamAuthSecrets
 
 	out = append(out, rewrittenPairs...)
 
-	return out, nil
+	return out
 }
 
 // rewritePhase2KVPairs walks pairCount TTC KV pairs in buf and returns a slice

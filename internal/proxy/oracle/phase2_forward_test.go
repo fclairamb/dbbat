@@ -23,7 +23,7 @@ func TestRewriteAuthPhase2_BasicSwap_CLR(t *testing.T) {
 		{"AUTH_COPYRIGHT", "Oracle blah", 0},
 		{"AUTH_ACL", "4400", 0},
 	}
-	body := buildPhase2Body(t, "CONNECTOR", 0x101, pairs, true /*CLR*/, 0x00 /*b0*/)
+	body := buildPhase2Body(t, "CONNECTOR", pairs, true /*CLR*/, 0x00 /*b0*/)
 
 	sec := &upstreamAuthSecrets{
 		encClientSessKey: "NEWSESS_HEX",
@@ -46,7 +46,7 @@ func TestRewriteAuthPhase2_BasicSwap_CLR(t *testing.T) {
 		{"AUTH_COPYRIGHT", "Oracle blah", 0},
 		{"AUTH_ACL", "4400", 0},
 	}
-	expected := buildPhase2Body(t, "LABEOMNGR_DEV", 0x101, expectedPairs, true, 0x00)
+	expected := buildPhase2Body(t, "LABEOMNGR_DEV", expectedPairs, true, 0x00)
 
 	if !bytes.Equal(out, expected) {
 		t.Fatalf("phase 2 rewrite mismatch:\n got %x\nwant %x", out, expected)
@@ -63,7 +63,7 @@ func TestRewriteAuthPhase2_BasicSwap_Bare(t *testing.T) {
 		{"AUTH_SESSKEY", "OLDSESS_HEX", 1},
 		{"AUTH_PASSWORD", "OLDPWD_HEX", 0},
 	}
-	body := buildPhase2Body(t, "CONNECTOR", 0x101, pairs, false /*bare*/, 0x02 /*b0*/)
+	body := buildPhase2Body(t, "CONNECTOR", pairs, false /*bare*/, 0x02 /*b0*/)
 
 	sec := &upstreamAuthSecrets{
 		encClientSessKey: "NEWSESS_HEX",
@@ -79,7 +79,7 @@ func TestRewriteAuthPhase2_BasicSwap_Bare(t *testing.T) {
 		{"AUTH_SESSKEY", "NEWSESS_HEX", 1},
 		{"AUTH_PASSWORD", "NEWPWD_HEX", 0},
 	}
-	expected := buildPhase2Body(t, "LABEOMNGR_DEV", 0x101, expectedPairs, false, 0x02)
+	expected := buildPhase2Body(t, "LABEOMNGR_DEV", expectedPairs, false, 0x02)
 
 	if !bytes.Equal(out, expected) {
 		t.Fatalf("phase 2 bare-rewrite mismatch:\n got %x\nwant %x", out, expected)
@@ -96,7 +96,7 @@ func TestRewriteAuthPhase2_NoSpeedyKey(t *testing.T) {
 		{"AUTH_SESSKEY", "OLDSESS_HEX", 1},
 		{"AUTH_TERMINAL", "unknown", 0},
 	}
-	body := buildPhase2Body(t, "CONNECTOR", 0x101, pairs, true, 0x00)
+	body := buildPhase2Body(t, "CONNECTOR", pairs, true, 0x00)
 
 	sec := &upstreamAuthSecrets{
 		encClientSessKey: "NEWSESS_HEX",
@@ -114,7 +114,7 @@ func TestRewriteAuthPhase2_NoSpeedyKey(t *testing.T) {
 		{"AUTH_SESSKEY", "NEWSESS_HEX", 1},
 		{"AUTH_TERMINAL", "unknown", 0},
 	}
-	expected := buildPhase2Body(t, "USR2", 0x101, expectedPairs, true, 0x00)
+	expected := buildPhase2Body(t, "USR2", expectedPairs, true, 0x00)
 
 	if !bytes.Equal(out, expected) {
 		t.Fatalf("phase 2 rewrite mismatch:\n got %x\nwant %x", out, expected)
@@ -236,8 +236,12 @@ type phase2KVForTest struct {
 // buildPhase2Body returns a TTC AUTH Phase 2 body. When clrUsername is true
 // the username is CLR-prefixed (go-ora-style); otherwise it's bare (JDBC
 // thin-style). b0 is the byte at offset 2 (0x00 for go-ora, 0x02 for JDBC).
-func buildPhase2Body(t *testing.T, username string, mode uint32, pairs []phase2KVForTest, clrUsername bool, b0 byte) []byte {
+// Mode is hard-coded to 0x101 (UserAndPass | NoNewPass) — the only value
+// observed in real Phase 2 traffic.
+func buildPhase2Body(t *testing.T, username string, pairs []phase2KVForTest, clrUsername bool, b0 byte) []byte {
 	t.Helper()
+
+	const mode uint32 = 0x101
 
 	usernameBytes := []byte(username)
 
