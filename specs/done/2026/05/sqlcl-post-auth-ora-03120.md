@@ -432,3 +432,31 @@ Same file, but the protocol layer:
 
 - Run `make test` (covers unit + testcontainer Oracle integration).
 - Confirm python-oracledb thin still works through the new flow — its existing integration test path doesn't change because dbbat-side caps are unchanged.
+
+## Update 2026-05-07 (Phase 2 forwarding shipped — PR #144)
+
+After the customHash strip removal (#143) restored the verifier-18453 path
+end-to-end for SQLcl, JDBC still tripped ORA-17401 inside `T4CTTIfun.receive`
+when reading the upstream's AUTH OK. The cause was a Phase 2 KV-pair gap:
+JDBC sends 14 pairs in a 1195-byte body — including `AUTH_CONNECT_STRING`,
+`AUTH_COPYRIGHT`, `AUTH_ACL`, and a JDBC-flavoured
+`SESSION_CLIENT_DRIVER_NAME` / `_VERSION` / `_LOBATTR` triplet — while
+`buildClientAuthPhase2` sent 12 pairs in ~870 bytes, with go-ora's static
+identity strings. The upstream's AUTH OK is conditioned on what was in
+Phase 2; the leaner body produced an AUTH OK shape JDBC's `T4CTTIfun.receive`
+default-cases on at line 1048.
+
+Fixed by mirroring the Phase-1-forwarding design from #138: when the relay
+captures the client's actual Phase 2 packet, splice in upstream-encrypted
+`AUTH_SESSKEY` / `AUTH_PASSWORD` / `AUTH_PBKDF2_SPEEDY_KEY` values, swap the
+username, and pass everything else through verbatim (`internal/proxy/oracle/phase2_forward.go`).
+The forwarder also handles JDBC's bare-username encoding and `0x02` byte at
+offset 2 of the body — both differ from go-ora's CLR-prefixed username +
+`0x00` shape.
+
+Pending verification: end-to-end SQLcl 26.1 → dbbat → Oracle 19c
+`oracle-abynonprod.db.stonal.io` once a v0.9.0 image is deployed. If
+ORA-17401 still trips after this change, the wire trace from the new path
+will show whether the upstream's AUTH OK still has a JDBC-incompatible
+field ordering / type tag (which would push the fix toward AUTH-OK-side
+patching analogous to `auth_svr_response.go`).
