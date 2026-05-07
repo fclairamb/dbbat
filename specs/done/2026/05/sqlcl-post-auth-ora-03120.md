@@ -72,11 +72,31 @@ Would only work if (1) we can observe SQLcl's negotiated caps during the relay a
 ## Acceptance criteria
 
 - [x] Code path implemented and unit-tested end-to-end (crypto chain, wire shape, parser).
-- [x] go-ora end-to-end through dbbat: validated locally against Oracle 19c (`abyla_abynonprod`) — uses the new relay-socket-o5logon path; query intercepted, result returned.
+- [x] go-ora end-to-end through dbbat: validated locally against Oracle 19c (`abyla_abynonprod`); query intercepted, result returned.
 - [x] python-oracledb thin end-to-end through dbbat: validated locally — uses the relay-socket path + per-session AUTH_SVR_RESPONSE patch; previous DPY-4035 resolved.
-- [ ] **SQLcl end-to-end through dbbat: still blocked, but the failure mode shifted.** Phase-1-rewrite (forwarding the client's own Phase 1 with the username swapped to the upstream DB user) is now implemented for all clients, including SQLcl. With it, the upstream accepts dbbat's Phase 1 and replies with a normal challenge — but for SQLcl that challenge is verifier 6949 with the upstream's `customHash` flag set yet no `AUTH_PBKDF2_*` fields. dbbat falls back to the legacy MD5/XOR password-key derivation, the upstream rejects Phase 2 with end-of-call code 4, and SQLcl ends up at ORA-17401 via the captured-AUTH-OK fallback. The remaining gap is the password-key derivation variant Oracle expects for `verifier 6949 + customHash + no PBKDF2 fields` — JDBC thin's source for that derivation needs reverse-engineering (a Java stack trace per `feedback_jdbc_oracle_trace.md` would identify it).
+- [ ] **SQLcl end-to-end through dbbat: still blocked.** Pre-auth relay completes; the upstream then sends two TNS Marker (interrupt + reset) packets in response to dbbat's hand-built Phase 1. Both go-ora and python-oracledb work because the TTC caps the upstream negotiated with them match dbbat's own Phase 1 wire shape; SQLcl negotiates richer JDBC-thin caps so the upstream rejects dbbat's go-ora-style Phase 1 mid-parse. The fix is **Phase-1 forwarding**: take SQLcl's actual Phase 1 packet, swap the username field to the stored DB user, and forward as-is. Roughly the approach of the dropped 5294b37 commit, but kept minimal.
 - [x] The Oracle compatibility table in `docs/oracle.md` updated.
 - [x] python-oracledb thin no-regression: validated locally end-to-end.
+
+## Update 2026-05-07: regression fix landed; SQLcl still blocked at upstream Phase 1
+
+While reproducing the SQLcl failure locally, three regressions in the upstream-auth parser were found and fixed (`internal/proxy/oracle/upstream_auth_client.go`):
+
+1. `parseAuthKVDictionary` was reading the dictionary length as a **raw 2-byte big-endian uint** when Oracle's wire format is a TTC compressed integer. dbbat read `01 06` as 262 instead of 6 and tried to consume 262 KV pairs.
+2. `parseAuthSummary` treated the first compressed-int after code 0x04 / 0x09 as the Oracle error code. That field is actually `EndOfCallStatus` — for Phase 1 challenge responses Oracle sets it to 1 (continuation needed) with `RetCode=0`. dbbat misreported the success as ORA-00001.
+3. `parseAuthMessageStream` waited for an end-of-call code 0x04 / 0x09 after the 0x08 dictionary, but Phase 2 responses interleave additional TTC messages (notably code 0x17 server-network-info) before the trailing 0x04. The new logic returns success after consuming the first 0x08 dictionary, which carries everything we need for either phase.
+
+Plus a fourth gap that python-oracledb thin and SQLcl both validated and rejected: dbbat was sending a static `capturedAuthOKResponse` blob to the client. Modern clients verify the embedded AUTH_SVR_RESPONSE field by AES-decrypting it under the negotiated O5LOGON combined key — and the captured blob's value was encrypted under a different key. The fix forwards the upstream's real AUTH OK packet with AUTH_SVR_RESPONSE re-encrypted under the client's combined key (`internal/proxy/oracle/auth_svr_response.go`).
+
+Validated locally against Oracle 19c (`oracle-abynonprod.db.stonal.io`):
+
+| Client | Before | After |
+|--------|--------|-------|
+| go-ora v2.9.0 | hangs 60s, upstream RST (`read: connection reset by peer`) | works |
+| python-oracledb thin 3.4 | DPY-4035 (invalid server response) | works |
+| SQLcl 26.1 (JDBC thin 23.7) | ORA-17401 | upstream sends TNS Markers in response to Phase 1; same end-state but the failure now lives at upstream Phase 1 acceptance, not AUTH OK validation |
+
+The SQLcl path forward is now just **Phase-1 forwarding** (not the broader "find the right verifier-6949+customHash derivation" rabbit hole that the original spec sketched). Picking up that work means: capture SQLcl's Phase 1 from the relay handoff (already available as `phase1Pkt`), locate the username field, splice in the upstream DB user, write the modified packet to the upstream socket. The Phase 2 path is unchanged because dbbat continues to drive Phase 2 with its own crypto.
 
 ## Local validation setup (2026-05-06)
 

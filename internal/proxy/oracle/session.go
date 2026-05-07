@@ -45,6 +45,18 @@ type session struct {
 	// PBKDF2 path.
 	upstreamCustomHash bool
 
+	// clientCombinedKey is the AES key derived from the dbbat-as-server O5LOGON
+	// session keys (MD5(serverSessKey || clientSessKey)). Captured by
+	// authenticateClient on success so the AUTH OK forwarded back to the client
+	// can carry an AUTH_SVR_RESPONSE encrypted with the same key the client
+	// expects. Empty when the client used the empty-AUTH_PASSWORD path.
+	clientCombinedKey []byte
+
+	// upstreamAuthOKResponse is the raw upstream Phase 2 response packet
+	// (TNS framing included) captured during runUpstreamClientAuth. Used as the
+	// AUTH OK forwarded to the client after AUTH_SVR_RESPONSE patching.
+	upstreamAuthOKResponse []byte
+
 	// Query tracking
 	tracker      *oracleQueryTracker
 	queryStorage config.QueryStorageConfig
@@ -134,10 +146,29 @@ func (s *session) run() error {
 		return fmt.Errorf("upstream auth failed: %w", err)
 	}
 
-	// Step 6b: Send the full AUTH OK + session properties response to client.
-	// This is a captured response from Oracle 19c that includes AUTH_VERSION_STRING,
-	// session properties, and the code-4 end marker that go-ora expects.
-	if _, err := s.clientConn.Write(capturedAuthOKResponse); err != nil {
+	// Step 6b: Forward the upstream's real AUTH OK packet to the client, with
+	// AUTH_SVR_RESPONSE re-encrypted under the client's O5LOGON combined key.
+	// Without that patch, modern clients (python-oracledb thin → DPY-4035,
+	// JDBC thin / SQLcl → ORA-17401) reject the AUTH OK because the upstream
+	// encrypted that field with its own combined key. go-ora ignores the
+	// field, so the previous static-captured-response path worked for it
+	// while silently breaking everyone else.
+	authOK := s.upstreamAuthOKResponse
+	if authOK == nil {
+		authOK = capturedAuthOKResponse
+	}
+
+	if len(s.clientCombinedKey) > 0 && len(s.upstreamAuthOKResponse) > 0 {
+		patched, err := patchAuthSvrResponse(authOK, s.clientCombinedKey)
+		if err != nil {
+			s.logger.WarnContext(s.ctx, "failed to patch AUTH_SVR_RESPONSE; forwarding upstream packet unchanged",
+				slog.Any("error", err))
+		} else {
+			authOK = patched
+		}
+	}
+
+	if _, err := s.clientConn.Write(authOK); err != nil {
 		return fmt.Errorf("failed to send AUTH OK: %w", err)
 	}
 
@@ -456,6 +487,8 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	if apiKey.UserID != user.UID {
 		return ErrAPIKeyOwnerMismatchOracle
 	}
+
+	s.clientCombinedKey = o5.CombinedKey
 
 	// Increment usage asynchronously
 	go func() { _ = s.store.IncrementAPIKeyUsage(context.Background(), apiKey.ID) }()

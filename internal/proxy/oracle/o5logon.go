@@ -27,6 +27,11 @@ type O5LogonServer struct {
 	salt             []byte // 10-byte salt (from stored verifier)
 	verifierKey      []byte // 24-byte key derived from password+salt
 	serverSessionKey []byte // 48-byte random (generated per auth)
+
+	// CombinedKey is set by DecryptPassword to MD5(serverSessKey || clientSessKey)
+	// derived from both session keys after a successful Phase 2. It is the AES key
+	// the client expects for AUTH_SVR_RESPONSE in the AUTH OK forwarded back.
+	CombinedKey []byte
 }
 
 // GenerateO5LogonVerifier creates salt + verifier key from a plaintext password.
@@ -80,6 +85,10 @@ func (s *O5LogonServer) GenerateChallenge() (string, string, error) {
 // DecryptPassword extracts the plaintext password from the client's AUTH Phase 2.
 // The client encrypts: random_prefix(16 bytes) + password using AES-192-CBC
 // with a key derived from MD5(server_session_key || client_session_key).
+//
+// Side-effect: on success, the negotiated combined key is stored on the
+// receiver as CombinedKey so callers can reuse it (e.g. to encrypt
+// AUTH_SVR_RESPONSE in the AUTH OK payload forwarded to the client).
 func (s *O5LogonServer) DecryptPassword(encClientSessKey, encPassword string) (string, error) {
 	// Decode client session key
 	encClientSessKeyBytes, err := hex.DecodeString(encClientSessKey)
@@ -97,6 +106,7 @@ func (s *O5LogonServer) DecryptPassword(encClientSessKey, encPassword string) (s
 
 	// Derive combined key from both session keys
 	combinedKey := deriveCombinedKey(s.serverSessionKey, clientSessionKey)
+	s.CombinedKey = combinedKey
 
 	// Decode and decrypt the password
 	encPasswordBytes, err := hex.DecodeString(encPassword)
