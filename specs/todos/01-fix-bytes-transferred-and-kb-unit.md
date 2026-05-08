@@ -208,3 +208,108 @@ unit that yields an integer ≥ 1 (so `1024` shows as `1 KB`, `1048576` as
 - Per-query bytes split (in vs out) on the API — the existing single field is
   fine.
 - Backfilling historical rows — the old undercount stays as historical truth.
+
+## Implementation Plan
+
+Concrete steps grounded in the actual codebase. Each phase is a separate
+commit.
+
+### Phase 1 — `internal/proxy/shared/byte_counter.go`
+
+Add a `net.Conn` wrapper with two `*atomic.Int64` counters (one per
+direction). Provide a constructor `NewCountingConn(conn, in, out)` and a
+`Total()` helper that returns `in + out`. Use atomics so per-query snapshots
+are safe to take while the conn is being read concurrently in another
+goroutine (PG proxies the upstream→client direction in a separate goroutine).
+
+Tests in `byte_counter_test.go`: a pipe-pair proves Read and Write update the
+right counter; concurrent goroutines hammering Read+Write cause no race
+(`go test -race`).
+
+### Phase 2 — PostgreSQL proxy
+
+`internal/proxy/postgresql/session.go`
+
+- In `NewSession`, allocate two atomic counters on the `Session`
+  (`bytesFromClient`, `bytesToClient`). Wrap `clientConn` with
+  `NewCountingConn` before constructing the buffered reader. The TLS upgrade
+  path at line 601 already does `tls.Server(s.clientConn, ...)` — that now
+  wraps our wrapper, so encrypted bytes still flow through it.
+- After `connectUpstream`, wrap `s.upstreamConn` with the same counters
+  (swapped: writes to upstream are bytes-from-client, reads from upstream are
+  bytes-to-client). Then pass the wrapped conn to `pgproto3.NewFrontend`.
+- Add `startBytes int64` to `pendingQuery`. When a pending query is created
+  (look up the call sites that set `s.currentQuery`), snapshot
+  `bytesFromClient + bytesToClient`.
+- In `proxyUpstreamToClient`, replace the per-`DataRow` and per-`CopyData`
+  byte additions with a single diff at `ReadyForQuery`:
+  `bytesTransferred = (bytesFromClient + bytesToClient) - query.startBytes`.
+- `logQuery` keeps its signature; the value passed in is the diff.
+
+### Phase 3 — Oracle proxy
+
+`internal/proxy/oracle/session.go`
+
+- Add atomic counters on `session`. Wrap `clientConn` at the top of
+  `newSession`. Wrap `upstreamConn` at the point it's first assigned (search
+  for `s.upstreamConn = `).
+- Rip out the existing `bytesTransferred := int64(len(pkt.Payload))` at line
+  740 and the per-call propagation through `interceptUpstreamMessage`,
+  `handleQueryResultV2`, `handleResponse`, `handleContinuation`,
+  `completeQuery`. Replace with a `startBytes` field on the per-query
+  tracker and a diff at `completeQuery`.
+- `internal/proxy/oracle/intercept.go` `completeQuery` accepts the diff
+  instead of computing it from packet length.
+
+### Phase 4 — MySQL proxy
+
+`internal/proxy/mysql/session.go` and `upstream.go`
+
+- Add atomic counters on `Session`. Wrap `clientConn` in `newSession` so
+  `gomysqlServer.NewCustomizedConn(s.clientConn, ...)` reads through the
+  wrapper.
+- `connectUpstream`: switch from `gomysqlclient.Connect` to
+  `gomysqlclient.ConnectWithDialer` (the upstream library exposes a `Dialer`
+  type that returns a `net.Conn`, see vendor inspection). The custom dialer
+  dials normally and wraps the resulting conn with `NewCountingConn` before
+  returning.
+- In `internal/proxy/mysql/result.go` `recordQuery` (line 171): replace the
+  JSON-encoded sizing with the snapshot diff at the per-query boundary.
+  The session needs a `startBytes` snapshot taken when each command starts;
+  hook this into `Handler.HandleQuery`/`HandleStmtExecute` (via the wrapping
+  `handler` struct) or compute against the previous total in
+  `IncrementConnectionStats` at query end.
+- The per-query bytes column on the queries row now reflects the diff;
+  connection totals naturally reflect the cumulative counter.
+
+### Phase 5 — Connection-total reporting
+
+No store changes (`IncrementConnectionStats` keeps its signature). Audit
+that connection-total bytes across all three protocols is `Total()` of the
+wrapper at session close, fed via the same `IncrementConnectionStats` call
+path.
+
+### Phase 6 — Frontend KB unit
+
+`front/src/routes/_authenticated/grants/index.tsx`
+
+- Add `KB` to the unit `<select>` (~line 456) ahead of MB.
+- Extend the unit→bytes map (~line 337) with `KB: 1024`.
+- Display logic when reading a grant back: pick the largest unit that yields
+  an integer ≥ 1 (so `512 KB` doesn't show as `0.5 MB`). Default new grants
+  to MB.
+
+### Phase 7 — Tests
+
+- Unit: `byte_counter_test.go` (Phase 1).
+- Integration (PostgreSQL): existing integration test in
+  `internal/proxy/postgresql/` runs `SELECT 1` through the proxy; add an
+  assertion that the resulting connection's `bytes_transferred` is materially
+  > the value bytes alone (≥ 50).
+- Frontend: Playwright e2e on the create-grant dialog asserting KB option
+  exists and round-trips. (May lift to a follow-up if the e2e harness is
+  flaky.)
+
+### Phase 8 — Build + lint
+
+`make build-binary build-front lint test` green. Fix issues until clean.
