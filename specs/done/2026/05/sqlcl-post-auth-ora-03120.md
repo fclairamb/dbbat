@@ -432,3 +432,86 @@ Same file, but the protocol layer:
 
 - Run `make test` (covers unit + testcontainer Oracle integration).
 - Confirm python-oracledb thin still works through the new flow — its existing integration test path doesn't change because dbbat-side caps are unchanged.
+
+## Update 2026-05-07 (Phase 2 forwarding shipped — PR #144)
+
+After the customHash strip removal (#143) restored the verifier-18453 path
+end-to-end for SQLcl, JDBC still tripped ORA-17401 inside `T4CTTIfun.receive`
+when reading the upstream's AUTH OK. The cause was a Phase 2 KV-pair gap:
+JDBC sends 14 pairs in a 1195-byte body — including `AUTH_CONNECT_STRING`,
+`AUTH_COPYRIGHT`, `AUTH_ACL`, and a JDBC-flavoured
+`SESSION_CLIENT_DRIVER_NAME` / `_VERSION` / `_LOBATTR` triplet — while
+`buildClientAuthPhase2` sent 12 pairs in ~870 bytes, with go-ora's static
+identity strings. The upstream's AUTH OK is conditioned on what was in
+Phase 2; the leaner body produced an AUTH OK shape JDBC's `T4CTTIfun.receive`
+default-cases on at line 1048.
+
+Fixed by mirroring the Phase-1-forwarding design from #138: when the relay
+captures the client's actual Phase 2 packet, splice in upstream-encrypted
+`AUTH_SESSKEY` / `AUTH_PASSWORD` / `AUTH_PBKDF2_SPEEDY_KEY` values, swap the
+username, and pass everything else through verbatim (`internal/proxy/oracle/phase2_forward.go`).
+The forwarder also handles JDBC's bare-username encoding and `0x02` byte at
+offset 2 of the body — both differ from go-ora's CLR-prefixed username +
+`0x00` shape.
+
+Pending verification: end-to-end SQLcl 26.1 → dbbat → Oracle 19c
+`oracle-abynonprod.db.stonal.io` once a v0.9.0 image is deployed. If
+ORA-17401 still trips after this change, the wire trace from the new path
+will show whether the upstream's AUTH OK still has a JDBC-incompatible
+field ordering / type tag (which would push the fix toward AUTH-OK-side
+patching analogous to `auth_svr_response.go`).
+
+## Update 2026-05-08 (AUTH OK byte-diff: structures match)
+
+Captured both flows over the Stonal VPN:
+
+- **Direct JDBC → upstream** via `/tmp/tcpsniff` on `:1530` →
+  `oracle-abynonprod:1521` — JDBC connects, AUTH succeeds.
+- **JDBC → dbbat (`:1523`) → upstream** with #144 + #148 — Phase 2
+  forwarded, upstream returns AUTH OK, dbbat patches AUTH_SVR_RESPONSE
+  and forwards. JDBC trips ORA-17401.
+
+Byte-diff of the two AUTH OK packets:
+
+- Total length: 2131 vs 2130 bytes (delta = 1, due to 3-digit vs
+  2-digit AUTH_SESSION_ID).
+- Common prefix: 3 bytes (the TNS length field itself).
+- Common suffix: 398 bytes (everything after AUTH_SVR_RESPONSE —
+  including AUTH_MAX_OPEN_CURSORS, AUTH_MAX_IDEN_LENGTH, the 0x17
+  NLS-info section, and the trailing 0x04 end-of-call Summary).
+- Diff region: AUTH_SESSION_ID, AUTH_SERIAL_NUM, AUTH_SERVER_PID,
+  AUTH_LAST_LOGIN timestamp, AUTH_SVR_RESPONSE.
+
+All structural elements identical: same 47 KV pairs in the dictionary,
+same key names, same ordering, same trailing TTC messages. The only
+non-session-specific difference is AUTH_SVR_RESPONSE.
+
+Patcher correctness verified independently: extracted dbbat's combined
+key + patched AUTH_SVR_RESPONSE ciphertext, decrypted in Python with
+AES-CBC zero-IV — last 16 bytes are exactly `SERVER_TO_CLIENT`. The
+combined key is the one
+`tryDecryptPasswordWithKey(candidate, encPassword)` validated, so it
+matches the key JDBC used to encrypt AUTH_PASSWORD. Setting
+`DBBAT_SKIP_AUTHOK_PATCH=1` (forwarding the upstream's
+AUTH_SVR_RESPONSE verbatim) gives the same ORA-17401 — so the patch
+isn't introducing the bug, but it's also not enough to satisfy JDBC.
+
+Open question: if the structure is right and the combined key
+matches the password the client encrypted, why does JDBC reject?
+Hypotheses:
+
+1. JDBC's AUTH_SVR_RESPONSE validation key is derived differently
+   from its AUTH_PASSWORD encryption key (one path uses customHash
+   PBKDF2, the other uses legacy MD5/XOR — the spec memory notes
+   python-oracledb thin's verifier-6949 path is hard-coded to legacy
+   regardless of customHash advertisement).
+2. JDBC validates fields beyond AUTH_SVR_RESPONSE (e.g. cryptographic
+   chain over AUTH_VERSION_NO + AUTH_SESSION_ID + …).
+3. Some byte-level encoding subtlety (uppercase vs lowercase hex in
+   the PBKDF2 input) makes JDBC and dbbat compute different keys even
+   with the same algorithm.
+
+Next step: instrument JDBC's `oracle.security.o5logon.O5Logon` (or
+attach a debugger) to dump its computed combined key + the
+`SERVER_TO_CLIENT` ciphertext it expects, then compare against
+dbbat's patcher output for the same session.
