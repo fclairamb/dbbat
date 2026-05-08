@@ -309,7 +309,7 @@ function CreateGrantDialog({
   });
   const [maxQueries, setMaxQueries] = useState<string>("");
   const [maxBytesValue, setMaxBytesValue] = useState<string>("");
-  const [bytesUnit, setBytesUnit] = useState<"MB" | "GB">("MB");
+  const [bytesUnit, setBytesUnit] = useState<"KB" | "MB" | "GB">("MB");
 
   // Compute duration and validation
   const startsAtDate = new Date(startsAt);
@@ -333,8 +333,14 @@ function CreateGrantDialog({
     e.preventDefault();
 
     // Convert bytes unit to actual bytes
+    const unitMultiplier =
+      bytesUnit === "GB"
+        ? 1024 * 1024 * 1024
+        : bytesUnit === "MB"
+          ? 1024 * 1024
+          : 1024; // KB
     const maxBytesTransferred = maxBytesValue
-      ? parseInt(maxBytesValue) * (bytesUnit === "GB" ? 1024 * 1024 * 1024 : 1024 * 1024)
+      ? parseInt(maxBytesValue) * unitMultiplier
       : undefined;
 
     createGrant.mutate({
@@ -453,11 +459,12 @@ function CreateGrantDialog({
                     onChange={(e) => setMaxBytesValue(e.target.value)}
                     className="flex-1"
                   />
-                  <Select value={bytesUnit} onValueChange={(v) => setBytesUnit(v as "MB" | "GB")}>
-                    <SelectTrigger className="w-20">
+                  <Select value={bytesUnit} onValueChange={(v) => setBytesUnit(v as "KB" | "MB" | "GB")}>
+                    <SelectTrigger className="w-20" data-testid="grant-bytes-unit">
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
+                      <SelectItem value="KB">KB</SelectItem>
                       <SelectItem value="MB">MB</SelectItem>
                       <SelectItem value="GB">GB</SelectItem>
                     </SelectContent>
