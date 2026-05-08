@@ -209,6 +209,39 @@ func (s *O5LogonServer) DecryptPassword(encClientSessKey, encPassword string) (s
 	return "", ErrDecryptedPasswordTooShort
 }
 
+// DeriveCombinedKey computes the combined-key the client used (the first
+// candidate per combinedKeyCandidates) and stores it on the receiver, without
+// requiring an AUTH_PASSWORD plaintext to verify against. Used by the
+// empty-AUTH_PASSWORD branch (SQLcl / JDBC thin 23c+) where the proxy has no
+// way to validate by password decryption — but still needs the combined key
+// so it can re-encrypt AUTH_SVR_RESPONSE before forwarding the upstream's
+// AUTH OK to the client.
+//
+// In customHash mode the customHash PBKDF2 derivation is preferred (matches
+// JDBC and go-ora). Otherwise the legacy MD5/XOR combined key is used.
+func (s *O5LogonServer) DeriveCombinedKey(encClientSessKey string) error {
+	encClientSessKeyBytes, err := hex.DecodeString(encClientSessKey)
+	if err != nil {
+		return fmt.Errorf("decode client session key: %w", err)
+	}
+
+	decKey := deriveAESKey(s.verifierKey)
+
+	clientSessionKey, err := aes192CBCDecrypt(decKey, encClientSessKeyBytes)
+	if err != nil {
+		return fmt.Errorf("decrypt client session key: %w", err)
+	}
+
+	candidates := s.combinedKeyCandidates(clientSessionKey)
+	if len(candidates) == 0 {
+		return ErrNoCombinedKeyCandidate
+	}
+
+	s.CombinedKey = candidates[0]
+
+	return nil
+}
+
 // combinedKeyCandidates returns the combined-key derivations to try, in order
 // of likelihood for the current mode.
 //

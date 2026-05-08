@@ -377,6 +377,17 @@ func (s *session) resolveAPIKeyFromPhase2(o5 *O5LogonServer, verifier *o5LogonVe
 		s.logger.InfoContext(s.ctx, "AUTH Phase 2: empty AUTH_PASSWORD — using loaded verifier's API key",
 			slog.String("key_id", verifier.apiKeyID.String()))
 
+		// Derive the combined key the way the client did so the AUTH_SVR_RESPONSE
+		// patch can run. Without this, dbbat forwards the upstream's
+		// AUTH_SVR_RESPONSE verbatim — that ciphertext is encrypted under
+		// dbbat's upstream-side combined key, so JDBC's client-side decrypt
+		// returns garbage and fails the "SERVER_TO_CLIENT" marker check with
+		// ORA-17401.
+		if err := o5.DeriveCombinedKey(clientSessKey); err != nil {
+			s.logger.WarnContext(s.ctx, "AUTH Phase 2: failed to derive combined key for empty-password path",
+				slog.Any("error", err))
+		}
+
 		apiKey, err := s.store.GetAPIKeyByID(s.ctx, verifier.apiKeyID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load API key by ID: %w", err)

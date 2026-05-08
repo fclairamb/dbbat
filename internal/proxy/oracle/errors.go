@@ -94,6 +94,7 @@ var (
 
 	// O5LOGON and TTC auth errors.
 	ErrDecryptedPasswordTooShort = errors.New("decrypted password too short")
+	ErrNoCombinedKeyCandidate    = errors.New("no combined-key candidate available")
 	ErrCiphertextNotAligned      = errors.New("ciphertext is not a multiple of block size")
 	ErrInvalidPadding            = errors.New("invalid PKCS7 padding")
 	ErrAuthPhase1TooShort        = errors.New("AUTH Phase 1 payload too short")
