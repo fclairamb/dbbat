@@ -38,6 +38,11 @@ func validateDefinitionRequest(req *CreateGrantDefinitionRequest) string {
 		return "duration_seconds must be > 0"
 	}
 
+	const maxDuration = int64(30 * 24 * 3600) // 30 days
+	if req.DurationSeconds > maxDuration {
+		return "duration_seconds must be at most 30 days (2592000)"
+	}
+
 	for _, control := range req.Controls {
 		valid := false
 
