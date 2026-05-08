@@ -63,25 +63,9 @@ func (s *Store) GetActiveGrant(ctx context.Context, userID, databaseID uuid.UUID
 		return nil, fmt.Errorf("failed to get active grant: %w", err)
 	}
 
-	// Get query count from queries table within the grant's time window
-	var queryCount int64
-	err = s.db.NewSelect().
-		ColumnExpr("COUNT(*) as query_count").
-		TableExpr("queries q").
-		Join("JOIN connections c ON q.connection_id = c.uid").
-		Where("c.user_id = ?", userID).
-		Where("c.database_id = ?", databaseID).
-		Where("q.executed_at >= ?", grant.StartsAt).
-		Where("q.executed_at < ?", grant.ExpiresAt).
-		Scan(ctx, &queryCount)
-	if err != nil {
-		// Non-fatal, just set to 0
-		queryCount = 0
+	if err := s.populateGrantCounters(ctx, grant); err != nil {
+		return nil, err
 	}
-
-	grant.QueryCount = queryCount
-	grant.BytesTransferred = 0 // Tracked in-session only
-
 	return grant, nil
 }
 
@@ -97,6 +81,10 @@ func (s *Store) GetGrantByUID(ctx context.Context, uid uuid.UUID) (*Grant, error
 			return nil, ErrGrantNotFound
 		}
 		return nil, fmt.Errorf("failed to get grant: %w", err)
+	}
+
+	if err := s.populateGrantCounters(ctx, grant); err != nil {
+		return nil, err
 	}
 	return grant, nil
 }
@@ -128,7 +116,53 @@ func (s *Store) ListGrants(ctx context.Context, filter GrantFilter) ([]Grant, er
 	if grants == nil {
 		grants = []AccessGrant{}
 	}
+	for i := range grants {
+		if err := s.populateGrantCounters(ctx, &grants[i]); err != nil {
+			return nil, err
+		}
+	}
 	return grants, nil
+}
+
+// populateGrantCounters fills the transient QueryCount and BytesTransferred
+// fields of g by aggregating from the queries and connections tables within
+// the grant's effective time window: [StartsAt, min(ExpiresAt, RevokedAt)).
+func (s *Store) populateGrantCounters(ctx context.Context, g *AccessGrant) error {
+	upper := g.ExpiresAt
+	if g.RevokedAt != nil && g.RevokedAt.Before(upper) {
+		upper = *g.RevokedAt
+	}
+
+	var queryCount int64
+	err := s.db.NewSelect().
+		ColumnExpr("COUNT(*)").
+		TableExpr("queries AS q").
+		Join("JOIN connections AS c ON q.connection_id = c.uid").
+		Where("c.user_id = ?", g.UserID).
+		Where("c.database_id = ?", g.DatabaseID).
+		Where("q.executed_at >= ?", g.StartsAt).
+		Where("q.executed_at < ?", upper).
+		Scan(ctx, &queryCount)
+	if err != nil {
+		return fmt.Errorf("failed to aggregate grant query count: %w", err)
+	}
+
+	var bytesTransferred int64
+	err = s.db.NewSelect().
+		ColumnExpr("COALESCE(SUM(bytes_transferred), 0)").
+		Model((*Connection)(nil)).
+		Where("user_id = ?", g.UserID).
+		Where("database_id = ?", g.DatabaseID).
+		Where("connected_at >= ?", g.StartsAt).
+		Where("connected_at < ?", upper).
+		Scan(ctx, &bytesTransferred)
+	if err != nil {
+		return fmt.Errorf("failed to aggregate grant bytes transferred: %w", err)
+	}
+
+	g.QueryCount = queryCount
+	g.BytesTransferred = bytesTransferred
+	return nil
 }
 
 // RevokeGrant revokes a grant
@@ -157,18 +191,3 @@ func (s *Store) RevokeGrant(ctx context.Context, uid uuid.UUID, revokedBy uuid.U
 	return nil
 }
 
-// IncrementQueryCount increments the query count for tracking quota usage.
-// This is called from the connections/queries tracking.
-func (s *Store) IncrementQueryCount(_ context.Context, _ uuid.UUID) error {
-	// Note: In the current schema, we don't have a query_count column on access_grants
-	// We calculate it dynamically from connections/queries
-	// This function is a placeholder for future optimization
-	return nil
-}
-
-// IncrementBytesTransferred increments the bytes transferred for tracking quota usage.
-func (s *Store) IncrementBytesTransferred(_ context.Context, _ uuid.UUID, _ int64) error {
-	// Note: Similar to IncrementQueryCount, this is calculated dynamically
-	// This function is a placeholder for future optimization
-	return nil
-}
