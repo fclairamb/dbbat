@@ -237,13 +237,10 @@ test.describe("Admin Password Reset", () => {
       await page.goto("/app/users");
       await page.waitForLoadState("networkidle");
 
-      // Step 5: Open actions menu for test user
-      const actionsButton = page.getByTestId(`user-actions-${testUsername}`);
-      await actionsButton.waitFor({ state: "visible", timeout: 10000 });
-      await actionsButton.click();
-
-      // Step 6: Click reset password
-      await page.getByTestId(`reset-password-${testUsername}`).click();
+      // Step 5: Click reset password directly
+      const resetButton = page.getByTestId(`reset-password-${testUsername}`);
+      await resetButton.waitFor({ state: "visible", timeout: 10000 });
+      await resetButton.click();
 
       // Step 7: Wait for dialog
       const dialog = page.getByTestId("reset-password-dialog");
@@ -310,8 +307,7 @@ test.describe("Admin Password Reset", () => {
       await page.goto("/app/users");
       await page.waitForLoadState("networkidle");
 
-      // Step 5: Open actions menu for test user
-      await page.getByTestId(`user-actions-${testUsername}`).click();
+      // Step 5: Click reset password directly
       await page.getByTestId(`reset-password-${testUsername}`).click();
 
       // Step 6: Wait for dialog

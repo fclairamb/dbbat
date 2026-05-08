@@ -34,12 +34,6 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
@@ -48,7 +42,7 @@ import { ResetPasswordDialog } from "@/components/shared/ResetPasswordDialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Plus, Trash2, MoreHorizontal, KeyRound } from "lucide-react";
+import { Plus, Trash2, KeyRound } from "lucide-react";
 import { toast } from "sonner";
 import { formatDistanceToNow } from "date-fns";
 
@@ -109,64 +103,55 @@ function UsersPage() {
       key: "actions",
       header: "",
       cell: (u) => (
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              data-testid={`user-actions-${u.username}`}
-            >
-              <MoreHorizontal className="h-4 w-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            {canReset ? (
-              <DropdownMenuItem
-                onClick={() => setResetPasswordUser(u)}
+        <div className="flex items-center justify-end gap-1">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                disabled={!canReset}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setResetPasswordUser(u);
+                }}
                 data-testid={`reset-password-${u.username}`}
+                aria-label={`Reset password for ${u.username}`}
               >
-                <KeyRound className="mr-2 h-4 w-4" />
-                Reset Password
-              </DropdownMenuItem>
-            ) : (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <DropdownMenuItem disabled>
-                    <KeyRound className="mr-2 h-4 w-4" />
-                    Reset Password
-                  </DropdownMenuItem>
-                </TooltipTrigger>
-                <TooltipContent>
-                  {getDisabledReason("reset-password", user?.roles)}
-                </TooltipContent>
-              </Tooltip>
-            )}
-            {canDelete ? (
-              <DropdownMenuItem
-                onClick={() => setDeleteUser(u)}
-                className="text-destructive focus:text-destructive"
+                <KeyRound className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {canReset
+                ? "Reset password"
+                : getDisabledReason("reset-password", user?.roles)}
+            </TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                disabled={!canDelete}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDeleteUser(u);
+                }}
+                className="text-destructive hover:text-destructive"
                 data-testid={`delete-user-${u.username}`}
+                aria-label={`Delete user ${u.username}`}
               >
-                <Trash2 className="mr-2 h-4 w-4" />
-                Delete User
-              </DropdownMenuItem>
-            ) : (
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <DropdownMenuItem disabled>
-                    <Trash2 className="mr-2 h-4 w-4" />
-                    Delete User
-                  </DropdownMenuItem>
-                </TooltipTrigger>
-                <TooltipContent>
-                  {getDisabledReason("delete-user", user?.roles)}
-                </TooltipContent>
-              </Tooltip>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {canDelete
+                ? "Delete user"
+                : getDisabledReason("delete-user", user?.roles)}
+            </TooltipContent>
+          </Tooltip>
+        </div>
       ),
-      className: "w-10",
+      className: "w-20",
     },
   ];
 
