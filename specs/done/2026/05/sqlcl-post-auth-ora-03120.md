@@ -432,3 +432,63 @@ Same file, but the protocol layer:
 
 - Run `make test` (covers unit + testcontainer Oracle integration).
 - Confirm python-oracledb thin still works through the new flow — its existing integration test path doesn't change because dbbat-side caps are unchanged.
+
+## Update 2026-05-07 (Phase 2 forwarding shipped — PR #144)
+
+After the customHash strip removal (#143) restored the verifier-18453 path
+end-to-end for SQLcl, JDBC still tripped ORA-17401 inside `T4CTTIfun.receive`
+when reading the upstream's AUTH OK. The cause was a Phase 2 KV-pair gap:
+JDBC sends 14 pairs in a 1195-byte body — including `AUTH_CONNECT_STRING`,
+`AUTH_COPYRIGHT`, `AUTH_ACL`, and a JDBC-flavoured
+`SESSION_CLIENT_DRIVER_NAME` / `_VERSION` / `_LOBATTR` triplet — while
+`buildClientAuthPhase2` sent 12 pairs in ~870 bytes, with go-ora's static
+identity strings. The upstream's AUTH OK is conditioned on what was in
+Phase 2; the leaner body produced an AUTH OK shape JDBC's `T4CTTIfun.receive`
+default-cases on at line 1048.
+
+Fixed by mirroring the Phase-1-forwarding design from #138: when the relay
+captures the client's actual Phase 2 packet, splice in upstream-encrypted
+`AUTH_SESSKEY` / `AUTH_PASSWORD` / `AUTH_PBKDF2_SPEEDY_KEY` values, swap the
+username, and pass everything else through verbatim (`internal/proxy/oracle/phase2_forward.go`).
+The forwarder also handles JDBC's bare-username encoding and `0x02` byte at
+offset 2 of the body — both differ from go-ora's CLR-prefixed username +
+`0x00` shape.
+
+Pending verification: end-to-end SQLcl 26.1 → dbbat → Oracle 19c
+`oracle-abynonprod.db.stonal.io` once a v0.9.0 image is deployed. If
+ORA-17401 still trips after this change, the wire trace from the new path
+will show whether the upstream's AUTH OK still has a JDBC-incompatible
+field ordering / type tag (which would push the fix toward AUTH-OK-side
+patching analogous to `auth_svr_response.go`).
+
+## Update 2026-05-08 (Phase 2 forwarding verified end-to-end)
+
+Tested locally (Stonal VPN) against a fresh dbbat instance on `:1523`
+built from main at `8d20e14`, with the upstream user's real password
+sourced from `kubectl --context=aws/nonprod -n dev exec
+service-abyla-… -- env | grep ORACLE_DATABASE_PASSWORD`. SSM had a
+stale value from the unrelated `LABEOMNGR` user; the SSM password
+returned ORA-01017 even on a direct go-ora→upstream connection.
+
+Outcomes after fixing the password:
+
+- **go-ora end-to-end**: connects, authenticates, `SELECT 1 FROM
+  dual` returns 1.
+- **SQLcl 26.1**: Phase 2 forwarding succeeds — the upstream returns
+  a 2123-byte AUTH OK Data packet (was TNS Marker / interrupt+reset
+  before #144). dbbat patches `AUTH_SVR_RESPONSE` with the client's
+  combined key and forwards. JDBC still trips ORA-17401 reading
+  dbbat's forwarded AUTH OK, then closes the socket.
+
+**Key conclusion**: Phase 2 forwarding (#144) is the right fix for
+the upstream-side rejection. The remaining ORA-17401 has moved one
+step downstream — JDBC now validates dbbat's *forwarded* AUTH OK and
+rejects something in it. Likely candidates: AUTH OK fields beyond
+`AUTH_SVR_RESPONSE` that JDBC validates and that need patching too
+(`AUTH_INSTANCE_NO`, `AUTH_DBNAME`, `AUTH_VERSION_STRING`,
+`AUTH_SC_DBUNIQUE_NAME`, `AUTH_SC_INSTANCE_ID`), or the cryptographic
+chain anchored on a key derivation JDBC validates.
+
+Next step: capture dbbat's outbound AUTH OK bytes and JDBC's
+expected AUTH OK bytes (from a direct JDBC→upstream session via
+`/tmp/tcpsniff`), diff to identify which field JDBC rejects.
