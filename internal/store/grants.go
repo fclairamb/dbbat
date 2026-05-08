@@ -190,4 +190,3 @@ func (s *Store) RevokeGrant(ctx context.Context, uid uuid.UUID, revokedBy uuid.U
 
 	return nil
 }
-
