@@ -515,3 +515,61 @@ Next step: instrument JDBC's `oracle.security.o5logon.O5Logon` (or
 attach a debugger) to dump its computed combined key + the
 `SERVER_TO_CLIENT` ciphertext it expects, then compare against
 dbbat's patcher output for the same session.
+
+## Update 2026-05-08 (RESOLVED — root cause was the challenge end-marker, PR #150)
+
+All four hypotheses above were wrong. The real root cause was completely
+unrelated to AUTH_SVR_RESPONSE: dbbat's `buildAuthChallengeEndMarker` was
+emitting **256 zero-padded bytes** after the 0x04 end-of-call code in the
+AUTH Phase 1 challenge response. JDBC thin parses a fixed-size 32-byte
+Summary structure and leaves the unread bytes in its read buffer. After
+JDBC sends Phase 2 and waits for the AUTH OK reply, `T4CTTIfun.receive()`
+reads what it thinks is the next TTC message code from its buffer — but
+the byte is `0x00`, leftover from the challenge. Code 0 isn't a case in
+the receive() switch, so it throws ORA-17401 from the default-case
+handler at line 1048.
+
+The "ORA-17401 happens reading dbbat's AUTH OK" diagnosis was misleading
+because the JDBC trace pinned the failure at `T4CTTIfun.receive:1048`,
+making it look like the AUTH OK was the problem. In reality, JDBC never
+even read the AUTH OK from the wire — it tripped on stale bytes in its
+own read buffer. tcpdump showed: dbbat sent 549-byte challenge, JDBC sent
+1041-byte Phase 2, JDBC sent a 10-byte break marker, JDBC threw. No AUTH
+OK read.
+
+Fix: replace `buildAuthChallengeEndMarker`'s 256-byte zero-padded buffer
+with the exact 33 bytes Oracle 19c sends (1 code byte + 32-byte Summary),
+captured via `/tmp/tcpsniff` against `oracle-abynonprod.db.stonal.io:1521`.
+
+Why go-ora and python-oracledb worked all along: their Summary parsers
+are tolerant — they consume more bytes from the trailing zeros, which
+either matches dbbat's pad (eating the leftover) or their next read is
+fresh from the socket. JDBC's strict parser caught dbbat's lazy padding.
+
+Verified end-to-end against real Stonal nonprod Oracle 19c via VPN:
+
+```
+$ sql -S connector/dbb_connector_key@localhost:1523/abynonprod
+SQL> SELECT 1 AS one FROM dual;
+   ONE
+______
+     1
+
+SQL> SELECT banner FROM v$version WHERE rownum=1;
+BANNER
+_________________________________________________________________________
+Oracle Database 19c Standard Edition 2 Release 19.0.0.0.0 - Production
+```
+
+All the work that came before this fix was still necessary:
+
+- #136 unbroke the upstream-auth parser (3 regressions).
+- #138 added Phase 1 forwarding so the upstream got JDBC's caps.
+- #143 enabled customHash mode in dbbat's O5LOGON server so JDBC didn't
+  see the verifier-6949 downgrade after the customHash strip removal.
+- #144 added Phase 2 forwarding so the upstream's AUTH OK matched
+  JDBC's caps surface.
+- #148 derived the combined key for the empty-AUTH_PASSWORD path
+  (latent fix; SQLcl 26.1 sends a non-empty password anyway).
+
+Without those, the end-marker fix wouldn't have been enough on its own.
