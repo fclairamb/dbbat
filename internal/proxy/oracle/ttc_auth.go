@@ -218,25 +218,28 @@ func buildAuthChallenge(encServerSessKey, authVfrData, pbkdf2ChkSaltHex string, 
 	return buf
 }
 
-// buildAuthChallengeEndMarker builds the end-of-response (message code 4) that
-// must follow the AUTH challenge. Clients read message codes in a loop and exit
-// on code 4. This is sent as part of the same TNS Data packet or as a separate one.
-// The bytes after code 4 are a minimal Summary structure captured from Oracle 19c.
+// buildAuthChallengeEndMarker builds the end-of-response (message code 4)
+// that must follow the AUTH challenge. The Summary structure is captured from
+// a real Oracle 19c Phase 1 challenge response — exactly 32 bytes after the
+// 0x04 code byte (33 bytes total).
+//
+// Earlier versions emitted 256 zero-padded bytes "to be safe", but JDBC thin
+// (SQLcl 26.1+) parses a fixed-size Summary off the wire and leaves the
+// remaining bytes in its read buffer. On the next round-trip those leftover
+// 0x00 bytes are read as TTC message codes — code 0 isn't a valid case in
+// T4CTTIfun.receive's switch, so JDBC throws ORA-17401 with no useful
+// stack location below T4CTTIfun.receive:1048. Matching Oracle's exact
+// 33-byte tail keeps JDBC's buffer empty after the challenge.
+//
+// go-ora and python-oracledb thin happen to consume more bytes from the
+// trailing zeros (their parsers are tolerant) so they survived this bug
+// for ~2 years. The fix is also a cleanup — sending fewer bytes per challenge.
 func buildAuthChallengeEndMarker() []byte {
-	// Message code 4 + minimal summary fields that NewSummary reads.
-	// These must align with the TTC capabilities negotiated in Set Protocol.
-	// Captured from the AUTH challenge tail of Oracle 19c.
-	// Message code 4 (end of call) + minimal Summary structure.
-	// All fields are zero (compressed int = 0x00), which is safe for any TTC version/capability combo.
-	// We send 64 zero bytes after code 4 to ensure NewSummary has enough data regardless
-	// of which conditional fields are enabled.
-	buf := make([]byte, 256)
-	buf[0] = 0x04 // message code 4
-	// Remaining 255 zero bytes provide enough data for NewSummary to read
-	// all conditional fields (RetCode, CurRowNumber, Flags, error messages, etc.)
-	// regardless of TTC version and capability flags.
-
-	return buf
+	return []byte{
+		0x04,                                                                                           // end-of-call code
+		0x01, 0x01, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // Summary fields
+		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	}
 }
 
 // buildAuthOK constructs the TTC AUTH success response.
