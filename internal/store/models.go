@@ -294,6 +294,51 @@ type GrantDefinitionFilter struct {
 	ActiveOnly bool
 }
 
+// GrantRequestStatus enumerates the lifecycle states a request can be in.
+type GrantRequestStatus string
+
+const (
+	GrantRequestPending   GrantRequestStatus = "pending"
+	GrantRequestApproved  GrantRequestStatus = "approved"
+	GrantRequestDenied    GrantRequestStatus = "denied"
+	GrantRequestCancelled GrantRequestStatus = "cancelled"
+	GrantRequestExpired   GrantRequestStatus = "expired"
+)
+
+// GrantRequest is a user-initiated request for a grant of a particular
+// shape (definition) on a particular database. Admins approve or deny.
+// On approval the system materializes a real AccessGrant from the
+// definition + the request's user/database.
+type GrantRequest struct {
+	bun.BaseModel `bun:"table:grant_requests,alias:gr"`
+
+	UID               uuid.UUID          `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	UserID            uuid.UUID          `bun:"user_id,notnull,type:uuid" json:"user_id"`
+	GrantDefinitionID uuid.UUID          `bun:"grant_definition_id,notnull,type:uuid" json:"grant_definition_id"`
+	DatabaseID        uuid.UUID          `bun:"database_id,notnull,type:uuid" json:"database_id"`
+	Justification     string             `bun:"justification,notnull,default:''" json:"justification"`
+	Status            GrantRequestStatus `bun:"status,notnull" json:"status"`
+	RequestedAt       time.Time          `bun:"requested_at,notnull,default:current_timestamp" json:"requested_at"`
+	DecidedAt         *time.Time         `bun:"decided_at" json:"decided_at,omitempty"`
+	DecidedBy         *uuid.UUID         `bun:"decided_by,type:uuid" json:"decided_by,omitempty"`
+	DecisionReason    *string            `bun:"decision_reason" json:"decision_reason,omitempty"`
+	ResultingGrantID  *uuid.UUID         `bun:"resulting_grant_id,type:uuid" json:"resulting_grant_id,omitempty"`
+
+	// Slack bookkeeping — populated by the notifier (Spec 04). JSON-omitted
+	// because the API has no need to expose Slack message coordinates.
+	SlackChannel   *string `bun:"slack_channel" json:"-"`
+	SlackMessageTS *string `bun:"slack_message_ts" json:"-"`
+}
+
+// GrantRequestFilter narrows ListGrantRequests queries.
+type GrantRequestFilter struct {
+	UserID     *uuid.UUID
+	Status     *GrantRequestStatus
+	DatabaseID *uuid.UUID
+	Limit      int
+	Offset     int
+}
+
 // GrantFilter represents filters for listing grants
 type GrantFilter struct {
 	UserID     *uuid.UUID

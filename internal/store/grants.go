@@ -10,6 +10,28 @@ import (
 	"github.com/google/uuid"
 )
 
+// BuildGrantFromDefinition assembles an AccessGrant from a GrantDefinition
+// + the requesting user/database, anchoring the time window to `now`. Used
+// by both the grant-request approval path and any future admin shortcut
+// that wants to materialize a definition into a concrete grant.
+func BuildGrantFromDefinition(def *GrantDefinition, userID, databaseID, grantedBy uuid.UUID, now time.Time) *Grant {
+	controls := append([]string(nil), def.Controls...)
+	if controls == nil {
+		controls = []string{}
+	}
+
+	return &Grant{
+		UserID:              userID,
+		DatabaseID:          databaseID,
+		Controls:            controls,
+		GrantedBy:           grantedBy,
+		StartsAt:            now,
+		ExpiresAt:           now.Add(time.Duration(def.DurationSeconds) * time.Second),
+		MaxQueryCounts:      def.MaxQueryCounts,
+		MaxBytesTransferred: def.MaxBytesTransferred,
+	}
+}
+
 // CreateGrant creates a new access grant
 func (s *Store) CreateGrant(ctx context.Context, grant *Grant) (*Grant, error) {
 	// Ensure Controls is not nil
