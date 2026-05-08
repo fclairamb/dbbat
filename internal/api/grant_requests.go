@@ -89,9 +89,9 @@ func (s *Server) handleCreateGrantRequest(c *gin.Context) {
 	}
 
 	details, _ := json.Marshal(map[string]any{
-		"grant_request_uid":    created.UID,
-		"grant_definition_id":  created.GrantDefinitionID,
-		"database_id":          created.DatabaseID,
+		"grant_request_uid":   created.UID,
+		"grant_definition_id": created.GrantDefinitionID,
+		"database_id":         created.DatabaseID,
 	})
 
 	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{

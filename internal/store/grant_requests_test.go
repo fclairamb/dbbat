@@ -8,19 +8,19 @@ import (
 	"github.com/google/uuid"
 )
 
-func setupRequestFixtures(t *testing.T, ctx context.Context, s *Store, suffix string) (admin, user *User, db *Database, def *GrantDefinition) {
+func setupRequestFixtures(t *testing.T, ctx context.Context, s *Store, suffix string) (*User, *User, *Database, *GrantDefinition) {
 	t.Helper()
 
-	admin = createTestAdmin(t, ctx, s, "req_admin_"+suffix)
+	admin := createTestAdmin(t, ctx, s, "req_admin_"+suffix)
 
-	var err error
-	user, err = s.CreateUser(ctx, "requser_"+suffix, "hash", []string{RoleConnector})
+	user, err := s.CreateUser(ctx, "requser_"+suffix, "hash", []string{RoleConnector})
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
 	}
 
 	key := testEncryptionKey()
-	db, err = s.CreateDatabase(ctx, &Database{
+
+	db, err := s.CreateDatabase(ctx, &Database{
 		Name:         "reqdb_" + suffix,
 		Host:         "localhost",
 		Port:         5432,
@@ -33,7 +33,7 @@ func setupRequestFixtures(t *testing.T, ctx context.Context, s *Store, suffix st
 		t.Fatalf("CreateDatabase: %v", err)
 	}
 
-	def, err = s.CreateGrantDefinition(ctx, &GrantDefinition{
+	def, err := s.CreateGrantDefinition(ctx, &GrantDefinition{
 		Name:            "req-def-" + suffix,
 		DurationSeconds: 3600,
 		Controls:        []string{ControlReadOnly},
@@ -192,7 +192,7 @@ func TestCancelGrantRequest(t *testing.T) {
 	}
 
 	if updated.Status != GrantRequestCancelled {
-		t.Errorf("status = %q, want cancelled", updated.Status)
+		t.Errorf("status = %q, want cancelled", updated.Status) //nolint:misspell // status value matches DB
 	}
 }
 

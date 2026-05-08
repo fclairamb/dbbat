@@ -181,7 +181,6 @@ func (s *Store) ApproveGrantRequest(ctx context.Context, uid, decidedBy uuid.UUI
 
 		return nil
 	})
-
 	if err != nil {
 		return nil, nil, err
 	}
@@ -198,6 +197,8 @@ func (s *Store) DenyGrantRequest(ctx context.Context, uid, decidedBy uuid.UUID, 
 // CancelGrantRequest atomically transitions pending → cancelled. Used by
 // the requester themselves; the caller layer enforces who can cancel
 // whose request.
+//
+//nolint:misspell // "cancelled" matches the DB CHECK constraint
 func (s *Store) CancelGrantRequest(ctx context.Context, uid, byUser uuid.UUID) (*GrantRequest, error) {
 	return s.transition(ctx, uid, GrantRequestCancelled, &byUser, "")
 }
@@ -265,7 +266,6 @@ func (s *Store) transition(
 
 		return nil
 	})
-
 	if err != nil {
 		return nil, err
 	}

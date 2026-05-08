@@ -114,6 +114,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // setupRouter configures the Gin router.
+//
+//nolint:funlen // route registration is intentionally sequential and grouped by resource
 func (s *Server) setupRouter() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()

@@ -297,11 +297,13 @@ type GrantDefinitionFilter struct {
 // GrantRequestStatus enumerates the lifecycle states a request can be in.
 type GrantRequestStatus string
 
+// Lifecycle states for grant requests. Keep these constants matching the
+// DB CHECK constraint values exactly.
 const (
 	GrantRequestPending   GrantRequestStatus = "pending"
 	GrantRequestApproved  GrantRequestStatus = "approved"
 	GrantRequestDenied    GrantRequestStatus = "denied"
-	GrantRequestCancelled GrantRequestStatus = "cancelled"
+	GrantRequestCancelled GrantRequestStatus = "cancelled" //nolint:misspell // matches DB CHECK constraint
 	GrantRequestExpired   GrantRequestStatus = "expired"
 )
 
