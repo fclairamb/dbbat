@@ -18,6 +18,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/auth/slack"
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/notify"
 	"github.com/fclairamb/dbbat/internal/store"
 	"github.com/fclairamb/dbbat/internal/version"
 )
@@ -39,6 +40,9 @@ type Server struct {
 	authCache          *cache.AuthCache
 	config             *config.Config
 	oauthProviders     map[string]auth.OAuthProvider
+	// notifier is the outbound Slack client; nil when notifications are
+	// disabled (no bot token configured).
+	notifier *notify.SlackNotifier
 }
 
 // NewServer creates a new API server.
@@ -69,6 +73,18 @@ func NewServer(dataStore *store.Store, encryptionKey []byte, logger *slog.Logger
 		logger.InfoContext(context.Background(), "Slack OAuth provider enabled")
 	}
 
+	// Initialize Slack notifier (outbound only — distinct from OAuth above)
+	var notifier *notify.SlackNotifier
+	if cfg != nil {
+		var err error
+		notifier, err = notify.NewSlackNotifier(cfg.SlackNotify, cfg.PublicURL, dataStore, logger)
+		if err != nil {
+			// Misconfiguration — log loudly but don't crash the server.
+			// The deployer can fix the env vars without losing the service.
+			logger.ErrorContext(context.Background(), "slack notifications misconfigured", slog.Any("error", err))
+		}
+	}
+
 	return &Server{
 		store:              dataStore,
 		encryptionKey:      encryptionKey,
@@ -78,6 +94,7 @@ func NewServer(dataStore *store.Store, encryptionKey []byte, logger *slog.Logger
 		authCache:          authCache,
 		config:             cfg,
 		oauthProviders:     oauthProviders,
+		notifier:           notifier,
 	}
 }
 

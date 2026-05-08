@@ -117,6 +117,25 @@ func (c SlackAuthConfig) Enabled() bool {
 	return c.ClientID != "" && c.ClientSecret != ""
 }
 
+// SlackNotifyConfig configures outbound Slack notifications for grant
+// request events. Distinct from SlackAuthConfig (login OIDC) so deployments
+// can enable one without the other.
+type SlackNotifyConfig struct {
+	// BotToken is the Slack bot user OAuth token (xoxb-...). Empty
+	// disables notifications.
+	BotToken string `koanf:"bot_token"`
+	// Channel is the Slack channel id or name (e.g. "#dbbat") where
+	// notifications are posted.
+	Channel string `koanf:"channel"`
+}
+
+// Enabled returns true when a bot token is set. Channel is enforced at
+// startup when Enabled is true; this method only gates whether the
+// notifier should run at all.
+func (c SlackNotifyConfig) Enabled() bool {
+	return c.BotToken != ""
+}
+
 // DumpConfig holds configuration for session packet dumps.
 type DumpConfig struct {
 	// Dir is the directory for dump files. Empty = disabled.
@@ -234,6 +253,15 @@ type Config struct {
 
 	// SlackAuth holds Slack OAuth configuration.
 	SlackAuth SlackAuthConfig `koanf:"slack_auth"`
+
+	// SlackNotify holds outbound Slack notification configuration for
+	// grant request events.
+	SlackNotify SlackNotifyConfig `koanf:"slack_notify"`
+
+	// PublicURL is the externally reachable base URL for this dbbat
+	// instance. Used to build deep-links in Slack notifications. Required
+	// only if SlackNotify is enabled.
+	PublicURL string `koanf:"public_url"`
 
 	// Dump holds session packet dump configuration.
 	Dump DumpConfig `koanf:"dump"`
@@ -367,6 +395,10 @@ func envTransform(k, v string) (string, any) {
 	// slack_auth_* -> slack_auth.*
 	if strings.HasPrefix(key, "slack_auth_") {
 		return "slack_auth." + strings.TrimPrefix(key, "slack_auth_"), v
+	}
+	// slack_notify_* -> slack_notify.*
+	if strings.HasPrefix(key, "slack_notify_") {
+		return "slack_notify." + strings.TrimPrefix(key, "slack_notify_"), v
 	}
 	// dump_* -> dump.*
 	if strings.HasPrefix(key, "dump_") {

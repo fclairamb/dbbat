@@ -1,15 +1,61 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/fclairamb/dbbat/internal/notify"
 	"github.com/fclairamb/dbbat/internal/store"
 )
+
+// slackNotifyTimeout caps how long we'll spend posting to Slack before
+// the goroutine gets canceled. Slack typically responds in <1s but we
+// don't want a slow Slack to leak goroutines forever.
+const slackNotifyTimeout = 5 * time.Second
+
+// notifyAsync fires a Slack notification in the background. The notifier
+// is a graceful no-op when nil (feature disabled), so callers don't need
+// to gate on configuration. We pass a fresh context so request
+// cancellation doesn't kill the notify in-flight.
+func (s *Server) notifyAsync(ev notify.GrantRequestEvent) {
+	if s.notifier == nil {
+		return
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), slackNotifyTimeout)
+		defer cancel()
+
+		s.notifier.NotifyGrantRequest(ctx, ev)
+	}()
+}
+
+// loadEventContext gathers the related rows the notifier needs to render a
+// message. Errors are logged and the partial event is returned — the
+// notifier can render with nil pointers, just less informatively.
+func (s *Server) loadEventContext(ctx context.Context, req *store.GrantRequest, decider *store.User) notify.GrantRequestEvent {
+	ev := notify.GrantRequestEvent{Request: req, Decider: decider}
+
+	if def, err := s.store.GetGrantDefinition(ctx, req.GrantDefinitionID); err == nil {
+		ev.Definition = def
+	}
+
+	if db, err := s.store.GetDatabaseByUID(ctx, req.DatabaseID); err == nil {
+		ev.Database = db
+	}
+
+	if u, err := s.store.GetUserByUID(ctx, req.UserID); err == nil {
+		ev.Requester = u
+	}
+
+	return ev
+}
 
 // CreateGrantRequestRequest is the body for POST /grant-requests.
 type CreateGrantRequestRequest struct {
@@ -100,6 +146,10 @@ func (s *Server) handleCreateGrantRequest(c *gin.Context) {
 		PerformedBy: &currentUser.UID,
 		Details:     details,
 	})
+
+	ev := s.loadEventContext(ctx, created, nil)
+	ev.Action = notify.GrantActionCreated
+	s.notifyAsync(ev)
 
 	successResponse(c, created)
 }
@@ -213,6 +263,10 @@ func (s *Server) handleApproveGrantRequest(c *gin.Context) {
 		Details:     details,
 	})
 
+	ev := s.loadEventContext(c.Request.Context(), request, currentUser)
+	ev.Action = notify.GrantActionApproved
+	s.notifyAsync(ev)
+
 	successResponse(c, gin.H{"grant_request": request, "grant": grant})
 }
 
@@ -255,6 +309,10 @@ func (s *Server) handleDenyGrantRequest(c *gin.Context) {
 		PerformedBy: &currentUser.UID,
 		Details:     details,
 	})
+
+	ev := s.loadEventContext(c.Request.Context(), updated, currentUser)
+	ev.Action = notify.GrantActionDenied
+	s.notifyAsync(ev)
 
 	successResponse(c, updated)
 }
@@ -313,6 +371,10 @@ func (s *Server) handleCancelGrantRequest(c *gin.Context) {
 		PerformedBy: &currentUser.UID,
 		Details:     details,
 	})
+
+	ev := s.loadEventContext(ctx, updated, currentUser)
+	ev.Action = notify.GrantActionCancelled
+	s.notifyAsync(ev)
 
 	successResponse(c, updated)
 }
