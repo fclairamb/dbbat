@@ -445,6 +445,65 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/grant-definitions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List grant definitions
+         * @description Lists grant definitions. Non-admins always receive only active
+         *     definitions. Admins can pass `active_only=true` to apply the same
+         *     filter for the request UI; otherwise both active and deactivated
+         *     definitions are returned.
+         */
+        get: operations["listGrantDefinitions"];
+        put?: never;
+        /**
+         * Create grant definition (admin)
+         * @description Creates a new admin-managed grant definition. Definitions are templates
+         *     for the grant request workflow — users can request grants only by
+         *     picking an active definition. Direct admin grant creation
+         *     (`POST /grants`) bypasses definitions.
+         */
+        post: operations["createGrantDefinition"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/grant-definitions/{uid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        /** Get grant definition by UID */
+        get: operations["getGrantDefinition"];
+        put?: never;
+        post?: never;
+        /**
+         * Deactivate grant definition (admin)
+         * @description Soft-deletes by flipping `is_active` to false. Definitions are not
+         *     hard-deleted because grant requests reference them and the audit
+         *     trail needs to stay intact.
+         */
+        delete: operations["deactivateGrantDefinition"];
+        options?: never;
+        head?: never;
+        /**
+         * Update grant definition (admin)
+         * @description Replaces the editable fields (uid / created_by / created_at / is_active stay put).
+         */
+        patch: operations["updateGrantDefinition"];
+        trace?: never;
+    };
     "/keys": {
         parameters: {
             query?: never;
@@ -910,6 +969,46 @@ export interface components {
          * @enum {string}
          */
         GrantControl: "read_only" | "block_copy" | "block_ddl";
+        /**
+         * @description Admin-managed template describing a *shape* of grant. Grant requests
+         *     (separate workflow) reference a definition; on approval a real
+         *     AccessGrant is built from the definition + the request's
+         *     user/database. Direct admin grant creation bypasses definitions.
+         */
+        GrantDefinition: {
+            /** Format: uuid */
+            uid: string;
+            name: string;
+            description?: string;
+            /**
+             * Format: int64
+             * @description How long the resulting grant remains valid after approval.
+             */
+            duration_seconds: number;
+            controls: components["schemas"]["GrantControl"][];
+            /** Format: int64 */
+            max_query_counts?: number | null;
+            /** Format: int64 */
+            max_bytes_transferred?: number | null;
+            /** @description Soft-deleted definitions have is_active=false; they remain referenced by historical grant requests. */
+            readonly is_active: boolean;
+            /** Format: uuid */
+            readonly created_by: string;
+            /** Format: date-time */
+            readonly created_at: string;
+        };
+        CreateGrantDefinitionRequest: {
+            name: string;
+            description?: string;
+            /** Format: int64 */
+            duration_seconds: number;
+            /** @default [] */
+            controls: components["schemas"]["GrantControl"][];
+            /** Format: int64 */
+            max_query_counts?: number | null;
+            /** Format: int64 */
+            max_bytes_transferred?: number | null;
+        };
         AccessGrant: {
             /**
              * Format: uuid
@@ -1378,6 +1477,8 @@ export type DatabaseLimited = components['schemas']['DatabaseLimited'];
 export type CreateDatabaseRequest = components['schemas']['CreateDatabaseRequest'];
 export type UpdateDatabaseRequest = components['schemas']['UpdateDatabaseRequest'];
 export type GrantControl = components['schemas']['GrantControl'];
+export type GrantDefinition = components['schemas']['GrantDefinition'];
+export type CreateGrantDefinitionRequest = components['schemas']['CreateGrantDefinitionRequest'];
 export type AccessGrant = components['schemas']['AccessGrant'];
 export type CreateGrantRequest = components['schemas']['CreateGrantRequest'];
 export type ApiKey = components['schemas']['APIKey'];
@@ -2173,6 +2274,140 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
+        };
+    };
+    listGrantDefinitions: {
+        parameters: {
+            query?: {
+                /** @description Restrict to active definitions */
+                active_only?: boolean;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of grant definitions */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        grant_definitions?: components["schemas"]["GrantDefinition"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createGrantDefinition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateGrantDefinitionRequest"];
+            };
+        };
+        responses: {
+            /** @description Definition created */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GrantDefinition"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getGrantDefinition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Definition details */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GrantDefinition"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deactivateGrantDefinition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Definition deactivated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateGrantDefinition: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateGrantDefinitionRequest"];
+            };
+        };
+        responses: {
+            /** @description Definition updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GrantDefinition"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
         };
     };
     listAPIKeys: {
