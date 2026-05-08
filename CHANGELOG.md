@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.9.0](https://github.com/fclairamb/dbbat/compare/v0.8.0...v0.9.0) (2026-05-08)
+
+
+### Features
+
+* **oracle:** customHash mode in O5LOGON server ([#143](https://github.com/fclairamb/dbbat/issues/143)) ([ff1a700](https://github.com/fclairamb/dbbat/commit/ff1a700429461ae7887f17d4da7fd4f8c6c2b465))
+* **oracle:** derive combined key for empty-AUTH_PASSWORD path ([#148](https://github.com/fclairamb/dbbat/issues/148)) ([ce4bb2c](https://github.com/fclairamb/dbbat/commit/ce4bb2c709134256c50a2342f120e0fb9f50960b))
+* **oracle:** forward client's actual Phase 1 to upstream ([#138](https://github.com/fclairamb/dbbat/issues/138)) ([126caa1](https://github.com/fclairamb/dbbat/commit/126caa18bc1f52fa7ac9b2f43f71d88f5f0f1da6))
+* **oracle:** forward client's actual Phase 2 to upstream ([#144](https://github.com/fclairamb/dbbat/issues/144)) ([ebc9df1](https://github.com/fclairamb/dbbat/commit/ebc9df1aa3bdb5faf17a7ae29f6ba9389dbc8baf))
+
+
+### Bug Fixes
+
+* **oracle:** trim AUTH challenge end-marker to 33 bytes (SQLcl unblocks) ([#150](https://github.com/fclairamb/dbbat/issues/150)) ([189f011](https://github.com/fclairamb/dbbat/commit/189f0117883c178126ba15af20d544f2121d41f5))
+* **oracle:** unbreak upstream auth parser; patch AUTH_SVR_RESPONSE ([#136](https://github.com/fclairamb/dbbat/issues/136)) ([db28eb6](https://github.com/fclairamb/dbbat/commit/db28eb673d5fb8e54bf6540b015ceb29436887a5))
+
 ## [0.8.0](https://github.com/fclairamb/dbbat/compare/v0.7.0...v0.8.0) (2026-05-06)
 
 
