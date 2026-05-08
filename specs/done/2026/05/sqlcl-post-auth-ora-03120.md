@@ -460,3 +460,58 @@ ORA-17401 still trips after this change, the wire trace from the new path
 will show whether the upstream's AUTH OK still has a JDBC-incompatible
 field ordering / type tag (which would push the fix toward AUTH-OK-side
 patching analogous to `auth_svr_response.go`).
+
+## Update 2026-05-08 (AUTH OK byte-diff: structures match)
+
+Captured both flows over the Stonal VPN:
+
+- **Direct JDBC → upstream** via `/tmp/tcpsniff` on `:1530` →
+  `oracle-abynonprod:1521` — JDBC connects, AUTH succeeds.
+- **JDBC → dbbat (`:1523`) → upstream** with #144 + #148 — Phase 2
+  forwarded, upstream returns AUTH OK, dbbat patches AUTH_SVR_RESPONSE
+  and forwards. JDBC trips ORA-17401.
+
+Byte-diff of the two AUTH OK packets:
+
+- Total length: 2131 vs 2130 bytes (delta = 1, due to 3-digit vs
+  2-digit AUTH_SESSION_ID).
+- Common prefix: 3 bytes (the TNS length field itself).
+- Common suffix: 398 bytes (everything after AUTH_SVR_RESPONSE —
+  including AUTH_MAX_OPEN_CURSORS, AUTH_MAX_IDEN_LENGTH, the 0x17
+  NLS-info section, and the trailing 0x04 end-of-call Summary).
+- Diff region: AUTH_SESSION_ID, AUTH_SERIAL_NUM, AUTH_SERVER_PID,
+  AUTH_LAST_LOGIN timestamp, AUTH_SVR_RESPONSE.
+
+All structural elements identical: same 47 KV pairs in the dictionary,
+same key names, same ordering, same trailing TTC messages. The only
+non-session-specific difference is AUTH_SVR_RESPONSE.
+
+Patcher correctness verified independently: extracted dbbat's combined
+key + patched AUTH_SVR_RESPONSE ciphertext, decrypted in Python with
+AES-CBC zero-IV — last 16 bytes are exactly `SERVER_TO_CLIENT`. The
+combined key is the one
+`tryDecryptPasswordWithKey(candidate, encPassword)` validated, so it
+matches the key JDBC used to encrypt AUTH_PASSWORD. Setting
+`DBBAT_SKIP_AUTHOK_PATCH=1` (forwarding the upstream's
+AUTH_SVR_RESPONSE verbatim) gives the same ORA-17401 — so the patch
+isn't introducing the bug, but it's also not enough to satisfy JDBC.
+
+Open question: if the structure is right and the combined key
+matches the password the client encrypted, why does JDBC reject?
+Hypotheses:
+
+1. JDBC's AUTH_SVR_RESPONSE validation key is derived differently
+   from its AUTH_PASSWORD encryption key (one path uses customHash
+   PBKDF2, the other uses legacy MD5/XOR — the spec memory notes
+   python-oracledb thin's verifier-6949 path is hard-coded to legacy
+   regardless of customHash advertisement).
+2. JDBC validates fields beyond AUTH_SVR_RESPONSE (e.g. cryptographic
+   chain over AUTH_VERSION_NO + AUTH_SESSION_ID + …).
+3. Some byte-level encoding subtlety (uppercase vs lowercase hex in
+   the PBKDF2 input) makes JDBC and dbbat compute different keys even
+   with the same algorithm.
+
+Next step: instrument JDBC's `oracle.security.o5logon.O5Logon` (or
+attach a debugger) to dump its computed combined key + the
+`SERVER_TO_CLIENT` ciphertext it expects, then compare against
+dbbat's patcher output for the same session.
