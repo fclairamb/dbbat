@@ -14,6 +14,9 @@ export type UpdateDatabaseRequest =
   components["schemas"]["UpdateDatabaseRequest"];
 export type AccessGrant = components["schemas"]["AccessGrant"];
 export type CreateGrantRequest = components["schemas"]["CreateGrantRequest"];
+export type GrantDefinition = components["schemas"]["GrantDefinition"];
+export type CreateGrantDefinitionRequest =
+  components["schemas"]["CreateGrantDefinitionRequest"];
 export type Connection = components["schemas"]["Connection"];
 export type Query = components["schemas"]["Query"];
 export type QueryWithRows = components["schemas"]["QueryWithRows"];
@@ -335,6 +338,110 @@ export function useRevokeGrant(options?: {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["grants"] });
+      options?.onSuccess?.();
+    },
+    onError: options?.onError,
+  });
+}
+
+// ============================================================================
+// Grant Definitions
+// ============================================================================
+
+export function useGrantDefinitions(filters?: { active_only?: boolean }) {
+  return useQuery({
+    queryKey: ["grant-definitions", filters],
+    queryFn: async (): Promise<GrantDefinition[]> => {
+      const response = await apiClient.GET("/grant-definitions", {
+        params: { query: filters },
+      });
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to load grant definitions"
+        );
+      }
+      return response.data?.grant_definitions || [];
+    },
+  });
+}
+
+export function useCreateGrantDefinition(options?: {
+  onSuccess?: (def: GrantDefinition) => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (
+      data: CreateGrantDefinitionRequest
+    ): Promise<GrantDefinition> => {
+      const response = await apiClient.POST("/grant-definitions", {
+        body: data,
+      });
+      if (response.error || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to create grant definition"
+        );
+      }
+      return response.data;
+    },
+    onSuccess: (def) => {
+      queryClient.invalidateQueries({ queryKey: ["grant-definitions"] });
+      options?.onSuccess?.(def);
+    },
+    onError: options?.onError,
+  });
+}
+
+export function useUpdateGrantDefinition(options?: {
+  onSuccess?: (def: GrantDefinition) => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (args: {
+      uid: string;
+      body: CreateGrantDefinitionRequest;
+    }): Promise<GrantDefinition> => {
+      const response = await apiClient.PATCH("/grant-definitions/{uid}", {
+        params: { path: { uid: args.uid } },
+        body: args.body,
+      });
+      if (response.error || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to update grant definition"
+        );
+      }
+      return response.data;
+    },
+    onSuccess: (def) => {
+      queryClient.invalidateQueries({ queryKey: ["grant-definitions"] });
+      options?.onSuccess?.(def);
+    },
+    onError: options?.onError,
+  });
+}
+
+export function useDeactivateGrantDefinition(options?: {
+  onSuccess?: () => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (uid: string): Promise<void> => {
+      const response = await apiClient.DELETE("/grant-definitions/{uid}", {
+        params: { path: { uid } },
+      });
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to deactivate grant definition"
+        );
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["grant-definitions"] });
       options?.onSuccess?.();
     },
     onError: options?.onError,

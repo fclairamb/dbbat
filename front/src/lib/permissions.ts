@@ -46,6 +46,7 @@ export const canDeleteDatabase = (roles: string[] | undefined): boolean => hasRo
 export const canUpdateUser = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canUpdateDatabase = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canResetPassword = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
+export const canManageGrantDefinitions = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 
 // API Key permissions (admin or connector, but not viewer-only)
 export const canCreateAPIKey = (roles: string[] | undefined): boolean => hasAnyRole(roles, ['admin', 'connector']);
