@@ -36,6 +36,9 @@ const (
 	ErrCodeWeakPassword ErrorCode = "WEAK_PASSWORD"
 	// ErrCodeRateLimited indicates too many requests.
 	ErrCodeRateLimited ErrorCode = "RATE_LIMITED"
+	// ErrCodeConflict indicates a state conflict (e.g. trying to transition
+	// a non-pending grant request, or duplicating a unique resource).
+	ErrCodeConflict ErrorCode = "CONFLICT"
 	// ErrCodeOAuthFailed indicates an OAuth authentication failure.
 	ErrCodeOAuthFailed ErrorCode = "OAUTH_FAILED"
 	// ErrCodeOAuthStateMismatch indicates an invalid or expired OAuth state.
