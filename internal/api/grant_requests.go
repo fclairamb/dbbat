@@ -15,7 +15,7 @@ import (
 )
 
 // slackNotifyTimeout caps how long we'll spend posting to Slack before
-// the goroutine gets cancelled. Slack typically responds in <1s but we
+// the goroutine gets canceled. Slack typically responds in <1s but we
 // don't want a slow Slack to leak goroutines forever.
 const slackNotifyTimeout = 5 * time.Second
 

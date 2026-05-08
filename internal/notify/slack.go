@@ -21,12 +21,22 @@ import (
 // GrantAction names the lifecycle event a notification refers to.
 type GrantAction string
 
+// Lifecycle actions a notification can describe. The cancel value matches
+// the DB CHECK constraint spelling.
 const (
 	GrantActionCreated   GrantAction = "created"
 	GrantActionApproved  GrantAction = "approved"
 	GrantActionDenied    GrantAction = "denied"
 	GrantActionCancelled GrantAction = "cancelled" //nolint:misspell // matches DB lifecycle value
 )
+
+// ErrChannelMissing is returned by NewSlackNotifier when a bot token is
+// set but no channel is configured.
+var ErrChannelMissing = errors.New("DBB_SLACK_NOTIFY_BOT_TOKEN set without DBB_SLACK_NOTIFY_CHANNEL")
+
+// ErrPublicURLMissing is returned by NewSlackNotifier when a bot token is
+// set but no public URL is configured.
+var ErrPublicURLMissing = errors.New("DBB_SLACK_NOTIFY_BOT_TOKEN set without DBB_PUBLIC_URL")
 
 // GrantRequestEvent carries the data the notifier needs to render a
 // message. Fields besides Request are looked up by the API handler before
@@ -38,7 +48,7 @@ type GrantRequestEvent struct {
 	Definition *store.GrantDefinition
 	Database   *store.Database
 	Requester  *store.User
-	// Decider is set when Action is approved/denied/cancelled.
+	// Decider is set when Action is approved/denied/canceled.
 	Decider *store.User
 }
 
@@ -64,19 +74,21 @@ type SlackNotifier struct {
 // disabled. A startup error fires only when notification is enabled but
 // dependent fields are missing — silent disable is intentional for
 // deployments that just don't want it.
+//
+//nolint:nilnil // nil notifier is the documented "disabled" sentinel
 func NewSlackNotifier(cfg config.SlackNotifyConfig, publicURL string, persister SlackPersister, log *slog.Logger) (*SlackNotifier, error) {
 	if !cfg.Enabled() {
-		log.Info("slack notifications: disabled (DBB_SLACK_NOTIFY_BOT_TOKEN unset)")
+		log.InfoContext(context.Background(), "slack notifications: disabled (DBB_SLACK_NOTIFY_BOT_TOKEN unset)")
 
 		return nil, nil
 	}
 
 	if cfg.Channel == "" {
-		return nil, errors.New("DBB_SLACK_NOTIFY_BOT_TOKEN set without DBB_SLACK_NOTIFY_CHANNEL")
+		return nil, ErrChannelMissing
 	}
 
 	if publicURL == "" {
-		return nil, errors.New("DBB_SLACK_NOTIFY_BOT_TOKEN set without DBB_PUBLIC_URL")
+		return nil, ErrPublicURLMissing
 	}
 
 	return &SlackNotifier{
@@ -105,7 +117,7 @@ func (n *SlackNotifier) NotifyGrantRequest(ctx context.Context, ev GrantRequestE
 
 	blocks := buildBlocks(ev, n.publicURL)
 
-	switch ev.Action {
+	switch ev.Action { //nolint:exhaustive // non-Created actions all share the update branch in the default case
 	case GrantActionCreated:
 		channel, ts, err := n.client.PostMessageContext(
 			ctx,

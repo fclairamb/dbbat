@@ -48,7 +48,7 @@ func (f *fakePersister) SetGrantRequestSlackMessage(_ context.Context, uid uuid.
 }
 
 func nopLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+	return slog.New(slog.DiscardHandler)
 }
 
 // fakeSlack stands up an httptest server that imitates the subset of
