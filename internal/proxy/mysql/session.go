@@ -8,12 +8,14 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	gomysqlclient "github.com/go-mysql-org/go-mysql/client"
 	gomysqlserver "github.com/go-mysql-org/go-mysql/server"
 
 	"github.com/fclairamb/dbbat/internal/dump"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -44,14 +46,43 @@ type Session struct {
 
 	logger *slog.Logger
 	ctx    context.Context //nolint:containedctx // Session-scoped context
+
+	// Wire-level byte counters for the client-facing socket. Together they
+	// capture every byte the proxy exchanged with the client (handshake,
+	// COM_QUERY/COM_STMT_EXECUTE requests, result-set responses, errors).
+	bytesFromClient *atomic.Int64
+	bytesToClient   *atomic.Int64
+	// lastBytesSnapshot is the cumulative client-side byte count at the end
+	// of the previous recorded query. The first query absorbs the
+	// handshake/auth bytes, which is the right place for them.
+	lastBytesSnapshot int64
+}
+
+// cumulativeClientBytes returns the running total of bytes exchanged with
+// the client. Nil-safe so tests that build sessions without going through
+// newSession don't panic.
+func (s *Session) cumulativeClientBytes() int64 {
+	var total int64
+	if s.bytesFromClient != nil {
+		total += s.bytesFromClient.Load()
+	}
+	if s.bytesToClient != nil {
+		total += s.bytesToClient.Load()
+	}
+	return total
 }
 
 func newSession(clientConn net.Conn, server *Server) *Session {
+	bytesFromClient := &atomic.Int64{}
+	bytesToClient := &atomic.Int64{}
+
 	return &Session{
-		server:     server,
-		clientConn: clientConn,
-		logger:     server.logger,
-		ctx:        server.ctx,
+		server:          server,
+		clientConn:      shared.NewCountingConn(clientConn, bytesFromClient, bytesToClient),
+		bytesFromClient: bytesFromClient,
+		bytesToClient:   bytesToClient,
+		logger:          server.logger,
+		ctx:             server.ctx,
 	}
 }
 
@@ -141,6 +172,13 @@ func (s *Session) recordDisconnect() {
 			slog.Any("connection_id", s.connection.UID),
 			slog.Any("error", err))
 	}
+
+	// Note: the very last query's response bytes are written by the
+	// gomysql server after recordQuery has run, so they aren't picked up
+	// by the per-query diff. For typical sessions (many queries, modest
+	// per-query response) this is a small undercount. A trailing flush
+	// would need a bytes-only Increment helper since IncrementConnectionStats
+	// also bumps the query count — out of scope for this fix.
 }
 
 // startDumpIfConfigured opens a packet-dump file for this session and tees the
