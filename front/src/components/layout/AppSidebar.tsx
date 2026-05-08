@@ -59,6 +59,7 @@ const mainNavItems = [
   { title: "Databases", icon: Database, href: "/databases" },
   { title: "Grants", icon: Shield, href: "/grants" },
   { title: "Grant Definitions", icon: Shield, href: "/grant-definitions" },
+  { title: "Grant Requests", icon: Shield, href: "/grant-requests" },
 ];
 
 const observabilityNavItems = [

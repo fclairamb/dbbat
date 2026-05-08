@@ -17,6 +17,9 @@ export type CreateGrantRequest = components["schemas"]["CreateGrantRequest"];
 export type GrantDefinition = components["schemas"]["GrantDefinition"];
 export type CreateGrantDefinitionRequest =
   components["schemas"]["CreateGrantDefinitionRequest"];
+export type GrantRequest = components["schemas"]["GrantRequest"];
+export type CreateGrantRequestPayload =
+  components["schemas"]["CreateGrantRequestPayload"];
 export type Connection = components["schemas"]["Connection"];
 export type Query = components["schemas"]["Query"];
 export type QueryWithRows = components["schemas"]["QueryWithRows"];
@@ -442,6 +445,142 @@ export function useDeactivateGrantDefinition(options?: {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["grant-definitions"] });
+      options?.onSuccess?.();
+    },
+    onError: options?.onError,
+  });
+}
+
+// ============================================================================
+// Grant Requests
+// ============================================================================
+
+export function useGrantRequests(filters?: {
+  status?: "pending" | "approved" | "denied" | "cancelled" | "expired";
+  user_id?: string;
+  database_id?: string;
+}) {
+  return useQuery({
+    queryKey: ["grant-requests", filters],
+    queryFn: async (): Promise<GrantRequest[]> => {
+      const response = await apiClient.GET("/grant-requests", {
+        params: { query: filters as Record<string, unknown> },
+      });
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to load grant requests"
+        );
+      }
+      return response.data?.grant_requests || [];
+    },
+  });
+}
+
+export function useCreateGrantRequest(options?: {
+  onSuccess?: (req: GrantRequest) => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (
+      data: CreateGrantRequestPayload
+    ): Promise<GrantRequest> => {
+      const response = await apiClient.POST("/grant-requests", { body: data });
+      if (response.error || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to submit grant request"
+        );
+      }
+      return response.data;
+    },
+    onSuccess: (req) => {
+      queryClient.invalidateQueries({ queryKey: ["grant-requests"] });
+      options?.onSuccess?.(req);
+    },
+    onError: options?.onError,
+  });
+}
+
+export function useApproveGrantRequest(options?: {
+  onSuccess?: () => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (uid: string): Promise<void> => {
+      const response = await apiClient.POST(
+        "/grant-requests/{uid}/approve",
+        { params: { path: { uid } } }
+      );
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to approve grant request"
+        );
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["grant-requests"] });
+      queryClient.invalidateQueries({ queryKey: ["grants"] });
+      options?.onSuccess?.();
+    },
+    onError: options?.onError,
+  });
+}
+
+export function useDenyGrantRequest(options?: {
+  onSuccess?: () => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (args: {
+      uid: string;
+      reason?: string;
+    }): Promise<void> => {
+      const response = await apiClient.POST(
+        "/grant-requests/{uid}/deny",
+        {
+          params: { path: { uid: args.uid } },
+          body: { reason: args.reason ?? "" },
+        }
+      );
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to deny grant request"
+        );
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["grant-requests"] });
+      options?.onSuccess?.();
+    },
+    onError: options?.onError,
+  });
+}
+
+export function useCancelGrantRequest(options?: {
+  onSuccess?: () => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (uid: string): Promise<void> => {
+      const response = await apiClient.POST(
+        "/grant-requests/{uid}/cancel",
+        { params: { path: { uid } } }
+      );
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to cancel grant request"
+        );
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["grant-requests"] });
       options?.onSuccess?.();
     },
     onError: options?.onError,

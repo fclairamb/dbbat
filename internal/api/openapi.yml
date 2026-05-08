@@ -1104,6 +1104,10 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/GrantRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
 
   /grant-requests/{uid}:
     parameters:
