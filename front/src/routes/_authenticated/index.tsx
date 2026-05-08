@@ -121,6 +121,7 @@ function DashboardPage() {
             data={queries ?? []}
             isLoading={queriesLoading}
             rowKey={(q) => q.uid}
+            rowHref={(q) => `/queries/${q.uid}`}
             emptyMessage="No queries recorded yet"
           />
         </div>

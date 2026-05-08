@@ -372,24 +372,256 @@ func TestRevokeGrant(t *testing.T) {
 	})
 }
 
-func TestIncrementQueryCount(t *testing.T) {
+func TestGrantCounters_PopulatedFromQueriesAndConnections(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	// This is a placeholder function, just verify it doesn't error
-	err := store.IncrementQueryCount(ctx, uuid.New())
+	user, database := createTestUserAndDatabase(t, ctx, store, "counters")
+	admin, _ := store.CreateUser(ctx, "countersadmin", "hash", []string{RoleAdmin, RoleConnector})
+
+	now := time.Now()
+	grant, err := store.CreateGrant(ctx, &Grant{
+		UserID:     user.UID,
+		DatabaseID: database.UID,
+		Controls:   []string{},
+		GrantedBy:  admin.UID,
+		StartsAt:   now.Add(-time.Hour),
+		ExpiresAt:  now.Add(time.Hour),
+	})
 	if err != nil {
-		t.Errorf("IncrementQueryCount() error = %v", err)
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	conn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.1")
+	if err != nil {
+		t.Fatalf("CreateConnection() error = %v", err)
+	}
+
+	const queryBytes = int64(100)
+	for i := 0; i < 3; i++ {
+		if _, err := store.CreateQuery(ctx, &Query{
+			ConnectionID: conn.UID,
+			SQLText:      "SELECT 1",
+			ExecutedAt:   now,
+		}); err != nil {
+			t.Fatalf("CreateQuery() error = %v", err)
+		}
+		if err := store.IncrementConnectionStats(ctx, conn.UID, queryBytes); err != nil {
+			t.Fatalf("IncrementConnectionStats() error = %v", err)
+		}
+	}
+
+	got, err := store.GetGrantByUID(ctx, grant.UID)
+	if err != nil {
+		t.Fatalf("GetGrantByUID() error = %v", err)
+	}
+	if got.QueryCount != 3 {
+		t.Errorf("QueryCount = %d, want 3", got.QueryCount)
+	}
+	if got.BytesTransferred != 3*queryBytes {
+		t.Errorf("BytesTransferred = %d, want %d", got.BytesTransferred, 3*queryBytes)
+	}
+
+	active, err := store.GetActiveGrant(ctx, user.UID, database.UID)
+	if err != nil {
+		t.Fatalf("GetActiveGrant() error = %v", err)
+	}
+	if active.QueryCount != 3 {
+		t.Errorf("active QueryCount = %d, want 3", active.QueryCount)
+	}
+	if active.BytesTransferred != 3*queryBytes {
+		t.Errorf("active BytesTransferred = %d, want %d", active.BytesTransferred, 3*queryBytes)
 	}
 }
 
-func TestIncrementBytesTransferred(t *testing.T) {
+func TestGrantCounters_TimeWindowExcludesOutOfRange(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	// This is a placeholder function, just verify it doesn't error
-	err := store.IncrementBytesTransferred(ctx, uuid.New(), 1024)
+	user, database := createTestUserAndDatabase(t, ctx, store, "window")
+	admin, _ := store.CreateUser(ctx, "windowadmin", "hash", []string{RoleAdmin, RoleConnector})
+
+	now := time.Now()
+	// Grant window is entirely in the future relative to the activity below.
+	grant, err := store.CreateGrant(ctx, &Grant{
+		UserID:     user.UID,
+		DatabaseID: database.UID,
+		Controls:   []string{},
+		GrantedBy:  admin.UID,
+		StartsAt:   now.Add(time.Hour),
+		ExpiresAt:  now.Add(2 * time.Hour),
+	})
 	if err != nil {
-		t.Errorf("IncrementBytesTransferred() error = %v", err)
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	conn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.2")
+	if err != nil {
+		t.Fatalf("CreateConnection() error = %v", err)
+	}
+	if _, err := store.CreateQuery(ctx, &Query{
+		ConnectionID: conn.UID,
+		SQLText:      "SELECT 1",
+		ExecutedAt:   now,
+	}); err != nil {
+		t.Fatalf("CreateQuery() error = %v", err)
+	}
+	if err := store.IncrementConnectionStats(ctx, conn.UID, 500); err != nil {
+		t.Fatalf("IncrementConnectionStats() error = %v", err)
+	}
+
+	got, err := store.GetGrantByUID(ctx, grant.UID)
+	if err != nil {
+		t.Fatalf("GetGrantByUID() error = %v", err)
+	}
+	if got.QueryCount != 0 {
+		t.Errorf("QueryCount = %d, want 0 (activity is before grant.StartsAt)", got.QueryCount)
+	}
+	if got.BytesTransferred != 0 {
+		t.Errorf("BytesTransferred = %d, want 0 (activity is before grant.StartsAt)", got.BytesTransferred)
+	}
+}
+
+func TestGrantCounters_BoundedByRevokedAt(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "revokebound")
+	admin, _ := store.CreateUser(ctx, "revokeboundadmin", "hash", []string{RoleAdmin, RoleConnector})
+
+	now := time.Now()
+	grant, err := store.CreateGrant(ctx, &Grant{
+		UserID:     user.UID,
+		DatabaseID: database.UID,
+		Controls:   []string{},
+		GrantedBy:  admin.UID,
+		StartsAt:   now.Add(-time.Hour),
+		ExpiresAt:  now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	// Pre-revocation activity (should be counted).
+	preConn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.3")
+	if err != nil {
+		t.Fatalf("CreateConnection() error = %v", err)
+	}
+	if _, err := store.CreateQuery(ctx, &Query{
+		ConnectionID: preConn.UID,
+		SQLText:      "SELECT pre",
+		ExecutedAt:   time.Now(),
+	}); err != nil {
+		t.Fatalf("CreateQuery() error = %v", err)
+	}
+	if err := store.IncrementConnectionStats(ctx, preConn.UID, 100); err != nil {
+		t.Fatalf("IncrementConnectionStats() error = %v", err)
+	}
+
+	// Ensure RevokedAt > pre-activity timestamps and < post-activity timestamps.
+	time.Sleep(20 * time.Millisecond)
+	if err := store.RevokeGrant(ctx, grant.UID, admin.UID); err != nil {
+		t.Fatalf("RevokeGrant() error = %v", err)
+	}
+	time.Sleep(20 * time.Millisecond)
+
+	// Post-revocation activity (should NOT be counted).
+	postConn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.4")
+	if err != nil {
+		t.Fatalf("CreateConnection() error = %v", err)
+	}
+	if _, err := store.CreateQuery(ctx, &Query{
+		ConnectionID: postConn.UID,
+		SQLText:      "SELECT post",
+		ExecutedAt:   time.Now(),
+	}); err != nil {
+		t.Fatalf("CreateQuery() error = %v", err)
+	}
+	if err := store.IncrementConnectionStats(ctx, postConn.UID, 999); err != nil {
+		t.Fatalf("IncrementConnectionStats() error = %v", err)
+	}
+
+	got, err := store.GetGrantByUID(ctx, grant.UID)
+	if err != nil {
+		t.Fatalf("GetGrantByUID() error = %v", err)
+	}
+	if got.QueryCount != 1 {
+		t.Errorf("QueryCount = %d, want 1 (only pre-revocation query counts)", got.QueryCount)
+	}
+	if got.BytesTransferred != 100 {
+		t.Errorf("BytesTransferred = %d, want 100 (only pre-revocation connection counts)", got.BytesTransferred)
+	}
+}
+
+func TestListGrants_PopulatesCountersForEach(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, db1 := createTestUserAndDatabase(t, ctx, store, "listcountersA")
+	_, db2 := createTestUserAndDatabase(t, ctx, store, "listcountersB")
+	admin, _ := store.CreateUser(ctx, "listcountersadmin", "hash", []string{RoleAdmin, RoleConnector})
+
+	now := time.Now()
+	g1, err := store.CreateGrant(ctx, &Grant{
+		UserID:     user.UID,
+		DatabaseID: db1.UID,
+		Controls:   []string{},
+		GrantedBy:  admin.UID,
+		StartsAt:   now.Add(-time.Hour),
+		ExpiresAt:  now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+	g2, err := store.CreateGrant(ctx, &Grant{
+		UserID:     user.UID,
+		DatabaseID: db2.UID,
+		Controls:   []string{},
+		GrantedBy:  admin.UID,
+		StartsAt:   now.Add(-time.Hour),
+		ExpiresAt:  now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	// 1 query / 100 bytes on g1; 2 queries / 500 bytes on g2.
+	conn1, _ := store.CreateConnection(ctx, user.UID, db1.UID, "10.0.0.5")
+	if _, err := store.CreateQuery(ctx, &Query{ConnectionID: conn1.UID, SQLText: "x", ExecutedAt: now}); err != nil {
+		t.Fatalf("CreateQuery() error = %v", err)
+	}
+	if err := store.IncrementConnectionStats(ctx, conn1.UID, 100); err != nil {
+		t.Fatalf("IncrementConnectionStats() error = %v", err)
+	}
+
+	conn2, _ := store.CreateConnection(ctx, user.UID, db2.UID, "10.0.0.6")
+	for i := 0; i < 2; i++ {
+		if _, err := store.CreateQuery(ctx, &Query{ConnectionID: conn2.UID, SQLText: "y", ExecutedAt: now}); err != nil {
+			t.Fatalf("CreateQuery() error = %v", err)
+		}
+		if err := store.IncrementConnectionStats(ctx, conn2.UID, 250); err != nil {
+			t.Fatalf("IncrementConnectionStats() error = %v", err)
+		}
+	}
+
+	listed, err := store.ListGrants(ctx, GrantFilter{UserID: &user.UID})
+	if err != nil {
+		t.Fatalf("ListGrants() error = %v", err)
+	}
+
+	byUID := map[uuid.UUID]Grant{}
+	for _, g := range listed {
+		byUID[g.UID] = g
+	}
+	got1, ok1 := byUID[g1.UID]
+	got2, ok2 := byUID[g2.UID]
+	if !ok1 || !ok2 {
+		t.Fatalf("ListGrants() missing one of the grants: ok1=%v ok2=%v", ok1, ok2)
+	}
+	if got1.QueryCount != 1 || got1.BytesTransferred != 100 {
+		t.Errorf("g1 QueryCount=%d BytesTransferred=%d, want 1 / 100", got1.QueryCount, got1.BytesTransferred)
+	}
+	if got2.QueryCount != 2 || got2.BytesTransferred != 500 {
+		t.Errorf("g2 QueryCount=%d BytesTransferred=%d, want 2 / 500", got2.QueryCount, got2.BytesTransferred)
 	}
 }
