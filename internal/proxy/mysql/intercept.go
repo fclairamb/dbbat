@@ -44,12 +44,12 @@ func (h *handler) UseDB(dbName string) error {
 	syntheticSQL := "USE " + dbName
 
 	if dbName == h.session.database.Name || dbName == h.session.database.DatabaseName {
-		h.recordQuery(syntheticSQL, nil, time.Now(), nil, nil, 0, nil)
+		h.recordQuery(syntheticSQL, nil, time.Now(), nil, nil, nil)
 
 		return nil
 	}
 
-	h.recordQuery(syntheticSQL, nil, time.Now(), nil, nil, 0, ptrErrString(ErrSwitchDatabaseDenied))
+	h.recordQuery(syntheticSQL, nil, time.Now(), nil, nil, ptrErrString(ErrSwitchDatabaseDenied))
 
 	return ErrSwitchDatabaseDenied
 }
@@ -78,12 +78,12 @@ func (h *handler) HandleStmtPrepare(query string) (int, int, any, error) {
 	stmt, err := h.session.upstreamConn.Prepare(query)
 	if err != nil {
 		errStr := err.Error()
-		h.recordQuery(syntheticSQL, nil, start, nil, nil, 0, &errStr)
+		h.recordQuery(syntheticSQL, nil, start, nil, nil, &errStr)
 
 		return 0, 0, nil, err
 	}
 
-	h.recordQuery(syntheticSQL, nil, start, nil, nil, 0, nil)
+	h.recordQuery(syntheticSQL, nil, start, nil, nil, nil)
 
 	return stmt.ParamNum(), stmt.ColumnNum(), stmt, nil
 }
@@ -138,14 +138,14 @@ func (h *handler) runIntercepted(
 
 	if err := checkQuotas(s.grant); err != nil {
 		errStr := err.Error()
-		h.recordQuery(sql, params, time.Now(), nil, nil, 0, &errStr)
+		h.recordQuery(sql, params, time.Now(), nil, nil, &errStr)
 
 		return nil, err
 	}
 
 	if err := shared.ValidateMySQLQuery(sql, s.grant); err != nil {
 		errStr := err.Error()
-		h.recordQuery(sql, params, time.Now(), nil, nil, 0, &errStr)
+		h.recordQuery(sql, params, time.Now(), nil, nil, &errStr)
 
 		return nil, err
 	}
@@ -154,7 +154,7 @@ func (h *handler) runIntercepted(
 	result, err := exec()
 	if err != nil {
 		errStr := err.Error()
-		h.recordQuery(sql, params, start, nil, nil, 0, &errStr)
+		h.recordQuery(sql, params, start, nil, nil, &errStr)
 
 		return result, err
 	}
@@ -166,9 +166,9 @@ func (h *handler) runIntercepted(
 		rowsAffected = &ra
 	}
 
-	capturedRows, totalBytes, _ := h.captureRows(result)
+	capturedRows, _, _ := h.captureRows(result)
 
-	h.recordQuery(sql, params, start, capturedRows, rowsAffected, totalBytes, nil)
+	h.recordQuery(sql, params, start, capturedRows, rowsAffected, nil)
 
 	return result, nil
 }
@@ -178,16 +178,20 @@ func (h *handler) runIntercepted(
 // bumps connection stats. Updates the session's grant counters so in-session
 // quota checks reflect work just done.
 //
-// capturedRows / bytesTransferred are 0/nil for non-SELECT queries, validation
-// failures, and synthetic USE/PREPARE entries — captureRows returns nil for
-// any result without a Resultset.
+// capturedRows is nil for non-SELECT queries, validation failures, and
+// synthetic USE/PREPARE entries.
+//
+// bytes_transferred is computed from the wire-level CountingConn around the
+// client socket — it captures the COM_QUERY/COM_STMT_EXECUTE request, the
+// full result-set response (header packets, row packets, EOF/OK), and any
+// error packets. Replaces the previous JSON-encoded row size which only
+// counted the captured-row payload.
 func (h *handler) recordQuery(
 	sql string,
 	params *store.QueryParameters,
 	start time.Time,
 	capturedRows []store.QueryRow,
 	rowsAffected *int64,
-	bytesTransferred int64,
 	queryError *string,
 ) {
 	s := h.session
@@ -195,6 +199,10 @@ func (h *handler) recordQuery(
 	if s.connection == nil {
 		return // pre-handshake or pre-connection-record; nothing to log against
 	}
+
+	total := s.cumulativeClientBytes()
+	bytesTransferred := total - s.lastBytesSnapshot
+	s.lastBytesSnapshot = total
 
 	durationMs := float64(time.Since(start).Microseconds()) / 1000.0
 
@@ -230,8 +238,10 @@ func (h *handler) recordQuery(
 	}()
 
 	// In-session quota counters so the next checkQuotas() reflects this query.
-	s.grant.QueryCount++
-	s.grant.BytesTransferred += bytesTransferred
+	if s.grant != nil {
+		s.grant.QueryCount++
+		s.grant.BytesTransferred += bytesTransferred
+	}
 }
 
 // stringifyArgs converts MySQL prepared-statement args into store.QueryParameters.

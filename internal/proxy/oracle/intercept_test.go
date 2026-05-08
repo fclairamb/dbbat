@@ -240,7 +240,7 @@ func TestCompleteQuery_SetsDuration(t *testing.T) {
 	// In a real integration test, we'd use a test store.
 	// For now, just verify the pending query is cleared.
 	s.store = nil // will cause the goroutine to fail silently
-	s.completeQuery(nil, nil, 100)
+	s.completeQuery(nil, nil)
 
 	assert.Nil(t, s.tracker.pendingQuery)
 }
@@ -531,7 +531,7 @@ func TestCompleteQuery_WithRows_AssignsRowNumbers(t *testing.T) {
 	assert.Equal(t, 0, pending.rowNumber)
 
 	rows := int64(3)
-	s.completeQuery(&rows, nil, 100)
+	s.completeQuery(&rows, nil)
 	assert.Nil(t, s.tracker.pendingQuery)
 }
 
@@ -541,7 +541,7 @@ func TestHandleResponse_ErrorResponse(t *testing.T) {
 	_ = s.handleOALL8(buildOALL8("SELECT * FROM nonexistent", nil, 1))
 
 	payload := buildTTCErrorResponse(942, "ORA-00942: table or view does not exist")
-	s.handleResponse(payload, 100)
+	s.handleResponse(payload)
 
 	// Pending query should be completed
 	assert.Nil(t, s.tracker.pendingQuery)
@@ -561,7 +561,7 @@ func TestHandleResponse_WithColumnDefsAndRows(t *testing.T) {
 	)
 
 	// handleResponse should capture the rows then complete
-	s.handleResponse(payload, 500)
+	s.handleResponse(payload)
 
 	// Query should be completed (pendingQuery cleared)
 	assert.Nil(t, s.tracker.pendingQuery)
@@ -573,7 +573,7 @@ func TestHandleResponse_MoreData_DoesNotComplete(t *testing.T) {
 	_ = s.handleOALL8(buildOALL8("SELECT id FROM big_table", nil, 1))
 
 	payload := buildTTCResponseWithMoreData(true)
-	s.handleResponse(payload, 100)
+	s.handleResponse(payload)
 
 	// Pending query should NOT be completed — more data expected
 	assert.NotNil(t, s.tracker.pendingQuery)

@@ -10,6 +10,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,6 +18,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -82,6 +84,37 @@ type session struct {
 	// Dump
 	dumpConfig config.DumpConfig
 	dump       *dump.Writer
+
+	// Wire-level byte counters for the client-facing socket. Reads = bytes
+	// sent by the client; writes = bytes returned to the client. Together
+	// they capture every byte the proxy exchanged with the client (TNS
+	// framing, AUTH packets, OALL8 SQL, OFETCH responses, errors). Atomics
+	// because Read/Write may be called from goroutines other than the
+	// per-query bookkeeping path.
+	bytesFromClient *atomic.Int64
+	bytesToClient   *atomic.Int64
+	// lastBytesSnapshot is the cumulative client-side total at the end of
+	// the previous query. completeQuery diffs against it to attribute
+	// bytes to the just-finished query (the first query absorbs the
+	// auth/handshake traffic, which is the right place for it).
+	lastBytesSnapshot int64
+}
+
+// cumulativeClientBytes returns the running total of bytes exchanged with
+// the client. Used by per-query bookkeeping to take snapshots at query
+// boundaries.
+//
+// Counters may be nil when sessions are constructed by tests that don't go
+// through newSession; treat that as zero rather than panic.
+func (s *session) cumulativeClientBytes() int64 {
+	var total int64
+	if s.bytesFromClient != nil {
+		total += s.bytesFromClient.Load()
+	}
+	if s.bytesToClient != nil {
+		total += s.bytesToClient.Load()
+	}
+	return total
 }
 
 // newSession creates a new Oracle proxy session.
@@ -95,16 +128,21 @@ func newSession(
 	queryStorage config.QueryStorageConfig,
 	dumpConfig config.DumpConfig,
 ) *session {
+	bytesFromClient := &atomic.Int64{}
+	bytesToClient := &atomic.Int64{}
+
 	return &session{
-		clientConn:    clientConn,
-		store:         dataStore,
-		encryptionKey: encryptionKey,
-		logger:        logger,
-		ctx:           ctx,
-		authCache:     authCache,
-		tracker:       newOracleQueryTracker(),
-		queryStorage:  queryStorage,
-		dumpConfig:    dumpConfig,
+		clientConn:      shared.NewCountingConn(clientConn, bytesFromClient, bytesToClient),
+		store:           dataStore,
+		encryptionKey:   encryptionKey,
+		logger:          logger,
+		ctx:             ctx,
+		authCache:       authCache,
+		tracker:         newOracleQueryTracker(),
+		queryStorage:    queryStorage,
+		dumpConfig:      dumpConfig,
+		bytesFromClient: bytesFromClient,
+		bytesToClient:   bytesToClient,
 	}
 }
 
@@ -736,12 +774,11 @@ func (s *session) upstreamToClient() error {
 			return fmt.Errorf("upstream read error: %w", err)
 		}
 
-		// Track bytes transferred
-		bytesTransferred := int64(len(pkt.Payload))
-
-		// Intercept Data packets for response handling
+		// Intercept Data packets for response handling. Wire-level byte
+		// tracking lives on the client-side CountingConn — we no longer
+		// pass per-packet sizes here.
 		if pkt.Type == TNSPacketTypeData && len(pkt.Payload) >= ttcDataFlagsSize+1 {
-			s.interceptUpstreamMessage(pkt, bytesTransferred)
+			s.interceptUpstreamMessage(pkt)
 		}
 
 		// Dump upstream->client packet
@@ -757,7 +794,7 @@ func (s *session) upstreamToClient() error {
 }
 
 // interceptUpstreamMessage handles response interception from upstream.
-func (s *session) interceptUpstreamMessage(pkt *TNSPacket, bytesTransferred int64) {
+func (s *session) interceptUpstreamMessage(pkt *TNSPacket) {
 	funcCode, err := parseTTCFunctionCode(pkt.Payload)
 	if err != nil {
 		return
@@ -770,11 +807,11 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket, bytesTransferred int6
 
 	switch funcCode { //nolint:exhaustive // only handling response-related codes
 	case TTCFuncQueryResult:
-		s.handleQueryResultV2(ttcPayload, bytesTransferred)
+		s.handleQueryResultV2(ttcPayload)
 	case TTCFuncResponse:
-		s.handleResponse(ttcPayload, bytesTransferred)
+		s.handleResponse(ttcPayload)
 	case TTCFuncContinuation:
-		s.handleContinuation(ttcPayload, bytesTransferred)
+		s.handleContinuation(ttcPayload)
 	}
 }
 
@@ -786,7 +823,7 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket, bytesTransferred int6
 // row (0x15 [flag] [count] [bitmask] 0x07) indicates which columns will
 // have new values in the NEXT row. Columns not in the bitmask retain their
 // previous values.
-func (s *session) handleContinuation(ttcPayload []byte, bytesTransferred int64) {
+func (s *session) handleContinuation(ttcPayload []byte) {
 	if s.tracker.pendingQuery == nil || s.tracker.pendingQuery.cursor == nil {
 		return
 	}
@@ -814,14 +851,14 @@ func (s *session) handleContinuation(ttcPayload []byte, bytesTransferred int64) 
 
 	// Check for ORA-01403 (no data found) which signals end of data
 	if findBytes(ttcPayload, []byte("ORA-01403")) >= 0 {
-		s.completeQuery(nil, nil, bytesTransferred)
+		s.completeQuery(nil, nil)
 	}
 }
 
 // handleResponse processes a legacy TTC Response (func=0x08).
 // In v315+, most responses don't follow the legacy format so we skip them.
 // Query completion is handled by handleQueryResultV2 for func=0x10.
-func (s *session) handleResponse(ttcPayload []byte, bytesTransferred int64) {
+func (s *session) handleResponse(ttcPayload []byte) {
 	resp, err := decodeTTCResponse(ttcPayload)
 	if err != nil {
 		// v315+ auth/negotiation responses don't follow legacy format — ignore
@@ -838,7 +875,7 @@ func (s *session) handleResponse(ttcPayload []byte, bytesTransferred int64) {
 	// If error or no more data, complete the query
 	if resp.IsError {
 		errMsg := resp.ErrorMessage
-		s.completeQuery(nil, &errMsg, bytesTransferred)
+		s.completeQuery(nil, &errMsg)
 	} else if !resp.MoreData {
 		var rowsAffected *int64
 		if resp.RowCount > 0 {
@@ -846,7 +883,7 @@ func (s *session) handleResponse(ttcPayload []byte, bytesTransferred int64) {
 			rowsAffected = &rc
 		}
 
-		s.completeQuery(rowsAffected, nil, bytesTransferred)
+		s.completeQuery(rowsAffected, nil)
 	}
 	// If MoreData is true, we wait for the next OFETCH response
 }

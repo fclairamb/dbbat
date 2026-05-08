@@ -101,7 +101,7 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 // Called before starting a new query to ensure the previous one is persisted.
 func (s *session) flushPendingQuery() {
 	if s.tracker.pendingQuery != nil {
-		s.completeQuery(nil, nil, 0)
+		s.completeQuery(nil, nil)
 	}
 }
 
@@ -177,7 +177,7 @@ func (s *session) handleJDBCExec(ttcPayload []byte) {
 // Extracts column names and row values, stores them as query results.
 // For large result sets, rows arrive across multiple response packets.
 // We accumulate rows until we see ORA-01403 (no data found) which signals end of data.
-func (s *session) handleQueryResultV2(ttcPayload []byte, bytesTransferred int64) {
+func (s *session) handleQueryResultV2(ttcPayload []byte) {
 	result := decodeQueryResultV2(ttcPayload)
 	if result == nil {
 		return
@@ -213,7 +213,7 @@ func (s *session) handleQueryResultV2(ttcPayload []byte, bytesTransferred int64)
 
 	// Only complete the query when we see the end-of-data marker (ORA-01403)
 	if result.NoData {
-		s.completeQuery(nil, nil, bytesTransferred)
+		s.completeQuery(nil, nil)
 	}
 }
 
@@ -337,13 +337,22 @@ func (s *session) persistQueryRecord() {
 
 // completeQuery finalizes a query record with duration and updates connection stats.
 // Rows have already been streamed to the database during capture.
-func (s *session) completeQuery(rowsAffected *int64, queryError *string, bytesTransferred int64) {
+//
+// bytes_transferred is computed from the wire-level CountingConn around the
+// client socket — this captures TNS framing, AUTH/OALL8/OFETCH payloads and
+// error packets, fixing the previous undercount that summed only response
+// payload lengths.
+func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 	pending := s.tracker.pendingQuery
 	if pending == nil || pending.cursor == nil {
 		return
 	}
 
 	s.tracker.pendingQuery = nil
+
+	total := s.cumulativeClientBytes()
+	bytesTransferred := total - s.lastBytesSnapshot
+	s.lastBytesSnapshot = total
 
 	duration := float64(time.Since(pending.startTime).Milliseconds())
 
