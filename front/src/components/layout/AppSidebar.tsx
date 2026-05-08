@@ -19,7 +19,12 @@ import {
 import { useAuth } from "@/contexts/AuthContext";
 import { useVersion } from "@/api/queries";
 import { PasswordChangeDialog } from "@/components/shared/PasswordChangeDialog";
-import { hasRole, canViewQueries, canViewAudit } from "@/lib/permissions";
+import {
+  hasRole,
+  canViewQueries,
+  canViewAudit,
+  canManageGrantDefinitions,
+} from "@/lib/permissions";
 import { Badge } from "@/components/ui/badge";
 import {
   Tooltip,
@@ -53,6 +58,7 @@ const mainNavItems = [
   { title: "Users", icon: Users, href: "/users" },
   { title: "Databases", icon: Database, href: "/databases" },
   { title: "Grants", icon: Shield, href: "/grants" },
+  { title: "Grant Definitions", icon: Shield, href: "/grant-definitions" },
 ];
 
 const observabilityNavItems = [
@@ -77,6 +83,10 @@ export function AppSidebar() {
     // Only show Users page to admins
     if (item.href === "/users") {
       return hasRole(user?.roles, "admin");
+    }
+    // Grant definitions are admin-only — non-admins don't manage templates
+    if (item.href === "/grant-definitions") {
+      return canManageGrantDefinitions(user?.roles);
     }
     return true;
   });

@@ -93,6 +93,7 @@ func setupTestStore(t *testing.T) *Store {
 		"queries",
 		"connections",
 		"access_grants",
+		"grant_definitions",
 		"audit_log",
 		"databases",
 		"user_identities",

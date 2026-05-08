@@ -196,6 +196,17 @@ func (s *Server) setupRouter() *gin.Engine {
 			grants.GET("/:uid", s.handleGetGrant)
 			grants.DELETE("/:uid", s.requireAdmin(), s.handleRevokeGrant)
 
+			// Grant definition endpoints — admin-managed templates that
+			// bound the shapes a user is allowed to request via the grant
+			// request workflow. Read access is open to any authenticated
+			// user so the request UI can populate its definition picker.
+			grantDefs := authenticated.Group("/grant-definitions")
+			grantDefs.POST("", s.requireAdmin(), s.handleCreateGrantDefinition)
+			grantDefs.GET("", s.handleListGrantDefinitions)
+			grantDefs.GET("/:uid", s.handleGetGrantDefinition)
+			grantDefs.PATCH("/:uid", s.requireAdmin(), s.handleUpdateGrantDefinition)
+			grantDefs.DELETE("/:uid", s.requireAdmin(), s.handleDeactivateGrantDefinition)
+
 			// API Key endpoints
 			keys := authenticated.Group("/keys")
 			// Create and revoke require Web Session or Basic Auth (API keys cannot manage API keys)
