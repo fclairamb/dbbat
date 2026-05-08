@@ -267,6 +267,33 @@ func (g *AccessGrant) ShouldBlockDDL() bool {
 // Grant is an alias for backward compatibility
 type Grant = AccessGrant
 
+// GrantDefinition is an admin-managed template describing the *shape* of a
+// grant: name, duration, controls, optional quotas. Grant requests
+// (separately implemented) reference a definition; on approval, a real
+// AccessGrant is built from the definition + the request's user/database.
+//
+// Direct admin grant creation bypasses definitions — they exist to bound
+// what users can self-request, not to constrain admins.
+type GrantDefinition struct {
+	bun.BaseModel `bun:"table:grant_definitions,alias:gd"`
+
+	UID                 uuid.UUID `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	Name                string    `bun:"name,notnull" json:"name"`
+	Description         string    `bun:"description,notnull,default:''" json:"description"`
+	DurationSeconds     int64     `bun:"duration_seconds,notnull" json:"duration_seconds"`
+	Controls            []string  `bun:"controls,array,notnull,default:'{}'" json:"controls"`
+	MaxQueryCounts      *int64    `bun:"max_query_counts" json:"max_query_counts"`
+	MaxBytesTransferred *int64    `bun:"max_bytes_transferred" json:"max_bytes_transferred"`
+	IsActive            bool      `bun:"is_active,notnull,default:true" json:"is_active"`
+	CreatedBy           uuid.UUID `bun:"created_by,notnull,type:uuid" json:"created_by"`
+	CreatedAt           time.Time `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+}
+
+// GrantDefinitionFilter narrows ListGrantDefinitions queries.
+type GrantDefinitionFilter struct {
+	ActiveOnly bool
+}
+
 // GrantFilter represents filters for listing grants
 type GrantFilter struct {
 	UserID     *uuid.UUID
