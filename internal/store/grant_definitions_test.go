@@ -25,14 +25,14 @@ func TestCreateGrantDefinition(t *testing.T) {
 
 	admin := createTestAdmin(t, ctx, store, "create")
 
-	max := int64(1000)
+	maxQ := int64(1000)
 
 	def := &GrantDefinition{
 		Name:                "Read-only 1h",
 		Description:         "Standard read access for an hour",
 		DurationSeconds:     3600,
 		Controls:            []string{ControlReadOnly},
-		MaxQueryCounts:      &max,
+		MaxQueryCounts:      &maxQ,
 		MaxBytesTransferred: nil,
 		CreatedBy:           admin.UID,
 	}
