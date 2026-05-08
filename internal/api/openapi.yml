@@ -1036,6 +1036,216 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /grant-requests:
+    post:
+      tags:
+        - Grant Requests
+      summary: Submit a grant request
+      description: |
+        Any authenticated user can request access by selecting a grant
+        definition and a database. An admin then approves or denies. On
+        approval, dbbat creates a real AccessGrant from the definition.
+      operationId: createGrantRequest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGrantRequestPayload'
+      responses:
+        '200':
+          description: Grant request submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrantRequest'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: A pending request already exists for this user/database/definition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    get:
+      tags:
+        - Grant Requests
+      summary: List grant requests
+      description: Admins see all (filterable). Non-admins see only their own.
+      operationId: listGrantRequests
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, approved, denied, cancelled, expired]
+        - name: user_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: database_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: List of grant requests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  grant_requests:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/GrantRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /grant-requests/{uid}:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+
+    get:
+      tags:
+        - Grant Requests
+      summary: Get grant request
+      operationId: getGrantRequest
+      responses:
+        '200':
+          description: Grant request details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrantRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /grant-requests/{uid}/approve:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      tags:
+        - Grant Requests
+      summary: Approve grant request (admin)
+      description: |
+        Atomically transitions pending → approved and creates a real
+        AccessGrant from the linked definition + the request's
+        user/database. Returns 409 if not pending or if the linked
+        definition has been deactivated.
+      operationId: approveGrantRequest
+      responses:
+        '200':
+          description: Approved; resulting grant included
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  grant_request:
+                    $ref: '#/components/schemas/GrantRequest'
+                  grant:
+                    $ref: '#/components/schemas/AccessGrant'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Not pending or definition inactive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /grant-requests/{uid}/deny:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      tags:
+        - Grant Requests
+      summary: Deny grant request (admin)
+      operationId: denyGrantRequest
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: Denied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrantRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Not pending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /grant-requests/{uid}/cancel:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      tags:
+        - Grant Requests
+      summary: Cancel grant request (requester or admin)
+      operationId: cancelGrantRequest
+      responses:
+        '200':
+          description: Cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrantRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Not pending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /keys:
     post:
       tags:
@@ -1919,6 +2129,74 @@ components:
         - `read_only`: Enables PostgreSQL session read-only mode and blocks write queries
         - `block_copy`: Blocks all COPY commands (both TO and FROM)
         - `block_ddl`: Blocks DDL statements (CREATE, ALTER, DROP, TRUNCATE)
+
+    GrantRequest:
+      type: object
+      description: |
+        A user-initiated request for a grant of a particular shape on a
+        particular database. Lifecycle: pending → approved/denied/cancelled.
+        On approval the system creates a real AccessGrant (referenced via
+        resulting_grant_id).
+      properties:
+        uid:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        grant_definition_id:
+          type: string
+          format: uuid
+        database_id:
+          type: string
+          format: uuid
+        justification:
+          type: string
+          maxLength: 1000
+        status:
+          type: string
+          enum: [pending, approved, denied, cancelled, expired]
+        requested_at:
+          type: string
+          format: date-time
+        decided_at:
+          type: string
+          format: date-time
+          nullable: true
+        decided_by:
+          type: string
+          format: uuid
+          nullable: true
+        decision_reason:
+          type: string
+          nullable: true
+        resulting_grant_id:
+          type: string
+          format: uuid
+          nullable: true
+      required:
+        - uid
+        - user_id
+        - grant_definition_id
+        - database_id
+        - status
+        - requested_at
+
+    CreateGrantRequestPayload:
+      type: object
+      properties:
+        grant_definition_id:
+          type: string
+          format: uuid
+        database_id:
+          type: string
+          format: uuid
+        justification:
+          type: string
+          maxLength: 1000
+      required:
+        - grant_definition_id
+        - database_id
 
     GrantDefinition:
       type: object

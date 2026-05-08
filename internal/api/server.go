@@ -114,6 +114,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // setupRouter configures the Gin router.
+//
+//nolint:funlen // route registration is intentionally sequential and grouped by resource
 func (s *Server) setupRouter() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
@@ -206,6 +208,17 @@ func (s *Server) setupRouter() *gin.Engine {
 			grantDefs.GET("/:uid", s.handleGetGrantDefinition)
 			grantDefs.PATCH("/:uid", s.requireAdmin(), s.handleUpdateGrantDefinition)
 			grantDefs.DELETE("/:uid", s.requireAdmin(), s.handleDeactivateGrantDefinition)
+
+			// Grant request endpoints — user self-service workflow.
+			// Approve/deny require admin; cancel is open to the requester
+			// (handler enforces ownership).
+			grantReqs := authenticated.Group("/grant-requests")
+			grantReqs.POST("", s.handleCreateGrantRequest)
+			grantReqs.GET("", s.handleListGrantRequests)
+			grantReqs.GET("/:uid", s.handleGetGrantRequest)
+			grantReqs.POST("/:uid/approve", s.requireAdmin(), s.handleApproveGrantRequest)
+			grantReqs.POST("/:uid/deny", s.requireAdmin(), s.handleDenyGrantRequest)
+			grantReqs.POST("/:uid/cancel", s.handleCancelGrantRequest)
 
 			// API Key endpoints
 			keys := authenticated.Group("/keys")

@@ -504,6 +504,114 @@ export interface paths {
         patch: operations["updateGrantDefinition"];
         trace?: never;
     };
+    "/grant-requests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List grant requests
+         * @description Admins see all (filterable). Non-admins see only their own.
+         */
+        get: operations["listGrantRequests"];
+        put?: never;
+        /**
+         * Submit a grant request
+         * @description Any authenticated user can request access by selecting a grant
+         *     definition and a database. An admin then approves or denies. On
+         *     approval, dbbat creates a real AccessGrant from the definition.
+         */
+        post: operations["createGrantRequest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/grant-requests/{uid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        /** Get grant request */
+        get: operations["getGrantRequest"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/grant-requests/{uid}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve grant request (admin)
+         * @description Atomically transitions pending → approved and creates a real
+         *     AccessGrant from the linked definition + the request's
+         *     user/database. Returns 409 if not pending or if the linked
+         *     definition has been deactivated.
+         */
+        post: operations["approveGrantRequest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/grant-requests/{uid}/deny": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Deny grant request (admin) */
+        post: operations["denyGrantRequest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/grant-requests/{uid}/cancel": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Cancel grant request (requester or admin) */
+        post: operations["cancelGrantRequest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/keys": {
         parameters: {
             query?: never;
@@ -969,6 +1077,41 @@ export interface components {
          * @enum {string}
          */
         GrantControl: "read_only" | "block_copy" | "block_ddl";
+        /**
+         * @description A user-initiated request for a grant of a particular shape on a
+         *     particular database. Lifecycle: pending → approved/denied/cancelled.
+         *     On approval the system creates a real AccessGrant (referenced via
+         *     resulting_grant_id).
+         */
+        GrantRequest: {
+            /** Format: uuid */
+            uid: string;
+            /** Format: uuid */
+            user_id: string;
+            /** Format: uuid */
+            grant_definition_id: string;
+            /** Format: uuid */
+            database_id: string;
+            justification?: string;
+            /** @enum {string} */
+            status: "pending" | "approved" | "denied" | "cancelled" | "expired";
+            /** Format: date-time */
+            requested_at: string;
+            /** Format: date-time */
+            decided_at?: string | null;
+            /** Format: uuid */
+            decided_by?: string | null;
+            decision_reason?: string | null;
+            /** Format: uuid */
+            resulting_grant_id?: string | null;
+        };
+        CreateGrantRequestPayload: {
+            /** Format: uuid */
+            grant_definition_id: string;
+            /** Format: uuid */
+            database_id: string;
+            justification?: string;
+        };
         /**
          * @description Admin-managed template describing a *shape* of grant. Grant requests
          *     (separate workflow) reference a definition; on approval a real
@@ -1477,6 +1620,8 @@ export type DatabaseLimited = components['schemas']['DatabaseLimited'];
 export type CreateDatabaseRequest = components['schemas']['CreateDatabaseRequest'];
 export type UpdateDatabaseRequest = components['schemas']['UpdateDatabaseRequest'];
 export type GrantControl = components['schemas']['GrantControl'];
+export type GrantRequest = components['schemas']['GrantRequest'];
+export type CreateGrantRequestPayload = components['schemas']['CreateGrantRequestPayload'];
 export type GrantDefinition = components['schemas']['GrantDefinition'];
 export type CreateGrantDefinitionRequest = components['schemas']['CreateGrantDefinitionRequest'];
 export type AccessGrant = components['schemas']['AccessGrant'];
@@ -2408,6 +2553,201 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+        };
+    };
+    listGrantRequests: {
+        parameters: {
+            query?: {
+                status?: "pending" | "approved" | "denied" | "cancelled" | "expired";
+                user_id?: string;
+                database_id?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of grant requests */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        grant_requests?: components["schemas"]["GrantRequest"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createGrantRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateGrantRequestPayload"];
+            };
+        };
+        responses: {
+            /** @description Grant request submitted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GrantRequest"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            /** @description A pending request already exists for this user/database/definition */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    getGrantRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Grant request details */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GrantRequest"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    approveGrantRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Approved; resulting grant included */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        grant_request?: components["schemas"]["GrantRequest"];
+                        grant?: components["schemas"]["AccessGrant"];
+                    };
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Not pending or definition inactive */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    denyGrantRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    reason?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Denied */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GrantRequest"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Not pending */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    cancelGrantRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Cancelled */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GrantRequest"];
+                };
+            };
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Not pending */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
         };
     };
     listAPIKeys: {
