@@ -32,6 +32,16 @@ func (s *Session) connectUpstream() error {
 		return fmt.Errorf("failed to connect to upstream: %w", err)
 	}
 
+	// Negotiate TLS with the upstream per ssl_mode (libpq semantics). Must
+	// happen before any StartupMessage — Postgres expects the SSLRequest
+	// preamble on a fresh connection, not interleaved with protocol traffic.
+	upgraded, err := negotiateUpstreamSSL(s.ctx, conn, s.database.Host, s.database.SSLMode)
+	if err != nil {
+		_ = conn.Close()
+		return fmt.Errorf("upstream SSL negotiation: %w", err)
+	}
+	conn = upgraded
+
 	s.upstreamConn = conn
 
 	// Create frontend for upstream (we act as client to upstream)
@@ -141,7 +151,13 @@ func (s *Session) processUpstreamAuthMessage(
 		return false, nil
 
 	case *pgproto3.AuthenticationSASL:
-		return false, ErrSASLAuthNotSupported
+		return false, s.beginUpstreamSCRAM(typedMsg, upstreamFrontend)
+
+	case *pgproto3.AuthenticationSASLContinue:
+		return false, s.continueUpstreamSCRAM(typedMsg, upstreamFrontend)
+
+	case *pgproto3.AuthenticationSASLFinal:
+		return false, s.finalizeUpstreamSCRAM(typedMsg)
 
 	case *pgproto3.ParameterStatus:
 		// Buffer ParameterStatus messages - they must come after AuthenticationOk
@@ -221,6 +237,69 @@ func (s *Session) processUpstreamAuthMessage(
 
 		return false, nil
 	}
+}
+
+// beginUpstreamSCRAM handles the AuthenticationSASL message: it picks a
+// supported mechanism, builds the client first message, and sends a
+// SASLInitialResponse upstream. The SCRAM state is parked on the session
+// until the matching Continue/Final messages arrive.
+func (s *Session) beginUpstreamSCRAM(
+	msg *pgproto3.AuthenticationSASL,
+	upstreamFrontend *pgproto3.Frontend,
+) error {
+	mech := pickSCRAMMechanism(msg.AuthMechanisms)
+	if mech == "" {
+		return fmt.Errorf("%w: offered=%v", ErrSCRAMNoSupportedMechanism, msg.AuthMechanisms)
+	}
+
+	client, err := newSCRAMClient(s.database.Password)
+	if err != nil {
+		return fmt.Errorf("scram client: %w", err)
+	}
+	s.upstreamSCRAM = client
+
+	resp := &pgproto3.SASLInitialResponse{
+		AuthMechanism: mech,
+		Data:          client.firstMessage(),
+	}
+	if err := sendToUpstream(upstreamFrontend, resp); err != nil {
+		return fmt.Errorf("send SASLInitialResponse: %w", err)
+	}
+	return nil
+}
+
+// continueUpstreamSCRAM handles the AuthenticationSASLContinue (server first
+// message): compute the client proof and send the SASLResponse.
+func (s *Session) continueUpstreamSCRAM(
+	msg *pgproto3.AuthenticationSASLContinue,
+	upstreamFrontend *pgproto3.Frontend,
+) error {
+	if s.upstreamSCRAM == nil {
+		return fmt.Errorf("%w: SASLContinue without SASL", ErrSCRAMUnexpectedMessage)
+	}
+	final, err := s.upstreamSCRAM.finalMessage(msg.Data)
+	if err != nil {
+		return err
+	}
+	if err := sendToUpstream(upstreamFrontend, &pgproto3.SASLResponse{Data: final}); err != nil {
+		return fmt.Errorf("send SASLResponse: %w", err)
+	}
+	return nil
+}
+
+// finalizeUpstreamSCRAM handles AuthenticationSASLFinal: verify the server's
+// signature so we know the upstream actually possesses the password's
+// SaltedPassword, then wait for the upstream's AuthenticationOk on the next
+// loop iteration.
+func (s *Session) finalizeUpstreamSCRAM(msg *pgproto3.AuthenticationSASLFinal) error {
+	if s.upstreamSCRAM == nil {
+		return fmt.Errorf("%w: SASLFinal without SASL", ErrSCRAMUnexpectedMessage)
+	}
+	if err := s.upstreamSCRAM.verifyServerFinal(msg.Data); err != nil {
+		return err
+	}
+	s.upstreamSCRAM = nil
+	return nil
 }
 
 // computeMD5Password computes the PostgreSQL MD5 password hash.

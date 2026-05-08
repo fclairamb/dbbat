@@ -94,6 +94,7 @@ type Session struct {
 	extendedState          *extendedQueryState         // State for Extended Query Protocol
 	clientApplicationName  string                      // application_name provided by the client
 	copyState              *copyState                  // Track COPY operation in progress
+	upstreamSCRAM          *scramClient                // SCRAM-SHA-256 state for upstream SASL auth
 }
 
 // NewSession creates a new session.
