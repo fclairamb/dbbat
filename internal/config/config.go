@@ -125,7 +125,7 @@ type SlackNotifyConfig struct {
 	// disables notifications.
 	BotToken string `koanf:"bot_token"`
 	// Channel is the Slack channel id or name (e.g. "#dbbat") where
-	// notifications are posted.
+	// notifications are posted. Defaults to "#dbbat".
 	Channel string `koanf:"channel"`
 }
 
@@ -350,6 +350,9 @@ func defaultConfig() Config {
 		SlackAuth: SlackAuthConfig{
 			AutoCreateUsers: true,
 			DefaultRole:     "connector",
+		},
+		SlackNotify: SlackNotifyConfig{
+			Channel: "#dbbat",
 		},
 		Dump: DumpConfig{
 			MaxSize:   DefaultDumpMaxSize,
