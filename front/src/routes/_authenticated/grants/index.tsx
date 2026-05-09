@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import {
   useGrants,
@@ -10,6 +10,7 @@ import {
 } from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { AdaptiveRefresh } from "@/components/shared/AdaptiveRefresh";
 import { Button } from "@/components/ui/button";
 import { PermissionButton } from "@/components/shared/PermissionButton";
 import { useAuth } from "@/contexts/AuthContext";
@@ -108,11 +109,32 @@ export const Route = createFileRoute("/_authenticated/grants/")({
 function GrantsPage() {
   const { user } = useAuth();
   const [activeOnly, setActiveOnly] = useState(true);
-  const { data: grants, isLoading } = useGrants({ active_only: activeOnly });
+  const { data: grants, isLoading, refetch } = useGrants({ active_only: activeOnly });
   const { data: users } = useUsers();
   const { data: databases } = useDatabases();
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [revokeGrant, setRevokeGrant] = useState<AccessGrant | null>(null);
+
+  const previousSignatureRef = useRef<string | null>(null);
+
+  const handleRefresh = useCallback(async () => {
+    const result = await refetch();
+    const newData = result.data ?? [];
+    const signature = newData
+      .map(
+        (g) =>
+          `${g.uid}:${g.revoked_at ?? ""}:${g.query_count ?? 0}:${g.bytes_transferred ?? 0}`,
+      )
+      .sort()
+      .join("|");
+
+    const hasNewData =
+      previousSignatureRef.current !== null &&
+      signature !== previousSignatureRef.current;
+    previousSignatureRef.current = signature;
+
+    return { hasNewData };
+  }, [refetch]);
 
   const canCreate = canCreateGrant(user?.roles);
   const canRevoke = canRevokeGrant(user?.roles);
@@ -236,6 +258,10 @@ function GrantsPage() {
         description="Manage database access grants"
         actions={
           <div className="flex items-center gap-4">
+            <AdaptiveRefresh
+              onRefresh={handleRefresh}
+              storageKey="dbbat.autoRefresh.grants"
+            />
             <div className="flex items-center gap-2">
               <Switch
                 id="activeOnly"
