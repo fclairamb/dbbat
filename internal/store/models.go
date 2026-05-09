@@ -267,6 +267,80 @@ func (g *AccessGrant) ShouldBlockDDL() bool {
 // Grant is an alias for backward compatibility
 type Grant = AccessGrant
 
+// GrantDefinition is an admin-managed template describing the *shape* of a
+// grant: name, duration, controls, optional quotas. Grant requests
+// (separately implemented) reference a definition; on approval, a real
+// AccessGrant is built from the definition + the request's user/database.
+//
+// Direct admin grant creation bypasses definitions — they exist to bound
+// what users can self-request, not to constrain admins.
+type GrantDefinition struct {
+	bun.BaseModel `bun:"table:grant_definitions,alias:gd"`
+
+	UID                 uuid.UUID `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	Name                string    `bun:"name,notnull" json:"name"`
+	Description         string    `bun:"description,notnull,default:''" json:"description"`
+	DurationSeconds     int64     `bun:"duration_seconds,notnull" json:"duration_seconds"`
+	Controls            []string  `bun:"controls,array,notnull,default:'{}'" json:"controls"`
+	MaxQueryCounts      *int64    `bun:"max_query_counts" json:"max_query_counts"`
+	MaxBytesTransferred *int64    `bun:"max_bytes_transferred" json:"max_bytes_transferred"`
+	IsActive            bool      `bun:"is_active,notnull,default:true" json:"is_active"`
+	CreatedBy           uuid.UUID `bun:"created_by,notnull,type:uuid" json:"created_by"`
+	CreatedAt           time.Time `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+}
+
+// GrantDefinitionFilter narrows ListGrantDefinitions queries.
+type GrantDefinitionFilter struct {
+	ActiveOnly bool
+}
+
+// GrantRequestStatus enumerates the lifecycle states a request can be in.
+type GrantRequestStatus string
+
+// Lifecycle states for grant requests. Keep these constants matching the
+// DB CHECK constraint values exactly.
+const (
+	GrantRequestPending   GrantRequestStatus = "pending"
+	GrantRequestApproved  GrantRequestStatus = "approved"
+	GrantRequestDenied    GrantRequestStatus = "denied"
+	GrantRequestCancelled GrantRequestStatus = "cancelled" //nolint:misspell // matches DB CHECK constraint
+	GrantRequestExpired   GrantRequestStatus = "expired"
+)
+
+// GrantRequest is a user-initiated request for a grant of a particular
+// shape (definition) on a particular database. Admins approve or deny.
+// On approval the system materializes a real AccessGrant from the
+// definition + the request's user/database.
+type GrantRequest struct {
+	bun.BaseModel `bun:"table:grant_requests,alias:gr"`
+
+	UID               uuid.UUID          `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	UserID            uuid.UUID          `bun:"user_id,notnull,type:uuid" json:"user_id"`
+	GrantDefinitionID uuid.UUID          `bun:"grant_definition_id,notnull,type:uuid" json:"grant_definition_id"`
+	DatabaseID        uuid.UUID          `bun:"database_id,notnull,type:uuid" json:"database_id"`
+	Justification     string             `bun:"justification,notnull,default:''" json:"justification"`
+	Status            GrantRequestStatus `bun:"status,notnull" json:"status"`
+	RequestedAt       time.Time          `bun:"requested_at,notnull,default:current_timestamp" json:"requested_at"`
+	DecidedAt         *time.Time         `bun:"decided_at" json:"decided_at,omitempty"`
+	DecidedBy         *uuid.UUID         `bun:"decided_by,type:uuid" json:"decided_by,omitempty"`
+	DecisionReason    *string            `bun:"decision_reason" json:"decision_reason,omitempty"`
+	ResultingGrantID  *uuid.UUID         `bun:"resulting_grant_id,type:uuid" json:"resulting_grant_id,omitempty"`
+
+	// Slack bookkeeping — populated by the notifier (Spec 04). JSON-omitted
+	// because the API has no need to expose Slack message coordinates.
+	SlackChannel   *string `bun:"slack_channel" json:"-"`
+	SlackMessageTS *string `bun:"slack_message_ts" json:"-"`
+}
+
+// GrantRequestFilter narrows ListGrantRequests queries.
+type GrantRequestFilter struct {
+	UserID     *uuid.UUID
+	Status     *GrantRequestStatus
+	DatabaseID *uuid.UUID
+	Limit      int
+	Offset     int
+}
+
 // GrantFilter represents filters for listing grants
 type GrantFilter struct {
 	UserID     *uuid.UUID

@@ -162,6 +162,8 @@ func (s *Store) DropAllTables(ctx context.Context) error {
 		"query_rows",
 		"queries",
 		"connections",
+		"grant_requests",
+		"grant_definitions",
 		"access_grants",
 		"api_keys",
 		"audit_log",

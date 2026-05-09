@@ -15,6 +15,8 @@ import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/
 import { Route as AuthenticatedUsersIndexRouteImport } from './routes/_authenticated/users/index'
 import { Route as AuthenticatedQueriesIndexRouteImport } from './routes/_authenticated/queries/index'
 import { Route as AuthenticatedGrantsIndexRouteImport } from './routes/_authenticated/grants/index'
+import { Route as AuthenticatedGrantRequestsIndexRouteImport } from './routes/_authenticated/grant-requests/index'
+import { Route as AuthenticatedGrantDefinitionsIndexRouteImport } from './routes/_authenticated/grant-definitions/index'
 import { Route as AuthenticatedDatabasesIndexRouteImport } from './routes/_authenticated/databases/index'
 import { Route as AuthenticatedConnectionsIndexRouteImport } from './routes/_authenticated/connections/index'
 import { Route as AuthenticatedAuditIndexRouteImport } from './routes/_authenticated/audit/index'
@@ -50,6 +52,18 @@ const AuthenticatedGrantsIndexRoute =
   AuthenticatedGrantsIndexRouteImport.update({
     id: '/grants/',
     path: '/grants/',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedGrantRequestsIndexRoute =
+  AuthenticatedGrantRequestsIndexRouteImport.update({
+    id: '/grant-requests/',
+    path: '/grant-requests/',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedGrantDefinitionsIndexRoute =
+  AuthenticatedGrantDefinitionsIndexRouteImport.update({
+    id: '/grant-definitions/',
+    path: '/grant-definitions/',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
 const AuthenticatedDatabasesIndexRoute =
@@ -89,6 +103,8 @@ export interface FileRoutesByFullPath {
   '/audit/': typeof AuthenticatedAuditIndexRoute
   '/connections/': typeof AuthenticatedConnectionsIndexRoute
   '/databases/': typeof AuthenticatedDatabasesIndexRoute
+  '/grant-definitions/': typeof AuthenticatedGrantDefinitionsIndexRoute
+  '/grant-requests/': typeof AuthenticatedGrantRequestsIndexRoute
   '/grants/': typeof AuthenticatedGrantsIndexRoute
   '/queries/': typeof AuthenticatedQueriesIndexRoute
   '/users/': typeof AuthenticatedUsersIndexRoute
@@ -101,6 +117,8 @@ export interface FileRoutesByTo {
   '/audit': typeof AuthenticatedAuditIndexRoute
   '/connections': typeof AuthenticatedConnectionsIndexRoute
   '/databases': typeof AuthenticatedDatabasesIndexRoute
+  '/grant-definitions': typeof AuthenticatedGrantDefinitionsIndexRoute
+  '/grant-requests': typeof AuthenticatedGrantRequestsIndexRoute
   '/grants': typeof AuthenticatedGrantsIndexRoute
   '/queries': typeof AuthenticatedQueriesIndexRoute
   '/users': typeof AuthenticatedUsersIndexRoute
@@ -115,6 +133,8 @@ export interface FileRoutesById {
   '/_authenticated/audit/': typeof AuthenticatedAuditIndexRoute
   '/_authenticated/connections/': typeof AuthenticatedConnectionsIndexRoute
   '/_authenticated/databases/': typeof AuthenticatedDatabasesIndexRoute
+  '/_authenticated/grant-definitions/': typeof AuthenticatedGrantDefinitionsIndexRoute
+  '/_authenticated/grant-requests/': typeof AuthenticatedGrantRequestsIndexRoute
   '/_authenticated/grants/': typeof AuthenticatedGrantsIndexRoute
   '/_authenticated/queries/': typeof AuthenticatedQueriesIndexRoute
   '/_authenticated/users/': typeof AuthenticatedUsersIndexRoute
@@ -129,6 +149,8 @@ export interface FileRouteTypes {
     | '/audit/'
     | '/connections/'
     | '/databases/'
+    | '/grant-definitions/'
+    | '/grant-requests/'
     | '/grants/'
     | '/queries/'
     | '/users/'
@@ -141,6 +163,8 @@ export interface FileRouteTypes {
     | '/audit'
     | '/connections'
     | '/databases'
+    | '/grant-definitions'
+    | '/grant-requests'
     | '/grants'
     | '/queries'
     | '/users'
@@ -154,6 +178,8 @@ export interface FileRouteTypes {
     | '/_authenticated/audit/'
     | '/_authenticated/connections/'
     | '/_authenticated/databases/'
+    | '/_authenticated/grant-definitions/'
+    | '/_authenticated/grant-requests/'
     | '/_authenticated/grants/'
     | '/_authenticated/queries/'
     | '/_authenticated/users/'
@@ -208,6 +234,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedGrantsIndexRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/grant-requests/': {
+      id: '/_authenticated/grant-requests/'
+      path: '/grant-requests'
+      fullPath: '/grant-requests/'
+      preLoaderRoute: typeof AuthenticatedGrantRequestsIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/grant-definitions/': {
+      id: '/_authenticated/grant-definitions/'
+      path: '/grant-definitions'
+      fullPath: '/grant-definitions/'
+      preLoaderRoute: typeof AuthenticatedGrantDefinitionsIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
     '/_authenticated/databases/': {
       id: '/_authenticated/databases/'
       path: '/databases'
@@ -253,6 +293,8 @@ interface AuthenticatedRouteChildren {
   AuthenticatedAuditIndexRoute: typeof AuthenticatedAuditIndexRoute
   AuthenticatedConnectionsIndexRoute: typeof AuthenticatedConnectionsIndexRoute
   AuthenticatedDatabasesIndexRoute: typeof AuthenticatedDatabasesIndexRoute
+  AuthenticatedGrantDefinitionsIndexRoute: typeof AuthenticatedGrantDefinitionsIndexRoute
+  AuthenticatedGrantRequestsIndexRoute: typeof AuthenticatedGrantRequestsIndexRoute
   AuthenticatedGrantsIndexRoute: typeof AuthenticatedGrantsIndexRoute
   AuthenticatedQueriesIndexRoute: typeof AuthenticatedQueriesIndexRoute
   AuthenticatedUsersIndexRoute: typeof AuthenticatedUsersIndexRoute
@@ -265,6 +307,9 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedAuditIndexRoute: AuthenticatedAuditIndexRoute,
   AuthenticatedConnectionsIndexRoute: AuthenticatedConnectionsIndexRoute,
   AuthenticatedDatabasesIndexRoute: AuthenticatedDatabasesIndexRoute,
+  AuthenticatedGrantDefinitionsIndexRoute:
+    AuthenticatedGrantDefinitionsIndexRoute,
+  AuthenticatedGrantRequestsIndexRoute: AuthenticatedGrantRequestsIndexRoute,
   AuthenticatedGrantsIndexRoute: AuthenticatedGrantsIndexRoute,
   AuthenticatedQueriesIndexRoute: AuthenticatedQueriesIndexRoute,
   AuthenticatedUsersIndexRoute: AuthenticatedUsersIndexRoute,

@@ -892,6 +892,360 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /grant-definitions:
+    post:
+      tags:
+        - Grant Definitions
+      summary: Create grant definition (admin)
+      description: |
+        Creates a new admin-managed grant definition. Definitions are templates
+        for the grant request workflow — users can request grants only by
+        picking an active definition. Direct admin grant creation
+        (`POST /grants`) bypasses definitions.
+      operationId: createGrantDefinition
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGrantDefinitionRequest'
+      responses:
+        '200':
+          description: Definition created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrantDefinition'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags:
+        - Grant Definitions
+      summary: List grant definitions
+      description: |
+        Lists grant definitions. Non-admins always receive only active
+        definitions. Admins can pass `active_only=true` to apply the same
+        filter for the request UI; otherwise both active and deactivated
+        definitions are returned.
+      operationId: listGrantDefinitions
+      parameters:
+        - name: active_only
+          in: query
+          description: Restrict to active definitions
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: List of grant definitions
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  grant_definitions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/GrantDefinition'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /grant-definitions/{uid}:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+
+    get:
+      tags:
+        - Grant Definitions
+      summary: Get grant definition by UID
+      operationId: getGrantDefinition
+      responses:
+        '200':
+          description: Definition details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrantDefinition'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags:
+        - Grant Definitions
+      summary: Update grant definition (admin)
+      description: Replaces the editable fields (uid / created_by / created_at / is_active stay put).
+      operationId: updateGrantDefinition
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGrantDefinitionRequest'
+      responses:
+        '200':
+          description: Definition updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrantDefinition'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags:
+        - Grant Definitions
+      summary: Deactivate grant definition (admin)
+      description: |
+        Soft-deletes by flipping `is_active` to false. Definitions are not
+        hard-deleted because grant requests reference them and the audit
+        trail needs to stay intact.
+      operationId: deactivateGrantDefinition
+      responses:
+        '200':
+          description: Definition deactivated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /grant-requests:
+    post:
+      tags:
+        - Grant Requests
+      summary: Submit a grant request
+      description: |
+        Any authenticated user can request access by selecting a grant
+        definition and a database. An admin then approves or denies. On
+        approval, dbbat creates a real AccessGrant from the definition.
+      operationId: createGrantRequest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateGrantRequestPayload'
+      responses:
+        '200':
+          description: Grant request submitted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrantRequest'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          description: A pending request already exists for this user/database/definition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+    get:
+      tags:
+        - Grant Requests
+      summary: List grant requests
+      description: Admins see all (filterable). Non-admins see only their own.
+      operationId: listGrantRequests
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, approved, denied, cancelled, expired]
+        - name: user_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: database_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: List of grant requests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  grant_requests:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/GrantRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /grant-requests/{uid}:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+
+    get:
+      tags:
+        - Grant Requests
+      summary: Get grant request
+      operationId: getGrantRequest
+      responses:
+        '200':
+          description: Grant request details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrantRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /grant-requests/{uid}/approve:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      tags:
+        - Grant Requests
+      summary: Approve grant request (admin)
+      description: |
+        Atomically transitions pending → approved and creates a real
+        AccessGrant from the linked definition + the request's
+        user/database. Returns 409 if not pending or if the linked
+        definition has been deactivated.
+      operationId: approveGrantRequest
+      responses:
+        '200':
+          description: Approved; resulting grant included
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  grant_request:
+                    $ref: '#/components/schemas/GrantRequest'
+                  grant:
+                    $ref: '#/components/schemas/AccessGrant'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Not pending or definition inactive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /grant-requests/{uid}/deny:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      tags:
+        - Grant Requests
+      summary: Deny grant request (admin)
+      operationId: denyGrantRequest
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                reason:
+                  type: string
+      responses:
+        '200':
+          description: Denied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrantRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Not pending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /grant-requests/{uid}/cancel:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+    post:
+      tags:
+        - Grant Requests
+      summary: Cancel grant request (requester or admin)
+      operationId: cancelGrantRequest
+      responses:
+        '200':
+          description: Cancelled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GrantRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Not pending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /keys:
     post:
       tags:
@@ -1775,6 +2129,157 @@ components:
         - `read_only`: Enables PostgreSQL session read-only mode and blocks write queries
         - `block_copy`: Blocks all COPY commands (both TO and FROM)
         - `block_ddl`: Blocks DDL statements (CREATE, ALTER, DROP, TRUNCATE)
+
+    GrantRequest:
+      type: object
+      description: |
+        A user-initiated request for a grant of a particular shape on a
+        particular database. Lifecycle: pending → approved/denied/cancelled.
+        On approval the system creates a real AccessGrant (referenced via
+        resulting_grant_id).
+      properties:
+        uid:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        grant_definition_id:
+          type: string
+          format: uuid
+        database_id:
+          type: string
+          format: uuid
+        justification:
+          type: string
+          maxLength: 1000
+        status:
+          type: string
+          enum: [pending, approved, denied, cancelled, expired]
+        requested_at:
+          type: string
+          format: date-time
+        decided_at:
+          type: string
+          format: date-time
+          nullable: true
+        decided_by:
+          type: string
+          format: uuid
+          nullable: true
+        decision_reason:
+          type: string
+          nullable: true
+        resulting_grant_id:
+          type: string
+          format: uuid
+          nullable: true
+      required:
+        - uid
+        - user_id
+        - grant_definition_id
+        - database_id
+        - status
+        - requested_at
+
+    CreateGrantRequestPayload:
+      type: object
+      properties:
+        grant_definition_id:
+          type: string
+          format: uuid
+        database_id:
+          type: string
+          format: uuid
+        justification:
+          type: string
+          maxLength: 1000
+      required:
+        - grant_definition_id
+        - database_id
+
+    GrantDefinition:
+      type: object
+      description: |
+        Admin-managed template describing a *shape* of grant. Grant requests
+        (separate workflow) reference a definition; on approval a real
+        AccessGrant is built from the definition + the request's
+        user/database. Direct admin grant creation bypasses definitions.
+      properties:
+        uid:
+          type: string
+          format: uuid
+        name:
+          type: string
+          maxLength: 64
+        description:
+          type: string
+        duration_seconds:
+          type: integer
+          format: int64
+          minimum: 1
+          description: How long the resulting grant remains valid after approval.
+        controls:
+          type: array
+          items:
+            $ref: '#/components/schemas/GrantControl'
+        max_query_counts:
+          type: integer
+          format: int64
+          nullable: true
+        max_bytes_transferred:
+          type: integer
+          format: int64
+          nullable: true
+        is_active:
+          type: boolean
+          readOnly: true
+          description: Soft-deleted definitions have is_active=false; they remain referenced by historical grant requests.
+        created_by:
+          type: string
+          format: uuid
+          readOnly: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+        - uid
+        - name
+        - duration_seconds
+        - controls
+        - is_active
+        - created_by
+        - created_at
+
+    CreateGrantDefinitionRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 64
+        description:
+          type: string
+        duration_seconds:
+          type: integer
+          format: int64
+          minimum: 1
+        controls:
+          type: array
+          items:
+            $ref: '#/components/schemas/GrantControl'
+          default: []
+        max_query_counts:
+          type: integer
+          format: int64
+          nullable: true
+        max_bytes_transferred:
+          type: integer
+          format: int64
+          nullable: true
+      required:
+        - name
+        - duration_seconds
 
     AccessGrant:
       type: object

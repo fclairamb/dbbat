@@ -1,0 +1,28 @@
+{
+  "display_information": {
+    "name": "DBBat",
+    "description": "Database Observability Proxy",
+    "background_color": "#2c3e50"
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "https://<YOUR_DBBAT_HOST>/api/v1/auth/slack/callback"
+    ],
+    "scopes": {
+      "user": [
+        "openid",
+        "email",
+        "email:read",
+        "profile"
+      ],
+      "bot": [
+        "chat:write"
+      ]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

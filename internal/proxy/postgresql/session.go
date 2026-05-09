@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,6 +19,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -95,6 +97,22 @@ type Session struct {
 	clientApplicationName  string                      // application_name provided by the client
 	copyState              *copyState                  // Track COPY operation in progress
 	upstreamSCRAM          *scramClient                // SCRAM-SHA-256 state for upstream SASL auth
+
+	// Wire-level byte counters for the client-facing socket. Reads count as
+	// bytes-from-client (queries the client sent), writes count as
+	// bytes-to-client (responses the proxy returned). Together they capture
+	// every byte the proxy exchanged with the client during the session
+	// — including framing, auth, and error packets — which is the basis for
+	// accurate bytes_transferred quotas. Atomics because the read and write
+	// halves are driven by separate goroutines (proxyClientToUpstream and
+	// proxyUpstreamToClient).
+	bytesFromClient *atomic.Int64
+	bytesToClient   *atomic.Int64
+	// lastBytesSnapshot is the cumulative client-side byte count at the end
+	// of the previous query. Per-query bytes = current cumulative - snapshot.
+	// Only mutated from the upstream→client goroutine where logQuery runs,
+	// so no atomic needed.
+	lastBytesSnapshot int64
 }
 
 // NewSession creates a new session.
@@ -109,17 +127,27 @@ func NewSession(
 	authCache *cache.AuthCache,
 	tlsConfig *tls.Config,
 ) *Session {
+	bytesFromClient := &atomic.Int64{}
+	bytesToClient := &atomic.Int64{}
+	// Wrap before constructing the buffered reader so every byte the
+	// pgproto3 backend reads is counted. The TLS upgrade in handleSSLRequest
+	// reassigns clientConn to a tls.Conn that wraps this CountingConn, so
+	// encrypted bytes still flow through the counter post-upgrade.
+	counted := shared.NewCountingConn(clientConn, bytesFromClient, bytesToClient)
+
 	return &Session{
-		clientConn:    clientConn,
-		clientReader:  bufio.NewReader(clientConn),
-		store:         dataStore,
-		encryptionKey: encryptionKey,
-		logger:        logger,
-		ctx:           ctx,
-		queryStorage:  queryStorage,
-		dumpConfig:    dumpConfig,
-		authCache:     authCache,
-		tlsConfig:     tlsConfig,
+		clientConn:      counted,
+		clientReader:    bufio.NewReader(counted),
+		store:           dataStore,
+		encryptionKey:   encryptionKey,
+		logger:          logger,
+		ctx:             ctx,
+		queryStorage:    queryStorage,
+		dumpConfig:      dumpConfig,
+		authCache:       authCache,
+		tlsConfig:       tlsConfig,
+		bytesFromClient: bytesFromClient,
+		bytesToClient:   bytesToClient,
 		extendedState: &extendedQueryState{
 			preparedStatements: make(map[string]*preparedStatement),
 			portals:            make(map[string]*portalState),
@@ -337,7 +365,6 @@ func (s *Session) getCurrentPendingQuery() *pendingQuery {
 func (s *Session) proxyUpstreamToClient() error {
 	var rowsAffected *int64
 	var queryError *string
-	var bytesTransferred int64
 
 	for {
 		msg, err := s.upstreamFrontend.Receive()
@@ -383,12 +410,13 @@ func (s *Session) proxyUpstreamToClient() error {
 			}
 
 		case *pgproto3.DataRow:
-			// Track bytes transferred (approximate size of row data)
+			// Compute the row's payload size for the result-capture limits
+			// only — wire-level bytes_transferred is tracked via the
+			// CountingConn around clientConn, not field-summed here.
 			rowSize := int64(0)
 			for _, val := range m.Values {
 				rowSize += int64(len(val))
 			}
-			bytesTransferred += rowSize
 
 			// Capture row data if enabled and within limits
 			query := s.getCurrentPendingQuery()
@@ -437,11 +465,12 @@ func (s *Session) proxyUpstreamToClient() error {
 			s.logger.InfoContext(s.ctx, "COPY IN started", slog.Int("format", int(m.OverallFormat)))
 
 		case *pgproto3.CopyData:
-			// Server sending COPY data to client (COPY TO)
+			// Server sending COPY data to client (COPY TO).
+			// Wire bytes are counted by the CountingConn — no manual
+			// addition here.
 			if s.copyState != nil && s.copyState.direction == "out" {
 				s.captureCopyData(m.Data)
 			}
-			bytesTransferred += int64(len(m.Data))
 
 		case *pgproto3.CopyDone:
 			// COPY operation complete - finalize capture
@@ -452,12 +481,20 @@ func (s *Session) proxyUpstreamToClient() error {
 		case *pgproto3.ReadyForQuery:
 			// Query complete - log it
 			if s.currentQuery != nil {
+				// Wire-level diff: cumulative client-side bytes since the
+				// previous query end (or session start). Captures the query
+				// text the client sent, the response framing, error
+				// packets, and pre-first-query auth bytes — everything the
+				// row-summed counter previously missed.
+				total := s.bytesFromClient.Load() + s.bytesToClient.Load()
+				bytesTransferred := total - s.lastBytesSnapshot
+				s.lastBytesSnapshot = total
+
 				s.logQuery(rowsAffected, queryError, bytesTransferred)
 				s.currentQuery = nil
 				s.copyState = nil // Reset copy state
 				rowsAffected = nil
 				queryError = nil
-				bytesTransferred = 0
 			}
 		}
 
@@ -598,6 +635,10 @@ func (s *Session) handleSSLRequest() (bool, error) {
 		return false, fmt.Errorf("write SSL accept: %w", err)
 	}
 
+	// tls.Server wraps s.clientConn — which is itself a CountingConn around
+	// the raw socket. Encrypted bytes still flow through the counter, so
+	// post-upgrade reads/writes continue to be accounted in the session
+	// bytes_transferred quota.
 	tlsConn := tls.Server(s.clientConn, s.tlsConfig)
 	if err := tlsConn.HandshakeContext(s.ctx); err != nil {
 		return false, fmt.Errorf("TLS handshake: %w", err)
