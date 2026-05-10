@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.10.0](https://github.com/fclairamb/dbbat/compare/v0.9.0...v0.10.0) (2026-05-10)
+
+
+### Features
+
+* **grants:** grant request workflow with Slack notifications and auto-refresh ([#157](https://github.com/fclairamb/dbbat/issues/157)) ([743fe20](https://github.com/fclairamb/dbbat/commit/743fe20201f96fc49173210431d54a6b5e68ee0b))
+* **proxy:** PostgreSQL upstream TLS and SCRAM-SHA-256 auth ([#154](https://github.com/fclairamb/dbbat/issues/154)) ([196d5cc](https://github.com/fclairamb/dbbat/commit/196d5cc277882646e9628a4b68157078f3a58afb))
+
+
+### Bug Fixes
+
+* **config:** default Slack notify channel to #dbbat ([#159](https://github.com/fclairamb/dbbat/issues/159)) ([d47eba2](https://github.com/fclairamb/dbbat/commit/d47eba2fa9e1013923f49206c3f0dd08ec56b9a1))
+* **deps:** update module github.com/knadh/koanf/parsers/toml/v2 to v2.2.1 ([#158](https://github.com/fclairamb/dbbat/issues/158)) ([616a10f](https://github.com/fclairamb/dbbat/commit/616a10f4de5a34c70bcac33210eeef5abacaf5b6))
+* **deps:** update module github.com/slack-go/slack to v0.23.1 ([#160](https://github.com/fclairamb/dbbat/issues/160)) ([7d732e2](https://github.com/fclairamb/dbbat/commit/7d732e29149113a0cb6d5d1995d4235bb7128cdb))
+* **deps:** update module golang.org/x/crypto to v0.51.0 ([#155](https://github.com/fclairamb/dbbat/issues/155)) ([7e04182](https://github.com/fclairamb/dbbat/commit/7e04182a16b3498ccc00af0a612056508c67dc4b))
+* **deps:** update module golang.org/x/text to v0.37.0 ([#152](https://github.com/fclairamb/dbbat/issues/152)) ([58b3265](https://github.com/fclairamb/dbbat/commit/58b32655ac50c007c381f17a10fff79a51d77aa6))
+* **grants:** populate query_count and bytes_transferred + UI polish ([#156](https://github.com/fclairamb/dbbat/issues/156)) ([e63de8c](https://github.com/fclairamb/dbbat/commit/e63de8cb0cc0fe185615b3e7d6e01d4abac88562))
+
 ## [0.9.0](https://github.com/fclairamb/dbbat/compare/v0.8.0...v0.9.0) (2026-05-08)
 
 
