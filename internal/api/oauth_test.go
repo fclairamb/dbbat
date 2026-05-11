@@ -17,7 +17,7 @@ import (
 // mockProvider is a minimal auth.OAuthProvider for tests.
 type mockProvider struct{ name string }
 
-func (m *mockProvider) Name() string { return m.name }
+func (m *mockProvider) Name() string                    { return m.name }
 func (m *mockProvider) AuthorizeURL(_, _ string) string { return "" }
 func (m *mockProvider) ExchangeCode(_ context.Context, _, _ string) (*auth.OAuthUser, error) {
 	return &auth.OAuthUser{}, nil
