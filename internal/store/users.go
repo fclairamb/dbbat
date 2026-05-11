@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 )
 
@@ -118,26 +119,35 @@ func (s *Store) UpdateUser(ctx context.Context, uid uuid.UUID, updates UserUpdat
 	return nil
 }
 
-// DeleteUser deletes a user
+// DeleteUser deletes a user and all of their linked OAuth identities.
 func (s *Store) DeleteUser(ctx context.Context, uid uuid.UUID) error {
-	result, err := s.db.NewDelete().
-		Model((*User)(nil)).
-		Where("uid = ?", uid).
-		Exec(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to delete user: %w", err)
-	}
+	return s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if _, err := tx.NewDelete().
+			Model((*UserIdentity)(nil)).
+			Where("user_id = ?", uid).
+			Exec(ctx); err != nil {
+			return fmt.Errorf("failed to delete user identities: %w", err)
+		}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
+		result, err := tx.NewDelete().
+			Model((*User)(nil)).
+			Where("uid = ?", uid).
+			Exec(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to delete user: %w", err)
+		}
 
-	if rowsAffected == 0 {
-		return ErrUserNotFound
-	}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("failed to get rows affected: %w", err)
+		}
 
-	return nil
+		if rowsAffected == 0 {
+			return ErrUserNotFound
+		}
+
+		return nil
+	})
 }
 
 // EnsureDefaultAdmin creates a default admin user if no users exist
