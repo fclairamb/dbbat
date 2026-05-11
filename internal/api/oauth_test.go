@@ -1,9 +1,67 @@
 package api
 
 import (
+	"context"
 	"strings"
 	"testing"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/fclairamb/dbbat/internal/auth"
+	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/store"
 )
+
+// mockProvider is a minimal auth.OAuthProvider for tests.
+type mockProvider struct{ name string }
+
+func (m *mockProvider) Name() string                                                          { return m.name }
+func (m *mockProvider) AuthorizeURL(_, _ string) string                                       { return "" }
+func (m *mockProvider) ExchangeCode(_ context.Context, _, _ string) (*auth.OAuthUser, error) { return nil, nil }
+
+func TestFindOrCreateOAuthUser_OrphanIdentity(t *testing.T) {
+	server, dataStore := setupTestServer(t)
+	ctx := context.Background()
+	suffix := uuid.NewString()[:8]
+
+	server.config = &config.Config{
+		SlackAuth: config.SlackAuthConfig{
+			AutoCreateUsers: true,
+			DefaultRole:     store.RoleConnector,
+		},
+	}
+
+	provider := &mockProvider{name: store.IdentityTypeSlack}
+	providerID := "UORPHAN-" + suffix
+
+	// Create a user, link a Slack identity, then delete the user (without the fix
+	// this would leave an orphan identity pointing to a soft-deleted user).
+	user, err := dataStore.CreateUser(ctx, "orphan-user-"+suffix, "hash", []string{store.RoleConnector})
+	require.NoError(t, err)
+
+	_, err = dataStore.CreateUserIdentity(ctx, &store.UserIdentity{
+		UserID:     user.UID,
+		Provider:   store.IdentityTypeSlack,
+		ProviderID: providerID,
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, dataStore.DeleteUser(ctx, user.UID))
+
+	// After DeleteUser the identity must already be gone (cascade fix).
+	// But even if it were orphaned (pre-fix DBs), findOrCreateOAuthUser must recover.
+	oauthUser := &auth.OAuthUser{
+		ProviderID:  providerID,
+		Email:       "orphan-" + suffix + "@example.com",
+		DisplayName: "Orphan User " + suffix,
+	}
+
+	newUser, err := server.findOrCreateOAuthUser(ctx, provider, oauthUser)
+	require.NoError(t, err, "findOrCreateOAuthUser must succeed after user deletion")
+	assert.NotEqual(t, user.UID, newUser.UID, "a new user must be created")
+}
 
 func TestCanonicalizeUsername(t *testing.T) {
 	t.Parallel()

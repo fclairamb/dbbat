@@ -311,6 +311,47 @@ func TestDeleteUser(t *testing.T) {
 	})
 }
 
+func TestDeleteUserCascadesToIdentities(t *testing.T) {
+	t.Parallel()
+
+	s := setupTestStoreNoCleanup(t)
+	ctx := context.Background()
+	suffix := uuid.NewString()[:8]
+
+	user, err := s.CreateUser(ctx, "cascade-delete-"+suffix, "hash", []string{RoleConnector})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	_, err = s.CreateUserIdentity(ctx, &UserIdentity{
+		UserID:     user.UID,
+		Provider:   IdentityTypeSlack,
+		ProviderID: "UCASCADE-" + suffix,
+	})
+	if err != nil {
+		t.Fatalf("CreateUserIdentity() error = %v", err)
+	}
+
+	if err := s.DeleteUser(ctx, user.UID); err != nil {
+		t.Fatalf("DeleteUser() error = %v", err)
+	}
+
+	// Identity must be gone so the same provider_id can be relinked to a new user.
+	_, err = s.GetUserByIdentity(ctx, IdentityTypeSlack, "UCASCADE-"+suffix)
+	if !errors.Is(err, ErrIdentityNotFound) {
+		t.Errorf("GetUserByIdentity() error = %v, want ErrIdentityNotFound", err)
+	}
+
+	// Username slot must be free so a new user can be created with the same name.
+	newUser, err := s.CreateUser(ctx, "cascade-delete-"+suffix, "hash2", []string{RoleConnector})
+	if err != nil {
+		t.Fatalf("CreateUser() with recycled username error = %v", err)
+	}
+	if newUser.UID == user.UID {
+		t.Error("new user must have a different UID")
+	}
+}
+
 func TestEnsureDefaultAdmin(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
