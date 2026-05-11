@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.1](https://github.com/fclairamb/dbbat/compare/v0.10.0...v0.10.1) (2026-05-11)
+
+
+### Bug Fixes
+
+* **auth:** re-creation of Slack-authenticated users after deletion ([#161](https://github.com/fclairamb/dbbat/issues/161)) ([a68af3a](https://github.com/fclairamb/dbbat/commit/a68af3ac01df0b1ca46d8d5a6abec4ca051ed77f))
+
 ## [0.10.0](https://github.com/fclairamb/dbbat/compare/v0.9.0...v0.10.0) (2026-05-10)
 
 
