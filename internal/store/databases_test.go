@@ -561,25 +561,26 @@ func TestUpdateDatabase_Listable(t *testing.T) {
 	s := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
 	key := testEncryptionKey()
-	suffix := uuid.NewString()[:8]
 
-	db := &Database{
-		Name:         "listable-update-" + suffix,
-		Host:         "localhost",
-		Port:         5432,
-		DatabaseName: "mydb",
-		Username:     "user",
-		Password:     "pass",
-		SSLMode:      "prefer",
-		Listable:     true,
-	}
-	created, err := s.CreateDatabase(ctx, db, key)
-	if err != nil {
-		t.Fatalf("CreateDatabase() error = %v", err)
+	newDB := func(name string, listable bool) *Database {
+		return &Database{
+			Name:         name,
+			Host:         "localhost",
+			Port:         5432,
+			DatabaseName: "mydb",
+			Username:     "user",
+			Password:     "pass",
+			SSLMode:      "prefer",
+			Listable:     listable,
+		}
 	}
 
 	t.Run("true to false", func(t *testing.T) {
 		t.Parallel()
+		created, err := s.CreateDatabase(ctx, newDB("lu-true-to-false-"+uuid.NewString()[:8], true), key)
+		if err != nil {
+			t.Fatalf("CreateDatabase() error = %v", err)
+		}
 		f := false
 		if err := s.UpdateDatabase(ctx, created.UID, DatabaseUpdate{Listable: &f}, key); err != nil {
 			t.Fatalf("UpdateDatabase() error = %v", err)
@@ -595,6 +596,10 @@ func TestUpdateDatabase_Listable(t *testing.T) {
 
 	t.Run("false to true", func(t *testing.T) {
 		t.Parallel()
+		created, err := s.CreateDatabase(ctx, newDB("lu-false-to-true-"+uuid.NewString()[:8], false), key)
+		if err != nil {
+			t.Fatalf("CreateDatabase() error = %v", err)
+		}
 		tr := true
 		if err := s.UpdateDatabase(ctx, created.UID, DatabaseUpdate{Listable: &tr}, key); err != nil {
 			t.Fatalf("UpdateDatabase() error = %v", err)
