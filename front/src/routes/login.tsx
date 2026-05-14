@@ -54,7 +54,7 @@ function LoginPage() {
   const navigate = useNavigate();
   // Read session_expired directly from URL to avoid TanStack Router's search param normalization
   const sessionExpired = new URLSearchParams(window.location.search).get("session_expired") === "true";
-  const { login, isLoading, refreshUser } = useAuth();
+  const { login, isLoading, isAuthenticated, refreshUser } = useAuth();
   const { data: versionInfo } = useVersion();
   const { data: providers } = useAuthProviders();
   const slackProvider = providers?.find((p) => p.type === "slack" && p.enabled);
@@ -69,19 +69,24 @@ function LoginPage() {
 
   const isDemo = versionInfo?.run_mode === "demo";
 
-  // Handle OAuth callback token
+  // Redirect authenticated users away from the login page (handles both OAuth
+  // callback and direct navigation by already-authenticated users).
+  useEffect(() => {
+    if (!isLoading && isAuthenticated) {
+      navigate({ to: "/" });
+    }
+  }, [isAuthenticated, isLoading, navigate]);
+
+  // Handle OAuth callback token — just store it and trigger a session refresh.
+  // The reactive effect above handles the navigation once isAuthenticated is committed.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const token = params.get("token");
     if (token) {
       // Remove token from URL immediately (security: don't leave in browser history)
       window.history.replaceState({}, "", window.location.pathname);
-
-      // Store token and redirect to app
       storeToken(token);
-      refreshUser().then(() => {
-        navigate({ to: "/" });
-      });
+      refreshUser();
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
