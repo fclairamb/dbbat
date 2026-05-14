@@ -60,14 +60,16 @@ func TestListDatabases_AdminSeesAll(t *testing.T) { //nolint:paralleltest // sha
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 
-	dbs := resp["databases"].([]any)
+	dbs, ok := resp["databases"].([]any)
+	require.True(t, ok, "databases must be a list")
 	// Admin must see both (at minimum these two).
 	assert.GreaterOrEqual(t, len(dbs), 2)
 
 	// Responses must include the listable field, including the hidden one.
 	names := make([]string, 0, len(dbs))
 	for _, entry := range dbs {
-		db := entry.(map[string]any)
+		db, ok := entry.(map[string]any)
+		require.True(t, ok, "database entry must be a map")
 		_, hasListable := db["listable"]
 		assert.True(t, hasListable, "admin response must include 'listable' field")
 		if name, ok := db["name"].(string); ok {
@@ -104,9 +106,11 @@ func TestListDatabases_ConnectorSeesOnlyListable(t *testing.T) { //nolint:parall
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 
-	dbs := resp["databases"].([]any)
+	dbs, ok := resp["databases"].([]any)
+	require.True(t, ok, "databases must be a list")
 	for _, entry := range dbs {
-		db := entry.(map[string]any)
+		db, ok := entry.(map[string]any)
+		require.True(t, ok, "database entry must be a map")
 		// Non-admin must never see the 'host' or 'port' fields.
 		assert.Nil(t, db["host"], "non-admin response must not include 'host'")
 		// Non-admin response must not include the listable field (DatabaseLimitedResponse).

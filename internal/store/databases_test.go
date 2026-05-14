@@ -579,6 +579,7 @@ func TestUpdateDatabase_Listable(t *testing.T) {
 	}
 
 	t.Run("true to false", func(t *testing.T) {
+		t.Parallel()
 		f := false
 		if err := s.UpdateDatabase(ctx, created.UID, DatabaseUpdate{Listable: &f}, key); err != nil {
 			t.Fatalf("UpdateDatabase() error = %v", err)
@@ -593,6 +594,7 @@ func TestUpdateDatabase_Listable(t *testing.T) {
 	})
 
 	t.Run("false to true", func(t *testing.T) {
+		t.Parallel()
 		tr := true
 		if err := s.UpdateDatabase(ctx, created.UID, DatabaseUpdate{Listable: &tr}, key); err != nil {
 			t.Fatalf("UpdateDatabase() error = %v", err)
