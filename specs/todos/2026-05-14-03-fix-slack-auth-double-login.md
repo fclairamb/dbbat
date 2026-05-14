@@ -108,3 +108,12 @@ No backend changes needed. No other frontend files need modification.
 ## Estimated Size
 
 ~5 lines changed in one file.
+
+## Implementation Plan
+
+1. **Read `front/src/routes/login.tsx`** to identify exact lines to change.
+2. **Add `isAuthenticated` to `useAuth()` destructuring** in `LoginPage`.
+3. **Add reactive redirect `useEffect`** that fires when `isAuthenticated` becomes true.
+4. **Simplify OAuth callback handler** — drop `.then(() => navigate(...))`, keep just `storeToken(token); refreshUser();`.
+5. **Build** (`bun run build`) to confirm no TypeScript errors.
+6. **Commit** the fix.
