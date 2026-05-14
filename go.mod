@@ -16,7 +16,7 @@ require (
 	github.com/knadh/koanf/providers/structs v1.0.0
 	github.com/knadh/koanf/v2 v2.3.4
 	github.com/sijms/go-ora/v2 v2.9.0
-	github.com/slack-go/slack v0.23.0
+	github.com/slack-go/slack v0.23.1
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.42.0
 	github.com/testcontainers/testcontainers-go/modules/mysql v0.42.0
@@ -24,7 +24,7 @@ require (
 	github.com/uptrace/bun v1.2.18
 	github.com/uptrace/bun/dialect/pgdialect v1.2.18
 	github.com/uptrace/bun/driver/pgdriver v1.2.18
-	github.com/urfave/cli/v3 v3.8.0
+	github.com/urfave/cli/v3 v3.9.0
 	golang.org/x/crypto v0.51.0
 	golang.org/x/text v0.37.0
 )

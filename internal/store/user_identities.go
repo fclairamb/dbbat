@@ -40,6 +40,24 @@ func (s *Store) GetUserByIdentity(ctx context.Context, provider, providerID stri
 	return user, nil
 }
 
+// GetIdentityByProviderID retrieves an identity row by (provider, provider_id) without joining the user.
+// Use this when you need the identity uid itself rather than the associated User.
+func (s *Store) GetIdentityByProviderID(ctx context.Context, provider, providerID string) (*UserIdentity, error) {
+	identity := new(UserIdentity)
+	err := s.db.NewSelect().
+		Model(identity).
+		Where("provider = ?", provider).
+		Where("provider_id = ?", providerID).
+		Scan(ctx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrIdentityNotFound
+		}
+		return nil, fmt.Errorf("failed to get identity: %w", err)
+	}
+	return identity, nil
+}
+
 // GetUserIdentity retrieves a single user identity by UID.
 func (s *Store) GetUserIdentity(ctx context.Context, uid uuid.UUID) (*UserIdentity, error) {
 	identity := new(UserIdentity)

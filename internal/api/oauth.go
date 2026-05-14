@@ -192,10 +192,21 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, provider auth.OAuthP
 
 	// 1. Check if identity is already linked
 	user, err := s.store.GetUserByIdentity(ctx, providerName, oauthUser.ProviderID)
-	if err == nil {
+	switch {
+	case err == nil:
 		return user, nil
-	}
-	if !errors.Is(err, store.ErrIdentityNotFound) {
+	case errors.Is(err, store.ErrIdentityNotFound):
+		// fall through to email / auto-create
+	case errors.Is(err, store.ErrUserNotFound):
+		// Orphan identity: the linked user was soft-deleted without cascading.
+		// Clean up the stale identity so the provider_id can be relinked below.
+		if cleanupErr := s.cleanupOrphanIdentity(ctx, providerName, oauthUser.ProviderID); cleanupErr != nil {
+			s.logger.WarnContext(ctx, "failed to clean up orphan identity",
+				slog.String("provider", providerName),
+				slog.String("provider_id", oauthUser.ProviderID),
+				slog.Any("err", cleanupErr))
+		}
+	default:
 		return nil, fmt.Errorf("identity lookup: %w", err)
 	}
 
@@ -277,6 +288,16 @@ func (s *Server) linkIdentity(ctx context.Context, userID uuid.UUID, providerNam
 
 	_, err := s.store.CreateUserIdentity(ctx, identity)
 	return err
+}
+
+// cleanupOrphanIdentity soft-deletes a user_identity row that points to a
+// soft-deleted (or otherwise missing) user, so its provider_id slot is freed.
+func (s *Server) cleanupOrphanIdentity(ctx context.Context, provider, providerID string) error {
+	identity, err := s.store.GetIdentityByProviderID(ctx, provider, providerID)
+	if err != nil {
+		return err
+	}
+	return s.store.DeleteUserIdentity(ctx, identity.UID)
 }
 
 // generateRandomState produces a cryptographically random hex-encoded state string.
