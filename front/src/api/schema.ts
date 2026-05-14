@@ -1099,6 +1099,11 @@ export interface components {
             /** @description Oracle SERVICE_NAME (Oracle only) */
             oracle_service_name?: string;
             /**
+             * @description Whether this database appears in the grant-request dropdown for non-admin users
+             * @default true
+             */
+            listable: boolean;
+            /**
              * Format: uuid
              * @description User who created this configuration
              */
@@ -1147,6 +1152,11 @@ export interface components {
             protocol: "postgresql" | "oracle" | "mysql" | "mariadb";
             /** @description Oracle SERVICE_NAME (required for Oracle) */
             oracle_service_name?: string;
+            /**
+             * @description Whether this database appears in the grant-request dropdown for non-admin users
+             * @default true
+             */
+            listable: boolean;
         };
         UpdateDatabaseRequest: {
             /** @description Description */
@@ -1170,6 +1180,8 @@ export interface components {
             protocol?: "postgresql" | "oracle" | "mysql" | "mariadb";
             /** @description Oracle SERVICE_NAME */
             oracle_service_name?: string;
+            /** @description Whether this database appears in the grant-request dropdown for non-admin users */
+            listable?: boolean;
         };
         /**
          * @description Control types that can be applied to a grant:

@@ -33,6 +33,7 @@ func (s *Store) CreateDatabase(ctx context.Context, db *Database, encryptionKey 
 		SSLMode:           db.SSLMode,
 		Protocol:          db.Protocol,
 		OracleServiceName: db.OracleServiceName,
+		Listable:          db.Listable,
 		CreatedBy:         db.CreatedBy,
 		CreatedAt:         time.Now(),
 		UpdatedAt:         time.Now(),
@@ -114,6 +115,25 @@ func (s *Store) GetDatabaseByOracleServiceName(ctx context.Context, serviceName 
 	}
 
 	return db, nil
+}
+
+// ListListableDatabases retrieves databases that are marked as listable.
+// Used by the non-admin listing path so any authenticated user can discover
+// databases available to request access to.
+func (s *Store) ListListableDatabases(ctx context.Context) ([]Database, error) {
+	var databases []Database
+	err := s.db.NewSelect().
+		Model(&databases).
+		Where("listable = ?", true).
+		Order("name ASC").
+		Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list listable databases: %w", err)
+	}
+	if databases == nil {
+		databases = []Database{}
+	}
+	return databases, nil
 }
 
 // GetDatabaseByUID retrieves a database by UID
@@ -236,6 +256,10 @@ func (s *Store) UpdateDatabase(ctx context.Context, uid uuid.UUID, updates Datab
 
 	if updates.OracleServiceName != nil {
 		q = q.Set("oracle_service_name = ?", *updates.OracleServiceName)
+	}
+
+	if updates.Listable != nil {
+		q = q.Set("listable = ?", *updates.Listable)
 	}
 
 	result, err := q.Exec(ctx)
