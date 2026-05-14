@@ -28,6 +28,7 @@ export type APIKey = components["schemas"]["APIKey"];
 export type CreateAPIKeyRequest = components["schemas"]["CreateAPIKeyRequest"];
 export type CreateAPIKeyResponse =
   components["schemas"]["CreateAPIKeyResponse"];
+export type ConnectionInfo = components["schemas"]["ConnectionInfo"];
 
 // ============================================================================
 // Auth Providers
@@ -183,6 +184,29 @@ export function useDatabase(uid: string) {
       return response.data;
     },
     enabled: !!uid,
+  });
+}
+
+export function useDatabaseConnection(uid: string | undefined) {
+  return useQuery({
+    queryKey: ["databases", uid, "connection"],
+    queryFn: async (): Promise<ConnectionInfo> => {
+      const response = await apiClient.GET("/databases/{uid}/connection", {
+        params: { path: { uid: uid! } },
+      });
+      if (response.error || !response.data) {
+        throw Object.assign(
+          new Error(
+            (response.error as { message?: string })?.message ||
+              "Failed to load connection URL"
+          ),
+          { status: response.response?.status }
+        );
+      }
+      return response.data;
+    },
+    enabled: !!uid,
+    retry: false,
   });
 }
 
