@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -19,13 +20,17 @@ type CreateAPIKeyRequest struct {
 
 // CreateAPIKeyResponse represents the response when creating an API key
 type CreateAPIKeyResponse struct {
-	ID        uuid.UUID  `json:"id"`
-	Name      string     `json:"name"`
-	Key       string     `json:"key"` // Only returned once!
-	KeyPrefix string     `json:"key_prefix"`
-	ExpiresAt *time.Time `json:"expires_at"`
-	CreatedAt time.Time  `json:"created_at"`
+	ID                   uuid.UUID        `json:"id"`
+	Name                 string           `json:"name"`
+	Key                  string           `json:"key"` // Only returned once!
+	KeyPrefix            string           `json:"key_prefix"`
+	ExpiresAt            *time.Time       `json:"expires_at"`
+	CreatedAt            time.Time        `json:"created_at"`
+	Connections          []ConnectionInfo `json:"connections"`
+	ConnectionsTruncated bool             `json:"connections_truncated"`
 }
+
+const maxConnectionsInResponse = 50
 
 // handleCreateAPIKey creates a new API key for the authenticated user
 // Requires Web Session or Basic Auth (API keys cannot create other API keys)
@@ -59,14 +64,18 @@ func (s *Server) handleCreateAPIKey(c *gin.Context) {
 		Details:     details,
 	})
 
+	connections, truncated := s.buildConnectionsForUser(c.Request.Context(), currentUser, plainKey)
+
 	// Return the full key (only time it's shown)
 	c.JSON(http.StatusCreated, CreateAPIKeyResponse{
-		ID:        apiKey.ID,
-		Name:      apiKey.Name,
-		Key:       plainKey,
-		KeyPrefix: apiKey.KeyPrefix,
-		ExpiresAt: apiKey.ExpiresAt,
-		CreatedAt: apiKey.CreatedAt,
+		ID:                   apiKey.ID,
+		Name:                 apiKey.Name,
+		Key:                  plainKey,
+		KeyPrefix:            apiKey.KeyPrefix,
+		ExpiresAt:            apiKey.ExpiresAt,
+		CreatedAt:            apiKey.CreatedAt,
+		Connections:          connections,
+		ConnectionsTruncated: truncated,
 	})
 }
 
@@ -175,4 +184,53 @@ func (s *Server) handleRevokeAPIKey(c *gin.Context) {
 	})
 
 	c.Status(http.StatusNoContent)
+}
+
+// buildConnectionsForUser builds connection URLs for all databases the user has active grants on.
+func (s *Server) buildConnectionsForUser(ctx context.Context, user *store.User, apiKey string) ([]ConnectionInfo, bool) {
+	if s.config == nil {
+		return []ConnectionInfo{}, false
+	}
+
+	pe, err := s.store.GetPublicEndpoints(ctx)
+	if err != nil {
+		return []ConnectionInfo{}, false
+	}
+	endpoints := store.ResolvePublicEndpoints(pe, s.config)
+
+	grants, err := s.store.ListGrants(ctx, store.GrantFilter{UserID: &user.UID, ActiveOnly: true})
+	if err != nil {
+		return []ConnectionInfo{}, false
+	}
+
+	// Deduplicate database UIDs
+	seen := make(map[uuid.UUID]bool)
+	var dbUIDs []uuid.UUID
+	for _, g := range grants {
+		if !seen[g.DatabaseID] {
+			seen[g.DatabaseID] = true
+			dbUIDs = append(dbUIDs, g.DatabaseID)
+		}
+	}
+
+	var connections []ConnectionInfo
+	for _, dbUID := range dbUIDs {
+		db, err := s.store.GetDatabaseByUID(ctx, dbUID)
+		if err != nil {
+			continue
+		}
+		info, ok := BuildConnectionURL(db, user, endpoints, apiKey)
+		if ok {
+			connections = append(connections, info)
+		}
+	}
+
+	if connections == nil {
+		connections = []ConnectionInfo{}
+	}
+
+	if len(connections) > maxConnectionsInResponse {
+		return connections[:maxConnectionsInResponse], true
+	}
+	return connections, false
 }

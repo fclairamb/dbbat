@@ -207,6 +207,7 @@ func (s *Server) setupRouter() *gin.Engine {
 			databases.GET("/:uid", s.handleGetDatabase)
 			databases.PUT("/:uid", s.requireAdmin(), s.handleUpdateDatabase)
 			databases.DELETE("/:uid", s.requireAdmin(), s.handleDeleteDatabase)
+			databases.GET("/:uid/connection", s.handleGetDatabaseConnection)
 
 			// Grant endpoints
 			grants := authenticated.Group("/grants")

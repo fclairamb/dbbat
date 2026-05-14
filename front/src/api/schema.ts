@@ -800,6 +800,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/databases/{uid}/connection": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get connection URL template for a database
+         * @description Returns a connection URL with `{API_KEY}` placeholder for the specified database.
+         *     - Admin callers: always 200.
+         *     - Non-admin callers: 200 if they have at least one active grant; 404 otherwise (to avoid leaking database existence).
+         *     - If the protocol proxy is disabled (resolved port = 0): returns 409.
+         */
+        get: operations["getDatabaseConnection"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/parameters": {
         parameters: {
             query?: never;
@@ -1414,6 +1437,10 @@ export interface components {
              * @description Creation timestamp
              */
             created_at: string;
+            /** @description Connection URLs for databases the key's owner has active grants on */
+            connections: components["schemas"]["ConnectionInfo"][];
+            /** @description True when there are more than 50 connections (list is truncated) */
+            connections_truncated: boolean;
         };
         Connection: {
             /**
@@ -1560,6 +1587,20 @@ export interface components {
              * @description Event timestamp
              */
             created_at: string;
+        };
+        /** @description Ready-to-paste connection URL for a database */
+        ConnectionInfo: {
+            /** Format: uuid */
+            database_uid: string;
+            database_name: string;
+            protocol: string;
+            /**
+             * @description "uri" or "ez-connect"
+             * @enum {string}
+             */
+            format: "uri" | "ez-connect";
+            /** @description Ready-to-paste connection URL */
+            url: string;
         };
         /** @description A runtime-editable key-value configuration entry */
         GlobalParameter: {
@@ -1769,6 +1810,7 @@ export type QueryWithRows = components['schemas']['QueryWithRows'];
 export type QueryRow = components['schemas']['QueryRow'];
 export type QueryRowsResponse = components['schemas']['QueryRowsResponse'];
 export type AuditEvent = components['schemas']['AuditEvent'];
+export type ConnectionInfo = components['schemas']['ConnectionInfo'];
 export type GlobalParameter = components['schemas']['GlobalParameter'];
 export type SetParameterRequest = components['schemas']['SetParameterRequest'];
 export type PublicEndpoints = components['schemas']['PublicEndpoints'];
@@ -3185,6 +3227,42 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getDatabaseConnection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Connection URL template */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectionInfo"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            /** @description Protocol proxy is disabled */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        error?: string;
+                    };
+                };
+            };
             500: components["responses"]["InternalError"];
         };
     };
