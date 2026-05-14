@@ -256,6 +256,17 @@ func (s *Server) setupRouter() *gin.Engine {
 			authenticated.GET("/queries/:uid/rows", s.requireAdminOrViewer(), s.handleGetQueryRows)
 			// Audit: admin/viewer only
 			authenticated.GET("/audit", s.requireAdminOrViewer(), s.handleListAudit)
+
+			// Global parameters (admin-only CRUD; GET /instance open to any authenticated user)
+			params := authenticated.Group("/parameters")
+			params.GET("", s.requireAdmin(), s.handleListParameters)
+			params.GET("/:group/:key", s.requireAdmin(), s.handleGetParameter)
+			params.PUT("/:group/:key", s.requireAdmin(), s.handleSetParameter)
+			params.DELETE("/:group/:key", s.requireAdmin(), s.handleDeleteParameter)
+
+			// Instance info
+			authenticated.GET("/instance", s.handleGetInstance)
+			authenticated.PUT("/instance/public", s.requireAdmin(), s.handleUpdateInstancePublic)
 		}
 	}
 

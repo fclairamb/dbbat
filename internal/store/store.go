@@ -169,6 +169,7 @@ func (s *Store) DropAllTables(ctx context.Context) error {
 		"audit_log",
 		"oauth_states",
 		"user_identities",
+		"global_parameters",
 		"databases",
 		"users",
 		"bun_migrations",
