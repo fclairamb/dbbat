@@ -14,6 +14,7 @@ import {
   Sun,
   LockKeyhole,
   Gamepad2,
+  Settings,
 } from "lucide-react";
 
 import { useAuth } from "@/contexts/AuthContext";
@@ -68,7 +69,10 @@ const observabilityNavItems = [
   { title: "Audit Log", icon: FileText, href: "/audit" },
 ];
 
-const settingsNavItems = [{ title: "API Keys", icon: Key, href: "/api-keys" }];
+const settingsNavItems = [
+  { title: "Settings", icon: Settings, href: "/settings" },
+  { title: "API Keys", icon: Key, href: "/api-keys" },
+];
 
 export function AppSidebar() {
   const location = useLocation();

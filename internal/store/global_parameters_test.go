@@ -131,9 +131,9 @@ func TestPublicEndpoints(t *testing.T) {
 		port5434 := 5434
 		port1522 := 1522
 		pe := PublicEndpoints{
-			Host:   "db.example.com",
-			PGHost: "pg.example.com",
-			PGPort: &port5434,
+			Host:    "db.example.com",
+			PGHost:  "pg.example.com",
+			PGPort:  &port5434,
 			OraPort: &port1522,
 		}
 
@@ -151,6 +151,8 @@ func TestPublicEndpoints(t *testing.T) {
 }
 
 func TestResolvePublicEndpoints(t *testing.T) {
+	t.Parallel()
+
 	port9999 := 9999
 
 	cfg := &config.Config{

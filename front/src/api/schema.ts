@@ -800,6 +800,85 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/parameters": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List all active parameters
+         * @description Returns all active global parameters. Admin-only. Optional `group_key` query filter.
+         */
+        get: operations["listParameters"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/parameters/{group}/{key}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get a single parameter */
+        get: operations["getParameter"];
+        /** Create or update a parameter */
+        put: operations["setParameter"];
+        post?: never;
+        /** Delete a parameter */
+        delete: operations["deleteParameter"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/instance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get instance information
+         * @description Returns listen addresses, public endpoint settings, and resolved connection info. Any authenticated user can call this endpoint; non-admins receive only `listen` and `resolved`.
+         */
+        get: operations["getInstance"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/instance/public": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Update public endpoint settings
+         * @description Atomically upserts all public.* parameters. Admin-only.
+         */
+        put: operations["updateInstancePublic"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -1482,6 +1561,60 @@ export interface components {
              */
             created_at: string;
         };
+        /** @description A runtime-editable key-value configuration entry */
+        GlobalParameter: {
+            /** Format: uuid */
+            uid: string;
+            group_key: string;
+            key: string;
+            value: string;
+            /** Format: date-time */
+            created_at: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        SetParameterRequest: {
+            value: string;
+        };
+        /** @description Public endpoint advertisement settings */
+        PublicEndpoints: {
+            /** @description Default public hostname for all protocols */
+            host?: string;
+            /** @description PostgreSQL-specific host override (empty = use host) */
+            pg_host?: string;
+            /** @description Oracle-specific host override (empty = use host) */
+            ora_host?: string;
+            /** @description MySQL-specific host override (empty = use host) */
+            mysql_host?: string;
+            /** @description PostgreSQL port override (null = use local listen port) */
+            pg_port?: number | null;
+            /** @description Oracle port override (null = use local listen port) */
+            ora_port?: number | null;
+            /** @description MySQL port override (null = use local listen port) */
+            mysql_port?: number | null;
+        };
+        /** @description Fully resolved connection advertisement values after fallback chains */
+        ResolvedEndpoints: {
+            pg_host: string;
+            /** @description 0 = protocol disabled */
+            pg_port: number;
+            ora_host: string;
+            ora_port: number;
+            mysql_host: string;
+            mysql_port: number;
+        };
+        /** @description Instance information including listen addresses and public endpoint config */
+        InstanceInfo: {
+            listen: {
+                pg: string;
+                ora: string;
+                mysql: string;
+                api: string;
+            };
+            /** @description Only present for admin callers */
+            public?: components["schemas"]["PublicEndpoints"];
+            resolved: components["schemas"]["ResolvedEndpoints"];
+        };
         /** @description Standard error response */
         Error: {
             /**
@@ -1636,6 +1769,11 @@ export type QueryWithRows = components['schemas']['QueryWithRows'];
 export type QueryRow = components['schemas']['QueryRow'];
 export type QueryRowsResponse = components['schemas']['QueryRowsResponse'];
 export type AuditEvent = components['schemas']['AuditEvent'];
+export type GlobalParameter = components['schemas']['GlobalParameter'];
+export type SetParameterRequest = components['schemas']['SetParameterRequest'];
+export type PublicEndpoints = components['schemas']['PublicEndpoints'];
+export type ResolvedEndpoints = components['schemas']['ResolvedEndpoints'];
+export type InstanceInfo = components['schemas']['InstanceInfo'];
 export type Error = components['schemas']['Error'];
 export type MessageResponse = components['schemas']['MessageResponse'];
 export type ResponseBadRequest = components['responses']['BadRequest'];
@@ -3047,6 +3185,163 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listParameters: {
+        parameters: {
+            query?: {
+                /** @description Filter by group key */
+                group_key?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of parameters */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GlobalParameter"][];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getParameter: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                group: string;
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Parameter */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GlobalParameter"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    setParameter: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                group: string;
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetParameterRequest"];
+            };
+        };
+        responses: {
+            /** @description Updated parameter */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GlobalParameter"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    deleteParameter: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                group: string;
+                key: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Parameter deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getInstance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Instance information */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstanceInfo"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    updateInstancePublic: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PublicEndpoints"];
+            };
+        };
+        responses: {
+            /** @description Settings saved */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalError"];
         };
     };

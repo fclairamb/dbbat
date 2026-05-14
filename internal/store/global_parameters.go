@@ -11,6 +11,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/config"
 )
 
+// ErrParameterNotFound is returned when no matching active parameter exists.
 var ErrParameterNotFound = errors.New("parameter not found")
 
 // GetParameter retrieves a single active parameter by group and key.
