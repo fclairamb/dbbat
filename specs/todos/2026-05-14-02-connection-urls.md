@@ -225,3 +225,16 @@ Also extend the `CreateAPIKeyResponse` type alias so TypeScript picks up `connec
 ### Build
 
 `make test && make lint && make build-app`
+
+## Implementation Plan
+
+1. **URL builder** — Create `internal/api/connection_url.go` with `ConnectionInfo` struct and `BuildConnectionURL` function covering all 4 protocol formats.
+2. **URL builder tests** — Create `internal/api/connection_url_test.go` with all unit test cases from spec.
+3. **Extend CreateAPIKeyResponse** — Add `connections []ConnectionInfo` and `connections_truncated bool` to the response struct in `internal/api/keys.go`. Update `handleCreateAPIKey` to load grants/databases and populate connection URLs.
+4. **Database connection endpoint** — Add `GET /databases/:uid/connection` handler in `internal/api/databases.go` (or new file). Wire in `server.go`.
+5. **OpenAPI spec** — Add `ConnectionInfo` schema, extend `CreateAPIKeyResponse`, add `/databases/{uid}/connection` path.
+6. **Regenerate schema** — Run `bun run generate-client` in `front/`.
+7. **CopyableField component** — Create `front/src/components/shared/CopyableField.tsx`. Refactor existing copy block in `api-keys/index.tsx` to use it.
+8. **API key created dialog** — Add connections section to `ShowKeyDialog` in `api-keys/index.tsx`.
+9. **Database detail dialog** — Add `DatabaseDetailsDialog` with `useDatabaseConnection` hook. Add `onRowClick` to database DataTable.
+10. **QA** — Run `make test lint build-app` and fix any issues.
