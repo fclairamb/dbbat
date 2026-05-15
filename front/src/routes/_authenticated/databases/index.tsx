@@ -454,7 +454,7 @@ function DatabaseDetailsDialog({
           )}
         </DialogHeader>
         <div className="space-y-4 py-4">
-          {isFullDatabase(db!) && (
+          {db && isFullDatabase(db) && (
             <div className="space-y-2 text-sm">
               <div className="grid grid-cols-3 gap-1">
                 <span className="text-muted-foreground">Protocol</span>
