@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.11.0](https://github.com/fclairamb/dbbat/compare/v0.10.1...v0.11.0) (2026-05-15)
+
+
+### Features
+
+* **db:** add listable flag to databases ([#166](https://github.com/fclairamb/dbbat/issues/166)) ([c23c179](https://github.com/fclairamb/dbbat/commit/c23c17945ad2d03dac5004692b3f8f5ff847b9b4))
+* grant definitions, grant requests, Slack notifications, global settings, connection URLs, auth fixes ([#168](https://github.com/fclairamb/dbbat/issues/168)) ([5136fc6](https://github.com/fclairamb/dbbat/commit/5136fc6833d0c9be5812249c395513096073e005))
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/urfave/cli/v3 to v3.9.0 ([#163](https://github.com/fclairamb/dbbat/issues/163)) ([3a320b2](https://github.com/fclairamb/dbbat/commit/3a320b25ab2960bf02564927769c58bb3243d59b))
+* **ui:** avoid setState-in-effect in PublicAdvertisementSection ([#169](https://github.com/fclairamb/dbbat/issues/169)) ([7c036fb](https://github.com/fclairamb/dbbat/commit/7c036fb9ad8591d14e89737fcc2a4376e1ac14d9))
+
 ## [0.10.1](https://github.com/fclairamb/dbbat/compare/v0.10.0...v0.10.1) (2026-05-11)
 
 
