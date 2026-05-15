@@ -395,20 +395,6 @@ func parseUIDParam(c *gin.Context) (uuid.UUID, error) {
 
 // setupFrontendRoutes configures routes to serve the frontend SPA.
 func (s *Server) setupFrontendRoutes(router *gin.Engine) {
-	// Strip the "resources" prefix from the embedded FS
-	frontendContent, err := fs.Sub(frontendFS, "resources")
-	if err != nil {
-		s.logger.ErrorContext(context.Background(), "Failed to create sub-filesystem for frontend", slog.Any("error", err))
-		return
-	}
-
-	// Pre-read index.html for SPA fallback
-	indexHTML, err := fs.ReadFile(frontendContent, "index.html")
-	if err != nil {
-		s.logger.ErrorContext(context.Background(), "Failed to read index.html", slog.Any("error", err))
-		return
-	}
-
 	// Determine base URL (defaults to "/app")
 	baseURL := "/app"
 	if s.config != nil && s.config.BaseURL != "" {
@@ -417,6 +403,19 @@ func (s *Server) setupFrontendRoutes(router *gin.Engine) {
 
 	// Build redirect lookup map for quick matching
 	redirects := s.buildRedirectMap()
+
+	// Try to load embedded frontend assets (optional — dev mode uses redirects instead)
+	var frontendContent fs.FS
+	var indexHTML []byte
+
+	if sub, err := fs.Sub(frontendFS, "resources"); err != nil {
+		s.logger.ErrorContext(context.Background(), "Failed to create sub-filesystem for frontend", slog.Any("error", err))
+	} else if html, err := fs.ReadFile(sub, "index.html"); err != nil {
+		s.logger.ErrorContext(context.Background(), "Failed to read index.html", slog.Any("error", err))
+	} else {
+		frontendContent = sub
+		indexHTML = html
+	}
 
 	// Redirect root to base URL
 	router.GET("/", func(c *gin.Context) {
@@ -427,7 +426,7 @@ func (s *Server) setupFrontendRoutes(router *gin.Engine) {
 	router.GET(baseURL+"/*filepath", func(c *gin.Context) {
 		requestPath := c.Request.URL.Path
 
-		// Check for dev redirect
+		// Check for dev redirect (takes priority over embedded assets)
 		if rule := s.matchRedirect(redirects, requestPath); rule != nil {
 			s.proxyToDevServer(c, rule, requestPath)
 			return
