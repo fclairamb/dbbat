@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dbbat",
+      "runtimeExecutable": "make",
+      "runtimeArgs": ["dev"],
+      "port": 5173,
+      "url": "http://localhost:5173/app/"
+    }
+  ]
+}
