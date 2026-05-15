@@ -114,6 +114,7 @@ type Database struct {
 	SSLMode           string     `bun:"ssl_mode,notnull,default:'prefer'" json:"ssl_mode"`
 	Protocol          string     `bun:"protocol,notnull,default:'postgresql'" json:"protocol"`
 	OracleServiceName *string    `bun:"oracle_service_name" json:"oracle_service_name,omitempty"`
+	Listable          bool       `bun:"listable,notnull" json:"listable"`
 	CreatedBy         *uuid.UUID `bun:"created_by,type:uuid" json:"created_by"`
 	CreatedAt         time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 	UpdatedAt         time.Time  `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
@@ -131,6 +132,7 @@ type DatabaseUpdate struct {
 	SSLMode           *string
 	Protocol          *string
 	OracleServiceName *string
+	Listable          *bool
 }
 
 // Connection represents a connection through the proxy

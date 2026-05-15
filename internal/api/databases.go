@@ -24,6 +24,7 @@ type CreateDatabaseRequest struct {
 	SSLMode           string `json:"ssl_mode"`
 	Protocol          string `json:"protocol"`
 	OracleServiceName string `json:"oracle_service_name"`
+	Listable          *bool  `json:"listable"`
 }
 
 // UpdateDatabaseRequest represents the request to update a database
@@ -37,6 +38,7 @@ type UpdateDatabaseRequest struct {
 	SSLMode           *string `json:"ssl_mode"`
 	Protocol          *string `json:"protocol"`
 	OracleServiceName *string `json:"oracle_service_name"`
+	Listable          *bool   `json:"listable"`
 }
 
 // DatabaseResponse represents a database with full details (admin only)
@@ -51,6 +53,7 @@ type DatabaseResponse struct {
 	SSLMode           string     `json:"ssl_mode,omitempty"`
 	Protocol          string     `json:"protocol,omitempty"`
 	OracleServiceName string     `json:"oracle_service_name,omitempty"`
+	Listable          bool       `json:"listable"`
 	CreatedBy         *uuid.UUID `json:"created_by,omitempty"`
 }
 
@@ -129,6 +132,11 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		oracleServiceName = &req.OracleServiceName
 	}
 
+	listable := true
+	if req.Listable != nil {
+		listable = *req.Listable
+	}
+
 	db := &store.Database{
 		Name:              req.Name,
 		Description:       req.Description,
@@ -140,6 +148,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		SSLMode:           req.SSLMode,
 		Protocol:          req.Protocol,
 		OracleServiceName: oracleServiceName,
+		Listable:          listable,
 		CreatedBy:         &currentUser.UID,
 	}
 
@@ -168,18 +177,19 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 	successResponse(c, toDatabaseResponse(result))
 }
 
-// handleListDatabases lists databases based on user role
+// handleListDatabases lists databases based on user role.
+// Admins receive all databases (including non-listable) with full details.
+// All other authenticated users receive only listable databases with limited details.
 func (s *Server) handleListDatabases(c *gin.Context) {
 	currentUser := getCurrentUser(c)
 
-	databases, err := s.store.ListDatabases(c.Request.Context())
-	if err != nil {
-		writeInternalError(c, s.logger, err, "failed to list databases")
-		return
-	}
-
-	// Admin sees full details
+	// Admin sees full details for every database, including non-listable ones.
 	if currentUser.IsAdmin() {
+		databases, err := s.store.ListDatabases(c.Request.Context())
+		if err != nil {
+			writeInternalError(c, s.logger, err, "failed to list databases")
+			return
+		}
 		response := make([]DatabaseResponse, len(databases))
 		for i, db := range databases {
 			response[i] = toDatabaseResponse(&db)
@@ -188,50 +198,17 @@ func (s *Server) handleListDatabases(c *gin.Context) {
 		return
 	}
 
-	// Viewer sees name and description for all databases
-	if currentUser.IsViewer() {
-		response := make([]DatabaseLimitedResponse, len(databases))
-		for i, db := range databases {
-			response[i] = toDatabaseLimitedResponse(&db)
-		}
-		successResponse(c, gin.H{"databases": response})
+	// Non-admin: only listable databases, limited response (no host/port/creds).
+	databases, err := s.store.ListListableDatabases(c.Request.Context())
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to list databases")
 		return
 	}
-
-	// Connector sees only databases they have grants for
-	if currentUser.IsConnector() {
-		// Get user's active grants to filter databases
-		grants, err := s.store.ListGrants(c.Request.Context(), store.GrantFilter{
-			UserID:     &currentUser.UID,
-			ActiveOnly: true,
-		})
-		if err != nil {
-			writeInternalError(c, s.logger, err, "failed to list databases")
-			return
-		}
-
-		// Build set of database UIDs user has access to
-		accessibleDBs := make(map[uuid.UUID]bool)
-		for _, grant := range grants {
-			accessibleDBs[grant.DatabaseID] = true
-		}
-
-		// Filter databases
-		var response []DatabaseLimitedResponse
-		for _, db := range databases {
-			if accessibleDBs[db.UID] {
-				response = append(response, toDatabaseLimitedResponse(&db))
-			}
-		}
-		if response == nil {
-			response = []DatabaseLimitedResponse{}
-		}
-		successResponse(c, gin.H{"databases": response})
-		return
+	response := make([]DatabaseLimitedResponse, len(databases))
+	for i, db := range databases {
+		response[i] = toDatabaseLimitedResponse(&db)
 	}
-
-	// User with no relevant roles sees nothing
-	successResponse(c, gin.H{"databases": []DatabaseLimitedResponse{}})
+	successResponse(c, gin.H{"databases": response})
 }
 
 // handleGetDatabase retrieves a specific database based on user role
@@ -368,6 +345,7 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		SSLMode:           req.SSLMode,
 		Protocol:          req.Protocol,
 		OracleServiceName: req.OracleServiceName,
+		Listable:          req.Listable,
 	}
 
 	if err := s.store.UpdateDatabase(c.Request.Context(), uid, updates, s.encryptionKey); err != nil {
@@ -500,6 +478,7 @@ func toDatabaseResponse(db *store.Database) DatabaseResponse {
 		SSLMode:           db.SSLMode,
 		Protocol:          db.Protocol,
 		OracleServiceName: oracleServiceName,
+		Listable:          db.Listable,
 		CreatedBy:         db.CreatedBy,
 	}
 }

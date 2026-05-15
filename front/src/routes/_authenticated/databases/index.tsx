@@ -47,6 +47,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Plus, Trash2, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 import { CopyableField } from "@/components/shared/CopyableField";
@@ -244,6 +245,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [sslMode, setSslMode] = useState("prefer");
+  const [listable, setListable] = useState(true);
 
   const createDb = useCreateDatabase({
     onSuccess: () => {
@@ -270,6 +272,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
       protocol,
       oracle_service_name:
         protocol === "oracle" ? oracleServiceName : undefined,
+      listable,
     });
   };
 
@@ -325,6 +328,19 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Production database"
+            />
+          </div>
+          <div className="flex items-center justify-between rounded-lg border p-3">
+            <div className="space-y-0.5">
+              <Label htmlFor="listable">Listable</Label>
+              <p className="text-sm text-muted-foreground">
+                Show in the access-request dropdown for non-admin users
+              </p>
+            </div>
+            <Switch
+              id="listable"
+              checked={listable}
+              onCheckedChange={setListable}
             />
           </div>
           <div className="grid grid-cols-3 gap-2">

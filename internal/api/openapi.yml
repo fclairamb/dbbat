@@ -2247,6 +2247,10 @@ components:
         oracle_service_name:
           type: string
           description: Oracle SERVICE_NAME (Oracle only)
+        listable:
+          type: boolean
+          default: true
+          description: Whether this database appears in the grant-request dropdown for non-admin users
         created_by:
           type: string
           format: uuid
@@ -2311,6 +2315,10 @@ components:
         oracle_service_name:
           type: string
           description: Oracle SERVICE_NAME (required for Oracle)
+        listable:
+          type: boolean
+          default: true
+          description: Whether this database appears in the grant-request dropdown for non-admin users
       required:
         - name
         - host
@@ -2348,6 +2356,9 @@ components:
         oracle_service_name:
           type: string
           description: Oracle SERVICE_NAME
+        listable:
+          type: boolean
+          description: Whether this database appears in the grant-request dropdown for non-admin users
 
     # Grant schemas
     GrantControl:

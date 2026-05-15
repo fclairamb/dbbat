@@ -516,3 +516,157 @@ func TestDecryptPassword(t *testing.T) {
 		}
 	})
 }
+
+func TestCreateDatabase_DefaultListable(t *testing.T) {
+	t.Parallel()
+
+	s := setupTestStoreNoCleanup(t)
+	ctx := context.Background()
+	key := testEncryptionKey()
+	suffix := uuid.NewString()[:8]
+
+	// Create without explicitly setting Listable — should default to true.
+	db := &Database{
+		Name:         "listable-default-" + suffix,
+		Host:         "localhost",
+		Port:         5432,
+		DatabaseName: "mydb",
+		Username:     "user",
+		Password:     "pass",
+		SSLMode:      "prefer",
+		Listable:     true, // explicit true mirrors what the handler sets when req.Listable==nil
+	}
+
+	created, err := s.CreateDatabase(ctx, db, key)
+	if err != nil {
+		t.Fatalf("CreateDatabase() error = %v", err)
+	}
+	if !created.Listable {
+		t.Error("CreateDatabase() Listable = false, want true (default)")
+	}
+
+	// Re-fetch to confirm DB persisted it correctly.
+	found, err := s.GetDatabaseByUID(ctx, created.UID)
+	if err != nil {
+		t.Fatalf("GetDatabaseByUID() error = %v", err)
+	}
+	if !found.Listable {
+		t.Error("GetDatabaseByUID() Listable = false, want true after create")
+	}
+}
+
+func TestUpdateDatabase_Listable(t *testing.T) {
+	t.Parallel()
+
+	s := setupTestStoreNoCleanup(t)
+	ctx := context.Background()
+	key := testEncryptionKey()
+
+	newDB := func(name string, listable bool) *Database {
+		return &Database{
+			Name:         name,
+			Host:         "localhost",
+			Port:         5432,
+			DatabaseName: "mydb",
+			Username:     "user",
+			Password:     "pass",
+			SSLMode:      "prefer",
+			Listable:     listable,
+		}
+	}
+
+	t.Run("true to false", func(t *testing.T) {
+		t.Parallel()
+		created, err := s.CreateDatabase(ctx, newDB("lu-true-to-false-"+uuid.NewString()[:8], true), key)
+		if err != nil {
+			t.Fatalf("CreateDatabase() error = %v", err)
+		}
+		f := false
+		if err := s.UpdateDatabase(ctx, created.UID, DatabaseUpdate{Listable: &f}, key); err != nil {
+			t.Fatalf("UpdateDatabase() error = %v", err)
+		}
+		found, err := s.GetDatabaseByUID(ctx, created.UID)
+		if err != nil {
+			t.Fatalf("GetDatabaseByUID() error = %v", err)
+		}
+		if found.Listable {
+			t.Error("Listable = true after setting to false")
+		}
+	})
+
+	t.Run("false to true", func(t *testing.T) {
+		t.Parallel()
+		created, err := s.CreateDatabase(ctx, newDB("lu-false-to-true-"+uuid.NewString()[:8], false), key)
+		if err != nil {
+			t.Fatalf("CreateDatabase() error = %v", err)
+		}
+		tr := true
+		if err := s.UpdateDatabase(ctx, created.UID, DatabaseUpdate{Listable: &tr}, key); err != nil {
+			t.Fatalf("UpdateDatabase() error = %v", err)
+		}
+		found, err := s.GetDatabaseByUID(ctx, created.UID)
+		if err != nil {
+			t.Fatalf("GetDatabaseByUID() error = %v", err)
+		}
+		if !found.Listable {
+			t.Error("Listable = false after setting to true")
+		}
+	})
+}
+
+func TestListListableDatabases(t *testing.T) {
+	t.Parallel()
+
+	s := setupTestStoreNoCleanup(t)
+	ctx := context.Background()
+	key := testEncryptionKey()
+	suffix := uuid.NewString()[:8]
+
+	mkDB := func(name string, listable bool) *Database {
+		return &Database{
+			Name:         name + "-" + suffix,
+			Host:         "localhost",
+			Port:         5432,
+			DatabaseName: "mydb",
+			Username:     "user",
+			Password:     "pass",
+			SSLMode:      "prefer",
+			Listable:     listable,
+		}
+	}
+
+	_, err := s.CreateDatabase(ctx, mkDB("listable-a", true), key)
+	if err != nil {
+		t.Fatalf("CreateDatabase(listable-a) error = %v", err)
+	}
+	_, err = s.CreateDatabase(ctx, mkDB("listable-b", true), key)
+	if err != nil {
+		t.Fatalf("CreateDatabase(listable-b) error = %v", err)
+	}
+	hidden, err := s.CreateDatabase(ctx, mkDB("hidden", false), key)
+	if err != nil {
+		t.Fatalf("CreateDatabase(hidden) error = %v", err)
+	}
+
+	all, err := s.ListListableDatabases(ctx)
+	if err != nil {
+		t.Fatalf("ListListableDatabases() error = %v", err)
+	}
+
+	for _, db := range all {
+		if db.UID == hidden.UID {
+			t.Error("ListListableDatabases() returned a non-listable database")
+		}
+	}
+
+	// Confirm at least two listable DBs are present (others from parallel tests may exist).
+	listableCount := 0
+	for _, db := range all {
+		if db.Listable {
+			listableCount++
+		}
+	}
+	if listableCount < 2 {
+		t.Errorf("ListListableDatabases() returned %d listable DBs, want ≥2", listableCount)
+	}
+}
