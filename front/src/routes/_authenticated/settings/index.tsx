@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import {
   useInstance,
@@ -7,6 +7,7 @@ import {
   useUpdateParameter,
   useDeleteParameter,
   type GlobalParameter,
+  type InstanceInfo,
   type PublicEndpoints,
 } from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -154,37 +155,48 @@ function resolvePort(override: number | null | undefined, listenAddr: string | u
 
 function PublicAdvertisementSection() {
   const { data: instance } = useInstance();
+  const pub = instance?.public;
+  const listen = instance?.listen;
+
+  return (
+    <PublicAdvertisementForm key={pub ? "loaded" : "init"} pub={pub} listen={listen} />
+  );
+}
+
+function PublicAdvertisementForm({
+  pub,
+  listen,
+}: {
+  pub: PublicEndpoints | undefined;
+  listen: InstanceInfo["listen"] | undefined;
+}) {
   const updatePublic = useUpdateInstancePublic({
     onSuccess: () => toast.success("Settings saved"),
     onError: (e) => toast.error(e.message),
   });
 
-  const pub = instance?.public;
-
-  const [host, setHost] = useState("");
-  const [pgHostOverride, setPgHostOverride] = useState("");
-  const [pgPortOverride, setPgPortOverride] = useState("");
-  const [pgOverrideEnabled, setPgOverrideEnabled] = useState(false);
-  const [oraHostOverride, setOraHostOverride] = useState("");
-  const [oraPortOverride, setOraPortOverride] = useState("");
-  const [oraOverrideEnabled, setOraOverrideEnabled] = useState(false);
-  const [mysqlHostOverride, setMysqlHostOverride] = useState("");
-  const [mysqlPortOverride, setMysqlPortOverride] = useState("");
-  const [mysqlOverrideEnabled, setMysqlOverrideEnabled] = useState(false);
-
-  useEffect(() => {
-    if (!pub) return;
-    setHost(pub.host ?? "");
-    setPgHostOverride(pub.pg_host ?? "");
-    setPgPortOverride(pub.pg_port != null ? String(pub.pg_port) : "");
-    setPgOverrideEnabled(!!(pub.pg_host || pub.pg_port != null));
-    setOraHostOverride(pub.ora_host ?? "");
-    setOraPortOverride(pub.ora_port != null ? String(pub.ora_port) : "");
-    setOraOverrideEnabled(!!(pub.ora_host || pub.ora_port != null));
-    setMysqlHostOverride(pub.mysql_host ?? "");
-    setMysqlPortOverride(pub.mysql_port != null ? String(pub.mysql_port) : "");
-    setMysqlOverrideEnabled(!!(pub.mysql_host || pub.mysql_port != null));
-  }, [pub]);
+  const [host, setHost] = useState(pub?.host ?? "");
+  const [pgHostOverride, setPgHostOverride] = useState(pub?.pg_host ?? "");
+  const [pgPortOverride, setPgPortOverride] = useState(
+    pub?.pg_port != null ? String(pub.pg_port) : ""
+  );
+  const [pgOverrideEnabled, setPgOverrideEnabled] = useState(
+    !!(pub?.pg_host || pub?.pg_port != null)
+  );
+  const [oraHostOverride, setOraHostOverride] = useState(pub?.ora_host ?? "");
+  const [oraPortOverride, setOraPortOverride] = useState(
+    pub?.ora_port != null ? String(pub.ora_port) : ""
+  );
+  const [oraOverrideEnabled, setOraOverrideEnabled] = useState(
+    !!(pub?.ora_host || pub?.ora_port != null)
+  );
+  const [mysqlHostOverride, setMysqlHostOverride] = useState(pub?.mysql_host ?? "");
+  const [mysqlPortOverride, setMysqlPortOverride] = useState(
+    pub?.mysql_port != null ? String(pub.mysql_port) : ""
+  );
+  const [mysqlOverrideEnabled, setMysqlOverrideEnabled] = useState(
+    !!(pub?.mysql_host || pub?.mysql_port != null)
+  );
 
   const handleSave = () => {
     const body: PublicEndpoints = {
@@ -198,8 +210,6 @@ function PublicAdvertisementSection() {
     };
     updatePublic.mutate(body);
   };
-
-  const listen = instance?.listen;
 
   return (
     <Card>
