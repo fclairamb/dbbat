@@ -15,7 +15,11 @@ fi
 
 # Start PostgreSQL if not running
 echo "Ensuring PostgreSQL is running..."
-docker compose up -d postgres
+if docker ps --format '{{.Names}}' | grep -q "dbbat-postgres"; then
+    echo "PostgreSQL already running, skipping..."
+else
+    docker compose up -d postgres
+fi
 sleep 2
 
 # Cleanup function to kill background processes
