@@ -5,8 +5,8 @@
       "name": "dbbat",
       "runtimeExecutable": "make",
       "runtimeArgs": ["dev"],
-      "port": 5173,
-      "url": "http://localhost:5173/app/"
+      "port": 4200,
+      "url": "http://localhost:4200/app/"
     }
   ]
 }
