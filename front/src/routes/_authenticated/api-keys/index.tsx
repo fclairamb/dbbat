@@ -9,6 +9,7 @@ import {
 } from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
+import { CopyableField } from "@/components/shared/CopyableField";
 import { Button } from "@/components/ui/button";
 import { PermissionButton } from "@/components/shared/PermissionButton";
 import { useAuth } from "@/contexts/AuthContext";
@@ -41,7 +42,7 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Plus, Ban, Copy, Key, AlertTriangle } from "lucide-react";
+import { Plus, Ban, Key, AlertTriangle, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 import { formatDistanceToNow, format } from "date-fns";
 
@@ -261,16 +262,12 @@ function ShowKeyDialog({
   newKey: CreateAPIKeyResponse | null;
   onClose: () => void;
 }) {
-  const copyKey = () => {
-    if (newKey) {
-      navigator.clipboard.writeText(newKey.key);
-      toast.success("API key copied to clipboard");
-    }
-  };
+  const connections = newKey?.connections ?? [];
+  const truncated = newKey?.connections_truncated ?? false;
 
   return (
     <Dialog open={!!newKey} onOpenChange={() => onClose()}>
-      <DialogContent>
+      <DialogContent className="max-w-lg max-h-[80vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Key className="h-5 w-5" />
@@ -286,22 +283,50 @@ function ShowKeyDialog({
               it securely.
             </AlertDescription>
           </Alert>
-          <div className="space-y-2">
-            <Label>API Key</Label>
-            <div className="flex gap-2">
-              <Input
-                readOnly
-                value={newKey?.key ?? ""}
-                className="font-mono text-sm"
-              />
-              <Button type="button" variant="outline" size="icon" onClick={copyKey}>
-                <Copy className="h-4 w-4" />
-              </Button>
-            </div>
+
+          <CopyableField
+            label="API Key"
+            value={newKey?.key ?? ""}
+            toastMessage="API key copied to clipboard"
+          />
+
+          <div data-testid="connections-section" className="space-y-2">
+            <h3 className="font-medium text-sm">Connection URLs</h3>
+            {connections.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                No active grants yet — ask an admin to grant you database access
+                before connecting.
+              </p>
+            ) : (
+              <div className="space-y-3">
+                {truncated && (
+                  <Alert>
+                    <AlertCircle className="h-4 w-4" />
+                    <AlertDescription>
+                      Showing first 50 databases. Use an existing grant to see all
+                      connection details.
+                    </AlertDescription>
+                  </Alert>
+                )}
+                {connections.map((conn) => (
+                  <div key={conn.database_uid} className="space-y-1">
+                    <p className="text-xs font-medium text-muted-foreground">
+                      {conn.database_name} ({conn.protocol}
+                      {conn.format === "ez-connect" ? " · EZ-Connect" : ""})
+                    </p>
+                    <CopyableField
+                      value={conn.url}
+                      testId={`connection-url-${conn.database_uid}`}
+                      toastMessage="Connection URL copied"
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
         <DialogFooter>
-          <Button onClick={onClose}>Done</Button>
+          <Button onClick={onClose}>Close</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

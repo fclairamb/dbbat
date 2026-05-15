@@ -434,6 +434,54 @@ func (s *Server) handleDeleteDatabase(c *gin.Context) {
 	successResponse(c, gin.H{"message": "database deleted"})
 }
 
+// handleGetDatabaseConnection returns a connection URL template for a database.
+//   - Admin: always 200.
+//   - Non-admin: 200 if at least one active grant exists; 404 otherwise (avoid leaking existence).
+//   - Protocol disabled (port 0): 409.
+func (s *Server) handleGetDatabaseConnection(c *gin.Context) {
+	uid, err := uuid.Parse(c.Param("uid"))
+	if err != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid database UID")
+		return
+	}
+
+	ctx := c.Request.Context()
+	currentUser := getCurrentUser(c)
+
+	db, err := s.store.GetDatabaseByUID(ctx, uid)
+	if err != nil {
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
+		return
+	}
+
+	// Non-admins: return 404 unless they have an active grant (avoid 403 leaking existence).
+	if !currentUser.IsAdmin() {
+		grants, err := s.store.ListGrants(ctx, store.GrantFilter{
+			UserID:     &currentUser.UID,
+			DatabaseID: &uid,
+			ActiveOnly: true,
+		})
+		if err != nil || len(grants) == 0 {
+			writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
+			return
+		}
+	}
+
+	pe, _ := s.store.GetPublicEndpoints(ctx)
+	var endpoints store.ResolvedEndpoints
+	if s.config != nil {
+		endpoints = store.ResolvePublicEndpoints(pe, s.config)
+	}
+
+	info, ok := BuildConnectionURL(db, currentUser, endpoints, "")
+	if !ok {
+		c.JSON(http.StatusConflict, gin.H{"error": "proxy for this protocol is disabled"})
+		return
+	}
+
+	c.JSON(http.StatusOK, info)
+}
+
 // toDatabaseResponse converts a Database to a DatabaseResponse (admin only, without password)
 func toDatabaseResponse(db *store.Database) DatabaseResponse {
 	var oracleServiceName string

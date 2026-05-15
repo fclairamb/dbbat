@@ -1655,6 +1655,238 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /databases/{uid}/connection:
+    get:
+      tags:
+        - Databases
+      summary: Get connection URL template for a database
+      description: |
+        Returns a connection URL with `{API_KEY}` placeholder for the specified database.
+        - Admin callers: always 200.
+        - Non-admin callers: 200 if they have at least one active grant; 404 otherwise (to avoid leaking database existence).
+        - If the protocol proxy is disabled (resolved port = 0): returns 409.
+      operationId: getDatabaseConnection
+      security:
+        - basicAuth: []
+        - bearerAuth: []
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Connection URL template
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectionInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Protocol proxy is disabled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /parameters:
+    get:
+      tags:
+        - Parameters
+      summary: List all active parameters
+      description: Returns all active global parameters. Admin-only. Optional `group_key` query filter.
+      operationId: listParameters
+      security:
+        - basicAuth: []
+        - bearerAuth: []
+      parameters:
+        - name: group_key
+          in: query
+          description: Filter by group key
+          schema:
+            type: string
+      responses:
+        '200':
+          description: List of parameters
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GlobalParameter'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /parameters/{group}/{key}:
+    get:
+      tags:
+        - Parameters
+      summary: Get a single parameter
+      operationId: getParameter
+      security:
+        - basicAuth: []
+        - bearerAuth: []
+      parameters:
+        - name: group
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlobalParameter'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    put:
+      tags:
+        - Parameters
+      summary: Create or update a parameter
+      operationId: setParameter
+      security:
+        - basicAuth: []
+        - bearerAuth: []
+      parameters:
+        - name: group
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetParameterRequest'
+      responses:
+        '200':
+          description: Updated parameter
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GlobalParameter'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+    delete:
+      tags:
+        - Parameters
+      summary: Delete a parameter
+      operationId: deleteParameter
+      security:
+        - basicAuth: []
+        - bearerAuth: []
+      parameters:
+        - name: group
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '204':
+          description: Parameter deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /instance:
+    get:
+      tags:
+        - Instance
+      summary: Get instance information
+      description: Returns listen addresses, public endpoint settings, and resolved connection info. Any authenticated user can call this endpoint; non-admins receive only `listen` and `resolved`.
+      operationId: getInstance
+      security:
+        - basicAuth: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Instance information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstanceInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /instance/public:
+    put:
+      tags:
+        - Instance
+      summary: Update public endpoint settings
+      description: Atomically upserts all public.* parameters. Admin-only.
+      operationId: updateInstancePublic
+      security:
+        - basicAuth: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublicEndpoints'
+      responses:
+        '204':
+          description: Settings saved
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
 components:
   securitySchemes:
     basicAuth:
@@ -2486,12 +2718,22 @@ components:
           type: string
           format: date-time
           description: Creation timestamp
+        connections:
+          type: array
+          description: Connection URLs for databases the key's owner has active grants on
+          items:
+            $ref: '#/components/schemas/ConnectionInfo'
+        connections_truncated:
+          type: boolean
+          description: True when there are more than 50 connections (list is truncated)
       required:
         - id
         - name
         - key
         - key_prefix
         - created_at
+        - connections
+        - connections_truncated
 
     # Connection schemas
     Connection:
@@ -2697,6 +2939,154 @@ components:
         - uid
         - event_type
         - created_at
+
+    # Connection URL schemas
+    ConnectionInfo:
+      type: object
+      description: Ready-to-paste connection URL for a database
+      properties:
+        database_uid:
+          type: string
+          format: uuid
+        database_name:
+          type: string
+        protocol:
+          type: string
+        format:
+          type: string
+          description: '"uri" or "ez-connect"'
+          enum:
+            - uri
+            - ez-connect
+        url:
+          type: string
+          description: Ready-to-paste connection URL
+      required:
+        - database_uid
+        - database_name
+        - protocol
+        - format
+        - url
+
+    # Global parameters schemas
+    GlobalParameter:
+      type: object
+      description: A runtime-editable key-value configuration entry
+      properties:
+        uid:
+          type: string
+          format: uuid
+        group_key:
+          type: string
+        key:
+          type: string
+        value:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+      required:
+        - uid
+        - group_key
+        - key
+        - value
+        - created_at
+        - updated_at
+
+    SetParameterRequest:
+      type: object
+      properties:
+        value:
+          type: string
+      required:
+        - value
+
+    PublicEndpoints:
+      type: object
+      description: Public endpoint advertisement settings
+      properties:
+        host:
+          type: string
+          description: Default public hostname for all protocols
+        pg_host:
+          type: string
+          description: PostgreSQL-specific host override (empty = use host)
+        ora_host:
+          type: string
+          description: Oracle-specific host override (empty = use host)
+        mysql_host:
+          type: string
+          description: MySQL-specific host override (empty = use host)
+        pg_port:
+          type: integer
+          nullable: true
+          description: PostgreSQL port override (null = use local listen port)
+        ora_port:
+          type: integer
+          nullable: true
+          description: Oracle port override (null = use local listen port)
+        mysql_port:
+          type: integer
+          nullable: true
+          description: MySQL port override (null = use local listen port)
+
+    ResolvedEndpoints:
+      type: object
+      description: Fully resolved connection advertisement values after fallback chains
+      properties:
+        pg_host:
+          type: string
+        pg_port:
+          type: integer
+          description: 0 = protocol disabled
+        ora_host:
+          type: string
+        ora_port:
+          type: integer
+        mysql_host:
+          type: string
+        mysql_port:
+          type: integer
+      required:
+        - pg_host
+        - pg_port
+        - ora_host
+        - ora_port
+        - mysql_host
+        - mysql_port
+
+    InstanceInfo:
+      type: object
+      description: Instance information including listen addresses and public endpoint config
+      properties:
+        listen:
+          type: object
+          properties:
+            pg:
+              type: string
+            ora:
+              type: string
+            mysql:
+              type: string
+            api:
+              type: string
+          required:
+            - pg
+            - ora
+            - mysql
+            - api
+        public:
+          $ref: '#/components/schemas/PublicEndpoints'
+          nullable: true
+          description: Only present for admin callers
+        resolved:
+          $ref: '#/components/schemas/ResolvedEndpoints'
+      required:
+        - listen
+        - resolved
 
     # Common schemas
     Error:

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import {
   useDatabases,
+  useDatabaseConnection,
   useCreateDatabase,
   useDeleteDatabase,
   type Database,
@@ -46,8 +47,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Plus, Trash2 } from "lucide-react";
+import { Plus, Trash2, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
+import { CopyableField } from "@/components/shared/CopyableField";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 
 export const Route = createFileRoute("/_authenticated/databases/")({
   component: DatabasesPage,
@@ -96,6 +99,7 @@ function DatabasesPage() {
   const { data: databases, isLoading } = useDatabases();
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [deleteDb, setDeleteDb] = useState<DatabaseItem | null>(null);
+  const [detailDb, setDetailDb] = useState<DatabaseItem | null>(null);
 
   const canCreate = canCreateDatabase(user?.roles);
   const canDelete = canDeleteDatabase(user?.roles);
@@ -220,9 +224,11 @@ function DatabasesPage() {
         isLoading={isLoading}
         rowKey={(db) => db.uid}
         emptyMessage="No databases configured"
+        onRowClick={(db) => setDetailDb(db)}
       />
 
       <DeleteDatabaseDialog db={deleteDb} onClose={() => setDeleteDb(null)} />
+      <DatabaseDetailsDialog db={detailDb} onClose={() => setDetailDb(null)} />
     </div>
   );
 }
@@ -415,6 +421,96 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
         </DialogFooter>
       </form>
     </DialogContent>
+  );
+}
+
+function DatabaseDetailsDialog({
+  db,
+  onClose,
+}: {
+  db: DatabaseItem | null;
+  onClose: () => void;
+}) {
+  const { data: connInfo, error: connError } = useDatabaseConnection(
+    db?.uid
+  );
+
+  const isProxyDisabled =
+    connError &&
+    "status" in connError &&
+    (connError as { status?: number }).status === 409;
+  const noGrant =
+    connError &&
+    "status" in connError &&
+    (connError as { status?: number }).status === 404;
+
+  return (
+    <Dialog open={!!db} onOpenChange={() => onClose()}>
+      <DialogContent data-testid="database-details-dialog" className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{db?.name}</DialogTitle>
+          {db?.description && (
+            <DialogDescription>{db.description}</DialogDescription>
+          )}
+        </DialogHeader>
+        <div className="space-y-4 py-4">
+          {db && isFullDatabase(db) && (
+            <div className="space-y-2 text-sm">
+              <div className="grid grid-cols-3 gap-1">
+                <span className="text-muted-foreground">Protocol</span>
+                <span className="col-span-2 font-medium">
+                  {PROTOCOL_LABEL[(db as Database).protocol as Protocol] ??
+                    (db as Database).protocol}
+                </span>
+              </div>
+              <div className="grid grid-cols-3 gap-1">
+                <span className="text-muted-foreground">Target</span>
+                <span className="col-span-2 font-mono">
+                  {(db as Database).host}:{(db as Database).port} /{" "}
+                  {(db as Database).database_name}
+                </span>
+              </div>
+              {(db as Database).protocol !== "oracle" && (
+                <div className="grid grid-cols-3 gap-1">
+                  <span className="text-muted-foreground">SSL mode</span>
+                  <span className="col-span-2">
+                    {(db as Database).ssl_mode ?? "-"}
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {!noGrant && (
+            <div className="space-y-2">
+              <h3 className="text-sm font-medium">Connection URL</h3>
+              <p className="text-xs text-muted-foreground">
+                Use one of your API keys as the password.
+              </p>
+              {isProxyDisabled ? (
+                <Alert>
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>
+                    The proxy for this protocol is currently disabled.
+                  </AlertDescription>
+                </Alert>
+              ) : connInfo ? (
+                <CopyableField
+                  value={connInfo.url}
+                  testId="database-connection-url"
+                  toastMessage="Connection URL copied"
+                />
+              ) : null}
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={onClose}>
+            Close
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

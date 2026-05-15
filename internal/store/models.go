@@ -474,3 +474,16 @@ type APIKeyFilter struct {
 	Limit      int
 	Offset     int
 }
+
+// GlobalParameter stores runtime-editable key-value configuration.
+type GlobalParameter struct {
+	bun.BaseModel `bun:"table:global_parameters,alias:gp"`
+
+	UID       uuid.UUID  `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	GroupKey  string     `bun:"group_key,notnull" json:"group_key"`
+	Key       string     `bun:"key,notnull" json:"key"`
+	Value     string     `bun:"value,notnull" json:"value"`
+	CreatedAt time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	UpdatedAt time.Time  `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
+	DeletedAt *time.Time `bun:"deleted_at,soft_delete" json:"-"`
+}

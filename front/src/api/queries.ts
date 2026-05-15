@@ -28,6 +28,7 @@ export type APIKey = components["schemas"]["APIKey"];
 export type CreateAPIKeyRequest = components["schemas"]["CreateAPIKeyRequest"];
 export type CreateAPIKeyResponse =
   components["schemas"]["CreateAPIKeyResponse"];
+export type ConnectionInfo = components["schemas"]["ConnectionInfo"];
 
 // ============================================================================
 // Auth Providers
@@ -183,6 +184,29 @@ export function useDatabase(uid: string) {
       return response.data;
     },
     enabled: !!uid,
+  });
+}
+
+export function useDatabaseConnection(uid: string | undefined) {
+  return useQuery({
+    queryKey: ["databases", uid, "connection"],
+    queryFn: async (): Promise<ConnectionInfo> => {
+      const response = await apiClient.GET("/databases/{uid}/connection", {
+        params: { path: { uid: uid! } },
+      });
+      if (response.error || !response.data) {
+        throw Object.assign(
+          new Error(
+            (response.error as { message?: string })?.message ||
+              "Failed to load connection URL"
+          ),
+          { status: response.response?.status }
+        );
+      }
+      return response.data;
+    },
+    enabled: !!uid,
+    retry: false,
   });
 }
 
@@ -799,6 +823,125 @@ export function useRevokeAPIKey(options?: {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["api-keys"] });
+      options?.onSuccess?.();
+    },
+    onError: options?.onError,
+  });
+}
+
+// ============================================================================
+// Instance & Parameters
+// ============================================================================
+
+export type GlobalParameter = components["schemas"]["GlobalParameter"];
+export type PublicEndpoints = components["schemas"]["PublicEndpoints"];
+export type ResolvedEndpoints = components["schemas"]["ResolvedEndpoints"];
+export type InstanceInfo = components["schemas"]["InstanceInfo"];
+
+export function useInstance() {
+  return useQuery({
+    queryKey: ["instance"],
+    queryFn: async (): Promise<InstanceInfo> => {
+      const response = await apiClient.GET("/instance");
+      if (response.error || !response.data) {
+        throw new Error(response.error?.message || "Failed to load instance info");
+      }
+      return response.data;
+    },
+  });
+}
+
+export function useUpdateInstancePublic(options?: {
+  onSuccess?: () => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (body: PublicEndpoints) => {
+      const response = await apiClient.PUT("/instance/public", { body });
+      if (response.error) {
+        throw new Error(
+          (response.error as { message?: string }).message ||
+            "Failed to save settings"
+        );
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["instance"] });
+      options?.onSuccess?.();
+    },
+    onError: options?.onError,
+  });
+}
+
+export function useParameters(groupKey?: string) {
+  return useQuery({
+    queryKey: ["parameters", groupKey],
+    queryFn: async (): Promise<GlobalParameter[]> => {
+      const response = await apiClient.GET("/parameters", {
+        params: { query: groupKey ? { group_key: groupKey } : undefined },
+      });
+      if (response.error) {
+        throw new Error(response.error.message || "Failed to load parameters");
+      }
+      return response.data ?? [];
+    },
+  });
+}
+
+export function useUpdateParameter(options?: {
+  onSuccess?: () => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({
+      group,
+      key,
+      value,
+    }: {
+      group: string;
+      key: string;
+      value: string;
+    }) => {
+      const response = await apiClient.PUT("/parameters/{group}/{key}", {
+        params: { path: { group, key } },
+        body: { value },
+      });
+      if (response.error) {
+        throw new Error(
+          (response.error as { message?: string }).message ||
+            "Failed to update parameter"
+        );
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["parameters"] });
+      options?.onSuccess?.();
+    },
+    onError: options?.onError,
+  });
+}
+
+export function useDeleteParameter(options?: {
+  onSuccess?: () => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async ({ group, key }: { group: string; key: string }) => {
+      const response = await apiClient.DELETE("/parameters/{group}/{key}", {
+        params: { path: { group, key } },
+      });
+      if (response.error) {
+        throw new Error(
+          (response.error as { message?: string }).message ||
+            "Failed to delete parameter"
+        );
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["parameters"] });
       options?.onSuccess?.();
     },
     onError: options?.onError,
