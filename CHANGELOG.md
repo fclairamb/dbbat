@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.12.0](https://github.com/fclairamb/dbbat/compare/v0.11.0...v0.12.0) (2026-05-15)
+
+
+### Features
+
+* **ui:** add favicon from logo-notext.png ([#171](https://github.com/fclairamb/dbbat/issues/171)) ([35d82ba](https://github.com/fclairamb/dbbat/commit/35d82baea8dcb7fb15392c9fd21f21bf8aa277f3))
+
+
+### Bug Fixes
+
+* **dev:** fix dev mode routing so DBB_REDIRECTS proxy works without built frontend ([#173](https://github.com/fclairamb/dbbat/issues/173)) ([cb945d5](https://github.com/fclairamb/dbbat/commit/cb945d50c08097e049456467e011e57c8e1ff875))
+* **ui:** fix favicon path and point preview at port 4200 ([#175](https://github.com/fclairamb/dbbat/issues/175)) ([863d123](https://github.com/fclairamb/dbbat/commit/863d123d38142eba2979f01d12fe339b0914a3b4))
+
 ## [0.11.0](https://github.com/fclairamb/dbbat/compare/v0.10.1...v0.11.0) (2026-05-15)
 
 
