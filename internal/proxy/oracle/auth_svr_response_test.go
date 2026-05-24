@@ -15,7 +15,7 @@ import (
 // around the AUTH_SVR_RESPONSE field: a KV flag, the key, a TTC length tag, a
 // 96-char uppercase-hex placeholder value, then a trailing terminator.
 func buildFakeAuthOK() []byte {
-	var b []byte
+	b := make([]byte, 0, 13+len(authSvrResponseKey)+authSvrResponseHexLen)
 	b = append(b, 0xDE, 0xAD, 0xBE, 0xEF) // leading noise
 	b = append(b, 0x01, 0x11, 0x11)       // KV flag + key length tags
 	b = append(b, authSvrResponseKey...)
