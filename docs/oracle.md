@@ -168,6 +168,28 @@ Byte 6: second (value - 1)
 
 Example: `78 7e 04 04 13 2f 1c` → 2026-04-04 18:46:27
 
+### Oracle TIMESTAMP Encoding
+
+TIMESTAMP extends DATE with fractional seconds; TIMESTAMP WITH TIME ZONE adds a
+zone. The instant is stored in **UTC**.
+
+```
+Bytes 0-6:  DATE portion (UTC wall clock, same layout as above)
+Bytes 7-10: fractional seconds — nanoseconds, big-endian uint32
+Bytes 11-12 (WITH TIME ZONE only):
+  If byte 11 high bit (0x80) is clear → numeric offset:
+    tz hours   = byte 11 - 20
+    tz minutes = byte 12 - 60   (both go negative for negative offsets)
+  If byte 11 high bit is set → named-region id (not resolved to an offset here)
+```
+
+- 11 bytes → TIMESTAMP / TIMESTAMP WITH LOCAL TIME ZONE (rendered as UTC wall clock).
+- 13 bytes → TIMESTAMP WITH TIME ZONE (rendered as the original local wall clock
+  = stored UTC + offset, with a `+HH:MM` suffix).
+
+Example: `78 7e 05 18 08 05 39 2f 07 5e 20 19 5a` → stored UTC `2026-05-24 07:04:56.789012`,
+offset `25-20=+5h` / `90-60=+30m` → **`2026-05-24 12:34:56.789012 +05:30`**.
+
 ## Connection Flow
 
 ```
@@ -208,7 +230,7 @@ The proxy is fully transparent — it forwards raw TNS packets without modificat
 - **TTC auth interception disabled**: The proxy doesn't extract the Oracle username from TTC AUTH messages. It uses the first user with an active grant for connection tracking.
 - **Row capture is best-effort**: The TTC binary format varies across Oracle client versions. Some clients/query types may produce partial or no row capture. SQL text extraction works reliably across all tested clients.
 - **No result capture for DML**: INSERT/UPDATE/DELETE statements are logged (SQL text + duration) but row counts are not captured from v315+ responses.
-- **TIMESTAMP with timezone**: Complex Oracle temporal types may appear as hex in captured results. Simple DATE works correctly.
+- **Temporal types**: DATE, TIMESTAMP, and TIMESTAMP WITH TIME ZONE decode in captured results (the tz form renders the original local wall clock plus its numeric offset). Named-region time zones fall back to the stored UTC wall clock without an offset suffix.
 - **Multi-packet rows**: Large result sets spanning multiple TNS Data packets capture rows from the first response and continuation packets, but some middle packets may be missed depending on their format.
 
 ## Testing

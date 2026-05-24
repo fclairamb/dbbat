@@ -66,12 +66,18 @@ func decodeOracleValue(typeCode uint8, data []byte) (interface{}, error) {
 			return nil, fmt.Errorf("%w: BINARY_DOUBLE requires 8 bytes, got %d", ErrInvalidFloatLength, len(data))
 		}
 		return math.Float64frombits(binary.BigEndian.Uint64(data)), nil
-	case OracleTypeTIMESTAMP, OracleTypeTIMESTAMPTZ, OracleTypeTIMESTAMPLTZ:
+	case OracleTypeTIMESTAMP, OracleTypeTIMESTAMPLTZ:
 		t, err := decodeOracleTimestamp(data)
 		if err != nil {
 			return nil, err
 		}
 		return t.Format("2006-01-02T15:04:05.000000000"), nil
+	case OracleTypeTIMESTAMPTZ:
+		t, err := decodeOracleTimestamp(data)
+		if err != nil {
+			return nil, err
+		}
+		return t.Format("2006-01-02T15:04:05.000000000Z07:00"), nil
 	case OracleTypeCLOB, OracleTypeBLOB:
 		return "[LOB]", nil
 	default:
@@ -211,6 +217,11 @@ func decodeOracleDate(data []byte) (time.Time, error) {
 
 // decodeOracleTimestamp decodes Oracle's TIMESTAMP format.
 // First 7 bytes are the same as DATE, followed by 4 bytes of fractional seconds (nanoseconds, big-endian).
+// For the 13-byte WITH TIME ZONE form, bytes 11-12 carry a numeric offset
+// (tzHour = b[11]-20, tzMin = b[12]-60) when b[11]'s high bit is clear; the
+// returned time is placed in that fixed zone so the original local wall clock
+// is preserved (Oracle stores the instant in UTC). Named-region zones (high bit
+// set) and out-of-range offsets fall back to UTC.
 func decodeOracleTimestamp(data []byte) (time.Time, error) {
 	if len(data) < 11 {
 		return time.Time{}, fmt.Errorf("%w: got %d bytes", ErrInvalidTimestampLength, len(data))
@@ -224,5 +235,14 @@ func decodeOracleTimestamp(data []byte) (time.Time, error) {
 	// Fractional seconds: 4 bytes big-endian nanoseconds
 	nsec := int(binary.BigEndian.Uint32(data[7:11]))
 
-	return time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), nsec, time.UTC), nil
+	base := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), nsec, time.UTC)
+
+	if len(data) >= 13 && data[11]&0x80 == 0 {
+		offsetSec := (int(data[11])-20)*3600 + (int(data[12])-60)*60
+		if offsetSec >= -15*3600 && offsetSec <= 15*3600 {
+			return base.In(time.FixedZone("", offsetSec)), nil
+		}
+	}
+
+	return base, nil
 }
