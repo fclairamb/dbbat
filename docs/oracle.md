@@ -218,7 +218,7 @@ The Oracle proxy has been tested with:
 | Client | Library | Status |
 |--------|---------|--------|
 | Go | go-ora | SQL + rows work end-to-end |
-| Python | oracledb (thin mode) | Authenticates, fails at AUTH OK with DPY-4035 — see below |
+| Python | oracledb (thin mode) | SQL works end-to-end (verified through dbbat → Oracle 19c) |
 | Java | ojdbc11 (JDBC thin) | SQL works, row capture partial (older tests) |
 | DBeaver | JDBC thin via ojdbc | Connects, SQL logged, row capture partial (older tests) |
 | SQLcl | JDBC thin (Oracle 23c+) | SQL works end-to-end |
@@ -254,20 +254,25 @@ the modern HMAC-SHA512 / verifier 18453 path with `customHash` enabled. It mirro
 algorithms in `go-ora/v2/auth_object.go` but does not depend on go-ora at runtime — it
 runs against the raw `net.Conn` returned by the pre-auth relay.
 
+Once upstream auth completes, dbbat forwards the **real** upstream AUTH OK packet to the
+client (not a static capture), so all session-specific fields — instance metadata,
+`AUTH_SESSION_ID`, `AUTH_SC_*`, etc. — match the live session. The one field it rewrites is
+`AUTH_SVR_RESPONSE` (`patchAuthSvrResponse`): the upstream encrypts it with the proxy↔upstream
+combined key, but modern clients decrypt it with the client↔proxy combined key to confirm the
+server holds the negotiated session key. dbbat re-encrypts it in place under the client's key.
+Without this, python-oracledb thin rejected the AUTH OK with `DPY-4035` and JDBC thin / SQLcl
+with `ORA-17401`. go-ora ignores the field, which is why the earlier static-capture path
+worked for it while silently breaking everyone else. The static `capturedAuthOKResponse`
+remains only as a fallback when no upstream packet was captured.
+
 ### Known client limitations
 
-- **Python `oracledb` (thin)**: authenticates successfully against dbbat (visible in logs)
-  and reaches "Oracle session established". The client then rejects the captured AUTH OK
-  response with `DPY-4035: invalid server response to connection request`. The captured
-  response was taken from a real Oracle 19c session, so its session-specific fields
-  (instance metadata, `AUTH_SVR_RESPONSE`, etc.) don't match the new session's combined
-  key. Fixing this needs a dynamic AUTH OK builder.
 - **sqlplus 23c** initiates Oracle Native Services (NS) negotiation via OOB break/reset
   markers after the AUTH challenge. dbbat doesn't implement the NS protocol layer, so
   sqlplus errors with `ORA-12630`.
 
-For now, `go-ora` and SQLcl 23c+ work end-to-end; the rest reach AUTH but not query
-execution.
+For now, `go-ora`, python-oracledb thin, and SQLcl 23c+ work end-to-end; sqlplus (OCI)
+reaches AUTH but not query execution.
 
 ### Per-user O5LOGON key
 
