@@ -39,7 +39,7 @@ RUN bun run generate-client && bun run build:no-check
 # Stage 2: Backend Build
 # -----------------------------------------------------------------------------
 # Builds the Go binary with the frontend embedded via go:embed.
-FROM golang:1.26.3-trixie AS backend
+FROM golang:1.26.4-trixie AS backend
 
 WORKDIR /app
 
