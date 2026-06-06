@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -710,6 +711,11 @@ func decodeOracleRawValue(b []byte) string {
 		return dt
 	}
 
+	// Try as Oracle TIMESTAMP (11 bytes) or TIMESTAMP WITH TIME ZONE (13 bytes)
+	if ts, ok := decodeOracleTimestampToString(b); ok {
+		return ts
+	}
+
 	// Try as Oracle NUMBER
 	if num, ok := decodeOracleNumberToString(b); ok {
 		return num
@@ -751,6 +757,74 @@ func decodeOracleDateToString(b []byte) (string, bool) {
 	fullYear := (century-100)*100 + (year - 100)
 
 	return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", fullYear, month, day, hour, minute, second), true
+}
+
+// decodeOracleTimestampToString converts Oracle TIMESTAMP (11 bytes) or
+// TIMESTAMP WITH TIME ZONE (13 bytes) to a readable string.
+//
+// Bytes 0-6 are the DATE portion (UTC wall clock), bytes 7-10 are fractional
+// seconds as a big-endian nanosecond count. For the 13-byte tz form, bytes
+// 11-12 carry the zone: a numeric offset (tzHour = b[11]-20, tzMin = b[12]-60)
+// when b[11]'s high bit is clear, or a named-region id (not resolvable to a
+// numeric offset here) when it is set — region values decode to the UTC wall
+// clock without an offset suffix.
+func decodeOracleTimestampToString(b []byte) (string, bool) {
+	if len(b) != 11 && len(b) != 13 {
+		return "", false
+	}
+
+	nanos := int(binary.BigEndian.Uint32(b[7:11]))
+
+	t, ok := parseOracleDateTimePrefix(b[:7], nanos)
+	if !ok {
+		return "", false
+	}
+
+	// 13-byte form with a numeric offset: render the original local wall clock
+	// (Oracle stores the instant in UTC) plus the offset suffix.
+	if len(b) == 13 && b[11]&0x80 == 0 {
+		offsetSec := (int(b[11])-20)*3600 + (int(b[12])-60)*60
+		if offsetSec < -15*3600 || offsetSec > 15*3600 {
+			return "", false
+		}
+
+		local := t.In(time.FixedZone("", offsetSec))
+
+		return local.Format("2006-01-02 15:04:05.999999999 -07:00"), true
+	}
+
+	return t.Format("2006-01-02 15:04:05.999999999"), true
+}
+
+// parseOracleDateTimePrefix validates and decodes the 7-byte
+// century/year/month/day/hour/min/sec prefix shared by Oracle DATE and
+// TIMESTAMP values, returning the UTC wall clock with the supplied nanoseconds.
+// ok is false when any field is out of range, which lets heuristic callers
+// reject non-temporal byte runs.
+func parseOracleDateTimePrefix(b []byte, nanos int) (time.Time, bool) {
+	century := int(b[0])
+	year := int(b[1])
+	month := int(b[2])
+	day := int(b[3])
+	hour := int(b[4]) - 1
+	minute := int(b[5]) - 1
+	second := int(b[6]) - 1
+
+	if century < 100 || century > 200 || year < 100 || year > 200 {
+		return time.Time{}, false
+	}
+
+	if month < 1 || month > 12 || day < 1 || day > 31 {
+		return time.Time{}, false
+	}
+
+	if hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59 {
+		return time.Time{}, false
+	}
+
+	fullYear := (century-100)*100 + (year - 100)
+
+	return time.Date(fullYear, time.Month(month), day, hour, minute, second, nanos, time.UTC), true
 }
 
 // isReadableASCII checks if all bytes are printable ASCII.

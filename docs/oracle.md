@@ -168,6 +168,28 @@ Byte 6: second (value - 1)
 
 Example: `78 7e 04 04 13 2f 1c` → 2026-04-04 18:46:27
 
+### Oracle TIMESTAMP Encoding
+
+TIMESTAMP extends DATE with fractional seconds; TIMESTAMP WITH TIME ZONE adds a
+zone. The instant is stored in **UTC**.
+
+```
+Bytes 0-6:  DATE portion (UTC wall clock, same layout as above)
+Bytes 7-10: fractional seconds — nanoseconds, big-endian uint32
+Bytes 11-12 (WITH TIME ZONE only):
+  If byte 11 high bit (0x80) is clear → numeric offset:
+    tz hours   = byte 11 - 20
+    tz minutes = byte 12 - 60   (both go negative for negative offsets)
+  If byte 11 high bit is set → named-region id (not resolved to an offset here)
+```
+
+- 11 bytes → TIMESTAMP / TIMESTAMP WITH LOCAL TIME ZONE (rendered as UTC wall clock).
+- 13 bytes → TIMESTAMP WITH TIME ZONE (rendered as the original local wall clock
+  = stored UTC + offset, with a `+HH:MM` suffix).
+
+Example: `78 7e 05 18 08 05 39 2f 07 5e 20 19 5a` → stored UTC `2026-05-24 07:04:56.789012`,
+offset `25-20=+5h` / `90-60=+30m` → **`2026-05-24 12:34:56.789012 +05:30`**.
+
 ## Connection Flow
 
 ```
@@ -208,7 +230,7 @@ The proxy is fully transparent — it forwards raw TNS packets without modificat
 - **TTC auth interception disabled**: The proxy doesn't extract the Oracle username from TTC AUTH messages. It uses the first user with an active grant for connection tracking.
 - **Row capture is best-effort**: The TTC binary format varies across Oracle client versions. Some clients/query types may produce partial or no row capture. SQL text extraction works reliably across all tested clients.
 - **No result capture for DML**: INSERT/UPDATE/DELETE statements are logged (SQL text + duration) but row counts are not captured from v315+ responses.
-- **TIMESTAMP with timezone**: Complex Oracle temporal types may appear as hex in captured results. Simple DATE works correctly.
+- **Temporal types**: DATE, TIMESTAMP, and TIMESTAMP WITH TIME ZONE decode in captured results (the tz form renders the original local wall clock plus its numeric offset). Named-region time zones fall back to the stored UTC wall clock without an offset suffix.
 - **Multi-packet rows**: Large result sets spanning multiple TNS Data packets capture rows from the first response and continuation packets, but some middle packets may be missed depending on their format.
 
 ## Testing
@@ -218,7 +240,7 @@ The Oracle proxy has been tested with:
 | Client | Library | Status |
 |--------|---------|--------|
 | Go | go-ora | SQL + rows work end-to-end |
-| Python | oracledb (thin mode) | Authenticates, fails at AUTH OK with DPY-4035 — see below |
+| Python | oracledb (thin mode) | SQL works end-to-end (verified through dbbat → Oracle 19c) |
 | Java | ojdbc11 (JDBC thin) | SQL works, row capture partial (older tests) |
 | DBeaver | JDBC thin via ojdbc | Connects, SQL logged, row capture partial (older tests) |
 | SQLcl | JDBC thin (Oracle 23c+) | SQL works end-to-end |
@@ -254,20 +276,25 @@ the modern HMAC-SHA512 / verifier 18453 path with `customHash` enabled. It mirro
 algorithms in `go-ora/v2/auth_object.go` but does not depend on go-ora at runtime — it
 runs against the raw `net.Conn` returned by the pre-auth relay.
 
+Once upstream auth completes, dbbat forwards the **real** upstream AUTH OK packet to the
+client (not a static capture), so all session-specific fields — instance metadata,
+`AUTH_SESSION_ID`, `AUTH_SC_*`, etc. — match the live session. The one field it rewrites is
+`AUTH_SVR_RESPONSE` (`patchAuthSvrResponse`): the upstream encrypts it with the proxy↔upstream
+combined key, but modern clients decrypt it with the client↔proxy combined key to confirm the
+server holds the negotiated session key. dbbat re-encrypts it in place under the client's key.
+Without this, python-oracledb thin rejected the AUTH OK with `DPY-4035` and JDBC thin / SQLcl
+with `ORA-17401`. go-ora ignores the field, which is why the earlier static-capture path
+worked for it while silently breaking everyone else. The static `capturedAuthOKResponse`
+remains only as a fallback when no upstream packet was captured.
+
 ### Known client limitations
 
-- **Python `oracledb` (thin)**: authenticates successfully against dbbat (visible in logs)
-  and reaches "Oracle session established". The client then rejects the captured AUTH OK
-  response with `DPY-4035: invalid server response to connection request`. The captured
-  response was taken from a real Oracle 19c session, so its session-specific fields
-  (instance metadata, `AUTH_SVR_RESPONSE`, etc.) don't match the new session's combined
-  key. Fixing this needs a dynamic AUTH OK builder.
 - **sqlplus 23c** initiates Oracle Native Services (NS) negotiation via OOB break/reset
   markers after the AUTH challenge. dbbat doesn't implement the NS protocol layer, so
   sqlplus errors with `ORA-12630`.
 
-For now, `go-ora` and SQLcl 23c+ work end-to-end; the rest reach AUTH but not query
-execution.
+For now, `go-ora`, python-oracledb thin, and SQLcl 23c+ work end-to-end; sqlplus (OCI)
+reaches AUTH but not query execution.
 
 ### Per-user O5LOGON key
 
