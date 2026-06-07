@@ -91,7 +91,7 @@ jobs:
         run: go test -race -coverprofile=coverage.out ./...
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v6.0.1
+        uses: codecov/codecov-action@v6.0.2
         with:
           files: coverage.out
         continue-on-error: true # Don't fail if codecov is not configured
