@@ -89,11 +89,15 @@
       Also fixed `decodeOracleValue` (legacy Response path), which used raw IEEE. Verified
       end-to-end (`testdata/go_ora_binfloat.dbbat-dump`, `TestDumpReplay_BinFloat`: 1.5 / 2.5 /
       -1.5) plus updated unit tests feeding real transformed wire bytes.
-- [ ] Type-aware DATE/TIMESTAMP vs NUMBER length collisions — a 7/11/13-byte NUMBER can be
-      mis-decoded as a temporal value by the heuristic; now that the column type is available,
-      route those columns by type too (currently only NUMBER is type-routed; temporal columns
-      still use the heuristic, which is correct for them but doesn't disambiguate a NUMBER of
-      the same length).
+- [x] DATE/TIMESTAMP vs NUMBER length collision — resolved by the NUMBER type-routing: a NUMBER
+      column now decodes via `formatOracleNumber` before any DATE/TIMESTAMP heuristic, so a
+      7/11/13-byte NUMBER can never be mis-read as temporal. Temporal columns themselves never
+      collide with the ASCII branch (the month byte is always < 0x20), so the heuristic stays
+      correct for them.
+- [x] Type-aware RAW decoding — RAW/LONG RAW columns now render as hex via `decodeRowValue`,
+      so printable binary content (e.g. a RAW holding "Hello") is no longer mis-captured as
+      text. Verified (`testdata/go_ora_raw.dbbat-dump`, `TestDumpReplay_Raw`) with a contrast
+      unit test.
 - [x] Extract Oracle username from TTC AUTH — stale item: already implemented (PR #134,
       `parseAuthPhase1` → `GetUserByUsername` → grant check; no fallback). Docs updated.
 - [ ] Multi-key O5LOGON support (only the user's first verifier-bearing API key works today;
