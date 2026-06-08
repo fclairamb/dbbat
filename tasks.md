@@ -27,6 +27,16 @@
       (`testdata/go_ora_largeresult.dbbat-dump`, 400 rows, `TestDumpReplay_LargeResultRows`).
       ⏳ Multi-TNS-packet (small-SDU/JDBC) results reuse the same decoder but per-row
       correctness there is not yet ground-truth-verified.
+- [x] Column-compression + NULL row capture — `parseRowStream` now carries unchanged
+      columns forward and decodes the `0x15` descriptor structurally (bitmask is
+      `ceil(numCols/8)` bytes), fixing corruption when a bitmask byte is itself `0x07`
+      (all-columns-change boundary). Verified against a live-Oracle ground-truth fixture
+      (`testdata/go_ora_compressed.dbbat-dump`, `TestDumpReplay_CompressedRows`:
+      repeated column runs, NULLs, GRP change boundary).
+- [ ] Single-char column names break capture — `scanColumnNames` requires ≥2-char names,
+      so `SELECT x AS n` undercounts columns and corrupts row parsing. Real fix: source the
+      column count from the describe metadata instead of name-scanning (avoid widening the
+      heuristic name matcher, which risks false positives).
 - [x] TIMESTAMP-with-timezone decoding — implemented + unit-tested with real captures.
       ⏳ Live end-to-end re-verification deferred until VPN reconnect (re-run probe, confirm
       captured rows decode instead of hex).
