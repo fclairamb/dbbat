@@ -757,10 +757,10 @@ func decodeOracleDateToString(b []byte) (string, bool) {
 //
 // Bytes 0-6 are the DATE portion (UTC wall clock), bytes 7-10 are fractional
 // seconds as a big-endian nanosecond count. For the 13-byte tz form, bytes
-// 11-12 carry the zone: a numeric offset (tzHour = b[11]-20, tzMin = b[12]-60)
-// when b[11]'s high bit is clear, or a named-region id (not resolvable to a
-// numeric offset here) when it is set — region values decode to the UTC wall
-// clock without an offset suffix.
+// 11-12 carry the zone: a numeric offset (tzHour = (b[11]&0x3f)-20,
+// tzMin = b[12]-60) when b[11]'s high bit is clear, or a named-region id (not
+// resolvable to a numeric offset here) when it is set — region values decode to
+// the UTC wall clock without an offset suffix.
 func decodeOracleTimestampToString(b []byte) (string, bool) {
 	if len(b) != 11 && len(b) != 13 {
 		return "", false
@@ -774,14 +774,22 @@ func decodeOracleTimestampToString(b []byte) (string, bool) {
 	}
 
 	// 13-byte form with a numeric offset: render the original local wall clock
-	// (Oracle stores the instant in UTC) plus the offset suffix.
+	// plus the offset suffix. Byte 11's low 6 bits are the hour; bit 0x80 (above)
+	// marks a named region; bit 0x40 is the "time in zone" flag — when set the
+	// 7-byte prefix is already the local wall clock, otherwise it is UTC and is
+	// shifted into the zone to recover the local time.
 	if len(b) == 13 && b[11]&0x80 == 0 {
-		offsetSec := (int(b[11])-20)*3600 + (int(b[12])-60)*60
+		offsetSec := (int(b[11]&0x3f)-20)*3600 + (int(b[12])-60)*60
 		if offsetSec < -15*3600 || offsetSec > 15*3600 {
 			return "", false
 		}
 
-		local := t.In(time.FixedZone("", offsetSec))
+		zone := time.FixedZone("", offsetSec)
+
+		local := t.In(zone)
+		if b[11]&0x40 != 0 {
+			local = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), zone)
+		}
 
 		return local.Format("2006-01-02 15:04:05.999999999 -07:00"), true
 	}

@@ -223,24 +223,32 @@ Example: `78 7e 04 04 13 2f 1c` → 2026-04-04 18:46:27
 ### Oracle TIMESTAMP Encoding
 
 TIMESTAMP extends DATE with fractional seconds; TIMESTAMP WITH TIME ZONE adds a
-zone. The instant is stored in **UTC**.
+zone. The 7-byte prefix holds either the UTC instant or the local wall clock,
+selected by byte 11's `0x40` flag (see below).
 
 ```
-Bytes 0-6:  DATE portion (UTC wall clock, same layout as above)
+Bytes 0-6:  DATE portion (same layout as above)
 Bytes 7-10: fractional seconds — nanoseconds, big-endian uint32
 Bytes 11-12 (WITH TIME ZONE only):
-  If byte 11 high bit (0x80) is clear → numeric offset:
-    tz hours   = byte 11 - 20
-    tz minutes = byte 12 - 60   (both go negative for negative offsets)
-  If byte 11 high bit is set → named-region id (not resolved to an offset here)
+  If byte 11 high bit (0x80) is set → named-region id (not resolved to an offset here)
+  Else → numeric offset (only the low 6 bits of byte 11 hold the hour):
+    tz hours   = (byte 11 & 0x3f) - 20
+    tz minutes =  byte 12 - 60          (both go negative for negative offsets)
+    byte 11 bit 0x40 = "time in zone" flag:
+      set   → bytes 0-6 are already the LOCAL wall clock (no shift)
+      clear → bytes 0-6 are UTC; shift into the offset zone to get local time
 ```
 
 - 11 bytes → TIMESTAMP / TIMESTAMP WITH LOCAL TIME ZONE (rendered as UTC wall clock).
-- 13 bytes → TIMESTAMP WITH TIME ZONE (rendered as the original local wall clock
-  = stored UTC + offset, with a `+HH:MM` suffix).
+- 13 bytes → TIMESTAMP WITH TIME ZONE (rendered as the local wall clock with a
+  `+HH:MM` suffix).
 
-Example: `78 7e 05 18 08 05 39 2f 07 5e 20 19 5a` → stored UTC `2026-05-24 07:04:56.789012`,
-offset `25-20=+5h` / `90-60=+30m` → **`2026-05-24 12:34:56.789012 +05:30`**.
+Examples (both render to a `+05:30` local clock):
+- 19c, flag clear: `78 7e 05 18 08 05 39 2f 07 5e 20 19 5a` → byte 11 `0x19`, prefix is
+  UTC `07:04:56`, shift `+5h30m` → **`2026-05-24 12:34:56.789012 +05:30`**.
+- Free 23ai, flag set: `78 7c 03 0f 0f 1f 2e 07 5b ca 00 59 5a` → byte 11 `0x59`
+  (`0x59&0x3f=0x19=25 → +5h`, `0x40` set), prefix `14:30:45` is already local →
+  **`2024-03-15 14:30:45.123456 +05:30`**.
 
 ## Connection Flow
 
@@ -283,7 +291,7 @@ The proxy is fully transparent — it forwards raw TNS packets without modificat
 - **Row capture is best-effort**: The TTC binary format varies across Oracle client versions. Some clients/query types may produce partial or no row capture. SQL text extraction works reliably across all tested clients.
 - **Undetectable column names**: The column count is read from the describe header (`describeColumnCount`: `[0x10][size][…][maxRowSize][colCount]`), so queries whose column names the scanner can't detect — single-char aliases (`SELECT level AS n`) or unnamed expressions (`SELECT 1`, `SELECT level*10`) — still capture all rows. Those undetectable columns are stored under synthetic `COLn` names (the value is correct; only the label is generic), and when *some* names are detected the synthetic ones are appended at the end, so labels can misalign with positions. Proper per-column names would require parsing the describe column-definition records.
 - **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`. Failed statements record the ORA error text. See `ttc_oer.go`.
-- **Temporal types**: DATE, TIMESTAMP, and TIMESTAMP WITH TIME ZONE decode in captured results (the tz form renders the original local wall clock plus its numeric offset). Named-region time zones fall back to the stored UTC wall clock without an offset suffix.
+- **Temporal types**: DATE, TIMESTAMP, and TIMESTAMP WITH TIME ZONE decode in captured results, verified end-to-end against `testdata/go_ora_temporal.dbbat-dump` (`TestDumpReplay_Temporal`). The tz form renders the local wall clock plus its numeric offset, honouring byte 11's `0x40` "time in zone" flag (prefix stored as local vs UTC). Named-region time zones fall back to the stored wall clock without an offset suffix.
 - **Large result sets**: The QueryResult (func `0x10`) row area and continuation packets (func `0x06`) share one decoder (`parseRowStream`) that walks the full compressed row stream — length-prefixed values plus the `0x15 [flag] [count] [bitmask] 0x07` column-compression descriptors between rows. A 400-row single-packet result is captured end-to-end against a live-Oracle ground-truth fixture (`testdata/go_ora_largeresult.dbbat-dump`, `TestDumpReplay_LargeResultRows`). Multi-TNS-packet (small-SDU/JDBC) result sets reuse the same decoder via the continuation path; their per-row correctness is not yet ground-truth-verified.
 
 ## Testing

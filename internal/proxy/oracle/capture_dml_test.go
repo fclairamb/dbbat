@@ -372,6 +372,65 @@ func TestCapture_GoOraNumbers(t *testing.T) {
 	t.Logf("capture written to %s", outPath)
 }
 
+// temporalQuery returns one row of temporal types: a DATE, a TIMESTAMP with
+// fractional seconds, and a TIMESTAMP WITH TIME ZONE at a numeric offset.
+const temporalQuery = "SELECT " +
+	"DATE '2024-03-15' AS dt, " +
+	"TIMESTAMP '2024-03-15 14:30:45.123456' AS ts, " +
+	"FROM_TZ(TIMESTAMP '2024-03-15 14:30:45.123456', '+05:30') AS tstz " +
+	"FROM dual"
+
+// TestCapture_GoOraTemporal records temporalQuery — the fixture verifying that
+// DATE/TIMESTAMP/TIMESTAMP WITH TIME ZONE decode in the row-capture pipeline.
+func TestCapture_GoOraTemporal(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_TEMPORAL", "testdata/go_ora_temporal.dbbat-dump")
+
+	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)
+	if err != nil {
+		t.Skipf("Oracle not reachable at %s: %v", oracleAddr, err)
+	}
+	_ = probe.Close()
+
+	w, err := dump.NewWriter(outPath, dump.Header{
+		SessionID: "capture-go-ora-temporal",
+		Protocol:  dump.ProtocolOracle,
+		StartTime: time.Now(),
+	}, 32*1024*1024)
+	require.NoError(t, err)
+
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	dsn := fmt.Sprintf("oracle://system:oracle@%s/%s?PREFETCH_ROWS=1000", relayAddr, oracleService)
+	db, err := sql.Open("oracle", dsn)
+	require.NoError(t, err)
+
+	defer func() { _ = db.Close() }()
+
+	db.SetMaxOpenConns(1)
+
+	ctx := t.Context()
+
+	var dt, ts, tstz time.Time
+
+	row := db.QueryRowContext(ctx, temporalQuery)
+	require.NoError(t, row.Scan(&dt, &ts, &tstz))
+
+	// Ground truth: the driver's typed values are what we encoded.
+	require.Equal(t, "2024-03-15", dt.Format("2006-01-02"))
+	require.Equal(t, "2024-03-15 14:30:45.123456", ts.Format("2006-01-02 15:04:05.999999"))
+	require.Equal(t, "2024-03-15 14:30:45", tstz.Format("2006-01-02 15:04:05"))
+	_, offset := tstz.Zone()
+	require.Equal(t, 5*3600+30*60, offset, "tz offset +05:30")
+
+	require.NoError(t, db.Close())
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s", outPath)
+}
+
 // TestCapture_GoOraDML records a go-ora session with DDL + DML statements.
 // The resulting dump is the fixture for DML row-count response parsing.
 func TestCapture_GoOraDML(t *testing.T) {

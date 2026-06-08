@@ -50,9 +50,13 @@
       (`testdata/go_ora_numbers.dbbat-dump`, `TestDumpReplay_Numbers`).
       ⏳ Residual: all-printable-ASCII negative NUMBERs (e.g. -42) are still captured as text on
       the type-less path; needs the column type from the describe column-definition records.
-- [x] TIMESTAMP-with-timezone decoding — implemented + unit-tested with real captures.
-      ⏳ Live end-to-end re-verification deferred until VPN reconnect (re-run probe, confirm
-      captured rows decode instead of hex).
+- [x] TIMESTAMP-with-timezone decoding — implemented + unit-tested with real captures, and
+      now re-verified live end-to-end (`testdata/go_ora_temporal.dbbat-dump`,
+      `TestDumpReplay_Temporal`: DATE, TIMESTAMP, TIMESTAMP WITH TIME ZONE). The live run
+      surfaced two bugs against Oracle Free 23ai, now fixed: the tz hour was read from the
+      whole byte instead of `byte11 & 0x3f` (23ai sets bit 0x40), and the `0x40` "time in zone"
+      flag was ignored — when set, the 7-byte prefix is the local wall clock and must not be
+      shifted from UTC. Both the heuristic and type-aware decoders were corrected.
 - [ ] Parse describe column-definition records — would yield real column names (instead of
       synthetic `COLn`) and the per-column data type, which in turn resolves the all-ASCII
       negative-NUMBER ambiguity. Version-sensitive (TTCVersion branches, DLC fields); deferred

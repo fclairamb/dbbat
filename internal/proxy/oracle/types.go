@@ -141,10 +141,10 @@ func decodeOracleDate(data []byte) (time.Time, error) {
 // decodeOracleTimestamp decodes Oracle's TIMESTAMP format.
 // First 7 bytes are the same as DATE, followed by 4 bytes of fractional seconds (nanoseconds, big-endian).
 // For the 13-byte WITH TIME ZONE form, bytes 11-12 carry a numeric offset
-// (tzHour = b[11]-20, tzMin = b[12]-60) when b[11]'s high bit is clear; the
-// returned time is placed in that fixed zone so the original local wall clock
-// is preserved (Oracle stores the instant in UTC). Named-region zones (high bit
-// set) and out-of-range offsets fall back to UTC.
+// (tzHour = (b[11]&0x3f)-20, tzMin = b[12]-60) when b[11]'s high bit is clear;
+// the returned time is placed in that fixed zone so the original local wall
+// clock is preserved (Oracle stores the instant in UTC). Named-region zones
+// (high bit set) and out-of-range offsets fall back to UTC.
 func decodeOracleTimestamp(data []byte) (time.Time, error) {
 	if len(data) < 11 {
 		return time.Time{}, fmt.Errorf("%w: got %d bytes", ErrInvalidTimestampLength, len(data))
@@ -161,9 +161,18 @@ func decodeOracleTimestamp(data []byte) (time.Time, error) {
 	base := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), nsec, time.UTC)
 
 	if len(data) >= 13 && data[11]&0x80 == 0 {
-		offsetSec := (int(data[11])-20)*3600 + (int(data[12])-60)*60
+		offsetSec := (int(data[11]&0x3f)-20)*3600 + (int(data[12])-60)*60
 		if offsetSec >= -15*3600 && offsetSec <= 15*3600 {
-			return base.In(time.FixedZone("", offsetSec)), nil
+			zone := time.FixedZone("", offsetSec)
+
+			// Bit 0x40 set: the prefix is already the local wall clock; clear:
+			// the prefix is UTC and is shifted into the zone.
+			if data[11]&0x40 != 0 {
+				return time.Date(base.Year(), base.Month(), base.Day(),
+					base.Hour(), base.Minute(), base.Second(), base.Nanosecond(), zone), nil
+			}
+
+			return base.In(zone), nil
 		}
 	}
 
