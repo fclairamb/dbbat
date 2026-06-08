@@ -316,6 +316,62 @@ func TestCapture_GoOraColCount(t *testing.T) {
 	t.Logf("capture written to %s (%d rows)", outPath, got)
 }
 
+// numbersQuery returns one row of positive NUMBERs that exercise the decimal
+// decoder: a 2-dp value, a large value with a fraction, an integer that needs
+// trailing-zero expansion, and a sub-1 fraction (leading-zero placement).
+const numbersQuery = "SELECT 3.14 AS pi, 1234567.89 AS amount, 1000000 AS million, 0.25 AS quarter FROM dual"
+
+// TestCapture_GoOraNumbers records numbersQuery — the fixture proving the proxy
+// decodes fractional NUMBERs correctly (previously decimals lost their point,
+// e.g. 3.14 was captured as "314").
+func TestCapture_GoOraNumbers(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_NUMBERS", "testdata/go_ora_numbers.dbbat-dump")
+
+	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)
+	if err != nil {
+		t.Skipf("Oracle not reachable at %s: %v", oracleAddr, err)
+	}
+	_ = probe.Close()
+
+	w, err := dump.NewWriter(outPath, dump.Header{
+		SessionID: "capture-go-ora-numbers",
+		Protocol:  dump.ProtocolOracle,
+		StartTime: time.Now(),
+	}, 32*1024*1024)
+	require.NoError(t, err)
+
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	dsn := fmt.Sprintf("oracle://system:oracle@%s/%s?PREFETCH_ROWS=1000", relayAddr, oracleService)
+	db, err := sql.Open("oracle", dsn)
+	require.NoError(t, err)
+
+	defer func() { _ = db.Close() }()
+
+	db.SetMaxOpenConns(1)
+
+	ctx := t.Context()
+
+	var pi, amount, million, quarter float64
+
+	row := db.QueryRowContext(ctx, numbersQuery)
+	require.NoError(t, row.Scan(&pi, &amount, &million, &quarter))
+
+	// Ground truth: the driver's typed values match our expected strings.
+	require.InDelta(t, 3.14, pi, 1e-9)
+	require.InDelta(t, 1234567.89, amount, 1e-9)
+	require.InDelta(t, 1000000, million, 1e-9)
+	require.InDelta(t, 0.25, quarter, 1e-9)
+
+	require.NoError(t, db.Close())
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s", outPath)
+}
+
 // TestCapture_GoOraDML records a go-ora session with DDL + DML statements.
 // The resulting dump is the fixture for DML row-count response parsing.
 func TestCapture_GoOraDML(t *testing.T) {

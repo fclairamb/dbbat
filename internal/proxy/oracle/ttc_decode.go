@@ -835,46 +835,166 @@ func isReadableASCII(b []byte) bool {
 	return true
 }
 
-// decodeOracleNumberToString converts Oracle NUMBER format to a string.
-// Oracle NUMBER: [exponent byte] [mantissa digits...]
-// Exponent byte: value - 193 gives the power of 100
-// Each mantissa byte: value - 1 gives a two-digit number (00-99)
+// decodeOracleNumberToString decodes an Oracle NUMBER for the heuristic
+// row-capture path, where no column type is available. It gates on
+// isOracleNumber so genuine text (which carries no type tag on the wire) is
+// never misread as a number, then formats with the shared formatOracleNumber.
+//
+// NOTE: a negative NUMBER whose bytes happen to all be printable ASCII is
+// indistinguishable from text here; decodeOracleRawValue tries ASCII first, so
+// such values are captured as strings.
 func decodeOracleNumberToString(b []byte) (string, bool) {
-	if len(b) < 2 {
-		return "", false
-	}
-
-	exp := int(b[0])
-
-	// Check for zero
-	if exp == 128 && len(b) == 1 {
+	if len(b) == 1 && b[0] == 0x80 {
 		return "0", true
 	}
 
-	// Positive numbers: exponent >= 193
-	if exp < 193 || exp > 213 {
-		return "", false // Not a simple positive number
+	if !isOracleNumber(b) {
+		return "", false
 	}
 
-	// Convert mantissa digits
-	power := exp - 193
-	var result int64
+	return formatOracleNumber(b)
+}
 
-	for i := 1; i < len(b); i++ {
-		digit := int64(b[i]) - 1
-		if digit < 0 || digit > 99 {
+// formatOracleNumber reconstructs the exact decimal string of an Oracle NUMBER
+// from its raw bytes: one exponent byte then up to 20 base-100 mantissa bytes
+// (negatives carry a trailing 0x66 terminator). The value is
+// sign × mantissa × 100^(exp100 - n + 1), where exp100 is the signed base-100
+// exponent of the most significant digit and the mantissa is the n base-100
+// digits laid out two decimal places each.
+//
+// It performs no validity gating — callers without a column type must pre-check
+// with isOracleNumber. ok is false only for empty or degenerate input.
+func formatOracleNumber(b []byte) (string, bool) {
+	if len(b) == 0 {
+		return "", false
+	}
+
+	if len(b) == 1 && b[0] == 0x80 {
+		return "0", true
+	}
+
+	positive := b[0]&0x80 != 0
+
+	var (
+		exp100 int
+		digits []int
+	)
+
+	if positive {
+		exp100 = int(b[0]&0x7f) - 65
+		for _, c := range b[1:] {
+			digits = append(digits, int(c)-1)
+		}
+	} else {
+		end := len(b)
+		if b[end-1] == 0x66 { // strip the negative terminator (102)
+			end--
+		}
+
+		exp100 = int((b[0]^0xff)&0x7f) - 65
+		for _, c := range b[1:end] {
+			digits = append(digits, 101-int(c))
+		}
+	}
+
+	if len(digits) == 0 {
+		return "", false
+	}
+
+	// Lay the base-100 digits out two decimal places each; the whole run then
+	// represents mantissa × 100^(exp100 - len(digits) + 1).
+	var mant strings.Builder
+	for _, d := range digits {
+		if d < 0 || d > 99 {
 			return "", false
 		}
 
-		result = result*100 + digit
+		fmt.Fprintf(&mant, "%02d", d)
 	}
 
-	// Apply power of 100
-	for i := len(b) - 2; i < power; i++ {
-		result *= 100
+	s := placeDecimalPoint(mant.String(), 2*(exp100-len(digits)+1))
+	if !positive {
+		s = "-" + s
 	}
 
-	return fmt.Sprintf("%d", result), true
+	return s, true
+}
+
+// isOracleNumber reports whether b is a valid Oracle NUMBER encoding. It mirrors
+// the driver's validity rules so that text values (which carry no type tag on
+// the wire) are not misread as numbers: positive mantissa bytes are 1..100 and
+// negative ones 2..101, with a length and terminator check.
+func isOracleNumber(b []byte) bool {
+	n := len(b)
+	if n < 2 || n > 21 {
+		return false
+	}
+
+	if b[0]&0x80 != 0 { // positive
+		if b[1] < 2 || b[n-1] < 2 {
+			return false
+		}
+
+		for _, c := range b[1:] {
+			if c < 1 || c > 100 {
+				return false
+			}
+		}
+
+		return true
+	}
+
+	// Negative: an optional 0x66 terminator, otherwise the full 20 mantissa bytes.
+	end := n
+	if b[n-1] == 0x66 {
+		end--
+	} else if n <= 20 {
+		return false
+	}
+
+	if end < 2 || b[1] > 100 || b[end-1] > 100 {
+		return false
+	}
+
+	for _, c := range b[1:end] {
+		if c < 2 || c > 101 {
+			return false
+		}
+	}
+
+	return true
+}
+
+// placeDecimalPoint formats mantissa × 10^shift, trimming leading integer zeros
+// and trailing fractional zeros (e.g. "0314",-2 → "3.14"; "50",-2 → "0.5").
+func placeDecimalPoint(mant string, shift int) string {
+	if shift >= 0 {
+		mant += strings.Repeat("0", shift)
+		if t := strings.TrimLeft(mant, "0"); t != "" {
+			return t
+		}
+
+		return "0"
+	}
+
+	frac := -shift
+
+	var intPart, fracPart string
+	if len(mant) > frac {
+		intPart, fracPart = mant[:len(mant)-frac], mant[len(mant)-frac:]
+	} else {
+		intPart, fracPart = "0", strings.Repeat("0", frac-len(mant))+mant
+	}
+
+	if intPart = strings.TrimLeft(intPart, "0"); intPart == "" {
+		intPart = "0"
+	}
+
+	if fracPart = strings.TrimRight(fracPart, "0"); fracPart == "" {
+		return intPart
+	}
+
+	return intPart + "." + fracPart
 }
 
 // continuationDescriptorMarker (0x15) appears after each row in a continuation

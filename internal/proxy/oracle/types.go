@@ -98,91 +98,14 @@ func decodeOracleNumber(data []byte) (string, error) {
 		return "", ErrInvalidNumberData
 	}
 
-	// Zero
-	if len(data) == 1 && data[0] == 0x80 {
-		return "0", nil
+	// The column type is known here (NUMBER), so no isOracleNumber gate is
+	// needed — decode the raw bytes directly with the shared formatter.
+	s, ok := formatOracleNumber(data)
+	if !ok {
+		return "", ErrInvalidNumberData
 	}
 
-	isPositive := data[0] > 0x80
-
-	var exponent int
-	var mantissa []int
-
-	if isPositive {
-		exponent = int(data[0]) - 0xC1
-		for i := 1; i < len(data); i++ {
-			mantissa = append(mantissa, int(data[i])-1)
-		}
-	} else {
-		exponent = 0x3E - int(data[0])
-		for i := 1; i < len(data); i++ {
-			if data[i] == 102 { // terminator for negative numbers
-				break
-			}
-			mantissa = append(mantissa, 101-int(data[i]))
-		}
-	}
-
-	if len(mantissa) == 0 {
-		return "0", nil
-	}
-
-	// Build the number string from base-100 digits
-	// Each mantissa digit represents two decimal digits (0-99)
-	var sb strings.Builder
-
-	if !isPositive {
-		sb.WriteByte('-')
-	}
-
-	// The exponent tells us where the decimal point goes.
-	// exponent=0 means the first pair is in the units place (0-99).
-	// exponent=1 means the first pair is in the hundreds place, etc.
-	// We need (exponent+1) pairs before the decimal point.
-
-	pairsBeforeDecimal := exponent + 1
-
-	for i, digit := range mantissa {
-		if i == pairsBeforeDecimal {
-			// Remove trailing zeros from integer part if no fractional part follows
-			// Actually, add decimal point
-			sb.WriteByte('.')
-		}
-
-		if i == 0 {
-			// First pair: no leading zero
-			if digit >= 10 {
-				sb.WriteByte(byte('0' + digit/10))
-				sb.WriteByte(byte('0' + digit%10))
-			} else {
-				sb.WriteByte(byte('0' + digit))
-			}
-		} else {
-			// Subsequent pairs: always two digits
-			sb.WriteByte(byte('0' + digit/10))
-			sb.WriteByte(byte('0' + digit%10))
-		}
-	}
-
-	// If we have fewer pairs than needed before the decimal, pad with "00"
-	for i := len(mantissa); i < pairsBeforeDecimal; i++ {
-		sb.WriteString("00")
-	}
-
-	result := sb.String()
-
-	// Clean up trailing zeros after decimal point
-	if strings.Contains(result, ".") {
-		result = strings.TrimRight(result, "0")
-		result = strings.TrimRight(result, ".")
-	}
-
-	// Handle edge case: negative zero
-	if result == "-0" {
-		return "0", nil
-	}
-
-	return result, nil
+	return s, nil
 }
 
 // decodeOracleDate decodes Oracle's 7-byte DATE format.
