@@ -1102,15 +1102,23 @@ func parseContinuationRows(payload []byte, numCols int, prevRow []string, colTyp
 	return parseRowStream(payload, headerEnd+1, numCols, activeCols, prev, colTypes)
 }
 
-// decodeRowValue decodes a single captured column value. When the column's TTC
-// type is known to be NUMBER it uses formatOracleNumber directly (correct for
-// negatives and fractionals, which the type-less heuristic — trying ASCII first
-// — mis-reads). Every other type falls through to decodeOracleRawValue, which
-// preserves the established string/temporal formats.
+// decodeRowValue decodes a single captured column value by its TTC type. NUMBER
+// uses formatOracleNumber directly (correct for negatives/fractionals the
+// type-less heuristic mis-reads); BINARY_FLOAT/DOUBLE undo Oracle's sortable
+// byte transform (which the heuristic can't decode at all). Every other type —
+// and any column with no known type — falls through to decodeOracleRawValue,
+// preserving the established string/temporal formats.
 func decodeRowValue(colTypes []int, col int, b []byte) string {
-	if col >= 0 && col < len(colTypes) && colTypes[col] == tnsTypeNUMBER {
-		if s, ok := formatOracleNumber(b); ok {
-			return s
+	if col >= 0 && col < len(colTypes) {
+		switch colTypes[col] {
+		case tnsTypeNUMBER:
+			if s, ok := formatOracleNumber(b); ok {
+				return s
+			}
+		case tnsTypeBINFLOAT, tnsTypeBINDOUBLE:
+			if s, ok := decodeOracleBinaryFloatString(b); ok {
+				return s
+			}
 		}
 	}
 

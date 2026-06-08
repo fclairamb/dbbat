@@ -203,8 +203,13 @@ NUMBER values are decoded by type via `formatOracleNumber`, so negative NUMBERs
 decode correctly. Without a type — continuation packets, or a server layout the
 describe parser can't read — the proxy falls back to `decodeOracleRawValue`,
 which tries ASCII first; a negative NUMBER whose bytes all fall in the printable
-ASCII range (e.g. `-42`) is then captured as text. (`BINARY_FLOAT`/`DOUBLE`
-remain heuristic-only.)
+ASCII range (e.g. `-42`) is then captured as text.
+
+`BINARY_FLOAT` (4 bytes) and `BINARY_DOUBLE` (8 bytes) are stored in a sortable
+form — the sign bit is flipped for positive values and every bit is inverted for
+negative values — so the raw bytes order numerically. `decodeOracleBinaryFloatString`
+undoes that transform before reading the IEEE-754 value; these need the column
+type (4/8 raw bytes are otherwise ambiguous).
 
 ### Oracle DATE Encoding
 

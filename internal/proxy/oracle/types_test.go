@@ -133,8 +133,10 @@ func TestDecodeOracleRAW(t *testing.T) {
 func TestDecodeOracleBINARY_FLOAT(t *testing.T) {
 	t.Parallel()
 
+	// Positive values arrive sign-bit-flipped on the wire (Oracle's sortable form).
 	buf := make([]byte, 4)
 	binary.BigEndian.PutUint32(buf, math.Float32bits(3.14))
+	buf[0] |= 0x80
 	result, err := decodeOracleValue(OracleTypeBINFLOAT, buf)
 	require.NoError(t, err)
 	assert.InDelta(t, 3.14, result, 0.01)
@@ -145,9 +147,24 @@ func TestDecodeOracleBINARY_DOUBLE(t *testing.T) {
 
 	buf := make([]byte, 8)
 	binary.BigEndian.PutUint64(buf, math.Float64bits(2.718281828))
+	buf[0] |= 0x80
 	result, err := decodeOracleValue(OracleTypeBINDOUBLE, buf)
 	require.NoError(t, err)
 	assert.InDelta(t, 2.718281828, result, 0.0001)
+}
+
+func TestDecodeOracleBINARY_DOUBLE_Negative(t *testing.T) {
+	t.Parallel()
+
+	// Negative values arrive with every bit inverted.
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, math.Float64bits(-1.5))
+	for i := range buf {
+		buf[i] = ^buf[i]
+	}
+	result, err := decodeOracleValue(OracleTypeBINDOUBLE, buf)
+	require.NoError(t, err)
+	assert.InDelta(t, -1.5, result, 1e-9)
 }
 
 func TestDecodeOracleLOB_ReturnsPlaceholder(t *testing.T) {
