@@ -57,10 +57,22 @@
       whole byte instead of `byte11 & 0x3f` (23ai sets bit 0x40), and the `0x40` "time in zone"
       flag was ignored — when set, the 7-byte prefix is the local wall clock and must not be
       shifted from UTC. Both the heuristic and type-aware decoders were corrected.
-- [ ] Parse describe column-definition records — would yield real column names (instead of
-      synthetic `COLn`) and the per-column data type, which in turn resolves the all-ASCII
-      negative-NUMBER ambiguity. Version-sensitive (TTCVersion branches, DLC fields); deferred
-      as a larger, riskier change.
+- [x] Combined-types row capture — integration fixture exercising NUMBER decimals, a
+      compressed-away repeated column, NULLs, and DATEs together across 6 rows
+      (`testdata/go_ora_mixed.dbbat-dump`, `TestDumpReplay_Mixed`). Locks in the interplay of
+      the individual decoder fixes (newly covers DATE in row capture and 4-column compression).
+- [ ] **Parse describe column-definition records (keystone)** — the highest-value remaining
+      item. Yields real column names (instead of synthetic `COLn`) and, more importantly, the
+      per-column data type, which unblocks type-aware value decoding and resolves the heuristic
+      ambiguities the type-less path can't: all-ASCII negative NUMBERs decoded as text,
+      BINARY_FLOAT/BINARY_DOUBLE not decoded, and 7/11/13-byte NUMBERs that can collide with
+      DATE/TIMESTAMP. Each record is `ParameterInfo.load` in go-ora: a fixed field sequence
+      (type, flag, precision, scale, maxLen, contFlag, charset, name/schema/typeName via
+      `GetDlc` = `readCompressedInt` + `readCLR`) followed by a **version-dependent tail** that
+      sets the record length — getting that tail wrong silently corrupts every later column, so
+      this needs a dedicated session with a test harness iterating against the fixtures, not a
+      20-min slot. Build it as a best-effort parser with a fallback to the current scan+pad
+      (zero regression).
 - [x] Extract Oracle username from TTC AUTH — stale item: already implemented (PR #134,
       `parseAuthPhase1` → `GetUserByUsername` → grant check; no fallback). Docs updated.
 - [ ] Multi-key O5LOGON support (only the user's first verifier-bearing API key works today;
