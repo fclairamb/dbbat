@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -60,12 +61,12 @@ func decodeOracleValue(typeCode uint8, data []byte) (interface{}, error) {
 		if len(data) < 4 {
 			return nil, fmt.Errorf("%w: BINARY_FLOAT requires 4 bytes, got %d", ErrInvalidFloatLength, len(data))
 		}
-		return math.Float32frombits(binary.BigEndian.Uint32(data)), nil
+		return math.Float32frombits(binary.BigEndian.Uint32(untransformOracleBinaryFloat(data[:4]))), nil
 	case OracleTypeBINDOUBLE:
 		if len(data) < 8 {
 			return nil, fmt.Errorf("%w: BINARY_DOUBLE requires 8 bytes, got %d", ErrInvalidFloatLength, len(data))
 		}
-		return math.Float64frombits(binary.BigEndian.Uint64(data)), nil
+		return math.Float64frombits(binary.BigEndian.Uint64(untransformOracleBinaryFloat(data[:8]))), nil
 	case OracleTypeTIMESTAMP, OracleTypeTIMESTAMPLTZ:
 		t, err := decodeOracleTimestamp(data)
 		if err != nil {
@@ -106,6 +107,46 @@ func decodeOracleNumber(data []byte) (string, error) {
 	}
 
 	return s, nil
+}
+
+// untransformOracleBinaryFloat reverses Oracle's sortable BINARY_FLOAT/DOUBLE
+// byte transform and returns the plain IEEE-754 big-endian bytes. On the wire
+// Oracle flips the sign bit of positive values and inverts every bit of negative
+// values, so the raw bytes order numerically; this undoes that.
+func untransformOracleBinaryFloat(b []byte) []byte {
+	raw := make([]byte, len(b))
+	copy(raw, b)
+
+	if len(raw) == 0 {
+		return raw
+	}
+
+	if raw[0]&0x80 != 0 { // positive: only the sign bit was flipped
+		raw[0] &^= 0x80
+	} else { // negative: all bits were inverted
+		for i := range raw {
+			raw[i] = ^raw[i]
+		}
+	}
+
+	return raw
+}
+
+// decodeOracleBinaryFloatString decodes Oracle BINARY_FLOAT (4 bytes) or
+// BINARY_DOUBLE (8 bytes) to its shortest round-trippable decimal string.
+func decodeOracleBinaryFloatString(b []byte) (string, bool) {
+	switch len(b) {
+	case 4:
+		f := math.Float32frombits(binary.BigEndian.Uint32(untransformOracleBinaryFloat(b)))
+
+		return strconv.FormatFloat(float64(f), 'g', -1, 32), true
+	case 8:
+		f := math.Float64frombits(binary.BigEndian.Uint64(untransformOracleBinaryFloat(b)))
+
+		return strconv.FormatFloat(f, 'g', -1, 64), true
+	default:
+		return "", false
+	}
 }
 
 // decodeOracleDate decodes Oracle's 7-byte DATE format.

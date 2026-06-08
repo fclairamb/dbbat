@@ -83,9 +83,12 @@
       a live fixture (`testdata/go_ora_negnumbers.dbbat-dump`, `TestDumpReplay_NegNumbers`:
       -42 / -3.14 / 100 / -1000000) plus a contrast unit test; heuristic stays the fallback
       when no type is available.
-- [ ] Type-aware BINARY_FLOAT / BINARY_DOUBLE decoding — these can't be decoded heuristically
-      (4/8 raw bytes are ambiguous) and the type-aware path doesn't handle them yet. Needs the
-      Oracle wire sign-transform (not raw IEEE) plus a ground-truth capture to verify.
+- [x] Type-aware BINARY_FLOAT / BINARY_DOUBLE decoding — `decodeRowValue` now decodes these by
+      type via `decodeOracleBinaryFloatString`, undoing Oracle's sortable wire transform
+      (positive: sign bit flipped; negative: all bits inverted) confirmed from a live capture.
+      Also fixed `decodeOracleValue` (legacy Response path), which used raw IEEE. Verified
+      end-to-end (`testdata/go_ora_binfloat.dbbat-dump`, `TestDumpReplay_BinFloat`: 1.5 / 2.5 /
+      -1.5) plus updated unit tests feeding real transformed wire bytes.
 - [ ] Type-aware DATE/TIMESTAMP vs NUMBER length collisions — a 7/11/13-byte NUMBER can be
       mis-decoded as a temporal value by the heuristic; now that the column type is available,
       route those columns by type too (currently only NUMBER is type-routed; temporal columns
