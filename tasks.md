@@ -41,9 +41,22 @@
       go_ora/python_thin replay column+row counts with no dbeaver regression.
       ⏳ Residual: undetectable columns get synthetic `COLn` labels (values correct); proper
       names need parsing the describe column-definition records.
+- [x] NUMBER decimal/sign decoding — the heuristic row-capture path used a decoder that only
+      handled non-negative integers (3.14 captured as "314"); the type-aware path
+      (`decodeOracleNumber`) separately dropped the leading zero on sub-1 fractions ("0.5"→".5").
+      Both now share `formatOracleNumber` (sign + base-100 mantissa + decimal placement),
+      gated by `isOracleNumber` on the type-less path. Cross-checked against go-ora's reference
+      decoder (`TestDecodeOracleNumberToString_Goora`) and verified end-to-end
+      (`testdata/go_ora_numbers.dbbat-dump`, `TestDumpReplay_Numbers`).
+      ⏳ Residual: all-printable-ASCII negative NUMBERs (e.g. -42) are still captured as text on
+      the type-less path; needs the column type from the describe column-definition records.
 - [x] TIMESTAMP-with-timezone decoding — implemented + unit-tested with real captures.
       ⏳ Live end-to-end re-verification deferred until VPN reconnect (re-run probe, confirm
       captured rows decode instead of hex).
+- [ ] Parse describe column-definition records — would yield real column names (instead of
+      synthetic `COLn`) and the per-column data type, which in turn resolves the all-ASCII
+      negative-NUMBER ambiguity. Version-sensitive (TTCVersion branches, DLC fields); deferred
+      as a larger, riskier change.
 - [x] Extract Oracle username from TTC AUTH — stale item: already implemented (PR #134,
       `parseAuthPhase1` → `GetUserByUsername` → grant check; no fallback). Docs updated.
 - [ ] Multi-key O5LOGON support (only the user's first verifier-bearing API key works today;

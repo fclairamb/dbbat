@@ -174,20 +174,35 @@ followed by TTC compressed integers:
 
 ### Oracle NUMBER Encoding
 
-Oracle NUMBER is a variable-length format:
+Oracle NUMBER is a variable-length, sign-and-magnitude, base-100 format:
 
 ```
-Byte 0:     Exponent (value - 193 = power of 100)
-Byte 1..N:  Mantissa digits (each byte - 1 = two-digit number 00-99)
+Byte 0:     Exponent + sign. High bit set = positive; base-100 exponent =
+            (byte & 0x7f) - 65 (positive) or ((byte ^ 0xff) & 0x7f) - 65 (negative).
+Byte 1..N:  Base-100 mantissa digits. Positive: digit = byte - 1 (00-99).
+            Negative: digit = 101 - byte, with a trailing 0x66 terminator.
 ```
 
-Examples:
-- `c1 02` → exponent=0, digit=1 → **1**
-- `c1 2b` → exponent=0, digit=42 → **42**
-- `c2 03 15` → exponent=1, digits=2,20 → **220**
-- `c2 16 44` → exponent=1, digits=21,67 → **2167**
+The value is `sign × mantissa × 100^(exp100 - n + 1)`; `formatOracleNumber` lays
+the digits out two decimal places each and places the point accordingly, so
+integers **and fractionals of either sign** decode exactly. Examples:
+- `c1 02` → **1**
+- `c1 2b` → **42**
+- `c1 04 0f` → exp100=0, digits 3,14 → **3.14**
+- `c0 33` → exp100=-1, digit 50 → **0.5**
+- `3e 3b 66` → **-42**
 
-Special case: `0x80` alone = **0**
+Special case: `0x80` alone = **0**.
+
+Cross-checked against go-ora's reference decoder in `TestDecodeOracleNumberToString_Goora`
+and verified end-to-end against `testdata/go_ora_numbers.dbbat-dump`
+(`TestDumpReplay_Numbers`).
+
+**Limitation**: in the type-less row-capture path the proxy guesses the value
+type (`decodeOracleRawValue` tries ASCII before NUMBER). A negative NUMBER whose
+bytes all fall in the printable ASCII range (most small negatives, e.g. `-42`)
+is therefore captured as text. Resolving this needs the column type from the
+describe column-definition records.
 
 ### Oracle DATE Encoding
 
