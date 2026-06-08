@@ -96,6 +96,37 @@ func TestParseColumnDescribes(t *testing.T) {
 	}
 }
 
+// TestDecodeQueryResultV2_RealColumnNames checks that decodeQueryResultV2 now
+// surfaces the describe-record column names through the live decode path —
+// in particular the single-char "N" and unnamed "LEVEL*10" that used to be
+// captured as synthetic COL1/COL2.
+func TestDecodeQueryResultV2_RealColumnNames(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		file   string
+		marker string
+		want   []string
+	}{
+		{"go_ora_colcount.dbbat-dump", colCountSQLMarker, []string{"N", "LEVEL*10"}},
+		{"go_ora_compressed.dbbat-dump", compressedSQLMarker, []string{"GRP", "NUM", "OPT"}},
+		{"go_ora_temporal.dbbat-dump", temporalSQLMarker, []string{"DT", "TS", "TSTZ"}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.file, func(t *testing.T) {
+			t.Parallel()
+
+			td := loadTestDump(t, tc.file)
+			ttc := firstQueryResultFor(t, td, tc.marker)
+
+			result := decodeQueryResultV2(ttc)
+			require.NotNil(t, result)
+			assert.Equal(t, tc.want, result.Columns)
+		})
+	}
+}
+
 // TestParseColumnDescribes_Fallback verifies the parser returns nil (so callers
 // fall back to name scanning) for inputs that are not a clean describe.
 func TestParseColumnDescribes_Fallback(t *testing.T) {
