@@ -251,6 +251,71 @@ func TestCapture_GoOraCompressedRows(t *testing.T) {
 	t.Logf("capture written to %s (%d rows)", outPath, got)
 }
 
+// colCountQuery has two columns the name scanner cannot detect: N is a single
+// char, and LEVEL*10 is an unnamed expression (Oracle names it "LEVEL*10",
+// not a valid identifier). Before the describe-header column count was used,
+// scanColumnNames returned 0 columns and no rows were captured at all.
+const colCountQuery = "SELECT LEVEL AS n, LEVEL * 10 FROM dual CONNECT BY LEVEL <= 4"
+
+// TestCapture_GoOraColCount records colCountQuery — the fixture proving the
+// proxy captures rows for queries whose column names the scanner can't detect.
+func TestCapture_GoOraColCount(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_COLCOUNT", "testdata/go_ora_colcount.dbbat-dump")
+
+	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)
+	if err != nil {
+		t.Skipf("Oracle not reachable at %s: %v", oracleAddr, err)
+	}
+	_ = probe.Close()
+
+	w, err := dump.NewWriter(outPath, dump.Header{
+		SessionID: "capture-go-ora-colcount",
+		Protocol:  dump.ProtocolOracle,
+		StartTime: time.Now(),
+	}, 32*1024*1024)
+	require.NoError(t, err)
+
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	dsn := fmt.Sprintf("oracle://system:oracle@%s/%s?PREFETCH_ROWS=1000", relayAddr, oracleService)
+	db, err := sql.Open("oracle", dsn)
+	require.NoError(t, err)
+
+	defer func() { _ = db.Close() }()
+
+	db.SetMaxOpenConns(1)
+
+	ctx := t.Context()
+
+	rows, err := db.QueryContext(ctx, colCountQuery)
+	require.NoError(t, err)
+
+	got := 0
+
+	for rows.Next() {
+		var n, tenN int
+
+		require.NoError(t, rows.Scan(&n, &tenN))
+
+		got++
+
+		require.Equal(t, got, n, "n must be sequential")
+		require.Equal(t, got*10, tenN, "second column is n*10")
+	}
+
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	require.Equal(t, 4, got, "ground truth row count")
+
+	require.NoError(t, db.Close())
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s (%d rows)", outPath, got)
+}
+
 // TestCapture_GoOraDML records a go-ora session with DDL + DML statements.
 // The resulting dump is the fixture for DML row-count response parsing.
 func TestCapture_GoOraDML(t *testing.T) {

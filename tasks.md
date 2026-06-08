@@ -33,10 +33,14 @@
       (all-columns-change boundary). Verified against a live-Oracle ground-truth fixture
       (`testdata/go_ora_compressed.dbbat-dump`, `TestDumpReplay_CompressedRows`:
       repeated column runs, NULLs, GRP change boundary).
-- [ ] Single-char column names break capture — `scanColumnNames` requires ≥2-char names,
-      so `SELECT x AS n` undercounts columns and corrupts row parsing. Real fix: source the
-      column count from the describe metadata instead of name-scanning (avoid widening the
-      heuristic name matcher, which risks false positives).
+- [x] Undetectable column names no longer break capture — the column count now comes from
+      the describe header (`describeColumnCount`) instead of name-scanning, so single-char
+      aliases (`SELECT level AS n`) and unnamed expressions (`SELECT 1`, `SELECT level*10`)
+      capture all rows. Verified with a live-Oracle ground-truth fixture
+      (`testdata/go_ora_colcount.dbbat-dump`, `TestDumpReplay_ColCount`); also lifts
+      go_ora/python_thin replay column+row counts with no dbeaver regression.
+      ⏳ Residual: undetectable columns get synthetic `COLn` labels (values correct); proper
+      names need parsing the describe column-definition records.
 - [x] TIMESTAMP-with-timezone decoding — implemented + unit-tested with real captures.
       ⏳ Live end-to-end re-verification deferred until VPN reconnect (re-run probe, confirm
       captured rows decode instead of hex).

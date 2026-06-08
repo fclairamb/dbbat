@@ -510,6 +510,17 @@ func decodeQueryResultV2(ttcPayload []byte) *QueryResultV2 {
 
 	result.Columns = scanColumnNames(columnArea)
 
+	// The name scanner misses single-char and unnamed expression columns
+	// (e.g. `SELECT 1 FROM dual`, `SELECT level AS n`), which would undercount
+	// columns and corrupt row framing. The describe header carries the
+	// authoritative count — pad up to it with synthetic names so the row stream
+	// is parsed with the right column count.
+	if n, ok := describeColumnCount(ttcPayload); ok && n > len(result.Columns) {
+		for i := len(result.Columns); i < n; i++ {
+			result.Columns = append(result.Columns, fmt.Sprintf("COL%d", i+1))
+		}
+	}
+
 	if len(result.Columns) == 0 {
 		return result
 	}
@@ -521,6 +532,41 @@ func decodeQueryResultV2(ttcPayload []byte) *QueryResultV2 {
 	result.Rows = scanRowValues(ttcPayload, len(result.Columns))
 
 	return result
+}
+
+// describeColumnCount reads the authoritative column count from a v315 describe
+// message (TTC func 0x10), whose header is:
+//
+//	[0x10] [size] [size bytes] [maxRowSize: compressed int] [colCount: compressed int]
+//
+// Returns false if the payload is not a describe header or the count is out of a
+// sane range, in which case callers fall back to the scanned column names.
+func describeColumnCount(ttcPayload []byte) (int, bool) {
+	if len(ttcPayload) < 3 || ttcPayload[0] != byte(TTCFuncQueryResult) {
+		return 0, false
+	}
+
+	pos := 1
+	size := int(ttcPayload[pos])
+	pos += 1 + size // skip the size byte and the size-bytes prefix
+
+	if pos >= len(ttcPayload) {
+		return 0, false
+	}
+
+	_, n1 := readCompressedInt(ttcPayload[pos:]) // maxRowSize
+	if n1 == 0 {
+		return 0, false
+	}
+
+	pos += n1
+
+	count, n2 := readCompressedInt(ttcPayload[pos:])
+	if n2 == 0 || count <= 0 || count > 1000 {
+		return 0, false
+	}
+
+	return count, true
 }
 
 // scanColumnNames finds length-prefixed column names in the payload.
