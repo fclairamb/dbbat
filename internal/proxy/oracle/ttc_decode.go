@@ -984,38 +984,51 @@ func readRowSeparator(payload []byte, offset, numCols int) ([]int, int, bool) {
 	case 0x07:
 		return allColumns(numCols), offset + 1, true
 	case continuationDescriptorMarker:
-		offset++ // skip 0x15
+		// Descriptor: 0x15 [flag] [count] [bitmask...] 0x07. The bitmask spans
+		// ceil(numCols/8) bytes. Parse it structurally rather than scanning for
+		// the 0x07 terminator — a bitmask byte can itself be 0x07 (e.g. columns
+		// 0,1,2 → 0x07), which would otherwise truncate the descriptor and leave
+		// the real terminator to corrupt the next row.
+		bitmaskBytes := (numCols + 7) / 8
+		maskStart := offset + 3 // skip 0x15, flag, count
+		maskEnd := maskStart + bitmaskBytes
 
-		// Read descriptor bytes [flag] [count] [bitmask] until the 0x07/0x08 terminator.
-		var desc []byte
-		for offset < len(payload) && payload[offset] != 0x07 && payload[offset] != 0x08 {
-			desc = append(desc, payload[offset])
-			offset++
+		if maskEnd > len(payload) {
+			return nil, len(payload), false
 		}
 
-		if offset < len(payload) && payload[offset] == 0x07 {
-			offset++ // skip the 0x07 that closes the descriptor
+		next := bitmaskColumns(payload[maskStart:maskEnd], numCols)
+
+		end := maskEnd
+		if end < len(payload) && payload[end] == 0x07 {
+			end++ // consume the 0x07 terminator
 		}
 
-		// The bitmask is at index 2 (for ≤8 columns); fall back to all columns.
-		if len(desc) >= 3 {
-			return bitmaskToColumns(desc[2], numCols), offset, true
+		if len(next) == 0 {
+			next = allColumns(numCols)
 		}
 
-		return allColumns(numCols), offset, true
+		return next, end, true
 	default:
 		return nil, offset, false
 	}
 }
 
-// bitmaskToColumns converts a column bitmask to a sorted slice of column indices.
-// Bit 0 = column 0, bit 1 = column 1, etc.
+// bitmaskToColumns converts a single-byte column bitmask to a sorted slice of
+// column indices. Bit 0 = column 0, bit 1 = column 1, etc.
 func bitmaskToColumns(bitmask byte, numCols int) []int {
+	return bitmaskColumns([]byte{bitmask}, numCols)
+}
+
+// bitmaskColumns converts a (possibly multi-byte, little-endian) column bitmask
+// to a sorted slice of active column indices: byte 0 holds columns 0-7, byte 1
+// columns 8-15, and so on.
+func bitmaskColumns(mask []byte, numCols int) []int {
 	var cols []int
 
-	for bit := range numCols {
-		if bitmask&(1<<bit) != 0 {
-			cols = append(cols, bit)
+	for col := range numCols {
+		if b := col / 8; b < len(mask) && mask[b]&(1<<(col%8)) != 0 {
+			cols = append(cols, col)
 		}
 	}
 

@@ -166,6 +166,91 @@ func TestCapture_GoOraLargeResult(t *testing.T) {
 	t.Logf("capture written to %s (%d rows)", outPath, got)
 }
 
+// compressedRowsQuery returns a result set that exercises column compression:
+//   - GRP runs "AAA" for rows 1-4 then "BBB" for 5-8, so the server omits it on
+//     unchanged rows and the proxy must carry the previous value forward.
+//   - NUM changes every row.
+//   - OPT is NULL on every third row (wire length 0).
+//
+// Column aliases are ≥2 chars on purpose — the v315 column scanner drops
+// single-char names, which corrupts the column count (tracked separately).
+const compressedRowsQuery = "SELECT " +
+	"CASE WHEN LEVEL <= 4 THEN 'AAA' ELSE 'BBB' END AS grp, " +
+	"LEVEL AS num, " +
+	"CASE WHEN MOD(LEVEL, 3) = 0 THEN NULL ELSE 'x' || LEVEL END AS opt " +
+	"FROM dual CONNECT BY LEVEL <= 8"
+
+// TestCapture_GoOraCompressedRows records a result set crafted to exercise the
+// column-compression carry-forward path: GRP repeats in long runs (the server
+// omits it on unchanged rows, so the proxy must keep the previous value), N
+// changes every row, and OPT is NULL on every third row. See compressedRows for
+// the ground truth and TestDumpReplay_CompressedRows for the replay assertions.
+func TestCapture_GoOraCompressedRows(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_COMPRESSED", "testdata/go_ora_compressed.dbbat-dump")
+
+	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)
+	if err != nil {
+		t.Skipf("Oracle not reachable at %s: %v", oracleAddr, err)
+	}
+	_ = probe.Close()
+
+	w, err := dump.NewWriter(outPath, dump.Header{
+		SessionID: "capture-go-ora-compressed",
+		Protocol:  dump.ProtocolOracle,
+		StartTime: time.Now(),
+	}, 32*1024*1024)
+	require.NoError(t, err)
+
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	dsn := fmt.Sprintf("oracle://system:oracle@%s/%s?PREFETCH_ROWS=1000", relayAddr, oracleService)
+	db, err := sql.Open("oracle", dsn)
+	require.NoError(t, err)
+
+	defer func() { _ = db.Close() }()
+
+	db.SetMaxOpenConns(1)
+
+	ctx := t.Context()
+
+	rows, err := db.QueryContext(ctx, compressedRowsQuery)
+	require.NoError(t, err)
+
+	want := compressedRows()
+	got := 0
+
+	for rows.Next() {
+		var (
+			grp string
+			n   int
+			opt sql.NullString
+		)
+
+		require.NoError(t, rows.Scan(&grp, &n, &opt))
+
+		require.Lessf(t, got, len(want), "more rows than ground truth at n=%d", n)
+
+		exp := want[got]
+		require.Equal(t, exp.grp, grp, "grp at row %d", got)
+		require.Equal(t, got+1, n, "n must be sequential")
+		require.Equal(t, exp.opt, opt.String, "opt at row %d", got) // NullString.String is "" when NULL
+
+		got++
+	}
+
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	require.Len(t, want, got, "ground truth row count")
+
+	require.NoError(t, db.Close())
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s (%d rows)", outPath, got)
+}
+
 // TestCapture_GoOraDML records a go-ora session with DDL + DML statements.
 // The resulting dump is the fixture for DML row-count response parsing.
 func TestCapture_GoOraDML(t *testing.T) {

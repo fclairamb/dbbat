@@ -140,11 +140,17 @@ Rows use **column-level compression**: a row sends values only for the columns
 that changed; unchanged columns keep their previous value. The marker between
 two rows says which columns the next row carries:
 - `0x07` — bare separator; the next row carries **all** columns.
-- `0x15 [flag] [count] [bitmask] 0x07` — descriptor; `bitmask` bit *i* set means
-  column *i* is present in the next row (≤8 columns per bitmask byte).
+- `0x15 [flag] [count] [bitmask…] 0x07` — descriptor; `bitmask` bit *i* set means
+  column *i* is present in the next row. The bitmask spans `ceil(numCols/8)`
+  bytes and is parsed structurally — **not** by scanning to the `0x07`
+  terminator, because a bitmask byte can itself be `0x07` (columns 0,1,2 → mask
+  `0x07`); scanning would truncate the descriptor and corrupt the next row.
 
 The same stream — both the func `0x10` QueryResult row area and func `0x06`
 continuation packets — is decoded by `parseRowStream` in `ttc_decode.go`.
+Verified against `testdata/go_ora_compressed.dbbat-dump`
+(`TestDumpReplay_CompressedRows`): runs of a repeated column, NULLs, and the
+all-columns-change boundary.
 
 #### DML status (OER, func=0x04)
 
@@ -260,6 +266,7 @@ The proxy is fully transparent — it forwards raw TNS packets without modificat
 
 - **Single O5LOGON key per user**: The Oracle username from TTC AUTH Phase 1 maps to the dbbat user (lowercased) for grant checks and connection tracking, but only that user's first verifier-bearing API key can authenticate — see "Per-user O5LOGON key" below.
 - **Row capture is best-effort**: The TTC binary format varies across Oracle client versions. Some clients/query types may produce partial or no row capture. SQL text extraction works reliably across all tested clients.
+- **Single-character column names**: The v315 QueryResult column-name scanner (`scanColumnNames`) requires ≥2-char names, so a single-char column/alias (e.g. `SELECT level AS n`) is dropped from the detected set. That undercounts columns and breaks row capture for that query. Use ≥2-char aliases until column-count is sourced from the describe metadata instead of name-scanning.
 - **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`. Failed statements record the ORA error text. See `ttc_oer.go`.
 - **Temporal types**: DATE, TIMESTAMP, and TIMESTAMP WITH TIME ZONE decode in captured results (the tz form renders the original local wall clock plus its numeric offset). Named-region time zones fall back to the stored UTC wall clock without an offset suffix.
 - **Large result sets**: The QueryResult (func `0x10`) row area and continuation packets (func `0x06`) share one decoder (`parseRowStream`) that walks the full compressed row stream — length-prefixed values plus the `0x15 [flag] [count] [bitmask] 0x07` column-compression descriptors between rows. A 400-row single-packet result is captured end-to-end against a live-Oracle ground-truth fixture (`testdata/go_ora_largeresult.dbbat-dump`, `TestDumpReplay_LargeResultRows`). Multi-TNS-packet (small-SDU/JDBC) result sets reuse the same decoder via the continuation path; their per-row correctness is not yet ground-truth-verified.
