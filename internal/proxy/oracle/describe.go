@@ -8,6 +8,7 @@ const (
 	tnsTypeNUMBER      = 2
 	tnsTypeDATE        = 12
 	tnsTypeRAW         = 23
+	tnsTypeLONGRAW     = 24
 	tnsTypeCHAR        = 96
 	tnsTypeBINFLOAT    = 100 // IBFloat
 	tnsTypeBINDOUBLE   = 101 // IBDouble

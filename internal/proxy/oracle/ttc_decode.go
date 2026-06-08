@@ -1105,9 +1105,10 @@ func parseContinuationRows(payload []byte, numCols int, prevRow []string, colTyp
 // decodeRowValue decodes a single captured column value by its TTC type. NUMBER
 // uses formatOracleNumber directly (correct for negatives/fractionals the
 // type-less heuristic mis-reads); BINARY_FLOAT/DOUBLE undo Oracle's sortable
-// byte transform (which the heuristic can't decode at all). Every other type —
-// and any column with no known type — falls through to decodeOracleRawValue,
-// preserving the established string/temporal formats.
+// byte transform (which the heuristic can't decode at all); RAW renders as hex
+// so binary content isn't mistaken for text. Every other type — and any column
+// with no known type — falls through to decodeOracleRawValue, preserving the
+// established string/temporal formats.
 func decodeRowValue(colTypes []int, col int, b []byte) string {
 	if col >= 0 && col < len(colTypes) {
 		switch colTypes[col] {
@@ -1119,6 +1120,10 @@ func decodeRowValue(colTypes []int, col int, b []byte) string {
 			if s, ok := decodeOracleBinaryFloatString(b); ok {
 				return s
 			}
+		case tnsTypeRAW, tnsTypeLONGRAW:
+			// RAW is binary; render it as hex so printable byte runs aren't
+			// mistaken for text by the ASCII-first heuristic.
+			return hex.EncodeToString(b)
 		}
 	}
 
