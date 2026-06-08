@@ -105,9 +105,11 @@
       `decodeOracleRawValue` (so a NUMBER bind renders as `42`, not hex). Wired into
       `handlePiggybackExec` → the existing `formatOracleBinds` storage path. Verified end-to-end
       (`testdata/go_ora_binds.dbbat-dump`, `TestDumpReplay_Binds`: `42`, `hello`).
-      ⏳ Not yet type-aware via the bind-definition records (the placeholder-count + content
-      heuristic suffices for scalar binds); large binds (>253 bytes, extended length) and the
-      legacy OALL8 `decodeBindValues` NUMBER-as-hex case remain follow-ups.
+      Both bind paths now share `decodeBindValue` (text incl. UTF-8 → string, NUMBER → decimal,
+      else hex), so a NUMBER bind renders as its value on the OALL8 path too and UTF-8 binds are
+      no longer mangled to hex (`TestDecodeBindValue`).
+      ⏳ Remaining: full type-aware decoding from the bind-definition records and large binds
+      (>253 bytes, extended length encoding) — both minor.
 - [x] Extract Oracle username from TTC AUTH — stale item: already implemented (PR #134,
       `parseAuthPhase1` → `GetUserByUsername` → grant check; no fallback). Docs updated.
 - [ ] Multi-key O5LOGON support (only the user's first verifier-bearing API key works today;

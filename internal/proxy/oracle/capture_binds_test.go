@@ -54,6 +54,19 @@ func TestDumpReplay_Binds(t *testing.T) {
 		"piggyback bind values should decode by content (NUMBER 42, string hello)")
 }
 
+// TestDecodeBindValue covers the shared bind-value renderer used by both the
+// OALL8 and piggyback paths: readable text (incl. UTF-8) stays text, NUMBER
+// bytes render as decimal, and other binary falls back to hex.
+func TestDecodeBindValue(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "NULL", decodeBindValue(nil))
+	assert.Equal(t, "hello", decodeBindValue([]byte("hello")))
+	assert.Equal(t, "Éric", decodeBindValue([]byte("Éric")), "valid UTF-8 must not become hex")
+	assert.Equal(t, "42", decodeBindValue([]byte{0xc1, 0x2b}), "NUMBER bind decodes to decimal")
+	assert.Equal(t, "deadbeef", decodeBindValue([]byte{0xde, 0xad, 0xbe, 0xef}), "other binary is hex")
+}
+
 // TestCountBindPlaceholders covers the bind-count heuristic.
 func TestCountBindPlaceholders(t *testing.T) {
 	t.Parallel()

@@ -437,11 +437,7 @@ func extractPiggybackBinds(payload []byte, sql string) []string {
 
 		out := make([]string, len(vals))
 		for i, v := range vals {
-			if len(v) == 0 {
-				out[i] = "NULL"
-			} else {
-				out[i] = decodeOracleRawValue(v)
-			}
+			out[i] = decodeBindValue(v)
 		}
 
 		return out
@@ -1502,15 +1498,31 @@ func decodeBindValues(data []byte, count int) []string {
 		valBytes := data[offset : offset+int(valLen)]
 		offset += int(valLen)
 
-		// Detect binary values (non-UTF8 or non-printable)
-		if isBinaryData(valBytes) {
-			values = append(values, hex.EncodeToString(valBytes))
-		} else {
-			values = append(values, string(valBytes))
-		}
+		values = append(values, decodeBindValue(valBytes))
 	}
 
 	return values
+}
+
+// decodeBindValue renders a single bind value. Bind values carry no inline type
+// tag, so it prefers readable text (including UTF-8, which the row-capture
+// ASCII-first heuristic would mangle), then a valid Oracle NUMBER (so a numeric
+// bind shows as its decimal rather than hex), and finally falls back to hex for
+// other binary content.
+func decodeBindValue(b []byte) string {
+	if len(b) == 0 {
+		return "NULL"
+	}
+
+	if !isBinaryData(b) {
+		return string(b)
+	}
+
+	if s, ok := decodeOracleNumberToString(b); ok {
+		return s
+	}
+
+	return hex.EncodeToString(b)
 }
 
 // isBinaryData checks if data is binary (non-text) content.
