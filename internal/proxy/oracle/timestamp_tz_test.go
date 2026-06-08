@@ -58,6 +58,21 @@ func TestDecodeOracleRawValue_TimestampNotHex(t *testing.T) {
 	assert.Equal(t, "2026-05-25 00:28:37.957343", decodeOracleRawValue(mustHex(t, capTSLocal)))
 }
 
+// Byte 11's 0x40 bit is the "time in zone" flag. capTSTZPlus (19c) has it clear,
+// so its 7-byte prefix is UTC and is shifted into +05:30. An Oracle Free 23ai
+// capture of FROM_TZ(TIMESTAMP '2024-03-15 14:30:45.123456','+05:30') sets the
+// bit (byte 11 = 0x59), so the prefix is already the local wall clock and must
+// not be shifted. The masked hour is the same (0x59&0x3f = 0x19 = 25 → +5h).
+func TestDecodeOracleTimestampToString_TimeInZoneFlag(t *testing.T) {
+	t.Parallel()
+
+	const capTSTZLocalFlag = "787c030f0f1f2e075bca00595a" // 2024-03-15 14:30:45.123456 +05:30
+
+	got, ok := decodeOracleTimestampToString(mustHex(t, capTSTZLocalFlag))
+	require.True(t, ok)
+	assert.Equal(t, "2024-03-15 14:30:45.123456 +05:30", got)
+}
+
 // A named-region zone (high bit set in byte 11) can't be resolved to a numeric
 // offset, so it decodes to the UTC wall clock with no offset suffix.
 func TestDecodeOracleTimestampToString_RegionZoneFallsBackToUTC(t *testing.T) {
