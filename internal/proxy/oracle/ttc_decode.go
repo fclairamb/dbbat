@@ -542,27 +542,8 @@ func decodeQueryResultV2(ttcPayload []byte) *QueryResultV2 {
 // Returns false if the payload is not a describe header or the count is out of a
 // sane range, in which case callers fall back to the scanned column names.
 func describeColumnCount(ttcPayload []byte) (int, bool) {
-	if len(ttcPayload) < 3 || ttcPayload[0] != byte(TTCFuncQueryResult) {
-		return 0, false
-	}
-
-	pos := 1
-	size := int(ttcPayload[pos])
-	pos += 1 + size // skip the size byte and the size-bytes prefix
-
-	if pos >= len(ttcPayload) {
-		return 0, false
-	}
-
-	_, n1 := readCompressedInt(ttcPayload[pos:]) // maxRowSize
-	if n1 == 0 {
-		return 0, false
-	}
-
-	pos += n1
-
-	count, n2 := readCompressedInt(ttcPayload[pos:])
-	if n2 == 0 || count <= 0 || count > 1000 {
+	count, _, ok := describeColumnLayout(ttcPayload)
+	if !ok || count <= 0 || count > 1000 {
 		return 0, false
 	}
 

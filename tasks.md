@@ -61,18 +61,21 @@
       compressed-away repeated column, NULLs, and DATEs together across 6 rows
       (`testdata/go_ora_mixed.dbbat-dump`, `TestDumpReplay_Mixed`). Locks in the interplay of
       the individual decoder fixes (newly covers DATE in row capture and 4-column compression).
-- [ ] **Parse describe column-definition records (keystone)** — the highest-value remaining
-      item. Yields real column names (instead of synthetic `COLn`) and, more importantly, the
-      per-column data type, which unblocks type-aware value decoding and resolves the heuristic
-      ambiguities the type-less path can't: all-ASCII negative NUMBERs decoded as text,
-      BINARY_FLOAT/BINARY_DOUBLE not decoded, and 7/11/13-byte NUMBERs that can collide with
-      DATE/TIMESTAMP. Each record is `ParameterInfo.load` in go-ora: a fixed field sequence
-      (type, flag, precision, scale, maxLen, contFlag, charset, name/schema/typeName via
-      `GetDlc` = `readCompressedInt` + `readCLR`) followed by a **version-dependent tail** that
-      sets the record length — getting that tail wrong silently corrupts every later column, so
-      this needs a dedicated session with a test harness iterating against the fixtures, not a
-      20-min slot. Build it as a best-effort parser with a fallback to the current scan+pad
-      (zero regression).
+- [x] Parse describe column-definition records — implemented in `describe.go`
+      (`parseColumnDescribes`): walks each `ParameterInfo.load` record and returns the column
+      name + TTC type code. Conservative — returns nil (caller falls back to scan+pad) on any
+      misalignment, gated by an `isKnownTNSType` check. Key encoding details: scale/length are
+      compressed ints whose length byte can have the high bit set for a negative value (the
+      NUMBER `-127` float-scale sentinel), and this server's record tail is just two version
+      ints. Verified against all six live-Oracle fixtures (`describe_test.go`): exact names +
+      types, including the single-char `N` and unnamed `LEVEL*10` the heuristic scanner misses,
+      and the temporal type codes. **Not yet wired into the live path** — see next item.
+- [ ] **Wire describe names + types into row capture** — replace the synthetic `COLn` labels
+      in `decodeQueryResultV2`/`handleQueryResultV2` with the parsed names, and use the parsed
+      per-column data type to decode values type-aware (resolving all-ASCII negative NUMBERs
+      captured as text, BINARY_FLOAT/DOUBLE, and DATE/TIMESTAMP-vs-NUMBER length collisions).
+      Must verify no regression on the dbeaver/python/go_ora fixtures (different Oracle
+      versions, where the parser may fall back); keep the heuristic path as the fallback.
 - [x] Extract Oracle username from TTC AUTH — stale item: already implemented (PR #134,
       `parseAuthPhase1` → `GetUserByUsername` → grant check; no fallback). Docs updated.
 - [ ] Multi-key O5LOGON support (only the user's first verifier-bearing API key works today;
