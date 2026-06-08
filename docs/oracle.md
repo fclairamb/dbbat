@@ -78,7 +78,8 @@ In modern Oracle, function code `0x03` is a generic "piggyback" that carries sub
 | 0x03 | 0x76 | AUTH Phase 1 |
 | 0x03 | 0x73 | AUTH Phase 2 |
 | 0x03 | 0x09 | Close cursor |
-| 0x08 | — | Server response (legacy) |
+| 0x04 | — | **OER — error/status** (carries DML row count or ORA error) |
+| 0x08 | — | Server response (carries an embedded OER on v315+) |
 | 0x09 | — | Close/marker |
 | 0x10 | — | **Query result with row data** |
 | 0x11 | — | Fetch rows |
@@ -134,6 +135,36 @@ Each column value is length-prefixed:
 - `0x00` = NULL
 - `0x01-0xFD` = length, followed by that many bytes of value data
 - Values can be strings (ASCII), Oracle NUMBER, Oracle DATE, or other types
+
+Rows use **column-level compression**: a row sends values only for the columns
+that changed; unchanged columns keep their previous value. The marker between
+two rows says which columns the next row carries:
+- `0x07` — bare separator; the next row carries **all** columns.
+- `0x15 [flag] [count] [bitmask] 0x07` — descriptor; `bitmask` bit *i* set means
+  column *i* is present in the next row (≤8 columns per bitmask byte).
+
+The same stream — both the func `0x10` QueryResult row area and func `0x06`
+continuation packets — is decoded by `parseRowStream` in `ttc_decode.go`.
+
+#### DML status (OER, func=0x04)
+
+INSERT/UPDATE/DELETE don't return rows — their outcome is an OER status block.
+On v315+ it is **embedded inside the execute Response** (func=0x08); a failed
+statement (e.g. dropping a missing table) instead arrives as a **standalone**
+func=0x04 packet after a marker exchange. The block begins at a `0x04` marker
+followed by TTC compressed integers:
+
+```
+[0x04] [callStatus] [seqNum] [curRowNumber] [errNum] [arrayElemWErr] [arrayElemErrNo] [cursorID] ...
+```
+
+- `curRowNumber` is the affected-row count (rows processed; `0` for DDL).
+- `errNum` is `0` on success, `1403` for end-of-data (ORA-01403, not an error),
+  or the `ORA-NNNNN` code on failure — followed later by the CLR-prefixed
+  `ORA-...` message text.
+- `callStatus` always has the end-of-call bit `0x010000` set on a real OER,
+  which `decodeOERAt` uses to reject stray `0x04` bytes inside the preceding
+  return-parameter block. See `ttc_oer.go` and `findOERInResponse`.
 
 ### Oracle NUMBER Encoding
 
@@ -227,11 +258,11 @@ The proxy is fully transparent — it forwards raw TNS packets without modificat
 
 ## Known Limitations
 
-- **TTC auth interception disabled**: The proxy doesn't extract the Oracle username from TTC AUTH messages. It uses the first user with an active grant for connection tracking.
+- **Single O5LOGON key per user**: The Oracle username from TTC AUTH Phase 1 maps to the dbbat user (lowercased) for grant checks and connection tracking, but only that user's first verifier-bearing API key can authenticate — see "Per-user O5LOGON key" below.
 - **Row capture is best-effort**: The TTC binary format varies across Oracle client versions. Some clients/query types may produce partial or no row capture. SQL text extraction works reliably across all tested clients.
-- **No result capture for DML**: INSERT/UPDATE/DELETE statements are logged (SQL text + duration) but row counts are not captured from v315+ responses.
+- **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`. Failed statements record the ORA error text. See `ttc_oer.go`.
 - **Temporal types**: DATE, TIMESTAMP, and TIMESTAMP WITH TIME ZONE decode in captured results (the tz form renders the original local wall clock plus its numeric offset). Named-region time zones fall back to the stored UTC wall clock without an offset suffix.
-- **Multi-packet rows**: Large result sets spanning multiple TNS Data packets capture rows from the first response and continuation packets, but some middle packets may be missed depending on their format.
+- **Large result sets**: The QueryResult (func `0x10`) row area and continuation packets (func `0x06`) share one decoder (`parseRowStream`) that walks the full compressed row stream — length-prefixed values plus the `0x15 [flag] [count] [bitmask] 0x07` column-compression descriptors between rows. A 400-row single-packet result is captured end-to-end against a live-Oracle ground-truth fixture (`testdata/go_ora_largeresult.dbbat-dump`, `TestDumpReplay_LargeResultRows`). Multi-TNS-packet (small-SDU/JDBC) result sets reuse the same decoder via the continuation path; their per-row correctness is not yet ground-truth-verified.
 
 ## Testing
 
@@ -298,4 +329,4 @@ reaches AUTH but not query execution.
 
 ### Per-user O5LOGON key
 
-dbbat picks the first API key with an O5LOGON verifier when generating the AUTH challenge — see the `O5LOGON verifier loaded` info log. That specific key (and only that one) is the password your Oracle client must supply: the salt sent in the challenge is bound to it, so any other API key fails to decrypt. Multi-key support is not yet implemented.
+dbbat picks the connecting user's first API key with an O5LOGON verifier when generating the AUTH challenge — see the `O5LOGON verifier loaded` info log. That specific key (and only that one) is the password your Oracle client must supply: the salt sent in the challenge is bound to it, so any other API key fails to decrypt. Multi-key support is not yet implemented (it would require all of a user's keys to share one salt, since the challenge can only carry one).
