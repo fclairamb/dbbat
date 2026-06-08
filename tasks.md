@@ -98,17 +98,16 @@
       so printable binary content (e.g. a RAW holding "Hello") is no longer mis-captured as
       text. Verified (`testdata/go_ora_raw.dbbat-dump`, `TestDumpReplay_Raw`) with a contrast
       unit test.
-- [ ] **Capture bind values for piggyback-exec (parameterized queries)** — modern clients
-      (go-ora, v315+) send `SELECT :1 …` as a piggyback exec (func `0x03` sub `0x5e`);
-      `decodePiggybackExecSQL` returns only the SQL, so bind parameters are not captured.
-      Investigation (fixture `testdata/go_ora_binds.dbbat-dump`, `SELECT :1 || '-' || :2 …`
-      bound to `42`,`"hello"`): bind count sits near payload offset `0x1a`; after the SQL come
-      `count` bind-definition records in the `ParameterInfo`/describe-record format (so
-      `parseColumnDescribe` should parse them for types), then length-prefixed values at the
-      tail — `02 c1 2b` (NUMBER 42) and `05 68 65 6c 6c 6f` ("hello"). Plan: parse the bind defs
-      to get types, read the trailing values, decode each with `decodeRowValue` (so NUMBER binds
-      render as `42`, not hex), and surface them via the existing `formatOracleBinds` storage
-      path. Also fix `decodeBindValues` (OALL8 path) to type-decode NUMBER binds.
+- [x] Capture bind values for piggyback-exec (parameterized queries) — `decodePiggybackExecSQL`
+      now extracts bind values via `extractPiggybackBinds`: the bind count is the number of
+      distinct `:name`/`:N` placeholders in the SQL, and the values are located as the payload
+      suffix that parses as exactly that many length-prefixed values, each decoded with
+      `decodeOracleRawValue` (so a NUMBER bind renders as `42`, not hex). Wired into
+      `handlePiggybackExec` → the existing `formatOracleBinds` storage path. Verified end-to-end
+      (`testdata/go_ora_binds.dbbat-dump`, `TestDumpReplay_Binds`: `42`, `hello`).
+      ⏳ Not yet type-aware via the bind-definition records (the placeholder-count + content
+      heuristic suffices for scalar binds); large binds (>253 bytes, extended length) and the
+      legacy OALL8 `decodeBindValues` NUMBER-as-hex case remain follow-ups.
 - [x] Extract Oracle username from TTC AUTH — stale item: already implemented (PR #134,
       `parseAuthPhase1` → `GetUserByUsername` → grant check; no fallback). Docs updated.
 - [ ] Multi-key O5LOGON support (only the user's first verifier-bearing API key works today;

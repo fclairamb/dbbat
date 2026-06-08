@@ -388,20 +388,130 @@ func decodePiggybackExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 	// Strategy: scan the payload for SQL text. Different Oracle client drivers
 	// (oracledb thin, JDBC thin) place the SQL at slightly different offsets
 	// (50-54 typically). We scan a range and validate the extracted text.
+	sql := ""
+
 	for offset := 40; offset < 70 && offset < len(ttcPayload)-1; offset++ {
-		sql, scanErr := extractSQLAtOffset(ttcPayload, offset)
-		if scanErr == nil && sql != "" {
-			return &OALL8Result{SQL: sql}, nil
+		if found, scanErr := extractSQLAtOffset(ttcPayload, offset); scanErr == nil && found != "" {
+			sql = found
+			break
 		}
 	}
 
-	// Last resort: find SQL keywords directly in the payload
-	sql := findSQLInPayload(ttcPayload)
-	if sql != "" {
-		return &OALL8Result{SQL: sql}, nil
+	// Last resort: find SQL keywords directly in the payload.
+	if sql == "" {
+		sql = findSQLInPayload(ttcPayload)
 	}
 
-	return nil, fmt.Errorf("%w: could not find SQL text in piggyback exec payload", ErrEmptySQL)
+	if sql == "" {
+		return nil, fmt.Errorf("%w: could not find SQL text in piggyback exec payload", ErrEmptySQL)
+	}
+
+	return &OALL8Result{SQL: sql, BindValues: extractPiggybackBinds(ttcPayload, sql)}, nil
+}
+
+// extractPiggybackBinds recovers the bind values from a piggyback exec payload.
+// The values are length-prefixed at the tail of the message and their count
+// equals the number of distinct bind placeholders in sql, so they are located as
+// the suffix that parses as exactly that many length-prefixed values consuming
+// the rest of the payload. Returns nil when they can't be located — binds are
+// then simply not captured rather than guessed wrong.
+func extractPiggybackBinds(payload []byte, sql string) []string {
+	count := countBindPlaceholders(sql)
+	if count == 0 {
+		return nil
+	}
+
+	// Don't scan into the SQL text itself.
+	lo := 0
+	if idx := findBytes(payload, []byte(sql)); idx >= 0 {
+		lo = idx + len(sql)
+	}
+
+	// Scan from the tail so the tightest (real) value run is found before any
+	// bind-definition bytes that might also parse as length-prefixed values.
+	for start := len(payload) - 1; start >= lo; start-- {
+		vals, ok := readLenPrefixedValues(payload[start:], count)
+		if !ok {
+			continue
+		}
+
+		out := make([]string, len(vals))
+		for i, v := range vals {
+			if len(v) == 0 {
+				out[i] = "NULL"
+			} else {
+				out[i] = decodeOracleRawValue(v)
+			}
+		}
+
+		return out
+	}
+
+	return nil
+}
+
+// readLenPrefixedValues reads exactly count single-byte-length-prefixed values
+// from data, succeeding only if they consume all of data (a strong validity
+// check that disambiguates the real bind run from coincidental byte patterns).
+func readLenPrefixedValues(data []byte, count int) ([][]byte, bool) {
+	vals := make([][]byte, 0, count)
+	offset := 0
+
+	for range count {
+		if offset >= len(data) {
+			return nil, false
+		}
+
+		n := int(data[offset])
+		offset++
+
+		if n == 0 {
+			vals = append(vals, nil)
+
+			continue
+		}
+
+		if n > 2000 || offset+n > len(data) {
+			return nil, false
+		}
+
+		vals = append(vals, data[offset:offset+n])
+		offset += n
+	}
+
+	if offset != len(data) {
+		return nil, false
+	}
+
+	return vals, true
+}
+
+// countBindPlaceholders counts the distinct bind placeholders (:name or :1) in
+// sql, which equals the number of bind values the client sends.
+func countBindPlaceholders(sql string) int {
+	seen := make(map[string]struct{})
+
+	for i := 0; i < len(sql); i++ {
+		if sql[i] != ':' {
+			continue
+		}
+
+		j := i + 1
+		for j < len(sql) && (isBindNameByte(sql[j])) {
+			j++
+		}
+
+		if j > i+1 {
+			seen[sql[i:j]] = struct{}{}
+			i = j - 1
+		}
+	}
+
+	return len(seen)
+}
+
+func isBindNameByte(c byte) bool {
+	return c == '_' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // decodeExecSQL extracts SQL text from an execute-with-SQL message (func=0x11).

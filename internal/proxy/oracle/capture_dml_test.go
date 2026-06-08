@@ -673,6 +673,51 @@ func TestCapture_GoOraRaw(t *testing.T) {
 	t.Logf("capture written to %s", outPath)
 }
 
+// bindsQuery is a parameterized query (binds 42 and "hello"). go-ora sends it as
+// a piggyback exec, the path that carries bind values at the message tail. See
+// TestDumpReplay_Binds.
+const bindsQuery = "SELECT :1 || '-' || :2 AS v FROM dual"
+
+// TestCapture_GoOraBinds records bindsQuery with its bind values.
+func TestCapture_GoOraBinds(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_BINDS", "testdata/go_ora_binds.dbbat-dump")
+
+	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)
+	if err != nil {
+		t.Skipf("Oracle not reachable at %s: %v", oracleAddr, err)
+	}
+	_ = probe.Close()
+
+	w, err := dump.NewWriter(outPath, dump.Header{
+		SessionID: "capture-go-ora-binds",
+		Protocol:  dump.ProtocolOracle,
+		StartTime: time.Now(),
+	}, 32*1024*1024)
+	require.NoError(t, err)
+
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	dsn := fmt.Sprintf("oracle://system:oracle@%s/%s?PREFETCH_ROWS=1000", relayAddr, oracleService)
+	db, err := sql.Open("oracle", dsn)
+	require.NoError(t, err)
+
+	defer func() { _ = db.Close() }()
+
+	db.SetMaxOpenConns(1)
+
+	var got string
+	require.NoError(t, db.QueryRowContext(t.Context(), bindsQuery, 42, "hello").Scan(&got))
+	require.Equal(t, "42-hello", got)
+
+	require.NoError(t, db.Close())
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s", outPath)
+}
+
 // TestCapture_GoOraDML records a go-ora session with DDL + DML statements.
 // The resulting dump is the fixture for DML row-count response parsing.
 func TestCapture_GoOraDML(t *testing.T) {

@@ -133,8 +133,9 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 
 	// Track as pending query and persist immediately
 	cursor := &trackedCursor{
-		sql:      result.SQL,
-		parsedAt: time.Now(),
+		sql:        result.SQL,
+		bindValues: result.BindValues,
+		parsedAt:   time.Now(),
 	}
 	s.tracker.pendingQuery = &pendingOracleQuery{
 		cursor:    cursor,
