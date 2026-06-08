@@ -598,85 +598,32 @@ func skipColumnMetadata(data []byte) int {
 	return 0
 }
 
-// scanRowValues extracts row values from the payload.
-// Each row contains `numCols` length-prefixed values.
-//
-// Row data layout (after the 0x06 0x22 marker + descriptor):
-//
-//	[0x07]                  — separator before first row
-//	[len1] [val1]           — first column value
-//	[len2] [val2]           — second column value (0x00 = NULL)
-//	...
-//	[0x07]                  — separator between rows
-//	[len1] [val1] ...       — next row
-//	[0x08] [0x01] [0x06]    — end-of-rows footer
+// scanRowValues extracts row values from a QRESULT (func=0x10) payload. The row
+// area uses the same compressed encoding as continuation packets — length-
+// prefixed values for each active column, 0x07 / 0x15 descriptors between rows,
+// terminated by the 0x08 footer or an ORA-01403 marker — so it delegates to the
+// shared parseRowStream. The first QRESULT row carries every column.
 func scanRowValues(data []byte, numCols int) [][]string {
 	rowStart := findRowDataStart(data)
 	if rowStart < 0 || numCols == 0 {
 		return nil
 	}
 
-	var rows [][]string
-	offset := rowStart
-	endOfData := len(data)
-	maxRows := 100
+	rows := parseRowStream(data, rowStart, numCols, allColumns(numCols), nil)
 
-	for len(rows) < maxRows && offset < endOfData {
-		row := make([]string, 0, numCols)
-		valid := true
-
-		for col := 0; col < numCols; col++ {
-			if offset >= endOfData {
-				valid = false
-				break
+	out := make([][]string, len(rows))
+	for i, row := range rows {
+		strRow := make([]string, numCols)
+		for j, v := range row {
+			if s, ok := v.(string); ok {
+				strRow[j] = s
 			}
-
-			valLen := int(data[offset])
-			offset++
-
-			if valLen == 0 {
-				row = append(row, "") // NULL
-				continue
-			}
-
-			if valLen > 4000 || offset+valLen > endOfData {
-				valid = false
-				break
-			}
-
-			valBytes := data[offset : offset+valLen]
-			offset += valLen
-
-			row = append(row, decodeOracleRawValue(valBytes))
 		}
 
-		if !valid || len(row) != numCols {
-			break
-		}
-
-		rows = append(rows, row)
-
-		// After a row, expect either:
-		// - 0x08 0x01 0x06: end-of-rows footer → stop
-		// - 0x07: row separator → continue to next row
-		// - anything else: stop
-		if offset >= endOfData {
-			break
-		}
-
-		if data[offset] == 0x08 {
-			break // Footer (0x08 0x01 0x06) or end of data
-		}
-
-		if data[offset] == 0x07 {
-			offset++ // Skip row separator, continue to next row
-			continue
-		}
-
-		break // Unknown byte — stop
+		out[i] = strRow
 	}
 
-	return rows
+	return out
 }
 
 // findRowDataStart locates where row data begins in the response.
@@ -891,17 +838,15 @@ const continuationDescriptorMarker = 0x15
 
 // parseContinuationRows decodes rows from a TTC continuation packet (func=0x06).
 //
-// Oracle's continuation format uses column-level compression:
-//   - A header bitmask (at header_end-2) indicates which columns have new values
-//     in the first row of the packet.
-//   - After each row, a descriptor (0x15 [flag] [count] [bitmask] 0x07) indicates
-//     which columns have new values in the NEXT row.
-//   - Columns not in the bitmask retain their values from the previous row.
+// A continuation packet is a header followed by the same compressed row stream
+// as the QueryResult row area, so the row decoding itself lives in the shared
+// parseRowStream. This function only locates the stream:
+//   - The first 0x07 in the header marks the start of row data.
+//   - The header bitmask (at header_end-2) selects the columns carried in the
+//     first row; later rows are selected by their 0x15 descriptors.
 //
-// The prevRow parameter provides the last row from the previous packet (or the
-// QueryResult) so that unchanged columns can be filled in correctly.
-//
-//nolint:gocognit,cyclop // Binary protocol parser requires many branches for different field types and markers.
+// prevRow is the last row of the previous packet so unchanged (compressed-away)
+// columns can be filled in.
 func parseContinuationRows(payload []byte, numCols int, prevRow []string) [][]interface{} {
 	if numCols == 0 || len(payload) < 15 {
 		return nil
@@ -930,30 +875,50 @@ func parseContinuationRows(payload []byte, numCols int, prevRow []string) [][]in
 		}
 	}
 
-	// Initialize previous row values from the provided lastRow.
+	// Carry forward the previous packet's last row for compressed-away columns.
 	prev := make([]string, numCols)
 	if len(prevRow) == numCols {
 		copy(prev, prevRow)
 	}
 
-	offset := headerEnd + 1
+	return parseRowStream(payload, headerEnd+1, numCols, activeCols, prev)
+}
+
+// parseRowStream decodes a run of compressed rows starting at payload[offset].
+//
+// Both the QueryResult (func=0x10) row area and continuation (func=0x06) packets
+// use this identical encoding: each row sends length-prefixed values only for
+// its active columns; columns absent from a row keep their previous value. Rows
+// are separated by either a bare 0x07 (all columns active next) or a compression
+// descriptor 0x15 [flag] [count] [bitmask] 0x07 (bitmask = active columns next).
+// The stream ends at the 0x08 footer, an ORA-01403 marker, or malformed bytes.
+//
+// activeCols are the columns carried in the FIRST row; prev seeds the carried-
+// over values (nil for a fresh QueryResult, the prior packet's last row for a
+// continuation). There is no row cap — the markers bound the scan, and the
+// caller (captureRow) enforces the configured result-size limits.
+func parseRowStream(payload []byte, offset, numCols int, activeCols []int, prev []string) [][]interface{} {
+	if numCols == 0 {
+		return nil
+	}
+
+	cur := make([]string, numCols)
+	copy(cur, prev)
+
 	var rows [][]interface{}
 
-rowLoop:
 	for offset < len(payload) {
 		if payload[offset] == 0x08 {
-			break
+			break // end-of-rows footer (0x08 0x01 0x06)
 		}
 
-		// Check for ORA-01403 end marker
 		if offset+9 <= len(payload) && string(payload[offset:offset+9]) == "ORA-01403" {
-			break
+			break // end-of-data marker
 		}
 
-		// Read values for active columns; inactive columns keep previous values.
 		row := make([]interface{}, numCols)
 		for i := range numCols {
-			row[i] = prev[i] // Default: previous value
+			row[i] = cur[i] // default: carried-over value
 		}
 
 		valid := true
@@ -970,7 +935,7 @@ rowLoop:
 
 			if valLen == 0 {
 				row[col] = ""
-				prev[col] = ""
+				cur[col] = ""
 
 				continue
 			}
@@ -983,7 +948,7 @@ rowLoop:
 
 			decoded := decodeOracleRawValue(payload[offset : offset+valLen])
 			row[col] = decoded
-			prev[col] = decoded
+			cur[col] = decoded
 			offset += valLen
 		}
 
@@ -993,43 +958,54 @@ rowLoop:
 
 		rows = append(rows, row)
 
-		// Parse the descriptor after the row to determine active columns for the next row.
-		if offset >= len(payload) {
+		next, newOffset, cont := readRowSeparator(payload, offset, numCols)
+		if !cont {
 			break
 		}
 
-		switch payload[offset] {
-		case continuationDescriptorMarker:
-			offset++ // skip 0x15
-
-			// Read descriptor bytes until 0x07 or 0x08.
-			var desc []byte
-			for offset < len(payload) && payload[offset] != 0x07 && payload[offset] != 0x08 {
-				desc = append(desc, payload[offset])
-				offset++
-			}
-
-			// Descriptor format: [flag] [count] [bitmask]
-			// The bitmask is at index 2 (for ≤8 columns).
-			if len(desc) >= 3 {
-				activeCols = bitmaskToColumns(desc[2], numCols)
-			} else {
-				activeCols = allColumns(numCols)
-			}
-
-			// Skip 0x07 separator
-			if offset < len(payload) && payload[offset] == 0x07 {
-				offset++
-			}
-		case 0x07:
-			offset++
-			activeCols = allColumns(numCols) // Simple separator: all columns in next row
-		default:
-			break rowLoop // Unknown byte — stop
-		}
+		activeCols = next
+		offset = newOffset
 	}
 
 	return rows
+}
+
+// readRowSeparator consumes the marker that follows a row and returns the
+// columns active in the next row, the advanced offset, and whether parsing
+// should continue. It handles a bare 0x07 separator (all columns active next)
+// and the 0x15 [flag] [count] [bitmask] 0x07 compression descriptor. Any other
+// byte (notably the 0x08 footer) ends the stream.
+func readRowSeparator(payload []byte, offset, numCols int) ([]int, int, bool) {
+	if offset >= len(payload) {
+		return nil, offset, false
+	}
+
+	switch payload[offset] {
+	case 0x07:
+		return allColumns(numCols), offset + 1, true
+	case continuationDescriptorMarker:
+		offset++ // skip 0x15
+
+		// Read descriptor bytes [flag] [count] [bitmask] until the 0x07/0x08 terminator.
+		var desc []byte
+		for offset < len(payload) && payload[offset] != 0x07 && payload[offset] != 0x08 {
+			desc = append(desc, payload[offset])
+			offset++
+		}
+
+		if offset < len(payload) && payload[offset] == 0x07 {
+			offset++ // skip the 0x07 that closes the descriptor
+		}
+
+		// The bitmask is at index 2 (for ≤8 columns); fall back to all columns.
+		if len(desc) >= 3 {
+			return bitmaskToColumns(desc[2], numCols), offset, true
+		}
+
+		return allColumns(numCols), offset, true
+	default:
+		return nil, offset, false
+	}
 }
 
 // bitmaskToColumns converts a column bitmask to a sorted slice of column indices.
