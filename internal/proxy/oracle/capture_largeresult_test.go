@@ -42,11 +42,12 @@ func replayCapturedRows(t *testing.T, td *testDump, sqlMarker string) [][]string
 	t.Helper()
 
 	var (
-		started bool
-		done    bool
-		columns []string
-		lastRow []string
-		rows    [][]string
+		started  bool
+		done     bool
+		columns  []string
+		colTypes []int
+		lastRow  []string
+		rows     [][]string
 	)
 
 	for _, pkt := range td.Packets {
@@ -89,6 +90,7 @@ func replayCapturedRows(t *testing.T, td *testDump, sqlMarker string) [][]string
 
 			if len(result.Columns) > 0 {
 				columns = result.Columns
+				colTypes = result.ColumnTypes
 			}
 
 			for _, row := range result.Rows {
@@ -96,7 +98,7 @@ func replayCapturedRows(t *testing.T, td *testDump, sqlMarker string) [][]string
 				lastRow = row
 			}
 		case TTCFuncContinuation:
-			contRows := parseContinuationRows(ttcPayload, len(columns), lastRow)
+			contRows := parseContinuationRows(ttcPayload, len(columns), lastRow, colTypes)
 			for _, row := range contRows {
 				strRow := make([]string, len(row))
 				for i, v := range row {

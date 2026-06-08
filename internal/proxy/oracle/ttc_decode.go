@@ -20,6 +20,27 @@ type columnDef struct {
 	Nullable  bool
 }
 
+// columnTypeCodes returns the per-column TTC type codes for type-aware value
+// decoding. It returns nil when no type is known (all codes zero), so callers
+// fall back to the heuristic decoder.
+func columnTypeCodes(columns []columnDef) []int {
+	types := make([]int, len(columns))
+
+	known := false
+	for i, c := range columns {
+		types[i] = int(c.TypeCode)
+		if c.TypeCode != 0 {
+			known = true
+		}
+	}
+
+	if !known {
+		return nil
+	}
+
+	return types
+}
+
 // TTCResponse contains decoded fields from a TTC Response message.
 type TTCResponse struct {
 	ReturnCode   uint16
@@ -475,8 +496,11 @@ func extractSQLAtOffset(data []byte, offset int) (string, error) {
 // QueryResultV2 contains parsed data from a v315+ TTC QueryResult (func=0x10).
 type QueryResultV2 struct {
 	Columns []string
-	Rows    [][]string
-	NoData  bool // true if ORA-01403 (normal end-of-data)
+	// ColumnTypes holds the TTC type code per column when it is known from the
+	// describe records (nil otherwise — values are then decoded heuristically).
+	ColumnTypes []int
+	Rows        [][]string
+	NoData      bool // true if ORA-01403 (normal end-of-data)
 }
 
 // decodeQueryResultV2 extracts column names and row values from a v315+
@@ -507,6 +531,7 @@ func decodeQueryResultV2(ttcPayload []byte) *QueryResultV2 {
 	// layout) so behavior never regresses.
 	if descs := parseColumnDescribes(ttcPayload); descs != nil {
 		result.Columns = describeColumnNames(descs)
+		result.ColumnTypes = describeColumnTypes(descs)
 	} else {
 		result.Columns = scanAndPadColumnNames(ttcPayload)
 	}
@@ -519,9 +544,20 @@ func decodeQueryResultV2(ttcPayload []byte) *QueryResultV2 {
 	// Row values appear after the column definitions. We look for a marker
 	// pattern that separates column defs from row data.
 	// The row data area starts roughly after the column definitions.
-	result.Rows = scanRowValues(ttcPayload, len(result.Columns))
+	result.Rows = scanRowValues(ttcPayload, len(result.Columns), result.ColumnTypes)
 
 	return result
+}
+
+// describeColumnTypes extracts the TTC type code per column from parsed describe
+// records, for type-aware value decoding.
+func describeColumnTypes(descs []columnDesc) []int {
+	types := make([]int, len(descs))
+	for i, d := range descs {
+		types[i] = d.Type
+	}
+
+	return types
 }
 
 // describeColumnNames maps parsed describe records to column-name labels,
@@ -657,13 +693,13 @@ func skipColumnMetadata(data []byte) int {
 // prefixed values for each active column, 0x07 / 0x15 descriptors between rows,
 // terminated by the 0x08 footer or an ORA-01403 marker — so it delegates to the
 // shared parseRowStream. The first QRESULT row carries every column.
-func scanRowValues(data []byte, numCols int) [][]string {
+func scanRowValues(data []byte, numCols int, colTypes []int) [][]string {
 	rowStart := findRowDataStart(data)
 	if rowStart < 0 || numCols == 0 {
 		return nil
 	}
 
-	rows := parseRowStream(data, rowStart, numCols, allColumns(numCols), nil)
+	rows := parseRowStream(data, rowStart, numCols, allColumns(numCols), nil, colTypes)
 
 	out := make([][]string, len(rows))
 	for i, row := range rows {
@@ -1029,7 +1065,7 @@ const continuationDescriptorMarker = 0x15
 //
 // prevRow is the last row of the previous packet so unchanged (compressed-away)
 // columns can be filled in.
-func parseContinuationRows(payload []byte, numCols int, prevRow []string) [][]interface{} {
+func parseContinuationRows(payload []byte, numCols int, prevRow []string, colTypes []int) [][]interface{} {
 	if numCols == 0 || len(payload) < 15 {
 		return nil
 	}
@@ -1063,7 +1099,22 @@ func parseContinuationRows(payload []byte, numCols int, prevRow []string) [][]in
 		copy(prev, prevRow)
 	}
 
-	return parseRowStream(payload, headerEnd+1, numCols, activeCols, prev)
+	return parseRowStream(payload, headerEnd+1, numCols, activeCols, prev, colTypes)
+}
+
+// decodeRowValue decodes a single captured column value. When the column's TTC
+// type is known to be NUMBER it uses formatOracleNumber directly (correct for
+// negatives and fractionals, which the type-less heuristic — trying ASCII first
+// — mis-reads). Every other type falls through to decodeOracleRawValue, which
+// preserves the established string/temporal formats.
+func decodeRowValue(colTypes []int, col int, b []byte) string {
+	if col >= 0 && col < len(colTypes) && colTypes[col] == tnsTypeNUMBER {
+		if s, ok := formatOracleNumber(b); ok {
+			return s
+		}
+	}
+
+	return decodeOracleRawValue(b)
 }
 
 // parseRowStream decodes a run of compressed rows starting at payload[offset].
@@ -1077,9 +1128,10 @@ func parseContinuationRows(payload []byte, numCols int, prevRow []string) [][]in
 //
 // activeCols are the columns carried in the FIRST row; prev seeds the carried-
 // over values (nil for a fresh QueryResult, the prior packet's last row for a
-// continuation). There is no row cap — the markers bound the scan, and the
-// caller (captureRow) enforces the configured result-size limits.
-func parseRowStream(payload []byte, offset, numCols int, activeCols []int, prev []string) [][]interface{} {
+// continuation). colTypes holds the per-column TTC type code for type-aware
+// value decoding (nil → heuristic). There is no row cap — the markers bound the
+// scan, and the caller (captureRow) enforces the configured result-size limits.
+func parseRowStream(payload []byte, offset, numCols int, activeCols []int, prev []string, colTypes []int) [][]interface{} {
 	if numCols == 0 {
 		return nil
 	}
@@ -1128,7 +1180,7 @@ func parseRowStream(payload []byte, offset, numCols int, activeCols []int, prev 
 				break
 			}
 
-			decoded := decodeOracleRawValue(payload[offset : offset+valLen])
+			decoded := decodeRowValue(colTypes, col, payload[offset:offset+valLen])
 			row[col] = decoded
 			cur[col] = decoded
 			offset += valLen

@@ -76,12 +76,21 @@
       other-version fixtures too (dbeaver parsed 50/50 QueryResults, go_ora 4/4, python 3/4 with
       one graceful fallback) and that `decodeQueryResultV2` returns the true names
       (`TestDecodeQueryResultV2_RealColumnNames`); no regression in the existing replay tests.
-- [ ] **Type-aware value decoding** — thread the per-column data type from `parseColumnDescribes`
-      into the row-capture value decode (via `decodeOracleValue`) instead of the type-less
-      `decodeOracleRawValue` heuristic. Resolves the remaining ambiguities: all-ASCII negative
-      NUMBERs captured as text, BINARY_FLOAT/BINARY_DOUBLE, and 7/11/13-byte NUMBERs that can
-      collide with DATE/TIMESTAMP. Keep the heuristic as the fallback when no type is available
-      (continuation packets, parser fallback).
+- [x] Type-aware NUMBER decoding — the per-column type from `parseColumnDescribes` now flows
+      through `decodeQueryResultV2` → `parseRowStream` (and continuation packets via the stored
+      `columnDef.TypeCode`); `decodeRowValue` decodes NUMBER columns with `formatOracleNumber`,
+      fixing negative NUMBERs that the ASCII-first heuristic captured as garbage. Verified with
+      a live fixture (`testdata/go_ora_negnumbers.dbbat-dump`, `TestDumpReplay_NegNumbers`:
+      -42 / -3.14 / 100 / -1000000) plus a contrast unit test; heuristic stays the fallback
+      when no type is available.
+- [ ] Type-aware BINARY_FLOAT / BINARY_DOUBLE decoding — these can't be decoded heuristically
+      (4/8 raw bytes are ambiguous) and the type-aware path doesn't handle them yet. Needs the
+      Oracle wire sign-transform (not raw IEEE) plus a ground-truth capture to verify.
+- [ ] Type-aware DATE/TIMESTAMP vs NUMBER length collisions — a 7/11/13-byte NUMBER can be
+      mis-decoded as a temporal value by the heuristic; now that the column type is available,
+      route those columns by type too (currently only NUMBER is type-routed; temporal columns
+      still use the heuristic, which is correct for them but doesn't disambiguate a NUMBER of
+      the same length).
 - [x] Extract Oracle username from TTC AUTH — stale item: already implemented (PR #134,
       `parseAuthPhase1` → `GetUserByUsername` → grant check; no fallback). Docs updated.
 - [ ] Multi-key O5LOGON support (only the user's first verifier-bearing API key works today;

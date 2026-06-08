@@ -512,6 +512,60 @@ func TestCapture_GoOraMixed(t *testing.T) {
 	t.Logf("capture written to %s", outPath)
 }
 
+// negNumbersQuery returns a row of negative and positive NUMBERs. Negative
+// NUMBERs encode to bytes that all fall in the printable-ASCII range, so the
+// type-less heuristic (ASCII first) captured them as garbage text; type-aware
+// decoding (the column type is NUMBER) renders them correctly.
+const negNumbersQuery = "SELECT -42 AS neg, -3.14 AS negdec, 100 AS pos, -1000000 AS bignum FROM dual"
+
+// TestCapture_GoOraNegNumbers records negNumbersQuery (see TestDumpReplay_NegNumbers).
+func TestCapture_GoOraNegNumbers(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_NEGNUM", "testdata/go_ora_negnumbers.dbbat-dump")
+
+	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)
+	if err != nil {
+		t.Skipf("Oracle not reachable at %s: %v", oracleAddr, err)
+	}
+	_ = probe.Close()
+
+	w, err := dump.NewWriter(outPath, dump.Header{
+		SessionID: "capture-go-ora-negnumbers",
+		Protocol:  dump.ProtocolOracle,
+		StartTime: time.Now(),
+	}, 32*1024*1024)
+	require.NoError(t, err)
+
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	dsn := fmt.Sprintf("oracle://system:oracle@%s/%s?PREFETCH_ROWS=1000", relayAddr, oracleService)
+	db, err := sql.Open("oracle", dsn)
+	require.NoError(t, err)
+
+	defer func() { _ = db.Close() }()
+
+	db.SetMaxOpenConns(1)
+
+	ctx := t.Context()
+
+	var neg, negdec, pos, bignum float64
+
+	row := db.QueryRowContext(ctx, negNumbersQuery)
+	require.NoError(t, row.Scan(&neg, &negdec, &pos, &bignum))
+
+	require.InDelta(t, -42, neg, 1e-9)
+	require.InDelta(t, -3.14, negdec, 1e-9)
+	require.InDelta(t, 100, pos, 1e-9)
+	require.InDelta(t, -1000000, bignum, 1e-9)
+
+	require.NoError(t, db.Close())
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s", outPath)
+}
+
 // TestCapture_GoOraDML records a go-ora session with DDL + DML statements.
 // The resulting dump is the fixture for DML row-count response parsing.
 func TestCapture_GoOraDML(t *testing.T) {
