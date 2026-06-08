@@ -70,12 +70,18 @@
       ints. Verified against all six live-Oracle fixtures (`describe_test.go`): exact names +
       types, including the single-char `N` and unnamed `LEVEL*10` the heuristic scanner misses,
       and the temporal type codes. **Not yet wired into the live path** — see next item.
-- [ ] **Wire describe names + types into row capture** — replace the synthetic `COLn` labels
-      in `decodeQueryResultV2`/`handleQueryResultV2` with the parsed names, and use the parsed
-      per-column data type to decode values type-aware (resolving all-ASCII negative NUMBERs
-      captured as text, BINARY_FLOAT/DOUBLE, and DATE/TIMESTAMP-vs-NUMBER length collisions).
-      Must verify no regression on the dbeaver/python/go_ora fixtures (different Oracle
-      versions, where the parser may fall back); keep the heuristic path as the fallback.
+- [x] Wire describe column names into row capture — `decodeQueryResultV2` now prefers
+      `parseColumnDescribes` for real names (single-char `N`, unnamed `LEVEL*10`, `COUNT(*)`),
+      falling back to scan+pad when the records don't parse. Verified the parser handles the
+      other-version fixtures too (dbeaver parsed 50/50 QueryResults, go_ora 4/4, python 3/4 with
+      one graceful fallback) and that `decodeQueryResultV2` returns the true names
+      (`TestDecodeQueryResultV2_RealColumnNames`); no regression in the existing replay tests.
+- [ ] **Type-aware value decoding** — thread the per-column data type from `parseColumnDescribes`
+      into the row-capture value decode (via `decodeOracleValue`) instead of the type-less
+      `decodeOracleRawValue` heuristic. Resolves the remaining ambiguities: all-ASCII negative
+      NUMBERs captured as text, BINARY_FLOAT/BINARY_DOUBLE, and 7/11/13-byte NUMBERs that can
+      collide with DATE/TIMESTAMP. Keep the heuristic as the fallback when no type is available
+      (continuation packets, parser fallback).
 - [x] Extract Oracle username from TTC AUTH — stale item: already implemented (PR #134,
       `parseAuthPhase1` → `GetUserByUsername` → grant check; no fallback). Docs updated.
 - [ ] Multi-key O5LOGON support (only the user's first verifier-bearing API key works today;

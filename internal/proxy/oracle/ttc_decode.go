@@ -500,25 +500,15 @@ func decodeQueryResultV2(ttcPayload []byte) *QueryResultV2 {
 		result.NoData = true
 	}
 
-	// Phase 1: Find column names
-	// Column names appear in the area BEFORE the 0x06 0x22 row data marker
-	markerIdx := findBytes(ttcPayload, []byte{0x06, 0x22})
-	columnArea := ttcPayload
-	if markerIdx > 0 {
-		columnArea = ttcPayload[:markerIdx]
-	}
-
-	result.Columns = scanColumnNames(columnArea)
-
-	// The name scanner misses single-char and unnamed expression columns
-	// (e.g. `SELECT 1 FROM dual`, `SELECT level AS n`), which would undercount
-	// columns and corrupt row framing. The describe header carries the
-	// authoritative count — pad up to it with synthetic names so the row stream
-	// is parsed with the right column count.
-	if n, ok := describeColumnCount(ttcPayload); ok && n > len(result.Columns) {
-		for i := len(result.Columns); i < n; i++ {
-			result.Columns = append(result.Columns, fmt.Sprintf("COL%d", i+1))
-		}
+	// Phase 1: Column names. Prefer the describe column-definition records, which
+	// give the real names (including single-char and unnamed-expression columns
+	// the heuristic scanner misses) and the authoritative count. Fall back to
+	// scanning + padding when the records don't parse (e.g. an unexpected server
+	// layout) so behavior never regresses.
+	if descs := parseColumnDescribes(ttcPayload); descs != nil {
+		result.Columns = describeColumnNames(descs)
+	} else {
+		result.Columns = scanAndPadColumnNames(ttcPayload)
 	}
 
 	if len(result.Columns) == 0 {
@@ -532,6 +522,43 @@ func decodeQueryResultV2(ttcPayload []byte) *QueryResultV2 {
 	result.Rows = scanRowValues(ttcPayload, len(result.Columns))
 
 	return result
+}
+
+// describeColumnNames maps parsed describe records to column-name labels,
+// substituting COLn for the unnamed-expression columns that carry no name.
+func describeColumnNames(descs []columnDesc) []string {
+	names := make([]string, len(descs))
+	for i, d := range descs {
+		if d.Name != "" {
+			names[i] = d.Name
+		} else {
+			names[i] = fmt.Sprintf("COL%d", i+1)
+		}
+	}
+
+	return names
+}
+
+// scanAndPadColumnNames is the fallback column-name source when the describe
+// records don't parse: scan the column-definition area for names, then pad up to
+// the describe-header count with synthetic COLn names so the row stream is still
+// framed with the correct column count.
+func scanAndPadColumnNames(ttcPayload []byte) []string {
+	// Column names appear in the area BEFORE the 0x06 0x22 row data marker.
+	columnArea := ttcPayload
+	if markerIdx := findBytes(ttcPayload, []byte{0x06, 0x22}); markerIdx > 0 {
+		columnArea = ttcPayload[:markerIdx]
+	}
+
+	names := scanColumnNames(columnArea)
+
+	if n, ok := describeColumnCount(ttcPayload); ok && n > len(names) {
+		for i := len(names); i < n; i++ {
+			names = append(names, fmt.Sprintf("COL%d", i+1))
+		}
+	}
+
+	return names
 }
 
 // describeColumnCount reads the authoritative column count from a v315 describe
