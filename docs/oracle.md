@@ -198,11 +198,13 @@ Cross-checked against go-ora's reference decoder in `TestDecodeOracleNumberToStr
 and verified end-to-end against `testdata/go_ora_numbers.dbbat-dump`
 (`TestDumpReplay_Numbers`).
 
-**Limitation**: in the type-less row-capture path the proxy guesses the value
-type (`decodeOracleRawValue` tries ASCII before NUMBER). A negative NUMBER whose
-bytes all fall in the printable ASCII range (most small negatives, e.g. `-42`)
-is therefore captured as text. Resolving this needs the column type from the
-describe column-definition records.
+When the column type is known (from the describe records — see "Column names"),
+NUMBER values are decoded by type via `formatOracleNumber`, so negative NUMBERs
+decode correctly. Without a type — continuation packets, or a server layout the
+describe parser can't read — the proxy falls back to `decodeOracleRawValue`,
+which tries ASCII first; a negative NUMBER whose bytes all fall in the printable
+ASCII range (e.g. `-42`) is then captured as text. (`BINARY_FLOAT`/`DOUBLE`
+remain heuristic-only.)
 
 ### Oracle DATE Encoding
 
