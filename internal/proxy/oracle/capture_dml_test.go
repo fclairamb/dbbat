@@ -431,6 +431,87 @@ func TestCapture_GoOraTemporal(t *testing.T) {
 	t.Logf("capture written to %s", outPath)
 }
 
+// mixedQuery returns six rows combining everything the row decoder must handle
+// together: an incrementing id, a repeated GRP column (compressed away on
+// unchanged rows), a fractional amount, and a DATE that is NULL on even rows.
+const mixedQuery = "SELECT " +
+	"LEVEL AS id, " +
+	"CASE WHEN LEVEL <= 3 THEN 100 ELSE 200 END AS grp, " +
+	"LEVEL + 0.5 AS amount, " +
+	"CASE WHEN MOD(LEVEL, 2) = 0 THEN NULL ELSE DATE '2024-01-01' + LEVEL END AS maybe_day " +
+	"FROM dual CONNECT BY LEVEL <= 6"
+
+// TestCapture_GoOraMixed records mixedQuery — a combined NUMBER/compression/
+// NULL/DATE row-capture fixture (see TestDumpReplay_Mixed).
+func TestCapture_GoOraMixed(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_MIXED", "testdata/go_ora_mixed.dbbat-dump")
+
+	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)
+	if err != nil {
+		t.Skipf("Oracle not reachable at %s: %v", oracleAddr, err)
+	}
+	_ = probe.Close()
+
+	w, err := dump.NewWriter(outPath, dump.Header{
+		SessionID: "capture-go-ora-mixed",
+		Protocol:  dump.ProtocolOracle,
+		StartTime: time.Now(),
+	}, 32*1024*1024)
+	require.NoError(t, err)
+
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	dsn := fmt.Sprintf("oracle://system:oracle@%s/%s?PREFETCH_ROWS=1000", relayAddr, oracleService)
+	db, err := sql.Open("oracle", dsn)
+	require.NoError(t, err)
+
+	defer func() { _ = db.Close() }()
+
+	db.SetMaxOpenConns(1)
+
+	ctx := t.Context()
+
+	rows, err := db.QueryContext(ctx, mixedQuery)
+	require.NoError(t, err)
+
+	got := 0
+
+	for rows.Next() {
+		var (
+			id     int
+			grp    int
+			amount float64
+			day    sql.NullTime
+		)
+
+		require.NoError(t, rows.Scan(&id, &grp, &amount, &day))
+
+		got++
+
+		want := mixedExpectedRow(got)
+		require.Equal(t, want.id, id)
+		require.Equal(t, want.grp, grp)
+		require.InDelta(t, want.amount, amount, 1e-9)
+		require.Equal(t, want.dayNull, !day.Valid, "NULL on even rows")
+
+		if day.Valid {
+			require.Equal(t, want.day[:10], day.Time.Format("2006-01-02"))
+		}
+	}
+
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	require.Equal(t, 6, got, "ground truth row count")
+
+	require.NoError(t, db.Close())
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s", outPath)
+}
+
 // TestCapture_GoOraDML records a go-ora session with DDL + DML statements.
 // The resulting dump is the fixture for DML row-count response parsing.
 func TestCapture_GoOraDML(t *testing.T) {
