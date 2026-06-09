@@ -78,7 +78,8 @@ In modern Oracle, function code `0x03` is a generic "piggyback" that carries sub
 | 0x03 | 0x76 | AUTH Phase 1 |
 | 0x03 | 0x73 | AUTH Phase 2 |
 | 0x03 | 0x09 | Close cursor |
-| 0x08 | — | Server response (legacy) |
+| 0x04 | — | **OER — error/status** (carries DML row count or ORA error) |
+| 0x08 | — | Server response (carries an embedded OER on v315+) |
 | 0x09 | — | Close/marker |
 | 0x10 | — | **Query result with row data** |
 | 0x11 | — | Fetch rows |
@@ -135,22 +136,80 @@ Each column value is length-prefixed:
 - `0x01-0xFD` = length, followed by that many bytes of value data
 - Values can be strings (ASCII), Oracle NUMBER, Oracle DATE, or other types
 
+Rows use **column-level compression**: a row sends values only for the columns
+that changed; unchanged columns keep their previous value. The marker between
+two rows says which columns the next row carries:
+- `0x07` — bare separator; the next row carries **all** columns.
+- `0x15 [flag] [count] [bitmask…] 0x07` — descriptor; `bitmask` bit *i* set means
+  column *i* is present in the next row. The bitmask spans `ceil(numCols/8)`
+  bytes and is parsed structurally — **not** by scanning to the `0x07`
+  terminator, because a bitmask byte can itself be `0x07` (columns 0,1,2 → mask
+  `0x07`); scanning would truncate the descriptor and corrupt the next row.
+
+The same stream — both the func `0x10` QueryResult row area and func `0x06`
+continuation packets — is decoded by `parseRowStream` in `ttc_decode.go`.
+Verified against `testdata/go_ora_compressed.dbbat-dump`
+(`TestDumpReplay_CompressedRows`): runs of a repeated column, NULLs, and the
+all-columns-change boundary.
+
+#### DML status (OER, func=0x04)
+
+INSERT/UPDATE/DELETE don't return rows — their outcome is an OER status block.
+On v315+ it is **embedded inside the execute Response** (func=0x08); a failed
+statement (e.g. dropping a missing table) instead arrives as a **standalone**
+func=0x04 packet after a marker exchange. The block begins at a `0x04` marker
+followed by TTC compressed integers:
+
+```
+[0x04] [callStatus] [seqNum] [curRowNumber] [errNum] [arrayElemWErr] [arrayElemErrNo] [cursorID] ...
+```
+
+- `curRowNumber` is the affected-row count (rows processed; `0` for DDL).
+- `errNum` is `0` on success, `1403` for end-of-data (ORA-01403, not an error),
+  or the `ORA-NNNNN` code on failure — followed later by the CLR-prefixed
+  `ORA-...` message text.
+- `callStatus` always has the end-of-call bit `0x010000` set on a real OER,
+  which `decodeOERAt` uses to reject stray `0x04` bytes inside the preceding
+  return-parameter block. See `ttc_oer.go` and `findOERInResponse`.
+
 ### Oracle NUMBER Encoding
 
-Oracle NUMBER is a variable-length format:
+Oracle NUMBER is a variable-length, sign-and-magnitude, base-100 format:
 
 ```
-Byte 0:     Exponent (value - 193 = power of 100)
-Byte 1..N:  Mantissa digits (each byte - 1 = two-digit number 00-99)
+Byte 0:     Exponent + sign. High bit set = positive; base-100 exponent =
+            (byte & 0x7f) - 65 (positive) or ((byte ^ 0xff) & 0x7f) - 65 (negative).
+Byte 1..N:  Base-100 mantissa digits. Positive: digit = byte - 1 (00-99).
+            Negative: digit = 101 - byte, with a trailing 0x66 terminator.
 ```
 
-Examples:
-- `c1 02` → exponent=0, digit=1 → **1**
-- `c1 2b` → exponent=0, digit=42 → **42**
-- `c2 03 15` → exponent=1, digits=2,20 → **220**
-- `c2 16 44` → exponent=1, digits=21,67 → **2167**
+The value is `sign × mantissa × 100^(exp100 - n + 1)`; `formatOracleNumber` lays
+the digits out two decimal places each and places the point accordingly, so
+integers **and fractionals of either sign** decode exactly. Examples:
+- `c1 02` → **1**
+- `c1 2b` → **42**
+- `c1 04 0f` → exp100=0, digits 3,14 → **3.14**
+- `c0 33` → exp100=-1, digit 50 → **0.5**
+- `3e 3b 66` → **-42**
 
-Special case: `0x80` alone = **0**
+Special case: `0x80` alone = **0**.
+
+Cross-checked against go-ora's reference decoder in `TestDecodeOracleNumberToString_Goora`
+and verified end-to-end against `testdata/go_ora_numbers.dbbat-dump`
+(`TestDumpReplay_Numbers`).
+
+When the column type is known (from the describe records — see "Column names"),
+NUMBER values are decoded by type via `formatOracleNumber`, so negative NUMBERs
+decode correctly. Without a type — continuation packets, or a server layout the
+describe parser can't read — the proxy falls back to `decodeOracleRawValue`,
+which tries ASCII first; a negative NUMBER whose bytes all fall in the printable
+ASCII range (e.g. `-42`) is then captured as text.
+
+`BINARY_FLOAT` (4 bytes) and `BINARY_DOUBLE` (8 bytes) are stored in a sortable
+form — the sign bit is flipped for positive values and every bit is inverted for
+negative values — so the raw bytes order numerically. `decodeOracleBinaryFloatString`
+undoes that transform before reading the IEEE-754 value; these need the column
+type (4/8 raw bytes are otherwise ambiguous).
 
 ### Oracle DATE Encoding
 
@@ -171,24 +230,32 @@ Example: `78 7e 04 04 13 2f 1c` → 2026-04-04 18:46:27
 ### Oracle TIMESTAMP Encoding
 
 TIMESTAMP extends DATE with fractional seconds; TIMESTAMP WITH TIME ZONE adds a
-zone. The instant is stored in **UTC**.
+zone. The 7-byte prefix holds either the UTC instant or the local wall clock,
+selected by byte 11's `0x40` flag (see below).
 
 ```
-Bytes 0-6:  DATE portion (UTC wall clock, same layout as above)
+Bytes 0-6:  DATE portion (same layout as above)
 Bytes 7-10: fractional seconds — nanoseconds, big-endian uint32
 Bytes 11-12 (WITH TIME ZONE only):
-  If byte 11 high bit (0x80) is clear → numeric offset:
-    tz hours   = byte 11 - 20
-    tz minutes = byte 12 - 60   (both go negative for negative offsets)
-  If byte 11 high bit is set → named-region id (not resolved to an offset here)
+  If byte 11 high bit (0x80) is set → named-region id (not resolved to an offset here)
+  Else → numeric offset (only the low 6 bits of byte 11 hold the hour):
+    tz hours   = (byte 11 & 0x3f) - 20
+    tz minutes =  byte 12 - 60          (both go negative for negative offsets)
+    byte 11 bit 0x40 = "time in zone" flag:
+      set   → bytes 0-6 are already the LOCAL wall clock (no shift)
+      clear → bytes 0-6 are UTC; shift into the offset zone to get local time
 ```
 
 - 11 bytes → TIMESTAMP / TIMESTAMP WITH LOCAL TIME ZONE (rendered as UTC wall clock).
-- 13 bytes → TIMESTAMP WITH TIME ZONE (rendered as the original local wall clock
-  = stored UTC + offset, with a `+HH:MM` suffix).
+- 13 bytes → TIMESTAMP WITH TIME ZONE (rendered as the local wall clock with a
+  `+HH:MM` suffix).
 
-Example: `78 7e 05 18 08 05 39 2f 07 5e 20 19 5a` → stored UTC `2026-05-24 07:04:56.789012`,
-offset `25-20=+5h` / `90-60=+30m` → **`2026-05-24 12:34:56.789012 +05:30`**.
+Examples (both render to a `+05:30` local clock):
+- 19c, flag clear: `78 7e 05 18 08 05 39 2f 07 5e 20 19 5a` → byte 11 `0x19`, prefix is
+  UTC `07:04:56`, shift `+5h30m` → **`2026-05-24 12:34:56.789012 +05:30`**.
+- Free 23ai, flag set: `78 7c 03 0f 0f 1f 2e 07 5b ca 00 59 5a` → byte 11 `0x59`
+  (`0x59&0x3f=0x19=25 → +5h`, `0x40` set), prefix `14:30:45` is already local →
+  **`2024-03-15 14:30:45.123456 +05:30`**.
 
 ## Connection Flow
 
@@ -227,11 +294,13 @@ The proxy is fully transparent — it forwards raw TNS packets without modificat
 
 ## Known Limitations
 
-- **TTC auth interception disabled**: The proxy doesn't extract the Oracle username from TTC AUTH messages. It uses the first user with an active grant for connection tracking.
+- **Single O5LOGON key per user**: The Oracle username from TTC AUTH Phase 1 maps to the dbbat user (lowercased) for grant checks and connection tracking, but only that user's first verifier-bearing API key can authenticate — see "Per-user O5LOGON key" below.
 - **Row capture is best-effort**: The TTC binary format varies across Oracle client versions. Some clients/query types may produce partial or no row capture. SQL text extraction works reliably across all tested clients.
-- **No result capture for DML**: INSERT/UPDATE/DELETE statements are logged (SQL text + duration) but row counts are not captured from v315+ responses.
-- **Temporal types**: DATE, TIMESTAMP, and TIMESTAMP WITH TIME ZONE decode in captured results (the tz form renders the original local wall clock plus its numeric offset). Named-region time zones fall back to the stored UTC wall clock without an offset suffix.
-- **Multi-packet rows**: Large result sets spanning multiple TNS Data packets capture rows from the first response and continuation packets, but some middle packets may be missed depending on their format.
+- **Column names**: Real column names come from the describe column-definition records (`parseColumnDescribes` in `describe.go`), so single-char aliases (`SELECT level AS n`) and unnamed expressions (`SELECT count(*)`) get their true names and positions. Only genuinely unnamed expression columns fall back to a synthetic `COLn` label. If the records don't parse on some server layout, decoding falls back to heuristic name-scanning plus describe-header count padding, so the column count (and row framing) stays correct.
+- **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`. Failed statements record the ORA error text. See `ttc_oer.go`.
+- **Bind values (parameterized queries)**: Bind values are captured from both the legacy `OALL8` execute path (`decodeBindValues`) and the v315+ **piggyback exec** path that modern clients use (`extractPiggybackBinds`, func `0x03` sub `0x5e`). The piggyback binds sit length-prefixed at the tail of the message; they're located as the suffix that parses as exactly as many values as there are distinct bind placeholders in the SQL, and each is decoded by content via `decodeOracleRawValue` (so a NUMBER bind like `42` renders as `42`, not hex). Verified against `testdata/go_ora_binds.dbbat-dump` (`TestDumpReplay_Binds`). Not yet handled: binds over ~253 bytes (extended length encoding) and full type-aware decoding from the bind-definition records.
+- **Temporal types**: DATE, TIMESTAMP, and TIMESTAMP WITH TIME ZONE decode in captured results, verified end-to-end against `testdata/go_ora_temporal.dbbat-dump` (`TestDumpReplay_Temporal`). The tz form renders the local wall clock plus its numeric offset, honouring byte 11's `0x40` "time in zone" flag (prefix stored as local vs UTC). Named-region time zones fall back to the stored wall clock without an offset suffix.
+- **Large result sets**: The QueryResult (func `0x10`) row area and continuation packets (func `0x06`) share one decoder (`parseRowStream`) that walks the full compressed row stream — length-prefixed values plus the `0x15 [flag] [count] [bitmask] 0x07` column-compression descriptors between rows. A 400-row single-packet result is captured end-to-end against a live-Oracle ground-truth fixture (`testdata/go_ora_largeresult.dbbat-dump`, `TestDumpReplay_LargeResultRows`). Multi-TNS-packet (small-SDU/JDBC) result sets reuse the same decoder via the continuation path; their per-row correctness is not yet ground-truth-verified.
 
 ## Testing
 
@@ -298,4 +367,4 @@ reaches AUTH but not query execution.
 
 ### Per-user O5LOGON key
 
-dbbat picks the first API key with an O5LOGON verifier when generating the AUTH challenge — see the `O5LOGON verifier loaded` info log. That specific key (and only that one) is the password your Oracle client must supply: the salt sent in the challenge is bound to it, so any other API key fails to decrypt. Multi-key support is not yet implemented.
+dbbat picks the connecting user's first API key with an O5LOGON verifier when generating the AUTH challenge — see the `O5LOGON verifier loaded` info log. That specific key (and only that one) is the password your Oracle client must supply: the salt sent in the challenge is bound to it, so any other API key fails to decrypt. Multi-key support is not yet implemented (it would require all of a user's keys to share one salt, since the challenge can only carry one).

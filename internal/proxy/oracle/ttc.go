@@ -20,6 +20,7 @@ const (
 	TTCFuncSetProtocol  TTCFunctionCode = 0x01 // OSETPRO — session init
 	TTCFuncSetDataTypes TTCFunctionCode = 0x02 // ODTYPES — session init
 	TTCFuncPiggyback    TTCFunctionCode = 0x03 // Generic piggyback (sub-op at byte 1)
+	TTCFuncOERR         TTCFunctionCode = 0x04 // OER — error/status message (server-side)
 	TTCFuncOCLOSE       TTCFunctionCode = 0x05 // OCLOSE — close cursor (legacy)
 	TTCFuncContinuation TTCFunctionCode = 0x06 // Continuation data (multi-packet result rows)
 	TTCFuncResponse     TTCFunctionCode = 0x08 // Server response
@@ -78,6 +79,8 @@ func (fc TTCFunctionCode) String() string {
 		return "ODTYPES"
 	case TTCFuncPiggyback:
 		return "PIGGYBACK"
+	case TTCFuncOERR:
+		return "OERR"
 	case TTCFuncOCLOSE:
 		return "OCLOSE"
 	case TTCFuncContinuation:

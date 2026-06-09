@@ -20,6 +20,27 @@ type columnDef struct {
 	Nullable  bool
 }
 
+// columnTypeCodes returns the per-column TTC type codes for type-aware value
+// decoding. It returns nil when no type is known (all codes zero), so callers
+// fall back to the heuristic decoder.
+func columnTypeCodes(columns []columnDef) []int {
+	types := make([]int, len(columns))
+
+	known := false
+	for i, c := range columns {
+		types[i] = int(c.TypeCode)
+		if c.TypeCode != 0 {
+			known = true
+		}
+	}
+
+	if !known {
+		return nil
+	}
+
+	return types
+}
+
 // TTCResponse contains decoded fields from a TTC Response message.
 type TTCResponse struct {
 	ReturnCode   uint16
@@ -367,20 +388,126 @@ func decodePiggybackExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 	// Strategy: scan the payload for SQL text. Different Oracle client drivers
 	// (oracledb thin, JDBC thin) place the SQL at slightly different offsets
 	// (50-54 typically). We scan a range and validate the extracted text.
+	sql := ""
+
 	for offset := 40; offset < 70 && offset < len(ttcPayload)-1; offset++ {
-		sql, scanErr := extractSQLAtOffset(ttcPayload, offset)
-		if scanErr == nil && sql != "" {
-			return &OALL8Result{SQL: sql}, nil
+		if found, scanErr := extractSQLAtOffset(ttcPayload, offset); scanErr == nil && found != "" {
+			sql = found
+			break
 		}
 	}
 
-	// Last resort: find SQL keywords directly in the payload
-	sql := findSQLInPayload(ttcPayload)
-	if sql != "" {
-		return &OALL8Result{SQL: sql}, nil
+	// Last resort: find SQL keywords directly in the payload.
+	if sql == "" {
+		sql = findSQLInPayload(ttcPayload)
 	}
 
-	return nil, fmt.Errorf("%w: could not find SQL text in piggyback exec payload", ErrEmptySQL)
+	if sql == "" {
+		return nil, fmt.Errorf("%w: could not find SQL text in piggyback exec payload", ErrEmptySQL)
+	}
+
+	return &OALL8Result{SQL: sql, BindValues: extractPiggybackBinds(ttcPayload, sql)}, nil
+}
+
+// extractPiggybackBinds recovers the bind values from a piggyback exec payload.
+// The values are length-prefixed at the tail of the message and their count
+// equals the number of distinct bind placeholders in sql, so they are located as
+// the suffix that parses as exactly that many length-prefixed values consuming
+// the rest of the payload. Returns nil when they can't be located — binds are
+// then simply not captured rather than guessed wrong.
+func extractPiggybackBinds(payload []byte, sql string) []string {
+	count := countBindPlaceholders(sql)
+	if count == 0 {
+		return nil
+	}
+
+	// Don't scan into the SQL text itself.
+	lo := 0
+	if idx := findBytes(payload, []byte(sql)); idx >= 0 {
+		lo = idx + len(sql)
+	}
+
+	// Scan from the tail so the tightest (real) value run is found before any
+	// bind-definition bytes that might also parse as length-prefixed values.
+	for start := len(payload) - 1; start >= lo; start-- {
+		vals, ok := readLenPrefixedValues(payload[start:], count)
+		if !ok {
+			continue
+		}
+
+		out := make([]string, len(vals))
+		for i, v := range vals {
+			out[i] = decodeBindValue(v)
+		}
+
+		return out
+	}
+
+	return nil
+}
+
+// readLenPrefixedValues reads exactly count single-byte-length-prefixed values
+// from data, succeeding only if they consume all of data (a strong validity
+// check that disambiguates the real bind run from coincidental byte patterns).
+func readLenPrefixedValues(data []byte, count int) ([][]byte, bool) {
+	vals := make([][]byte, 0, count)
+	offset := 0
+
+	for range count {
+		if offset >= len(data) {
+			return nil, false
+		}
+
+		n := int(data[offset])
+		offset++
+
+		if n == 0 {
+			vals = append(vals, nil)
+
+			continue
+		}
+
+		if n > 2000 || offset+n > len(data) {
+			return nil, false
+		}
+
+		vals = append(vals, data[offset:offset+n])
+		offset += n
+	}
+
+	if offset != len(data) {
+		return nil, false
+	}
+
+	return vals, true
+}
+
+// countBindPlaceholders counts the distinct bind placeholders (:name or :1) in
+// sql, which equals the number of bind values the client sends.
+func countBindPlaceholders(sql string) int {
+	seen := make(map[string]struct{})
+
+	for i := 0; i < len(sql); i++ {
+		if sql[i] != ':' {
+			continue
+		}
+
+		j := i + 1
+		for j < len(sql) && (isBindNameByte(sql[j])) {
+			j++
+		}
+
+		if j > i+1 {
+			seen[sql[i:j]] = struct{}{}
+			i = j - 1
+		}
+	}
+
+	return len(seen)
+}
+
+func isBindNameByte(c byte) bool {
+	return c == '_' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
 // decodeExecSQL extracts SQL text from an execute-with-SQL message (func=0x11).
@@ -475,8 +602,11 @@ func extractSQLAtOffset(data []byte, offset int) (string, error) {
 // QueryResultV2 contains parsed data from a v315+ TTC QueryResult (func=0x10).
 type QueryResultV2 struct {
 	Columns []string
-	Rows    [][]string
-	NoData  bool // true if ORA-01403 (normal end-of-data)
+	// ColumnTypes holds the TTC type code per column when it is known from the
+	// describe records (nil otherwise — values are then decoded heuristically).
+	ColumnTypes []int
+	Rows        [][]string
+	NoData      bool // true if ORA-01403 (normal end-of-data)
 }
 
 // decodeQueryResultV2 extracts column names and row values from a v315+
@@ -500,15 +630,17 @@ func decodeQueryResultV2(ttcPayload []byte) *QueryResultV2 {
 		result.NoData = true
 	}
 
-	// Phase 1: Find column names
-	// Column names appear in the area BEFORE the 0x06 0x22 row data marker
-	markerIdx := findBytes(ttcPayload, []byte{0x06, 0x22})
-	columnArea := ttcPayload
-	if markerIdx > 0 {
-		columnArea = ttcPayload[:markerIdx]
+	// Phase 1: Column names. Prefer the describe column-definition records, which
+	// give the real names (including single-char and unnamed-expression columns
+	// the heuristic scanner misses) and the authoritative count. Fall back to
+	// scanning + padding when the records don't parse (e.g. an unexpected server
+	// layout) so behavior never regresses.
+	if descs := parseColumnDescribes(ttcPayload); descs != nil {
+		result.Columns = describeColumnNames(descs)
+		result.ColumnTypes = describeColumnTypes(descs)
+	} else {
+		result.Columns = scanAndPadColumnNames(ttcPayload)
 	}
-
-	result.Columns = scanColumnNames(columnArea)
 
 	if len(result.Columns) == 0 {
 		return result
@@ -518,9 +650,73 @@ func decodeQueryResultV2(ttcPayload []byte) *QueryResultV2 {
 	// Row values appear after the column definitions. We look for a marker
 	// pattern that separates column defs from row data.
 	// The row data area starts roughly after the column definitions.
-	result.Rows = scanRowValues(ttcPayload, len(result.Columns))
+	result.Rows = scanRowValues(ttcPayload, len(result.Columns), result.ColumnTypes)
 
 	return result
+}
+
+// describeColumnTypes extracts the TTC type code per column from parsed describe
+// records, for type-aware value decoding.
+func describeColumnTypes(descs []columnDesc) []int {
+	types := make([]int, len(descs))
+	for i, d := range descs {
+		types[i] = d.Type
+	}
+
+	return types
+}
+
+// describeColumnNames maps parsed describe records to column-name labels,
+// substituting COLn for the unnamed-expression columns that carry no name.
+func describeColumnNames(descs []columnDesc) []string {
+	names := make([]string, len(descs))
+	for i, d := range descs {
+		if d.Name != "" {
+			names[i] = d.Name
+		} else {
+			names[i] = fmt.Sprintf("COL%d", i+1)
+		}
+	}
+
+	return names
+}
+
+// scanAndPadColumnNames is the fallback column-name source when the describe
+// records don't parse: scan the column-definition area for names, then pad up to
+// the describe-header count with synthetic COLn names so the row stream is still
+// framed with the correct column count.
+func scanAndPadColumnNames(ttcPayload []byte) []string {
+	// Column names appear in the area BEFORE the 0x06 0x22 row data marker.
+	columnArea := ttcPayload
+	if markerIdx := findBytes(ttcPayload, []byte{0x06, 0x22}); markerIdx > 0 {
+		columnArea = ttcPayload[:markerIdx]
+	}
+
+	names := scanColumnNames(columnArea)
+
+	if n, ok := describeColumnCount(ttcPayload); ok && n > len(names) {
+		for i := len(names); i < n; i++ {
+			names = append(names, fmt.Sprintf("COL%d", i+1))
+		}
+	}
+
+	return names
+}
+
+// describeColumnCount reads the authoritative column count from a v315 describe
+// message (TTC func 0x10), whose header is:
+//
+//	[0x10] [size] [size bytes] [maxRowSize: compressed int] [colCount: compressed int]
+//
+// Returns false if the payload is not a describe header or the count is out of a
+// sane range, in which case callers fall back to the scanned column names.
+func describeColumnCount(ttcPayload []byte) (int, bool) {
+	count, _, ok := describeColumnLayout(ttcPayload)
+	if !ok || count <= 0 || count > 1000 {
+		return 0, false
+	}
+
+	return count, true
 }
 
 // scanColumnNames finds length-prefixed column names in the payload.
@@ -598,85 +794,32 @@ func skipColumnMetadata(data []byte) int {
 	return 0
 }
 
-// scanRowValues extracts row values from the payload.
-// Each row contains `numCols` length-prefixed values.
-//
-// Row data layout (after the 0x06 0x22 marker + descriptor):
-//
-//	[0x07]                  — separator before first row
-//	[len1] [val1]           — first column value
-//	[len2] [val2]           — second column value (0x00 = NULL)
-//	...
-//	[0x07]                  — separator between rows
-//	[len1] [val1] ...       — next row
-//	[0x08] [0x01] [0x06]    — end-of-rows footer
-func scanRowValues(data []byte, numCols int) [][]string {
+// scanRowValues extracts row values from a QRESULT (func=0x10) payload. The row
+// area uses the same compressed encoding as continuation packets — length-
+// prefixed values for each active column, 0x07 / 0x15 descriptors between rows,
+// terminated by the 0x08 footer or an ORA-01403 marker — so it delegates to the
+// shared parseRowStream. The first QRESULT row carries every column.
+func scanRowValues(data []byte, numCols int, colTypes []int) [][]string {
 	rowStart := findRowDataStart(data)
 	if rowStart < 0 || numCols == 0 {
 		return nil
 	}
 
-	var rows [][]string
-	offset := rowStart
-	endOfData := len(data)
-	maxRows := 100
+	rows := parseRowStream(data, rowStart, numCols, allColumns(numCols), nil, colTypes)
 
-	for len(rows) < maxRows && offset < endOfData {
-		row := make([]string, 0, numCols)
-		valid := true
-
-		for col := 0; col < numCols; col++ {
-			if offset >= endOfData {
-				valid = false
-				break
+	out := make([][]string, len(rows))
+	for i, row := range rows {
+		strRow := make([]string, numCols)
+		for j, v := range row {
+			if s, ok := v.(string); ok {
+				strRow[j] = s
 			}
-
-			valLen := int(data[offset])
-			offset++
-
-			if valLen == 0 {
-				row = append(row, "") // NULL
-				continue
-			}
-
-			if valLen > 4000 || offset+valLen > endOfData {
-				valid = false
-				break
-			}
-
-			valBytes := data[offset : offset+valLen]
-			offset += valLen
-
-			row = append(row, decodeOracleRawValue(valBytes))
 		}
 
-		if !valid || len(row) != numCols {
-			break
-		}
-
-		rows = append(rows, row)
-
-		// After a row, expect either:
-		// - 0x08 0x01 0x06: end-of-rows footer → stop
-		// - 0x07: row separator → continue to next row
-		// - anything else: stop
-		if offset >= endOfData {
-			break
-		}
-
-		if data[offset] == 0x08 {
-			break // Footer (0x08 0x01 0x06) or end of data
-		}
-
-		if data[offset] == 0x07 {
-			offset++ // Skip row separator, continue to next row
-			continue
-		}
-
-		break // Unknown byte — stop
+		out[i] = strRow
 	}
 
-	return rows
+	return out
 }
 
 // findRowDataStart locates where row data begins in the response.
@@ -764,10 +907,10 @@ func decodeOracleDateToString(b []byte) (string, bool) {
 //
 // Bytes 0-6 are the DATE portion (UTC wall clock), bytes 7-10 are fractional
 // seconds as a big-endian nanosecond count. For the 13-byte tz form, bytes
-// 11-12 carry the zone: a numeric offset (tzHour = b[11]-20, tzMin = b[12]-60)
-// when b[11]'s high bit is clear, or a named-region id (not resolvable to a
-// numeric offset here) when it is set — region values decode to the UTC wall
-// clock without an offset suffix.
+// 11-12 carry the zone: a numeric offset (tzHour = (b[11]&0x3f)-20,
+// tzMin = b[12]-60) when b[11]'s high bit is clear, or a named-region id (not
+// resolvable to a numeric offset here) when it is set — region values decode to
+// the UTC wall clock without an offset suffix.
 func decodeOracleTimestampToString(b []byte) (string, bool) {
 	if len(b) != 11 && len(b) != 13 {
 		return "", false
@@ -781,14 +924,22 @@ func decodeOracleTimestampToString(b []byte) (string, bool) {
 	}
 
 	// 13-byte form with a numeric offset: render the original local wall clock
-	// (Oracle stores the instant in UTC) plus the offset suffix.
+	// plus the offset suffix. Byte 11's low 6 bits are the hour; bit 0x80 (above)
+	// marks a named region; bit 0x40 is the "time in zone" flag — when set the
+	// 7-byte prefix is already the local wall clock, otherwise it is UTC and is
+	// shifted into the zone to recover the local time.
 	if len(b) == 13 && b[11]&0x80 == 0 {
-		offsetSec := (int(b[11])-20)*3600 + (int(b[12])-60)*60
+		offsetSec := (int(b[11]&0x3f)-20)*3600 + (int(b[12])-60)*60
 		if offsetSec < -15*3600 || offsetSec > 15*3600 {
 			return "", false
 		}
 
-		local := t.In(time.FixedZone("", offsetSec))
+		zone := time.FixedZone("", offsetSec)
+
+		local := t.In(zone)
+		if b[11]&0x40 != 0 {
+			local = time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), t.Nanosecond(), zone)
+		}
 
 		return local.Format("2006-01-02 15:04:05.999999999 -07:00"), true
 	}
@@ -842,46 +993,166 @@ func isReadableASCII(b []byte) bool {
 	return true
 }
 
-// decodeOracleNumberToString converts Oracle NUMBER format to a string.
-// Oracle NUMBER: [exponent byte] [mantissa digits...]
-// Exponent byte: value - 193 gives the power of 100
-// Each mantissa byte: value - 1 gives a two-digit number (00-99)
+// decodeOracleNumberToString decodes an Oracle NUMBER for the heuristic
+// row-capture path, where no column type is available. It gates on
+// isOracleNumber so genuine text (which carries no type tag on the wire) is
+// never misread as a number, then formats with the shared formatOracleNumber.
+//
+// NOTE: a negative NUMBER whose bytes happen to all be printable ASCII is
+// indistinguishable from text here; decodeOracleRawValue tries ASCII first, so
+// such values are captured as strings.
 func decodeOracleNumberToString(b []byte) (string, bool) {
-	if len(b) < 2 {
-		return "", false
-	}
-
-	exp := int(b[0])
-
-	// Check for zero
-	if exp == 128 && len(b) == 1 {
+	if len(b) == 1 && b[0] == 0x80 {
 		return "0", true
 	}
 
-	// Positive numbers: exponent >= 193
-	if exp < 193 || exp > 213 {
-		return "", false // Not a simple positive number
+	if !isOracleNumber(b) {
+		return "", false
 	}
 
-	// Convert mantissa digits
-	power := exp - 193
-	var result int64
+	return formatOracleNumber(b)
+}
 
-	for i := 1; i < len(b); i++ {
-		digit := int64(b[i]) - 1
-		if digit < 0 || digit > 99 {
+// formatOracleNumber reconstructs the exact decimal string of an Oracle NUMBER
+// from its raw bytes: one exponent byte then up to 20 base-100 mantissa bytes
+// (negatives carry a trailing 0x66 terminator). The value is
+// sign × mantissa × 100^(exp100 - n + 1), where exp100 is the signed base-100
+// exponent of the most significant digit and the mantissa is the n base-100
+// digits laid out two decimal places each.
+//
+// It performs no validity gating — callers without a column type must pre-check
+// with isOracleNumber. ok is false only for empty or degenerate input.
+func formatOracleNumber(b []byte) (string, bool) {
+	if len(b) == 0 {
+		return "", false
+	}
+
+	if len(b) == 1 && b[0] == 0x80 {
+		return "0", true
+	}
+
+	positive := b[0]&0x80 != 0
+
+	var (
+		exp100 int
+		digits []int
+	)
+
+	if positive {
+		exp100 = int(b[0]&0x7f) - 65
+		for _, c := range b[1:] {
+			digits = append(digits, int(c)-1)
+		}
+	} else {
+		end := len(b)
+		if b[end-1] == 0x66 { // strip the negative terminator (102)
+			end--
+		}
+
+		exp100 = int((b[0]^0xff)&0x7f) - 65
+		for _, c := range b[1:end] {
+			digits = append(digits, 101-int(c))
+		}
+	}
+
+	if len(digits) == 0 {
+		return "", false
+	}
+
+	// Lay the base-100 digits out two decimal places each; the whole run then
+	// represents mantissa × 100^(exp100 - len(digits) + 1).
+	var mant strings.Builder
+	for _, d := range digits {
+		if d < 0 || d > 99 {
 			return "", false
 		}
 
-		result = result*100 + digit
+		fmt.Fprintf(&mant, "%02d", d)
 	}
 
-	// Apply power of 100
-	for i := len(b) - 2; i < power; i++ {
-		result *= 100
+	s := placeDecimalPoint(mant.String(), 2*(exp100-len(digits)+1))
+	if !positive {
+		s = "-" + s
 	}
 
-	return fmt.Sprintf("%d", result), true
+	return s, true
+}
+
+// isOracleNumber reports whether b is a valid Oracle NUMBER encoding. It mirrors
+// the driver's validity rules so that text values (which carry no type tag on
+// the wire) are not misread as numbers: positive mantissa bytes are 1..100 and
+// negative ones 2..101, with a length and terminator check.
+func isOracleNumber(b []byte) bool {
+	n := len(b)
+	if n < 2 || n > 21 {
+		return false
+	}
+
+	if b[0]&0x80 != 0 { // positive
+		if b[1] < 2 || b[n-1] < 2 {
+			return false
+		}
+
+		for _, c := range b[1:] {
+			if c < 1 || c > 100 {
+				return false
+			}
+		}
+
+		return true
+	}
+
+	// Negative: an optional 0x66 terminator, otherwise the full 20 mantissa bytes.
+	end := n
+	if b[n-1] == 0x66 {
+		end--
+	} else if n <= 20 {
+		return false
+	}
+
+	if end < 2 || b[1] > 100 || b[end-1] > 100 {
+		return false
+	}
+
+	for _, c := range b[1:end] {
+		if c < 2 || c > 101 {
+			return false
+		}
+	}
+
+	return true
+}
+
+// placeDecimalPoint formats mantissa × 10^shift, trimming leading integer zeros
+// and trailing fractional zeros (e.g. "0314",-2 → "3.14"; "50",-2 → "0.5").
+func placeDecimalPoint(mant string, shift int) string {
+	if shift >= 0 {
+		mant += strings.Repeat("0", shift)
+		if t := strings.TrimLeft(mant, "0"); t != "" {
+			return t
+		}
+
+		return "0"
+	}
+
+	frac := -shift
+
+	var intPart, fracPart string
+	if len(mant) > frac {
+		intPart, fracPart = mant[:len(mant)-frac], mant[len(mant)-frac:]
+	} else {
+		intPart, fracPart = "0", strings.Repeat("0", frac-len(mant))+mant
+	}
+
+	if intPart = strings.TrimLeft(intPart, "0"); intPart == "" {
+		intPart = "0"
+	}
+
+	if fracPart = strings.TrimRight(fracPart, "0"); fracPart == "" {
+		return intPart
+	}
+
+	return intPart + "." + fracPart
 }
 
 // continuationDescriptorMarker (0x15) appears after each row in a continuation
@@ -891,18 +1162,16 @@ const continuationDescriptorMarker = 0x15
 
 // parseContinuationRows decodes rows from a TTC continuation packet (func=0x06).
 //
-// Oracle's continuation format uses column-level compression:
-//   - A header bitmask (at header_end-2) indicates which columns have new values
-//     in the first row of the packet.
-//   - After each row, a descriptor (0x15 [flag] [count] [bitmask] 0x07) indicates
-//     which columns have new values in the NEXT row.
-//   - Columns not in the bitmask retain their values from the previous row.
+// A continuation packet is a header followed by the same compressed row stream
+// as the QueryResult row area, so the row decoding itself lives in the shared
+// parseRowStream. This function only locates the stream:
+//   - The first 0x07 in the header marks the start of row data.
+//   - The header bitmask (at header_end-2) selects the columns carried in the
+//     first row; later rows are selected by their 0x15 descriptors.
 //
-// The prevRow parameter provides the last row from the previous packet (or the
-// QueryResult) so that unchanged columns can be filled in correctly.
-//
-//nolint:gocognit,cyclop // Binary protocol parser requires many branches for different field types and markers.
-func parseContinuationRows(payload []byte, numCols int, prevRow []string) [][]interface{} {
+// prevRow is the last row of the previous packet so unchanged (compressed-away)
+// columns can be filled in.
+func parseContinuationRows(payload []byte, numCols int, prevRow []string, colTypes []int) [][]interface{} {
 	if numCols == 0 || len(payload) < 15 {
 		return nil
 	}
@@ -930,30 +1199,79 @@ func parseContinuationRows(payload []byte, numCols int, prevRow []string) [][]in
 		}
 	}
 
-	// Initialize previous row values from the provided lastRow.
+	// Carry forward the previous packet's last row for compressed-away columns.
 	prev := make([]string, numCols)
 	if len(prevRow) == numCols {
 		copy(prev, prevRow)
 	}
 
-	offset := headerEnd + 1
+	return parseRowStream(payload, headerEnd+1, numCols, activeCols, prev, colTypes)
+}
+
+// decodeRowValue decodes a single captured column value by its TTC type. NUMBER
+// uses formatOracleNumber directly (correct for negatives/fractionals the
+// type-less heuristic mis-reads); BINARY_FLOAT/DOUBLE undo Oracle's sortable
+// byte transform (which the heuristic can't decode at all); RAW renders as hex
+// so binary content isn't mistaken for text. Every other type — and any column
+// with no known type — falls through to decodeOracleRawValue, preserving the
+// established string/temporal formats.
+func decodeRowValue(colTypes []int, col int, b []byte) string {
+	if col >= 0 && col < len(colTypes) {
+		switch colTypes[col] {
+		case tnsTypeNUMBER:
+			if s, ok := formatOracleNumber(b); ok {
+				return s
+			}
+		case tnsTypeBINFLOAT, tnsTypeBINDOUBLE:
+			if s, ok := decodeOracleBinaryFloatString(b); ok {
+				return s
+			}
+		case tnsTypeRAW, tnsTypeLONGRAW:
+			// RAW is binary; render it as hex so printable byte runs aren't
+			// mistaken for text by the ASCII-first heuristic.
+			return hex.EncodeToString(b)
+		}
+	}
+
+	return decodeOracleRawValue(b)
+}
+
+// parseRowStream decodes a run of compressed rows starting at payload[offset].
+//
+// Both the QueryResult (func=0x10) row area and continuation (func=0x06) packets
+// use this identical encoding: each row sends length-prefixed values only for
+// its active columns; columns absent from a row keep their previous value. Rows
+// are separated by either a bare 0x07 (all columns active next) or a compression
+// descriptor 0x15 [flag] [count] [bitmask] 0x07 (bitmask = active columns next).
+// The stream ends at the 0x08 footer, an ORA-01403 marker, or malformed bytes.
+//
+// activeCols are the columns carried in the FIRST row; prev seeds the carried-
+// over values (nil for a fresh QueryResult, the prior packet's last row for a
+// continuation). colTypes holds the per-column TTC type code for type-aware
+// value decoding (nil → heuristic). There is no row cap — the markers bound the
+// scan, and the caller (captureRow) enforces the configured result-size limits.
+func parseRowStream(payload []byte, offset, numCols int, activeCols []int, prev []string, colTypes []int) [][]interface{} {
+	if numCols == 0 {
+		return nil
+	}
+
+	cur := make([]string, numCols)
+	copy(cur, prev)
+
 	var rows [][]interface{}
 
-rowLoop:
 	for offset < len(payload) {
 		if payload[offset] == 0x08 {
-			break
+			break // end-of-rows footer (0x08 0x01 0x06)
 		}
 
-		// Check for ORA-01403 end marker
 		if offset+9 <= len(payload) && string(payload[offset:offset+9]) == "ORA-01403" {
-			break
+			break // end-of-data marker
 		}
 
-		// Read values for active columns; inactive columns keep previous values.
 		row := make([]interface{}, numCols)
 		for i := range numCols {
-			row[i] = prev[i] // Default: previous value
+			row[i] = cur[i] // default: carried-over value
 		}
 
 		valid := true
@@ -970,7 +1288,7 @@ rowLoop:
 
 			if valLen == 0 {
 				row[col] = ""
-				prev[col] = ""
+				cur[col] = ""
 
 				continue
 			}
@@ -981,9 +1299,9 @@ rowLoop:
 				break
 			}
 
-			decoded := decodeOracleRawValue(payload[offset : offset+valLen])
+			decoded := decodeRowValue(colTypes, col, payload[offset:offset+valLen])
 			row[col] = decoded
-			prev[col] = decoded
+			cur[col] = decoded
 			offset += valLen
 		}
 
@@ -993,53 +1311,77 @@ rowLoop:
 
 		rows = append(rows, row)
 
-		// Parse the descriptor after the row to determine active columns for the next row.
-		if offset >= len(payload) {
+		next, newOffset, cont := readRowSeparator(payload, offset, numCols)
+		if !cont {
 			break
 		}
 
-		switch payload[offset] {
-		case continuationDescriptorMarker:
-			offset++ // skip 0x15
-
-			// Read descriptor bytes until 0x07 or 0x08.
-			var desc []byte
-			for offset < len(payload) && payload[offset] != 0x07 && payload[offset] != 0x08 {
-				desc = append(desc, payload[offset])
-				offset++
-			}
-
-			// Descriptor format: [flag] [count] [bitmask]
-			// The bitmask is at index 2 (for ≤8 columns).
-			if len(desc) >= 3 {
-				activeCols = bitmaskToColumns(desc[2], numCols)
-			} else {
-				activeCols = allColumns(numCols)
-			}
-
-			// Skip 0x07 separator
-			if offset < len(payload) && payload[offset] == 0x07 {
-				offset++
-			}
-		case 0x07:
-			offset++
-			activeCols = allColumns(numCols) // Simple separator: all columns in next row
-		default:
-			break rowLoop // Unknown byte — stop
-		}
+		activeCols = next
+		offset = newOffset
 	}
 
 	return rows
 }
 
-// bitmaskToColumns converts a column bitmask to a sorted slice of column indices.
-// Bit 0 = column 0, bit 1 = column 1, etc.
+// readRowSeparator consumes the marker that follows a row and returns the
+// columns active in the next row, the advanced offset, and whether parsing
+// should continue. It handles a bare 0x07 separator (all columns active next)
+// and the 0x15 [flag] [count] [bitmask] 0x07 compression descriptor. Any other
+// byte (notably the 0x08 footer) ends the stream.
+func readRowSeparator(payload []byte, offset, numCols int) ([]int, int, bool) {
+	if offset >= len(payload) {
+		return nil, offset, false
+	}
+
+	switch payload[offset] {
+	case 0x07:
+		return allColumns(numCols), offset + 1, true
+	case continuationDescriptorMarker:
+		// Descriptor: 0x15 [flag] [count] [bitmask...] 0x07. The bitmask spans
+		// ceil(numCols/8) bytes. Parse it structurally rather than scanning for
+		// the 0x07 terminator — a bitmask byte can itself be 0x07 (e.g. columns
+		// 0,1,2 → 0x07), which would otherwise truncate the descriptor and leave
+		// the real terminator to corrupt the next row.
+		bitmaskBytes := (numCols + 7) / 8
+		maskStart := offset + 3 // skip 0x15, flag, count
+		maskEnd := maskStart + bitmaskBytes
+
+		if maskEnd > len(payload) {
+			return nil, len(payload), false
+		}
+
+		next := bitmaskColumns(payload[maskStart:maskEnd], numCols)
+
+		end := maskEnd
+		if end < len(payload) && payload[end] == 0x07 {
+			end++ // consume the 0x07 terminator
+		}
+
+		if len(next) == 0 {
+			next = allColumns(numCols)
+		}
+
+		return next, end, true
+	default:
+		return nil, offset, false
+	}
+}
+
+// bitmaskToColumns converts a single-byte column bitmask to a sorted slice of
+// column indices. Bit 0 = column 0, bit 1 = column 1, etc.
 func bitmaskToColumns(bitmask byte, numCols int) []int {
+	return bitmaskColumns([]byte{bitmask}, numCols)
+}
+
+// bitmaskColumns converts a (possibly multi-byte, little-endian) column bitmask
+// to a sorted slice of active column indices: byte 0 holds columns 0-7, byte 1
+// columns 8-15, and so on.
+func bitmaskColumns(mask []byte, numCols int) []int {
 	var cols []int
 
-	for bit := range numCols {
-		if bitmask&(1<<bit) != 0 {
-			cols = append(cols, bit)
+	for col := range numCols {
+		if b := col / 8; b < len(mask) && mask[b]&(1<<(col%8)) != 0 {
+			cols = append(cols, col)
 		}
 	}
 
@@ -1156,15 +1498,31 @@ func decodeBindValues(data []byte, count int) []string {
 		valBytes := data[offset : offset+int(valLen)]
 		offset += int(valLen)
 
-		// Detect binary values (non-UTF8 or non-printable)
-		if isBinaryData(valBytes) {
-			values = append(values, hex.EncodeToString(valBytes))
-		} else {
-			values = append(values, string(valBytes))
-		}
+		values = append(values, decodeBindValue(valBytes))
 	}
 
 	return values
+}
+
+// decodeBindValue renders a single bind value. Bind values carry no inline type
+// tag, so it prefers readable text (including UTF-8, which the row-capture
+// ASCII-first heuristic would mangle), then a valid Oracle NUMBER (so a numeric
+// bind shows as its decimal rather than hex), and finally falls back to hex for
+// other binary content.
+func decodeBindValue(b []byte) string {
+	if len(b) == 0 {
+		return "NULL"
+	}
+
+	if !isBinaryData(b) {
+		return string(b)
+	}
+
+	if s, ok := decodeOracleNumberToString(b); ok {
+		return s
+	}
+
+	return hex.EncodeToString(b)
 }
 
 // isBinaryData checks if data is binary (non-text) content.

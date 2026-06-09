@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -60,12 +61,12 @@ func decodeOracleValue(typeCode uint8, data []byte) (interface{}, error) {
 		if len(data) < 4 {
 			return nil, fmt.Errorf("%w: BINARY_FLOAT requires 4 bytes, got %d", ErrInvalidFloatLength, len(data))
 		}
-		return math.Float32frombits(binary.BigEndian.Uint32(data)), nil
+		return math.Float32frombits(binary.BigEndian.Uint32(untransformOracleBinaryFloat(data[:4]))), nil
 	case OracleTypeBINDOUBLE:
 		if len(data) < 8 {
 			return nil, fmt.Errorf("%w: BINARY_DOUBLE requires 8 bytes, got %d", ErrInvalidFloatLength, len(data))
 		}
-		return math.Float64frombits(binary.BigEndian.Uint64(data)), nil
+		return math.Float64frombits(binary.BigEndian.Uint64(untransformOracleBinaryFloat(data[:8]))), nil
 	case OracleTypeTIMESTAMP, OracleTypeTIMESTAMPLTZ:
 		t, err := decodeOracleTimestamp(data)
 		if err != nil {
@@ -98,91 +99,54 @@ func decodeOracleNumber(data []byte) (string, error) {
 		return "", ErrInvalidNumberData
 	}
 
-	// Zero
-	if len(data) == 1 && data[0] == 0x80 {
-		return "0", nil
+	// The column type is known here (NUMBER), so no isOracleNumber gate is
+	// needed — decode the raw bytes directly with the shared formatter.
+	s, ok := formatOracleNumber(data)
+	if !ok {
+		return "", ErrInvalidNumberData
 	}
 
-	isPositive := data[0] > 0x80
+	return s, nil
+}
 
-	var exponent int
-	var mantissa []int
+// untransformOracleBinaryFloat reverses Oracle's sortable BINARY_FLOAT/DOUBLE
+// byte transform and returns the plain IEEE-754 big-endian bytes. On the wire
+// Oracle flips the sign bit of positive values and inverts every bit of negative
+// values, so the raw bytes order numerically; this undoes that.
+func untransformOracleBinaryFloat(b []byte) []byte {
+	raw := make([]byte, len(b))
+	copy(raw, b)
 
-	if isPositive {
-		exponent = int(data[0]) - 0xC1
-		for i := 1; i < len(data); i++ {
-			mantissa = append(mantissa, int(data[i])-1)
-		}
-	} else {
-		exponent = 0x3E - int(data[0])
-		for i := 1; i < len(data); i++ {
-			if data[i] == 102 { // terminator for negative numbers
-				break
-			}
-			mantissa = append(mantissa, 101-int(data[i]))
-		}
+	if len(raw) == 0 {
+		return raw
 	}
 
-	if len(mantissa) == 0 {
-		return "0", nil
-	}
-
-	// Build the number string from base-100 digits
-	// Each mantissa digit represents two decimal digits (0-99)
-	var sb strings.Builder
-
-	if !isPositive {
-		sb.WriteByte('-')
-	}
-
-	// The exponent tells us where the decimal point goes.
-	// exponent=0 means the first pair is in the units place (0-99).
-	// exponent=1 means the first pair is in the hundreds place, etc.
-	// We need (exponent+1) pairs before the decimal point.
-
-	pairsBeforeDecimal := exponent + 1
-
-	for i, digit := range mantissa {
-		if i == pairsBeforeDecimal {
-			// Remove trailing zeros from integer part if no fractional part follows
-			// Actually, add decimal point
-			sb.WriteByte('.')
-		}
-
-		if i == 0 {
-			// First pair: no leading zero
-			if digit >= 10 {
-				sb.WriteByte(byte('0' + digit/10))
-				sb.WriteByte(byte('0' + digit%10))
-			} else {
-				sb.WriteByte(byte('0' + digit))
-			}
-		} else {
-			// Subsequent pairs: always two digits
-			sb.WriteByte(byte('0' + digit/10))
-			sb.WriteByte(byte('0' + digit%10))
+	if raw[0]&0x80 != 0 { // positive: only the sign bit was flipped
+		raw[0] &^= 0x80
+	} else { // negative: all bits were inverted
+		for i := range raw {
+			raw[i] = ^raw[i]
 		}
 	}
 
-	// If we have fewer pairs than needed before the decimal, pad with "00"
-	for i := len(mantissa); i < pairsBeforeDecimal; i++ {
-		sb.WriteString("00")
+	return raw
+}
+
+// decodeOracleBinaryFloatString decodes Oracle BINARY_FLOAT (4 bytes) or
+// BINARY_DOUBLE (8 bytes) to its shortest round-trippable decimal string.
+func decodeOracleBinaryFloatString(b []byte) (string, bool) {
+	switch len(b) {
+	case 4:
+		f := math.Float32frombits(binary.BigEndian.Uint32(untransformOracleBinaryFloat(b)))
+
+		return strconv.FormatFloat(float64(f), 'g', -1, 32), true
+	case 8:
+		f := math.Float64frombits(binary.BigEndian.Uint64(untransformOracleBinaryFloat(b)))
+
+		return strconv.FormatFloat(f, 'g', -1, 64), true
+	default:
+		return "", false
 	}
-
-	result := sb.String()
-
-	// Clean up trailing zeros after decimal point
-	if strings.Contains(result, ".") {
-		result = strings.TrimRight(result, "0")
-		result = strings.TrimRight(result, ".")
-	}
-
-	// Handle edge case: negative zero
-	if result == "-0" {
-		return "0", nil
-	}
-
-	return result, nil
 }
 
 // decodeOracleDate decodes Oracle's 7-byte DATE format.
@@ -218,10 +182,10 @@ func decodeOracleDate(data []byte) (time.Time, error) {
 // decodeOracleTimestamp decodes Oracle's TIMESTAMP format.
 // First 7 bytes are the same as DATE, followed by 4 bytes of fractional seconds (nanoseconds, big-endian).
 // For the 13-byte WITH TIME ZONE form, bytes 11-12 carry a numeric offset
-// (tzHour = b[11]-20, tzMin = b[12]-60) when b[11]'s high bit is clear; the
-// returned time is placed in that fixed zone so the original local wall clock
-// is preserved (Oracle stores the instant in UTC). Named-region zones (high bit
-// set) and out-of-range offsets fall back to UTC.
+// (tzHour = (b[11]&0x3f)-20, tzMin = b[12]-60) when b[11]'s high bit is clear;
+// the returned time is placed in that fixed zone so the original local wall
+// clock is preserved (Oracle stores the instant in UTC). Named-region zones
+// (high bit set) and out-of-range offsets fall back to UTC.
 func decodeOracleTimestamp(data []byte) (time.Time, error) {
 	if len(data) < 11 {
 		return time.Time{}, fmt.Errorf("%w: got %d bytes", ErrInvalidTimestampLength, len(data))
@@ -238,9 +202,18 @@ func decodeOracleTimestamp(data []byte) (time.Time, error) {
 	base := time.Date(t.Year(), t.Month(), t.Day(), t.Hour(), t.Minute(), t.Second(), nsec, time.UTC)
 
 	if len(data) >= 13 && data[11]&0x80 == 0 {
-		offsetSec := (int(data[11])-20)*3600 + (int(data[12])-60)*60
+		offsetSec := (int(data[11]&0x3f)-20)*3600 + (int(data[12])-60)*60
 		if offsetSec >= -15*3600 && offsetSec <= 15*3600 {
-			return base.In(time.FixedZone("", offsetSec)), nil
+			zone := time.FixedZone("", offsetSec)
+
+			// Bit 0x40 set: the prefix is already the local wall clock; clear:
+			// the prefix is UTC and is shifted into the zone.
+			if data[11]&0x40 != 0 {
+				return time.Date(base.Year(), base.Month(), base.Day(),
+					base.Hour(), base.Minute(), base.Second(), base.Nanosecond(), zone), nil
+			}
+
+			return base.In(zone), nil
 		}
 	}
 

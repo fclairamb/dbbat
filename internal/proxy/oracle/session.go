@@ -810,8 +810,42 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket) {
 		s.handleQueryResultV2(ttcPayload)
 	case TTCFuncResponse:
 		s.handleResponse(ttcPayload)
+	case TTCFuncOERR:
+		s.handleOERStatus(ttcPayload)
 	case TTCFuncContinuation:
 		s.handleContinuation(ttcPayload)
+	}
+}
+
+// handleOERStatus processes a standalone OER (func=0x04) message. Servers send
+// it directly (after a marker exchange) when a statement fails, and as an
+// end-of-call status in some flows.
+func (s *session) handleOERStatus(ttcPayload []byte) {
+	info := decodeOERAt(ttcPayload, 0)
+	if info == nil {
+		return
+	}
+
+	s.completeQueryFromOER(info)
+}
+
+// completeQueryFromOER finalizes the pending query from decoded OER fields:
+// rows affected on success, error text on failure, plain completion on
+// ORA-01403 (end-of-data, keeps captured-row counts).
+func (s *session) completeQueryFromOER(info *oerInfo) {
+	switch {
+	case info.ErrorCode == oraNoDataFound:
+		s.completeQuery(nil, nil)
+	case info.ErrorCode != 0:
+		msg := info.ErrorMessage
+		if msg == "" {
+			msg = fmt.Sprintf("ORA-%05d", info.ErrorCode)
+		}
+
+		s.completeQuery(nil, &msg)
+	default:
+		rows := int64(info.CurRowNumber)
+		s.completeQuery(&rows, nil)
 	}
 }
 
@@ -832,7 +866,7 @@ func (s *session) handleContinuation(ttcPayload []byte) {
 	numCols := len(columns)
 
 	if numCols > 0 {
-		rows := parseContinuationRows(ttcPayload, numCols, s.tracker.pendingQuery.lastRow)
+		rows := parseContinuationRows(ttcPayload, numCols, s.tracker.pendingQuery.lastRow, columnTypeCodes(columns))
 
 		for _, row := range rows {
 			s.captureRow(columns, row)
@@ -859,6 +893,15 @@ func (s *session) handleContinuation(ttcPayload []byte) {
 // In v315+, most responses don't follow the legacy format so we skip them.
 // Query completion is handled by handleQueryResultV2 for func=0x10.
 func (s *session) handleResponse(ttcPayload []byte) {
+	// v315+ DML responses embed an OER (func=0x04) status block carrying the
+	// affected-row count (INSERT/UPDATE/DELETE) or the ORA error. This is the
+	// reliable source — the legacy fixed-offset layout below misreads v315+
+	// responses, so prefer the OER whenever one is present.
+	if oer := findOERInResponse(ttcPayload); oer != nil {
+		s.completeQueryFromOER(oer)
+		return
+	}
+
 	resp, err := decodeTTCResponse(ttcPayload)
 	if err != nil {
 		// v315+ auth/negotiation responses don't follow legacy format — ignore

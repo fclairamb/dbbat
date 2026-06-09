@@ -133,8 +133,9 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 
 	// Track as pending query and persist immediately
 	cursor := &trackedCursor{
-		sql:      result.SQL,
-		parsedAt: time.Now(),
+		sql:        result.SQL,
+		bindValues: result.BindValues,
+		parsedAt:   time.Now(),
 	}
 	s.tracker.pendingQuery = &pendingOracleQuery{
 		cursor:    cursor,
@@ -183,11 +184,16 @@ func (s *session) handleQueryResultV2(ttcPayload []byte) {
 		return
 	}
 
-	// Store column definitions from the first response (they only appear once)
+	// Store column definitions from the first response (they only appear once).
+	// The type code (when known) feeds type-aware value decoding of continuation
+	// packets, which carry no describe of their own.
 	if s.tracker.pendingQuery != nil && s.tracker.pendingQuery.cursor != nil && len(result.Columns) > 0 {
 		columns := make([]columnDef, len(result.Columns))
 		for i, name := range result.Columns {
 			columns[i] = columnDef{Name: name}
+			if i < len(result.ColumnTypes) {
+				columns[i].TypeCode = uint8(result.ColumnTypes[i])
+			}
 		}
 
 		s.tracker.pendingQuery.cursor.columns = columns
