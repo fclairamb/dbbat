@@ -30,9 +30,9 @@ cleanup() {
     if [ -n "$FRONT_PID" ]; then
         kill $FRONT_PID 2>/dev/null || true
     fi
-    # Kill air if running
-    if [ -n "$AIR_PID" ]; then
-        kill $AIR_PID 2>/dev/null || true
+    # Kill devloop if running
+    if [ -n "$DEVLOOP_PID" ]; then
+        kill $DEVLOOP_PID 2>/dev/null || true
     fi
     exit 0
 }
@@ -63,9 +63,11 @@ echo "  Press Ctrl+C to stop all servers"
 echo "========================================"
 echo ""
 
-# Start backend with Air (foreground)
-air &
-AIR_PID=$!
+# Start backend with devloop (build-first hot reload)
+# shellcheck source=scripts/run-backend-dev.sh
+. "$(dirname "$0")/run-backend-dev.sh"
+go run ./cmd/devloop &
+DEVLOOP_PID=$!
 
 # Wait for either process to exit
-wait $AIR_PID $FRONT_PID
+wait $DEVLOOP_PID $FRONT_PID
