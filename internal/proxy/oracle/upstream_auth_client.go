@@ -1,6 +1,7 @@
 package oracle
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -264,8 +265,9 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, err
 	resp := &upstreamAuthResponse{properties: make(map[string]string)}
 
 	var (
-		buf     []byte
-		lastRaw []byte
+		buf      []byte
+		lastRaw  []byte
+		sawBreak bool
 	)
 
 	for {
@@ -280,9 +282,26 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, err
 			slog.Int("payload_len", len(pkt.Payload)))
 
 		if pkt.Type != TNSPacketTypeData {
-			s.logger.DebugContext(s.ctx, "upstream AUTH: skipping non-Data packet",
-				slog.String("type", pkt.Type.String()),
-				slog.Int("len", len(pkt.Raw)))
+			// Oracle 12c+/23ai runs an OOB break/reset probe during AUTH when the
+			// session negotiated it (modern thin clients enable it, and dbbat
+			// relayed their Set Data Types to the upstream). As the upstream's
+			// O5LOGON *client*, dbbat must answer the break with a reset marker or
+			// the upstream stalls waiting for it — mirroring readPhase2Packet on
+			// the client-facing side. Without this, go-ora connections (which
+			// don't enable the probe) work but python-oracledb thin / SQLcl hang.
+			if isBreakMarker(pkt) {
+				sawBreak = true
+			}
+
+			if isResetMarker(pkt) && sawBreak {
+				if _, err := s.upstreamConn.Write(buildResetMarker()); err != nil {
+					return nil, nil, fmt.Errorf("send upstream reset marker: %w", err)
+				}
+
+				s.logger.DebugContext(s.ctx, "upstream AUTH: answered break with reset marker")
+
+				sawBreak = false
+			}
 
 			continue
 		}
@@ -294,7 +313,7 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, err
 		lastRaw = pkt.Raw
 		buf = append(buf, pkt.Payload[ttcDataFlagsSize:]...)
 
-		if parseAuthMessageStream(buf, resp) {
+		if parseAuthMessageStream(buf, resp, s.clientWideEncoding) {
 			return resp, lastRaw, nil
 		}
 	}
@@ -318,7 +337,7 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, err
 //
 // The function is tolerant: when it cannot decode a region it returns false
 // so the caller reads more bytes.
-func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse) bool {
+func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse, wide bool) bool {
 	pos := 0
 
 	for pos < len(buf) {
@@ -327,7 +346,7 @@ func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse) bool {
 
 		switch msgCode {
 		case 0x08:
-			if _, ok := parseAuthKVDictionary(buf[pos:], resp); !ok {
+			if _, ok := parseAuthKVDictionary(buf[pos:], resp, wide); !ok {
 				return false
 			}
 
@@ -359,16 +378,30 @@ func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse) bool {
 // The dictionary length is a TTC compressed integer, matching go-ora's
 // session.GetInt(2, bigEndian=true, compress=true). A 1-byte size prefix is
 // followed by `size` big-endian bytes encoding the count of KV pairs.
-func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse) (int, bool) {
-	dictLen, n := readCompressedInt(buf)
-	if n == 0 {
-		return 0, false
+func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse, wide bool) (int, bool) {
+	var dictLen, pos int
+
+	if wide {
+		// OCI: dictionary count is a 2-byte little-endian integer.
+		if len(buf) < 2 {
+			return 0, false
+		}
+
+		dictLen = int(binary.LittleEndian.Uint16(buf[0:2]))
+		pos = 2
+	} else {
+		var n int
+
+		dictLen, n = readCompressedInt(buf)
+		if n == 0 {
+			return 0, false
+		}
+
+		pos = n
 	}
 
-	pos := n
-
 	for i := 0; i < dictLen; i++ {
-		pair, ok := readAuthKVPair(buf[pos:])
+		pair, ok := readAuthKVPair(buf[pos:], wide)
 		if !ok {
 			return 0, false
 		}
@@ -389,8 +422,13 @@ type authKVPairResult struct {
 }
 
 // readAuthKVPair reads keyLen + keyCLR + valueLen + valueCLR + flag, mirroring
-// session.GetKeyVal in go-ora. ok=false signals the buffer is truncated.
-func readAuthKVPair(buf []byte) (authKVPairResult, bool) {
+// session.GetKeyVal in go-ora. ok=false signals the buffer is truncated. wide
+// selects the OCI fixed 4-byte little-endian length/flag encoding.
+func readAuthKVPair(buf []byte, wide bool) (authKVPairResult, bool) {
+	if wide {
+		return readAuthKVPairWide(buf)
+	}
+
 	pos := 0
 	out := authKVPairResult{}
 
@@ -435,6 +473,57 @@ func readAuthKVPair(buf []byte) (authKVPairResult, bool) {
 
 	pos += fn
 	out.Flag = flagVal
+	out.Consumed = pos
+
+	return out, true
+}
+
+// readAuthKVPairWide is the OCI (4-byte little-endian) counterpart of
+// readAuthKVPair: keyLen:4 LE + keyCLR + valueLen:4 LE + valueCLR + flag:4 LE.
+func readAuthKVPairWide(buf []byte) (authKVPairResult, bool) {
+	pos := 0
+	out := authKVPairResult{}
+
+	if pos+4 > len(buf) {
+		return authKVPairResult{}, false
+	}
+
+	keyLen := int(binary.LittleEndian.Uint32(buf[pos : pos+4]))
+	pos += 4
+
+	if keyLen > 0 {
+		k, kn := readCLR(buf[pos:])
+		if kn == 0 {
+			return authKVPairResult{}, false
+		}
+
+		out.Key = k
+		pos += kn
+	}
+
+	if pos+4 > len(buf) {
+		return authKVPairResult{}, false
+	}
+
+	vLen := int(binary.LittleEndian.Uint32(buf[pos : pos+4]))
+	pos += 4
+
+	if vLen > 0 {
+		v, vClrN := readCLR(buf[pos:])
+		if vClrN == 0 {
+			return authKVPairResult{}, false
+		}
+
+		out.Value = v
+		pos += vClrN
+	}
+
+	if pos+4 > len(buf) {
+		return authKVPairResult{}, false
+	}
+
+	out.Flag = int(binary.LittleEndian.Uint32(buf[pos : pos+4]))
+	pos += 4
 	out.Consumed = pos
 
 	return out, true

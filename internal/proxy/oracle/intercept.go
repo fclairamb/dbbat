@@ -330,6 +330,7 @@ func (s *session) persistQueryRecord() {
 		ConnectionID: s.connectionUID,
 		SQLText:      pending.cursor.sql,
 		ExecutedAt:   pending.startTime,
+		Parameters:   formatOracleBinds(pending.cursor.bindValues),
 	}
 
 	created, err := s.store.CreateQuery(s.ctx, query)
@@ -382,6 +383,7 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 			DurationMs:   &duration,
 			RowsAffected: rowsAffected,
 			Error:        queryError,
+			Parameters:   formatOracleBinds(pending.cursor.bindValues),
 		}
 
 		go func() {

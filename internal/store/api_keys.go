@@ -155,15 +155,21 @@ func (s *Store) CreateAPIKeyWithValue(ctx context.Context, userID uuid.UUID, nam
 	return apiKey, nil
 }
 
-// computeO5LogonVerifier generates and encrypts O5LOGON verifier data for an API key.
+// computeO5LogonVerifier generates and encrypts O5LOGON verifier data for an API
+// key. Both the legacy verifier-6949 (SHA-1, for go-ora and other legacy clients)
+// and the modern verifier-18453 (12c PBKDF2/HMAC-SHA512, for python-oracledb thin,
+// JDBC thin / SQLcl, and sqlplus against Oracle 12c+/23ai) are stored, each
+// encrypted with the dbbat master key; the Oracle proxy picks the one matching
+// what the connecting client negotiates.
 func (k *APIKey) computeO5LogonVerifier(plainKey string, encryptionKey []byte) error {
+	aad := crypto.APIKeyAAD(k.KeyPrefix)
+
+	// Legacy verifier-6949 (SHA-1).
 	salt, verifierKey, err := crypto.GenerateO5LogonVerifier(plainKey)
 	if err != nil {
 		return fmt.Errorf("failed to generate O5LOGON verifier: %w", err)
 	}
 
-	// Encrypt verifier key with dbbat master key
-	aad := crypto.APIKeyAAD(k.KeyPrefix)
 	encVerifier, err := crypto.Encrypt(verifierKey, encryptionKey, aad)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt O5LOGON verifier: %w", err)
@@ -171,6 +177,20 @@ func (k *APIKey) computeO5LogonVerifier(plainKey string, encryptionKey []byte) e
 
 	k.O5LogonSalt = salt
 	k.O5LogonVerifier = encVerifier
+
+	// Modern verifier-18453 (PBKDF2/HMAC-SHA512).
+	salt18453, verifier18453, err := crypto.GenerateO5LogonVerifier18453(plainKey)
+	if err != nil {
+		return fmt.Errorf("failed to generate O5LOGON verifier-18453: %w", err)
+	}
+
+	encVerifier18453, err := crypto.Encrypt(verifier18453, encryptionKey, aad)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt O5LOGON verifier-18453: %w", err)
+	}
+
+	k.O5LogonSalt18453 = salt18453
+	k.O5LogonVerifier18453 = encVerifier18453
 
 	return nil
 }

@@ -1,9 +1,107 @@
 package oracle
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 )
+
+// rewriteAuthPhase1UsernameAnchored locates the login username by anchoring on
+// the AUTH_* key/value section that follows it (the same robust approach as
+// usernameBeforeAuthKV) and splices in newUsername, updating its 1-byte CLR
+// length prefix. This is preamble-layout independent, so it handles clients
+// whose Phase 1 framing the fixed-offset parser misreads — notably
+// python-oracledb thin's verifier-18453 login, where the fixed parser read
+// user_id_len as 1 and produced a corrupt body the upstream rejects (ORA-03120).
+// Returns ok=false if the username can't be located this way.
+func rewriteAuthPhase1UsernameAnchored(body []byte, newUsername string) ([]byte, bool) {
+	authIdx := bytes.Index(body, []byte("AUTH_"))
+	if authIdx < 2 {
+		return nil, false
+	}
+
+	const maxFramingGap = 8
+
+	// Locate the username as the identifier run ending just before the first
+	// AUTH_ key (see usernameBeforeAuthKV). Works for both length-prefixed
+	// (go-ora, python-oracledb thin) and bare (SQLcl/JDBC thin) usernames.
+	end := authIdx
+
+	for gap := 0; end > 0 && !isIdentifierByte(body[end-1]); gap++ {
+		if gap >= maxFramingGap {
+			return nil, false
+		}
+
+		end--
+	}
+
+	start := end
+	for start > 0 && isIdentifierByte(body[start-1]) && end-start < 30 {
+		start--
+	}
+
+	if start == end || knownAuthKeys[strings.ToUpper(string(body[start:end]))] {
+		return nil, false
+	}
+
+	oldLen := end - start
+	newLen := byte(len(newUsername))
+
+	// A 1-byte CLR length prefix precedes the username for go-ora / python; SQLcl
+	// sends the bytes bare (length given only by user_id_len). Detect by checking
+	// whether the preceding byte equals the username length.
+	clrPrefixed := start > 0 && int(body[start-1]) == oldLen
+
+	fieldStart := start
+	if clrPrefixed {
+		fieldStart = start - 1
+	}
+
+	// The preamble also carries a user_id_len (== old username length). Both it
+	// and the CLR prefix must be rewritten or the upstream reads a stale count
+	// and overflows (ORA-03120 / ORA-03146). OCI (sqlplus) encodes it as a 4-byte
+	// little-endian field (oldLen 00 00 00) sitting tens of bytes ahead of the
+	// username; thin clients use a single byte close to it.
+	userIDLenPos := -1
+
+	if payloadUsesWideKVEncoding(body) {
+		for i := fieldStart - 4; i >= 2; i-- {
+			if body[i] == byte(oldLen) && body[i+1] == 0 && body[i+2] == 0 && body[i+3] == 0 {
+				userIDLenPos = i
+
+				break
+			}
+		}
+	} else {
+		for i := fieldStart - 1; i >= 2 && i >= fieldStart-12; i-- {
+			if body[i] == byte(oldLen) {
+				userIDLenPos = i
+
+				break
+			}
+		}
+	}
+
+	out := make([]byte, 0, len(body)+len(newUsername))
+
+	if userIDLenPos >= 0 {
+		out = append(out, body[:userIDLenPos]...)
+		out = append(out, newLen) // user_id_len
+		out = append(out, body[userIDLenPos+1:fieldStart]...)
+	} else {
+		out = append(out, body[:fieldStart]...)
+	}
+
+	if clrPrefixed {
+		out = append(out, newLen) // CLR length prefix
+	}
+
+	out = append(out, []byte(newUsername)...)
+	out = append(out, body[end:]...) // KV pairs
+
+	return out, true
+}
 
 // rewriteAuthPhase1Username takes a TTC AUTH Phase 1 body (everything after
 // the TNS frame header AND the 2-byte data-flags prefix — i.e. what would
@@ -34,6 +132,13 @@ func rewriteAuthPhase1Username(body []byte, newUsername string) ([]byte, error) 
 
 	if body[0] != byte(TTCFuncPiggyback) || body[1] != PiggybackSubAuth1 {
 		return nil, fmt.Errorf("%w: not a Phase 1 piggyback", ErrAuthPhase1Rewrite)
+	}
+
+	// Preferred: anchor on the AUTH_* keys (handles all client preambles,
+	// including python-oracledb thin's 18453 login). Fall back to the
+	// fixed-offset splice below only if the anchor can't find the username.
+	if out, ok := rewriteAuthPhase1UsernameAnchored(body, newUsername); ok {
+		return out, nil
 	}
 
 	rest := body[headerLen:]

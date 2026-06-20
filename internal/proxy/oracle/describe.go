@@ -51,6 +51,26 @@ type columnDesc struct {
 // off the end, or a decoded type code is not a known TNSType (a strong signal of
 // a misaligned parse). A clean parse therefore yields trustworthy names+types.
 func parseColumnDescribes(ttcPayload []byte) []columnDesc {
+	// The per-column record has version-dependent trailing fields. Classic
+	// servers / lower-TTCVersion clients (go-ora, python-oracledb thin) end the
+	// record after two trailing ints; modern ones (Oracle 23ai negotiating a high
+	// TTCVersion with SQLcl/ojdbc 26.x) append data-use-case domain DLCs, an
+	// annotations block, and three further ints. Try the classic layout first
+	// (so thin clients never regress); if it misaligns — a record runs off the
+	// end or yields an unknown TTC type — retry with the modern layout.
+	if cols := parseColumnDescribesMode(ttcPayload, false); cols != nil {
+		return cols
+	}
+
+	return parseColumnDescribesMode(ttcPayload, true)
+}
+
+// parseColumnDescribesMode decodes the column records using either the classic
+// (modern=false) or modern (modern=true) per-record trailing layout. Returns nil
+// — so the caller falls back / retries — whenever the payload is not a describe,
+// the count is implausible, a record runs off the end, or a decoded type code is
+// not a known TNSType (a strong signal of a misaligned parse).
+func parseColumnDescribesMode(ttcPayload []byte, modern bool) []columnDesc {
 	count, start, ok := describeColumnLayout(ttcPayload)
 	if !ok || count <= 0 || count > 1000 {
 		return nil
@@ -60,7 +80,7 @@ func parseColumnDescribes(ttcPayload []byte) []columnDesc {
 	cols := make([]columnDesc, 0, count)
 
 	for range count {
-		name, typ := parseColumnDescribe(c)
+		name, typ := parseColumnDescribe(c, modern)
 		if c.err || !isKnownTNSType(typ) {
 			return nil
 		}
@@ -200,7 +220,11 @@ func (c *dcursor) cint() int {
 // CLR-encoded bytes (truncated to that length). Returns nil for an empty field.
 func (c *dcursor) dlc() []byte {
 	length := c.cint()
-	if c.err || length == 0 {
+	if c.err || length <= 0 {
+		// A negative length means the parse has drifted (e.g. a NUMBER scale's
+		// -127 sentinel was read where a length was expected). Treat it as an
+		// empty/invalid field rather than slicing with a negative bound, which
+		// would panic. parseColumnDescribes validates alignment and bails out.
 		return nil
 	}
 
@@ -222,10 +246,11 @@ func (c *dcursor) dlc() []byte {
 
 // parseColumnDescribe parses one column-definition record (ParameterInfo.load)
 // at the cursor, advancing past it, and returns the column name and TTC type
-// code. The field order is fixed up to the name; the trailing fields are the
-// modern-server (TTCVersion ≥ 20) layout — domain schema/name plus an
-// annotations count — which sets where the next record starts.
-func parseColumnDescribe(c *dcursor) (string, int) {
+// code. The field order is fixed up to the name + the two trailing ints (the
+// classic layout). When modern is true, the additional TTCVersion ≥ 17/20 fields
+// are consumed too — data-use-case domain schema/name, an annotations block, and
+// three further ints — which sets where the next record starts.
+func parseColumnDescribe(c *dcursor, modern bool) (string, int) {
 	dataType := c.byte()
 	c.byte() // flag
 	c.byte() // precision
@@ -252,12 +277,46 @@ func parseColumnDescribe(c *dcursor) (string, int) {
 	c.dlc()         // schema name
 	c.dlc()         // type name
 
-	// Trailing version ints (TTCVersion ≥ 3 and ≥ 6). Newer servers append
-	// domain-name and annotation fields here; the observed Oracle Free server
-	// does not, and the record ends after these two — see parseColumnDescribes,
-	// which validates alignment and bails out rather than trust a bad parse.
+	// Trailing version ints (TTCVersion ≥ 3 and ≥ 6). The classic layout ends
+	// here; go-ora / python-oracledb thin negotiate this with the server.
 	c.cint()
 	c.cint()
 
+	if modern {
+		parseColumnDescribeModernTail(c)
+	}
+
 	return string(name), dataType
+}
+
+// parseColumnDescribeModernTail consumes the extra per-column fields a modern
+// Oracle server (23ai negotiating a high TTCVersion with SQLcl / ojdbc 26.x)
+// appends after the classic two trailing ints: the TTCVersion ≥ 17 data-use-case
+// domain schema and name (DLCs), the ≥ 20 annotations count and — when non-zero
+// — the annotation key/value block (mirrors go-ora ParameterInfo.load), plus
+// three further trailing ints that the 23ai server emits but go-ora v2.9.0 does
+// not yet model (observed all-zero for non-domain columns). Without consuming
+// these the next column record would start mid-field and misalign.
+func parseColumnDescribeModernTail(c *dcursor) {
+	c.dlc() // data-use-case domain schema (TTCVersion ≥ 17)
+	c.dlc() // data-use-case domain name (TTCVersion ≥ 17)
+
+	if numAnnotations := c.cint(); numAnnotations > 0 { // TTCVersion ≥ 20
+		c.byte()
+		numAnnotations = c.cint() // re-read count
+		c.byte()
+
+		for i := 0; i < numAnnotations && !c.err; i++ {
+			c.dlc()  // annotation key
+			c.dlc()  // annotation value
+			c.cint() // annotation flag
+		}
+
+		c.cint() // trailing length
+	}
+
+	// Three further version ints the 23ai server appends.
+	c.cint()
+	c.cint()
+	c.cint()
 }

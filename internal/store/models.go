@@ -409,6 +409,10 @@ type APIKey struct {
 	RevokedBy       *uuid.UUID `bun:"revoked_by,type:uuid" json:"revoked_by"`
 	O5LogonSalt     []byte     `bun:"o5logon_salt" json:"-"`
 	O5LogonVerifier []byte     `bun:"o5logon_verifier" json:"-"` // encrypted with dbbat master key
+	// Modern verifier-18453 (12c PBKDF2/HMAC-SHA512) O5LOGON material, for
+	// python-oracledb thin / JDBC thin / sqlplus against Oracle 12c+/23ai.
+	O5LogonSalt18453     []byte `bun:"o5logon_salt_18453" json:"-"`
+	O5LogonVerifier18453 []byte `bun:"o5logon_verifier_18453" json:"-"` // encrypted with dbbat master key
 }
 
 // IsExpired returns true if the API key has expired
