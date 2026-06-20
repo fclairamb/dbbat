@@ -72,38 +72,7 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 	// until it sees AUTH Phase 1, which it returns (unforwarded) to the caller.
 	pumpDone := make(chan error, 1)
 
-	go func() {
-		for {
-			pkt, err := readTNSPacket(upstream)
-			if err != nil {
-				pumpDone <- err
-
-				return
-			}
-
-			// Set Protocol responses carry ServerCompileTimeCaps; caps[4]&0x20
-			// enables the customHash (PBKDF2) combined-key derivation. Record it
-			// so authenticateClient can switch the O5LOGON server to that mode.
-			// Record the upstream's customHash capability and forward it to the
-			// client unchanged, so a modern client negotiates customHash and dbbat
-			// answers with a verifier-18453 challenge (built from the API key's
-			// stored 18453 verifier). Legacy clients (go-ora) read the verifier
-			// type from the challenge's AUTH_VFR_DATA flag and adapt.
-			if observeCustomHashFlag(pkt.Raw) {
-				s.upstreamCustomHash = true
-			}
-
-			s.logger.DebugContext(s.ctx, "pre-auth relay: upstream→client",
-				slog.String("type", pkt.Type.String()),
-				slog.Int("len", len(pkt.Raw)))
-
-			if _, err := s.clientConn.Write(pkt.Raw); err != nil {
-				pumpDone <- err
-
-				return
-			}
-		}
-	}()
+	go s.pumpPreAuthUpstream(upstream, pumpDone)
 
 	// stopPump hands the upstream socket back to the caller for the O5LOGON
 	// handover. Clients pipeline the pre-auth sequence — they send AUTH Phase 1
@@ -156,26 +125,12 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 				slog.Int("auth1_len", len(auth1Payload)))
 			stopPump()
 
-			// Replay the wrapped Set Protocol / Set Data Types as classic standalone
-			// messages so the upstream advances to the post-Data-Types state and
-			// returns each reply for the client to consume.
-			for _, msg := range prefixMsgs {
-				if _, err := upstream.Write(encodeTNSDataV315(msg)); err != nil {
-					_ = upstream.Close()
-
-					return nil, nil, fmt.Errorf("forward de-pipelined prefix to upstream: %w", err)
-				}
-
-				if err := drainUpstreamToClient(s, upstream); err != nil {
-					_ = upstream.Close()
-
-					return nil, nil, err
-				}
+			authPkt, err := s.replayDepipelinedPrefix(upstream, prefixMsgs, auth1Payload)
+			if err != nil {
+				return nil, nil, err
 			}
 
-			raw := encodeTNSDataV315(auth1Payload)
-
-			return &TNSPacket{Type: TNSPacketTypeData, Payload: auth1Payload, Raw: raw}, upstream, nil
+			return authPkt, upstream, nil
 		}
 
 		s.logger.DebugContext(s.ctx, "pre-auth relay: client→upstream",
@@ -189,6 +144,67 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 			return nil, nil, fmt.Errorf("forward client packet to upstream: %w", err)
 		}
 	}
+}
+
+// pumpPreAuthUpstream continuously forwards upstream→client TNS packets during
+// the pre-auth relay, reporting the first read/write error (including the
+// drain-grace deadline that stopPump arms) on pumpDone. See
+// relayPreAuthNegotiation for why the relay is a concurrent pump, not lockstep.
+func (s *session) pumpPreAuthUpstream(upstream net.Conn, pumpDone chan<- error) {
+	for {
+		pkt, err := readTNSPacket(upstream)
+		if err != nil {
+			pumpDone <- err
+
+			return
+		}
+
+		// Set Protocol responses carry ServerCompileTimeCaps; caps[4]&0x20
+		// enables the customHash (PBKDF2) combined-key derivation. Record the
+		// upstream's customHash capability and forward it to the client
+		// unchanged, so a modern client negotiates customHash and dbbat answers
+		// with a verifier-18453 challenge (built from the API key's stored 18453
+		// verifier). Legacy clients (go-ora) read the verifier type from the
+		// challenge's AUTH_VFR_DATA flag and adapt.
+		if observeCustomHashFlag(pkt.Raw) {
+			s.upstreamCustomHash = true
+		}
+
+		s.logger.DebugContext(s.ctx, "pre-auth relay: upstream→client",
+			slog.String("type", pkt.Type.String()),
+			slog.Int("len", len(pkt.Raw)))
+
+		if _, err := s.clientConn.Write(pkt.Raw); err != nil {
+			pumpDone <- err
+
+			return
+		}
+	}
+}
+
+// replayDepipelinedPrefix replays a fast-auth packet's wrapped Set Protocol /
+// Set Data Types messages to the upstream as classic standalone messages (so its
+// TTC session advances to the post-Data-Types state O5LOGON expects), draining
+// each reply back to the client, then frames the carved-out AUTH Phase 1 for the
+// caller. On any write/drain failure it closes the upstream and returns the error.
+func (s *session) replayDepipelinedPrefix(upstream net.Conn, prefixMsgs [][]byte, auth1Payload []byte) (*TNSPacket, error) {
+	for _, msg := range prefixMsgs {
+		if _, err := upstream.Write(encodeTNSDataV315(msg)); err != nil {
+			_ = upstream.Close()
+
+			return nil, fmt.Errorf("forward de-pipelined prefix to upstream: %w", err)
+		}
+
+		if err := drainUpstreamToClient(s, upstream); err != nil {
+			_ = upstream.Close()
+
+			return nil, err
+		}
+	}
+
+	raw := encodeTNSDataV315(auth1Payload)
+
+	return &TNSPacket{Type: TNSPacketTypeData, Payload: auth1Payload, Raw: raw}, nil
 }
 
 // TTC op signatures (func, sub) for the messages a fast-auth packet bundles.
@@ -229,7 +245,7 @@ const (
 // FAST_AUTH wire layout (after the 2-byte data flags):
 //
 //	[0x22][ver][convChars][0]  [ProtocolMessage]  [charset:2][csFlag:1][ncharset:2][ttcVer:1]  [DataTypesMessage]  [AuthMessage]
-func splitBundledAuthPhase1(payload []byte) (prefixMsgs [][]byte, auth1 []byte, ok bool) {
+func splitBundledAuthPhase1(payload []byte) ([][]byte, []byte, bool) {
 	protoStart := ttcDataFlagsSize + fastAuthHeaderLen
 	if len(payload) < protoStart+2 {
 		return nil, nil, false
@@ -255,7 +271,7 @@ func splitBundledAuthPhase1(payload []byte) (prefixMsgs [][]byte, auth1 []byte, 
 		return nil, nil, false
 	}
 
-	auth1 = make([]byte, 0, ttcDataFlagsSize+len(payload)-auth1Off)
+	auth1 := make([]byte, 0, ttcDataFlagsSize+len(payload)-auth1Off)
 	auth1 = append(auth1, 0x00, 0x00)
 	auth1 = append(auth1, payload[auth1Off:]...)
 
@@ -263,8 +279,8 @@ func splitBundledAuthPhase1(payload []byte) (prefixMsgs [][]byte, auth1 []byte, 
 		return nil, nil, false
 	}
 
-	prefixMsgs = [][]byte{
-		framePreAuthMsg(payload[protoStart:protoEnd]),  // Set Protocol
+	prefixMsgs := [][]byte{
+		framePreAuthMsg(payload[protoStart:protoEnd]),   // Set Protocol
 		framePreAuthMsg(payload[dataTypesOff:auth1Off]), // Set Data Types
 	}
 
@@ -427,7 +443,6 @@ func observeCustomHashFlag(raw []byte) bool {
 
 	return raw[capsOff]&0x20 != 0
 }
-
 
 // dialUpstreamWithRedirect opens a TCP connection to the upstream Oracle, sends the
 // initial Connect packet, and follows any Redirect packets (for Oracle RAC / SCAN

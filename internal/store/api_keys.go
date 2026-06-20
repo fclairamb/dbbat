@@ -175,9 +175,6 @@ func (k *APIKey) computeO5LogonVerifier(plainKey string, encryptionKey []byte) e
 		return fmt.Errorf("failed to encrypt O5LOGON verifier: %w", err)
 	}
 
-	k.O5LogonSalt = salt
-	k.O5LogonVerifier = encVerifier
-
 	// Modern verifier-18453 (PBKDF2/HMAC-SHA512).
 	salt18453, verifier18453, err := crypto.GenerateO5LogonVerifier18453(plainKey)
 	if err != nil {
@@ -189,8 +186,15 @@ func (k *APIKey) computeO5LogonVerifier(plainKey string, encryptionKey []byte) e
 		return fmt.Errorf("failed to encrypt O5LOGON verifier-18453: %w", err)
 	}
 
-	k.O5LogonSalt18453 = salt18453
-	k.O5LogonVerifier18453 = encVerifier18453
+	// Both verifier types live together in the protocol-specific jsonb column.
+	k.ProtocolData = &ProtocolData{
+		Oracle: &OracleAPIKeyData{
+			O5LogonSalt6949:      salt,
+			O5LogonVerifier6949:  encVerifier,
+			O5LogonSalt18453:     salt18453,
+			O5LogonVerifier18453: encVerifier18453,
+		},
+	}
 
 	return nil
 }

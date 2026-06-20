@@ -16,32 +16,8 @@ import (
 // user_id_len as 1 and produced a corrupt body the upstream rejects (ORA-03120).
 // Returns ok=false if the username can't be located this way.
 func rewriteAuthPhase1UsernameAnchored(body []byte, newUsername string) ([]byte, bool) {
-	authIdx := bytes.Index(body, []byte("AUTH_"))
-	if authIdx < 2 {
-		return nil, false
-	}
-
-	const maxFramingGap = 8
-
-	// Locate the username as the identifier run ending just before the first
-	// AUTH_ key (see usernameBeforeAuthKV). Works for both length-prefixed
-	// (go-ora, python-oracledb thin) and bare (SQLcl/JDBC thin) usernames.
-	end := authIdx
-
-	for gap := 0; end > 0 && !isIdentifierByte(body[end-1]); gap++ {
-		if gap >= maxFramingGap {
-			return nil, false
-		}
-
-		end--
-	}
-
-	start := end
-	for start > 0 && isIdentifierByte(body[start-1]) && end-start < 30 {
-		start--
-	}
-
-	if start == end || knownAuthKeys[strings.ToUpper(string(body[start:end]))] {
+	start, end, ok := locateAnchoredUsername(body)
+	if !ok {
 		return nil, false
 	}
 
@@ -58,30 +34,7 @@ func rewriteAuthPhase1UsernameAnchored(body []byte, newUsername string) ([]byte,
 		fieldStart = start - 1
 	}
 
-	// The preamble also carries a user_id_len (== old username length). Both it
-	// and the CLR prefix must be rewritten or the upstream reads a stale count
-	// and overflows (ORA-03120 / ORA-03146). OCI (sqlplus) encodes it as a 4-byte
-	// little-endian field (oldLen 00 00 00) sitting tens of bytes ahead of the
-	// username; thin clients use a single byte close to it.
-	userIDLenPos := -1
-
-	if payloadUsesWideKVEncoding(body) {
-		for i := fieldStart - 4; i >= 2; i-- {
-			if body[i] == byte(oldLen) && body[i+1] == 0 && body[i+2] == 0 && body[i+3] == 0 {
-				userIDLenPos = i
-
-				break
-			}
-		}
-	} else {
-		for i := fieldStart - 1; i >= 2 && i >= fieldStart-12; i-- {
-			if body[i] == byte(oldLen) {
-				userIDLenPos = i
-
-				break
-			}
-		}
-	}
+	userIDLenPos := findUserIDLenPos(body, fieldStart, oldLen)
 
 	out := make([]byte, 0, len(body)+len(newUsername))
 
@@ -101,6 +54,67 @@ func rewriteAuthPhase1UsernameAnchored(body []byte, newUsername string) ([]byte,
 	out = append(out, body[end:]...) // KV pairs
 
 	return out, true
+}
+
+// locateAnchoredUsername returns the [start, end) byte range of the login
+// username in a Phase 1 body by anchoring on the first AUTH_* key that follows
+// it (see usernameBeforeAuthKV). Works for both length-prefixed (go-ora,
+// python-oracledb thin) and bare (SQLcl/JDBC thin) usernames. ok=false if the
+// run can't be located or resolves to a well-known AUTH key.
+func locateAnchoredUsername(body []byte) (int, int, bool) {
+	authIdx := bytes.Index(body, []byte("AUTH_"))
+	if authIdx < 2 {
+		return 0, 0, false
+	}
+
+	const maxFramingGap = 8
+
+	end := authIdx
+
+	for gap := 0; end > 0 && !isIdentifierByte(body[end-1]); gap++ {
+		if gap >= maxFramingGap {
+			return 0, 0, false
+		}
+
+		end--
+	}
+
+	start := end
+	for start > 0 && isIdentifierByte(body[start-1]) && end-start < 30 {
+		start--
+	}
+
+	if start == end || knownAuthKeys[strings.ToUpper(string(body[start:end]))] {
+		return 0, 0, false
+	}
+
+	return start, end, true
+}
+
+// findUserIDLenPos returns the offset of the preamble user_id_len field (== the
+// old username length), or -1 if not found. Both it and the CLR prefix must be
+// rewritten or the upstream reads a stale count and overflows (ORA-03120 /
+// ORA-03146). OCI (sqlplus) encodes it as a 4-byte little-endian field
+// (oldLen 00 00 00) sitting tens of bytes ahead of the username; thin clients
+// use a single byte close to it.
+func findUserIDLenPos(body []byte, fieldStart, oldLen int) int {
+	if payloadUsesWideKVEncoding(body) {
+		for i := fieldStart - 4; i >= 2; i-- {
+			if body[i] == byte(oldLen) && body[i+1] == 0 && body[i+2] == 0 && body[i+3] == 0 {
+				return i
+			}
+		}
+
+		return -1
+	}
+
+	for i := fieldStart - 1; i >= 2 && i >= fieldStart-12; i-- {
+		if body[i] == byte(oldLen) {
+			return i
+		}
+	}
+
+	return -1
 }
 
 // rewriteAuthPhase1Username takes a TTC AUTH Phase 1 body (everything after

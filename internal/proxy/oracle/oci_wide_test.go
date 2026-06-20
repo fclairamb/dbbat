@@ -10,6 +10,8 @@ import (
 // before the 1-byte CLR length, while thin clients use the compressed form
 // (01 0d). Fixtures are the byte run around AUTH_TERMINAL captured from each.
 func TestPayloadUsesWideKVEncoding(t *testing.T) {
+	t.Parallel()
+
 	wide := append([]byte{0x54, 0x0d, 0x00, 0x00, 0x00, 0x0d}, []byte("AUTH_TERMINAL")...)
 	if !payloadUsesWideKVEncoding(wide) {
 		t.Fatalf("expected wide encoding to be detected")
@@ -25,6 +27,8 @@ func TestPayloadUsesWideKVEncoding(t *testing.T) {
 // func 0x08, a 2-byte little-endian pair count, and 4-byte little-endian key
 // lengths — the shape sqlplus parses (a compressed challenge makes it abort).
 func TestBuildAuthChallengeWide(t *testing.T) {
+	t.Parallel()
+
 	c := buildAuthChallenge("AABB", "CCDD", "EEFF", 4096, 3, VerifierType18453, true)
 
 	if c[0] != 0x20 || c[1] != 0x00 {
@@ -57,7 +61,10 @@ func TestBuildAuthChallengeWide(t *testing.T) {
 // writes AUTH_SESSKEY/AUTH_PASSWORD with 4-byte lengths, and parseAuthPhase2
 // must recover their values via the wide finder.
 func TestParseAuthPhase2Wide(t *testing.T) {
-	body := []byte{0x00, 0x00, byte(TTCFuncPiggyback), PiggybackSubAuth2}
+	t.Parallel()
+
+	body := make([]byte, 0, 64)
+	body = append(body, 0x00, 0x00, byte(TTCFuncPiggyback), PiggybackSubAuth2)
 	// A wide preamble byte run so payloadUsesWideKVEncoding trips before the keys.
 	body = append(body, 0x09, 0x00, 0x00, 0x00, 0x09)
 	body = append(body, []byte("ORAUSERXX")...)

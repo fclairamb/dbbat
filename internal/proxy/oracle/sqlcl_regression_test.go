@@ -14,6 +14,8 @@ import (
 // 26.1.2 against Oracle 23ai, taken as the TTC payload (after the 2-byte data
 // flags, starting at the 0x11 func code).
 func TestDecodeExecSQL_SQLclLowercase(t *testing.T) {
+	t.Parallel()
+
 	ttc := mustHex(t, "116910000101010101035e11000280210001012a01010d000004ffffffff0132047fffffff00000000000000000000000100000000000000000000000000000073656c656374202773716c636c2d6f6b27206173206d2c20372a3620617320612066726f6d206475616c0101000000000000010100028000000000")
 
 	res, err := decodeExecSQL(ttc)
@@ -38,6 +40,8 @@ const modernSQLclDescribeFixture = "10173d20afa10f9cb3a32fc3f5f88e89224b787e0614
 // fix: a misaligned modern describe must never panic (`data[:-127]` once crashed
 // the whole proxy process).
 func TestDecodeQueryResultV2_ModernDescribeNoPanic(t *testing.T) {
+	t.Parallel()
+
 	_ = decodeQueryResultV2(mustHex(t, modernSQLclDescribeFixture))
 }
 
@@ -46,6 +50,8 @@ func TestDecodeQueryResultV2_ModernDescribeNoPanic(t *testing.T) {
 // parseColumnDescribes bailed out and SQLcl SELECTs captured no columns (and
 // therefore no rows). Expects M (CHAR/96) and A (NUMBER/2).
 func TestDecodeQueryResultV2_ModernDescribeColumns(t *testing.T) {
+	t.Parallel()
+
 	res := decodeQueryResultV2(mustHex(t, modernSQLclDescribeFixture))
 	if res == nil {
 		t.Fatal("decodeQueryResultV2 returned nil")
@@ -85,6 +91,8 @@ const modernSQLclRowFixture = "10172a3e2cd14bedc60281caf2ab09f03cc0787e061417061
 // value (length prefix 0x08) is captured as a row rather than being swallowed by
 // the end-of-rows-footer check. Expects one row [sqlcl-ok, 42].
 func TestDecodeQueryResultV2_ModernDescribeRows(t *testing.T) {
+	t.Parallel()
+
 	res := decodeQueryResultV2(mustHex(t, modernSQLclRowFixture))
 	if res == nil {
 		t.Fatal("decodeQueryResultV2 returned nil")

@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	o5LogonSaltLength        = 10
-	o5LogonVerifierKeyLength = 24     // SHA-1 (20 bytes) zero-padded to 24
-	o5LogonSessionKeyLength  = 48     // 48 bytes needed for non-customHash key derivation (XOR bytes 16-39)
+	o5LogonSaltLength            = 10
+	o5LogonVerifierKeyLength     = 24 // SHA-1 (20 bytes) zero-padded to 24
+	o5LogonSessionKeyLength      = 48 // 48 bytes needed for non-customHash key derivation (XOR bytes 16-39)
 	o5LogonSessionKey18453Length = 32 // verifier-18453 session key (AES-256), matches Oracle 12c+/23ai
 
 	o5LogonVerifierType      = "6949" // SHA-1 based verifier (legacy, used in value suffix)

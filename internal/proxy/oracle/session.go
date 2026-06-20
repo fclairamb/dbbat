@@ -629,12 +629,13 @@ func (s *session) loadO5LogonVerifier(userID uuid.UUID) (*o5LogonVerifierData, e
 	}
 
 	for i := range keys {
-		if len(keys[i].O5LogonSalt) == 0 || len(keys[i].O5LogonVerifier) == 0 {
+		oracleData := keys[i].OracleData()
+		if oracleData == nil || len(oracleData.O5LogonSalt6949) == 0 || len(oracleData.O5LogonVerifier6949) == 0 {
 			continue
 		}
 
 		// Decrypt the verifier with dbbat master key
-		decrypted, err := decryptO5LogonVerifier(keys[i].O5LogonVerifier, s.encryptionKey, keys[i].KeyPrefix)
+		decrypted, err := decryptO5LogonVerifier(oracleData.O5LogonVerifier6949, s.encryptionKey, keys[i].KeyPrefix)
 		if err != nil {
 			s.logger.WarnContext(s.ctx, "failed to decrypt O5LOGON verifier",
 				slog.String("key_prefix", keys[i].KeyPrefix),
@@ -644,19 +645,19 @@ func (s *session) loadO5LogonVerifier(userID uuid.UUID) (*o5LogonVerifierData, e
 		}
 
 		data := &o5LogonVerifierData{
-			O5LogonSalt:       keys[i].O5LogonSalt,
+			O5LogonSalt:       oracleData.O5LogonSalt6949,
 			decryptedVerifier: decrypted,
 			apiKeyID:          keys[i].ID,
 		}
 
 		// Also decrypt the modern verifier-18453 material if present, so the
 		// proxy can serve customHash (Oracle 12c+/23ai) clients.
-		if len(keys[i].O5LogonSalt18453) > 0 && len(keys[i].O5LogonVerifier18453) > 0 {
-			if v18453, err := decryptO5LogonVerifier(keys[i].O5LogonVerifier18453, s.encryptionKey, keys[i].KeyPrefix); err != nil {
+		if len(oracleData.O5LogonSalt18453) > 0 && len(oracleData.O5LogonVerifier18453) > 0 {
+			if v18453, err := decryptO5LogonVerifier(oracleData.O5LogonVerifier18453, s.encryptionKey, keys[i].KeyPrefix); err != nil {
 				s.logger.WarnContext(s.ctx, "failed to decrypt O5LOGON verifier-18453",
 					slog.String("key_prefix", keys[i].KeyPrefix), slog.Any("error", err))
 			} else {
-				data.salt18453 = keys[i].O5LogonSalt18453
+				data.salt18453 = oracleData.O5LogonSalt18453
 				data.decryptedVerifier18453 = v18453
 			}
 		}
@@ -735,13 +736,13 @@ func (s *session) clientToUpstream() error {
 // Query interception is best-effort observability: a malformed or unexpected
 // TTC layout must never crash the proxy or break the connection. Any panic in
 // the decode path is recovered here and the packet is forwarded unchanged.
-func (s *session) interceptClientMessage(pkt *TNSPacket) (blocked bool) {
+func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 	defer func() {
 		if r := recover(); r != nil {
+			// A recovered panic leaves the function returning the zero value
+			// (false) — i.e. don't block the message.
 			s.logger.WarnContext(s.ctx, "recovered from panic intercepting client message",
 				slog.Any("panic", r))
-
-			blocked = false
 		}
 	}()
 

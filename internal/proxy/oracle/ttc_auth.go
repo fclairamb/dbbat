@@ -9,13 +9,13 @@ import (
 
 // TTC AUTH key names used in Oracle authentication messages.
 const (
-	authKeyUsername        = "AUTH_TERMINAL"
-	authKeySessKey         = "AUTH_SESSKEY"
-	authKeyVfrData         = "AUTH_VFR_DATA"
-	authKeyPassword        = "AUTH_PASSWORD"
-	authKeyPbkdf2CskSalt   = "AUTH_PBKDF2_CSK_SALT"
-	authKeyPbkdf2VgenCount = "AUTH_PBKDF2_VGEN_COUNT"
-	authKeyPbkdf2SderCount = "AUTH_PBKDF2_SDER_COUNT"
+	authKeyUsername           = "AUTH_TERMINAL"
+	authKeySessKey            = "AUTH_SESSKEY"
+	authKeyVfrData            = "AUTH_VFR_DATA"
+	authKeyPassword           = "AUTH_PASSWORD"
+	authKeyPbkdf2CskSalt      = "AUTH_PBKDF2_CSK_SALT"
+	authKeyPbkdf2VgenCount    = "AUTH_PBKDF2_VGEN_COUNT"
+	authKeyPbkdf2SderCount    = "AUTH_PBKDF2_SDER_COUNT"
 	authKeyGloballyUniqueDBID = "AUTH_GLOBALLY_UNIQUE_DBID"
 )
 
@@ -186,26 +186,6 @@ func isIdentifierByte(b byte) bool {
 	default:
 		return false
 	}
-}
-
-// isIdentifierASCII reports whether b is a non-empty run of Oracle identifier
-// characters (letters, digits, and _ $ #), used to distinguish a real username
-// from framing bytes when scanning.
-func isIdentifierASCII(b []byte) bool {
-	if len(b) == 0 {
-		return false
-	}
-
-	for _, c := range b {
-		switch {
-		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9':
-		case c == '_' || c == '$' || c == '#':
-		default:
-			return false
-		}
-	}
-
-	return true
 }
 
 // readUsernameAtOffset returns the next userIDLen bytes as a username if they
