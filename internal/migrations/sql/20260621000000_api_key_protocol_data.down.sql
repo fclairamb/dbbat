@@ -1,6 +1,7 @@
 -- Restore the dedicated verifier-6949 columns and migrate the bytes back out of
--- protocol_data. verifier-18453 material (jsonb-only) is intentionally dropped on
--- rollback — it never had dedicated columns.
+-- protocol_data, reversing to the canonical pre-state (the schema on main). The
+-- verifier-18453 columns are intentionally NOT recreated — no retained migration
+-- defines them — so any verifier-18453 material is dropped on rollback.
 ALTER TABLE api_keys ADD COLUMN o5logon_salt BYTEA;
 
 --bun:split
