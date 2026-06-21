@@ -13,9 +13,11 @@ import (
 )
 
 const (
-	o5LogonSaltLength        = 10
-	o5LogonVerifierKeyLength = 24     // SHA-1 (20 bytes) zero-padded to 24
-	o5LogonSessionKeyLength  = 48     // 48 bytes needed for non-customHash key derivation (XOR bytes 16-39)
+	o5LogonSaltLength            = 10
+	o5LogonVerifierKeyLength     = 24 // SHA-1 (20 bytes) zero-padded to 24
+	o5LogonSessionKeyLength      = 48 // 48 bytes needed for non-customHash key derivation (XOR bytes 16-39)
+	o5LogonSessionKey18453Length = 32 // verifier-18453 session key (AES-256), matches Oracle 12c+/23ai
+
 	o5LogonVerifierType      = "6949" // SHA-1 based verifier (legacy, used in value suffix)
 	o5LogonVerifierTypeNum   = 6949   // Verifier type sent as KV pair flag
 	o5LogonPasswordPrefixLen = 16     // Random prefix prepended to password by client
@@ -65,6 +67,12 @@ type O5LogonServer struct {
 	// the AES key the client expects for AUTH_SVR_RESPONSE in the AUTH OK
 	// forwarded back.
 	CombinedKey []byte
+
+	// verifierType selects the O5LOGON verifier: VerifierType6949 (SHA-1, legacy,
+	// AES-192) or VerifierType18453 (12c PBKDF2/HMAC-SHA512, AES-256). 18453 is
+	// what modern thin clients require on Oracle 12c+/23ai; the verifierKey/salt
+	// then hold the 18453 material and challenges advertise type 18453.
+	verifierType int
 }
 
 // GenerateO5LogonVerifier creates salt + verifier key from a plaintext password.
@@ -80,14 +88,29 @@ func deriveVerifierKey(password string, salt []byte) []byte {
 	return dbbcrypto.DeriveO5LogonVerifierKey(password, salt)
 }
 
-// NewO5LogonServer creates a server from stored verifier data.
+// NewO5LogonServer creates a server from stored verifier data (legacy 6949).
 func NewO5LogonServer(salt, verifierKey []byte) *O5LogonServer {
 	return &O5LogonServer{
 		salt:            salt,
 		verifierKey:     verifierKey,
+		verifierType:    VerifierType6949,
 		pbkdf2VgenCount: o5LogonDefaultPbkdf2VgenCount,
 		pbkdf2SderCount: o5LogonDefaultPbkdf2SderCount,
 	}
+}
+
+// UseVerifier18453 switches the server to the modern verifier-18453 (12c PBKDF2 /
+// HMAC-SHA512) using the supplied 16-byte salt and 32-byte verifier key. This
+// implies customHash mode (the challenge carries AUTH_PBKDF2_* fields and the
+// combined key uses the PBKDF2 derivation). Use it when the client negotiates
+// customHash (Oracle 12c+/23ai) so python-oracledb thin, JDBC thin / SQLcl, and
+// sqlplus — which reject the legacy 6949 challenge — can authenticate.
+func (s *O5LogonServer) UseVerifier18453(salt, verifierKey []byte) {
+	s.salt = salt
+	s.verifierKey = verifierKey
+	s.verifierType = VerifierType18453
+	s.customHash = true
+	s.pbkdf2VgenCount = dbbcrypto.O5LogonPbkdf2VgenCount
 }
 
 // EnableCustomHash switches the server into customHash mode. GenerateChallenge
@@ -127,8 +150,15 @@ func (s *O5LogonServer) PBKDF2SderCount() int { return s.pbkdf2SderCount }
 // via PBKDF2ChkSalt) so the caller can include the matching KV fields in the
 // Phase 1 challenge sent on the wire.
 func (s *O5LogonServer) GenerateChallenge() (string, string, error) {
-	// Generate random server session key
-	s.serverSessionKey = make([]byte, o5LogonSessionKeyLength)
+	// Generate random server session key. verifier-18453 uses a 32-byte key
+	// (AES-256, matching what real Oracle 12c+/23ai emits); legacy 6949 uses 48
+	// bytes (its MD5/XOR derivation reads bytes 16-39).
+	sessKeyLen := o5LogonSessionKeyLength
+	if s.verifierType == VerifierType18453 {
+		sessKeyLen = o5LogonSessionKey18453Length
+	}
+
+	s.serverSessionKey = make([]byte, sessKeyLen)
 	if _, err := rand.Read(s.serverSessionKey); err != nil {
 		return "", "", fmt.Errorf("failed to generate server session key: %w", err)
 	}
@@ -140,23 +170,37 @@ func (s *O5LogonServer) GenerateChallenge() (string, string, error) {
 		}
 	}
 
-	// Derive encryption key from verifier key
-	encKey := deriveAESKey(s.verifierKey)
+	// Encrypt the server session key. verifier-18453 uses the 32-byte verifier
+	// key directly with AES-256-CBC (zero IV, pad block truncated); legacy 6949
+	// derives an AES-192 key from the 24-byte verifier.
+	var (
+		encrypted []byte
+		err       error
+	)
 
-	// Encrypt server session key with AES-192-CBC (truncated to original length)
-	encrypted, err := aes192CBCEncryptTruncated(encKey, s.serverSessionKey)
+	if s.verifierType == VerifierType18453 {
+		encrypted, err = aesCBCEncryptZeroIV(s.verifierKey, s.serverSessionKey, false)
+	} else {
+		encrypted, err = aes192CBCEncryptTruncated(deriveAESKey(s.verifierKey), s.serverSessionKey)
+	}
+
 	if err != nil {
 		return "", "", fmt.Errorf("failed to encrypt server session key: %w", err)
 	}
 
 	encSessKey := strings.ToUpper(hex.EncodeToString(encrypted))
 
-	// AUTH_VFR_DATA = hex(salt). The verifier type (6949) is sent as the
-	// KV pair flag, not as a value suffix (go-ora reads VerifierType from the flag).
+	// AUTH_VFR_DATA = hex(salt). The verifier type is sent as the KV pair flag
+	// (see buildAuthChallenge), not as a value suffix — go-ora and the thin
+	// clients read VerifierType from the flag.
 	vfrData := strings.ToUpper(hex.EncodeToString(s.salt))
 
 	return encSessKey, vfrData, nil
 }
+
+// VerifierType returns the O5LOGON verifier type the server is configured for
+// (6949 or 18453), used by the challenge builder for the AUTH_VFR_DATA flag.
+func (s *O5LogonServer) VerifierType() int { return s.verifierType }
 
 // DecryptPassword extracts the plaintext password from the client's AUTH Phase 2.
 // The client encrypts: random_prefix(16 bytes) + password using AES-192-CBC
@@ -180,10 +224,8 @@ func (s *O5LogonServer) DecryptPassword(encClientSessKey, encPassword string) (s
 		return "", fmt.Errorf("failed to decode client session key: %w", err)
 	}
 
-	// Decrypt client session key using verifier key
-	decKey := deriveAESKey(s.verifierKey)
-
-	clientSessionKey, err := aes192CBCDecrypt(decKey, encClientSessKeyBytes)
+	// Decrypt client session key using verifier key (AES-256 for 18453, AES-192 for 6949)
+	clientSessionKey, err := s.decryptSessionKey(encClientSessKeyBytes)
 	if err != nil {
 		return "", fmt.Errorf("failed to decrypt client session key: %w", err)
 	}
@@ -225,9 +267,7 @@ func (s *O5LogonServer) DeriveCombinedKey(encClientSessKey string) error {
 		return fmt.Errorf("decode client session key: %w", err)
 	}
 
-	decKey := deriveAESKey(s.verifierKey)
-
-	clientSessionKey, err := aes192CBCDecrypt(decKey, encClientSessKeyBytes)
+	clientSessionKey, err := s.decryptSessionKey(encClientSessKeyBytes)
 	if err != nil {
 		return fmt.Errorf("decrypt client session key: %w", err)
 	}
@@ -250,6 +290,17 @@ func (s *O5LogonServer) DeriveCombinedKey(encClientSessKey string) error {
 //     to legacy regardless of customHash advertisement).
 //   - non-customHash mode: legacy only.
 func (s *O5LogonServer) combinedKeyCandidates(clientSessionKey []byte) [][]byte {
+	// verifier-18453: combined key = chained HMAC-SHA512 over hex(FULL
+	// clientSessionKey || FULL serverSessionKey) keyed with pbkdf2ChkSalt for
+	// sderCount turns, truncated to 32 bytes (AES-256). Mirrors the 18453 branch
+	// of derivePasswordEncKey. customHash-only; no legacy fallback.
+	if s.verifierType == VerifierType18453 {
+		joined := append(append([]byte{}, clientSessionKey...), s.serverSessionKey...)
+		hexJoined := strings.ToUpper(hex.EncodeToString(joined))
+
+		return [][]byte{pbkdf2SpeedyKey(s.pbkdf2ChkSalt, []byte(hexJoined), s.pbkdf2SderCount)[:32]}
+	}
+
 	legacy := deriveCombinedKey(s.serverSessionKey, clientSessionKey)
 
 	if !s.customHash {
@@ -265,6 +316,16 @@ func (s *O5LogonServer) combinedKeyCandidates(clientSessionKey []byte) [][]byte 
 	customHashKey := pbkdf2SpeedyKey(s.pbkdf2ChkSalt, []byte(hexJoined), s.pbkdf2SderCount)[:24]
 
 	return [][]byte{customHashKey, legacy}
+}
+
+// decryptSessionKey decrypts a hex-decoded O5LOGON session key with the verifier
+// key — AES-256 zero-IV (no padding) for verifier-18453, AES-192 for legacy 6949.
+func (s *O5LogonServer) decryptSessionKey(enc []byte) ([]byte, error) {
+	if s.verifierType == VerifierType18453 {
+		return aesCBCDecryptZeroIV(s.verifierKey, enc, false)
+	}
+
+	return aes192CBCDecrypt(deriveAESKey(s.verifierKey), enc)
 }
 
 // tryDecryptPasswordWithKey attempts AES-192-CBC decryption of the encrypted
