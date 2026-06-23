@@ -146,7 +146,7 @@ jobs:
         run: git checkout ${{ inputs.tag }}
 
       - name: Install Helm
-        uses: azure/setup-helm@v5.0.0
+        uses: azure/setup-helm@v5.0.1
         with:
           version: v4.2.2
 
