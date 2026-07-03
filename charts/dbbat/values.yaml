@@ -149,6 +149,27 @@ ingress:
   #      - dbbat.example.com
 
 # =============================================================================
+# HTTPRoute (Gateway API - alternative to Ingress, for API and Web UI)
+# =============================================================================
+httpRoute:
+  # -- Enable HTTPRoute for API/Web UI (requires Gateway API CRDs and a Gateway)
+  enabled: false
+  # -- HTTPRoute annotations
+  annotations: {}
+    # external-dns.alpha.kubernetes.io/hostname: dbbat.example.com
+  # -- Hostnames the route matches
+  hostnames:
+    - dbbat.example.com
+  # -- Parent Gateway references
+  parentRefs:
+    - name: my-gateway
+      namespace: gateway-namespace
+      sectionName: https
+  # -- Matched path prefixes
+  paths:
+    - /
+
+# =============================================================================
 # Service Account
 # =============================================================================
 serviceAccount:
