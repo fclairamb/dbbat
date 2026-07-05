@@ -269,6 +269,52 @@
         }
       }
     },
+    "httpRoute": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable HTTPRoute (Gateway API)"
+        },
+        "annotations": {
+          "type": "object",
+          "description": "HTTPRoute annotations"
+        },
+        "hostnames": {
+          "type": "array",
+          "description": "Hostnames the route matches",
+          "items": {
+            "type": "string"
+          }
+        },
+        "parentRefs": {
+          "type": "array",
+          "description": "Parent Gateway references",
+          "items": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "namespace": {
+                "type": "string"
+              },
+              "sectionName": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "paths": {
+          "type": "array",
+          "description": "Matched path prefixes",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "serviceAccount": {
       "type": "object",
       "properties": {

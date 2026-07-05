@@ -203,6 +203,34 @@ ingress:
         - dbbat.example.com
 ```
 
+### HTTPRoute Configuration (Gateway API)
+
+As an alternative to Ingress, the API/Web UI can be exposed through a
+[Gateway API](https://gateway-api.sigs.k8s.io/) `HTTPRoute` attached to an
+existing Gateway (e.g. Istio):
+
+```yaml
+ingress:
+  enabled: false
+
+httpRoute:
+  enabled: true
+  hostnames:
+    - dbbat.example.com
+  parentRefs:
+    - name: http-gateway
+      namespace: istio-gateway
+      sectionName: https
+  paths:
+    - /
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: dbbat.example.com
+```
+
+Requires the Gateway API CRDs and a Gateway accepting routes from the release
+namespace. TLS is terminated by the Gateway listener (`sectionName`), so no
+certificate configuration is needed on the chart side.
+
 ### Security Configuration
 
 #### Pod Security
@@ -400,6 +428,10 @@ psql -h localhost -p 5434 -U <username> -d <database>
 | `service.proxy.port` | Proxy service port | `5434` |
 | `ingress.enabled` | Enable ingress | `false` |
 | `ingress.className` | Ingress class name | `""` |
+| `httpRoute.enabled` | Enable HTTPRoute (Gateway API) | `false` |
+| `httpRoute.hostnames` | Hostnames the route matches | `["dbbat.example.com"]` |
+| `httpRoute.parentRefs` | Parent Gateway references | example placeholder |
+| `httpRoute.paths` | Matched path prefixes | `["/"]` |
 | `serviceAccount.create` | Create service account | `true` |
 | `podSecurityContext.runAsUser` | User ID | `65532` |
 | `resources.limits.cpu` | CPU limit | `500m` |
