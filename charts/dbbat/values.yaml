@@ -94,35 +94,32 @@ service:
     annotations: {}
 
   proxy:
-    # -- Enable PostgreSQL proxy service
+    # -- Enable unified proxy service (PostgreSQL, Oracle, MySQL share one LoadBalancer)
     enabled: true
     # -- Proxy service type (ClusterIP, NodePort, LoadBalancer)
     type: ClusterIP
-    # -- Proxy service port
-    port: 5434
-    # -- Fixed NodePort (optional, only for type: NodePort)
-    nodePort: ""
-    # -- Proxy service annotations (e.g., cloud LB configuration)
+    # -- PostgreSQL proxy external port (maps to container port 5434 via DBB_LISTEN_PG)
+    port: 5432
+    # -- Proxy service annotations (e.g., cloud LB configuration, external-dns)
     annotations: {}
-    # Example for AWS NLB:
-    #   service.beta.kubernetes.io/aws-load-balancer-type: nlb
-    #   service.beta.kubernetes.io/aws-load-balancer-scheme: internal
+    # Example for AWS NLB with external-dns:
+    #   service.beta.kubernetes.io/aws-load-balancer-type: external
+    #   service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    #   service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+    #   service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+    #   external-dns.alpha.kubernetes.io/hostname: db.example.com
 
   oracle:
-    # -- Enable Oracle proxy service (TNS/TTC)
+    # -- Enable Oracle proxy port on the unified proxy service
     enabled: false
-    # -- Oracle service type (ClusterIP, NodePort, LoadBalancer)
-    type: ClusterIP
-    # -- Oracle service port (default Oracle TNS port is 1521; proxy defaults to 1522)
+    # -- Oracle proxy port (default Oracle TNS port is 1521; proxy defaults to 1522)
     port: 1522
-    # -- Fixed NodePort (optional, only for type: NodePort)
-    nodePort: ""
-    # -- Oracle service annotations (e.g., cloud LB configuration)
-    annotations: {}
-    # Example for AWS NLB:
-    #   service.beta.kubernetes.io/aws-load-balancer-type: nlb
-    #   service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
-    #   service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+
+  mysql:
+    # -- Enable MySQL/MariaDB proxy port on the unified proxy service
+    enabled: false
+    # -- MySQL proxy port
+    port: 3307
 
 # =============================================================================
 # Ingress (HTTP only - for API and Web UI)

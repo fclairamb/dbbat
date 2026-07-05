@@ -48,6 +48,11 @@ spec:
               containerPort: {{ .Values.service.oracle.port }}
               protocol: TCP
             {{- end }}
+            {{- if .Values.service.mysql.enabled }}
+            - name: mysql
+              containerPort: {{ .Values.service.mysql.port }}
+              protocol: TCP
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "dbbat.fullname" . }}
