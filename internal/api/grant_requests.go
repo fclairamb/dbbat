@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -54,7 +55,48 @@ func (s *Server) loadEventContext(ctx context.Context, req *store.GrantRequest, 
 		ev.Requester = u
 	}
 
+	// Interactive rendering (buttons + @-mentions) only applies when the
+	// notifier has a signing secret. Gate all the extra lookups on it so
+	// non-interactive deployments keep exactly today's behavior.
+	if s.notifier.Interactive() {
+		ev.Interactive = true
+		ev.RequesterSlackID = s.slackIDForUser(ctx, req.UserID)
+		ev.DeciderSlackID = s.deciderSlackID(ctx, decider)
+
+		if admins, err := s.store.ListAdminSlackUserIDs(ctx); err == nil {
+			ev.AdminSlackIDs = admins
+		} else {
+			s.logger.WarnContext(ctx, "list admin slack ids failed", slog.Any("error", err))
+		}
+	}
+
 	return ev
+}
+
+// slackIDForUser returns the given user's linked Slack provider_id, or ""
+// if they have no Slack identity. Best-effort: lookup errors yield "".
+func (s *Server) slackIDForUser(ctx context.Context, userID uuid.UUID) string {
+	identities, err := s.store.GetUserIdentities(ctx, userID)
+	if err != nil {
+		return ""
+	}
+
+	for i := range identities {
+		if identities[i].Provider == store.IdentityTypeSlack {
+			return identities[i].ProviderID
+		}
+	}
+
+	return ""
+}
+
+// deciderSlackID resolves the decider's Slack ID for thread-reply mentions.
+func (s *Server) deciderSlackID(ctx context.Context, decider *store.User) string {
+	if decider == nil {
+		return ""
+	}
+
+	return s.slackIDForUser(ctx, decider.UID)
 }
 
 // CreateGrantRequestRequest is the body for POST /grant-requests.
@@ -223,6 +265,95 @@ func (s *Server) handleGetGrantRequest(c *gin.Context) {
 	successResponse(c, req)
 }
 
+// decisionSource records where a grant decision originated, recorded in the
+// audit event `details.via` field so Slack- and UI-driven decisions can be
+// told apart. The web UI omits it (via is only set when non-default).
+type decisionSource string
+
+const (
+	decisionSourceWeb   decisionSource = "web"
+	decisionSourceSlack decisionSource = "slack"
+)
+
+// decideOutcome is the result of a shared approve/deny decision. It carries
+// enough for both the HTTP handlers (response body) and the Slack handler
+// (thread reply text + message coordinates) without re-querying.
+type decideOutcome struct {
+	Request *store.GrantRequest
+	Grant   *store.Grant             // nil for deny
+	Event   notify.GrantRequestEvent // the event already fired to the notifier
+	Action  notify.GrantAction       // approved | denied
+}
+
+// approveGrantRequest runs the approve decision: store transition, audit
+// event (with source), and async notification. It returns the raw store
+// error unmapped so each caller can translate it to its own transport
+// (HTTP status vs Slack ephemeral). Mirrors the deny path below.
+func (s *Server) approveGrantRequest(ctx context.Context, uid uuid.UUID, decider *store.User, source decisionSource) (*decideOutcome, error) {
+	grant, request, err := s.store.ApproveGrantRequest(ctx, uid, decider.UID)
+	if err != nil {
+		return nil, err
+	}
+
+	details := decisionDetails(map[string]any{
+		"grant_request_uid":  request.UID,
+		"resulting_grant_id": grant.UID,
+	}, source)
+
+	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{
+		EventType:   "grant_request.approved",
+		UserID:      &request.UserID,
+		PerformedBy: &decider.UID,
+		Details:     details,
+	})
+
+	ev := s.loadEventContext(ctx, request, decider)
+	ev.Action = notify.GrantActionApproved
+	s.notifyAsync(ev)
+
+	return &decideOutcome{Request: request, Grant: grant, Event: ev, Action: notify.GrantActionApproved}, nil
+}
+
+// denyGrantRequest runs the deny decision: store transition, audit event
+// (with source), and async notification. Returns the raw store error
+// unmapped, like approveGrantRequest.
+func (s *Server) denyGrantRequest(ctx context.Context, uid uuid.UUID, decider *store.User, reason string, source decisionSource) (*decideOutcome, error) {
+	updated, err := s.store.DenyGrantRequest(ctx, uid, decider.UID, reason)
+	if err != nil {
+		return nil, err
+	}
+
+	details := decisionDetails(map[string]any{
+		"grant_request_uid": updated.UID,
+		"reason":            reason,
+	}, source)
+
+	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{
+		EventType:   "grant_request.denied",
+		UserID:      &updated.UserID,
+		PerformedBy: &decider.UID,
+		Details:     details,
+	})
+
+	ev := s.loadEventContext(ctx, updated, decider)
+	ev.Action = notify.GrantActionDenied
+	s.notifyAsync(ev)
+
+	return &decideOutcome{Request: updated, Event: ev, Action: notify.GrantActionDenied}, nil
+}
+
+// decisionDetails marshals audit details, adding `via` only for non-web
+// sources so existing UI-driven audit rows are unchanged.
+func decisionDetails(base map[string]any, source decisionSource) json.RawMessage {
+	if source != decisionSourceWeb {
+		base["via"] = string(source)
+	}
+
+	details, _ := json.Marshal(base)
+
+	return details
+}
+
 // handleApproveGrantRequest — admin-only; flips pending → approved and
 // materializes the grant in the same transaction.
 func (s *Server) handleApproveGrantRequest(c *gin.Context) {
@@ -235,7 +366,7 @@ func (s *Server) handleApproveGrantRequest(c *gin.Context) {
 
 	currentUser := getCurrentUser(c)
 
-	grant, request, err := s.store.ApproveGrantRequest(c.Request.Context(), uid, currentUser.UID)
+	outcome, err := s.approveGrantRequest(c.Request.Context(), uid, currentUser, decisionSourceWeb)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrGrantRequestNotFound):
@@ -251,23 +382,7 @@ func (s *Server) handleApproveGrantRequest(c *gin.Context) {
 		return
 	}
 
-	details, _ := json.Marshal(map[string]any{
-		"grant_request_uid":  request.UID,
-		"resulting_grant_id": grant.UID,
-	})
-
-	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
-		EventType:   "grant_request.approved",
-		UserID:      &request.UserID,
-		PerformedBy: &currentUser.UID,
-		Details:     details,
-	})
-
-	ev := s.loadEventContext(c.Request.Context(), request, currentUser)
-	ev.Action = notify.GrantActionApproved
-	s.notifyAsync(ev)
-
-	successResponse(c, gin.H{"grant_request": request, "grant": grant})
+	successResponse(c, gin.H{"grant_request": outcome.Request, "grant": outcome.Grant})
 }
 
 // handleDenyGrantRequest — admin-only.
@@ -284,7 +399,7 @@ func (s *Server) handleDenyGrantRequest(c *gin.Context) {
 
 	currentUser := getCurrentUser(c)
 
-	updated, err := s.store.DenyGrantRequest(c.Request.Context(), uid, currentUser.UID, body.Reason)
+	outcome, err := s.denyGrantRequest(c.Request.Context(), uid, currentUser, body.Reason, decisionSourceWeb)
 	if err != nil {
 		switch {
 		case errors.Is(err, store.ErrGrantRequestNotFound):
@@ -298,23 +413,7 @@ func (s *Server) handleDenyGrantRequest(c *gin.Context) {
 		return
 	}
 
-	details, _ := json.Marshal(map[string]any{
-		"grant_request_uid": updated.UID,
-		"reason":            body.Reason,
-	})
-
-	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
-		EventType:   "grant_request.denied",
-		UserID:      &updated.UserID,
-		PerformedBy: &currentUser.UID,
-		Details:     details,
-	})
-
-	ev := s.loadEventContext(c.Request.Context(), updated, currentUser)
-	ev.Action = notify.GrantActionDenied
-	s.notifyAsync(ev)
-
-	successResponse(c, updated)
+	successResponse(c, outcome.Request)
 }
 
 // handleCancelGrantRequest — requester (or admin) only, while pending.
