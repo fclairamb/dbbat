@@ -330,6 +330,48 @@ paths:
         '302':
           description: Redirect to app with session token
 
+  /slack/interactions:
+    post:
+      tags:
+        - Auth
+      summary: Slack interactivity webhook
+      description: |
+        Receives Slack Block Kit interaction callbacks (Approve / Deny button
+        clicks on grant-request notifications). Authenticated by the Slack
+        request signature (`X-Slack-Signature` / `X-Slack-Request-Timestamp`
+        verified with the app signing secret), not a bearer token.
+
+        Slack sends `application/x-www-form-urlencoded` with a single
+        `payload` field containing the interaction JSON. The endpoint acks
+        with `200` immediately (Slack's 3-second deadline) and processes the
+        decision asynchronously; all user feedback is delivered back to Slack
+        (message update, thread reply, or ephemeral message). Only registered
+        when `DBB_SLACK_SIGNING_SECRET` is configured.
+      operationId: slackInteractions
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                payload:
+                  type: string
+                  description: URL-encoded JSON interaction callback from Slack.
+              required:
+                - payload
+      responses:
+        '200':
+          description: |
+            Acknowledged. Returned for valid interactions (processed
+            asynchronously) and for ignored ones (unknown action, non-UUID
+            value) alike — an empty body so Slack shows the user nothing.
+        '401':
+          description: |
+            Signature verification failed — missing/invalid signature,
+            stale timestamp (>5 min), or oversized body. No body detail.
+
   /users:
     post:
       tags:

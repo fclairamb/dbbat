@@ -10,6 +10,36 @@ import (
 	"github.com/google/uuid"
 )
 
+// ListAdminSlackUserIDs returns the Slack user IDs (provider_id) of every
+// user holding the admin role who has a linked Slack identity. Used by the
+// grant-request notifier to @-mention approvers on the pending message.
+//
+// One query joins users carrying 'admin' in their roles array to their
+// user_identities row for provider 'slack'. Soft-deleted users and
+// identities are excluded (bun applies the soft-delete filter for the
+// modeled UserIdentity; the users join is guarded explicitly).
+func (s *Store) ListAdminSlackUserIDs(ctx context.Context) ([]string, error) {
+	var slackIDs []string
+
+	err := s.db.NewSelect().
+		Model((*UserIdentity)(nil)).
+		Column("ui.provider_id").
+		Join("JOIN users AS u ON u.uid = ui.user_id").
+		Where("ui.provider = ?", IdentityTypeSlack).
+		Where("? = ANY(u.roles)", RoleAdmin).
+		Where("u.deleted_at IS NULL").
+		Scan(ctx, &slackIDs)
+	if err != nil {
+		return nil, fmt.Errorf("list admin slack user ids: %w", err)
+	}
+
+	if slackIDs == nil {
+		slackIDs = []string{}
+	}
+
+	return slackIDs, nil
+}
+
 // GetUserByIdentity retrieves a user by their external identity (provider + provider_id).
 func (s *Store) GetUserByIdentity(ctx context.Context, provider, providerID string) (*User, error) {
 	identity := new(UserIdentity)

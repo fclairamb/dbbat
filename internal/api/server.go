@@ -171,6 +171,14 @@ func (s *Server) setupRouter() *gin.Engine {
 			auth.GET("/"+name+"/callback", s.handleOAuthCallback(name))
 		}
 
+		// Slack interactivity webhook (unauthenticated at the middleware
+		// layer — the Slack request signature is the authentication). Only
+		// registered when interactivity is configured (signing secret set),
+		// so intranet-only deployments don't expose an inbound endpoint.
+		if s.notifier.Interactive() {
+			v1.POST("/slack/interactions", s.handleSlackInteraction)
+		}
+
 		// Password change endpoint uses credential auth from body (not Bearer token)
 		v1.PUT("/users/:uid/password", s.handleChangePassword)
 

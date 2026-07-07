@@ -1,7 +1,10 @@
-// Package notify implements outbound notification channels for grant
-// request lifecycle events. Today this is Slack-only and outbound-only —
-// no inbound webhooks, no interactive buttons. The admin sees the post in
-// Slack, follows the link to the dbbat UI, and decides there.
+// Package notify implements notification channels for grant request
+// lifecycle events. Today this is Slack-only. Notifications are posted
+// outbound to a configured channel and, when a signing secret is set,
+// carry interactive Approve / Deny buttons whose clicks flow back through
+// the inbound interaction endpoint (see internal/api/slack_interactions.go).
+// Without a signing secret the feature degrades to link-through-UI:
+// messages have no buttons and the admin decides in the dbbat UI.
 package notify
 
 import (
@@ -30,6 +33,14 @@ const (
 	GrantActionCancelled GrantAction = "cancelled" //nolint:misspell // matches DB lifecycle value
 )
 
+// Slack interaction action IDs carried by the Approve / Deny buttons. The
+// inbound interaction handler matches on these; kept here so the button
+// rendering and the handler can't drift.
+const (
+	ActionApprove = "grant_request_approve"
+	ActionDeny    = "grant_request_deny"
+)
+
 // ErrChannelMissing is returned by NewSlackNotifier when a bot token is
 // set but no channel is configured.
 var ErrChannelMissing = errors.New("DBB_SLACK_NOTIFY_BOT_TOKEN set without DBB_SLACK_NOTIFY_CHANNEL")
@@ -37,6 +48,11 @@ var ErrChannelMissing = errors.New("DBB_SLACK_NOTIFY_BOT_TOKEN set without DBB_S
 // ErrPublicURLMissing is returned by NewSlackNotifier when a bot token is
 // set but no public URL is configured.
 var ErrPublicURLMissing = errors.New("DBB_SLACK_NOTIFY_BOT_TOKEN set without DBB_PUBLIC_URL")
+
+// ErrSigningSecretWithoutBotToken is returned by NewSlackNotifier when a
+// signing secret is set but no bot token is: interactivity lives on
+// notification messages, so it is meaningless without notifications.
+var ErrSigningSecretWithoutBotToken = errors.New("DBB_SLACK_SIGNING_SECRET set without DBB_SLACK_NOTIFY_BOT_TOKEN")
 
 // GrantRequestEvent carries the data the notifier needs to render a
 // message. Fields besides Request are looked up by the API handler before
@@ -50,6 +66,20 @@ type GrantRequestEvent struct {
 	Requester  *store.User
 	// Decider is set when Action is approved/denied/canceled.
 	Decider *store.User
+
+	// RequesterSlackID is the requester's linked Slack user ID, or "" if
+	// the requester has no linked Slack identity. Used to @-mention them.
+	RequesterSlackID string
+	// AdminSlackIDs are the Slack user IDs of admins with a linked Slack
+	// identity, used to @-mention them on the pending message.
+	AdminSlackIDs []string
+	// DeciderSlackID is the decider's linked Slack user ID (set on decision
+	// events), used to @-mention them in the thread reply.
+	DeciderSlackID string
+	// Interactive requests Approve / Deny buttons on the pending message.
+	// Only honored for GrantActionCreated; every other render (decision,
+	// cancel) rebuilds blocks without buttons so stale buttons disappear.
+	Interactive bool
 }
 
 // SlackPersister is the slice of the store API the notifier uses to
@@ -63,11 +93,13 @@ type SlackPersister interface {
 // request lifecycle events. A nil notifier is a graceful no-op (returned
 // from NewSlackNotifier when the bot token is unset).
 type SlackNotifier struct {
-	client    *slack.Client
-	channel   string
-	publicURL string
-	store     SlackPersister
-	log       *slog.Logger
+	client        *slack.Client
+	channel       string
+	publicURL     string
+	signingSecret string
+	interactive   bool
+	store         SlackPersister
+	log           *slog.Logger
 }
 
 // NewSlackNotifier returns a configured notifier or nil when the feature is
@@ -78,6 +110,13 @@ type SlackNotifier struct {
 //nolint:nilnil // nil notifier is the documented "disabled" sentinel
 func NewSlackNotifier(cfg config.SlackNotifyConfig, publicURL string, persister SlackPersister, log *slog.Logger) (*SlackNotifier, error) {
 	if !cfg.Enabled() {
+		// A signing secret without a bot token is a misconfiguration:
+		// interactivity rides on notification messages, so it can't work
+		// without the notifier. Fail fast rather than silently disabling.
+		if cfg.SigningSecret != "" {
+			return nil, ErrSigningSecretWithoutBotToken
+		}
+
 		log.InfoContext(context.Background(), "slack notifications: disabled (DBB_SLACK_NOTIFY_BOT_TOKEN unset)")
 
 		return nil, nil
@@ -92,12 +131,36 @@ func NewSlackNotifier(cfg config.SlackNotifyConfig, publicURL string, persister 
 	}
 
 	return &SlackNotifier{
-		client:    slack.New(cfg.BotToken),
-		channel:   cfg.Channel,
-		publicURL: strings.TrimRight(publicURL, "/"),
-		store:     persister,
-		log:       log,
+		client:        slack.New(cfg.BotToken),
+		channel:       cfg.Channel,
+		publicURL:     strings.TrimRight(publicURL, "/"),
+		signingSecret: cfg.SigningSecret,
+		interactive:   cfg.Interactive(),
+		store:         persister,
+		log:           log,
 	}, nil
+}
+
+// Interactive reports whether Approve / Deny buttons are rendered and the
+// inbound interaction endpoint should be served. A nil notifier is never
+// interactive.
+func (n *SlackNotifier) Interactive() bool {
+	if n == nil {
+		return false
+	}
+
+	return n.interactive
+}
+
+// SigningSecret returns the Slack app signing secret used to verify inbound
+// interaction callbacks. Empty on a nil notifier or when interactivity is
+// disabled.
+func (n *SlackNotifier) SigningSecret() string {
+	if n == nil {
+		return ""
+	}
+
+	return n.signingSecret
 }
 
 // NotifyGrantRequest posts a fresh message on creation and chat.update's
@@ -158,9 +221,35 @@ func (n *SlackNotifier) NotifyGrantRequest(ctx context.Context, ev GrantRequestE
 	}
 }
 
+// PostThreadReply posts a plain-text reply in the thread of an existing
+// message (channel + ts). It notifies watchers of a decision — unlike a
+// chat.update, which edits silently. Best-effort: errors are logged and
+// swallowed, and a nil notifier or missing coordinates is a no-op.
+func (n *SlackNotifier) PostThreadReply(ctx context.Context, channel, ts, text string) {
+	if n == nil {
+		return
+	}
+
+	if channel == "" || ts == "" {
+		return
+	}
+
+	if _, _, err := n.client.PostMessageContext(
+		ctx,
+		channel,
+		slack.MsgOptionText(text, false),
+		slack.MsgOptionTS(ts),
+	); err != nil {
+		n.log.WarnContext(ctx, "slack thread reply failed", slog.Any("error", err))
+	}
+}
+
 // buildBlocks renders a Block Kit message for the event. The same shape
-// is used for create and update — only the status badge and decider line
-// change.
+// is used for create and update — only the status badge, mention line,
+// decider line and (for pending + interactive) the action buttons change.
+// The actions block is emitted only for GrantActionCreated + Interactive:
+// every other render (decision, cancel) rebuilds without it, which is how
+// stale buttons disappear once a request is decided.
 func buildBlocks(ev GrantRequestEvent, publicURL string) []slack.Block {
 	header := slack.NewHeaderBlock(slack.NewTextBlockObject(
 		"plain_text",
@@ -169,6 +258,32 @@ func buildBlocks(ev GrantRequestEvent, publicURL string) []slack.Block {
 		false,
 	))
 
+	blocks := []slack.Block{header}
+
+	if mention := mentionLine(ev); mention != "" {
+		blocks = append(blocks, slack.NewSectionBlock(
+			slack.NewTextBlockObject("mrkdwn", mention, false, false), nil, nil,
+		))
+	}
+
+	blocks = append(blocks, slack.NewSectionBlock(
+		slack.NewTextBlockObject("mrkdwn", mainSectionText(ev), false, false), nil, nil,
+	))
+
+	if ev.Action == GrantActionCreated && ev.Interactive {
+		blocks = append(blocks, actionsBlock(ev.Request.UID.String()))
+	}
+
+	link := fmt.Sprintf("%s/app/grant-requests", publicURL)
+	blocks = append(blocks, slack.NewContextBlock("",
+		slack.NewTextBlockObject("mrkdwn", fmt.Sprintf("<%s|Review in dbbat →>", link), false, false),
+	))
+
+	return blocks
+}
+
+// mainSectionText renders the *Database* / *Definition* / … detail section.
+func mainSectionText(ev GrantRequestEvent) string {
 	dbName := "—"
 	if ev.Database != nil {
 		dbName = ev.Database.Name
@@ -203,15 +318,81 @@ func buildBlocks(ev GrantRequestEvent, publicURL string) []slack.Block {
 		mainText += "\n*Reason*: " + *ev.Request.DecisionReason
 	}
 
-	main := slack.NewSectionBlock(slack.NewTextBlockObject("mrkdwn", mainText, false, false), nil, nil)
+	return mainText
+}
 
-	link := fmt.Sprintf("%s/app/grant-requests", publicURL)
+// mentionLine builds the "@requester requested access … @admin1, @admin2 —
+// please approve or deny." sentence for the pending message. Linked users
+// render as <@SLACK_ID>; unlinked users fall back to their plain username.
+// The second sentence is dropped when no admins have a linked Slack
+// identity (nobody to ping). Returns "" for non-created events.
+func mentionLine(ev GrantRequestEvent) string {
+	if ev.Action != GrantActionCreated {
+		return ""
+	}
 
-	context := slack.NewContextBlock("",
-		slack.NewTextBlockObject("mrkdwn", fmt.Sprintf("<%s|Review in dbbat →>", link), false, false),
-	)
+	requester := slackMention(ev.RequesterSlackID, userLabel(ev.Requester))
 
-	return []slack.Block{header, main, context}
+	dbName := "—"
+	if ev.Database != nil {
+		dbName = ev.Database.Name
+	}
+
+	defName := "access"
+	if ev.Definition != nil {
+		defName = ev.Definition.Name
+	}
+
+	line := fmt.Sprintf("%s requested access on *%s* with *%s*.", requester, dbName, defName)
+
+	if len(ev.AdminSlackIDs) > 0 {
+		mentions := make([]string, 0, len(ev.AdminSlackIDs))
+		for _, id := range ev.AdminSlackIDs {
+			mentions = append(mentions, slackMention(id, ""))
+		}
+
+		line += fmt.Sprintf(" %s — please approve or deny.", strings.Join(mentions, ", "))
+	}
+
+	return line
+}
+
+// actionsBlock renders the Approve / Deny buttons. Both carry the request
+// UID as value and a native confirm dialog to guard against fat-finger
+// decisions.
+func actionsBlock(requestUID string) *slack.ActionBlock {
+	approve := slack.NewButtonBlockElement(
+		ActionApprove, requestUID,
+		slack.NewTextBlockObject("plain_text", "✅ Approve", true, false),
+	).WithStyle(slack.StylePrimary).WithConfirm(slack.NewConfirmationBlockObject(
+		slack.NewTextBlockObject("plain_text", "Approve grant request?", false, false),
+		slack.NewTextBlockObject("plain_text", "This grants the requested access immediately.", false, false),
+		slack.NewTextBlockObject("plain_text", "Approve", false, false),
+		slack.NewTextBlockObject("plain_text", "Cancel", false, false),
+	))
+
+	deny := slack.NewButtonBlockElement(
+		ActionDeny, requestUID,
+		slack.NewTextBlockObject("plain_text", "❌ Deny", true, false),
+	).WithStyle(slack.StyleDanger).WithConfirm(slack.NewConfirmationBlockObject(
+		slack.NewTextBlockObject("plain_text", "Deny grant request?", false, false),
+		slack.NewTextBlockObject("plain_text", "This rejects the request. It cannot be undone.", false, false),
+		slack.NewTextBlockObject("plain_text", "Deny", false, false),
+		slack.NewTextBlockObject("plain_text", "Cancel", false, false),
+	))
+
+	return slack.NewActionBlock("grant_request_actions", approve, deny)
+}
+
+// slackMention renders a Slack @-mention for a linked user (<@ID>) or falls
+// back to the plain username for users without a linked Slack identity.
+// A blank fallback yields "" so callers can skip empty entries.
+func slackMention(slackID, fallback string) string {
+	if slackID != "" {
+		return "<@" + slackID + ">"
+	}
+
+	return fallback
 }
 
 func userLabel(u *store.User) string {

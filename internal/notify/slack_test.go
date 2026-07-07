@@ -3,6 +3,7 @@ package notify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -291,6 +292,215 @@ func TestNotifier_DecidedFallsBackToPostWhenNoTS(t *testing.T) {
 	if got := fake.updateCount(); got != 0 {
 		t.Fatalf("update calls = %d, want 0", got)
 	}
+}
+
+func TestNotifier_SigningSecretWithoutBotTokenFails(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewSlackNotifier(
+		config.SlackNotifyConfig{Channel: "#dbbat", SigningSecret: "shhh"},
+		"https://example.com",
+		nil, nopLogger(),
+	)
+	if !errors.Is(err, ErrSigningSecretWithoutBotToken) {
+		t.Fatalf("expected ErrSigningSecretWithoutBotToken, got %v", err)
+	}
+}
+
+func TestNotifier_InteractiveFlag(t *testing.T) {
+	t.Parallel()
+
+	n, err := NewSlackNotifier(
+		config.SlackNotifyConfig{BotToken: "xoxb-test", Channel: "#dbbat", SigningSecret: "shhh"},
+		"https://example.com",
+		nil, nopLogger(),
+	)
+	if err != nil {
+		t.Fatalf("NewSlackNotifier: %v", err)
+	}
+
+	if !n.Interactive() {
+		t.Error("expected Interactive() true when signing secret + bot token set")
+	}
+
+	if n.SigningSecret() != "shhh" {
+		t.Errorf("SigningSecret() = %q, want %q", n.SigningSecret(), "shhh")
+	}
+
+	// A nil notifier is never interactive and has no secret.
+	if (*SlackNotifier)(nil).Interactive() {
+		t.Error("nil notifier should not be interactive")
+	}
+
+	if (*SlackNotifier)(nil).SigningSecret() != "" {
+		t.Error("nil notifier should have empty signing secret")
+	}
+}
+
+func TestNotifier_CreatedInteractiveRendersButtonsAndMentions(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeSlack(t)
+
+	n := &SlackNotifier{
+		client:      fake.client(),
+		channel:     "#dbbat",
+		publicURL:   "https://example.com",
+		interactive: true,
+		log:         nopLogger(),
+	}
+
+	ev := sampleEvent(GrantActionCreated)
+	ev.Request.SlackChannel = nil
+	ev.Request.SlackMessageTS = nil
+	ev.Interactive = true
+	ev.RequesterSlackID = "U0REQ"
+	ev.AdminSlackIDs = []string{"U0ADM1", "U0ADM2"}
+
+	n.NotifyGrantRequest(context.Background(), ev)
+
+	if got := fake.postCount(); got != 1 {
+		t.Fatalf("post calls = %d, want 1", got)
+	}
+
+	blocks := fake.postCalls[0].Get("blocks")
+	// Mention line: requester + both admins. The `<@ID>` wrappers are
+	// JSON-escaped (<…>) in the serialized blocks, so assert on
+	// the raw IDs, which appear only inside the mention wrappers.
+	for _, want := range []string{"@U0REQ", "@U0ADM1", "@U0ADM2", "please approve or deny"} {
+		if !strings.Contains(blocks, want) {
+			t.Errorf("blocks missing %q: %s", want, blocks)
+		}
+	}
+	// Action buttons present with our action IDs.
+	for _, want := range []string{ActionApprove, ActionDeny} {
+		if !strings.Contains(blocks, want) {
+			t.Errorf("blocks missing action_id %q: %s", want, blocks)
+		}
+	}
+}
+
+func TestNotifier_CreatedNonInteractiveHasNoButtons(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeSlack(t)
+
+	n := &SlackNotifier{
+		client:    fake.client(),
+		channel:   "#dbbat",
+		publicURL: "https://example.com",
+		log:       nopLogger(),
+	}
+
+	ev := sampleEvent(GrantActionCreated)
+	ev.Request.SlackChannel = nil
+	ev.Request.SlackMessageTS = nil
+	// Interactive not set.
+
+	n.NotifyGrantRequest(context.Background(), ev)
+
+	blocks := fake.postCalls[0].Get("blocks")
+	if strings.Contains(blocks, ActionApprove) || strings.Contains(blocks, ActionDeny) {
+		t.Errorf("non-interactive created message should have no buttons: %s", blocks)
+	}
+}
+
+func TestNotifier_DecidedRenderDropsButtons(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeSlack(t)
+
+	n := &SlackNotifier{
+		client:      fake.client(),
+		channel:     "#dbbat",
+		publicURL:   "https://example.com",
+		interactive: true,
+		log:         nopLogger(),
+	}
+
+	ev := sampleEvent(GrantActionApproved)
+	ev.Interactive = true // even interactive, decided renders must drop buttons
+	ev.Decider = &store.User{Username: "carol"}
+
+	n.NotifyGrantRequest(context.Background(), ev)
+
+	if got := fake.updateCount(); got != 1 {
+		t.Fatalf("update calls = %d, want 1", got)
+	}
+
+	blocks := fake.updateCalls[0].Get("blocks")
+	if strings.Contains(blocks, ActionApprove) || strings.Contains(blocks, ActionDeny) {
+		t.Errorf("decided render should drop buttons: %s", blocks)
+	}
+}
+
+func TestNotifier_MentionLineFallsBackToUsername(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeSlack(t)
+
+	n := &SlackNotifier{
+		client:      fake.client(),
+		channel:     "#dbbat",
+		publicURL:   "https://example.com",
+		interactive: true,
+		log:         nopLogger(),
+	}
+
+	ev := sampleEvent(GrantActionCreated)
+	ev.Request.SlackChannel = nil
+	ev.Request.SlackMessageTS = nil
+	ev.Interactive = true
+	// No RequesterSlackID and no AdminSlackIDs: requester renders as plain
+	// username, and the second sentence is dropped.
+
+	n.NotifyGrantRequest(context.Background(), ev)
+
+	blocks := fake.postCalls[0].Get("blocks")
+	if !strings.Contains(blocks, "alice requested access") {
+		t.Errorf("expected plain username fallback in mention line: %s", blocks)
+	}
+
+	if strings.Contains(blocks, "please approve or deny") {
+		t.Errorf("second sentence should be dropped when no admins linked: %s", blocks)
+	}
+}
+
+func TestNotifier_PostThreadReply(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeSlack(t)
+
+	n := &SlackNotifier{
+		client:    fake.client(),
+		channel:   "#dbbat",
+		publicURL: "https://example.com",
+		log:       nopLogger(),
+	}
+
+	n.PostThreadReply(context.Background(), "C123", "1.2", "✅ approved by <@U0ADM1>")
+
+	if got := fake.postCount(); got != 1 {
+		t.Fatalf("post calls = %d, want 1", got)
+	}
+
+	form := fake.postCalls[0]
+	if form.Get("thread_ts") != "1.2" {
+		t.Errorf("thread_ts = %q, want %q", form.Get("thread_ts"), "1.2")
+	}
+
+	if !strings.Contains(form.Get("text"), "approved") {
+		t.Errorf("thread reply text missing: %q", form.Get("text"))
+	}
+
+	// Missing coordinates → no-op.
+	n.PostThreadReply(context.Background(), "", "", "ignored")
+	if fake.postCount() != 1 {
+		t.Errorf("expected no extra post for empty coords, got %d", fake.postCount())
+	}
+
+	// nil notifier → no-op, no panic.
+	(*SlackNotifier)(nil).PostThreadReply(context.Background(), "C123", "1.2", "x")
 }
 
 func TestNotifier_SlackErrorIsLoggedNotReturned(t *testing.T) {
