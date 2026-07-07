@@ -113,6 +113,37 @@ See [Session Packet Dumps](/docs/features/session-dumps) for what gets captured.
 | `DBB_SLACK_AUTH_AUTO_CREATE_USERS` | Auto-provision new users (default `true`) |
 | `DBB_SLACK_AUTH_DEFAULT_ROLE` | Role assigned to auto-provisioned users (default `connector`) |
 
+### Slack notifications & interactivity (optional)
+
+When configured, DBBat posts each grant request to a Slack channel and updates
+that message as the request is decided.
+
+| Variable | Description |
+|----------|-------------|
+| `DBB_SLACK_NOTIFY_BOT_TOKEN` | Bot user OAuth token (`xoxb-…`). Empty disables notifications. |
+| `DBB_SLACK_NOTIFY_CHANNEL` | Channel id or `#name` to post to (default `#dbbat`). Required when the bot token is set. |
+| `DBB_PUBLIC_URL` | Externally reachable base URL, used for the "Review in dbbat" deep-link. Required when the bot token is set. |
+| `DBB_SLACK_SIGNING_SECRET` | App signing secret. When set, notification messages carry **✅ Approve / ❌ Deny** buttons and DBBat serves `POST /api/v1/slack/interactions` to receive clicks. Empty keeps the link-through-UI flow (no buttons, no inbound endpoint). Requires the bot token — setting it without one fails at startup. |
+
+#### Enabling the Approve / Deny buttons
+
+1. In your Slack app, enable **Interactivity & Shortcuts** and set the request
+   URL to `https://<YOUR_DBBAT_HOST>/api/v1/slack/interactions` (see
+   [`slack_app_manifest.json`](https://github.com/fclairamb/dbbat/blob/main/slack_app_manifest.json)).
+2. Copy the app's **Signing Secret** from the *Basic Information* page into
+   `DBB_SLACK_SIGNING_SECRET`.
+
+Clicks are authenticated by Slack's request signature. Only DBBat admins can
+approve or deny; anyone else who clicks gets an ephemeral error. A decision made
+from a button is identical to one made in the web UI (same audit event, tagged
+`via: slack`), updates the original message in place (removing the buttons), and
+posts a reply in the message thread.
+
+**Deployment note:** button clicks require *Slack's servers* to reach
+`DBB_PUBLIC_URL` (inbound), whereas the deep-link only needs *users' browsers*
+to reach it. Intranet-only deployments should leave the signing secret unset and
+keep the link-through-UI flow.
+
 ## Configuration File
 
 DBBat supports YAML, JSON, and TOML configuration files.
@@ -152,6 +183,13 @@ slack_auth:
   client_secret: "..."
   auto_create_users: true
   default_role: "connector"
+
+slack_notify:
+  bot_token: "xoxb-..."
+  channel: "#dbbat"
+  signing_secret: "..."   # enables Approve/Deny buttons
+
+public_url: "https://dbbat.example.com"
 ```
 
 Load with the `--config` flag:

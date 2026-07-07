@@ -142,6 +142,68 @@ func TestGetUserByIdentity(t *testing.T) { //nolint:tparallel // subtests share 
 	})
 }
 
+func TestListAdminSlackUserIDs(t *testing.T) { //nolint:tparallel // subtests share parent data
+	t.Parallel()
+
+	store := setupTestStoreNoCleanup(t)
+	ctx := context.Background()
+	suffix := uuid.NewString()[:8]
+
+	// Admin with a linked Slack identity — should be listed.
+	admin, err := store.CreateUser(ctx, "admin-slack-"+suffix, "hash", []string{RoleAdmin, RoleConnector})
+	require.NoError(t, err)
+
+	adminSlackID := "UADMIN-" + suffix
+	_, err = store.CreateUserIdentity(ctx, &UserIdentity{
+		UserID:     admin.UID,
+		Provider:   IdentityTypeSlack,
+		ProviderID: adminSlackID,
+	})
+	require.NoError(t, err)
+
+	// Non-admin (connector) with a linked Slack identity — must NOT be listed.
+	connector, err := store.CreateUser(ctx, "connector-slack-"+suffix, "hash", []string{RoleConnector})
+	require.NoError(t, err)
+
+	connectorSlackID := "UCONN-" + suffix
+	_, err = store.CreateUserIdentity(ctx, &UserIdentity{
+		UserID:     connector.UID,
+		Provider:   IdentityTypeSlack,
+		ProviderID: connectorSlackID,
+	})
+	require.NoError(t, err)
+
+	// Admin WITHOUT a linked Slack identity — must NOT be listed (no identity row).
+	_, err = store.CreateUser(ctx, "admin-nolink-"+suffix, "hash", []string{RoleAdmin})
+	require.NoError(t, err)
+
+	t.Run("lists linked admins, excludes non-admins and unlinked", func(t *testing.T) {
+		ids, err := store.ListAdminSlackUserIDs(ctx)
+		require.NoError(t, err)
+		assert.Contains(t, ids, adminSlackID)
+		assert.NotContains(t, ids, connectorSlackID)
+	})
+
+	t.Run("excludes soft-deleted admin identity", func(t *testing.T) {
+		delAdmin, err := store.CreateUser(ctx, "admin-deleted-id-"+suffix, "hash", []string{RoleAdmin})
+		require.NoError(t, err)
+
+		delSlackID := "UDELADM-" + suffix
+		identity, err := store.CreateUserIdentity(ctx, &UserIdentity{
+			UserID:     delAdmin.UID,
+			Provider:   IdentityTypeSlack,
+			ProviderID: delSlackID,
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, store.DeleteUserIdentity(ctx, identity.UID))
+
+		ids, err := store.ListAdminSlackUserIDs(ctx)
+		require.NoError(t, err)
+		assert.NotContains(t, ids, delSlackID)
+	})
+}
+
 func TestDeleteUserIdentity(t *testing.T) { //nolint:tparallel // subtests share parent data
 	t.Parallel()
 
