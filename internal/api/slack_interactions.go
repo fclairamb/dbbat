@@ -236,7 +236,7 @@ func (s *Server) processSlackDecision(
 
 	var outcome *decideOutcome
 
-	switch action {
+	switch action { //nolint:exhaustive // only approve/deny reach here (filtered in slackDecisionFromCallback)
 	case notify.GrantActionApproved:
 		outcome, err = decider.approve(ctx, requestUID, user)
 	case notify.GrantActionDenied:
@@ -268,7 +268,7 @@ func (s *Server) handleSlackDecisionError(
 ) {
 	switch {
 	case errors.Is(err, store.ErrInvalidTransition):
-		// Already decided/cancelled/expired (includes the losing side of a
+		// Already decided/canceled/expired (includes the losing side of a
 		// two-admin race). Re-render to current state and tell the clicker.
 		decider.rerenderRequest(ctx, requestUID)
 		s.postEphemeral(ctx, responseURL, msgNoLongerPending)
@@ -335,7 +335,9 @@ func (s *Server) rerenderRequest(ctx context.Context, uid uuid.UUID) {
 
 	ev := s.loadEventContext(ctx, req, s.deciderUserForRequest(ctx, req))
 	ev.Action = actionForStatus(req.Status)
-	s.notifyAsync(ev)
+	// notifyAsync intentionally detaches from ctx (own background timeout),
+	// so the request context is deliberately not threaded through.
+	s.notifyAsync(ev) //nolint:contextcheck // notifyAsync detaches by design
 }
 
 // deciderUserForRequest loads the user who decided a request (if any), so a
@@ -377,7 +379,7 @@ func threadReplyText(action notify.GrantAction, deciderSlackID string, decider *
 		who = decider.Username
 	}
 
-	switch action {
+	switch action { //nolint:exhaustive // GrantActionCreated has no reply text (handled by default)
 	case notify.GrantActionApproved:
 		return fmt.Sprintf("✅ This request has been *approved* by %s.", who)
 	case notify.GrantActionDenied:
@@ -392,7 +394,7 @@ func threadReplyText(action notify.GrantAction, deciderSlackID string, decider *
 // actionForStatus maps a request's terminal status to the notify action
 // used to re-render its message.
 func actionForStatus(status store.GrantRequestStatus) notify.GrantAction {
-	switch status {
+	switch status { //nolint:exhaustive // pending/expired fall through to the no-buttons default
 	case store.GrantRequestApproved:
 		return notify.GrantActionApproved
 	case store.GrantRequestDenied:

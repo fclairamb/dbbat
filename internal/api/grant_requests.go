@@ -309,7 +309,7 @@ func (s *Server) approveGrantRequest(ctx context.Context, uid uuid.UUID, decider
 
 	ev := s.loadEventContext(ctx, request, decider)
 	ev.Action = notify.GrantActionApproved
-	s.notifyAsync(ev)
+	s.notifyAsync(ev) //nolint:contextcheck // notifyAsync detaches by design
 
 	return &decideOutcome{Request: request, Grant: grant, Event: ev, Action: notify.GrantActionApproved}, nil
 }
@@ -337,7 +337,7 @@ func (s *Server) denyGrantRequest(ctx context.Context, uid uuid.UUID, decider *s
 
 	ev := s.loadEventContext(ctx, updated, decider)
 	ev.Action = notify.GrantActionDenied
-	s.notifyAsync(ev)
+	s.notifyAsync(ev) //nolint:contextcheck // notifyAsync detaches by design
 
 	return &decideOutcome{Request: updated, Event: ev, Action: notify.GrantActionDenied}, nil
 }

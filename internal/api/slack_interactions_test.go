@@ -34,8 +34,8 @@ func testLogger() *slog.Logger {
 // given timestamp, matching slack.NewSecretsVerifier's expectation.
 func signSlackBody(secret, timestamp string, body []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
-	fmt.Fprintf(mac, "v0:%s:", timestamp)
-	mac.Write(body)
+	_, _ = mac.Write([]byte("v0:" + timestamp + ":"))
+	_, _ = mac.Write(body)
 
 	return "v0=" + hex.EncodeToString(mac.Sum(nil))
 }
@@ -67,21 +67,20 @@ func slackInteractionBody(t *testing.T, actionID, value, userID, responseURL str
 	return []byte(form.Encode())
 }
 
-// newSignedSlackRequest builds a gin context + recorder for a signed
-// interaction POST with a valid current timestamp.
-func newSignedSlackRequest(t *testing.T, body []byte) (*gin.Context, *httptest.ResponseRecorder) {
+// newSignedSlackRequest builds a gin context for a signed interaction POST
+// with a valid current timestamp. Status is asserted via c.Writer.Status().
+func newSignedSlackRequest(t *testing.T, body []byte) *gin.Context {
 	t.Helper()
 
 	ts := fmt.Sprintf("%d", time.Now().Unix())
 
-	rec := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(rec)
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
 	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/slack/interactions", strings.NewReader(string(body)))
 	c.Request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	c.Request.Header.Set("X-Slack-Request-Timestamp", ts)
 	c.Request.Header.Set("X-Slack-Signature", signSlackBody(testSigningSecret, ts, body))
 
-	return c, rec
+	return c
 }
 
 // stubDecider records calls and returns canned results, standing in for
@@ -265,7 +264,7 @@ func TestSlackInteraction_ValidSignatureAcks200(t *testing.T) {
 	dec.approveOutcome = sampleOutcome(notify.GrantActionApproved)
 
 	body := slackInteractionBody(t, notify.ActionApprove, uuid.NewString(), "U0ADM1", "")
-	c, _ := newSignedSlackRequest(t, body)
+	c := newSignedSlackRequest(t, body)
 
 	testServer().serveSlackInteraction(c, testSigningSecret, dec)
 
@@ -350,7 +349,7 @@ func TestSlackInteraction_EmptySigningSecret401(t *testing.T) {
 	t.Parallel()
 
 	body := slackInteractionBody(t, notify.ActionApprove, uuid.NewString(), "U0ADM1", "")
-	c, _ := newSignedSlackRequest(t, body)
+	c := newSignedSlackRequest(t, body)
 
 	testServer().serveSlackInteraction(c, "", newStubDecider())
 
@@ -370,7 +369,7 @@ func TestSlackInteraction_AdminApprove(t *testing.T) {
 
 	requestUID := uuid.NewString()
 	body := slackInteractionBody(t, notify.ActionApprove, requestUID, "U0ADM1", "")
-	c, _ := newSignedSlackRequest(t, body)
+	c := newSignedSlackRequest(t, body)
 
 	testServer().serveSlackInteraction(c, testSigningSecret, dec)
 
@@ -408,7 +407,7 @@ func TestSlackInteraction_AdminDeny(t *testing.T) {
 	dec.denyOutcome = sampleOutcome(notify.GrantActionDenied)
 
 	body := slackInteractionBody(t, notify.ActionDeny, uuid.NewString(), "U0ADM1", "")
-	c, _ := newSignedSlackRequest(t, body)
+	c := newSignedSlackRequest(t, body)
 
 	testServer().serveSlackInteraction(c, testSigningSecret, dec)
 
@@ -443,7 +442,7 @@ func TestSlackInteraction_NonAdminEphemeralNoStore(t *testing.T) {
 	dec.user = nonAdminUser()
 
 	body := slackInteractionBody(t, notify.ActionApprove, uuid.NewString(), "U0USR", eph.srv.URL)
-	c, _ := newSignedSlackRequest(t, body)
+	c := newSignedSlackRequest(t, body)
 
 	testServer().serveSlackInteraction(c, testSigningSecret, dec)
 
@@ -474,7 +473,7 @@ func TestSlackInteraction_UnlinkedUserEphemeralNoStore(t *testing.T) {
 	dec.userErr = store.ErrIdentityNotFound
 
 	body := slackInteractionBody(t, notify.ActionApprove, uuid.NewString(), "U0GHOST", eph.srv.URL)
-	c, _ := newSignedSlackRequest(t, body)
+	c := newSignedSlackRequest(t, body)
 
 	testServer().serveSlackInteraction(c, testSigningSecret, dec)
 
@@ -506,7 +505,7 @@ func TestSlackInteraction_AlreadyDecidedEphemeralAndRerender(t *testing.T) {
 	dec.approveErr = store.ErrInvalidTransition
 
 	body := slackInteractionBody(t, notify.ActionApprove, uuid.NewString(), "U0ADM1", eph.srv.URL)
-	c, _ := newSignedSlackRequest(t, body)
+	c := newSignedSlackRequest(t, body)
 
 	testServer().serveSlackInteraction(c, testSigningSecret, dec)
 
@@ -541,7 +540,7 @@ func TestSlackInteraction_UnknownActionIDNoOp(t *testing.T) {
 	dec.user = adminUser()
 
 	body := slackInteractionBody(t, "some_other_button", uuid.NewString(), "U0ADM1", "")
-	c, _ := newSignedSlackRequest(t, body)
+	c := newSignedSlackRequest(t, body)
 
 	testServer().serveSlackInteraction(c, testSigningSecret, dec)
 
@@ -568,7 +567,7 @@ func TestSlackInteraction_NonUUIDValueNoOp(t *testing.T) {
 	dec.user = adminUser()
 
 	body := slackInteractionBody(t, notify.ActionApprove, "not-a-uuid", "U0ADM1", "")
-	c, _ := newSignedSlackRequest(t, body)
+	c := newSignedSlackRequest(t, body)
 
 	testServer().serveSlackInteraction(c, testSigningSecret, dec)
 
@@ -599,8 +598,8 @@ func TestThreadReplyText(t *testing.T) {
 		t.Errorf("denied reply = %q", got)
 	}
 
-	if got := threadReplyText(notify.GrantActionCancelled, "", nil); !strings.Contains(got, "cancelled") {
-		t.Errorf("cancelled reply = %q", got)
+	if got := threadReplyText(notify.GrantActionCancelled, "", nil); !strings.Contains(got, "🚫") || !strings.Contains(got, "requester") {
+		t.Errorf("cancel reply = %q", got)
 	}
 }
 
