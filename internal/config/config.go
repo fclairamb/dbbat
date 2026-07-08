@@ -127,6 +127,11 @@ type SlackNotifyConfig struct {
 	// Channel is the Slack channel id or name (e.g. "#dbbat") where
 	// notifications are posted. Defaults to "#dbbat".
 	Channel string `koanf:"channel"`
+	// SigningSecret is the Slack app signing secret used to verify inbound
+	// interaction callbacks (Approve/Deny button clicks). Empty disables
+	// interactivity: messages carry no buttons and the inbound endpoint is
+	// not registered — outbound notifications still work.
+	SigningSecret string `koanf:"signing_secret"`
 }
 
 // Enabled returns true when a bot token is set. Channel is enforced at
@@ -134,6 +139,15 @@ type SlackNotifyConfig struct {
 // notifier should run at all.
 func (c SlackNotifyConfig) Enabled() bool {
 	return c.BotToken != ""
+}
+
+// Interactive returns true when Approve/Deny buttons should be rendered and
+// the inbound interaction endpoint should be served. Both a signing secret
+// (to verify inbound clicks) and a bot token (to carry the buttons on
+// notification messages) are required — a signing secret without a bot token
+// is a misconfiguration caught at startup.
+func (c SlackNotifyConfig) Interactive() bool {
+	return c.SigningSecret != "" && c.BotToken != ""
 }
 
 // DumpConfig holds configuration for session packet dumps.
