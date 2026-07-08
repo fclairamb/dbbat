@@ -1,10 +1,13 @@
 // Package notify implements notification channels for grant request
 // lifecycle events. Today this is Slack-only. Notifications are posted
-// outbound to a configured channel and, when a signing secret is set,
-// carry interactive Approve / Deny buttons whose clicks flow back through
-// the inbound interaction endpoint (see internal/api/slack_interactions.go).
-// Without a signing secret the feature degrades to link-through-UI:
-// messages have no buttons and the admin decides in the dbbat UI.
+// outbound to a configured channel and, when an inbound transport is
+// configured, carry interactive Approve / Deny buttons whose clicks flow
+// back into the decision pipeline. Two inbound transports are supported: a
+// signing-secret-verified HTTPS endpoint (see internal/api/slack_interactions.go)
+// and an outbound Socket Mode connection for deployments that can't accept
+// inbound Slack traffic (see internal/api/slack_socketmode.go). With neither
+// configured the feature degrades to link-through-UI: messages have no
+// buttons and the admin decides in the dbbat UI.
 package notify
 
 import (
@@ -53,6 +56,12 @@ var ErrPublicURLMissing = errors.New("DBB_SLACK_NOTIFY_BOT_TOKEN set without DBB
 // signing secret is set but no bot token is: interactivity lives on
 // notification messages, so it is meaningless without notifications.
 var ErrSigningSecretWithoutBotToken = errors.New("DBB_SLACK_SIGNING_SECRET set without DBB_SLACK_NOTIFY_BOT_TOKEN")
+
+// ErrAppTokenWithoutBotToken is returned by NewSlackNotifier when an
+// app-level token (Socket Mode) is set but no bot token is: Socket Mode
+// receives interactions that ride on notification messages and posts
+// decisions with the bot token, so it is meaningless without notifications.
+var ErrAppTokenWithoutBotToken = errors.New("DBB_SLACK_NOTIFY_APP_TOKEN set without DBB_SLACK_NOTIFY_BOT_TOKEN")
 
 // GrantRequestEvent carries the data the notifier needs to render a
 // message. Fields besides Request are looked up by the API handler before
@@ -110,11 +119,16 @@ type SlackNotifier struct {
 //nolint:nilnil // nil notifier is the documented "disabled" sentinel
 func NewSlackNotifier(cfg config.SlackNotifyConfig, publicURL string, persister SlackPersister, log *slog.Logger) (*SlackNotifier, error) {
 	if !cfg.Enabled() {
-		// A signing secret without a bot token is a misconfiguration:
-		// interactivity rides on notification messages, so it can't work
-		// without the notifier. Fail fast rather than silently disabling.
+		// A signing secret or app-level token without a bot token is a
+		// misconfiguration: interactivity rides on notification messages, so
+		// it can't work without the notifier. Fail fast rather than silently
+		// disabling.
 		if cfg.SigningSecret != "" {
 			return nil, ErrSigningSecretWithoutBotToken
+		}
+
+		if cfg.AppToken != "" {
+			return nil, ErrAppTokenWithoutBotToken
 		}
 
 		log.InfoContext(context.Background(), "slack notifications: disabled (DBB_SLACK_NOTIFY_BOT_TOKEN unset)")
