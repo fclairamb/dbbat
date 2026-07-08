@@ -307,6 +307,36 @@ func TestNotifier_SigningSecretWithoutBotTokenFails(t *testing.T) {
 	}
 }
 
+func TestNotifier_AppTokenWithoutBotTokenFails(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewSlackNotifier(
+		config.SlackNotifyConfig{Channel: "#dbbat", AppToken: "xapp-shhh"},
+		"https://example.com",
+		nil, nopLogger(),
+	)
+	if !errors.Is(err, ErrAppTokenWithoutBotToken) {
+		t.Fatalf("expected ErrAppTokenWithoutBotToken, got %v", err)
+	}
+}
+
+func TestNotifier_InteractiveFlagViaAppToken(t *testing.T) {
+	t.Parallel()
+
+	n, err := NewSlackNotifier(
+		config.SlackNotifyConfig{BotToken: "xoxb-test", Channel: "#dbbat", AppToken: "xapp-test"},
+		"https://example.com",
+		nil, nopLogger(),
+	)
+	if err != nil {
+		t.Fatalf("NewSlackNotifier: %v", err)
+	}
+
+	if !n.Interactive() {
+		t.Error("expected Interactive() true when app token + bot token set (Socket Mode)")
+	}
+}
+
 func TestNotifier_InteractiveFlag(t *testing.T) {
 	t.Parallel()
 
