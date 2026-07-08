@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.14.0](https://github.com/fclairamb/dbbat/compare/v0.13.0...v0.14.0) (2026-07-08)
+
+
+### Features
+
+* **api:** add Slack interactive grant approval (Approve/Deny buttons) ([#223](https://github.com/fclairamb/dbbat/issues/223)) ([516d4ca](https://github.com/fclairamb/dbbat/commit/516d4ca7b1152dcd5122a49dea071ef46b5961ea))
+* **api:** add Slack Socket Mode transport for Approve/Deny interactions ([#229](https://github.com/fclairamb/dbbat/issues/229)) ([d1d33d4](https://github.com/fclairamb/dbbat/commit/d1d33d4c80c60cbb6b2cdeeddade0b095359a701))
+
+
+### Bug Fixes
+
+* **deps:** update module golang.org/x/crypto to v0.54.0 ([#226](https://github.com/fclairamb/dbbat/issues/226)) ([d53ede1](https://github.com/fclairamb/dbbat/commit/d53ede1b36bf573498d87982e11ab1ca24f1782f))
+* **deps:** update module golang.org/x/text to v0.39.0 ([#221](https://github.com/fclairamb/dbbat/issues/221)) ([c10f410](https://github.com/fclairamb/dbbat/commit/c10f4101bc9b6c828d0a8165915213d6230019fe))
+* **deps:** update module golang.org/x/text to v0.40.0 ([#225](https://github.com/fclairamb/dbbat/issues/225)) ([abf43ff](https://github.com/fclairamb/dbbat/commit/abf43ffcb91d1734123973855892f3f562f7fab6))
+
 ## [0.13.0](https://github.com/fclairamb/dbbat/compare/v0.12.0...v0.13.0) (2026-07-05)
 
 
