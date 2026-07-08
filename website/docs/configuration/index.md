@@ -124,6 +124,7 @@ that message as the request is decided.
 | `DBB_SLACK_NOTIFY_CHANNEL` | Channel id or `#name` to post to (default `#dbbat`). Required when the bot token is set. |
 | `DBB_PUBLIC_URL` | Externally reachable base URL, used for the "Review in dbbat" deep-link. Required when the bot token is set. |
 | `DBB_SLACK_SIGNING_SECRET` | App signing secret. When set, notification messages carry **✅ Approve / ❌ Deny** buttons and DBBat serves `POST /api/v1/slack/interactions` to receive clicks. Empty keeps the link-through-UI flow (no buttons, no inbound endpoint). Requires the bot token — setting it without one fails at startup. |
+| `DBB_SLACK_NOTIFY_APP_TOKEN` | App-level token (`xapp-…`, scope `connections:write`). When set, DBBat opens an outbound **Socket Mode** connection and receives Approve/Deny clicks over it — no inbound reachability or signing secret needed. Renders the buttons on its own. Requires the bot token — setting it without one fails at startup. |
 
 #### Enabling the Approve / Deny buttons
 
@@ -141,8 +142,26 @@ posts a reply in the message thread.
 
 **Deployment note:** button clicks require *Slack's servers* to reach
 `DBB_PUBLIC_URL` (inbound), whereas the deep-link only needs *users' browsers*
-to reach it. Intranet-only deployments should leave the signing secret unset and
-keep the link-through-UI flow.
+to reach it. Intranet-only deployments that can't accept inbound Slack traffic
+should use **Socket Mode** (below) instead of the signing secret — or leave both
+unset and keep the link-through-UI flow.
+
+#### Socket Mode (no inbound endpoint)
+
+For deployments Slack can't reach inbound (behind a VPN or an IP-allowlisted
+ingress), Socket Mode delivers Approve/Deny clicks over an **outbound** WebSocket
+that DBBat opens to Slack — so no public reachability and no signing secret are
+required.
+
+1. In your Slack app, open **Settings → Socket Mode** and enable it.
+2. Under **Basic Information → App-Level Tokens**, generate a token with the
+   `connections:write` scope and put it in `DBB_SLACK_NOTIFY_APP_TOKEN`.
+
+Everything downstream (admin-only decisions, ephemeral errors, `via: slack` audit
+tagging, in-place message update, thread reply) is identical to the HTTP path —
+only the transport differs. Socket Mode and the HTTP endpoint can both be
+configured; at the Slack app level, enabling Socket Mode makes Slack deliver over
+the socket and ignore the request URL.
 
 ## Configuration File
 
