@@ -132,6 +132,13 @@ type SlackNotifyConfig struct {
 	// interactivity: messages carry no buttons and the inbound endpoint is
 	// not registered — outbound notifications still work.
 	SigningSecret string `koanf:"signing_secret"`
+	// AppToken is the Slack app-level token (xapp-...) with the
+	// connections:write scope. When set together with a bot token, dbbat
+	// opens an outbound Socket Mode connection and receives Approve/Deny
+	// interactions over it instead of the inbound HTTP endpoint — for
+	// deployments that can't accept inbound Slack traffic. Empty = no Socket
+	// Mode.
+	AppToken string `koanf:"app_token"`
 }
 
 // Enabled returns true when a bot token is set. Channel is enforced at
@@ -141,13 +148,21 @@ func (c SlackNotifyConfig) Enabled() bool {
 	return c.BotToken != ""
 }
 
-// Interactive returns true when Approve/Deny buttons should be rendered and
-// the inbound interaction endpoint should be served. Both a signing secret
-// (to verify inbound clicks) and a bot token (to carry the buttons on
-// notification messages) are required — a signing secret without a bot token
-// is a misconfiguration caught at startup.
+// SocketMode returns true when dbbat should open an outbound Slack Socket
+// Mode connection: both an app-level token and a bot token are set. An app
+// token without a bot token is a misconfiguration caught at startup.
+func (c SlackNotifyConfig) SocketMode() bool {
+	return c.AppToken != "" && c.BotToken != ""
+}
+
+// Interactive returns true when Approve/Deny buttons should be rendered and an
+// inbound interaction transport should be served. A bot token (to carry the
+// buttons on notification messages) plus at least one inbound transport — a
+// signing secret (the HTTP endpoint) or an app-level token (Socket Mode) — is
+// required. A signing secret or app token without a bot token is a
+// misconfiguration caught at startup.
 func (c SlackNotifyConfig) Interactive() bool {
-	return c.SigningSecret != "" && c.BotToken != ""
+	return c.BotToken != "" && (c.SigningSecret != "" || c.AppToken != "")
 }
 
 // DumpConfig holds configuration for session packet dumps.
