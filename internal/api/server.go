@@ -43,6 +43,9 @@ type Server struct {
 	// notifier is the outbound Slack client; nil when notifications are
 	// disabled (no bot token configured).
 	notifier *notify.SlackNotifier
+	// socketCancel stops the Slack Socket Mode connection on shutdown; nil
+	// when Socket Mode is not running.
+	socketCancel context.CancelFunc
 }
 
 // NewServer creates a new API server.
@@ -116,6 +119,10 @@ func (s *Server) Start(addr string) error {
 		IdleTimeout:  httpIdleTimeout,
 	}
 
+	// Start the outbound Slack Socket Mode connection (no-op unless an
+	// app-level token is configured). Runs for the server's lifetime.
+	s.startSocketMode()
+
 	s.logger.InfoContext(context.Background(), "Starting API server", slog.String("addr", addr))
 
 	return s.httpServer.ListenAndServe()
@@ -123,6 +130,10 @@ func (s *Server) Start(addr string) error {
 
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	if s.socketCancel != nil {
+		s.socketCancel()
+	}
+
 	if s.httpServer != nil {
 		return s.httpServer.Shutdown(ctx)
 	}
