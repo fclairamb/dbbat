@@ -351,7 +351,7 @@ Verified end-to-end (authenticate + query + observability capture) against Oracl
 | go-ora | thin | ✅ works | accepts 6949 or 18453 |
 | python-oracledb thin | thin | ✅ works | FAST_AUTH de-pipelined; verifier 18453 |
 | SQLcl 26.1.2 (ojdbc) | thin | ✅ works | classic O5LOGON; verifier 18453 |
-| sqlplus / OCI instant client | thick | ⚠️ partial | auth + query work via the **wide** (4-byte LE) TTC encoding (verified locally, `DISABLE_OOB=ON`); blocked over a non-OOB-preserving ingress — see "OCI wide encoding" / "OCI break probe" below |
+| sqlplus / OCI instant client | thick | ✅ works | auth + query work via the **wide** (4-byte LE) TTC encoding, with **no dependency on OOB/`DISABLE_OOB`** — verified locally against Oracle 23ai and through an OOB-stripping TCP relay (a NodePort/NLB stand-in). See "OCI wide encoding" and "OCI break/reset before AUTH Phase 2" below |
 
 Each API key now stores **both** verifiers (`api_keys.o5logon_verifier` 6949 and
 `o5logon_verifier_18453` + `o5logon_salt_18453`). When the upstream's Set Protocol
@@ -425,22 +425,64 @@ form `01 0d` never produces) and mirrors it across the whole terminated-auth pat
   upstream negotiated wide with the client's relayed caps, so its challenge is wide too.
 
 With this, sqlplus authenticates and runs queries end-to-end (verified locally against
-Oracle 23ai with `DISABLE_OOB=ON`); the SQL is captured like any other client.
+Oracle 23ai, `DISABLE_OOB` unset); the SQL is captured like any other client.
 
-#### OCI break probe — remaining limitation over non-OOB ingress
+Four more OCI-only fixes complete the wide path (all captured/verified against the macOS
+Oracle Instant Client 23.3 and the DB-bundled 23.26 OCI client — the two flavors differ on
+the wire, so both are covered by fixtures in `oci_instantclient_test.go`):
 
-Over a network connection, the OCI client runs a **break probe** before AUTH Phase 2: it
-sends an inline break marker (`01 00 01`) plus a TCP-urgent (out-of-band) break byte, then
-waits for the server's out-of-band acknowledgement. dbbat (a userspace proxy) cannot relay
-TCP urgent data, and a Kubernetes NodePort/NLB does not preserve it either, so the probe
-never completes — sqlplus stalls, or aborts with `ORA-03106` (it sends a TTC EOF data
-packet `0x0040` and closes). Answering the break inline (reset marker), re-sending the
-challenge, sending an OOB byte back, and `DISABLE_OOB` were all tried over the cluster
-NodePort without success. The local container client does not hit this — it has
-`DISABLE_OOB=ON` in its sqlnet.ora. Mitigations / follow-ups: set `DISABLE_OOB=ON` on the
-OCI client, front dbbat with a TCP-passthrough ingress that preserves urgent data, or
-implement full OOB urgent-data bridging in the proxy. Thin clients never run this probe and
-are unaffected.
+- **Client challenge end-of-call summary** (`clientChallengeTrailer`, `session.go`): the
+  summary appended after the AUTH challenge KV dictionary is **caps-conditioned** — 80
+  bytes for instantclient 23.3, 153 for the 23.26 bundled client. A fixed-width capture
+  only fits the client it came from; any other client leaves unread bytes in its TTC read
+  buffer, treats the next stale byte as a message code, and aborts the AUTH call with an
+  inline break/reset marker exchange — the "sqlplus stalls before AUTH Phase 2" symptom.
+  dbbat therefore runs upstream AUTH Phase 1 first (`beginUpstreamAuth`, before it
+  challenges the client) and reuses the **live upstream challenge's summary bytes**, which
+  the real server sized for these exact caps.
+- **Phase 1 user-len locator** (`findUserIDLenPos`, `phase1_forward.go`): the wide preamble
+  encodes `user_id_len` as a 4-byte LE field after the first `fe…`-pointer run — sometimes
+  as a 3× UTF-8 max-expansion buffer size. It must be found by anchoring on that pointer
+  run, **never** by scanning backward for a dword equal to the old length: the KV pair
+  count is also a small 4-byte LE integer between pointer runs, and a backward scan
+  corrupts it whenever `len(username) == numPairs` (the 5-char `admin` collides with the
+  OCI Phase-1 pair count of 5), after which the upstream waits forever for a pair that
+  never arrives and AUTH hangs.
+- **Phase 2 value length convention** (`replaceAuthKVValueWide`, `phase2_forward.go`): when
+  splicing AUTH_SESSKEY / AUTH_PASSWORD / AUTH_PBKDF2_SPEEDY_KEY, the 4-byte LE value
+  length must mirror the client's convention. instantclient 23.3 sends every value length
+  as a 3× buffer size; a spliced plain length draws `ORA-28041` ("authentication protocol
+  internal error") from a 23ai parsing at that client's caps.
+- **AUTH OK reassembly + re-fragmentation** (`readUpstreamAuthMessages` / `reframeAuthOK`,
+  `upstream_auth_client.go`): Oracle 23ai splits an OCI AUTH OK across two Data packets
+  (observed 1967+557 bytes) with the `AUTH_SVR_RESPONSE` hex value straddling the boundary.
+  dbbat merges the fragments into one packet so it can patch `AUTH_SVR_RESPONSE`
+  contiguously, then **re-fragments at the upstream's original boundaries** before
+  forwarding — a single merged packet exceeds the client's negotiated SDU and is rejected
+  with `ORA-12592` ("bad packet").
+
+#### OCI break/reset before AUTH Phase 2 — root cause and fix
+
+The OCI client sends an inline break/reset marker pair (`01 00 01` / `01 00 02`) before
+AUTH Phase 2 **when it rejects the challenge dbbat sent** — overwhelmingly because the
+challenge's trailing end-of-call summary width did not match the client's negotiated TTC
+caps (fixed above). After the resync the client waits for the aborted call's completion,
+which dbbat does not synthesize, so the session stalls or ends with `ORA-03106`. This was
+**historically mis-attributed to the TCP-urgent (out-of-band) break probe** — but a spy
+relay with `SO_OOBINLINE` + `SIOCATMARK` on both legs observed **zero** urgent bytes during
+the failing handshake, and the corrected proxy now works end-to-end through an
+OOB-stripping TCP relay (a faithful NodePort/NLB stand-in). No OOB bridging, no
+`DISABLE_OOB`, and no OOB-preserving ingress are required. `readPhase2Packet` still answers
+an inline break with a reset marker for resync robustness. Thin clients never send this
+marker pair and are unaffected.
+
+Cluster verification over the Kubernetes NodePort from the Windows host
+(`C:\oracle\instantclient_23_0\sqlplus.exe`) is **pending manual verification** — it was out
+of scope for the automated run that landed these fixes. Runbook: deploy the image built
+from this branch, then from the Windows host run
+`sqlplus orauser/<key>@//<node>:<nodeport>/FREEPDB1` and confirm a `SELECT … FROM dual`
+returns rows with no `ORA-03106` / `ORA-12592` / hang, and re-check go-ora /
+python-oracledb thin / SQLcl for no regression.
 
 ### Authentication path
 
@@ -476,19 +518,20 @@ client (not a static capture), so all session-specific fields — instance metad
 `AUTH_SVR_RESPONSE` (`patchAuthSvrResponse`): the upstream encrypts it with the proxy↔upstream
 combined key, but modern clients decrypt it with the client↔proxy combined key to confirm the
 server holds the negotiated session key. dbbat re-encrypts it in place under the client's key.
-Without this, python-oracledb thin rejected the AUTH OK with `DPY-4035` and JDBC thin / SQLcl
-with `ORA-17401`. go-ora ignores the field, which is why the earlier static-capture path
-worked for it while silently breaking everyone else. The static `capturedAuthOKResponse`
-remains only as a fallback when no upstream packet was captured.
+Without this, python-oracledb thin rejected the AUTH OK with `DPY-4035`, JDBC thin / SQLcl
+with `ORA-17401`, and sqlplus / OCI with `ORA-01017`. go-ora ignores the field, which is why
+the earlier static-capture path worked for it while silently breaking everyone else. The
+static `capturedAuthOKResponse` remains only as a fallback when no upstream packet was
+captured. For OCI the AUTH OK arrives split across two Data packets, so the value is patched
+on the reassembled packet and re-fragmented before forwarding — see "OCI wide encoding".
 
-### Known client limitations
+### Client compatibility
 
-Against **Oracle 23ai**, only `go-ora` (legacy verifier-6949) authenticates end-to-end.
-python-oracledb thin, SQLcl (JDBC thin), and sqlplus reach the O5LOGON challenge and then
-fail (`Get the session key` / connection reset) because they require the verifier-18453
-challenge dbbat does not yet issue server-side — see "Modern thin clients on Oracle 23ai"
-above. Against Oracle 19c the historical behavior (python thin / SQLcl SQL end-to-end)
-still applies.
+All four supported client families authenticate + query + capture end-to-end against Oracle
+23ai through the proxy — see the table under "Client compatibility on Oracle 23ai" above.
+The last holdout, sqlplus / OCI instant client, was fixed by the wide-encoding path plus the
+four OCI-only fixes documented there; it no longer depends on OOB / `DISABLE_OOB`. Against
+Oracle 19c the historical behavior still applies.
 
 ### Per-user O5LOGON key
 
