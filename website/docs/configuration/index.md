@@ -123,7 +123,7 @@ that message as the request is decided.
 | `DBB_SLACK_NOTIFY_BOT_TOKEN` | Bot user OAuth token (`xoxb-…`). Empty disables notifications. |
 | `DBB_SLACK_NOTIFY_CHANNEL` | Channel id or `#name` to post to (default `#dbbat`). Required when the bot token is set. |
 | `DBB_PUBLIC_URL` | Externally reachable base URL, used for the "Review in dbbat" deep-link. Required when the bot token is set. |
-| `DBB_SLACK_SIGNING_SECRET` | App signing secret. When set, notification messages carry **✅ Approve / ❌ Deny** buttons and DBBat serves `POST /api/v1/slack/interactions` to receive clicks. Empty keeps the link-through-UI flow (no buttons, no inbound endpoint). Requires the bot token — setting it without one fails at startup. |
+| `DBB_SLACK_SIGNING_SECRET` | App signing secret. When set, notification messages carry **✅ Approve / ❌ Deny** buttons and DBBat serves `POST /api/v1/slack/interactions` to receive clicks. Empty keeps the link-through-UI flow (no buttons, no inbound endpoint). Requires the bot token — setting it without one fails at startup. The legacy name `DBB_SLACK_NOTIFY_SIGNING_SECRET` is also accepted as an alias; if both are set, the canonical `DBB_SLACK_SIGNING_SECRET` wins. |
 | `DBB_SLACK_NOTIFY_APP_TOKEN` | App-level token (`xapp-…`, scope `connections:write`). When set, DBBat opens an outbound **Socket Mode** connection and receives Approve/Deny clicks over it — no inbound reachability or signing secret needed. Renders the buttons on its own. Requires the bot token — setting it without one fails at startup. |
 
 #### Choosing a deployment shape

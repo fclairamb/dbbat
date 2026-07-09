@@ -98,6 +98,11 @@ Not in this pass: filing the GitHub issue (still to do, see above), and the
 mismatch, which is tracked separately in
 `specs/todos/2026-07-08-slack-signing-secret-env-var-name-mismatch.md`.
 
+> **Editor's note (2026-07-09):** the env-var name mismatch has since been
+> resolved — the documented `DBB_SLACK_SIGNING_SECRET` is now the canonical
+> name and `DBB_SLACK_NOTIFY_SIGNING_SECRET` remains accepted as a legacy
+> alias (canonical wins when both are set).
+
 ## Resolution
 
 **Option 3 — Slack Socket Mode — is the resolution.** Options 1 and 2 (opening
