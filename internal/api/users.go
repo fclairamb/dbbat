@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/store"
@@ -134,25 +135,8 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 	}
 
 	// Prevent a roles update that would leave the instance without any admin
-	if req.Roles != nil && !slices.Contains(req.Roles, store.RoleAdmin) {
-		targetUser, err := s.store.GetUserByUID(c.Request.Context(), uid)
-		if err != nil {
-			writeError(c, http.StatusNotFound, ErrCodeNotFound, "user not found")
-			return
-		}
-
-		if targetUser.IsAdmin() {
-			adminCount, err := s.store.CountAdmins(c.Request.Context())
-			if err != nil {
-				writeInternalError(c, s.logger, err, "failed to count admin users")
-				return
-			}
-
-			if adminCount <= 1 {
-				writeError(c, http.StatusConflict, ErrCodeConflict, "cannot remove the admin role from the last admin user")
-				return
-			}
-		}
+	if s.rejectLastAdminDemotion(c, uid, req.Roles) {
+		return
 	}
 
 	updates := store.UserUpdate{
@@ -186,6 +170,38 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 	})
 
 	successResponse(c, gin.H{"message": "user updated"})
+}
+
+// rejectLastAdminDemotion writes an error response and returns true when the
+// requested roles update would remove the admin role from the last remaining
+// admin user (or when the target user cannot be loaded).
+func (s *Server) rejectLastAdminDemotion(c *gin.Context, uid uuid.UUID, roles []string) bool {
+	if roles == nil || slices.Contains(roles, store.RoleAdmin) {
+		return false
+	}
+
+	targetUser, err := s.store.GetUserByUID(c.Request.Context(), uid)
+	if err != nil {
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "user not found")
+		return true
+	}
+
+	if !targetUser.IsAdmin() {
+		return false
+	}
+
+	adminCount, err := s.store.CountAdmins(c.Request.Context())
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to count admin users")
+		return true
+	}
+
+	if adminCount <= 1 {
+		writeError(c, http.StatusConflict, ErrCodeConflict, "cannot remove the admin role from the last admin user")
+		return true
+	}
+
+	return false
 }
 
 // handleDeleteUser deletes a user

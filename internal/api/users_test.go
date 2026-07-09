@@ -33,7 +33,7 @@ func doUpdateUserRoles(router *gin.Engine, token, uid string, roles []string) *h
 	return w
 }
 
-func TestUpdateUser_LastAdminDemotionRejected(t *testing.T) {
+func TestUpdateUser_LastAdminDemotionRejected(t *testing.T) { //nolint:paralleltest // shared database state
 	server, dataStore := setupTestServer(t)
 
 	adminUser := createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
@@ -64,7 +64,7 @@ func TestUpdateUser_LastAdminDemotionRejected(t *testing.T) {
 	}
 }
 
-func TestUpdateUser_LastAdminEmptyRolesRejected(t *testing.T) {
+func TestUpdateUser_LastAdminEmptyRolesRejected(t *testing.T) { //nolint:paralleltest // shared database state
 	server, dataStore := setupTestServer(t)
 
 	adminUser := createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
@@ -78,7 +78,7 @@ func TestUpdateUser_LastAdminEmptyRolesRejected(t *testing.T) {
 	}
 }
 
-func TestUpdateUser_DemotionAllowedWithAnotherAdmin(t *testing.T) {
+func TestUpdateUser_DemotionAllowedWithAnotherAdmin(t *testing.T) { //nolint:paralleltest // shared database state
 	server, dataStore := setupTestServer(t)
 
 	createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
@@ -104,7 +104,7 @@ func TestUpdateUser_DemotionAllowedWithAnotherAdmin(t *testing.T) {
 	}
 }
 
-func TestUpdateUser_PromoteAddsAdminRole(t *testing.T) {
+func TestUpdateUser_PromoteAddsAdminRole(t *testing.T) { //nolint:paralleltest // shared database state
 	server, dataStore := setupTestServer(t)
 
 	createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
@@ -130,7 +130,7 @@ func TestUpdateUser_PromoteAddsAdminRole(t *testing.T) {
 	}
 }
 
-func TestUpdateUser_NonAdminCannotClearOwnRoles(t *testing.T) {
+func TestUpdateUser_NonAdminCannotClearOwnRoles(t *testing.T) { //nolint:paralleltest // shared database state
 	server, dataStore := setupTestServer(t)
 
 	viewerUser := createTestUser(t, dataStore, "viewer", "viewerpassword123", []string{"viewer"})
@@ -153,7 +153,7 @@ func TestUpdateUser_NonAdminCannotClearOwnRoles(t *testing.T) {
 	}
 }
 
-func TestDeleteUser_LastAdminRejected(t *testing.T) {
+func TestDeleteUser_LastAdminRejected(t *testing.T) { //nolint:paralleltest // shared database state
 	server, dataStore := setupTestServer(t)
 
 	adminUser := createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
@@ -182,7 +182,7 @@ func TestDeleteUser_LastAdminRejected(t *testing.T) {
 	}
 }
 
-func TestDeleteUser_AdminCanDeleteOtherAdmin(t *testing.T) {
+func TestDeleteUser_AdminCanDeleteOtherAdmin(t *testing.T) { //nolint:paralleltest // shared database state
 	server, dataStore := setupTestServer(t)
 
 	createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
@@ -204,7 +204,7 @@ func TestDeleteUser_AdminCanDeleteOtherAdmin(t *testing.T) {
 	}
 }
 
-func TestDeleteUser_NotFound(t *testing.T) {
+func TestDeleteUser_NotFound(t *testing.T) { //nolint:paralleltest // shared database state
 	server, dataStore := setupTestServer(t)
 
 	createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
