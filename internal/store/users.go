@@ -86,6 +86,18 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	return users, nil
 }
 
+// CountAdmins returns the number of users holding the admin role
+func (s *Store) CountAdmins(ctx context.Context) (int, error) {
+	count, err := s.db.NewSelect().
+		Model((*User)(nil)).
+		Where("? = ANY(roles)", RoleAdmin).
+		Count(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count admin users: %w", err)
+	}
+	return count, nil
+}
+
 // UpdateUser updates a user
 func (s *Store) UpdateUser(ctx context.Context, uid uuid.UUID, updates UserUpdate) error {
 	q := s.db.NewUpdate().

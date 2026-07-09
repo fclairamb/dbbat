@@ -468,6 +468,7 @@ paths:
         - Non-admins can only update their own password
         - Non-admins cannot change roles
         - API keys cannot change passwords (requires Basic Auth)
+        - The admin role cannot be removed from the last remaining admin
       operationId: updateUser
       requestBody:
         required: true
@@ -488,6 +489,12 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          description: The update would remove the admin role from the last admin user
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -500,7 +507,7 @@ paths:
       description: |
         Deletes a user account. Requires admin role.
 
-        Note: Cannot delete your own user account.
+        Note: Cannot delete your own user account, nor the last admin user.
       operationId: deleteUser
       responses:
         '200':
@@ -515,6 +522,14 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: Deleting this user would leave the instance without any admin
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':

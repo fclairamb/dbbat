@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 
 	"github.com/gin-gonic/gin"
 
@@ -126,9 +127,31 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 			writeError(c, http.StatusForbidden, ErrCodeForbidden, "can only update your own user")
 			return
 		}
-		if len(req.Roles) > 0 {
+		if req.Roles != nil {
 			writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot change roles")
 			return
+		}
+	}
+
+	// Prevent a roles update that would leave the instance without any admin
+	if req.Roles != nil && !slices.Contains(req.Roles, store.RoleAdmin) {
+		targetUser, err := s.store.GetUserByUID(c.Request.Context(), uid)
+		if err != nil {
+			writeError(c, http.StatusNotFound, ErrCodeNotFound, "user not found")
+			return
+		}
+
+		if targetUser.IsAdmin() {
+			adminCount, err := s.store.CountAdmins(c.Request.Context())
+			if err != nil {
+				writeInternalError(c, s.logger, err, "failed to count admin users")
+				return
+			}
+
+			if adminCount <= 1 {
+				writeError(c, http.StatusConflict, ErrCodeConflict, "cannot remove the admin role from the last admin user")
+				return
+			}
 		}
 	}
 
@@ -181,16 +204,30 @@ func (s *Server) handleDeleteUser(c *gin.Context) {
 		return
 	}
 
+	userToDelete, err := s.store.GetUserByUID(c.Request.Context(), uid)
+	if err != nil {
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "user not found")
+		return
+	}
+
 	// In demo mode, prevent deleting the admin user
-	if s.config != nil && s.config.IsDemoMode() {
-		userToDelete, err := s.store.GetUserByUID(c.Request.Context(), uid)
+	if s.config != nil && s.config.IsDemoMode() && userToDelete.Username == "admin" {
+		writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot delete admin user in demo mode")
+		return
+	}
+
+	// Prevent deleting the last remaining admin. This is defense in depth:
+	// deletes require an admin actor and self-deletion is blocked, so the
+	// actor is normally a second admin — but the invariant must never break.
+	if userToDelete.IsAdmin() {
+		adminCount, err := s.store.CountAdmins(c.Request.Context())
 		if err != nil {
-			writeError(c, http.StatusNotFound, ErrCodeNotFound, "user not found")
+			writeInternalError(c, s.logger, err, "failed to count admin users")
 			return
 		}
 
-		if userToDelete.Username == "admin" {
-			writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot delete admin user in demo mode")
+		if adminCount <= 1 {
+			writeError(c, http.StatusConflict, ErrCodeConflict, "cannot delete the last admin user")
 			return
 		}
 	}
