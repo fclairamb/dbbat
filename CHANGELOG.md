@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.15.0](https://github.com/fclairamb/dbbat/compare/v0.14.0...v0.15.0) (2026-07-09)
+
+Implements five backlog specs in one squash-merged PR ([#230](https://github.com/fclairamb/dbbat/issues/230)) ([42c4e37](https://github.com/fclairamb/dbbat/commit/42c4e3713c95091fef3b51a15dd54489813300c8)); the individual changes are broken out below.
+
+### Features
+
+* **ui:** admin user-management UI — edit users and promote/demote admin rights from the users page, guarded so the last admin can't be demoted or deleted (UI lock plus a backend `409` on update/delete) ([#230](https://github.com/fclairamb/dbbat/issues/230))
+
+### Bug Fixes
+
+* **oracle:** make sqlplus / OCI instant client work through the proxy — root-caused the long-standing stall to a malformed wide-encoding AUTH challenge (not the TCP-urgent OOB break probe that was long assumed), fixing four wide-encoding bugs; works even over an OOB-dropping network path ([#230](https://github.com/fclairamb/dbbat/issues/230))
+* **config:** accept the documented `DBB_SLACK_SIGNING_SECRET` env var for the Slack signing secret, with the legacy `DBB_SLACK_NOTIFY_SIGNING_SECRET` kept as an accepted alias (canonical wins if both are set) ([#230](https://github.com/fclairamb/dbbat/issues/230))
+
+### Documentation
+
+* document the three Slack interactivity deployment shapes and Socket Mode (`DBB_SLACK_NOTIFY_APP_TOKEN`) for gated deployments, plus a startup warning when the inbound endpoint must be reachable from Slack ([#230](https://github.com/fclairamb/dbbat/issues/230))
+* document HTTPRoute (Gateway API) exposure on the website and fix the Docusaurus build ([#230](https://github.com/fclairamb/dbbat/issues/230))
+
 ## [0.14.0](https://github.com/fclairamb/dbbat/compare/v0.13.0...v0.14.0) (2026-07-08)
 
 
