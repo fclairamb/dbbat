@@ -13,7 +13,7 @@ A Helm chart is also maintained in-tree under [`charts/`](https://github.com/fcl
 - Kubernetes cluster (1.19+)
 - kubectl configured
 - PostgreSQL database accessible from the cluster
-- Ingress controller installed (e.g., nginx-ingress, traefik)
+- Ingress controller installed (e.g., nginx-ingress, traefik) — or a Gateway API implementation if you prefer an HTTPRoute
 
 ## Listeners
 
@@ -314,6 +314,59 @@ spec:
               name: api
 ```
 
+## HTTPRoute (Gateway API)
+
+As an alternative to Ingress, the REST API and web UI can be exposed through a [Gateway API](https://gateway-api.sigs.k8s.io/) `HTTPRoute` attached to an existing Gateway (e.g. Istio). This requires the Gateway API CRDs installed in the cluster and a Gateway that accepts routes from the `dbbat` namespace. TLS is terminated by the Gateway listener (`sectionName`), so no certificate configuration is needed on the route side:
+
+```yaml
+# httproute.yaml
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: dbbat
+  namespace: dbbat
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: dbbat.example.com
+spec:
+  hostnames:
+    - dbbat.example.com
+  parentRefs:
+    - name: http-gateway
+      namespace: istio-gateway
+      sectionName: https
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: dbbat
+          port: 4200
+          kind: Service
+```
+
+### With the Helm Chart
+
+The in-tree [Helm chart](https://github.com/fclairamb/dbbat/tree/main/charts) renders the same route from the `httpRoute.*` values (disable the Ingress when using it):
+
+```yaml
+ingress:
+  enabled: false
+
+httpRoute:
+  enabled: true
+  hostnames:
+    - dbbat.example.com
+  parentRefs:
+    - name: http-gateway
+      namespace: istio-gateway
+      sectionName: https
+  paths:
+    - /
+  annotations:
+    external-dns.alpha.kubernetes.io/hostname: dbbat.example.com
+```
+
 ## Exposing the Proxy Listeners
 
 The proxy listeners (PostgreSQL `5434`, Oracle `1522`, MySQL/MariaDB `3307`) cannot be exposed via a standard HTTP Ingress — they speak TCP/wire protocols, not HTTP. Options:
@@ -399,7 +452,7 @@ kubectl apply -f namespace.yaml
 kubectl apply -f secret.yaml        # Or use your secrets management
 kubectl apply -f deployment.yaml
 kubectl apply -f service.yaml
-kubectl apply -f ingress.yaml
+kubectl apply -f ingress.yaml     # Or httproute.yaml
 ```
 
 Verify the deployment:
@@ -407,7 +460,7 @@ Verify the deployment:
 ```bash
 kubectl get pods -n dbbat
 kubectl get svc -n dbbat
-kubectl get ingress -n dbbat
+kubectl get ingress -n dbbat      # Or: kubectl get httproute -n dbbat
 
 # Check logs
 kubectl logs -n dbbat -l app=dbbat
