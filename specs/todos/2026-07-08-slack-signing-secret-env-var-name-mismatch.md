@@ -54,3 +54,35 @@ Either way: grep the tree for `DBB_SLACK_SIGNING_SECRET` and
 manifest, openapi) consistent.
 
 No GitHub issue filed yet — one should be opened and linked here.
+
+## Implementation Plan
+
+Option A — make the documented name `DBB_SLACK_SIGNING_SECRET` work, keeping the
+legacy `DBB_SLACK_NOTIFY_SIGNING_SECRET` accepted (the live Stonal deployment
+sets it today, so it must not break).
+
+1. **Config alias** (`internal/config/config.go`):
+   - In `envTransform`, map the exact key `slack_signing_secret` →
+     `slack_notify.signing_secret` (canonical documented name). The existing
+     `slack_notify_*` prefix rule keeps the legacy name working.
+   - Deterministic precedence: koanf's env provider offers no ordering
+     guarantee when two env vars map to the same key, so after the env load in
+     `Load()`, explicitly `k.Set("slack_notify.signing_secret", v)` when
+     `DBB_SLACK_SIGNING_SECRET` is non-empty — the canonical name always wins.
+   - `Interactive()` semantics unchanged.
+2. **Tests** (`internal/config/slack_notify_test.go`):
+   - `DBB_SLACK_SIGNING_SECRET` populates `SlackNotify.SigningSecret` and flips
+     `Interactive()` (the assertion the audit lacked).
+   - Legacy `DBB_SLACK_NOTIFY_SIGNING_SECRET` still populates the field.
+   - Both set → canonical wins (verified, not assumed).
+3. **Docs**: `CLAUDE.md` env table and
+   `website/docs/configuration/index.md` — document `DBB_SLACK_SIGNING_SECRET`
+   as canonical and note the legacy alias. `internal/notify/slack.go` error
+   string and `internal/api/openapi.yml` already use the canonical name (no
+   change).
+4. **Archived specs** (`specs/done/`): short editor's notes —
+   `2026-07-08-slack-interactions-endpoint-not-reachable-by-slack.md` (mismatch
+   now resolved), `2026-01-24-slack-integration.md` (historical design,
+   variable name later reused by the notify feature).
+5. **QA**: `make build-binary`, `make lint`, `make test`; website build since
+   its docs change.
