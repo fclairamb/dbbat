@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -619,4 +620,56 @@ func TestActionForStatus(t *testing.T) {
 			t.Errorf("actionForStatus(%q) = %q, want %q", status, got, want)
 		}
 	}
+}
+
+// --- Startup transport note ---
+
+// transportNoteServer builds a Server with the given Slack notify config whose
+// log output is captured in the returned buffer.
+func transportNoteServer(sn config.SlackNotifyConfig) (*Server, *bytes.Buffer) {
+	var buf bytes.Buffer
+
+	return &Server{
+		logger: slog.New(slog.NewTextHandler(&buf, nil)),
+		config: &config.Config{PublicURL: "https://dbbat.example.com", SlackNotify: sn},
+	}, &buf
+}
+
+func TestLogSlackInteractivityTransport(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]struct {
+		cfg      config.SlackNotifyConfig
+		wantNote bool
+	}{
+		"signing secret only": {config.SlackNotifyConfig{BotToken: "xoxb-1", SigningSecret: "s3"}, true},
+		"socket mode":         {config.SlackNotifyConfig{BotToken: "xoxb-1", AppToken: "xapp-1"}, false},
+		"both transports":     {config.SlackNotifyConfig{BotToken: "xoxb-1", SigningSecret: "s3", AppToken: "xapp-1"}, false},
+		"notify only":         {config.SlackNotifyConfig{BotToken: "xoxb-1"}, false},
+		"disabled":            {config.SlackNotifyConfig{}, false},
+	}
+
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			srv, buf := transportNoteServer(tc.cfg)
+			srv.logSlackInteractivityTransport()
+
+			if got := strings.Contains(buf.String(), "DBB_SLACK_NOTIFY_APP_TOKEN"); got != tc.wantNote {
+				t.Errorf("reachability note logged = %v, want %v (log: %q)", got, tc.wantNote, buf.String())
+			}
+
+			if tc.wantNote && !strings.Contains(buf.String(), "https://dbbat.example.com/api/v1/slack/interactions") {
+				t.Errorf("note should carry the endpoint URL (log: %q)", buf.String())
+			}
+		})
+	}
+}
+
+func TestLogSlackInteractivityTransport_NilConfig(t *testing.T) {
+	t.Parallel()
+
+	srv := &Server{logger: testLogger()}
+	srv.logSlackInteractivityTransport() // must not panic on a nil config
 }
