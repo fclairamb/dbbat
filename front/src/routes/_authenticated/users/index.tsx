@@ -1,6 +1,12 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { useUsers, useCreateUser, useDeleteUser, type User } from "@/api";
+import {
+  useUsers,
+  useCreateUser,
+  useUpdateUser,
+  useDeleteUser,
+  type User,
+} from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { Button } from "@/components/ui/button";
@@ -10,8 +16,10 @@ import {
   canCreateUser,
   canDeleteUser,
   canResetPassword,
+  canUpdateUser,
   getDisabledReason,
   getActionTooltip,
+  type UserRole,
 } from "@/lib/permissions";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -42,7 +50,7 @@ import { ResetPasswordDialog } from "@/components/shared/ResetPasswordDialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Plus, Trash2, KeyRound } from "lucide-react";
+import { Plus, Trash2, KeyRound, Pencil } from "lucide-react";
 import { toast } from "sonner";
 import { formatDistanceToNow } from "date-fns";
 
@@ -54,12 +62,17 @@ function UsersPage() {
   const { user } = useAuth();
   const { data: users, isLoading } = useUsers();
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [editUser, setEditUser] = useState<User | null>(null);
   const [deleteUser, setDeleteUser] = useState<User | null>(null);
   const [resetPasswordUser, setResetPasswordUser] = useState<User | null>(null);
 
   const canCreate = canCreateUser(user?.roles);
+  const canUpdate = canUpdateUser(user?.roles);
   const canDelete = canDeleteUser(user?.roles);
   const canReset = canResetPassword(user?.roles);
+
+  const adminCount =
+    users?.filter((u) => u.roles?.includes("admin")).length ?? 0;
 
   const columns: Column<User>[] = [
     {
@@ -104,6 +117,28 @@ function UsersPage() {
       header: "",
       cell: (u) => (
         <div className="flex items-center justify-end gap-1">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                disabled={!canUpdate}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setEditUser(u);
+                }}
+                data-testid={`edit-user-${u.username}`}
+                aria-label={`Edit user ${u.username}`}
+              >
+                <Pencil className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>
+              {canUpdate
+                ? getActionTooltip("update-user")
+                : getDisabledReason("update-user", user?.roles)}
+            </TooltipContent>
+          </Tooltip>
           <Tooltip>
             <TooltipTrigger asChild>
               <Button
@@ -185,6 +220,20 @@ function UsersPage() {
         emptyMessage="No users found"
       />
 
+      {editUser && (
+        <Dialog open onOpenChange={(open) => !open && setEditUser(null)}>
+          <EditUserDialog
+            key={editUser.uid}
+            user={editUser}
+            currentUserUid={user?.uid}
+            isLastAdmin={
+              (editUser.roles?.includes("admin") ?? false) && adminCount <= 1
+            }
+            onClose={() => setEditUser(null)}
+          />
+        </Dialog>
+      )}
+
       <DeleteUserDialog user={deleteUser} onClose={() => setDeleteUser(null)} />
 
       {resetPasswordUser && (
@@ -201,10 +250,84 @@ function UsersPage() {
   );
 }
 
+const ROLE_OPTIONS: { value: UserRole; label: string }[] = [
+  { value: "admin", label: "Administrator" },
+  { value: "viewer", label: "Viewer" },
+  { value: "connector", label: "Connector" },
+];
+
+/** Normalize an API roles array to known roles, in canonical order */
+const toUserRoles = (roles: string[] | undefined): UserRole[] =>
+  ROLE_OPTIONS.map((o) => o.value).filter((v) => roles?.includes(v));
+
+function RoleCheckboxes({
+  idPrefix,
+  roles,
+  onChange,
+  lockedRole,
+  lockedReason,
+}: {
+  idPrefix: string;
+  roles: UserRole[];
+  onChange: (roles: UserRole[]) => void;
+  lockedRole?: UserRole;
+  lockedReason?: string;
+}) {
+  const toggleRole = (value: UserRole, checked: boolean) => {
+    const next = checked
+      ? [...new Set([...roles, value])]
+      : roles.filter((r) => r !== value);
+    // Keep a stable, canonical role ordering
+    onChange(ROLE_OPTIONS.map((o) => o.value).filter((v) => next.includes(v)));
+  };
+
+  return (
+    <div className="space-y-2">
+      <Label>Roles</Label>
+      {ROLE_OPTIONS.map((role) => {
+        const isLocked = role.value === lockedRole;
+        const row = (
+          <div className="flex items-center space-x-2">
+            <Checkbox
+              id={`${idPrefix}-role-${role.value}`}
+              checked={roles.includes(role.value)}
+              disabled={isLocked}
+              onCheckedChange={(checked) =>
+                toggleRole(role.value, checked === true)
+              }
+              data-testid={`${idPrefix}-role-${role.value}`}
+              aria-label={`${role.label} role`}
+            />
+            <Label
+              htmlFor={`${idPrefix}-role-${role.value}`}
+              className="font-normal"
+            >
+              {role.label}
+            </Label>
+          </div>
+        );
+
+        if (!isLocked || !lockedReason) {
+          return <div key={role.value}>{row}</div>;
+        }
+
+        return (
+          <Tooltip key={role.value} delayDuration={0}>
+            <TooltipTrigger asChild>
+              <div>{row}</div>
+            </TooltipTrigger>
+            <TooltipContent>{lockedReason}</TooltipContent>
+          </Tooltip>
+        );
+      })}
+    </div>
+  );
+}
+
 function CreateUserDialog({ onClose }: { onClose: () => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [isAdmin, setIsAdmin] = useState(false);
+  const [roles, setRoles] = useState<UserRole[]>(["connector"]);
 
   const createUser = useCreateUser({
     onSuccess: () => {
@@ -221,12 +344,12 @@ function CreateUserDialog({ onClose }: { onClose: () => void }) {
     createUser.mutate({
       username,
       password,
-      roles: isAdmin ? ["admin"] : ["connector"],
+      roles,
     });
   };
 
   return (
-    <DialogContent>
+    <DialogContent data-testid="create-user-dialog">
       <form onSubmit={handleSubmit}>
         <DialogHeader>
           <DialogTitle>Create User</DialogTitle>
@@ -252,25 +375,139 @@ function CreateUserDialog({ onClose }: { onClose: () => void }) {
               required
             />
           </div>
-          <div className="flex items-center space-x-2">
-            <Checkbox
-              id="isAdmin"
-              checked={isAdmin}
-              onCheckedChange={(checked) => setIsAdmin(checked === true)}
-            />
-            <Label htmlFor="isAdmin">Admin user</Label>
-          </div>
+          <RoleCheckboxes
+            idPrefix="create-user"
+            roles={roles}
+            onChange={setRoles}
+          />
         </div>
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onClose}>
             Cancel
           </Button>
-          <Button type="submit" disabled={createUser.isPending}>
+          <Button
+            type="submit"
+            disabled={createUser.isPending || roles.length === 0}
+            data-testid="create-user-submit"
+          >
             Create
           </Button>
         </DialogFooter>
       </form>
     </DialogContent>
+  );
+}
+
+function EditUserDialog({
+  user: targetUser,
+  currentUserUid,
+  isLastAdmin,
+  onClose,
+}: {
+  user: User;
+  currentUserUid?: string;
+  isLastAdmin: boolean;
+  onClose: () => void;
+}) {
+  const [roles, setRoles] = useState<UserRole[]>(toUserRoles(targetUser.roles));
+  const [confirmSelfDemote, setConfirmSelfDemote] = useState(false);
+
+  const updateUser = useUpdateUser(targetUser.uid, {
+    onSuccess: () => {
+      toast.success(`User "${targetUser.username}" updated`);
+      onClose();
+    },
+    onError: (error) => {
+      toast.error(error.message);
+    },
+  });
+
+  const wasAdmin = targetUser.roles?.includes("admin") ?? false;
+  const isSelfDemotion =
+    targetUser.uid === currentUserUid && wasAdmin && !roles.includes("admin");
+
+  const submit = () => {
+    updateUser.mutate({ roles });
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isSelfDemotion) {
+      setConfirmSelfDemote(true);
+      return;
+    }
+    submit();
+  };
+
+  return (
+    <>
+      <DialogContent data-testid="edit-user-dialog">
+        <form onSubmit={handleSubmit}>
+          <DialogHeader>
+            <DialogTitle>Edit User</DialogTitle>
+            <DialogDescription>
+              Manage roles for "{targetUser.username}".
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label htmlFor="edit-username">Username</Label>
+              <Input
+                id="edit-username"
+                value={targetUser.username}
+                readOnly
+                disabled
+                data-testid="edit-user-username"
+              />
+            </div>
+            <RoleCheckboxes
+              idPrefix="edit-user"
+              roles={roles}
+              onChange={setRoles}
+              lockedRole={isLastAdmin ? "admin" : undefined}
+              lockedReason="Cannot remove the admin role from the last administrator"
+            />
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              disabled={updateUser.isPending || roles.length === 0}
+              data-testid="edit-user-submit"
+            >
+              Save
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+
+      <AlertDialog open={confirmSelfDemote} onOpenChange={setConfirmSelfDemote}>
+        <AlertDialogContent data-testid="edit-user-demote-self-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Remove your own admin rights?</AlertDialogTitle>
+            <AlertDialogDescription>
+              You are about to remove the administrator role from your own
+              account. You will immediately lose access to user management and
+              other admin-only features.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="edit-user-demote-self-cancel">
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={submit}
+              className="bg-destructive text-white hover:bg-destructive/90"
+              data-testid="edit-user-demote-self-confirm"
+            >
+              Remove my admin role
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
   );
 }
 

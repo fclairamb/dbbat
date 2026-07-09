@@ -203,6 +203,36 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/slack/interactions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Slack interactivity webhook
+         * @description Receives Slack Block Kit interaction callbacks (Approve / Deny button
+         *     clicks on grant-request notifications). Authenticated by the Slack
+         *     request signature (`X-Slack-Signature` / `X-Slack-Request-Timestamp`
+         *     verified with the app signing secret), not a bearer token.
+         *
+         *     Slack sends `application/x-www-form-urlencoded` with a single
+         *     `payload` field containing the interaction JSON. The endpoint acks
+         *     with `200` immediately (Slack's 3-second deadline) and processes the
+         *     decision asynchronously; all user feedback is delivered back to Slack
+         *     (message update, thread reply, or ephemeral message). Only registered
+         *     when `DBB_SLACK_SIGNING_SECRET` is configured.
+         */
+        post: operations["slackInteractions"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users": {
         parameters: {
             query?: never;
@@ -252,6 +282,7 @@ export interface paths {
          *     - Non-admins can only update their own password
          *     - Non-admins cannot change roles
          *     - API keys cannot change passwords (requires Basic Auth)
+         *     - The admin role cannot be removed from the last remaining admin
          */
         put: operations["updateUser"];
         post?: never;
@@ -259,7 +290,7 @@ export interface paths {
          * Delete user
          * @description Deletes a user account. Requires admin role.
          *
-         *     Note: Cannot delete your own user account.
+         *     Note: Cannot delete your own user account, nor the last admin user.
          */
         delete: operations["deleteUser"];
         options?: never;
@@ -2099,6 +2130,45 @@ export interface operations {
             };
         };
     };
+    slackInteractions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/x-www-form-urlencoded": {
+                    /** @description URL-encoded JSON interaction callback from Slack. */
+                    payload: string;
+                };
+            };
+        };
+        responses: {
+            /**
+             * @description Acknowledged. Returned for valid interactions (processed
+             *     asynchronously) and for ignored ones (unknown action, non-UUID
+             *     value) alike — an empty body so Slack shows the user nothing.
+             */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /**
+             * @description Signature verification failed — missing/invalid signature,
+             *     stale timestamp (>5 min), or oversized body. No body detail.
+             */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     listUsers: {
         parameters: {
             query?: never;
@@ -2208,6 +2278,15 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            /** @description The update would remove the admin role from the last admin user */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
         };
@@ -2236,6 +2315,16 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Deleting this user would leave the instance without any admin */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
         };
