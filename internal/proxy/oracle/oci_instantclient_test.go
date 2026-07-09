@@ -170,6 +170,30 @@ func TestRewritePhase1WideDottedUsername(t *testing.T) {
 	}
 }
 
+// TestParseAuthPhase1WideDottedUsername covers the client-authentication side of
+// the dotted-username bug: parseAuthPhase1 (via usernameBeforeAuthKV) must
+// recover the WHOLE login name from a wide/OCI Phase 1 payload, not the tail
+// after the '.'. The old identifier-walk extractor returned "CLAIRAMBAULT",
+// which dbbat then failed to find in its user store ("user not found:
+// CLAIRAMBAULT") — the failure that surfaced once the upstream Phase 1 rewrite
+// was fixed.
+func TestParseAuthPhase1WideDottedUsername(t *testing.T) {
+	t.Parallel()
+
+	// parseAuthPhase1 receives the TNS Data payload including the 2 data-flag
+	// bytes; prepend them to the captured body.
+	payload := append([]byte{0x00, 0x00}, instantclientPhase1Body("florent.clairambault")...)
+
+	name, err := parseAuthPhase1(payload)
+	if err != nil {
+		t.Fatalf("parseAuthPhase1 failed: %v", err)
+	}
+
+	if name != "FLORENT.CLAIRAMBAULT" {
+		t.Fatalf("parsed username = %q, want %q (whole dotted name, upper-cased)", name, "FLORENT.CLAIRAMBAULT")
+	}
+}
+
 // TestReplaceAuthKVValueWideBufferSized covers the ORA-28041 regression: the
 // instantclient 23.3 sends every 4-byte value length as a 3x UTF-8
 // max-expansion buffer size; the splice must mirror that convention, not write

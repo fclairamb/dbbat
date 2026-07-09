@@ -126,54 +126,27 @@ func parseAuthPhase1(tnsDataPayload []byte) (string, error) {
 }
 
 // usernameBeforeAuthKV extracts the login username by anchoring on the AUTH_*
-// key/value section that follows it in every O5LOGON Phase 1 message. It locates
-// the first "AUTH_" key and walks back a short window for the length-prefixed
-// identifier (the username) that sits just ahead of the KV pairs — tolerating
-// the small, client-specific framing bytes between them. This is preamble-layout
-// independent, so it handles go-ora, SQLcl/JDBC, and python-oracledb thin
-// (classic and fast-auth) uniformly.
+// key/value section that follows it in every O5LOGON Phase 1 message. It
+// delegates to locateAnchoredUsername, which handles both wire encodings:
+//   - thin clients (go-ora, SQLcl/JDBC, python-oracledb thin) — the username is
+//     the identifier run just ahead of the KV pairs;
+//   - wide clients (OCI / sqlplus) — the username is CLR-length-prefixed and may
+//     contain non-identifier characters (e.g. the '.' in "florent.clairambault"),
+//     so its extent comes from the CLR prefix, not an identifier walk.
+//
+// Sharing locateAnchoredUsername keeps client authentication in lock-step with
+// the upstream Phase 1/2 username rewriter: the span that authenticates here is
+// the same span rewritten onto the upstream packet. The previous private
+// identifier-walk truncated dotted usernames at the '.', so the client was
+// authenticated as (and looked up as) only the tail after the dot — e.g.
+// "user not found: CLAIRAMBAULT" for a login of florent.clairambault.
 func usernameBeforeAuthKV(payload []byte) (string, bool) {
-	authIdx := bytes.Index(payload, []byte("AUTH_"))
-	if authIdx < 2 {
+	start, end, ok := locateAnchoredUsername(payload)
+	if !ok {
 		return "", false
 	}
 
-	const (
-		maxFramingGap = 8  // KV-count/key-length framing bytes between username and AUTH_
-		maxUserLen    = 30 // longest plausible username
-	)
-
-	// The username is the run of identifier bytes ending just before the first
-	// AUTH_ key, separated only by a few non-identifier framing bytes (the KV
-	// pair count and key-length prefixes). This works whether the username is
-	// length-prefixed (go-ora, python-oracledb thin) or bare (SQLcl/JDBC thin) —
-	// the preceding length byte (<32 for any real username) is a control byte and
-	// so is not part of the identifier run.
-	end := authIdx
-
-	for gap := 0; end > 0 && !isIdentifierByte(payload[end-1]); gap++ {
-		if gap >= maxFramingGap {
-			return "", false
-		}
-
-		end--
-	}
-
-	start := end
-	for start > 0 && isIdentifierByte(payload[start-1]) && end-start < maxUserLen {
-		start--
-	}
-
-	if start == end {
-		return "", false
-	}
-
-	name := strings.ToUpper(string(payload[start:end]))
-	if knownAuthKeys[name] {
-		return "", false
-	}
-
-	return name, true
+	return strings.ToUpper(string(payload[start:end])), true
 }
 
 // isIdentifierByte reports whether b is an Oracle identifier character.
