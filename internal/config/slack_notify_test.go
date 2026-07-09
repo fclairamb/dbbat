@@ -25,6 +25,58 @@ func TestSlackNotifyAppTokenEnv(t *testing.T) {
 	assert.True(t, cfg.SlackNotify.Interactive(), "an app token should render buttons")
 }
 
+// TestSlackSigningSecretEnv verifies the canonical documented name
+// DBB_SLACK_SIGNING_SECRET populates SlackNotify.SigningSecret and enables
+// interactivity (the cross-check the completeness audit lacked).
+func TestSlackSigningSecretEnv(t *testing.T) {
+	t.Setenv("DBB_DSN", "postgres://x:x@localhost/x")
+	t.Setenv("DBB_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	t.Setenv("DBB_PUBLIC_URL", "https://dbbat.example.com")
+	t.Setenv("DBB_SLACK_NOTIFY_BOT_TOKEN", "xoxb-test")
+	t.Setenv("DBB_SLACK_SIGNING_SECRET", "canonical-secret")
+
+	cfg, err := Load(LoadOptions{})
+	require.NoError(t, err)
+
+	assert.Equal(t, "canonical-secret", cfg.SlackNotify.SigningSecret)
+	assert.True(t, cfg.SlackNotify.Interactive(), "signing secret + bot token should enable interactivity")
+}
+
+// TestSlackNotifySigningSecretLegacyEnv verifies the legacy alias
+// DBB_SLACK_NOTIFY_SIGNING_SECRET (still set on live deployments) keeps
+// populating SlackNotify.SigningSecret.
+func TestSlackNotifySigningSecretLegacyEnv(t *testing.T) {
+	t.Setenv("DBB_DSN", "postgres://x:x@localhost/x")
+	t.Setenv("DBB_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	t.Setenv("DBB_PUBLIC_URL", "https://dbbat.example.com")
+	t.Setenv("DBB_SLACK_NOTIFY_BOT_TOKEN", "xoxb-test")
+	t.Setenv("DBB_SLACK_NOTIFY_SIGNING_SECRET", "legacy-secret")
+
+	cfg, err := Load(LoadOptions{})
+	require.NoError(t, err)
+
+	assert.Equal(t, "legacy-secret", cfg.SlackNotify.SigningSecret)
+	assert.True(t, cfg.SlackNotify.Interactive(), "signing secret + bot token should enable interactivity")
+}
+
+// TestSlackSigningSecretPrecedence verifies the canonical
+// DBB_SLACK_SIGNING_SECRET deterministically wins over the legacy alias when
+// both are set (env provider map order is not guaranteed).
+func TestSlackSigningSecretPrecedence(t *testing.T) {
+	t.Setenv("DBB_DSN", "postgres://x:x@localhost/x")
+	t.Setenv("DBB_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	t.Setenv("DBB_PUBLIC_URL", "https://dbbat.example.com")
+	t.Setenv("DBB_SLACK_NOTIFY_BOT_TOKEN", "xoxb-test")
+	t.Setenv("DBB_SLACK_SIGNING_SECRET", "canonical-secret")
+	t.Setenv("DBB_SLACK_NOTIFY_SIGNING_SECRET", "legacy-secret")
+
+	cfg, err := Load(LoadOptions{})
+	require.NoError(t, err)
+
+	assert.Equal(t, "canonical-secret", cfg.SlackNotify.SigningSecret,
+		"canonical DBB_SLACK_SIGNING_SECRET must win over the legacy alias")
+}
+
 // TestSlackNotifySocketModeAndInteractive covers the SocketMode() gate and the
 // widened Interactive() gate across field combinations.
 func TestSlackNotifySocketModeAndInteractive(t *testing.T) {
