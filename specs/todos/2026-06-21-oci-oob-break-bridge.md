@@ -51,3 +51,44 @@ See `docs/oracle.md` → "OCI break probe — remaining limitation over non-OOB 
 - Windows host (`florent@15.237.251.23`): `C:\oracle\instantclient_23_0\sqlplus.exe`
   → `orauser/<key>@//<node>:32181/FREEPDB1` returns rows (no `ORA-03106`/hang).
 - No regression for go-ora / python-oracledb thin / SQLcl on the cluster.
+
+## Implementation Plan
+
+Chosen directions: **(1) local repro first**, then a **negotiation-level variant of (2)**
+— make the proxy *disable OOB at the TNS negotiation layer* instead of bridging urgent
+bytes — with **(4)** kept as documented fallback and **(3)** documented as infra guidance.
+
+Rationale:
+
+- A local repro is feasible in this environment: sqlplus 23.3 (Oracle Instant Client for
+  macOS ARM64, via Homebrew — needed an ad-hoc `codesign` to run) and the
+  `gvenzl/oracle-free:23-slim` image are both present.
+- Raw OOB *bridging* (SO_OOBINLINE + `MSG_OOB` sends) can only ever work on paths that
+  preserve TCP urgent data. The cluster ingress (NodePort/NLB) strips it, so bridging is
+  a dead end for the actual deployment — confirmed by the "already tried" list.
+- The only proxy-side fix that can survive an OOB-stripping ingress is to make the client
+  *not use OOB at all*: Oracle already has this switch server-side (`DISABLE_OOB_AUTO`,
+  19c+), which means the Accept/negotiation carries a signal the client honors. dbbat
+  already rewrites the Accept for similar reasons (`stripAcceptModernAuthFlags`), so the
+  plan is to find the OOB-capability bits empirically (diff Connect/Accept captures with
+  and without `DISABLE_OOB` / `DISABLE_OOB_AUTO`) and clear them in the relay.
+
+Steps:
+
+1. Local repro: sqlplus (OOB enabled) → docker Oracle 23ai directly, and through a local
+   dbbat; note that Docker Desktop's port forwarding on macOS is itself a userspace,
+   OOB-stripping path — i.e. a faithful stand-in for the cluster ingress.
+2. Observe the probe with a small spy relay (SO_OOBINLINE + SIOCATMARK on both legs) to
+   see exactly which side sends urgent data when, and what the negotiation carries.
+3. Implement OOB-disable in dbbat's pre-auth relay: clear the urgent-data capability
+   bits in the client's Connect (NT protocol characteristics) as forwarded upstream,
+   and/or the corresponding Accept bits toward the client, so neither side attempts the
+   break probe through the proxy. Unit tests from captured fixtures.
+4. Local end-to-end verification including an OOB-stripping hop in front of dbbat (plain
+   TCP relay) to simulate the NodePort: sqlplus must authenticate + query with
+   `DISABLE_OOB` unset.
+5. Regression: `make test` (+ existing thin-client fixtures), lint, build.
+6. Docs: update `docs/oracle.md` OOB section; document the `DISABLE_OOB=ON` client recipe
+   (direction 4) and the TCP-passthrough-ingress option (direction 3). Cluster/Windows
+   verification is out of scope for this run — documented as pending manual verification
+   with a runbook.
