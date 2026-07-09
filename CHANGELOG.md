@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/fclairamb/dbbat/compare/v0.14.0...v0.15.0) (2026-07-09)
+
+
+### Features
+
+* implement backlog specs (admin user-management UI, OCI sqlplus fix, Slack config fixes, HTTPRoute docs) ([#230](https://github.com/fclairamb/dbbat/issues/230)) ([42c4e37](https://github.com/fclairamb/dbbat/commit/42c4e3713c95091fef3b51a15dd54489813300c8))
+
 ## [0.14.0](https://github.com/fclairamb/dbbat/compare/v0.13.0...v0.14.0) (2026-07-08)
 
 
