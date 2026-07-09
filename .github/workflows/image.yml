@@ -14,11 +14,13 @@ jobs:
       should_build: ${{ steps.check.outputs.should_build }}
     steps:
       - id: check
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
-          if echo "${{ github.event.head_commit.message }}" | grep -qi '#image'; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
+          if printf '%s' "$COMMIT_MSG" | grep -qi '#image'; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
           else
-            echo "should_build=false" >> $GITHUB_OUTPUT
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
           fi
 
   build-image:
