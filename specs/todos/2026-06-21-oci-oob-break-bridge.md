@@ -92,3 +92,45 @@ Steps:
    (direction 4) and the TCP-passthrough-ingress option (direction 3). Cluster/Windows
    verification is out of scope for this run — documented as pending manual verification
    with a runbook.
+
+## Findings & Outcome
+
+**Root cause was NOT the TCP-urgent OOB break probe.** With a local repro (sqlplus 23.3
+Instant Client for macOS ARM64 → dbbat → `gvenzl/oracle-free:23-slim`) and a spy relay
+running `SO_OOBINLINE` + `SIOCATMARK` on both legs, **zero** TCP-urgent bytes were observed
+during the failing handshake. The sqlplus "stall before AUTH Phase 2 / `ORA-03106`" was an
+**inline TTC-level break/reset abort** triggered by a malformed AUTH challenge, not the
+out-of-band probe. The proxy now works over a plain TCP relay that *drops* urgent data (a
+faithful NodePort/NLB stand-in), so directions (2) OOB-bridging, (3) OOB-preserving ingress,
+and (4) `DISABLE_OOB` client recipe are all **unnecessary** — the fix is at the protocol
+layer, not the OOB layer.
+
+**Direction landed: (1) local repro → a protocol fix** (a superset of what the spec
+anticipated). Four OCI wide-encoding bugs in the terminated-auth path, each found and fixed
+against a live 23ai and pinned with fixtures from both OCI flavors (macOS Instant Client
+23.3 and DB-bundled 23.26):
+
+1. **Challenge end-of-call summary width** — was a fixed capture; now reuses the live
+   upstream Phase 1 summary (`clientChallengeTrailer` + `beginUpstreamAuth` running before
+   the client challenge). This is the direct cause of the break/reset stall.
+2. **Phase 1 user-len locator** (`findUserIDLenPos`) — backward dword scan corrupted the KV
+   pair count when `len(username) == numPairs` (5-char `admin`); now anchors on the first
+   `fe…` pointer run and handles the 3× buffer-size convention.
+3. **Phase 2 value-length convention** (`replaceAuthKVValueWide`) — instantclient 23.3 sends
+   3× UTF-8 buffer sizes; a plain length drew `ORA-28041`.
+4. **AUTH OK reassembly + re-fragmentation** (`readUpstreamAuthMessages` / `reframeAuthOK`) —
+   the AUTH OK spans two packets with `AUTH_SVR_RESPONSE` straddling the boundary; merge to
+   patch, then re-fragment or the client rejects a too-large packet with `ORA-12592`.
+
+**Verified locally:** `sqlplus admin/<key>@//127.0.0.1:<port>/oralocal` returns rows over
+(a) a direct connection and (b) an OOB-dropping relay in front of dbbat. `make build-binary`,
+`make lint`, `make test` all green. New fixtures in `internal/proxy/oracle/oci_instantclient_test.go`;
+all pre-existing thin-client dump-replay fixtures still pass (no regression).
+
+**Not verified (out of scope for this automated run):** live cluster verification from the
+Windows host over the Kubernetes NodePort. A runbook for it is in `docs/oracle.md`
+("OCI break/reset before AUTH Phase 2"). Note: go-ora and python-oracledb **thin** clients
+fail with `ORA-03120` against the `gvenzl/oracle-free:23-slim` container in this local
+harness — but they fail **identically on the pre-change base binary**, so this is a
+container/caps quirk of the local harness, not a regression (their captured dump-replay
+fixtures pass, and they are validated against real Stonal RDS Oracle on the cluster).
