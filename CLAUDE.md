@@ -145,7 +145,7 @@ make clean            # Clean build artifacts
 | `DBB_SLACK_NOTIFY_BOT_TOKEN` | Slack bot user OAuth token (`xoxb-...`); empty disables notifications | No |
 | `DBB_SLACK_NOTIFY_CHANNEL` | Slack channel id or name for grant-request notifications (default: `#dbbat`) | No |
 | `DBB_SLACK_SIGNING_SECRET` | Slack app signing secret; enables Approve/Deny buttons + inbound interactions endpoint. Empty = link-through-UI (no buttons). Requires the bot token. | No |
-| `DBB_PUBLIC_URL` | Externally reachable base URL; used for deep-links in Slack notifications | If notify enabled |
+| `DBB_PUBLIC_URL` | Externally reachable base URL of the **web UI** (the address a Slack reviewer opens in a browser, e.g. `https://dbbat.tools.stonal.io`); used for deep-links in Slack notifications. NOT the DB proxy connection host (e.g. `db.stonal.io`), which may be VPN-gated | If notify enabled |
 
 Note: If no encryption key is provided, one is created at `~/.dbbat/key`.
 

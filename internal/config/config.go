@@ -272,9 +272,16 @@ type Config struct {
 	// grant request events.
 	SlackNotify SlackNotifyConfig `koanf:"slack_notify"`
 
-	// PublicURL is the externally reachable base URL for this dbbat
-	// instance. Used to build deep-links in Slack notifications. Required
-	// only if SlackNotify is enabled.
+	// PublicURL is the externally reachable base URL of the dbbat *web UI* —
+	// the address a human (e.g. a Slack reviewer) opens in a browser, such as
+	// "https://dbbat.tools.stonal.io". It is used to build the deep-links and
+	// user-facing hints in Slack notifications.
+	//
+	// This is NOT the database connection/proxy host that clients point their
+	// PostgreSQL/Oracle/MySQL drivers at (e.g. "db.stonal.io", which may be
+	// VPN-gated and not browser-reachable). Those two addresses are distinct
+	// settings; do not reuse the DB proxy host here or Slack links will be
+	// unreachable. Required only if SlackNotify is enabled.
 	PublicURL string `koanf:"public_url"`
 
 	// Dump holds session packet dump configuration.
