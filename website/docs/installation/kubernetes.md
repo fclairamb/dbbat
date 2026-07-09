@@ -367,6 +367,17 @@ httpRoute:
     external-dns.alpha.kubernetes.io/hostname: dbbat.example.com
 ```
 
+:::note Slack interactivity behind a gated gateway
+Shared gateways are often fronted by a load balancer whose security group
+allowlists inbound source IPs (a common webhook-hardening pattern). Slack's
+Approve/Deny button clicks originate from *Slack's servers*, whose IP ranges are
+wide and changing — allowlisting them is impractical, so clicks time out even
+though the endpoint works from your own network. On such deployments, configure
+[Socket Mode](/docs/configuration#socket-mode-no-inbound-endpoint)
+(`DBB_SLACK_NOTIFY_APP_TOKEN`): clicks then arrive over an outbound WebSocket
+and no gateway change is needed.
+:::
+
 ## Exposing the Proxy Listeners
 
 The proxy listeners (PostgreSQL `5434`, Oracle `1522`, MySQL/MariaDB `3307`) cannot be exposed via a standard HTTP Ingress — they speak TCP/wire protocols, not HTTP. Options:
