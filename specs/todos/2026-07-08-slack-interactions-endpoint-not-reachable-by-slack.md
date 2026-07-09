@@ -59,3 +59,41 @@ clicking them times out). Consider not advertising buttons on gated deployments.
 
 No GitHub issue filed yet — open one and link it here. Related:
 `specs/todos/2026-07-08-slack-signing-secret-env-var-name-mismatch.md`.
+
+## Implementation Plan
+
+Options 1 and 2 are changes to **Stonal's shared Istio gateway / internet-facing
+NLB security group** — blast radius is every service behind the shared gateway,
+and this spec itself says to do that deliberately, with review. They are out of
+scope for an automated in-repo run and are intentionally not implemented here.
+
+Option 3 (**Slack Socket Mode**) has since landed in-repo:
+`feat(api): add Slack Socket Mode transport for Approve/Deny interactions`
+(#229, commit `d1d33d4`, spec archived at
+`specs/done/2026/07/2026-07-08-slack-socket-mode.md`). It is the sanctioned
+resolution of this spec. Remaining work in this pass:
+
+1. **Verify** Socket Mode closes the gap: with `DBB_SLACK_NOTIFY_BOT_TOKEN` +
+   `DBB_SLACK_NOTIFY_APP_TOKEN` and no reachable inbound endpoint, Approve/Deny
+   clicks arrive over the outbound WebSocket and run the *same* decision
+   pipeline as the HTTP endpoint (`internal/api/slack_socketmode.go` →
+   `dispatchSlackCallback` → `processSlackDecision`, shared with
+   `internal/api/slack_interactions.go`). Confirm test coverage.
+2. **Degraded-mode guidance** (the "consider not advertising buttons on gated
+   deployments" note): add a startup log line when interactivity is enabled via
+   signing-secret only (no app token), stating that
+   `POST /api/v1/slack/interactions` must be reachable from *Slack's servers*
+   — not just users' browsers — and that Socket Mode
+   (`DBB_SLACK_NOTIFY_APP_TOKEN`) is the alternative for gated deployments.
+   Unit-test the predicate + log emission. No config redesign.
+3. **Docs**: strengthen the website configuration page with an explicit
+   three-deployment-shapes summary (public endpoint / gated + Socket Mode /
+   neither = link-through-UI), add `app_token` to the YAML example, and add a
+   note on the Kubernetes page (IP-allowlisted gateways → Socket Mode).
+4. **Spec resolution section** (below) with the ops runbook for
+   dbbat.tools.stonal.io.
+
+Not in this pass: filing the GitHub issue (still to do, see above), and the
+`DBB_SLACK_SIGNING_SECRET` vs `DBB_SLACK_NOTIFY_SIGNING_SECRET` env-var name
+mismatch, which is tracked separately in
+`specs/todos/2026-07-08-slack-signing-secret-env-var-name-mismatch.md`.
