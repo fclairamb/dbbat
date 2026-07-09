@@ -74,6 +74,14 @@ func replaceAuthKVValue(body []byte, key, newValue string, wide bool) []byte {
 // key side verbatim (the 4-byte keyLen field is sometimes a buffer size, not the
 // exact key length) and rewrites only the value side: a fresh 4-byte valLen, the
 // CLR-encoded new value, and the original flag.
+//
+// The 4-byte valLen convention is client-specific and must be preserved: the
+// DB-bundled 23.26 OCI client sends the plain value byte length, while the
+// macOS/Windows Oracle Instant Client 23.3 sends a UTF-8 max-expansion buffer
+// size (3x the CLR length) for EVERY value — and Oracle 23ai, parsing at that
+// client's caps level, rejects a spliced plain length with ORA-28041
+// ("authentication protocol internal error"). Mirror whichever convention the
+// original pair used.
 func replaceAuthKVValueWide(body []byte, key, newValue string) []byte {
 	keyB := []byte(key)
 
@@ -93,9 +101,10 @@ func replaceAuthKVValueWide(body []byte, key, newValue string) []byte {
 		return body
 	}
 
+	origValLen := binary.LittleEndian.Uint32(body[pos : pos+4])
 	valPos := pos + 4 // skip 4-byte LE valLen
 
-	_, clrN := readCLR(body[valPos:])
+	origVal, clrN := readCLR(body[valPos:])
 	if clrN == 0 {
 		return body
 	}
@@ -108,9 +117,14 @@ func replaceAuthKVValueWide(body []byte, key, newValue string) []byte {
 	flagVal := binary.LittleEndian.Uint32(body[flagPos : flagPos+4])
 	end := flagPos + 4
 
+	newValLen := uint32(len(newValue))
+	if len(origVal) > 0 && origValLen == uint32(3*len(origVal)) {
+		newValLen = uint32(3 * len(newValue))
+	}
+
 	out := make([]byte, 0, pos+len(body)-end+len(newValue)+12)
 	out = append(out, body[:pos]...) // key side preserved verbatim
-	out = binary.LittleEndian.AppendUint32(out, uint32(len(newValue)))
+	out = binary.LittleEndian.AppendUint32(out, newValLen)
 	out = append(out, ttcClr([]byte(newValue))...)
 	out = binary.LittleEndian.AppendUint32(out, flagVal)
 	out = append(out, body[end:]...)

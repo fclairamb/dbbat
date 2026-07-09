@@ -34,13 +34,13 @@ func rewriteAuthPhase1UsernameAnchored(body []byte, newUsername string) ([]byte,
 		fieldStart = start - 1
 	}
 
-	userIDLenPos := findUserIDLenPos(body, fieldStart, oldLen)
+	userIDLenPos, userIDLenVal := findUserIDLenPos(body, fieldStart, oldLen, len(newUsername))
 
 	out := make([]byte, 0, len(body)+len(newUsername))
 
 	if userIDLenPos >= 0 {
 		out = append(out, body[:userIDLenPos]...)
-		out = append(out, newLen) // user_id_len
+		out = append(out, userIDLenVal) // user_id_len (or its 3x buffer-size form)
 		out = append(out, body[userIDLenPos+1:fieldStart]...)
 	} else {
 		out = append(out, body[:fieldStart]...)
@@ -67,16 +67,35 @@ func locateAnchoredUsername(body []byte) (int, int, bool) {
 		return 0, 0, false
 	}
 
-	const maxFramingGap = 8
-
 	end := authIdx
 
-	for gap := 0; end > 0 && !isIdentifierByte(body[end-1]); gap++ {
-		if gap >= maxFramingGap {
+	if payloadUsesWideKVEncoding(body) {
+		// Wide (OCI) bodies frame the first key deterministically: a 4-byte LE
+		// key length (sometimes a 3x buffer size) + a 1-byte CLR length — so
+		// the username's last byte sits exactly 5 bytes before the key. The
+		// non-identifier walk below is a trap here: instantclient 23.3's
+		// buffer-sized AUTH_SESSKEY key length is 36 = 0x24 = '$', an Oracle
+		// identifier byte, and the walk then anchors on that length byte
+		// instead of the username — the "rewrite" splices the new username
+		// over the key-length field and the upstream rejects the mangled
+		// Phase 2 with ORA-28041.
+		const wideKeyFraming = 5
+
+		if authIdx < wideKeyFraming+1 {
 			return 0, 0, false
 		}
 
-		end--
+		end = authIdx - wideKeyFraming
+	} else {
+		const maxFramingGap = 8
+
+		for gap := 0; end > 0 && !isIdentifierByte(body[end-1]); gap++ {
+			if gap >= maxFramingGap {
+				return 0, 0, false
+			}
+
+			end--
+		}
 	}
 
 	start := end
@@ -91,30 +110,63 @@ func locateAnchoredUsername(body []byte) (int, int, bool) {
 	return start, end, true
 }
 
-// findUserIDLenPos returns the offset of the preamble user_id_len field (== the
-// old username length), or -1 if not found. Both it and the CLR prefix must be
-// rewritten or the upstream reads a stale count and overflows (ORA-03120 /
-// ORA-03146). OCI (sqlplus) encodes it as a 4-byte little-endian field
-// (oldLen 00 00 00) sitting tens of bytes ahead of the username; thin clients
-// use a single byte close to it.
-func findUserIDLenPos(body []byte, fieldStart, oldLen int) int {
+// findUserIDLenPos returns the offset of the preamble user_id_len field and the
+// byte to write there for the new username, or (-1, 0) if not found. Both it
+// and the CLR prefix must be rewritten or the upstream reads a stale count and
+// overflows (ORA-03120 / ORA-03146) — or, when the count grows, waits forever
+// for bytes that never come.
+//
+// OCI (sqlplus) wide preamble — same shape for AUTH Phase 1 (03 76) and
+// Phase 2 (03 73), captured from the DB-bundled 23.26 OCI client and the
+// macOS/Windows Oracle Instant Client 23.3:
+//
+//	03 76 <seq> <variable...>
+//	fe ff ff ff ff ff ff ff    first 8-byte pointer placeholder run
+//	<user-len field: 4 LE>     == len(username)   (23.26 bundled client)
+//	                           == 3*len(username) (instantclient 23.3 — a
+//	                              UTF-8 max-expansion buffer size)
+//	<logon mode: 4 LE>
+//	... more pointer runs, the KV pair count, then the CLR username.
+//
+// The field is located by anchoring on the FIRST pointer run — never by
+// scanning backward for a dword equal to oldLen: the KV pair count is also a
+// small 4-byte LE integer (5 for OCI Phase 1) sitting between pointer runs, and
+// a backward scan corrupts it whenever len(username) == numPairs (e.g. the
+// 5-char "admin" — the upstream then waits for a 6th pair that never arrives
+// and AUTH hangs).
+//
+// Thin clients use a single plain-length byte close to the username field.
+func findUserIDLenPos(body []byte, fieldStart, oldLen, newLen int) (int, byte) {
 	if payloadUsesWideKVEncoding(body) {
-		for i := fieldStart - 4; i >= 2; i-- {
-			if body[i] == byte(oldLen) && body[i+1] == 0 && body[i+2] == 0 && body[i+3] == 0 {
-				return i
-			}
+		ptrRun := []byte{0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+
+		idx := bytes.Index(body[:fieldStart], ptrRun)
+		if idx < 0 || idx+len(ptrRun)+4 > fieldStart {
+			return -1, 0
 		}
 
-		return -1
+		pos := idx + len(ptrRun)
+		if body[pos+1] != 0 || body[pos+2] != 0 || body[pos+3] != 0 {
+			return -1, 0
+		}
+
+		switch int(body[pos]) {
+		case oldLen:
+			return pos, byte(newLen)
+		case 3 * oldLen:
+			return pos, byte(3 * newLen)
+		default:
+			return -1, 0
+		}
 	}
 
 	for i := fieldStart - 1; i >= 2 && i >= fieldStart-12; i-- {
 		if body[i] == byte(oldLen) {
-			return i
+			return i, byte(newLen)
 		}
 	}
 
-	return -1
+	return -1, 0
 }
 
 // rewriteAuthPhase1Username takes a TTC AUTH Phase 1 body (everything after
