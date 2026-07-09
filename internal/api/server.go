@@ -123,6 +123,10 @@ func (s *Server) Start(addr string) error {
 	// app-level token is configured). Runs for the server's lifetime.
 	s.startSocketMode()
 
+	// When interactivity rides on the inbound HTTP endpoint alone, surface
+	// the Slack-side reachability requirement in the startup logs.
+	s.logSlackInteractivityTransport()
+
 	s.logger.InfoContext(context.Background(), "Starting API server", slog.String("addr", addr))
 
 	return s.httpServer.ListenAndServe()
@@ -184,8 +188,10 @@ func (s *Server) setupRouter() *gin.Engine {
 
 		// Slack interactivity webhook (unauthenticated at the middleware
 		// layer — the Slack request signature is the authentication). Only
-		// registered when interactivity is configured (signing secret set),
-		// so intranet-only deployments don't expose an inbound endpoint.
+		// registered when interactivity is configured (signing secret or
+		// Socket Mode app token set), so notification-only deployments don't
+		// expose an inbound endpoint. Under Socket Mode without a signing
+		// secret the handler rejects every request with 401.
 		if s.notifier.Interactive() {
 			v1.POST("/slack/interactions", s.handleSlackInteraction)
 		}

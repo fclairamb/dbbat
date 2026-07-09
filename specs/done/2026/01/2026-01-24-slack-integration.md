@@ -2,6 +2,13 @@
 
 ## Status: Draft
 
+> **Editor's note (2026-07-09):** historical design document. The env vars
+> sketched below (`DBB_SLACK_SIGNING_SECRET`, `DBB_SLACK_BOT_TOKEN`,
+> `DBB_SLACK_APP_ID`) do not match what was ultimately implemented: Slack
+> login uses `DBB_SLACK_AUTH_*` (OIDC client id/secret), and
+> `DBB_SLACK_SIGNING_SECRET` now belongs to the grant-notification
+> interactivity feature (`SlackNotify.SigningSecret`).
+
 ## Summary
 
 Add Slack integration to DBBat, enabling users to register their Slack identity with DBBat, manage their passwords, and request database access grants directly from Slack.
