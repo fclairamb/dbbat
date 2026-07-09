@@ -121,7 +121,7 @@ func locateAnchoredUsername(body []byte) (int, int, bool) {
 // macOS/Windows Oracle Instant Client 23.3:
 //
 //	03 76 <seq> <variable...>
-//	fe ff ff ff ff ff ff ff    first 8-byte pointer placeholder run
+//	<0xfe repeated 8x>         first 8-byte pointer placeholder run
 //	<user-len field: 4 LE>     == len(username)   (23.26 bundled client)
 //	                           == 3*len(username) (instantclient 23.3 — a
 //	                              UTF-8 max-expansion buffer size)
