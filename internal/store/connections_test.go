@@ -109,6 +109,95 @@ func TestCloseConnection(t *testing.T) {
 	})
 }
 
+// findConnection returns the connection with the given uid for a user, failing
+// the test if it is not present.
+func findConnection(t *testing.T, ctx context.Context, store *Store, userID, connID uuid.UUID) Connection {
+	t.Helper()
+	conns, err := store.ListConnections(ctx, ConnectionFilter{UserID: &userID})
+	if err != nil {
+		t.Fatalf("ListConnections() error = %v", err)
+	}
+	for _, c := range conns {
+		if c.UID == connID {
+			return c
+		}
+	}
+	t.Fatalf("connection %s not found", connID)
+	return Connection{}
+}
+
+func TestMarkAllConnectionsDisconnected(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "sweep")
+
+	// Two connections left open (disconnected_at IS NULL), as if the previous
+	// process died without closing them.
+	open1, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.1")
+	if err != nil {
+		t.Fatalf("CreateConnection() error = %v", err)
+	}
+	open2, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.2")
+	if err != nil {
+		t.Fatalf("CreateConnection() error = %v", err)
+	}
+
+	// One connection already cleanly closed before the sweep.
+	closed, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.3")
+	if err != nil {
+		t.Fatalf("CreateConnection() error = %v", err)
+	}
+	if err := store.CloseConnection(ctx, closed.UID); err != nil {
+		t.Fatalf("CloseConnection() error = %v", err)
+	}
+
+	// Capture the already-closed connection's disconnected_at so we can assert the
+	// sweep leaves it untouched.
+	closedBefore := findConnection(t, ctx, store, user.UID, closed.UID)
+	if closedBefore.DisconnectedAt == nil {
+		t.Fatal("pre-sweep: already-closed connection should have disconnected_at set")
+	}
+	originalClosedAt := *closedBefore.DisconnectedAt
+
+	t.Run("sweep marks only the open connections", func(t *testing.T) {
+		n, err := store.MarkAllConnectionsDisconnected(ctx)
+		if err != nil {
+			t.Fatalf("MarkAllConnectionsDisconnected() error = %v", err)
+		}
+		if n != 2 {
+			t.Errorf("MarkAllConnectionsDisconnected() count = %d, want 2", n)
+		}
+
+		// The two open connections must now be disconnected.
+		for _, uid := range []uuid.UUID{open1.UID, open2.UID} {
+			c := findConnection(t, ctx, store, user.UID, uid)
+			if c.DisconnectedAt == nil {
+				t.Errorf("connection %s should have disconnected_at set after sweep", uid)
+			}
+		}
+
+		// The already-closed connection must keep its original timestamp.
+		c := findConnection(t, ctx, store, user.UID, closed.UID)
+		if c.DisconnectedAt == nil {
+			t.Fatal("already-closed connection lost its disconnected_at after sweep")
+		}
+		if !c.DisconnectedAt.Equal(originalClosedAt) {
+			t.Errorf("already-closed connection disconnected_at changed: got %v, want %v", *c.DisconnectedAt, originalClosedAt)
+		}
+	})
+
+	t.Run("second sweep is a no-op", func(t *testing.T) {
+		n, err := store.MarkAllConnectionsDisconnected(ctx)
+		if err != nil {
+			t.Fatalf("MarkAllConnectionsDisconnected() error = %v", err)
+		}
+		if n != 0 {
+			t.Errorf("MarkAllConnectionsDisconnected() count = %d, want 0 (all already disconnected)", n)
+		}
+	})
+}
+
 func TestListConnections(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
