@@ -409,6 +409,12 @@ type APIKey struct {
 	RevokedBy       *uuid.UUID `bun:"revoked_by,type:uuid" json:"revoked_by"`
 	O5LogonSalt     []byte     `bun:"o5logon_salt" json:"-"`
 	O5LogonVerifier []byte     `bun:"o5logon_verifier" json:"-"` // encrypted with dbbat master key
+
+	// UserLogin is the owning user's username. It is NOT a database column; it
+	// is populated only by the list handler for admins (the fleet-review "All
+	// keys" view) so the UI can show an Owner column without an N+1. It stays
+	// empty for soft-deleted owners and in responses that don't enrich it.
+	UserLogin string `bun:"-" json:"user_login,omitempty"`
 }
 
 // IsExpired returns true if the API key has expired

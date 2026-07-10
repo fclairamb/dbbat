@@ -2691,6 +2691,12 @@ components:
           type: string
           format: uuid
           description: User UID
+        user_login:
+          type: string
+          nullable: true
+          description: >-
+            Owning user's username. Populated only in list responses for admins
+            (the fleet-review "All keys" view); omitted otherwise.
         name:
           type: string
           description: Key name

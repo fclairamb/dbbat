@@ -86,6 +86,32 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	return users, nil
 }
 
+// GetUsernamesByIDs returns a map of user UID -> username for the given IDs.
+// It runs a single batched query (no N+1) and is unaffected by any future
+// pagination of the users list. Missing or soft-deleted users are simply
+// absent from the returned map.
+func (s *Store) GetUsernamesByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]string, error) {
+	result := make(map[uuid.UUID]string, len(ids))
+	if len(ids) == 0 {
+		return result, nil
+	}
+
+	var users []User
+	err := s.db.NewSelect().
+		Model(&users).
+		Column("uid", "username").
+		Where("uid IN (?)", bun.In(ids)).
+		Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get usernames by ids: %w", err)
+	}
+
+	for _, u := range users {
+		result[u.UID] = u.Username
+	}
+	return result, nil
+}
+
 // UpdateUser updates a user
 func (s *Store) UpdateUser(ctx context.Context, uid uuid.UUID, updates UserUpdate) error {
 	q := s.db.NewUpdate().
