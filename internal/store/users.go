@@ -100,7 +100,7 @@ func (s *Store) GetUsernamesByIDs(ctx context.Context, ids []uuid.UUID) (map[uui
 	err := s.db.NewSelect().
 		Model(&users).
 		Column("uid", "username").
-		Where("uid IN (?)", bun.In(ids)).
+		Where("uid IN (?)", bun.List(ids)).
 		Scan(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get usernames by ids: %w", err)
