@@ -56,6 +56,32 @@ func (s *Store) CloseConnection(ctx context.Context, uid uuid.UUID) error {
 	return nil
 }
 
+// MarkAllConnectionsDisconnected marks every still-active connection
+// (disconnected_at IS NULL) as disconnected as of now, returning the number of
+// rows updated. It is meant to be called once on startup: on a fresh process no
+// previously tracked socket can still be alive, so any row left active belonged to
+// a prior process that died without running CloseConnection and is stale. Unlike
+// CloseConnection, a zero count is not an error (a clean start with no stale rows
+// is expected).
+func (s *Store) MarkAllConnectionsDisconnected(ctx context.Context) (int64, error) {
+	now := time.Now()
+	result, err := s.db.NewUpdate().
+		Model((*Connection)(nil)).
+		Where("disconnected_at IS NULL").
+		Set("disconnected_at = ?", now).
+		Exec(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to mark all connections disconnected: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	return rowsAffected, nil
+}
+
 // UpdateConnectionActivity updates the last_activity_at timestamp
 func (s *Store) UpdateConnectionActivity(ctx context.Context, uid uuid.UUID) error {
 	_, err := s.db.NewUpdate().
