@@ -13,6 +13,7 @@ var (
 	ErrReadOnlyViolation     = errors.New("write operations not permitted with read-only access")
 	ErrDDLBlocked            = errors.New("DDL operations not permitted: your access grant blocks schema modifications")
 	ErrPasswordChangeBlocked = errors.New("password modification is not allowed through the proxy")
+	ErrAdminCommandBlocked   = errors.New("role and privilege administration is not permitted through the proxy")
 	ErrOraclePatternBlocked  = errors.New("blocked: this Oracle operation is not permitted through the proxy")
 	ErrMySQLPatternBlocked   = errors.New("blocked: this MySQL operation is not permitted through the proxy")
 )
@@ -29,6 +30,8 @@ var writeKeywords = []string{
 var ddlKeywords = []string{"CREATE", "ALTER", "DROP", "TRUNCATE"}
 
 // Oracle-specific blocked patterns (always blocked regardless of grant controls).
+// User/role/privilege administration (ALTER USER, CREATE/DROP USER, GRANT, REVOKE)
+// is caught earlier by the cross-protocol IsAdminCommand in ValidateQuery.
 var oracleBlockedPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)ALTER\s+SYSTEM`),
 	regexp.MustCompile(`(?i)CREATE\s+DATABASE\s+LINK`),
@@ -38,6 +41,10 @@ var oracleBlockedPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)UTL_TCP`),
 	regexp.MustCompile(`(?i)UTL_FILE`),
 	regexp.MustCompile(`(?i)DBMS_PIPE`),
+	// AUDIT / NOAUDIT change server-side audit policy. Anchored at statement
+	// start (Oracle delivers one statement per OALL8) so a column or table
+	// named "audit" in an ordinary query is not a false positive.
+	regexp.MustCompile(`(?i)^\s*(?:NO)?AUDIT\b`),
 }
 
 // MySQL-specific blocked patterns (always blocked regardless of grant controls).
@@ -49,11 +56,58 @@ var oracleBlockedPatterns = []*regexp.Regexp{
 //   - SET GLOBAL: server-wide variable changes (privilege escalation).
 //   - SET PASSWORD: covered separately by IsPasswordChangeQuery for ALTER USER,
 //     but the SET PASSWORD syntax also exists.
+//   - SET PERSIST / PERSIST_ONLY: like SET GLOBAL but survives restarts.
+//   - INSTALL/UNINSTALL PLUGIN and CREATE FUNCTION ... SONAME: load native
+//     server-side code (UDF/plugin) — remote code execution vectors.
+//   - SHUTDOWN: stops the server. Anchored at statement start to avoid matching
+//     a column named "shutdown"; the COM_SHUTDOWN protocol command is refused
+//     separately.
+//
+// User/role administration (CREATE/DROP/RENAME USER, GRANT, REVOKE, non-password
+// ALTER USER) is caught earlier by the cross-protocol IsAdminCommand.
 var mysqlBlockedPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bLOAD\s+DATA\s+(?:LOCAL\s+)?INFILE\b`),
 	regexp.MustCompile(`(?i)\bINTO\s+(?:OUT|DUMP)FILE\b`),
 	regexp.MustCompile(`(?i)\bSET\s+GLOBAL\b`),
 	regexp.MustCompile(`(?i)\bSET\s+PASSWORD\b`),
+	regexp.MustCompile(`(?i)\bSET\s+PERSIST(?:_ONLY)?\b`),
+	regexp.MustCompile(`(?i)\b(?:UN)?INSTALL\s+PLUGIN\b`),
+	regexp.MustCompile(`(?i)\bCREATE\s+(?:AGGREGATE\s+)?FUNCTION\b[\s\S]*?\bSONAME\b`),
+	regexp.MustCompile(`(?i)^\s*SHUTDOWN\b`),
+}
+
+// adminCommandPatterns match privilege/identity administration that is always
+// blocked on every protocol (the same tier as the password-change block). They
+// are anchored at the (comment-stripped) start of a statement so ordinary DML
+// and non-admin DDL such as ALTER TABLE / CREATE INDEX are unaffected.
+var adminCommandPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)^ALTER\s+(?:ROLE|USER|GROUP)\b`),
+	regexp.MustCompile(`(?i)^CREATE\s+(?:ROLE|USER|GROUP)\b`),
+	regexp.MustCompile(`(?i)^DROP\s+(?:ROLE|USER|GROUP)\b`),
+	regexp.MustCompile(`(?i)^RENAME\s+USER\b`),
+	regexp.MustCompile(`(?i)^GRANT\b`),
+	regexp.MustCompile(`(?i)^REVOKE\b`),
+}
+
+// pgBlockedPatterns are PostgreSQL-specific statements always blocked regardless
+// of grant controls (parallel to the Oracle/MySQL lists). Matched per statement.
+//
+//   - ALTER SYSTEM: rewrites server configuration.
+//   - COPY ... TO/FROM PROGRAM: arbitrary command execution on the DB host.
+//   - ALTER DEFAULT PRIVILEGES: privilege administration (companion to GRANT/REVOKE).
+//   - CREATE SERVER / CREATE FOREIGN DATA WRAPPER: network egress / code loading
+//     (the PG analogue of Oracle's blocked CREATE DATABASE LINK).
+//
+// Identity switching (SET ROLE / SET SESSION AUTHORIZATION) is intentionally not
+// here: it stays blocked only under read_only (see the PG readOnlyBypassPatterns)
+// pending confirmation it does not break pooler/ORM clients. CREATE EXTENSION and
+// file-access functions are deferred to a follow-up (see the spec).
+var pgBlockedPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\bALTER\s+SYSTEM\b`),
+	regexp.MustCompile(`(?i)\bCOPY\b[\s\S]*\bPROGRAM\b`),
+	regexp.MustCompile(`(?i)\bALTER\s+DEFAULT\s+PRIVILEGES\b`),
+	regexp.MustCompile(`(?i)\bCREATE\s+SERVER\b`),
+	regexp.MustCompile(`(?i)\bCREATE\s+FOREIGN\s+DATA\s+WRAPPER\b`),
 }
 
 // leadingBlockCommentRe matches a single leading block comment (/* ... */),
@@ -143,10 +197,51 @@ func IsPasswordChangeQuery(sql string) bool {
 	return false
 }
 
-// ValidateQuery checks SQL against grant controls. Used by both PG and Oracle proxies.
+// IsAdminCommand reports whether any statement is privilege/identity
+// administration (ALTER/CREATE/DROP ROLE|USER|GROUP, RENAME USER, GRANT, REVOKE).
+// These are always blocked because the proxy connects to the target with shared,
+// dbbat-held credentials: role administration through it can escalate the proxied
+// account or grant access that bypasses dbbat entirely.
+func IsAdminCommand(sql string) bool {
+	for _, stmt := range classifyStatements(sql) {
+		for _, pattern := range adminCommandPatterns {
+			if pattern.MatchString(stmt) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// IsPostgreSQLBlockedPattern reports whether any statement matches a
+// PostgreSQL-specific always-blocked pattern (ALTER SYSTEM, COPY ... PROGRAM,
+// ALTER DEFAULT PRIVILEGES, CREATE SERVER / FOREIGN DATA WRAPPER). Applied per
+// statement so a "SELECT 1; ALTER SYSTEM ..." batch is caught and COPY's span
+// cannot bleed across statements.
+func IsPostgreSQLBlockedPattern(sql string) bool {
+	for _, stmt := range classifyStatements(sql) {
+		for _, pattern := range pgBlockedPatterns {
+			if pattern.MatchString(stmt) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// ValidateQuery checks SQL against the always-blocked tiers (password change,
+// role/privilege administration) and the grant controls. Used by the MySQL and
+// Oracle proxies through ValidateMySQLQuery / ValidateOracleQuery; the PostgreSQL
+// proxy runs the equivalent checks inline with protocol-local errors.
 func ValidateQuery(sql string, grant *store.Grant) error {
 	if IsPasswordChangeQuery(sql) {
 		return ErrPasswordChangeBlocked
+	}
+
+	if IsAdminCommand(sql) {
+		return ErrAdminCommandBlocked
 	}
 
 	if grant.IsReadOnly() && IsWriteQuery(sql) {
