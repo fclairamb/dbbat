@@ -125,6 +125,75 @@ func TestRewritePhase1WideBundledClient(t *testing.T) {
 	}
 }
 
+// TestRewritePhase1WideDottedUsername covers the ORA-03146 regression: a login
+// username containing a non-identifier character (the '.' in
+// "florent.clairambault") must be located and rewritten whole. The old
+// identifier-run walk stopped at the '.', capturing only "clairambault" — it
+// then spliced the new user over that substring (leaving "florent." in front)
+// and failed to update the user_id_len field, so the upstream saw a
+// length/buffer mismatch and rejected AUTH Phase 1 with
+// "ORA-03146: invalid buffer length for TTC field".
+func TestRewritePhase1WideDottedUsername(t *testing.T) {
+	t.Parallel()
+
+	const user = "florent.clairambault" // 20 chars, contains a '.'
+
+	body := instantclientPhase1Body(user)
+
+	out, ok := rewriteAuthPhase1UsernameAnchored(body, "GLH")
+	if !ok {
+		t.Fatalf("rewriteAuthPhase1UsernameAnchored failed for dotted username")
+	}
+
+	// The username field must become exactly "GLH" — not "florent.GLH", which is
+	// what a walk that truncated at the '.' produces.
+	if bytes.Contains(out, []byte("florent")) || bytes.Contains(out, []byte("clairambault")) {
+		t.Fatalf("dotted username not replaced whole; leftover fragment in body: %q", out)
+	}
+
+	if !bytes.Contains(out, []byte("GLH")) {
+		t.Fatalf("rewritten body does not contain new username")
+	}
+
+	// user_id_len field (after the FIRST pointer run at offset 13) must be the
+	// 3x buffer-size of the NEW username: 3*len("GLH") = 9.
+	userLen := binary.LittleEndian.Uint32(out[13:17])
+	if userLen != uint32(3*len("GLH")) {
+		t.Fatalf("user-len field = %d, want %d (3x buffer-size of new username)", userLen, 3*len("GLH"))
+	}
+
+	// The CLR length prefix immediately before the username must equal the new
+	// username length (3); otherwise the upstream overruns/underruns the field.
+	glhIdx := bytes.Index(out, []byte("GLH"))
+	if glhIdx < 1 || int(out[glhIdx-1]) != len("GLH") {
+		t.Fatalf("CLR length prefix before username = %d, want %d", out[glhIdx-1], len("GLH"))
+	}
+}
+
+// TestParseAuthPhase1WideDottedUsername covers the client-authentication side of
+// the dotted-username bug: parseAuthPhase1 (via usernameBeforeAuthKV) must
+// recover the WHOLE login name from a wide/OCI Phase 1 payload, not the tail
+// after the '.'. The old identifier-walk extractor returned "CLAIRAMBAULT",
+// which dbbat then failed to find in its user store ("user not found:
+// CLAIRAMBAULT") — the failure that surfaced once the upstream Phase 1 rewrite
+// was fixed.
+func TestParseAuthPhase1WideDottedUsername(t *testing.T) {
+	t.Parallel()
+
+	// parseAuthPhase1 receives the TNS Data payload including the 2 data-flag
+	// bytes; prepend them to the captured body.
+	payload := append([]byte{0x00, 0x00}, instantclientPhase1Body("florent.clairambault")...)
+
+	name, err := parseAuthPhase1(payload)
+	if err != nil {
+		t.Fatalf("parseAuthPhase1 failed: %v", err)
+	}
+
+	if name != "FLORENT.CLAIRAMBAULT" {
+		t.Fatalf("parsed username = %q, want %q (whole dotted name, upper-cased)", name, "FLORENT.CLAIRAMBAULT")
+	}
+}
+
 // TestReplaceAuthKVValueWideBufferSized covers the ORA-28041 regression: the
 // instantclient 23.3 sends every 4-byte value length as a 3x UTF-8
 // max-expansion buffer size; the splice must mirror that convention, not write

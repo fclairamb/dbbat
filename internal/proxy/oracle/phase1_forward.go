@@ -67,35 +67,80 @@ func locateAnchoredUsername(body []byte) (int, int, bool) {
 		return 0, 0, false
 	}
 
-	end := authIdx
+	var (
+		start, end int
+		ok         bool
+	)
 
 	if payloadUsesWideKVEncoding(body) {
-		// Wide (OCI) bodies frame the first key deterministically: a 4-byte LE
-		// key length (sometimes a 3x buffer size) + a 1-byte CLR length — so
-		// the username's last byte sits exactly 5 bytes before the key. The
-		// non-identifier walk below is a trap here: instantclient 23.3's
-		// buffer-sized AUTH_SESSKEY key length is 36 = 0x24 = '$', an Oracle
-		// identifier byte, and the walk then anchors on that length byte
-		// instead of the username — the "rewrite" splices the new username
-		// over the key-length field and the upstream rejects the mangled
-		// Phase 2 with ORA-28041.
-		const wideKeyFraming = 5
+		start, end, ok = locateWideUsername(body, authIdx)
+	} else {
+		start, end, ok = locateThinUsername(body, authIdx)
+	}
 
-		if authIdx < wideKeyFraming+1 {
+	if !ok || knownAuthKeys[strings.ToUpper(string(body[start:end]))] {
+		return 0, 0, false
+	}
+
+	return start, end, true
+}
+
+// locateWideUsername finds the login username in a wide (OCI/sqlplus) Phase 1
+// body. These bodies frame the first key deterministically: a 4-byte LE key
+// length (sometimes a 3x buffer size) + a 1-byte CLR length — so the username's
+// last byte sits exactly 5 bytes before the AUTH_ key.
+//
+// The username itself is CLR-prefixed: [clrLen:1][username]. Its extent is
+// derived from that prefix, NOT by walking Oracle-identifier bytes: the
+// identifier walk (like isPrintableASCII, which accepts only the identifier
+// set) stops at the first non-identifier character, so a username such as
+// "florent.clairambault" is truncated at the '.' to "clairambault". The rewrite
+// then splices the new user over that fragment (leaving "florent." in front)
+// and leaves user_id_len stale, so the upstream rejects Phase 1 with
+// "ORA-03146: invalid buffer length for TTC field".
+//
+// The scan keeps the longest length L whose CLR prefix byte matches
+// (body[end-L-1] == L) and whose L bytes are all printable ASCII (dots, digits
+// and the like included); the real CLR prefix (< 0x20 for names up to 30 chars)
+// is a non-printable wall that bounds it.
+func locateWideUsername(body []byte, authIdx int) (int, int, bool) {
+	const wideKeyFraming = 5
+
+	if authIdx < wideKeyFraming+1 {
+		return 0, 0, false
+	}
+
+	end := authIdx - wideKeyFraming
+	start := 0
+
+	for l := 1; l <= 30 && end-l-1 >= 0; l++ {
+		if int(body[end-l-1]) == l && isPrintableASCIIRun(body[end-l:end]) {
+			start = end - l
+		}
+	}
+
+	if start == 0 {
+		return 0, 0, false
+	}
+
+	return start, end, true
+}
+
+// locateThinUsername finds the login username in a compressed (thin-client)
+// Phase 1 body: go-ora / python-oracledb use a 1-byte CLR length prefix,
+// SQLcl/JDBC thin send the bytes bare. The username is the identifier run ending
+// at (or just before) the first AUTH_ key.
+func locateThinUsername(body []byte, authIdx int) (int, int, bool) {
+	end := authIdx
+
+	const maxFramingGap = 8
+
+	for gap := 0; end > 0 && !isIdentifierByte(body[end-1]); gap++ {
+		if gap >= maxFramingGap {
 			return 0, 0, false
 		}
 
-		end = authIdx - wideKeyFraming
-	} else {
-		const maxFramingGap = 8
-
-		for gap := 0; end > 0 && !isIdentifierByte(body[end-1]); gap++ {
-			if gap >= maxFramingGap {
-				return 0, 0, false
-			}
-
-			end--
-		}
+		end--
 	}
 
 	start := end
@@ -103,7 +148,7 @@ func locateAnchoredUsername(body []byte) (int, int, bool) {
 		start--
 	}
 
-	if start == end || knownAuthKeys[strings.ToUpper(string(body[start:end]))] {
+	if start == end {
 		return 0, 0, false
 	}
 
@@ -284,6 +329,25 @@ func detectUsernameEncoding(rest []byte, userLen int) bool {
 	}
 
 	return false
+}
+
+// isPrintableASCIIRun reports whether every byte is printable ASCII (0x20–0x7E).
+// Unlike isPrintableASCII — which only accepts the Oracle identifier set and so
+// rejects the '.' in usernames such as "florent.clairambault" — this admits any
+// printable character, which is what the wide-encoding username locator needs to
+// capture a dotted or otherwise non-identifier login name whole.
+func isPrintableASCIIRun(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+
+	for _, c := range b {
+		if c < 0x20 || c > 0x7e {
+			return false
+		}
+	}
+
+	return true
 }
 
 // ErrAuthPhase1Rewrite signals a Phase 1 body that does not match the
