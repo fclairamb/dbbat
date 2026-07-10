@@ -96,7 +96,7 @@ var adminCommandPatterns = []*regexp.Regexp{
 //   - COPY ... TO/FROM PROGRAM: arbitrary command execution on the DB host.
 //   - ALTER DEFAULT PRIVILEGES: privilege administration (companion to GRANT/REVOKE).
 //   - CREATE SERVER / CREATE FOREIGN DATA WRAPPER: network egress / code loading
-//     (the PG analogue of Oracle's blocked CREATE DATABASE LINK).
+//     (the PG analog of Oracle's blocked CREATE DATABASE LINK).
 //
 // Identity switching (SET ROLE / SET SESSION AUTHORIZATION) is intentionally not
 // here: it stays blocked only under read_only (see the PG readOnlyBypassPatterns)
