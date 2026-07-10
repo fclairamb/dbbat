@@ -56,37 +56,88 @@ var mysqlBlockedPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\bSET\s+PASSWORD\b`),
 }
 
-// IsWriteQuery checks if a query is a write operation.
-func IsWriteQuery(sql string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(sql))
-	for _, keyword := range writeKeywords {
-		if strings.HasPrefix(upper, keyword) {
-			return true
+// leadingBlockCommentRe matches a single leading block comment (/* ... */),
+// including one that spans multiple lines. leadingLineCommentRe matches a single
+// leading line comment (-- ... up to end of line).
+var (
+	leadingBlockCommentRe = regexp.MustCompile(`(?s)^\s*/\*.*?\*/`)
+	leadingLineCommentRe  = regexp.MustCompile(`^\s*--[^\n]*`)
+)
+
+// stripLeadingComments removes any stacked leading SQL comments (block or line)
+// and surrounding whitespace so a query like "/* x */ ALTER ROLE ..." is
+// classified by its real leading keyword rather than bypassing every prefix
+// check. Returns the remaining SQL, trimmed.
+func stripLeadingComments(sql string) string {
+	prev := ""
+	out := strings.TrimSpace(sql)
+
+	for out != prev {
+		prev = out
+		out = leadingBlockCommentRe.ReplaceAllString(out, "")
+		out = leadingLineCommentRe.ReplaceAllString(out, "")
+		out = strings.TrimSpace(out)
+	}
+
+	return out
+}
+
+// classifyStatements splits a possibly multi-statement SQL string into its
+// individual statements for prefix/pattern classification. Leading comments are
+// stripped from the whole string first (so a "; " inside a leading comment does
+// not create bogus fragments) and again from each fragment (to catch comments
+// between statements). Empty fragments are dropped.
+//
+// This is deliberately a naive semicolon split — it does not parse string
+// literals — which matches the proxy's existing prefix-based classification.
+// Its purpose is to stop a trailing "; ALTER ROLE ..." from hiding behind a
+// leading "SELECT 1" in the PostgreSQL simple query protocol.
+func classifyStatements(sql string) []string {
+	parts := strings.Split(stripLeadingComments(sql), ";")
+	out := make([]string, 0, len(parts))
+
+	for _, part := range parts {
+		if stmt := stripLeadingComments(part); stmt != "" {
+			out = append(out, stmt)
+		}
+	}
+
+	return out
+}
+
+// statementHasPrefix reports whether any statement in sql begins with one of the
+// given (upper-case) keywords once leading comments are stripped.
+func statementHasPrefix(sql string, keywords ...string) bool {
+	for _, stmt := range classifyStatements(sql) {
+		upper := strings.ToUpper(stmt)
+		for _, keyword := range keywords {
+			if strings.HasPrefix(upper, keyword) {
+				return true
+			}
 		}
 	}
 
 	return false
+}
+
+// IsWriteQuery checks if a query is a write operation.
+func IsWriteQuery(sql string) bool {
+	return statementHasPrefix(sql, writeKeywords...)
 }
 
 // IsDDLQuery checks if a query is a DDL operation.
 func IsDDLQuery(sql string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(sql))
-	for _, keyword := range ddlKeywords {
-		if strings.HasPrefix(upper, keyword) {
-			return true
-		}
-	}
-
-	return false
+	return statementHasPrefix(sql, ddlKeywords...)
 }
 
 // IsPasswordChangeQuery checks if a query attempts to modify user/role passwords.
 func IsPasswordChangeQuery(sql string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(sql))
-
-	if (strings.HasPrefix(upper, "ALTER USER") || strings.HasPrefix(upper, "ALTER ROLE")) &&
-		strings.Contains(upper, "PASSWORD") {
-		return true
+	for _, stmt := range classifyStatements(sql) {
+		upper := strings.ToUpper(stmt)
+		if (strings.HasPrefix(upper, "ALTER USER") || strings.HasPrefix(upper, "ALTER ROLE")) &&
+			strings.Contains(upper, "PASSWORD") {
+			return true
+		}
 	}
 
 	return false
