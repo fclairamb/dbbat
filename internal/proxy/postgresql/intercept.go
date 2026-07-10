@@ -47,6 +47,21 @@ func (s *Session) handleQuery(query *pgproto3.Query) error {
 		return ErrPasswordChangeNotAllowed
 	}
 
+	// Always block role/privilege administration (ALTER ROLE/USER, CREATE/DROP
+	// ROLE/USER, GRANT, REVOKE) regardless of controls — the proxy connects with
+	// shared credentials, so this can escalate the proxied account or grant
+	// access that bypasses dbbat entirely.
+	if shared.IsAdminCommand(sqlText) {
+		return ErrAdminCommandNotAllowed
+	}
+
+	// Always block PG-specific dangerous statements (ALTER SYSTEM,
+	// COPY ... PROGRAM, ALTER DEFAULT PRIVILEGES, CREATE SERVER / FOREIGN DATA
+	// WRAPPER) regardless of controls.
+	if shared.IsPostgreSQLBlockedPattern(sqlText) {
+		return ErrRestrictedCommandNotAllowed
+	}
+
 	// Control: read_only bypass prevention
 	if s.grant.IsReadOnly() && isReadOnlyBypassAttempt(sqlText) {
 		return ErrReadOnlyBypassAttempt
@@ -84,6 +99,21 @@ func (s *Session) handleParse(msg *pgproto3.Parse) error {
 	// Always block password changes regardless of controls
 	if isPasswordChangeQuery(sqlText) {
 		return ErrPasswordChangeNotAllowed
+	}
+
+	// Always block role/privilege administration (ALTER ROLE/USER, CREATE/DROP
+	// ROLE/USER, GRANT, REVOKE) regardless of controls — the proxy connects with
+	// shared credentials, so this can escalate the proxied account or grant
+	// access that bypasses dbbat entirely.
+	if shared.IsAdminCommand(sqlText) {
+		return ErrAdminCommandNotAllowed
+	}
+
+	// Always block PG-specific dangerous statements (ALTER SYSTEM,
+	// COPY ... PROGRAM, ALTER DEFAULT PRIVILEGES, CREATE SERVER / FOREIGN DATA
+	// WRAPPER) regardless of controls.
+	if shared.IsPostgreSQLBlockedPattern(sqlText) {
+		return ErrRestrictedCommandNotAllowed
 	}
 
 	// Control: read_only bypass prevention
