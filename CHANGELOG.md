@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.15.1](https://github.com/fclairamb/dbbat/compare/v0.15.0...v0.15.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* **ci:** prevent shell injection from commit message in image workflow ([#233](https://github.com/fclairamb/dbbat/issues/233)) ([a436a05](https://github.com/fclairamb/dbbat/commit/a436a05bac6e0b593fbc81272d28587f5e2991f7))
+* **oracle:** handle dotted usernames in OCI/sqlplus auth (both phases) ([#235](https://github.com/fclairamb/dbbat/issues/235)) ([d822022](https://github.com/fclairamb/dbbat/commit/d822022fbb84466f473b3ac7db9f98ae73244803))
+
 ## [0.15.0](https://github.com/fclairamb/dbbat/compare/v0.14.0...v0.15.0) (2026-07-09)
 
 Implements five backlog specs in one squash-merged PR ([#230](https://github.com/fclairamb/dbbat/issues/230)) ([42c4e37](https://github.com/fclairamb/dbbat/commit/42c4e3713c95091fef3b51a15dd54489813300c8)); the individual changes are broken out below.
