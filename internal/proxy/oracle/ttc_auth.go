@@ -566,6 +566,60 @@ func readCLR(buf []byte) ([]byte, int) {
 	return buf[1 : 1+dataLen], 1 + dataLen
 }
 
+// readCLRVariant decodes a CLR value, choosing the chunk-length encoding for the
+// 0xfe long form: 1-byte lengths (default) or 4-byte compressed lengths when
+// bigChunks is set (go-ora UseBigClrChunks, negotiated via caps[37]&0x20). Short
+// values are identical in both, so only long (>=253-byte) values differ — e.g.
+// AUTH_CONNECT_STRING with a long host on a cluster LB.
+func readCLRVariant(buf []byte, bigChunks bool) ([]byte, int) {
+	if !bigChunks {
+		return readCLR(buf)
+	}
+
+	if len(buf) == 0 {
+		return nil, 0
+	}
+
+	first := buf[0]
+	if first == 0 || first == 0xFF || first == 0xFD {
+		return nil, 1
+	}
+
+	if first == 0xFE {
+		var data []byte
+
+		offset := 1
+		for offset < len(buf) {
+			chunkLen, n := readCompressedInt(buf[offset:])
+			if n == 0 {
+				return nil, 0
+			}
+
+			offset += n
+
+			if chunkLen == 0 {
+				break
+			}
+
+			if offset+chunkLen > len(buf) {
+				return nil, 0
+			}
+
+			data = append(data, buf[offset:offset+chunkLen]...)
+			offset += chunkLen
+		}
+
+		return data, offset
+	}
+
+	dataLen := int(first)
+	if 1+dataLen > len(buf) {
+		return nil, 0
+	}
+
+	return buf[1 : 1+dataLen], 1 + dataLen
+}
+
 // encodeTTCString encodes a string with Oracle TTC length prefix.
 // Short strings (< 254 bytes): 1-byte length prefix.
 // Long strings (>= 254 bytes): 0xFE marker + 2-byte BE length.

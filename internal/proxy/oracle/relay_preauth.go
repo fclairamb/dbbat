@@ -164,13 +164,18 @@ func (p *upstreamPump) run(s *session) {
 			return
 		}
 
-		if caps, ok := serverCompileTimeCaps(pkt.Payload); ok && len(caps) > logonCompatibilityCapIndex &&
-			caps[logonCompatibilityCapIndex]&capCustomHash != 0 {
-			s.upstreamCustomHash = true
+		if caps, ok := serverCompileTimeCaps(pkt.Payload); ok {
+			if len(caps) > logonCompatibilityCapIndex && caps[logonCompatibilityCapIndex]&capCustomHash != 0 {
+				s.upstreamCustomHash = true
 
-			s.logger.DebugContext(s.ctx, "pre-auth relay: observed upstream customHash",
-				slog.Int("caps_len", len(caps)),
-				slog.String("caps4", fmt.Sprintf("0x%02x", caps[logonCompatibilityCapIndex])))
+				s.logger.DebugContext(s.ctx, "pre-auth relay: observed upstream customHash",
+					slog.Int("caps_len", len(caps)),
+					slog.String("caps4", fmt.Sprintf("0x%02x", caps[logonCompatibilityCapIndex])))
+			}
+
+			if len(caps) > bigClrChunksCapIndex && caps[bigClrChunksCapIndex]&capBigClrChunks != 0 {
+				s.clientBigClrChunks = true
+			}
 		}
 
 		s.logger.DebugContext(s.ctx, "pre-auth relay: upstream→client",
@@ -226,6 +231,12 @@ const (
 	// capCustomHash (caps[4]&0x20) enables the PBKDF2 customHash combined-key
 	// derivation in modern Oracle clients.
 	capCustomHash = 0x20
+
+	// bigClrChunksCapIndex / capBigClrChunks: ServerCompileTimeCaps[37]&0x20
+	// makes clients use 4-byte compressed chunk lengths for long CLR values
+	// (go-ora's UseBigClrChunks).
+	bigClrChunksCapIndex = 37
+	capBigClrChunks      = 0x20
 
 	// acceptFlags2FastAuth is the FAST_AUTH bit in the Accept packet's flags2
 	// field (python-oracledb TNS_ACCEPT_FLAG_FAST_AUTH). When set, modern clients

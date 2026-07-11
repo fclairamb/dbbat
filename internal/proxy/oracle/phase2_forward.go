@@ -40,13 +40,13 @@ import (
 // caps-conditioned parser happy).
 //
 // The rewritten body is returned as a fresh slice; the input is not mutated.
-func rewriteAuthPhase2(body []byte, newUsername string, sec *upstreamAuthSecrets) ([]byte, error) {
+func rewriteAuthPhase2(body []byte, newUsername string, sec *upstreamAuthSecrets, bigChunks bool) ([]byte, error) {
 	hdr, err := parseAuthPhase2Header(body)
 	if err != nil {
 		return nil, err
 	}
 
-	rewrittenPairs, err := rewritePhase2KVPairs(body[hdr.usernameEnd:], hdr.pairCount, sec)
+	rewrittenPairs, err := rewritePhase2KVPairs(body[hdr.usernameEnd:], hdr.pairCount, sec, bigChunks)
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +222,7 @@ func assembleAuthPhase2(body []byte, hdr authPhase2Header, newUsername string, r
 // copied verbatim.
 //
 // On any decoding error, returns ErrAuthPhase2Rewrite.
-func rewritePhase2KVPairs(buf []byte, pairCount int, sec *upstreamAuthSecrets) ([]byte, error) {
+func rewritePhase2KVPairs(buf []byte, pairCount int, sec *upstreamAuthSecrets, bigChunks bool) ([]byte, error) {
 	out := make([]byte, 0, len(buf))
 	pos := 0
 
@@ -231,7 +231,7 @@ func rewritePhase2KVPairs(buf []byte, pairCount int, sec *upstreamAuthSecrets) (
 			return nil, fmt.Errorf("%w: truncated at pair %d/%d", ErrAuthPhase2Rewrite, i, pairCount)
 		}
 
-		pair, ok := readAuthKVPair(buf[pos:])
+		pair, ok := readAuthKVPair(buf[pos:], bigChunks)
 		if !ok {
 			return nil, fmt.Errorf("%w: bad pair %d/%d", ErrAuthPhase2Rewrite, i, pairCount)
 		}

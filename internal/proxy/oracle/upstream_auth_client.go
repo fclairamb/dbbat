@@ -98,7 +98,7 @@ func (s *session) runUpstreamAuthPhase1() error {
 		return fmt.Errorf("%w: ORA-%05d %s", ErrUpstreamAuthPhase1Rejected, authResp.OracleErr, authResp.OracleErrText)
 	}
 
-	if marker := extractEndOfCallMarker(phase1Raw, s.clientWideFormat); marker != nil {
+	if marker := extractEndOfCallMarker(phase1Raw, s.clientWideFormat, s.clientBigClrChunks); marker != nil {
 		s.upstreamEndMarker = marker
 		s.logger.DebugContext(s.ctx, "captured upstream end-of-call marker",
 			slog.Int("len", len(marker)))
@@ -159,7 +159,7 @@ func (s *session) runUpstreamAuthPhase2() error {
 // raw upstream AUTH Phase 1 challenge packet. Layout: TNS header (8) + data
 // flags (2) + [0x08 KV dictionary][0x04 Summary...]. Returns nil if the packet
 // does not match (caller falls back to the built-in marker).
-func extractEndOfCallMarker(raw []byte, wide bool) []byte {
+func extractEndOfCallMarker(raw []byte, wide, bigChunks bool) []byte {
 	const tnsHdr = 8
 
 	off := tnsHdr + ttcDataFlagsSize
@@ -167,7 +167,7 @@ func extractEndOfCallMarker(raw []byte, wide bool) []byte {
 		return nil
 	}
 
-	consumed, ok := parseAuthKVDictionary(raw[off+1:], &upstreamAuthResponse{properties: make(map[string]string)}, wide)
+	consumed, ok := parseAuthKVDictionary(raw[off+1:], &upstreamAuthResponse{properties: make(map[string]string)}, wide, bigChunks)
 	if !ok {
 		return nil
 	}
@@ -252,12 +252,17 @@ func (s *session) sendUpstreamAuthPhase2(username string, identity driverIdentit
 	dataFlags := clientPayload[:ttcDataFlagsSize]
 	clientBody := clientPayload[ttcDataFlagsSize:]
 
-	rewrite := rewriteAuthPhase2
+	var (
+		rewritten []byte
+		err       error
+	)
+
 	if s.clientWideFormat {
-		rewrite = rewriteAuthPhase2Wide
+		rewritten, err = rewriteAuthPhase2Wide(clientBody, username, sec)
+	} else {
+		rewritten, err = rewriteAuthPhase2(clientBody, username, sec, s.clientBigClrChunks)
 	}
 
-	rewritten, err := rewrite(clientBody, username, sec)
 	if err != nil {
 		s.logger.WarnContext(s.ctx, "Phase 2 rewrite failed; falling back to synthetic Phase 2",
 			slog.Any("error", err))
@@ -373,7 +378,7 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, []b
 		allRaw = append(allRaw, pkt.Raw...)
 		buf = append(buf, pkt.Payload[ttcDataFlagsSize:]...)
 
-		if parseAuthMessageStream(buf, resp, s.clientWideFormat) {
+		if parseAuthMessageStream(buf, resp, s.clientWideFormat, s.clientBigClrChunks) {
 			return resp, allRaw, buf, nil
 		}
 	}
@@ -397,7 +402,7 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, []b
 //
 // The function is tolerant: when it cannot decode a region it returns false
 // so the caller reads more bytes.
-func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse, wide bool) bool {
+func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse, wide, bigChunks bool) bool {
 	pos := 0
 
 	for pos < len(buf) {
@@ -406,7 +411,7 @@ func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse, wide bool) b
 
 		switch msgCode {
 		case 0x08:
-			if _, ok := parseAuthKVDictionary(buf[pos:], resp, wide); !ok {
+			if _, ok := parseAuthKVDictionary(buf[pos:], resp, wide, bigChunks); !ok {
 				return false
 			}
 
@@ -438,7 +443,7 @@ func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse, wide bool) b
 // The dictionary length is a TTC compressed integer, matching go-ora's
 // session.GetInt(2, bigEndian=true, compress=true). A 1-byte size prefix is
 // followed by `size` big-endian bytes encoding the count of KV pairs.
-func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse, wide bool) (int, bool) {
+func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse, wide, bigChunks bool) (int, bool) {
 	if wide {
 		return parseWideAuthKVDictionary(buf, resp)
 	}
@@ -451,7 +456,7 @@ func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse, wide bool) (i
 	pos := n
 
 	for i := 0; i < dictLen; i++ {
-		pair, ok := readAuthKVPair(buf[pos:])
+		pair, ok := readAuthKVPair(buf[pos:], bigChunks)
 		if !ok {
 			return 0, false
 		}
@@ -496,7 +501,7 @@ type authKVPairResult struct {
 
 // readAuthKVPair reads keyLen + keyCLR + valueLen + valueCLR + flag, mirroring
 // session.GetKeyVal in go-ora. ok=false signals the buffer is truncated.
-func readAuthKVPair(buf []byte) (authKVPairResult, bool) {
+func readAuthKVPair(buf []byte, bigChunks bool) (authKVPairResult, bool) {
 	pos := 0
 	out := authKVPairResult{}
 
@@ -508,6 +513,7 @@ func readAuthKVPair(buf []byte) (authKVPairResult, bool) {
 	pos += n
 
 	if keyLen > 0 {
+		// Keys are short AUTH_* names — always 1-byte CLR framing.
 		k, kn := readCLR(buf[pos:])
 		if kn == 0 {
 			return authKVPairResult{}, false
@@ -525,7 +531,7 @@ func readAuthKVPair(buf []byte) (authKVPairResult, bool) {
 	pos += vn
 
 	if vLen > 0 {
-		v, vClrN := readCLR(buf[pos:])
+		v, vClrN := readCLRVariant(buf[pos:], bigChunks)
 		if vClrN == 0 {
 			return authKVPairResult{}, false
 		}

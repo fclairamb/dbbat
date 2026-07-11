@@ -48,6 +48,14 @@ type session struct {
 	// PBKDF2 path.
 	upstreamCustomHash bool
 
+	// clientBigClrChunks is true when the upstream advertised
+	// ServerCompileTimeCaps[37]&0x20, which makes clients (go-ora, JDBC thin)
+	// encode long CLR values with 4-byte compressed chunk lengths after the
+	// 0xfe long-form marker instead of 1-byte lengths. Captured in the relay so
+	// the Phase 2 rewriter can parse long values (e.g. AUTH_CONNECT_STRING with
+	// a long host) correctly.
+	clientBigClrChunks bool
+
 	// clientWideFormat is true when the client (OCI thick / sqlplus) marshals
 	// AUTH TTC messages in the "wide" encoding (4-byte little-endian lengths and
 	// flags) rather than the compact TTC encoding used by go-ora and
