@@ -162,31 +162,25 @@ func (k *APIKey) computeO5LogonVerifier(plainKey string, encryptionKey []byte) e
 		return fmt.Errorf("failed to generate O5LOGON verifier: %w", err)
 	}
 
-	// Encrypt verifier key with dbbat master key
+	// Also derive the verifier-18453 blob (salt || key) so OCI thick clients,
+	// which resolve the O5LOGON challenge as verifier 18453, can authenticate.
+	// Both variants are packed into the single o5logon_verifier column.
+	salt18453, key18453, err := crypto.GenerateO5Logon18453Verifier(plainKey)
+	if err != nil {
+		return fmt.Errorf("failed to generate O5LOGON 18453 verifier: %w", err)
+	}
+
+	blob := crypto.EncodeO5LogonVerifierBlob(verifierKey, salt18453, key18453)
+
+	// Encrypt the packed verifier blob with the dbbat master key.
 	aad := crypto.APIKeyAAD(k.KeyPrefix)
-	encVerifier, err := crypto.Encrypt(verifierKey, encryptionKey, aad)
+	encVerifier, err := crypto.Encrypt(blob, encryptionKey, aad)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt O5LOGON verifier: %w", err)
 	}
 
 	k.O5LogonSalt = salt
 	k.O5LogonVerifier = encVerifier
-
-	// Also store the verifier-18453 blob (salt || key) so OCI thick clients,
-	// which resolve the O5LOGON challenge as verifier 18453, can authenticate.
-	salt18453, key18453, err := crypto.GenerateO5Logon18453Verifier(plainKey)
-	if err != nil {
-		return fmt.Errorf("failed to generate O5LOGON 18453 verifier: %w", err)
-	}
-
-	blob := append(append([]byte{}, salt18453...), key18453...)
-
-	enc18453, err := crypto.Encrypt(blob, encryptionKey, aad)
-	if err != nil {
-		return fmt.Errorf("failed to encrypt O5LOGON 18453 verifier: %w", err)
-	}
-
-	k.O5LogonVerifier18453 = enc18453
 
 	return nil
 }

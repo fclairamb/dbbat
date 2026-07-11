@@ -701,7 +701,8 @@ func (s *session) loadO5LogonVerifier(userID uuid.UUID) (*o5LogonVerifierData, e
 			continue
 		}
 
-		// Decrypt the verifier with dbbat master key
+		// Decrypt the packed verifier blob with the dbbat master key, then unpack
+		// its variants (legacy rows decode to a lone raw 6949 verifier key).
 		decrypted, err := decryptO5LogonVerifier(keys[i].O5LogonVerifier, s.encryptionKey, keys[i].KeyPrefix)
 		if err != nil {
 			s.logger.WarnContext(s.ctx, "failed to decrypt O5LOGON verifier",
@@ -711,26 +712,24 @@ func (s *session) loadO5LogonVerifier(userID uuid.UUID) (*o5LogonVerifierData, e
 			continue
 		}
 
+		fields := dbbcrypto.DecodeO5LogonVerifierBlob(decrypted)
+
 		s.logger.InfoContext(s.ctx, "O5LOGON verifier loaded — only this API key works for Oracle login",
 			slog.String("key_prefix", keys[i].KeyPrefix),
 			slog.String("key_id", keys[i].ID.String()))
 
 		data := &o5LogonVerifierData{
 			O5LogonSalt:       keys[i].O5LogonSalt,
-			decryptedVerifier: decrypted,
+			decryptedVerifier: fields[0],
 			apiKeyID:          keys[i].ID,
 		}
 
-		// Decrypt the verifier-18453 blob (salt || key) when present.
-		if len(keys[i].O5LogonVerifier18453) > 0 {
-			blob, err := decryptO5LogonVerifier(keys[i].O5LogonVerifier18453, s.encryptionKey, keys[i].KeyPrefix)
-			if err != nil {
-				s.logger.WarnContext(s.ctx, "failed to decrypt O5LOGON 18453 verifier",
-					slog.String("key_prefix", keys[i].KeyPrefix), slog.Any("error", err))
-			} else if len(blob) == dbbcrypto.O5Logon18453SaltLength+dbbcrypto.O5Logon18453KeyLength {
-				data.O5Logon18453Salt = blob[:dbbcrypto.O5Logon18453SaltLength]
-				data.O5Logon18453Key = blob[dbbcrypto.O5Logon18453SaltLength:]
-			}
+		// Fields 1 and 2 (when present) are the verifier-18453 salt and key.
+		if len(fields) >= 3 &&
+			len(fields[1]) == dbbcrypto.O5Logon18453SaltLength &&
+			len(fields[2]) == dbbcrypto.O5Logon18453KeyLength {
+			data.O5Logon18453Salt = fields[1]
+			data.O5Logon18453Key = fields[2]
 		}
 
 		return data, nil

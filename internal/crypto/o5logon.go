@@ -1,10 +1,12 @@
 package crypto
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1" // O5LOGON protocol requires SHA-1
 	"crypto/sha512"
+	"encoding/binary"
 	"fmt"
 )
 
@@ -52,6 +54,59 @@ func DeriveO5LogonVerifierKey(password string, salt []byte) []byte {
 	copy(key, hash)
 
 	return key
+}
+
+// o5LogonBlobMagic tags a packed, multi-variant O5LOGON verifier blob. Decrypted
+// plaintext that does NOT begin with this magic is a legacy raw 6949 verifier
+// key, kept working without a migration.
+var o5LogonBlobMagic = []byte("O5LG")
+
+// o5LogonBlobVersion is the container layout version.
+const o5LogonBlobVersion byte = 1
+
+// EncodeO5LogonVerifierBlob packs every O5LOGON verifier variant for an API key
+// into one self-describing blob so they all live in the single (encrypted)
+// o5logon_verifier column — no dedicated column per verifier type. Fields are
+// stored in order, each as a uint16-BE length prefix followed by its bytes.
+func EncodeO5LogonVerifierBlob(fields ...[]byte) []byte {
+	out := append([]byte{}, o5LogonBlobMagic...)
+	out = append(out, o5LogonBlobVersion)
+
+	for _, f := range fields {
+		var l [2]byte
+		binary.BigEndian.PutUint16(l[:], uint16(len(f)))
+		out = append(out, l[:]...)
+		out = append(out, f...)
+	}
+
+	return out
+}
+
+// DecodeO5LogonVerifierBlob reverses EncodeO5LogonVerifierBlob. A blob without
+// the magic prefix is a legacy raw 6949 verifier key: it is returned as the sole
+// field. Otherwise the packed fields are returned in the order they were encoded.
+func DecodeO5LogonVerifierBlob(blob []byte) [][]byte {
+	if len(blob) < len(o5LogonBlobMagic)+1 || !bytes.Equal(blob[:len(o5LogonBlobMagic)], o5LogonBlobMagic) {
+		return [][]byte{blob}
+	}
+
+	p := blob[len(o5LogonBlobMagic)+1:] // skip magic + version byte
+
+	var fields [][]byte
+
+	for len(p) >= 2 {
+		n := int(binary.BigEndian.Uint16(p[:2]))
+		p = p[2:]
+
+		if len(p) < n {
+			break
+		}
+
+		fields = append(fields, append([]byte{}, p[:n]...))
+		p = p[n:]
+	}
+
+	return fields
 }
 
 // GenerateO5Logon18453Verifier creates a fresh salt and the verifier-18453 key
