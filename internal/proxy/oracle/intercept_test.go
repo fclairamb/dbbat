@@ -170,6 +170,86 @@ func TestHandleOALL8_PasswordChangeBlocked(t *testing.T) {
 	assert.ErrorIs(t, err, shared.ErrPasswordChangeBlocked)
 }
 
+// The JDBC thin-driver execute-with-SQL path (func=0x11 sub=0x69) once bypassed
+// ValidateOracleQuery entirely, so grant controls, the password-change block and
+// the admin-command block did not apply to it. These tests pin the fix: the JDBC
+// path must enforce the same gate as the OALL8 and piggyback paths.
+
+func TestHandleJDBCExec_DecodesAndTracksQuery(t *testing.T) {
+	t.Parallel()
+	s := newTestSession(&store.Grant{})
+
+	err := s.handleJDBCExec(buildExecSQL("SELECT 1 FROM DUAL"))
+	require.NoError(t, err)
+
+	// An allowed query is tracked as pending, like the OALL8/piggyback paths.
+	require.NotNil(t, s.tracker.pendingQuery)
+	require.NotNil(t, s.tracker.pendingQuery.cursor)
+	assert.Equal(t, "SELECT 1 FROM DUAL", s.tracker.pendingQuery.cursor.sql)
+}
+
+func TestHandleJDBCExec_ReadOnlyBlocks(t *testing.T) {
+	t.Parallel()
+	grant := &store.Grant{Controls: []string{store.ControlReadOnly}}
+
+	tests := []struct {
+		sql  string
+		fail bool
+	}{
+		{"SELECT 1 FROM DUAL", false},
+		{"INSERT INTO t VALUES (1)", true},
+		{"UPDATE t SET x = 1", true},
+		{"DELETE FROM t WHERE id = 1", true},
+		{"DROP TABLE t", true},
+		{"CREATE TABLE t (id NUMBER)", true},
+	}
+
+	for _, tt := range tests {
+		s := newTestSession(grant)
+		err := s.handleJDBCExec(buildExecSQL(tt.sql))
+
+		if tt.fail {
+			require.ErrorIs(t, err, shared.ErrReadOnlyViolation, "should block: %s", tt.sql)
+			// A blocked query must not be tracked or persisted — consistent with
+			// the OALL8 and piggyback block paths (they return before tracking).
+			assert.Nil(t, s.tracker.pendingQuery, "blocked query must not be tracked: %s", tt.sql)
+		} else {
+			require.NoError(t, err, "should allow: %s", tt.sql)
+			assert.NotNil(t, s.tracker.pendingQuery, "allowed query should be tracked: %s", tt.sql)
+		}
+	}
+}
+
+func TestHandleJDBCExec_AdminCommandBlocked(t *testing.T) {
+	t.Parallel()
+	// A full-write grant (no controls) must still block role/privilege
+	// administration — this is the gap the JDBC path previously let through.
+	grant := &store.Grant{}
+
+	blocked := []string{
+		"GRANT DBA TO bob",
+		"REVOKE DBA FROM bob",
+		"CREATE USER bob IDENTIFIED BY secret",
+		"DROP USER bob",
+		"ALTER USER bob QUOTA UNLIMITED ON users",
+	}
+
+	for _, sql := range blocked {
+		s := newTestSession(grant)
+		err := s.handleJDBCExec(buildExecSQL(sql))
+		require.ErrorIs(t, err, shared.ErrAdminCommandBlocked, "should block: %s", sql)
+		assert.Nil(t, s.tracker.pendingQuery, "blocked query must not be tracked: %s", sql)
+	}
+}
+
+func TestHandleJDBCExec_PasswordChangeBlocked(t *testing.T) {
+	t.Parallel()
+	s := newTestSession(&store.Grant{})
+
+	err := s.handleJDBCExec(buildExecSQL("ALTER USER bob PASSWORD 'secret'"))
+	assert.ErrorIs(t, err, shared.ErrPasswordChangeBlocked)
+}
+
 func TestHandleOFETCH_LinksToCursor(t *testing.T) {
 	t.Parallel()
 	s := newTestSession(&store.Grant{})

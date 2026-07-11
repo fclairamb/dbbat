@@ -43,6 +43,22 @@ func buildOALL8(sql string, binds []string, cursorID uint16) []byte {
 	return buf
 }
 
+// buildExecSQL creates a JDBC execute-with-SQL TTC payload (func=0x11, sub=0x69)
+// that decodeExecSQL can extract SQL text from. Real thin-driver payloads place
+// the length-prefixed SQL after a run of header bytes (around offset 57), which
+// decodeExecSQL scans for; a zero-padded header followed by the varlen-prefixed
+// SQL reproduces that shape closely enough for unit testing the intercept path.
+func buildExecSQL(sql string) []byte {
+	const sqlOffset = 57 // DBeaver/JDBC thin driver places SQL text around offset 57-63
+
+	prefix := encodeVarLen(uint32(len(sql)))
+	buf := make([]byte, sqlOffset+len(prefix)+len(sql))
+	copy(buf[sqlOffset:], prefix)
+	copy(buf[sqlOffset+len(prefix):], sql)
+
+	return buf
+}
+
 // buildOALL8WithNulls creates an OALL8 payload with mixed NULL and non-NULL binds.
 func buildOALL8WithNulls(sql string, binds []interface{}, cursorID uint16) []byte {
 	buf := make([]byte, 0, 64)
