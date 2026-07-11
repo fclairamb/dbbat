@@ -59,6 +59,21 @@ type session struct {
 	// AUTH OK forwarded to the client after AUTH_SVR_RESPONSE patching.
 	upstreamAuthOKResponse []byte
 
+	// upstreamEndMarker is the end-of-call (0x04) Summary that trailed the
+	// upstream's AUTH Phase 1 challenge. Its exact byte layout depends on the
+	// upstream's negotiated TTC field version (19c vs 23ai differ), so dbbat
+	// replays this captured marker after its own client-facing challenge rather
+	// than a hardcoded one — a stale/wrong marker desyncs strict client parsers
+	// (python-oracledb error_info, JDBC OER Summary). Empty if capture failed;
+	// callers fall back to buildAuthChallengeEndMarker.
+	upstreamEndMarker []byte
+
+	// upstreamAuthState carries the Phase 1-derived secrets and identity from
+	// runUpstreamAuthPhase1 to runUpstreamAuthPhase2, which now straddle the
+	// client O5LOGON exchange (Phase 1 runs first so its marker can seed the
+	// client challenge).
+	upstreamAuthState *upstreamAuthPhaseState
+
 	// clientAuthPhase1Pkt is the actual AUTH Phase 1 packet the client (SQLcl,
 	// go-ora, python-oracledb) sent during pre-auth relay. dbbat reuses its
 	// wire-shape (with the username swapped to the upstream DB user) when
@@ -185,7 +200,16 @@ func (s *session) run() error {
 	s.upstreamConn = upstreamConn
 	s.clientAuthPhase1Pkt = phase1Pkt
 
-	// Step 5: Authenticate client via O5LOGON (API key as Oracle password)
+	// Step 5: Drive the upstream AUTH Phase 1 first (dbbat authenticates with its
+	// own stored DB credentials, independent of the client). This captures the
+	// upstream's real end-of-call marker so the client-facing challenge can
+	// replay it — its byte layout is version-specific (19c vs 23ai) and a
+	// hardcoded marker desyncs strict client parsers.
+	if err := s.runUpstreamAuthPhase1(); err != nil {
+		return fmt.Errorf("upstream auth phase 1 failed: %w", err)
+	}
+
+	// Step 6: Authenticate client via O5LOGON (API key as Oracle password).
 	if err := s.authenticateClient(phase1Pkt); err != nil {
 		s.logger.WarnContext(s.ctx, "client authentication failed", slog.Any("error", err))
 		s.sendAuthFailed(ORA01017, "invalid username/password; logon denied")
@@ -197,10 +221,9 @@ func (s *session) run() error {
 		slog.String("username", s.username),
 		slog.String("database", s.database.Name))
 
-	// Step 6: Authenticate to upstream Oracle on the relay-phase socket using
-	// stored database credentials.
-	if err := s.upstreamAuth(); err != nil {
-		return fmt.Errorf("upstream auth failed: %w", err)
+	// Step 7: Complete the upstream AUTH (Phase 2) on the relay-phase socket.
+	if err := s.runUpstreamAuthPhase2(); err != nil {
+		return fmt.Errorf("upstream auth phase 2 failed: %w", err)
 	}
 
 	// Step 6b: Forward the upstream's real AUTH OK packet to the client, with
@@ -462,9 +485,6 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	}
 
 	// Extract username from AUTH Phase 1
-	s.logger.DebugContext(s.ctx, "AUTH Phase 1 payload",
-		slog.Int("len", len(phase1Pkt.Payload)),
-		slog.String("hex_head", fmt.Sprintf("%x", phase1Pkt.Payload[:min(len(phase1Pkt.Payload), 40)])))
 	username, err := parseAuthPhase1(phase1Pkt.Payload)
 	if err != nil {
 		return fmt.Errorf("failed to parse AUTH Phase 1: %w", err)
@@ -523,10 +543,18 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 		slog.Int("vfrdata_len", len(vfrData)),
 		slog.Bool("custom_hash", o5.CustomHashEnabled()))
 	challengePayload := buildAuthChallenge(encSessKey, vfrData, o5.PBKDF2ChkSalt(), o5.PBKDF2VgenCount(), o5.PBKDF2SderCount())
-	challengePayload = append(challengePayload, buildAuthChallengeEndMarker()...)
+	// Replay the upstream's real end-of-call marker (its layout is version-
+	// specific); fall back to the built-in 19c-shaped marker only if capture
+	// failed.
+	endMarker := s.upstreamEndMarker
+	if len(endMarker) == 0 {
+		endMarker = buildAuthChallengeEndMarker()
+	}
+
+	challengePayload = append(challengePayload, endMarker...)
 	s.logger.DebugContext(s.ctx, "AUTH challenge payload",
 		slog.Int("len", len(challengePayload)),
-		slog.String("hex_head", fmt.Sprintf("%x", challengePayload[:min(len(challengePayload), 60)])))
+		slog.Int("end_marker_len", len(endMarker)))
 	// Write as raw v315+ TNS Data packet (4-byte length header, not 2-byte)
 	// After Accept, all packets must use v315+ format.
 	challengeRaw := encodeV315DataPacket(challengePayload)
@@ -546,9 +574,6 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 		slog.Int("payload_len", len(phase2Pkt.Payload)))
 
 	// Parse AUTH Phase 2 to get encrypted password
-	s.logger.DebugContext(s.ctx, "AUTH Phase 2 payload",
-		slog.Int("len", len(phase2Pkt.Payload)),
-		slog.String("hex_head", fmt.Sprintf("%x", phase2Pkt.Payload[:min(len(phase2Pkt.Payload), 60)])))
 	clientSessKey, encPassword, err := parseAuthPhase2(phase2Pkt.Payload)
 	if err != nil {
 		return fmt.Errorf("failed to parse AUTH Phase 2: %w", err)

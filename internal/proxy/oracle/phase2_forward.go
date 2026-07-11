@@ -57,6 +57,7 @@ func rewriteAuthPhase2(body []byte, newUsername string, sec *upstreamAuthSecrets
 // authPhase2Header captures the byte boundaries needed to splice in a new
 // username and KV-pair set.
 type authPhase2Header struct {
+	headerLen    int
 	hasUsername  bool
 	hasCLRPrefix bool
 	modeStart    int
@@ -69,16 +70,35 @@ type authPhase2Header struct {
 // flag, user_id_len, mode, pair_count, marker, and username field — returning
 // the offsets needed to reassemble the body.
 func parseAuthPhase2Header(body []byte) (authPhase2Header, error) {
-	const headerLen = 3 // [03 73 b0]
-
-	out := authPhase2Header{}
-
-	if len(body) < headerLen+1 {
-		return out, fmt.Errorf("%w: body too short for header", ErrAuthPhase2Rewrite)
+	if len(body) < 2 {
+		return authPhase2Header{}, fmt.Errorf("%w: body too short for header", ErrAuthPhase2Rewrite)
 	}
 
 	if body[0] != byte(TTCFuncPiggyback) || body[1] != PiggybackSubAuth2 {
-		return out, fmt.Errorf("%w: not a Phase 2 piggyback", ErrAuthPhase2Rewrite)
+		return authPhase2Header{}, fmt.Errorf("%w: not a Phase 2 piggyback", ErrAuthPhase2Rewrite)
+	}
+
+	// The framing bytes between the [03 73] sub-op and the has-username flag
+	// vary by client: go-ora / SQLcl JDBC use a 1-byte trailer (headerLen 3),
+	// while python-oracledb thin inserts one extra byte (headerLen 4). Try each
+	// and keep the alignment whose KV pairs begin with a valid AUTH_* key.
+	for _, headerLen := range [...]int{3, 4} {
+		out, err := parseAuthPhase2HeaderAt(body, headerLen)
+		if err == nil && authKVTailLooksValid(body[out.usernameEnd:]) {
+			return out, nil
+		}
+	}
+
+	return authPhase2Header{}, fmt.Errorf("%w: could not align has-username / username", ErrAuthPhase2Rewrite)
+}
+
+// parseAuthPhase2HeaderAt walks the Phase 2 preamble assuming a specific header
+// length (bytes before the has-username flag) and returns the field offsets.
+func parseAuthPhase2HeaderAt(body []byte, headerLen int) (authPhase2Header, error) {
+	out := authPhase2Header{headerLen: headerLen}
+
+	if len(body) < headerLen+1 {
+		return out, fmt.Errorf("%w: body too short for header", ErrAuthPhase2Rewrite)
 	}
 
 	pos := headerLen
@@ -168,10 +188,8 @@ func readPhase2UserLen(body []byte, pos *int, hasUsername bool) (int, error) {
 // assembleAuthPhase2 builds the rewritten body with the new username and
 // pre-rewritten KV pairs, preserving the original header / mode / marker bytes.
 func assembleAuthPhase2(body []byte, hdr authPhase2Header, newUsername string, rewrittenPairs []byte) []byte {
-	const headerLen = 3
-
 	out := make([]byte, 0, len(body)+len(newUsername))
-	out = append(out, body[:headerLen]...)
+	out = append(out, body[:hdr.headerLen]...)
 
 	if hdr.hasUsername {
 		out = append(out, 0x01)

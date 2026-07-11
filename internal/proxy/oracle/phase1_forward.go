@@ -26,9 +26,7 @@ import (
 // username (AUTH_TERMINAL, AUTH_PROGRAM_NM, ...) are passed through
 // unchanged so the upstream sees the client's actual TTC capabilities.
 func rewriteAuthPhase1Username(body []byte, newUsername string) ([]byte, error) {
-	const headerLen = 4 // [03 76 b0 b1] piggyback marker + sub-op + 2-byte trailer
-
-	if len(body) < headerLen {
+	if len(body) < 2 {
 		return nil, fmt.Errorf("%w: body too short for header", ErrAuthPhase1Rewrite)
 	}
 
@@ -36,11 +34,34 @@ func rewriteAuthPhase1Username(body []byte, newUsername string) ([]byte, error) 
 		return nil, fmt.Errorf("%w: not a Phase 1 piggyback", ErrAuthPhase1Rewrite)
 	}
 
+	// The framing bytes between the [03 76] sub-op and the user_id_len vary by
+	// client: go-ora / SQLcl JDBC use a 2-byte trailer (headerLen 4), while
+	// python-oracledb thin inserts one extra byte (headerLen 5). Try each and
+	// keep the alignment whose username field is followed by a valid AUTH_* KV
+	// pair — the only layout that will parse correctly upstream.
+	for _, headerLen := range [...]int{4, 5} {
+		out, ok := rewriteAuthPhase1AtHeader(body, newUsername, headerLen)
+		if ok {
+			return out, nil
+		}
+	}
+
+	return nil, fmt.Errorf("%w: could not align user_id_len / username", ErrAuthPhase1Rewrite)
+}
+
+// rewriteAuthPhase1AtHeader attempts the username splice assuming a specific
+// header length (bytes before user_id_len). Returns ok=false if the layout does
+// not parse or the username is not followed by a plausible AUTH_* KV pair.
+func rewriteAuthPhase1AtHeader(body []byte, newUsername string, headerLen int) ([]byte, bool) {
+	if len(body) < headerLen {
+		return nil, false
+	}
+
 	rest := body[headerLen:]
 
 	userLen, n := readCompressedInt(rest)
 	if n == 0 || userLen <= 0 || userLen > 128 {
-		return nil, fmt.Errorf("%w: invalid user_id_len", ErrAuthPhase1Rewrite)
+		return nil, false
 	}
 
 	userLenBytes := n
@@ -48,7 +69,7 @@ func rewriteAuthPhase1Username(body []byte, newUsername string) ([]byte, error) 
 
 	_, n = readCompressedInt(rest)
 	if n == 0 {
-		return nil, fmt.Errorf("%w: missing logon_mode", ErrAuthPhase1Rewrite)
+		return nil, false
 	}
 
 	modeBytes := n
@@ -56,7 +77,7 @@ func rewriteAuthPhase1Username(body []byte, newUsername string) ([]byte, error) 
 
 	const magicLen = 5
 	if len(rest) < magicLen {
-		return nil, fmt.Errorf("%w: missing 5-byte magic", ErrAuthPhase1Rewrite)
+		return nil, false
 	}
 
 	rest = rest[magicLen:]
@@ -69,10 +90,13 @@ func rewriteAuthPhase1Username(body []byte, newUsername string) ([]byte, error) 
 	}
 
 	if len(rest) < consumed {
-		return nil, fmt.Errorf("%w: username field truncated", ErrAuthPhase1Rewrite)
+		return nil, false
 	}
 
 	tail := rest[consumed:]
+	if !authKVTailLooksValid(tail) {
+		return nil, false
+	}
 
 	// Reassemble: header + new userLen + mode + magic + new username field + tail (KV pairs).
 	preMagicLen := headerLen + userLenBytes + modeBytes + magicLen
@@ -96,8 +120,38 @@ func rewriteAuthPhase1Username(body []byte, newUsername string) ([]byte, error) 
 	out = append(out, []byte(newUsername)...)
 	out = append(out, tail...)
 
-	return out, nil
+	return out, true
 }
+
+// authKVTailLooksValid reports whether the bytes following the username field
+// begin a plausible AUTH_* key-value pair (compressed-int key length, CLR key
+// bytes starting with "AUTH_"). Used by both Phase 1 and Phase 2 to confirm the
+// header alignment picked the real username boundary rather than a coincidental
+// one.
+func authKVTailLooksValid(tail []byte) bool {
+	keyLen, n := readCompressedInt(tail)
+	if n == 0 || keyLen < len(authKeyPrefix) || keyLen > 64 {
+		return false
+	}
+
+	p := tail[n:]
+	// CLR short form: 1-byte length then the key bytes.
+	if len(p) < 1+keyLen {
+		return false
+	}
+
+	if int(p[0]) != keyLen {
+		return false
+	}
+
+	key := p[1 : 1+keyLen]
+
+	return len(key) >= len(authKeyPrefix) && string(key[:len(authKeyPrefix)]) == authKeyPrefix
+}
+
+// authKeyPrefix is the common prefix of the KV keys that follow the username in
+// an AUTH Phase 1 body (AUTH_TERMINAL, AUTH_PROGRAM_NM, ...).
+const authKeyPrefix = "AUTH_"
 
 // detectUsernameEncoding determines whether the buffer's username field uses
 // the CLR-prefixed form (1-byte length followed by username) or the bare form

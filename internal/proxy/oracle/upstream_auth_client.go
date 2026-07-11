@@ -54,7 +54,23 @@ func defaultDriverIdentity() driverIdentity {
 // runUpstreamClientAuth drives Oracle AUTH on the relay-phase upstream socket
 // using stored database credentials. The caller must already have a
 // post-Set-Data-Types socket open on s.upstreamConn.
-func (s *session) runUpstreamClientAuth() error {
+// upstreamAuthPhaseState carries the identity and derived secrets from the
+// upstream AUTH Phase 1 exchange to Phase 2. dbbat runs Phase 1 before the
+// client O5LOGON challenge so it can capture the upstream's real end-of-call
+// marker (see session.upstreamEndMarker), then Phase 2 after the client has
+// authenticated.
+type upstreamAuthPhaseState struct {
+	identity driverIdentity
+	username string
+	mode     uint32
+	sec      *upstreamAuthSecrets
+}
+
+// runUpstreamAuthPhase1 drives the upstream AUTH Phase 1 exchange on the
+// relay-phase socket: it sends the (rewritten) client Phase 1, reads the
+// challenge, derives the upstream auth secrets, and captures the challenge's
+// end-of-call marker into s.upstreamEndMarker for the client-facing challenge.
+func (s *session) runUpstreamAuthPhase1() error {
 	if s.upstreamConn == nil {
 		return ErrUpstreamConnNotSet
 	}
@@ -72,13 +88,19 @@ func (s *session) runUpstreamClientAuth() error {
 		return fmt.Errorf("write upstream AUTH Phase 1: %w", err)
 	}
 
-	authResp, _, err := s.readUpstreamAuthMessages()
+	authResp, phase1Raw, err := s.readUpstreamAuthMessages()
 	if err != nil {
 		return fmt.Errorf("read upstream AUTH Phase 1 response: %w", err)
 	}
 
 	if authResp.OracleErr != 0 {
 		return fmt.Errorf("%w: ORA-%05d %s", ErrUpstreamAuthPhase1Rejected, authResp.OracleErr, authResp.OracleErrText)
+	}
+
+	if marker := extractEndOfCallMarker(phase1Raw); marker != nil {
+		s.upstreamEndMarker = marker
+		s.logger.DebugContext(s.ctx, "captured upstream end-of-call marker",
+			slog.Int("len", len(marker)))
 	}
 
 	sec, err := buildSecretsFromPhase1Response(authResp, s.upstreamCustomHash)
@@ -90,7 +112,25 @@ func (s *session) runUpstreamClientAuth() error {
 		return fmt.Errorf("derive upstream auth secrets: %w", err)
 	}
 
-	if err := s.sendUpstreamAuthPhase2(username, identity, sec, mode|logonModeUserAndPass); err != nil {
+	s.upstreamAuthState = &upstreamAuthPhaseState{
+		identity: identity,
+		username: username,
+		mode:     mode,
+		sec:      sec,
+	}
+
+	return nil
+}
+
+// runUpstreamAuthPhase2 completes the upstream AUTH exchange using the state
+// captured by runUpstreamAuthPhase1. It must be called after that.
+func (s *session) runUpstreamAuthPhase2() error {
+	st := s.upstreamAuthState
+	if st == nil {
+		return ErrUpstreamConnNotSet
+	}
+
+	if err := s.sendUpstreamAuthPhase2(st.username, st.identity, st.sec, st.mode|logonModeUserAndPass); err != nil {
 		return fmt.Errorf("write upstream AUTH Phase 2: %w", err)
 	}
 
@@ -107,10 +147,38 @@ func (s *session) runUpstreamClientAuth() error {
 
 	s.logger.InfoContext(s.ctx, "upstream Oracle AUTH complete on relay-phase socket",
 		slog.String("user", s.database.Username),
-		slog.Int("verifier_type", sec.verifierType),
-		slog.Bool("custom_hash", sec.customHash))
+		slog.Int("verifier_type", st.sec.verifierType),
+		slog.Bool("custom_hash", st.sec.customHash))
 
 	return nil
+}
+
+// extractEndOfCallMarker pulls the trailing end-of-call (0x04) Summary out of a
+// raw upstream AUTH Phase 1 challenge packet. Layout: TNS header (8) + data
+// flags (2) + [0x08 KV dictionary][0x04 Summary...]. Returns nil if the packet
+// does not match (caller falls back to the built-in marker).
+func extractEndOfCallMarker(raw []byte) []byte {
+	const tnsHdr = 8
+
+	off := tnsHdr + ttcDataFlagsSize
+	if off >= len(raw) || raw[off] != 0x08 {
+		return nil
+	}
+
+	consumed, ok := parseAuthKVDictionary(raw[off+1:], &upstreamAuthResponse{properties: make(map[string]string)})
+	if !ok {
+		return nil
+	}
+
+	markerStart := off + 1 + consumed
+	if markerStart >= len(raw) || raw[markerStart] != 0x04 {
+		return nil
+	}
+
+	marker := make([]byte, len(raw)-markerStart)
+	copy(marker, raw[markerStart:])
+
+	return marker
 }
 
 // sendUpstreamAuthPhase1 writes the upstream-facing AUTH Phase 1 packet.

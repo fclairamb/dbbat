@@ -1,7 +1,6 @@
 package oracle
 
 import (
-	"bytes"
 	"fmt"
 	"log/slog"
 	"net"
@@ -46,6 +45,19 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 		return nil, nil, err
 	}
 
+	// Force clients onto the classic multi-round-trip login by clearing the
+	// FAST_AUTH capability in the Accept we relay. When the upstream advertises
+	// FAST_AUTH (Oracle 23ai), modern clients (python-oracledb thin, OCI thick /
+	// sqlplus) fold protocol + data-type negotiation and AUTH into a single
+	// pipelined message the pre-auth relay cannot split — so dbbat never sees an
+	// isolated AUTH Phase 1 to terminate, relays the client's auth (API key as
+	// password) straight to the real server, and the login fails. Stripping the
+	// bit is safe: the client's negotiation is with dbbat, and dbbat runs its own
+	// O5LOGON client against the upstream afterwards.
+	if stripUnsupportedAcceptFlags(acceptPkt.Raw) {
+		s.logger.DebugContext(s.ctx, "pre-auth relay: cleared FAST_AUTH / END_OF_RESPONSE in Accept")
+	}
+
 	s.logger.DebugContext(s.ctx, "pre-auth relay: forwarding Accept to client", slog.Int("len", len(acceptPkt.Raw)))
 
 	if _, err := s.clientConn.Write(acceptPkt.Raw); err != nil {
@@ -87,23 +99,127 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 	}
 }
 
-// observeCustomHashFlag reports whether the Set Protocol response carries
-// caps[4]&0x20 (customHash). Used to remember the upstream's true cap level
-// before we mutate the bytes for the client.
-func observeCustomHashFlag(raw []byte) bool {
-	marker := []byte{0x2a, 0x06, 0x01, 0x01, 0x01}
+const (
+	// logonCompatibilityCapIndex is the index into ServerCompileTimeCaps that
+	// carries the logon-compatibility flags (go-ora's ServerCompileTimeCaps[4]).
+	logonCompatibilityCapIndex = 4
+	// capCustomHash (caps[4]&0x20) enables the PBKDF2 customHash combined-key
+	// derivation in modern Oracle clients.
+	capCustomHash = 0x20
 
-	idx := bytes.Index(raw, marker)
-	if idx < 0 {
+	// acceptFlags2FastAuth is the FAST_AUTH bit in the Accept packet's flags2
+	// field (python-oracledb TNS_ACCEPT_FLAG_FAST_AUTH). When set, modern clients
+	// fold negotiation + AUTH into a single pipelined message.
+	acceptFlags2FastAuth = 0x10000000
+	// acceptFlags2EndOfResponse is the HAS_END_OF_RESPONSE bit
+	// (python-oracledb TNS_ACCEPT_FLAG_HAS_END_OF_RESPONSE). When set (protocol
+	// version >= 319), clients enable end-of-response markers on every server
+	// response and advertise the matching TTC cap upstream. dbbat's terminated
+	// O5LOGON path emits no such markers, so the client blocks waiting for one
+	// after the AUTH challenge. Clearing the bit keeps end-of-response disabled
+	// consistently across client, dbbat, and upstream.
+	acceptFlags2EndOfResponse = 0x02000000
+	// acceptFlags2ProxyUnsupported bundles the Accept capabilities dbbat's
+	// terminated-auth relay cannot honor and therefore clears before forwarding.
+	acceptFlags2ProxyUnsupported = acceptFlags2FastAuth | acceptFlags2EndOfResponse
+	// tnsVersionMinOOBCheck is the protocol version at/above which the Accept
+	// packet carries the 4-byte flags2 word (python-oracledb TNS_VERSION_MIN_OOB_CHECK).
+	tnsVersionMinOOBCheck = 318
+	// acceptFlags2BodyOffset is the offset of the 4-byte flags2 word within the
+	// Accept packet body (after the 8-byte TNS header). Layout mirrors
+	// python-oracledb's Accept parse: version(2) options(2) skip(10) flags1(1)
+	// skip(9) sdu(4) skip(5) flags2(4) = 33.
+	acceptFlags2BodyOffset = 33
+)
+
+// serverCompileTimeCaps extracts the ServerCompileTimeCaps byte array from a
+// Set Protocol (protocol negotiation) response payload. The payload is the TNS
+// packet body (data-flags prefix included). Returns ok=false for any packet
+// that is not an Accept-protocol response (message code 1) or that is
+// truncated. The field walk mirrors go-ora's newTCPNego / python-oracledb's
+// protocol parse so dbbat reads the exact caps[4] its client will.
+func serverCompileTimeCaps(payload []byte) ([]byte, bool) {
+	p := ttcDataFlagsSize
+	if p >= len(payload) || payload[p] != 0x01 { // message code 1 = Accept protocol
+		return nil, false
+	}
+
+	p++    // message code
+	p++    // protocol server version
+	p++    // reserved byte
+	// protocol server string (null-terminated)
+	for p < len(payload) && payload[p] != 0x00 {
+		p++
+	}
+	p++ // null terminator
+
+	p += 2 // server charset (uint16)
+	p++    // server flags (uint8)
+	if p+2 > len(payload) {
+		return nil, false
+	}
+
+	charsetElem := int(payload[p]) | int(payload[p+1])<<8 // little-endian
+	p += 2
+	p += charsetElem * 5 // charset table
+
+	if p+2 > len(payload) {
+		return nil, false
+	}
+
+	len1 := int(payload[p])<<8 | int(payload[p+1]) // big-endian
+	p += 2
+	p += len1 // reserved array
+
+	if p >= len(payload) {
+		return nil, false
+	}
+
+	capsLen := int(payload[p])
+	p++
+
+	if p+capsLen > len(payload) {
+		return nil, false
+	}
+
+	return payload[p : p+capsLen], true
+}
+
+// stripUnsupportedAcceptFlags clears the Accept flags2 capabilities dbbat's
+// terminated-auth relay cannot honor (FAST_AUTH and HAS_END_OF_RESPONSE) in
+// place, returning true if any were present and cleared. Only Accept packets
+// from protocol version >= 318 carry flags2; older or shorter packets are left
+// untouched. See acceptFlags2ProxyUnsupported for why.
+func stripUnsupportedAcceptFlags(raw []byte) bool {
+	const tnsHdr = 8
+
+	if len(raw) < tnsHdr+2 {
 		return false
 	}
 
-	caps4Off := idx + len(marker)
-	if caps4Off >= len(raw) {
+	body := raw[tnsHdr:]
+	version := int(body[0])<<8 | int(body[1])
+	if version < tnsVersionMinOOBCheck {
 		return false
 	}
 
-	return raw[caps4Off]&0x20 != 0
+	if len(body) < acceptFlags2BodyOffset+4 {
+		return false
+	}
+
+	off := acceptFlags2BodyOffset
+	flags2 := uint32(body[off])<<24 | uint32(body[off+1])<<16 | uint32(body[off+2])<<8 | uint32(body[off+3])
+	if flags2&acceptFlags2ProxyUnsupported == 0 {
+		return false
+	}
+
+	flags2 &^= acceptFlags2ProxyUnsupported
+	body[off] = byte(flags2 >> 24)
+	body[off+1] = byte(flags2 >> 16)
+	body[off+2] = byte(flags2 >> 8)
+	body[off+3] = byte(flags2)
+
+	return true
 }
 
 // relayUpstreamResponses reads one response packet from upstream and forwards it
@@ -138,8 +254,13 @@ func relayUpstreamResponses(s *session, upstream net.Conn) error {
 	//
 	// We still record the bit on the session so authenticateClient can
 	// switch the O5LOGON server into customHash mode for this connection.
-	if observeCustomHashFlag(raw) {
+	if caps, ok := serverCompileTimeCaps(pkt.Payload); ok && len(caps) > logonCompatibilityCapIndex &&
+		caps[logonCompatibilityCapIndex]&capCustomHash != 0 {
 		s.upstreamCustomHash = true
+
+		s.logger.DebugContext(s.ctx, "pre-auth relay: observed upstream customHash",
+			slog.Int("caps_len", len(caps)),
+			slog.String("caps4", fmt.Sprintf("0x%02x", caps[logonCompatibilityCapIndex])))
 	}
 
 	s.logger.DebugContext(s.ctx, "pre-auth relay: upstream→client",

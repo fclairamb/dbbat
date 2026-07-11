@@ -288,8 +288,12 @@ func TestRunUpstreamClientAuthHandshake(t *testing.T) {
 		t.Fatalf("set deadline: %v", err)
 	}
 
-	if err := s.runUpstreamClientAuth(); err != nil {
-		t.Fatalf("runUpstreamClientAuth: %v", err)
+	if err := s.runUpstreamAuthPhase1(); err != nil {
+		t.Fatalf("runUpstreamAuthPhase1: %v", err)
+	}
+
+	if err := s.runUpstreamAuthPhase2(); err != nil {
+		t.Fatalf("runUpstreamAuthPhase2: %v", err)
 	}
 
 	if scriptedSrv.err != nil {
