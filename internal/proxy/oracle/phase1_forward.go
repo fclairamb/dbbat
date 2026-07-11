@@ -46,7 +46,82 @@ func rewriteAuthPhase1Username(body []byte, newUsername string) ([]byte, error) 
 		}
 	}
 
+	// OCI thick clients (sqlplus) use a wholly different "wide" wire encoding
+	// (4/8-byte little-endian counts, 0xfe-sentinel pointer placeholders) with
+	// no compressed-int user_id_len header — the username is just a bare
+	// 1-byte-length token before the first AUTH_* KV pair. Splice it in place.
+	if out, ok := spliceLenPrefixedUsername(body, newUsername); ok {
+		return out, nil
+	}
+
 	return nil, fmt.Errorf("%w: could not align user_id_len / username", ErrAuthPhase1Rewrite)
+}
+
+// spliceLenPrefixedUsername replaces the [1-byte length][username] token that
+// immediately precedes the first AUTH_* KV pair with newUsername, updating the
+// length byte. It is wire-encoding agnostic: it locates the username by anchor
+// (the first AUTH_* key) rather than by parsing the client-specific header, so
+// it handles the OCI wide format whose header the compressed-int parsers can't
+// read. Returns ok=false if no length-prefixed username can be located.
+func spliceLenPrefixedUsername(body []byte, newUsername string) ([]byte, bool) {
+	start, length, ok := findLenPrefixedUsername(body)
+	if !ok {
+		return nil, false
+	}
+
+	out := make([]byte, 0, len(body)-length+len(newUsername))
+	out = append(out, body[:start-1]...)
+	out = append(out, byte(len(newUsername)))
+	out = append(out, []byte(newUsername)...)
+	out = append(out, body[start+length:]...)
+
+	return out, true
+}
+
+// findLenPrefixedUsername locates a [1-byte length][printable username] token
+// sitting just before the first AUTH_* KV key in an AUTH body. Returns the
+// username's start offset and length. The username is the printable token
+// closest to (and before) the first AUTH_* key whose preceding byte equals its
+// length — the framing between it and the key is a few encoding bytes.
+func findLenPrefixedUsername(body []byte) (start, length int, ok bool) {
+	authIdx := indexOfBytes(body, []byte(authKeyPrefix))
+	if authIdx < 2 {
+		return 0, 0, false
+	}
+
+	// The username ends within a small framing window before the first key.
+	const maxFraming = 8
+
+	lo := authIdx - maxFraming
+	if lo < 2 {
+		lo = 2
+	}
+
+	for uEnd := authIdx - 1; uEnd >= lo; uEnd-- {
+		for l := 1; l <= 30 && uEnd-l-1 >= 0; l++ {
+			s := uEnd - l
+			if int(body[s-1]) != l {
+				continue
+			}
+
+			if isPrintableASCII(body[s:uEnd]) {
+				return s, l, true
+			}
+		}
+	}
+
+	return 0, 0, false
+}
+
+// indexOfBytes returns the first index of sub in b, or -1.
+func indexOfBytes(b, sub []byte) int {
+	for i := 0; i+len(sub) <= len(b); i++ {
+		if string(b[i:i+len(sub)]) == string(sub) {
+			return i
+		}
+	}
+
+	return -1
 }
 
 // rewriteAuthPhase1AtHeader attempts the username splice assuming a specific

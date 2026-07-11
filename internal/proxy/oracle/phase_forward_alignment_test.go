@@ -31,6 +31,12 @@ func bodyOf(t *testing.T, payloadHex string) []byte {
 	return raw[ttcDataFlagsSize:]
 }
 
+// ociPhase1Body is a real sqlplus (OCI thick) AUTH Phase 1 body — the "wide"
+// wire encoding (4/8-byte little-endian counts, 0xfe pointer sentinels) with a
+// bare 1-byte-length username token and no compressed-int user_id_len header.
+const ociPhase1Body = "0376020103feffffffffffffff1b00000001000000feffffffffffffff05000000feffffffffffffff" +
+	"feffffffffffffff09636f6e6e6563746f72270000000d415554485f5445524d494e414c"
+
 func TestRewriteAuthPhase1Username_ClientFramings(t *testing.T) {
 	t.Parallel()
 
@@ -65,6 +71,32 @@ func TestRewriteAuthPhase1Username_ClientFramings(t *testing.T) {
 				t.Errorf("rewritten body dropped AUTH_* KV tail: %x", out)
 			}
 		})
+	}
+}
+
+func TestRewriteAuthPhase1Username_OCIWide(t *testing.T) {
+	t.Parallel()
+
+	body, err := hex.DecodeString(ociPhase1Body)
+	if err != nil {
+		t.Fatalf("decode fixture: %v", err)
+	}
+
+	out, err := rewriteAuthPhase1Username(body, "DBBATTEST")
+	if err != nil {
+		t.Fatalf("rewrite OCI wide Phase 1: %v", err)
+	}
+
+	if !strings.Contains(string(out), "DBBATTEST") {
+		t.Errorf("missing new username: %x", out)
+	}
+
+	if strings.Contains(strings.ToLower(string(out)), "connector") {
+		t.Errorf("client username not replaced: %x", out)
+	}
+
+	if !strings.Contains(string(out), "AUTH_TERMINAL") {
+		t.Errorf("KV tail dropped: %x", out)
 	}
 }
 

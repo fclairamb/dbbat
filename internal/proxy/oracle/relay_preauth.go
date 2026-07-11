@@ -66,9 +66,22 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 		return nil, nil, fmt.Errorf("forward Accept to client: %w", err)
 	}
 
+	// Pump upstream→client concurrently rather than reading one upstream packet
+	// after each client packet. The pre-auth negotiation is NOT strictly
+	// lock-step: OCI thick clients (sqlplus) send Set Data Types and then their
+	// next message without waiting for a server reply, and the server may batch
+	// or defer responses. A single-read-per-write relay deadlocks — it blocks
+	// waiting for an upstream reply that only comes after the client's next
+	// packet, which the relay hasn't read yet (observed as a 5s upstream i/o
+	// timeout → ORA-03135 on sqlplus). A concurrent pump forwards each direction
+	// as bytes arrive. The client→upstream direction stays here so we can tap it
+	// for AUTH Phase 1 and stop before forwarding it.
+	pump := s.startUpstreamPump(upstream)
+
 	for {
 		clientPkt, err := readTNSPacket(s.clientConn)
 		if err != nil {
+			pump.stop()
 			_ = upstream.Close()
 
 			return nil, nil, fmt.Errorf("read client packet during pre-auth relay: %w", err)
@@ -78,7 +91,22 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 			s.logger.DebugContext(s.ctx, "pre-auth relay: detected AUTH Phase 1, ending relay",
 				slog.Int("len", len(clientPkt.Payload)))
 
+			// Stop the pump cleanly; the upstream socket stays open and idle
+			// (the server is waiting for AUTH) so dbbat can reuse it.
+			if err := pump.stop(); err != nil {
+				_ = upstream.Close()
+
+				return nil, nil, fmt.Errorf("upstream relay failed: %w", err)
+			}
+
 			return clientPkt, upstream, nil
+		}
+
+		if err := pump.err(); err != nil {
+			pump.stop()
+			_ = upstream.Close()
+
+			return nil, nil, fmt.Errorf("upstream relay failed: %w", err)
 		}
 
 		s.logger.DebugContext(s.ctx, "pre-auth relay: client→upstream",
@@ -86,17 +114,109 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 			slog.Int("len", len(clientPkt.Raw)))
 
 		if _, err := upstream.Write(clientPkt.Raw); err != nil {
+			pump.stop()
 			_ = upstream.Close()
 
 			return nil, nil, fmt.Errorf("forward client packet to upstream: %w", err)
 		}
+	}
+}
 
-		if err := relayUpstreamResponses(s, upstream); err != nil {
-			_ = upstream.Close()
+// upstreamPump forwards upstream→client packets in a background goroutine during
+// the pre-auth relay, observing the customHash capability as the Set Protocol
+// response flows past. It exists so the relay is not lock-step (see
+// relayPreAuthNegotiation for why that matters).
+type upstreamPump struct {
+	upstream net.Conn
+	done     chan error
+	stopCh   chan struct{}
+	fatal    chan error // buffered snapshot of an unexpected upstream error
+}
 
-			return nil, nil, err
+// startUpstreamPump launches the upstream→client forwarding goroutine.
+func (s *session) startUpstreamPump(upstream net.Conn) *upstreamPump {
+	p := &upstreamPump{
+		upstream: upstream,
+		done:     make(chan error, 1),
+		stopCh:   make(chan struct{}),
+		fatal:    make(chan error, 1),
+	}
+
+	go p.run(s)
+
+	return p
+}
+
+func (p *upstreamPump) run(s *session) {
+	for {
+		pkt, err := readTNSPacket(p.upstream)
+		if err != nil {
+			// Distinguish a deliberate stop (we set a past read deadline to
+			// unblock this read) from a real upstream failure.
+			select {
+			case <-p.stopCh:
+				p.done <- nil
+			default:
+				p.fatal <- err
+				p.done <- err
+			}
+
+			return
+		}
+
+		if caps, ok := serverCompileTimeCaps(pkt.Payload); ok && len(caps) > logonCompatibilityCapIndex &&
+			caps[logonCompatibilityCapIndex]&capCustomHash != 0 {
+			s.upstreamCustomHash = true
+
+			s.logger.DebugContext(s.ctx, "pre-auth relay: observed upstream customHash",
+				slog.Int("caps_len", len(caps)),
+				slog.String("caps4", fmt.Sprintf("0x%02x", caps[logonCompatibilityCapIndex])))
+		}
+
+		s.logger.DebugContext(s.ctx, "pre-auth relay: upstream→client",
+			slog.String("type", pkt.Type.String()),
+			slog.Int("len", len(pkt.Raw)))
+
+		if _, err := s.clientConn.Write(pkt.Raw); err != nil {
+			p.fatal <- err
+			p.done <- err
+
+			return
 		}
 	}
+}
+
+// err returns a non-nil error if the pump has already failed with an unexpected
+// upstream/client error (non-blocking).
+func (p *upstreamPump) err() error {
+	select {
+	case err := <-p.fatal:
+		return err
+	default:
+		return nil
+	}
+}
+
+// stop signals the pump to exit and waits for it. The upstream socket is left
+// open (deadline cleared) for reuse by the upstream O5LOGON client. Returns the
+// pump's terminal error, or nil if it stopped on request.
+func (p *upstreamPump) stop() error {
+	select {
+	case <-p.stopCh:
+		// already stopping/stopped
+	default:
+		close(p.stopCh)
+	}
+
+	// Unblock a pump goroutine parked in readTNSPacket.
+	_ = p.upstream.SetReadDeadline(time.Now())
+
+	err := <-p.done
+
+	// Restore the socket to a usable state for the upstream auth exchange.
+	_ = p.upstream.SetReadDeadline(time.Time{})
+
+	return err
 }
 
 const (
@@ -220,58 +340,6 @@ func stripUnsupportedAcceptFlags(raw []byte) bool {
 	body[off+3] = byte(flags2)
 
 	return true
-}
-
-// relayUpstreamResponses reads one response packet from upstream and forwards it
-// to the client. The pre-auth phase is strictly request/response, so a single
-// read is sufficient. Read deadlines bound the wait so we don't block on a
-// silent upstream.
-func relayUpstreamResponses(s *session, upstream net.Conn) error {
-	if err := upstream.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
-		return fmt.Errorf("set upstream read deadline: %w", err)
-	}
-
-	pkt, err := readTNSPacket(upstream)
-	if err != nil {
-		return fmt.Errorf("read upstream response: %w", err)
-	}
-
-	if err := upstream.SetReadDeadline(time.Time{}); err != nil {
-		return fmt.Errorf("clear upstream read deadline: %w", err)
-	}
-
-	raw := pkt.Raw
-
-	// Set Protocol responses carry ServerCompileTimeCaps. caps[4]&0x20 enables
-	// a customHash (PBKDF2) combined-key derivation in modern Oracle clients
-	// (go-ora, JDBC thin, SQLcl). dbbat's O5LOGON server now implements that
-	// derivation too (see EnableCustomHash on O5LogonServer), so we forward
-	// the bit unchanged: dbbat-as-server, the client, and the upstream all
-	// agree on customHash mode. Previously we stripped the bit to match
-	// dbbat's legacy-only server, which made the upstream emit verifier 6949
-	// with no PBKDF2 fields when the client subsequently advertised "no
-	// customHash support" — and broke SQLcl Phase 2 derivation.
-	//
-	// We still record the bit on the session so authenticateClient can
-	// switch the O5LOGON server into customHash mode for this connection.
-	if caps, ok := serverCompileTimeCaps(pkt.Payload); ok && len(caps) > logonCompatibilityCapIndex &&
-		caps[logonCompatibilityCapIndex]&capCustomHash != 0 {
-		s.upstreamCustomHash = true
-
-		s.logger.DebugContext(s.ctx, "pre-auth relay: observed upstream customHash",
-			slog.Int("caps_len", len(caps)),
-			slog.String("caps4", fmt.Sprintf("0x%02x", caps[logonCompatibilityCapIndex])))
-	}
-
-	s.logger.DebugContext(s.ctx, "pre-auth relay: upstream→client",
-		slog.String("type", pkt.Type.String()),
-		slog.Int("len", len(raw)))
-
-	if _, err := s.clientConn.Write(raw); err != nil {
-		return fmt.Errorf("forward upstream packet to client: %w", err)
-	}
-
-	return nil
 }
 
 // dialUpstreamWithRedirect opens a TCP connection to the upstream Oracle, sends the
