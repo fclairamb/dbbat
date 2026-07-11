@@ -74,6 +74,41 @@ func TestRewriteAuthPhase1Username_ClientFramings(t *testing.T) {
 	}
 }
 
+func TestExtractPhase1Username_Framings(t *testing.T) {
+	t.Parallel()
+
+	// SQLcl (JDBC thin) uses python's 5-byte header but a BARE uppercase
+	// username (no CLR prefix), which the legacy scan truncated to "CONNE".
+	sqlclBody := "0376010001010901010101050101434f4e4e4543544f52010d0d415554485f5445524d494e414c"
+
+	cases := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{"go-ora (4-byte header, CLR)", gooraPhase1Payload, "connector"},
+		{"python (5-byte header, CLR)", pythonPhase1Payload, "connector"},
+		{"sqlcl (5-byte header, bare)", "0000" + sqlclBody, "CONNECTOR"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			body := bodyOf(t, tc.payload)
+
+			got, ok := extractPhase1Username(body)
+			if !ok {
+				t.Fatalf("extractPhase1Username failed")
+			}
+
+			if got != tc.want {
+				t.Errorf("username = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestRewriteAuthPhase1Username_OCIWide(t *testing.T) {
 	t.Parallel()
 

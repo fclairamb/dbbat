@@ -63,11 +63,15 @@ func parseAuthPhase1(tnsDataPayload []byte) (string, error) {
 		return "", ErrAuthPhase1TooShort
 	}
 
-	// Skip data flags (2 bytes) + func code (0x03) + sub-op (0x76) + 2-byte trailer.
-	if len(tnsDataPayload) < ttcDataFlagsSize+4 {
-		return "", ErrAuthPhase1TooShort
+	// Preferred path: framing-aware extraction that tries each known header
+	// length and username encoding, validated by the trailing AUTH_* KV pair.
+	// Handles JDBC thin (SQLcl)'s 5-byte header + bare uppercase username, which
+	// the compressed-int / fallback scan below otherwise truncates.
+	if name, ok := extractPhase1Username(tnsDataPayload[ttcDataFlagsSize:]); ok {
+		return name, nil
 	}
 
+	// Skip data flags (2 bytes) + func code (0x03) + sub-op (0x76) + 2-byte trailer.
 	payload := tnsDataPayload[ttcDataFlagsSize+4:]
 
 	// Read user_id_len (compressed-int).

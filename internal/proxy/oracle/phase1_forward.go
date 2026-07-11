@@ -124,6 +124,72 @@ func indexOfBytes(b, sub []byte) int {
 	return -1
 }
 
+// extractPhase1Username returns the client username from an AUTH Phase 1 body,
+// trying each known header framing (go-ora/JDBC 4-byte, python-oracledb 5-byte)
+// and both username encodings (CLR-prefixed, bare). Validated against the
+// trailing AUTH_* KV pair, so it handles JDBC's bare uppercase username where
+// the compressed-int / fallback scan otherwise misreads a truncated name.
+func extractPhase1Username(body []byte) (string, bool) {
+	for _, headerLen := range [...]int{4, 5} {
+		if name, ok := phase1UsernameAtHeader(body, headerLen); ok {
+			return name, true
+		}
+	}
+
+	return "", false
+}
+
+// phase1UsernameAtHeader extracts the username assuming a specific header length.
+func phase1UsernameAtHeader(body []byte, headerLen int) (string, bool) {
+	if len(body) < headerLen+2 || body[0] != byte(TTCFuncPiggyback) || body[1] != PiggybackSubAuth1 {
+		return "", false
+	}
+
+	rest := body[headerLen:]
+
+	userLen, n := readCompressedInt(rest)
+	if n == 0 || userLen <= 0 || userLen > 128 {
+		return "", false
+	}
+
+	rest = rest[n:]
+
+	if _, n = readCompressedInt(rest); n == 0 {
+		return "", false
+	}
+
+	rest = rest[n:]
+
+	const magicLen = 5
+	if len(rest) < magicLen {
+		return "", false
+	}
+
+	rest = rest[magicLen:]
+
+	hasCLRPrefix := detectUsernameEncoding(rest, userLen)
+
+	start := 0
+	if hasCLRPrefix {
+		start = 1
+	}
+
+	if len(rest) < start+userLen {
+		return "", false
+	}
+
+	name := rest[start : start+userLen]
+	if !isPrintableASCII(name) {
+		return "", false
+	}
+
+	if !authKVTailLooksValid(rest[start+userLen:]) {
+		return "", false
+	}
+
+	return string(name), true
+}
+
 // rewriteAuthPhase1AtHeader attempts the username splice assuming a specific
 // header length (bytes before user_id_len). Returns ok=false if the layout does
 // not parse or the username is not followed by a plausible AUTH_* KV pair.

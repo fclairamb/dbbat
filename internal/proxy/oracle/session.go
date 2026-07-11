@@ -17,6 +17,7 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
+	dbbcrypto "github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
@@ -47,6 +48,15 @@ type session struct {
 	// PBKDF2 path.
 	upstreamCustomHash bool
 
+	// clientWideFormat is true when the client (OCI thick / sqlplus) marshals
+	// AUTH TTC messages in the "wide" encoding (4-byte little-endian lengths and
+	// flags) rather than the compact TTC encoding used by go-ora and
+	// python-oracledb thin. Detected from the client's AUTH Phase 1 packet and
+	// used to switch the AUTH KV parse/build helpers (see oci_wide.go). The
+	// upstream mirrors the client's encoding because dbbat relays the client's
+	// data-type negotiation to it.
+	clientWideFormat bool
+
 	// clientCombinedKey is the AES key derived from the dbbat-as-server O5LOGON
 	// session keys (MD5(serverSessKey || clientSessKey)). Captured by
 	// authenticateClient on success so the AUTH OK forwarded back to the client
@@ -54,10 +64,14 @@ type session struct {
 	// expects. Empty when the client used the empty-AUTH_PASSWORD path.
 	clientCombinedKey []byte
 
-	// upstreamAuthOKResponse is the raw upstream Phase 2 response packet
-	// (TNS framing included) captured during runUpstreamClientAuth. Used as the
-	// AUTH OK forwarded to the client after AUTH_SVR_RESPONSE patching.
+	// upstreamAuthOKResponse is the raw upstream Phase 2 response (all TNS
+	// packets concatenated) captured during upstream auth. Used as the AUTH OK
+	// forwarded to compact-format clients after AUTH_SVR_RESPONSE patching.
 	upstreamAuthOKResponse []byte
+	// upstreamAuthOKTTC is the reassembled AUTH OK TTC stream (packet payloads
+	// concatenated, data flags stripped). OCI wide clients need patching on this
+	// contiguous form because AUTH_SVR_RESPONSE spans two upstream TNS packets.
+	upstreamAuthOKTTC []byte
 
 	// upstreamEndMarker is the end-of-call (0x04) Summary that trailed the
 	// upstream's AUTH Phase 1 challenge. Its exact byte layout depends on the
@@ -200,6 +214,13 @@ func (s *session) run() error {
 	s.upstreamConn = upstreamConn
 	s.clientAuthPhase1Pkt = phase1Pkt
 
+	if len(phase1Pkt.Payload) > ttcDataFlagsSize {
+		s.clientWideFormat = isOCIWideAuthPhase1(phase1Pkt.Payload[ttcDataFlagsSize:])
+		if s.clientWideFormat {
+			s.logger.DebugContext(s.ctx, "client uses OCI wide AUTH encoding")
+		}
+	}
+
 	// Step 5: Drive the upstream AUTH Phase 1 first (dbbat authenticates with its
 	// own stored DB credentials, independent of the client). This captures the
 	// upstream's real end-of-call marker so the client-facing challenge can
@@ -238,9 +259,20 @@ func (s *session) run() error {
 		authOK = capturedAuthOKResponse
 	}
 
-	if len(s.clientCombinedKey) > 0 && len(s.upstreamAuthOKResponse) > 0 {
-		patched, err := patchAuthSvrResponse(authOK, s.clientCombinedKey)
-		if err != nil {
+	if s.clientWideFormat {
+		// The OCI AUTH OK spans multiple TNS packets and its AUTH_SVR_RESPONSE
+		// value straddles the packet boundary, so patch it in place across the
+		// original packets (preserving their exact framing).
+		if len(s.clientCombinedKey) > 0 {
+			if patched, err := patchAuthSvrResponseMultiPacket(authOK, s.clientCombinedKey); err != nil {
+				s.logger.WarnContext(s.ctx, "failed to patch wide AUTH_SVR_RESPONSE; forwarding unchanged",
+					slog.Any("error", err))
+			} else {
+				authOK = patched
+			}
+		}
+	} else if len(s.clientCombinedKey) > 0 && len(s.upstreamAuthOKResponse) > 0 {
+		if patched, err := patchAuthSvrResponse(authOK, s.clientCombinedKey); err != nil {
 			s.logger.WarnContext(s.ctx, "failed to patch AUTH_SVR_RESPONSE; forwarding upstream packet unchanged",
 				slog.Any("error", err))
 		} else {
@@ -532,6 +564,14 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 		o5.EnableCustomHash()
 	}
 
+	// OCI thick clients (wide encoding) resolve a customHash challenge as
+	// verifier 18453 (32-byte session keys, PBKDF2 verifier). Switch the O5LOGON
+	// server into 18453 mode, seeding it with the API key's stored 18453
+	// verifier key.
+	if s.clientWideFormat && len(verifier.O5Logon18453Key) > 0 {
+		o5.EnableVerifier18453(verifier.O5Logon18453Salt, verifier.O5Logon18453Key)
+	}
+
 	encSessKey, vfrData, err := o5.GenerateChallenge()
 	if err != nil {
 		return fmt.Errorf("failed to generate O5LOGON challenge: %w", err)
@@ -542,7 +582,13 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 		slog.Int("sesskey_len", len(encSessKey)),
 		slog.Int("vfrdata_len", len(vfrData)),
 		slog.Bool("custom_hash", o5.CustomHashEnabled()))
-	challengePayload := buildAuthChallenge(encSessKey, vfrData, o5.PBKDF2ChkSalt(), o5.PBKDF2VgenCount(), o5.PBKDF2SderCount())
+	var challengePayload []byte
+	if s.clientWideFormat {
+		challengePayload = buildAuthChallengeWide(encSessKey, vfrData, o5.PBKDF2ChkSalt(), o5.PBKDF2VgenCount(), o5.PBKDF2SderCount(), o5.VerifierType())
+	} else {
+		challengePayload = buildAuthChallenge(encSessKey, vfrData, o5.PBKDF2ChkSalt(), o5.PBKDF2VgenCount(), o5.PBKDF2SderCount())
+	}
+
 	// Replay the upstream's real end-of-call marker (its layout is version-
 	// specific); fall back to the built-in 19c-shaped marker only if capture
 	// failed.
@@ -574,9 +620,20 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 		slog.Int("payload_len", len(phase2Pkt.Payload)))
 
 	// Parse AUTH Phase 2 to get encrypted password
-	clientSessKey, encPassword, err := parseAuthPhase2(phase2Pkt.Payload)
-	if err != nil {
-		return fmt.Errorf("failed to parse AUTH Phase 2: %w", err)
+	var clientSessKey, encPassword string
+
+	if s.clientWideFormat {
+		clientSessKey, encPassword = parseAuthPhase2Wide(phase2Pkt.Payload[ttcDataFlagsSize:])
+		if clientSessKey == "" {
+			return fmt.Errorf("failed to parse AUTH Phase 2: %w", ErrAuthPhase2MissingSessKey)
+		}
+	} else {
+		var perr error
+
+		clientSessKey, encPassword, perr = parseAuthPhase2(phase2Pkt.Payload)
+		if perr != nil {
+			return fmt.Errorf("failed to parse AUTH Phase 2: %w", perr)
+		}
 	}
 
 	s.logger.DebugContext(s.ctx, "AUTH Phase 2 parsed",
@@ -612,7 +669,12 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 type o5LogonVerifierData struct {
 	O5LogonSalt       []byte
 	decryptedVerifier []byte
-	apiKeyID          uuid.UUID
+	// O5Logon18453Salt / O5Logon18453Key are the decrypted verifier-18453 salt
+	// (16 bytes) and key (32 bytes) for OCI thick clients; empty when the API
+	// key predates 18453 support.
+	O5Logon18453Salt []byte
+	O5Logon18453Key  []byte
+	apiKeyID         uuid.UUID
 }
 
 // loadO5LogonVerifier finds and decrypts the O5LOGON verifier for a user.
@@ -645,11 +707,25 @@ func (s *session) loadO5LogonVerifier(userID uuid.UUID) (*o5LogonVerifierData, e
 			slog.String("key_prefix", keys[i].KeyPrefix),
 			slog.String("key_id", keys[i].ID.String()))
 
-		return &o5LogonVerifierData{
+		data := &o5LogonVerifierData{
 			O5LogonSalt:       keys[i].O5LogonSalt,
 			decryptedVerifier: decrypted,
 			apiKeyID:          keys[i].ID,
-		}, nil
+		}
+
+		// Decrypt the verifier-18453 blob (salt || key) when present.
+		if len(keys[i].O5LogonVerifier18453) > 0 {
+			blob, err := decryptO5LogonVerifier(keys[i].O5LogonVerifier18453, s.encryptionKey, keys[i].KeyPrefix)
+			if err != nil {
+				s.logger.WarnContext(s.ctx, "failed to decrypt O5LOGON 18453 verifier",
+					slog.String("key_prefix", keys[i].KeyPrefix), slog.Any("error", err))
+			} else if len(blob) == dbbcrypto.O5Logon18453SaltLength+dbbcrypto.O5Logon18453KeyLength {
+				data.O5Logon18453Salt = blob[:dbbcrypto.O5Logon18453SaltLength]
+				data.O5Logon18453Key = blob[dbbcrypto.O5Logon18453SaltLength:]
+			}
+		}
+
+		return data, nil
 	}
 
 	return nil, ErrNoO5LogonVerifier

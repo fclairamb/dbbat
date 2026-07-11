@@ -139,6 +139,163 @@ func buildAuthSvrResponseValue(combinedKey []byte) ([]byte, error) {
 	return []byte(hexed), nil
 }
 
+// patchAuthSvrResponseMultiPacket patches AUTH_SVR_RESPONSE in a raw upstream
+// AUTH OK that may span several concatenated TNS Data packets. Because the value
+// can straddle a packet boundary (interrupted by the next packet's TNS header +
+// data flags), it reassembles the TTC stream with a byte-position map, locates
+// and rewrites the value in the contiguous stream, then writes each patched byte
+// back to its original position in allRaw — preserving the exact packet framing.
+func patchAuthSvrResponseMultiPacket(allRaw, combinedKey []byte) ([]byte, error) {
+	ttc, posMap, err := reassembleTTC(allRaw)
+	if err != nil {
+		return nil, err
+	}
+
+	keyIdx := bytes.Index(ttc, authSvrResponseKey)
+	if keyIdx < 0 {
+		return nil, ErrAuthSvrResponseKeyNotFound
+	}
+
+	hexStart, err := findAuthSvrResponseHexStart(ttc, keyIdx+len(authSvrResponseKey))
+	if err != nil {
+		return nil, err
+	}
+
+	freshHex, err := buildAuthSvrResponseValue(combinedKey)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(freshHex) != authSvrResponseHexLen {
+		return nil, fmt.Errorf("%w: got %d, want %d", ErrAuthSvrResponseBadLength, len(freshHex), authSvrResponseHexLen)
+	}
+
+	out := make([]byte, len(allRaw))
+	copy(out, allRaw)
+
+	for j := 0; j < authSvrResponseHexLen; j++ {
+		out[posMap[hexStart+j]] = freshHex[j]
+	}
+
+	return out, nil
+}
+
+// reassembleTTC walks concatenated TNS Data packets and returns the reassembled
+// TTC stream (each packet's payload after its 2-byte data-flags prefix) plus a
+// map from TTC byte index to the byte's offset in allRaw.
+func reassembleTTC(allRaw []byte) ([]byte, []int, error) {
+	const tnsHdr = 8
+
+	var (
+		ttc    []byte
+		posMap []int
+	)
+
+	off := 0
+	for off+tnsHdr <= len(allRaw) {
+		pktLen := int(allRaw[off])<<24 | int(allRaw[off+1])<<16 | int(allRaw[off+2])<<8 | int(allRaw[off+3])
+		if pktLen < tnsHdr+ttcDataFlagsSize || off+pktLen > len(allRaw) {
+			return nil, nil, ErrAuthSvrResponseTruncated
+		}
+
+		// Payload starts after the 8-byte TNS header; skip the 2 data-flag bytes.
+		start := off + tnsHdr + ttcDataFlagsSize
+		for i := start; i < off+pktLen; i++ {
+			ttc = append(ttc, allRaw[i])
+			posMap = append(posMap, i)
+		}
+
+		off += pktLen
+	}
+
+	if len(ttc) == 0 {
+		return nil, nil, ErrAuthSvrResponseTruncated
+	}
+
+	return ttc, posMap, nil
+}
+
+// authSvrResponse18453HexLen is the on-wire hex length of the verifier-18453
+// AUTH_SVR_RESPONSE: 64 chars = 32 bytes (16 random prefix + "SERVER_TO_CLIENT",
+// AES-256-CBC with no padding).
+const authSvrResponse18453HexLen = 64
+
+// patchAuthSvrResponseWide rewrites the AUTH_SVR_RESPONSE of an OCI wide
+// verifier-18453 AUTH OK. Unlike the compact form, the 12c AUTH OK leads with
+// the bare 64-char hex response value (no "AUTH_SVR_RESPONSE" key), so this
+// locates the first isolated 64-char uppercase-hex run and replaces it with a
+// value the client can verify under its combined key.
+func patchAuthSvrResponseWide(authOK, combinedKey []byte) ([]byte, error) {
+	idx := -1
+
+	for i := 0; i+authSvrResponse18453HexLen <= len(authOK); i++ {
+		if !isHexRun(authOK, i, authSvrResponse18453HexLen) {
+			continue
+		}
+
+		// Require the run to be isolated (a KV/framing boundary before and after)
+		// so we don't land inside a longer hex field.
+		if i > 0 && isHexByte(authOK[i-1]) {
+			continue
+		}
+
+		if i+authSvrResponse18453HexLen < len(authOK) && isHexByte(authOK[i+authSvrResponse18453HexLen]) {
+			continue
+		}
+
+		idx = i
+
+		break
+	}
+
+	if idx < 0 {
+		return nil, ErrAuthSvrResponseKeyNotFound
+	}
+
+	fresh, err := buildAuthSvrResponse18453Value(combinedKey)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(fresh) != authSvrResponse18453HexLen {
+		return nil, fmt.Errorf("%w: got %d, want %d", ErrAuthSvrResponseBadLength, len(fresh), authSvrResponse18453HexLen)
+	}
+
+	out := make([]byte, len(authOK))
+	copy(out, authOK)
+	copy(out[idx:idx+authSvrResponse18453HexLen], fresh)
+
+	return out, nil
+}
+
+// buildAuthSvrResponse18453Value builds the verifier-18453 AUTH_SVR_RESPONSE:
+// AES-256-CBC (zero IV, no padding) of 16 random bytes + "SERVER_TO_CLIENT",
+// hex-encoded to 64 uppercase chars.
+func buildAuthSvrResponse18453Value(combinedKey []byte) ([]byte, error) {
+	plaintext := make([]byte, authSvrResponsePlaintextLen)
+	if _, err := rand.Read(plaintext[:16]); err != nil {
+		return nil, fmt.Errorf("rand AUTH_SVR_RESPONSE prefix: %w", err)
+	}
+
+	copy(plaintext[16:], authSvrResponseMarker)
+
+	blk, err := aes.NewCipher(combinedKey)
+	if err != nil {
+		return nil, fmt.Errorf("aes new cipher: %w", err)
+	}
+
+	enc := cipher.NewCBCEncrypter(blk, make([]byte, blk.BlockSize()))
+	out := make([]byte, len(plaintext))
+	enc.CryptBlocks(out, plaintext)
+
+	return []byte(strings.ToUpper(hex.EncodeToString(out))), nil
+}
+
+// isHexByte reports whether c is an uppercase hex digit.
+func isHexByte(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'A' && c <= 'F')
+}
+
 // AUTH_SVR_RESPONSE patcher errors.
 var (
 	ErrAuthSvrResponseKeyNotFound = errors.New("AUTH_SVR_RESPONSE key not found in AUTH OK")

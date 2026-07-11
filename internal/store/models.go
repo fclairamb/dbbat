@@ -409,6 +409,9 @@ type APIKey struct {
 	RevokedBy       *uuid.UUID `bun:"revoked_by,type:uuid" json:"revoked_by"`
 	O5LogonSalt     []byte     `bun:"o5logon_salt" json:"-"`
 	O5LogonVerifier []byte     `bun:"o5logon_verifier" json:"-"` // encrypted with dbbat master key
+	// O5LogonVerifier18453 holds the encrypted verifier-18453 (12c) blob —
+	// salt (16 bytes) || verifier key (32 bytes) — for OCI thick clients.
+	O5LogonVerifier18453 []byte `bun:"o5logon_verifier_18453" json:"-"`
 
 	// UserLogin is the owning user's username. It is NOT a database column; it
 	// is populated only by the list handler for admins (the fleet-review "All

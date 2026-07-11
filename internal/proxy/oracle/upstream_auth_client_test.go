@@ -156,7 +156,7 @@ func TestPhase1ResponseParserHappyPath(t *testing.T) {
 
 	stream := buildSyntheticAuthPhase1Response(encServerKey, salt, csk, "8192", "10", VerifierType18453)
 
-	if !parseAuthMessageStream(stream, resp) {
+	if !parseAuthMessageStream(stream, resp, false) {
 		t.Fatalf("parseAuthMessageStream returned false on a complete stream")
 	}
 
@@ -200,11 +200,11 @@ func TestPhase1ResponseParserSplitAcrossPackets(t *testing.T) {
 
 	half := len(stream) / 2
 
-	if parseAuthMessageStream(stream[:half], resp) {
+	if parseAuthMessageStream(stream[:half], resp, false) {
 		t.Fatalf("parseAuthMessageStream returned true on partial stream")
 	}
 
-	if !parseAuthMessageStream(stream, resp) {
+	if !parseAuthMessageStream(stream, resp, false) {
 		t.Fatalf("parseAuthMessageStream did not finish on full stream")
 	}
 }
@@ -224,7 +224,7 @@ func TestPhase1ResponseSurfacesOracleError(t *testing.T) {
 
 	resp := &upstreamAuthResponse{properties: map[string]string{}}
 
-	if !parseAuthMessageStream(stream, resp) {
+	if !parseAuthMessageStream(stream, resp, false) {
 		t.Fatalf("parseAuthMessageStream did not finish on a complete stream")
 	}
 

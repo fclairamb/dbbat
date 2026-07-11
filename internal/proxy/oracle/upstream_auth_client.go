@@ -1,6 +1,7 @@
 package oracle
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -88,7 +89,7 @@ func (s *session) runUpstreamAuthPhase1() error {
 		return fmt.Errorf("write upstream AUTH Phase 1: %w", err)
 	}
 
-	authResp, phase1Raw, err := s.readUpstreamAuthMessages()
+	authResp, phase1Raw, _, err := s.readUpstreamAuthMessages()
 	if err != nil {
 		return fmt.Errorf("read upstream AUTH Phase 1 response: %w", err)
 	}
@@ -97,7 +98,7 @@ func (s *session) runUpstreamAuthPhase1() error {
 		return fmt.Errorf("%w: ORA-%05d %s", ErrUpstreamAuthPhase1Rejected, authResp.OracleErr, authResp.OracleErrText)
 	}
 
-	if marker := extractEndOfCallMarker(phase1Raw); marker != nil {
+	if marker := extractEndOfCallMarker(phase1Raw, s.clientWideFormat); marker != nil {
 		s.upstreamEndMarker = marker
 		s.logger.DebugContext(s.ctx, "captured upstream end-of-call marker",
 			slog.Int("len", len(marker)))
@@ -134,7 +135,7 @@ func (s *session) runUpstreamAuthPhase2() error {
 		return fmt.Errorf("write upstream AUTH Phase 2: %w", err)
 	}
 
-	finalResp, finalRaw, err := s.readUpstreamAuthMessages()
+	finalResp, finalRaw, finalTTC, err := s.readUpstreamAuthMessages()
 	if err != nil {
 		return fmt.Errorf("read upstream AUTH Phase 2 response: %w", err)
 	}
@@ -144,6 +145,7 @@ func (s *session) runUpstreamAuthPhase2() error {
 	}
 
 	s.upstreamAuthOKResponse = finalRaw
+	s.upstreamAuthOKTTC = finalTTC
 
 	s.logger.InfoContext(s.ctx, "upstream Oracle AUTH complete on relay-phase socket",
 		slog.String("user", s.database.Username),
@@ -157,7 +159,7 @@ func (s *session) runUpstreamAuthPhase2() error {
 // raw upstream AUTH Phase 1 challenge packet. Layout: TNS header (8) + data
 // flags (2) + [0x08 KV dictionary][0x04 Summary...]. Returns nil if the packet
 // does not match (caller falls back to the built-in marker).
-func extractEndOfCallMarker(raw []byte) []byte {
+func extractEndOfCallMarker(raw []byte, wide bool) []byte {
 	const tnsHdr = 8
 
 	off := tnsHdr + ttcDataFlagsSize
@@ -165,7 +167,7 @@ func extractEndOfCallMarker(raw []byte) []byte {
 		return nil
 	}
 
-	consumed, ok := parseAuthKVDictionary(raw[off+1:], &upstreamAuthResponse{properties: make(map[string]string)})
+	consumed, ok := parseAuthKVDictionary(raw[off+1:], &upstreamAuthResponse{properties: make(map[string]string)}, wide)
 	if !ok {
 		return nil
 	}
@@ -250,7 +252,12 @@ func (s *session) sendUpstreamAuthPhase2(username string, identity driverIdentit
 	dataFlags := clientPayload[:ttcDataFlagsSize]
 	clientBody := clientPayload[ttcDataFlagsSize:]
 
-	rewritten, err := rewriteAuthPhase2(clientBody, username, sec)
+	rewrite := rewriteAuthPhase2
+	if s.clientWideFormat {
+		rewrite = rewriteAuthPhase2Wide
+	}
+
+	rewritten, err := rewrite(clientBody, username, sec)
 	if err != nil {
 		s.logger.WarnContext(s.ctx, "Phase 2 rewrite failed; falling back to synthetic Phase 2",
 			slog.Any("error", err))
@@ -328,18 +335,18 @@ type upstreamAuthResponse struct {
 // The last raw Data packet read is returned alongside the parsed response.
 // Callers (notably runUpstreamClientAuth's Phase 2 read) reuse it as the
 // AUTH OK packet forwarded to the client after AUTH_SVR_RESPONSE patching.
-func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, error) {
+func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, []byte, error) {
 	resp := &upstreamAuthResponse{properties: make(map[string]string)}
 
 	var (
-		buf     []byte
-		lastRaw []byte
+		buf    []byte
+		allRaw []byte
 	)
 
 	for {
 		pkt, err := readTNSPacket(s.upstreamConn)
 		if err != nil {
-			return nil, nil, fmt.Errorf("read upstream packet: %w", err)
+			return nil, nil, nil, fmt.Errorf("read upstream packet: %w", err)
 		}
 
 		s.logger.DebugContext(s.ctx, "upstream AUTH: received packet",
@@ -359,11 +366,15 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, err
 			continue
 		}
 
-		lastRaw = pkt.Raw
+		// Accumulate every raw response packet: the AUTH OK (and, on richer
+		// clients like sqlplus/OCI, the Phase 1 challenge) can span multiple
+		// TNS packets. Forwarding only the last one truncates the response and
+		// trips ORA-03106 on the client.
+		allRaw = append(allRaw, pkt.Raw...)
 		buf = append(buf, pkt.Payload[ttcDataFlagsSize:]...)
 
-		if parseAuthMessageStream(buf, resp) {
-			return resp, lastRaw, nil
+		if parseAuthMessageStream(buf, resp, s.clientWideFormat) {
+			return resp, allRaw, buf, nil
 		}
 	}
 }
@@ -386,7 +397,7 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, err
 //
 // The function is tolerant: when it cannot decode a region it returns false
 // so the caller reads more bytes.
-func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse) bool {
+func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse, wide bool) bool {
 	pos := 0
 
 	for pos < len(buf) {
@@ -395,7 +406,7 @@ func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse) bool {
 
 		switch msgCode {
 		case 0x08:
-			if _, ok := parseAuthKVDictionary(buf[pos:], resp); !ok {
+			if _, ok := parseAuthKVDictionary(buf[pos:], resp, wide); !ok {
 				return false
 			}
 
@@ -427,7 +438,11 @@ func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse) bool {
 // The dictionary length is a TTC compressed integer, matching go-ora's
 // session.GetInt(2, bigEndian=true, compress=true). A 1-byte size prefix is
 // followed by `size` big-endian bytes encoding the count of KV pairs.
-func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse) (int, bool) {
+func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse, wide bool) (int, bool) {
+	if wide {
+		return parseWideAuthKVDictionary(buf, resp)
+	}
+
 	dictLen, n := readCompressedInt(buf)
 	if n == 0 {
 		return 0, false
@@ -437,6 +452,29 @@ func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse) (int, bool) {
 
 	for i := 0; i < dictLen; i++ {
 		pair, ok := readAuthKVPair(buf[pos:])
+		if !ok {
+			return 0, false
+		}
+
+		pos += pair.Consumed
+		recordAuthProperty(string(pair.Key), string(pair.Value), pair.Flag, resp)
+	}
+
+	return pos, true
+}
+
+// parseWideAuthKVDictionary parses an OCI wide-encoded AUTH KV dictionary:
+// [uint16-LE pair count] followed by wide KV pairs.
+func parseWideAuthKVDictionary(buf []byte, resp *upstreamAuthResponse) (int, bool) {
+	if len(buf) < 2 {
+		return 0, false
+	}
+
+	count := int(binary.LittleEndian.Uint16(buf))
+	pos := 2
+
+	for i := 0; i < count; i++ {
+		pair, ok := readWideKVPair(buf[pos:])
 		if !ok {
 			return 0, false
 		}
