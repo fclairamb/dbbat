@@ -33,3 +33,36 @@ non-identifier characters.
   space) so the naming and behavior can't drift again.
 
 No originating GitHub issue yet — file one if this is picked up.
+
+## Implementation Plan
+
+Two helpers now exist in the package:
+- `isPrintableASCII` (ttc_auth.go) — **misnamed**; accepts only the Oracle
+  identifier set `A-Z a-z 0-9 _ $ #`.
+- `isPrintableASCIIRun` (phase1_forward.go) — true printable-ASCII check
+  (0x20–0x7E), introduced by #235; rejects empty input.
+
+Steps:
+1. Rename `isPrintableASCII` → `isIdentifierRun` (truthful name) and fix its
+   doc comment.
+2. Audit every call site. Decision per site:
+   - `readUsernameAtOffset` (ttc_auth.go): reads the username at its declared
+     length → real field, must allow `.` → **switch to `isPrintableASCIIRun`**
+     (latent dotted-username bug).
+   - `detectUsernameEncoding` (phase1_forward.go, both branches): disambiguates
+     CLR-prefixed vs bare username; the printable check is a sanity gate on the
+     username bytes → **switch to `isPrintableASCIIRun`** (spec-flagged
+     fixed-offset fallback; dotted username previously misdetected).
+   - `tryDecryptPasswordWithKey` (o5logon.go): validates a decrypted *password*;
+     passwords routinely contain `.-@!` etc. → **switch to `isPrintableASCIIRun`**
+     (latent special-char-password bug — key detection would fail).
+   - `parseAuthPhase1Fallback` (ttc_auth.go, ×2): last-resort *heuristic* scan
+     for a plausible username token in deviant Phase-1 layouts → **keep
+     identifier-only (`isIdentifierRun`)** deliberately, to keep the fuzzy scan
+     tight against false positives. The anchored main path (already fixed by
+     #235) handles dotted usernames for the common clients.
+3. Fix stale references to `isPrintableASCII` in comments.
+4. Add a table-driven test (`ttc_auth_helpers_test.go`) asserting the acceptance
+   sets of both `isIdentifierRun` and `isPrintableASCIIRun` for `.`, `-`, `@`,
+   space, identifiers, empty, and non-printable bytes, so naming/behavior can't
+   drift again.
