@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/urfave/cli/v3"
 
 	"github.com/fclairamb/dbbat/internal/api"
@@ -633,20 +634,8 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 
 	// 6b. Create a quota-bounded grant for the admin user so the grants list
 	// has a grant with applied limits (alongside the unlimited grants above).
-	maxQueries := int64(100)
-	maxBytes := int64(1024 * 1024 * 1024) // 1 GB
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:              adminUser.UID,
-		DatabaseID:          targetDB.UID,
-		Controls:            []string{store.ControlReadOnly},
-		GrantedBy:           adminUser.UID,
-		StartsAt:            time.Now(),
-		ExpiresAt:           time.Now().AddDate(10, 0, 0), // 10 years from now
-		MaxQueryCounts:      &maxQueries,
-		MaxBytesTransferred: &maxBytes,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create quota grant for admin user: %w", err)
+	if err := seedQuotaGrant(ctx, dataStore, adminUser.UID, targetDB.UID); err != nil {
+		return err
 	}
 	logger.InfoContext(ctx, "Created quota-bounded grant for admin user on proxy_target")
 
@@ -789,6 +778,28 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	logger.InfoContext(ctx, "Created read-only grant for viewer user on demo_db")
 
 	logger.InfoContext(ctx, "Demo data provisioning complete")
+	return nil
+}
+
+// seedQuotaGrant creates a read-only grant bounded by a query count and a
+// data-transfer quota, so the test-mode grants list has a grant with applied
+// limits to render (alongside the unlimited seed grants).
+func seedQuotaGrant(ctx context.Context, dataStore *store.Store, userID, databaseID uuid.UUID) error {
+	maxQueries := int64(100)
+	maxBytes := int64(1024 * 1024 * 1024) // 1 GB
+	_, err := dataStore.CreateGrant(ctx, &store.Grant{
+		UserID:              userID,
+		DatabaseID:          databaseID,
+		Controls:            []string{store.ControlReadOnly},
+		GrantedBy:           userID,
+		StartsAt:            time.Now(),
+		ExpiresAt:           time.Now().AddDate(10, 0, 0), // 10 years from now
+		MaxQueryCounts:      &maxQueries,
+		MaxBytesTransferred: &maxBytes,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create quota grant: %w", err)
+	}
 	return nil
 }
 

@@ -54,7 +54,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Plus, Ban } from "lucide-react";
 import { toast } from "sonner";
 import { formatDateTimeLocal, formatDateTime } from "@/lib/date-utils";
-import { UsageMeter, formatBytes } from "@/components/shared/UsageMeter";
+import { UsageMeter } from "@/components/shared/UsageMeter";
+import { formatBytes } from "@/lib/utils";
 
 // Control options with descriptions
 const CONTROLS = [

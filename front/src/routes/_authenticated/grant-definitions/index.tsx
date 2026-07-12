@@ -45,7 +45,8 @@ import {
 } from "@/components/ui/select";
 import { useAuth } from "@/contexts/AuthContext";
 import { canManageGrantDefinitions } from "@/lib/permissions";
-import { UsageLimit, formatBytes } from "@/components/shared/UsageMeter";
+import { UsageLimit } from "@/components/shared/UsageMeter";
+import { formatBytes } from "@/lib/utils";
 
 export const Route = createFileRoute("/_authenticated/grant-definitions/")({
   component: GrantDefinitionsPage,
