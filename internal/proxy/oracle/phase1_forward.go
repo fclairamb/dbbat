@@ -92,7 +92,7 @@ func locateAnchoredUsername(body []byte) (int, int, bool) {
 //
 // The username itself is CLR-prefixed: [clrLen:1][username]. Its extent is
 // derived from that prefix, NOT by walking Oracle-identifier bytes: the
-// identifier walk (like isPrintableASCII, which accepts only the identifier
+// identifier walk (like isIdentifierRun, which accepts only the identifier
 // set) stops at the first non-identifier character, so a username such as
 // "florent.clairambault" is truncated at the '.' to "clairambault". The rewrite
 // then splices the new user over that fragment (leaving "florent." in front)
@@ -320,11 +320,11 @@ func rewriteAuthPhase1Username(body []byte, newUsername string) ([]byte, error) 
 // (raw bytes). Used by both Phase 1 and Phase 2 forwarders to splice in a new
 // username while preserving the client's original encoding.
 func detectUsernameEncoding(rest []byte, userLen int) bool {
-	if len(rest) >= userLen+1 && int(rest[0]) == userLen && isPrintableASCII(rest[1:1+userLen]) {
+	if len(rest) >= userLen+1 && int(rest[0]) == userLen && isPrintableASCIIRun(rest[1:1+userLen]) {
 		return true
 	}
 
-	if len(rest) >= userLen && isPrintableASCII(rest[:userLen]) {
+	if len(rest) >= userLen && isPrintableASCIIRun(rest[:userLen]) {
 		return false
 	}
 
@@ -332,7 +332,7 @@ func detectUsernameEncoding(rest []byte, userLen int) bool {
 }
 
 // isPrintableASCIIRun reports whether every byte is printable ASCII (0x20–0x7E).
-// Unlike isPrintableASCII — which only accepts the Oracle identifier set and so
+// Unlike isIdentifierRun — which only accepts the Oracle identifier set and so
 // rejects the '.' in usernames such as "florent.clairambault" — this admits any
 // printable character, which is what the wide-encoding username locator needs to
 // capture a dotted or otherwise non-identifier login name whole.
