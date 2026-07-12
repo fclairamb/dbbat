@@ -189,10 +189,12 @@ func rewriteAuthPhase2Anchored(body []byte, newUsername string, sec *upstreamAut
 // caps-conditioned parser happy).
 //
 // The rewritten body is returned as a fresh slice; the input is not mutated.
-func rewriteAuthPhase2(body []byte, newUsername string, sec *upstreamAuthSecrets) ([]byte, error) {
+func rewriteAuthPhase2(body []byte, newUsername string, sec *upstreamAuthSecrets, bigChunks bool) ([]byte, error) {
 	// Preferred: anchor on the AUTH_* keys (handles all client preambles,
-	// including python-oracledb thin's 18453 login). Fall back to the
-	// fixed-offset parser only if the anchor can't locate the username.
+	// including python-oracledb thin's 18453 login). The anchored path splices
+	// only the short AUTH_SESSKEY / AUTH_PASSWORD / speedy-key values and never
+	// decodes long values, so it is unaffected by big-CLR-chunk encoding. Fall
+	// back to the full KV walk only if the anchor can't locate the username.
 	if out, ok := rewriteAuthPhase2Anchored(body, newUsername, sec); ok {
 		return out, nil
 	}
@@ -202,7 +204,7 @@ func rewriteAuthPhase2(body []byte, newUsername string, sec *upstreamAuthSecrets
 		return nil, err
 	}
 
-	rewrittenPairs, err := rewritePhase2KVPairs(body[hdr.usernameEnd:], hdr.pairCount, sec)
+	rewrittenPairs, err := rewritePhase2KVPairs(body[hdr.usernameEnd:], hdr.pairCount, sec, bigChunks)
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +362,7 @@ func assembleAuthPhase2(body []byte, hdr authPhase2Header, newUsername string, r
 // copied verbatim.
 //
 // On any decoding error, returns ErrAuthPhase2Rewrite.
-func rewritePhase2KVPairs(buf []byte, pairCount int, sec *upstreamAuthSecrets) ([]byte, error) {
+func rewritePhase2KVPairs(buf []byte, pairCount int, sec *upstreamAuthSecrets, bigChunks bool) ([]byte, error) {
 	out := make([]byte, 0, len(buf))
 	pos := 0
 
@@ -369,7 +371,7 @@ func rewritePhase2KVPairs(buf []byte, pairCount int, sec *upstreamAuthSecrets) (
 			return nil, fmt.Errorf("%w: truncated at pair %d/%d", ErrAuthPhase2Rewrite, i, pairCount)
 		}
 
-		pair, ok := readAuthKVPair(buf[pos:], false)
+		pair, ok := readAuthKVPair(buf[pos:], false, bigChunks)
 		if !ok {
 			return nil, fmt.Errorf("%w: bad pair %d/%d", ErrAuthPhase2Rewrite, i, pairCount)
 		}

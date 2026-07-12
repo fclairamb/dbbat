@@ -170,6 +170,10 @@ func (s *session) pumpPreAuthUpstream(upstream net.Conn, pumpDone chan<- error) 
 			s.upstreamCustomHash = true
 		}
 
+		if observeBigClrChunksFlag(pkt.Raw) {
+			s.clientBigClrChunks = true
+		}
+
 		s.logger.DebugContext(s.ctx, "pre-auth relay: upstream→client",
 			slog.String("type", pkt.Type.String()),
 			slog.Int("len", len(pkt.Raw)))
@@ -347,6 +351,10 @@ func drainUpstreamToClient(s *session, upstream net.Conn) error {
 			s.upstreamCustomHash = true
 		}
 
+		if observeBigClrChunksFlag(pkt.Raw) {
+			s.clientBigClrChunks = true
+		}
+
 		s.logger.DebugContext(s.ctx, "pre-auth relay: upstream→client (pipelined prefix reply)",
 			slog.String("type", pkt.Type.String()),
 			slog.Int("len", len(pkt.Raw)))
@@ -442,6 +450,38 @@ func observeCustomHashFlag(raw []byte) bool {
 	}
 
 	return raw[capsOff]&0x20 != 0
+}
+
+// bigClrChunksCapIndex is the ServerCompileTimeCaps index whose 0x20 bit
+// (UseBigClrChunks) tells clients (go-ora, JDBC thin) to encode long CLR values
+// with compressed-int chunk lengths after the 0xFE long-form marker instead of
+// single-byte lengths.
+const bigClrChunksCapIndex = 37
+
+// observeBigClrChunksFlag reports whether the Set Protocol response advertises
+// UseBigClrChunks (ServerCompileTimeCaps[37]&0x20). Anchors on the same stable
+// 06 01 01 01 capability prefix as observeCustomHashFlag. When set, long CLR
+// values in later AUTH messages carry compressed-int chunk lengths — see
+// readCLRVariant.
+func observeBigClrChunksFlag(raw []byte) bool {
+	prefix := []byte{0x06, 0x01, 0x01, 0x01}
+
+	idx := bytes.Index(raw, prefix)
+	if idx < 1 {
+		return false
+	}
+
+	numCaps := raw[idx-1]
+	if numCaps < 0x20 || numCaps > 0x60 || int(numCaps) <= bigClrChunksCapIndex {
+		return false
+	}
+
+	capsOff := idx + len(prefix)
+	if capsOff+bigClrChunksCapIndex >= len(raw) {
+		return false
+	}
+
+	return raw[capsOff+bigClrChunksCapIndex]&0x20 != 0
 }
 
 // dialUpstreamWithRedirect opens a TCP connection to the upstream Oracle, sends the

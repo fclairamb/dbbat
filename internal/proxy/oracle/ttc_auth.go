@@ -770,6 +770,45 @@ func readCLR(buf []byte) ([]byte, int) {
 	return buf[1 : 1+dataLen], 1 + dataLen
 }
 
+// readCLRVariant reads TTC CLR-encoded data, optionally in the UseBigClrChunks
+// long-form encoding. When bigChunks is false it is identical to readCLR
+// (single-byte chunk lengths). When bigChunks is true, long-form (0xFE) chunk
+// lengths are TTC compressed integers rather than single bytes — the encoding
+// go-ora and JDBC thin use once the server advertises
+// ServerCompileTimeCaps[37]&0x20. Short-form values are byte-identical in both
+// encodings, so only values over ~252 bytes differ.
+func readCLRVariant(buf []byte, bigChunks bool) ([]byte, int) {
+	if !bigChunks || len(buf) == 0 || buf[0] != 0xFE {
+		return readCLR(buf)
+	}
+
+	// Long form with compressed-int chunk lengths: 0xFE (chunkLen chunk)* 0x00.
+	var data []byte
+
+	offset := 1
+	for offset < len(buf) {
+		chunkLen, n := readCompressedInt(buf[offset:])
+		if n == 0 {
+			return nil, 0
+		}
+
+		offset += n
+
+		if chunkLen == 0 {
+			break
+		}
+
+		if offset+chunkLen > len(buf) {
+			return nil, 0
+		}
+
+		data = append(data, buf[offset:offset+chunkLen]...)
+		offset += chunkLen
+	}
+
+	return data, offset
+}
+
 // encodeTTCString encodes a string with Oracle TTC length prefix.
 // Short strings (< 254 bytes): 1-byte length prefix.
 // Long strings (>= 254 bytes): 0xFE marker + 2-byte BE length.
