@@ -67,15 +67,17 @@ test.describe("Observability Features", () => {
     await authenticatedPage.goto("queries");
     await authenticatedPage.waitForLoadState("networkidle");
 
-    const rows = authenticatedPage.locator("tbody tr");
-    const rowCount = await rows.count();
-    if (rowCount === 0) {
+    // A real query row is a table row containing a navigation link. The empty
+    // state renders a single colSpan row with no <a>, so guard on the link
+    // count (not the row count) to avoid hanging when there are no queries.
+    const rowLinks = authenticatedPage.locator("tbody tr td a");
+    if ((await rowLinks.count()) === 0) {
       test.skip(true, "No query rows available in this environment");
       return;
     }
 
     // Click the first query row to open its detail page.
-    await rows.first().locator("a").first().click();
+    await rowLinks.first().click();
     await expect(authenticatedPage).toHaveURL(
       /\/queries\/[0-9a-f-]{36}$/
     );

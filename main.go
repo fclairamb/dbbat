@@ -639,6 +639,14 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	}
 	logger.InfoContext(ctx, "Created quota-bounded grant for admin user on proxy_target")
 
+	// 6c. Seed a sample logged query (via a closed connection) so the queries
+	// list has a row and the query-detail breadcrumb has real SQL text to
+	// preview in test mode.
+	if err := seedSampleQuery(ctx, dataStore, adminUser.UID, targetDB.UID); err != nil {
+		return err
+	}
+	logger.InfoContext(ctx, "Created sample logged query on proxy_target")
+
 	// 7. Create stable API keys for test users
 	testKeys := []struct {
 		user *store.User
@@ -799,6 +807,34 @@ func seedQuotaGrant(ctx context.Context, dataStore *store.Store, userID, databas
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create quota grant: %w", err)
+	}
+	return nil
+}
+
+// seedSampleQuery records one historical query on a closed connection so the
+// test-mode queries list has a clickable row and the query-detail breadcrumb
+// has real SQL text (long enough to exercise the preview truncation) to render.
+func seedSampleQuery(ctx context.Context, dataStore *store.Store, userID, databaseID uuid.UUID) error {
+	conn, err := dataStore.CreateConnection(ctx, userID, databaseID, "127.0.0.1")
+	if err != nil {
+		return fmt.Errorf("failed to create sample connection: %w", err)
+	}
+
+	durationMs := 1.234
+	rowsAffected := int64(3)
+	if _, err := dataStore.CreateQuery(ctx, &store.Query{
+		ConnectionID: conn.UID,
+		SQLText:      "SELECT id, name, email, created_at FROM users WHERE active = true ORDER BY created_at DESC",
+		ExecutedAt:   time.Now(),
+		DurationMs:   &durationMs,
+		RowsAffected: &rowsAffected,
+	}); err != nil {
+		return fmt.Errorf("failed to create sample query: %w", err)
+	}
+
+	// Close the connection so it doesn't linger as an "active" connection.
+	if err := dataStore.CloseConnection(ctx, conn.UID); err != nil {
+		return fmt.Errorf("failed to close sample connection: %w", err)
 	}
 	return nil
 }
