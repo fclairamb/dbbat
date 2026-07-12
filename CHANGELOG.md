@@ -3,6 +3,11 @@
 ## [0.15.2](https://github.com/fclairamb/dbbat/compare/v0.15.1...v0.15.2) (2026-07-12)
 
 
+### Features
+
+* **ui:** hide the Active Connections stat card when there are none ([#238](https://github.com/fclairamb/dbbat/issues/238)) ([242bd8c](https://github.com/fclairamb/dbbat/commit/242bd8cd1f11ce206bd225b1e18068e23fbe7ead))
+
+
 ### Bug Fixes
 
 * **deps:** update docusaurus monorepo to v3.10.2 ([#236](https://github.com/fclairamb/dbbat/issues/236)) ([25f4adb](https://github.com/fclairamb/dbbat/commit/25f4adb43ca67c66e60cbe79ef8f9a85a69724f1))
