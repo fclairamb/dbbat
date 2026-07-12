@@ -10,6 +10,8 @@ import "testing"
 //   - isPrintableASCIIRun — any printable ASCII byte, 0x20–0x7E (dots, dashes,
 //     at-signs and spaces included); rejects empty input.
 func TestIdentifierRunVsPrintableASCIIRun(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name       string
 		input      []byte
@@ -35,6 +37,8 @@ func TestIdentifierRunVsPrintableASCIIRun(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			if got := isIdentifierRun(tc.input); got != tc.identifier {
 				t.Errorf("isIdentifierRun(%q) = %v, want %v", tc.input, got, tc.identifier)
 			}
