@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.15.4](https://github.com/fclairamb/dbbat/compare/v0.15.3...v0.15.4) (2026-07-12)
+
+
+### Bug Fixes
+
+* **oracle:** per-user O5LOGON salts — any API key works for Oracle login ([#243](https://github.com/fclairamb/dbbat/issues/243)) ([2b3e8c0](https://github.com/fclairamb/dbbat/commit/2b3e8c0e16c39ad52fb1b2d4c3a26412ff06a640))
+* **oracle:** shared-service-name resolution by grants + dbbat-name connect strings + dotted thin usernames ([#242](https://github.com/fclairamb/dbbat/issues/242)) ([430e704](https://github.com/fclairamb/dbbat/commit/430e704655950d148028d6a9c233b017c70fab21))
+
 ## [0.15.3](https://github.com/fclairamb/dbbat/compare/v0.15.2...v0.15.3) (2026-07-12)
 
 Implements seven backlog specs in one squash-merged PR ([#240](https://github.com/fclairamb/dbbat/issues/240)) ([caa73cb](https://github.com/fclairamb/dbbat/commit/caa73cb7ed99742556f1179f1c9500084fa85bc1)); the individual changes are broken out below.
