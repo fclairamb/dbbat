@@ -99,6 +99,11 @@ func (s *Store) GetDatabaseByName(ctx context.Context, name string) (*Database, 
 }
 
 // GetDatabaseByOracleServiceName retrieves an Oracle database by its service name.
+//
+// CAUTION: several dbbat databases may share one upstream service name (a
+// mutualized Oracle instance); this returns an arbitrary matching row in that
+// case. Resolution paths that must be deterministic should use
+// ListDatabasesByOracleServiceName and disambiguate explicitly.
 func (s *Store) GetDatabaseByOracleServiceName(ctx context.Context, serviceName string) (*Database, error) {
 	db := new(Database)
 	err := s.db.NewSelect().
@@ -115,6 +120,27 @@ func (s *Store) GetDatabaseByOracleServiceName(ctx context.Context, serviceName 
 	}
 
 	return db, nil
+}
+
+// ListDatabasesByOracleServiceName retrieves every Oracle database registered
+// with the given upstream service name, ordered by name for determinism.
+// Multiple dbbat logical databases can share one upstream SERVICE_NAME (e.g.
+// several schemas of a mutualized Oracle instance behind MUTU01), so callers
+// must handle 0, 1, or N results.
+func (s *Store) ListDatabasesByOracleServiceName(ctx context.Context, serviceName string) ([]Database, error) {
+	var databases []Database
+
+	err := s.db.NewSelect().
+		Model(&databases).
+		Where("oracle_service_name = ?", serviceName).
+		Where("protocol = ?", ProtocolOracle).
+		Order("name ASC").
+		Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list databases by oracle service name: %w", err)
+	}
+
+	return databases, nil
 }
 
 // ListListableDatabases retrieves databases that are marked as listable.

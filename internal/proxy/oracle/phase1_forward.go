@@ -128,14 +128,21 @@ func locateWideUsername(body []byte, authIdx int) (int, int, bool) {
 
 // locateThinUsername finds the login username in a compressed (thin-client)
 // Phase 1 body: go-ora / python-oracledb use a 1-byte CLR length prefix,
-// SQLcl/JDBC thin send the bytes bare. The username is the identifier run ending
-// at (or just before) the first AUTH_ key.
+// SQLcl/JDBC thin send the bytes bare. The username is the run of username
+// bytes ending at (or just before) the first AUTH_ key.
+//
+// The walk uses isUsernameByte, NOT isIdentifierByte: dbbat login names may
+// contain '.', '-' or '@' (e.g. "florent.clairambault"), and the
+// identifier-only walk truncated them at the first such character — the
+// wide/OCI path was fixed for this, but thin clients (python-oracledb thin,
+// go-ora) kept truncating ("user not found: CLAIRAMBAULT", with the reject
+// then surfacing as DPY-5002 on python-oracledb).
 func locateThinUsername(body []byte, authIdx int) (int, int, bool) {
 	end := authIdx
 
 	const maxFramingGap = 8
 
-	for gap := 0; end > 0 && !isIdentifierByte(body[end-1]); gap++ {
+	for gap := 0; end > 0 && !isUsernameByte(body[end-1]); gap++ {
 		if gap >= maxFramingGap {
 			return 0, 0, false
 		}
@@ -144,7 +151,7 @@ func locateThinUsername(body []byte, authIdx int) (int, int, bool) {
 	}
 
 	start := end
-	for start > 0 && isIdentifierByte(body[start-1]) && end-start < 30 {
+	for start > 0 && isUsernameByte(body[start-1]) && end-start < 30 {
 		start--
 	}
 

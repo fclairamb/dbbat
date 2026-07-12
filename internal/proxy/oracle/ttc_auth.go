@@ -161,6 +161,18 @@ func isIdentifierByte(b byte) bool {
 	}
 }
 
+// isUsernameByte reports whether b can appear in a login username. dbbat
+// usernames come from OAuth identities (e.g. Slack handles) and routinely
+// contain '.', '-' or '@' — characters outside the Oracle identifier set.
+// The thin-client username locator must accept them or a login such as
+// "florent.clairambault" is truncated at the '.' to "clairambault" and the
+// user is authenticated (and looked up) as the wrong name ("user not found:
+// CLAIRAMBAULT"). Framing bytes around the username field are control bytes
+// (< 0x20), so widening the set does not over-capture.
+func isUsernameByte(b byte) bool {
+	return isIdentifierByte(b) || b == '.' || b == '-' || b == '@'
+}
+
 // readUsernameAtOffset returns the next userIDLen bytes as a username if they
 // are all printable ASCII; ok=false otherwise. It uses the true printable check
 // (not the identifier-only one) because the field is the exact declared username

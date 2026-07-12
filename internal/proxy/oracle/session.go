@@ -41,6 +41,15 @@ type session struct {
 	grant         *store.Grant
 	connectionUID uuid.UUID
 
+	// databaseCandidates holds every dbbat database sharing the connect
+	// string's oracle_service_name when that name is ambiguous (a mutualized
+	// upstream instance). The database is resolved at TNS Connect time —
+	// before the username is known — so final selection is deferred to
+	// disambiguateDatabase, which filters the candidates by the connecting
+	// user's active grants once AUTH Phase 1 has revealed the username.
+	// Empty when the connect string resolved to exactly one database.
+	databaseCandidates []store.Database
+
 	// upstreamCustomHash records whether the upstream's Set Protocol response
 	// had caps[4]&0x20 set (customHash). Captured during the pre-auth relay
 	// before we strip the bit for the client. The upstream AUTH client uses it
@@ -217,6 +226,19 @@ func (s *session) run() error {
 	s.upstreamConn = upstreamConn
 	s.clientAuthPhase1Pkt = phase1Pkt
 
+	// Step 4a: If the connect string's service name matched several dbbat
+	// databases (mutualized upstream), pick the real one now that AUTH Phase 1
+	// has revealed the username — the user's active grants decide. This MUST
+	// run before beginUpstreamAuth (step 4b), which authenticates upstream
+	// with the selected database's stored schema credentials.
+	if err := s.disambiguateDatabase(phase1Pkt); err != nil {
+		s.logger.WarnContext(s.ctx, "database disambiguation failed", slog.Any("error", err))
+		oraCode, message := authRejectFor(err)
+		s.sendAuthFailed(oraCode, message)
+
+		return fmt.Errorf("%w: %w", ErrClientAuthFailed, err)
+	}
+
 	// Step 4b: For OCI (wide-encoding) clients, drive AUTH Phase 1 against the
 	// upstream BEFORE challenging the client. The upstream's challenge carries
 	// the end-of-call summary shaped for the exact TTC caps this client
@@ -363,6 +385,13 @@ func authRejectFor(err error) (uint16, string) {
 		return ORA01045, "no active grant for this database; request access via dbbat"
 	}
 
+	// An ambiguous shared service name is actionable too: the user holds
+	// grants on several databases behind this service name and must pick one
+	// explicitly by connecting with the dbbat database name.
+	if errors.Is(err, ErrAmbiguousServiceName) {
+		return ORA01045, "service name matches multiple dbbat databases; connect using the dbbat database name instead"
+	}
+
 	return ORA01017, "invalid username/password; logon denied"
 }
 
@@ -394,18 +423,111 @@ func (s *session) resolveDatabase(connectPayload []byte) error {
 	s.logger = s.logger.With("service_name", s.serviceName)
 
 	db, err := s.store.GetDatabaseByName(s.ctx, s.serviceName)
-	if err != nil {
-		db, err = s.store.GetDatabaseByOracleServiceName(s.ctx, s.serviceName)
-		if err != nil {
-			s.sendRefuse(ORA12514, "database not found")
+	if err == nil {
+		s.database = db
 
-			return fmt.Errorf("%w: %s: %w", ErrDatabaseNotFound, s.serviceName, err)
+		return nil
+	}
+
+	// Fallback: the connect string carries a raw upstream service name. That
+	// name may be shared by several dbbat databases (mutualized instance), in
+	// which case the true database can only be chosen once the username is
+	// known (AUTH Phase 1) — see disambiguateDatabase.
+	candidates, err := s.store.ListDatabasesByOracleServiceName(s.ctx, s.serviceName)
+	if err != nil || len(candidates) == 0 {
+		s.sendRefuse(ORA12514, "database not found")
+
+		return fmt.Errorf("%w: %s", ErrDatabaseNotFound, s.serviceName)
+	}
+
+	if len(candidates) == 1 {
+		s.database = &candidates[0]
+
+		return nil
+	}
+
+	// The pre-auth relay connects upstream BEFORE authentication, so an
+	// ambiguous name is only workable when every candidate shares the same
+	// upstream address (the mutualized-instance case). Otherwise refuse now —
+	// there is no address to relay to.
+	firstAddr := net.JoinHostPort(candidates[0].Host, fmt.Sprintf("%d", candidates[0].Port))
+	for i := 1; i < len(candidates); i++ {
+		addr := net.JoinHostPort(candidates[i].Host, fmt.Sprintf("%d", candidates[i].Port))
+		if addr != firstAddr {
+			s.sendRefuse(ORA12514,
+				"service name matches multiple dbbat databases with different upstreams; connect using the dbbat database name")
+
+			return fmt.Errorf("%w: %s: candidates have different upstream addresses", ErrAmbiguousServiceName, s.serviceName)
 		}
 	}
 
-	s.database = db
+	s.logger.InfoContext(s.ctx, "service name matches multiple dbbat databases; deferring selection to AUTH Phase 1",
+		slog.Int("candidates", len(candidates)))
+
+	// Use the first candidate for the relay (all upstream-relevant fields —
+	// host, port, oracle_service_name — are identical across candidates); the
+	// final choice happens in disambiguateDatabase.
+	s.database = &candidates[0]
+	s.databaseCandidates = candidates
 
 	return nil
+}
+
+// disambiguateDatabase finalizes the database selection when the connect
+// string's service name matched several dbbat databases. It parses the
+// username from the client's AUTH Phase 1 packet and keeps the candidates the
+// user holds an active grant on:
+//
+//   - exactly one → that database is selected;
+//   - zero → ErrNoActiveGrant (the user has no access however you slice it);
+//   - several → ErrAmbiguousServiceName; the user must connect with the
+//     unambiguous dbbat database name instead of the shared service name.
+//
+// No-op when the connect string already resolved to exactly one database.
+func (s *session) disambiguateDatabase(phase1Pkt *TNSPacket) error {
+	if len(s.databaseCandidates) < 2 {
+		return nil
+	}
+
+	username, err := parseAuthPhase1(phase1Pkt.Payload)
+	if err != nil {
+		return fmt.Errorf("failed to parse AUTH Phase 1: %w", err)
+	}
+
+	// Oracle clients uppercase usernames — normalize like authenticateClient.
+	user, err := s.store.GetUserByUsername(s.ctx, strings.ToLower(username))
+	if err != nil {
+		return fmt.Errorf("%w: %s", ErrUserNotFound, username)
+	}
+
+	var matched []*store.Database
+
+	for i := range s.databaseCandidates {
+		if _, err := s.store.GetActiveGrant(s.ctx, user.UID, s.databaseCandidates[i].UID); err == nil {
+			matched = append(matched, &s.databaseCandidates[i])
+		}
+	}
+
+	switch len(matched) {
+	case 0:
+		return fmt.Errorf("%w: user=%s service_name=%s (no grant on any of the %d databases sharing this service name)",
+			ErrNoActiveGrant, username, s.serviceName, len(s.databaseCandidates))
+	case 1:
+		s.database = matched[0]
+		s.logger.InfoContext(s.ctx, "ambiguous service name resolved by user grants",
+			slog.String("username", username),
+			slog.String("database", s.database.Name))
+
+		return nil
+	default:
+		names := make([]string, len(matched))
+		for i, db := range matched {
+			names[i] = db.Name
+		}
+
+		return fmt.Errorf("%w: user=%s has active grants on %s; connect using the dbbat database name",
+			ErrAmbiguousServiceName, username, strings.Join(names, ", "))
+	}
 }
 
 // readPhase1Packet returns the AUTH Phase 1 packet, reading from the client when
