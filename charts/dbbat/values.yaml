@@ -112,14 +112,16 @@ service:
   oracle:
     # -- Enable Oracle proxy port on the unified proxy service
     enabled: false
-    # -- Oracle proxy port (default Oracle TNS port is 1521; proxy defaults to 1522)
-    port: 1522
+    # -- Oracle proxy port (standard Oracle TNS port). Also sets the container
+    # listen port via DBB_LISTEN_ORA, so client and container ports match.
+    port: 1521
 
   mysql:
     # -- Enable MySQL/MariaDB proxy port on the unified proxy service
     enabled: false
-    # -- MySQL proxy port
-    port: 3307
+    # -- MySQL/MariaDB proxy port (standard MySQL port). Also sets the container
+    # listen port via DBB_LISTEN_MYSQL.
+    port: 3306
 
 # =============================================================================
 # Ingress (HTTP only - for API and Web UI)
