@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.3](https://github.com/fclairamb/dbbat/compare/v0.15.2...v0.15.3) (2026-07-12)
+
+
+### Bug Fixes
+
+* implement backlog specs (grants usage meters, query breadcrumb, Oracle auth-reject frame, dialog prefill fixes, {DBBAT_KEY} rename) ([#240](https://github.com/fclairamb/dbbat/issues/240)) ([caa73cb](https://github.com/fclairamb/dbbat/commit/caa73cb7ed99742556f1179f1c9500084fa85bc1))
+
 ## [0.15.2](https://github.com/fclairamb/dbbat/compare/v0.15.1...v0.15.2) (2026-07-12)
 
 
