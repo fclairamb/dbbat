@@ -215,6 +215,7 @@ function GrantDefinitionsPage() {
                 </Button>
               </DialogTrigger>
               <DefinitionDialog
+                key={editing?.uid ?? "new"}
                 editing={editing}
                 onClose={() => {
                   setDialogOpen(false);
@@ -386,6 +387,7 @@ function DefinitionDialog({
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="Standard read access for an hour"
+              data-testid="grant-definition-description"
             />
           </div>
           <div className="space-y-2">
@@ -398,12 +400,16 @@ function DefinitionDialog({
                 onChange={(e) => setDurationValue(e.target.value)}
                 className="flex-1"
                 required
+                data-testid="grant-definition-duration-value"
               />
               <Select
                 value={durationUnit}
                 onValueChange={(v) => setDurationUnit(v as "m" | "h" | "d")}
               >
-                <SelectTrigger className="w-28">
+                <SelectTrigger
+                  className="w-28"
+                  data-testid="grant-definition-duration-unit"
+                >
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -441,6 +447,7 @@ function DefinitionDialog({
                 placeholder="Unlimited"
                 value={maxQueries}
                 onChange={(e) => setMaxQueries(e.target.value)}
+                data-testid="grant-definition-max-queries"
               />
             </div>
             <div className="space-y-2">
@@ -454,6 +461,7 @@ function DefinitionDialog({
                   value={maxBytesValue}
                   onChange={(e) => setMaxBytesValue(e.target.value)}
                   className="flex-1"
+                  data-testid="grant-definition-max-bytes"
                 />
                 <Select
                   value={bytesUnit}
@@ -461,7 +469,10 @@ function DefinitionDialog({
                     setBytesUnit(v as "KB" | "MB" | "GB")
                   }
                 >
-                  <SelectTrigger className="w-20">
+                  <SelectTrigger
+                    className="w-20"
+                    data-testid="grant-definition-bytes-unit"
+                  >
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
