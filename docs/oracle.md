@@ -292,6 +292,27 @@ Client                          DBBat Proxy                     Oracle
 
 The proxy is fully transparent — it forwards raw TNS packets without modification. SQL extraction and row capture happen by inspecting copies of the data, never altering the traffic.
 
+### Database resolution and shared service names
+
+The service name from the TNS Connect descriptor is first matched against dbbat
+database **names** (exact match), then against `oracle_service_name`. Several
+dbbat logical databases can share one upstream `oracle_service_name` (e.g. five
+schemas of a mutualized instance behind `MUTU01`). Because the database is
+resolved at Connect time — before AUTH Phase 1 reveals the username — an
+ambiguous service name is handled by deferring the final choice:
+
+- all candidates must share the same upstream `host:port` (otherwise the
+  connection is refused immediately — there is no single address to relay to);
+- after AUTH Phase 1, the candidates are filtered by the connecting user's
+  active grants: exactly one match selects that database; zero rejects with
+  "no active grant"; several rejects with a message asking the user to connect
+  with the unambiguous dbbat database name instead.
+
+The `GET /api/v1/databases/{uid}/connection` endpoint therefore advertises the
+dbbat logical name in the EZ-Connect string whenever it is EZ-Connect-safe
+(letters, digits, `_`, `.`, `-`), falling back to the raw upstream service name
+for names containing spaces or parentheses.
+
 ## Known Limitations
 
 - **Single O5LOGON key per user**: The Oracle username from TTC AUTH Phase 1 maps to the dbbat user (lowercased) for grant checks and connection tracking, but only that user's first verifier-bearing API key can authenticate — see "Per-user O5LOGON key" below.

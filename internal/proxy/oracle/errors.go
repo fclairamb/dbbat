@@ -59,6 +59,10 @@ var (
 	ErrDatabaseNotFound = errors.New("database not found")
 	// ErrUserNotFound indicates the requested user was not found in the store.
 	ErrUserNotFound = errors.New("user not found")
+	// ErrAmbiguousServiceName indicates a service name shared by several dbbat
+	// databases could not be narrowed to one (the user holds grants on more
+	// than one of them, or they point at different upstream addresses).
+	ErrAmbiguousServiceName = errors.New("service name matches multiple dbbat databases")
 
 	// ErrTTCPayloadTooShort indicates a TTC payload is shorter than expected.
 	ErrTTCPayloadTooShort = errors.New("TTC payload too short")

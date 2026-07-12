@@ -670,3 +670,64 @@ func TestListListableDatabases(t *testing.T) {
 		t.Errorf("ListListableDatabases() returned %d listable DBs, want ≥2", listableCount)
 	}
 }
+
+// TestListDatabasesByOracleServiceName covers the mutualized-instance case:
+// several dbbat logical databases sharing one upstream oracle_service_name
+// (e.g. MUTU01) must ALL be returned, ordered by name — the previous
+// single-row lookup returned an arbitrary one, so the Oracle proxy could
+// resolve a connection to the wrong logical database.
+func TestListDatabasesByOracleServiceName(t *testing.T) {
+	s := setupTestStore(t)
+	ctx := context.Background()
+	key := testEncryptionKey()
+
+	svc := "MUTU01_TEST"
+	mkOra := func(name string) *Database {
+		return &Database{
+			Name:              name,
+			Host:              "orahost",
+			Port:              1521,
+			DatabaseName:      name,
+			Username:          name + "_user",
+			Password:          "pass",
+			SSLMode:           "prefer",
+			Protocol:          ProtocolOracle,
+			OracleServiceName: &svc,
+		}
+	}
+
+	for _, name := range []string{"abyla_i3f_t", "abyla_glh_t", "abyla_onv_t"} {
+		if _, err := s.CreateDatabase(ctx, mkOra(name), key); err != nil {
+			t.Fatalf("CreateDatabase(%s) error = %v", name, err)
+		}
+	}
+
+	t.Run("returns all databases sharing the service name, ordered", func(t *testing.T) {
+		dbs, err := s.ListDatabasesByOracleServiceName(ctx, svc)
+		if err != nil {
+			t.Fatalf("ListDatabasesByOracleServiceName() error = %v", err)
+		}
+
+		if len(dbs) != 3 {
+			t.Fatalf("got %d databases, want 3", len(dbs))
+		}
+
+		want := []string{"abyla_glh_t", "abyla_i3f_t", "abyla_onv_t"}
+		for i, name := range want {
+			if dbs[i].Name != name {
+				t.Errorf("dbs[%d].Name = %q, want %q", i, dbs[i].Name, name)
+			}
+		}
+	})
+
+	t.Run("unknown service name returns empty slice", func(t *testing.T) {
+		dbs, err := s.ListDatabasesByOracleServiceName(ctx, "NO_SUCH_SERVICE")
+		if err != nil {
+			t.Fatalf("ListDatabasesByOracleServiceName() error = %v", err)
+		}
+
+		if len(dbs) != 0 {
+			t.Errorf("got %d databases, want 0", len(dbs))
+		}
+	})
+}
