@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -10,6 +12,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
+
+	"github.com/fclairamb/dbbat/internal/crypto"
 )
 
 // CreateUser creates a new user with the specified roles
@@ -160,6 +164,79 @@ func (s *Store) DeleteUser(ctx context.Context, uid uuid.UUID) error {
 
 		return nil
 	})
+}
+
+// EnsureUserOracleSalts returns the user's shared O5LOGON salts, generating and
+// persisting them lazily on first use (typically at API key creation). All of a
+// user's API keys derive their O5LOGON verifiers from these salts so the Oracle
+// proxy can commit to one salt in the AUTH challenge and still accept any of
+// the user's keys as the password.
+//
+// Concurrency-safe: the persist is a compare-and-set (only writes when the
+// oracle material is still absent), and on a lost race the winner's salts are
+// re-read so both callers converge on the same values.
+func (s *Store) EnsureUserOracleSalts(ctx context.Context, userID uuid.UUID) (*OracleUserData, error) {
+	user, err := s.GetUserByUID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	if data := user.OracleData(); data != nil &&
+		len(data.O5LogonUserSalt6949) > 0 && len(data.O5LogonUserSalt18453) > 0 {
+		return data, nil
+	}
+
+	salt6949 := make([]byte, crypto.O5LogonSaltLength)
+	if _, err := rand.Read(salt6949); err != nil {
+		return nil, fmt.Errorf("failed to generate user O5LOGON salt: %w", err)
+	}
+
+	salt18453 := make([]byte, crypto.O5LogonPbkdf2SaltLength)
+	if _, err := rand.Read(salt18453); err != nil {
+		return nil, fmt.Errorf("failed to generate user O5LOGON PBKDF2 salt: %w", err)
+	}
+
+	protocolData := user.ProtocolData
+	if protocolData == nil {
+		protocolData = &UserProtocolData{}
+	}
+
+	protocolData.Oracle = &OracleUserData{
+		O5LogonUserSalt6949:  salt6949,
+		O5LogonUserSalt18453: salt18453,
+	}
+
+	encoded, err := json.Marshal(protocolData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode user protocol data: %w", err)
+	}
+
+	res, err := s.db.NewUpdate().
+		Model((*User)(nil)).
+		Set("protocol_data = ?::jsonb", string(encoded)).
+		Set("updated_at = ?", time.Now()).
+		Where("uid = ?", userID).
+		Where("protocol_data IS NULL OR protocol_data -> 'oracle' IS NULL").
+		Exec(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to persist user O5LOGON salts: %w", err)
+	}
+
+	if rows, err := res.RowsAffected(); err == nil && rows == 0 {
+		// Lost a concurrent-generation race — adopt the winner's salts.
+		winner, err := s.GetUserByUID(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+
+		if data := winner.OracleData(); data != nil {
+			return data, nil
+		}
+
+		return nil, ErrUserNotFound
+	}
+
+	return protocolData.Oracle, nil
 }
 
 // EnsureDefaultAdmin creates a default admin user if no users exist

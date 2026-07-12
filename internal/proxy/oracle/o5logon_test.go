@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	dbbcrypto "github.com/fclairamb/dbbat/internal/crypto"
 )
 
 func TestO5Logon_VerifierGeneration(t *testing.T) {
@@ -224,4 +226,168 @@ func simulateO5LogonClientRaw(password, encServerSessKey, authVfrData string) (s
 	return strings.ToUpper(hex.EncodeToString(encClientSessKeyBytes)),
 		strings.ToUpper(hex.EncodeToString(encPasswordBytes)),
 		nil
+}
+
+// --- Per-user-salt multi-candidate tests -----------------------------------
+//
+// With user-shared salts, all of a user's API keys answer the same challenge:
+// the challenge ciphertext goes out encrypted under ONE key's verifier (the
+// most recently created), and Phase 2 tries each candidate by rebuilding the
+// server state as a client holding that key saw it (CloneForCandidate). The
+// client role below is computeUpstreamAuthSecrets — dbbat's own go-ora-mirror
+// client implementation — so the round trip is authentic for both verifier
+// types.
+
+// TestO5Logon_MultiCandidate_6949 covers the legacy 6949 flow: the client
+// authenticates with key A while the challenge was built from key B.
+func TestO5Logon_MultiCandidate_6949(t *testing.T) {
+	t.Parallel()
+
+	userSalt := make([]byte, o5LogonSaltLength)
+	_, err := rand.Read(userSalt)
+	require.NoError(t, err)
+
+	keyA := "dbb_multicand_aaaa11112222333344"
+	keyB := "dbb_multicand_bbbb55556666777788"
+
+	verifierA := deriveVerifierKey(keyA, userSalt)
+	verifierB := deriveVerifierKey(keyB, userSalt)
+
+	// Challenge committed to key B's verifier (most recently created).
+	server := NewO5LogonServer(userSalt, verifierB)
+	encSessKey, vfrData, err := server.GenerateChallenge()
+	require.NoError(t, err)
+
+	salt, err := hex.DecodeString(vfrData)
+	require.NoError(t, err)
+	assert.Equal(t, userSalt, salt, "challenge must carry the shared user salt")
+
+	// Client logs in with key A (authentic client role).
+	sec := &upstreamAuthSecrets{verifierType: VerifierType6949, salt: userSalt}
+	require.NoError(t, computeUpstreamAuthSecrets(keyA, encSessKey, sec))
+
+	// Primary candidate (key B) must not decrypt to key A.
+	if pw, err := server.DecryptPassword(sec.encClientSessKey, sec.encPassword); err == nil {
+		assert.NotEqual(t, keyA, pw, "wrong candidate must not recover the password")
+	}
+
+	// The clone for key A must recover the password exactly.
+	clone, err := server.CloneForCandidate(userSalt, verifierA, encSessKey)
+	require.NoError(t, err)
+
+	pw, err := clone.DecryptPassword(sec.encClientSessKey, sec.encPassword)
+	require.NoError(t, err)
+	assert.Equal(t, keyA, pw)
+	assert.NotEmpty(t, clone.CombinedKey, "winning candidate must expose the client's combined key")
+}
+
+// TestO5Logon_MultiCandidate_18453 covers the modern PBKDF2/HMAC-SHA512 flow
+// (python-oracledb thin, JDBC thin / SQLcl, sqlplus against 12c+/23ai).
+func TestO5Logon_MultiCandidate_18453(t *testing.T) {
+	t.Parallel()
+
+	userSalt := make([]byte, 16)
+	_, err := rand.Read(userSalt)
+	require.NoError(t, err)
+
+	keyA := "dbb_multicand_cccc11112222333344"
+	keyB := "dbb_multicand_dddd55556666777788"
+
+	verifierA := dbbcryptoDerive18453(keyA, userSalt)
+	verifierB := dbbcryptoDerive18453(keyB, userSalt)
+
+	server := NewO5LogonServer(nil, nil)
+	server.UseVerifier18453(userSalt, verifierB)
+
+	encSessKey, vfrData, err := server.GenerateChallenge()
+	require.NoError(t, err)
+
+	salt, err := hex.DecodeString(vfrData)
+	require.NoError(t, err)
+
+	chkSalt, err := hex.DecodeString(server.PBKDF2ChkSalt())
+	require.NoError(t, err)
+
+	sec := &upstreamAuthSecrets{
+		verifierType:    VerifierType18453,
+		customHash:      true,
+		salt:            salt,
+		pbkdf2ChkSalt:   chkSalt,
+		pbkdf2VgenCount: server.PBKDF2VgenCount(),
+		pbkdf2SderCount: server.PBKDF2SderCount(),
+	}
+	require.NoError(t, computeUpstreamAuthSecrets(keyA, encSessKey, sec))
+
+	// Primary candidate (key B) must not decrypt to key A.
+	if pw, err := server.DecryptPassword(sec.encClientSessKey, sec.encPassword); err == nil {
+		assert.NotEqual(t, keyA, pw, "wrong candidate must not recover the password")
+	}
+
+	clone, err := server.CloneForCandidate(userSalt, verifierA, encSessKey)
+	require.NoError(t, err)
+
+	pw, err := clone.DecryptPassword(sec.encClientSessKey, sec.encPassword)
+	require.NoError(t, err)
+	assert.Equal(t, keyA, pw)
+}
+
+// TestO5Logon_MultiCandidate_WrongPassword: a password that matches NO key
+// must fail against every candidate.
+func TestO5Logon_MultiCandidate_WrongPassword(t *testing.T) {
+	t.Parallel()
+
+	userSalt := make([]byte, o5LogonSaltLength)
+	_, err := rand.Read(userSalt)
+	require.NoError(t, err)
+
+	keyA := "dbb_multicand_eeee11112222333344"
+	keyB := "dbb_multicand_ffff55556666777788"
+	wrong := "dbb_multicand_0000wrongwrongwron"
+
+	verifierA := deriveVerifierKey(keyA, userSalt)
+	verifierB := deriveVerifierKey(keyB, userSalt)
+
+	server := NewO5LogonServer(userSalt, verifierB)
+	encSessKey, _, err := server.GenerateChallenge()
+	require.NoError(t, err)
+
+	sec := &upstreamAuthSecrets{verifierType: VerifierType6949, salt: userSalt}
+	require.NoError(t, computeUpstreamAuthSecrets(wrong, encSessKey, sec))
+
+	for name, verifier := range map[string][]byte{"A": verifierA, "B": verifierB} {
+		clone, err := server.CloneForCandidate(userSalt, verifier, encSessKey)
+		require.NoError(t, err)
+
+		if pw, err := clone.DecryptPassword(sec.encClientSessKey, sec.encPassword); err == nil {
+			assert.NotEqual(t, keyA, pw, "candidate %s must not recover key A from a wrong password", name)
+			assert.NotEqual(t, keyB, pw, "candidate %s must not recover key B from a wrong password", name)
+		}
+	}
+}
+
+// TestO5Logon_CloneForCandidate_PrimaryEquivalence: cloning with the PRIMARY
+// key's own verifier must reproduce the original server session key, so the
+// candidate loop can treat every candidate uniformly.
+func TestO5Logon_CloneForCandidate_PrimaryEquivalence(t *testing.T) {
+	t.Parallel()
+
+	password := "dbb_clone_equiv_1234567890123456"
+
+	salt, verifierKey, err := GenerateO5LogonVerifier(password)
+	require.NoError(t, err)
+
+	server := NewO5LogonServer(salt, verifierKey)
+	encSessKey, _, err := server.GenerateChallenge()
+	require.NoError(t, err)
+
+	clone, err := server.CloneForCandidate(salt, verifierKey, encSessKey)
+	require.NoError(t, err)
+
+	assert.Equal(t, server.serverSessionKey, clone.serverSessionKey)
+}
+
+// dbbcryptoDerive18453 derives a verifier-18453 key (thin wrapper to keep the
+// tests readable).
+func dbbcryptoDerive18453(password string, salt []byte) []byte {
+	return dbbcrypto.DeriveO5LogonVerifier18453Key(password, salt)
 }

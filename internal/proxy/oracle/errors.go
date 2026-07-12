@@ -79,6 +79,9 @@ var (
 	ErrNoO5LogonVerifier = errors.New("no API key with O5LOGON verifier found")
 	// ErrAPIKeyOwnerMismatch indicates the API key does not belong to the authenticated user.
 	ErrAPIKeyOwnerMismatchOracle = errors.New("API key does not belong to user")
+	// ErrAPIKeyVerification indicates no verifier candidate decrypted the
+	// client's AUTH_PASSWORD to a valid API key (wrong password).
+	ErrAPIKeyVerification = errors.New("API key verification failed")
 
 	// ErrColumnDefTooShort indicates a column definition is shorter than expected.
 	ErrColumnDefTooShort = errors.New("column definition too short")

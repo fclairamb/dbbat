@@ -37,7 +37,7 @@ The reference implementation. Both authentication and command-phase traffic are 
 Implemented as a hand-rolled TNS/TTC proxy in `internal/proxy/oracle`. See the full [protocol notes](https://github.com/fclairamb/dbbat/blob/main/docs/oracle.md) for wire-level details.
 
 - **Connection routing** uses the `SERVICE_NAME` from the TNS connect descriptor — match it against either the database `name` or its `oracle_service_name`.
-- **Auth**: dbbat speaks O5LOGON to the client (per-user verifier loaded from an API key). The upstream session is re-authenticated using the database's stored credentials.
+- **Auth**: dbbat speaks O5LOGON to the client — any of the user's API keys works as the password (per-user O5LOGON salts; verifiers loaded from the user's API keys). The upstream session is re-authenticated using the database's stored credentials.
 - **Query extraction**: SQL is parsed out of TTC `Execute` (function `0x03`, sub-op `0x5e`) packets; result rows are decoded for the first response (`func=0x10`) and continuation packets (`func=0x06`).
 - **Number/Date decoding**: Oracle `NUMBER` and `DATE` formats are decoded for row capture.
 

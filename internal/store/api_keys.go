@@ -94,9 +94,9 @@ func (s *Store) CreateAPIKey(ctx context.Context, userID uuid.UUID, name string,
 		CreatedAt: time.Now(),
 	}
 
-	// Generate O5LOGON verifier if encryption key is available
+	// Generate O5LOGON verifiers if encryption key is available
 	if len(encryptionKey) > 0 && len(encryptionKey[0]) > 0 {
-		if err := apiKey.computeO5LogonVerifier(plainKey, encryptionKey[0]); err != nil {
+		if err := s.attachO5LogonVerifiers(ctx, apiKey, plainKey, encryptionKey[0]); err != nil {
 			return nil, "", err
 		}
 	}
@@ -110,6 +110,22 @@ func (s *Store) CreateAPIKey(ctx context.Context, userID uuid.UUID, name string,
 	}
 
 	return apiKey, plainKey, nil
+}
+
+// attachO5LogonVerifiers computes the key's O5LOGON verifiers from the USER's
+// shared salts (generated lazily if the user has none yet), so all of a user's
+// keys are interchangeable for Oracle login. Falls back to legacy per-key
+// random salts only if the user salts cannot be obtained.
+func (s *Store) attachO5LogonVerifiers(ctx context.Context, apiKey *APIKey, plainKey string, encryptionKey []byte) error {
+	userSalts, err := s.EnsureUserOracleSalts(ctx, apiKey.UserID)
+	if err != nil {
+		// Defensive fallback — should not happen for existing users. A per-key
+		// salt still yields a usable (single-candidate) Oracle key.
+		return apiKey.computeO5LogonVerifier(plainKey, encryptionKey)
+	}
+
+	return apiKey.computeO5LogonVerifierWithSalts(
+		plainKey, encryptionKey, userSalts.O5LogonUserSalt6949, userSalts.O5LogonUserSalt18453)
 }
 
 // CreateAPIKeyWithValue creates an API key with a specific plaintext value.
@@ -137,9 +153,9 @@ func (s *Store) CreateAPIKeyWithValue(ctx context.Context, userID uuid.UUID, nam
 		CreatedAt: time.Now(),
 	}
 
-	// Generate O5LOGON verifier if encryption key is available
+	// Generate O5LOGON verifiers if encryption key is available
 	if len(encryptionKey) > 0 && len(encryptionKey[0]) > 0 {
-		if err := apiKey.computeO5LogonVerifier(plainKey, encryptionKey[0]); err != nil {
+		if err := s.attachO5LogonVerifiers(ctx, apiKey, plainKey, encryptionKey[0]); err != nil {
 			return nil, err
 		}
 	}
@@ -156,19 +172,57 @@ func (s *Store) CreateAPIKeyWithValue(ctx context.Context, userID uuid.UUID, nam
 }
 
 // computeO5LogonVerifier generates and encrypts O5LOGON verifier data for an API
-// key. Both the legacy verifier-6949 (SHA-1, for go-ora and other legacy clients)
-// and the modern verifier-18453 (12c PBKDF2/HMAC-SHA512, for python-oracledb thin,
-// JDBC thin / SQLcl, and sqlplus against Oracle 12c+/23ai) are stored, each
-// encrypted with the dbbat master key; the Oracle proxy picks the one matching
-// what the connecting client negotiates.
+// key using fresh per-key random salts (legacy scheme). Both the legacy
+// verifier-6949 (SHA-1, for go-ora and other legacy clients) and the modern
+// verifier-18453 (12c PBKDF2/HMAC-SHA512, for python-oracledb thin, JDBC thin /
+// SQLcl, and sqlplus against Oracle 12c+/23ai) are stored, each encrypted with
+// the dbbat master key; the Oracle proxy picks the one matching what the
+// connecting client negotiates.
+//
+// New keys normally go through computeO5LogonVerifierWithSalts (user-shared
+// salts) instead; this remains as the fallback path.
 func (k *APIKey) computeO5LogonVerifier(plainKey string, encryptionKey []byte) error {
-	aad := crypto.APIKeyAAD(k.KeyPrefix)
-
-	// Legacy verifier-6949 (SHA-1).
-	salt, verifierKey, err := crypto.GenerateO5LogonVerifier(plainKey)
+	salt, _, err := crypto.GenerateO5LogonVerifier(plainKey)
 	if err != nil {
 		return fmt.Errorf("failed to generate O5LOGON verifier: %w", err)
 	}
+
+	salt18453, _, err := crypto.GenerateO5LogonVerifier18453(plainKey)
+	if err != nil {
+		return fmt.Errorf("failed to generate O5LOGON verifier-18453: %w", err)
+	}
+
+	if err := k.storeO5LogonVerifiers(plainKey, encryptionKey, salt, salt18453); err != nil {
+		return err
+	}
+
+	k.ProtocolData.Oracle.UserSalt = false
+
+	return nil
+}
+
+// computeO5LogonVerifierWithSalts derives and stores the key's O5LOGON
+// verifiers from the USER's shared salts, and marks the key as user-salt so
+// the Oracle proxy's challenge path keeps it as a login candidate alongside
+// the user's other user-salt keys.
+func (k *APIKey) computeO5LogonVerifierWithSalts(plainKey string, encryptionKey, salt6949, salt18453 []byte) error {
+	if err := k.storeO5LogonVerifiers(plainKey, encryptionKey, salt6949, salt18453); err != nil {
+		return err
+	}
+
+	k.ProtocolData.Oracle.UserSalt = true
+
+	return nil
+}
+
+// storeO5LogonVerifiers derives the 6949 + 18453 verifier keys from plainKey
+// and the given salts, encrypts them with the dbbat master key (AAD bound to
+// the key prefix), and stores everything in the key's protocol_data.
+func (k *APIKey) storeO5LogonVerifiers(plainKey string, encryptionKey, salt6949, salt18453 []byte) error {
+	aad := crypto.APIKeyAAD(k.KeyPrefix)
+
+	// Legacy verifier-6949 (SHA-1).
+	verifierKey := crypto.DeriveO5LogonVerifierKey(plainKey, salt6949)
 
 	encVerifier, err := crypto.Encrypt(verifierKey, encryptionKey, aad)
 	if err != nil {
@@ -176,10 +230,7 @@ func (k *APIKey) computeO5LogonVerifier(plainKey string, encryptionKey []byte) e
 	}
 
 	// Modern verifier-18453 (PBKDF2/HMAC-SHA512).
-	salt18453, verifier18453, err := crypto.GenerateO5LogonVerifier18453(plainKey)
-	if err != nil {
-		return fmt.Errorf("failed to generate O5LOGON verifier-18453: %w", err)
-	}
+	verifier18453 := crypto.DeriveO5LogonVerifier18453Key(plainKey, salt18453)
 
 	encVerifier18453, err := crypto.Encrypt(verifier18453, encryptionKey, aad)
 	if err != nil {
@@ -189,7 +240,7 @@ func (k *APIKey) computeO5LogonVerifier(plainKey string, encryptionKey []byte) e
 	// Both verifier types live together in the protocol-specific jsonb column.
 	k.ProtocolData = &ProtocolData{
 		Oracle: &OracleAPIKeyData{
-			O5LogonSalt6949:      salt,
+			O5LogonSalt6949:      salt6949,
 			O5LogonVerifier6949:  encVerifier,
 			O5LogonSalt18453:     salt18453,
 			O5LogonVerifier18453: encVerifier18453,

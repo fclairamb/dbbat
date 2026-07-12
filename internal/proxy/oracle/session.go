@@ -1,6 +1,7 @@
 package oracle
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"errors"
@@ -484,19 +485,29 @@ func (s *session) readPhase2Packet() (*TNSPacket, error) {
 	return phase2Pkt, nil
 }
 
-// resolveAPIKeyFromPhase2 returns the API key that authenticated the client.
+// resolveAPIKeyFromPhase2 returns the API key that authenticated the client,
+// trying every loaded verifier candidate (all of a user's user-salt API keys
+// share the user's O5LOGON salts, so any of them may be the password in use).
 //
 // Two paths:
 //   - encPassword == "" (SQLcl / JDBC thin 23c+): the client doesn't send the
-//     password text. Proof of knowledge is implicit — if the wrong key were typed,
-//     the client would fail to validate our AUTH_SVR_RESPONSE marker and
-//     disconnect. We trust the loaded verifier's API key as the one in use.
-//   - encPassword non-empty (standard): decrypt with the negotiated combined key
-//     and look up the recovered plaintext as an API key.
-func (s *session) resolveAPIKeyFromPhase2(o5 *O5LogonServer, verifier *o5LogonVerifierData, clientSessKey, encPassword string) (*store.APIKey, error) {
+//     password text, so candidates CANNOT be disambiguated. Deterministic
+//     rule: assume the most-recently-created active key with user-salt
+//     verifiers (candidates are ordered created_at DESC, so verifiers[0]).
+//     Proof of knowledge is implicit — if the wrong key were typed, the
+//     client fails to validate our AUTH_SVR_RESPONSE marker and disconnects.
+//   - encPassword non-empty (go-ora, python-oracledb thin, sqlplus): for each
+//     candidate, derive that candidate's view of the combined key (the
+//     challenge ciphertext decrypted under ITS verifier — see
+//     CloneForCandidate), attempt AUTH_PASSWORD decryption, and accept only a
+//     plaintext that verifies as a real API key.
+func (s *session) resolveAPIKeyFromPhase2(o5 *O5LogonServer, verifiers []*o5LogonVerifierData, clientSessKey, encPassword, encChallenge string) (*store.APIKey, error) {
 	if encPassword == "" {
-		s.logger.InfoContext(s.ctx, "AUTH Phase 2: empty AUTH_PASSWORD — using loaded verifier's API key",
-			slog.String("key_id", verifier.apiKeyID.String()))
+		primary := verifiers[0]
+		s.logger.InfoContext(s.ctx, "AUTH Phase 2: empty AUTH_PASSWORD — cannot disambiguate candidates; assuming most-recently-created key",
+			slog.String("key_id", primary.apiKeyID.String()),
+			slog.String("key_prefix", primary.keyPrefix),
+			slog.Int("candidates", len(verifiers)))
 
 		// Derive the combined key the way the client did so the AUTH_SVR_RESPONSE
 		// patch can run. Without this, dbbat forwards the upstream's
@@ -509,7 +520,7 @@ func (s *session) resolveAPIKeyFromPhase2(o5 *O5LogonServer, verifier *o5LogonVe
 				slog.Any("error", err))
 		}
 
-		apiKey, err := s.store.GetAPIKeyByID(s.ctx, verifier.apiKeyID)
+		apiKey, err := s.store.GetAPIKeyByID(s.ctx, primary.apiKeyID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load API key by ID: %w", err)
 		}
@@ -517,21 +528,63 @@ func (s *session) resolveAPIKeyFromPhase2(o5 *O5LogonServer, verifier *o5LogonVe
 		return apiKey, nil
 	}
 
-	plainPassword, err := o5.DecryptPassword(clientSessKey, encPassword)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decrypt password: %w", err)
+	for i, verifier := range verifiers {
+		cand := o5
+
+		if i > 0 {
+			// The challenge went out encrypted under verifiers[0]'s key; rebuild
+			// the server state as a client holding THIS candidate key saw it.
+			salt, verifierKey := verifier.O5LogonSalt, verifier.decryptedVerifier
+			if o5.VerifierType() == VerifierType18453 {
+				if len(verifier.decryptedVerifier18453) == 0 {
+					continue // candidate lacks the negotiated verifier type
+				}
+
+				salt, verifierKey = verifier.salt18453, verifier.decryptedVerifier18453
+			}
+
+			clone, err := o5.CloneForCandidate(salt, verifierKey, encChallenge)
+			if err != nil {
+				s.logger.DebugContext(s.ctx, "AUTH Phase 2: candidate clone failed",
+					slog.String("key_prefix", verifier.keyPrefix), slog.Any("error", err))
+
+				continue
+			}
+
+			cand = clone
+		}
+
+		plainPassword, err := cand.DecryptPassword(clientSessKey, encPassword)
+		if err != nil {
+			s.logger.DebugContext(s.ctx, "AUTH Phase 2: candidate did not decrypt AUTH_PASSWORD",
+				slog.String("key_prefix", verifier.keyPrefix))
+
+			continue
+		}
+
+		apiKey, err := s.store.VerifyAPIKey(s.ctx, plainPassword)
+		if err != nil {
+			s.logger.DebugContext(s.ctx, "AUTH Phase 2: candidate plaintext failed API key verification",
+				slog.String("key_prefix", verifier.keyPrefix))
+
+			continue
+		}
+
+		// Propagate the winning candidate's combined key so the AUTH OK's
+		// AUTH_SVR_RESPONSE is re-encrypted under the key the client derived.
+		o5.CombinedKey = cand.CombinedKey
+
+		s.logger.InfoContext(s.ctx, "AUTH Phase 2: API key authenticated",
+			slog.String("key_prefix", apiKey.KeyPrefix),
+			slog.String("key_id", apiKey.ID.String()),
+			slog.Int("candidate_index", i),
+			slog.Int("candidates", len(verifiers)))
+
+		return apiKey, nil
 	}
 
-	s.logger.DebugContext(s.ctx, "decrypted password from O5LOGON",
-		slog.Int("len", len(plainPassword)),
-		slog.String("prefix", plainPassword[:min(len(plainPassword), 10)]))
-
-	apiKey, err := s.store.VerifyAPIKey(s.ctx, plainPassword)
-	if err != nil {
-		return nil, fmt.Errorf("API key verification failed: %w", err)
-	}
-
-	return apiKey, nil
+	return nil, fmt.Errorf("%w: no candidate key decrypted AUTH_PASSWORD (%d tried)",
+		ErrAPIKeyVerification, len(verifiers))
 }
 
 // authenticateClient performs O5LOGON server-side authentication.
@@ -577,21 +630,26 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 		return err
 	}
 
-	// Load O5LOGON verifier for this user
-	verifier, err := s.loadO5LogonVerifier(user.UID)
+	// Load the O5LOGON verifier candidates for this user: all of the user's
+	// user-salt API keys (they share the user's salts, so any of them can
+	// answer the challenge), or the single first legacy per-key-salt key.
+	verifiers, err := s.loadO5LogonVerifiers(user.UID)
 	if err != nil {
 		return fmt.Errorf("failed to load O5LOGON verifier: %w", err)
 	}
 
-	// Build the O5LOGON server. Default to legacy verifier-6949 (go-ora and other
-	// legacy clients). When the client negotiated customHash (Oracle 12c+/23ai —
-	// observed from the upstream Set Protocol response) and the API key carries a
-	// verifier-18453, switch to the modern PBKDF2/HMAC-SHA512 challenge that
-	// python-oracledb thin, JDBC thin / SQLcl, and sqlplus require — they reject
-	// the 6949 challenge against a 23ai-version server.
-	o5 := NewO5LogonServer(verifier.O5LogonSalt, verifier.decryptedVerifier)
-	if s.upstreamCustomHash && len(verifier.decryptedVerifier18453) > 0 {
-		o5.UseVerifier18453(verifier.salt18453, verifier.decryptedVerifier18453)
+	// Build the O5LOGON server from the primary (most recently created)
+	// candidate. Default to legacy verifier-6949 (go-ora and other legacy
+	// clients). When the client negotiated customHash (Oracle 12c+/23ai —
+	// observed from the upstream Set Protocol response) and the API key carries
+	// a verifier-18453, switch to the modern PBKDF2/HMAC-SHA512 challenge that
+	// python-oracledb thin, JDBC thin / SQLcl, and sqlplus require — they
+	// reject the 6949 challenge against a 23ai-version server.
+	primary := verifiers[0]
+
+	o5 := NewO5LogonServer(primary.O5LogonSalt, primary.decryptedVerifier)
+	if s.upstreamCustomHash && len(primary.decryptedVerifier18453) > 0 {
+		o5.UseVerifier18453(primary.salt18453, primary.decryptedVerifier18453)
 	}
 
 	encSessKey, vfrData, err := o5.GenerateChallenge()
@@ -651,7 +709,7 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 		slog.String("client_sesskey", clientSessKey),
 		slog.String("enc_password", encPassword))
 
-	apiKey, err := s.resolveAPIKeyFromPhase2(o5, verifier, clientSessKey, encPassword)
+	apiKey, err := s.resolveAPIKeyFromPhase2(o5, verifiers, clientSessKey, encPassword, encSessKey)
 	if err != nil {
 		return err
 	}
@@ -699,12 +757,18 @@ func (s *session) clientChallengeTrailer(verifierType int) []byte {
 
 // o5LogonVerifierData holds decrypted O5LOGON verifier data for a user's API key.
 // apiKeyID is the UUID of the API key whose verifier was used. Needed for the
-// empty-AUTH_PASSWORD path (SQLcl / JDBC thin), where dbbat trusts the loaded
-// key as the one the client must have authenticated with.
+// empty-AUTH_PASSWORD path (SQLcl / JDBC thin), where dbbat trusts the primary
+// candidate as the key the client must have authenticated with.
 type o5LogonVerifierData struct {
 	O5LogonSalt       []byte
 	decryptedVerifier []byte
 	apiKeyID          uuid.UUID
+	keyPrefix         string
+
+	// userSalt records whether the verifiers were derived from the USER's
+	// shared salts (all such keys are interchangeable login candidates) or
+	// legacy per-key random salts (only usable alone).
+	userSalt bool
 
 	// Modern verifier-18453 material (empty if the key predates it). When the
 	// client negotiates customHash (Oracle 12c+/23ai), the proxy issues an
@@ -713,9 +777,62 @@ type o5LogonVerifierData struct {
 	decryptedVerifier18453 []byte
 }
 
-// loadO5LogonVerifier finds and decrypts the O5LOGON verifier for a user.
-// Returns the first valid API key with an O5LOGON verifier.
-func (s *session) loadO5LogonVerifier(userID uuid.UUID) (*o5LogonVerifierData, error) {
+// decryptVerifierData decrypts a key's stored O5LOGON material (6949 required,
+// 18453 optional) with the dbbat master key. Returns nil when the key has no
+// usable 6949 verifier.
+func (s *session) decryptVerifierData(key *store.APIKey) *o5LogonVerifierData {
+	oracleData := key.OracleData()
+	if oracleData == nil || len(oracleData.O5LogonSalt6949) == 0 || len(oracleData.O5LogonVerifier6949) == 0 {
+		return nil
+	}
+
+	decrypted, err := decryptO5LogonVerifier(oracleData.O5LogonVerifier6949, s.encryptionKey, key.KeyPrefix)
+	if err != nil {
+		s.logger.WarnContext(s.ctx, "failed to decrypt O5LOGON verifier",
+			slog.String("key_prefix", key.KeyPrefix),
+			slog.Any("error", err))
+
+		return nil
+	}
+
+	data := &o5LogonVerifierData{
+		O5LogonSalt:       oracleData.O5LogonSalt6949,
+		decryptedVerifier: decrypted,
+		apiKeyID:          key.ID,
+		keyPrefix:         key.KeyPrefix,
+		userSalt:          oracleData.UserSalt,
+	}
+
+	// Also decrypt the modern verifier-18453 material if present, so the
+	// proxy can serve customHash (Oracle 12c+/23ai) clients.
+	if len(oracleData.O5LogonSalt18453) > 0 && len(oracleData.O5LogonVerifier18453) > 0 {
+		if v18453, err := decryptO5LogonVerifier(oracleData.O5LogonVerifier18453, s.encryptionKey, key.KeyPrefix); err != nil {
+			s.logger.WarnContext(s.ctx, "failed to decrypt O5LOGON verifier-18453",
+				slog.String("key_prefix", key.KeyPrefix), slog.Any("error", err))
+		} else {
+			data.salt18453 = oracleData.O5LogonSalt18453
+			data.decryptedVerifier18453 = v18453
+		}
+	}
+
+	return data
+}
+
+// loadO5LogonVerifiers finds and decrypts the O5LOGON verifier candidates for
+// a user, ordered most-recently-created first (ListAPIKeys order).
+//
+// When the user has keys whose verifiers were derived from the USER's shared
+// salts (OracleAPIKeyData.UserSalt), ALL of them are returned: the challenge
+// commits to the shared salt, and AUTH Phase 2 tries each candidate — so any
+// of the user's API keys works as the Oracle password. Keys whose salts
+// disagree with the newest user-salt key (possible after a rollback that
+// regenerated the user salts) are dropped: they could never answer a
+// challenge built from the current salts.
+//
+// Otherwise (legacy keys only, with per-key random salts) the first
+// verifier-bearing key is the single candidate — the pre-user-salt behavior,
+// where only that specific key can authenticate.
+func (s *session) loadO5LogonVerifiers(userID uuid.UUID) ([]*o5LogonVerifierData, error) {
 	keys, err := s.store.ListAPIKeys(s.ctx, store.APIKeyFilter{
 		UserID:  &userID,
 		KeyType: strPtr(store.KeyTypeAPI),
@@ -724,49 +841,76 @@ func (s *session) loadO5LogonVerifier(userID uuid.UUID) (*o5LogonVerifierData, e
 		return nil, fmt.Errorf("failed to list API keys: %w", err)
 	}
 
+	all := make([]*o5LogonVerifierData, 0, len(keys))
 	for i := range keys {
-		oracleData := keys[i].OracleData()
-		if oracleData == nil || len(oracleData.O5LogonSalt6949) == 0 || len(oracleData.O5LogonVerifier6949) == 0 {
-			continue
+		if data := s.decryptVerifierData(&keys[i]); data != nil {
+			all = append(all, data)
 		}
+	}
 
-		// Decrypt the verifier with dbbat master key
-		decrypted, err := decryptO5LogonVerifier(oracleData.O5LogonVerifier6949, s.encryptionKey, keys[i].KeyPrefix)
-		if err != nil {
-			s.logger.WarnContext(s.ctx, "failed to decrypt O5LOGON verifier",
-				slog.String("key_prefix", keys[i].KeyPrefix),
-				slog.Any("error", err))
+	candidates := selectVerifierCandidates(all)
+	if len(candidates) == 0 {
+		return nil, ErrNoO5LogonVerifier
+	}
 
-			continue
+	primary := candidates[0]
+
+	if primary.userSalt {
+		s.logger.InfoContext(s.ctx, "O5LOGON verifiers loaded — any of these API keys works for Oracle login",
+			slog.Int("candidates", len(candidates)),
+			slog.String("primary_key_prefix", primary.keyPrefix),
+			slog.Bool("has_18453", len(primary.decryptedVerifier18453) > 0))
+	} else {
+		s.logger.InfoContext(s.ctx, "O5LOGON verifier loaded (legacy per-key salt) — only this API key works for Oracle login",
+			slog.String("key_prefix", primary.keyPrefix),
+			slog.String("key_id", primary.apiKeyID.String()),
+			slog.Bool("has_18453", len(primary.decryptedVerifier18453) > 0))
+	}
+
+	return candidates, nil
+}
+
+// selectVerifierCandidates picks the login candidates from a user's decrypted
+// verifier data (ordered most-recently-created first):
+//
+//   - any user-salt keys present → ALL of them (minus keys whose salt
+//     disagrees with the newest one — possible after a rollback regenerated
+//     the user salts; they could never answer the current challenge);
+//   - otherwise → the first legacy per-key-salt key alone (pre-user-salt
+//     behavior: the challenge salt is bound to that specific key).
+func selectVerifierCandidates(all []*o5LogonVerifierData) []*o5LogonVerifierData {
+	var (
+		userSaltCandidates []*o5LogonVerifierData
+		legacy             *o5LogonVerifierData
+	)
+
+	for _, data := range all {
+		switch {
+		case data.userSalt:
+			userSaltCandidates = append(userSaltCandidates, data)
+		case legacy == nil:
+			legacy = data
 		}
+	}
 
-		data := &o5LogonVerifierData{
-			O5LogonSalt:       oracleData.O5LogonSalt6949,
-			decryptedVerifier: decrypted,
-			apiKeyID:          keys[i].ID,
-		}
+	if len(userSaltCandidates) > 0 {
+		primary := userSaltCandidates[0]
 
-		// Also decrypt the modern verifier-18453 material if present, so the
-		// proxy can serve customHash (Oracle 12c+/23ai) clients.
-		if len(oracleData.O5LogonSalt18453) > 0 && len(oracleData.O5LogonVerifier18453) > 0 {
-			if v18453, err := decryptO5LogonVerifier(oracleData.O5LogonVerifier18453, s.encryptionKey, keys[i].KeyPrefix); err != nil {
-				s.logger.WarnContext(s.ctx, "failed to decrypt O5LOGON verifier-18453",
-					slog.String("key_prefix", keys[i].KeyPrefix), slog.Any("error", err))
-			} else {
-				data.salt18453 = oracleData.O5LogonSalt18453
-				data.decryptedVerifier18453 = v18453
+		matching := userSaltCandidates[:0]
+		for _, c := range userSaltCandidates {
+			if bytes.Equal(c.O5LogonSalt, primary.O5LogonSalt) {
+				matching = append(matching, c)
 			}
 		}
 
-		s.logger.InfoContext(s.ctx, "O5LOGON verifier loaded — only this API key works for Oracle login",
-			slog.String("key_prefix", keys[i].KeyPrefix),
-			slog.String("key_id", keys[i].ID.String()),
-			slog.Bool("has_18453", len(data.decryptedVerifier18453) > 0))
-
-		return data, nil
+		return matching
 	}
 
-	return nil, ErrNoO5LogonVerifier
+	if legacy != nil {
+		return []*o5LogonVerifierData{legacy}
+	}
+
+	return nil
 }
 
 // strPtr returns a pointer to the given string.

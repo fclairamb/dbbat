@@ -330,3 +330,76 @@ func TestBuildTNSConnect_DifferentServiceNames(t *testing.T) {
 		assert.Equal(t, name, parseServiceName(connectStr), "service name %s", name)
 	}
 }
+
+// TestSelectVerifierCandidates covers the candidate-selection policy that
+// backs multi-key Oracle login (per-user O5LOGON salts) and the legacy
+// single-key fallback.
+func TestSelectVerifierCandidates(t *testing.T) {
+	t.Parallel()
+
+	saltA := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	saltB := []byte{9, 9, 9, 9, 9, 9, 9, 9, 9, 9}
+
+	mk := func(prefix string, salt []byte, userSalt bool) *o5LogonVerifierData {
+		return &o5LogonVerifierData{keyPrefix: prefix, O5LogonSalt: salt, userSalt: userSalt}
+	}
+
+	t.Run("all user-salt keys are candidates", func(t *testing.T) {
+		t.Parallel()
+
+		got := selectVerifierCandidates([]*o5LogonVerifierData{
+			mk("dbb_new1", saltA, true),
+			mk("dbb_old1", saltA, true),
+			mk("dbb_old2", saltA, true),
+		})
+
+		require.Len(t, got, 3)
+		assert.Equal(t, "dbb_new1", got[0].keyPrefix, "most recently created key must stay first")
+	})
+
+	t.Run("legacy fallback: only the first legacy key", func(t *testing.T) {
+		t.Parallel()
+
+		got := selectVerifierCandidates([]*o5LogonVerifierData{
+			mk("dbb_lg1", saltA, false),
+			mk("dbb_lg2", saltB, false),
+		})
+
+		require.Len(t, got, 1)
+		assert.Equal(t, "dbb_lg1", got[0].keyPrefix)
+		assert.False(t, got[0].userSalt)
+	})
+
+	t.Run("user-salt keys win over legacy keys", func(t *testing.T) {
+		t.Parallel()
+
+		got := selectVerifierCandidates([]*o5LogonVerifierData{
+			mk("dbb_lgcy", saltB, false),
+			mk("dbb_usr1", saltA, true),
+			mk("dbb_usr2", saltA, true),
+		})
+
+		require.Len(t, got, 2)
+		assert.Equal(t, "dbb_usr1", got[0].keyPrefix)
+		assert.True(t, got[0].userSalt)
+	})
+
+	t.Run("salt mismatch with newest key is dropped", func(t *testing.T) {
+		t.Parallel()
+
+		got := selectVerifierCandidates([]*o5LogonVerifierData{
+			mk("dbb_new1", saltA, true),
+			mk("dbb_stale", saltB, true),
+			mk("dbb_new2", saltA, true),
+		})
+
+		require.Len(t, got, 2)
+		assert.Equal(t, "dbb_new1", got[0].keyPrefix)
+		assert.Equal(t, "dbb_new2", got[1].keyPrefix)
+	})
+
+	t.Run("empty input returns nil", func(t *testing.T) {
+		t.Parallel()
+		assert.Nil(t, selectVerifierCandidates(nil))
+	})
+}

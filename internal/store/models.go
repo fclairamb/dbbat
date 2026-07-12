@@ -43,6 +43,38 @@ type User struct {
 	CreatedAt         time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 	UpdatedAt         time.Time  `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
 	DeletedAt         *time.Time `bun:"deleted_at,soft_delete" json:"-"`
+	// ProtocolData holds protocol-specific per-user material (Oracle O5LOGON
+	// user salts, etc.) in a single generic jsonb column — mirroring
+	// APIKey.ProtocolData — rather than protocol-specific user columns.
+	// nil until first needed (populated lazily at API key creation).
+	ProtocolData *UserProtocolData `bun:"protocol_data,type:jsonb,nullzero" json:"-"`
+}
+
+// UserProtocolData is the per-protocol material attached to a user, stored as
+// a single jsonb column so protocol-specific fields don't proliferate as table
+// columns. Absent protocols are omitted.
+type UserProtocolData struct {
+	Oracle *OracleUserData `json:"oracle,omitempty"`
+}
+
+// OracleUserData holds the per-USER O5LOGON salts. Every API key created for
+// the user derives its O5LOGON verifiers from these shared salts (instead of
+// per-key random salts), so the Oracle proxy can commit to one salt in the
+// AUTH challenge while keeping ALL of the user's keys as login candidates.
+// Salts are public challenge material (sent to any connecting client), so they
+// are stored unencrypted, like the per-key salts.
+type OracleUserData struct {
+	O5LogonUserSalt6949  []byte `json:"o5logon_user_salt_6949,omitempty"`
+	O5LogonUserSalt18453 []byte `json:"o5logon_user_salt_18453,omitempty"`
+}
+
+// OracleData returns the user's Oracle protocol material, or nil if absent.
+func (u *User) OracleData() *OracleUserData {
+	if u.ProtocolData == nil {
+		return nil
+	}
+
+	return u.ProtocolData.Oracle
 }
 
 // HasChangedPassword returns true if the user has changed their initial password
@@ -430,6 +462,14 @@ type OracleAPIKeyData struct {
 	O5LogonVerifier6949  []byte `json:"o5logon_verifier_6949,omitempty"`
 	O5LogonSalt18453     []byte `json:"o5logon_salt_18453,omitempty"`
 	O5LogonVerifier18453 []byte `json:"o5logon_verifier_18453,omitempty"`
+
+	// UserSalt records which salt scheme derived the verifiers above:
+	// true = the USER's shared salts (users.protocol_data.oracle), so this key
+	// is a login candidate alongside the user's other user-salt keys; false /
+	// absent = legacy per-key random salts (only usable when it is the single
+	// key the challenge was built from). The salts are duplicated here either
+	// way so the challenge path never needs a user-row lookup.
+	UserSalt bool `json:"user_salt,omitempty"`
 }
 
 // OracleData returns the key's Oracle protocol material, or nil if it has none.
