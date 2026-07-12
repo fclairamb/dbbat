@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.5](https://github.com/fclairamb/dbbat/compare/v0.15.4...v0.15.5) (2026-07-12)
+
+
+### Bug Fixes
+
+* **oracle:** migration name collision left users.protocol_data missing; don't mask store errors as user-not-found ([#245](https://github.com/fclairamb/dbbat/issues/245)) ([f8e343c](https://github.com/fclairamb/dbbat/commit/f8e343cc30e384bb9ec0748f1c9b256fd8dfdc11))
+
 ## [0.15.4](https://github.com/fclairamb/dbbat/compare/v0.15.3...v0.15.4) (2026-07-12)
 
 
