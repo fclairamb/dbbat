@@ -5,6 +5,7 @@ import { AppSidebar } from "@/components/layout/AppSidebar";
 import { Header } from "@/components/layout/Header";
 import { PageLoader } from "@/components/shared/LoadingSpinner";
 import { useAuth } from "@/contexts/AuthContext";
+import { BreadcrumbProvider } from "@/contexts/BreadcrumbContext";
 
 export const Route = createFileRoute("/_authenticated")({
   beforeLoad: ({ context }) => {
@@ -38,14 +39,16 @@ function AuthenticatedLayout() {
   }
 
   return (
-    <SidebarProvider>
-      <AppSidebar />
-      <SidebarInset>
-        <Header />
-        <main className="flex-1 overflow-auto p-4 md:p-6">
-          <Outlet />
-        </main>
-      </SidebarInset>
-    </SidebarProvider>
+    <BreadcrumbProvider>
+      <SidebarProvider>
+        <AppSidebar />
+        <SidebarInset>
+          <Header />
+          <main className="flex-1 overflow-auto p-4 md:p-6">
+            <Outlet />
+          </main>
+        </SidebarInset>
+      </SidebarProvider>
+    </BreadcrumbProvider>
   );
 }
