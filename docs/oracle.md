@@ -315,7 +315,7 @@ for names containing spaces or parentheses.
 
 ## Known Limitations
 
-- **Single O5LOGON key per user**: The Oracle username from TTC AUTH Phase 1 maps to the dbbat user (lowercased) for grant checks and connection tracking, but only that user's first verifier-bearing API key can authenticate — see "Per-user O5LOGON key" below.
+- **Any API key works for Oracle login (per-user salts)**: The Oracle username from TTC AUTH Phase 1 maps to the dbbat user (lowercased) for grant checks and connection tracking, and any of that user's API keys created since the per-user-salt scheme can authenticate — see "Per-user O5LOGON salts" below. Two caveats: keys created before the scheme (legacy per-key salts) still fall back to first-key-only behavior until a new key is created, and clients that send an empty `AUTH_PASSWORD` (SQLcl / JDBC thin 23c+) cannot be disambiguated — dbbat assumes the most-recently-created user-salt key.
 - **Row capture is best-effort**: The TTC binary format varies across Oracle client versions. Some clients/query types may produce partial or no row capture. SQL text extraction works reliably across all tested clients.
 - **Column names**: Real column names come from the describe column-definition records (`parseColumnDescribes` in `describe.go`), so single-char aliases (`SELECT level AS n`) and unnamed expressions (`SELECT count(*)`) get their true names and positions. Only genuinely unnamed expression columns fall back to a synthetic `COLn` label. If the records don't parse on some server layout, decoding falls back to heuristic name-scanning plus describe-header count padding, so the column count (and row framing) stays correct.
 - **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`. Failed statements record the ORA error text. See `ttc_oer.go`.
@@ -554,6 +554,31 @@ The last holdout, sqlplus / OCI instant client, was fixed by the wide-encoding p
 four OCI-only fixes documented there; it no longer depends on OOB / `DISABLE_OOB`. Against
 Oracle 19c the historical behavior still applies.
 
-### Per-user O5LOGON key
+### Per-user O5LOGON salts (any API key works)
 
-dbbat picks the connecting user's first API key with an O5LOGON verifier when generating the AUTH challenge — see the `O5LOGON verifier loaded` info log. That specific key (and only that one) is the password your Oracle client must supply: the salt sent in the challenge is bound to it, so any other API key fails to decrypt. Multi-key support is not yet implemented (it would require all of a user's keys to share one salt, since the challenge can only carry one).
+The O5LOGON challenge can only carry **one** salt and **one** encrypted server
+session key, and both must be committed before the client reveals which API key
+it holds. Historically each key had its own random salts, so dbbat picked the
+user's first verifier-bearing key and only that key could log in.
+
+Since the per-user-salt scheme, the salts live on the **user**
+(`users.protocol_data.oracle.o5logon_user_salt_6949` / `_18453`, generated
+lazily at API key creation) and every new key derives its 6949 + 18453
+verifiers from them (`OracleAPIKeyData.user_salt = true`; the verifiers stay
+per-key, AES-GCM encrypted with AAD bound to the key prefix). The challenge is
+built from the most-recently-created user-salt key, and **all** user-salt keys
+remain candidates:
+
+- **Phase 2 with `AUTH_PASSWORD`** (go-ora, python-oracledb thin, sqlplus):
+  each candidate's view of the combined key is rebuilt by decrypting the
+  challenge ciphertext under that candidate's verifier (`CloneForCandidate`),
+  `AUTH_PASSWORD` is trial-decrypted, and only a plaintext that passes
+  `VerifyAPIKey` authenticates. Works for both 6949 and 18453/customHash.
+- **Phase 2 with empty `AUTH_PASSWORD`** (SQLcl / JDBC thin 23c+): the client
+  never sends the password text, so candidates cannot be disambiguated. dbbat
+  deterministically assumes the **most-recently-created** active user-salt key
+  (logged as `empty AUTH_PASSWORD — cannot disambiguate candidates`); proof of
+  knowledge stays implicit via the `AUTH_SVR_RESPONSE` marker check.
+- **Legacy keys** (created before the scheme, `user_salt` absent): unchanged
+  fallback — the first verifier-bearing key is the single candidate, no forced
+  rotation. Creating any new key upgrades the user to multi-key login.

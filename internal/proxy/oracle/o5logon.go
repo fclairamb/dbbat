@@ -282,6 +282,48 @@ func (s *O5LogonServer) DeriveCombinedKey(encClientSessKey string) error {
 	return nil
 }
 
+// CloneForCandidate returns an O5LogonServer configured like s (verifier type,
+// customHash mode, per-session PBKDF2 salt and iteration counts) but keyed with
+// ANOTHER candidate API key's verifier material. Its server session key is
+// recovered by decrypting the challenge ciphertext that was actually sent on
+// the wire (encrypted under the primary candidate's verifier) with the new
+// candidate's verifier — exactly what a client holding that candidate key
+// computed client-side. This makes multi-key Oracle login possible when all of
+// a user's keys share the user's salts: the challenge commits to one salt and
+// one ciphertext, and Phase 2 tries each candidate's view of it.
+func (s *O5LogonServer) CloneForCandidate(salt, verifierKey []byte, encChallengeHex string) (*O5LogonServer, error) {
+	challenge, err := hex.DecodeString(encChallengeHex)
+	if err != nil {
+		return nil, fmt.Errorf("decode challenge ciphertext: %w", err)
+	}
+
+	c := &O5LogonServer{
+		salt:            salt,
+		verifierKey:     verifierKey,
+		verifierType:    s.verifierType,
+		customHash:      s.customHash,
+		pbkdf2ChkSalt:   s.pbkdf2ChkSalt,
+		pbkdf2VgenCount: s.pbkdf2VgenCount,
+		pbkdf2SderCount: s.pbkdf2SderCount,
+	}
+
+	// Recover the candidate's view of the server session key. No padding strip:
+	// the session key is exactly the ciphertext-length plaintext (the challenge
+	// encryptors truncate the PKCS7 pad block), and a spurious unpad of what is
+	// effectively random data would corrupt the key length.
+	if c.verifierType == VerifierType18453 {
+		c.serverSessionKey, err = aesCBCDecryptZeroIV(c.verifierKey, challenge, false)
+	} else {
+		c.serverSessionKey, err = aes192CBCDecryptRaw(deriveAESKey(c.verifierKey), challenge)
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("decrypt challenge under candidate verifier: %w", err)
+	}
+
+	return c, nil
+}
+
 // combinedKeyCandidates returns the combined-key derivations to try, in order
 // of likelihood for the current mode.
 //
@@ -412,6 +454,28 @@ func aes192CBCEncryptTruncated(key, plaintext []byte) ([]byte, error) {
 	}
 
 	return ciphertext[:len(plaintext)], nil
+}
+
+// aes192CBCDecryptRaw decrypts AES-192-CBC (zero IV) WITHOUT the PKCS7 unpad
+// heuristic — the caller knows the plaintext occupies the full ciphertext
+// length (O5LOGON session keys, whose pad block is truncated at encryption).
+func aes192CBCDecryptRaw(key, ciphertext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create cipher: %w", err)
+	}
+
+	if len(ciphertext)%aes.BlockSize != 0 {
+		return nil, ErrCiphertextNotAligned
+	}
+
+	iv := make([]byte, aes.BlockSize)
+	mode := cipher.NewCBCDecrypter(block, iv)
+
+	plaintext := make([]byte, len(ciphertext))
+	mode.CryptBlocks(plaintext, ciphertext)
+
+	return plaintext, nil
 }
 
 // aes192CBCDecrypt decrypts data using AES-192-CBC with a zero IV.

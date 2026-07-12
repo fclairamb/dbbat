@@ -572,3 +572,123 @@ func TestAPIKeyIsValid(t *testing.T) {
 		}
 	})
 }
+
+// TestCreateAPIKey_UserSharedSalts verifies the per-user O5LOGON salt scheme:
+// every key created for a user derives its verifiers from the USER's shared
+// salts (generated lazily on the first key), is flagged user_salt, and the
+// verifier bytes equal a fresh derivation from plainKey + shared salt — so
+// the Oracle proxy can keep all of a user's keys as login candidates.
+func TestCreateAPIKey_UserSharedSalts(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, err := store.CreateUser(ctx, "usersaltuser", "hash", []string{RoleConnector})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	if user.OracleData() != nil {
+		t.Fatal("new user should have no Oracle protocol data yet")
+	}
+
+	encKey := bytes.Repeat([]byte{0x42}, 32)
+
+	keyA, plainA, err := store.CreateAPIKey(ctx, user.UID, "Key A", nil, encKey)
+	if err != nil {
+		t.Fatalf("CreateAPIKey(A) error = %v", err)
+	}
+
+	keyB, plainB, err := store.CreateAPIKey(ctx, user.UID, "Key B", nil, encKey)
+	if err != nil {
+		t.Fatalf("CreateAPIKey(B) error = %v", err)
+	}
+
+	// The user now has lazily generated shared salts.
+	refreshed, err := store.GetUserByUID(ctx, user.UID)
+	if err != nil {
+		t.Fatalf("GetUserByUID() error = %v", err)
+	}
+
+	userData := refreshed.OracleData()
+	if userData == nil {
+		t.Fatal("user OracleData() = nil after key creation, want lazily generated salts")
+	}
+	if len(userData.O5LogonUserSalt6949) != crypto.O5LogonSaltLength {
+		t.Errorf("user salt 6949 length = %d, want %d", len(userData.O5LogonUserSalt6949), crypto.O5LogonSaltLength)
+	}
+	if len(userData.O5LogonUserSalt18453) != crypto.O5LogonPbkdf2SaltLength {
+		t.Errorf("user salt 18453 length = %d, want %d", len(userData.O5LogonUserSalt18453), crypto.O5LogonPbkdf2SaltLength)
+	}
+
+	for name, k := range map[string]*APIKey{"A": keyA, "B": keyB} {
+		od := k.OracleData()
+		if od == nil {
+			t.Fatalf("key %s has no Oracle data", name)
+		}
+		if !od.UserSalt {
+			t.Errorf("key %s UserSalt = false, want true", name)
+		}
+		if !bytes.Equal(od.O5LogonSalt6949, userData.O5LogonUserSalt6949) {
+			t.Errorf("key %s salt 6949 differs from user salt", name)
+		}
+		if !bytes.Equal(od.O5LogonSalt18453, userData.O5LogonUserSalt18453) {
+			t.Errorf("key %s salt 18453 differs from user salt", name)
+		}
+	}
+
+	// The stored (encrypted) verifiers must equal a fresh derivation from the
+	// plaintext key + the shared user salt.
+	for name, kp := range map[string]struct {
+		key   *APIKey
+		plain string
+	}{"A": {keyA, plainA}, "B": {keyB, plainB}} {
+		aad := crypto.APIKeyAAD(kp.key.KeyPrefix)
+
+		dec6949, err := crypto.Decrypt(kp.key.OracleData().O5LogonVerifier6949, encKey, aad)
+		if err != nil {
+			t.Fatalf("Decrypt(verifier 6949 %s) error = %v", name, err)
+		}
+		if want := crypto.DeriveO5LogonVerifierKey(kp.plain, userData.O5LogonUserSalt6949); !bytes.Equal(dec6949, want) {
+			t.Errorf("key %s verifier 6949 not derived from user salt", name)
+		}
+
+		dec18453, err := crypto.Decrypt(kp.key.OracleData().O5LogonVerifier18453, encKey, aad)
+		if err != nil {
+			t.Fatalf("Decrypt(verifier 18453 %s) error = %v", name, err)
+		}
+		if want := crypto.DeriveO5LogonVerifier18453Key(kp.plain, userData.O5LogonUserSalt18453); !bytes.Equal(dec18453, want) {
+			t.Errorf("key %s verifier 18453 not derived from user salt", name)
+		}
+	}
+}
+
+// TestEnsureUserOracleSalts_Idempotent verifies lazy generation is stable:
+// repeated calls return the same salts, and salts survive a user re-read.
+func TestEnsureUserOracleSalts_Idempotent(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, err := store.CreateUser(ctx, "saltidem", "hash", []string{RoleConnector})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	first, err := store.EnsureUserOracleSalts(ctx, user.UID)
+	if err != nil {
+		t.Fatalf("EnsureUserOracleSalts() error = %v", err)
+	}
+
+	second, err := store.EnsureUserOracleSalts(ctx, user.UID)
+	if err != nil {
+		t.Fatalf("EnsureUserOracleSalts() second call error = %v", err)
+	}
+
+	if !bytes.Equal(first.O5LogonUserSalt6949, second.O5LogonUserSalt6949) ||
+		!bytes.Equal(first.O5LogonUserSalt18453, second.O5LogonUserSalt18453) {
+		t.Error("EnsureUserOracleSalts() not idempotent: salts changed between calls")
+	}
+
+	if _, err := store.EnsureUserOracleSalts(ctx, uuid.New()); !errors.Is(err, ErrUserNotFound) {
+		t.Errorf("EnsureUserOracleSalts(unknown user) error = %v, want ErrUserNotFound", err)
+	}
+}
