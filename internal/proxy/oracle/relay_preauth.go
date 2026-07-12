@@ -1,6 +1,9 @@
 package oracle
 
 import (
+	"bytes"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -45,17 +48,8 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 		return nil, nil, err
 	}
 
-	// Force clients onto the classic multi-round-trip login by clearing the
-	// FAST_AUTH capability in the Accept we relay. When the upstream advertises
-	// FAST_AUTH (Oracle 23ai), modern clients (python-oracledb thin, OCI thick /
-	// sqlplus) fold protocol + data-type negotiation and AUTH into a single
-	// pipelined message the pre-auth relay cannot split — so dbbat never sees an
-	// isolated AUTH Phase 1 to terminate, relays the client's auth (API key as
-	// password) straight to the real server, and the login fails. Stripping the
-	// bit is safe: the client's negotiation is with dbbat, and dbbat runs its own
-	// O5LOGON client against the upstream afterwards.
-	if stripUnsupportedAcceptFlags(acceptPkt.Raw) {
-		s.logger.DebugContext(s.ctx, "pre-auth relay: cleared FAST_AUTH / END_OF_RESPONSE in Accept")
+	if stripAcceptModernAuthFlags(acceptPkt.Raw) {
+		s.logger.DebugContext(s.ctx, "pre-auth relay: stripped FAST_AUTH/END_OF_RESPONSE from Accept")
 	}
 
 	s.logger.DebugContext(s.ctx, "pre-auth relay: forwarding Accept to client", slog.Int("len", len(acceptPkt.Raw)))
@@ -66,22 +60,42 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 		return nil, nil, fmt.Errorf("forward Accept to client: %w", err)
 	}
 
-	// Pump upstream→client concurrently rather than reading one upstream packet
-	// after each client packet. The pre-auth negotiation is NOT strictly
-	// lock-step: OCI thick clients (sqlplus) send Set Data Types and then their
-	// next message without waiting for a server reply, and the server may batch
-	// or defer responses. A single-read-per-write relay deadlocks — it blocks
-	// waiting for an upstream reply that only comes after the client's next
-	// packet, which the relay hasn't read yet (observed as a 5s upstream i/o
-	// timeout → ORA-03135 on sqlplus). A concurrent pump forwards each direction
-	// as bytes arrive. The client→upstream direction stays here so we can tap it
-	// for AUTH Phase 1 and stop before forwarding it.
-	pump := s.startUpstreamPump(upstream)
+	// Pre-auth negotiation (Set Protocol / Set Data Types / capability exchange)
+	// is NOT a strict 1:1 request/response: a single client packet can elicit
+	// several upstream packets, and modern servers (Oracle 23ai, and sqlplus's
+	// Native Services break/reset probe) send Control/Marker packets the client
+	// must see before it proceeds. A lockstep relay (one upstream read per client
+	// packet) deadlocks the moment the counts diverge — the proxy waits for the
+	// client while the client waits for an upstream packet still queued behind a
+	// marker. So we run a concurrent bidirectional pump: a goroutine forwards
+	// upstream→client continuously, while this goroutine forwards client→upstream
+	// until it sees AUTH Phase 1, which it returns (unforwarded) to the caller.
+	pumpDone := make(chan error, 1)
+
+	go s.pumpPreAuthUpstream(upstream, pumpDone)
+
+	// stopPump hands the upstream socket back to the caller for the O5LOGON
+	// handover. Clients pipeline the pre-auth sequence — they send AUTH Phase 1
+	// immediately after Set Protocol / Set Data Types, so the main loop can read
+	// AUTH Phase 1 before the pump has forwarded those replies. Forcing the
+	// deadline into the past here would drop the unforwarded replies and the
+	// client would block forever waiting for them. Instead set a short FUTURE
+	// deadline: the pump first drains any replies already on the socket (the
+	// upstream is quiescent once it has answered Set Data Types and is waiting
+	// for AUTH), then its next read times out cleanly between packets and it
+	// exits. The grace window is a one-time cost on the auth handover.
+	const pumpDrainGrace = 750 * time.Millisecond
+
+	stopPump := func() {
+		_ = upstream.SetReadDeadline(time.Now().Add(pumpDrainGrace))
+		<-pumpDone
+		_ = upstream.SetReadDeadline(time.Time{})
+	}
 
 	for {
 		clientPkt, err := readTNSPacket(s.clientConn)
 		if err != nil {
-			pump.stop()
+			stopPump()
 			_ = upstream.Close()
 
 			return nil, nil, fmt.Errorf("read client packet during pre-auth relay: %w", err)
@@ -90,23 +104,33 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 		if isAuthPhase1(clientPkt) {
 			s.logger.DebugContext(s.ctx, "pre-auth relay: detected AUTH Phase 1, ending relay",
 				slog.Int("len", len(clientPkt.Payload)))
-
-			// Stop the pump cleanly; the upstream socket stays open and idle
-			// (the server is waiting for AUTH) so dbbat can reuse it.
-			if err := pump.stop(); err != nil {
-				_ = upstream.Close()
-
-				return nil, nil, fmt.Errorf("upstream relay failed: %w", err)
-			}
+			stopPump()
 
 			return clientPkt, upstream, nil
 		}
 
-		if err := pump.err(); err != nil {
-			pump.stop()
-			_ = upstream.Close()
+		// Modern clients (python-oracledb thin, recent ODP/ojdbc) pipeline the
+		// login: Set Protocol + Set Data Types + AUTH Phase 1 are concatenated
+		// into a single TNS Data packet to save round trips. isAuthPhase1 only
+		// matches when AUTH Phase 1 is the FIRST op, so we'd otherwise forward
+		// the whole bundle — auth included — to the real Oracle, which rejects
+		// the dbb_ API key with ORA-01017. Detect the embedded AUTH Phase 1,
+		// forward only the Set Protocol / Set Data Types prefix to the upstream
+		// (so its TTC session reaches the post-Data-Types state O5LOGON expects),
+		// relay the upstream's responses back, then hand the carved-out AUTH
+		// Phase 1 to the caller for terminated O5LOGON.
+		if prefixMsgs, auth1Payload, ok := splitBundledAuthPhase1(clientPkt.Payload); ok {
+			s.logger.DebugContext(s.ctx, "pre-auth relay: de-pipelining fast-auth login",
+				slog.Int("prefix_msgs", len(prefixMsgs)),
+				slog.Int("auth1_len", len(auth1Payload)))
+			stopPump()
 
-			return nil, nil, fmt.Errorf("upstream relay failed: %w", err)
+			authPkt, err := s.replayDepipelinedPrefix(upstream, prefixMsgs, auth1Payload)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			return authPkt, upstream, nil
 		}
 
 		s.logger.DebugContext(s.ctx, "pre-auth relay: client→upstream",
@@ -114,7 +138,7 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 			slog.Int("len", len(clientPkt.Raw)))
 
 		if _, err := upstream.Write(clientPkt.Raw); err != nil {
-			pump.stop()
+			stopPump()
 			_ = upstream.Close()
 
 			return nil, nil, fmt.Errorf("forward client packet to upstream: %w", err)
@@ -122,60 +146,28 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 	}
 }
 
-// upstreamPump forwards upstream→client packets in a background goroutine during
-// the pre-auth relay, observing the customHash capability as the Set Protocol
-// response flows past. It exists so the relay is not lock-step (see
-// relayPreAuthNegotiation for why that matters).
-type upstreamPump struct {
-	upstream net.Conn
-	done     chan error
-	stopCh   chan struct{}
-	fatal    chan error // buffered snapshot of an unexpected upstream error
-}
-
-// startUpstreamPump launches the upstream→client forwarding goroutine.
-func (s *session) startUpstreamPump(upstream net.Conn) *upstreamPump {
-	p := &upstreamPump{
-		upstream: upstream,
-		done:     make(chan error, 1),
-		stopCh:   make(chan struct{}),
-		fatal:    make(chan error, 1),
-	}
-
-	go p.run(s)
-
-	return p
-}
-
-func (p *upstreamPump) run(s *session) {
+// pumpPreAuthUpstream continuously forwards upstream→client TNS packets during
+// the pre-auth relay, reporting the first read/write error (including the
+// drain-grace deadline that stopPump arms) on pumpDone. See
+// relayPreAuthNegotiation for why the relay is a concurrent pump, not lockstep.
+func (s *session) pumpPreAuthUpstream(upstream net.Conn, pumpDone chan<- error) {
 	for {
-		pkt, err := readTNSPacket(p.upstream)
+		pkt, err := readTNSPacket(upstream)
 		if err != nil {
-			// Distinguish a deliberate stop (we set a past read deadline to
-			// unblock this read) from a real upstream failure.
-			select {
-			case <-p.stopCh:
-				p.done <- nil
-			default:
-				p.fatal <- err
-				p.done <- err
-			}
+			pumpDone <- err
 
 			return
 		}
 
-		if caps, ok := serverCompileTimeCaps(pkt.Payload); ok {
-			if len(caps) > logonCompatibilityCapIndex && caps[logonCompatibilityCapIndex]&capCustomHash != 0 {
-				s.upstreamCustomHash = true
-
-				s.logger.DebugContext(s.ctx, "pre-auth relay: observed upstream customHash",
-					slog.Int("caps_len", len(caps)),
-					slog.String("caps4", fmt.Sprintf("0x%02x", caps[logonCompatibilityCapIndex])))
-			}
-
-			if len(caps) > bigClrChunksCapIndex && caps[bigClrChunksCapIndex]&capBigClrChunks != 0 {
-				s.clientBigClrChunks = true
-			}
+		// Set Protocol responses carry ServerCompileTimeCaps; caps[4]&0x20
+		// enables the customHash (PBKDF2) combined-key derivation. Record the
+		// upstream's customHash capability and forward it to the client
+		// unchanged, so a modern client negotiates customHash and dbbat answers
+		// with a verifier-18453 challenge (built from the API key's stored 18453
+		// verifier). Legacy clients (go-ora) read the verifier type from the
+		// challenge's AUTH_VFR_DATA flag and adapt.
+		if observeCustomHashFlag(pkt.Raw) {
+			s.upstreamCustomHash = true
 		}
 
 		s.logger.DebugContext(s.ctx, "pre-auth relay: upstream→client",
@@ -183,174 +175,273 @@ func (p *upstreamPump) run(s *session) {
 			slog.Int("len", len(pkt.Raw)))
 
 		if _, err := s.clientConn.Write(pkt.Raw); err != nil {
-			p.fatal <- err
-			p.done <- err
+			pumpDone <- err
 
 			return
 		}
 	}
 }
 
-// err returns a non-nil error if the pump has already failed with an unexpected
-// upstream/client error (non-blocking).
-func (p *upstreamPump) err() error {
-	select {
-	case err := <-p.fatal:
-		return err
-	default:
-		return nil
-	}
-}
+// replayDepipelinedPrefix replays a fast-auth packet's wrapped Set Protocol /
+// Set Data Types messages to the upstream as classic standalone messages (so its
+// TTC session advances to the post-Data-Types state O5LOGON expects), draining
+// each reply back to the client, then frames the carved-out AUTH Phase 1 for the
+// caller. On any write/drain failure it closes the upstream and returns the error.
+func (s *session) replayDepipelinedPrefix(upstream net.Conn, prefixMsgs [][]byte, auth1Payload []byte) (*TNSPacket, error) {
+	for _, msg := range prefixMsgs {
+		if _, err := upstream.Write(encodeTNSDataV315(msg)); err != nil {
+			_ = upstream.Close()
 
-// stop signals the pump to exit and waits for it. The upstream socket is left
-// open (deadline cleared) for reuse by the upstream O5LOGON client. Returns the
-// pump's terminal error, or nil if it stopped on request.
-func (p *upstreamPump) stop() error {
-	select {
-	case <-p.stopCh:
-		// already stopping/stopped
-	default:
-		close(p.stopCh)
+			return nil, fmt.Errorf("forward de-pipelined prefix to upstream: %w", err)
+		}
+
+		if err := drainUpstreamToClient(s, upstream); err != nil {
+			_ = upstream.Close()
+
+			return nil, err
+		}
 	}
 
-	// Unblock a pump goroutine parked in readTNSPacket.
-	_ = p.upstream.SetReadDeadline(time.Now())
+	raw := encodeTNSDataV315(auth1Payload)
 
-	err := <-p.done
-
-	// Restore the socket to a usable state for the upstream auth exchange.
-	_ = p.upstream.SetReadDeadline(time.Time{})
-
-	return err
+	return &TNSPacket{Type: TNSPacketTypeData, Payload: auth1Payload, Raw: raw}, nil
 }
 
-const (
-	// logonCompatibilityCapIndex is the index into ServerCompileTimeCaps that
-	// carries the logon-compatibility flags (go-ora's ServerCompileTimeCaps[4]).
-	logonCompatibilityCapIndex = 4
-	// capCustomHash (caps[4]&0x20) enables the PBKDF2 customHash combined-key
-	// derivation in modern Oracle clients.
-	capCustomHash = 0x20
-
-	// bigClrChunksCapIndex / capBigClrChunks: ServerCompileTimeCaps[37]&0x20
-	// makes clients use 4-byte compressed chunk lengths for long CLR values
-	// (go-ora's UseBigClrChunks).
-	bigClrChunksCapIndex = 37
-	capBigClrChunks      = 0x20
-
-	// acceptFlags2FastAuth is the FAST_AUTH bit in the Accept packet's flags2
-	// field (python-oracledb TNS_ACCEPT_FLAG_FAST_AUTH). When set, modern clients
-	// fold negotiation + AUTH into a single pipelined message.
-	acceptFlags2FastAuth = 0x10000000
-	// acceptFlags2EndOfResponse is the HAS_END_OF_RESPONSE bit
-	// (python-oracledb TNS_ACCEPT_FLAG_HAS_END_OF_RESPONSE). When set (protocol
-	// version >= 319), clients enable end-of-response markers on every server
-	// response and advertise the matching TTC cap upstream. dbbat's terminated
-	// O5LOGON path emits no such markers, so the client blocks waiting for one
-	// after the AUTH challenge. Clearing the bit keeps end-of-response disabled
-	// consistently across client, dbbat, and upstream.
-	acceptFlags2EndOfResponse = 0x02000000
-	// acceptFlags2ProxyUnsupported bundles the Accept capabilities dbbat's
-	// terminated-auth relay cannot honor and therefore clears before forwarding.
-	acceptFlags2ProxyUnsupported = acceptFlags2FastAuth | acceptFlags2EndOfResponse
-	// tnsVersionMinOOBCheck is the protocol version at/above which the Accept
-	// packet carries the 4-byte flags2 word (python-oracledb TNS_VERSION_MIN_OOB_CHECK).
-	tnsVersionMinOOBCheck = 318
-	// acceptFlags2BodyOffset is the offset of the 4-byte flags2 word within the
-	// Accept packet body (after the 8-byte TNS header). Layout mirrors
-	// python-oracledb's Accept parse: version(2) options(2) skip(10) flags1(1)
-	// skip(9) sdu(4) skip(5) flags2(4) = 33.
-	acceptFlags2BodyOffset = 33
+// TTC op signatures (func, sub) for the messages a fast-auth packet bundles.
+var (
+	opSetProtocol = [2]byte{0x01, 0x06} // Set Protocol  (TNS_MSG_TYPE_PROTOCOL)
+	opDataTypes   = [2]byte{0x02, 0x69} // Set Data Types (TNS_MSG_TYPE_DATA_TYPES)
 )
 
-// serverCompileTimeCaps extracts the ServerCompileTimeCaps byte array from a
-// Set Protocol (protocol negotiation) response payload. The payload is the TNS
-// packet body (data-flags prefix included). Returns ok=false for any packet
-// that is not an Accept-protocol response (message code 1) or that is
-// truncated. The field walk mirrors go-ora's newTCPNego / python-oracledb's
-// protocol parse so dbbat reads the exact caps[4] its client will.
-func serverCompileTimeCaps(payload []byte) ([]byte, bool) {
-	p := ttcDataFlagsSize
-	if p >= len(payload) || payload[p] != 0x01 { // message code 1 = Accept protocol
-		return nil, false
+const (
+	// tnsMsgTypeFastAuth is python-oracledb thin's FAST_AUTH message type, the
+	// first byte after the 2-byte data flags of a pipelined login packet.
+	tnsMsgTypeFastAuth = 0x22
+
+	// fastAuthHeaderLen is the FAST_AUTH preamble written before the wrapped
+	// Set Protocol message: msg type (0x22), version, server-converts-chars
+	// flag, and a reserved zero byte.
+	fastAuthHeaderLen = 4
+
+	// fastAuthProtoToDataTypesGap is the fixed block FAST_AUTH writes between the
+	// Set Protocol and Set Data Types messages: server charset (uint16be),
+	// server charset flag (uint8), server ncharset (uint16be) and the TTC field
+	// version (uint8) — six bytes that are NOT part of either wrapped message and
+	// must be dropped when replaying them as classic standalone messages.
+	fastAuthProtoToDataTypesGap = 6
+)
+
+// splitBundledAuthPhase1 detects python-oracledb thin's FAST_AUTH login (TNS
+// message type 0x22) — a packet that pipelines Set Protocol + Set Data Types +
+// AUTH Phase 1 to save round trips. Its first TTC op is NOT AUTH Phase 1, so
+// isAuthPhase1 misses it; forwarding it whole would feed the dbb_ API key to the
+// real Oracle (→ ORA-01017). On a match it returns the wrapped Set Protocol and
+// Set Data Types messages as classic standalone payloads (2-byte data flags +
+// message, FAST_AUTH framing stripped) for the caller to replay to the upstream,
+// plus a freshly framed AUTH Phase 1 payload for terminated O5LOGON. The carved
+// AUTH message is validated by parseAuthPhase1 so a stray 0x03 0x76 inside the
+// Set-Data-Types blob can't trigger a false split.
+//
+// FAST_AUTH wire layout (after the 2-byte data flags):
+//
+//	[0x22][ver][convChars][0]  [ProtocolMessage]  [charset:2][csFlag:1][ncharset:2][ttcVer:1]  [DataTypesMessage]  [AuthMessage]
+func splitBundledAuthPhase1(payload []byte) ([][]byte, []byte, bool) {
+	protoStart := ttcDataFlagsSize + fastAuthHeaderLen
+	if len(payload) < protoStart+2 {
+		return nil, nil, false
 	}
 
-	p++    // message code
-	p++    // protocol server version
-	p++    // reserved byte
-	// protocol server string (null-terminated)
-	for p < len(payload) && payload[p] != 0x00 {
-		p++
-	}
-	p++ // null terminator
-
-	p += 2 // server charset (uint16)
-	p++    // server flags (uint8)
-	if p+2 > len(payload) {
-		return nil, false
+	if payload[ttcDataFlagsSize] != tnsMsgTypeFastAuth {
+		return nil, nil, false
 	}
 
-	charsetElem := int(payload[p]) | int(payload[p+1])<<8 // little-endian
-	p += 2
-	p += charsetElem * 5 // charset table
+	auth1Off := indexOfOp(payload, protoStart, len(payload), [2]byte{byte(TTCFuncPiggyback), PiggybackSubAuth1})
+	dataTypesOff := indexOfOp(payload, protoStart, len(payload), opDataTypes)
 
-	if p+2 > len(payload) {
-		return nil, false
+	if auth1Off < 0 || dataTypesOff < 0 || dataTypesOff >= auth1Off {
+		return nil, nil, false
 	}
 
-	len1 := int(payload[p])<<8 | int(payload[p+1]) // big-endian
-	p += 2
-	p += len1 // reserved array
-
-	if p >= len(payload) {
-		return nil, false
+	if payload[protoStart] != opSetProtocol[0] || payload[protoStart+1] != opSetProtocol[1] {
+		return nil, nil, false
 	}
 
-	capsLen := int(payload[p])
-	p++
-
-	if p+capsLen > len(payload) {
-		return nil, false
+	protoEnd := dataTypesOff - fastAuthProtoToDataTypesGap
+	if protoEnd <= protoStart {
+		return nil, nil, false
 	}
 
-	return payload[p : p+capsLen], true
+	auth1 := make([]byte, 0, ttcDataFlagsSize+len(payload)-auth1Off)
+	auth1 = append(auth1, 0x00, 0x00)
+	auth1 = append(auth1, payload[auth1Off:]...)
+
+	if username, err := parseAuthPhase1(auth1); err != nil || username == "" {
+		return nil, nil, false
+	}
+
+	prefixMsgs := [][]byte{
+		framePreAuthMsg(payload[protoStart:protoEnd]),   // Set Protocol
+		framePreAuthMsg(payload[dataTypesOff:auth1Off]), // Set Data Types
+	}
+
+	return prefixMsgs, auth1, true
 }
 
-// stripUnsupportedAcceptFlags clears the Accept flags2 capabilities dbbat's
-// terminated-auth relay cannot honor (FAST_AUTH and HAS_END_OF_RESPONSE) in
-// place, returning true if any were present and cleared. Only Accept packets
-// from protocol version >= 318 carry flags2; older or shorter packets are left
-// untouched. See acceptFlags2ProxyUnsupported for why.
-func stripUnsupportedAcceptFlags(raw []byte) bool {
-	const tnsHdr = 8
+// framePreAuthMsg prepends the 2-byte TNS data flags to a bare TTC message so it
+// can be sent to the upstream as a classic standalone Data payload.
+func framePreAuthMsg(msg []byte) []byte {
+	out := make([]byte, 0, ttcDataFlagsSize+len(msg))
+	out = append(out, 0x00, 0x00)
+	out = append(out, msg...)
 
-	if len(raw) < tnsHdr+2 {
+	return out
+}
+
+// indexOfOp returns the offset in payload[start:end) where the 2-byte TTC op
+// signature first appears, or -1.
+func indexOfOp(payload []byte, start, end int, op [2]byte) int {
+	for i := start; i+1 < end; i++ {
+		if payload[i] == op[0] && payload[i+1] == op[1] {
+			return i
+		}
+	}
+
+	return -1
+}
+
+// drainUpstreamToClient forwards the upstream's responses to the pipelined
+// prefix (Set Protocol / Set Data Types replies) to the client, until the
+// upstream falls silent — at which point it is waiting for AUTH, which dbbat
+// now drives via terminated O5LOGON. A generous first deadline tolerates
+// upstream latency; the shorter follow-up deadline detects end-of-burst between
+// whole packets (the upstream is quiescent here, so the timeout never truncates
+// a packet mid-read).
+func drainUpstreamToClient(s *session, upstream net.Conn) error {
+	first := true
+
+	for {
+		deadline := 800 * time.Millisecond
+		if first {
+			deadline = 8 * time.Second
+		}
+
+		if err := upstream.SetReadDeadline(time.Now().Add(deadline)); err != nil {
+			return fmt.Errorf("set upstream drain deadline: %w", err)
+		}
+
+		pkt, err := readTNSPacket(upstream)
+		if err != nil {
+			var netErr net.Error
+			if errors.As(err, &netErr) && netErr.Timeout() {
+				_ = upstream.SetReadDeadline(time.Time{})
+
+				return nil
+			}
+
+			return fmt.Errorf("drain upstream response: %w", err)
+		}
+
+		first = false
+
+		if observeCustomHashFlag(pkt.Raw) {
+			s.upstreamCustomHash = true
+		}
+
+		s.logger.DebugContext(s.ctx, "pre-auth relay: upstream→client (pipelined prefix reply)",
+			slog.String("type", pkt.Type.String()),
+			slog.Int("len", len(pkt.Raw)))
+
+		if _, err := s.clientConn.Write(pkt.Raw); err != nil {
+			return fmt.Errorf("forward upstream prefix reply to client: %w", err)
+		}
+	}
+}
+
+// Accept-packet "connect flags" (a big-endian uint32) and the flags dbbat
+// clears so every client uses the classic, terminated-O5LOGON flow dbbat fully
+// implements instead of 23ai fast paths it would otherwise have to synthesize.
+const (
+	// acceptFlagsOffset is the byte offset of the 4-byte connect-flags field in a
+	// v315+ TNS Accept packet (after the 8-byte header, version, options, SDU/TDU,
+	// data length/offset, the legacy connect-flag bytes and the v315 SDU/TDU).
+	acceptFlagsOffset = 41
+
+	tnsAcceptFlagFastAuth         = 0x10000000 // client pipelines Set Protocol+Data Types+AUTH (python-oracledb thin, etc.)
+	tnsAcceptFlagHasEndOfResponse = 0x02000000 // server appends an end-of-response marker to every reply (23ai)
+)
+
+// stripAcceptModernAuthFlags clears FAST_AUTH and HAS_END_OF_RESPONSE from a
+// v315+ Accept packet (mutating raw in place) so the client negotiates the
+// classic two-phase O5LOGON with no per-message end-of-response markers — the
+// exact shape dbbat terminates. Without this, modern clients (python-oracledb
+// thin against Oracle 23ai) bundle the login and expect end-of-response markers
+// on dbbat's synthesized challenge, which dbbat does not emit, so AUTH stalls.
+// Returns whether any bit was cleared.
+func stripAcceptModernAuthFlags(raw []byte) bool {
+	if len(raw) < acceptFlagsOffset+4 {
 		return false
 	}
 
-	body := raw[tnsHdr:]
-	version := int(body[0])<<8 | int(body[1])
-	if version < tnsVersionMinOOBCheck {
+	if TNSPacketType(raw[4]) != TNSPacketTypeAccept {
 		return false
 	}
 
-	if len(body) < acceptFlags2BodyOffset+4 {
+	if binary.BigEndian.Uint16(raw[8:10]) < 315 {
 		return false
 	}
 
-	off := acceptFlags2BodyOffset
-	flags2 := uint32(body[off])<<24 | uint32(body[off+1])<<16 | uint32(body[off+2])<<8 | uint32(body[off+3])
-	if flags2&acceptFlags2ProxyUnsupported == 0 {
+	flags := binary.BigEndian.Uint32(raw[acceptFlagsOffset : acceptFlagsOffset+4])
+
+	const mask = tnsAcceptFlagFastAuth | tnsAcceptFlagHasEndOfResponse
+	if flags&mask == 0 {
 		return false
 	}
 
-	flags2 &^= acceptFlags2ProxyUnsupported
-	body[off] = byte(flags2 >> 24)
-	body[off+1] = byte(flags2 >> 16)
-	body[off+2] = byte(flags2 >> 8)
-	body[off+3] = byte(flags2)
+	binary.BigEndian.PutUint32(raw[acceptFlagsOffset:acceptFlagsOffset+4], flags&^uint32(mask))
 
 	return true
+}
+
+// encodeTNSDataV315 frames a TNS Data payload using the v315+ 4-byte length
+// header (the 2-byte legacy length reads as 0x0000) so reconstructed packets
+// match the wire format modern clients and servers negotiate.
+func encodeTNSDataV315(payload []byte) []byte {
+	total := tnsHeaderSize + len(payload)
+	buf := make([]byte, total)
+	binary.BigEndian.PutUint32(buf[0:4], uint32(total))
+	buf[4] = byte(TNSPacketTypeData)
+	copy(buf[tnsHeaderSize:], payload)
+
+	return buf
+}
+
+// observeCustomHashFlag reports whether the Set Protocol response advertises
+// customHash (PBKDF2 combined-key derivation) — the first server-capability
+// byte's 0x20 bit. The capability array is framed as
+// [numCaps][06 01 01 01][caps...], where numCaps is the count of capability
+// bytes and varies by server version (0x2a on 19c, 0x36 on Oracle 23ai). We
+// anchor on the stable 06 01 01 01 prefix (validating the preceding count byte)
+// rather than a version-specific literal, then read the first capability byte.
+func observeCustomHashFlag(raw []byte) bool {
+	prefix := []byte{0x06, 0x01, 0x01, 0x01}
+
+	idx := bytes.Index(raw, prefix)
+	if idx < 1 {
+		return false
+	}
+
+	// The byte before the prefix is the capability count; sanity-check it so a
+	// stray 06 01 01 01 elsewhere in the response can't false-match.
+	if numCaps := raw[idx-1]; numCaps < 0x20 || numCaps > 0x60 {
+		return false
+	}
+
+	capsOff := idx + len(prefix)
+	if capsOff >= len(raw) {
+		return false
+	}
+
+	return raw[capsOff]&0x20 != 0
 }
 
 // dialUpstreamWithRedirect opens a TCP connection to the upstream Oracle, sends the

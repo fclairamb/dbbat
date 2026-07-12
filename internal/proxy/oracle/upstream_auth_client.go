@@ -55,23 +55,27 @@ func defaultDriverIdentity() driverIdentity {
 // runUpstreamClientAuth drives Oracle AUTH on the relay-phase upstream socket
 // using stored database credentials. The caller must already have a
 // post-Set-Data-Types socket open on s.upstreamConn.
-// upstreamAuthPhaseState carries the identity and derived secrets from the
-// upstream AUTH Phase 1 exchange to Phase 2. dbbat runs Phase 1 before the
-// client O5LOGON challenge so it can capture the upstream's real end-of-call
-// marker (see session.upstreamEndMarker), then Phase 2 after the client has
-// authenticated.
-type upstreamAuthPhaseState struct {
-	identity driverIdentity
-	username string
-	mode     uint32
-	sec      *upstreamAuthSecrets
+//
+// The exchange is split in two stages so the session can interleave them with
+// client-side O5LOGON: beginUpstreamAuth (Phase 1 → upstream challenge) may run
+// BEFORE dbbat challenges the client, so the client challenge can borrow the
+// upstream's caps-correct end-of-call summary (see clientChallengeTrailer);
+// finishUpstreamAuth (Phase 2 → AUTH OK) runs after.
+func (s *session) runUpstreamClientAuth() error {
+	if s.upstreamAuthResp == nil {
+		if err := s.beginUpstreamAuth(); err != nil {
+			return err
+		}
+	}
+
+	return s.finishUpstreamAuth()
 }
 
-// runUpstreamAuthPhase1 drives the upstream AUTH Phase 1 exchange on the
-// relay-phase socket: it sends the (rewritten) client Phase 1, reads the
-// challenge, derives the upstream auth secrets, and captures the challenge's
-// end-of-call marker into s.upstreamEndMarker for the client-facing challenge.
-func (s *session) runUpstreamAuthPhase1() error {
+// beginUpstreamAuth sends AUTH Phase 1 upstream (reusing the client's Phase 1
+// wire-shape with the username swapped) and reads the upstream's challenge,
+// which it stores on the session for finishUpstreamAuth — and for the client
+// challenge builder, which reuses the challenge's trailing end-of-call summary.
+func (s *session) beginUpstreamAuth() error {
 	if s.upstreamConn == nil {
 		return ErrUpstreamConnNotSet
 	}
@@ -82,14 +86,13 @@ func (s *session) runUpstreamAuthPhase1() error {
 
 	identity := defaultDriverIdentity()
 	username := strings.ToUpper(s.database.Username)
-	password := s.database.Password
 	mode := uint32(logonModeNoNewPass)
 
 	if err := s.sendUpstreamAuthPhase1(username, identity, mode); err != nil {
 		return fmt.Errorf("write upstream AUTH Phase 1: %w", err)
 	}
 
-	authResp, phase1Raw, _, err := s.readUpstreamAuthMessages()
+	authResp, _, err := s.readUpstreamAuthMessages()
 	if err != nil {
 		return fmt.Errorf("read upstream AUTH Phase 1 response: %w", err)
 	}
@@ -98,11 +101,23 @@ func (s *session) runUpstreamAuthPhase1() error {
 		return fmt.Errorf("%w: ORA-%05d %s", ErrUpstreamAuthPhase1Rejected, authResp.OracleErr, authResp.OracleErrText)
 	}
 
-	if marker := extractEndOfCallMarker(phase1Raw, s.clientWideFormat, s.clientBigClrChunks); marker != nil {
-		s.upstreamEndMarker = marker
-		s.logger.DebugContext(s.ctx, "captured upstream end-of-call marker",
-			slog.Int("len", len(marker)))
+	s.upstreamAuthResp = authResp
+
+	return nil
+}
+
+// finishUpstreamAuth derives the auth secrets from the challenge captured by
+// beginUpstreamAuth, sends AUTH Phase 2 upstream, and reads the AUTH OK.
+func (s *session) finishUpstreamAuth() error {
+	authResp := s.upstreamAuthResp
+	if authResp == nil {
+		return ErrUpstreamAuthNotBegun
 	}
+
+	identity := defaultDriverIdentity()
+	username := strings.ToUpper(s.database.Username)
+	password := s.database.Password // decrypted in beginUpstreamAuth
+	mode := uint32(logonModeNoNewPass)
 
 	sec, err := buildSecretsFromPhase1Response(authResp, s.upstreamCustomHash)
 	if err != nil {
@@ -113,29 +128,11 @@ func (s *session) runUpstreamAuthPhase1() error {
 		return fmt.Errorf("derive upstream auth secrets: %w", err)
 	}
 
-	s.upstreamAuthState = &upstreamAuthPhaseState{
-		identity: identity,
-		username: username,
-		mode:     mode,
-		sec:      sec,
-	}
-
-	return nil
-}
-
-// runUpstreamAuthPhase2 completes the upstream AUTH exchange using the state
-// captured by runUpstreamAuthPhase1. It must be called after that.
-func (s *session) runUpstreamAuthPhase2() error {
-	st := s.upstreamAuthState
-	if st == nil {
-		return ErrUpstreamConnNotSet
-	}
-
-	if err := s.sendUpstreamAuthPhase2(st.username, st.identity, st.sec, st.mode|logonModeUserAndPass); err != nil {
+	if err := s.sendUpstreamAuthPhase2(username, identity, sec, mode|logonModeUserAndPass); err != nil {
 		return fmt.Errorf("write upstream AUTH Phase 2: %w", err)
 	}
 
-	finalResp, finalRaw, finalTTC, err := s.readUpstreamAuthMessages()
+	finalResp, finalRaw, err := s.readUpstreamAuthMessages()
 	if err != nil {
 		return fmt.Errorf("read upstream AUTH Phase 2 response: %w", err)
 	}
@@ -145,42 +142,15 @@ func (s *session) runUpstreamAuthPhase2() error {
 	}
 
 	s.upstreamAuthOKResponse = finalRaw
-	s.upstreamAuthOKTTC = finalTTC
+	s.upstreamAuthOKFlags = finalResp.dataFlags
+	s.upstreamAuthOKFragLens = finalResp.fragTTCLens
 
 	s.logger.InfoContext(s.ctx, "upstream Oracle AUTH complete on relay-phase socket",
 		slog.String("user", s.database.Username),
-		slog.Int("verifier_type", st.sec.verifierType),
-		slog.Bool("custom_hash", st.sec.customHash))
+		slog.Int("verifier_type", sec.verifierType),
+		slog.Bool("custom_hash", sec.customHash))
 
 	return nil
-}
-
-// extractEndOfCallMarker pulls the trailing end-of-call (0x04) Summary out of a
-// raw upstream AUTH Phase 1 challenge packet. Layout: TNS header (8) + data
-// flags (2) + [0x08 KV dictionary][0x04 Summary...]. Returns nil if the packet
-// does not match (caller falls back to the built-in marker).
-func extractEndOfCallMarker(raw []byte, wide, bigChunks bool) []byte {
-	const tnsHdr = 8
-
-	off := tnsHdr + ttcDataFlagsSize
-	if off >= len(raw) || raw[off] != 0x08 {
-		return nil
-	}
-
-	consumed, ok := parseAuthKVDictionary(raw[off+1:], &upstreamAuthResponse{properties: make(map[string]string)}, wide, bigChunks)
-	if !ok {
-		return nil
-	}
-
-	markerStart := off + 1 + consumed
-	if markerStart >= len(raw) || raw[markerStart] != 0x04 {
-		return nil
-	}
-
-	marker := make([]byte, len(raw)-markerStart)
-	copy(marker, raw[markerStart:])
-
-	return marker
 }
 
 // sendUpstreamAuthPhase1 writes the upstream-facing AUTH Phase 1 packet.
@@ -252,17 +222,7 @@ func (s *session) sendUpstreamAuthPhase2(username string, identity driverIdentit
 	dataFlags := clientPayload[:ttcDataFlagsSize]
 	clientBody := clientPayload[ttcDataFlagsSize:]
 
-	var (
-		rewritten []byte
-		err       error
-	)
-
-	if s.clientWideFormat {
-		rewritten, err = rewriteAuthPhase2Wide(clientBody, username, sec)
-	} else {
-		rewritten, err = rewriteAuthPhase2(clientBody, username, sec, s.clientBigClrChunks)
-	}
-
+	rewritten, err := rewriteAuthPhase2(clientBody, username, sec)
 	if err != nil {
 		s.logger.WarnContext(s.ctx, "Phase 2 rewrite failed; falling back to synthetic Phase 2",
 			slog.Any("error", err))
@@ -331,27 +291,56 @@ type upstreamAuthResponse struct {
 	OracleErr        int
 	OracleErrText    string
 	properties       map[string]string
+
+	// challengeTrailer is everything that followed the Phase 1 challenge's KV
+	// dictionary — the end-of-call summary (message code 0x04 + Summary bytes).
+	// Its width depends on the TTC compile-time caps the client negotiated
+	// (e.g. 80 bytes for instantclient 23.3, 153 for the 23.26 DB-bundled OCI
+	// client), so the client challenge dbbat builds reuses these live bytes
+	// instead of a hard-coded capture — a wrong-width summary leaves unread
+	// bytes in the client's TTC buffer and OCI aborts the AUTH call with a
+	// break/reset marker exchange. See clientChallengeTrailer.
+	challengeTrailer []byte
+
+	// dataFlags is the 2-byte TTC data-flags prefix of the first Data packet in
+	// the response. fragTTCLens is the TTC byte length (payload minus data
+	// flags) of each Data packet the upstream sent. Together they let the AUTH
+	// OK be re-fragmented at the upstream's original packet boundaries after the
+	// AUTH_SVR_RESPONSE patch — a single merged packet can exceed the client's
+	// negotiated SDU and be rejected with ORA-12592. See reframeAuthOK.
+	dataFlags   []byte
+	fragTTCLens []int
 }
 
 // readUpstreamAuthMessages reads TNS Data packets from upstream until an
 // end-of-call message code (4 or 9) appears. Multiple Data packets may
 // carry pieces of the same TTC stream.
 //
-// The last raw Data packet read is returned alongside the parsed response.
-// Callers (notably runUpstreamClientAuth's Phase 2 read) reuse it as the
-// AUTH OK packet forwarded to the client after AUTH_SVR_RESPONSE patching.
-func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, []byte, error) {
+// It returns a single reassembled TNS Data packet — the first packet's data
+// flags followed by every fragment's TTC bytes — alongside the parsed response.
+// finishUpstreamAuth reuses it as the AUTH OK forwarded to the client after
+// AUTH_SVR_RESPONSE patching. Reassembling into one packet (rather than
+// concatenating the raw framed packets) matters for OCI: the AUTH OK exceeds the
+// upstream leg's SDU and arrives as two Data packets (observed 1967+557 bytes
+// from Oracle 23ai), with the AUTH_SVR_RESPONSE hex value straddling the
+// boundary. Concatenating raw packets injects an inner 8-byte TNS header mid-
+// value, so the AUTH_SVR_RESPONSE patcher can't find the contiguous 96-char hex
+// run (and a truncated single packet draws ORA-03106 on the client). The merged
+// packet is what a direct client reassembles anyway.
+func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, error) {
 	resp := &upstreamAuthResponse{properties: make(map[string]string)}
 
 	var (
-		buf    []byte
-		allRaw []byte
+		buf       []byte
+		dataFlags []byte
+		sawBreak  bool
+		haveFlags bool
 	)
 
 	for {
 		pkt, err := readTNSPacket(s.upstreamConn)
 		if err != nil {
-			return nil, nil, nil, fmt.Errorf("read upstream packet: %w", err)
+			return nil, nil, fmt.Errorf("read upstream packet: %w", err)
 		}
 
 		s.logger.DebugContext(s.ctx, "upstream AUTH: received packet",
@@ -360,9 +349,26 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, []b
 			slog.Int("payload_len", len(pkt.Payload)))
 
 		if pkt.Type != TNSPacketTypeData {
-			s.logger.DebugContext(s.ctx, "upstream AUTH: skipping non-Data packet",
-				slog.String("type", pkt.Type.String()),
-				slog.Int("len", len(pkt.Raw)))
+			// Oracle 12c+/23ai runs an OOB break/reset probe during AUTH when the
+			// session negotiated it (modern thin clients enable it, and dbbat
+			// relayed their Set Data Types to the upstream). As the upstream's
+			// O5LOGON *client*, dbbat must answer the break with a reset marker or
+			// the upstream stalls waiting for it — mirroring readPhase2Packet on
+			// the client-facing side. Without this, go-ora connections (which
+			// don't enable the probe) work but python-oracledb thin / SQLcl hang.
+			if isBreakMarker(pkt) {
+				sawBreak = true
+			}
+
+			if isResetMarker(pkt) && sawBreak {
+				if _, err := s.upstreamConn.Write(buildResetMarker()); err != nil {
+					return nil, nil, fmt.Errorf("send upstream reset marker: %w", err)
+				}
+
+				s.logger.DebugContext(s.ctx, "upstream AUTH: answered break with reset marker")
+
+				sawBreak = false
+			}
 
 			continue
 		}
@@ -371,17 +377,69 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, []b
 			continue
 		}
 
-		// Accumulate every raw response packet: the AUTH OK (and, on richer
-		// clients like sqlplus/OCI, the Phase 1 challenge) can span multiple
-		// TNS packets. Forwarding only the last one truncates the response and
-		// trips ORA-03106 on the client.
-		allRaw = append(allRaw, pkt.Raw...)
-		buf = append(buf, pkt.Payload[ttcDataFlagsSize:]...)
+		if !haveFlags {
+			dataFlags = append([]byte(nil), pkt.Payload[:ttcDataFlagsSize]...)
+			haveFlags = true
+		}
 
-		if parseAuthMessageStream(buf, resp, s.clientWideFormat, s.clientBigClrChunks) {
-			return resp, allRaw, buf, nil
+		fragTTC := pkt.Payload[ttcDataFlagsSize:]
+		resp.fragTTCLens = append(resp.fragTTCLens, len(fragTTC))
+		buf = append(buf, fragTTC...)
+
+		if parseAuthMessageStream(buf, resp, s.clientWideEncoding) {
+			resp.dataFlags = dataFlags
+
+			merged := make([]byte, 0, ttcDataFlagsSize+len(buf))
+			merged = append(merged, dataFlags...)
+			merged = append(merged, buf...)
+
+			return resp, encodeV315DataPacket(merged), nil
 		}
 	}
+}
+
+// reframeAuthOK re-fragments a merged single-packet AUTH OK back into the TNS
+// Data packets the upstream originally sent (payload sizes in fragTTCLens, each
+// carrying the same 2-byte data-flags prefix). Forwarding a single merged AUTH
+// OK can exceed the client's negotiated SDU — OCI rejects it with ORA-12592
+// "bad packet" — while re-fragmenting at the upstream's boundaries reproduces
+// exactly what a direct client accepts (real Oracle 23ai splits an OCI AUTH OK
+// into 1967+557 byte packets). Because the AUTH_SVR_RESPONSE patch is a
+// same-length in-place replacement, splitting at the original TTC offsets keeps
+// every fragment valid even when the patched value straddles a boundary.
+//
+// mergedPacket is a v315 Data packet: 8-byte header + 2-byte data flags + TTC.
+// When there are 0/1 fragments, or the sizes don't add up, mergedPacket is
+// returned unchanged.
+func reframeAuthOK(mergedPacket, dataFlags []byte, fragTTCLens []int) []byte {
+	if len(fragTTCLens) <= 1 || len(dataFlags) != ttcDataFlagsSize {
+		return mergedPacket
+	}
+
+	total := 0
+	for _, n := range fragTTCLens {
+		total += n
+	}
+
+	ttcStart := tnsHeaderSize + ttcDataFlagsSize
+	if len(mergedPacket) < ttcStart || len(mergedPacket)-ttcStart != total {
+		return mergedPacket
+	}
+
+	ttc := mergedPacket[ttcStart:]
+
+	out := make([]byte, 0, len(mergedPacket)+len(fragTTCLens)*(tnsHeaderSize+ttcDataFlagsSize))
+	pos := 0
+
+	for _, n := range fragTTCLens {
+		frag := make([]byte, 0, ttcDataFlagsSize+n)
+		frag = append(frag, dataFlags...)
+		frag = append(frag, ttc[pos:pos+n]...)
+		out = append(out, encodeV315DataPacket(frag)...)
+		pos += n
+	}
+
+	return out
 }
 
 // parseAuthMessageStream walks a TTC byte stream and returns true when the
@@ -402,7 +460,7 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, []b
 //
 // The function is tolerant: when it cannot decode a region it returns false
 // so the caller reads more bytes.
-func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse, wide, bigChunks bool) bool {
+func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse, wide bool) bool {
 	pos := 0
 
 	for pos < len(buf) {
@@ -411,8 +469,16 @@ func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse, wide, bigChu
 
 		switch msgCode {
 		case 0x08:
-			if _, ok := parseAuthKVDictionary(buf[pos:], resp, wide, bigChunks); !ok {
+			consumed, ok := parseAuthKVDictionary(buf[pos:], resp, wide)
+			if !ok {
 				return false
+			}
+
+			// Capture the end-of-call summary that trails the dictionary. Its
+			// exact width is conditioned on the negotiated TTC caps, so the
+			// client challenge builder reuses it verbatim (clientChallengeTrailer).
+			if rest := buf[pos+consumed:]; len(rest) > 0 && rest[0] == byte(TTCFuncOERR) {
+				resp.challengeTrailer = append([]byte(nil), rest...)
 			}
 
 			return true
@@ -443,43 +509,30 @@ func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse, wide, bigChu
 // The dictionary length is a TTC compressed integer, matching go-ora's
 // session.GetInt(2, bigEndian=true, compress=true). A 1-byte size prefix is
 // followed by `size` big-endian bytes encoding the count of KV pairs.
-func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse, wide, bigChunks bool) (int, bool) {
+func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse, wide bool) (int, bool) {
+	var dictLen, pos int
+
 	if wide {
-		return parseWideAuthKVDictionary(buf, resp)
-	}
-
-	dictLen, n := readCompressedInt(buf)
-	if n == 0 {
-		return 0, false
-	}
-
-	pos := n
-
-	for i := 0; i < dictLen; i++ {
-		pair, ok := readAuthKVPair(buf[pos:], bigChunks)
-		if !ok {
+		// OCI: dictionary count is a 2-byte little-endian integer.
+		if len(buf) < 2 {
 			return 0, false
 		}
 
-		pos += pair.Consumed
-		recordAuthProperty(string(pair.Key), string(pair.Value), pair.Flag, resp)
+		dictLen = int(binary.LittleEndian.Uint16(buf[0:2]))
+		pos = 2
+	} else {
+		var n int
+
+		dictLen, n = readCompressedInt(buf)
+		if n == 0 {
+			return 0, false
+		}
+
+		pos = n
 	}
 
-	return pos, true
-}
-
-// parseWideAuthKVDictionary parses an OCI wide-encoded AUTH KV dictionary:
-// [uint16-LE pair count] followed by wide KV pairs.
-func parseWideAuthKVDictionary(buf []byte, resp *upstreamAuthResponse) (int, bool) {
-	if len(buf) < 2 {
-		return 0, false
-	}
-
-	count := int(binary.LittleEndian.Uint16(buf))
-	pos := 2
-
-	for i := 0; i < count; i++ {
-		pair, ok := readWideKVPair(buf[pos:])
+	for i := 0; i < dictLen; i++ {
+		pair, ok := readAuthKVPair(buf[pos:], wide)
 		if !ok {
 			return 0, false
 		}
@@ -500,8 +553,13 @@ type authKVPairResult struct {
 }
 
 // readAuthKVPair reads keyLen + keyCLR + valueLen + valueCLR + flag, mirroring
-// session.GetKeyVal in go-ora. ok=false signals the buffer is truncated.
-func readAuthKVPair(buf []byte, bigChunks bool) (authKVPairResult, bool) {
+// session.GetKeyVal in go-ora. ok=false signals the buffer is truncated. wide
+// selects the OCI fixed 4-byte little-endian length/flag encoding.
+func readAuthKVPair(buf []byte, wide bool) (authKVPairResult, bool) {
+	if wide {
+		return readAuthKVPairWide(buf)
+	}
+
 	pos := 0
 	out := authKVPairResult{}
 
@@ -513,7 +571,6 @@ func readAuthKVPair(buf []byte, bigChunks bool) (authKVPairResult, bool) {
 	pos += n
 
 	if keyLen > 0 {
-		// Keys are short AUTH_* names — always 1-byte CLR framing.
 		k, kn := readCLR(buf[pos:])
 		if kn == 0 {
 			return authKVPairResult{}, false
@@ -531,7 +588,7 @@ func readAuthKVPair(buf []byte, bigChunks bool) (authKVPairResult, bool) {
 	pos += vn
 
 	if vLen > 0 {
-		v, vClrN := readCLRVariant(buf[pos:], bigChunks)
+		v, vClrN := readCLR(buf[pos:])
 		if vClrN == 0 {
 			return authKVPairResult{}, false
 		}
@@ -547,6 +604,57 @@ func readAuthKVPair(buf []byte, bigChunks bool) (authKVPairResult, bool) {
 
 	pos += fn
 	out.Flag = flagVal
+	out.Consumed = pos
+
+	return out, true
+}
+
+// readAuthKVPairWide is the OCI (4-byte little-endian) counterpart of
+// readAuthKVPair: keyLen:4 LE + keyCLR + valueLen:4 LE + valueCLR + flag:4 LE.
+func readAuthKVPairWide(buf []byte) (authKVPairResult, bool) {
+	pos := 0
+	out := authKVPairResult{}
+
+	if pos+4 > len(buf) {
+		return authKVPairResult{}, false
+	}
+
+	keyLen := int(binary.LittleEndian.Uint32(buf[pos : pos+4]))
+	pos += 4
+
+	if keyLen > 0 {
+		k, kn := readCLR(buf[pos:])
+		if kn == 0 {
+			return authKVPairResult{}, false
+		}
+
+		out.Key = k
+		pos += kn
+	}
+
+	if pos+4 > len(buf) {
+		return authKVPairResult{}, false
+	}
+
+	vLen := int(binary.LittleEndian.Uint32(buf[pos : pos+4]))
+	pos += 4
+
+	if vLen > 0 {
+		v, vClrN := readCLR(buf[pos:])
+		if vClrN == 0 {
+			return authKVPairResult{}, false
+		}
+
+		out.Value = v
+		pos += vClrN
+	}
+
+	if pos+4 > len(buf) {
+		return authKVPairResult{}, false
+	}
+
+	out.Flag = int(binary.LittleEndian.Uint32(buf[pos : pos+4]))
+	pos += 4
 	out.Consumed = pos
 
 	return out, true
@@ -801,6 +909,7 @@ func hexNibble(b byte) (byte, error) {
 // errors specific to the upstream AUTH client.
 var (
 	ErrUpstreamConnNotSet         = errors.New("upstream connection not set before AUTH")
+	ErrUpstreamAuthNotBegun       = errors.New("upstream AUTH Phase 2 requested before Phase 1")
 	ErrPhase1MissingSessKey       = errors.New("AUTH Phase 1 response: missing AUTH_SESSKEY")
 	ErrPhase1MissingVerifierData  = errors.New("AUTH Phase 1 response: missing AUTH_VFR_DATA")
 	ErrInvalidHex                 = errors.New("invalid hex character")

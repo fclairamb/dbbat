@@ -541,33 +541,77 @@ func decodeExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 }
 
 // findSQLInPayload scans the raw payload for SQL text by looking for SQL keywords.
-// Used as a fallback when length-prefix decoding fails.
+// Used as a fallback when length-prefix decoding fails — notably for SQLcl/JDBC
+// thin's func=0x11 exec, where the SQL follows a run of zero bytes (so no length
+// prefix sits immediately before it). The keyword match is case-insensitive
+// because clients send the statement verbatim and SQLcl lowercases its SQL.
 func findSQLInPayload(payload []byte) string {
-	keywords := []string{
-		"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
-		"ALTER", "BEGIN", "DECLARE", "WITH", "MERGE", "CALL",
+	keywords := [][]byte{
+		[]byte("SELECT"), []byte("INSERT"), []byte("UPDATE"), []byte("DELETE"),
+		[]byte("CREATE"), []byte("DROP"), []byte("ALTER"), []byte("BEGIN"),
+		[]byte("DECLARE"), []byte("WITH"), []byte("MERGE"), []byte("CALL"),
 	}
 
-	for _, kw := range keywords {
-		kwBytes := []byte(kw)
-		idx := findBytes(payload, kwBytes)
-		if idx < 0 {
-			continue
-		}
+	idx := indexOfAnyKeywordCI(payload, keywords)
+	if idx < 0 {
+		return ""
+	}
 
-		// Found a keyword — extract until we hit a non-SQL byte
-		// SQL ends at a null byte, or at the end of printable ASCII
-		end := idx
-		for end < len(payload) && payload[end] >= 0x0A && payload[end] <= 0x7E {
-			end++
-		}
+	// Found a keyword — extract until we hit a non-SQL byte. SQL ends at a
+	// control byte (the TTC framing that follows it) or the end of the payload.
+	end := idx
+	for end < len(payload) && payload[end] >= 0x0A && payload[end] <= 0x7E {
+		end++
+	}
 
-		if end > idx+2 {
-			return strings.TrimSpace(string(payload[idx:end]))
-		}
+	if end > idx+2 {
+		return strings.TrimSpace(string(payload[idx:end]))
 	}
 
 	return ""
+}
+
+// indexOfAnyKeywordCI returns the offset of the earliest case-insensitive match
+// of any keyword in payload, or -1. Used to locate the SQL statement inside an
+// exec message whose framing varies by client.
+func indexOfAnyKeywordCI(payload []byte, keywords [][]byte) int {
+	for i := range payload {
+		for _, kw := range keywords {
+			if i+len(kw) > len(payload) {
+				continue
+			}
+
+			if equalFoldASCIIBytes(payload[i:i+len(kw)], kw) {
+				return i
+			}
+		}
+	}
+
+	return -1
+}
+
+// equalFoldASCIIBytes reports whether a and b are equal ignoring ASCII letter case.
+func equalFoldASCIIBytes(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for i := range a {
+		ca, cb := a[i], b[i]
+		if ca >= 'A' && ca <= 'Z' {
+			ca += 'a' - 'A'
+		}
+
+		if cb >= 'A' && cb <= 'Z' {
+			cb += 'a' - 'A'
+		}
+
+		if ca != cb {
+			return false
+		}
+	}
+
+	return true
 }
 
 // extractSQLAtOffset tries to read a length-prefixed SQL string at the given offset.
@@ -1261,8 +1305,13 @@ func parseRowStream(payload []byte, offset, numCols int, activeCols []int, prev 
 	var rows [][]interface{}
 
 	for offset < len(payload) {
-		if payload[offset] == 0x08 {
-			break // end-of-rows footer (0x08 0x01 0x06)
+		// The end-of-rows footer is the 3-byte sequence 0x08 0x01 0x06. A bare
+		// 0x08 must NOT end the scan on its own: it is also a valid column value
+		// length (an 8-byte first column value, e.g. the string "sqlcl-ok"),
+		// which previously made such rows vanish. Match the full footer instead.
+		if offset+3 <= len(payload) &&
+			payload[offset] == 0x08 && payload[offset+1] == 0x01 && payload[offset+2] == 0x06 {
+			break
 		}
 
 		if offset+9 <= len(payload) && string(payload[offset:offset+9]) == "ORA-01403" {

@@ -109,6 +109,18 @@ make clean            # Clean build artifacts
 
 **Never kill the running dbbat instance.** It is started beforehand with `make dev` which provides live reload (Air). Restarting it would break the dev workflow. The test mode credentials are `admin`/`admintest`.
 
+## Follow-up Tasks → `specs/todos/`
+
+**Whenever you identify a follow-up task** — an out-of-scope improvement, a deferred fix, a known limitation, or "we should also do X later" — **write it into `specs/todos/` autonomously**, in the same turn, without being asked. Don't just mention it in chat or leave it only in an ephemeral task list: chat scrolls away, `specs/todos/` is the durable backlog.
+
+Conventions (see `specs/README.md`):
+- One markdown file per task, named `specs/todos/YYYY-MM-DD-short-kebab-name.md` (date = today).
+- Lead with `# Title`, then `## Goal`, `## Why`, and `## Implementation` (sketch the approach + key files). Enough that someone can pick it up cold.
+- Link the originating GitHub issue when there is one: `[#4](https://github.com/fclairamb/dbbat/issues/4)`. If none exists, note that an issue should be filed.
+- When a todo is implemented, move its file to `specs/done/YYYY/MM/` (keep the same filename).
+
+This applies even when the current task is otherwise complete — capture the follow-up before moving on.
+
 ## CLI Commands
 
 ```bash
@@ -144,8 +156,9 @@ make clean            # Clean build artifacts
 | `DBB_PG_TLS_KEY_FILE` | PEM key for PostgreSQL TLS termination (auto-generated if empty) | No |
 | `DBB_SLACK_NOTIFY_BOT_TOKEN` | Slack bot user OAuth token (`xoxb-...`); empty disables notifications | No |
 | `DBB_SLACK_NOTIFY_CHANNEL` | Slack channel id or name for grant-request notifications (default: `#dbbat`) | No |
-| `DBB_SLACK_SIGNING_SECRET` | Slack app signing secret; enables Approve/Deny buttons + inbound interactions endpoint. Empty = link-through-UI (no buttons). Requires the bot token. | No |
-| `DBB_PUBLIC_URL` | Externally reachable base URL of the **web UI** (the address a Slack reviewer opens in a browser, e.g. `https://dbbat.tools.stonal.io`); used for deep-links in Slack notifications. NOT the DB proxy connection host (e.g. `db.stonal.io`), which may be VPN-gated | If notify enabled |
+| `DBB_SLACK_SIGNING_SECRET` | Slack app signing secret; enables Approve/Deny buttons + inbound interactions endpoint. Empty = link-through-UI (no buttons). Requires the bot token. Legacy alias `DBB_SLACK_NOTIFY_SIGNING_SECRET` is also accepted; the canonical name wins if both are set. | No |
+| `DBB_SLACK_NOTIFY_APP_TOKEN` | Slack app-level token (`xapp-...`, scope `connections:write`); enables **Socket Mode** — receives Approve/Deny clicks over an outbound WebSocket instead of the inbound endpoint (for deployments Slack can't reach inbound). Requires the bot token. | No |
+| `DBB_PUBLIC_URL` | Externally reachable base URL; used for deep-links in Slack notifications | If notify enabled |
 
 Note: If no encryption key is provided, one is created at `~/.dbbat/key`.
 

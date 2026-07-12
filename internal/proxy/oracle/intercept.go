@@ -147,35 +147,17 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 }
 
 // handleJDBCExec intercepts a JDBC execute-with-SQL message (func=0x11, sub=0x69).
-// Returns an error if the query should be blocked by access control. Mirrors the
-// OALL8 and piggyback paths — without this gate the JDBC thin-driver exec path
-// would bypass read_only/block_ddl/block_copy, the password-change block, and the
-// admin-command block entirely.
-func (s *session) handleJDBCExec(ttcPayload []byte) error {
+func (s *session) handleJDBCExec(ttcPayload []byte) {
 	result, err := decodeExecSQL(ttcPayload)
 	if err != nil {
 		s.logger.DebugContext(s.ctx, "failed to decode JDBC exec", slog.Any("error", err))
-		return nil
+		return
 	}
 
 	s.logger.InfoContext(s.ctx, "query intercepted",
 		slog.String("sql", truncateSQL(result.SQL, 200)),
 		slog.String("source", "jdbc"),
 	)
-
-	// Access control check — same gate the OALL8/piggyback paths use. Runs before
-	// the query is tracked or persisted, so a blocked query is not logged as
-	// executed, consistent with the other Oracle block paths.
-	if s.grant != nil {
-		if err := shared.ValidateOracleQuery(result.SQL, s.grant); err != nil {
-			s.logger.WarnContext(s.ctx, "query blocked by access control",
-				slog.String("sql", truncateSQL(result.SQL, 200)),
-				slog.Any("error", err),
-			)
-
-			return err
-		}
-	}
 
 	// Complete previous query if still pending (sets duration)
 	s.flushPendingQuery()
@@ -190,8 +172,6 @@ func (s *session) handleJDBCExec(ttcPayload []byte) error {
 		startTime: time.Now(),
 	}
 	s.persistQueryRecord()
-
-	return nil
 }
 
 // handleQueryResultV2 processes a v315+ QueryResult (func=0x10) response.
@@ -350,6 +330,7 @@ func (s *session) persistQueryRecord() {
 		ConnectionID: s.connectionUID,
 		SQLText:      pending.cursor.sql,
 		ExecutedAt:   pending.startTime,
+		Parameters:   formatOracleBinds(pending.cursor.bindValues),
 	}
 
 	created, err := s.store.CreateQuery(s.ctx, query)
@@ -402,6 +383,7 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 			DurationMs:   &duration,
 			RowsAffected: rowsAffected,
 			Error:        queryError,
+			Parameters:   formatOracleBinds(pending.cursor.bindValues),
 		}
 
 		go func() {

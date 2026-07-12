@@ -275,18 +275,6 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	logger.InfoContext(ctx, "Database connection established")
 
-	// Mark connections left "active" by a previous process as disconnected. On a
-	// fresh start no socket tracked by this instance can still be alive, so any row
-	// with disconnected_at IS NULL is stale (the previous process died before
-	// CloseConnection ran). Run unconditionally and before any listener accepts
-	// clients, so a client reconnecting right after a restart creates a fresh row
-	// instead of racing the cleanup of its own new connection.
-	staleConnections, err := dataStore.MarkAllConnectionsDisconnected(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to mark stale connections as disconnected: %w", err)
-	}
-	logger.InfoContext(ctx, "Marked stale connections as disconnected", slog.Int64("count", staleConnections))
-
 	// Check for database configurations that match the storage DSN
 	checkDatabaseConfigurations(ctx, dataStore, logger)
 

@@ -1,0 +1,53 @@
+# Air configuration for hot reloading
+# https://github.com/air-verse/air
+
+root = "."
+tmp_dir = "tmp"
+
+[build]
+# Build command
+cmd = "go build -o ./tmp/dbbat"
+# Binary to run
+bin = "./tmp/dbbat"
+# Full command with environment variables
+# DBB_REDIRECTS proxies /app/* to the Vite dev server for hot module replacement
+full_bin = "./scripts/run-backend-dev.sh"
+# Watch these file extensions
+include_ext = ["go", "sql"]
+# Exclude directories
+exclude_dir = ["tmp", "vendor", ".git", "testdata", "front", "website"]
+# Exclude files
+exclude_file = []
+# Exclude regex patterns
+exclude_regex = ["_test.go$"]
+# Exclude unchanged files
+exclude_unchanged = false
+# Follow symlinks
+follow_symlink = false
+# Log file location
+log = "tmp/air.log"
+# Kill delay (ms) - wait before killing the process
+kill_delay = "500ms"
+# Send interrupt signal before kill
+send_interrupt = true
+# Delay before re-running after change (ms)
+delay = 1000
+# Stop running old binary after build failure
+stop_on_error = true
+
+[log]
+# Show timestamp in logs
+time = true
+# Log only main logs (no build output)
+main_only = false
+
+[color]
+# Customize colors
+main = "magenta"
+watcher = "cyan"
+build = "yellow"
+runner = "green"
+
+[misc]
+# Delete tmp directory on exit
+clean_on_exit = true

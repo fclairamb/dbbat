@@ -395,29 +395,50 @@ const (
 type APIKey struct {
 	bun.BaseModel `bun:"table:api_keys,alias:ak"`
 
-	ID              uuid.UUID  `bun:"id,pk,type:uuid,default:gen_random_uuid()" json:"id"`
-	UserID          uuid.UUID  `bun:"user_id,notnull,type:uuid" json:"user_id"`
-	Name            string     `bun:"name,notnull" json:"name"`
-	KeyHash         string     `bun:"key_hash,notnull" json:"-"`
-	KeyPrefix       string     `bun:"key_prefix,notnull" json:"key_prefix"`
-	KeyType         string     `bun:"key_type,notnull,default:'api'" json:"key_type"`
-	ExpiresAt       *time.Time `bun:"expires_at" json:"expires_at"`
-	LastUsedAt      *time.Time `bun:"last_used_at" json:"last_used_at"`
-	RequestCount    int64      `bun:"request_count,notnull,default:0" json:"request_count"`
-	CreatedAt       time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
-	RevokedAt       *time.Time `bun:"revoked_at" json:"revoked_at"`
-	RevokedBy       *uuid.UUID `bun:"revoked_by,type:uuid" json:"revoked_by"`
-	O5LogonSalt []byte `bun:"o5logon_salt" json:"-"`
-	// O5LogonVerifier is the encrypted, self-describing verifier blob (dbbat
-	// master key). It packs the 6949 verifier key plus the verifier-18453
-	// salt/key for OCI thick clients — see crypto.EncodeO5LogonVerifierBlob.
-	O5LogonVerifier []byte `bun:"o5logon_verifier" json:"-"`
+	ID           uuid.UUID  `bun:"id,pk,type:uuid,default:gen_random_uuid()" json:"id"`
+	UserID       uuid.UUID  `bun:"user_id,notnull,type:uuid" json:"user_id"`
+	Name         string     `bun:"name,notnull" json:"name"`
+	KeyHash      string     `bun:"key_hash,notnull" json:"-"`
+	KeyPrefix    string     `bun:"key_prefix,notnull" json:"key_prefix"`
+	KeyType      string     `bun:"key_type,notnull,default:'api'" json:"key_type"`
+	ExpiresAt    *time.Time `bun:"expires_at" json:"expires_at"`
+	LastUsedAt   *time.Time `bun:"last_used_at" json:"last_used_at"`
+	RequestCount int64      `bun:"request_count,notnull,default:0" json:"request_count"`
+	CreatedAt    time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	RevokedAt    *time.Time `bun:"revoked_at" json:"revoked_at"`
+	RevokedBy    *uuid.UUID `bun:"revoked_by,type:uuid" json:"revoked_by"`
+	// ProtocolData holds protocol-specific material (Oracle O5LOGON verifiers,
+	// etc.) in a single jsonb column rather than dedicated per-protocol columns.
+	// nil when the key has no protocol-specific data.
+	ProtocolData *ProtocolData `bun:"protocol_data,type:jsonb,nullzero" json:"-"`
+}
 
-	// UserLogin is the owning user's username. It is NOT a database column; it
-	// is populated only by the list handler for admins (the fleet-review "All
-	// keys" view) so the UI can show an Owner column without an N+1. It stays
-	// empty for soft-deleted owners and in responses that don't enrich it.
-	UserLogin string `bun:"-" json:"user_login,omitempty"`
+// ProtocolData is the per-protocol material attached to an API key, stored as a
+// single jsonb column so protocol-specific fields don't proliferate as table
+// columns. Absent protocols are omitted.
+type ProtocolData struct {
+	Oracle *OracleAPIKeyData `json:"oracle,omitempty"`
+}
+
+// OracleAPIKeyData is the Oracle O5LOGON verifier material derived from the API
+// key for the proxy's terminated authentication. Both verifier types are kept:
+// 6949 (legacy SHA-1) and 18453 (12c PBKDF2/HMAC-SHA512). Verifier values are
+// encrypted with the dbbat master key (AAD-bound to the key prefix); salts are
+// public challenge material. Empty fields are omitted from the jsonb.
+type OracleAPIKeyData struct {
+	O5LogonSalt6949      []byte `json:"o5logon_salt_6949,omitempty"`
+	O5LogonVerifier6949  []byte `json:"o5logon_verifier_6949,omitempty"`
+	O5LogonSalt18453     []byte `json:"o5logon_salt_18453,omitempty"`
+	O5LogonVerifier18453 []byte `json:"o5logon_verifier_18453,omitempty"`
+}
+
+// OracleData returns the key's Oracle protocol material, or nil if it has none.
+func (k *APIKey) OracleData() *OracleAPIKeyData {
+	if k.ProtocolData == nil {
+		return nil
+	}
+
+	return k.ProtocolData.Oracle
 }
 
 // IsExpired returns true if the API key has expired

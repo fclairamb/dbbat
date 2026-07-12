@@ -282,6 +282,7 @@ export interface paths {
          *     - Non-admins can only update their own password
          *     - Non-admins cannot change roles
          *     - API keys cannot change passwords (requires Basic Auth)
+         *     - The admin role cannot be removed from the last remaining admin
          */
         put: operations["updateUser"];
         post?: never;
@@ -289,7 +290,7 @@ export interface paths {
          * Delete user
          * @description Deletes a user account. Requires admin role.
          *
-         *     Note: Cannot delete your own user account.
+         *     Note: Cannot delete your own user account, nor the last admin user.
          */
         delete: operations["deleteUser"];
         options?: never;
@@ -1413,8 +1414,6 @@ export interface components {
              * @description User UID
              */
             user_id: string;
-            /** @description Owning user's username. Populated only in list responses for admins (the fleet-review "All keys" view); omitted otherwise. */
-            user_login?: string | null;
             /** @description Key name */
             name: string;
             /** @description Key prefix for identification */
@@ -2279,6 +2278,15 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            /** @description The update would remove the admin role from the last admin user */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
         };
@@ -2307,6 +2315,16 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            /** @description Deleting this user would leave the instance without any admin */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
         };

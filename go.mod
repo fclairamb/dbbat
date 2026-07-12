@@ -3,7 +3,6 @@ module github.com/fclairamb/dbbat
 go 1.25.5
 
 require (
-	github.com/fsnotify/fsnotify v1.9.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-mysql-org/go-mysql v1.15.0
 	github.com/go-sql-driver/mysql v1.10.0
@@ -17,7 +16,7 @@ require (
 	github.com/knadh/koanf/providers/structs v1.0.0
 	github.com/knadh/koanf/v2 v2.3.5
 	github.com/sijms/go-ora/v2 v2.9.0
-	github.com/slack-go/slack v0.26.0
+	github.com/slack-go/slack v0.27.0
 	github.com/stretchr/testify v1.11.1
 	github.com/testcontainers/testcontainers-go v0.43.0
 	github.com/testcontainers/testcontainers-go/modules/mysql v0.43.0
@@ -25,9 +24,9 @@ require (
 	github.com/uptrace/bun v1.2.18
 	github.com/uptrace/bun/dialect/pgdialect v1.2.18
 	github.com/uptrace/bun/driver/pgdriver v1.2.18
-	github.com/urfave/cli/v3 v3.10.0
-	golang.org/x/crypto v0.53.0
-	golang.org/x/text v0.38.0
+	github.com/urfave/cli/v3 v3.10.1
+	golang.org/x/crypto v0.54.0
+	golang.org/x/text v0.40.0
 )
 
 require (
@@ -54,6 +53,7 @@ require (
 	github.com/ebitengine/purego v0.10.0 // indirect
 	github.com/fatih/structs v1.1.0 // indirect
 	github.com/felixge/httpsnoop v1.0.4 // indirect
+	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.13 // indirect
 	github.com/gin-contrib/sse v1.1.1 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
@@ -123,8 +123,8 @@ require (
 	go.uber.org/zap v1.28.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/arch v0.25.0 // indirect
-	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
+	golang.org/x/net v0.56.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

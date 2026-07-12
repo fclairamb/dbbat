@@ -1,9 +1,218 @@
 package oracle
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"strings"
 )
+
+// rewriteAuthPhase1UsernameAnchored locates the login username by anchoring on
+// the AUTH_* key/value section that follows it (the same robust approach as
+// usernameBeforeAuthKV) and splices in newUsername, updating its 1-byte CLR
+// length prefix. This is preamble-layout independent, so it handles clients
+// whose Phase 1 framing the fixed-offset parser misreads — notably
+// python-oracledb thin's verifier-18453 login, where the fixed parser read
+// user_id_len as 1 and produced a corrupt body the upstream rejects (ORA-03120).
+// Returns ok=false if the username can't be located this way.
+func rewriteAuthPhase1UsernameAnchored(body []byte, newUsername string) ([]byte, bool) {
+	start, end, ok := locateAnchoredUsername(body)
+	if !ok {
+		return nil, false
+	}
+
+	oldLen := end - start
+	newLen := byte(len(newUsername))
+
+	// A 1-byte CLR length prefix precedes the username for go-ora / python; SQLcl
+	// sends the bytes bare (length given only by user_id_len). Detect by checking
+	// whether the preceding byte equals the username length.
+	clrPrefixed := start > 0 && int(body[start-1]) == oldLen
+
+	fieldStart := start
+	if clrPrefixed {
+		fieldStart = start - 1
+	}
+
+	userIDLenPos, userIDLenVal := findUserIDLenPos(body, fieldStart, oldLen, len(newUsername))
+
+	out := make([]byte, 0, len(body)+len(newUsername))
+
+	if userIDLenPos >= 0 {
+		out = append(out, body[:userIDLenPos]...)
+		out = append(out, userIDLenVal) // user_id_len (or its 3x buffer-size form)
+		out = append(out, body[userIDLenPos+1:fieldStart]...)
+	} else {
+		out = append(out, body[:fieldStart]...)
+	}
+
+	if clrPrefixed {
+		out = append(out, newLen) // CLR length prefix
+	}
+
+	out = append(out, []byte(newUsername)...)
+	out = append(out, body[end:]...) // KV pairs
+
+	return out, true
+}
+
+// locateAnchoredUsername returns the [start, end) byte range of the login
+// username in a Phase 1 body by anchoring on the first AUTH_* key that follows
+// it (see usernameBeforeAuthKV). Works for both length-prefixed (go-ora,
+// python-oracledb thin) and bare (SQLcl/JDBC thin) usernames. ok=false if the
+// run can't be located or resolves to a well-known AUTH key.
+func locateAnchoredUsername(body []byte) (int, int, bool) {
+	authIdx := bytes.Index(body, []byte("AUTH_"))
+	if authIdx < 2 {
+		return 0, 0, false
+	}
+
+	var (
+		start, end int
+		ok         bool
+	)
+
+	if payloadUsesWideKVEncoding(body) {
+		start, end, ok = locateWideUsername(body, authIdx)
+	} else {
+		start, end, ok = locateThinUsername(body, authIdx)
+	}
+
+	if !ok || knownAuthKeys[strings.ToUpper(string(body[start:end]))] {
+		return 0, 0, false
+	}
+
+	return start, end, true
+}
+
+// locateWideUsername finds the login username in a wide (OCI/sqlplus) Phase 1
+// body. These bodies frame the first key deterministically: a 4-byte LE key
+// length (sometimes a 3x buffer size) + a 1-byte CLR length — so the username's
+// last byte sits exactly 5 bytes before the AUTH_ key.
+//
+// The username itself is CLR-prefixed: [clrLen:1][username]. Its extent is
+// derived from that prefix, NOT by walking Oracle-identifier bytes: the
+// identifier walk (like isPrintableASCII, which accepts only the identifier
+// set) stops at the first non-identifier character, so a username such as
+// "florent.clairambault" is truncated at the '.' to "clairambault". The rewrite
+// then splices the new user over that fragment (leaving "florent." in front)
+// and leaves user_id_len stale, so the upstream rejects Phase 1 with
+// "ORA-03146: invalid buffer length for TTC field".
+//
+// The scan keeps the longest length L whose CLR prefix byte matches
+// (body[end-L-1] == L) and whose L bytes are all printable ASCII (dots, digits
+// and the like included); the real CLR prefix (< 0x20 for names up to 30 chars)
+// is a non-printable wall that bounds it.
+func locateWideUsername(body []byte, authIdx int) (int, int, bool) {
+	const wideKeyFraming = 5
+
+	if authIdx < wideKeyFraming+1 {
+		return 0, 0, false
+	}
+
+	end := authIdx - wideKeyFraming
+	start := 0
+
+	for l := 1; l <= 30 && end-l-1 >= 0; l++ {
+		if int(body[end-l-1]) == l && isPrintableASCIIRun(body[end-l:end]) {
+			start = end - l
+		}
+	}
+
+	if start == 0 {
+		return 0, 0, false
+	}
+
+	return start, end, true
+}
+
+// locateThinUsername finds the login username in a compressed (thin-client)
+// Phase 1 body: go-ora / python-oracledb use a 1-byte CLR length prefix,
+// SQLcl/JDBC thin send the bytes bare. The username is the identifier run ending
+// at (or just before) the first AUTH_ key.
+func locateThinUsername(body []byte, authIdx int) (int, int, bool) {
+	end := authIdx
+
+	const maxFramingGap = 8
+
+	for gap := 0; end > 0 && !isIdentifierByte(body[end-1]); gap++ {
+		if gap >= maxFramingGap {
+			return 0, 0, false
+		}
+
+		end--
+	}
+
+	start := end
+	for start > 0 && isIdentifierByte(body[start-1]) && end-start < 30 {
+		start--
+	}
+
+	if start == end {
+		return 0, 0, false
+	}
+
+	return start, end, true
+}
+
+// findUserIDLenPos returns the offset of the preamble user_id_len field and the
+// byte to write there for the new username, or (-1, 0) if not found. Both it
+// and the CLR prefix must be rewritten or the upstream reads a stale count and
+// overflows (ORA-03120 / ORA-03146) — or, when the count grows, waits forever
+// for bytes that never come.
+//
+// OCI (sqlplus) wide preamble — same shape for AUTH Phase 1 (03 76) and
+// Phase 2 (03 73), captured from the DB-bundled 23.26 OCI client and the
+// macOS/Windows Oracle Instant Client 23.3:
+//
+//	03 76 <seq> <variable...>
+//	<0xfe repeated 8x>         first 8-byte pointer placeholder run
+//	<user-len field: 4 LE>     == len(username)   (23.26 bundled client)
+//	                           == 3*len(username) (instantclient 23.3 — a
+//	                              UTF-8 max-expansion buffer size)
+//	<logon mode: 4 LE>
+//	... more pointer runs, the KV pair count, then the CLR username.
+//
+// The field is located by anchoring on the FIRST pointer run — never by
+// scanning backward for a dword equal to oldLen: the KV pair count is also a
+// small 4-byte LE integer (5 for OCI Phase 1) sitting between pointer runs, and
+// a backward scan corrupts it whenever len(username) == numPairs (e.g. the
+// 5-char "admin" — the upstream then waits for a 6th pair that never arrives
+// and AUTH hangs).
+//
+// Thin clients use a single plain-length byte close to the username field.
+func findUserIDLenPos(body []byte, fieldStart, oldLen, newLen int) (int, byte) {
+	if payloadUsesWideKVEncoding(body) {
+		ptrRun := []byte{0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+
+		idx := bytes.Index(body[:fieldStart], ptrRun)
+		if idx < 0 || idx+len(ptrRun)+4 > fieldStart {
+			return -1, 0
+		}
+
+		pos := idx + len(ptrRun)
+		if body[pos+1] != 0 || body[pos+2] != 0 || body[pos+3] != 0 {
+			return -1, 0
+		}
+
+		switch int(body[pos]) {
+		case oldLen:
+			return pos, byte(newLen)
+		case 3 * oldLen:
+			return pos, byte(3 * newLen)
+		default:
+			return -1, 0
+		}
+	}
+
+	for i := fieldStart - 1; i >= 2 && i >= fieldStart-12; i-- {
+		if body[i] == byte(oldLen) {
+			return i, byte(newLen)
+		}
+	}
+
+	return -1, 0
+}
 
 // rewriteAuthPhase1Username takes a TTC AUTH Phase 1 body (everything after
 // the TNS frame header AND the 2-byte data-flags prefix — i.e. what would
@@ -26,7 +235,9 @@ import (
 // username (AUTH_TERMINAL, AUTH_PROGRAM_NM, ...) are passed through
 // unchanged so the upstream sees the client's actual TTC capabilities.
 func rewriteAuthPhase1Username(body []byte, newUsername string) ([]byte, error) {
-	if len(body) < 2 {
+	const headerLen = 4 // [03 76 b0 b1] piggyback marker + sub-op + 2-byte trailer
+
+	if len(body) < headerLen {
 		return nil, fmt.Errorf("%w: body too short for header", ErrAuthPhase1Rewrite)
 	}
 
@@ -34,175 +245,18 @@ func rewriteAuthPhase1Username(body []byte, newUsername string) ([]byte, error) 
 		return nil, fmt.Errorf("%w: not a Phase 1 piggyback", ErrAuthPhase1Rewrite)
 	}
 
-	// The framing bytes between the [03 76] sub-op and the user_id_len vary by
-	// client: go-ora / SQLcl JDBC use a 2-byte trailer (headerLen 4), while
-	// python-oracledb thin inserts one extra byte (headerLen 5). Try each and
-	// keep the alignment whose username field is followed by a valid AUTH_* KV
-	// pair — the only layout that will parse correctly upstream.
-	for _, headerLen := range [...]int{4, 5} {
-		out, ok := rewriteAuthPhase1AtHeader(body, newUsername, headerLen)
-		if ok {
-			return out, nil
-		}
-	}
-
-	// OCI thick clients (sqlplus) use a wholly different "wide" wire encoding
-	// (4/8-byte little-endian counts, 0xfe-sentinel pointer placeholders) with
-	// no compressed-int user_id_len header — the username is just a bare
-	// 1-byte-length token before the first AUTH_* KV pair. Splice it in place.
-	if out, ok := spliceLenPrefixedUsername(body, newUsername); ok {
+	// Preferred: anchor on the AUTH_* keys (handles all client preambles,
+	// including python-oracledb thin's 18453 login). Fall back to the
+	// fixed-offset splice below only if the anchor can't find the username.
+	if out, ok := rewriteAuthPhase1UsernameAnchored(body, newUsername); ok {
 		return out, nil
 	}
 
-	return nil, fmt.Errorf("%w: could not align user_id_len / username", ErrAuthPhase1Rewrite)
-}
-
-// spliceLenPrefixedUsername replaces the [1-byte length][username] token that
-// immediately precedes the first AUTH_* KV pair with newUsername, updating the
-// length byte. It is wire-encoding agnostic: it locates the username by anchor
-// (the first AUTH_* key) rather than by parsing the client-specific header, so
-// it handles the OCI wide format whose header the compressed-int parsers can't
-// read. Returns ok=false if no length-prefixed username can be located.
-func spliceLenPrefixedUsername(body []byte, newUsername string) ([]byte, bool) {
-	start, length, ok := findLenPrefixedUsername(body)
-	if !ok {
-		return nil, false
-	}
-
-	out := make([]byte, 0, len(body)-length+len(newUsername))
-	out = append(out, body[:start-1]...)
-	out = append(out, byte(len(newUsername)))
-	out = append(out, []byte(newUsername)...)
-	out = append(out, body[start+length:]...)
-
-	return out, true
-}
-
-// findLenPrefixedUsername locates a [1-byte length][printable username] token
-// sitting just before the first AUTH_* KV key in an AUTH body. Returns the
-// username's start offset and length. The username is the printable token
-// closest to (and before) the first AUTH_* key whose preceding byte equals its
-// length — the framing between it and the key is a few encoding bytes.
-func findLenPrefixedUsername(body []byte) (start, length int, ok bool) {
-	authIdx := indexOfBytes(body, []byte(authKeyPrefix))
-	if authIdx < 2 {
-		return 0, 0, false
-	}
-
-	// The username ends within a small framing window before the first key.
-	const maxFraming = 8
-
-	lo := authIdx - maxFraming
-	if lo < 2 {
-		lo = 2
-	}
-
-	for uEnd := authIdx - 1; uEnd >= lo; uEnd-- {
-		for l := 1; l <= 30 && uEnd-l-1 >= 0; l++ {
-			s := uEnd - l
-			if int(body[s-1]) != l {
-				continue
-			}
-
-			if isPrintableASCII(body[s:uEnd]) {
-				return s, l, true
-			}
-		}
-	}
-
-	return 0, 0, false
-}
-
-// indexOfBytes returns the first index of sub in b, or -1.
-func indexOfBytes(b, sub []byte) int {
-	for i := 0; i+len(sub) <= len(b); i++ {
-		if string(b[i:i+len(sub)]) == string(sub) {
-			return i
-		}
-	}
-
-	return -1
-}
-
-// extractPhase1Username returns the client username from an AUTH Phase 1 body,
-// trying each known header framing (go-ora/JDBC 4-byte, python-oracledb 5-byte)
-// and both username encodings (CLR-prefixed, bare). Validated against the
-// trailing AUTH_* KV pair, so it handles JDBC's bare uppercase username where
-// the compressed-int / fallback scan otherwise misreads a truncated name.
-func extractPhase1Username(body []byte) (string, bool) {
-	for _, headerLen := range [...]int{4, 5} {
-		if name, ok := phase1UsernameAtHeader(body, headerLen); ok {
-			return name, true
-		}
-	}
-
-	return "", false
-}
-
-// phase1UsernameAtHeader extracts the username assuming a specific header length.
-func phase1UsernameAtHeader(body []byte, headerLen int) (string, bool) {
-	if len(body) < headerLen+2 || body[0] != byte(TTCFuncPiggyback) || body[1] != PiggybackSubAuth1 {
-		return "", false
-	}
-
 	rest := body[headerLen:]
 
 	userLen, n := readCompressedInt(rest)
 	if n == 0 || userLen <= 0 || userLen > 128 {
-		return "", false
-	}
-
-	rest = rest[n:]
-
-	if _, n = readCompressedInt(rest); n == 0 {
-		return "", false
-	}
-
-	rest = rest[n:]
-
-	const magicLen = 5
-	if len(rest) < magicLen {
-		return "", false
-	}
-
-	rest = rest[magicLen:]
-
-	hasCLRPrefix := detectUsernameEncoding(rest, userLen)
-
-	start := 0
-	if hasCLRPrefix {
-		start = 1
-	}
-
-	if len(rest) < start+userLen {
-		return "", false
-	}
-
-	name := rest[start : start+userLen]
-	if !isPrintableASCII(name) {
-		return "", false
-	}
-
-	if !authKVTailLooksValid(rest[start+userLen:]) {
-		return "", false
-	}
-
-	return string(name), true
-}
-
-// rewriteAuthPhase1AtHeader attempts the username splice assuming a specific
-// header length (bytes before user_id_len). Returns ok=false if the layout does
-// not parse or the username is not followed by a plausible AUTH_* KV pair.
-func rewriteAuthPhase1AtHeader(body []byte, newUsername string, headerLen int) ([]byte, bool) {
-	if len(body) < headerLen {
-		return nil, false
-	}
-
-	rest := body[headerLen:]
-
-	userLen, n := readCompressedInt(rest)
-	if n == 0 || userLen <= 0 || userLen > 128 {
-		return nil, false
+		return nil, fmt.Errorf("%w: invalid user_id_len", ErrAuthPhase1Rewrite)
 	}
 
 	userLenBytes := n
@@ -210,7 +264,7 @@ func rewriteAuthPhase1AtHeader(body []byte, newUsername string, headerLen int) (
 
 	_, n = readCompressedInt(rest)
 	if n == 0 {
-		return nil, false
+		return nil, fmt.Errorf("%w: missing logon_mode", ErrAuthPhase1Rewrite)
 	}
 
 	modeBytes := n
@@ -218,7 +272,7 @@ func rewriteAuthPhase1AtHeader(body []byte, newUsername string, headerLen int) (
 
 	const magicLen = 5
 	if len(rest) < magicLen {
-		return nil, false
+		return nil, fmt.Errorf("%w: missing 5-byte magic", ErrAuthPhase1Rewrite)
 	}
 
 	rest = rest[magicLen:]
@@ -231,13 +285,10 @@ func rewriteAuthPhase1AtHeader(body []byte, newUsername string, headerLen int) (
 	}
 
 	if len(rest) < consumed {
-		return nil, false
+		return nil, fmt.Errorf("%w: username field truncated", ErrAuthPhase1Rewrite)
 	}
 
 	tail := rest[consumed:]
-	if !authKVTailLooksValid(tail) {
-		return nil, false
-	}
 
 	// Reassemble: header + new userLen + mode + magic + new username field + tail (KV pairs).
 	preMagicLen := headerLen + userLenBytes + modeBytes + magicLen
@@ -261,38 +312,8 @@ func rewriteAuthPhase1AtHeader(body []byte, newUsername string, headerLen int) (
 	out = append(out, []byte(newUsername)...)
 	out = append(out, tail...)
 
-	return out, true
+	return out, nil
 }
-
-// authKVTailLooksValid reports whether the bytes following the username field
-// begin a plausible AUTH_* key-value pair (compressed-int key length, CLR key
-// bytes starting with "AUTH_"). Used by both Phase 1 and Phase 2 to confirm the
-// header alignment picked the real username boundary rather than a coincidental
-// one.
-func authKVTailLooksValid(tail []byte) bool {
-	keyLen, n := readCompressedInt(tail)
-	if n == 0 || keyLen < len(authKeyPrefix) || keyLen > 64 {
-		return false
-	}
-
-	p := tail[n:]
-	// CLR short form: 1-byte length then the key bytes.
-	if len(p) < 1+keyLen {
-		return false
-	}
-
-	if int(p[0]) != keyLen {
-		return false
-	}
-
-	key := p[1 : 1+keyLen]
-
-	return len(key) >= len(authKeyPrefix) && string(key[:len(authKeyPrefix)]) == authKeyPrefix
-}
-
-// authKeyPrefix is the common prefix of the KV keys that follow the username in
-// an AUTH Phase 1 body (AUTH_TERMINAL, AUTH_PROGRAM_NM, ...).
-const authKeyPrefix = "AUTH_"
 
 // detectUsernameEncoding determines whether the buffer's username field uses
 // the CLR-prefixed form (1-byte length followed by username) or the bare form
@@ -308,6 +329,25 @@ func detectUsernameEncoding(rest []byte, userLen int) bool {
 	}
 
 	return false
+}
+
+// isPrintableASCIIRun reports whether every byte is printable ASCII (0x20–0x7E).
+// Unlike isPrintableASCII — which only accepts the Oracle identifier set and so
+// rejects the '.' in usernames such as "florent.clairambault" — this admits any
+// printable character, which is what the wide-encoding username locator needs to
+// capture a dotted or otherwise non-identifier login name whole.
+func isPrintableASCIIRun(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+
+	for _, c := range b {
+		if c < 0x20 || c > 0x7e {
+			return false
+		}
+	}
+
+	return true
 }
 
 // ErrAuthPhase1Rewrite signals a Phase 1 body that does not match the

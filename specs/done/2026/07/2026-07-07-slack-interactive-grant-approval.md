@@ -60,6 +60,12 @@ setting the signing secret — the feature degrades gracefully.
 
 ## Configuration
 
+> **Editor's note (2026-07-09):** as first shipped, the config layer only read
+> `DBB_SLACK_NOTIFY_SIGNING_SECRET`, not the `DBB_SLACK_SIGNING_SECRET`
+> documented here. This has since been fixed: `DBB_SLACK_SIGNING_SECRET` is
+> the canonical name and the `_NOTIFY_` form remains accepted as a legacy
+> alias (see `specs/todos/2026-07-08-slack-signing-secret-env-var-name-mismatch.md`).
+
 | Var                        | Description                                              | Required |
 |----------------------------|----------------------------------------------------------|----------|
 | `DBB_SLACK_SIGNING_SECRET` | Slack app signing secret. Empty → no buttons, no inbound endpoint (today's behavior). | no |

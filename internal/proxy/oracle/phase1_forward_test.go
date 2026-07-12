@@ -85,9 +85,7 @@ func buildPhase1Body(t *testing.T, username string, withCLRPrefix bool) []byte {
 	}
 
 	buf = append(buf, []byte(username)...)
-	// Real Phase 1 bodies carry AUTH_* KV pairs after the username; the rewriter
-	// uses that to confirm it aligned the username boundary correctly.
-	buf = append(buf, ttcKeyVal("AUTH_TERMINAL", "unknown", 0)...)
+	buf = append(buf, []byte("__KV_TAIL__")...)
 
 	return buf
 }

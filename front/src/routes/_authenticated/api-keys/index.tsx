@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import {
   useAPIKeys,
@@ -50,40 +50,15 @@ export const Route = createFileRoute("/_authenticated/api-keys/")({
   component: APIKeysPage,
 });
 
-// A key with no expiry ("Never") is a standing security risk that admins review
-// for. Kept as a helper so a "> N days out" threshold can be added here later
-// without touching any callers.
-function isLongTermKey(key: APIKey): boolean {
-  return !key.expires_at;
-}
-
 function APIKeysPage() {
-  const { user, isAdmin } = useAuth();
-  // Everyone defaults to their own keys. Admins can flip to the fleet-review
-  // "All keys" view; non-admins never see the switcher and stay on "mine".
-  const [scope, setScope] = useState<"mine" | "all">("mine");
-  const effectiveScope: "mine" | "all" = isAdmin ? scope : "mine";
-  const showAllKeys = effectiveScope === "all";
-
-  const { data: keys, isLoading } = useAPIKeys(
-    showAllKeys ? undefined : { user_id: user?.uid }
-  );
+  const { user } = useAuth();
+  const { data: keys, isLoading } = useAPIKeys();
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newKey, setNewKey] = useState<CreateAPIKeyResponse | null>(null);
   const [revokeKey, setRevokeKey] = useState<APIKey | null>(null);
 
   const canCreate = canCreateAPIKey(user?.roles);
   const canRevoke = canRevokeAPIKey(user?.roles);
-
-  // In the review view, surface long-term (never-expiring) keys first. Stable
-  // sort keeps the backend's created_at DESC order within each group.
-  const rows = useMemo(() => {
-    const list = keys ?? [];
-    if (!showAllKeys) return list;
-    return [...list].sort(
-      (a, b) => Number(isLongTermKey(b)) - Number(isLongTermKey(a))
-    );
-  }, [keys, showAllKeys]);
 
   const getStatus = (key: APIKey) => {
     if (key.revoked_at) return "revoked";
@@ -98,19 +73,6 @@ function APIKeysPage() {
       header: "Name",
       cell: (k) => <span className="font-medium">{k.name}</span>,
     },
-    ...(showAllKeys
-      ? [
-          {
-            key: "owner",
-            header: "Owner",
-            cell: (k: APIKey) => (
-              <span className="text-sm" data-testid="api-key-owner">
-                {k.user_login ?? k.user_id}
-              </span>
-            ),
-          },
-        ]
-      : []),
     {
       key: "key_prefix",
       header: "Key",
@@ -140,14 +102,7 @@ function APIKeysPage() {
             {format(new Date(k.expires_at), "MMM d, yyyy")}
           </span>
         ) : (
-          <Badge
-            variant="outline"
-            className="gap-1 border-amber-500/50 text-amber-600 dark:text-amber-500"
-            data-testid="api-key-longterm-flag"
-          >
-            <AlertTriangle className="h-3 w-3" />
-            Never
-          </Badge>
+          <span className="text-muted-foreground">Never</span>
         ),
     },
     {
@@ -215,33 +170,9 @@ function APIKeysPage() {
         }
       />
 
-      {isAdmin && (
-        <div
-          className="flex w-fit items-center gap-1 rounded-md border bg-muted/30 p-1"
-          data-testid="api-keys-scope"
-        >
-          <Button
-            variant={effectiveScope === "mine" ? "default" : "ghost"}
-            size="sm"
-            onClick={() => setScope("mine")}
-            data-testid="api-keys-scope-mine"
-          >
-            My keys
-          </Button>
-          <Button
-            variant={effectiveScope === "all" ? "default" : "ghost"}
-            size="sm"
-            onClick={() => setScope("all")}
-            data-testid="api-keys-scope-all"
-          >
-            All keys
-          </Button>
-        </div>
-      )}
-
       <DataTable
         columns={columns}
-        data={rows}
+        data={keys ?? []}
         isLoading={isLoading}
         rowKey={(k) => k.id}
         emptyMessage="No API keys found"

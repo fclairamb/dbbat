@@ -298,7 +298,7 @@ The proxy is fully transparent — it forwards raw TNS packets without modificat
 - **Row capture is best-effort**: The TTC binary format varies across Oracle client versions. Some clients/query types may produce partial or no row capture. SQL text extraction works reliably across all tested clients.
 - **Column names**: Real column names come from the describe column-definition records (`parseColumnDescribes` in `describe.go`), so single-char aliases (`SELECT level AS n`) and unnamed expressions (`SELECT count(*)`) get their true names and positions. Only genuinely unnamed expression columns fall back to a synthetic `COLn` label. If the records don't parse on some server layout, decoding falls back to heuristic name-scanning plus describe-header count padding, so the column count (and row framing) stays correct.
 - **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`. Failed statements record the ORA error text. See `ttc_oer.go`.
-- **Bind values (parameterized queries)**: Bind values are captured from both the legacy `OALL8` execute path (`decodeBindValues`) and the v315+ **piggyback exec** path that modern clients use (`extractPiggybackBinds`, func `0x03` sub `0x5e`). The piggyback binds sit length-prefixed at the tail of the message; they're located as the suffix that parses as exactly as many values as there are distinct bind placeholders in the SQL, and each is decoded by content via `decodeOracleRawValue` (so a NUMBER bind like `42` renders as `42`, not hex). Verified against `testdata/go_ora_binds.dbbat-dump` (`TestDumpReplay_Binds`). Not yet handled: binds over ~253 bytes (extended length encoding) and full type-aware decoding from the bind-definition records.
+- **Bind values (parameterized queries)**: Bind values are captured from both the legacy `OALL8` execute path (`decodeBindValues`) and the v315+ **piggyback exec** path that modern clients use (`extractPiggybackBinds`, func `0x03` sub `0x5e`). The piggyback binds sit length-prefixed at the tail of the message; they're located as the suffix that parses as exactly as many values as there are distinct bind placeholders in the SQL, and each is decoded by content via `decodeOracleRawValue` (so a NUMBER bind like `42` renders as `42`, not hex). Verified against `testdata/go_ora_binds.dbbat-dump` (`TestDumpReplay_Binds`). Captured binds are now persisted to `queries.parameters` (`formatOracleBinds` wired into `persistQueryRecord` and `completeQuery`), so the API (`GET /api/v1/queries/:uid`) and the UI Parameters card report them. Not yet handled: binds over ~253 bytes (extended length encoding) and full type-aware decoding from the bind-definition records.
 - **Temporal types**: DATE, TIMESTAMP, and TIMESTAMP WITH TIME ZONE decode in captured results, verified end-to-end against `testdata/go_ora_temporal.dbbat-dump` (`TestDumpReplay_Temporal`). The tz form renders the local wall clock plus its numeric offset, honouring byte 11's `0x40` "time in zone" flag (prefix stored as local vs UTC). Named-region time zones fall back to the stored wall clock without an offset suffix.
 - **Large result sets**: The QueryResult (func `0x10`) row area and continuation packets (func `0x06`) share one decoder (`parseRowStream`) that walks the full compressed row stream — length-prefixed values plus the `0x15 [flag] [count] [bitmask] 0x07` column-compression descriptors between rows. A 400-row single-packet result is captured end-to-end against a live-Oracle ground-truth fixture (`testdata/go_ora_largeresult.dbbat-dump`, `TestDumpReplay_LargeResultRows`). Multi-TNS-packet (small-SDU/JDBC) result sets reuse the same decoder via the continuation path; their per-row correctness is not yet ground-truth-verified.
 
@@ -308,14 +308,181 @@ The Oracle proxy has been tested with:
 
 | Client | Library | Status |
 |--------|---------|--------|
-| Go | go-ora | SQL + rows work end-to-end |
-| Python | oracledb (thin mode) | SQL works end-to-end (verified through dbbat → Oracle 19c) |
+| Go | go-ora | SQL + rows + **bind values** end-to-end (verified vs Oracle 23ai Free) |
+| Python | oracledb (thin mode) | SQL works vs Oracle 19c; **fails at AUTH vs Oracle 23ai** — see "Modern thin clients" below |
 | Java | ojdbc11 (JDBC thin) | SQL works, row capture partial (older tests) |
 | DBeaver | JDBC thin via ojdbc | Connects, SQL logged, row capture partial (older tests) |
-| SQLcl | JDBC thin (Oracle 23c+) | SQL works end-to-end |
-| sqlplus | OCI (Oracle 23c) | Not yet supported — see below |
+| SQLcl | JDBC thin (Oracle 23c+) | SQL works vs 19c; **fails at AUTH vs Oracle 23ai** (`ORA-03113 … Get the session key`) |
+| sqlplus | OCI (Oracle 23c) | Fails at AUTH vs Oracle 23ai |
 
 For debugging, enable `DBB_LOG_LEVEL=debug` to see TTC function codes and SQL extraction details.
+
+### Pre-auth relay (Oracle 23ai)
+
+The pre-auth negotiation is **not** strict request/response: a single client packet can
+elicit several upstream packets, and 23ai injects Control/Marker (OOB break/reset) packets
+mid-negotiation. The relay (`relayPreAuthNegotiation`) therefore runs a **concurrent
+bidirectional pump** (upstream→client in a goroutine; client→upstream in the main loop)
+until it sees AUTH Phase 1 — an earlier lockstep "one upstream read per client packet"
+relay **deadlocked** the moment the counts diverged, hanging *every* client on 23ai.
+
+Modern clients also **pipeline** the login into one FAST_AUTH packet (TNS message type
+`0x22`): `[0x22][ver][convChars][0]` + Set Protocol + `[charset:2][csFlag:1][ncharset:2]
+[ttcVer:1]` + Set Data Types + AUTH Phase 1, written back-to-back. `splitBundledAuthPhase1`
+de-pipelines this — replaying Set Protocol / Set Data Types to the upstream as classic
+standalone messages and carving out the embedded AUTH Phase 1 for terminated O5LOGON.
+`stripAcceptModernAuthFlags` also clears `FAST_AUTH` (`0x10000000`) and
+`HAS_END_OF_RESPONSE` (`0x02000000`) from the Accept's 4-byte connect-flags (offset 41,
+v315+) so clients fall back to the classic flow dbbat terminates.
+
+The Set Protocol response capability array is framed `[numCaps][06 01 01 01][caps…]`, where
+`numCaps` varies by server version (`0x2a` on 19c, `0x36` on 23ai) — `observeCustomHashFlag`
+anchors on the stable `06 01 01 01` prefix (not a version literal) and reads caps[0]&0x20.
+`stripCustomHashFromSetProto` clears that bit toward the client so it negotiates the
+verifier-6949 O5LOGON dbbat issues, while dbbat still uses customHash upstream.
+
+### Client compatibility on Oracle 23ai
+
+Verified end-to-end (authenticate + query + observability capture) against Oracle 23ai
+(`23.26`) through the cluster proxy from the Windows host:
+
+| Client | Protocol | Status | Notes |
+|--------|----------|--------|-------|
+| go-ora | thin | ✅ works | accepts 6949 or 18453 |
+| python-oracledb thin | thin | ✅ works | FAST_AUTH de-pipelined; verifier 18453 |
+| SQLcl 26.1.2 (ojdbc) | thin | ✅ works | classic O5LOGON; verifier 18453 |
+| sqlplus / OCI instant client | thick | ✅ works | auth + query work via the **wide** (4-byte LE) TTC encoding, with **no dependency on OOB/`DISABLE_OOB`** — verified locally against Oracle 23ai and through an OOB-stripping TCP relay (a NodePort/NLB stand-in). See "OCI wide encoding" and "OCI break/reset before AUTH Phase 2" below |
+
+Each API key now stores **both** verifiers (`api_keys.o5logon_verifier` 6949 and
+`o5logon_verifier_18453` + `o5logon_salt_18453`). When the upstream's Set Protocol
+response advertises `customHash` (23ai), `authenticateClient` switches the O5LOGON server
+to the 18453 (PBKDF2 / HMAC-SHA512) challenge — `AUTH_PBKDF2_CSK_SALT`,
+`AUTH_PBKDF2_VGEN_COUNT`, `AUTH_PBKDF2_SDER_COUNT`, `AUTH_GLOBALLY_UNIQUE_DBID`,
+`AUTH_SESSKEY` flag 0 — which modern thin clients require. Legacy go-ora reads the
+verifier type from the challenge's `AUTH_VFR_DATA` flag and uses 6949.
+
+#### Proxy-mode robustness (must never crash on a malformed packet)
+
+Query/response interception in proxy mode is **best-effort observability**: it decodes a
+copy for logging but forwards every packet byte-exact regardless. A decode error must
+never break the connection — and a *panic* must never take down the whole process. Two
+guards enforce this:
+
+- `dlc()` (`describe.go`) rejects a negative length. SQLcl/ojdbc negotiates a high
+  TTCVersion, so the server's column-describe records carry the modern domain/annotation
+  layout the parser misaligns on; a NUMBER scale's `-127` sentinel was then read as a
+  length, producing `data[:-127]` — a panic that crashed the **entire** dbbat process for
+  *all* connections. Now it returns nil and `parseColumnDescribes` bails out.
+- `interceptClientMessage` / `interceptUpstreamMessage` each `recover()` from any panic in
+  the decode path and forward the packet unchanged.
+
+See `sqlcl_regression_test.go` for both guards (real SQLcl 26.1.2 fixtures).
+
+#### SQLcl/ojdbc exec SQL capture
+
+SQLcl sends its statements via the `func=0x11` JDBC exec, where the SQL follows a run of
+zero bytes (no length prefix immediately before it). `findSQLInPayload` locates it by a
+**case-insensitive** keyword scan (SQLcl lowercases its SQL).
+
+#### SQLcl/ojdbc result capture — modern column-describe + 8-byte row values
+
+SQLcl/ojdbc negotiates a high TTCVersion, so the func=0x10 QueryResult's per-column
+describe records carry the modern (TTCVersion ≥ 17/20) trailing layout — data-use-case
+domain schema/name DLCs, an annotations block, and three further ints — that the classic
+parser misaligns on. `parseColumnDescribe(c, modern)` consumes those when needed and
+`parseColumnDescribes` auto-detects the layout: it tries the classic record first (so thin
+clients never regress) and retries the modern one only when the classic parse misaligns
+(an unknown TTC type or a record running off the end). go-ora v2.9.0 is the field-order
+reference but is stale for 23ai — the three extra trailing ints were recovered empirically
+from a real SQLcl describe (`sqlcl_regression_test.go`).
+
+Once columns parse, rows are located independently by `scanRowValues`. A second, latent bug
+surfaced there: `parseRowStream` treated a leading `0x08` as the end-of-rows footer, but
+`0x08` is also a valid column-value length (an 8-byte first value such as the string
+`sqlcl-ok`), so such rows vanished. The footer is the 3-byte sequence `08 01 06`; matching
+the full footer fixes it. SQLcl SELECT results (columns + rows, single- and multi-row) are
+now captured like any other client.
+
+#### OCI wide (4-byte little-endian) TTC encoding
+
+OCI clients (sqlplus / instant client) negotiate a different TTC integer encoding than thin
+clients: the AUTH key/value **lengths and flags are fixed 4-byte little-endian integers**,
+not the compressed length-prefixed form go-ora / python-oracledb thin / JDBC thin use. dbbat
+detects the client's encoding from its AUTH Phase 1 (`payloadUsesWideKVEncoding`: a 4-byte LE
+key length — three high zero bytes — precedes the 1-byte CLR length, which the compressed
+form `01 0d` never produces) and mirrors it across the whole terminated-auth path:
+
+- the **challenge** (`buildAuthChallenge` / `ttcKeyValWide` / `buildAuthChallengeEndMarker`):
+  data flags `20 00`, a 2-byte LE dictionary count, 4-byte LE key/val lengths and flags, and
+  a 153-byte wide end-of-call summary. Verified byte-for-byte against a real Oracle 23ai
+  classic 18453 challenge to an OCI client.
+- **Phase 2 parsing** (`parseAuthPhase2` → `findKVByKeyBytesWide`): value lengths are read as
+  4-byte LE.
+- the **upstream rewrite** (`rewriteAuthPhase1UsernameAnchored`, `replaceAuthKVValueWide`):
+  the user_id_len is a 4-byte LE field tens of bytes ahead of the username; AUTH_SESSKEY /
+  AUTH_PASSWORD values are spliced preserving the (sometimes buffer-sized) 4-byte key length.
+- the **upstream challenge parse** (`parseAuthKVDictionary` / `readAuthKVPairWide`): the
+  upstream negotiated wide with the client's relayed caps, so its challenge is wide too.
+
+With this, sqlplus authenticates and runs queries end-to-end (verified locally against
+Oracle 23ai, `DISABLE_OOB` unset); the SQL is captured like any other client.
+
+Four more OCI-only fixes complete the wide path (all captured/verified against the macOS
+Oracle Instant Client 23.3 and the DB-bundled 23.26 OCI client — the two flavors differ on
+the wire, so both are covered by fixtures in `oci_instantclient_test.go`):
+
+- **Client challenge end-of-call summary** (`clientChallengeTrailer`, `session.go`): the
+  summary appended after the AUTH challenge KV dictionary is **caps-conditioned** — 80
+  bytes for instantclient 23.3, 153 for the 23.26 bundled client. A fixed-width capture
+  only fits the client it came from; any other client leaves unread bytes in its TTC read
+  buffer, treats the next stale byte as a message code, and aborts the AUTH call with an
+  inline break/reset marker exchange — the "sqlplus stalls before AUTH Phase 2" symptom.
+  dbbat therefore runs upstream AUTH Phase 1 first (`beginUpstreamAuth`, before it
+  challenges the client) and reuses the **live upstream challenge's summary bytes**, which
+  the real server sized for these exact caps.
+- **Phase 1 user-len locator** (`findUserIDLenPos`, `phase1_forward.go`): the wide preamble
+  encodes `user_id_len` as a 4-byte LE field after the first `fe…`-pointer run — sometimes
+  as a 3× UTF-8 max-expansion buffer size. It must be found by anchoring on that pointer
+  run, **never** by scanning backward for a dword equal to the old length: the KV pair
+  count is also a small 4-byte LE integer between pointer runs, and a backward scan
+  corrupts it whenever `len(username) == numPairs` (the 5-char `admin` collides with the
+  OCI Phase-1 pair count of 5), after which the upstream waits forever for a pair that
+  never arrives and AUTH hangs.
+- **Phase 2 value length convention** (`replaceAuthKVValueWide`, `phase2_forward.go`): when
+  splicing AUTH_SESSKEY / AUTH_PASSWORD / AUTH_PBKDF2_SPEEDY_KEY, the 4-byte LE value
+  length must mirror the client's convention. instantclient 23.3 sends every value length
+  as a 3× buffer size; a spliced plain length draws `ORA-28041` ("authentication protocol
+  internal error") from a 23ai parsing at that client's caps.
+- **AUTH OK reassembly + re-fragmentation** (`readUpstreamAuthMessages` / `reframeAuthOK`,
+  `upstream_auth_client.go`): Oracle 23ai splits an OCI AUTH OK across two Data packets
+  (observed 1967+557 bytes) with the `AUTH_SVR_RESPONSE` hex value straddling the boundary.
+  dbbat merges the fragments into one packet so it can patch `AUTH_SVR_RESPONSE`
+  contiguously, then **re-fragments at the upstream's original boundaries** before
+  forwarding — a single merged packet exceeds the client's negotiated SDU and is rejected
+  with `ORA-12592` ("bad packet").
+
+#### OCI break/reset before AUTH Phase 2 — root cause and fix
+
+The OCI client sends an inline break/reset marker pair (`01 00 01` / `01 00 02`) before
+AUTH Phase 2 **when it rejects the challenge dbbat sent** — overwhelmingly because the
+challenge's trailing end-of-call summary width did not match the client's negotiated TTC
+caps (fixed above). After the resync the client waits for the aborted call's completion,
+which dbbat does not synthesize, so the session stalls or ends with `ORA-03106`. This was
+**historically mis-attributed to the TCP-urgent (out-of-band) break probe** — but a spy
+relay with `SO_OOBINLINE` + `SIOCATMARK` on both legs observed **zero** urgent bytes during
+the failing handshake, and the corrected proxy now works end-to-end through an
+OOB-stripping TCP relay (a faithful NodePort/NLB stand-in). No OOB bridging, no
+`DISABLE_OOB`, and no OOB-preserving ingress are required. `readPhase2Packet` still answers
+an inline break with a reset marker for resync robustness. Thin clients never send this
+marker pair and are unaffected.
+
+Cluster verification over the Kubernetes NodePort from the Windows host
+(`C:\oracle\instantclient_23_0\sqlplus.exe`) is **pending manual verification** — it was out
+of scope for the automated run that landed these fixes. Runbook: deploy the image built
+from this branch, then from the Windows host run
+`sqlplus orauser/<key>@//<node>:<nodeport>/FREEPDB1` and confirm a `SELECT … FROM dual`
+returns rows with no `ORA-03106` / `ORA-12592` / hang, and re-check go-ora /
+python-oracledb thin / SQLcl for no regression.
 
 ### Authentication path
 
@@ -351,19 +518,20 @@ client (not a static capture), so all session-specific fields — instance metad
 `AUTH_SVR_RESPONSE` (`patchAuthSvrResponse`): the upstream encrypts it with the proxy↔upstream
 combined key, but modern clients decrypt it with the client↔proxy combined key to confirm the
 server holds the negotiated session key. dbbat re-encrypts it in place under the client's key.
-Without this, python-oracledb thin rejected the AUTH OK with `DPY-4035` and JDBC thin / SQLcl
-with `ORA-17401`. go-ora ignores the field, which is why the earlier static-capture path
-worked for it while silently breaking everyone else. The static `capturedAuthOKResponse`
-remains only as a fallback when no upstream packet was captured.
+Without this, python-oracledb thin rejected the AUTH OK with `DPY-4035`, JDBC thin / SQLcl
+with `ORA-17401`, and sqlplus / OCI with `ORA-01017`. go-ora ignores the field, which is why
+the earlier static-capture path worked for it while silently breaking everyone else. The
+static `capturedAuthOKResponse` remains only as a fallback when no upstream packet was
+captured. For OCI the AUTH OK arrives split across two Data packets, so the value is patched
+on the reassembled packet and re-fragmented before forwarding — see "OCI wide encoding".
 
-### Known client limitations
+### Client compatibility
 
-- **sqlplus 23c** initiates Oracle Native Services (NS) negotiation via OOB break/reset
-  markers after the AUTH challenge. dbbat doesn't implement the NS protocol layer, so
-  sqlplus errors with `ORA-12630`.
-
-For now, `go-ora`, python-oracledb thin, and SQLcl 23c+ work end-to-end; sqlplus (OCI)
-reaches AUTH but not query execution.
+All four supported client families authenticate + query + capture end-to-end against Oracle
+23ai through the proxy — see the table under "Client compatibility on Oracle 23ai" above.
+The last holdout, sqlplus / OCI instant client, was fixed by the wide-encoding path plus the
+four OCI-only fixes documented there; it no longer depends on OOB / `DISABLE_OOB`. Against
+Oracle 19c the historical behavior still applies.
 
 ### Per-user O5LOGON key
 

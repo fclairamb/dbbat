@@ -132,6 +132,13 @@ type SlackNotifyConfig struct {
 	// interactivity: messages carry no buttons and the inbound endpoint is
 	// not registered — outbound notifications still work.
 	SigningSecret string `koanf:"signing_secret"`
+	// AppToken is the Slack app-level token (xapp-...) with the
+	// connections:write scope. When set together with a bot token, dbbat
+	// opens an outbound Socket Mode connection and receives Approve/Deny
+	// interactions over it instead of the inbound HTTP endpoint — for
+	// deployments that can't accept inbound Slack traffic. Empty = no Socket
+	// Mode.
+	AppToken string `koanf:"app_token"`
 }
 
 // Enabled returns true when a bot token is set. Channel is enforced at
@@ -141,13 +148,21 @@ func (c SlackNotifyConfig) Enabled() bool {
 	return c.BotToken != ""
 }
 
-// Interactive returns true when Approve/Deny buttons should be rendered and
-// the inbound interaction endpoint should be served. Both a signing secret
-// (to verify inbound clicks) and a bot token (to carry the buttons on
-// notification messages) are required — a signing secret without a bot token
-// is a misconfiguration caught at startup.
+// SocketMode returns true when dbbat should open an outbound Slack Socket
+// Mode connection: both an app-level token and a bot token are set. An app
+// token without a bot token is a misconfiguration caught at startup.
+func (c SlackNotifyConfig) SocketMode() bool {
+	return c.AppToken != "" && c.BotToken != ""
+}
+
+// Interactive returns true when Approve/Deny buttons should be rendered and an
+// inbound interaction transport should be served. A bot token (to carry the
+// buttons on notification messages) plus at least one inbound transport — a
+// signing secret (the HTTP endpoint) or an app-level token (Socket Mode) — is
+// required. A signing secret or app token without a bot token is a
+// misconfiguration caught at startup.
 func (c SlackNotifyConfig) Interactive() bool {
-	return c.SigningSecret != "" && c.BotToken != ""
+	return c.BotToken != "" && (c.SigningSecret != "" || c.AppToken != "")
 }
 
 // DumpConfig holds configuration for session packet dumps.
@@ -272,16 +287,9 @@ type Config struct {
 	// grant request events.
 	SlackNotify SlackNotifyConfig `koanf:"slack_notify"`
 
-	// PublicURL is the externally reachable base URL of the dbbat *web UI* —
-	// the address a human (e.g. a Slack reviewer) opens in a browser, such as
-	// "https://dbbat.tools.stonal.io". It is used to build the deep-links and
-	// user-facing hints in Slack notifications.
-	//
-	// This is NOT the database connection/proxy host that clients point their
-	// PostgreSQL/Oracle/MySQL drivers at (e.g. "db.stonal.io", which may be
-	// VPN-gated and not browser-reachable). Those two addresses are distinct
-	// settings; do not reuse the DB proxy host here or Slack links will be
-	// unreachable. Required only if SlackNotify is enabled.
+	// PublicURL is the externally reachable base URL for this dbbat
+	// instance. Used to build deep-links in Slack notifications. Required
+	// only if SlackNotify is enabled.
 	PublicURL string `koanf:"public_url"`
 
 	// Dump holds session packet dump configuration.
@@ -420,6 +428,13 @@ func envTransform(k, v string) (string, any) {
 	if strings.HasPrefix(key, "slack_auth_") {
 		return "slack_auth." + strings.TrimPrefix(key, "slack_auth_"), v
 	}
+	// slack_signing_secret -> slack_notify.signing_secret
+	// DBB_SLACK_SIGNING_SECRET is the canonical, documented name; the
+	// slack_notify_* prefix rule below keeps the legacy
+	// DBB_SLACK_NOTIFY_SIGNING_SECRET working as an accepted alias.
+	if key == "slack_signing_secret" {
+		return "slack_notify.signing_secret", v
+	}
 	// slack_notify_* -> slack_notify.*
 	if strings.HasPrefix(key, "slack_notify_") {
 		return "slack_notify." + strings.TrimPrefix(key, "slack_notify_"), v
@@ -469,6 +484,16 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 	// 4. Load environment variables (DBB_ prefix) - these override config file values
 	if err := k.Load(env.Provider(koanfDelim, env.Opt{Prefix: "DBB_", TransformFunc: envTransform}), nil); err != nil {
 		return nil, fmt.Errorf("failed to load environment variables: %w", err)
+	}
+
+	// Both DBB_SLACK_SIGNING_SECRET (canonical) and the legacy
+	// DBB_SLACK_NOTIFY_SIGNING_SECRET map to slack_notify.signing_secret, and
+	// the env provider gives no ordering guarantee when both are set. Re-apply
+	// the canonical variable explicitly so it deterministically wins.
+	if v := os.Getenv("DBB_SLACK_SIGNING_SECRET"); v != "" {
+		if err := k.Set("slack_notify.signing_secret", v); err != nil {
+			return nil, fmt.Errorf("failed to apply DBB_SLACK_SIGNING_SECRET: %w", err)
+		}
 	}
 
 	// Unmarshal into Config struct

@@ -1,5 +1,72 @@
 # Changelog
 
+## [0.15.1](https://github.com/fclairamb/dbbat/compare/v0.15.0...v0.15.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* **ci:** prevent shell injection from commit message in image workflow ([#233](https://github.com/fclairamb/dbbat/issues/233)) ([a436a05](https://github.com/fclairamb/dbbat/commit/a436a05bac6e0b593fbc81272d28587f5e2991f7))
+* **oracle:** handle dotted usernames in OCI/sqlplus auth (both phases) ([#235](https://github.com/fclairamb/dbbat/issues/235)) ([d822022](https://github.com/fclairamb/dbbat/commit/d822022fbb84466f473b3ac7db9f98ae73244803))
+
+## [0.15.0](https://github.com/fclairamb/dbbat/compare/v0.14.0...v0.15.0) (2026-07-09)
+
+Implements five backlog specs in one squash-merged PR ([#230](https://github.com/fclairamb/dbbat/issues/230)) ([42c4e37](https://github.com/fclairamb/dbbat/commit/42c4e3713c95091fef3b51a15dd54489813300c8)); the individual changes are broken out below.
+
+### Features
+
+* **ui:** admin user-management UI — edit users and promote/demote admin rights from the users page, guarded so the last admin can't be demoted or deleted (UI lock plus a backend `409` on update/delete) ([#230](https://github.com/fclairamb/dbbat/issues/230))
+
+### Bug Fixes
+
+* **oracle:** make sqlplus / OCI instant client work through the proxy — root-caused the long-standing stall to a malformed wide-encoding AUTH challenge (not the TCP-urgent OOB break probe that was long assumed), fixing four wide-encoding bugs; works even over an OOB-dropping network path ([#230](https://github.com/fclairamb/dbbat/issues/230))
+* **config:** accept the documented `DBB_SLACK_SIGNING_SECRET` env var for the Slack signing secret, with the legacy `DBB_SLACK_NOTIFY_SIGNING_SECRET` kept as an accepted alias (canonical wins if both are set) ([#230](https://github.com/fclairamb/dbbat/issues/230))
+
+### Documentation
+
+* document the three Slack interactivity deployment shapes and Socket Mode (`DBB_SLACK_NOTIFY_APP_TOKEN`) for gated deployments, plus a startup warning when the inbound endpoint must be reachable from Slack ([#230](https://github.com/fclairamb/dbbat/issues/230))
+* document HTTPRoute (Gateway API) exposure on the website and fix the Docusaurus build ([#230](https://github.com/fclairamb/dbbat/issues/230))
+
+## [0.14.0](https://github.com/fclairamb/dbbat/compare/v0.13.0...v0.14.0) (2026-07-08)
+
+
+### Features
+
+* **api:** add Slack interactive grant approval (Approve/Deny buttons) ([#223](https://github.com/fclairamb/dbbat/issues/223)) ([516d4ca](https://github.com/fclairamb/dbbat/commit/516d4ca7b1152dcd5122a49dea071ef46b5961ea))
+* **api:** add Slack Socket Mode transport for Approve/Deny interactions ([#229](https://github.com/fclairamb/dbbat/issues/229)) ([d1d33d4](https://github.com/fclairamb/dbbat/commit/d1d33d4c80c60cbb6b2cdeeddade0b095359a701))
+
+
+### Bug Fixes
+
+* **deps:** update module golang.org/x/crypto to v0.54.0 ([#226](https://github.com/fclairamb/dbbat/issues/226)) ([d53ede1](https://github.com/fclairamb/dbbat/commit/d53ede1b36bf573498d87982e11ab1ca24f1782f))
+* **deps:** update module golang.org/x/text to v0.39.0 ([#221](https://github.com/fclairamb/dbbat/issues/221)) ([c10f410](https://github.com/fclairamb/dbbat/commit/c10f4101bc9b6c828d0a8165915213d6230019fe))
+* **deps:** update module golang.org/x/text to v0.40.0 ([#225](https://github.com/fclairamb/dbbat/issues/225)) ([abf43ff](https://github.com/fclairamb/dbbat/commit/abf43ffcb91d1734123973855892f3f562f7fab6))
+
+## [0.13.0](https://github.com/fclairamb/dbbat/compare/v0.12.0...v0.13.0) (2026-07-05)
+
+
+### Features
+
+* add Gateway API HTTPRoute support to the Helm chart ([#218](https://github.com/fclairamb/dbbat/issues/218)) ([1de8a62](https://github.com/fclairamb/dbbat/commit/1de8a627393779c075e17c2cf82241d8f902dccc))
+* **oracle:** modern client support — sqlplus/OCI auth, SQLcl result capture, verifier-18453 ([#205](https://github.com/fclairamb/dbbat/issues/205)) ([a9858f6](https://github.com/fclairamb/dbbat/commit/a9858f6ccca16f26755fe126e961b816261cea6e))
+* **oracle:** type-aware row & value capture with describe-record parser and bind extraction ([#195](https://github.com/fclairamb/dbbat/issues/195)) ([933a91e](https://github.com/fclairamb/dbbat/commit/933a91e5611adb985e82d0f500014a5f6212e1ef))
+
+
+### Bug Fixes
+
+* **ci:** restore unified dbbat-proxy service (pg+oracle+mysql) ([#220](https://github.com/fclairamb/dbbat/issues/220)) ([7bd9aa0](https://github.com/fclairamb/dbbat/commit/7bd9aa0793e77d62e037109b13acc4b0dd53e52f))
+* **deps:** update module github.com/jackc/pgx/v5 to v5.10.0 ([#190](https://github.com/fclairamb/dbbat/issues/190)) ([d6a86c5](https://github.com/fclairamb/dbbat/commit/d6a86c55e2d4c1f88ae0296770f6e99fedd8e5e0))
+* **deps:** update module github.com/knadh/koanf/v2 to v2.3.5 ([#187](https://github.com/fclairamb/dbbat/issues/187)) ([88f286e](https://github.com/fclairamb/dbbat/commit/88f286e519085eb4c4ea163eafc3428e185ef584))
+* **deps:** update module github.com/slack-go/slack to v0.24.0 ([#184](https://github.com/fclairamb/dbbat/issues/184)) ([c532e11](https://github.com/fclairamb/dbbat/commit/c532e11a744671e1b5ac08de52eb057c314375ce))
+* **deps:** update module github.com/slack-go/slack to v0.25.0 ([#191](https://github.com/fclairamb/dbbat/issues/191)) ([b6d2b01](https://github.com/fclairamb/dbbat/commit/b6d2b01aeafd2f22288228babfbf878e8c34a37a))
+* **deps:** update module github.com/slack-go/slack to v0.26.0 ([#200](https://github.com/fclairamb/dbbat/issues/200)) ([5d72fc1](https://github.com/fclairamb/dbbat/commit/5d72fc18e99232444d1dcb1d0197a1fbd8fa7370))
+* **deps:** update module github.com/slack-go/slack to v0.27.0 ([#210](https://github.com/fclairamb/dbbat/issues/210)) ([294d902](https://github.com/fclairamb/dbbat/commit/294d9020c058be7f8fe108395018abfb4b285049))
+* **deps:** update module github.com/urfave/cli/v3 to v3.10.0 ([#201](https://github.com/fclairamb/dbbat/issues/201)) ([02d077e](https://github.com/fclairamb/dbbat/commit/02d077eb60e61a03bde4abb82e12cb3109f068c7))
+* **deps:** update module github.com/urfave/cli/v3 to v3.10.1 ([#211](https://github.com/fclairamb/dbbat/issues/211)) ([76d52b9](https://github.com/fclairamb/dbbat/commit/76d52b914a08eb696ca09d44c684f759c3f8a7f7))
+* **deps:** update module github.com/urfave/cli/v3 to v3.9.1 ([#196](https://github.com/fclairamb/dbbat/issues/196)) ([78b61fa](https://github.com/fclairamb/dbbat/commit/78b61fa5837953614bdf583c1e7f240e25b91ddd))
+* **deps:** update module golang.org/x/crypto to v0.52.0 ([#180](https://github.com/fclairamb/dbbat/issues/180)) ([eadd0ba](https://github.com/fclairamb/dbbat/commit/eadd0bab2b5e8f27ad6909ba51e398f4580c48be))
+* **deps:** update module golang.org/x/crypto to v0.53.0 ([#194](https://github.com/fclairamb/dbbat/issues/194)) ([0566f88](https://github.com/fclairamb/dbbat/commit/0566f88dc61a170ffe2396f885b29e6f69cc58e9))
+* **deps:** update testcontainers-go monorepo to v0.43.0 ([#203](https://github.com/fclairamb/dbbat/issues/203)) ([6d9e06f](https://github.com/fclairamb/dbbat/commit/6d9e06fc47d43ee0fda06f818b6e80230dc861c7))
+
 ## [0.12.0](https://github.com/fclairamb/dbbat/compare/v0.11.0...v0.12.0) (2026-05-15)
 
 

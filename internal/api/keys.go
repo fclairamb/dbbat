@@ -114,38 +114,7 @@ func (s *Server) handleListAPIKeys(c *gin.Context) {
 		return
 	}
 
-	// Enrich with owner usernames for the admin fleet-review view so the UI can
-	// render an Owner column. Best-effort: a lookup failure just leaves the
-	// owner blank rather than failing the whole request. Only needed for admins
-	// (non-admins only ever see their own keys).
-	if currentUser.IsAdmin() && len(keys) > 0 {
-		s.enrichAPIKeyOwners(c.Request.Context(), keys)
-	}
-
 	successResponse(c, gin.H{"keys": keys})
-}
-
-// enrichAPIKeyOwners populates the UserLogin field on each key with the owning
-// user's username, using a single batched lookup over the distinct user IDs.
-func (s *Server) enrichAPIKeyOwners(ctx context.Context, keys []store.APIKey) {
-	seen := make(map[uuid.UUID]bool, len(keys))
-	ids := make([]uuid.UUID, 0, len(keys))
-	for i := range keys {
-		if !seen[keys[i].UserID] {
-			seen[keys[i].UserID] = true
-			ids = append(ids, keys[i].UserID)
-		}
-	}
-
-	names, err := s.store.GetUsernamesByIDs(ctx, ids)
-	if err != nil {
-		s.logger.WarnContext(ctx, "failed to resolve API key owner usernames", "error", err)
-		return
-	}
-
-	for i := range keys {
-		keys[i].UserLogin = names[keys[i].UserID]
-	}
 }
 
 // handleGetAPIKey retrieves a specific API key

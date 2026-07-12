@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"strings"
@@ -8,6 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/fclairamb/dbbat/internal/crypto"
 )
 
 func TestGenerateAPIKey(t *testing.T) {
@@ -115,6 +118,88 @@ func TestCreateAPIKey(t *testing.T) {
 			t.Errorf("CreateAPIKey() apiKey.ExpiresAt = %v, want %v", apiKey.ExpiresAt, expiresAt)
 		}
 	})
+}
+
+func TestAPIKeyProtocolDataRoundTrip(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, err := store.CreateUser(ctx, "oracleuser", "hash", []string{RoleConnector})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	// 32-byte AES-256 master key so the O5LOGON verifiers are computed + encrypted
+	// and stored in the protocol_data jsonb column.
+	encKey := bytes.Repeat([]byte{0x42}, 32)
+
+	created, _, err := store.CreateAPIKey(ctx, user.UID, "Oracle Key", nil, encKey)
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+
+	od := created.OracleData()
+	if od == nil {
+		t.Fatal("created.OracleData() = nil, want Oracle protocol data")
+	}
+	if len(od.O5LogonSalt6949) == 0 || len(od.O5LogonVerifier6949) == 0 ||
+		len(od.O5LogonSalt18453) == 0 || len(od.O5LogonVerifier18453) == 0 {
+		t.Fatalf("created O5LOGON material incomplete: %+v", od)
+	}
+
+	// Round-trip through the jsonb column: bun must marshal []byte as base64 and
+	// recover the exact bytes on read.
+	fetched, err := store.GetAPIKeyByPrefix(ctx, created.KeyPrefix)
+	if err != nil {
+		t.Fatalf("GetAPIKeyByPrefix() error = %v", err)
+	}
+
+	fod := fetched.OracleData()
+	if fod == nil {
+		t.Fatal("fetched.OracleData() = nil after jsonb round-trip")
+	}
+
+	for _, tc := range []struct {
+		name      string
+		got, want []byte
+	}{
+		{"salt_6949", fod.O5LogonSalt6949, od.O5LogonSalt6949},
+		{"verifier_6949", fod.O5LogonVerifier6949, od.O5LogonVerifier6949},
+		{"salt_18453", fod.O5LogonSalt18453, od.O5LogonSalt18453},
+		{"verifier_18453", fod.O5LogonVerifier18453, od.O5LogonVerifier18453},
+	} {
+		if !bytes.Equal(tc.got, tc.want) {
+			t.Errorf("%s mismatch after round-trip:\n got=%x\nwant=%x", tc.name, tc.got, tc.want)
+		}
+	}
+
+	// The round-tripped verifiers must still decrypt with the master key + AAD —
+	// i.e. the bytes survived jsonb storage intact, not just compared equal.
+	aad := crypto.APIKeyAAD(fetched.KeyPrefix)
+	if _, err := crypto.Decrypt(fod.O5LogonVerifier6949, encKey, aad); err != nil {
+		t.Errorf("Decrypt(verifier_6949) after round-trip error = %v", err)
+	}
+	if _, err := crypto.Decrypt(fod.O5LogonVerifier18453, encKey, aad); err != nil {
+		t.Errorf("Decrypt(verifier_18453) after round-trip error = %v", err)
+	}
+
+	// A key created without an encryption key has no protocol data — the jsonb
+	// column is NULL and OracleData() returns nil (nullzero behavior).
+	plain, _, err := store.CreateAPIKey(ctx, user.UID, "Plain Key", nil)
+	if err != nil {
+		t.Fatalf("CreateAPIKey(no enc) error = %v", err)
+	}
+
+	plainFetched, err := store.GetAPIKeyByPrefix(ctx, plain.KeyPrefix)
+	if err != nil {
+		t.Fatalf("GetAPIKeyByPrefix(plain) error = %v", err)
+	}
+	if plainFetched.ProtocolData != nil {
+		t.Errorf("plain key ProtocolData = %+v, want nil", plainFetched.ProtocolData)
+	}
+	if plainFetched.OracleData() != nil {
+		t.Errorf("plain key OracleData() = %+v, want nil", plainFetched.OracleData())
+	}
 }
 
 func TestVerifyAPIKey(t *testing.T) {

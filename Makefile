@@ -19,18 +19,18 @@ dev-front:
 	@echo "Starting frontend dev server..."
 	@cd front && bun run dev
 
-# Start only backend with devloop (requires frontend to be running separately for HMR)
+# Start only backend with Air (requires frontend to be running separately for HMR)
 dev-back:
-	@echo "Starting backend with devloop hot reloading..."
+	@echo "Starting backend with Air hot reloading..."
 	@docker compose up -d postgres
 	@sleep 2
-	@. ./scripts/run-backend-dev.sh && go run ./cmd/devloop
+	@air
 
 # Stop development environment
 dev-stop:
 	@echo "Stopping development environment..."
 	@-pkill -f "bun run dev" 2>/dev/null || true
-	@-pkill -f "dbbat serve" 2>/dev/null || true
+	@-pkill -f "air" 2>/dev/null || true
 	@docker compose down
 
 # Build variables for ldflags

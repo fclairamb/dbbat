@@ -56,6 +56,42 @@ type slackDecider interface {
 	postThreadReply(ctx context.Context, ev notify.GrantRequestEvent, action notify.GrantAction)
 }
 
+// logSlackInteractivityTransport notes at startup which inbound transport
+// carries Slack Approve/Deny clicks. When interactivity is enabled through
+// the signing secret alone (no Socket Mode app token), the buttons are
+// advertised on notification messages but clicks only work if Slack's
+// servers — not just users' browsers — can reach the inbound endpoint. On
+// gated/intranet deployments that failure mode is silent: Slack shows
+// "Operation timed out" after 3s and dbbat never sees the request. This
+// line makes the reachability requirement, and the Socket Mode
+// alternative, visible in the startup logs. Socket Mode logs its own
+// "slack socket mode enabled" line in startSocketMode.
+func (s *Server) logSlackInteractivityTransport() {
+	if !s.slackHTTPOnlyInteractivity() {
+		return
+	}
+
+	s.logger.InfoContext(context.Background(),
+		"slack interactivity: inbound HTTP transport only — POST /api/v1/slack/interactions must be reachable"+
+			" from Slack's servers (not just users' browsers), or Approve/Deny clicks will time out after 3s;"+
+			" on gated/intranet deployments set DBB_SLACK_NOTIFY_APP_TOKEN to receive clicks over Socket Mode instead",
+		slog.String("endpoint", s.publicURLForMessage()+"/api/v1/slack/interactions"),
+	)
+}
+
+// slackHTTPOnlyInteractivity reports whether Approve/Deny interactivity is
+// enabled with the signing-secret HTTP endpoint as its only inbound
+// transport (no Socket Mode).
+func (s *Server) slackHTTPOnlyInteractivity() bool {
+	if s.config == nil {
+		return false
+	}
+
+	cfg := s.config.SlackNotify
+
+	return cfg.Interactive() && !cfg.SocketMode()
+}
+
 // handleSlackInteraction handles POST /api/v1/slack/interactions — inbound
 // Approve/Deny button clicks from Slack. Registered OUTSIDE the
 // authenticated group: the Slack request signature is the authentication.

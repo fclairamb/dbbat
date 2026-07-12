@@ -155,32 +155,46 @@ func (s *Store) CreateAPIKeyWithValue(ctx context.Context, userID uuid.UUID, nam
 	return apiKey, nil
 }
 
-// computeO5LogonVerifier generates and encrypts O5LOGON verifier data for an API key.
+// computeO5LogonVerifier generates and encrypts O5LOGON verifier data for an API
+// key. Both the legacy verifier-6949 (SHA-1, for go-ora and other legacy clients)
+// and the modern verifier-18453 (12c PBKDF2/HMAC-SHA512, for python-oracledb thin,
+// JDBC thin / SQLcl, and sqlplus against Oracle 12c+/23ai) are stored, each
+// encrypted with the dbbat master key; the Oracle proxy picks the one matching
+// what the connecting client negotiates.
 func (k *APIKey) computeO5LogonVerifier(plainKey string, encryptionKey []byte) error {
+	aad := crypto.APIKeyAAD(k.KeyPrefix)
+
+	// Legacy verifier-6949 (SHA-1).
 	salt, verifierKey, err := crypto.GenerateO5LogonVerifier(plainKey)
 	if err != nil {
 		return fmt.Errorf("failed to generate O5LOGON verifier: %w", err)
 	}
 
-	// Also derive the verifier-18453 blob (salt || key) so OCI thick clients,
-	// which resolve the O5LOGON challenge as verifier 18453, can authenticate.
-	// Both variants are packed into the single o5logon_verifier column.
-	salt18453, key18453, err := crypto.GenerateO5Logon18453Verifier(plainKey)
-	if err != nil {
-		return fmt.Errorf("failed to generate O5LOGON 18453 verifier: %w", err)
-	}
-
-	blob := crypto.EncodeO5LogonVerifierBlob(verifierKey, salt18453, key18453)
-
-	// Encrypt the packed verifier blob with the dbbat master key.
-	aad := crypto.APIKeyAAD(k.KeyPrefix)
-	encVerifier, err := crypto.Encrypt(blob, encryptionKey, aad)
+	encVerifier, err := crypto.Encrypt(verifierKey, encryptionKey, aad)
 	if err != nil {
 		return fmt.Errorf("failed to encrypt O5LOGON verifier: %w", err)
 	}
 
-	k.O5LogonSalt = salt
-	k.O5LogonVerifier = encVerifier
+	// Modern verifier-18453 (PBKDF2/HMAC-SHA512).
+	salt18453, verifier18453, err := crypto.GenerateO5LogonVerifier18453(plainKey)
+	if err != nil {
+		return fmt.Errorf("failed to generate O5LOGON verifier-18453: %w", err)
+	}
+
+	encVerifier18453, err := crypto.Encrypt(verifier18453, encryptionKey, aad)
+	if err != nil {
+		return fmt.Errorf("failed to encrypt O5LOGON verifier-18453: %w", err)
+	}
+
+	// Both verifier types live together in the protocol-specific jsonb column.
+	k.ProtocolData = &ProtocolData{
+		Oracle: &OracleAPIKeyData{
+			O5LogonSalt6949:      salt,
+			O5LogonVerifier6949:  encVerifier,
+			O5LogonSalt18453:     salt18453,
+			O5LogonVerifier18453: encVerifier18453,
+		},
+	}
 
 	return nil
 }

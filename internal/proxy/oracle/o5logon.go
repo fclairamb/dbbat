@@ -13,14 +13,14 @@ import (
 )
 
 const (
-	o5LogonSaltLength        = 10
-	o5LogonVerifierKeyLength = 24     // SHA-1 (20 bytes) zero-padded to 24
-	o5LogonSessionKeyLength  = 48     // 48 bytes needed for non-customHash key derivation (XOR bytes 16-39)
-	o5LogonVerifierType         = "6949" // SHA-1 based verifier (legacy, used in value suffix)
-	o5LogonVerifierTypeNum      = 6949   // Verifier type sent as KV pair flag
-	o5LogonVerifierType18453Num = 18453  // 12c PBKDF2 verifier type flag
-	o5Logon18453SessionKeyLen   = 32     // 12c session-key length
-	o5LogonPasswordPrefixLen    = 16     // Random prefix prepended to password by client
+	o5LogonSaltLength            = 10
+	o5LogonVerifierKeyLength     = 24 // SHA-1 (20 bytes) zero-padded to 24
+	o5LogonSessionKeyLength      = 48 // 48 bytes needed for non-customHash key derivation (XOR bytes 16-39)
+	o5LogonSessionKey18453Length = 32 // verifier-18453 session key (AES-256), matches Oracle 12c+/23ai
+
+	o5LogonVerifierType      = "6949" // SHA-1 based verifier (legacy, used in value suffix)
+	o5LogonVerifierTypeNum   = 6949   // Verifier type sent as KV pair flag
+	o5LogonPasswordPrefixLen = 16     // Random prefix prepended to password by client
 
 	// o5LogonPbkdf2ChkSaltLen is the length of AUTH_PBKDF2_CSK_SALT in bytes
 	// (32-character hex on the wire). go-ora rejects values whose hex form is
@@ -62,20 +62,17 @@ type O5LogonServer struct {
 	pbkdf2VgenCount int
 	pbkdf2SderCount int
 
-	// verifier18453, when true, switches the server to the 12c PBKDF2 verifier:
-	// 32-byte session keys encrypted with verifierKey18453 (AES-256, no
-	// padding), AUTH_VFR_DATA=salt18453 flagged 18453, and the 18453 combined
-	// key. Used for OCI thick clients (sqlplus), which resolve a customHash
-	// challenge as verifier 18453. Implies customHash.
-	verifier18453    bool
-	salt18453        []byte
-	verifierKey18453 []byte
-
 	// CombinedKey is set by DecryptPassword to the negotiated combined key
 	// — either MD5/XOR (legacy) or the PBKDF2-customHash derivation. It is
 	// the AES key the client expects for AUTH_SVR_RESPONSE in the AUTH OK
 	// forwarded back.
 	CombinedKey []byte
+
+	// verifierType selects the O5LOGON verifier: VerifierType6949 (SHA-1, legacy,
+	// AES-192) or VerifierType18453 (12c PBKDF2/HMAC-SHA512, AES-256). 18453 is
+	// what modern thin clients require on Oracle 12c+/23ai; the verifierKey/salt
+	// then hold the 18453 material and challenges advertise type 18453.
+	verifierType int
 }
 
 // GenerateO5LogonVerifier creates salt + verifier key from a plaintext password.
@@ -91,14 +88,29 @@ func deriveVerifierKey(password string, salt []byte) []byte {
 	return dbbcrypto.DeriveO5LogonVerifierKey(password, salt)
 }
 
-// NewO5LogonServer creates a server from stored verifier data.
+// NewO5LogonServer creates a server from stored verifier data (legacy 6949).
 func NewO5LogonServer(salt, verifierKey []byte) *O5LogonServer {
 	return &O5LogonServer{
 		salt:            salt,
 		verifierKey:     verifierKey,
+		verifierType:    VerifierType6949,
 		pbkdf2VgenCount: o5LogonDefaultPbkdf2VgenCount,
 		pbkdf2SderCount: o5LogonDefaultPbkdf2SderCount,
 	}
+}
+
+// UseVerifier18453 switches the server to the modern verifier-18453 (12c PBKDF2 /
+// HMAC-SHA512) using the supplied 16-byte salt and 32-byte verifier key. This
+// implies customHash mode (the challenge carries AUTH_PBKDF2_* fields and the
+// combined key uses the PBKDF2 derivation). Use it when the client negotiates
+// customHash (Oracle 12c+/23ai) so python-oracledb thin, JDBC thin / SQLcl, and
+// sqlplus — which reject the legacy 6949 challenge — can authenticate.
+func (s *O5LogonServer) UseVerifier18453(salt, verifierKey []byte) {
+	s.salt = salt
+	s.verifierKey = verifierKey
+	s.verifierType = VerifierType18453
+	s.customHash = true
+	s.pbkdf2VgenCount = dbbcrypto.O5LogonPbkdf2VgenCount
 }
 
 // EnableCustomHash switches the server into customHash mode. GenerateChallenge
@@ -115,25 +127,6 @@ func (s *O5LogonServer) EnableCustomHash() {
 // the challenge builder to decide whether to include AUTH_PBKDF2_* fields.
 func (s *O5LogonServer) CustomHashEnabled() bool {
 	return s.customHash
-}
-
-// EnableVerifier18453 switches the server to the 12c PBKDF2 verifier using the
-// stored 18453 salt and key. Implies customHash.
-func (s *O5LogonServer) EnableVerifier18453(salt18453, verifierKey18453 []byte) {
-	s.verifier18453 = true
-	s.customHash = true
-	s.salt18453 = salt18453
-	s.verifierKey18453 = verifierKey18453
-}
-
-// VerifierType returns the verifier type flag the challenge advertises on
-// AUTH_VFR_DATA: 18453 in 12c mode, otherwise 6949.
-func (s *O5LogonServer) VerifierType() int {
-	if s.verifier18453 {
-		return o5LogonVerifierType18453Num
-	}
-
-	return o5LogonVerifierTypeNum
 }
 
 // PBKDF2ChkSalt returns the per-session salt as an uppercase hex string.
@@ -157,6 +150,19 @@ func (s *O5LogonServer) PBKDF2SderCount() int { return s.pbkdf2SderCount }
 // via PBKDF2ChkSalt) so the caller can include the matching KV fields in the
 // Phase 1 challenge sent on the wire.
 func (s *O5LogonServer) GenerateChallenge() (string, string, error) {
+	// Generate random server session key. verifier-18453 uses a 32-byte key
+	// (AES-256, matching what real Oracle 12c+/23ai emits); legacy 6949 uses 48
+	// bytes (its MD5/XOR derivation reads bytes 16-39).
+	sessKeyLen := o5LogonSessionKeyLength
+	if s.verifierType == VerifierType18453 {
+		sessKeyLen = o5LogonSessionKey18453Length
+	}
+
+	s.serverSessionKey = make([]byte, sessKeyLen)
+	if _, err := rand.Read(s.serverSessionKey); err != nil {
+		return "", "", fmt.Errorf("failed to generate server session key: %w", err)
+	}
+
 	if s.customHash {
 		s.pbkdf2ChkSalt = make([]byte, o5LogonPbkdf2ChkSaltLen)
 		if _, err := rand.Read(s.pbkdf2ChkSalt); err != nil {
@@ -164,53 +170,37 @@ func (s *O5LogonServer) GenerateChallenge() (string, string, error) {
 		}
 	}
 
-	if s.verifier18453 {
-		return s.generateChallenge18453()
+	// Encrypt the server session key. verifier-18453 uses the 32-byte verifier
+	// key directly with AES-256-CBC (zero IV, pad block truncated); legacy 6949
+	// derives an AES-192 key from the 24-byte verifier.
+	var (
+		encrypted []byte
+		err       error
+	)
+
+	if s.verifierType == VerifierType18453 {
+		encrypted, err = aesCBCEncryptZeroIV(s.verifierKey, s.serverSessionKey, false)
+	} else {
+		encrypted, err = aes192CBCEncryptTruncated(deriveAESKey(s.verifierKey), s.serverSessionKey)
 	}
 
-	// Generate random server session key
-	s.serverSessionKey = make([]byte, o5LogonSessionKeyLength)
-	if _, err := rand.Read(s.serverSessionKey); err != nil {
-		return "", "", fmt.Errorf("failed to generate server session key: %w", err)
-	}
-
-	// Derive encryption key from verifier key
-	encKey := deriveAESKey(s.verifierKey)
-
-	// Encrypt server session key with AES-192-CBC (truncated to original length)
-	encrypted, err := aes192CBCEncryptTruncated(encKey, s.serverSessionKey)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to encrypt server session key: %w", err)
 	}
 
 	encSessKey := strings.ToUpper(hex.EncodeToString(encrypted))
 
-	// AUTH_VFR_DATA = hex(salt). The verifier type (6949) is sent as the
-	// KV pair flag, not as a value suffix (go-ora reads VerifierType from the flag).
+	// AUTH_VFR_DATA = hex(salt). The verifier type is sent as the KV pair flag
+	// (see buildAuthChallenge), not as a value suffix — go-ora and the thin
+	// clients read VerifierType from the flag.
 	vfrData := strings.ToUpper(hex.EncodeToString(s.salt))
 
 	return encSessKey, vfrData, nil
 }
 
-// generateChallenge18453 produces the 12c-verifier challenge: a 32-byte server
-// session key encrypted with the 18453 key (AES-256-CBC, zero IV, no padding),
-// and AUTH_VFR_DATA = hex(salt18453).
-func (s *O5LogonServer) generateChallenge18453() (string, string, error) {
-	s.serverSessionKey = make([]byte, o5Logon18453SessionKeyLen)
-	if _, err := rand.Read(s.serverSessionKey); err != nil {
-		return "", "", fmt.Errorf("failed to generate server session key: %w", err)
-	}
-
-	encrypted, err := aesCBCEncryptZeroIV(s.verifierKey18453, s.serverSessionKey, false)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to encrypt server session key (18453): %w", err)
-	}
-
-	encSessKey := strings.ToUpper(hex.EncodeToString(encrypted))
-	vfrData := strings.ToUpper(hex.EncodeToString(s.salt18453))
-
-	return encSessKey, vfrData, nil
-}
+// VerifierType returns the O5LOGON verifier type the server is configured for
+// (6949 or 18453), used by the challenge builder for the AUTH_VFR_DATA flag.
+func (s *O5LogonServer) VerifierType() int { return s.verifierType }
 
 // DecryptPassword extracts the plaintext password from the client's AUTH Phase 2.
 // The client encrypts: random_prefix(16 bytes) + password using AES-192-CBC
@@ -234,16 +224,8 @@ func (s *O5LogonServer) DecryptPassword(encClientSessKey, encPassword string) (s
 		return "", fmt.Errorf("failed to decode client session key: %w", err)
 	}
 
-	// Decrypt client session key using the verifier key. 18453 uses the 32-byte
-	// key (AES-256, no padding); 6949 uses the 24-byte key (AES-192).
-	var clientSessionKey []byte
-
-	if s.verifier18453 {
-		clientSessionKey, err = aesCBCDecryptZeroIV(s.verifierKey18453, encClientSessKeyBytes, false)
-	} else {
-		clientSessionKey, err = aes192CBCDecrypt(deriveAESKey(s.verifierKey), encClientSessKeyBytes)
-	}
-
+	// Decrypt client session key using verifier key (AES-256 for 18453, AES-192 for 6949)
+	clientSessionKey, err := s.decryptSessionKey(encClientSessKeyBytes)
 	if err != nil {
 		return "", fmt.Errorf("failed to decrypt client session key: %w", err)
 	}
@@ -285,9 +267,7 @@ func (s *O5LogonServer) DeriveCombinedKey(encClientSessKey string) error {
 		return fmt.Errorf("decode client session key: %w", err)
 	}
 
-	decKey := deriveAESKey(s.verifierKey)
-
-	clientSessionKey, err := aes192CBCDecrypt(decKey, encClientSessKeyBytes)
+	clientSessionKey, err := s.decryptSessionKey(encClientSessKeyBytes)
 	if err != nil {
 		return fmt.Errorf("decrypt client session key: %w", err)
 	}
@@ -310,45 +290,42 @@ func (s *O5LogonServer) DeriveCombinedKey(encClientSessKey string) error {
 //     to legacy regardless of customHash advertisement).
 //   - non-customHash mode: legacy only.
 func (s *O5LogonServer) combinedKeyCandidates(clientSessionKey []byte) [][]byte {
-	var candidates [][]byte
+	// verifier-18453: combined key = chained HMAC-SHA512 over hex(FULL
+	// clientSessionKey || FULL serverSessionKey) keyed with pbkdf2ChkSalt for
+	// sderCount turns, truncated to 32 bytes (AES-256). Mirrors the 18453 branch
+	// of derivePasswordEncKey. customHash-only; no legacy fallback.
+	if s.verifierType == VerifierType18453 {
+		joined := append(append([]byte{}, clientSessionKey...), s.serverSessionKey...)
+		hexJoined := strings.ToUpper(hex.EncodeToString(joined))
 
-	if s.customHash {
-		// customHash 18453 (12c) derivation: HMAC-SHA512 over hex(clientKey ||
-		// serverKey) keyed with pbkdf2ChkSalt, using the full keys — matches
-		// go-ora's generatePasswordEncKey verifier-18453 branch. OCI thick
-		// clients drive this with 32-byte session keys.
-		if k := s.customHashCombinedKey(clientSessionKey, len(clientSessionKey)); k != nil {
-			candidates = append(candidates, k)
-		}
-
-		// customHash 6949 derivation: same HMAC but over the first 24 bytes of
-		// each key (go-ora / JDBC 6949 branch).
-		if k := s.customHashCombinedKey(clientSessionKey, 24); k != nil {
-			candidates = append(candidates, k)
-		}
+		return [][]byte{pbkdf2SpeedyKey(s.pbkdf2ChkSalt, []byte(hexJoined), s.pbkdf2SderCount)[:32]}
 	}
 
-	// Legacy MD5/XOR path (python-oracledb thin's 6949 route, and non-customHash).
-	if legacy := deriveCombinedKey(s.serverSessionKey, clientSessionKey); legacy != nil {
-		candidates = append(candidates, legacy)
+	legacy := deriveCombinedKey(s.serverSessionKey, clientSessionKey)
+
+	if !s.customHash {
+		return [][]byte{legacy}
 	}
 
-	return candidates
+	// customHash branch mirrors derivePasswordEncKey in upstream_auth_crypto.go:
+	// for verifier 6949 + customHash, joined = clientSessionKey[:24] ||
+	// serverSessionKey[:24], then chained HMAC-SHA512 over hex(joined) keyed
+	// with pbkdf2ChkSalt for sderCount turns, truncated to 24 bytes.
+	joined := append(append([]byte{}, clientSessionKey[:24]...), s.serverSessionKey[:24]...)
+	hexJoined := strings.ToUpper(hex.EncodeToString(joined))
+	customHashKey := pbkdf2SpeedyKey(s.pbkdf2ChkSalt, []byte(hexJoined), s.pbkdf2SderCount)[:24]
+
+	return [][]byte{customHashKey, legacy}
 }
 
-// customHashCombinedKey derives the customHash combined key from the first
-// keyLen bytes of each session key: HMAC-SHA512 chain (pbkdf2SpeedyKey) over
-// hex(clientKey[:keyLen] || serverKey[:keyLen]) keyed with pbkdf2ChkSalt,
-// truncated to keyLen. Returns nil if either key is shorter than keyLen.
-func (s *O5LogonServer) customHashCombinedKey(clientSessionKey []byte, keyLen int) []byte {
-	if keyLen <= 0 || len(clientSessionKey) < keyLen || len(s.serverSessionKey) < keyLen {
-		return nil
+// decryptSessionKey decrypts a hex-decoded O5LOGON session key with the verifier
+// key — AES-256 zero-IV (no padding) for verifier-18453, AES-192 for legacy 6949.
+func (s *O5LogonServer) decryptSessionKey(enc []byte) ([]byte, error) {
+	if s.verifierType == VerifierType18453 {
+		return aesCBCDecryptZeroIV(s.verifierKey, enc, false)
 	}
 
-	joined := append(append([]byte{}, clientSessionKey[:keyLen]...), s.serverSessionKey[:keyLen]...)
-	hexJoined := strings.ToUpper(hex.EncodeToString(joined))
-
-	return pbkdf2SpeedyKey(s.pbkdf2ChkSalt, []byte(hexJoined), s.pbkdf2SderCount)[:keyLen]
+	return aes192CBCDecrypt(deriveAESKey(s.verifierKey), enc)
 }
 
 // tryDecryptPasswordWithKey attempts AES-192-CBC decryption of the encrypted
@@ -391,13 +368,6 @@ func deriveAESKey(verifierKey []byte) []byte {
 // XOR server[16:40] ^ client[16:40], then MD5(first_16) + MD5(last_8), truncated to 24 bytes.
 func deriveCombinedKey(serverKey, clientKey []byte) []byte {
 	start := 16
-
-	// The XOR window is [16:40]; keys shorter than 40 bytes (e.g. 32-byte 12c
-	// session keys) don't use this legacy path.
-	if len(serverKey) < start+24 || len(clientKey) < start+24 {
-		return nil
-	}
-
 	buffer := make([]byte, 24)
 
 	for i := range 24 {

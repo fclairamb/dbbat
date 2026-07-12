@@ -43,6 +43,9 @@ type Server struct {
 	// notifier is the outbound Slack client; nil when notifications are
 	// disabled (no bot token configured).
 	notifier *notify.SlackNotifier
+	// socketCancel stops the Slack Socket Mode connection on shutdown; nil
+	// when Socket Mode is not running.
+	socketCancel context.CancelFunc
 }
 
 // NewServer creates a new API server.
@@ -116,6 +119,14 @@ func (s *Server) Start(addr string) error {
 		IdleTimeout:  httpIdleTimeout,
 	}
 
+	// Start the outbound Slack Socket Mode connection (no-op unless an
+	// app-level token is configured). Runs for the server's lifetime.
+	s.startSocketMode()
+
+	// When interactivity rides on the inbound HTTP endpoint alone, surface
+	// the Slack-side reachability requirement in the startup logs.
+	s.logSlackInteractivityTransport()
+
 	s.logger.InfoContext(context.Background(), "Starting API server", slog.String("addr", addr))
 
 	return s.httpServer.ListenAndServe()
@@ -123,6 +134,10 @@ func (s *Server) Start(addr string) error {
 
 // Shutdown gracefully shuts down the server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	if s.socketCancel != nil {
+		s.socketCancel()
+	}
+
 	if s.httpServer != nil {
 		return s.httpServer.Shutdown(ctx)
 	}
@@ -173,8 +188,10 @@ func (s *Server) setupRouter() *gin.Engine {
 
 		// Slack interactivity webhook (unauthenticated at the middleware
 		// layer — the Slack request signature is the authentication). Only
-		// registered when interactivity is configured (signing secret set),
-		// so intranet-only deployments don't expose an inbound endpoint.
+		// registered when interactivity is configured (signing secret or
+		// Socket Mode app token set), so notification-only deployments don't
+		// expose an inbound endpoint. Under Socket Mode without a signing
+		// secret the handler rejects every request with 401.
 		if s.notifier.Interactive() {
 			v1.POST("/slack/interactions", s.handleSlackInteraction)
 		}

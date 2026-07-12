@@ -17,7 +17,6 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
-	dbbcrypto "github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
@@ -48,22 +47,11 @@ type session struct {
 	// PBKDF2 path.
 	upstreamCustomHash bool
 
-	// clientBigClrChunks is true when the upstream advertised
-	// ServerCompileTimeCaps[37]&0x20, which makes clients (go-ora, JDBC thin)
-	// encode long CLR values with 4-byte compressed chunk lengths after the
-	// 0xfe long-form marker instead of 1-byte lengths. Captured in the relay so
-	// the Phase 2 rewriter can parse long values (e.g. AUTH_CONNECT_STRING with
-	// a long host) correctly.
-	clientBigClrChunks bool
-
-	// clientWideFormat is true when the client (OCI thick / sqlplus) marshals
-	// AUTH TTC messages in the "wide" encoding (4-byte little-endian lengths and
-	// flags) rather than the compact TTC encoding used by go-ora and
-	// python-oracledb thin. Detected from the client's AUTH Phase 1 packet and
-	// used to switch the AUTH KV parse/build helpers (see oci_wide.go). The
-	// upstream mirrors the client's encoding because dbbat relays the client's
-	// data-type negotiation to it.
-	clientWideFormat bool
+	// clientWideEncoding records whether the client encodes TTC AUTH key/value
+	// lengths as fixed 4-byte little-endian integers (OCI / sqlplus) rather than
+	// the compressed form (thin clients). Detected from AUTH Phase 1 and used to
+	// shape the challenge dbbat issues so OCI can parse it.
+	clientWideEncoding bool
 
 	// clientCombinedKey is the AES key derived from the dbbat-as-server O5LOGON
 	// session keys (MD5(serverSessKey || clientSessKey)). Captured by
@@ -72,29 +60,18 @@ type session struct {
 	// expects. Empty when the client used the empty-AUTH_PASSWORD path.
 	clientCombinedKey []byte
 
-	// upstreamAuthOKResponse is the raw upstream Phase 2 response (all TNS
-	// packets concatenated) captured during upstream auth. Used as the AUTH OK
-	// forwarded to compact-format clients after AUTH_SVR_RESPONSE patching.
+	// upstreamAuthOKResponse is the reassembled upstream Phase 2 response as a
+	// single TNS Data packet, captured during runUpstreamClientAuth. Used as the
+	// AUTH OK forwarded to the client after AUTH_SVR_RESPONSE patching.
 	upstreamAuthOKResponse []byte
-	// upstreamAuthOKTTC is the reassembled AUTH OK TTC stream (packet payloads
-	// concatenated, data flags stripped). OCI wide clients need patching on this
-	// contiguous form because AUTH_SVR_RESPONSE spans two upstream TNS packets.
-	upstreamAuthOKTTC []byte
 
-	// upstreamEndMarker is the end-of-call (0x04) Summary that trailed the
-	// upstream's AUTH Phase 1 challenge. Its exact byte layout depends on the
-	// upstream's negotiated TTC field version (19c vs 23ai differ), so dbbat
-	// replays this captured marker after its own client-facing challenge rather
-	// than a hardcoded one — a stale/wrong marker desyncs strict client parsers
-	// (python-oracledb error_info, JDBC OER Summary). Empty if capture failed;
-	// callers fall back to buildAuthChallengeEndMarker.
-	upstreamEndMarker []byte
-
-	// upstreamAuthState carries the Phase 1-derived secrets and identity from
-	// runUpstreamAuthPhase1 to runUpstreamAuthPhase2, which now straddle the
-	// client O5LOGON exchange (Phase 1 runs first so its marker can seed the
-	// client challenge).
-	upstreamAuthState *upstreamAuthPhaseState
+	// upstreamAuthOKFlags / upstreamAuthOKFragLens record the data-flags prefix
+	// and per-packet TTC lengths the upstream used to fragment the AUTH OK, so
+	// the patched AUTH OK can be re-fragmented at the same boundaries before
+	// being forwarded (a single merged packet can exceed the client's SDU →
+	// ORA-12592). See reframeAuthOK.
+	upstreamAuthOKFlags    []byte
+	upstreamAuthOKFragLens []int
 
 	// clientAuthPhase1Pkt is the actual AUTH Phase 1 packet the client (SQLcl,
 	// go-ora, python-oracledb) sent during pre-auth relay. dbbat reuses its
@@ -103,6 +80,14 @@ type session struct {
 	// upstream parser accepts it. nil for legacy paths that read Phase 1
 	// directly from the client connection.
 	clientAuthPhase1Pkt *TNSPacket
+
+	// upstreamAuthResp is the parsed upstream AUTH Phase 1 challenge, set by
+	// beginUpstreamAuth. For OCI (wide-encoding) clients it is populated BEFORE
+	// dbbat challenges the client, so the client challenge can reuse the
+	// upstream's end-of-call summary (challengeTrailer) — the summary's width
+	// depends on the negotiated TTC caps and a hard-coded capture only fits the
+	// client it was captured from. finishUpstreamAuth consumes it for Phase 2.
+	upstreamAuthResp *upstreamAuthResponse
 
 	// clientAuthPhase2Pkt is the AUTH Phase 2 packet the client sent. dbbat
 	// reuses its wire-shape (with username + AUTH_SESSKEY/AUTH_PASSWORD/
@@ -222,23 +207,23 @@ func (s *session) run() error {
 	s.upstreamConn = upstreamConn
 	s.clientAuthPhase1Pkt = phase1Pkt
 
-	if len(phase1Pkt.Payload) > ttcDataFlagsSize {
-		s.clientWideFormat = isOCIWideAuthPhase1(phase1Pkt.Payload[ttcDataFlagsSize:])
-		if s.clientWideFormat {
-			s.logger.DebugContext(s.ctx, "client uses OCI wide AUTH encoding")
+	// Step 4b: For OCI (wide-encoding) clients, drive AUTH Phase 1 against the
+	// upstream BEFORE challenging the client. The upstream's challenge carries
+	// the end-of-call summary shaped for the exact TTC caps this client
+	// negotiated (the relay forwarded them verbatim); dbbat's client challenge
+	// reuses those bytes. A wrong-width summary (the old hard-coded capture)
+	// leaves unread bytes in the OCI client's TTC buffer, and the client aborts
+	// the AUTH call with a break/reset marker exchange — the "sqlplus stalls
+	// before AUTH Phase 2" failure. Thin clients keep the proven hand-built
+	// summaries and the original ordering.
+	s.clientWideEncoding = payloadUsesWideKVEncoding(phase1Pkt.Payload)
+	if s.clientWideEncoding {
+		if err := s.beginUpstreamAuth(); err != nil {
+			return fmt.Errorf("upstream auth failed: %w", err)
 		}
 	}
 
-	// Step 5: Drive the upstream AUTH Phase 1 first (dbbat authenticates with its
-	// own stored DB credentials, independent of the client). This captures the
-	// upstream's real end-of-call marker so the client-facing challenge can
-	// replay it — its byte layout is version-specific (19c vs 23ai) and a
-	// hardcoded marker desyncs strict client parsers.
-	if err := s.runUpstreamAuthPhase1(); err != nil {
-		return fmt.Errorf("upstream auth phase 1 failed: %w", err)
-	}
-
-	// Step 6: Authenticate client via O5LOGON (API key as Oracle password).
+	// Step 5: Authenticate client via O5LOGON (API key as Oracle password)
 	if err := s.authenticateClient(phase1Pkt); err != nil {
 		s.logger.WarnContext(s.ctx, "client authentication failed", slog.Any("error", err))
 		s.sendAuthFailed(ORA01017, "invalid username/password; logon denied")
@@ -250,9 +235,10 @@ func (s *session) run() error {
 		slog.String("username", s.username),
 		slog.String("database", s.database.Name))
 
-	// Step 7: Complete the upstream AUTH (Phase 2) on the relay-phase socket.
-	if err := s.runUpstreamAuthPhase2(); err != nil {
-		return fmt.Errorf("upstream auth phase 2 failed: %w", err)
+	// Step 6: Authenticate to upstream Oracle on the relay-phase socket using
+	// stored database credentials.
+	if err := s.upstreamAuth(); err != nil {
+		return fmt.Errorf("upstream auth failed: %w", err)
 	}
 
 	// Step 6b: Forward the upstream's real AUTH OK packet to the client, with
@@ -267,25 +253,24 @@ func (s *session) run() error {
 		authOK = capturedAuthOKResponse
 	}
 
-	if s.clientWideFormat {
-		// The OCI AUTH OK spans multiple TNS packets and its AUTH_SVR_RESPONSE
-		// value straddles the packet boundary, so patch it in place across the
-		// original packets (preserving their exact framing).
-		if len(s.clientCombinedKey) > 0 {
-			if patched, err := patchAuthSvrResponseMultiPacket(authOK, s.clientCombinedKey); err != nil {
-				s.logger.WarnContext(s.ctx, "failed to patch wide AUTH_SVR_RESPONSE; forwarding unchanged",
-					slog.Any("error", err))
-			} else {
-				authOK = patched
-			}
-		}
-	} else if len(s.clientCombinedKey) > 0 && len(s.upstreamAuthOKResponse) > 0 {
-		if patched, err := patchAuthSvrResponse(authOK, s.clientCombinedKey); err != nil {
+	if len(s.clientCombinedKey) > 0 && len(s.upstreamAuthOKResponse) > 0 {
+		patched, err := patchAuthSvrResponse(authOK, s.clientCombinedKey)
+		if err != nil {
 			s.logger.WarnContext(s.ctx, "failed to patch AUTH_SVR_RESPONSE; forwarding upstream packet unchanged",
 				slog.Any("error", err))
 		} else {
 			authOK = patched
 		}
+	}
+
+	// Re-fragment the (patched) AUTH OK at the upstream's original packet
+	// boundaries. dbbat reassembles the upstream's multi-packet AUTH OK into one
+	// packet to patch AUTH_SVR_RESPONSE contiguously, but an OCI client rejects a
+	// single packet that exceeds its negotiated SDU with ORA-12592; splitting it
+	// back reproduces what a direct client accepts. No-op for single-packet
+	// (thin-client) AUTH OKs.
+	if len(s.upstreamAuthOKResponse) > 0 {
+		authOK = reframeAuthOK(authOK, s.upstreamAuthOKFlags, s.upstreamAuthOKFragLens)
 	}
 
 	if _, err := s.clientConn.Write(authOK); err != nil {
@@ -424,9 +409,18 @@ func (s *session) readPhase1Packet(phase1Pkt *TNSPacket) (*TNSPacket, error) {
 	return pkt, nil
 }
 
-// readPhase2Packet returns the AUTH Phase 2 Data packet from the client. sqlplus 23c
-// emits OOB break/reset markers before AUTH Phase 2; we honor the protocol by
-// replying with a reset marker, then keep reading.
+// readPhase2Packet returns the AUTH Phase 2 Data packet from the client. When a
+// break/reset marker pair arrives instead, we honor the inline resync protocol
+// by replying with a reset marker, then keep reading.
+//
+// NOTE: an OCI client (sqlplus / instant client) sends break+reset here when it
+// rejects the challenge dbbat sent — most notably when the challenge's trailing
+// end-of-call summary width does not match the client's negotiated TTC caps
+// (fixed by clientChallengeTrailer, which reuses the live upstream summary).
+// After the resync the client waits for the aborted call's completion, which
+// dbbat does not synthesize, so the session stalls or ends with ORA-03106 — a
+// failure historically mis-attributed to the TCP-urgent (out-of-band) break
+// probe. See docs/oracle.md ("OCI break/reset before AUTH Phase 2").
 func (s *session) readPhase2Packet() (*TNSPacket, error) {
 	phase2Pkt, err := readTNSPacket(s.clientConn)
 	if err != nil {
@@ -525,6 +519,9 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	}
 
 	// Extract username from AUTH Phase 1
+	s.logger.DebugContext(s.ctx, "AUTH Phase 1 payload",
+		slog.Int("len", len(phase1Pkt.Payload)),
+		slog.String("hex_head", fmt.Sprintf("%x", phase1Pkt.Payload[:min(len(phase1Pkt.Payload), 40)])))
 	username, err := parseAuthPhase1(phase1Pkt.Payload)
 	if err != nil {
 		return fmt.Errorf("failed to parse AUTH Phase 1: %w", err)
@@ -560,24 +557,15 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 		return fmt.Errorf("failed to load O5LOGON verifier: %w", err)
 	}
 
-	// Generate O5LOGON challenge. When the upstream's Set Protocol response
-	// had caps[4]&0x20 set, we run customHash mode: the challenge advertises
-	// AUTH_PBKDF2_CSK_SALT / VGEN_COUNT / SDER_COUNT and DecryptPassword
-	// uses the PBKDF2 combined-key derivation. This keeps the customHash
-	// bit on for the client (no strip needed in the relay) so the upstream
-	// doesn't downgrade to verifier 6949 with no PBKDF2 fields when the
-	// client advertises modern caps in subsequent packets.
+	// Build the O5LOGON server. Default to legacy verifier-6949 (go-ora and other
+	// legacy clients). When the client negotiated customHash (Oracle 12c+/23ai —
+	// observed from the upstream Set Protocol response) and the API key carries a
+	// verifier-18453, switch to the modern PBKDF2/HMAC-SHA512 challenge that
+	// python-oracledb thin, JDBC thin / SQLcl, and sqlplus require — they reject
+	// the 6949 challenge against a 23ai-version server.
 	o5 := NewO5LogonServer(verifier.O5LogonSalt, verifier.decryptedVerifier)
-	if s.upstreamCustomHash {
-		o5.EnableCustomHash()
-	}
-
-	// OCI thick clients (wide encoding) resolve a customHash challenge as
-	// verifier 18453 (32-byte session keys, PBKDF2 verifier). Switch the O5LOGON
-	// server into 18453 mode, seeding it with the API key's stored 18453
-	// verifier key.
-	if s.clientWideFormat && len(verifier.O5Logon18453Key) > 0 {
-		o5.EnableVerifier18453(verifier.O5Logon18453Salt, verifier.O5Logon18453Key)
+	if s.upstreamCustomHash && len(verifier.decryptedVerifier18453) > 0 {
+		o5.UseVerifier18453(verifier.salt18453, verifier.decryptedVerifier18453)
 	}
 
 	encSessKey, vfrData, err := o5.GenerateChallenge()
@@ -585,30 +573,25 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 		return fmt.Errorf("failed to generate O5LOGON challenge: %w", err)
 	}
 
+	// OCI clients (sqlplus / instant client) negotiate fixed 4-byte little-endian
+	// key/value lengths in the AUTH messages, whereas thin clients use the
+	// compressed length-prefixed form. Detect the client's encoding from its
+	// AUTH Phase 1 and mirror it in the challenge — OCI breaks/aborts on a
+	// compressed challenge it cannot parse.
+	s.clientWideEncoding = payloadUsesWideKVEncoding(phase1Pkt.Payload)
+
 	// Send AUTH challenge to client
 	s.logger.DebugContext(s.ctx, "sending AUTH challenge",
 		slog.Int("sesskey_len", len(encSessKey)),
 		slog.Int("vfrdata_len", len(vfrData)),
-		slog.Bool("custom_hash", o5.CustomHashEnabled()))
-	var challengePayload []byte
-	if s.clientWideFormat {
-		challengePayload = buildAuthChallengeWide(encSessKey, vfrData, o5.PBKDF2ChkSalt(), o5.PBKDF2VgenCount(), o5.PBKDF2SderCount(), o5.VerifierType())
-	} else {
-		challengePayload = buildAuthChallenge(encSessKey, vfrData, o5.PBKDF2ChkSalt(), o5.PBKDF2VgenCount(), o5.PBKDF2SderCount())
-	}
-
-	// Replay the upstream's real end-of-call marker (its layout is version-
-	// specific); fall back to the built-in 19c-shaped marker only if capture
-	// failed.
-	endMarker := s.upstreamEndMarker
-	if len(endMarker) == 0 {
-		endMarker = buildAuthChallengeEndMarker()
-	}
-
-	challengePayload = append(challengePayload, endMarker...)
+		slog.Bool("custom_hash", o5.CustomHashEnabled()),
+		slog.Int("verifier_type", o5.VerifierType()),
+		slog.Bool("wide_encoding", s.clientWideEncoding))
+	challengePayload := buildAuthChallenge(encSessKey, vfrData, o5.PBKDF2ChkSalt(), o5.PBKDF2VgenCount(), o5.PBKDF2SderCount(), o5.VerifierType(), s.clientWideEncoding)
+	challengePayload = append(challengePayload, s.clientChallengeTrailer(o5.VerifierType())...)
 	s.logger.DebugContext(s.ctx, "AUTH challenge payload",
 		slog.Int("len", len(challengePayload)),
-		slog.Int("end_marker_len", len(endMarker)))
+		slog.String("hex_head", fmt.Sprintf("%x", challengePayload[:min(len(challengePayload), 60)])))
 	// Write as raw v315+ TNS Data packet (4-byte length header, not 2-byte)
 	// After Accept, all packets must use v315+ format.
 	challengeRaw := encodeV315DataPacket(challengePayload)
@@ -628,20 +611,12 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 		slog.Int("payload_len", len(phase2Pkt.Payload)))
 
 	// Parse AUTH Phase 2 to get encrypted password
-	var clientSessKey, encPassword string
-
-	if s.clientWideFormat {
-		clientSessKey, encPassword = parseAuthPhase2Wide(phase2Pkt.Payload[ttcDataFlagsSize:])
-		if clientSessKey == "" {
-			return fmt.Errorf("failed to parse AUTH Phase 2: %w", ErrAuthPhase2MissingSessKey)
-		}
-	} else {
-		var perr error
-
-		clientSessKey, encPassword, perr = parseAuthPhase2(phase2Pkt.Payload)
-		if perr != nil {
-			return fmt.Errorf("failed to parse AUTH Phase 2: %w", perr)
-		}
+	s.logger.DebugContext(s.ctx, "AUTH Phase 2 payload",
+		slog.Int("len", len(phase2Pkt.Payload)),
+		slog.String("hex_head", fmt.Sprintf("%x", phase2Pkt.Payload[:min(len(phase2Pkt.Payload), 60)])))
+	clientSessKey, encPassword, err := parseAuthPhase2(phase2Pkt.Payload)
+	if err != nil {
+		return fmt.Errorf("failed to parse AUTH Phase 2: %w", err)
 	}
 
 	s.logger.DebugContext(s.ctx, "AUTH Phase 2 parsed",
@@ -670,6 +645,32 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	return nil
 }
 
+// clientChallengeTrailer returns the end-of-call summary appended to the AUTH
+// challenge dbbat sends the client.
+//
+// The Summary's exact width is conditioned on the TTC compile-time caps the
+// client negotiated (relayed verbatim to the upstream during pre-auth): the
+// macOS/Windows Oracle Instant Client 23.3 parses an 80-byte wide summary while
+// the 23.26 DB-bundled OCI client parses a 153-byte one. A fixed capture only
+// fits the client it came from — any other client leaves unread bytes in its
+// TTC read buffer, treats the next stale byte as a message code, and aborts the
+// AUTH call with a break/reset marker exchange, stalling before AUTH Phase 2
+// (historically mis-attributed to the TCP-urgent OOB probe; see docs/oracle.md).
+//
+// For wide-encoding (OCI) clients the session therefore runs upstream AUTH
+// Phase 1 first (beginUpstreamAuth) and reuses the live upstream challenge's
+// summary bytes, which the real server sized for these exact caps. Thin clients
+// keep the proven hand-built summaries.
+func (s *session) clientChallengeTrailer(verifierType int) []byte {
+	if s.clientWideEncoding && s.upstreamAuthResp != nil {
+		if t := s.upstreamAuthResp.challengeTrailer; len(t) > 0 && t[0] == byte(TTCFuncOERR) {
+			return t
+		}
+	}
+
+	return buildAuthChallengeEndMarker(verifierType, s.clientWideEncoding)
+}
+
 // o5LogonVerifierData holds decrypted O5LOGON verifier data for a user's API key.
 // apiKeyID is the UUID of the API key whose verifier was used. Needed for the
 // empty-AUTH_PASSWORD path (SQLcl / JDBC thin), where dbbat trusts the loaded
@@ -677,12 +678,13 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 type o5LogonVerifierData struct {
 	O5LogonSalt       []byte
 	decryptedVerifier []byte
-	// O5Logon18453Salt / O5Logon18453Key are the decrypted verifier-18453 salt
-	// (16 bytes) and key (32 bytes) for OCI thick clients; empty when the API
-	// key predates 18453 support.
-	O5Logon18453Salt []byte
-	O5Logon18453Key  []byte
-	apiKeyID         uuid.UUID
+	apiKeyID          uuid.UUID
+
+	// Modern verifier-18453 material (empty if the key predates it). When the
+	// client negotiates customHash (Oracle 12c+/23ai), the proxy issues an
+	// 18453 challenge from these instead of the legacy 6949 verifier above.
+	salt18453              []byte
+	decryptedVerifier18453 []byte
 }
 
 // loadO5LogonVerifier finds and decrypts the O5LOGON verifier for a user.
@@ -697,13 +699,13 @@ func (s *session) loadO5LogonVerifier(userID uuid.UUID) (*o5LogonVerifierData, e
 	}
 
 	for i := range keys {
-		if len(keys[i].O5LogonSalt) == 0 || len(keys[i].O5LogonVerifier) == 0 {
+		oracleData := keys[i].OracleData()
+		if oracleData == nil || len(oracleData.O5LogonSalt6949) == 0 || len(oracleData.O5LogonVerifier6949) == 0 {
 			continue
 		}
 
-		// Decrypt the packed verifier blob with the dbbat master key, then unpack
-		// its variants (legacy rows decode to a lone raw 6949 verifier key).
-		decrypted, err := decryptO5LogonVerifier(keys[i].O5LogonVerifier, s.encryptionKey, keys[i].KeyPrefix)
+		// Decrypt the verifier with dbbat master key
+		decrypted, err := decryptO5LogonVerifier(oracleData.O5LogonVerifier6949, s.encryptionKey, keys[i].KeyPrefix)
 		if err != nil {
 			s.logger.WarnContext(s.ctx, "failed to decrypt O5LOGON verifier",
 				slog.String("key_prefix", keys[i].KeyPrefix),
@@ -712,25 +714,28 @@ func (s *session) loadO5LogonVerifier(userID uuid.UUID) (*o5LogonVerifierData, e
 			continue
 		}
 
-		fields := dbbcrypto.DecodeO5LogonVerifierBlob(decrypted)
-
-		s.logger.InfoContext(s.ctx, "O5LOGON verifier loaded — only this API key works for Oracle login",
-			slog.String("key_prefix", keys[i].KeyPrefix),
-			slog.String("key_id", keys[i].ID.String()))
-
 		data := &o5LogonVerifierData{
-			O5LogonSalt:       keys[i].O5LogonSalt,
-			decryptedVerifier: fields[0],
+			O5LogonSalt:       oracleData.O5LogonSalt6949,
+			decryptedVerifier: decrypted,
 			apiKeyID:          keys[i].ID,
 		}
 
-		// Fields 1 and 2 (when present) are the verifier-18453 salt and key.
-		if len(fields) >= 3 &&
-			len(fields[1]) == dbbcrypto.O5Logon18453SaltLength &&
-			len(fields[2]) == dbbcrypto.O5Logon18453KeyLength {
-			data.O5Logon18453Salt = fields[1]
-			data.O5Logon18453Key = fields[2]
+		// Also decrypt the modern verifier-18453 material if present, so the
+		// proxy can serve customHash (Oracle 12c+/23ai) clients.
+		if len(oracleData.O5LogonSalt18453) > 0 && len(oracleData.O5LogonVerifier18453) > 0 {
+			if v18453, err := decryptO5LogonVerifier(oracleData.O5LogonVerifier18453, s.encryptionKey, keys[i].KeyPrefix); err != nil {
+				s.logger.WarnContext(s.ctx, "failed to decrypt O5LOGON verifier-18453",
+					slog.String("key_prefix", keys[i].KeyPrefix), slog.Any("error", err))
+			} else {
+				data.salt18453 = oracleData.O5LogonSalt18453
+				data.decryptedVerifier18453 = v18453
+			}
 		}
+
+		s.logger.InfoContext(s.ctx, "O5LOGON verifier loaded — only this API key works for Oracle login",
+			slog.String("key_prefix", keys[i].KeyPrefix),
+			slog.String("key_id", keys[i].ID.String()),
+			slog.Bool("has_18453", len(data.decryptedVerifier18453) > 0))
 
 		return data, nil
 	}
@@ -797,7 +802,20 @@ func (s *session) clientToUpstream() error {
 
 // interceptClientMessage examines a TNS Data packet from the client.
 // Returns true if the packet was blocked (error sent to client), false if it should be forwarded.
+//
+// Query interception is best-effort observability: a malformed or unexpected
+// TTC layout must never crash the proxy or break the connection. Any panic in
+// the decode path is recovered here and the packet is forwarded unchanged.
 func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
+	defer func() {
+		if r := recover(); r != nil {
+			// A recovered panic leaves the function returning the zero value
+			// (false) — i.e. don't block the message.
+			s.logger.WarnContext(s.ctx, "recovered from panic intercepting client message",
+				slog.Any("panic", r))
+		}
+	}()
+
 	funcCode, err := parseTTCFunctionCode(pkt.Payload)
 	if err != nil {
 		return false
@@ -851,10 +869,7 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 				return true
 			}
 
-			if err := s.handleJDBCExec(ttcPayload); err != nil {
-				_ = s.sendOracleError(err)
-				return true
-			}
+			s.handleJDBCExec(ttcPayload)
 		} else {
 			s.handleOFETCH(ttcPayload)
 		}
@@ -905,7 +920,18 @@ func (s *session) upstreamToClient() error {
 }
 
 // interceptUpstreamMessage handles response interception from upstream.
+//
+// Like interceptClientMessage, this is best-effort observability: any panic in
+// the response-decode path is recovered so the upstream packet is still
+// forwarded to the client and the session survives.
 func (s *session) interceptUpstreamMessage(pkt *TNSPacket) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.WarnContext(s.ctx, "recovered from panic intercepting upstream message",
+				slog.Any("panic", r))
+		}
+	}()
+
 	funcCode, err := parseTTCFunctionCode(pkt.Payload)
 	if err != nil {
 		return

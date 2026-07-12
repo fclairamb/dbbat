@@ -31,7 +31,7 @@ func TestRewriteAuthPhase2_BasicSwap_CLR(t *testing.T) {
 		eSpeedyKey:       "NEWSPEEDY_HEX",
 	}
 
-	out, err := rewriteAuthPhase2(body, "LABEOMNGR_DEV", sec, false)
+	out, err := rewriteAuthPhase2(body, "LABEOMNGR_DEV", sec)
 	if err != nil {
 		t.Fatalf("rewrite: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestRewriteAuthPhase2_BasicSwap_Bare(t *testing.T) {
 		encPassword:      "NEWPWD_HEX",
 	}
 
-	out, err := rewriteAuthPhase2(body, "LABEOMNGR_DEV", sec, false)
+	out, err := rewriteAuthPhase2(body, "LABEOMNGR_DEV", sec)
 	if err != nil {
 		t.Fatalf("rewrite: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestRewriteAuthPhase2_NoSpeedyKey(t *testing.T) {
 		eSpeedyKey:       "", // verifier 6949
 	}
 
-	out, err := rewriteAuthPhase2(body, "USR2", sec, false)
+	out, err := rewriteAuthPhase2(body, "USR2", sec)
 	if err != nil {
 		t.Fatalf("rewrite: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestRewriteAuthPhase2_RealJDBC(t *testing.T) {
 		eSpeedyKey:       "NEW_SPEEDY_CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
 	}
 
-	out, err := rewriteAuthPhase2(body, "NEWUSER_X", sec, false)
+	out, err := rewriteAuthPhase2(body, "NEWUSER_X", sec)
 	if err != nil {
 		t.Fatalf("rewrite: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestRewriteAuthPhase2_Errors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			if _, err := rewriteAuthPhase2(tc.body, "X", sec, false); err == nil {
+			if _, err := rewriteAuthPhase2(tc.body, "X", sec); err == nil {
 				t.Fatalf("expected error for %s", tc.name)
 			}
 		})

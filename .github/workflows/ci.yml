@@ -23,11 +23,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.0
 
-      - uses: actions/setup-go@v6.4.0
+      - uses: actions/setup-go@v6.5.0
         with:
           go-version: "1.26"
 
-      - uses: golangci/golangci-lint-action@v9.2.1
+      - uses: golangci/golangci-lint-action@v9.3.0
         with:
           version: v2.12.2
 
@@ -43,7 +43,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2.2.0
 
       - name: Cache frontend dependencies
-        uses: actions/cache@v5.0.5
+        uses: actions/cache@v6.1.0
         with:
           path: |
             front/node_modules
@@ -83,7 +83,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.0
 
-      - uses: actions/setup-go@v6.4.0
+      - uses: actions/setup-go@v6.5.0
         with:
           go-version: "1.26"
 
@@ -108,7 +108,7 @@ jobs:
         with:
           fetch-depth: 0 # Needed for git log to get commit timestamp
 
-      - uses: actions/setup-go@v6.4.0
+      - uses: actions/setup-go@v6.5.0
         with:
           go-version: "1.26"
 
@@ -171,7 +171,7 @@ jobs:
           done
 
       - name: Cache Playwright browsers
-        uses: actions/cache@v5.0.5
+        uses: actions/cache@v6.1.0
         with:
           path: ~/.cache/ms-playwright
           key: playwright-${{ hashFiles('front/bun.lock') }}

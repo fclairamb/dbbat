@@ -5,78 +5,82 @@ import (
 	"testing"
 )
 
-func TestWideKVRoundTrip(t *testing.T) {
+// TestPayloadUsesWideKVEncoding verifies the OCI-vs-thin discriminator: OCI
+// (sqlplus) encodes a 13-byte key length as 4-byte little-endian (0d 00 00 00)
+// before the 1-byte CLR length, while thin clients use the compressed form
+// (01 0d). Fixtures are the byte run around AUTH_TERMINAL captured from each.
+func TestPayloadUsesWideKVEncoding(t *testing.T) {
 	t.Parallel()
 
-	cases := []struct {
-		key, value string
-		flag       int
-	}{
-		{"AUTH_SESSKEY", "40414243", 1},
-		{"AUTH_VFR_DATA", "DEADBEEF", 18453},
-		{"AUTH_TERMINAL", "", 0},
-		// Value longer than one CLR chunk (exercises the 0xfe long form).
-		{"AUTH_PASSWORD", string(make([]byte, 300)), 0},
+	wide := append([]byte{0x54, 0x0d, 0x00, 0x00, 0x00, 0x0d}, []byte("AUTH_TERMINAL")...)
+	if !payloadUsesWideKVEncoding(wide) {
+		t.Fatalf("expected wide encoding to be detected")
 	}
 
-	for _, tc := range cases {
-		buf := writeWideKV(nil, tc.key, tc.value, tc.flag)
-
-		pair, ok := readWideKVPair(buf)
-		if !ok {
-			t.Fatalf("%s: readWideKVPair failed", tc.key)
-		}
-
-		if string(pair.Key) != tc.key {
-			t.Errorf("%s: key = %q", tc.key, pair.Key)
-		}
-
-		if string(pair.Value) != tc.value {
-			t.Errorf("%s: value len = %d, want %d", tc.key, len(pair.Value), len(tc.value))
-		}
-
-		if pair.Flag != tc.flag {
-			t.Errorf("%s: flag = %d, want %d", tc.key, pair.Flag, tc.flag)
-		}
-
-		if pair.Consumed != len(buf) {
-			t.Errorf("%s: consumed %d, want %d", tc.key, pair.Consumed, len(buf))
-		}
+	compressed := append([]byte{0x45, 0x53, 0x54, 0x01, 0x0d, 0x0d}, []byte("AUTH_TERMINAL")...)
+	if payloadUsesWideKVEncoding(compressed) {
+		t.Fatalf("compressed encoding wrongly detected as wide")
 	}
 }
 
-func TestParseWideAuthKVDictionary(t *testing.T) {
+// TestBuildAuthChallengeWide checks the OCI challenge framing: data flags 0x2000,
+// func 0x08, a 2-byte little-endian pair count, and 4-byte little-endian key
+// lengths — the shape sqlplus parses (a compressed challenge makes it abort).
+func TestBuildAuthChallengeWide(t *testing.T) {
 	t.Parallel()
 
-	// Build a 2-pair wide dictionary (count uint16-LE) and parse it back.
-	buf := binary.LittleEndian.AppendUint16(nil, 2)
-	buf = writeWideKV(buf, "AUTH_VFR_DATA", "0011AABB", 18453)
-	buf = writeWideKV(buf, "AUTH_PBKDF2_VGEN_COUNT", "4096", 0)
+	c := buildAuthChallenge("AABB", "CCDD", "EEFF", 4096, 3, VerifierType18453, true)
 
-	resp := &upstreamAuthResponse{properties: map[string]string{}}
-	if _, ok := parseWideAuthKVDictionary(buf, resp); !ok {
-		t.Fatal("parseWideAuthKVDictionary failed")
+	if c[0] != 0x20 || c[1] != 0x00 {
+		t.Fatalf("wide data flags = %02x %02x, want 20 00", c[0], c[1])
 	}
 
-	if resp.verifierType != 18453 {
-		t.Errorf("verifierType = %d, want 18453", resp.verifierType)
+	if c[2] != byte(TTCFuncResponse) {
+		t.Fatalf("func = %02x, want %02x", c[2], byte(TTCFuncResponse))
 	}
 
-	if resp.pbkdf2VgenCount != 4096 {
-		t.Errorf("pbkdf2VgenCount = %d, want 4096", resp.pbkdf2VgenCount)
+	pairs := binary.LittleEndian.Uint16(c[3:5])
+	if pairs != 6 {
+		t.Fatalf("pair count = %d, want 6", pairs)
+	}
+
+	// First KV pair: keyLen is a 4-byte LE integer = len("AUTH_SESSKEY") = 12.
+	keyLen := binary.LittleEndian.Uint32(c[5:9])
+	if keyLen != uint32(len(authKeySessKey)) {
+		t.Fatalf("first keyLen = %d, want %d", keyLen, len(authKeySessKey))
+	}
+
+	// The compressed form must NOT use 4-byte lengths (regression guard).
+	cc := buildAuthChallenge("AABB", "CCDD", "EEFF", 4096, 3, VerifierType18453, false)
+	if cc[0] != 0x00 || cc[1] != 0x00 {
+		t.Fatalf("compressed data flags = %02x %02x, want 00 00", cc[0], cc[1])
 	}
 }
 
-func TestIsOCIWideAuthPhase1(t *testing.T) {
+// TestParseAuthPhase2Wide round-trips a wide-encoded Phase 2: ttcKeyValWide
+// writes AUTH_SESSKEY/AUTH_PASSWORD with 4-byte lengths, and parseAuthPhase2
+// must recover their values via the wide finder.
+func TestParseAuthPhase2Wide(t *testing.T) {
 	t.Parallel()
 
-	oci := []byte{0x03, 0x76, 0x02, 0x01, 0x03, 0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-	if !isOCIWideAuthPhase1(oci) {
-		t.Error("expected OCI wide detection on sentinel body")
+	body := make([]byte, 0, 64)
+	body = append(body, 0x00, 0x00, byte(TTCFuncPiggyback), PiggybackSubAuth2)
+	// A wide preamble byte run so payloadUsesWideKVEncoding trips before the keys.
+	body = append(body, 0x09, 0x00, 0x00, 0x00, 0x09)
+	body = append(body, []byte("ORAUSERXX")...)
+	body = append(body, ttcKeyValWide(authKeySessKey, "DEADBEEF", 0)...)
+	body = append(body, ttcKeyValWide(authKeyPassword, "CAFEBABE", 0)...)
+
+	sess, pw, err := parseAuthPhase2(body)
+	if err != nil {
+		t.Fatalf("parseAuthPhase2 (wide) failed: %v", err)
 	}
 
-	thin := []byte{0x03, 0x76, 0x00, 0x01, 0x01, 0x09}
-	if isOCIWideAuthPhase1(thin) {
-		t.Error("thin body misdetected as OCI wide")
+	if sess != "DEADBEEF" {
+		t.Fatalf("sesskey = %q, want DEADBEEF", sess)
+	}
+
+	if pw != "CAFEBABE" {
+		t.Fatalf("password = %q, want CAFEBABE", pw)
 	}
 }

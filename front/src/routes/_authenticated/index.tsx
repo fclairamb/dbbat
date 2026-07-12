@@ -81,15 +81,13 @@ function DashboardPage() {
       />
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        {(connectionsLoading || activeConnections > 0) && (
-          <StatCard
-            title="Active Connections"
-            value={activeConnections}
-            icon={Activity}
-            isLoading={connectionsLoading}
-            description="Currently connected"
-          />
-        )}
+        <StatCard
+          title="Active Connections"
+          value={activeConnections}
+          icon={Activity}
+          isLoading={connectionsLoading}
+          description="Currently connected"
+        />
         {canSeeQueries && (
           <StatCard
             title="Total Queries"
