@@ -214,14 +214,16 @@ function GrantDefinitionsPage() {
                   New Definition
                 </Button>
               </DialogTrigger>
-              <DefinitionDialog
-                key={editing?.uid ?? "new"}
-                editing={editing}
-                onClose={() => {
-                  setDialogOpen(false);
-                  setEditing(null);
-                }}
-              />
+              {dialogOpen && (
+                <DefinitionDialog
+                  key={editing?.uid ?? "new"}
+                  editing={editing}
+                  onClose={() => {
+                    setDialogOpen(false);
+                    setEditing(null);
+                  }}
+                />
+              )}
             </Dialog>
           )
         }

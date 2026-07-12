@@ -222,6 +222,42 @@ test.describe("Grant Definition edit dialog prefill", () => {
     await expect(page.locator("#def-block_copy")).not.toBeChecked();
   });
 
+  test("staleness: New then New opens a blank form", async ({
+    authenticatedPage: page,
+  }) => {
+    await page.goto(DEFS_URL);
+    await page.waitForLoadState("networkidle");
+
+    const name = `E2E NewThenNew ${Date.now()}`;
+
+    // Create a definition (first New).
+    await openCreateDialog(page);
+    await fillDefinition(page, {
+      name,
+      description: "new-then-new",
+      durationValue: "4",
+      durationUnitLabel: "Hours",
+      controls: ["read_only", "block_ddl"],
+      maxQueries: "321",
+    });
+    await submitDialog(page);
+
+    // Two consecutive New opens share the uid->"new" key, so only unmounting the
+    // dialog on close guarantees the second New starts blank rather than
+    // retaining the values just submitted.
+    await openCreateDialog(page);
+    await expect(page.getByTestId("grant-definition-name")).toHaveValue("");
+    await expect(page.getByTestId("grant-definition-description")).toHaveValue(
+      ""
+    );
+    await expect(page.getByTestId("grant-definition-max-queries")).toHaveValue(
+      ""
+    );
+    await expect(page.locator("#def-read_only")).not.toBeChecked();
+    await expect(page.locator("#def-block_copy")).not.toBeChecked();
+    await expect(page.locator("#def-block_ddl")).not.toBeChecked();
+  });
+
   test("staleness: Edit A then Edit B loads B's values", async ({
     authenticatedPage: page,
   }) => {
