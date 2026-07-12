@@ -54,6 +54,8 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Plus, Ban } from "lucide-react";
 import { toast } from "sonner";
 import { formatDateTimeLocal, formatDateTime } from "@/lib/date-utils";
+import { UsageMeter } from "@/components/shared/UsageMeter";
+import { formatBytes } from "@/lib/utils";
 
 // Control options with descriptions
 const CONTROLS = [
@@ -67,15 +69,6 @@ function formatControlName(control: string): string {
   return control
     .replace(/_/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
-}
-
-// Helper to format bytes in human-readable format
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 }
 
 // Helper to format duration in human-readable format
@@ -216,15 +209,17 @@ function GrantsPage() {
       key: "usage",
       header: "Usage",
       cell: (g) => (
-        <div className="text-sm space-y-1">
-          <div>
-            {g.query_count ?? 0}
-            {g.max_query_counts && ` / ${g.max_query_counts}`} queries
-          </div>
-          <div className="text-muted-foreground">
-            {formatBytes(g.bytes_transferred ?? 0)}
-            {g.max_bytes_transferred && ` / ${formatBytes(g.max_bytes_transferred)}`}
-          </div>
+        <div className="space-y-2" data-testid={`grant-usage-${g.uid}`}>
+          <UsageMeter
+            used={g.query_count ?? 0}
+            limit={g.max_query_counts}
+            unit="queries"
+          />
+          <UsageMeter
+            used={g.bytes_transferred ?? 0}
+            limit={g.max_bytes_transferred}
+            format={formatBytes}
+          />
         </div>
       ),
     },

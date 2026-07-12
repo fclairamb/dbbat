@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/urfave/cli/v3"
 
 	"github.com/fclairamb/dbbat/internal/api"
@@ -631,6 +632,21 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	}
 	logger.InfoContext(ctx, "Created read-only grant for viewer user on proxy_target")
 
+	// 6b. Create a quota-bounded grant for the admin user so the grants list
+	// has a grant with applied limits (alongside the unlimited grants above).
+	if err := seedQuotaGrant(ctx, dataStore, adminUser.UID, targetDB.UID); err != nil {
+		return err
+	}
+	logger.InfoContext(ctx, "Created quota-bounded grant for admin user on proxy_target")
+
+	// 6c. Seed a sample logged query (via a closed connection) so the queries
+	// list has a row and the query-detail breadcrumb has real SQL text to
+	// preview in test mode.
+	if err := seedSampleQuery(ctx, dataStore, adminUser.UID, targetDB.UID); err != nil {
+		return err
+	}
+	logger.InfoContext(ctx, "Created sample logged query on proxy_target")
+
 	// 7. Create stable API keys for test users
 	testKeys := []struct {
 		user *store.User
@@ -770,6 +786,60 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	logger.InfoContext(ctx, "Created read-only grant for viewer user on demo_db")
 
 	logger.InfoContext(ctx, "Demo data provisioning complete")
+	return nil
+}
+
+// seedQuotaGrant creates a read-only grant bounded by a query count and a
+// data-transfer quota, so the test-mode grants list has a grant with applied
+// limits to render (alongside the unlimited seed grants).
+func seedQuotaGrant(ctx context.Context, dataStore *store.Store, userID, databaseID uuid.UUID) error {
+	maxQueries := int64(100)
+	maxBytes := int64(1024 * 1024 * 1024) // 1 GB
+	_, err := dataStore.CreateGrant(ctx, &store.Grant{
+		UserID:              userID,
+		DatabaseID:          databaseID,
+		Controls:            []string{store.ControlReadOnly},
+		GrantedBy:           userID,
+		StartsAt:            time.Now(),
+		ExpiresAt:           time.Now().AddDate(10, 0, 0), // 10 years from now
+		MaxQueryCounts:      &maxQueries,
+		MaxBytesTransferred: &maxBytes,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create quota grant: %w", err)
+	}
+	return nil
+}
+
+// seedSampleQuery records one historical query on a closed connection so the
+// test-mode queries list has a clickable row and the query-detail breadcrumb
+// has real SQL text (long enough to exercise the preview truncation) to render.
+func seedSampleQuery(ctx context.Context, dataStore *store.Store, userID, databaseID uuid.UUID) error {
+	conn, err := dataStore.CreateConnection(ctx, userID, databaseID, "127.0.0.1")
+	if err != nil {
+		return fmt.Errorf("failed to create sample connection: %w", err)
+	}
+
+	durationMs := 1.234
+	rowsAffected := int64(3)
+	if _, err := dataStore.CreateQuery(ctx, &store.Query{
+		ConnectionID: conn.UID,
+		// Deliberately avoids nav-section words (users, databases, grants,
+		// connections, queries, audit) so the e2e navigation test's broad
+		// `getByRole("link", { name: /users/i })`-style locators don't match
+		// this query's row link on the dashboard's "Recent Queries" table.
+		SQLText:      "SELECT order_id, total_amount, status FROM orders WHERE status = 'shipped' ORDER BY order_id DESC",
+		ExecutedAt:   time.Now(),
+		DurationMs:   &durationMs,
+		RowsAffected: &rowsAffected,
+	}); err != nil {
+		return fmt.Errorf("failed to create sample query: %w", err)
+	}
+
+	// Close the connection so it doesn't linger as an "active" connection.
+	if err := dataStore.CloseConnection(ctx, conn.UID); err != nil {
+		return fmt.Errorf("failed to close sample connection: %w", err)
+	}
 	return nil
 }
 

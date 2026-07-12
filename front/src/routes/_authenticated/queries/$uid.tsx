@@ -19,6 +19,8 @@ import { format } from "date-fns";
 import { useAuth } from "@/contexts/AuthContext";
 import { canViewQueries } from "@/lib/permissions";
 import { AccessDenied } from "@/components/shared/AccessDenied";
+import { useBreadcrumbTitle } from "@/contexts/BreadcrumbContext";
+import { sqlPreview } from "@/lib/sql";
 
 const DEFAULT_PAGE_SIZE = 100;
 const PAGE_SIZE_OPTIONS = [50, 100, 500];
@@ -31,6 +33,12 @@ function QueryDetailPage() {
   const { user } = useAuth();
   const { uid } = Route.useParams();
   const { data: query, isLoading: isLoadingQuery } = useQueryDetails(uid);
+
+  // Publish a "Queries › SELECT …" breadcrumb once the SQL text is loaded.
+  useBreadcrumbTitle(
+    `/queries/${uid}`,
+    query?.sql_text ? sqlPreview(query.sql_text) : undefined
+  );
 
   // Rows pagination state (local, not URL-based)
   const [cursor, setCursor] = useState<string | undefined>();

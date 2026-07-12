@@ -840,7 +840,7 @@ export interface paths {
         };
         /**
          * Get connection URL template for a database
-         * @description Returns a connection URL with `{API_KEY}` placeholder for the specified database.
+         * @description Returns a connection URL with `{DBBAT_KEY}` placeholder for the specified database.
          *     - Admin callers: always 200.
          *     - Non-admin callers: 200 if they have at least one active grant; 404 otherwise (to avoid leaking database existence).
          *     - If the protocol proxy is disabled (resolved port = 0): returns 409.

@@ -162,14 +162,16 @@ func isIdentifierByte(b byte) bool {
 }
 
 // readUsernameAtOffset returns the next userIDLen bytes as a username if they
-// are all printable ASCII identifier characters; ok=false otherwise.
+// are all printable ASCII; ok=false otherwise. It uses the true printable check
+// (not the identifier-only one) because the field is the exact declared username
+// span and may legitimately contain '.', '-', '@' etc. (e.g. florent.clairambault).
 func readUsernameAtOffset(payload []byte, userIDLen int) (string, bool) {
 	if userIDLen <= 0 || userIDLen > len(payload) {
 		return "", false
 	}
 
 	candidate := payload[:userIDLen]
-	if !isPrintableASCII(candidate) {
+	if !isPrintableASCIIRun(candidate) {
 		return "", false
 	}
 
@@ -197,7 +199,7 @@ func parseAuthPhase1Fallback(payload []byte) (string, error) {
 		}
 
 		candidate := payload[i+4 : i+4+strLen]
-		if !isPrintableASCII(candidate) {
+		if !isIdentifierRun(candidate) {
 			continue
 		}
 
@@ -214,7 +216,7 @@ func parseAuthPhase1Fallback(payload []byte) (string, error) {
 		}
 
 		candidate := payload[i+1 : i+1+strLen]
-		if !isPrintableASCII(candidate) {
+		if !isIdentifierRun(candidate) {
 			continue
 		}
 
@@ -229,8 +231,12 @@ func parseAuthPhase1Fallback(payload []byte) (string, error) {
 	return "", ErrAuthPhase1BadUsername
 }
 
-// isPrintableASCII checks if all bytes are printable ASCII (letters, digits, _, $, #).
-func isPrintableASCII(b []byte) bool {
+// isIdentifierRun reports whether every byte is an Oracle identifier character
+// (letters, digits, _, $, #). NOTE: despite the historical name this is NOT a
+// printable-ASCII test — it rejects '.', '-', '@', spaces and every other
+// printable-but-non-identifier byte. For a true printable check (e.g. usernames
+// with dots or passwords with punctuation) use isPrintableASCIIRun instead.
+func isIdentifierRun(b []byte) bool {
 	for _, c := range b {
 		if (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') &&
 			(c < '0' || c > '9') && c != '_' && c != '$' && c != '#' {

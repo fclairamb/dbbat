@@ -346,7 +346,7 @@ func tryDecryptPasswordWithKey(key, encPasswordBytes []byte) (string, bool) {
 	password := plaintext[o5LogonPasswordPrefixLen:]
 	password = trimNullBytes(password)
 
-	if len(password) == 0 || !isPrintableASCII(password) {
+	if len(password) == 0 || !isPrintableASCIIRun(password) {
 		return "", false
 	}
 

@@ -80,7 +80,7 @@ func TestBuildConnectionURL_PostgreSQL(t *testing.T) {
 		assert.NotEmpty(t, info.URL)
 	})
 
-	t.Run("apiKey empty produces {API_KEY} placeholder", func(t *testing.T) {
+	t.Run("apiKey empty produces {DBBAT_KEY} placeholder", func(t *testing.T) {
 		t.Parallel()
 		db := makeDB(store.ProtocolPostgreSQL, "mydb", "prefer")
 		info, ok := BuildConnectionURL(db, user, endpoints, "")
@@ -184,7 +184,7 @@ func TestBuildConnectionURL_Oracle(t *testing.T) {
 		assert.False(t, ok)
 	})
 
-	t.Run("oracle placeholder URL contains {API_KEY}", func(t *testing.T) {
+	t.Run("oracle placeholder URL contains {DBBAT_KEY}", func(t *testing.T) {
 		t.Parallel()
 		db := makeDB(store.ProtocolOracle, "ORCL", "")
 		info, ok := BuildConnectionURL(db, user, endpoints, "")

@@ -9,6 +9,7 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
 import { Link, useMatches } from "@tanstack/react-router";
+import { useBreadcrumbContext } from "@/contexts/BreadcrumbContext";
 
 interface BreadcrumbItem {
   title: string;
@@ -17,23 +18,29 @@ interface BreadcrumbItem {
 
 export function Header() {
   const matches = useMatches();
+  const { titles } = useBreadcrumbContext();
 
-  // Build breadcrumbs from route matches
+  // Build breadcrumbs from the deepest matched route's pathname, split into
+  // cumulative segments. Building from segments (rather than from the router
+  // matches) guarantees a crumb for every path level — including parent
+  // segments like "/queries" that have no layout route of their own.
   const breadcrumbs: BreadcrumbItem[] = [];
+  const deepest = matches[matches.length - 1];
+  const pathname = deepest?.pathname ?? "/";
+  const segments = pathname.split("/").filter(Boolean);
 
-  for (const match of matches) {
-    // Skip root and layout routes
-    if (match.pathname === "/" && matches.length > 1) continue;
-
-    // Get route meta for title
-    const routeMeta = match.context as { title?: string } | undefined;
-    const title = routeMeta?.title || formatPathname(match.pathname);
-
-    if (title) {
-      breadcrumbs.push({
-        title,
-        href: match.pathname,
-      });
+  if (segments.length === 0) {
+    breadcrumbs.push({ title: "Dashboard", href: "/" });
+  } else {
+    let href = "";
+    for (const segment of segments) {
+      href += `/${segment}`;
+      // A page may publish a friendlier crumb (e.g. a SQL preview) for its own
+      // path via the breadcrumb context; fall back to a formatted segment.
+      const title = titles[href] || formatSegment(segment);
+      if (title) {
+        breadcrumbs.push({ title, href });
+      }
     }
   }
 
@@ -50,7 +57,12 @@ export function Header() {
                 <BreadcrumbPage>{crumb.title}</BreadcrumbPage>
               ) : (
                 <BreadcrumbLink asChild>
-                  <Link to={crumb.href || "/"}>{crumb.title}</Link>
+                  {/* exact match only: a parent crumb (e.g. "Queries" on a
+                      /queries/:id detail page) must not be marked
+                      aria-current="page" — only the leaf crumb is. */}
+                  <Link to={crumb.href || "/"} activeOptions={{ exact: true }}>
+                    {crumb.title}
+                  </Link>
                 </BreadcrumbLink>
               )}
             </BreadcrumbItem>
@@ -61,23 +73,20 @@ export function Header() {
   );
 }
 
-function formatPathname(pathname: string): string {
-  if (pathname === "/") return "Dashboard";
-
-  const segments = pathname.split("/").filter(Boolean);
-  const lastSegment = segments[segments.length - 1];
-
-  // Check if it's a UUID (detail page)
+function formatSegment(segment: string): string {
+  // For a UUID detail segment with no published override, fall back to a short
+  // id rather than the literal "Details" (which made every detail page's
+  // breadcrumb look identical).
   if (
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-      lastSegment
+      segment
     )
   ) {
-    return "Details";
+    return segment.slice(0, 8);
   }
 
   // Capitalize and format
-  return lastSegment
+  return segment
     .split("-")
     .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
     .join(" ");

@@ -19,10 +19,10 @@ type ConnectionInfo struct {
 	URL          string    `json:"url"`
 }
 
-const keyPlaceholder = "{API_KEY}"
+const keyPlaceholder = "{DBBAT_KEY}"
 
 // BuildConnectionURL builds a connection URL for the given database, user, and key.
-// When apiKey is "", the placeholder "{API_KEY}" is substituted in the password slot.
+// When apiKey is "", the placeholder "{DBBAT_KEY}" is substituted in the password slot.
 // Returns (ConnectionInfo{}, false) when the protocol's resolved port is 0.
 func BuildConnectionURL(
 	db *store.Database,

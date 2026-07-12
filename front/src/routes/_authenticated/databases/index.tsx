@@ -501,7 +501,12 @@ function DatabaseDetailsDialog({
             <div className="space-y-2">
               <h3 className="text-sm font-medium">Connection URL</h3>
               <p className="text-xs text-muted-foreground">
-                Use one of your API keys as the password.
+                Replace{" "}
+                <code className="rounded bg-muted px-1 py-0.5 font-mono">
+                  {"{DBBAT_KEY}"}
+                </code>{" "}
+                with one of your dbbat API keys (the{" "}
+                <code className="font-mono">dbb_…</code> token).
               </p>
               {isProxyDisabled ? (
                 <Alert>
