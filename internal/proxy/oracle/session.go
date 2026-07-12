@@ -496,8 +496,10 @@ func (s *session) disambiguateDatabase(phase1Pkt *TNSPacket) error {
 
 	// Oracle clients uppercase usernames — normalize like authenticateClient.
 	user, err := s.store.GetUserByUsername(s.ctx, strings.ToLower(username))
-	if err != nil {
+	if errors.Is(err, store.ErrUserNotFound) {
 		return fmt.Errorf("%w: %s", ErrUserNotFound, username)
+	} else if err != nil {
+		return fmt.Errorf("user lookup failed for %s: %w", username, err)
 	}
 
 	var matched []*store.Database
@@ -733,8 +735,10 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 
 	// Look up dbbat user
 	user, err := s.store.GetUserByUsername(s.ctx, s.username)
-	if err != nil {
+	if errors.Is(err, store.ErrUserNotFound) {
 		return fmt.Errorf("%w: %s", ErrUserNotFound, username)
+	} else if err != nil {
+		return fmt.Errorf("user lookup failed for %s: %w", username, err)
 	}
 
 	s.user = user
