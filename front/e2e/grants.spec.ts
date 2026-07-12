@@ -278,6 +278,35 @@ test.describe("Grant Quota Management", () => {
     expect(content?.toLowerCase()).toMatch(/queries|usage/);
   });
 
+  test("should render applied limits and unlimited fallback in usage column", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("grants");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    // Test mode seeds a quota-bounded grant (admin, 100 queries / 1 GB) and
+    // unlimited grants (connector write, viewer read-only).
+    const body = (await authenticatedPage.textContent("body")) ?? "";
+
+    // A grant with a limit shows "used / limit queries" (e.g. "0 / 100 queries").
+    expect(body).toMatch(/\/\s*100\s*queries/);
+
+    // The data-transfer limit is rendered too (1 GB).
+    expect(body).toMatch(/\/\s*1 GB/);
+
+    // Unlimited grants show an explicit "unlimited" marker instead of nothing.
+    expect(body.toLowerCase()).toContain("unlimited");
+
+    // A visual progress indicator is present for the quota grant.
+    const progressBars = authenticatedPage.locator('[role="progressbar"]');
+    expect(await progressBars.count()).toBeGreaterThan(0);
+
+    await authenticatedPage.screenshot({
+      path: "test-results/screenshots/grants-list-applied-limits.png",
+      fullPage: true,
+    });
+  });
+
   test("quota fields should have unlimited placeholder", async ({
     authenticatedPage,
   }) => {
