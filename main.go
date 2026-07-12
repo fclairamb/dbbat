@@ -631,6 +631,25 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	}
 	logger.InfoContext(ctx, "Created read-only grant for viewer user on proxy_target")
 
+	// 6b. Create a quota-bounded grant for the admin user so the grants list
+	// has a grant with applied limits (alongside the unlimited grants above).
+	maxQueries := int64(100)
+	maxBytes := int64(1024 * 1024 * 1024) // 1 GB
+	_, err = dataStore.CreateGrant(ctx, &store.Grant{
+		UserID:              adminUser.UID,
+		DatabaseID:          targetDB.UID,
+		Controls:            []string{store.ControlReadOnly},
+		GrantedBy:           adminUser.UID,
+		StartsAt:            time.Now(),
+		ExpiresAt:           time.Now().AddDate(10, 0, 0), // 10 years from now
+		MaxQueryCounts:      &maxQueries,
+		MaxBytesTransferred: &maxBytes,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create quota grant for admin user: %w", err)
+	}
+	logger.InfoContext(ctx, "Created quota-bounded grant for admin user on proxy_target")
+
 	// 7. Create stable API keys for test users
 	testKeys := []struct {
 		user *store.User

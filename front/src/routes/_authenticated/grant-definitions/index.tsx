@@ -45,6 +45,7 @@ import {
 } from "@/components/ui/select";
 import { useAuth } from "@/contexts/AuthContext";
 import { canManageGrantDefinitions } from "@/lib/permissions";
+import { UsageLimit, formatBytes } from "@/components/shared/UsageMeter";
 
 export const Route = createFileRoute("/_authenticated/grant-definitions/")({
   component: GrantDefinitionsPage,
@@ -68,14 +69,6 @@ function formatDuration(seconds: number): string {
   const days = Math.floor(hours / 24);
   const rem = hours % 24;
   return rem ? `${days}d ${rem}h` : `${days}d`;
-}
-
-function formatBytes(bytes: number | null | undefined): string {
-  if (bytes == null) return "Unlimited";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + " " + sizes[i];
 }
 
 function GrantDefinitionsPage() {
@@ -145,12 +138,16 @@ function GrantDefinitionsPage() {
     {
       key: "max_query_counts",
       header: "Max Queries",
-      cell: (d: GrantDefinition) => d.max_query_counts ?? "Unlimited",
+      cell: (d: GrantDefinition) => (
+        <UsageLimit limit={d.max_query_counts} unit="queries" />
+      ),
     },
     {
       key: "max_bytes_transferred",
       header: "Max Data",
-      cell: (d: GrantDefinition) => formatBytes(d.max_bytes_transferred),
+      cell: (d: GrantDefinition) => (
+        <UsageLimit limit={d.max_bytes_transferred} format={formatBytes} />
+      ),
     },
     {
       key: "is_active",
