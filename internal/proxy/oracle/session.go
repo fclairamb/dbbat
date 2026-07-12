@@ -235,7 +235,8 @@ func (s *session) run() error {
 	// Step 5: Authenticate client via O5LOGON (API key as Oracle password)
 	if err := s.authenticateClient(phase1Pkt); err != nil {
 		s.logger.WarnContext(s.ctx, "client authentication failed", slog.Any("error", err))
-		s.sendAuthFailed(ORA01017, "invalid username/password; logon denied")
+		oraCode, message := authRejectFor(err)
+		s.sendAuthFailed(oraCode, message)
 
 		return fmt.Errorf("%w: %w", ErrClientAuthFailed, err)
 	}
@@ -335,17 +336,33 @@ func encodeV315DataPacket(payload []byte) []byte {
 	return buf
 }
 
-// sendAuthFailed sends an ORA-01017 style auth failure to the client.
+// sendAuthFailed sends an ORA error TTC AUTH-reject frame to the client before
+// the socket is closed, so the client renders a real ORA code instead of a
+// generic ORA-12566 / ORA-03113 protocol error.
+//
+// The frame MUST use v315+ framing (4-byte length header, the 2-byte length
+// field left 0x0000) — the same as the AUTH challenge (encodeV315DataPacket).
+// After the TNS Accept, modern clients read the packet length as a 4-byte field;
+// a legacy 2-byte-framed reject (the old writeTNSPacket path) is misread as an
+// oversized/malformed packet and surfaces as ORA-12566 with no useful reason.
 func (s *session) sendAuthFailed(oraCode uint16, message string) {
-	payload := buildAuthFailed(int(oraCode), message)
-	pkt := &TNSPacket{
-		Type:    TNSPacketTypeData,
-		Payload: payload,
-	}
-
-	if err := writeTNSPacket(s.clientConn, pkt); err != nil {
+	frame := encodeV315DataPacket(buildAuthFailed(int(oraCode), message))
+	if _, err := s.clientConn.Write(frame); err != nil {
 		s.logger.ErrorContext(s.ctx, "failed to send auth failed", slog.Any("error", err))
 	}
+}
+
+// authRejectFor maps a client-authentication failure to the ORA code and message
+// dbbat surfaces to the client. A missing grant is actionable — the user simply
+// needs to request access — so it gets its own ORA-01045 code and message. Every
+// other failure (unknown user, wrong password) returns the generic ORA-01017 so
+// the response never reveals whether the username exists or the password was wrong.
+func authRejectFor(err error) (uint16, string) {
+	if errors.Is(err, ErrNoActiveGrant) {
+		return ORA01045, "no active grant for this database; request access via dbbat"
+	}
+
+	return ORA01017, "invalid username/password; logon denied"
 }
 
 // resolveDatabase parses the service name from the Connect payload and looks up the database.

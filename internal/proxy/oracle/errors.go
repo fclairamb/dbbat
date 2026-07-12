@@ -9,6 +9,7 @@ import (
 // ORA error codes for TNS Refuse packets.
 const (
 	ORA01017 uint16 = 1017  // ORA-01017: invalid username/password; logon denied
+	ORA01045 uint16 = 1045  // ORA-01045: user lacks privilege; logon denied (used for "no active grant")
 	ORA12505 uint16 = 12505 // TNS:listener does not currently know of SID
 	ORA12514 uint16 = 12514 // TNS:listener does not currently know of service
 	ORA12520 uint16 = 12520 // TNS:listener could not find available handler
