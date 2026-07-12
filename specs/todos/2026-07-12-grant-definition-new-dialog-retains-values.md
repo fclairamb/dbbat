@@ -39,3 +39,19 @@ blank (note: the existing "Edit A then New" test already asserts blank, but via
 the uid→"new" key change, which does not exercise the New→New path).
 
 No GitHub issue filed yet — one should be created and linked here.
+
+## Implementation Plan
+
+1. Adopt Option 1 (cheapest): only mount `DefinitionDialog` while the dialog is
+   open. In `front/src/routes/_authenticated/grant-definitions/index.tsx`, wrap
+   the `<DefinitionDialog .../>` in `{dialogOpen && (...)}`, keeping the existing
+   `key={editing?.uid ?? "new"}`. The `DialogTrigger` stays outside the guard so
+   the button still renders. Because the component unmounts on close and remounts
+   on every open, its `useState` (name, description, controls, quotas) always
+   starts fresh — New→New now opens blank while Edit A→New and Edit A→Edit B stay
+   correct.
+2. Extend `front/e2e/grant-definitions.spec.ts` with a New→New test: create a
+   definition, reopen **New Definition**, and assert name/description/controls
+   are blank (the existing Edit→New test only exercises the uid→"new" key path).
+3. QA: `make build-front` and `cd front && bun run lint` must pass with no new
+   errors in touched files. Run E2E if the local devloop is in test mode.
