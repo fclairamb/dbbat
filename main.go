@@ -824,7 +824,11 @@ func seedSampleQuery(ctx context.Context, dataStore *store.Store, userID, databa
 	rowsAffected := int64(3)
 	if _, err := dataStore.CreateQuery(ctx, &store.Query{
 		ConnectionID: conn.UID,
-		SQLText:      "SELECT id, name, email, created_at FROM users WHERE active = true ORDER BY created_at DESC",
+		// Deliberately avoids nav-section words (users, databases, grants,
+		// connections, queries, audit) so the e2e navigation test's broad
+		// `getByRole("link", { name: /users/i })`-style locators don't match
+		// this query's row link on the dashboard's "Recent Queries" table.
+		SQLText:      "SELECT order_id, total_amount, status FROM orders WHERE status = 'shipped' ORDER BY order_id DESC",
 		ExecutedAt:   time.Now(),
 		DurationMs:   &durationMs,
 		RowsAffected: &rowsAffected,

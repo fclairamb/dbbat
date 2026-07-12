@@ -57,7 +57,12 @@ export function Header() {
                 <BreadcrumbPage>{crumb.title}</BreadcrumbPage>
               ) : (
                 <BreadcrumbLink asChild>
-                  <Link to={crumb.href || "/"}>{crumb.title}</Link>
+                  {/* exact match only: a parent crumb (e.g. "Queries" on a
+                      /queries/:id detail page) must not be marked
+                      aria-current="page" — only the leaf crumb is. */}
+                  <Link to={crumb.href || "/"} activeOptions={{ exact: true }}>
+                    {crumb.title}
+                  </Link>
                 </BreadcrumbLink>
               )}
             </BreadcrumbItem>
