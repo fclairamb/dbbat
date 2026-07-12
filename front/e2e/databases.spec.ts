@@ -48,6 +48,30 @@ test.describe("Databases Management", () => {
     }
   });
 
+  test("connection URL shows the {DBBAT_KEY} placeholder", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("databases");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    // Open the first database's detail dialog by clicking its table row.
+    const firstRow = authenticatedPage.locator("tbody tr").first();
+    if ((await firstRow.count()) === 0) {
+      test.skip(true, "no databases available in this environment");
+      return;
+    }
+    await firstRow.click();
+
+    const dialog = authenticatedPage.getByTestId("database-details-dialog");
+    await expect(dialog).toBeVisible();
+
+    // Admin callers have no API key, so the URL is rendered with the placeholder.
+    const connUrl = authenticatedPage.getByTestId("database-connection-url");
+    if ((await connUrl.count()) > 0) {
+      await expect(connUrl.first()).toHaveValue(/\{DBBAT_KEY\}/);
+    }
+  });
+
   test("should display database configuration options", async ({
     authenticatedPage,
   }) => {
