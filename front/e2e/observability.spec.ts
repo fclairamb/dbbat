@@ -35,6 +35,66 @@ test.describe("Observability Features", () => {
     expect(content).toBeTruthy();
   });
 
+  test("query detail breadcrumb shows Queries parent, not 'Details'", async ({
+    authenticatedPage,
+  }) => {
+    // Navigate straight to a detail route with a synthetic uid. Even with no
+    // matching query, the breadcrumb is built from the pathname, so it must
+    // still show the "Queries" parent crumb and must not collapse the detail
+    // segment to the literal "Details".
+    await authenticatedPage.goto(
+      "queries/00000000-0000-0000-0000-000000000000"
+    );
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const breadcrumb = authenticatedPage.locator(
+      'nav[aria-label="breadcrumb"]'
+    );
+    await expect(breadcrumb).toBeVisible();
+
+    // Parent "Queries" crumb links back to the list.
+    const queriesCrumb = breadcrumb.getByRole("link", { name: "Queries" });
+    await expect(queriesCrumb).toBeVisible();
+    await expect(queriesCrumb).toHaveAttribute("href", /\/queries$/);
+
+    // The old behaviour rendered every detail page's crumb as "Details".
+    await expect(breadcrumb).not.toContainText("Details");
+  });
+
+  test("query detail breadcrumb shows a SQL preview when a query exists", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("queries");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const rows = authenticatedPage.locator("tbody tr");
+    const rowCount = await rows.count();
+    if (rowCount === 0) {
+      test.skip(true, "No query rows available in this environment");
+      return;
+    }
+
+    // Click the first query row to open its detail page.
+    await rows.first().locator("a").first().click();
+    await expect(authenticatedPage).toHaveURL(
+      /\/queries\/[0-9a-f-]{36}$/
+    );
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const breadcrumb = authenticatedPage.locator(
+      'nav[aria-label="breadcrumb"]'
+    );
+    // "Queries" parent + a non-empty preview leaf (the SQL text, not "Details").
+    await expect(
+      breadcrumb.getByRole("link", { name: "Queries" })
+    ).toBeVisible();
+    await expect(breadcrumb).not.toContainText("Details");
+    // The leaf (current-page) crumb carries the SQL preview.
+    const leaf = breadcrumb.locator('[aria-current="page"]');
+    await expect(leaf).toBeVisible();
+    await expect(leaf).not.toHaveText("");
+  });
+
   test("should display audit log page", async ({ authenticatedPage }) => {
     await authenticatedPage.goto("audit");
     await authenticatedPage.waitForLoadState("networkidle");
