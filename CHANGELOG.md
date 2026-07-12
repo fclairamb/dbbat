@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.15.3](https://github.com/fclairamb/dbbat/compare/v0.15.2...v0.15.3) (2026-07-12)
+
+Implements seven backlog specs in one squash-merged PR ([#240](https://github.com/fclairamb/dbbat/issues/240)) ([caa73cb](https://github.com/fclairamb/dbbat/commit/caa73cb7ed99742556f1179f1c9500084fa85bc1)); the individual changes are broken out below.
+
+### Features
+
+* **ui:** query detail breadcrumb now reads `Queries › <sql-preview>` — a link back to the queries list plus the first ~40 chars of the SQL — instead of a generic "Details"; the parent crumb now appears on every detail route and a bare UUID no longer collapses to "Details" ([#240](https://github.com/fclairamb/dbbat/issues/240))
+* **ui:** grants list and grant-definitions always show the applied limits (`9 / 100 queries`, `169.8 MB / 1 GB`) with a usage bar, a warning colour ≥80%, destructive ≥100%, and an explicit `unlimited` marker when no limit is set ([#240](https://github.com/fclairamb/dbbat/issues/240))
+* **api:** rename the connection-URL password placeholder `{API_KEY}` → `{DBBAT_KEY}` so it unambiguously names a dbbat-issued `dbb_…` token ([#240](https://github.com/fclairamb/dbbat/issues/240))
+
+
+### Bug Fixes
+
+* **ui:** the grant-definition edit dialog now opens pre-filled with the definition's current values instead of an empty form (which silently blanked the definition on save) ([#240](https://github.com/fclairamb/dbbat/issues/240))
+* **ui:** the "New Definition" dialog now opens blank on consecutive opens instead of retaining the previously-submitted values ([#240](https://github.com/fclairamb/dbbat/issues/240))
+* **oracle:** surface grant/auth denials as a clean error — no active grant → `ORA-01045`, bad credentials → `ORA-01017` — instead of tearing the socket down and letting the client report a generic `ORA-12566` / `ORA-03113` (root cause: the auth-reject frame used legacy TNS framing that v315+ clients misread) ([#240](https://github.com/fclairamb/dbbat/issues/240))
+* **oracle:** rename the misleading `isPrintableASCII` helper (it only accepted the Oracle identifier set) and fix three latent call sites that truncated dotted usernames or rejected special-character passwords — the same class of bug as [#235](https://github.com/fclairamb/dbbat/issues/235) ([#240](https://github.com/fclairamb/dbbat/issues/240))
+
 ## [0.15.2](https://github.com/fclairamb/dbbat/compare/v0.15.1...v0.15.2) (2026-07-12)
 
 
