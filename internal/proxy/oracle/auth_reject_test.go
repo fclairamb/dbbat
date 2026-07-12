@@ -92,11 +92,12 @@ func TestSendAuthFailed_EmitsV315FrameWithORACode(t *testing.T) {
 
 			total := int(binary.BigEndian.Uint32(header[0:4]))
 			require.GreaterOrEqual(t, total, 8)
-			body := make([]byte, total-8)
-			_, err = io.ReadFull(client, body)
+
+			frame := make([]byte, total)
+			copy(frame, header)
+			_, err = io.ReadFull(client, frame[8:])
 			require.NoError(t, err)
 
-			frame := append(header, body...)
 			code, message := decodeAuthRejectFrame(t, frame)
 			assert.Equal(t, tt.code, code, "reject frame must carry the chosen ORA code, not an abrupt EOF")
 			assert.Equal(t, tt.message, message)
