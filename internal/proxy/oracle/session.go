@@ -53,6 +53,15 @@ type session struct {
 	// shape the challenge dbbat issues so OCI can parse it.
 	clientWideEncoding bool
 
+	// clientBigClrChunks records whether the upstream advertised
+	// ServerCompileTimeCaps[37]&0x20 (UseBigClrChunks) during the pre-auth relay.
+	// When set, clients encode long CLR values with compressed-int chunk lengths
+	// after the 0xFE long-form marker instead of single-byte lengths. Used to
+	// harden the Phase 2 rewrite fallback (rewritePhase2KVPairs) so a long
+	// AUTH_CONNECT_STRING (e.g. a load-balancer DNS host) decodes correctly. The
+	// primary anchored rewrite never decodes long values, so it is unaffected.
+	clientBigClrChunks bool
+
 	// clientCombinedKey is the AES key derived from the dbbat-as-server O5LOGON
 	// session keys (MD5(serverSessKey || clientSessKey)). Captured by
 	// authenticateClient on success so the AUTH OK forwarded back to the client

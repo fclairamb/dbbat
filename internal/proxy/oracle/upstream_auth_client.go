@@ -222,7 +222,7 @@ func (s *session) sendUpstreamAuthPhase2(username string, identity driverIdentit
 	dataFlags := clientPayload[:ttcDataFlagsSize]
 	clientBody := clientPayload[ttcDataFlagsSize:]
 
-	rewritten, err := rewriteAuthPhase2(clientBody, username, sec)
+	rewritten, err := rewriteAuthPhase2(clientBody, username, sec, s.clientBigClrChunks)
 	if err != nil {
 		s.logger.WarnContext(s.ctx, "Phase 2 rewrite failed; falling back to synthetic Phase 2",
 			slog.Any("error", err))
@@ -532,7 +532,7 @@ func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse, wide bool) (i
 	}
 
 	for i := 0; i < dictLen; i++ {
-		pair, ok := readAuthKVPair(buf[pos:], wide)
+		pair, ok := readAuthKVPair(buf[pos:], wide, false)
 		if !ok {
 			return 0, false
 		}
@@ -554,8 +554,11 @@ type authKVPairResult struct {
 
 // readAuthKVPair reads keyLen + keyCLR + valueLen + valueCLR + flag, mirroring
 // session.GetKeyVal in go-ora. ok=false signals the buffer is truncated. wide
-// selects the OCI fixed 4-byte little-endian length/flag encoding.
-func readAuthKVPair(buf []byte, wide bool) (authKVPairResult, bool) {
+// selects the OCI fixed 4-byte little-endian length/flag encoding. bigChunks
+// selects the UseBigClrChunks long-value encoding (compressed-int chunk lengths)
+// for the value CLR; keys are always short so are unaffected. bigChunks is
+// ignored in the wide path (OCI does not use it).
+func readAuthKVPair(buf []byte, wide, bigChunks bool) (authKVPairResult, bool) {
 	if wide {
 		return readAuthKVPairWide(buf)
 	}
@@ -588,7 +591,7 @@ func readAuthKVPair(buf []byte, wide bool) (authKVPairResult, bool) {
 	pos += vn
 
 	if vLen > 0 {
-		v, vClrN := readCLR(buf[pos:])
+		v, vClrN := readCLRVariant(buf[pos:], bigChunks)
 		if vClrN == 0 {
 			return authKVPairResult{}, false
 		}
