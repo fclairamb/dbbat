@@ -88,9 +88,21 @@ func BuildConnectionURL(
 		if endpoints.OraPort == 0 {
 			return ConnectionInfo{}, false
 		}
+		// Advertise the dbbat logical database name, not the raw upstream
+		// service name: the Oracle session resolver tries an exact
+		// GetDatabaseByName lookup first, so the logical name is unambiguous
+		// even when several dbbat databases proxy the same upstream
+		// SERVICE_NAME (e.g. five databases sharing a mutualized MUTU01).
+		// A raw service name would resolve to an arbitrary one of them.
+		// Names that would break an EZ-Connect string (spaces, parens, …)
+		// fall back to the previous service-name behavior.
 		serviceOrDB := db.DatabaseName
 		if db.OracleServiceName != nil && *db.OracleServiceName != "" {
 			serviceOrDB = *db.OracleServiceName
+		}
+
+		if isEZConnectSafeName(db.Name) {
+			serviceOrDB = db.Name
 		}
 		// Oracle EZ-Connect format: user/key@host:port/service
 		rawURL := fmt.Sprintf("%s/%s@%s:%d/%s",
@@ -110,4 +122,27 @@ func BuildConnectionURL(
 	}
 
 	return ConnectionInfo{}, false
+}
+
+// isEZConnectSafeName reports whether a dbbat database name can be embedded
+// verbatim as the service part of an Oracle EZ-Connect string
+// (user/key@host:port/name). Letters, digits, '_', '.' and '-' are safe;
+// anything else (spaces, parentheses — e.g. "abyla_abymutualise02 (Admin)")
+// would break the connect-string parse, so callers fall back to the raw
+// upstream service name for those.
+func isEZConnectSafeName(name string) bool {
+	if name == "" {
+		return false
+	}
+
+	for _, c := range name {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '_' || c == '.' || c == '-':
+		default:
+			return false
+		}
+	}
+
+	return true
 }

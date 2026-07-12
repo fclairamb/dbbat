@@ -147,20 +147,36 @@ func TestBuildConnectionURL_Oracle(t *testing.T) {
 	endpoints := makeEndpoints()
 	user := makeUser()
 
-	t.Run("oracle uses OracleServiceName when set", func(t *testing.T) {
+	t.Run("oracle advertises dbbat logical name over shared service name", func(t *testing.T) {
 		t.Parallel()
-		svc := "ORCLPDB"
-		db := makeDB(store.ProtocolOracle, "ORCL", "")
+		// Several dbbat databases can share one upstream SERVICE_NAME (e.g.
+		// MUTU01): the advertised connect string must carry the unambiguous
+		// dbbat name, which the session resolver matches first (exact name).
+		svc := "MUTU01"
+		db := makeDB(store.ProtocolOracle, "abyla_i3f", "")
 		db.OracleServiceName = &svc
 		info, ok := BuildConnectionURL(db, user, endpoints, "key")
 		require.True(t, ok)
-		assert.Contains(t, info.URL, "/ORCLPDB")
-		assert.NotContains(t, info.URL, "/ORCL\x00") // DatabaseName "ORCL" is not used as path when service name set
+		assert.Contains(t, info.URL, "/abyla_i3f")
+		assert.NotContains(t, info.URL, "MUTU01")
 	})
 
-	t.Run("oracle falls back to DatabaseName when OracleServiceName not set", func(t *testing.T) {
+	t.Run("oracle falls back to OracleServiceName when dbbat name is not EZ-Connect safe", func(t *testing.T) {
+		t.Parallel()
+		svc := "MUTU02"
+		db := makeDB(store.ProtocolOracle, "aby", "")
+		db.Name = "abyla_abymutualise02 (Admin)"
+		db.OracleServiceName = &svc
+		info, ok := BuildConnectionURL(db, user, endpoints, "key")
+		require.True(t, ok)
+		assert.Contains(t, info.URL, "/MUTU02")
+		assert.NotContains(t, info.URL, "(Admin)")
+	})
+
+	t.Run("oracle falls back to DatabaseName when name unsafe and no service name", func(t *testing.T) {
 		t.Parallel()
 		db := makeDB(store.ProtocolOracle, "MYDB", "")
+		db.Name = "my db (RO)"
 		info, ok := BuildConnectionURL(db, user, endpoints, "key")
 		require.True(t, ok)
 		assert.Contains(t, info.URL, "/MYDB")
