@@ -56,6 +56,9 @@ export const canCreateAPIKey = (roles: string[] | undefined): boolean => hasAnyR
 
 export const canRevokeAPIKey = (roles: string[] | undefined): boolean => hasAnyRole(roles, ['admin', 'connector']);
 
+// Admins can review every user's API keys (fleet-wide "See other users' keys" toggle)
+export const canViewAllAPIKeys = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
+
 /**
  * Get tooltip message explaining why a button is disabled
  */

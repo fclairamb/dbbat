@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: DBBat API
   description: |
-    REST API for DBBat PostgreSQL Observability Proxy.
+    REST API for DBBat Database Observability Proxy.
 
     DBBat is a transparent PostgreSQL proxy for query observability, access control, and safety.
 
@@ -1350,16 +1350,31 @@ paths:
       description: |
         Returns a list of API keys.
 
-        - Non-admins can only see their own keys
-        - Admins can see all keys (optionally filter by user_id)
+        - Default for every caller, including admins: only the caller's own
+          keys.
+        - Admins can override the default with `all_users=true` (every user's
+          keys) or `user_id=<uuid>` (one specific user's keys). If both are
+          given, `user_id` wins.
+        - Non-admins can never see another user's keys: `all_users` and
+          `user_id` are ignored for them.
       operationId: listAPIKeys
       parameters:
         - name: user_id
           in: query
-          description: Filter by user UID (admin only)
+          description: >-
+            Return only this user's keys (admin only). Overrides the
+            own-keys-by-default behavior; wins over all_users if both are set.
           schema:
             type: string
             format: uuid
+        - name: all_users
+          in: query
+          description: >-
+            Return every user's keys instead of just the caller's own (admin
+            only; ignored for non-admins).
+          schema:
+            type: boolean
+            default: false
         - name: include_all
           in: query
           description: Include revoked and expired keys
@@ -2299,11 +2314,14 @@ components:
           description: SSL mode (disable, prefer, require, etc.)
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql, mariadb]
+          enum: [postgresql, oracle, mysql, mariadb, mongodb]
           description: Database protocol
         oracle_service_name:
           type: string
           description: Oracle SERVICE_NAME (Oracle only)
+        mongo_auth_source:
+          type: string
+          description: Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin")
         listable:
           type: boolean
           default: true
@@ -2366,12 +2384,15 @@ components:
           description: SSL mode
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql, mariadb]
+          enum: [postgresql, oracle, mysql, mariadb, mongodb]
           default: postgresql
           description: Database protocol
         oracle_service_name:
           type: string
           description: Oracle SERVICE_NAME (required for Oracle)
+        mongo_auth_source:
+          type: string
+          description: Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin")
         listable:
           type: boolean
           default: true
@@ -2408,11 +2429,14 @@ components:
           description: SSL mode
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql, mariadb]
+          enum: [postgresql, oracle, mysql, mariadb, mongodb]
           description: Database protocol
         oracle_service_name:
           type: string
           description: Oracle SERVICE_NAME
+        mongo_auth_source:
+          type: string
+          description: Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin")
         listable:
           type: boolean
           description: Whether this database appears in the grant-request dropdown for non-admin users
@@ -2865,6 +2889,20 @@ components:
           type: string
           format: uuid
           description: Connection UID
+        user_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            UID of the user who ran the query, resolved from the connection.
+            Only populated when listing queries.
+        database_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            UID of the target database, resolved from the connection.
+            Only populated when listing queries.
         sql_text:
           type: string
           description: SQL query text
@@ -3074,11 +3112,18 @@ components:
 
     PublicEndpoints:
       type: object
-      description: Public endpoint advertisement settings
+      description: >-
+        Public endpoint advertisement settings. Covers two independent
+        network paths: the *connection* host (host/pg_host/ora_host/
+        mysql_host/*_port — where SQL clients reach the PG/Oracle/MySQL
+        proxies, via direct or TCP-load-balancer access) and the *Web UI*
+        host (web_ui_url — where the browser and REST API are reached,
+        behind an HTTP ingress / reverse proxy). These are typically two
+        different DNS names on two different network paths.
       properties:
         host:
           type: string
-          description: Default public hostname for all protocols
+          description: Default public hostname for all protocols (the connection host, e.g. db.company.com)
         pg_host:
           type: string
           description: PostgreSQL-specific host override (empty = use host)
@@ -3088,6 +3133,9 @@ components:
         mysql_host:
           type: string
           description: MySQL-specific host override (empty = use host)
+        mongo_host:
+          type: string
+          description: MongoDB-specific host override (empty = use host)
         pg_port:
           type: integer
           nullable: true
@@ -3100,6 +3148,18 @@ components:
           type: integer
           nullable: true
           description: MySQL port override (null = use local listen port)
+        mongo_port:
+          type: integer
+          nullable: true
+          description: MongoDB port override (null = use local listen port)
+        web_ui_url:
+          type: string
+          description: >-
+            Web UI / public base URL override (e.g. https://dbbat.company.com),
+            reached through an HTTP ingress / reverse proxy. Empty = fall
+            back to the DBB_PUBLIC_URL environment variable. Used for Slack
+            deep-links and other absolute-URL generation. Independent of
+            `host`, which advertises the connection host instead.
 
     ResolvedEndpoints:
       type: object
@@ -3118,6 +3178,13 @@ components:
           type: string
         mysql_port:
           type: integer
+        mongo_host:
+          type: string
+        mongo_port:
+          type: integer
+        web_ui_url:
+          type: string
+          description: Effective Web UI / public base URL (web_ui_url parameter, falling back to DBB_PUBLIC_URL)
       required:
         - pg_host
         - pg_port
@@ -3125,6 +3192,9 @@ components:
         - ora_port
         - mysql_host
         - mysql_port
+        - mongo_host
+        - mongo_port
+        - web_ui_url
 
     InstanceInfo:
       type: object
@@ -3132,15 +3202,28 @@ components:
       properties:
         listen:
           type: object
+          description: >-
+            Live listen addresses this process is bound to, straight from
+            config (DBB_LISTEN_*). `api` is the HTTP listener (REST API +
+            Web UI, meant for an HTTP reverse proxy / ingress); `pg`, `ora`,
+            and `mysql` are TCP listeners (SQL client proxies, meant for a
+            TCP load balancer).
           properties:
             pg:
               type: string
+              description: PostgreSQL proxy TCP listen address
             ora:
               type: string
+              description: Oracle proxy TCP listen address
             mysql:
               type: string
+              description: MySQL/MariaDB proxy TCP listen address
+            mongo:
+              type: string
+              description: MongoDB proxy TCP listen address
             api:
               type: string
+              description: REST API / Web UI HTTP listen address
           required:
             - pg
             - ora

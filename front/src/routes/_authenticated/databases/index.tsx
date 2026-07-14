@@ -63,13 +63,14 @@ function isFullDatabase(db: DatabaseItem): db is Database {
   return "host" in db;
 }
 
-type Protocol = "postgresql" | "oracle" | "mysql" | "mariadb";
+type Protocol = "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb";
 
 const PROTOCOL_LABEL: Record<Protocol, string> = {
   postgresql: "PostgreSQL",
   oracle: "Oracle",
   mysql: "MySQL",
   mariadb: "MariaDB",
+  mongodb: "MongoDB",
 };
 
 const PROTOCOL_DEFAULT_PORT: Record<Protocol, string> = {
@@ -77,6 +78,7 @@ const PROTOCOL_DEFAULT_PORT: Record<Protocol, string> = {
   oracle: "1521",
   mysql: "3306",
   mariadb: "3306",
+  mongodb: "27017",
 };
 
 const PROTOCOL_BADGE_CLASS: Record<Protocol, string> = {
@@ -86,6 +88,8 @@ const PROTOCOL_BADGE_CLASS: Record<Protocol, string> = {
     "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
   mariadb:
     "bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-400",
+  mongodb:
+    "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
 };
 
 const PROTOCOL_USERNAME_PLACEHOLDER: Record<Protocol, string> = {
@@ -93,6 +97,7 @@ const PROTOCOL_USERNAME_PLACEHOLDER: Record<Protocol, string> = {
   oracle: "SYSTEM",
   mysql: "root",
   mariadb: "root",
+  mongodb: "admin",
 };
 
 function DatabasesPage() {
@@ -242,6 +247,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
   const [port, setPort] = useState(PROTOCOL_DEFAULT_PORT.postgresql);
   const [databaseName, setDatabaseName] = useState("");
   const [oracleServiceName, setOracleServiceName] = useState("");
+  const [mongoAuthSource, setMongoAuthSource] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [sslMode, setSslMode] = useState("prefer");
@@ -272,6 +278,10 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
       protocol,
       oracle_service_name:
         protocol === "oracle" ? oracleServiceName : undefined,
+      mongo_auth_source:
+        protocol === "mongodb" && mongoAuthSource
+          ? mongoAuthSource
+          : undefined,
       listable,
     });
   };
@@ -308,6 +318,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
                 <SelectItem value="oracle">Oracle</SelectItem>
                 <SelectItem value="mysql">MySQL</SelectItem>
                 <SelectItem value="mariadb">MariaDB</SelectItem>
+                <SelectItem value="mongodb">MongoDB</SelectItem>
               </SelectContent>
             </Select>
           </div>
@@ -372,7 +383,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
                 id="databaseName"
                 value={databaseName}
                 onChange={(e) => setDatabaseName(e.target.value)}
-                placeholder={protocol === "mysql" || protocol === "mariadb" ? "mydb" : "myapp"}
+                placeholder={protocol === "mysql" || protocol === "mariadb" || protocol === "mongodb" ? "mydb" : "myapp"}
                 required
               />
             </div>
@@ -387,6 +398,21 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
                 placeholder="ORCL"
                 required
               />
+            </div>
+          )}
+          {protocol === "mongodb" && (
+            <div className="space-y-2">
+              <Label htmlFor="mongoAuthSource">Auth Source</Label>
+              <Input
+                id="mongoAuthSource"
+                value={mongoAuthSource}
+                onChange={(e) => setMongoAuthSource(e.target.value)}
+                placeholder="admin"
+              />
+              <p className="text-xs text-muted-foreground">
+                Upstream MongoDB database where the proxy user's credentials
+                live. Defaults to <code className="font-mono">admin</code>.
+              </p>
             </div>
           )}
           <div className="space-y-2">

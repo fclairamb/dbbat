@@ -4,7 +4,7 @@ sidebar_position: 2
 
 # Database Configuration
 
-Target databases are configured through the REST API. Each entry maps a DBBat database name to a target server (PostgreSQL, Oracle, MySQL, or MariaDB).
+Target databases are configured through the REST API. Each entry maps a DBBat database name to a target server (PostgreSQL, Oracle, MySQL, MariaDB, or MongoDB).
 
 ## Creating a Database Configuration
 
@@ -70,19 +70,42 @@ curl -X POST http://localhost:4200/api/v1/databases \
 
 For MariaDB, set `"protocol": "mariadb"`. Both share the same listener and proxy code path; the protocol field controls UI labelling and default-port hints.
 
+### MongoDB
+
+```bash
+curl -X POST http://localhost:4200/api/v1/databases \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "catalog",
+    "description": "Production MongoDB",
+    "protocol": "mongodb",
+    "host": "mongo.example.com",
+    "port": 27017,
+    "database_name": "catalog",
+    "username": "app_user",
+    "password": "secret",
+    "mongo_auth_source": "admin",
+    "ssl_mode": "prefer"
+  }'
+```
+
+`mongo_auth_source` is the upstream auth database DBBat authenticates against (defaults to `admin`, where root/service users are typically defined). Clients reach this entry by putting the DBBat database name in their connection's `authSource` (or using a `dbbatuser#catalog` username).
+
 ## Fields
 
 | Field | Type | Description | Required |
 |-------|------|-------------|----------|
 | `name` | string | DBBat database name (used by clients in their connection string) | Yes |
-| `protocol` | enum | `postgresql`, `oracle`, `mysql`, `mariadb` | No (default: `postgresql`) |
+| `protocol` | enum | `postgresql`, `oracle`, `mysql`, `mariadb`, `mongodb` | No (default: `postgresql`) |
 | `host` | string | Target database host | Yes |
-| `port` | integer | Target database port. Suggested defaults: 5432 / 1521 / 3306. | Yes |
+| `port` | integer | Target database port. Suggested defaults: 5432 / 1521 / 3306 / 27017. | Yes |
 | `database_name` | string | Target database name (or PDB name for Oracle) | Yes (PG/MySQL); recommended (Oracle) |
 | `username` | string | Target database username | Yes |
 | `password` | string | Target database password (encrypted at rest) | Yes |
 | `ssl_mode` | string | SSL mode for the upstream connection | No (default: `prefer`) |
 | `oracle_service_name` | string | Oracle SERVICE_NAME — used to route TNS connects | Recommended for Oracle |
+| `mongo_auth_source` | string | MongoDB upstream auth database (defaults to `admin`) | No (MongoDB only) |
 | `description` | string | Human-readable description | No |
 
 ## SSL Modes
@@ -146,7 +169,8 @@ When a user connects with `database=production`:
 
 1. **PostgreSQL / MySQL**: DBBat looks up the entry by `name` (the database name in the client's connection string).
 2. **Oracle**: DBBat matches the TNS connect descriptor's `SERVICE_NAME` against `oracle_service_name` (falls back to `name`).
-3. DBBat decrypts the stored credentials.
+3. **MongoDB**: DBBat resolves the entry from the SASL `authSource` (the DBBat database name), a `dbbatuser#name` username, or the user's single active MongoDB grant.
+4. DBBat decrypts the stored credentials.
 4. DBBat verifies the user has an active, non-revoked grant for this database.
 5. DBBat connects to the upstream using the stored credentials.
 6. DBBat proxies all subsequent queries between client and target, logging everything.

@@ -139,6 +139,13 @@ type session struct {
 	// bytes to the just-finished query (the first query absorbs the
 	// auth/handshake traffic, which is the right place for it).
 	lastBytesSnapshot int64
+
+	// guard enforces the grant's time-window and bandwidth limits mid-stream.
+	guard *shared.LimitGuard
+
+	// revocation is signaled when this session's grant is revoked mid-flight,
+	// so the next command is rejected and the watchdog tears the session down.
+	revocation *cache.RevocationHandle
 }
 
 // cumulativeClientBytes returns the running total of bytes exchanged with
@@ -704,6 +711,23 @@ func (s *session) resolveAPIKeyFromPhase2(o5 *O5LogonServer, verifiers []*o5Logo
 			slog.Int("candidate_index", i),
 			slog.Int("candidates", len(verifiers)))
 
+		// Opportunistically migrate a legacy per-key-salt key to the user's
+		// shared salts now that we briefly hold the plaintext — this is the only
+		// point where it's available. Once upgraded, the key joins the user's
+		// other keys as an interchangeable Oracle login candidate, without
+		// forcing a rotation. Best-effort and async (like IncrementAPIKeyUsage);
+		// failures never block the login. The empty-password path above cannot
+		// do this (it has no plaintext).
+		if od := apiKey.OracleData(); od != nil && !od.UserSalt {
+			keyID, plain, encKey := apiKey.ID, plainPassword, s.encryptionKey
+			go func() {
+				if err := s.store.UpgradeAPIKeyO5LogonVerifiers(context.Background(), keyID, plain, encKey); err != nil {
+					s.logger.WarnContext(context.Background(), "failed to upgrade legacy O5LOGON verifiers to user salts",
+						slog.String("key_id", keyID.String()), slog.Any("error", err))
+				}
+			}()
+		}
+
 		return apiKey, nil
 	}
 
@@ -1048,6 +1072,30 @@ func strPtr(s string) *string {
 
 // proxyMessages relays TNS packets bidirectionally with TTC-aware interception.
 func (s *session) proxyMessages() error {
+	// Register this live session against its grant so an admin revoke can
+	// signal it (block the next command + tear it down) instead of waiting for
+	// a reconnect. Deregistered in cleanup. s.grant may be nil for sessions
+	// that never resolved one; Register(uuid.Nil) still yields a usable handle.
+	var grantUID uuid.UUID
+	if s.grant != nil {
+		grantUID = s.grant.UID
+	}
+
+	s.revocation = s.store.Revocations().Register(grantUID)
+
+	// Build the limit guard now that the grant is known, and run a watchdog to
+	// tear the session down if a limit is crossed (or the grant is revoked)
+	// while a query is blocked producing no traffic. The inline check in
+	// upstreamToClient handles the actively-streaming case with a clean TTC
+	// error frame.
+	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
+		WithRevocation(s.revocation.Flag())
+
+	watchCtx, cancelWatch := context.WithCancel(s.ctx)
+	defer cancelWatch()
+
+	go s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, s.onLimitViolation)
+
 	errChan := make(chan error, 2)
 
 	// Client → Upstream (with query interception)
@@ -1062,6 +1110,23 @@ func (s *session) proxyMessages() error {
 
 	// Wait for either direction to close
 	return <-errChan
+}
+
+// onLimitViolation is invoked by the limit watchdog when a time/bandwidth limit
+// is crossed. It force-closes both conns, unblocking whichever relay goroutine
+// is parked in a Read/Write so the session tears down. This is the only way to
+// terminate a query that is blocked producing no traffic (idle expiry).
+func (s *session) onLimitViolation(err error) {
+	s.logger.WarnContext(s.ctx, "terminating Oracle session: grant no longer valid mid-stream",
+		slog.Any("error", err))
+
+	if s.upstreamConn != nil {
+		_ = s.upstreamConn.Close()
+	}
+
+	if s.clientConn != nil {
+		_ = s.clientConn.Close()
+	}
 }
 
 // clientToUpstream reads TNS packets from the client, intercepts Data packets
@@ -1211,6 +1276,28 @@ func (s *session) upstreamToClient() error {
 		// Forward to client
 		if err := writeTNSPacket(s.clientConn, pkt); err != nil {
 			return fmt.Errorf("client write error: %w", err)
+		}
+
+		// Enforce time/bandwidth limits mid-stream. While a query is in flight,
+		// re-check after every forwarded packet: the moment the grant's byte
+		// quota is crossed or the grant expires, send a TTC error frame and end
+		// the session rather than streaming the rest of a huge result.
+		if s.tracker.pendingQuery != nil {
+			if verr := s.guard.Check(); verr != nil {
+				_ = s.writeTTCError(int(ORA00028), "session terminated: "+verr.Error())
+
+				// Finalize the in-flight query so its streamed-so-far bytes are
+				// flushed to the store before we return. Otherwise those bytes
+				// live only in the CountingConn atomics and a reconnect recomputes
+				// BytesTransferred without them, letting the cumulative cap be
+				// bypassed across short-lived connections. completeQuery diffs the
+				// bytes since the last query boundary, persists, bumps the
+				// in-session grant, and clears pendingQuery (no double-count).
+				errMsg := "aborted: " + verr.Error()
+				s.completeQuery(nil, &errMsg)
+
+				return verr
+			}
 		}
 	}
 }
@@ -1380,6 +1467,10 @@ func (s *session) sendRefuse(oraCode uint16, reason string) {
 
 // cleanup closes upstream connection and updates records.
 func (s *session) cleanup() {
+	if s.grant != nil && s.revocation != nil {
+		s.store.Revocations().Deregister(s.grant.UID, s.revocation)
+	}
+
 	if s.dump != nil {
 		if err := s.dump.Close(); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to close dump writer", slog.Any("error", err))

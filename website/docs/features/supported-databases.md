@@ -4,7 +4,7 @@ sidebar_position: 0
 
 # Supported Databases
 
-DBBat ships with three independent listeners — one per wire protocol family. Enable only the engines you need by setting the matching `DBB_LISTEN_*` variable; an empty value disables that proxy.
+DBBat ships with four independent listeners — one per wire protocol family. Enable only the engines you need by setting the matching `DBB_LISTEN_*` variable; an empty value disables that proxy.
 
 | Engine | Protocol | Default proxy port | Env var | Status |
 |--------|----------|--------------------|---------|--------|
@@ -12,8 +12,9 @@ DBBat ships with three independent listeners — one per wire protocol family. E
 | Oracle | TNS / TTC | `:1522` | `DBB_LISTEN_ORA` | Hand-rolled TTC parser. End-to-end with `go-ora`; other clients reach AUTH but cannot yet execute queries (see notes below). |
 | MySQL | MySQL wire (`go-mysql-org/go-mysql`) | `:3307` | `DBB_LISTEN_MYSQL` | `caching_sha2_password` (default), `mysql_clear_password`. TLS terminated at the proxy. `mysql_native_password` not supported. |
 | MariaDB | MySQL wire (same listener) | `:3307` | `DBB_LISTEN_MYSQL` | Shares the MySQL listener. `STMT_BULK_EXECUTE` is refused — clients need batch-rewriting disabled. |
+| MongoDB | MongoDB wire (`OP_MSG`, hand-rolled) | `:27018` | `DBB_LISTEN_MONGO` | Clients authenticate with `SCRAM-SHA-256` or `PLAIN`-over-TLS; upstream via `SCRAM-SHA-256`. Every command is classified, logged, and grant-checked. |
 
-The same auth + grant + query-logging pipeline runs across all three protocols, so:
+The same auth + grant + query-logging pipeline runs across all four protocols, so:
 
 - **One user store** (Argon2id passwords, roles, optional Slack OAuth) authenticates against any engine.
 - **One database catalogue** holds target connections; a `protocol` field marks the engine.
@@ -93,6 +94,17 @@ Implemented in `internal/proxy/mysql` on top of `go-mysql-org/go-mysql`. See the
 | Python | PyMySQL | Manual smoke test |
 | MariaDB CLI | `mariadb` 10.x | Manual smoke test |
 
+## MongoDB
+
+Implemented as a hand-rolled MongoDB wire proxy in `internal/proxy/mongodb`. See the full [MongoDB notes](https://github.com/fclairamb/dbbat/blob/main/docs/mongodb.md) for protocol-level details.
+
+- **Wire framing**: `OP_MSG` (2013) with kind-0 command bodies and kind-1 document sequences, plus the legacy `OP_QUERY`/`OP_REPLY` used for the first `hello`. BSON encode/decode via `go.mongodb.org/mongo-driver/v2/bson`. `OP_COMPRESSED` is rejected.
+- **Auth termination**: two client mechanisms are terminated at the proxy:
+  - **`SCRAM-SHA-256`** (driver default) — DBBat runs the server side of SCRAM against a stored verifier in `users.protocol_data.mongodb`, so the cleartext password never crosses the wire (TLS optional). Verifiers exist only for passwords set after this shipped.
+  - **`PLAIN`-over-TLS** (`authMechanism=PLAIN`) — the driver sends the cleartext password (hence the TLS requirement), verified via the same Argon2id path as the other proxies. `dbb_` API keys work as the password.
+- **Upstream**: DBBat authenticates to the target with `SCRAM-SHA-256` using the decrypted stored credentials. The upstream `authSource` defaults to `admin` and is overridable per database via `mongo_auth_source`.
+- **Target-database resolution**: Mongo has no pre-auth database field, so the SASL `authSource` carries the DBBat database name (or a `dbbatuser#databasename` username, or the user's single active MongoDB grant).
+
 ## Picking a Port
 
 Default ports are chosen to avoid colliding with a co-located database server:
@@ -102,6 +114,7 @@ Default ports are chosen to avoid colliding with a co-located database server:
 | PostgreSQL proxy | 5434 (PostgreSQL itself usually binds 5432) |
 | Oracle proxy | 1522 (Oracle listener usually binds 1521) |
 | MySQL/MariaDB proxy | 3307 (MySQL/MariaDB usually bind 3306) |
+| MongoDB proxy | 27018 (MongoDB itself usually binds 27017) |
 | REST API + web UI | 4200 |
 
 Override any of them with the matching `DBB_LISTEN_*` environment variable.

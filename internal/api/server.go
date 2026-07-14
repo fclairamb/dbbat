@@ -80,7 +80,12 @@ func NewServer(dataStore *store.Store, encryptionKey []byte, logger *slog.Logger
 	var notifier *notify.SlackNotifier
 	if cfg != nil {
 		var err error
-		notifier, err = notify.NewSlackNotifier(cfg.SlackNotify, cfg.PublicURL, dataStore, logger)
+		// Prefer the operator-editable public.web_ui_url global parameter
+		// over the raw env var, so an admin can point Slack deep-links at
+		// dbbat.company.com from the Settings page without redeploying.
+		// Resolved once at startup, not live-updated without a restart.
+		webUIURL := dataStore.ResolveWebUIURL(context.Background(), cfg)
+		notifier, err = notify.NewSlackNotifier(cfg.SlackNotify, webUIURL, dataStore, logger)
 		if err != nil {
 			// Misconfiguration — log loudly but don't crash the server.
 			// The deployer can fix the env vars without losing the service.

@@ -84,6 +84,30 @@ func BuildConnectionURL(
 			URL:          rawURL,
 		}, true
 
+	case store.ProtocolMongoDB:
+		if endpoints.MongoPort == 0 {
+			return ConnectionInfo{}, false
+		}
+		// authSource carries the dbbat database name — dbbat resolves the
+		// target from it (contract §5), terminates PLAIN, then re-authenticates
+		// upstream with SCRAM. The path selects the upstream database for
+		// commands. directConnection=true stops the driver from dialing the
+		// real host advertised by topology discovery (we present standalone).
+		rawURL := fmt.Sprintf("mongodb://%s:%s@%s/%s?authMechanism=PLAIN&authSource=%s&tls=true&directConnection=true",
+			url.PathEscape(user.Username),
+			encodeKey(key),
+			net.JoinHostPort(endpoints.MongoHost, fmt.Sprintf("%d", endpoints.MongoPort)),
+			url.PathEscape(db.DatabaseName),
+			url.PathEscape(db.Name),
+		)
+		return ConnectionInfo{
+			DatabaseUID:  db.UID,
+			DatabaseName: db.Name,
+			Protocol:     db.Protocol,
+			Format:       "uri",
+			URL:          rawURL,
+		}, true
+
 	case store.ProtocolOracle:
 		if endpoints.OraPort == 0 {
 			return ConnectionInfo{}, false

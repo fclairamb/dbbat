@@ -8,7 +8,7 @@ DBBat is a transparent database proxy designed for query observability, access c
 
 It gives temporary, audited access to production databases for support, debugging, and data analysis — without handing out raw credentials.
 
-It speaks **PostgreSQL**, **Oracle**, and **MySQL/MariaDB** wire protocols, so any standard SQL client (psql, sqlplus, mysql, DBeaver, IntelliJ, pgAdmin, your application's ORM, …) can connect through DBBat without modification.
+It speaks the **PostgreSQL**, **Oracle**, **MySQL/MariaDB**, and **MongoDB** wire protocols, so any standard database client (psql, sqlplus, mysql, mongosh, DBeaver, IntelliJ, pgAdmin, your application's ORM or driver, …) can connect through DBBat without modification.
 
 ## Why DBBat?
 
@@ -29,24 +29,27 @@ DBBat addresses all these needs without requiring changes to your application co
 | Oracle | TNS / TTC | `:1522` | O5LOGON proxy auth, hand-rolled TTC parser. End-to-end with `go-ora`; other clients reach AUTH but do not yet execute queries |
 | MySQL | MySQL wire (`go-mysql-org/go-mysql`) | `:3307` | `caching_sha2_password` (default), `mysql_clear_password`. TLS terminated at the proxy. `mysql_native_password` not supported |
 | MariaDB | MySQL wire (same listener) | `:3307` | Same as MySQL — `STMT_BULK_EXECUTE` refused (clients need batch-rewriting off) |
+| MongoDB | MongoDB wire (`OP_MSG`, hand-rolled) | `:27018` | Clients authenticate with `SCRAM-SHA-256` or `PLAIN`-over-TLS; upstream via `SCRAM-SHA-256`. `authSource` carries the DBBat database name |
 
-Each engine has its own listener and is enabled independently via `DBB_LISTEN_PG` / `DBB_LISTEN_ORA` / `DBB_LISTEN_MYSQL`. Setting the variable to an empty string disables that proxy.
+Each engine has its own listener and is enabled independently via `DBB_LISTEN_PG` / `DBB_LISTEN_ORA` / `DBB_LISTEN_MYSQL` / `DBB_LISTEN_MONGO`. Setting the variable to an empty string disables that proxy.
 
 For protocol-level details, see:
 - [Oracle proxy notes (TNS/TTC)](https://github.com/fclairamb/dbbat/blob/main/docs/oracle.md)
 - [MySQL proxy notes](https://github.com/fclairamb/dbbat/blob/main/docs/mysql.md)
+- [MongoDB proxy notes](https://github.com/fclairamb/dbbat/blob/main/docs/mongodb.md)
 - [Dump file format](https://github.com/fclairamb/dbbat/blob/main/docs/dump-format.md)
 
 ## Core Features
 
 ### Transparent Multi-Protocol Proxy
 
-DBBat speaks each engine's native wire protocol. The same auth + grant + query-logging pipeline runs across all three.
+DBBat speaks each engine's native wire protocol. The same auth + grant + query-logging pipeline runs across all four.
 
 ```
 psql / pg client     ─►  DBBat (auth + grant check + log) ─► PostgreSQL upstream
 sqlplus / go-ora     ─►  DBBat (TNS service-name routing)  ─► Oracle upstream
 mysql / mariadb cli  ─►  DBBat (caching_sha2_password)     ─► MySQL / MariaDB upstream
+mongosh / driver     ─►  DBBat (SCRAM-SHA-256 / PLAIN-TLS) ─► MongoDB upstream
 ```
 
 ### User Management
@@ -60,8 +63,8 @@ mysql / mariadb cli  ─►  DBBat (caching_sha2_password)     ─► MySQL / Ma
 
 - Store multiple target database connection details — one entry per database
 - Credentials encrypted at rest with AES-256-GCM (AAD-bound to the database UID, so a stolen ciphertext cannot be transplanted)
-- A `protocol` field marks each entry as `postgresql`, `oracle`, `mysql`, or `mariadb`
-- For Oracle, an `oracle_service_name` is stored alongside the database name
+- A `protocol` field marks each entry as `postgresql`, `oracle`, `mysql`, `mariadb`, or `mongodb`
+- For Oracle, an `oracle_service_name` is stored alongside the database name; for MongoDB, an optional `mongo_auth_source` selects the upstream auth database (defaults to `admin`)
 
 ### Connection & Query Tracking
 
@@ -98,7 +101,7 @@ Everything described here can be done via the REST API or the web UI.
 1. **Admin creates a user**
 2. **Admin configures a target database** (protocol, host, port, credentials, optional `oracle_service_name`)
 3. **Admin grants the user access** to the database with a time window, controls, and optional quotas
-4. **User connects** with `psql` / `sqlplus` / `mysql` / any client, using their DBBat credentials (or an API key)
+4. **User connects** with `psql` / `sqlplus` / `mysql` / `mongosh` / any client, using their DBBat credentials (or an API key)
 5. **DBBat authenticates** the user, checks for a valid grant, and connects to the upstream using the stored encrypted credentials
 6. **DBBat proxies** all queries to the target database, logging everything
 

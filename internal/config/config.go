@@ -192,6 +192,15 @@ type MySQLConfig struct {
 	TLS TLSConfig `koanf:"tls"`
 }
 
+// MongoConfig holds configuration specific to the MongoDB proxy.
+type MongoConfig struct {
+	// TLS holds TLS server-termination settings for the proxy. Mongo TLS is
+	// implicit-from-byte-0 (no STARTTLS dance): when certs are configured (or
+	// auto-generated) the proxy terminates TLS, and SASL PLAIN auth is only
+	// accepted over TLS. When Disable is true the listener stays plaintext.
+	TLS TLSConfig `koanf:"tls"`
+}
+
 // PGConfig holds configuration specific to the PostgreSQL proxy.
 type PGConfig struct {
 	// TLS holds TLS server-termination settings for the proxy. When enabled,
@@ -229,6 +238,9 @@ type Config struct {
 
 	// MySQL proxy listen address (empty = disabled).
 	ListenMySQL string `koanf:"listen_mysql"`
+
+	// MongoDB proxy listen address (empty = disabled).
+	ListenMongo string `koanf:"listen_mongo"`
 
 	// REST API listen address.
 	ListenAPI string `koanf:"listen_api"`
@@ -298,6 +310,9 @@ type Config struct {
 	// MySQL holds MySQL proxy specific configuration.
 	MySQL MySQLConfig `koanf:"mysql"`
 
+	// Mongo holds MongoDB proxy specific configuration.
+	Mongo MongoConfig `koanf:"mongo"`
+
 	// PG holds PostgreSQL proxy specific configuration.
 	PG PGConfig `koanf:"pg"`
 }
@@ -353,6 +368,7 @@ func defaultConfig() Config {
 		ListenAPI:    ":4200",
 		ListenOracle: ":1522",
 		ListenMySQL:  ":3307",
+		ListenMongo:  ":27018",
 		BaseURL:      DefaultBaseURL,
 		LogLevel:     DefaultLogLevel,
 		QueryStorage: QueryStorageConfig{
@@ -446,6 +462,10 @@ func envTransform(k, v string) (string, any) {
 	// mysql_tls_* -> mysql.tls.*
 	if strings.HasPrefix(key, "mysql_tls_") {
 		return "mysql.tls." + strings.TrimPrefix(key, "mysql_tls_"), v
+	}
+	// mongo_tls_* -> mongo.tls.*
+	if strings.HasPrefix(key, "mongo_tls_") {
+		return "mongo.tls." + strings.TrimPrefix(key, "mongo_tls_"), v
 	}
 	// pg_tls_* -> pg.tls.*
 	if strings.HasPrefix(key, "pg_tls_") {

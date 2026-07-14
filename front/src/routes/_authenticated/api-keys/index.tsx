@@ -4,6 +4,7 @@ import {
   useAPIKeys,
   useCreateAPIKey,
   useRevokeAPIKey,
+  useUsers,
   type APIKey,
   type CreateAPIKeyResponse,
 } from "@/api";
@@ -16,6 +17,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import {
   canCreateAPIKey,
   canRevokeAPIKey,
+  canViewAllAPIKeys,
   getDisabledReason,
   getActionTooltip,
 } from "@/lib/permissions";
@@ -42,9 +44,19 @@ import {
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { Plus, Ban, Key, AlertTriangle, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 import { formatDistanceToNow, format } from "date-fns";
+
+const ALL_USERS_VALUE = "all";
 
 export const Route = createFileRoute("/_authenticated/api-keys/")({
   component: APIKeysPage,
@@ -52,13 +64,35 @@ export const Route = createFileRoute("/_authenticated/api-keys/")({
 
 function APIKeysPage() {
   const { user } = useAuth();
-  const { data: keys, isLoading } = useAPIKeys();
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [newKey, setNewKey] = useState<CreateAPIKeyResponse | null>(null);
   const [revokeKey, setRevokeKey] = useState<APIKey | null>(null);
 
   const canCreate = canCreateAPIKey(user?.roles);
   const canRevoke = canRevokeAPIKey(user?.roles);
+  const canSeeAllKeys = canViewAllAPIKeys(user?.roles);
+
+  // Admin-only "See other users' keys" toggle, with an optional per-user
+  // narrow-down. Non-admins never see the toggle, so these stay at their
+  // defaults for them and the query keeps its own-keys-only backend default.
+  const [showAllUsers, setShowAllUsers] = useState(false);
+  const [filterUserId, setFilterUserId] = useState(ALL_USERS_VALUE);
+
+  const isReviewingOthers = canSeeAllKeys && showAllUsers;
+  const scopedUserId =
+    isReviewingOthers && filterUserId !== ALL_USERS_VALUE
+      ? filterUserId
+      : undefined;
+  const scopedAllUsers = isReviewingOthers && !scopedUserId;
+
+  const { data: keys, isLoading } = useAPIKeys({
+    all_users: scopedAllUsers || undefined,
+    user_id: scopedUserId,
+  });
+  const { data: users } = useUsers();
+
+  const getUserName = (uid: string) =>
+    users?.find((u) => u.uid === uid)?.username ?? uid;
 
   const getStatus = (key: APIKey) => {
     if (key.revoked_at) return "revoked";
@@ -68,6 +102,17 @@ function APIKeysPage() {
   };
 
   const columns: Column<APIKey>[] = [
+    ...(isReviewingOthers
+      ? [
+          {
+            key: "owner",
+            header: "Owner",
+            cell: (k: APIKey) => (
+              <span className="font-medium">{getUserName(k.user_id)}</span>
+            ),
+          } satisfies Column<APIKey>,
+        ]
+      : []),
     {
       key: "name",
       header: "Name",
@@ -151,22 +196,56 @@ function APIKeysPage() {
         title="API Keys"
         description="Manage API authentication keys"
         actions={
-          <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
-            <DialogTrigger asChild>
-              <PermissionButton
-                disabled={!canCreate}
-                disabledReason={getDisabledReason("create-api-key", user?.roles)}
-                enabledTooltip={getActionTooltip("create-api-key")}
-              >
-                <Plus className="mr-2 h-4 w-4" />
-                Create Key
-              </PermissionButton>
-            </DialogTrigger>
-            <CreateKeyDialog
-              onClose={() => setIsCreateOpen(false)}
-              onCreated={setNewKey}
-            />
-          </Dialog>
+          <div className="flex items-center gap-4">
+            {canSeeAllKeys && (
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="showAllUsers"
+                  data-testid="see-other-users-keys-toggle"
+                  checked={showAllUsers}
+                  onCheckedChange={(checked) => {
+                    setShowAllUsers(checked);
+                    if (!checked) setFilterUserId(ALL_USERS_VALUE);
+                  }}
+                />
+                <Label htmlFor="showAllUsers">See other users' keys</Label>
+              </div>
+            )}
+            {isReviewingOthers && (
+              <Select value={filterUserId} onValueChange={setFilterUserId}>
+                <SelectTrigger
+                  className="w-44"
+                  data-testid="api-keys-user-filter"
+                >
+                  <SelectValue placeholder="All users" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value={ALL_USERS_VALUE}>All users</SelectItem>
+                  {users?.map((u) => (
+                    <SelectItem key={u.uid} value={u.uid}>
+                      {u.username}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            )}
+            <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
+              <DialogTrigger asChild>
+                <PermissionButton
+                  disabled={!canCreate}
+                  disabledReason={getDisabledReason("create-api-key", user?.roles)}
+                  enabledTooltip={getActionTooltip("create-api-key")}
+                >
+                  <Plus className="mr-2 h-4 w-4" />
+                  Create Key
+                </PermissionButton>
+              </DialogTrigger>
+              <CreateKeyDialog
+                onClose={() => setIsCreateOpen(false)}
+                onCreated={setNewKey}
+              />
+            </Dialog>
+          </div>
         }
       />
 

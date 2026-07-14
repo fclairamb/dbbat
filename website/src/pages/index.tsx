@@ -95,7 +95,7 @@ function QuickStart() {
         <Heading as="h2">Quick Start</Heading>
         <p>
           Get DBBat running in seconds with Docker — one container fronts
-          PostgreSQL, Oracle, and MySQL/MariaDB:
+          PostgreSQL, Oracle, MySQL/MariaDB, and MongoDB:
         </p>
         <pre className={styles.codeBlock}>
           <code>
@@ -106,6 +106,8 @@ function QuickStart() {
             &nbsp;&nbsp;-p 1522:1522&nbsp;&nbsp;# Oracle proxy
             <br />
             &nbsp;&nbsp;-p 3307:3307&nbsp;&nbsp;# MySQL / MariaDB proxy
+            <br />
+            &nbsp;&nbsp;-p 27018:27018&nbsp;&nbsp;# MongoDB proxy
             <br />
             &nbsp;&nbsp;-p 4200:4200&nbsp;&nbsp;# REST API + web UI
             <br />
@@ -130,7 +132,7 @@ export default function Home(): JSX.Element {
   return (
     <Layout
       title={`${siteConfig.title} - Database Observability Proxy`}
-      description="Give your devs (temporary) access to prod. PostgreSQL, Oracle, and MySQL/MariaDB proxy with full query logging, fine-grained access control, and session capture."
+      description="Give your devs (temporary) access to prod. PostgreSQL, Oracle, MySQL/MariaDB, and MongoDB proxy with full query logging, fine-grained access control, and session capture."
     >
       <HomepageHeader />
       <main>

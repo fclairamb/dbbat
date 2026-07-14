@@ -654,8 +654,13 @@ export interface paths {
          * List API keys
          * @description Returns a list of API keys.
          *
-         *     - Non-admins can only see their own keys
-         *     - Admins can see all keys (optionally filter by user_id)
+         *     - Default for every caller, including admins: only the caller's own
+         *       keys.
+         *     - Admins can override the default with `all_users=true` (every user's
+         *       keys) or `user_id=<uuid>` (one specific user's keys). If both are
+         *       given, `user_id` wins.
+         *     - Non-admins can never see another user's keys: `all_users` and
+         *       `user_id` are ignored for them.
          */
         get: operations["listAPIKeys"];
         put?: never;
@@ -1126,9 +1131,11 @@ export interface components {
              * @description Database protocol
              * @enum {string}
              */
-            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb";
+            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb";
             /** @description Oracle SERVICE_NAME (Oracle only) */
             oracle_service_name?: string;
+            /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
+            mongo_auth_source?: string;
             /**
              * @description Whether this database appears in the grant-request dropdown for non-admin users
              * @default true
@@ -1180,9 +1187,11 @@ export interface components {
              * @default postgresql
              * @enum {string}
              */
-            protocol: "postgresql" | "oracle" | "mysql" | "mariadb";
+            protocol: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb";
             /** @description Oracle SERVICE_NAME (required for Oracle) */
             oracle_service_name?: string;
+            /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
+            mongo_auth_source?: string;
             /**
              * @description Whether this database appears in the grant-request dropdown for non-admin users
              * @default true
@@ -1208,9 +1217,11 @@ export interface components {
              * @description Database protocol
              * @enum {string}
              */
-            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb";
+            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb";
             /** @description Oracle SERVICE_NAME */
             oracle_service_name?: string;
+            /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
+            mongo_auth_source?: string;
             /** @description Whether this database appears in the grant-request dropdown for non-admin users */
             listable?: boolean;
         };
@@ -1540,6 +1551,16 @@ export interface components {
              * @description Connection UID
              */
             connection_id: string;
+            /**
+             * Format: uuid
+             * @description UID of the user who ran the query, resolved from the connection. Only populated when listing queries.
+             */
+            user_id?: string | null;
+            /**
+             * Format: uuid
+             * @description UID of the target database, resolved from the connection. Only populated when listing queries.
+             */
+            database_id?: string | null;
             /** @description SQL query text */
             sql_text: string;
             parameters?: components["schemas"]["QueryParameters"];
@@ -1660,9 +1681,9 @@ export interface components {
         SetParameterRequest: {
             value: string;
         };
-        /** @description Public endpoint advertisement settings */
+        /** @description Public endpoint advertisement settings. Covers two independent network paths: the *connection* host (host/pg_host/ora_host/ mysql_host/*_port — where SQL clients reach the PG/Oracle/MySQL proxies, via direct or TCP-load-balancer access) and the *Web UI* host (web_ui_url — where the browser and REST API are reached, behind an HTTP ingress / reverse proxy). These are typically two different DNS names on two different network paths. */
         PublicEndpoints: {
-            /** @description Default public hostname for all protocols */
+            /** @description Default public hostname for all protocols (the connection host, e.g. db.company.com) */
             host?: string;
             /** @description PostgreSQL-specific host override (empty = use host) */
             pg_host?: string;
@@ -1670,12 +1691,18 @@ export interface components {
             ora_host?: string;
             /** @description MySQL-specific host override (empty = use host) */
             mysql_host?: string;
+            /** @description MongoDB-specific host override (empty = use host) */
+            mongo_host?: string;
             /** @description PostgreSQL port override (null = use local listen port) */
             pg_port?: number | null;
             /** @description Oracle port override (null = use local listen port) */
             ora_port?: number | null;
             /** @description MySQL port override (null = use local listen port) */
             mysql_port?: number | null;
+            /** @description MongoDB port override (null = use local listen port) */
+            mongo_port?: number | null;
+            /** @description Web UI / public base URL override (e.g. https://dbbat.company.com), reached through an HTTP ingress / reverse proxy. Empty = fall back to the DBB_PUBLIC_URL environment variable. Used for Slack deep-links and other absolute-URL generation. Independent of `host`, which advertises the connection host instead. */
+            web_ui_url?: string;
         };
         /** @description Fully resolved connection advertisement values after fallback chains */
         ResolvedEndpoints: {
@@ -1686,13 +1713,24 @@ export interface components {
             ora_port: number;
             mysql_host: string;
             mysql_port: number;
+            mongo_host: string;
+            mongo_port: number;
+            /** @description Effective Web UI / public base URL (web_ui_url parameter, falling back to DBB_PUBLIC_URL) */
+            web_ui_url: string;
         };
         /** @description Instance information including listen addresses and public endpoint config */
         InstanceInfo: {
+            /** @description Live listen addresses this process is bound to, straight from config (DBB_LISTEN_*). `api` is the HTTP listener (REST API + Web UI, meant for an HTTP reverse proxy / ingress); `pg`, `ora`, and `mysql` are TCP listeners (SQL client proxies, meant for a TCP load balancer). */
             listen: {
+                /** @description PostgreSQL proxy TCP listen address */
                 pg: string;
+                /** @description Oracle proxy TCP listen address */
                 ora: string;
+                /** @description MySQL/MariaDB proxy TCP listen address */
                 mysql: string;
+                /** @description MongoDB proxy TCP listen address */
+                mongo?: string;
+                /** @description REST API / Web UI HTTP listen address */
                 api: string;
             };
             /** @description Only present for admin callers */
@@ -3034,8 +3072,10 @@ export interface operations {
     listAPIKeys: {
         parameters: {
             query?: {
-                /** @description Filter by user UID (admin only) */
+                /** @description Return only this user's keys (admin only). Overrides the own-keys-by-default behavior; wins over all_users if both are set. */
                 user_id?: string;
+                /** @description Return every user's keys instead of just the caller's own (admin only; ignored for non-admins). */
+                all_users?: boolean;
                 /** @description Include revoked and expired keys */
                 include_all?: boolean;
             };

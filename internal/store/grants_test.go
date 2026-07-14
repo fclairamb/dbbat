@@ -553,6 +553,67 @@ func TestGrantCounters_BoundedByRevokedAt(t *testing.T) {
 	}
 }
 
+// TestGrantBytesRecompute_IncludesAbortedQueryBytes covers the core scenario of
+// spec 2026-07-14-09: bytes from a query aborted mid-stream by a grant limit are
+// flushed to the connection via IncrementConnectionBytes (no query log row / no
+// query-count bump). The grant's recomputed BytesTransferred — the value a fresh
+// reconnect enforces against — must include them, otherwise the cumulative cap
+// could be bypassed across short-lived reconnects.
+func TestGrantBytesRecompute_IncludesAbortedQueryBytes(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "abortedbytes")
+	admin, _ := store.CreateUser(ctx, "abortedbytesadmin", "hash", []string{RoleAdmin, RoleConnector})
+
+	now := time.Now()
+	grant, err := store.CreateGrant(ctx, &Grant{
+		UserID:     user.UID,
+		DatabaseID: database.UID,
+		Controls:   []string{},
+		GrantedBy:  admin.UID,
+		StartsAt:   now.Add(-time.Hour),
+		ExpiresAt:  now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	conn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.9")
+	if err != nil {
+		t.Fatalf("CreateConnection() error = %v", err)
+	}
+
+	// One completed query (row + stats), then a mid-stream-aborted query whose
+	// streamed bytes are flushed bytes-only (no query row, no query-count bump).
+	if _, err := store.CreateQuery(ctx, &Query{
+		ConnectionID: conn.UID,
+		SQLText:      "SELECT ok",
+		ExecutedAt:   time.Now(),
+	}); err != nil {
+		t.Fatalf("CreateQuery() error = %v", err)
+	}
+	if err := store.IncrementConnectionStats(ctx, conn.UID, 300); err != nil {
+		t.Fatalf("IncrementConnectionStats() error = %v", err)
+	}
+	if err := store.IncrementConnectionBytes(ctx, conn.UID, 700); err != nil {
+		t.Fatalf("IncrementConnectionBytes() error = %v", err)
+	}
+
+	got, err := store.GetGrantByUID(ctx, grant.UID)
+	if err != nil {
+		t.Fatalf("GetGrantByUID() error = %v", err)
+	}
+	// Query count reflects only logged queries (1); bytes include the aborted
+	// query's flushed bytes (300 + 700).
+	if got.QueryCount != 1 {
+		t.Errorf("QueryCount = %d, want 1", got.QueryCount)
+	}
+	if got.BytesTransferred != 1000 {
+		t.Errorf("BytesTransferred = %d, want 1000 (must include the aborted query's flushed bytes)", got.BytesTransferred)
+	}
+}
+
 func TestListGrants_PopulatesCountersForEach(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()

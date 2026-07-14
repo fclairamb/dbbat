@@ -33,6 +33,7 @@ func (s *Store) CreateDatabase(ctx context.Context, db *Database, encryptionKey 
 		SSLMode:           db.SSLMode,
 		Protocol:          db.Protocol,
 		OracleServiceName: db.OracleServiceName,
+		ProtocolData:      db.ProtocolData,
 		Listable:          db.Listable,
 		CreatedBy:         db.CreatedBy,
 		CreatedAt:         time.Now(),
@@ -284,6 +285,17 @@ func (s *Store) UpdateDatabase(ctx context.Context, uid uuid.UUID, updates Datab
 		q = q.Set("oracle_service_name = ?", *updates.OracleServiceName)
 	}
 
+	if updates.MongoAuthSource != nil {
+		// Merge into protocol_data.mongodb.auth_source rather than overwriting
+		// the whole jsonb column, so other protocol_data keys survive.
+		q = q.Set(
+			"protocol_data = coalesce(protocol_data, '{}'::jsonb) || "+
+				"jsonb_build_object('mongodb', coalesce(protocol_data->'mongodb', '{}'::jsonb) || "+
+				"jsonb_build_object('auth_source', ?::text))",
+			*updates.MongoAuthSource,
+		)
+	}
+
 	if updates.Listable != nil {
 		q = q.Set("listable = ?", *updates.Listable)
 	}
@@ -325,6 +337,17 @@ func (s *Store) DeleteDatabase(ctx context.Context, uid uuid.UUID) error {
 	}
 
 	return nil
+}
+
+// MongoAuthSourceOrDefault returns the upstream MongoDB SCRAM authSource
+// configured for this database, defaulting to "admin" (the MongoDB convention
+// where service/root users are created) when unset.
+func (db *Database) MongoAuthSourceOrDefault() string {
+	if data := db.MongoData(); data != nil && data.AuthSource != "" {
+		return data.AuthSource
+	}
+
+	return "admin"
 }
 
 // DecryptPassword decrypts a database password using AAD bound to the database UID.

@@ -2,7 +2,7 @@
 
 **Give your devs access to prod.**
 
-A transparent database proxy for query observability, access control, and safety. Speaks **PostgreSQL**, **Oracle**, and **MySQL/MariaDB** wire protocols. Every query logged. Every connection tracked.
+A transparent database proxy for query observability, access control, and safety. Speaks **PostgreSQL**, **Oracle**, **MySQL/MariaDB**, and **MongoDB** wire protocols. Every query logged. Every connection tracked.
 
 ## Documentation
 
@@ -36,16 +36,17 @@ DBBat acts as a monitoring proxy that allows controlled developer access to prod
 | Oracle | TNS / TTC | `:1522` (`DBB_LISTEN_ORA`) | O5LOGON proxy auth; `go-ora` end-to-end (other clients reach AUTH only — see [docs/oracle.md](docs/oracle.md)) |
 | MySQL | MySQL wire (`go-mysql-org/go-mysql`) | `:3307` (`DBB_LISTEN_MYSQL`) | `caching_sha2_password` (default), `mysql_clear_password`; TLS terminated at proxy |
 | MariaDB | MySQL wire (same listener) | `:3307` (`DBB_LISTEN_MYSQL`) | Same as MySQL — `mysql_native_password` not supported, `STMT_BULK_EXECUTE` refused |
+| MongoDB | MongoDB wire (`OP_MSG`, hand-rolled) | `:27018` (`DBB_LISTEN_MONGO`) | `SCRAM-SHA-256` or `PLAIN`-over-TLS at the proxy; upstream via `SCRAM-SHA-256` — see [docs/mongodb.md](docs/mongodb.md) |
 
-Each engine has its own listener; enable only the ones you need by setting the matching `DBB_LISTEN_*` environment variable. PostgreSQL is enabled by default; Oracle/MySQL listen on their default ports unless explicitly disabled in config.
+Each engine has its own listener; enable only the ones you need by setting the matching `DBB_LISTEN_*` environment variable. PostgreSQL is enabled by default; Oracle/MySQL/MongoDB listen on their default ports unless explicitly disabled in config.
 
 ## Features
 
-- **Multi-engine proxy**: PostgreSQL, Oracle, MySQL/MariaDB on independent listeners
+- **Multi-engine proxy**: PostgreSQL, Oracle, MySQL/MariaDB, MongoDB on independent listeners
 - **User Management**: Local user database with username/password (Argon2id) and `admin`/`viewer`/`connector` roles
 - **API Keys**: Long-lived bearer tokens (`dbb_…`) for programmatic access; cannot create or revoke other keys (security restriction)
 - **Slack OAuth (optional)**: Sign-in via Slack workspace, optional auto-provisioning
-- **Database Configuration**: Store target database connections with AES-256-GCM encrypted credentials; `protocol` field per database (`postgresql`, `oracle`, `mysql`, `mariadb`)
+- **Database Configuration**: Store target database connections with AES-256-GCM encrypted credentials; `protocol` field per database (`postgresql`, `oracle`, `mysql`, `mariadb`, `mongodb`)
 - **Connection & Query Tracking**: Logs every connection, every query (SQL text, parameters, duration, rows affected, errors), and optionally captures result rows (`query_rows` table) up to configurable size limits
 - **Access Control**: Time-windowed grants (`starts_at` / `expires_at`), independent controls (`read_only`, `block_copy`, `block_ddl`), and optional quotas (`max_query_counts`, `max_bytes_transferred`)
 - **Read-only enforcement**: Defense in depth — SQL inspection, PostgreSQL `default_transaction_read_only`, MySQL/MariaDB blocks for `LOAD DATA`/`SELECT … INTO OUTFILE`/etc., and proxy-side opt-out from `LOCAL INFILE`
@@ -67,11 +68,12 @@ docker run -d \
   -p 5434:5434 \
   -p 1522:1522 \
   -p 3307:3307 \
+  -p 27018:27018 \
   -p 4200:4200 \
   ghcr.io/fclairamb/dbbat
 ```
 
-Ports: `5434` PostgreSQL proxy, `1522` Oracle proxy, `3307` MySQL/MariaDB proxy, `4200` REST API + web UI.
+Ports: `5434` PostgreSQL proxy, `1522` Oracle proxy, `3307` MySQL/MariaDB proxy, `27018` MongoDB proxy, `4200` REST API + web UI.
 
 ### Running with Docker Compose
 
@@ -121,7 +123,7 @@ curl -X POST http://localhost:4200/api/v1/databases \
   }'
 ```
 
-For Oracle, set `"protocol": "oracle"` and add `"oracle_service_name": "ORCL"`. For MySQL/MariaDB, set `"protocol": "mysql"` (or `"mariadb"`) and use port `3306`.
+For Oracle, set `"protocol": "oracle"` and add `"oracle_service_name": "ORCL"`. For MySQL/MariaDB, set `"protocol": "mysql"` (or `"mariadb"`) and use port `3306`. For MongoDB, set `"protocol": "mongodb"`, use port `27017`, and optionally add `"mongo_auth_source": "admin"`.
 
 ### 4. Grant Access
 
@@ -154,6 +156,9 @@ psql -h localhost -p 5434 -U developer -d production
 
 # MySQL / MariaDB
 mysql -h 127.0.0.1 -P 3307 -u developer -p production
+
+# MongoDB (authSource carries the DBBat database name)
+mongosh "mongodb://developer:temppass123@localhost:27018/?authSource=production&authMechanism=SCRAM-SHA-256"
 ```
 
 ## Configuration
@@ -164,6 +169,7 @@ mysql -h 127.0.0.1 -P 3307 -u developer -p production
 | `DBB_LISTEN_PG` | PostgreSQL proxy listen address | `:5434` |
 | `DBB_LISTEN_ORA` | Oracle proxy listen address (empty disables) | `:1522` |
 | `DBB_LISTEN_MYSQL` | MySQL/MariaDB proxy listen address (empty disables) | `:3307` |
+| `DBB_LISTEN_MONGO` | MongoDB proxy listen address (empty disables) | `:27018` |
 | `DBB_LISTEN_API` | REST API listen address | `:4200` |
 | `DBB_KEY` | Base64-encoded AES-256 encryption key | Auto-generated at `~/.dbbat/key` |
 | `DBB_KEYFILE` | Path to file containing encryption key | - |
@@ -192,6 +198,7 @@ See [Configuration](https://dbbat.com/docs/configuration) for the full set, incl
 psql / pg client     ─►  DBBat (auth + grant check + log) ─► PostgreSQL upstream
 sqlplus / go-ora     ─►  DBBat (TNS service-name routing)  ─► Oracle upstream
 mysql / mariadb cli  ─►  DBBat (caching_sha2_password)     ─► MySQL / MariaDB upstream
+mongosh / driver     ─►  DBBat (SCRAM-SHA-256 / PLAIN-TLS) ─► MongoDB upstream
 ```
 
 DBBat is a single Go binary backed by a PostgreSQL store (users, databases, grants, connections, queries, audit, dumps).

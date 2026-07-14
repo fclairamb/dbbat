@@ -24,6 +24,7 @@ type CreateDatabaseRequest struct {
 	SSLMode           string `json:"ssl_mode"`
 	Protocol          string `json:"protocol"`
 	OracleServiceName string `json:"oracle_service_name"`
+	MongoAuthSource   string `json:"mongo_auth_source"`
 	Listable          *bool  `json:"listable"`
 }
 
@@ -38,6 +39,7 @@ type UpdateDatabaseRequest struct {
 	SSLMode           *string `json:"ssl_mode"`
 	Protocol          *string `json:"protocol"`
 	OracleServiceName *string `json:"oracle_service_name"`
+	MongoAuthSource   *string `json:"mongo_auth_source"`
 	Listable          *bool   `json:"listable"`
 }
 
@@ -53,6 +55,7 @@ type DatabaseResponse struct {
 	SSLMode           string     `json:"ssl_mode,omitempty"`
 	Protocol          string     `json:"protocol,omitempty"`
 	OracleServiceName string     `json:"oracle_service_name,omitempty"`
+	MongoAuthSource   string     `json:"mongo_auth_source,omitempty"`
 	Listable          bool       `json:"listable"`
 	CreatedBy         *uuid.UUID `json:"created_by,omitempty"`
 }
@@ -87,7 +90,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 
 	if !isSupportedProtocol(req.Protocol) {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
-			"protocol must be one of: postgresql, oracle, mysql")
+			"protocol must be one of: postgresql, oracle, mysql, mariadb, mongodb")
 		return
 	}
 
@@ -132,6 +135,11 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		oracleServiceName = &req.OracleServiceName
 	}
 
+	var protocolData *store.DatabaseProtocolData
+	if req.MongoAuthSource != "" {
+		protocolData = &store.DatabaseProtocolData{MongoDB: &store.MongoDatabaseData{AuthSource: req.MongoAuthSource}}
+	}
+
 	listable := true
 	if req.Listable != nil {
 		listable = *req.Listable
@@ -148,6 +156,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		SSLMode:           req.SSLMode,
 		Protocol:          req.Protocol,
 		OracleServiceName: oracleServiceName,
+		ProtocolData:      protocolData,
 		Listable:          listable,
 		CreatedBy:         &currentUser.UID,
 	}
@@ -345,6 +354,7 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		SSLMode:           req.SSLMode,
 		Protocol:          req.Protocol,
 		OracleServiceName: req.OracleServiceName,
+		MongoAuthSource:   req.MongoAuthSource,
 		Listable:          req.Listable,
 	}
 
@@ -467,6 +477,11 @@ func toDatabaseResponse(db *store.Database) DatabaseResponse {
 		oracleServiceName = *db.OracleServiceName
 	}
 
+	var mongoAuthSource string
+	if data := db.MongoData(); data != nil {
+		mongoAuthSource = data.AuthSource
+	}
+
 	return DatabaseResponse{
 		UID:               db.UID,
 		Name:              db.Name,
@@ -478,6 +493,7 @@ func toDatabaseResponse(db *store.Database) DatabaseResponse {
 		SSLMode:           db.SSLMode,
 		Protocol:          db.Protocol,
 		OracleServiceName: oracleServiceName,
+		MongoAuthSource:   mongoAuthSource,
 		Listable:          db.Listable,
 		CreatedBy:         db.CreatedBy,
 	}
@@ -497,7 +513,7 @@ func toDatabaseLimitedResponse(db *store.Database) DatabaseLimitedResponse {
 // of truth for the enum.
 func isSupportedProtocol(protocol string) bool {
 	switch protocol {
-	case store.ProtocolPostgreSQL, store.ProtocolOracle, store.ProtocolMySQL, store.ProtocolMariaDB:
+	case store.ProtocolPostgreSQL, store.ProtocolOracle, store.ProtocolMySQL, store.ProtocolMariaDB, store.ProtocolMongoDB:
 		return true
 	default:
 		return false
@@ -515,6 +531,11 @@ func defaultPortFor(protocol string) int {
 		return 1521
 	case store.ProtocolMySQL, store.ProtocolMariaDB:
 		return 3306
+	case store.ProtocolMongoDB:
+		// MongoDB's standard target port. The proxy listener defaults to 27018
+		// to avoid clashing with a local mongod, but Database.Port is the
+		// upstream target's port, which conventionally is 27017.
+		return 27017
 	default:
 		return 0
 	}

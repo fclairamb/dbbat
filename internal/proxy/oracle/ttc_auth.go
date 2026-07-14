@@ -17,6 +17,7 @@ const (
 	authKeyPbkdf2VgenCount    = "AUTH_PBKDF2_VGEN_COUNT"
 	authKeyPbkdf2SderCount    = "AUTH_PBKDF2_SDER_COUNT"
 	authKeyGloballyUniqueDBID = "AUTH_GLOBALLY_UNIQUE_DBID"
+	authKeyProgramNM          = "AUTH_PROGRAM_NM"
 )
 
 // dbbatGloballyUniqueDBID is the synthetic AUTH_GLOBALLY_UNIQUE_DBID value dbbat
@@ -39,7 +40,7 @@ var knownAuthKeys = map[string]bool{
 	authKeySessKey:            true, // "AUTH_SESSKEY"
 	authKeyVfrData:            true, // "AUTH_VFR_DATA"
 	authKeyPassword:           true, // "AUTH_PASSWORD"
-	"AUTH_PROGRAM_NM":         true,
+	authKeyProgramNM:          true, // "AUTH_PROGRAM_NM"
 	"AUTH_MACHINE":            true,
 	"AUTH_PID":                true,
 	"AUTH_SID":                true,

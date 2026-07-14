@@ -245,7 +245,7 @@ DBBat supports PostgreSQL SSL modes for upstream connections:
 
 ### For Target Databases
 
-- [ ] Use a dedicated upstream user for each target (PostgreSQL, Oracle, MySQL/MariaDB)
+- [ ] Use a dedicated upstream user for each target (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB)
 - [ ] Grant minimum required privileges to that user
 - [ ] For read-only grants, also restrict the upstream user to read-only privileges
   - PostgreSQL: `GRANT SELECT` only

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
@@ -289,7 +290,24 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 		capturedRows = s.currentQuery.capturedRows
 	}
 
-	// Log asynchronously to not block proxy
+	// Persist asynchronously so the proxy isn't blocked on the store write.
+	s.persistQueryAsync(query, capturedRows, bytesTransferred)
+
+	// Update local grant state for in-session quota checks
+	s.grant.QueryCount++
+	s.grant.BytesTransferred += bytesTransferred
+}
+
+// persistQueryAsync writes the query log row, its captured rows, and the
+// connection byte increment in a background goroutine. It is a no-op when there
+// is no connection record to write against — the mid-stream abort path
+// (persistAbortedQuery) reuses logQuery purely for its in-memory grant
+// accounting in unit contexts that have no store.
+func (s *Session) persistQueryAsync(query *store.Query, capturedRows []store.QueryRow, bytesTransferred int64) {
+	if s.store == nil || s.connectionUID == uuid.Nil {
+		return
+	}
+
 	go func() {
 		createdQuery, err := s.store.CreateQuery(s.ctx, query)
 		if err != nil {
@@ -314,10 +332,6 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 			s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
 		}
 	}()
-
-	// Update local grant state for in-session quota checks
-	s.grant.QueryCount++
-	s.grant.BytesTransferred += bytesTransferred
 }
 
 // copyFormatToString converts COPY format byte to string.

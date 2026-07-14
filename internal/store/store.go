@@ -20,9 +20,10 @@ import (
 
 // Store provides access to the database
 type Store struct {
-	db         *bun.DB
-	storageDSN string           // Parsed storage DSN for security validation
-	authCache  *cache.AuthCache // Optional auth cache for API key verification
+	db          *bun.DB
+	storageDSN  string                    // Parsed storage DSN for security validation
+	authCache   *cache.AuthCache          // Optional auth cache for API key verification
+	revocations *cache.RevocationRegistry // In-process fan-out of grant revocations to live proxy sessions
 }
 
 // Options configures Store creation.
@@ -55,7 +56,7 @@ func New(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	s := &Store{db: db, storageDSN: dsn}
+	s := &Store{db: db, storageDSN: dsn, revocations: cache.NewRevocationRegistry()}
 
 	// Drop all tables first if requested (for test mode)
 	if options.DropTablesFirst {
@@ -94,6 +95,20 @@ func (s *Store) DB() *bun.DB {
 // SetAuthCache sets the authentication cache for API key verification.
 func (s *Store) SetAuthCache(authCache *cache.AuthCache) {
 	s.authCache = authCache
+}
+
+// Revocations returns the process-wide grant-revocation registry that live
+// proxy sessions register with and the API's revoke handler signals. Always
+// non-nil for a store built via New. Nil-safe on both a nil *Store receiver and
+// a zero-value store (some tests build sessions without a real store); the
+// returned registry's own methods are also nil-safe, so callers never have to
+// nil-check.
+func (s *Store) Revocations() *cache.RevocationRegistry {
+	if s == nil {
+		return nil
+	}
+
+	return s.revocations
 }
 
 // runMigrations runs the database schema migrations

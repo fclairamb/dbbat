@@ -136,6 +136,15 @@ func (h *handler) runIntercepted(
 ) (*gomysql.Result, error) {
 	s := h.session
 
+	// A grant revoked mid-session invalidates every subsequent command, even
+	// before the watchdog force-closes the connection.
+	if s.revocation.Revoked() {
+		errStr := shared.ErrGrantRevoked.Error()
+		h.recordQuery(sql, params, time.Now(), nil, nil, &errStr)
+
+		return nil, shared.ErrGrantRevoked
+	}
+
 	if err := checkQuotas(s.grant); err != nil {
 		errStr := err.Error()
 		h.recordQuery(sql, params, time.Now(), nil, nil, &errStr)

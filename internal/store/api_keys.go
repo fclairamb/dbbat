@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -245,6 +246,60 @@ func (k *APIKey) storeO5LogonVerifiers(plainKey string, encryptionKey, salt6949,
 			O5LogonSalt18453:     salt18453,
 			O5LogonVerifier18453: encVerifier18453,
 		},
+	}
+
+	return nil
+}
+
+// UpgradeAPIKeyO5LogonVerifiers migrates a legacy per-key-salt O5LOGON key to
+// the user's shared salts, so it joins the user's other keys as an
+// interchangeable Oracle login candidate — without forcing the user to rotate
+// the key. It re-derives both verifiers (6949 + 18453) from the plaintext key
+// and the user's shared salts and persists the refreshed protocol_data.
+//
+// Intended to be called best-effort (fire-and-forget, like IncrementAPIKeyUsage)
+// on a successful Oracle login, while the proxy still holds the plaintext key.
+// It is a no-op (returns nil) when no encryption key is available, when the key
+// has been revoked/deleted, or when the key already uses the user's salts — so
+// a repeat login on an already-upgraded key costs only a single read.
+func (s *Store) UpgradeAPIKeyO5LogonVerifiers(ctx context.Context, keyID uuid.UUID, plainKey string, encryptionKey []byte) error {
+	if len(encryptionKey) == 0 {
+		return nil
+	}
+
+	apiKey, err := s.GetAPIKeyByID(ctx, keyID)
+	if err != nil {
+		return err
+	}
+
+	// Only legacy per-key-salt keys need upgrading; keys already on the user's
+	// shared salts (or without any Oracle material) are left untouched.
+	if od := apiKey.OracleData(); od == nil || od.UserSalt {
+		return nil
+	}
+
+	userSalts, err := s.EnsureUserOracleSalts(ctx, apiKey.UserID)
+	if err != nil {
+		return fmt.Errorf("failed to ensure user O5LOGON salts: %w", err)
+	}
+
+	if err := apiKey.computeO5LogonVerifierWithSalts(
+		plainKey, encryptionKey, userSalts.O5LogonUserSalt6949, userSalts.O5LogonUserSalt18453); err != nil {
+		return err
+	}
+
+	encoded, err := json.Marshal(apiKey.ProtocolData)
+	if err != nil {
+		return fmt.Errorf("failed to encode upgraded API key protocol data: %w", err)
+	}
+
+	_, err = s.db.NewUpdate().
+		Model((*APIKey)(nil)).
+		Set("protocol_data = ?::jsonb", string(encoded)).
+		Where("id = ?", keyID).
+		Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to persist upgraded O5LOGON verifiers: %w", err)
 	}
 
 	return nil

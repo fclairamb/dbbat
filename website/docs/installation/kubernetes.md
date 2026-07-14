@@ -17,16 +17,17 @@ A Helm chart is also maintained in-tree under [`charts/`](https://github.com/fcl
 
 ## Listeners
 
-DBBat exposes four listeners by default. Each can be disabled by setting the matching environment variable to an empty string.
+DBBat exposes five listeners by default. Each can be disabled by setting the matching environment variable to an empty string.
 
 | Listener | Default port | Env var |
 |----------|-------------|---------|
 | PostgreSQL proxy | `5434` | `DBB_LISTEN_PG` |
 | Oracle proxy | `1522` | `DBB_LISTEN_ORA` |
 | MySQL/MariaDB proxy | `3307` | `DBB_LISTEN_MYSQL` |
+| MongoDB proxy | `27018` | `DBB_LISTEN_MONGO` |
 | REST API + web UI | `4200` | `DBB_LISTEN_API` |
 
-The wire protocols (PostgreSQL, Oracle TNS, MySQL) generally cannot share an HTTP Ingress — see "Exposing the proxy listeners" below for the options.
+The wire protocols (PostgreSQL, Oracle TNS, MySQL, MongoDB) generally cannot share an HTTP Ingress — see "Exposing the proxy listeners" below for the options.
 
 ## Encryption Key Management
 
@@ -161,6 +162,9 @@ spec:
         - name: mysql
           containerPort: 3307
           protocol: TCP
+        - name: mongo
+          containerPort: 27018
+          protocol: TCP
         - name: api
           containerPort: 4200
           protocol: TCP
@@ -181,6 +185,8 @@ spec:
           value: ":1522"
         - name: DBB_LISTEN_MYSQL
           value: ":3307"
+        - name: DBB_LISTEN_MONGO
+          value: ":27018"
         - name: DBB_LISTEN_API
           value: ":4200"
         resources:
@@ -243,6 +249,10 @@ spec:
   - name: mysql
     port: 3307
     targetPort: mysql
+    protocol: TCP
+  - name: mongo
+    port: 27018
+    targetPort: mongo
     protocol: TCP
   - name: api
     port: 4200
@@ -380,7 +390,7 @@ and no gateway change is needed.
 
 ## Exposing the Proxy Listeners
 
-The proxy listeners (PostgreSQL `5434`, Oracle `1522`, MySQL/MariaDB `3307`) cannot be exposed via a standard HTTP Ingress — they speak TCP/wire protocols, not HTTP. Options:
+The proxy listeners (PostgreSQL `5434`, Oracle `1522`, MySQL/MariaDB `3307`, MongoDB `27018`) cannot be exposed via a standard HTTP Ingress — they speak TCP/wire protocols, not HTTP. Options:
 
 ### Option 1: LoadBalancer Service
 
@@ -406,6 +416,9 @@ spec:
   - name: mysql
     port: 3307
     targetPort: mysql
+  - name: mongo
+    port: 27018
+    targetPort: mongo
   type: LoadBalancer
 ```
 
@@ -434,6 +447,10 @@ spec:
     port: 3307
     targetPort: mysql
     nodePort: 33307
+  - name: mongo
+    port: 27018
+    targetPort: mongo
+    nodePort: 32018
   type: NodePort
 ```
 
@@ -452,6 +469,7 @@ data:
   "5434": "dbbat/dbbat:5434"
   "1522": "dbbat/dbbat:1522"
   "3307": "dbbat/dbbat:3307"
+  "27018": "dbbat/dbbat:27018"
 ```
 
 ## Complete Deployment

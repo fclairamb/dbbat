@@ -7,6 +7,14 @@
       "runtimeArgs": ["dev"],
       "port": 4200,
       "url": "http://localhost:4200/app/"
+    },
+    {
+      "name": "website",
+      "runtimeExecutable": "bun",
+      "runtimeArgs": ["run", "serve", "--port", "3210"],
+      "cwd": "website",
+      "port": 3210,
+      "url": "http://localhost:3210/"
     }
   ]
 }

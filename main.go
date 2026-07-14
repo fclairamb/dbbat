@@ -20,6 +20,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/dump"
+	"github.com/fclairamb/dbbat/internal/proxy/mongodb"
 	"github.com/fclairamb/dbbat/internal/proxy/mysql"
 	"github.com/fclairamb/dbbat/internal/proxy/oracle"
 	"github.com/fclairamb/dbbat/internal/proxy/postgresql"
@@ -350,6 +351,9 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	// Start MySQL proxy server (if configured)
 	mysqlServer := startMySQLProxy(ctx, cfg, dataStore, proxyAuthCache, logger)
 
+	// Start MongoDB proxy server (if configured)
+	mongoServer := startMongoProxy(ctx, cfg, dataStore, proxyAuthCache, logger)
+
 	// Wait for shutdown signal and gracefully stop all servers
 	servers := []shutdownable{apiServer, proxyServer}
 	if oracleServer != nil {
@@ -357,6 +361,9 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	}
 	if mysqlServer != nil {
 		servers = append(servers, mysqlServer)
+	}
+	if mongoServer != nil {
+		servers = append(servers, mongoServer)
 	}
 
 	return awaitShutdown(ctx, logger, servers...)
@@ -429,6 +436,31 @@ func startMySQLProxy(ctx context.Context, cfg *config.Config, dataStore *store.S
 	logger.InfoContext(ctx, "MySQL proxy server started",
 		slog.String("addr", cfg.ListenMySQL),
 		slog.Bool("tls", !cfg.MySQL.TLS.Disable))
+
+	return srv
+}
+
+func startMongoProxy(ctx context.Context, cfg *config.Config, dataStore *store.Store, authCache *cache.AuthCache, logger *slog.Logger) *mongodb.Server {
+	if cfg.ListenMongo == "" {
+		return nil
+	}
+
+	srv, err := mongodb.NewServer(dataStore, cfg.EncryptionKey, cfg.QueryStorage, cfg.Dump, authCache, cfg.Mongo, logger)
+	if err != nil {
+		logger.ErrorContext(ctx, "MongoDB proxy server init failed", slog.Any("error", err))
+		os.Exit(1)
+	}
+
+	go func() {
+		if err := srv.Start(cfg.ListenMongo); err != nil {
+			logger.ErrorContext(context.Background(), "MongoDB proxy server error", slog.Any("error", err))
+			os.Exit(1)
+		}
+	}()
+
+	logger.InfoContext(ctx, "MongoDB proxy server started",
+		slog.String("addr", cfg.ListenMongo),
+		slog.Bool("tls", !cfg.Mongo.TLS.Disable))
 
 	return srv
 }

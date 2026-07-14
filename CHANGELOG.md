@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+* **oracle:** upgrade legacy per-key-salt O5LOGON verifiers to the newer per-user-salt format automatically on successful login
+* **api,ui:** scope the API-key list to the caller's own keys by default, with an admin-only toggle (`all_users`) to review other users' keys
+* **store,api,ui:** add a configurable `web_ui_url` (falling back to `cfg.PublicURL`) and split the settings page's single port field into distinct HTTP/TCP listener fields, replacing hard-coded values
+* **proxy:** shared `BuildUpstreamName` helper encodes the dbbat user name into the upstream connection metadata (`application_name` / `program_name` / `AUTH_PROGRAM_NM`) for PostgreSQL, Oracle, and MySQL
+* **proxy:** shared `LimitGuard` enforces grant time/bandwidth limits mid-stream (not only between commands) across PostgreSQL, Oracle, and MySQL
+* **grants:** shared revocation registry — revoking a grant now blocks queries and disconnects live sessions across all three protocols
+* **api,ui:** global queries list now shows user, database, and connection columns
+* **ui:** replace the stale "PostgreSQL Proxy" subtitle with generic wording, since dbbat now proxies PostgreSQL, Oracle, MySQL/MariaDB, and MongoDB
+* **store,postgresql,oracle,mysql:** persist the bytes transferred by a query aborted mid-stream by a grant limit, so byte quotas stay accurate
+* **mongodb:** full MongoDB wire-protocol proxy (PLAIN-over-TLS + SCRAM upstream auth, command classification/enforcement, query + result logging, API/UI integration, mid-session revoke/quota rejection), plus phase-5 enhancements — stored per-user SCRAM-SHA-256 verifiers, configurable per-database `authSource`, `loadBalanced` support, `OP_COMPRESSED` compression, filtered `listDatabases`, and `getMore` cursor lineage linking
+
 ## [0.15.5](https://github.com/fclairamb/dbbat/compare/v0.15.4...v0.15.5) (2026-07-12)
 
 

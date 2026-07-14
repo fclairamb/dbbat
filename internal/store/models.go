@@ -54,7 +54,29 @@ type User struct {
 // a single jsonb column so protocol-specific fields don't proliferate as table
 // columns. Absent protocols are omitted.
 type UserProtocolData struct {
-	Oracle *OracleUserData `json:"oracle,omitempty"`
+	Oracle  *OracleUserData `json:"oracle,omitempty"`
+	MongoDB *MongoUserData  `json:"mongodb,omitempty"`
+}
+
+// MongoUserData holds the per-user MongoDB SCRAM verifier material, letting a
+// client authenticate to the proxy with the driver-default SCRAM-SHA-256 (which
+// keeps the cleartext password off the wire) instead of being forced onto
+// authMechanism=PLAIN. Populated lazily whenever the user's password is set
+// after this feature shipped; absent otherwise (PLAIN stays the fallback).
+type MongoUserData struct {
+	SCRAMSHA256 *MongoSCRAMCredentials `json:"scram_sha256,omitempty"`
+}
+
+// MongoSCRAMCredentials are the SCRAM-SHA-256 stored credentials derived from
+// the user's password (RFC 5802 / RFC 7677). Salt and Iterations are public
+// challenge material; StoredKey and ServerKey are password-equivalent secrets
+// and are encrypted at rest with the dbbat master key (AAD-bound to the user
+// UID), mirroring the encrypted Oracle O5LOGON verifiers.
+type MongoSCRAMCredentials struct {
+	Salt       []byte `json:"salt,omitempty"`
+	Iterations int    `json:"iterations,omitempty"`
+	StoredKey  []byte `json:"stored_key,omitempty"`
+	ServerKey  []byte `json:"server_key,omitempty"`
 }
 
 // OracleUserData holds the per-USER O5LOGON salts. Every API key created for
@@ -75,6 +97,27 @@ func (u *User) OracleData() *OracleUserData {
 	}
 
 	return u.ProtocolData.Oracle
+}
+
+// MongoData returns the user's MongoDB protocol material, or nil if absent.
+func (u *User) MongoData() *MongoUserData {
+	if u.ProtocolData == nil {
+		return nil
+	}
+
+	return u.ProtocolData.MongoDB
+}
+
+// MongoSCRAMCredentials returns the user's stored MongoDB SCRAM-SHA-256
+// credentials, or nil when the user has no stored verifier (so the MongoDB
+// proxy falls back to PLAIN for them).
+func (u *User) MongoSCRAMCredentials() *MongoSCRAMCredentials {
+	data := u.MongoData()
+	if data == nil {
+		return nil
+	}
+
+	return data.SCRAMSHA256
 }
 
 // HasChangedPassword returns true if the user has changed their initial password
@@ -119,6 +162,7 @@ const (
 	ProtocolOracle     = "oracle"
 	ProtocolMySQL      = "mysql"
 	ProtocolMariaDB    = "mariadb"
+	ProtocolMongoDB    = "mongodb"
 )
 
 // IsMySQLFamily reports whether the given protocol speaks the MySQL wire
@@ -134,23 +178,50 @@ func IsMySQLFamily(protocol string) bool {
 type Database struct {
 	bun.BaseModel `bun:"table:databases,alias:d"`
 
-	UID               uuid.UUID  `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
-	Name              string     `bun:"name,notnull,unique" json:"name"`
-	Description       string     `bun:"description" json:"description"`
-	Host              string     `bun:"host,notnull" json:"host"`
-	Port              int        `bun:"port,notnull" json:"port"`
-	DatabaseName      string     `bun:"database_name,notnull" json:"database_name"`
-	Username          string     `bun:"username,notnull" json:"username"`
-	Password          string     `bun:"-" json:"-"`                          // Decrypted, not stored
-	PasswordEncrypted []byte     `bun:"password_encrypted,notnull" json:"-"` // Encrypted form
-	SSLMode           string     `bun:"ssl_mode,notnull,default:'prefer'" json:"ssl_mode"`
-	Protocol          string     `bun:"protocol,notnull,default:'postgresql'" json:"protocol"`
-	OracleServiceName *string    `bun:"oracle_service_name" json:"oracle_service_name,omitempty"`
-	Listable          bool       `bun:"listable,notnull" json:"listable"`
-	CreatedBy         *uuid.UUID `bun:"created_by,type:uuid" json:"created_by"`
-	CreatedAt         time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
-	UpdatedAt         time.Time  `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
-	DeletedAt         *time.Time `bun:"deleted_at,soft_delete" json:"-"`
+	UID               uuid.UUID `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	Name              string    `bun:"name,notnull,unique" json:"name"`
+	Description       string    `bun:"description" json:"description"`
+	Host              string    `bun:"host,notnull" json:"host"`
+	Port              int       `bun:"port,notnull" json:"port"`
+	DatabaseName      string    `bun:"database_name,notnull" json:"database_name"`
+	Username          string    `bun:"username,notnull" json:"username"`
+	Password          string    `bun:"-" json:"-"`                          // Decrypted, not stored
+	PasswordEncrypted []byte    `bun:"password_encrypted,notnull" json:"-"` // Encrypted form
+	SSLMode           string    `bun:"ssl_mode,notnull,default:'prefer'" json:"ssl_mode"`
+	Protocol          string    `bun:"protocol,notnull,default:'postgresql'" json:"protocol"`
+	OracleServiceName *string   `bun:"oracle_service_name" json:"oracle_service_name,omitempty"`
+	// ProtocolData holds protocol-specific per-database settings (MongoDB
+	// upstream authSource, etc.) in a single generic jsonb column — mirroring
+	// User.ProtocolData — rather than a dedicated column per setting.
+	ProtocolData *DatabaseProtocolData `bun:"protocol_data,type:jsonb,nullzero" json:"-"`
+	Listable     bool                  `bun:"listable,notnull" json:"listable"`
+	CreatedBy    *uuid.UUID            `bun:"created_by,type:uuid" json:"created_by"`
+	CreatedAt    time.Time             `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	UpdatedAt    time.Time             `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
+	DeletedAt    *time.Time            `bun:"deleted_at,soft_delete" json:"-"`
+}
+
+// DatabaseProtocolData is per-protocol material attached to a database, stored
+// as a single jsonb column so protocol-specific settings don't proliferate as
+// table columns — mirrors UserProtocolData. Absent protocols are omitted.
+type DatabaseProtocolData struct {
+	MongoDB *MongoDatabaseData `json:"mongodb,omitempty"`
+}
+
+// MongoDatabaseData holds MongoDB-specific per-database settings.
+type MongoDatabaseData struct {
+	// AuthSource is the upstream SCRAM authSource; empty defers to
+	// MongoAuthSourceOrDefault's "admin" default.
+	AuthSource string `json:"auth_source,omitempty"`
+}
+
+// MongoData returns the database's MongoDB protocol material, or nil if absent.
+func (db *Database) MongoData() *MongoDatabaseData {
+	if db.ProtocolData == nil {
+		return nil
+	}
+
+	return db.ProtocolData.MongoDB
 }
 
 // DatabaseUpdate represents fields that can be updated
@@ -164,6 +235,7 @@ type DatabaseUpdate struct {
 	SSLMode           *string
 	Protocol          *string
 	OracleServiceName *string
+	MongoAuthSource   *string
 	Listable          *bool
 }
 
@@ -213,6 +285,11 @@ type Query struct {
 	Error         *string          `bun:"error" json:"error"`
 	CopyFormat    *string          `bun:"copy_format" json:"copy_format,omitempty"`       // 'text', 'csv', 'binary', or nil for non-COPY
 	CopyDirection *string          `bun:"copy_direction" json:"copy_direction,omitempty"` // 'in', 'out', or nil for non-COPY
+
+	// Joined fields populated only by ListQueries (via a JOIN on connections);
+	// not stored on the queries table itself.
+	UserID     *uuid.UUID `bun:"user_id,scanonly" json:"user_id,omitempty"`
+	DatabaseID *uuid.UUID `bun:"database_id,scanonly" json:"database_id,omitempty"`
 }
 
 // QueryRowModel represents a single row from query results or COPY data

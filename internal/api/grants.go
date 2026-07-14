@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -163,6 +164,15 @@ func (s *Server) handleRevokeGrant(c *gin.Context) {
 	if err := s.store.RevokeGrant(c.Request.Context(), uid, currentUser.UID); err != nil {
 		writeInternalError(c, s.logger, err, "failed to revoke grant")
 		return
+	}
+
+	// Signal any live proxy sessions authenticated under this grant so they
+	// stop accepting queries and disconnect, rather than staying usable until
+	// their next reconnect. Purely in-process; a no-op when nothing is live.
+	if signaled := s.store.Revocations().Revoke(uid); signaled > 0 {
+		s.logger.InfoContext(c.Request.Context(), "grant revoked: signaled live sessions",
+			slog.String("grant_uid", uid.String()),
+			slog.Int("sessions", signaled))
 	}
 
 	// Log audit event

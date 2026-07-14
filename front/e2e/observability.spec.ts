@@ -35,6 +35,50 @@ test.describe("Observability Features", () => {
     expect(content).toBeTruthy();
   });
 
+  test("queries list shows user, database, and connection columns", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("queries");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    // Column headers are present regardless of whether any rows exist.
+    const headerRow = authenticatedPage.locator("thead tr");
+    await expect(headerRow.getByText("User", { exact: true })).toBeVisible();
+    await expect(
+      headerRow.getByText("Database", { exact: true })
+    ).toBeVisible();
+    await expect(
+      headerRow.getByText("Connection", { exact: true })
+    ).toBeVisible();
+
+    const rows = authenticatedPage.locator("tbody tr");
+    if ((await rows.count()) === 0) {
+      test.skip(true, "No query rows available in this environment");
+      return;
+    }
+
+    // Test-mode seeds one query executed by the admin user against
+    // proxy_target (see seedSampleQuery in main.go) — assert it renders.
+    const firstRow = rows.first();
+    await expect(firstRow.getByText("admin")).toBeVisible();
+    await expect(firstRow.getByText("proxy_target")).toBeVisible();
+
+    // The connection cell is a link scoped to that connection's queries,
+    // independently clickable from the row's own link to the query detail.
+    const connectionLink = firstRow.locator("a").last();
+    const href = await connectionLink.getAttribute("href");
+    expect(href).toMatch(/\/queries\?connection_id=/);
+
+    await connectionLink.click();
+    await expect(authenticatedPage).toHaveURL(/connection_id=/);
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    // Filter badge confirms the connection-scoped view is active.
+    await expect(
+      authenticatedPage.getByText("Filtered by connection")
+    ).toBeVisible();
+  });
+
   test("query detail breadcrumb shows Queries parent, not 'Details'", async ({
     authenticatedPage,
   }) => {

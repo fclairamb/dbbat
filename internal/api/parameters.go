@@ -87,6 +87,7 @@ type instanceListenInfo struct {
 	PG    string `json:"pg"`
 	Ora   string `json:"ora"`
 	MySQL string `json:"mysql"`
+	Mongo string `json:"mongo"`
 	API   string `json:"api"`
 }
 
@@ -96,9 +97,14 @@ type instancePublicInfo struct {
 	PGHost    string `json:"pg_host"`
 	OraHost   string `json:"ora_host"`
 	MySQLHost string `json:"mysql_host"`
+	MongoHost string `json:"mongo_host"`
 	PGPort    *int   `json:"pg_port"`
 	OraPort   *int   `json:"ora_port"`
 	MySQLPort *int   `json:"mysql_port"`
+	MongoPort *int   `json:"mongo_port"`
+	// WebUIURL is the raw operator-configured Web UI / public base URL
+	// override (empty = falling back to DBB_PUBLIC_URL).
+	WebUIURL string `json:"web_ui_url"`
 }
 
 // instanceResolvedInfo holds the resolved effective connection values.
@@ -109,6 +115,11 @@ type instanceResolvedInfo struct {
 	OraPort   int    `json:"ora_port"`
 	MySQLHost string `json:"mysql_host"`
 	MySQLPort int    `json:"mysql_port"`
+	MongoHost string `json:"mongo_host"`
+	MongoPort int    `json:"mongo_port"`
+	// WebUIURL is the effective Web UI / public base URL (public.web_ui_url
+	// parameter, falling back to DBB_PUBLIC_URL).
+	WebUIURL string `json:"web_ui_url"`
 }
 
 // instanceInfoResponse is the full GET /instance response.
@@ -135,11 +146,13 @@ func (s *Server) handleGetInstance(c *gin.Context) {
 	listenPG := ""
 	listenOra := ""
 	listenMySQL := ""
+	listenMongo := ""
 	listenAPI := ""
 	if s.config != nil {
 		listenPG = s.config.ListenPG
 		listenOra = s.config.ListenOracle
 		listenMySQL = s.config.ListenMySQL
+		listenMongo = s.config.ListenMongo
 		listenAPI = s.config.ListenAPI
 	}
 
@@ -148,6 +161,7 @@ func (s *Server) handleGetInstance(c *gin.Context) {
 			PG:    listenPG,
 			Ora:   listenOra,
 			MySQL: listenMySQL,
+			Mongo: listenMongo,
 			API:   listenAPI,
 		},
 		Resolved: instanceResolvedInfo{
@@ -157,6 +171,9 @@ func (s *Server) handleGetInstance(c *gin.Context) {
 			OraPort:   resolved.OraPort,
 			MySQLHost: resolved.MySQLHost,
 			MySQLPort: resolved.MySQLPort,
+			MongoHost: resolved.MongoHost,
+			MongoPort: resolved.MongoPort,
+			WebUIURL:  resolved.WebUIURL,
 		},
 	}
 
@@ -166,9 +183,12 @@ func (s *Server) handleGetInstance(c *gin.Context) {
 			PGHost:    pe.PGHost,
 			OraHost:   pe.OraHost,
 			MySQLHost: pe.MySQLHost,
+			MongoHost: pe.MongoHost,
 			PGPort:    pe.PGPort,
 			OraPort:   pe.OraPort,
 			MySQLPort: pe.MySQLPort,
+			MongoPort: pe.MongoPort,
+			WebUIURL:  pe.WebUIURL,
 		}
 	}
 
@@ -181,9 +201,16 @@ type updateInstancePublicRequest struct {
 	PGHost    string `json:"pg_host"`
 	OraHost   string `json:"ora_host"`
 	MySQLHost string `json:"mysql_host"`
+	MongoHost string `json:"mongo_host"`
 	PGPort    *int   `json:"pg_port"`
 	OraPort   *int   `json:"ora_port"`
 	MySQLPort *int   `json:"mysql_port"`
+	MongoPort *int   `json:"mongo_port"`
+	// WebUIURL sets the Web UI / public base URL override (empty leaves it
+	// unset, falling back to DBB_PUBLIC_URL). Distinct from Host: this is
+	// where the browser/API is reached (HTTP ingress), not where SQL
+	// clients connect (TCP load balancer).
+	WebUIURL string `json:"web_ui_url"`
 }
 
 // handleUpdateInstancePublic atomically upserts all public.* parameters.
@@ -199,9 +226,12 @@ func (s *Server) handleUpdateInstancePublic(c *gin.Context) {
 		PGHost:    req.PGHost,
 		OraHost:   req.OraHost,
 		MySQLHost: req.MySQLHost,
+		MongoHost: req.MongoHost,
 		PGPort:    req.PGPort,
 		OraPort:   req.OraPort,
 		MySQLPort: req.MySQLPort,
+		MongoPort: req.MongoPort,
+		WebUIURL:  req.WebUIURL,
 	}
 
 	if err := s.store.SetPublicEndpoints(c.Request.Context(), pe); err != nil {

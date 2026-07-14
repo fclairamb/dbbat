@@ -6,7 +6,7 @@ sidebar_position: 4
 
 DBBat can write **per-session binary dumps** of every proxied connection. The dump captures the post-auth byte stream between client and upstream, which is invaluable for protocol-level debugging, replay testing, and forensic analysis.
 
-The format is **protocol-agnostic**: PostgreSQL, Oracle, and MySQL/MariaDB sessions all use the same `.dbbat-dump` file structure. See the [full format spec](https://github.com/fclairamb/dbbat/blob/main/docs/dump-format.md) for the on-disk layout.
+The format is **protocol-agnostic**: PostgreSQL, Oracle, MySQL/MariaDB, and MongoDB sessions all use the same `.dbbat-dump` file structure. See the [full format spec](https://github.com/fclairamb/dbbat/blob/main/docs/dump-format.md) for the on-disk layout.
 
 ## Enabling Dumps
 

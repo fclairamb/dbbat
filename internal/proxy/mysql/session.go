@@ -14,6 +14,7 @@ import (
 	gomysqlclient "github.com/go-mysql-org/go-mysql/client"
 	gomysqlserver "github.com/go-mysql-org/go-mysql/server"
 
+	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
@@ -56,6 +57,16 @@ type Session struct {
 	// of the previous recorded query. The first query absorbs the
 	// handshake/auth bytes, which is the right place for them.
 	lastBytesSnapshot int64
+
+	// guard enforces the grant's time-window and bandwidth limits. The
+	// go-mysql library owns the wire and buffers whole results, so mid-stream
+	// enforcement runs entirely through the watchdog (onLimitViolation), which
+	// force-closes both conns.
+	guard *shared.LimitGuard
+
+	// revocation is signaled when this session's grant is revoked mid-flight,
+	// so the next command is rejected and the watchdog tears the session down.
+	revocation *cache.RevocationHandle
 }
 
 // cumulativeClientBytes returns the running total of bytes exchanged with
@@ -96,6 +107,12 @@ func (s *Session) Run() error {
 	authHandler := &dbbatAuthHandler{session: s}
 	commandHandler := &handler{session: s}
 
+	// Deregister the revocation handle on the way out no matter how the session
+	// ends. Deferred before the handshake so that even if NewCustomizedConn
+	// fails *after* OnAuth registered a handle, it is still dropped. It is a
+	// no-op until OnAuth actually registers (guarded on s.revocation != nil).
+	defer s.deregisterRevocation()
+
 	conn, err := s.server.gomysqlServer.NewCustomizedConn(s.clientConn, authHandler, commandHandler)
 	if err != nil {
 		return fmt.Errorf("MySQL handshake: %w", err)
@@ -119,12 +136,58 @@ func (s *Session) Run() error {
 	s.startDumpIfConfigured()
 	defer s.closeDump()
 
+	// Run a watchdog that tears the session down the moment a time/bandwidth
+	// limit is crossed. The go-mysql library owns the wire and buffers whole
+	// results, so there is no message boundary at which to inject a clean error
+	// frame — force-closing the conns (in onLimitViolation) is the enforcement
+	// mechanism. Canceled when the command loop exits so no goroutine leaks.
+	//
+	// The conn references are captured into locals so the watchdog goroutine
+	// never reads the mutable s.upstreamConn field (closeUpstream nils it),
+	// keeping the teardown race-free.
+	watchCtx, cancelWatch := context.WithCancel(s.ctx)
+	defer cancelWatch()
+
+	upstreamConn := s.upstreamConn
+	clientConn := s.clientConn
+
+	go s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
+		s.onLimitViolation(upstreamConn, clientConn, err)
+	})
+
 	s.logger.InfoContext(s.ctx, "MySQL session ready",
 		slog.String("user", s.user.Username),
 		slog.String("database", s.database.Name),
 		slog.Any("remote_addr", s.clientConn.RemoteAddr()))
 
 	return s.commandLoop()
+}
+
+// onLimitViolation is invoked by the limit watchdog when a time/bandwidth limit
+// is crossed mid-query. It force-closes both conns: closing the upstream
+// unblocks a long-running Execute (the go-mysql client aborts its result read
+// and returns an error, surfaced to the client as an ERR packet); closing the
+// client ends the command loop. The go-mysql library owns the wire and buffers
+// whole results, so there is no message boundary at which to inject a clean
+// error frame — force-closing the conns is the enforcement mechanism, mirroring
+// the PostgreSQL/Oracle onLimitViolation methods.
+//
+// The conns are passed in (captured as locals when the watchdog starts) rather
+// than read from s.upstreamConn, which closeUpstream nils; this keeps the
+// teardown race-free. Close is safe to call concurrently with a blocked
+// Read/Write and safe to call twice (the deferred closeUpstream closes the same
+// conn).
+func (s *Session) onLimitViolation(upstreamConn, clientConn io.Closer, err error) {
+	s.logger.WarnContext(s.ctx, "terminating MySQL session: grant no longer valid mid-stream",
+		slog.Any("error", err))
+
+	if upstreamConn != nil {
+		_ = upstreamConn.Close()
+	}
+
+	if clientConn != nil {
+		_ = clientConn.Close()
+	}
 }
 
 // commandLoop dispatches client commands until the connection closes.
@@ -162,9 +225,38 @@ func (s *Session) recordConnection() error {
 	return nil
 }
 
+// deregisterRevocation drops this session's handle from the store's revocation
+// registry. Safe to call when the session never registered (grant nil).
+func (s *Session) deregisterRevocation() {
+	if s.grant == nil || s.revocation == nil {
+		return
+	}
+
+	s.server.store.Revocations().Deregister(s.grant.UID, s.revocation)
+}
+
 func (s *Session) recordDisconnect() {
 	if s.connection == nil {
 		return
+	}
+
+	// Flush any client-side bytes not yet attributed to a query. Two sources:
+	//   - the last query's response bytes, written by the gomysql server AFTER
+	//     recordQuery ran, so never picked up by a per-query diff;
+	//   - a query cut off mid-Execute by the limit watchdog (which force-closes
+	//     the conns), whose request/partial bytes never reached recordQuery.
+	// Persisting them keeps the grant's recomputed BytesTransferred honest across
+	// reconnects. Bytes-only (IncrementConnectionBytes) so this teardown flush
+	// never inflates the query count.
+	total := s.cumulativeClientBytes()
+	if delta := total - s.lastBytesSnapshot; delta > 0 {
+		s.lastBytesSnapshot = total
+
+		if err := s.server.store.IncrementConnectionBytes(s.ctx, s.connection.UID, delta); err != nil {
+			s.logger.DebugContext(s.ctx, "MySQL trailing byte flush failed",
+				slog.Any("connection_id", s.connection.UID),
+				slog.Any("error", err))
+		}
 	}
 
 	if err := s.server.store.CloseConnection(s.ctx, s.connection.UID); err != nil {
@@ -172,13 +264,6 @@ func (s *Session) recordDisconnect() {
 			slog.Any("connection_id", s.connection.UID),
 			slog.Any("error", err))
 	}
-
-	// Note: the very last query's response bytes are written by the
-	// gomysql server after recordQuery has run, so they aren't picked up
-	// by the per-query diff. For typical sessions (many queries, modest
-	// per-query response) this is a small undercount. A trailing flush
-	// would need a bytes-only Increment helper since IncrementConnectionStats
-	// also bumps the query count — out of scope for this fix.
 }
 
 // startDumpIfConfigured opens a packet-dump file for this session and tees the

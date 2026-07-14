@@ -1,6 +1,6 @@
 # DBBat - Database Observability Proxy
 
-A transparent database proxy for query observability, access control, and safety. Supports **PostgreSQL**, **Oracle**, and **MySQL/MariaDB**. Every query logged. Every connection tracked.
+A transparent database proxy for query observability, access control, and safety. Supports **PostgreSQL**, **Oracle**, **MySQL/MariaDB**, and **MongoDB**. Every query logged. Every connection tracked.
 
 ## Semantic Versioning
 
@@ -27,7 +27,7 @@ PR titles MUST follow the conventional commit format:
 | `ci` | CI configuration | None |
 | `chore` | Other changes (deps, tooling) | None |
 
-**Scopes** (optional): `api`, `auth`, `config`, `crypto`, `db`, `deps`, `docs`, `dump`, `grants`, `migrations`, `mysql`, `oracle`, `postgresql`, `proxy`, `store`, `ui`, `release`, `ci`
+**Scopes** (optional): `api`, `auth`, `config`, `crypto`, `db`, `deps`, `docs`, `dump`, `grants`, `migrations`, `mongodb`, `mysql`, `oracle`, `postgresql`, `proxy`, `store`, `ui`, `release`, `ci`
 
 **Breaking Changes:** Add `!` after type/scope or include `BREAKING CHANGE:` in body for major version bumps.
 
@@ -46,6 +46,7 @@ PR titles MUST follow the conventional commit format:
   - PostgreSQL wire protocol via `jackc/pgx/v5`
   - Oracle TNS/TTC (hand-rolled) — see `docs/oracle.md`
   - MySQL/MariaDB via `go-mysql-org/go-mysql` (server + client) — see `docs/mysql.md`
+  - MongoDB wire protocol (hand-rolled `OP_MSG`; BSON via `go.mongodb.org/mongo-driver/v2`) — see `docs/mongodb.md`
 - **API**: `gin-gonic/gin` with OpenAPI 3.0 docs
 - **CLI**: `urfave/cli/v3`
 - **Config**: `knadh/koanf`
@@ -71,11 +72,12 @@ dbbat/
 │   │   ├── shared/          # Auth, query interception shared across protocols
 │   │   ├── postgresql/      # PostgreSQL wire protocol proxy
 │   │   ├── oracle/          # Oracle TNS/TTC proxy (see docs/oracle.md)
-│   │   └── mysql/           # MySQL/MariaDB proxy (see docs/mysql.md)
+│   │   ├── mysql/           # MySQL/MariaDB proxy (see docs/mysql.md)
+│   │   └── mongodb/         # MongoDB wire protocol proxy (see docs/mongodb.md)
 │   └── auth/                # OAuth provider abstraction (Slack, etc.)
 ├── front/                   # React frontend (see front/CLAUDE.md)
 ├── website/                 # Docusaurus site for dbbat.com
-├── docs/                    # Protocol-level technical notes (oracle, mysql, dump format)
+├── docs/                    # Protocol-level technical notes (oracle, mysql, mongodb, dump format)
 ├── docker-compose.yml
 └── go.mod
 ```
@@ -140,6 +142,7 @@ This applies even when the current task is otherwise complete — capture the fo
 | `DBB_LISTEN_PG` | PostgreSQL proxy listen address (default: `:5434`) | No |
 | `DBB_LISTEN_ORA` | Oracle proxy listen address (default: `:1522`; empty disables) | No |
 | `DBB_LISTEN_MYSQL` | MySQL/MariaDB proxy listen address (default: `:3307`; empty disables) | No |
+| `DBB_LISTEN_MONGO` | MongoDB proxy listen address (default: `:27018`; empty disables) | No |
 | `DBB_LISTEN_API` | REST API listen address (default: `:4200`) | No |
 | `DBB_KEY` | Base64-encoded AES-256 encryption key | No |
 | `DBB_KEYFILE` | Path to file containing encryption key | No |
@@ -154,6 +157,9 @@ This applies even when the current task is otherwise complete — capture the fo
 | `DBB_PG_TLS_DISABLE` | Refuse TLS upgrade on the PostgreSQL listener (default: `false`) | No |
 | `DBB_PG_TLS_CERT_FILE` | PEM cert for PostgreSQL TLS termination (auto self-signed if empty) | No |
 | `DBB_PG_TLS_KEY_FILE` | PEM key for PostgreSQL TLS termination (auto-generated if empty) | No |
+| `DBB_MONGO_TLS_DISABLE` | Keep the MongoDB listener plaintext — refuse TLS termination (default: `false`) | No |
+| `DBB_MONGO_TLS_CERT_FILE` | PEM cert for MongoDB TLS termination (auto self-signed if empty) | No |
+| `DBB_MONGO_TLS_KEY_FILE` | PEM key for MongoDB TLS termination (auto-generated if empty) | No |
 | `DBB_SLACK_NOTIFY_BOT_TOKEN` | Slack bot user OAuth token (`xoxb-...`); empty disables notifications | No |
 | `DBB_SLACK_NOTIFY_CHANNEL` | Slack channel id or name for grant-request notifications (default: `#dbbat`) | No |
 | `DBB_SLACK_SIGNING_SECRET` | Slack app signing secret; enables Approve/Deny buttons + inbound interactions endpoint. Empty = link-through-UI (no buttons). Requires the bot token. Legacy alias `DBB_SLACK_NOTIFY_SIGNING_SECRET` is also accepted; the canonical name wins if both are set. | No |
@@ -193,9 +199,10 @@ Use `--bun:split` directive to split multiple statements.
 Client → DBBat (auth + grant check) → Target PostgreSQL
 Client → DBBat (service-name lookup, O5LOGON proxy auth) → Target Oracle
 Client → DBBat (caching_sha2_password / TLS termination) → Target MySQL/MariaDB
+Client → DBBat (SCRAM-SHA-256 or PLAIN-over-TLS, authSource lookup) → Target MongoDB
 ```
 
-The same auth + grant + query-logging pipeline runs across all three protocols (`internal/proxy/shared`).
+The same auth + grant + query-logging pipeline runs across all four protocols (`internal/proxy/shared`).
 
 ### Access Control
 - Time-windowed grants (`starts_at`, `expires_at`)

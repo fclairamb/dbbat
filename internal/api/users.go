@@ -25,6 +25,18 @@ type UpdateUserRequest struct {
 	Roles    []string `json:"roles"`
 }
 
+// setMongoVerifier derives and stores the user's MongoDB SCRAM-SHA-256 verifier
+// from their new plaintext password, so they can authenticate to the MongoDB
+// proxy with the driver-default SCRAM-SHA-256 instead of PLAIN. It is a
+// best-effort optimisation layered on top of the Argon2id password hash: any
+// failure is logged but never fails the password change (PLAIN stays available).
+func (s *Server) setMongoVerifier(c *gin.Context, userID uuid.UUID, password string) {
+	if err := s.store.SetUserMongoVerifier(c.Request.Context(), userID, password, s.encryptionKey); err != nil {
+		s.logger.WarnContext(c.Request.Context(), "failed to store MongoDB SCRAM verifier",
+			"user_uid", userID, "error", err)
+	}
+}
+
 // handleCreateUser creates a new user
 func (s *Server) handleCreateUser(c *gin.Context) {
 	var req CreateUserRequest
@@ -46,6 +58,9 @@ func (s *Server) handleCreateUser(c *gin.Context) {
 		writeInternalError(c, s.logger, err, "failed to create user")
 		return
 	}
+
+	// Store the MongoDB SCRAM verifier so the user can use SCRAM-SHA-256.
+	s.setMongoVerifier(c, user.UID, req.Password)
 
 	// Log audit event
 	currentUser := getCurrentUser(c)
@@ -156,6 +171,11 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 	if err := s.store.UpdateUser(c.Request.Context(), uid, updates); err != nil {
 		writeInternalError(c, s.logger, err, "failed to update user")
 		return
+	}
+
+	// Refresh the MongoDB SCRAM verifier when the password changed.
+	if req.Password != nil {
+		s.setMongoVerifier(c, uid, *req.Password)
 	}
 
 	// Log audit event
