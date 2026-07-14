@@ -218,7 +218,10 @@ func TestValidateMongoCommand_Classification(t *testing.T) {
 
 	// always-blocked and unknown commands.
 	require.ErrorIs(t, ValidateMongoCommand("createUser", "app", mongoBody(t, bson.D{{Key: "createUser", Value: "x"}}), db, full), ErrMongoCommandBlocked)
-	require.ErrorIs(t, ValidateMongoCommand("listDatabases", "admin", mongoBody(t, bson.D{{Key: "listDatabases", Value: 1}}), db, full), ErrMongoDatabaseBlocked)
+	// listDatabases is allowed at validation time (the reply is filtered to the
+	// grant's database by the MongoDB proxy's result layer instead of denied).
+	require.NoError(t, ValidateMongoCommand("listDatabases", "admin", mongoBody(t, bson.D{{Key: "listDatabases", Value: 1}}), db, full))
+	require.NoError(t, ValidateMongoCommand("listDatabases", "", mongoBody(t, bson.D{{Key: "listDatabases", Value: 1}}), db, readOnly))
 	require.ErrorIs(t, ValidateMongoCommand("frobnicate", "app", mongoBody(t, bson.D{{Key: "frobnicate", Value: 1}}), db, full), ErrMongoUnknownCommand)
 }
 
