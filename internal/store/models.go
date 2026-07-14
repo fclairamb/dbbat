@@ -54,7 +54,29 @@ type User struct {
 // a single jsonb column so protocol-specific fields don't proliferate as table
 // columns. Absent protocols are omitted.
 type UserProtocolData struct {
-	Oracle *OracleUserData `json:"oracle,omitempty"`
+	Oracle  *OracleUserData `json:"oracle,omitempty"`
+	MongoDB *MongoUserData  `json:"mongodb,omitempty"`
+}
+
+// MongoUserData holds the per-user MongoDB SCRAM verifier material, letting a
+// client authenticate to the proxy with the driver-default SCRAM-SHA-256 (which
+// keeps the cleartext password off the wire) instead of being forced onto
+// authMechanism=PLAIN. Populated lazily whenever the user's password is set
+// after this feature shipped; absent otherwise (PLAIN stays the fallback).
+type MongoUserData struct {
+	SCRAMSHA256 *MongoSCRAMCredentials `json:"scram_sha256,omitempty"`
+}
+
+// MongoSCRAMCredentials are the SCRAM-SHA-256 stored credentials derived from
+// the user's password (RFC 5802 / RFC 7677). Salt and Iterations are public
+// challenge material; StoredKey and ServerKey are password-equivalent secrets
+// and are encrypted at rest with the dbbat master key (AAD-bound to the user
+// UID), mirroring the encrypted Oracle O5LOGON verifiers.
+type MongoSCRAMCredentials struct {
+	Salt       []byte `json:"salt,omitempty"`
+	Iterations int    `json:"iterations,omitempty"`
+	StoredKey  []byte `json:"stored_key,omitempty"`
+	ServerKey  []byte `json:"server_key,omitempty"`
 }
 
 // OracleUserData holds the per-USER O5LOGON salts. Every API key created for
@@ -75,6 +97,27 @@ func (u *User) OracleData() *OracleUserData {
 	}
 
 	return u.ProtocolData.Oracle
+}
+
+// MongoData returns the user's MongoDB protocol material, or nil if absent.
+func (u *User) MongoData() *MongoUserData {
+	if u.ProtocolData == nil {
+		return nil
+	}
+
+	return u.ProtocolData.MongoDB
+}
+
+// MongoSCRAMCredentials returns the user's stored MongoDB SCRAM-SHA-256
+// credentials, or nil when the user has no stored verifier (so the MongoDB
+// proxy falls back to PLAIN for them).
+func (u *User) MongoSCRAMCredentials() *MongoSCRAMCredentials {
+	data := u.MongoData()
+	if data == nil {
+		return nil
+	}
+
+	return data.SCRAMSHA256
 }
 
 // HasChangedPassword returns true if the user has changed their initial password
