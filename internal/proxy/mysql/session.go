@@ -240,18 +240,30 @@ func (s *Session) recordDisconnect() {
 		return
 	}
 
+	// Flush any client-side bytes not yet attributed to a query. Two sources:
+	//   - the last query's response bytes, written by the gomysql server AFTER
+	//     recordQuery ran, so never picked up by a per-query diff;
+	//   - a query cut off mid-Execute by the limit watchdog (which force-closes
+	//     the conns), whose request/partial bytes never reached recordQuery.
+	// Persisting them keeps the grant's recomputed BytesTransferred honest across
+	// reconnects. Bytes-only (IncrementConnectionBytes) so this teardown flush
+	// never inflates the query count.
+	total := s.cumulativeClientBytes()
+	if delta := total - s.lastBytesSnapshot; delta > 0 {
+		s.lastBytesSnapshot = total
+
+		if err := s.server.store.IncrementConnectionBytes(s.ctx, s.connection.UID, delta); err != nil {
+			s.logger.DebugContext(s.ctx, "MySQL trailing byte flush failed",
+				slog.Any("connection_id", s.connection.UID),
+				slog.Any("error", err))
+		}
+	}
+
 	if err := s.server.store.CloseConnection(s.ctx, s.connection.UID); err != nil {
 		s.logger.WarnContext(s.ctx, "MySQL connection close failed",
 			slog.Any("connection_id", s.connection.UID),
 			slog.Any("error", err))
 	}
-
-	// Note: the very last query's response bytes are written by the
-	// gomysql server after recordQuery has run, so they aren't picked up
-	// by the per-query diff. For typical sessions (many queries, modest
-	// per-query response) this is a small undercount. A trailing flush
-	// would need a bytes-only Increment helper since IncrementConnectionStats
-	// also bumps the query count — out of scope for this fix.
 }
 
 // startDumpIfConfigured opens a packet-dump file for this session and tees the
