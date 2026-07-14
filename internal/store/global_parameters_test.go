@@ -105,15 +105,18 @@ func TestGlobalParameters(t *testing.T) {
 	})
 }
 
+// TestPublicEndpoints is intentionally NOT run in parallel (neither this
+// func nor its subtests): public.* global parameters are a single
+// un-namespaced row-space shared by every caller of
+// GetPublicEndpoints/SetPublicEndpoints against the one shared test-container
+// DB. Running these subtests (or this test and TestResolveWebUIURL) in
+// parallel races writes/reads of the same public.web_ui_url row and produces
+// flaky failures. See also TestResolveWebUIURL below.
 func TestPublicEndpoints(t *testing.T) {
-	t.Parallel()
-
 	s := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
 
 	t.Run("GetPublicEndpoints returns empty struct when no rows exist", func(t *testing.T) {
-		t.Parallel()
-
 		// Use an isolated store to avoid interference from other tests.
 		pe, err := s.GetPublicEndpoints(ctx)
 		require.NoError(t, err)
@@ -123,9 +126,7 @@ func TestPublicEndpoints(t *testing.T) {
 	})
 
 	t.Run("SetPublicEndpoints and GetPublicEndpoints round-trip", func(t *testing.T) {
-		t.Parallel()
-
-		// Give each parallel run a unique store to avoid conflicts.
+		// Give each run a unique store to avoid conflicts.
 		s2 := setupTestStoreNoCleanup(t)
 
 		port5434 := 5434
@@ -137,6 +138,17 @@ func TestPublicEndpoints(t *testing.T) {
 			OraPort:  &port1522,
 			WebUIURL: "https://dbbat.example.com",
 		}
+
+		// public.* is a single un-namespaced row-space (no group-key
+		// isolation available), so reset every key this subtest wrote once
+		// it's done — otherwise it leaks into TestResolveWebUIURL (and any
+		// later subtest in this file) and makes assertions that expect an
+		// unset web_ui_url fail deterministically.
+		t.Cleanup(func() {
+			for _, key := range []string{KeyPublicHost, KeyPublicPGHost, KeyPublicPGPort, KeyPublicOraPort, KeyPublicWebUIURL} {
+				_ = s2.DeleteParameter(ctx, GroupPublic, key)
+			}
+		})
 
 		require.NoError(t, s2.SetPublicEndpoints(ctx, pe))
 
@@ -239,22 +251,28 @@ func TestResolvePublicEndpoints(t *testing.T) {
 	})
 }
 
+// TestResolveWebUIURL is intentionally NOT run in parallel (neither this
+// func nor its subtests): it exercises the same shared public.web_ui_url row
+// as TestPublicEndpoints above (see comment there). Each subtest here also
+// sets/reads that row, so running them concurrently would race with each
+// other too.
 func TestResolveWebUIURL(t *testing.T) {
-	t.Parallel()
-
 	t.Run("falls back to cfg.PublicURL when no parameter stored", func(t *testing.T) {
-		t.Parallel()
-
 		s := setupTestStoreNoCleanup(t)
 		got := s.ResolveWebUIURL(context.Background(), &config.Config{PublicURL: "https://env.example.com"})
 		assert.Equal(t, "https://env.example.com", got)
 	})
 
 	t.Run("stored parameter takes priority over cfg.PublicURL", func(t *testing.T) {
-		t.Parallel()
-
 		s := setupTestStoreNoCleanup(t)
 		ctx := context.Background()
+
+		// Reset public.web_ui_url once this subtest is done so it doesn't
+		// leak into the next subtest, which expects it unset.
+		t.Cleanup(func() {
+			_ = s.DeleteParameter(ctx, GroupPublic, KeyPublicWebUIURL)
+		})
+
 		require.NoError(t, s.SetPublicEndpoints(ctx, PublicEndpoints{WebUIURL: "https://stored.example.com"}))
 
 		got := s.ResolveWebUIURL(ctx, &config.Config{PublicURL: "https://env.example.com"})
@@ -262,8 +280,6 @@ func TestResolveWebUIURL(t *testing.T) {
 	})
 
 	t.Run("nil cfg does not panic and falls back to empty", func(t *testing.T) {
-		t.Parallel()
-
 		s := setupTestStoreNoCleanup(t)
 		got := s.ResolveWebUIURL(context.Background(), nil)
 		assert.Empty(t, got)
