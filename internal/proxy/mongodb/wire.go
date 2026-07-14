@@ -11,6 +11,8 @@
 package mongodb
 
 import (
+	"bytes"
+	"compress/zlib"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -23,9 +25,23 @@ import (
 const (
 	opCodeReply      int32 = 1    // legacy server reply to OP_QUERY
 	opCodeQuery      int32 = 2004 // legacy client request (first hello)
-	opCodeCompressed int32 = 2012 // never negotiated; rejected on receipt
+	opCodeCompressed int32 = 2012 // OP_COMPRESSED: zlib negotiated in hello
 	opCodeMsg        int32 = 2013 // everything, MongoDB >= 3.6
 )
+
+// Wire compressor IDs (OP_COMPRESSED). dbbat negotiates only zlib (stdlib); a
+// noop-compressed frame is also accepted. snappy (1) and zstd (3) are declined
+// during hello negotiation, so a client never sends them.
+const (
+	compressorNoop   uint8 = 0
+	compressorSnappy uint8 = 1
+	compressorZlib   uint8 = 2
+	compressorZstd   uint8 = 3
+)
+
+// opCompressedHeaderLen is the fixed prefix of an OP_COMPRESSED body:
+// originalOpcode(4) + uncompressedSize(4) + compressorId(1).
+const opCompressedHeaderLen = 9
 
 // headerLen is the fixed 16-byte message header size.
 const headerLen = 16
@@ -47,13 +63,14 @@ const opReplyAwaitCapable uint32 = 8
 
 // Wire-parsing errors.
 var (
-	ErrShortMessage     = errors.New("mongodb: message shorter than declared")
-	ErrMessageTooLarge  = errors.New("mongodb: message exceeds maximum size")
-	ErrCompressed       = errors.New("mongodb: OP_COMPRESSED not supported")
-	ErrUnknownOpCode    = errors.New("mongodb: unknown opcode")
-	ErrBadSection       = errors.New("mongodb: invalid OP_MSG section kind")
-	ErrNoCommandBody    = errors.New("mongodb: OP_MSG has no kind-0 command body")
-	ErrEmptyCommandBody = errors.New("mongodb: empty command document")
+	ErrShortMessage         = errors.New("mongodb: message shorter than declared")
+	ErrMessageTooLarge      = errors.New("mongodb: message exceeds maximum size")
+	ErrUnsupportedCompress  = errors.New("mongodb: unsupported OP_COMPRESSED compressor")
+	ErrCompressedSizeMismat = errors.New("mongodb: OP_COMPRESSED uncompressed size mismatch")
+	ErrUnknownOpCode        = errors.New("mongodb: unknown opcode")
+	ErrBadSection           = errors.New("mongodb: invalid OP_MSG section kind")
+	ErrNoCommandBody        = errors.New("mongodb: OP_MSG has no kind-0 command body")
+	ErrEmptyCommandBody     = errors.New("mongodb: empty command document")
 )
 
 // message is a raw wire-protocol message: the parsed 16-byte header plus the
@@ -99,6 +116,149 @@ func readMessage(r io.Reader) (*message, error) {
 		body:       raw[headerLen:],
 		raw:        raw,
 	}, nil
+}
+
+// decompressMessage unwraps an OP_COMPRESSED message (opcode 2012) into the
+// logical message it carries. The body layout is originalOpcode(int32) +
+// uncompressedSize(int32) + compressorId(uint8) + compressed bytes. The
+// returned message's raw is the reconstructed *uncompressed* frame, ready for
+// verbatim relay upstream (which never negotiates compression). The compressor
+// id actually used is returned so replies can mirror it.
+func decompressMessage(m *message) (*message, uint8, error) {
+	if len(m.body) < opCompressedHeaderLen {
+		return nil, 0, ErrShortMessage
+	}
+
+	originalOpcode := int32(binary.LittleEndian.Uint32(m.body[0:4]))
+	uncompressedSize := int(binary.LittleEndian.Uint32(m.body[4:8]))
+	compressorID := m.body[8]
+	compressed := m.body[opCompressedHeaderLen:]
+
+	if uncompressedSize < 0 || uncompressedSize > maxWireMessageSize {
+		return nil, 0, fmt.Errorf("%w: %d", ErrMessageTooLarge, uncompressedSize)
+	}
+
+	innerBody, err := decompress(compressorID, compressed, uncompressedSize)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if len(innerBody) != uncompressedSize {
+		return nil, 0, ErrCompressedSizeMismat
+	}
+
+	total := headerLen + len(innerBody)
+
+	raw := make([]byte, total)
+	writeHeader(raw, int32(total), m.requestID, m.responseTo, originalOpcode)
+	copy(raw[headerLen:], innerBody)
+
+	return &message{
+		length:     int32(total),
+		requestID:  m.requestID,
+		responseTo: m.responseTo,
+		opCode:     originalOpcode,
+		body:       raw[headerLen:],
+		raw:        raw,
+	}, compressorID, nil
+}
+
+// compressMessage wraps a full uncompressed frame (with its 16-byte header) in
+// an OP_COMPRESSED envelope using the given compressor, preserving requestID /
+// responseTo and recording the original opcode.
+func compressMessage(raw []byte, compressorID uint8) ([]byte, error) {
+	if len(raw) < headerLen {
+		return nil, ErrShortMessage
+	}
+
+	requestID := int32(binary.LittleEndian.Uint32(raw[4:8]))
+	responseTo := int32(binary.LittleEndian.Uint32(raw[8:12]))
+	originalOpcode := int32(binary.LittleEndian.Uint32(raw[12:16]))
+	innerBody := raw[headerLen:]
+
+	compressed, err := compress(compressorID, innerBody)
+	if err != nil {
+		return nil, err
+	}
+
+	total := headerLen + opCompressedHeaderLen + len(compressed)
+
+	buf := make([]byte, total)
+	writeHeader(buf, int32(total), requestID, responseTo, opCodeCompressed)
+	binary.LittleEndian.PutUint32(buf[16:20], uint32(originalOpcode))
+	binary.LittleEndian.PutUint32(buf[20:24], uint32(len(innerBody)))
+	buf[24] = compressorID
+	copy(buf[25:], compressed)
+
+	return buf, nil
+}
+
+// decompress inflates data per the compressor id. Only noop and zlib are
+// supported (the only compressors dbbat negotiates).
+func decompress(compressorID uint8, data []byte, uncompressedSize int) ([]byte, error) {
+	switch compressorID {
+	case compressorNoop:
+		out := make([]byte, len(data))
+		copy(out, data)
+
+		return out, nil
+	case compressorZlib:
+		zr, err := zlib.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return nil, fmt.Errorf("mongodb: zlib reader: %w", err)
+		}
+		defer func() { _ = zr.Close() }()
+
+		// Bound inflation to the declared size + 1 so a malicious frame can't
+		// expand unbounded; the caller rejects any length != uncompressedSize.
+		out, err := io.ReadAll(io.LimitReader(zr, int64(uncompressedSize)+1))
+		if err != nil {
+			return nil, fmt.Errorf("mongodb: zlib inflate: %w", err)
+		}
+
+		return out, nil
+	default:
+		return nil, fmt.Errorf("%w: id %d", ErrUnsupportedCompress, compressorID)
+	}
+}
+
+// compress deflates data per the compressor id (noop or zlib).
+func compress(compressorID uint8, data []byte) ([]byte, error) {
+	switch compressorID {
+	case compressorNoop:
+		out := make([]byte, len(data))
+		copy(out, data)
+
+		return out, nil
+	case compressorZlib:
+		var buf bytes.Buffer
+
+		zw := zlib.NewWriter(&buf)
+		if _, err := zw.Write(data); err != nil {
+			_ = zw.Close()
+
+			return nil, fmt.Errorf("mongodb: zlib deflate: %w", err)
+		}
+
+		if err := zw.Close(); err != nil {
+			return nil, fmt.Errorf("mongodb: zlib close: %w", err)
+		}
+
+		return buf.Bytes(), nil
+	default:
+		return nil, fmt.Errorf("%w: id %d", ErrUnsupportedCompress, compressorID)
+	}
+}
+
+// compressorIDForName maps a hello-advertised compressor name to its wire id,
+// returning (0,false) for names dbbat doesn't support.
+func compressorIDForName(name string) (uint8, bool) {
+	switch name {
+	case "zlib":
+		return compressorZlib, true
+	default:
+		return 0, false
+	}
 }
 
 // opMsgSection is one OP_MSG section: a single document (kind 0) or a named

@@ -27,15 +27,9 @@ type pendingQuery struct {
 // capture (phase 3).
 func (s *Session) pumpClientToUpstream() error {
 	for {
-		m, err := readMessage(s.reader)
+		m, err := s.readClientMessage()
 		if err != nil {
 			return err
-		}
-
-		if m.opCode == opCodeCompressed {
-			s.logger.WarnContext(s.ctx, "MongoDB OP_COMPRESSED received mid-session; closing")
-
-			return ErrCompressed
 		}
 
 		if m.opCode != opCodeMsg {

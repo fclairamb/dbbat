@@ -65,6 +65,14 @@ func (s *Session) helloDoc(name string, request bson.Raw) bson.D {
 		doc = append(doc, bson.E{Key: "saslSupportedMechs", Value: s.supportedMechsFor(mechs)})
 	}
 
+	// Wire compression (item 4): if the client offered a compressor we support
+	// (zlib), echo it so the client may compress subsequent messages. dbbat then
+	// mirrors — it compresses replies only after the client sends a compressed
+	// frame (see Session.compressReplies).
+	if clientOffersZlib(request) {
+		doc = append(doc, bson.E{Key: "compression", Value: bson.A{"zlib"}})
+	}
+
 	// loadBalanced=true (MongoDB 5.0+): the client asks the server to identify
 	// itself with a serviceId so it can pin cursors/transactions to this
 	// connection. This is the clean topology story for an L4 proxy — a driver in
@@ -105,6 +113,34 @@ func (s *Session) userHasMongoVerifier(username string) bool {
 	}
 
 	return user.MongoSCRAMCredentials() != nil
+}
+
+// clientOffersZlib reports whether a hello's compression array offers zlib, the
+// one compressor dbbat supports.
+func clientOffersZlib(request bson.Raw) bool {
+	if request == nil {
+		return false
+	}
+
+	arr, ok := request.Lookup("compression").ArrayOK()
+	if !ok {
+		return false
+	}
+
+	values, err := arr.Values()
+	if err != nil {
+		return false
+	}
+
+	for _, v := range values {
+		if name, ok := v.StringValueOK(); ok {
+			if _, supported := compressorIDForName(name); supported {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // okDoc is the minimal success reply {ok: 1.0}.

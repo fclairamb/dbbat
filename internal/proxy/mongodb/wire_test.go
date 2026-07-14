@@ -135,6 +135,66 @@ func TestParseOpQueryHello(t *testing.T) {
 	assert.True(t, lookupBool(q.query, "helloOk"))
 }
 
+// TestCompressDecompressRoundTrip verifies an OP_MSG frame survives a
+// compress → decompress round-trip for both supported compressors, restoring
+// the original opcode, ids and body (item 4).
+func TestCompressDecompressRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	for _, compressorID := range []uint8{compressorNoop, compressorZlib} {
+		original, err := buildOpMsgReply(11, 22, bson.D{{Key: "find", Value: "widgets"}, {Key: "$db", Value: "app"}})
+		require.NoError(t, err)
+
+		wrapped, err := compressMessage(original, compressorID)
+		require.NoError(t, err)
+
+		wm, err := readMessage(bytes.NewReader(wrapped))
+		require.NoError(t, err)
+		assert.Equal(t, opCodeCompressed, wm.opCode)
+
+		inner, gotID, err := decompressMessage(wm)
+		require.NoError(t, err)
+		assert.Equal(t, compressorID, gotID)
+		assert.Equal(t, opCodeMsg, inner.opCode)
+		assert.Equal(t, int32(11), inner.requestID)
+		assert.Equal(t, int32(22), inner.responseTo)
+		assert.Equal(t, original, inner.raw, "round-trip must restore the exact frame")
+
+		body, ok := parseOpMsgBody(t, inner)
+		require.True(t, ok)
+		assert.Equal(t, "find", commandName(body))
+	}
+}
+
+// TestDecompressRejectsUnsupportedCompressor verifies snappy/zstd frames are
+// rejected (dbbat never negotiates them).
+func TestDecompressRejectsUnsupportedCompressor(t *testing.T) {
+	t.Parallel()
+
+	original, err := buildOpMsgReply(1, 2, bson.D{{Key: "ping", Value: 1}})
+	require.NoError(t, err)
+
+	// Hand-craft an OP_COMPRESSED claiming compressor id 1 (snappy).
+	wrapped, err := compressMessage(original, compressorNoop)
+	require.NoError(t, err)
+	wrapped[24] = compressorSnappy
+
+	wm, err := readMessage(bytes.NewReader(wrapped))
+	require.NoError(t, err)
+
+	_, _, err = decompressMessage(wm)
+	require.ErrorIs(t, err, ErrUnsupportedCompress)
+}
+
+func parseOpMsgBody(t *testing.T, m *message) (bson.Raw, bool) {
+	t.Helper()
+
+	parsed, err := parseOpMsg(m.body)
+	require.NoError(t, err)
+
+	return parsed.commandBody()
+}
+
 func TestReadMessageRejectsShortLength(t *testing.T) {
 	t.Parallel()
 

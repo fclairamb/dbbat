@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -63,6 +64,13 @@ type Session struct {
 	scramConv       *scram.ServerConversation
 	scramUser       *store.User
 	scramUserDBHint string
+
+	// OP_COMPRESSED negotiation (item 4). clientCompressor is the compressor id
+	// the client last used; compressReplies mirrors the client — replies are
+	// compressed only once the client has itself sent a compressed frame, which
+	// guarantees it will decompress ours (and keeps the first hello reply plain).
+	clientCompressor uint8
+	compressReplies  bool
 
 	// upstream is the authenticated connection to the target MongoDB.
 	upstream *upstreamConn
@@ -192,15 +200,9 @@ func (s *Session) setupTransport() error {
 // session (returns nil) or the connection ends / errors.
 func (s *Session) preAuthLoop() error {
 	for {
-		m, err := readMessage(s.reader)
+		m, err := s.readClientMessage()
 		if err != nil {
 			return fmt.Errorf("pre-auth read: %w", err)
-		}
-
-		if m.opCode == opCodeCompressed {
-			s.logger.WarnContext(s.ctx, "MongoDB OP_COMPRESSED received; closing")
-
-			return ErrCompressed
 		}
 
 		done, err := s.dispatchPreAuth(m)
@@ -212,6 +214,31 @@ func (s *Session) preAuthLoop() error {
 			return nil
 		}
 	}
+}
+
+// readClientMessage reads one framed message from the client, transparently
+// inflating an OP_COMPRESSED envelope into the logical message it carries
+// (item 4). Receiving a compressed frame enables reply compression mirroring
+// the client's chosen compressor.
+func (s *Session) readClientMessage() (*message, error) {
+	m, err := readMessage(s.reader)
+	if err != nil {
+		return nil, err
+	}
+
+	if m.opCode != opCodeCompressed {
+		return m, nil
+	}
+
+	inner, compressorID, err := decompressMessage(m)
+	if err != nil {
+		return nil, err
+	}
+
+	s.clientCompressor = compressorID
+	s.compressReplies = true
+
+	return inner, nil
 }
 
 // dispatchPreAuth handles one pre-auth message. It returns done=true only when
@@ -332,11 +359,33 @@ func (s *Session) pumpUpstreamToClient() error {
 	}
 }
 
-// writeClient writes raw bytes to the client conn.
+// writeClient writes a framed message to the client, compressing it into an
+// OP_COMPRESSED envelope when the client has enabled compression (item 4).
 func (s *Session) writeClient(raw []byte) error {
-	_, err := s.clientConn.Write(raw)
+	out, err := s.maybeCompress(raw)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.clientConn.Write(out)
 
 	return err
+}
+
+// maybeCompress wraps an OP_MSG / OP_REPLY frame in OP_COMPRESSED when reply
+// compression is active with a real (non-noop) compressor; other frames and the
+// pre-negotiation phase pass through untouched.
+func (s *Session) maybeCompress(raw []byte) ([]byte, error) {
+	if !s.compressReplies || s.clientCompressor == compressorNoop || len(raw) < headerLen {
+		return raw, nil
+	}
+
+	opCode := int32(binary.LittleEndian.Uint32(raw[12:16]))
+	if opCode != opCodeMsg && opCode != opCodeReply {
+		return raw, nil
+	}
+
+	return compressMessage(raw, s.clientCompressor)
 }
 
 // nextReplyID returns the next requestID for a proxy-generated reply.
