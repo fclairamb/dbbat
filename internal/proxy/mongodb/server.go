@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.mongodb.org/mongo-driver/v2/bson"
+
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
@@ -34,6 +36,12 @@ type Server struct {
 
 	// connCounter feeds the synthetic connectionId advertised in hello.
 	connCounter atomic.Int32
+
+	// serviceID is a stable per-process identifier advertised in the hello
+	// reply when a client connects with loadBalanced=true (MongoDB 5.0+), so
+	// drivers pin cursors/transactions to this connection. Generated once at
+	// startup — designed exactly for an L4 proxy like dbbat.
+	serviceID bson.ObjectID
 
 	listener net.Listener
 	wg       sync.WaitGroup
@@ -66,6 +74,7 @@ func NewServer(
 		dumpConfig:    dumpConfig,
 		authCache:     authCache,
 		tlsConfig:     tlsConfig,
+		serviceID:     bson.NewObjectID(),
 		logger:        logger,
 		shutdown:      make(chan struct{}),
 		ctx:           ctx,

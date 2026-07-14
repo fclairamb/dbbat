@@ -58,15 +58,53 @@ func (s *Session) helloDoc(name string, request bson.Raw) bson.D {
 		bson.E{Key: "readOnly", Value: false},
 	)
 
-	// If the client asked which SASL mechanisms fit its user, advertise PLAIN
-	// only (contract §3) so it falls through to our PLAIN negotiation.
-	if lookupString(request, "saslSupportedMechs") != "" {
-		doc = append(doc, bson.E{Key: "saslSupportedMechs", Value: bson.A{"PLAIN"}})
+	// If the client asked which SASL mechanisms fit its user, advertise the
+	// mechanisms it can use (contract §3): SCRAM-SHA-256 when the named user has
+	// a stored verifier, otherwise PLAIN. PLAIN is always offered as a fallback.
+	if mechs := lookupString(request, "saslSupportedMechs"); mechs != "" {
+		doc = append(doc, bson.E{Key: "saslSupportedMechs", Value: s.supportedMechsFor(mechs)})
+	}
+
+	// loadBalanced=true (MongoDB 5.0+): the client asks the server to identify
+	// itself with a serviceId so it can pin cursors/transactions to this
+	// connection. This is the clean topology story for an L4 proxy — a driver in
+	// loadBalanced mode never tries to discover or dial the real host directly.
+	if lookupBool(request, "loadBalanced") {
+		doc = append(doc, bson.E{Key: "serviceId", Value: s.server.serviceID})
 	}
 
 	doc = append(doc, bson.E{Key: "ok", Value: 1.0})
 
 	return doc
+}
+
+// supportedMechsFor answers a hello's saslSupportedMechs probe. The probe value
+// is "<authSource>.<username>". SCRAM-SHA-256 is advertised first (drivers
+// prefer it) when that user has a stored MongoDB SCRAM verifier; PLAIN is
+// always offered as a fallback.
+func (s *Session) supportedMechsFor(probe string) bson.A {
+	username := ""
+	if idx := indexByte([]byte(probe), '.'); idx >= 0 {
+		username = probe[idx+1:]
+	}
+
+	if username != "" && s.userHasMongoVerifier(username) {
+		return bson.A{"SCRAM-SHA-256", "PLAIN"}
+	}
+
+	return bson.A{"PLAIN"}
+}
+
+// userHasMongoVerifier reports whether the named dbbat user has a stored
+// MongoDB SCRAM-SHA-256 verifier (set on a password change after the feature
+// shipped). Implemented in scram_server.go.
+func (s *Session) userHasMongoVerifier(username string) bool {
+	user, err := s.server.store.GetUserByUsername(s.ctx, username)
+	if err != nil {
+		return false
+	}
+
+	return user.MongoSCRAMCredentials() != nil
 }
 
 // okDoc is the minimal success reply {ok: 1.0}.
