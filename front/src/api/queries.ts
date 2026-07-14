@@ -748,6 +748,7 @@ export function useAuditEvents(filters?: {
 
 export function useAPIKeys(filters?: {
   user_id?: string;
+  all_users?: boolean;
   include_all?: boolean;
 }) {
   return useQuery({

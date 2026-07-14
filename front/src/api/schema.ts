@@ -654,8 +654,13 @@ export interface paths {
          * List API keys
          * @description Returns a list of API keys.
          *
-         *     - Non-admins can only see their own keys
-         *     - Admins can see all keys (optionally filter by user_id)
+         *     - Default for every caller, including admins: only the caller's own
+         *       keys.
+         *     - Admins can override the default with `all_users=true` (every user's
+         *       keys) or `user_id=<uuid>` (one specific user's keys). If both are
+         *       given, `user_id` wins.
+         *     - Non-admins can never see another user's keys: `all_users` and
+         *       `user_id` are ignored for them.
          */
         get: operations["listAPIKeys"];
         put?: never;
@@ -3034,8 +3039,10 @@ export interface operations {
     listAPIKeys: {
         parameters: {
             query?: {
-                /** @description Filter by user UID (admin only) */
+                /** @description Return only this user's keys (admin only). Overrides the own-keys-by-default behavior; wins over all_users if both are set. */
                 user_id?: string;
+                /** @description Return every user's keys instead of just the caller's own (admin only; ignored for non-admins). */
+                all_users?: boolean;
                 /** @description Include revoked and expired keys */
                 include_all?: boolean;
             };
