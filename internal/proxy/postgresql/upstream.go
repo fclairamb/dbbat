@@ -7,10 +7,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"strings"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/version"
 )
 
@@ -63,7 +63,7 @@ func (s *Session) sendStartupMessage(conn net.Conn) error {
 		Parameters: map[string]string{
 			"user":             s.database.Username,
 			"database":         s.database.DatabaseName,
-			"application_name": buildApplicationName(s.clientApplicationName),
+			"application_name": buildApplicationName(s.user.Username, s.clientApplicationName),
 		},
 	}
 
@@ -322,32 +322,12 @@ func computeMD5Password(password, username string, salt [4]byte) string {
 // maxAppNameLen is the maximum length for PostgreSQL application_name (NAMEDATALEN - 1).
 const maxAppNameLen = 63
 
-// buildApplicationName constructs the application_name for upstream connections.
-// Format: "dbbat-{version}" or "dbbat-{version} / {client_app_name}"
-func buildApplicationName(clientAppName string) string {
-	dbbatName := "dbbat-" + version.Version
-
-	clientAppName = strings.TrimSpace(clientAppName)
-	if clientAppName == "" {
-		return dbbatName
-	}
-
-	combined := dbbatName + " / " + clientAppName
-
-	// Truncate if exceeds PostgreSQL limit
-	if len(combined) > maxAppNameLen {
-		// Calculate how much space we have for client app name
-		// dbbatName + " / " = dbbatName length + 3
-		maxClientLen := maxAppNameLen - len(dbbatName) - 3
-		if maxClientLen > 0 {
-			clientAppName = clientAppName[:maxClientLen]
-			combined = dbbatName + " / " + clientAppName
-		} else {
-			combined = dbbatName
-		}
-	}
-
-	return combined
+// buildApplicationName constructs the application_name for upstream
+// connections: "dbbat/$version @$username", plus " for $appName" when the
+// client declared an application_name of its own. See
+// shared.BuildUpstreamName for the truncation rules.
+func buildApplicationName(username, clientAppName string) string {
+	return shared.BuildUpstreamName(version.Version, username, clientAppName, maxAppNameLen)
 }
 
 // setSessionReadOnly sets the upstream session to read-only mode.

@@ -12,38 +12,44 @@ func TestBuildApplicationName(t *testing.T) {
 
 	tests := []struct {
 		name          string
+		username      string
 		clientAppName string
 		want          string
 	}{
 		{
-			name:          "empty client app name",
-			clientAppName: "",
-			want:          "dbbat-" + version.Version,
+			name:     "empty client app name",
+			username: "florent",
+			want:     "dbbat/" + version.Version + " @florent",
 		},
 		{
 			name:          "whitespace only",
+			username:      "florent",
 			clientAppName: "   ",
-			want:          "dbbat-" + version.Version,
+			want:          "dbbat/" + version.Version + " @florent",
 		},
 		{
 			name:          "psql client",
+			username:      "florent",
 			clientAppName: "psql",
-			want:          "dbbat-" + version.Version + " / psql",
+			want:          "dbbat/" + version.Version + " @florent for psql",
 		},
 		{
 			name:          "custom app name",
+			username:      "florent",
 			clientAppName: "myapp",
-			want:          "dbbat-" + version.Version + " / myapp",
+			want:          "dbbat/" + version.Version + " @florent for myapp",
 		},
 		{
 			name:          "app name with spaces",
+			username:      "florent",
 			clientAppName: "My Application",
-			want:          "dbbat-" + version.Version + " / My Application",
+			want:          "dbbat/" + version.Version + " @florent for My Application",
 		},
 		{
 			name:          "app name with leading/trailing spaces",
+			username:      "florent",
 			clientAppName: "  trimmed  ",
-			want:          "dbbat-" + version.Version + " / trimmed",
+			want:          "dbbat/" + version.Version + " @florent for trimmed",
 		},
 	}
 
@@ -51,9 +57,9 @@ func TestBuildApplicationName(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := buildApplicationName(tt.clientAppName)
+			got := buildApplicationName(tt.username, tt.clientAppName)
 			if got != tt.want {
-				t.Errorf("buildApplicationName(%q) = %q, want %q", tt.clientAppName, got, tt.want)
+				t.Errorf("buildApplicationName(%q, %q) = %q, want %q", tt.username, tt.clientAppName, got, tt.want)
 			}
 		})
 	}
@@ -64,14 +70,14 @@ func TestBuildApplicationName_MaxLength(t *testing.T) {
 
 	// Test that result never exceeds maxAppNameLen (63 characters)
 	longAppName := strings.Repeat("x", 100)
-	result := buildApplicationName(longAppName)
+	result := buildApplicationName("florent", longAppName)
 
 	if len(result) > maxAppNameLen {
 		t.Errorf("buildApplicationName() returned %d chars, want <= %d", len(result), maxAppNameLen)
 	}
 
-	// Verify it still starts with dbbat prefix
-	expectedPrefix := "dbbat-" + version.Version
+	// Verify it still starts with the dbbat/version @username prefix
+	expectedPrefix := "dbbat/" + version.Version + " @florent"
 	if !strings.HasPrefix(result, expectedPrefix) {
 		t.Errorf("buildApplicationName() = %q, want prefix %q", result, expectedPrefix)
 	}
@@ -81,14 +87,14 @@ func TestBuildApplicationName_ExactlyMaxLength(t *testing.T) {
 	t.Parallel()
 
 	// Calculate how long the client app name can be to hit exactly 63 chars
-	dbbatName := "dbbat-" + version.Version
-	separator := " / "
-	maxClientLen := maxAppNameLen - len(dbbatName) - len(separator)
+	base := "dbbat/" + version.Version + " @florent"
+	separator := " for "
+	maxClientLen := maxAppNameLen - len(base) - len(separator)
 
 	clientAppName := strings.Repeat("a", maxClientLen)
-	result := buildApplicationName(clientAppName)
+	result := buildApplicationName("florent", clientAppName)
 
-	expected := dbbatName + separator + clientAppName
+	expected := base + separator + clientAppName
 	if result != expected {
 		t.Errorf("buildApplicationName(%q) = %q, want %q", clientAppName, result, expected)
 	}
