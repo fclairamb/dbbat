@@ -135,9 +135,9 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		oracleServiceName = &req.OracleServiceName
 	}
 
-	var mongoAuthSource *string
+	var protocolData *store.DatabaseProtocolData
 	if req.MongoAuthSource != "" {
-		mongoAuthSource = &req.MongoAuthSource
+		protocolData = &store.DatabaseProtocolData{MongoDB: &store.MongoDatabaseData{AuthSource: req.MongoAuthSource}}
 	}
 
 	listable := true
@@ -156,7 +156,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		SSLMode:           req.SSLMode,
 		Protocol:          req.Protocol,
 		OracleServiceName: oracleServiceName,
-		MongoAuthSource:   mongoAuthSource,
+		ProtocolData:      protocolData,
 		Listable:          listable,
 		CreatedBy:         &currentUser.UID,
 	}
@@ -478,8 +478,8 @@ func toDatabaseResponse(db *store.Database) DatabaseResponse {
 	}
 
 	var mongoAuthSource string
-	if db.MongoAuthSource != nil {
-		mongoAuthSource = *db.MongoAuthSource
+	if data := db.MongoData(); data != nil {
+		mongoAuthSource = data.AuthSource
 	}
 
 	return DatabaseResponse{

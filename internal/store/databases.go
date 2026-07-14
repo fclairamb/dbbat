@@ -33,7 +33,7 @@ func (s *Store) CreateDatabase(ctx context.Context, db *Database, encryptionKey 
 		SSLMode:           db.SSLMode,
 		Protocol:          db.Protocol,
 		OracleServiceName: db.OracleServiceName,
-		MongoAuthSource:   db.MongoAuthSource,
+		ProtocolData:      db.ProtocolData,
 		Listable:          db.Listable,
 		CreatedBy:         db.CreatedBy,
 		CreatedAt:         time.Now(),
@@ -286,7 +286,14 @@ func (s *Store) UpdateDatabase(ctx context.Context, uid uuid.UUID, updates Datab
 	}
 
 	if updates.MongoAuthSource != nil {
-		q = q.Set("mongo_auth_source = ?", *updates.MongoAuthSource)
+		// Merge into protocol_data.mongodb.auth_source rather than overwriting
+		// the whole jsonb column, so other protocol_data keys survive.
+		q = q.Set(
+			"protocol_data = coalesce(protocol_data, '{}'::jsonb) || "+
+				"jsonb_build_object('mongodb', coalesce(protocol_data->'mongodb', '{}'::jsonb) || "+
+				"jsonb_build_object('auth_source', ?::text))",
+			*updates.MongoAuthSource,
+		)
 	}
 
 	if updates.Listable != nil {
@@ -336,8 +343,8 @@ func (s *Store) DeleteDatabase(ctx context.Context, uid uuid.UUID) error {
 // configured for this database, defaulting to "admin" (the MongoDB convention
 // where service/root users are created) when unset.
 func (db *Database) MongoAuthSourceOrDefault() string {
-	if db.MongoAuthSource != nil && *db.MongoAuthSource != "" {
-		return *db.MongoAuthSource
+	if data := db.MongoData(); data != nil && data.AuthSource != "" {
+		return data.AuthSource
 	}
 
 	return "admin"

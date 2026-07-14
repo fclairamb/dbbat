@@ -45,8 +45,9 @@ Upstream, dbbat decrypts the stored credentials (AES-256-GCM, AAD-bound to the
 database UID) and authenticates with SCRAM-SHA-256 as a client, SASLprep-ing the
 password. The upstream `authSource` defaults to `admin` (where MongoDB
 service/root users are typically defined, e.g. `MONGO_INITDB_ROOT_USERNAME`) and
-is configurable per database via the `mongo_auth_source` column / API field for
-targets whose proxy user lives in a different auth database.
+is configurable per database via the `mongo_auth_source` API field (stored in
+the generic `databases.protocol_data` jsonb column) for targets whose proxy
+user lives in a different auth database.
 
 ### Target-database resolution
 

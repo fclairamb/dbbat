@@ -60,11 +60,11 @@ func TestMongoAuthSourceOrDefault(t *testing.T) {
 
 	assert.Equal(t, "admin", (&store.Database{}).MongoAuthSourceOrDefault())
 
-	custom := "services"
-	assert.Equal(t, "services", (&store.Database{MongoAuthSource: &custom}).MongoAuthSourceOrDefault())
+	withCustom := &store.Database{ProtocolData: &store.DatabaseProtocolData{MongoDB: &store.MongoDatabaseData{AuthSource: "services"}}}
+	assert.Equal(t, "services", withCustom.MongoAuthSourceOrDefault())
 
-	empty := ""
-	assert.Equal(t, "admin", (&store.Database{MongoAuthSource: &empty}).MongoAuthSourceOrDefault())
+	withEmpty := &store.Database{ProtocolData: &store.DatabaseProtocolData{MongoDB: &store.MongoDatabaseData{AuthSource: ""}}}
+	assert.Equal(t, "admin", withEmpty.MongoAuthSourceOrDefault())
 }
 
 func lookupServiceID(doc bson.D) (bson.ObjectID, bool) {

@@ -178,24 +178,50 @@ func IsMySQLFamily(protocol string) bool {
 type Database struct {
 	bun.BaseModel `bun:"table:databases,alias:d"`
 
-	UID               uuid.UUID  `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
-	Name              string     `bun:"name,notnull,unique" json:"name"`
-	Description       string     `bun:"description" json:"description"`
-	Host              string     `bun:"host,notnull" json:"host"`
-	Port              int        `bun:"port,notnull" json:"port"`
-	DatabaseName      string     `bun:"database_name,notnull" json:"database_name"`
-	Username          string     `bun:"username,notnull" json:"username"`
-	Password          string     `bun:"-" json:"-"`                          // Decrypted, not stored
-	PasswordEncrypted []byte     `bun:"password_encrypted,notnull" json:"-"` // Encrypted form
-	SSLMode           string     `bun:"ssl_mode,notnull,default:'prefer'" json:"ssl_mode"`
-	Protocol          string     `bun:"protocol,notnull,default:'postgresql'" json:"protocol"`
-	OracleServiceName *string    `bun:"oracle_service_name" json:"oracle_service_name,omitempty"`
-	MongoAuthSource   *string    `bun:"mongo_auth_source" json:"mongo_auth_source,omitempty"`
-	Listable          bool       `bun:"listable,notnull" json:"listable"`
-	CreatedBy         *uuid.UUID `bun:"created_by,type:uuid" json:"created_by"`
-	CreatedAt         time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
-	UpdatedAt         time.Time  `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
-	DeletedAt         *time.Time `bun:"deleted_at,soft_delete" json:"-"`
+	UID               uuid.UUID `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	Name              string    `bun:"name,notnull,unique" json:"name"`
+	Description       string    `bun:"description" json:"description"`
+	Host              string    `bun:"host,notnull" json:"host"`
+	Port              int       `bun:"port,notnull" json:"port"`
+	DatabaseName      string    `bun:"database_name,notnull" json:"database_name"`
+	Username          string    `bun:"username,notnull" json:"username"`
+	Password          string    `bun:"-" json:"-"`                          // Decrypted, not stored
+	PasswordEncrypted []byte    `bun:"password_encrypted,notnull" json:"-"` // Encrypted form
+	SSLMode           string    `bun:"ssl_mode,notnull,default:'prefer'" json:"ssl_mode"`
+	Protocol          string    `bun:"protocol,notnull,default:'postgresql'" json:"protocol"`
+	OracleServiceName *string   `bun:"oracle_service_name" json:"oracle_service_name,omitempty"`
+	// ProtocolData holds protocol-specific per-database settings (MongoDB
+	// upstream authSource, etc.) in a single generic jsonb column — mirroring
+	// User.ProtocolData — rather than a dedicated column per setting.
+	ProtocolData *DatabaseProtocolData `bun:"protocol_data,type:jsonb,nullzero" json:"-"`
+	Listable     bool                  `bun:"listable,notnull" json:"listable"`
+	CreatedBy    *uuid.UUID            `bun:"created_by,type:uuid" json:"created_by"`
+	CreatedAt    time.Time             `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	UpdatedAt    time.Time             `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
+	DeletedAt    *time.Time            `bun:"deleted_at,soft_delete" json:"-"`
+}
+
+// DatabaseProtocolData is per-protocol material attached to a database, stored
+// as a single jsonb column so protocol-specific settings don't proliferate as
+// table columns — mirrors UserProtocolData. Absent protocols are omitted.
+type DatabaseProtocolData struct {
+	MongoDB *MongoDatabaseData `json:"mongodb,omitempty"`
+}
+
+// MongoDatabaseData holds MongoDB-specific per-database settings.
+type MongoDatabaseData struct {
+	// AuthSource is the upstream SCRAM authSource; empty defers to
+	// MongoAuthSourceOrDefault's "admin" default.
+	AuthSource string `json:"auth_source,omitempty"`
+}
+
+// MongoData returns the database's MongoDB protocol material, or nil if absent.
+func (db *Database) MongoData() *MongoDatabaseData {
+	if db.ProtocolData == nil {
+		return nil
+	}
+
+	return db.ProtocolData.MongoDB
 }
 
 // DatabaseUpdate represents fields that can be updated
