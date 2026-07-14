@@ -154,6 +154,12 @@ func (s *Session) authenticateWithAPIKey(apiKey string) error {
 // time, so without this a session opened just before expiry could keep issuing
 // queries indefinitely.
 func (s *Session) checkQuotas() error {
+	// A grant revoked mid-session invalidates every subsequent command, even
+	// before the watchdog force-closes the connection.
+	if s.revocation.Revoked() {
+		return shared.ErrGrantRevoked
+	}
+
 	if !s.grant.ExpiresAt.IsZero() && !time.Now().Before(s.grant.ExpiresAt) {
 		return shared.ErrGrantExpired
 	}

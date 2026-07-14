@@ -98,6 +98,7 @@ type Session struct {
 	copyState              *copyState                  // Track COPY operation in progress
 	upstreamSCRAM          *scramClient                // SCRAM-SHA-256 state for upstream SASL auth
 	guard                  *shared.LimitGuard          // Mid-stream time/bandwidth limit enforcement
+	revocation             *cache.RevocationHandle     // Signalled when this session's grant is revoked mid-flight
 
 	// Wire-level byte counters for the client-facing socket. Reads count as
 	// bytes-from-client (queries the client sent), writes count as
@@ -226,11 +227,19 @@ func (s *Session) Run() error {
 
 // proxyMessages proxies messages between client and upstream.
 func (s *Session) proxyMessages() error {
+	// Register this live session against its grant so an admin revoke can
+	// signal it (block the next query + tear it down) instead of waiting for a
+	// reconnect. s.grant is always set here (authentication requires a grant);
+	// deregistered in cleanup.
+	s.revocation = s.store.Revocations().Register(s.grant.UID)
+
 	// Build the limit guard once the grant is known, then run a watchdog that
-	// tears the session down if a limit is crossed while a query is blocked
-	// producing no traffic (the inline check in proxyUpstreamToClient handles
-	// the actively-streaming case with a clean error frame).
-	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient)
+	// tears the session down if a limit is crossed (or the grant is revoked)
+	// while a query is blocked producing no traffic (the inline check in
+	// proxyUpstreamToClient handles the actively-streaming case with a clean
+	// error frame).
+	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
+		WithRevocation(s.revocation.Flag())
 
 	watchCtx, cancelWatch := context.WithCancel(s.ctx)
 	defer cancelWatch()
@@ -264,7 +273,7 @@ func (s *Session) proxyMessages() error {
 // blocked without producing traffic) can only be terminated this way — there is
 // no message boundary at which to inject a clean ErrorResponse.
 func (s *Session) onLimitViolation(err error) {
-	s.logger.WarnContext(s.ctx, "terminating session: grant limit reached mid-stream",
+	s.logger.WarnContext(s.ctx, "terminating session: grant no longer valid mid-stream",
 		slog.Any("error", err))
 
 	if s.upstreamConn != nil {
@@ -605,6 +614,10 @@ func (s *Session) abortStream(cause error) {
 
 // cleanup closes connections and updates records.
 func (s *Session) cleanup() {
+	if s.grant != nil && s.revocation != nil {
+		s.store.Revocations().Deregister(s.grant.UID, s.revocation)
+	}
+
 	if s.dumpWriter != nil {
 		if err := s.dumpWriter.Close(); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to close dump writer", slog.Any("error", err))
