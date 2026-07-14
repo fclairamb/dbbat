@@ -540,14 +540,27 @@ func (s *Session) proxyUpstreamToClient() error {
 		// crosses the grant's byte quota or the grant expires, abort with a
 		// clean ErrorResponse + ReadyForQuery instead of streaming the rest of a
 		// potentially huge result. Cheap (two atomic loads + a time compare).
-		if s.getCurrentPendingQuery() != nil {
-			if verr := s.guard.Check(); verr != nil {
-				s.abortStream(verr)
-
-				return verr
-			}
+		if verr := s.enforceStreamLimits(); verr != nil {
+			return verr
 		}
 	}
+}
+
+// enforceStreamLimits aborts the in-flight query when a time/bandwidth limit
+// has been crossed, sending the client a clean error frame first. It returns
+// the abort reason, or nil when no query is in flight or the grant is still
+// within bounds.
+func (s *Session) enforceStreamLimits() error {
+	if s.getCurrentPendingQuery() == nil {
+		return nil
+	}
+
+	verr := s.guard.Check()
+	if verr != nil {
+		s.abortStream(verr)
+	}
+
+	return verr
 }
 
 // abortStream cuts an in-flight query off at a message boundary, sending the

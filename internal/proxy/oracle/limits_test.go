@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
@@ -16,8 +16,8 @@ func TestCheckQuotas_Expiry(t *testing.T) {
 	t.Parallel()
 
 	expired := newTestSession(&store.Grant{ExpiresAt: time.Now().Add(-time.Minute)})
-	assert.ErrorIs(t, expired.checkQuotas(), shared.ErrGrantExpired)
+	require.ErrorIs(t, expired.checkQuotas(), shared.ErrGrantExpired)
 
 	live := newTestSession(&store.Grant{ExpiresAt: time.Now().Add(time.Hour)})
-	assert.NoError(t, live.checkQuotas())
+	require.NoError(t, live.checkQuotas())
 }

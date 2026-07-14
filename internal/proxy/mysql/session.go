@@ -135,7 +135,7 @@ func (s *Session) Run() error {
 	//
 	// The conn references are captured into locals so the watchdog goroutine
 	// never reads the mutable s.upstreamConn field (closeUpstream nils it),
-	// keeping the teardown race-free. Cancelled when the command loop exits so
+	// keeping the teardown race-free. Canceled when the command loop exits so
 	// no goroutine leaks. net.Conn.Close is safe to call concurrently with a
 	// blocked Read/Write and safe to call twice (the deferred closeUpstream
 	// closes the same conn).

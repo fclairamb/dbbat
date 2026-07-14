@@ -3,7 +3,6 @@ package postgresql
 import (
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"net"
 	"sync/atomic"
@@ -65,7 +64,7 @@ func TestSession_ProxyUpstreamToClient_ByteLimitAbort(t *testing.T) {
 			preparedStatements: make(map[string]*preparedStatement),
 			portals:            make(map[string]*portalState),
 		},
-		logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		logger: slog.New(slog.DiscardHandler),
 		ctx:    context.Background(),
 	}
 

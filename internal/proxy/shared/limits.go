@@ -105,7 +105,7 @@ func (g *LimitGuard) Check() error {
 	return nil
 }
 
-// Watch polls Check on a ticker until a limit is crossed or ctx is cancelled.
+// Watch polls Check on a ticker until a limit is crossed or ctx is canceled.
 // On the first violation it invokes onViolation with the offending error and
 // returns; onViolation is never called more than once. interval <= 0 falls back
 // to DefaultLimitPollInterval.
