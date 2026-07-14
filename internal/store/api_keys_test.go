@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -659,6 +660,131 @@ func TestCreateAPIKey_UserSharedSalts(t *testing.T) {
 		if want := crypto.DeriveO5LogonVerifier18453Key(kp.plain, userData.O5LogonUserSalt18453); !bytes.Equal(dec18453, want) {
 			t.Errorf("key %s verifier 18453 not derived from user salt", name)
 		}
+	}
+}
+
+// TestUpgradeAPIKeyO5LogonVerifiers verifies that a legacy per-key-salt key is
+// migrated in place to the user's shared salts (as the Oracle proxy does on a
+// successful login) without rotating the key: it flips to user_salt=true, its
+// salts become the user's shared salts, and its verifiers re-derive from the
+// plaintext + those salts. Also asserts the operation is idempotent and that
+// upgrading with no encryption key is a no-op.
+func TestUpgradeAPIKeyO5LogonVerifiers(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, err := store.CreateUser(ctx, "legacyupgrade", "hash", []string{RoleConnector})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	encKey := bytes.Repeat([]byte{0x42}, 32)
+
+	apiKey, plain, err := store.CreateAPIKey(ctx, user.UID, "Legacy Key", nil, encKey)
+	if err != nil {
+		t.Fatalf("CreateAPIKey() error = %v", err)
+	}
+
+	// Simulate a pre-user-salt (legacy) key: re-derive verifiers from fresh
+	// per-key random salts and persist, so user_salt=false with salts that
+	// differ from the user's shared salts.
+	if err := apiKey.computeO5LogonVerifier(plain, encKey); err != nil {
+		t.Fatalf("computeO5LogonVerifier() error = %v", err)
+	}
+	encoded, err := json.Marshal(apiKey.ProtocolData)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	if _, err := store.db.NewUpdate().
+		Model((*APIKey)(nil)).
+		Set("protocol_data = ?::jsonb", string(encoded)).
+		Where("id = ?", apiKey.ID).
+		Exec(ctx); err != nil {
+		t.Fatalf("downgrade update error = %v", err)
+	}
+
+	legacy, err := store.GetAPIKeyByID(ctx, apiKey.ID)
+	if err != nil {
+		t.Fatalf("GetAPIKeyByID() error = %v", err)
+	}
+	if legacy.OracleData() == nil || legacy.OracleData().UserSalt {
+		t.Fatal("precondition: key should be legacy (user_salt=false) before upgrade")
+	}
+
+	userSalts, err := store.EnsureUserOracleSalts(ctx, user.UID)
+	if err != nil {
+		t.Fatalf("EnsureUserOracleSalts() error = %v", err)
+	}
+	// Sanity: the legacy per-key salts must differ from the user's shared salts.
+	if bytes.Equal(legacy.OracleData().O5LogonSalt6949, userSalts.O5LogonUserSalt6949) {
+		t.Fatal("precondition: legacy key salt should differ from user salt")
+	}
+
+	// A no-op when no encryption key is available: key stays legacy.
+	if err := store.UpgradeAPIKeyO5LogonVerifiers(ctx, apiKey.ID, plain, nil); err != nil {
+		t.Fatalf("UpgradeAPIKeyO5LogonVerifiers(no enc key) error = %v", err)
+	}
+	stillLegacy, err := store.GetAPIKeyByID(ctx, apiKey.ID)
+	if err != nil {
+		t.Fatalf("GetAPIKeyByID() error = %v", err)
+	}
+	if stillLegacy.OracleData().UserSalt {
+		t.Error("UpgradeAPIKeyO5LogonVerifiers(no enc key) should be a no-op, but key was upgraded")
+	}
+
+	// Upgrade for real.
+	if err := store.UpgradeAPIKeyO5LogonVerifiers(ctx, apiKey.ID, plain, encKey); err != nil {
+		t.Fatalf("UpgradeAPIKeyO5LogonVerifiers() error = %v", err)
+	}
+
+	upgraded, err := store.GetAPIKeyByID(ctx, apiKey.ID)
+	if err != nil {
+		t.Fatalf("GetAPIKeyByID() after upgrade error = %v", err)
+	}
+	od := upgraded.OracleData()
+	if od == nil {
+		t.Fatal("upgraded key has no Oracle data")
+	}
+	if !od.UserSalt {
+		t.Error("upgraded key UserSalt = false, want true")
+	}
+	if !bytes.Equal(od.O5LogonSalt6949, userSalts.O5LogonUserSalt6949) {
+		t.Error("upgraded key salt 6949 differs from user salt")
+	}
+	if !bytes.Equal(od.O5LogonSalt18453, userSalts.O5LogonUserSalt18453) {
+		t.Error("upgraded key salt 18453 differs from user salt")
+	}
+
+	// The stored (encrypted) verifiers must re-derive from the plaintext key +
+	// the user's shared salts.
+	aad := crypto.APIKeyAAD(upgraded.KeyPrefix)
+	dec6949, err := crypto.Decrypt(od.O5LogonVerifier6949, encKey, aad)
+	if err != nil {
+		t.Fatalf("Decrypt(verifier 6949) error = %v", err)
+	}
+	if want := crypto.DeriveO5LogonVerifierKey(plain, userSalts.O5LogonUserSalt6949); !bytes.Equal(dec6949, want) {
+		t.Error("upgraded verifier 6949 not derived from user salt")
+	}
+	dec18453, err := crypto.Decrypt(od.O5LogonVerifier18453, encKey, aad)
+	if err != nil {
+		t.Fatalf("Decrypt(verifier 18453) error = %v", err)
+	}
+	if want := crypto.DeriveO5LogonVerifier18453Key(plain, userSalts.O5LogonUserSalt18453); !bytes.Equal(dec18453, want) {
+		t.Error("upgraded verifier 18453 not derived from user salt")
+	}
+
+	// Idempotent: a second upgrade on an already-user-salt key is a no-op and
+	// leaves the stored verifier bytes untouched (no needless re-encryption).
+	if err := store.UpgradeAPIKeyO5LogonVerifiers(ctx, apiKey.ID, plain, encKey); err != nil {
+		t.Fatalf("second UpgradeAPIKeyO5LogonVerifiers() error = %v", err)
+	}
+	again, err := store.GetAPIKeyByID(ctx, apiKey.ID)
+	if err != nil {
+		t.Fatalf("GetAPIKeyByID() after idempotent upgrade error = %v", err)
+	}
+	if !again.OracleData().UserSalt ||
+		!bytes.Equal(again.OracleData().O5LogonVerifier6949, od.O5LogonVerifier6949) {
+		t.Error("second upgrade changed an already-upgraded key")
 	}
 }
 
