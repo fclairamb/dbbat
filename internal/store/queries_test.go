@@ -213,6 +213,24 @@ func TestListQueries(t *testing.T) {
 			t.Errorf("ListQueries() len = %d, want 1", len(result))
 		}
 	})
+
+	t.Run("resolves user and database via the connection join", func(t *testing.T) {
+		result, err := store.ListQueries(ctx, QueryFilter{ConnectionID: &conn1.UID})
+		if err != nil {
+			t.Fatalf("ListQueries() error = %v", err)
+		}
+		if len(result) != 2 {
+			t.Fatalf("ListQueries() len = %d, want 2", len(result))
+		}
+		for _, q := range result {
+			if q.UserID == nil || *q.UserID != conn1.UserID {
+				t.Errorf("ListQueries() query %s UserID = %v, want %s", q.UID, q.UserID, conn1.UserID)
+			}
+			if q.DatabaseID == nil || *q.DatabaseID != conn1.DatabaseID {
+				t.Errorf("ListQueries() query %s DatabaseID = %v, want %s", q.UID, q.DatabaseID, conn1.DatabaseID)
+			}
+		}
+	})
 }
 
 func TestGetQueryWithRows(t *testing.T) {
