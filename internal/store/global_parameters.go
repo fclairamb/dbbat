@@ -111,17 +111,28 @@ const (
 	KeyPublicPGPort    = "pg.port"
 	KeyPublicOraPort   = "ora.port"
 	KeyPublicMySQLPort = "mysql.port"
+	// KeyPublicWebUIURL is the operator-editable Web UI / public base URL
+	// (e.g. "https://dbbat.company.com"), reached through an HTTP ingress /
+	// reverse proxy. Distinct from Host/PGHost/etc, which advertise the
+	// *connection* host reached via direct / TCP load-balancer access.
+	KeyPublicWebUIURL = "web_ui_url"
 )
 
 // PublicEndpoints holds the operator-configured public advertisement settings.
 type PublicEndpoints struct {
-	Host      string // default public hostname for all protocols
+	Host      string // default public hostname for all protocols (connection host)
 	PGHost    string // optional override; "" = fall back to Host
 	OraHost   string
 	MySQLHost string
 	PGPort    *int // optional override; nil = fall back to local listen port
 	OraPort   *int
 	MySQLPort *int
+	// WebUIURL is the operator-configured public base URL for the Web UI /
+	// REST API (e.g. "https://dbbat.company.com"), used for Slack deep-links
+	// and absolute-URL generation. Independent of Host: the UI is typically
+	// reached through an HTTP ingress while Host is reached via TCP
+	// load-balancer / direct access.
+	WebUIURL string
 }
 
 // GetPublicEndpoints reads all public.* parameters and returns the typed struct.
@@ -153,6 +164,8 @@ func (s *Store) GetPublicEndpoints(ctx context.Context) (PublicEndpoints, error)
 			if n, err := strconv.Atoi(p.Value); err == nil {
 				pe.MySQLPort = &n
 			}
+		case KeyPublicWebUIURL:
+			pe.WebUIURL = p.Value
 		}
 	}
 	return pe, nil
@@ -184,6 +197,9 @@ func (s *Store) SetPublicEndpoints(ctx context.Context, pe PublicEndpoints) erro
 	if pe.MySQLPort != nil {
 		pairs = append(pairs, kv{KeyPublicMySQLPort, strconv.Itoa(*pe.MySQLPort)})
 	}
+	if pe.WebUIURL != "" {
+		pairs = append(pairs, kv{KeyPublicWebUIURL, pe.WebUIURL})
+	}
 
 	for _, p := range pairs {
 		if err := s.SetParameter(ctx, GroupPublic, p.key, p.value); err != nil {
@@ -201,6 +217,9 @@ type ResolvedEndpoints struct {
 	PGPort    int // 0 = protocol disabled
 	OraPort   int
 	MySQLPort int
+	// WebUIURL is the effective Web UI / public base URL: pe.WebUIURL when
+	// set, else cfg.PublicURL (the DBB_PUBLIC_URL env var).
+	WebUIURL string
 }
 
 // ResolvePublicEndpoints applies fallback chains for host and port resolution.
@@ -230,6 +249,11 @@ func ResolvePublicEndpoints(pe PublicEndpoints, cfg *config.Config) ResolvedEndp
 		return port
 	}
 
+	webUIURL := pe.WebUIURL
+	if webUIURL == "" && cfg != nil {
+		webUIURL = cfg.PublicURL
+	}
+
 	return ResolvedEndpoints{
 		PGHost:    resolve(pe.PGHost, pe.Host),
 		OraHost:   resolve(pe.OraHost, pe.Host),
@@ -237,5 +261,28 @@ func ResolvePublicEndpoints(pe PublicEndpoints, cfg *config.Config) ResolvedEndp
 		PGPort:    resolvePort(pe.PGPort, cfg.ListenPG),
 		OraPort:   resolvePort(pe.OraPort, cfg.ListenOracle),
 		MySQLPort: resolvePort(pe.MySQLPort, cfg.ListenMySQL),
+		WebUIURL:  webUIURL,
 	}
+}
+
+// ResolveWebUIURL returns the effective Web UI / public base URL: the
+// operator-configured public.web_ui_url parameter when set, otherwise
+// cfg.PublicURL. Best-effort — a store error falls back to cfg.PublicURL (or
+// "" when cfg is nil too) rather than propagating, since callers use this
+// for best-effort user-facing text (Slack messages, deep-links) rather than
+// anything that should fail a request. Safe to call with a nil cfg.
+func (s *Store) ResolveWebUIURL(ctx context.Context, cfg *config.Config) string {
+	fallback := ""
+	if cfg != nil {
+		fallback = cfg.PublicURL
+	}
+
+	pe, err := s.GetPublicEndpoints(ctx)
+	if err != nil {
+		return fallback
+	}
+	if pe.WebUIURL != "" {
+		return pe.WebUIURL
+	}
+	return fallback
 }
