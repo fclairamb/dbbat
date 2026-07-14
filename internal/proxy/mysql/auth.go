@@ -209,9 +209,16 @@ func (h *dbbatAuthHandler) OnAuthSuccess(_ *gomysqlserver.Conn) error {
 		return err
 	}
 
+	// Register this live session against its grant so an admin revoke can
+	// signal it (block the next command + tear it down) instead of waiting for
+	// a reconnect. Deregistered by the deferred deregisterRevocation in Run.
+	s.revocation = s.server.store.Revocations().Register(grant.UID)
+
 	// Build the limit guard now that the grant is known. The command loop's
-	// watchdog (started in Run) uses it to terminate the session mid-query.
-	s.guard = shared.NewLimitGuard(grant, s.bytesFromClient, s.bytesToClient)
+	// watchdog (started in Run) uses it to terminate the session mid-query,
+	// including when the grant is revoked.
+	s.guard = shared.NewLimitGuard(grant, s.bytesFromClient, s.bytesToClient).
+		WithRevocation(s.revocation.Flag())
 
 	s.authComplete = true
 

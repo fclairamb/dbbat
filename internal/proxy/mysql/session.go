@@ -14,6 +14,7 @@ import (
 	gomysqlclient "github.com/go-mysql-org/go-mysql/client"
 	gomysqlserver "github.com/go-mysql-org/go-mysql/server"
 
+	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
@@ -62,6 +63,10 @@ type Session struct {
 	// enforcement runs entirely through the watchdog (onLimitViolation), which
 	// force-closes both conns.
 	guard *shared.LimitGuard
+
+	// revocation is signalled when this session's grant is revoked mid-flight,
+	// so the next command is rejected and the watchdog tears the session down.
+	revocation *cache.RevocationHandle
 }
 
 // cumulativeClientBytes returns the running total of bytes exchanged with
@@ -108,6 +113,11 @@ func (s *Session) Run() error {
 	}
 
 	s.serverConn = conn
+
+	// Auth succeeded, so the session is registered in the revocation registry
+	// (see OnAuth). Deregister on the way out regardless of how the session
+	// ends — deferred here, before any early return below, so no handle leaks.
+	defer s.deregisterRevocation()
 
 	if err := s.connectUpstream(); err != nil {
 		return err
@@ -167,7 +177,7 @@ func (s *Session) Run() error {
 // Read/Write and safe to call twice (the deferred closeUpstream closes the same
 // conn).
 func (s *Session) onLimitViolation(upstreamConn, clientConn io.Closer, err error) {
-	s.logger.WarnContext(s.ctx, "terminating MySQL session: grant limit reached mid-stream",
+	s.logger.WarnContext(s.ctx, "terminating MySQL session: grant no longer valid mid-stream",
 		slog.Any("error", err))
 
 	if upstreamConn != nil {
@@ -212,6 +222,16 @@ func (s *Session) recordConnection() error {
 	s.connection = conn
 
 	return nil
+}
+
+// deregisterRevocation drops this session's handle from the store's revocation
+// registry. Safe to call when the session never registered (grant nil).
+func (s *Session) deregisterRevocation() {
+	if s.grant == nil || s.revocation == nil {
+		return
+	}
+
+	s.server.store.Revocations().Deregister(s.grant.UID, s.revocation)
 }
 
 func (s *Session) recordDisconnect() {
