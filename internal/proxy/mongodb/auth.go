@@ -141,7 +141,7 @@ func (s *Session) failAuth(responseTo int32) error {
 // parsePlainPayload decodes an RFC 4616 SASL PLAIN payload
 // ([authzid] \0 authcid \0 password). Drivers send an empty authzid; we parse
 // defensively, taking the last two NUL-separated fields.
-func parsePlainPayload(body bson.Raw) (username, password string, ok bool) {
+func parsePlainPayload(body bson.Raw) (string, string, bool) {
 	_, data, hasBin := body.Lookup("payload").BinaryOK()
 	if !hasBin {
 		return "", "", false
@@ -152,8 +152,8 @@ func parsePlainPayload(body bson.Raw) (username, password string, ok bool) {
 		return "", "", false
 	}
 
-	username = string(fields[len(fields)-2])
-	password = string(fields[len(fields)-1])
+	username := string(fields[len(fields)-2])
+	password := string(fields[len(fields)-1])
 
 	if username == "" {
 		return "", "", false
@@ -164,7 +164,7 @@ func parsePlainPayload(body bson.Raw) (username, password string, ok bool) {
 
 // splitUserDBHint splits a "user#database" username into its parts. When there
 // is no '#', the hint is empty.
-func splitUserDBHint(raw string) (user, dbHint string) {
+func splitUserDBHint(raw string) (string, string) {
 	if idx := strings.LastIndex(raw, "#"); idx >= 0 {
 		return raw[:idx], raw[idx+1:]
 	}

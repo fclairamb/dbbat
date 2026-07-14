@@ -18,12 +18,20 @@ const (
 	codeNameUnauthorized         = "Unauthorized"
 )
 
+// authFailedMsg is the exact errmsg text a driver / mongosh expects on an
+// authentication failure (contract §5/§7). Kept separate from the sentinel
+// error so the sentinel stays lint-compliant (lowercase, no trailing period).
+const authFailedMsg = "Authentication failed."
+
 // Sentinel errors for the MongoDB proxy session lifecycle. The user-facing
 // text is what a mongosh / driver surfaces in the errmsg field (contract §7).
 var (
 	// ErrAuthenticationFailed — SASL PLAIN verification failed (bad password,
 	// unknown user, or API-key mismatch).
-	ErrAuthenticationFailed = errors.New("Authentication failed.")
+	ErrAuthenticationFailed = errors.New("authentication failed")
+	// ErrUpstreamRejected — the upstream MongoDB rejected our hello or SASL
+	// exchange (ok != 1).
+	ErrUpstreamRejected = errors.New("dbbat: upstream MongoDB rejected the exchange")
 	// ErrDatabaseNotResolvable — the target dbbat database could not be
 	// resolved from authSource / user#db / a single active grant.
 	ErrDatabaseNotResolvable = errors.New("dbbat: could not resolve target database; " +
@@ -58,7 +66,7 @@ func errorDoc(code int32, codeName, errmsg string) bson.D {
 
 // authFailedDoc is the standard authentication-failure reply (contract §5/§7).
 func authFailedDoc() bson.D {
-	return errorDoc(codeAuthenticationFailed, codeNameAuthenticationFailed, ErrAuthenticationFailed.Error())
+	return errorDoc(codeAuthenticationFailed, codeNameAuthenticationFailed, authFailedMsg)
 }
 
 // unauthorizedDoc builds an Unauthorized (13) reply with a dbbat reason.

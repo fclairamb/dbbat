@@ -120,7 +120,7 @@ func (s *Session) dialUpstream(addr string) (net.Conn, error) {
 	switch s.database.SSLMode {
 	case "require":
 		tlsConn := tls.Client(conn, &tls.Config{
-			InsecureSkipVerify: true, //nolint:gosec // "require" = encrypt without cert verification
+			InsecureSkipVerify: true, // "require" = encrypt without cert verification
 			MinVersion:         tls.VersionTLS12,
 		})
 		if err := tlsConn.Handshake(); err != nil {
@@ -172,7 +172,7 @@ func (s *Session) upstreamHandshake(up *upstreamConn) error {
 	}
 
 	if !replyOK(body) {
-		return fmt.Errorf("upstream hello rejected: %s", lookupString(body, "errmsg"))
+		return fmt.Errorf("%w: hello: %s", ErrUpstreamRejected, lookupString(body, "errmsg"))
 	}
 
 	return nil
@@ -264,14 +264,14 @@ func (s *Session) scramAuthDB() string {
 
 // parseSaslReply extracts (conversationId, payload, done) from a SASL reply,
 // returning an error when the server rejected the exchange (ok != 1).
-func parseSaslReply(body bson.Raw) (convID int32, payload []byte, done bool, err error) {
+func parseSaslReply(body bson.Raw) (int32, []byte, bool, error) {
 	if !replyOK(body) {
-		return 0, nil, false, fmt.Errorf("upstream SASL rejected: %s", lookupString(body, "errmsg"))
+		return 0, nil, false, fmt.Errorf("%w: SASL: %s", ErrUpstreamRejected, lookupString(body, "errmsg"))
 	}
 
-	convID, _ = body.Lookup("conversationId").Int32OK()
-	_, payload, _ = body.Lookup("payload").BinaryOK()
-	done = lookupBool(body, "done")
+	convID, _ := body.Lookup("conversationId").Int32OK()
+	_, payload, _ := body.Lookup("payload").BinaryOK()
+	done := lookupBool(body, "done")
 
 	return convID, payload, done, nil
 }

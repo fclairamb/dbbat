@@ -11,6 +11,8 @@ import (
 )
 
 func TestOpMsgReplyRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	doc := bson.D{{Key: "ok", Value: 1.0}, {Key: "hello", Value: "world"}}
 
 	raw, err := buildOpMsgReply(7, 42, doc)
@@ -32,6 +34,8 @@ func TestOpMsgReplyRoundTrip(t *testing.T) {
 }
 
 func TestOpReplyRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	doc := bson.D{{Key: "ismaster", Value: true}, {Key: "ok", Value: 1.0}}
 
 	raw, err := buildOpReply(3, 99, doc)
@@ -46,6 +50,8 @@ func TestOpReplyRoundTrip(t *testing.T) {
 // TestParseOpMsgWithChecksum verifies a trailing CRC-32C checksum is tolerated
 // (stripped) on parse (contract §1).
 func TestParseOpMsgWithChecksum(t *testing.T) {
+	t.Parallel()
+
 	docBytes, err := bson.Marshal(bson.D{{Key: "ping", Value: 1}})
 	require.NoError(t, err)
 
@@ -69,6 +75,8 @@ func TestParseOpMsgWithChecksum(t *testing.T) {
 // TestParseOpMsgKind1Sequence verifies a kind-1 document sequence (e.g.
 // insert's "documents") parses alongside the kind-0 body.
 func TestParseOpMsgKind1Sequence(t *testing.T) {
+	t.Parallel()
+
 	cmdBytes, err := bson.Marshal(bson.D{{Key: "insert", Value: "coll"}, {Key: "$db", Value: "app"}})
 	require.NoError(t, err)
 
@@ -108,6 +116,8 @@ func TestParseOpMsgKind1Sequence(t *testing.T) {
 }
 
 func TestParseOpQueryHello(t *testing.T) {
+	t.Parallel()
+
 	queryBytes, err := bson.Marshal(bson.D{{Key: "isMaster", Value: 1}, {Key: "helloOk", Value: true}})
 	require.NoError(t, err)
 
@@ -126,6 +136,8 @@ func TestParseOpQueryHello(t *testing.T) {
 }
 
 func TestReadMessageRejectsShortLength(t *testing.T) {
+	t.Parallel()
+
 	var buf [16]byte
 	binary.LittleEndian.PutUint32(buf[0:4], 4) // length < headerLen
 
