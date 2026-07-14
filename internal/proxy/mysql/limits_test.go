@@ -42,7 +42,7 @@ func TestRunIntercepted_Revoked(t *testing.T) {
 	_, err := hnd.runIntercepted("SELECT 1", nil, func() (*gomysql.Result, error) {
 		execRan = true
 
-		return nil, nil
+		return &gomysql.Result{}, nil
 	})
 
 	if !errors.Is(err, shared.ErrGrantRevoked) {

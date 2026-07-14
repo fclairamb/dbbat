@@ -107,7 +107,7 @@ func (r *RevocationRegistry) Deregister(grantUID uuid.UUID, h *RevocationHandle)
 }
 
 // Revoke flips the revoked flag on every live session bound to grantUID and
-// returns the number of sessions signalled. Safe to call for a grant with no
+// returns the number of sessions signaled. Safe to call for a grant with no
 // live sessions (returns 0). It does not deregister the handles — the sessions
 // tear themselves down and Deregister on the way out.
 func (r *RevocationRegistry) Revoke(grantUID uuid.UUID) int {

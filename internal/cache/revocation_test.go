@@ -22,7 +22,7 @@ func TestRevocationRegistry_RevokeSignalsRegisteredSessions(t *testing.T) {
 
 	n := r.Revoke(grant)
 	if n != 2 {
-		t.Fatalf("Revoke signalled %d sessions, want 2", n)
+		t.Fatalf("Revoke signaled %d sessions, want 2", n)
 	}
 
 	if !h1.Revoked() || !h2.Revoked() {
@@ -53,7 +53,7 @@ func TestRevocationRegistry_RevokeOnlyAffectsMatchingGrant(t *testing.T) {
 	}
 }
 
-func TestRevocationRegistry_DeregisteredSessionNotSignalled(t *testing.T) {
+func TestRevocationRegistry_DeregisteredSessionNotSignaled(t *testing.T) {
 	t.Parallel()
 
 	r := NewRevocationRegistry()
@@ -63,7 +63,7 @@ func TestRevocationRegistry_DeregisteredSessionNotSignalled(t *testing.T) {
 	r.Deregister(grant, h)
 
 	if got := r.Revoke(grant); got != 0 {
-		t.Fatalf("Revoke after Deregister signalled %d, want 0", got)
+		t.Fatalf("Revoke after Deregister signaled %d, want 0", got)
 	}
 
 	if h.Revoked() {
@@ -103,13 +103,13 @@ func TestRevocationRegistry_NilSafety(t *testing.T) {
 	}
 
 	// uuid.Nil grant is ignored by a real registry.
-	real := NewRevocationRegistry()
-	hn := real.Register(uuid.Nil)
+	realReg := NewRevocationRegistry()
+	hn := realReg.Register(uuid.Nil)
 	if hn == nil {
 		t.Fatal("Register(uuid.Nil) returned nil handle")
 	}
 
-	if got := real.Revoke(uuid.Nil); got != 0 {
+	if got := realReg.Revoke(uuid.Nil); got != 0 {
 		t.Fatalf("Revoke(uuid.Nil) = %d, want 0", got)
 	}
 }

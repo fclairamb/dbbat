@@ -143,7 +143,7 @@ type session struct {
 	// guard enforces the grant's time-window and bandwidth limits mid-stream.
 	guard *shared.LimitGuard
 
-	// revocation is signalled when this session's grant is revoked mid-flight,
+	// revocation is signaled when this session's grant is revoked mid-flight,
 	// so the next command is rejected and the watchdog tears the session down.
 	revocation *cache.RevocationHandle
 }

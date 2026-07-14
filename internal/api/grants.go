@@ -169,10 +169,10 @@ func (s *Server) handleRevokeGrant(c *gin.Context) {
 	// Signal any live proxy sessions authenticated under this grant so they
 	// stop accepting queries and disconnect, rather than staying usable until
 	// their next reconnect. Purely in-process; a no-op when nothing is live.
-	if signalled := s.store.Revocations().Revoke(uid); signalled > 0 {
-		s.logger.InfoContext(c.Request.Context(), "grant revoked: signalled live sessions",
+	if signaled := s.store.Revocations().Revoke(uid); signaled > 0 {
+		s.logger.InfoContext(c.Request.Context(), "grant revoked: signaled live sessions",
 			slog.String("grant_uid", uid.String()),
-			slog.Int("sessions", signalled))
+			slog.Int("sessions", signaled))
 	}
 
 	// Log audit event

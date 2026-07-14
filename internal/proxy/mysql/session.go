@@ -64,7 +64,7 @@ type Session struct {
 	// force-closes both conns.
 	guard *shared.LimitGuard
 
-	// revocation is signalled when this session's grant is revoked mid-flight,
+	// revocation is signaled when this session's grant is revoked mid-flight,
 	// so the next command is rejected and the watchdog tears the session down.
 	revocation *cache.RevocationHandle
 }
@@ -107,17 +107,18 @@ func (s *Session) Run() error {
 	authHandler := &dbbatAuthHandler{session: s}
 	commandHandler := &handler{session: s}
 
+	// Deregister the revocation handle on the way out no matter how the session
+	// ends. Deferred before the handshake so that even if NewCustomizedConn
+	// fails *after* OnAuth registered a handle, it is still dropped. It is a
+	// no-op until OnAuth actually registers (guarded on s.revocation != nil).
+	defer s.deregisterRevocation()
+
 	conn, err := s.server.gomysqlServer.NewCustomizedConn(s.clientConn, authHandler, commandHandler)
 	if err != nil {
 		return fmt.Errorf("MySQL handshake: %w", err)
 	}
 
 	s.serverConn = conn
-
-	// Auth succeeded, so the session is registered in the revocation registry
-	// (see OnAuth). Deregister on the way out regardless of how the session
-	// ends — deferred here, before any early return below, so no handle leaks.
-	defer s.deregisterRevocation()
 
 	if err := s.connectUpstream(); err != nil {
 		return err

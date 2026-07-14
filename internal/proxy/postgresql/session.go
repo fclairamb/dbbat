@@ -98,7 +98,7 @@ type Session struct {
 	copyState              *copyState                  // Track COPY operation in progress
 	upstreamSCRAM          *scramClient                // SCRAM-SHA-256 state for upstream SASL auth
 	guard                  *shared.LimitGuard          // Mid-stream time/bandwidth limit enforcement
-	revocation             *cache.RevocationHandle     // Signalled when this session's grant is revoked mid-flight
+	revocation             *cache.RevocationHandle     // Signaled when this session's grant is revoked mid-flight
 
 	// Wire-level byte counters for the client-facing socket. Reads count as
 	// bytes-from-client (queries the client sent), writes count as
