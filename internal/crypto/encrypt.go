@@ -100,3 +100,10 @@ func DatabaseAAD(databaseUID string) []byte {
 func APIKeyAAD(keyPrefix string) []byte {
 	return []byte(fmt.Sprintf("apikey:%s", keyPrefix))
 }
+
+// UserAAD returns the AAD for encrypting per-user protocol verifier material
+// (e.g. MongoDB SCRAM stored/server keys). This binds the ciphertext to a
+// specific user UID, preventing verifier transplant attacks between users.
+func UserAAD(userUID string) []byte {
+	return []byte(fmt.Sprintf("user:%s", userUID))
+}
