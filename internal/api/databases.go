@@ -87,7 +87,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 
 	if !isSupportedProtocol(req.Protocol) {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
-			"protocol must be one of: postgresql, oracle, mysql")
+			"protocol must be one of: postgresql, oracle, mysql, mariadb, mongodb")
 		return
 	}
 
@@ -497,7 +497,7 @@ func toDatabaseLimitedResponse(db *store.Database) DatabaseLimitedResponse {
 // of truth for the enum.
 func isSupportedProtocol(protocol string) bool {
 	switch protocol {
-	case store.ProtocolPostgreSQL, store.ProtocolOracle, store.ProtocolMySQL, store.ProtocolMariaDB:
+	case store.ProtocolPostgreSQL, store.ProtocolOracle, store.ProtocolMySQL, store.ProtocolMariaDB, store.ProtocolMongoDB:
 		return true
 	default:
 		return false
@@ -515,6 +515,11 @@ func defaultPortFor(protocol string) int {
 		return 1521
 	case store.ProtocolMySQL, store.ProtocolMariaDB:
 		return 3306
+	case store.ProtocolMongoDB:
+		// MongoDB's standard target port. The proxy listener defaults to 27018
+		// to avoid clashing with a local mongod, but Database.Port is the
+		// upstream target's port, which conventionally is 27017.
+		return 27017
 	default:
 		return 0
 	}
