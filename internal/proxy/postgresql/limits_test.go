@@ -227,6 +227,22 @@ func TestSession_ProxyUpstreamToClient_ByteLimitAbort(t *testing.T) {
 		t.Fatalf("proxyUpstreamToClient() = %v, want ErrByteQuotaExceeded", relayErr)
 	}
 
+	// The aborted query's streamed-so-far bytes must be attributed to the grant,
+	// not silently dropped. With no store wired, logQuery skips the async write
+	// but still updates the in-session grant counters — the same value that gets
+	// persisted (and recomputed on reconnect) in a real session.
+	if grant.BytesTransferred < maxBytes {
+		t.Fatalf("grant.BytesTransferred = %d, want >= %d (aborted query's bytes must be attributed)", grant.BytesTransferred, maxBytes)
+	}
+
+	if grant.BytesTransferred != s.lastBytesSnapshot {
+		t.Fatalf("grant.BytesTransferred = %d, want == lastBytesSnapshot %d", grant.BytesTransferred, s.lastBytesSnapshot)
+	}
+
+	if grant.QueryCount != 1 {
+		t.Fatalf("grant.QueryCount = %d, want 1 (aborted query is logged once)", grant.QueryCount)
+	}
+
 	select {
 	case res := <-resCh:
 		if res.errResp == nil {

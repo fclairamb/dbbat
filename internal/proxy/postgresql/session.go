@@ -610,6 +610,45 @@ func (s *Session) abortStream(cause error) {
 	if _, err := s.clientConn.Write(readyBuf); err != nil {
 		s.logger.ErrorContext(s.ctx, "failed to write ready to client", slog.Any("error", err))
 	}
+
+	// Attribute the in-flight query's streamed bytes to the grant before the
+	// session tears down. Without this, the bytes an aborted query already
+	// streamed are live in the CountingConn atomics but never persisted, so a
+	// reconnect recomputes BytesTransferred without them and the cumulative cap
+	// can be bypassed across short-lived connections.
+	s.persistAbortedQuery(cause)
+}
+
+// persistAbortedQuery logs the query cut off by abortStream as a failed query
+// and attributes its streamed-so-far bytes to the connection/grant. Called at
+// the end of abortStream, once the error frame has been written (so the frame's
+// bytes are included in the attribution).
+func (s *Session) persistAbortedQuery(cause error) {
+	query := s.getCurrentPendingQuery()
+	if query == nil {
+		return
+	}
+
+	// Wire-level diff since the previous query end: the aborted query's text
+	// plus every response byte streamed before the abort.
+	total := s.bytesFromClient.Load() + s.bytesToClient.Load()
+	bytesTransferred := total - s.lastBytesSnapshot
+	if bytesTransferred <= 0 {
+		return
+	}
+
+	s.lastBytesSnapshot = total
+
+	// Extended Query Protocol leaves the in-flight query in the pending queue
+	// (currentQuery is nil until CommandComplete/ErrorResponse pops it); logQuery
+	// persists s.currentQuery, so promote it. The session is tearing down, so
+	// mutating currentQuery here is safe.
+	if s.currentQuery == nil {
+		s.currentQuery = query
+	}
+
+	errMsg := "aborted: " + cause.Error()
+	s.logQuery(nil, &errMsg, bytesTransferred)
 }
 
 // cleanup closes connections and updates records.

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
@@ -289,31 +290,36 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 		capturedRows = s.currentQuery.capturedRows
 	}
 
-	// Log asynchronously to not block proxy
-	go func() {
-		createdQuery, err := s.store.CreateQuery(s.ctx, query)
-		if err != nil {
-			s.logger.ErrorContext(s.ctx, "failed to log query", slog.Any("error", err))
-			return
-		}
-
-		// Store captured result rows
-		if len(capturedRows) > 0 {
-			// Assign row numbers
-			for i := range capturedRows {
-				capturedRows[i].RowNumber = i + 1
+	// Log asynchronously to not block proxy. Guarded on a real connection
+	// record: the mid-stream abort path (persistAbortedQuery) reuses logQuery for
+	// its in-memory grant accounting even in unit contexts without a store, so
+	// skip the persistence when there is nothing to write against.
+	if s.store != nil && s.connectionUID != uuid.Nil {
+		go func() {
+			createdQuery, err := s.store.CreateQuery(s.ctx, query)
+			if err != nil {
+				s.logger.ErrorContext(s.ctx, "failed to log query", slog.Any("error", err))
+				return
 			}
 
-			if err := s.store.StoreQueryRows(s.ctx, createdQuery.UID, capturedRows); err != nil {
-				s.logger.ErrorContext(s.ctx, "failed to store query rows", slog.Any("error", err))
-			}
-		}
+			// Store captured result rows
+			if len(capturedRows) > 0 {
+				// Assign row numbers
+				for i := range capturedRows {
+					capturedRows[i].RowNumber = i + 1
+				}
 
-		// Update connection stats
-		if err := s.store.IncrementConnectionStats(s.ctx, s.connectionUID, bytesTransferred); err != nil {
-			s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
-		}
-	}()
+				if err := s.store.StoreQueryRows(s.ctx, createdQuery.UID, capturedRows); err != nil {
+					s.logger.ErrorContext(s.ctx, "failed to store query rows", slog.Any("error", err))
+				}
+			}
+
+			// Update connection stats
+			if err := s.store.IncrementConnectionStats(s.ctx, s.connectionUID, bytesTransferred); err != nil {
+				s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
+			}
+		}()
+	}
 
 	// Update local grant state for in-session quota checks
 	s.grant.QueryCount++
