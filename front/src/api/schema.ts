@@ -1545,6 +1545,16 @@ export interface components {
              * @description Connection UID
              */
             connection_id: string;
+            /**
+             * Format: uuid
+             * @description UID of the user who ran the query, resolved from the connection. Only populated when listing queries.
+             */
+            user_id?: string | null;
+            /**
+             * Format: uuid
+             * @description UID of the target database, resolved from the connection. Only populated when listing queries.
+             */
+            database_id?: string | null;
             /** @description SQL query text */
             sql_text: string;
             parameters?: components["schemas"]["QueryParameters"];
