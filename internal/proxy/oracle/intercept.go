@@ -552,10 +552,17 @@ func decodeCursorIDFromOCLOSE(ttcPayload []byte) (uint16, error) {
 	return binary.BigEndian.Uint16(ttcPayload[1:3]), nil
 }
 
-// checkQuotas checks whether quota limits have been reached.
+// checkQuotas checks whether quota limits have been reached. It also enforces
+// the grant's expiry between commands: expiry is otherwise only validated at
+// connect time, so without this a session opened just before expiry could keep
+// issuing queries indefinitely.
 func (s *session) checkQuotas() error {
 	if s.grant == nil {
 		return nil
+	}
+
+	if !s.grant.ExpiresAt.IsZero() && !time.Now().Before(s.grant.ExpiresAt) {
+		return shared.ErrGrantExpired
 	}
 
 	if s.grant.MaxQueryCounts != nil && s.grant.QueryCount >= *s.grant.MaxQueryCounts {

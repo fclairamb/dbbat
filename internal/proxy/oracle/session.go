@@ -139,6 +139,9 @@ type session struct {
 	// bytes to the just-finished query (the first query absorbs the
 	// auth/handshake traffic, which is the right place for it).
 	lastBytesSnapshot int64
+
+	// guard enforces the grant's time-window and bandwidth limits mid-stream.
+	guard *shared.LimitGuard
 }
 
 // cumulativeClientBytes returns the running total of bytes exchanged with
@@ -1065,6 +1068,17 @@ func strPtr(s string) *string {
 
 // proxyMessages relays TNS packets bidirectionally with TTC-aware interception.
 func (s *session) proxyMessages() error {
+	// Build the limit guard now that the grant is known, and run a watchdog to
+	// tear the session down if a limit is crossed while a query is blocked
+	// producing no traffic. The inline check in upstreamToClient handles the
+	// actively-streaming case with a clean TTC error frame.
+	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient)
+
+	watchCtx, cancelWatch := context.WithCancel(s.ctx)
+	defer cancelWatch()
+
+	go s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, s.onLimitViolation)
+
 	errChan := make(chan error, 2)
 
 	// Client → Upstream (with query interception)
@@ -1079,6 +1093,23 @@ func (s *session) proxyMessages() error {
 
 	// Wait for either direction to close
 	return <-errChan
+}
+
+// onLimitViolation is invoked by the limit watchdog when a time/bandwidth limit
+// is crossed. It force-closes both conns, unblocking whichever relay goroutine
+// is parked in a Read/Write so the session tears down. This is the only way to
+// terminate a query that is blocked producing no traffic (idle expiry).
+func (s *session) onLimitViolation(err error) {
+	s.logger.WarnContext(s.ctx, "terminating Oracle session: grant limit reached mid-stream",
+		slog.Any("error", err))
+
+	if s.upstreamConn != nil {
+		_ = s.upstreamConn.Close()
+	}
+
+	if s.clientConn != nil {
+		_ = s.clientConn.Close()
+	}
 }
 
 // clientToUpstream reads TNS packets from the client, intercepts Data packets
@@ -1228,6 +1259,18 @@ func (s *session) upstreamToClient() error {
 		// Forward to client
 		if err := writeTNSPacket(s.clientConn, pkt); err != nil {
 			return fmt.Errorf("client write error: %w", err)
+		}
+
+		// Enforce time/bandwidth limits mid-stream. While a query is in flight,
+		// re-check after every forwarded packet: the moment the grant's byte
+		// quota is crossed or the grant expires, send a TTC error frame and end
+		// the session rather than streaming the rest of a huge result.
+		if s.tracker.pendingQuery != nil {
+			if verr := s.guard.Check(); verr != nil {
+				_ = s.writeTTCError(int(ORA00028), "session terminated: "+verr.Error())
+
+				return verr
+			}
 		}
 	}
 }
