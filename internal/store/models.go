@@ -213,6 +213,11 @@ type Query struct {
 	Error         *string          `bun:"error" json:"error"`
 	CopyFormat    *string          `bun:"copy_format" json:"copy_format,omitempty"`       // 'text', 'csv', 'binary', or nil for non-COPY
 	CopyDirection *string          `bun:"copy_direction" json:"copy_direction,omitempty"` // 'in', 'out', or nil for non-COPY
+
+	// Joined fields populated only by ListQueries (via a JOIN on connections);
+	// not stored on the queries table itself.
+	UserID     *uuid.UUID `bun:"user_id,scanonly" json:"user_id,omitempty"`
+	DatabaseID *uuid.UUID `bun:"database_id,scanonly" json:"database_id,omitempty"`
 }
 
 // QueryRowModel represents a single row from query results or COPY data

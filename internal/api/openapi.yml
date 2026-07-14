@@ -2880,6 +2880,20 @@ components:
           type: string
           format: uuid
           description: Connection UID
+        user_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            UID of the user who ran the query, resolved from the connection.
+            Only populated when listing queries.
+        database_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            UID of the target database, resolved from the connection.
+            Only populated when listing queries.
         sql_text:
           type: string
           description: SQL query text

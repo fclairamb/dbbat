@@ -118,12 +118,8 @@ func (s *Store) ListQueries(ctx context.Context, filter QueryFilter) ([]Query, e
 	var queries []Query
 	q := s.db.NewSelect().
 		Model(&queries).
-		ColumnExpr("q.uid, q.connection_id, q.sql_text, q.parameters, q.executed_at, q.duration_ms, q.rows_affected, q.error")
-
-	// Join with connections if filtering by user or database
-	if filter.UserID != nil || filter.DatabaseID != nil {
-		q = q.Join("JOIN connections c ON q.connection_id = c.uid")
-	}
+		ColumnExpr("q.uid, q.connection_id, q.sql_text, q.parameters, q.executed_at, q.duration_ms, q.rows_affected, q.error, c.user_id, c.database_id").
+		Join("JOIN connections c ON q.connection_id = c.uid")
 
 	if filter.ConnectionID != nil {
 		q = q.Where("q.connection_id = ?", *filter.ConnectionID)
