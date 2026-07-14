@@ -26,7 +26,7 @@ const mongoSCRAMSaltLength = 16
 // RFC 5802 / RFC 7677. The password is SASLprep-normalized by the scram client,
 // matching what MongoDB drivers do — so a proof computed by a driver validates
 // against these keys. The username does not enter the derivation.
-func deriveMongoSCRAM(password string, salt []byte, iters int) (storedKey, serverKey []byte, err error) {
+func deriveMongoSCRAM(password string, salt []byte, iters int) ([]byte, []byte, error) {
 	client, err := scram.SHA256.NewClient("dbbat", password, "")
 	if err != nil {
 		return nil, nil, fmt.Errorf("scram client: %w", err)
