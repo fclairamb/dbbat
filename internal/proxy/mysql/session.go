@@ -128,17 +128,12 @@ func (s *Session) Run() error {
 	// Run a watchdog that tears the session down the moment a time/bandwidth
 	// limit is crossed. The go-mysql library owns the wire and buffers whole
 	// results, so there is no message boundary at which to inject a clean error
-	// frame — force-closing the conns is the enforcement mechanism. Closing the
-	// upstream unblocks a long-running Execute (the go-mysql client aborts its
-	// result read and returns an error, surfaced to the client as an ERR
-	// packet); closing the client ends the command loop.
+	// frame — force-closing the conns (in onLimitViolation) is the enforcement
+	// mechanism. Canceled when the command loop exits so no goroutine leaks.
 	//
 	// The conn references are captured into locals so the watchdog goroutine
 	// never reads the mutable s.upstreamConn field (closeUpstream nils it),
-	// keeping the teardown race-free. Canceled when the command loop exits so
-	// no goroutine leaks. net.Conn.Close is safe to call concurrently with a
-	// blocked Read/Write and safe to call twice (the deferred closeUpstream
-	// closes the same conn).
+	// keeping the teardown race-free.
 	watchCtx, cancelWatch := context.WithCancel(s.ctx)
 	defer cancelWatch()
 
@@ -146,16 +141,7 @@ func (s *Session) Run() error {
 	clientConn := s.clientConn
 
 	go s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
-		s.logger.WarnContext(s.ctx, "terminating MySQL session: grant limit reached mid-stream",
-			slog.Any("error", err))
-
-		if upstreamConn != nil {
-			_ = upstreamConn.Close()
-		}
-
-		if clientConn != nil {
-			_ = clientConn.Close()
-		}
+		s.onLimitViolation(upstreamConn, clientConn, err)
 	})
 
 	s.logger.InfoContext(s.ctx, "MySQL session ready",
@@ -164,6 +150,33 @@ func (s *Session) Run() error {
 		slog.Any("remote_addr", s.clientConn.RemoteAddr()))
 
 	return s.commandLoop()
+}
+
+// onLimitViolation is invoked by the limit watchdog when a time/bandwidth limit
+// is crossed mid-query. It force-closes both conns: closing the upstream
+// unblocks a long-running Execute (the go-mysql client aborts its result read
+// and returns an error, surfaced to the client as an ERR packet); closing the
+// client ends the command loop. The go-mysql library owns the wire and buffers
+// whole results, so there is no message boundary at which to inject a clean
+// error frame — force-closing the conns is the enforcement mechanism, mirroring
+// the PostgreSQL/Oracle onLimitViolation methods.
+//
+// The conns are passed in (captured as locals when the watchdog starts) rather
+// than read from s.upstreamConn, which closeUpstream nils; this keeps the
+// teardown race-free. Close is safe to call concurrently with a blocked
+// Read/Write and safe to call twice (the deferred closeUpstream closes the same
+// conn).
+func (s *Session) onLimitViolation(upstreamConn, clientConn io.Closer, err error) {
+	s.logger.WarnContext(s.ctx, "terminating MySQL session: grant limit reached mid-stream",
+		slog.Any("error", err))
+
+	if upstreamConn != nil {
+		_ = upstreamConn.Close()
+	}
+
+	if clientConn != nil {
+		_ = clientConn.Close()
+	}
 }
 
 // commandLoop dispatches client commands until the connection closes.
