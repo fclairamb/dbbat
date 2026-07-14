@@ -71,6 +71,17 @@ func (s *Session) handleClientOpMsg(m *message) error {
 	dbName := lookupString(body, "$db")
 	moreToCome := parsed.flags&flagMoreToCome != 0
 
+	// Reject immediately when the grant is revoked or exhausted, so the next
+	// command after a mid-session revoke/quota-hit fails cleanly rather than
+	// waiting for the watchdog's poll interval (parity with the MySQL proxy).
+	if s.revocation != nil && s.revocation.Revoked() {
+		return s.rejectCommand(m, cmd, body, moreToCome, shared.ErrGrantRevoked)
+	}
+
+	if qerr := checkQuotas(s.grant); qerr != nil {
+		return s.rejectCommand(m, cmd, body, moreToCome, qerr)
+	}
+
 	if verr := shared.ValidateMongoCommand(cmd, dbName, body, s.database, s.grant); verr != nil {
 		return s.rejectCommand(m, cmd, body, moreToCome, verr)
 	}
