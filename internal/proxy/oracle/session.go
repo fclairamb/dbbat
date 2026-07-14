@@ -1286,6 +1286,16 @@ func (s *session) upstreamToClient() error {
 			if verr := s.guard.Check(); verr != nil {
 				_ = s.writeTTCError(int(ORA00028), "session terminated: "+verr.Error())
 
+				// Finalize the in-flight query so its streamed-so-far bytes are
+				// flushed to the store before we return. Otherwise those bytes
+				// live only in the CountingConn atomics and a reconnect recomputes
+				// BytesTransferred without them, letting the cumulative cap be
+				// bypassed across short-lived connections. completeQuery diffs the
+				// bytes since the last query boundary, persists, bumps the
+				// in-session grant, and clears pendingQuery (no double-count).
+				errMsg := "aborted: " + verr.Error()
+				s.completeQuery(nil, &errMsg)
+
 				return verr
 			}
 		}

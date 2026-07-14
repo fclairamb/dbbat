@@ -183,6 +183,13 @@ func TestUpstreamToClient_ByteLimitAbort(t *testing.T) {
 
 	require.ErrorIs(t, relayErr, shared.ErrByteQuotaExceeded)
 
+	// The aborted query's streamed-so-far bytes must be attributed to the grant.
+	// With no store wired, completeQuery skips the async persist but still bumps
+	// the in-session grant counters — the value a real session persists and
+	// recomputes on reconnect.
+	require.Positive(t, grant.BytesTransferred, "aborted query's streamed bytes must be attributed to the grant")
+	require.Nil(t, s.tracker.pendingQuery, "completeQuery must clear the pending query on abort")
+
 	select {
 	case n := <-pktCh:
 		require.Positive(t, n, "client should have received forwarded packets plus the TTC error frame")
