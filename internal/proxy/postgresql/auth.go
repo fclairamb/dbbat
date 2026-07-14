@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -147,8 +149,15 @@ func (s *Session) authenticateWithAPIKey(apiKey string) error {
 	return nil
 }
 
-// checkQuotas verifies that quotas have not been exceeded.
+// checkQuotas verifies that quotas have not been exceeded. It also enforces the
+// grant's expiry between commands: expiry is otherwise only validated at connect
+// time, so without this a session opened just before expiry could keep issuing
+// queries indefinitely.
 func (s *Session) checkQuotas() error {
+	if !s.grant.ExpiresAt.IsZero() && !time.Now().Before(s.grant.ExpiresAt) {
+		return shared.ErrGrantExpired
+	}
+
 	if s.grant.MaxQueryCounts != nil && s.grant.QueryCount >= *s.grant.MaxQueryCounts {
 		return ErrQueryLimitExceeded
 	}

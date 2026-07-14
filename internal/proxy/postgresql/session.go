@@ -97,6 +97,7 @@ type Session struct {
 	clientApplicationName  string                      // application_name provided by the client
 	copyState              *copyState                  // Track COPY operation in progress
 	upstreamSCRAM          *scramClient                // SCRAM-SHA-256 state for upstream SASL auth
+	guard                  *shared.LimitGuard          // Mid-stream time/bandwidth limit enforcement
 
 	// Wire-level byte counters for the client-facing socket. Reads count as
 	// bytes-from-client (queries the client sent), writes count as
@@ -225,6 +226,17 @@ func (s *Session) Run() error {
 
 // proxyMessages proxies messages between client and upstream.
 func (s *Session) proxyMessages() error {
+	// Build the limit guard once the grant is known, then run a watchdog that
+	// tears the session down if a limit is crossed while a query is blocked
+	// producing no traffic (the inline check in proxyUpstreamToClient handles
+	// the actively-streaming case with a clean error frame).
+	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient)
+
+	watchCtx, cancelWatch := context.WithCancel(s.ctx)
+	defer cancelWatch()
+
+	go s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, s.onLimitViolation)
+
 	// Channel to receive errors from goroutines
 	errChan := make(chan error, 2)
 
@@ -244,6 +256,24 @@ func (s *Session) proxyMessages() error {
 	err := <-errChan
 
 	return err
+}
+
+// onLimitViolation is invoked by the limit watchdog when a time/bandwidth limit
+// is crossed. It force-closes both conns, unblocking whichever relay goroutine
+// is parked in a Read/Write so the session tears down. The idle case (a query
+// blocked without producing traffic) can only be terminated this way — there is
+// no message boundary at which to inject a clean ErrorResponse.
+func (s *Session) onLimitViolation(err error) {
+	s.logger.WarnContext(s.ctx, "terminating session: grant limit reached mid-stream",
+		slog.Any("error", err))
+
+	if s.upstreamConn != nil {
+		_ = s.upstreamConn.Close()
+	}
+
+	if s.clientConn != nil {
+		_ = s.clientConn.Close()
+	}
 }
 
 // proxyClientToUpstream proxies messages from client to upstream.
@@ -504,6 +534,59 @@ func (s *Session) proxyUpstreamToClient() error {
 		if err := s.clientBackend.Flush(); err != nil {
 			return fmt.Errorf("failed to send to client: %w", err)
 		}
+
+		// Enforce time/bandwidth limits mid-stream. While a query is in flight,
+		// re-check after every forwarded message: the moment the running total
+		// crosses the grant's byte quota or the grant expires, abort with a
+		// clean ErrorResponse + ReadyForQuery instead of streaming the rest of a
+		// potentially huge result. Cheap (two atomic loads + a time compare).
+		if s.getCurrentPendingQuery() != nil {
+			if verr := s.guard.Check(); verr != nil {
+				s.abortStream(verr)
+
+				return verr
+			}
+		}
+	}
+}
+
+// abortStream cuts an in-flight query off at a message boundary, sending the
+// client a real ErrorResponse (SQLSTATE 53400, configuration_limit_exceeded) and
+// a ReadyForQuery so it observes a failed query rather than a bare connection
+// reset. The session then tears down (the grant is exhausted/expired, so every
+// subsequent command would be refused anyway).
+func (s *Session) abortStream(cause error) {
+	s.logger.WarnContext(s.ctx, "aborting in-flight query: grant limit reached",
+		slog.Any("error", cause))
+
+	errMsg := &pgproto3.ErrorResponse{
+		Severity: "ERROR",
+		Code:     "53400", // configuration_limit_exceeded
+		Message:  cause.Error(),
+	}
+
+	errBuf, encodeErr := errMsg.Encode(nil)
+	if encodeErr != nil {
+		s.logger.ErrorContext(s.ctx, "failed to encode limit error", slog.Any("error", encodeErr))
+
+		return
+	}
+
+	if _, err := s.clientConn.Write(errBuf); err != nil {
+		s.logger.ErrorContext(s.ctx, "failed to write limit error to client", slog.Any("error", err))
+
+		return
+	}
+
+	readyMsg := &pgproto3.ReadyForQuery{TxStatus: 'I'}
+
+	readyBuf, encodeErr := readyMsg.Encode(nil)
+	if encodeErr != nil {
+		return
+	}
+
+	if _, err := s.clientConn.Write(readyBuf); err != nil {
+		s.logger.ErrorContext(s.ctx, "failed to write ready to client", slog.Any("error", err))
 	}
 }
 
