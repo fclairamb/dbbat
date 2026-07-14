@@ -131,10 +131,11 @@ func TestPublicEndpoints(t *testing.T) {
 		port5434 := 5434
 		port1522 := 1522
 		pe := PublicEndpoints{
-			Host:    "db.example.com",
-			PGHost:  "pg.example.com",
-			PGPort:  &port5434,
-			OraPort: &port1522,
+			Host:     "db.example.com",
+			PGHost:   "pg.example.com",
+			PGPort:   &port5434,
+			OraPort:  &port1522,
+			WebUIURL: "https://dbbat.example.com",
 		}
 
 		require.NoError(t, s2.SetPublicEndpoints(ctx, pe))
@@ -147,6 +148,7 @@ func TestPublicEndpoints(t *testing.T) {
 		assert.Equal(t, 5434, *got.PGPort)
 		require.NotNil(t, got.OraPort)
 		assert.Equal(t, 1522, *got.OraPort)
+		assert.Equal(t, "https://dbbat.example.com", got.WebUIURL)
 	})
 }
 
@@ -208,5 +210,62 @@ func TestResolvePublicEndpoints(t *testing.T) {
 		assert.Equal(t, 0, r.OraPort)
 		assert.Equal(t, 0, r.MySQLPort)
 		assert.Equal(t, 5434, r.PGPort)
+	})
+
+	t.Run("web_ui_url override takes priority over cfg.PublicURL", func(t *testing.T) {
+		t.Parallel()
+
+		cfgWithPublicURL := &config.Config{PublicURL: "https://env.example.com"}
+		pe := PublicEndpoints{WebUIURL: "https://override.example.com"}
+
+		r := ResolvePublicEndpoints(pe, cfgWithPublicURL)
+		assert.Equal(t, "https://override.example.com", r.WebUIURL)
+	})
+
+	t.Run("web_ui_url falls back to cfg.PublicURL when unset", func(t *testing.T) {
+		t.Parallel()
+
+		cfgWithPublicURL := &config.Config{PublicURL: "https://env.example.com"}
+
+		r := ResolvePublicEndpoints(PublicEndpoints{}, cfgWithPublicURL)
+		assert.Equal(t, "https://env.example.com", r.WebUIURL)
+	})
+
+	t.Run("web_ui_url is empty when neither override nor cfg.PublicURL set", func(t *testing.T) {
+		t.Parallel()
+
+		r := ResolvePublicEndpoints(PublicEndpoints{}, cfg)
+		assert.Empty(t, r.WebUIURL)
+	})
+}
+
+func TestResolveWebUIURL(t *testing.T) {
+	t.Parallel()
+
+	t.Run("falls back to cfg.PublicURL when no parameter stored", func(t *testing.T) {
+		t.Parallel()
+
+		s := setupTestStoreNoCleanup(t)
+		got := s.ResolveWebUIURL(context.Background(), &config.Config{PublicURL: "https://env.example.com"})
+		assert.Equal(t, "https://env.example.com", got)
+	})
+
+	t.Run("stored parameter takes priority over cfg.PublicURL", func(t *testing.T) {
+		t.Parallel()
+
+		s := setupTestStoreNoCleanup(t)
+		ctx := context.Background()
+		require.NoError(t, s.SetPublicEndpoints(ctx, PublicEndpoints{WebUIURL: "https://stored.example.com"}))
+
+		got := s.ResolveWebUIURL(ctx, &config.Config{PublicURL: "https://env.example.com"})
+		assert.Equal(t, "https://stored.example.com", got)
+	})
+
+	t.Run("nil cfg does not panic and falls back to empty", func(t *testing.T) {
+		t.Parallel()
+
+		s := setupTestStoreNoCleanup(t)
+		got := s.ResolveWebUIURL(context.Background(), nil)
+		assert.Empty(t, got)
 	})
 }
