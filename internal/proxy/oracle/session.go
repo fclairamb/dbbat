@@ -142,6 +142,10 @@ type session struct {
 
 	// guard enforces the grant's time-window and bandwidth limits mid-stream.
 	guard *shared.LimitGuard
+
+	// revocation is signalled when this session's grant is revoked mid-flight,
+	// so the next command is rejected and the watchdog tears the session down.
+	revocation *cache.RevocationHandle
 }
 
 // cumulativeClientBytes returns the running total of bytes exchanged with
@@ -1068,11 +1072,24 @@ func strPtr(s string) *string {
 
 // proxyMessages relays TNS packets bidirectionally with TTC-aware interception.
 func (s *session) proxyMessages() error {
+	// Register this live session against its grant so an admin revoke can
+	// signal it (block the next command + tear it down) instead of waiting for
+	// a reconnect. Deregistered in cleanup. s.grant may be nil for sessions
+	// that never resolved one; Register(uuid.Nil) still yields a usable handle.
+	var grantUID uuid.UUID
+	if s.grant != nil {
+		grantUID = s.grant.UID
+	}
+
+	s.revocation = s.store.Revocations().Register(grantUID)
+
 	// Build the limit guard now that the grant is known, and run a watchdog to
-	// tear the session down if a limit is crossed while a query is blocked
-	// producing no traffic. The inline check in upstreamToClient handles the
-	// actively-streaming case with a clean TTC error frame.
-	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient)
+	// tear the session down if a limit is crossed (or the grant is revoked)
+	// while a query is blocked producing no traffic. The inline check in
+	// upstreamToClient handles the actively-streaming case with a clean TTC
+	// error frame.
+	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
+		WithRevocation(s.revocation.Flag())
 
 	watchCtx, cancelWatch := context.WithCancel(s.ctx)
 	defer cancelWatch()
@@ -1100,7 +1117,7 @@ func (s *session) proxyMessages() error {
 // is parked in a Read/Write so the session tears down. This is the only way to
 // terminate a query that is blocked producing no traffic (idle expiry).
 func (s *session) onLimitViolation(err error) {
-	s.logger.WarnContext(s.ctx, "terminating Oracle session: grant limit reached mid-stream",
+	s.logger.WarnContext(s.ctx, "terminating Oracle session: grant no longer valid mid-stream",
 		slog.Any("error", err))
 
 	if s.upstreamConn != nil {
@@ -1440,6 +1457,10 @@ func (s *session) sendRefuse(oraCode uint16, reason string) {
 
 // cleanup closes upstream connection and updates records.
 func (s *session) cleanup() {
+	if s.grant != nil && s.revocation != nil {
+		s.store.Revocations().Deregister(s.grant.UID, s.revocation)
+	}
+
 	if s.dump != nil {
 		if err := s.dump.Close(); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to close dump writer", slog.Any("error", err))

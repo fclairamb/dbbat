@@ -557,6 +557,12 @@ func decodeCursorIDFromOCLOSE(ttcPayload []byte) (uint16, error) {
 // connect time, so without this a session opened just before expiry could keep
 // issuing queries indefinitely.
 func (s *session) checkQuotas() error {
+	// A grant revoked mid-session invalidates every subsequent command, even
+	// before the watchdog force-closes the connection.
+	if s.revocation.Revoked() {
+		return shared.ErrGrantRevoked
+	}
+
 	if s.grant == nil {
 		return nil
 	}
