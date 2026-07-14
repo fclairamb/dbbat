@@ -8,7 +8,7 @@ To learn more about the release, try:
   $ helm get all {{ .Release.Name }} --namespace {{ .Release.Namespace }}
 
 =============================================================================
-DBBat - PostgreSQL Observability Proxy
+DBBat - Database Observability Proxy
 =============================================================================
 
 {{ if .Values.ingress.enabled }}
