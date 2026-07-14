@@ -10,9 +10,79 @@ import (
 	"testing"
 	"time"
 
+	gomysql "github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/google/uuid"
+
+	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
+
+// TestRunIntercepted_Revoked asserts a revoked grant blocks the next command on
+// a live MySQL connection: runIntercepted returns ErrGrantRevoked and never
+// runs the exec.
+func TestRunIntercepted_Revoked(t *testing.T) {
+	t.Parallel()
+
+	reg := cache.NewRevocationRegistry()
+	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour)}
+	h := reg.Register(grant.UID)
+	reg.Revoke(grant.UID)
+
+	s := &Session{
+		logger:     discardLogger(),
+		ctx:        context.Background(),
+		grant:      grant,
+		revocation: h,
+	}
+	hnd := &handler{session: s}
+
+	execRan := false
+
+	_, err := hnd.runIntercepted("SELECT 1", nil, func() (*gomysql.Result, error) {
+		execRan = true
+
+		return nil, nil
+	})
+
+	if !errors.Is(err, shared.ErrGrantRevoked) {
+		t.Fatalf("runIntercepted() after revoke = %v, want ErrGrantRevoked", err)
+	}
+
+	if execRan {
+		t.Fatal("exec must not run for a revoked grant")
+	}
+}
+
+// TestWatchdog_TearsDownOnRevocation exercises the real wiring seam for
+// revocation: the guard is built with the session's revocation flag and the
+// watchdog tears both conns down once the grant is revoked.
+func TestWatchdog_TearsDownOnRevocation(t *testing.T) {
+	t.Parallel()
+
+	s := &Session{logger: discardLogger(), ctx: context.Background()}
+
+	reg := cache.NewRevocationRegistry()
+	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour)}
+	h := reg.Register(grant.UID)
+
+	guard := shared.NewLimitGuard(grant, &atomic.Int64{}, &atomic.Int64{}).WithRevocation(h.Flag())
+
+	clientConn := pipePair(t)
+	upstreamConn := pipePair(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go guard.Watch(ctx, time.Millisecond, func(err error) {
+		s.onLimitViolation(upstreamConn, clientConn, err)
+	})
+
+	reg.Revoke(grant.UID)
+
+	assertConnClosed(t, clientConn, "client")
+	assertConnClosed(t, upstreamConn, "upstream")
+}
 
 // TestCheckQuotas_Expiry asserts the between-commands expiry gap is closed: a
 // command issued after the grant's ExpiresAt is rejected with ErrGrantExpired,

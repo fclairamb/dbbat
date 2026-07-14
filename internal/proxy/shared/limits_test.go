@@ -192,6 +192,108 @@ func TestLimitGuard_Watch_StopsOnContextCancel(t *testing.T) {
 	}
 }
 
+func TestLimitGuard_Check_Revocation(t *testing.T) {
+	t.Parallel()
+
+	var revoked atomic.Bool
+
+	grant := &store.Grant{
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+
+	g := NewLimitGuard(grant, &atomic.Int64{}, &atomic.Int64{}).WithRevocation(&revoked)
+
+	// Not revoked yet.
+	if err := g.Check(); err != nil {
+		t.Fatalf("Check() before revoke = %v, want nil", err)
+	}
+
+	// Flip the shared flag as the API's revoke path would.
+	revoked.Store(true)
+
+	if err := g.Check(); !errors.Is(err, ErrGrantRevoked) {
+		t.Fatalf("Check() after revoke = %v, want ErrGrantRevoked", err)
+	}
+}
+
+func TestLimitGuard_Check_RevocationTakesPrecedence(t *testing.T) {
+	t.Parallel()
+
+	var revoked atomic.Bool
+	revoked.Store(true)
+
+	// Grant is also already expired; revocation must win as it is the most
+	// authoritative reason.
+	grant := &store.Grant{
+		ExpiresAt: time.Now().Add(-time.Hour),
+	}
+
+	g := NewLimitGuard(grant, &atomic.Int64{}, &atomic.Int64{}).WithRevocation(&revoked)
+
+	if err := g.Check(); !errors.Is(err, ErrGrantRevoked) {
+		t.Fatalf("Check() = %v, want ErrGrantRevoked to take precedence", err)
+	}
+}
+
+func TestLimitGuard_Watch_FiresOnRevocation(t *testing.T) {
+	t.Parallel()
+
+	var revoked atomic.Bool
+
+	grant := &store.Grant{
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+
+	g := NewLimitGuard(grant, &atomic.Int64{}, &atomic.Int64{}).WithRevocation(&revoked)
+
+	got := make(chan error, 1)
+
+	go g.Watch(context.Background(), 5*time.Millisecond, func(err error) {
+		got <- err
+	})
+
+	// Revoke after the watch has started.
+	time.Sleep(10 * time.Millisecond)
+	revoked.Store(true)
+
+	select {
+	case err := <-got:
+		if !errors.Is(err, ErrGrantRevoked) {
+			t.Fatalf("Watch onViolation = %v, want ErrGrantRevoked", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Watch did not fire onViolation for revocation")
+	}
+}
+
+func TestLimitGuard_Watch_KeepsRunningForRevocationWithoutLimits(t *testing.T) {
+	t.Parallel()
+
+	// A grant with no byte cap and no expiry, but a revocation flag attached:
+	// Watch must keep polling so the eventual revoke tears the session down.
+	var revoked atomic.Bool
+
+	g := NewLimitGuard(nil, &atomic.Int64{}, &atomic.Int64{}).WithRevocation(&revoked)
+
+	got := make(chan error, 1)
+
+	go g.Watch(context.Background(), 5*time.Millisecond, func(err error) {
+		got <- err
+	})
+
+	time.Sleep(10 * time.Millisecond)
+	revoked.Store(true)
+
+	select {
+	case err := <-got:
+		if !errors.Is(err, ErrGrantRevoked) {
+			t.Fatalf("Watch onViolation = %v, want ErrGrantRevoked", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Watch did not fire onViolation for revocation-only guard")
+	}
+}
+
 func TestLimitGuard_Watch_NoLimitsReturnsImmediately(t *testing.T) {
 	t.Parallel()
 

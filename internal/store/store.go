@@ -99,9 +99,15 @@ func (s *Store) SetAuthCache(authCache *cache.AuthCache) {
 
 // Revocations returns the process-wide grant-revocation registry that live
 // proxy sessions register with and the API's revoke handler signals. Always
-// non-nil for a store built via New; a zero-value store (some tests) returns
-// nil, and the registry's methods are nil-safe.
+// non-nil for a store built via New. Nil-safe on both a nil *Store receiver and
+// a zero-value store (some tests build sessions without a real store); the
+// returned registry's own methods are also nil-safe, so callers never have to
+// nil-check.
 func (s *Store) Revocations() *cache.RevocationRegistry {
+	if s == nil {
+		return nil
+	}
+
 	return s.revocations
 }
 

@@ -2,16 +2,94 @@ package oracle
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
+	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
+
+// TestCheckQuotas_Revoked asserts a revoked grant blocks the next command on a
+// live Oracle connection.
+func TestCheckQuotas_Revoked(t *testing.T) {
+	t.Parallel()
+
+	reg := cache.NewRevocationRegistry()
+	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour)}
+	h := reg.Register(grant.UID)
+
+	s := newTestSession(grant)
+	s.revocation = h
+
+	require.NoError(t, s.checkQuotas())
+
+	reg.Revoke(grant.UID)
+
+	require.ErrorIs(t, s.checkQuotas(), shared.ErrGrantRevoked)
+}
+
+// TestRevocation_DisconnectsLiveSession drives the registry → guard watchdog →
+// onLimitViolation seam: revoking a grant while the watchdog runs force-closes
+// both conns.
+func TestRevocation_DisconnectsLiveSession(t *testing.T) {
+	t.Parallel()
+
+	reg := cache.NewRevocationRegistry()
+	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour)}
+	h := reg.Register(grant.UID)
+
+	clientProxyEnd, clientTestEnd := net.Pipe()
+	upstreamProxyEnd, upstreamTestEnd := net.Pipe()
+
+	var from, to atomic.Int64
+
+	s := &session{
+		clientConn:      clientProxyEnd,
+		upstreamConn:    upstreamProxyEnd,
+		logger:          testLogger(),
+		ctx:             context.Background(),
+		grant:           grant,
+		revocation:      h,
+		guard:           shared.NewLimitGuard(grant, &from, &to).WithRevocation(h.Flag()),
+		tracker:         newOracleQueryTracker(),
+		bytesFromClient: &from,
+		bytesToClient:   &to,
+	}
+
+	go s.guard.Watch(context.Background(), 5*time.Millisecond, s.onLimitViolation)
+
+	reg.Revoke(grant.UID)
+
+	assertOraclePeerClosed(t, clientTestEnd, "client conn")
+	assertOraclePeerClosed(t, upstreamTestEnd, "upstream conn")
+}
+
+func assertOraclePeerClosed(t *testing.T, c net.Conn, name string) {
+	t.Helper()
+
+	_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+	buf := make([]byte, 1)
+
+	_, err := c.Read(buf)
+	if err == nil {
+		t.Fatalf("%s: read succeeded, want the conn to be closed", name)
+	}
+
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) {
+		return
+	}
+
+	t.Fatalf("%s: read err = %v, want EOF/closed-pipe (conn not torn down in time)", name, err)
+}
 
 // TestCheckQuotas_Expiry asserts the between-commands expiry gap is closed: a
 // command issued after the grant's ExpiresAt is rejected with ErrGrantExpired.
