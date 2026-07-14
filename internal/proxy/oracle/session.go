@@ -704,6 +704,23 @@ func (s *session) resolveAPIKeyFromPhase2(o5 *O5LogonServer, verifiers []*o5Logo
 			slog.Int("candidate_index", i),
 			slog.Int("candidates", len(verifiers)))
 
+		// Opportunistically migrate a legacy per-key-salt key to the user's
+		// shared salts now that we briefly hold the plaintext — this is the only
+		// point where it's available. Once upgraded, the key joins the user's
+		// other keys as an interchangeable Oracle login candidate, without
+		// forcing a rotation. Best-effort and async (like IncrementAPIKeyUsage);
+		// failures never block the login. The empty-password path above cannot
+		// do this (it has no plaintext).
+		if od := apiKey.OracleData(); od != nil && !od.UserSalt {
+			keyID, plain, encKey := apiKey.ID, plainPassword, s.encryptionKey
+			go func() {
+				if err := s.store.UpgradeAPIKeyO5LogonVerifiers(context.Background(), keyID, plain, encKey); err != nil {
+					s.logger.WarnContext(context.Background(), "failed to upgrade legacy O5LOGON verifiers to user salts",
+						slog.String("key_id", keyID.String()), slog.Any("error", err))
+				}
+			}()
+		}
+
 		return apiKey, nil
 	}
 
