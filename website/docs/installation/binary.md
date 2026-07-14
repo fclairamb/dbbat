@@ -38,6 +38,7 @@ By default, DBBat listens on:
 | PostgreSQL proxy | `:5434` |
 | Oracle proxy | `:1522` |
 | MySQL / MariaDB proxy | `:3307` |
+| MongoDB proxy | `:27018` |
 | REST API + web UI | `:4200` |
 
 Set `DBB_LISTEN_*=""` to disable a listener you don't need.
@@ -78,6 +79,7 @@ DBBat supports YAML, JSON, and TOML configuration files:
 listen_pg: ":5434"
 listen_ora: ":1522"
 listen_mysql: ":3307"
+listen_mongo: ":27018"
 listen_api: ":4200"
 dsn: "postgres://user:pass@localhost:5432/dbbat"
 
@@ -115,6 +117,7 @@ Environment=DBB_KEYFILE=/etc/dbbat/key
 Environment=DBB_LISTEN_PG=:5434
 Environment=DBB_LISTEN_ORA=:1522
 Environment=DBB_LISTEN_MYSQL=:3307
+Environment=DBB_LISTEN_MONGO=:27018
 Environment=DBB_LISTEN_API=:4200
 
 [Install]

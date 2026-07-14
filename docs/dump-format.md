@@ -1,6 +1,6 @@
 # DBBat Dump Format v2
 
-Binary capture format for database proxy sessions. Protocol-agnostic: the same format works for PostgreSQL, Oracle, and any future protocol.
+Binary capture format for database proxy sessions. Protocol-agnostic: the same format works for PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, and any future protocol.
 
 ## Design Principles
 

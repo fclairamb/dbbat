@@ -32,11 +32,13 @@ services:
       DBB_LISTEN_PG: ":5434"
       DBB_LISTEN_ORA: ":1522"
       DBB_LISTEN_MYSQL: ":3307"
+      DBB_LISTEN_MONGO: ":27018"
       DBB_LISTEN_API: ":4200"
     ports:
       - "5001:5434"   # PostgreSQL proxy
       - "1522:1522"   # Oracle proxy
       - "3307:3307"   # MySQL / MariaDB proxy
+      - "27018:27018" # MongoDB proxy
       - "4200:4200"   # REST API + web UI
 
 volumes:
@@ -163,6 +165,9 @@ mysql -h 127.0.0.1 -P 3307 -u testuser -p target_db
 
 # Oracle (against an Oracle target — using go-ora-style easy connect)
 # user/pass@//localhost:1522/target_db
+
+# MongoDB (against a MongoDB target — authSource carries the DBBat database name)
+mongosh "mongodb://testuser:newtestpass@localhost:27018/?authSource=target_db&authMechanism=SCRAM-SHA-256"
 ```
 
 ## Stopping

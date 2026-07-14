@@ -35,7 +35,7 @@ curl -X POST http://localhost:4200/api/v1/grants \
 | `max_query_counts` | integer | Maximum number of queries allowed | No |
 | `max_bytes_transferred` | integer | Maximum bytes transferred (response size) | No |
 
-The grant model is the same across all engines (PostgreSQL, Oracle, MySQL/MariaDB).
+The grant model is the same across all engines (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB).
 
 ## Controls
 

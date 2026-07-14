@@ -14,9 +14,9 @@ const FeatureList: FeatureItem[] = [
     emoji: "🔌",
     description: (
       <>
-        PostgreSQL, Oracle, and MySQL/MariaDB on independent listeners. Connect
-        any standard client — psql, sqlplus, mysql, DBeaver, your ORM — without
-        application changes.
+        PostgreSQL, Oracle, MySQL/MariaDB, and MongoDB on independent listeners.
+        Connect any standard client — psql, sqlplus, mysql, mongosh, DBeaver,
+        your ORM — without application changes.
       </>
     ),
   },
