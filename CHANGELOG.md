@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/fclairamb/dbbat/compare/v0.15.5...v0.16.0) (2026-07-14)
+
+
+### Features
+
+* land pending main batch — grant enforcement, revocation, upstream identity, query columns, UI ([#255](https://github.com/fclairamb/dbbat/issues/255)) ([e6cbeeb](https://github.com/fclairamb/dbbat/commit/e6cbeebef133018297c8102c6b6a73303db298fe))
+
 ## [Unreleased]
 
 ### Features
