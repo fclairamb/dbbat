@@ -2319,6 +2319,9 @@ components:
         oracle_service_name:
           type: string
           description: Oracle SERVICE_NAME (Oracle only)
+        mongo_auth_source:
+          type: string
+          description: Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin")
         listable:
           type: boolean
           default: true
@@ -2387,6 +2390,9 @@ components:
         oracle_service_name:
           type: string
           description: Oracle SERVICE_NAME (required for Oracle)
+        mongo_auth_source:
+          type: string
+          description: Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin")
         listable:
           type: boolean
           default: true
@@ -2428,6 +2434,9 @@ components:
         oracle_service_name:
           type: string
           description: Oracle SERVICE_NAME
+        mongo_auth_source:
+          type: string
+          description: Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin")
         listable:
           type: boolean
           description: Whether this database appears in the grant-request dropdown for non-admin users

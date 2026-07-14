@@ -147,6 +147,7 @@ type Database struct {
 	SSLMode           string     `bun:"ssl_mode,notnull,default:'prefer'" json:"ssl_mode"`
 	Protocol          string     `bun:"protocol,notnull,default:'postgresql'" json:"protocol"`
 	OracleServiceName *string    `bun:"oracle_service_name" json:"oracle_service_name,omitempty"`
+	MongoAuthSource   *string    `bun:"mongo_auth_source" json:"mongo_auth_source,omitempty"`
 	Listable          bool       `bun:"listable,notnull" json:"listable"`
 	CreatedBy         *uuid.UUID `bun:"created_by,type:uuid" json:"created_by"`
 	CreatedAt         time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
@@ -165,6 +166,7 @@ type DatabaseUpdate struct {
 	SSLMode           *string
 	Protocol          *string
 	OracleServiceName *string
+	MongoAuthSource   *string
 	Listable          *bool
 }
 

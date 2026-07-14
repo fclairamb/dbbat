@@ -249,17 +249,14 @@ func (s *Session) scramLoop(up *upstreamConn, conv *scram.ClientConversation, bo
 	return nil
 }
 
-// upstreamAuthSource is the authSource dbbat uses for the upstream SCRAM
-// exchange. It is intentionally NOT the client's authSource (which carries the
-// dbbat database selector, contract §5) — the upstream user's credentials live
-// in its own auth database, and "admin" is the MongoDB default where service /
-// root users are created (e.g. MONGO_INITDB_ROOT_USERNAME). Targets whose proxy
-// user lives in a non-admin authSource are a documented phase-5 limitation.
-const upstreamAuthSource = "admin"
-
-// scramAuthDB returns the authSource for the upstream SCRAM exchange.
+// scramAuthDB returns the authSource for the upstream SCRAM exchange. It is
+// intentionally NOT the client's authSource (which carries the dbbat database
+// selector, contract §5) — the upstream user's credentials live in its own auth
+// database. Configurable per-database via the mongo_auth_source column,
+// defaulting to "admin" (the MongoDB default where service/root users are
+// created, e.g. MONGO_INITDB_ROOT_USERNAME).
 func (s *Session) scramAuthDB() string {
-	return upstreamAuthSource
+	return s.database.MongoAuthSourceOrDefault()
 }
 
 // parseSaslReply extracts (conversationId, payload, done) from a SASL reply,

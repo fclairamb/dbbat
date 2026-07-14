@@ -1134,6 +1134,8 @@ export interface components {
             protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb";
             /** @description Oracle SERVICE_NAME (Oracle only) */
             oracle_service_name?: string;
+            /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
+            mongo_auth_source?: string;
             /**
              * @description Whether this database appears in the grant-request dropdown for non-admin users
              * @default true
@@ -1188,6 +1190,8 @@ export interface components {
             protocol: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb";
             /** @description Oracle SERVICE_NAME (required for Oracle) */
             oracle_service_name?: string;
+            /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
+            mongo_auth_source?: string;
             /**
              * @description Whether this database appears in the grant-request dropdown for non-admin users
              * @default true
@@ -1216,6 +1220,8 @@ export interface components {
             protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb";
             /** @description Oracle SERVICE_NAME */
             oracle_service_name?: string;
+            /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
+            mongo_auth_source?: string;
             /** @description Whether this database appears in the grant-request dropdown for non-admin users */
             listable?: boolean;
         };

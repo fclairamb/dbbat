@@ -247,6 +247,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
   const [port, setPort] = useState(PROTOCOL_DEFAULT_PORT.postgresql);
   const [databaseName, setDatabaseName] = useState("");
   const [oracleServiceName, setOracleServiceName] = useState("");
+  const [mongoAuthSource, setMongoAuthSource] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [sslMode, setSslMode] = useState("prefer");
@@ -277,6 +278,10 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
       protocol,
       oracle_service_name:
         protocol === "oracle" ? oracleServiceName : undefined,
+      mongo_auth_source:
+        protocol === "mongodb" && mongoAuthSource
+          ? mongoAuthSource
+          : undefined,
       listable,
     });
   };
@@ -393,6 +398,21 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
                 placeholder="ORCL"
                 required
               />
+            </div>
+          )}
+          {protocol === "mongodb" && (
+            <div className="space-y-2">
+              <Label htmlFor="mongoAuthSource">Auth Source</Label>
+              <Input
+                id="mongoAuthSource"
+                value={mongoAuthSource}
+                onChange={(e) => setMongoAuthSource(e.target.value)}
+                placeholder="admin"
+              />
+              <p className="text-xs text-muted-foreground">
+                Upstream MongoDB database where the proxy user's credentials
+                live. Defaults to <code className="font-mono">admin</code>.
+              </p>
             </div>
           )}
           <div className="space-y-2">

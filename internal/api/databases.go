@@ -24,6 +24,7 @@ type CreateDatabaseRequest struct {
 	SSLMode           string `json:"ssl_mode"`
 	Protocol          string `json:"protocol"`
 	OracleServiceName string `json:"oracle_service_name"`
+	MongoAuthSource   string `json:"mongo_auth_source"`
 	Listable          *bool  `json:"listable"`
 }
 
@@ -38,6 +39,7 @@ type UpdateDatabaseRequest struct {
 	SSLMode           *string `json:"ssl_mode"`
 	Protocol          *string `json:"protocol"`
 	OracleServiceName *string `json:"oracle_service_name"`
+	MongoAuthSource   *string `json:"mongo_auth_source"`
 	Listable          *bool   `json:"listable"`
 }
 
@@ -53,6 +55,7 @@ type DatabaseResponse struct {
 	SSLMode           string     `json:"ssl_mode,omitempty"`
 	Protocol          string     `json:"protocol,omitempty"`
 	OracleServiceName string     `json:"oracle_service_name,omitempty"`
+	MongoAuthSource   string     `json:"mongo_auth_source,omitempty"`
 	Listable          bool       `json:"listable"`
 	CreatedBy         *uuid.UUID `json:"created_by,omitempty"`
 }
@@ -132,6 +135,11 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		oracleServiceName = &req.OracleServiceName
 	}
 
+	var mongoAuthSource *string
+	if req.MongoAuthSource != "" {
+		mongoAuthSource = &req.MongoAuthSource
+	}
+
 	listable := true
 	if req.Listable != nil {
 		listable = *req.Listable
@@ -148,6 +156,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		SSLMode:           req.SSLMode,
 		Protocol:          req.Protocol,
 		OracleServiceName: oracleServiceName,
+		MongoAuthSource:   mongoAuthSource,
 		Listable:          listable,
 		CreatedBy:         &currentUser.UID,
 	}
@@ -345,6 +354,7 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		SSLMode:           req.SSLMode,
 		Protocol:          req.Protocol,
 		OracleServiceName: req.OracleServiceName,
+		MongoAuthSource:   req.MongoAuthSource,
 		Listable:          req.Listable,
 	}
 
@@ -467,6 +477,11 @@ func toDatabaseResponse(db *store.Database) DatabaseResponse {
 		oracleServiceName = *db.OracleServiceName
 	}
 
+	var mongoAuthSource string
+	if db.MongoAuthSource != nil {
+		mongoAuthSource = *db.MongoAuthSource
+	}
+
 	return DatabaseResponse{
 		UID:               db.UID,
 		Name:              db.Name,
@@ -478,6 +493,7 @@ func toDatabaseResponse(db *store.Database) DatabaseResponse {
 		SSLMode:           db.SSLMode,
 		Protocol:          db.Protocol,
 		OracleServiceName: oracleServiceName,
+		MongoAuthSource:   mongoAuthSource,
 		Listable:          db.Listable,
 		CreatedBy:         db.CreatedBy,
 	}
