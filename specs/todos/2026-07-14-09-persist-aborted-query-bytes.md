@@ -44,3 +44,59 @@ in `internal/proxy/mysql/session.go` `recordDisconnect`.)
 
 No GitHub issue yet — file one when this is picked up (relates to
 [#251](https://github.com/fclairamb/dbbat/issues/251)).
+
+## Implementation Plan
+
+### Store helper (`internal/store/connections.go`)
+- Add `IncrementConnectionBytes(ctx, uid, bytes)` next to
+  `IncrementConnectionStats`. Same UPDATE but WITHOUT `queries = queries + 1`:
+  only `bytes_transferred = bytes_transferred + ?` and `last_activity_at`. Used
+  by the MySQL teardown flush (no query context to log a row against) and is the
+  bytes-only primitive the spec calls for.
+- Tests (`internal/store/connections_test.go`, `grants_test.go`):
+  `TestIncrementConnectionBytes` asserts bytes bump but query count unchanged;
+  a grants test asserts `populateGrantCounters`/`GetActiveGrant` recompute picks
+  up bytes flushed this way (the core reconnect-bypass scenario).
+
+### PostgreSQL (`internal/proxy/postgresql/session.go` + `intercept.go`)
+- `abortStream(cause)` (called from `enforceStreamLimits`) gains a final
+  `s.persistAbortedQuery(cause)` after the error frame is written.
+- New `persistAbortedQuery`: `query := getCurrentPendingQuery()`; snapshot
+  `bytesFromClient+bytesToClient - lastBytesSnapshot`, advance `lastBytesSnapshot`,
+  skip if `<= 0`. Promote the in-flight query to `s.currentQuery` (Extended Query
+  Protocol leaves it in the pending queue) and call
+  `logQuery(nil, &"aborted: <cause>", delta)` — logs a failed query row +
+  `IncrementConnectionStats` + in-memory grant bump.
+- `logQuery` gains a `s.store != nil && s.connectionUID != uuid.Nil` guard around
+  its async store write (keeps the in-memory grant update always; prevents nil
+  panics on the abort path when no connection record exists).
+- No double-count: `enforceStreamLimits` returns early when
+  `getCurrentPendingQuery() == nil`, so a normally-completed query (currentQuery
+  nil after `ReadyForQuery`) never hits the abort path; the relay returns right
+  after abort so the real `ReadyForQuery` is never processed.
+- Test: extend `TestSession_ProxyUpstreamToClient_ByteLimitAbort` to assert
+  `grant.BytesTransferred >= maxBytes` and `lastBytesSnapshot` advanced after the
+  mid-stream abort (store nil → in-memory attribution).
+
+### Oracle (`internal/proxy/oracle/session.go`)
+- In `upstreamToClient`'s abort branch (`if s.tracker.pendingQuery != nil` →
+  `guard.Check()` trips), after `writeTTCError`, call
+  `s.completeQuery(nil, &"aborted: <cause>")` before `return verr`.
+  `completeQuery` already diffs `cumulativeClientBytes - lastBytesSnapshot`,
+  persists (create + `IncrementConnectionStats`, guarded by `s.store != nil`),
+  bumps the in-memory grant, and nils `pendingQuery` (no double-count).
+- Test: extend `TestUpstreamToClient_ByteLimitAbort` to assert
+  `grant.BytesTransferred > 0` after the abort.
+
+### MySQL (`internal/proxy/mysql/session.go` + `intercept.go`)
+- The result is buffered and written to the client only after `Execute`/
+  `recordQuery`; on a mid-`Execute` teardown the last query's trailing response
+  (and any aborted-request) client bytes are never persisted. `recordDisconnect`
+  now flushes them: `delta := cumulativeClientBytes() - lastBytesSnapshot`; when
+  `> 0`, `IncrementConnectionBytes(connection.UID, delta)` (bytes only — no
+  spurious query row/count). Replaces the "out of scope" comment.
+- No double-count: `recordQuery` keeps `lastBytesSnapshot` current for every
+  recorded query, so the teardown delta excludes already-persisted bytes.
+- Test: PG-store-container-backed `TestRecordDisconnect_FlushesUnrecordedBytes`
+  — connection with a stale `lastBytesSnapshot`, call `recordDisconnect`, assert
+  `bytes_transferred` grew by the delta and `queries` unchanged.
