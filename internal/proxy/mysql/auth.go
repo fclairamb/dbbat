@@ -6,11 +6,13 @@ import (
 	"crypto/tls"
 	"log/slog"
 	"strings"
+	"time"
 
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	gomysqlserver "github.com/go-mysql-org/go-mysql/server"
 
 	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -207,6 +209,10 @@ func (h *dbbatAuthHandler) OnAuthSuccess(_ *gomysqlserver.Conn) error {
 		return err
 	}
 
+	// Build the limit guard now that the grant is known. The command loop's
+	// watchdog (started in Run) uses it to terminate the session mid-query.
+	s.guard = shared.NewLimitGuard(grant, s.bytesFromClient, s.bytesToClient)
+
 	s.authComplete = true
 
 	return nil
@@ -218,8 +224,15 @@ func (h *dbbatAuthHandler) OnAuthFailure(c *gomysqlserver.Conn, err error) {
 		slog.Any("error", err))
 }
 
-// checkQuotas verifies the grant's count/byte quotas have not been exceeded.
+// checkQuotas verifies the grant's count/byte quotas have not been exceeded. It
+// also enforces the grant's expiry between commands: expiry is otherwise only
+// validated at connect time, so without this a session opened just before
+// expiry could keep issuing queries indefinitely.
 func checkQuotas(grant *store.Grant) error {
+	if !grant.ExpiresAt.IsZero() && !time.Now().Before(grant.ExpiresAt) {
+		return shared.ErrGrantExpired
+	}
+
 	if grant.MaxQueryCounts != nil && grant.QueryCount >= *grant.MaxQueryCounts {
 		return ErrQueryLimitExceeded
 	}

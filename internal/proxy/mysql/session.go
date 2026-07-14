@@ -56,6 +56,12 @@ type Session struct {
 	// of the previous recorded query. The first query absorbs the
 	// handshake/auth bytes, which is the right place for them.
 	lastBytesSnapshot int64
+
+	// guard enforces the grant's time-window and bandwidth limits. The
+	// go-mysql library owns the wire and buffers whole results, so mid-stream
+	// enforcement runs entirely through the watchdog (onLimitViolation), which
+	// force-closes both conns.
+	guard *shared.LimitGuard
 }
 
 // cumulativeClientBytes returns the running total of bytes exchanged with
@@ -118,6 +124,39 @@ func (s *Session) Run() error {
 
 	s.startDumpIfConfigured()
 	defer s.closeDump()
+
+	// Run a watchdog that tears the session down the moment a time/bandwidth
+	// limit is crossed. The go-mysql library owns the wire and buffers whole
+	// results, so there is no message boundary at which to inject a clean error
+	// frame — force-closing the conns is the enforcement mechanism. Closing the
+	// upstream unblocks a long-running Execute (the go-mysql client aborts its
+	// result read and returns an error, surfaced to the client as an ERR
+	// packet); closing the client ends the command loop.
+	//
+	// The conn references are captured into locals so the watchdog goroutine
+	// never reads the mutable s.upstreamConn field (closeUpstream nils it),
+	// keeping the teardown race-free. Cancelled when the command loop exits so
+	// no goroutine leaks. net.Conn.Close is safe to call concurrently with a
+	// blocked Read/Write and safe to call twice (the deferred closeUpstream
+	// closes the same conn).
+	watchCtx, cancelWatch := context.WithCancel(s.ctx)
+	defer cancelWatch()
+
+	upstreamConn := s.upstreamConn
+	clientConn := s.clientConn
+
+	go s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
+		s.logger.WarnContext(s.ctx, "terminating MySQL session: grant limit reached mid-stream",
+			slog.Any("error", err))
+
+		if upstreamConn != nil {
+			_ = upstreamConn.Close()
+		}
+
+		if clientConn != nil {
+			_ = clientConn.Close()
+		}
+	})
 
 	s.logger.InfoContext(s.ctx, "MySQL session ready",
 		slog.String("user", s.user.Username),
