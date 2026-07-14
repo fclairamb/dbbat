@@ -18,19 +18,31 @@ import (
 // briefly before the connection is torn down (contract §5).
 const authFailDelay = 250 * time.Millisecond
 
-// handleSaslStart performs the server side of SASL PLAIN (contract §5): parse
-// the RFC 4616 payload, verify the credential (Argon2id or dbb_ API key),
-// resolve the target database + grant, register revocation, build the limit
-// guard, dial the upstream, and record the connection.
+// handleSaslStart dispatches a saslStart on its mechanism (contract §5): PLAIN
+// (cleartext over TLS, verified against the Argon2id hash / dbb_ API key) or
+// SCRAM-SHA-256 (item 1, verified against the user's stored verifier). The
+// authSource carrying the dbbat database selector is captured for both paths.
 //
-// Returns done=true only on full success.
+// Returns done=true only once a mechanism has fully authenticated the session.
 func (s *Session) handleSaslStart(responseTo int32, body bson.Raw) (bool, error) {
-	if mech := lookupString(body, "mechanism"); mech != "PLAIN" {
+	s.authSource = lookupString(body, "$db")
+
+	switch mech := lookupString(body, "mechanism"); mech {
+	case "PLAIN":
+		return s.handlePlainStart(responseTo, body)
+	case "SCRAM-SHA-256":
+		return s.handleScramStart(responseTo, body)
+	default:
 		s.logger.InfoContext(s.ctx, "MongoDB unsupported SASL mechanism", "mechanism", mech)
 
 		return false, s.failAuth(responseTo)
 	}
+}
 
+// handlePlainStart performs the server side of SASL PLAIN: parse the RFC 4616
+// payload, verify the credential (Argon2id or dbb_ API key), then authorize and
+// establish the session. PLAIN is single-step, so a success reply completes it.
+func (s *Session) handlePlainStart(responseTo int32, body bson.Raw) (bool, error) {
 	// PLAIN must run over TLS, unless the operator disabled TLS entirely on
 	// this listener (server.tlsConfig == nil) — then plaintext is a choice.
 	if s.server.tlsConfig != nil && !s.tlsActive {
@@ -46,8 +58,6 @@ func (s *Session) handleSaslStart(responseTo int32, body bson.Raw) (bool, error)
 		return false, s.failAuth(responseTo)
 	}
 
-	s.authSource = lookupString(body, "$db")
-
 	// A username may carry a "user#database" hint (resolution order #2).
 	bareUser, userDBHint := splitUserDBHint(rawUser)
 
@@ -56,16 +66,36 @@ func (s *Session) handleSaslStart(responseTo int32, body bson.Raw) (bool, error)
 		return false, s.failAuth(responseTo)
 	}
 
+	if err := s.authorizeAndEstablish(responseTo, user, userDBHint); err != nil {
+		return false, err
+	}
+
+	// SASL PLAIN is single-step: reply done:true with an empty payload.
+	reply := bson.D{
+		{Key: "conversationId", Value: int32(1)},
+		{Key: "done", Value: true},
+		{Key: "payload", Value: bson.Binary{Subtype: 0, Data: []byte{}}},
+		{Key: "ok", Value: 1.0},
+	}
+
+	return true, s.replyOpMsg(responseTo, reply)
+}
+
+// authorizeAndEstablish resolves the target database + grant for an
+// authenticated user, checks quotas, and establishes the session (upstream dial
+// + connection record). Shared by the PLAIN and SCRAM auth paths. On any
+// failure it sends the client an error reply and returns the error.
+func (s *Session) authorizeAndEstablish(responseTo int32, user *store.User, userDBHint string) error {
 	s.user = user
 
 	db, err := s.resolveDatabase(user, userDBHint)
 	if err != nil {
 		s.logger.InfoContext(s.ctx, "MongoDB database resolution failed",
-			"user", bareUser, "auth_source", s.authSource, "error", err)
+			"user", user.Username, "auth_source", s.authSource, "error", err)
 		_ = s.replyOpMsg(responseTo, errorDoc(codeAuthenticationFailed, codeNameAuthenticationFailed, err.Error()))
 		time.Sleep(authFailDelay)
 
-		return false, err
+		return err
 	}
 
 	s.database = db
@@ -75,7 +105,7 @@ func (s *Session) handleSaslStart(responseTo int32, body bson.Raw) (bool, error)
 		_ = s.replyOpMsg(responseTo, errorDoc(codeAuthenticationFailed, codeNameAuthenticationFailed, ErrNoActiveGrant.Error()))
 		time.Sleep(authFailDelay)
 
-		return false, ErrNoActiveGrant
+		return ErrNoActiveGrant
 	}
 
 	s.grant = grant
@@ -84,19 +114,17 @@ func (s *Session) handleSaslStart(responseTo int32, body bson.Raw) (bool, error)
 		_ = s.replyOpMsg(responseTo, errorDoc(codeAuthenticationFailed, codeNameAuthenticationFailed, err.Error()))
 		time.Sleep(authFailDelay)
 
-		return false, err
+		return err
 	}
 
-	if err := s.completeAuth(responseTo, grant); err != nil {
-		return false, err
-	}
-
-	return true, nil
+	return s.establishSession(responseTo, grant)
 }
 
-// completeAuth wires up the authenticated session: revocation registration,
-// limit guard, upstream dial, connection record, and the success reply.
-func (s *Session) completeAuth(responseTo int32, grant *store.Grant) error {
+// establishSession wires up the authenticated session: revocation registration,
+// limit guard, upstream dial and connection record. The mechanism-specific
+// success reply is sent by the caller. On upstream-dial failure it sends an
+// error reply and returns the error.
+func (s *Session) establishSession(responseTo int32, grant *store.Grant) error {
 	// Register the live session so an admin revoke can signal it.
 	s.revocation = s.server.store.Revocations().Register(grant.UID)
 	s.guard = shared.NewLimitGuard(grant, s.bytesFromClient, s.bytesToClient).
@@ -118,15 +146,7 @@ func (s *Session) completeAuth(responseTo int32, grant *store.Grant) error {
 
 	s.authenticated = true
 
-	// SASL PLAIN is single-step: reply done:true with an empty payload.
-	reply := bson.D{
-		{Key: "conversationId", Value: int32(1)},
-		{Key: "done", Value: true},
-		{Key: "payload", Value: bson.Binary{Subtype: 0, Data: []byte{}}},
-		{Key: "ok", Value: 1.0},
-	}
-
-	return s.replyOpMsg(responseTo, reply)
+	return nil
 }
 
 // failAuth sends the standard authentication-failure reply, then holds briefly

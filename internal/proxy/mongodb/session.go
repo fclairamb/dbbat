@@ -14,6 +14,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/xdg-go/scram"
+
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
@@ -54,6 +56,13 @@ type Session struct {
 	// authSource is the SASL authSource the client used; forwarded to the
 	// upstream SCRAM exchange as $db (contract §5).
 	authSource string
+
+	// SCRAM-SHA-256 client-side auth state (item 1): the in-progress server
+	// conversation and the dbbat user resolved by its credential lookup, carried
+	// across the saslStart → saslContinue exchange.
+	scramConv       *scram.ServerConversation
+	scramUser       *store.User
+	scramUserDBHint string
 
 	// upstream is the authenticated connection to the target MongoDB.
 	upstream *upstreamConn
@@ -267,7 +276,13 @@ func (s *Session) dispatchPreAuthOpMsg(m *message) (bool, error) {
 	case "saslStart":
 		return s.handleSaslStart(m.requestID, body)
 	case "saslContinue":
-		// PLAIN is single-step; a stray saslContinue is an auth failure.
+		// SCRAM-SHA-256 is multi-step; route to its continue handler when a
+		// conversation is in flight. PLAIN is single-step, so an otherwise stray
+		// saslContinue is an auth failure.
+		if s.scramConv != nil {
+			return s.handleScramContinue(m.requestID, body)
+		}
+
 		return false, s.failAuth(m.requestID)
 	default:
 		return false, s.replyOpMsg(m.requestID, unauthorizedDoc(ErrPreAuthNotAllowed.Error()))

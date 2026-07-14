@@ -96,8 +96,8 @@ func (s *Session) supportedMechsFor(probe string) bson.A {
 }
 
 // userHasMongoVerifier reports whether the named dbbat user has a stored
-// MongoDB SCRAM-SHA-256 verifier (set on a password change after the feature
-// shipped). Implemented in scram_server.go.
+// MongoDB SCRAM-SHA-256 verifier (populated on a password change after the
+// feature shipped) — driving whether hello advertises SCRAM-SHA-256.
 func (s *Session) userHasMongoVerifier(username string) bool {
 	user, err := s.server.store.GetUserByUsername(s.ctx, username)
 	if err != nil {
