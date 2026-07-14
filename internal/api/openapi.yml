@@ -2,7 +2,7 @@ openapi: 3.0.3
 info:
   title: DBBat API
   description: |
-    REST API for DBBat PostgreSQL Observability Proxy.
+    REST API for DBBat Database Observability Proxy.
 
     DBBat is a transparent PostgreSQL proxy for query observability, access control, and safety.
 

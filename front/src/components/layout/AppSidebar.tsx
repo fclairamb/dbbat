@@ -120,7 +120,7 @@ export function AppSidebar() {
           <div className="flex flex-col">
             <span className="font-semibold text-lg text-primary">DBBat</span>
             <span className="text-xs text-muted-foreground">
-              PostgreSQL Proxy
+              Every query, tracked
             </span>
           </div>
         </div>
