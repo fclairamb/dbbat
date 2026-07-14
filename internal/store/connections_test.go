@@ -278,6 +278,67 @@ func TestIncrementConnectionStats(t *testing.T) {
 	})
 }
 
+func TestIncrementConnectionBytes(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "bytesonly")
+
+	conn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.2")
+	if err != nil {
+		t.Fatalf("CreateConnection() error = %v", err)
+	}
+
+	findConn := func() *Connection {
+		conns, err := store.ListConnections(ctx, ConnectionFilter{UserID: &user.UID})
+		if err != nil {
+			t.Fatalf("ListConnections() error = %v", err)
+		}
+		for i := range conns {
+			if conns[i].UID == conn.UID {
+				return &conns[i]
+			}
+		}
+		t.Fatal("connection not found")
+		return nil
+	}
+
+	t.Run("adds bytes without bumping query count", func(t *testing.T) {
+		if err := store.IncrementConnectionBytes(ctx, conn.UID, 4096); err != nil {
+			t.Fatalf("IncrementConnectionBytes() error = %v", err)
+		}
+
+		found := findConn()
+		if found.BytesTransferred != 4096 {
+			t.Errorf("conn.BytesTransferred = %d, want 4096", found.BytesTransferred)
+		}
+		if found.Queries != 0 {
+			t.Errorf("conn.Queries = %d, want 0 (bytes-only increment must not bump query count)", found.Queries)
+		}
+	})
+
+	t.Run("accumulates and coexists with IncrementConnectionStats", func(t *testing.T) {
+		// A completed query bumps both counters...
+		if err := store.IncrementConnectionStats(ctx, conn.UID, 1000); err != nil {
+			t.Fatalf("IncrementConnectionStats() error = %v", err)
+		}
+		// ...then an aborted-query byte flush adds bytes only.
+		if err := store.IncrementConnectionBytes(ctx, conn.UID, 500); err != nil {
+			t.Fatalf("IncrementConnectionBytes() error = %v", err)
+		}
+
+		found := findConn()
+		// 4096 + 1000 + 500
+		if found.BytesTransferred != 5596 {
+			t.Errorf("conn.BytesTransferred = %d, want 5596", found.BytesTransferred)
+		}
+		// Only the IncrementConnectionStats call bumps queries.
+		if found.Queries != 1 {
+			t.Errorf("conn.Queries = %d, want 1", found.Queries)
+		}
+	})
+}
+
 func TestExtractSourceIP(t *testing.T) {
 	tests := []struct {
 		name     string

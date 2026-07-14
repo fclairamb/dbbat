@@ -84,6 +84,26 @@ func (s *Store) IncrementConnectionStats(ctx context.Context, uid uuid.UUID, byt
 	return nil
 }
 
+// IncrementConnectionBytes adds bytes to bytes_transferred WITHOUT bumping the
+// query count. Used to flush client-side bytes that are not attributable to a
+// completed query log row — e.g. a query aborted mid-stream by a grant limit
+// (whose response never reached the normal completion path) or the trailing
+// response bytes of the last query, written after per-query bookkeeping ran.
+// Persisting them keeps the grant's recomputed bytes_transferred honest across
+// reconnects instead of undercounting.
+func (s *Store) IncrementConnectionBytes(ctx context.Context, uid uuid.UUID, bytes int64) error {
+	_, err := s.db.NewUpdate().
+		Model((*Connection)(nil)).
+		Where("uid = ?", uid).
+		Set("bytes_transferred = bytes_transferred + ?", bytes).
+		Set("last_activity_at = ?", time.Now()).
+		Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to increment connection bytes: %w", err)
+	}
+	return nil
+}
+
 // ListConnections retrieves connections with optional filters
 func (s *Store) ListConnections(ctx context.Context, filter ConnectionFilter) ([]Connection, error) {
 	var connections []Connection
