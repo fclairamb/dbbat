@@ -98,14 +98,44 @@ function SettingsPage() {
   );
 }
 
+interface ListenerRow {
+  protocol: string;
+  address: string;
+}
+
+function ListenerTable({ rows }: { rows: ListenerRow[] }) {
+  return (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Protocol</TableHead>
+          <TableHead>Bound address</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {rows.map((row) => (
+          <TableRow key={row.protocol}>
+            <TableCell>{row.protocol}</TableCell>
+            <TableCell className="font-mono text-sm">
+              {row.address || <span className="text-muted-foreground italic">disabled</span>}
+            </TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+}
+
 function LocalListenersSection() {
   const { data: instance } = useInstance();
 
-  const rows = [
+  const httpRows: ListenerRow[] = [
+    { protocol: "API / Web UI", address: instance?.listen.api ?? "" },
+  ];
+  const tcpRows: ListenerRow[] = [
     { protocol: "PostgreSQL", address: instance?.listen.pg ?? "" },
     { protocol: "Oracle", address: instance?.listen.ora ?? "" },
     { protocol: "MySQL", address: instance?.listen.mysql ?? "" },
-    { protocol: "API", address: instance?.listen.api ?? "" },
   ];
 
   return (
@@ -113,30 +143,32 @@ function LocalListenersSection() {
       <CardHeader>
         <CardTitle>Local listeners</CardTitle>
         <CardDescription>
-          These are the addresses the server is bound to. Change them via{" "}
-          <code className="text-xs">DBB_LISTEN_*</code> environment variables
-          and restart.
+          These are the addresses this server process is bound to. Change
+          them via <code className="text-xs">DBB_LISTEN_*</code> environment
+          variables and restart.
         </CardDescription>
       </CardHeader>
-      <CardContent>
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Protocol</TableHead>
-              <TableHead>Bound address</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {rows.map((row) => (
-              <TableRow key={row.protocol}>
-                <TableCell>{row.protocol}</TableCell>
-                <TableCell className="font-mono text-sm">
-                  {row.address || <span className="text-muted-foreground italic">disabled</span>}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
+      <CardContent className="space-y-6">
+        <div data-testid="http-listener-group" className="space-y-2">
+          <div>
+            <h4 className="text-sm font-medium">HTTP — API / Web UI</h4>
+            <p className="text-xs text-muted-foreground">
+              Put an HTTP reverse proxy / ingress in front of this port for
+              the browser and REST API.
+            </p>
+          </div>
+          <ListenerTable rows={httpRows} />
+        </div>
+        <div data-testid="tcp-listener-group" className="space-y-2">
+          <div>
+            <h4 className="text-sm font-medium">TCP — SQL proxies</h4>
+            <p className="text-xs text-muted-foreground">
+              Put a TCP load balancer in front of these ports for SQL
+              clients connecting through dbbat.
+            </p>
+          </div>
+          <ListenerTable rows={tcpRows} />
+        </div>
       </CardContent>
     </Card>
   );
@@ -175,6 +207,7 @@ function PublicAdvertisementForm({
     onError: (e) => toast.error(e.message),
   });
 
+  const [webUIURL, setWebUIURL] = useState(pub?.web_ui_url ?? "");
   const [host, setHost] = useState(pub?.host ?? "");
   const [pgHostOverride, setPgHostOverride] = useState(pub?.pg_host ?? "");
   const [pgPortOverride, setPgPortOverride] = useState(
@@ -207,82 +240,115 @@ function PublicAdvertisementForm({
       ora_port: oraOverrideEnabled && oraPortOverride ? parseInt(oraPortOverride, 10) : null,
       mysql_host: mysqlOverrideEnabled ? mysqlHostOverride : "",
       mysql_port: mysqlOverrideEnabled && mysqlPortOverride ? parseInt(mysqlPortOverride, 10) : null,
+      web_ui_url: webUIURL,
     };
     updatePublic.mutate(body);
   };
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Public advertisement</CardTitle>
-        <CardDescription>
-          Configure the host and ports that clients should use to connect
-          through the proxy.
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-6">
-        <div className="space-y-2">
-          <Label htmlFor="public-host">Default public host</Label>
-          <Input
-            id="public-host"
-            data-testid="public-host-input"
-            placeholder="e.g. dbbat.example.com"
-            value={host}
-            onChange={(e) => setHost(e.target.value)}
+    <div className="space-y-6">
+      <Card data-testid="web-ui-host-section">
+        <CardHeader>
+          <CardTitle>Web UI host</CardTitle>
+          <CardDescription>
+            Where the browser and REST API are reached, behind an HTTP
+            ingress / reverse proxy — e.g.{" "}
+            <code className="text-xs">https://dbbat.company.com</code>. Falls
+            back to the <code className="text-xs">DBB_PUBLIC_URL</code>{" "}
+            environment variable when unset. Used for Slack deep-links and
+            other absolute links dbbat generates. Distinct from the
+            connection host below — these are two separate network paths.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="space-y-2">
+            <Label htmlFor="web-ui-url">Web UI host / public base URL</Label>
+            <Input
+              id="web-ui-url"
+              data-testid="public-web-ui-url-input"
+              placeholder="e.g. https://dbbat.company.com"
+              value={webUIURL}
+              onChange={(e) => setWebUIURL(e.target.value)}
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card data-testid="connection-host-section">
+        <CardHeader>
+          <CardTitle>Connection host</CardTitle>
+          <CardDescription>
+            Where SQL clients connect to the PostgreSQL / Oracle / MySQL
+            proxies, via direct access or a TCP load balancer — e.g.{" "}
+            <code className="text-xs">db.company.com</code>. Configure the
+            host and ports that clients should use to connect through the
+            proxy. Distinct from the Web UI host above.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-6">
+          <div className="space-y-2">
+            <Label htmlFor="public-host">Default connection host</Label>
+            <Input
+              id="public-host"
+              data-testid="public-host-input"
+              placeholder="e.g. db.company.com"
+              value={host}
+              onChange={(e) => setHost(e.target.value)}
+            />
+          </div>
+
+          <ProtocolOverrideRow
+            protocol="PostgreSQL"
+            listenAddr={listen?.pg}
+            defaultHost={host}
+            enabled={pgOverrideEnabled}
+            onEnabledChange={setPgOverrideEnabled}
+            hostValue={pgHostOverride}
+            onHostChange={setPgHostOverride}
+            portValue={pgPortOverride}
+            onPortChange={setPgPortOverride}
+            hostTestId="public-pg-host-input"
+            portTestId="public-pg-port-input"
           />
-        </div>
 
-        <ProtocolOverrideRow
-          protocol="PostgreSQL"
-          listenAddr={listen?.pg}
-          defaultHost={host}
-          enabled={pgOverrideEnabled}
-          onEnabledChange={setPgOverrideEnabled}
-          hostValue={pgHostOverride}
-          onHostChange={setPgHostOverride}
-          portValue={pgPortOverride}
-          onPortChange={setPgPortOverride}
-          hostTestId="public-pg-host-input"
-          portTestId="public-pg-port-input"
-        />
+          <ProtocolOverrideRow
+            protocol="Oracle"
+            listenAddr={listen?.ora}
+            defaultHost={host}
+            enabled={oraOverrideEnabled}
+            onEnabledChange={setOraOverrideEnabled}
+            hostValue={oraHostOverride}
+            onHostChange={setOraHostOverride}
+            portValue={oraPortOverride}
+            onPortChange={setOraPortOverride}
+            hostTestId="public-ora-host-input"
+            portTestId="public-ora-port-input"
+          />
 
-        <ProtocolOverrideRow
-          protocol="Oracle"
-          listenAddr={listen?.ora}
-          defaultHost={host}
-          enabled={oraOverrideEnabled}
-          onEnabledChange={setOraOverrideEnabled}
-          hostValue={oraHostOverride}
-          onHostChange={setOraHostOverride}
-          portValue={oraPortOverride}
-          onPortChange={setOraPortOverride}
-          hostTestId="public-ora-host-input"
-          portTestId="public-ora-port-input"
-        />
+          <ProtocolOverrideRow
+            protocol="MySQL"
+            listenAddr={listen?.mysql}
+            defaultHost={host}
+            enabled={mysqlOverrideEnabled}
+            onEnabledChange={setMysqlOverrideEnabled}
+            hostValue={mysqlHostOverride}
+            onHostChange={setMysqlHostOverride}
+            portValue={mysqlPortOverride}
+            onPortChange={setMysqlPortOverride}
+            hostTestId="public-mysql-host-input"
+            portTestId="public-mysql-port-input"
+          />
+        </CardContent>
+      </Card>
 
-        <ProtocolOverrideRow
-          protocol="MySQL"
-          listenAddr={listen?.mysql}
-          defaultHost={host}
-          enabled={mysqlOverrideEnabled}
-          onEnabledChange={setMysqlOverrideEnabled}
-          hostValue={mysqlHostOverride}
-          onHostChange={setMysqlHostOverride}
-          portValue={mysqlPortOverride}
-          onPortChange={setMysqlPortOverride}
-          hostTestId="public-mysql-host-input"
-          portTestId="public-mysql-port-input"
-        />
-
-        <Button
-          data-testid="save-public-settings-btn"
-          onClick={handleSave}
-          disabled={updatePublic.isPending}
-        >
-          {updatePublic.isPending ? "Saving…" : "Save"}
-        </Button>
-      </CardContent>
-    </Card>
+      <Button
+        data-testid="save-public-settings-btn"
+        onClick={handleSave}
+        disabled={updatePublic.isPending}
+      >
+        {updatePublic.isPending ? "Saving…" : "Save"}
+      </Button>
+    </div>
   );
 }
 
