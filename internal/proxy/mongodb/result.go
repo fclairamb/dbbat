@@ -60,6 +60,104 @@ func (s *Session) captureResult(m *message) {
 	s.recordQuery(pq, rows, rowsAffected, queryError)
 }
 
+// bytesPerMB is used to recompute listDatabases' totalSizeMb after filtering.
+const bytesPerMB = 1024 * 1024
+
+// filterListDatabasesReply rewrites a listDatabases reply so its databases
+// array lists only the session's grant target (item 5), recomputing totalSize /
+// totalSizeMb. It returns (rewritten, true) on success; (nil, false) when the
+// reply isn't a filterable listDatabases result (e.g. an error reply), so the
+// caller relays the original verbatim.
+func (s *Session) filterListDatabasesReply(m *message) ([]byte, bool) {
+	parsed, err := parseOpMsg(m.body)
+	if err != nil {
+		return nil, false
+	}
+
+	body, ok := parsed.commandBody()
+	if !ok {
+		return nil, false
+	}
+
+	arr, ok := body.Lookup("databases").ArrayOK()
+	if !ok {
+		return nil, false
+	}
+
+	values, err := arr.Values()
+	if err != nil {
+		return nil, false
+	}
+
+	allowed := s.database.DatabaseName
+
+	var (
+		kept      bson.A
+		totalSize int64
+	)
+
+	for _, v := range values {
+		doc, ok := v.DocumentOK()
+		if !ok {
+			continue
+		}
+
+		if lookupString(doc, "name") != allowed {
+			continue
+		}
+
+		kept = append(kept, doc)
+
+		if sz, ok := lookupInt64(doc, "sizeOnDisk"); ok {
+			totalSize += sz
+		}
+	}
+
+	rebuilt := rewriteDatabasesField(body, kept, totalSize)
+
+	raw, err := buildOpMsgReply(m.requestID, m.responseTo, rebuilt)
+	if err != nil {
+		return nil, false
+	}
+
+	return raw, true
+}
+
+// rewriteDatabasesField rebuilds a listDatabases body preserving field order and
+// every other field (ok, etc.), substituting the filtered databases array and
+// the recomputed totalSize / totalSizeMb.
+func rewriteDatabasesField(body bson.Raw, databases bson.A, totalSize int64) bson.D {
+	if databases == nil {
+		databases = bson.A{}
+	}
+
+	elems, err := body.Elements()
+	if err != nil {
+		return bson.D{
+			{Key: "databases", Value: databases},
+			{Key: "totalSize", Value: float64(totalSize)},
+			{Key: "ok", Value: 1.0},
+		}
+	}
+
+	out := make(bson.D, 0, len(elems))
+
+	for _, e := range elems {
+		switch e.Key() {
+		case "databases":
+			out = append(out, bson.E{Key: "databases", Value: databases})
+		case "totalSize":
+			out = append(out, bson.E{Key: "totalSize", Value: float64(totalSize)})
+		case "totalSizeMb":
+			out = append(out, bson.E{Key: "totalSizeMb", Value: float64(totalSize) / bytesPerMB})
+		default:
+			out = append(out, bson.E{Key: e.Key(), Value: e.Value()})
+		}
+	}
+
+	return out
+}
+
 // rowsAffectedFrom extracts the write result count from a reply, preferring
 // nModified (updates) over n (inserts/deletes).
 func rowsAffectedFrom(body bson.Raw) *int64 {

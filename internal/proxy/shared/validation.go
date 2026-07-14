@@ -273,8 +273,10 @@ func ValidateMongoCommand(cmd, dbName string, body bson.Raw, db *store.Database,
 	case classBlocked:
 		return ErrMongoCommandBlocked
 	case classListDatabases:
-		// Cluster-wide disclosure — denied by default.
-		return ErrMongoDatabaseBlocked
+		// Allowed, but the MongoDB proxy filters the reply's databases array down
+		// to the grant's target database (result.go), so no cluster-wide
+		// disclosure leaks. Runs against admin, so skip the $db policy below.
+		return nil
 	case classUnknown:
 		// Default-deny so the allowlist is extended from real logs, never
 		// silently punching a hole in read_only.

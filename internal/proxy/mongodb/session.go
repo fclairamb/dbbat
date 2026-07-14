@@ -342,7 +342,9 @@ func (s *Session) relay() error {
 }
 
 // pumpUpstreamToClient relays upstream replies to the client. Result capture
-// (phase 3) correlates each reply to its originating query via responseTo.
+// (phase 3) correlates each reply to its originating query via responseTo. A
+// listDatabases reply is rewritten to the grant's database before relay
+// (item 5) so no cluster-wide database list leaks.
 func (s *Session) pumpUpstreamToClient() error {
 	for {
 		m, err := readMessage(s.upstream.reader)
@@ -350,10 +352,17 @@ func (s *Session) pumpUpstreamToClient() error {
 			return err
 		}
 
-		s.captureResult(m)
-		s.dumpPacket(dump.DirServerToClient, m.raw)
+		outRaw := m.raw
+		if s.pendingCommand(m.responseTo) == "listDatabases" {
+			if rewritten, ok := s.filterListDatabasesReply(m); ok {
+				outRaw = rewritten
+			}
+		}
 
-		if err := s.writeClient(m.raw); err != nil {
+		s.captureResult(m)
+		s.dumpPacket(dump.DirServerToClient, outRaw)
+
+		if err := s.writeClient(outRaw); err != nil {
 			return err
 		}
 	}

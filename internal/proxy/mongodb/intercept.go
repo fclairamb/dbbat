@@ -157,3 +157,16 @@ func (s *Session) takePending(responseTo int32) *pendingQuery {
 
 	return pq
 }
+
+// pendingCommand returns the command name of the in-flight query for responseTo
+// without removing it (a peek), or "" if none is registered.
+func (s *Session) pendingCommand(responseTo int32) string {
+	s.pendingMu.Lock()
+	defer s.pendingMu.Unlock()
+
+	if pq, ok := s.pending[responseTo]; ok {
+		return pq.command
+	}
+
+	return ""
+}
