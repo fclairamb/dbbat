@@ -75,7 +75,7 @@ func (s *Server) logSlackInteractivityTransport() {
 		"slack interactivity: inbound HTTP transport only — POST /api/v1/slack/interactions must be reachable"+
 			" from Slack's servers (not just users' browsers), or Approve/Deny clicks will time out after 3s;"+
 			" on gated/intranet deployments set DBB_SLACK_NOTIFY_APP_TOKEN to receive clicks over Socket Mode instead",
-		slog.String("endpoint", s.publicURLForMessage()+"/api/v1/slack/interactions"),
+		slog.String("endpoint", s.publicURLForMessage(context.Background())+"/api/v1/slack/interactions"),
 	)
 }
 
@@ -253,7 +253,7 @@ func (s *Server) processSlackDecision(
 	user, err := decider.userBySlackID(ctx, slackUserID)
 	if err != nil {
 		if errors.Is(err, store.ErrUserNotFound) || errors.Is(err, store.ErrIdentityNotFound) {
-			s.postEphemeral(ctx, responseURL, fmt.Sprintf(msgNotLinked, s.publicURLForMessage()))
+			s.postEphemeral(ctx, responseURL, fmt.Sprintf(msgNotLinked, s.publicURLForMessage(ctx)))
 
 			return
 		}
@@ -335,9 +335,17 @@ func (s *Server) postEphemeral(ctx context.Context, responseURL, text string) {
 	}
 }
 
-// publicURLForMessage returns the configured public URL for user-facing
-// copy, falling back to a generic hint if unset.
-func (s *Server) publicURLForMessage() string {
+// publicURLForMessage returns the effective Web UI / public URL for
+// user-facing copy: the live public.web_ui_url global parameter when set
+// (so an admin-edited value takes effect without a restart), falling back
+// to the configured DBB_PUBLIC_URL env var, then a generic hint.
+func (s *Server) publicURLForMessage(ctx context.Context) string {
+	if s.store != nil {
+		if url := s.store.ResolveWebUIURL(ctx, s.config); url != "" {
+			return url
+		}
+	}
+
 	if s.config != nil && s.config.PublicURL != "" {
 		return s.config.PublicURL
 	}

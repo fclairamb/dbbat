@@ -99,6 +99,9 @@ type instancePublicInfo struct {
 	PGPort    *int   `json:"pg_port"`
 	OraPort   *int   `json:"ora_port"`
 	MySQLPort *int   `json:"mysql_port"`
+	// WebUIURL is the raw operator-configured Web UI / public base URL
+	// override (empty = falling back to DBB_PUBLIC_URL).
+	WebUIURL string `json:"web_ui_url"`
 }
 
 // instanceResolvedInfo holds the resolved effective connection values.
@@ -109,6 +112,9 @@ type instanceResolvedInfo struct {
 	OraPort   int    `json:"ora_port"`
 	MySQLHost string `json:"mysql_host"`
 	MySQLPort int    `json:"mysql_port"`
+	// WebUIURL is the effective Web UI / public base URL (public.web_ui_url
+	// parameter, falling back to DBB_PUBLIC_URL).
+	WebUIURL string `json:"web_ui_url"`
 }
 
 // instanceInfoResponse is the full GET /instance response.
@@ -157,6 +163,7 @@ func (s *Server) handleGetInstance(c *gin.Context) {
 			OraPort:   resolved.OraPort,
 			MySQLHost: resolved.MySQLHost,
 			MySQLPort: resolved.MySQLPort,
+			WebUIURL:  resolved.WebUIURL,
 		},
 	}
 
@@ -169,6 +176,7 @@ func (s *Server) handleGetInstance(c *gin.Context) {
 			PGPort:    pe.PGPort,
 			OraPort:   pe.OraPort,
 			MySQLPort: pe.MySQLPort,
+			WebUIURL:  pe.WebUIURL,
 		}
 	}
 
@@ -184,6 +192,11 @@ type updateInstancePublicRequest struct {
 	PGPort    *int   `json:"pg_port"`
 	OraPort   *int   `json:"ora_port"`
 	MySQLPort *int   `json:"mysql_port"`
+	// WebUIURL sets the Web UI / public base URL override (empty leaves it
+	// unset, falling back to DBB_PUBLIC_URL). Distinct from Host: this is
+	// where the browser/API is reached (HTTP ingress), not where SQL
+	// clients connect (TCP load balancer).
+	WebUIURL string `json:"web_ui_url"`
 }
 
 // handleUpdateInstancePublic atomically upserts all public.* parameters.
@@ -202,6 +215,7 @@ func (s *Server) handleUpdateInstancePublic(c *gin.Context) {
 		PGPort:    req.PGPort,
 		OraPort:   req.OraPort,
 		MySQLPort: req.MySQLPort,
+		WebUIURL:  req.WebUIURL,
 	}
 
 	if err := s.store.SetPublicEndpoints(c.Request.Context(), pe); err != nil {
