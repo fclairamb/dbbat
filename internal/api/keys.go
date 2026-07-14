@@ -80,8 +80,14 @@ func (s *Server) handleCreateAPIKey(c *gin.Context) {
 }
 
 // handleListAPIKeys lists API keys
-// Non-admin users see only their own keys
-// Admin users see all keys (can filter by user_id query param)
+// Default for every caller (including admins): only the caller's own keys.
+// Admin-only overrides of that default:
+//   - all_users=true returns every user's keys
+//   - user_id=<uuid> returns one specific user's keys (wins over all_users if
+//     both are given)
+//
+// Non-admins can never see another user's keys: both query params are simply
+// ignored for them.
 // Web session keys are excluded from the list (they are internal)
 func (s *Server) handleListAPIKeys(c *gin.Context) {
 	currentUser := getCurrentUser(c)
@@ -91,13 +97,13 @@ func (s *Server) handleListAPIKeys(c *gin.Context) {
 	filter := store.APIKeyFilter{
 		IncludeAll: c.Query("include_all") == "true",
 		KeyType:    &apiKeyType,
+		UserID:     &currentUser.UID, // default: own keys only, for everyone
 	}
 
-	// Non-admins can only see their own keys
-	if !currentUser.IsAdmin() {
-		filter.UserID = &currentUser.UID
-	} else {
-		// Admins can filter by user_id
+	if currentUser.IsAdmin() {
+		if c.Query("all_users") == "true" {
+			filter.UserID = nil
+		}
 		if userIDStr := c.Query("user_id"); userIDStr != "" {
 			userID, err := uuid.Parse(userIDStr)
 			if err != nil {
