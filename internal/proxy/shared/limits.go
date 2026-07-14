@@ -20,6 +20,9 @@ var (
 	// ErrGrantExpired indicates the grant's expiry time passed while the
 	// session was still open.
 	ErrGrantExpired = errors.New("grant expired")
+	// ErrGrantRevoked indicates the grant backing the session was revoked
+	// (by an admin, via the API) while the connection was still live.
+	ErrGrantRevoked = errors.New("grant revoked")
 )
 
 // DefaultLimitPollInterval is how often the watchdog re-evaluates limits when
@@ -47,6 +50,13 @@ type LimitGuard struct {
 	maxBytes  *int64
 	expiresAt time.Time
 
+	// revoked, when non-nil, is the session's shared revocation flag. It is
+	// flipped to true by the API's grant-revoke path (via the store's
+	// RevocationRegistry). Checked on the data path so a revoked grant blocks
+	// the next query and the watchdog tears the live connection down. nil when
+	// there is no revocation to watch.
+	revoked *atomic.Bool
+
 	// now is the clock, injectable for deterministic tests. Defaults to
 	// time.Now.
 	now func() time.Time
@@ -67,6 +77,21 @@ func NewLimitGuard(grant *store.Grant, from, to *atomic.Int64) *LimitGuard {
 		g.maxBytes = grant.MaxBytesTransferred
 		g.expiresAt = grant.ExpiresAt
 	}
+
+	return g
+}
+
+// WithRevocation attaches the session's shared revocation flag to the guard so
+// Check/Watch also trip when the grant is revoked mid-session. Returns the
+// guard for fluent construction. A nil flag is a no-op (nothing to watch),
+// keeping the plain NewLimitGuard signature stable for callers/tests that don't
+// track revocation.
+func (g *LimitGuard) WithRevocation(revoked *atomic.Bool) *LimitGuard {
+	if g == nil {
+		return g
+	}
+
+	g.revoked = revoked
 
 	return g
 }
@@ -92,6 +117,12 @@ func (g *LimitGuard) liveBytes() int64 {
 func (g *LimitGuard) Check() error {
 	if g == nil {
 		return nil
+	}
+
+	// Revocation is the most authoritative reason to stop: an admin explicitly
+	// pulled access, so report it ahead of the incidental byte/time limits.
+	if g.revoked != nil && g.revoked.Load() {
+		return ErrGrantRevoked
 	}
 
 	if g.maxBytes != nil && g.baseBytes+g.liveBytes() >= *g.maxBytes {
@@ -120,8 +151,9 @@ func (g *LimitGuard) Watch(ctx context.Context, interval time.Duration, onViolat
 	}
 
 	// Nothing to enforce — avoid spinning a pointless ticker for the lifetime
-	// of the session.
-	if g.maxBytes == nil && g.expiresAt.IsZero() {
+	// of the session. A revocation flag is itself something to watch, so keep
+	// polling whenever one is attached even if the grant carries no limits.
+	if g.maxBytes == nil && g.expiresAt.IsZero() && g.revoked == nil {
 		return
 	}
 
