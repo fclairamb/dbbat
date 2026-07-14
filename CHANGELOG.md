@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+* **mongodb:** support driver-default SCRAM-SHA-256 client authentication via stored per-user verifiers in `users.protocol_data`, falling back to PLAIN when no verifier exists
+* **mongodb:** configurable per-database upstream `authSource` (defaults to `admin`) instead of a fixed value
+* **mongodb:** advertise a `serviceId` in `hello` for `loadBalanced=true` clients
+* **mongodb:** negotiate zlib `OP_COMPRESSED` wire compression instead of rejecting compression-enabled clients
+* **mongodb:** allow `listDatabases` and filter the reply to the grant's configured database instead of denying it outright
+* **mongodb:** link `getMore` batches back to their originating `find`/`aggregate` cursor in query logging
+
 ## [0.15.5](https://github.com/fclairamb/dbbat/compare/v0.15.4...v0.15.5) (2026-07-12)
 
 
