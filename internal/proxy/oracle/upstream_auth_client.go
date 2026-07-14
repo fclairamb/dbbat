@@ -9,6 +9,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/version"
 )
 
 // LogonMode flags from go-ora/v2/connection.go. Inlined so the upstream AUTH
@@ -19,6 +22,13 @@ const (
 )
 
 const defaultDriverName = "dbbat-oracle-proxy"
+
+// maxProgramNameLen bounds the AUTH_PROGRAM_NM value dbbat sends upstream.
+// Oracle's V$SESSION.PROGRAM column is historically VARCHAR2(48) across
+// widely-deployed versions (11g through 19c); keep to that width so the
+// dbbat-branded name isn't silently truncated by the database itself in a
+// way that could cut off the "@$username" suffix.
+const maxProgramNameLen = 48
 
 // driverIdentity holds optional process-level descriptors sent in AUTH KV
 // pairs. The values are informational; Oracle uses them for v$session.
@@ -50,6 +60,55 @@ func defaultDriverIdentity() driverIdentity {
 		OSUser:      user,
 		DriverName:  defaultDriverName,
 	}
+}
+
+// oracleDbbatUsername returns the dbbat login username for the connecting
+// client, so upstream AUTH can encode "@$username" in AUTH_PROGRAM_NM.
+//
+// It is parsed fresh from the captured AUTH Phase 1 packet via the
+// already-hardened parseAuthPhase1, rather than read from s.user: for
+// OCI/wide-encoding clients, beginUpstreamAuth runs BEFORE authenticateClient
+// resolves s.user (see Run's Step 4b driving upstream Phase 1 ahead of the
+// client's own O5LOGON exchange), so s.user may still be nil at that point.
+// Falls back to s.username (set once authenticateClient has run) if the
+// packet isn't available or doesn't parse.
+func (s *session) oracleDbbatUsername() string {
+	if s.clientAuthPhase1Pkt != nil {
+		if name, err := parseAuthPhase1(s.clientAuthPhase1Pkt.Payload); err == nil {
+			return strings.ToLower(name)
+		}
+	}
+
+	return s.username
+}
+
+// clientDeclaredProgramName extracts the client's own AUTH_PROGRAM_NM value
+// from a captured AUTH packet (Phase 1 or Phase 2 — both carry it), so it can
+// be embedded as the "$appName" suffix of the upstream-facing program name.
+// Returns "" if pkt is nil or the key isn't present.
+func clientDeclaredProgramName(pkt *TNSPacket) string {
+	if pkt == nil {
+		return ""
+	}
+
+	payload := pkt.Payload
+
+	if payloadUsesWideKVEncoding(payload) {
+		return findKVByKeyBytesWide(payload, []byte(authKeyProgramNM))
+	}
+
+	return findKVByKeyBytes(payload, []byte(authKeyProgramNM))
+}
+
+// buildUpstreamProgramName composes the canonical dbbat-branded AUTH_PROGRAM_NM
+// forwarded to the upstream: "dbbat/$version @$username", plus " for $appName"
+// when the client declared (and dbbat could intercept) its own program name.
+// See shared.BuildUpstreamName for the truncation rules.
+func (s *session) buildUpstreamProgramName() string {
+	username := s.oracleDbbatUsername()
+	appName := clientDeclaredProgramName(s.clientAuthPhase1Pkt)
+
+	return shared.BuildUpstreamName(version.Version, username, appName, maxProgramNameLen)
 }
 
 // runUpstreamClientAuth drives Oracle AUTH on the relay-phase upstream socket
@@ -85,6 +144,7 @@ func (s *session) beginUpstreamAuth() error {
 	}
 
 	identity := defaultDriverIdentity()
+	identity.ProgramName = s.buildUpstreamProgramName()
 	username := strings.ToUpper(s.database.Username)
 	mode := uint32(logonModeNoNewPass)
 
@@ -115,6 +175,7 @@ func (s *session) finishUpstreamAuth() error {
 	}
 
 	identity := defaultDriverIdentity()
+	identity.ProgramName = s.buildUpstreamProgramName()
 	username := strings.ToUpper(s.database.Username)
 	password := s.database.Password // decrypted in beginUpstreamAuth
 	mode := uint32(logonModeNoNewPass)
@@ -167,6 +228,11 @@ func (s *session) finishUpstreamAuth() error {
 //
 // When phase1Pkt is unavailable (legacy non-relay path / tests) we fall
 // back to the synthetic builder with `00 00` data flags.
+//
+// Beyond the username swap, AUTH_PROGRAM_NM is also spliced to
+// identity.ProgramName (the dbbat-branded name) via replaceAuthKVValue — a
+// no-op if the key isn't present in the client's packet, so this is a safe
+// addition on top of the existing rewrite.
 func (s *session) sendUpstreamAuthPhase1(username string, identity driverIdentity, mode uint32) error {
 	if s.clientAuthPhase1Pkt == nil || len(s.clientAuthPhase1Pkt.Payload) <= ttcDataFlagsSize {
 		return s.writeUpstreamData(buildClientAuthPhase1(username, identity, mode))
@@ -183,6 +249,8 @@ func (s *session) sendUpstreamAuthPhase1(username string, identity driverIdentit
 
 		return s.writeUpstreamData(buildClientAuthPhase1(username, identity, mode))
 	}
+
+	rewritten = replaceAuthKVValue(rewritten, authKeyProgramNM, identity.ProgramName, payloadUsesWideKVEncoding(clientBody))
 
 	s.logger.DebugContext(s.ctx, "upstream AUTH: forwarding rewritten client Phase 1",
 		slog.Int("original_body_len", len(clientBody)),
@@ -213,6 +281,11 @@ func (s *session) sendUpstreamAuthPhase1(username string, identity driverIdentit
 //
 // When clientAuthPhase2Pkt is unavailable (legacy non-relay path / tests) we
 // fall back to the synthetic builder.
+//
+// Beyond those swaps, AUTH_PROGRAM_NM is also spliced to identity.ProgramName
+// (the dbbat-branded name) via replaceAuthKVValue — a no-op if the key isn't
+// present in the client's packet, so this is a safe addition on top of the
+// existing rewrite.
 func (s *session) sendUpstreamAuthPhase2(username string, identity driverIdentity, sec *upstreamAuthSecrets, mode uint32) error {
 	if s.clientAuthPhase2Pkt == nil || len(s.clientAuthPhase2Pkt.Payload) <= ttcDataFlagsSize {
 		return s.writeUpstreamData(buildClientAuthPhase2(username, identity, sec, mode))
@@ -229,6 +302,8 @@ func (s *session) sendUpstreamAuthPhase2(username string, identity driverIdentit
 
 		return s.writeUpstreamData(buildClientAuthPhase2(username, identity, sec, mode))
 	}
+
+	rewritten = replaceAuthKVValue(rewritten, authKeyProgramNM, identity.ProgramName, payloadUsesWideKVEncoding(clientBody))
 
 	s.logger.DebugContext(s.ctx, "upstream AUTH: forwarding rewritten client Phase 2",
 		slog.Int("original_body_len", len(clientBody)),
