@@ -108,9 +108,11 @@ const (
 	KeyPublicPGHost    = "pg.host"
 	KeyPublicOraHost   = "ora.host"
 	KeyPublicMySQLHost = "mysql.host"
+	KeyPublicMongoHost = "mongo.host"
 	KeyPublicPGPort    = "pg.port"
 	KeyPublicOraPort   = "ora.port"
 	KeyPublicMySQLPort = "mysql.port"
+	KeyPublicMongoPort = "mongo.port"
 	// KeyPublicWebUIURL is the operator-editable Web UI / public base URL
 	// (e.g. "https://dbbat.company.com"), reached through an HTTP ingress /
 	// reverse proxy. Distinct from Host/PGHost/etc, which advertise the
@@ -124,9 +126,11 @@ type PublicEndpoints struct {
 	PGHost    string // optional override; "" = fall back to Host
 	OraHost   string
 	MySQLHost string
+	MongoHost string
 	PGPort    *int // optional override; nil = fall back to local listen port
 	OraPort   *int
 	MySQLPort *int
+	MongoPort *int
 	// WebUIURL is the operator-configured public base URL for the Web UI /
 	// REST API (e.g. "https://dbbat.company.com"), used for Slack deep-links
 	// and absolute-URL generation. Independent of Host: the UI is typically
@@ -152,6 +156,8 @@ func (s *Store) GetPublicEndpoints(ctx context.Context) (PublicEndpoints, error)
 			pe.OraHost = p.Value
 		case KeyPublicMySQLHost:
 			pe.MySQLHost = p.Value
+		case KeyPublicMongoHost:
+			pe.MongoHost = p.Value
 		case KeyPublicPGPort:
 			if n, err := strconv.Atoi(p.Value); err == nil {
 				pe.PGPort = &n
@@ -163,6 +169,10 @@ func (s *Store) GetPublicEndpoints(ctx context.Context) (PublicEndpoints, error)
 		case KeyPublicMySQLPort:
 			if n, err := strconv.Atoi(p.Value); err == nil {
 				pe.MySQLPort = &n
+			}
+		case KeyPublicMongoPort:
+			if n, err := strconv.Atoi(p.Value); err == nil {
+				pe.MongoPort = &n
 			}
 		case KeyPublicWebUIURL:
 			pe.WebUIURL = p.Value
@@ -188,6 +198,9 @@ func (s *Store) SetPublicEndpoints(ctx context.Context, pe PublicEndpoints) erro
 	if pe.MySQLHost != "" {
 		pairs = append(pairs, kv{KeyPublicMySQLHost, pe.MySQLHost})
 	}
+	if pe.MongoHost != "" {
+		pairs = append(pairs, kv{KeyPublicMongoHost, pe.MongoHost})
+	}
 	if pe.PGPort != nil {
 		pairs = append(pairs, kv{KeyPublicPGPort, strconv.Itoa(*pe.PGPort)})
 	}
@@ -196,6 +209,9 @@ func (s *Store) SetPublicEndpoints(ctx context.Context, pe PublicEndpoints) erro
 	}
 	if pe.MySQLPort != nil {
 		pairs = append(pairs, kv{KeyPublicMySQLPort, strconv.Itoa(*pe.MySQLPort)})
+	}
+	if pe.MongoPort != nil {
+		pairs = append(pairs, kv{KeyPublicMongoPort, strconv.Itoa(*pe.MongoPort)})
 	}
 	if pe.WebUIURL != "" {
 		pairs = append(pairs, kv{KeyPublicWebUIURL, pe.WebUIURL})
@@ -214,9 +230,11 @@ type ResolvedEndpoints struct {
 	PGHost    string
 	OraHost   string
 	MySQLHost string
+	MongoHost string
 	PGPort    int // 0 = protocol disabled
 	OraPort   int
 	MySQLPort int
+	MongoPort int
 	// WebUIURL is the effective Web UI / public base URL: pe.WebUIURL when
 	// set, else cfg.PublicURL (the DBB_PUBLIC_URL env var).
 	WebUIURL string
@@ -258,9 +276,11 @@ func ResolvePublicEndpoints(pe PublicEndpoints, cfg *config.Config) ResolvedEndp
 		PGHost:    resolve(pe.PGHost, pe.Host),
 		OraHost:   resolve(pe.OraHost, pe.Host),
 		MySQLHost: resolve(pe.MySQLHost, pe.Host),
+		MongoHost: resolve(pe.MongoHost, pe.Host),
 		PGPort:    resolvePort(pe.PGPort, cfg.ListenPG),
 		OraPort:   resolvePort(pe.OraPort, cfg.ListenOracle),
 		MySQLPort: resolvePort(pe.MySQLPort, cfg.ListenMySQL),
+		MongoPort: resolvePort(pe.MongoPort, cfg.ListenMongo),
 		WebUIURL:  webUIURL,
 	}
 }

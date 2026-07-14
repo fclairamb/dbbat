@@ -136,6 +136,7 @@ function LocalListenersSection() {
     { protocol: "PostgreSQL", address: instance?.listen.pg ?? "" },
     { protocol: "Oracle", address: instance?.listen.ora ?? "" },
     { protocol: "MySQL", address: instance?.listen.mysql ?? "" },
+    { protocol: "MongoDB", address: instance?.listen.mongo ?? "" },
   ];
 
   return (
@@ -230,6 +231,13 @@ function PublicAdvertisementForm({
   const [mysqlOverrideEnabled, setMysqlOverrideEnabled] = useState(
     !!(pub?.mysql_host || pub?.mysql_port != null)
   );
+  const [mongoHostOverride, setMongoHostOverride] = useState(pub?.mongo_host ?? "");
+  const [mongoPortOverride, setMongoPortOverride] = useState(
+    pub?.mongo_port != null ? String(pub.mongo_port) : ""
+  );
+  const [mongoOverrideEnabled, setMongoOverrideEnabled] = useState(
+    !!(pub?.mongo_host || pub?.mongo_port != null)
+  );
 
   const handleSave = () => {
     const body: PublicEndpoints = {
@@ -240,6 +248,8 @@ function PublicAdvertisementForm({
       ora_port: oraOverrideEnabled && oraPortOverride ? parseInt(oraPortOverride, 10) : null,
       mysql_host: mysqlOverrideEnabled ? mysqlHostOverride : "",
       mysql_port: mysqlOverrideEnabled && mysqlPortOverride ? parseInt(mysqlPortOverride, 10) : null,
+      mongo_host: mongoOverrideEnabled ? mongoHostOverride : "",
+      mongo_port: mongoOverrideEnabled && mongoPortOverride ? parseInt(mongoPortOverride, 10) : null,
       web_ui_url: webUIURL,
     };
     updatePublic.mutate(body);
@@ -337,6 +347,20 @@ function PublicAdvertisementForm({
             onPortChange={setMysqlPortOverride}
             hostTestId="public-mysql-host-input"
             portTestId="public-mysql-port-input"
+          />
+
+          <ProtocolOverrideRow
+            protocol="MongoDB"
+            listenAddr={listen?.mongo}
+            defaultHost={host}
+            enabled={mongoOverrideEnabled}
+            onEnabledChange={setMongoOverrideEnabled}
+            hostValue={mongoHostOverride}
+            onHostChange={setMongoHostOverride}
+            portValue={mongoPortOverride}
+            onPortChange={setMongoPortOverride}
+            hostTestId="public-mongo-host-input"
+            portTestId="public-mongo-port-input"
           />
         </CardContent>
       </Card>

@@ -2314,7 +2314,7 @@ components:
           description: SSL mode (disable, prefer, require, etc.)
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql, mariadb]
+          enum: [postgresql, oracle, mysql, mariadb, mongodb]
           description: Database protocol
         oracle_service_name:
           type: string
@@ -2381,7 +2381,7 @@ components:
           description: SSL mode
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql, mariadb]
+          enum: [postgresql, oracle, mysql, mariadb, mongodb]
           default: postgresql
           description: Database protocol
         oracle_service_name:
@@ -2423,7 +2423,7 @@ components:
           description: SSL mode
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql, mariadb]
+          enum: [postgresql, oracle, mysql, mariadb, mongodb]
           description: Database protocol
         oracle_service_name:
           type: string
@@ -3124,6 +3124,9 @@ components:
         mysql_host:
           type: string
           description: MySQL-specific host override (empty = use host)
+        mongo_host:
+          type: string
+          description: MongoDB-specific host override (empty = use host)
         pg_port:
           type: integer
           nullable: true
@@ -3136,6 +3139,10 @@ components:
           type: integer
           nullable: true
           description: MySQL port override (null = use local listen port)
+        mongo_port:
+          type: integer
+          nullable: true
+          description: MongoDB port override (null = use local listen port)
         web_ui_url:
           type: string
           description: >-
@@ -3162,6 +3169,10 @@ components:
           type: string
         mysql_port:
           type: integer
+        mongo_host:
+          type: string
+        mongo_port:
+          type: integer
         web_ui_url:
           type: string
           description: Effective Web UI / public base URL (web_ui_url parameter, falling back to DBB_PUBLIC_URL)
@@ -3172,6 +3183,8 @@ components:
         - ora_port
         - mysql_host
         - mysql_port
+        - mongo_host
+        - mongo_port
         - web_ui_url
 
     InstanceInfo:
@@ -3196,6 +3209,9 @@ components:
             mysql:
               type: string
               description: MySQL/MariaDB proxy TCP listen address
+            mongo:
+              type: string
+              description: MongoDB proxy TCP listen address
             api:
               type: string
               description: REST API / Web UI HTTP listen address

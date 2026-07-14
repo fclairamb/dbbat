@@ -1131,7 +1131,7 @@ export interface components {
              * @description Database protocol
              * @enum {string}
              */
-            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb";
+            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb";
             /** @description Oracle SERVICE_NAME (Oracle only) */
             oracle_service_name?: string;
             /**
@@ -1185,7 +1185,7 @@ export interface components {
              * @default postgresql
              * @enum {string}
              */
-            protocol: "postgresql" | "oracle" | "mysql" | "mariadb";
+            protocol: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb";
             /** @description Oracle SERVICE_NAME (required for Oracle) */
             oracle_service_name?: string;
             /**
@@ -1213,7 +1213,7 @@ export interface components {
              * @description Database protocol
              * @enum {string}
              */
-            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb";
+            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb";
             /** @description Oracle SERVICE_NAME */
             oracle_service_name?: string;
             /** @description Whether this database appears in the grant-request dropdown for non-admin users */
@@ -1685,12 +1685,16 @@ export interface components {
             ora_host?: string;
             /** @description MySQL-specific host override (empty = use host) */
             mysql_host?: string;
+            /** @description MongoDB-specific host override (empty = use host) */
+            mongo_host?: string;
             /** @description PostgreSQL port override (null = use local listen port) */
             pg_port?: number | null;
             /** @description Oracle port override (null = use local listen port) */
             ora_port?: number | null;
             /** @description MySQL port override (null = use local listen port) */
             mysql_port?: number | null;
+            /** @description MongoDB port override (null = use local listen port) */
+            mongo_port?: number | null;
             /** @description Web UI / public base URL override (e.g. https://dbbat.company.com), reached through an HTTP ingress / reverse proxy. Empty = fall back to the DBB_PUBLIC_URL environment variable. Used for Slack deep-links and other absolute-URL generation. Independent of `host`, which advertises the connection host instead. */
             web_ui_url?: string;
         };
@@ -1703,6 +1707,8 @@ export interface components {
             ora_port: number;
             mysql_host: string;
             mysql_port: number;
+            mongo_host: string;
+            mongo_port: number;
             /** @description Effective Web UI / public base URL (web_ui_url parameter, falling back to DBB_PUBLIC_URL) */
             web_ui_url: string;
         };
@@ -1716,6 +1722,8 @@ export interface components {
                 ora: string;
                 /** @description MySQL/MariaDB proxy TCP listen address */
                 mysql: string;
+                /** @description MongoDB proxy TCP listen address */
+                mongo?: string;
                 /** @description REST API / Web UI HTTP listen address */
                 api: string;
             };
