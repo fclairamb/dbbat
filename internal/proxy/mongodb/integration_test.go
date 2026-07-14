@@ -21,12 +21,16 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	"go.mongodb.org/mongo-driver/v2/mongo/writeconcern"
 
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
+// defaultMongoImage is the upstream image the integration suite runs against.
+// Set MONGO_TEST_IMAGE=mongo:8 (or mongo:6) to run the same matrix on another
+// server version — the proxy supports 6.0 / 7.0 / 8.0.
 const defaultMongoImage = "mongo:7"
 
 func mongoImage() string {
@@ -201,6 +205,30 @@ func (f *fixture) dialThrough(username, password string) *mongo.Client {
 			AuthSource:    testDBName,
 			Username:      username,
 			Password:      password,
+		}).
+		SetTLSConfig(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}). //nolint:gosec // self-signed proxy cert
+		SetDirect(true).
+		SetServerSelectionTimeout(8 * time.Second).
+		SetTimeout(10 * time.Second)
+
+	client, err := mongo.Connect(opts)
+	require.NoError(f.t, err)
+
+	return client
+}
+
+// dialThroughSCRAM connects with the driver-default auth mechanism (no explicit
+// PLAIN), so the driver negotiates SCRAM-SHA-256 via the hello saslSupportedMechs
+// probe — exercising the stored-verifier path (item 1).
+func (f *fixture) dialThroughSCRAM(username, password string) *mongo.Client {
+	f.t.Helper()
+
+	opts := options.Client().
+		SetHosts([]string{f.proxyAddr}).
+		SetAuth(options.Credential{
+			AuthSource: testDBName,
+			Username:   username,
+			Password:   password,
 		}).
 		SetTLSConfig(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}). //nolint:gosec // self-signed proxy cert
 		SetDirect(true).
@@ -433,4 +461,182 @@ func TestIntegration_RevocationKillsSession(t *testing.T) {
 
 		return e != nil
 	}, 5*time.Second, 200*time.Millisecond, "revoked session should be torn down")
+}
+
+// TestIntegration_SCRAMAuth authenticates with the driver-default mechanism,
+// which negotiates SCRAM-SHA-256 from the stored verifier (item 1) — no
+// authMechanism=PLAIN and no cleartext password on the wire.
+func TestIntegration_SCRAMAuth(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	// Store the SCRAM verifier the way an API password-set would.
+	require.NoError(t, f.store.SetUserMongoVerifier(ctx, f.user.UID, fixturePass, f.encKey))
+
+	client := f.dialThroughSCRAM(fixtureUser, fixturePass)
+	defer func() { _ = client.Disconnect(ctx) }()
+
+	require.NoError(t, client.Ping(ctx, nil))
+
+	_, err := client.Database(testDBName).Collection("scram").
+		InsertOne(ctx, bson.D{{Key: "via", Value: "scram"}})
+	require.NoError(t, err, "SCRAM-authenticated write should succeed")
+}
+
+// TestIntegration_SCRAMWrongPassword confirms a bad password fails the SCRAM
+// proof (the verifier path rejects it just like PLAIN).
+func TestIntegration_SCRAMWrongPassword(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	require.NoError(t, f.store.SetUserMongoVerifier(ctx, f.user.UID, fixturePass, f.encKey))
+
+	client := f.dialThroughSCRAM(fixtureUser, "not-the-password")
+	defer func() { _ = client.Disconnect(ctx) }()
+
+	require.Error(t, client.Ping(ctx, nil), "wrong SCRAM password must fail")
+}
+
+// TestIntegration_UnacknowledgedWrite exercises the w:0 / moreToCome path: an
+// unacknowledged insert produces no server reply, yet is logged immediately and
+// the data still lands upstream (item 7).
+func TestIntegration_UnacknowledgedWrite(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	client := f.dialThrough(fixtureUser, fixturePass)
+	defer func() { _ = client.Disconnect(ctx) }()
+
+	unack := client.Database(testDBName).
+		Collection("unack", options.Collection().SetWriteConcern(writeconcern.Unacknowledged()))
+
+	// A w:0 insert sets moreToCome and expects no reply; it must return promptly
+	// without blocking on a response that never comes.
+	_, err := unack.InsertOne(ctx, bson.D{{Key: "fire", Value: "forget"}})
+	require.NoError(t, err, "unacknowledged insert should not error")
+
+	// The moreToCome path records the insert without waiting for a reply.
+	require.Eventually(t, func() bool {
+		queries, err := f.store.ListQueries(ctx, store.QueryFilter{Limit: 200})
+		if err != nil {
+			return false
+		}
+
+		for i := range queries {
+			if strings.HasPrefix(queries[i].SQLText, "insert ") &&
+				strings.Contains(queries[i].SQLText, "unack") {
+				return true
+			}
+		}
+
+		return false
+	}, 3*time.Second, 100*time.Millisecond, "unacknowledged insert should be logged")
+
+	// And the document must actually have landed upstream (acknowledged read).
+	require.Eventually(t, func() bool {
+		var got bson.M
+
+		return client.Database(testDBName).Collection("unack").
+			FindOne(ctx, bson.D{{Key: "fire", Value: "forget"}}).Decode(&got) == nil
+	}, 3*time.Second, 100*time.Millisecond, "unacknowledged write should reach upstream")
+}
+
+// TestIntegration_ListDatabasesFiltered verifies listDatabases is allowed but
+// filtered to the grant's database (item 5) — no cluster-wide disclosure.
+func TestIntegration_ListDatabasesFiltered(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	client := f.dialThrough(fixtureUser, fixturePass)
+	defer func() { _ = client.Disconnect(ctx) }()
+
+	// Materialize the target database so it appears in listDatabases.
+	_, err := client.Database(testDBName).Collection("seed").
+		InsertOne(ctx, bson.D{{Key: "x", Value: 1}})
+	require.NoError(t, err)
+
+	names, err := client.ListDatabaseNames(ctx, bson.D{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{testDBName}, names, "listDatabases must be filtered to the grant database")
+}
+
+// TestIntegration_Compression connects with zlib wire compression enabled and
+// verifies a full round-trip works through the proxy's OP_COMPRESSED handling
+// (item 4).
+func TestIntegration_Compression(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	opts := options.Client().
+		SetHosts([]string{f.proxyAddr}).
+		SetAuth(options.Credential{
+			AuthMechanism: "PLAIN",
+			AuthSource:    testDBName,
+			Username:      fixtureUser,
+			Password:      fixturePass,
+		}).
+		SetTLSConfig(&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}). //nolint:gosec // self-signed proxy cert
+		SetDirect(true).
+		SetCompressors([]string{"zlib"}).
+		SetServerSelectionTimeout(8 * time.Second).
+		SetTimeout(10 * time.Second)
+
+	client, err := mongo.Connect(opts)
+	require.NoError(t, err)
+	defer func() { _ = client.Disconnect(ctx) }()
+
+	require.NoError(t, client.Ping(ctx, nil))
+
+	coll := client.Database(testDBName).Collection("compressed")
+	_, err = coll.InsertOne(ctx, bson.D{{Key: "payload", Value: strings.Repeat("dbbat-", 512)}})
+	require.NoError(t, err)
+
+	var got bson.M
+	require.NoError(t, coll.FindOne(ctx, bson.D{}).Decode(&got))
+	assert.Contains(t, got["payload"], "dbbat-")
+}
+
+// TestIntegration_GetMoreLineage forces a paged result (batchSize < result set)
+// and asserts the getMore batches are linked back to the originating find cursor
+// in the query log (item 6).
+func TestIntegration_GetMoreLineage(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	client := f.dialThrough(fixtureUser, fixturePass)
+	defer func() { _ = client.Disconnect(ctx) }()
+
+	coll := client.Database(testDBName).Collection("paged")
+	for i := 0; i < 5; i++ {
+		_, err := coll.InsertOne(ctx, bson.D{{Key: "i", Value: i}})
+		require.NoError(t, err)
+	}
+
+	cur, err := coll.Find(ctx, bson.D{}, options.Find().SetBatchSize(2))
+	require.NoError(t, err)
+
+	var all []bson.M
+	require.NoError(t, cur.All(ctx, &all))
+	assert.Len(t, all, 5)
+
+	require.Eventually(t, func() bool {
+		queries, err := f.store.ListQueries(ctx, store.QueryFilter{Limit: 200})
+		if err != nil {
+			return false
+		}
+
+		for i := range queries {
+			if !strings.HasPrefix(queries[i].SQLText, "getMore ") || queries[i].Parameters == nil {
+				continue
+			}
+
+			for _, v := range queries[i].Parameters.Values {
+				if strings.HasPrefix(v, "cursor_origin=find") {
+					return true
+				}
+			}
+		}
+
+		return false
+	}, 3*time.Second, 100*time.Millisecond, "getMore should be linked to its originating find cursor")
 }
