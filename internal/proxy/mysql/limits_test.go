@@ -1,7 +1,12 @@
 package mysql
 
 import (
+	"context"
 	"errors"
+	"io"
+	"log/slog"
+	"net"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,4 +27,104 @@ func TestCheckQuotas_Expiry(t *testing.T) {
 	if err := checkQuotas(&store.Grant{ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
 		t.Fatalf("checkQuotas() live grant = %v, want nil", err)
 	}
+}
+
+// discardLogger builds a no-op logger for session tests.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.DiscardHandler)
+}
+
+// pipePair returns a net.Pipe whose peer end is closed on test cleanup.
+func pipePair(t *testing.T) net.Conn {
+	t.Helper()
+
+	conn, peer := net.Pipe()
+	t.Cleanup(func() { _ = peer.Close() })
+
+	return conn
+}
+
+// assertConnClosed asserts that conn has been closed: a Read on our own end of
+// a net.Pipe returns io.ErrClosedPipe. A generous read deadline turns a "never
+// closed" bug into a clear timeout failure instead of a hang.
+func assertConnClosed(t *testing.T, conn net.Conn, name string) {
+	t.Helper()
+
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+
+	buf := make([]byte, 1)
+	if _, err := conn.Read(buf); !errors.Is(err, io.ErrClosedPipe) {
+		t.Fatalf("%s conn: Read err = %v, want io.ErrClosedPipe (conn should be closed)", name, err)
+	}
+}
+
+// TestOnLimitViolation_ClosesConns asserts the teardown callback force-closes
+// both the client-facing and upstream conns — the mid-query enforcement
+// mechanism for MySQL (the go-mysql library owns the wire, so closing the conns
+// is the only way to abort an in-flight query).
+func TestOnLimitViolation_ClosesConns(t *testing.T) {
+	t.Parallel()
+
+	s := &Session{logger: discardLogger(), ctx: context.Background()}
+
+	clientConn := pipePair(t)
+	upstreamConn := pipePair(t)
+
+	s.onLimitViolation(upstreamConn, clientConn, shared.ErrByteQuotaExceeded)
+
+	assertConnClosed(t, clientConn, "client")
+	assertConnClosed(t, upstreamConn, "upstream")
+}
+
+// TestWatchdog_TearsDownOnByteQuota exercises the real wiring seam: it builds
+// the guard the way mysql/auth.go does (from the session's grant) and starts
+// the watchdog the way mysql/session.go's Run does (guard.Watch invoking
+// onLimitViolation), then asserts both conns are torn down. The grant is
+// pre-exhausted so the watchdog's immediate check trips without waiting.
+func TestWatchdog_TearsDownOnByteQuota(t *testing.T) {
+	t.Parallel()
+
+	s := &Session{logger: discardLogger(), ctx: context.Background()}
+
+	maxBytes := int64(50)
+	grant := &store.Grant{BytesTransferred: 100, MaxBytesTransferred: &maxBytes}
+	guard := shared.NewLimitGuard(grant, &atomic.Int64{}, &atomic.Int64{})
+
+	clientConn := pipePair(t)
+	upstreamConn := pipePair(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go guard.Watch(ctx, time.Millisecond, func(err error) {
+		s.onLimitViolation(upstreamConn, clientConn, err)
+	})
+
+	assertConnClosed(t, clientConn, "client")
+	assertConnClosed(t, upstreamConn, "upstream")
+}
+
+// TestWatchdog_TearsDownOnExpiry mirrors TestWatchdog_TearsDownOnByteQuota for
+// the time-window limit: an already-expired grant trips the watchdog, which
+// tears the session down mid-query.
+func TestWatchdog_TearsDownOnExpiry(t *testing.T) {
+	t.Parallel()
+
+	s := &Session{logger: discardLogger(), ctx: context.Background()}
+
+	grant := &store.Grant{ExpiresAt: time.Now().Add(-time.Minute)}
+	guard := shared.NewLimitGuard(grant, &atomic.Int64{}, &atomic.Int64{})
+
+	clientConn := pipePair(t)
+	upstreamConn := pipePair(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go guard.Watch(ctx, time.Millisecond, func(err error) {
+		s.onLimitViolation(upstreamConn, clientConn, err)
+	})
+
+	assertConnClosed(t, clientConn, "client")
+	assertConnClosed(t, upstreamConn, "upstream")
 }
