@@ -10,8 +10,29 @@ import (
 	gomysqlclient "github.com/go-mysql-org/go-mysql/client"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/version"
 )
+
+// maxProgramNameLen bounds the "program_name" connection attribute dbbat
+// sends upstream. MySQL's CLIENT_CONNECT_ATTRS extension has no hard
+// protocol-level length limit on an individual attribute value, but
+// performance_schema_session_connect_attrs_size (the server setting that
+// governs how much of the combined attribute blob MySQL retains for
+// performance_schema.session_connect_attrs) historically defaults to 512
+// bytes across all attributes combined. Keep well under that so the
+// dbbat-branded name survives alongside any other attributes the driver
+// sends.
+const maxProgramNameLen = 256
+
+// buildUpstreamProgramName constructs the "program_name" connection
+// attribute sent to the upstream MySQL/MariaDB server: "dbbat/$version
+// @$username", plus " for $appName" when the client declared its own
+// program_name attribute. See shared.BuildUpstreamName for the truncation
+// rules.
+func buildUpstreamProgramName(username, clientProgramName string) string {
+	return shared.BuildUpstreamName(version.Version, username, clientProgramName, maxProgramNameLen)
+}
 
 // connectUpstream opens an authenticated MySQL connection to the upstream
 // database configured for the session's grant. The session's encrypted
@@ -52,9 +73,9 @@ func (s *Session) connectUpstream() error {
 
 // applyUpstreamOptions configures the upstream client connection: TLS mode
 // from the database's ssl_mode column, a connection attribute identifying
-// dbbat as the application, and explicit refusal of CLIENT_LOCAL_FILES so a
-// compromised upstream cannot ask the proxy to upload arbitrary files via
-// `LOAD DATA LOCAL INFILE` mid-query.
+// dbbat (and the connecting dbbat user) as the application, and explicit
+// refusal of CLIENT_LOCAL_FILES so a compromised upstream cannot ask the
+// proxy to upload arbitrary files via `LOAD DATA LOCAL INFILE` mid-query.
 func (s *Session) applyUpstreamOptions(c *gomysqlclient.Conn) error {
 	switch s.database.SSLMode {
 	case "require":
@@ -74,8 +95,16 @@ func (s *Session) applyUpstreamOptions(c *gomysqlclient.Conn) error {
 	// filesystem unless we opt out at handshake time.
 	c.UnsetCapability(gomysql.CLIENT_LOCAL_FILES)
 
+	// The client's own program_name attribute — sent during the client's
+	// handshake with dbbat and captured on s.serverConn — is the intercepted
+	// $appName, appended when present.
+	var clientProgramName string
+	if s.serverConn != nil {
+		clientProgramName = s.serverConn.Attributes()["program_name"]
+	}
+
 	c.SetAttributes(map[string]string{
-		"program_name": "dbbat-" + version.Version,
+		"program_name": buildUpstreamProgramName(s.user.Username, clientProgramName),
 	})
 
 	return nil
