@@ -57,6 +57,10 @@ func (s *Session) captureResult(m *message) {
 	rowsAffected := rowsAffectedFrom(body)
 	rows := s.captureCursorRows(body)
 
+	// Maintain find→getMore cursor lineage (item 6) before logging so the
+	// origin's own row carries its cursor_id.
+	s.trackCursorFromReply(pq, body)
+
 	s.recordQuery(pq, rows, rowsAffected, queryError)
 }
 

@@ -97,6 +97,14 @@ type Session struct {
 	pendingMu sync.Mutex
 	pending   map[int32]*pendingQuery
 
+	// cursorOrigins links a server cursor id back to the find/aggregate that
+	// opened it (item 6) so every getMore batch of one result set logs a shared
+	// cursor_id + the originating command. Written by the upstream→client pump
+	// (on cursor-opening replies) and read by the client→upstream pump (on
+	// getMore), hence guarded by its own mutex.
+	cursorMu      sync.Mutex
+	cursorOrigins map[int64]cursorOrigin
+
 	logger *slog.Logger
 	ctx    context.Context //nolint:containedctx // Session-scoped context
 }
@@ -112,6 +120,7 @@ func newSession(rawConn net.Conn, server *Server) *Session {
 		bytesToClient:   bytesToClient,
 		connID:          server.connCounter.Add(1),
 		pending:         make(map[int32]*pendingQuery),
+		cursorOrigins:   make(map[int64]cursorOrigin),
 		logger:          server.logger,
 		ctx:             server.ctx,
 	}

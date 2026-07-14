@@ -20,6 +20,9 @@ type pendingQuery struct {
 	params     *store.QueryParameters
 	start      time.Time
 	moreToCome bool
+	// cursorID is the server cursor a getMore iterates (item 6); 0 for other
+	// commands. Used to drop the cursor→origin link once the cursor is drained.
+	cursorID int64
 }
 
 // pumpClientToUpstream reads each client message, classifies + validates it
@@ -82,13 +85,20 @@ func (s *Session) handleClientOpMsg(m *message) error {
 
 	// Register for result capture before forwarding so a fast upstream reply
 	// never races an unregistered query.
-	s.registerPending(m.requestID, &pendingQuery{
+	pq := &pendingQuery{
 		command:    cmd,
 		sqlText:    buildSQLText(cmd, body),
 		params:     extractParams(body),
 		start:      time.Now(),
 		moreToCome: moreToCome,
-	})
+	}
+
+	// Link a getMore to the find/aggregate cursor it iterates (item 6).
+	if cmd == "getMore" {
+		s.annotateGetMore(pq, body)
+	}
+
+	s.registerPending(m.requestID, pq)
 
 	if err := s.forward(m); err != nil {
 		s.takePending(m.requestID)
