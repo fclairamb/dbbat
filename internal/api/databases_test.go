@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -78,6 +79,62 @@ func TestListDatabases_AdminSeesAll(t *testing.T) { //nolint:paralleltest // sha
 	}
 	assert.Contains(t, names, "listable-db-"+suffix)
 	assert.Contains(t, names, "hidden-db-"+suffix)
+}
+
+// TestCreateDatabase_MongoDBProtocol exercises the HTTP handler
+// (handleCreateDatabase), not store.CreateDatabase directly, to prove the
+// create path accepts protocol "mongodb". This case previously returned HTTP
+// 400 because isSupportedProtocol omitted store.ProtocolMongoDB.
+func TestCreateDatabase_MongoDBProtocol(t *testing.T) { //nolint:paralleltest // shared migration lock
+	server, dataStore := setupTestServer(t)
+	suffix := "mongo"
+
+	// The handler encrypts the target password with s.encryptionKey; the shared
+	// setupTestServer wires a nil key, so provide a real one for this path.
+	server.encryptionKey = dbTestEncryptionKey
+
+	createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	router := gin.New()
+	router.Use(server.authMiddleware())
+	router.POST("/api/v1/databases", server.handleCreateDatabase)
+
+	body, _ := json.Marshal(map[string]any{
+		"name":          "mongo-db-" + suffix,
+		"host":          "mongo.example.com",
+		"port":          27017,
+		"database_name": "appdb",
+		"username":      "mongouser",
+		"password":      "mongopass",
+		"protocol":      store.ProtocolMongoDB,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/databases", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equalf(t, http.StatusOK, w.Code, "mongodb create must succeed, got %d: %s", w.Code, w.Body.String())
+
+	// The response must round-trip the mongodb protocol.
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, store.ProtocolMongoDB, resp["protocol"], "response must echo the mongodb protocol")
+
+	// And the persisted row must carry the mongodb protocol too.
+	dbs, err := dataStore.ListDatabases(context.Background())
+	require.NoError(t, err)
+	var found *store.Database
+	for i := range dbs {
+		if dbs[i].Name == "mongo-db-"+suffix {
+			found = &dbs[i]
+			break
+		}
+	}
+	require.NotNil(t, found, "created mongodb database must be persisted")
+	assert.Equal(t, store.ProtocolMongoDB, found.Protocol)
 }
 
 func TestListDatabases_ConnectorSeesOnlyListable(t *testing.T) { //nolint:paralleltest // shared migration lock
