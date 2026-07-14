@@ -256,6 +256,9 @@ func (s *Server) handlePreLoginPasswordChange(c *gin.Context) {
 		return
 	}
 
+	// Refresh the MongoDB SCRAM verifier for the new password.
+	s.setMongoVerifier(c, user.UID, req.NewPassword)
+
 	s.logger.InfoContext(ctx, "pre-login password changed", slog.String("user", user.Username), slog.Any("uid", user.UID))
 
 	c.JSON(http.StatusOK, gin.H{"message": "Password changed successfully"})
@@ -380,6 +383,9 @@ func (s *Server) handleChangePassword(c *gin.Context) {
 		return
 	}
 
+	// Refresh the MongoDB SCRAM verifier for the new password.
+	s.setMongoVerifier(c, targetUID, req.NewPassword)
+
 	s.logger.InfoContext(ctx, "password changed", slog.String("auth_user", authUser.Username), slog.String("target_user", targetUser.Username), slog.Any("target_uid", targetUID))
 
 	c.JSON(http.StatusOK, gin.H{"message": "Password changed successfully"})
@@ -460,6 +466,9 @@ func (s *Server) handleResetPassword(c *gin.Context) {
 		writeInternalError(c, s.logger, err, "failed to update password")
 		return
 	}
+
+	// Refresh the MongoDB SCRAM verifier for the new password.
+	s.setMongoVerifier(c, targetUID, req.NewPassword)
 
 	// 11. Log the action
 	s.logger.InfoContext(ctx, "password reset by admin",
