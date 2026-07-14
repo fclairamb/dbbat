@@ -90,4 +90,11 @@ test.describe("Navigation", () => {
     const navText = await page.textContent("body");
     expect(navText).toBeTruthy();
   });
+
+  test("should show the generic proxy tagline in the sidebar", async ({ authenticatedPage }) => {
+    // The sidebar subtitle should reflect that DBBat proxies more than just
+    // PostgreSQL (it also proxies Oracle and MySQL/MariaDB).
+    await expect(authenticatedPage.getByText("Every query, tracked")).toBeVisible();
+    await expect(authenticatedPage.getByText("PostgreSQL Proxy", { exact: false })).toHaveCount(0);
+  });
 });
