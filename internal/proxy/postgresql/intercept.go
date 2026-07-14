@@ -290,40 +290,48 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 		capturedRows = s.currentQuery.capturedRows
 	}
 
-	// Log asynchronously to not block proxy. Guarded on a real connection
-	// record: the mid-stream abort path (persistAbortedQuery) reuses logQuery for
-	// its in-memory grant accounting even in unit contexts without a store, so
-	// skip the persistence when there is nothing to write against.
-	if s.store != nil && s.connectionUID != uuid.Nil {
-		go func() {
-			createdQuery, err := s.store.CreateQuery(s.ctx, query)
-			if err != nil {
-				s.logger.ErrorContext(s.ctx, "failed to log query", slog.Any("error", err))
-				return
-			}
-
-			// Store captured result rows
-			if len(capturedRows) > 0 {
-				// Assign row numbers
-				for i := range capturedRows {
-					capturedRows[i].RowNumber = i + 1
-				}
-
-				if err := s.store.StoreQueryRows(s.ctx, createdQuery.UID, capturedRows); err != nil {
-					s.logger.ErrorContext(s.ctx, "failed to store query rows", slog.Any("error", err))
-				}
-			}
-
-			// Update connection stats
-			if err := s.store.IncrementConnectionStats(s.ctx, s.connectionUID, bytesTransferred); err != nil {
-				s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
-			}
-		}()
-	}
+	// Persist asynchronously so the proxy isn't blocked on the store write.
+	s.persistQueryAsync(query, capturedRows, bytesTransferred)
 
 	// Update local grant state for in-session quota checks
 	s.grant.QueryCount++
 	s.grant.BytesTransferred += bytesTransferred
+}
+
+// persistQueryAsync writes the query log row, its captured rows, and the
+// connection byte increment in a background goroutine. It is a no-op when there
+// is no connection record to write against — the mid-stream abort path
+// (persistAbortedQuery) reuses logQuery purely for its in-memory grant
+// accounting in unit contexts that have no store.
+func (s *Session) persistQueryAsync(query *store.Query, capturedRows []store.QueryRow, bytesTransferred int64) {
+	if s.store == nil || s.connectionUID == uuid.Nil {
+		return
+	}
+
+	go func() {
+		createdQuery, err := s.store.CreateQuery(s.ctx, query)
+		if err != nil {
+			s.logger.ErrorContext(s.ctx, "failed to log query", slog.Any("error", err))
+			return
+		}
+
+		// Store captured result rows
+		if len(capturedRows) > 0 {
+			// Assign row numbers
+			for i := range capturedRows {
+				capturedRows[i].RowNumber = i + 1
+			}
+
+			if err := s.store.StoreQueryRows(s.ctx, createdQuery.UID, capturedRows); err != nil {
+				s.logger.ErrorContext(s.ctx, "failed to store query rows", slog.Any("error", err))
+			}
+		}
+
+		// Update connection stats
+		if err := s.store.IncrementConnectionStats(s.ctx, s.connectionUID, bytesTransferred); err != nil {
+			s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
+		}
+	}()
 }
 
 // copyFormatToString converts COPY format byte to string.

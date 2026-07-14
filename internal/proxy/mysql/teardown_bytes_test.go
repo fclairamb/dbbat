@@ -55,6 +55,8 @@ func newTeardownTestStore(t *testing.T) *store.Store {
 // Persisting them keeps the grant's recomputed BytesTransferred honest across
 // reconnects (the core concern of spec 2026-07-14-09).
 func TestRecordDisconnect_FlushesUnrecordedBytes(t *testing.T) {
+	t.Parallel()
+
 	dataStore := newTeardownTestStore(t)
 	ctx := context.Background()
 
