@@ -119,6 +119,7 @@ const (
 	ProtocolOracle     = "oracle"
 	ProtocolMySQL      = "mysql"
 	ProtocolMariaDB    = "mariadb"
+	ProtocolMongoDB    = "mongodb"
 )
 
 // IsMySQLFamily reports whether the given protocol speaks the MySQL wire

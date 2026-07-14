@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -170,4 +171,70 @@ func TestValidateMySQLQuery_CombinesSharedAndMySQLChecks(t *testing.T) {
 	require.ErrorIs(t, ValidateMySQLQuery("INSERT INTO t VALUES (1)", grant), ErrReadOnlyViolation)
 	require.ErrorIs(t, ValidateMySQLQuery("REPLACE INTO t VALUES (1)", grant), ErrReadOnlyViolation)
 	require.ErrorIs(t, ValidateMySQLQuery("LOAD DATA INFILE '/x' INTO TABLE t", grant), ErrMySQLPatternBlocked)
+}
+
+func mongoBody(t *testing.T, d bson.D) bson.Raw {
+	t.Helper()
+
+	b, err := bson.Marshal(d)
+	require.NoError(t, err)
+
+	return bson.Raw(b)
+}
+
+func TestValidateMongoCommand_Classification(t *testing.T) {
+	t.Parallel()
+
+	db := &store.Database{Name: "app", DatabaseName: "app"}
+	full := &store.Grant{Controls: []string{}}
+	readOnly := &store.Grant{Controls: []string{store.ControlReadOnly}}
+	noDDL := &store.Grant{Controls: []string{store.ControlBlockDDL}}
+
+	// Reads and writes on the configured db under a full grant.
+	require.NoError(t, ValidateMongoCommand("find", "app", mongoBody(t, bson.D{{Key: "find", Value: "c"}, {Key: "$db", Value: "app"}}), db, full))
+	require.NoError(t, ValidateMongoCommand("insert", "app", mongoBody(t, bson.D{{Key: "insert", Value: "c"}, {Key: "$db", Value: "app"}}), db, full))
+
+	// read_only blocks writes.
+	require.ErrorIs(t,
+		ValidateMongoCommand("insert", "app", mongoBody(t, bson.D{{Key: "insert", Value: "c"}}), db, readOnly),
+		ErrMongoReadOnly)
+
+	// aggregate with $out is a write.
+	aggOut := mongoBody(t, bson.D{
+		{Key: "aggregate", Value: "c"},
+		{Key: "pipeline", Value: bson.A{bson.D{{Key: "$out", Value: "dest"}}}},
+		{Key: "$db", Value: "app"},
+	})
+	require.ErrorIs(t, ValidateMongoCommand("aggregate", "app", aggOut, db, readOnly), ErrMongoReadOnly)
+
+	// plain aggregate is a read.
+	aggRead := mongoBody(t, bson.D{{Key: "aggregate", Value: "c"}, {Key: "pipeline", Value: bson.A{}}, {Key: "$db", Value: "app"}})
+	require.NoError(t, ValidateMongoCommand("aggregate", "app", aggRead, db, readOnly))
+
+	// block_ddl blocks createIndexes.
+	require.ErrorIs(t,
+		ValidateMongoCommand("createIndexes", "app", mongoBody(t, bson.D{{Key: "createIndexes", Value: "c"}}), db, noDDL),
+		ErrMongoDDLBlocked)
+
+	// always-blocked and unknown commands.
+	require.ErrorIs(t, ValidateMongoCommand("createUser", "app", mongoBody(t, bson.D{{Key: "createUser", Value: "x"}}), db, full), ErrMongoCommandBlocked)
+	require.ErrorIs(t, ValidateMongoCommand("listDatabases", "admin", mongoBody(t, bson.D{{Key: "listDatabases", Value: 1}}), db, full), ErrMongoDatabaseBlocked)
+	require.ErrorIs(t, ValidateMongoCommand("frobnicate", "app", mongoBody(t, bson.D{{Key: "frobnicate", Value: 1}}), db, full), ErrMongoUnknownCommand)
+}
+
+func TestValidateMongoCommand_DBEnforcement(t *testing.T) {
+	t.Parallel()
+
+	db := &store.Database{Name: "app", DatabaseName: "app"}
+	full := &store.Grant{Controls: []string{}}
+
+	// admin allowed for diagnostics only.
+	require.NoError(t, ValidateMongoCommand("ping", "admin", mongoBody(t, bson.D{{Key: "ping", Value: 1}}), db, full))
+	require.ErrorIs(t,
+		ValidateMongoCommand("find", "admin", mongoBody(t, bson.D{{Key: "find", Value: "c"}}), db, full),
+		ErrMongoDatabaseBlocked)
+
+	// local / config / other databases denied.
+	require.ErrorIs(t, ValidateMongoCommand("find", "local", mongoBody(t, bson.D{{Key: "find", Value: "c"}}), db, full), ErrMongoDatabaseBlocked)
+	require.ErrorIs(t, ValidateMongoCommand("find", "other", mongoBody(t, bson.D{{Key: "find", Value: "c"}}), db, full), ErrMongoDatabaseBlocked)
 }
