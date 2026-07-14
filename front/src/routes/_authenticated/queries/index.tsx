@@ -1,6 +1,6 @@
 import { useRef, useCallback } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useQueries, type Query } from "@/api";
+import { useQueries, useUsers, useDatabases, type Query } from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { AdaptiveRefresh } from "@/components/shared/AdaptiveRefresh";
@@ -32,6 +32,13 @@ function QueriesPage() {
     before,
     limit: size,
   });
+  const { data: users } = useUsers();
+  const { data: databases } = useDatabases();
+
+  const getUserName = (uid: string | null | undefined) =>
+    uid ? users?.find((u) => u.uid === uid)?.username ?? uid : "-";
+  const getDbName = (uid: string | null | undefined) =>
+    uid ? databases?.find((d) => d.uid === uid)?.name ?? uid : "-";
 
   const isFirstPage = !before;
 
@@ -66,6 +73,37 @@ function QueriesPage() {
             {q.sql_text}
           </span>
         </div>
+      ),
+    },
+    {
+      key: "user",
+      header: "User",
+      cell: (q) => (
+        <span className="font-medium whitespace-nowrap">
+          {getUserName(q.user_id)}
+        </span>
+      ),
+    },
+    {
+      key: "database",
+      header: "Database",
+      cell: (q) => (
+        <span className="font-mono text-sm whitespace-nowrap">
+          {getDbName(q.database_id)}
+        </span>
+      ),
+    },
+    {
+      key: "connection",
+      header: "Connection",
+      cell: (q) => (
+        <Link
+          to="/queries"
+          search={{ connection_id: q.connection_id, before: undefined, size }}
+          className="relative z-10 font-mono text-xs text-muted-foreground hover:text-foreground hover:underline whitespace-nowrap"
+        >
+          {q.connection_id.slice(0, 8)}
+        </Link>
       ),
     },
     {
