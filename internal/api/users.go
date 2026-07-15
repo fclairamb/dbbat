@@ -135,6 +135,15 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 		return
 	}
 
+	// In demo mode, prevent changing the admin user's password
+	if req.Password != nil && s.config != nil && s.config.IsDemoMode() {
+		targetUser, err := s.store.GetUserByUID(c.Request.Context(), uid)
+		if err == nil && targetUser.Username == "admin" {
+			writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot change admin password in demo mode")
+			return
+		}
+	}
+
 	currentUser := getCurrentUser(c)
 
 	// Non-admins can only update their own password

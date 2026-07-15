@@ -9,6 +9,9 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/crypto"
 )
 
 // newUsersTestRouter mounts the user update/delete routes with the same
@@ -218,5 +221,80 @@ func TestDeleteUser_NotFound(t *testing.T) { //nolint:paralleltest // shared dat
 
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("expected status 404 Not Found, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// doUpdateUserPassword performs a PUT /users/:uid with a new-password payload.
+func doUpdateUserPassword(router *gin.Engine, token, uid, newPassword string) *httptest.ResponseRecorder {
+	body, _ := json.Marshal(map[string]any{"password": newPassword})
+	req := httptest.NewRequest(http.MethodPut, "/api/v1/users/"+uid, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w
+}
+
+func TestUpdateUser_DemoModeAdminPasswordChangeRejected(t *testing.T) { //nolint:paralleltest // shared database state
+	server, dataStore := setupTestServer(t)
+	server.config.RunMode = config.RunModeDemo
+
+	adminUser := createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
+	token := loginUser(t, server, "admin", "adminpassword123")
+	router := newUsersTestRouter(server)
+
+	w := doUpdateUserPassword(router, token, adminUser.UID.String(), "newpassword456")
+
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected status 403 Forbidden, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var response map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("failed to parse response: %v", err)
+	}
+	if response["code"] != "FORBIDDEN" {
+		t.Errorf("expected error code %q, got %q", "FORBIDDEN", response["code"])
+	}
+
+	// Password must be unchanged
+	user, err := dataStore.GetUserByUID(context.Background(), adminUser.UID)
+	if err != nil {
+		t.Fatalf("failed to refetch user: %v", err)
+	}
+	ok, err := crypto.VerifyPassword(user.PasswordHash, "adminpassword123")
+	if err != nil {
+		t.Fatalf("failed to verify password: %v", err)
+	}
+	if !ok {
+		t.Error("admin password should not have been changed")
+	}
+}
+
+func TestUpdateUser_DemoModeNonAdminPasswordChangeAllowed(t *testing.T) { //nolint:paralleltest // shared database state
+	server, dataStore := setupTestServer(t)
+	server.config.RunMode = config.RunModeDemo
+
+	createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
+	viewerUser := createTestUser(t, dataStore, "viewer", "viewerpassword123", []string{"viewer"})
+	token := loginUser(t, server, "viewer", "viewerpassword123")
+	router := newUsersTestRouter(server)
+
+	w := doUpdateUserPassword(router, token, viewerUser.UID.String(), "newviewerpassword456")
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200 OK, got %d: %s", w.Code, w.Body.String())
+	}
+
+	user, err := dataStore.GetUserByUID(context.Background(), viewerUser.UID)
+	if err != nil {
+		t.Fatalf("failed to refetch user: %v", err)
+	}
+	ok, err := crypto.VerifyPassword(user.PasswordHash, "newviewerpassword456")
+	if err != nil {
+		t.Fatalf("failed to verify password: %v", err)
+	}
+	if !ok {
+		t.Error("viewer password should have been changed")
 	}
 }
