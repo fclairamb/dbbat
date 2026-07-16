@@ -438,7 +438,7 @@ func threadReplyText(action notify.GrantAction, deciderSlackID string, decider *
 // actionForStatus maps a request's terminal status to the notify action
 // used to re-render its message.
 func actionForStatus(status store.GrantRequestStatus) notify.GrantAction {
-	switch status {
+	switch status { //nolint:exhaustive // pending/expired handled by default
 	case store.GrantRequestApproved:
 		return notify.GrantActionApproved
 	case store.GrantRequestDenied:
