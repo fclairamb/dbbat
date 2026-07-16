@@ -135,8 +135,12 @@ func (d *Dialer) sshClientFor(
 	if err := bastion.DecryptSSHSecrets(encryptionKey); err != nil {
 		return nil, err
 	}
-	if err := bastion.DecryptPassword(encryptionKey); err != nil {
-		return nil, err
+	// A bastion may authenticate by key only; decrypt the password just for the
+	// password-auth path (an empty/absent ciphertext means no password auth).
+	if len(bastion.PasswordEncrypted) > 0 {
+		if err := bastion.DecryptPassword(encryptionKey); err != nil {
+			return nil, err
+		}
 	}
 
 	auths, err := sshAuthMethods(bastion)
