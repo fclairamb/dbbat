@@ -356,7 +356,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/databases": {
+    "/servers": {
         parameters: {
             query?: never;
             header?: never;
@@ -385,7 +385,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/databases/{uid}": {
+    "/servers/{uid}": {
         parameters: {
             query?: never;
             header?: never;
@@ -836,7 +836,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/databases/{uid}/connection": {
+    "/servers/{uid}/connection": {
         parameters: {
             query?: never;
             header?: never;
@@ -851,6 +851,29 @@ export interface paths {
          *     - If the protocol proxy is disabled (resolved port = 0): returns 409.
          */
         get: operations["getDatabaseConnection"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/ssh-servers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List SSH bastion servers (admin only)
+         * @description Returns SSH bastion rows (protocol `ssh`). These are excluded from the
+         *     regular database listing and every grantable/connectable target
+         *     context; they appear only here, for management and the "via SSH server"
+         *     selector. Secrets (private key, passphrase) are never returned.
+         */
+        get: operations["listSSHServers"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1128,10 +1151,10 @@ export interface components {
             /** @description SSL mode (disable, prefer, require, etc.) */
             ssl_mode?: string;
             /**
-             * @description Database protocol
+             * @description Server protocol (ssh = an SSH bastion, not a database target)
              * @enum {string}
              */
-            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb";
+            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "ssh";
             /** @description Oracle SERVICE_NAME (Oracle only) */
             oracle_service_name?: string;
             /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
@@ -1146,6 +1169,13 @@ export interface components {
              * @description User who created this configuration
              */
             created_by?: string | null;
+            /**
+             * Format: uuid
+             * @description SSH server (bastion) UID to tunnel through; null for a direct dial
+             */
+            via_uid?: string | null;
+            /** @description TOFU-pinned SSH bastion host key (read-only; ssh servers only) */
+            ssh_known_host_key?: string;
         };
         /** @description Limited database info for non-admin users */
         DatabaseLimited: {
@@ -1176,18 +1206,18 @@ export interface components {
             /** @description Target database username */
             username: string;
             /** @description Target database password (encrypted at rest) */
-            password: string;
+            password?: string;
             /**
              * @description SSL mode
              * @default prefer
              */
             ssl_mode: string;
             /**
-             * @description Database protocol
+             * @description Server protocol (ssh = an SSH bastion, not a database target)
              * @default postgresql
              * @enum {string}
              */
-            protocol: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb";
+            protocol: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "ssh";
             /** @description Oracle SERVICE_NAME (required for Oracle) */
             oracle_service_name?: string;
             /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
@@ -1197,6 +1227,15 @@ export interface components {
              * @default true
              */
             listable: boolean;
+            /**
+             * Format: uuid
+             * @description SSH server (bastion) UID to tunnel through; null for a direct dial
+             */
+            via_uid?: string | null;
+            /** @description SSH private key (PEM) for an ssh server; write-only, never returned */
+            ssh_private_key?: string;
+            /** @description Passphrase for the SSH private key; write-only, never returned */
+            ssh_passphrase?: string;
         };
         UpdateDatabaseRequest: {
             /** @description Description */
@@ -1214,16 +1253,27 @@ export interface components {
             /** @description SSL mode */
             ssl_mode?: string;
             /**
-             * @description Database protocol
+             * @description Server protocol
              * @enum {string}
              */
-            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb";
+            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "ssh";
             /** @description Oracle SERVICE_NAME */
             oracle_service_name?: string;
             /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
             mongo_auth_source?: string;
             /** @description Whether this database appears in the grant-request dropdown for non-admin users */
             listable?: boolean;
+            /**
+             * Format: uuid
+             * @description SSH server (bastion) UID to tunnel through
+             */
+            via_uid?: string | null;
+            /** @description When true, removes the SSH tunnel (direct dial) */
+            clear_via_uid?: boolean;
+            /** @description SSH private key (PEM); write-only, never returned */
+            ssh_private_key?: string;
+            /** @description Passphrase for the SSH private key; write-only, never returned */
+            ssh_passphrase?: string;
         };
         /**
          * @description Control types that can be applied to a grant:
@@ -3416,6 +3466,31 @@ export interface operations {
                     };
                 };
             };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listSSHServers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of SSH servers */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        servers?: components["schemas"]["Database"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalError"];
         };
     };

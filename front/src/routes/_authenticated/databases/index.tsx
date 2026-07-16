@@ -5,6 +5,7 @@ import {
   useDatabaseConnection,
   useCreateDatabase,
   useDeleteDatabase,
+  useSSHServers,
   type Database,
   type DatabaseLimited,
 } from "@/api";
@@ -63,7 +64,13 @@ function isFullDatabase(db: DatabaseItem): db is Database {
   return "host" in db;
 }
 
-type Protocol = "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb";
+type Protocol =
+  | "postgresql"
+  | "oracle"
+  | "mysql"
+  | "mariadb"
+  | "mongodb"
+  | "ssh";
 
 const PROTOCOL_LABEL: Record<Protocol, string> = {
   postgresql: "PostgreSQL",
@@ -71,6 +78,7 @@ const PROTOCOL_LABEL: Record<Protocol, string> = {
   mysql: "MySQL",
   mariadb: "MariaDB",
   mongodb: "MongoDB",
+  ssh: "SSH Bastion",
 };
 
 const PROTOCOL_DEFAULT_PORT: Record<Protocol, string> = {
@@ -79,6 +87,7 @@ const PROTOCOL_DEFAULT_PORT: Record<Protocol, string> = {
   mysql: "3306",
   mariadb: "3306",
   mongodb: "27017",
+  ssh: "22",
 };
 
 const PROTOCOL_BADGE_CLASS: Record<Protocol, string> = {
@@ -90,6 +99,7 @@ const PROTOCOL_BADGE_CLASS: Record<Protocol, string> = {
     "bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-400",
   mongodb:
     "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+  ssh: "bg-slate-100 text-slate-700 dark:bg-slate-800/50 dark:text-slate-300",
 };
 
 const PROTOCOL_USERNAME_PLACEHOLDER: Record<Protocol, string> = {
@@ -98,6 +108,7 @@ const PROTOCOL_USERNAME_PLACEHOLDER: Record<Protocol, string> = {
   mysql: "root",
   mariadb: "root",
   mongodb: "admin",
+  ssh: "www-data",
 };
 
 function DatabasesPage() {
@@ -252,10 +263,16 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
   const [password, setPassword] = useState("");
   const [sslMode, setSslMode] = useState("prefer");
   const [listable, setListable] = useState(true);
+  const [viaUid, setViaUid] = useState<string>("");
+  const [sshPrivateKey, setSshPrivateKey] = useState("");
+  const [sshPassphrase, setSshPassphrase] = useState("");
+
+  const isSSH = protocol === "ssh";
+  const { data: sshServers } = useSSHServers();
 
   const createDb = useCreateDatabase({
     onSuccess: () => {
-      toast.success("Database created successfully");
+      toast.success(isSSH ? "SSH server created" : "Database created successfully");
       onClose();
     },
     onError: (error) => {
@@ -265,6 +282,20 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSSH) {
+      createDb.mutate({
+        name,
+        description: description || undefined,
+        host,
+        port: parseInt(port, 10),
+        username,
+        password: password || undefined,
+        protocol,
+        ssh_private_key: sshPrivateKey || undefined,
+        ssh_passphrase: sshPassphrase || undefined,
+      });
+      return;
+    }
     createDb.mutate({
       name,
       description: description || undefined,
@@ -283,6 +314,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
           ? mongoAuthSource
           : undefined,
       listable,
+      via_uid: viaUid || undefined,
     });
   };
 
@@ -319,8 +351,16 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
                 <SelectItem value="mysql">MySQL</SelectItem>
                 <SelectItem value="mariadb">MariaDB</SelectItem>
                 <SelectItem value="mongodb">MongoDB</SelectItem>
+                <SelectItem value="ssh">SSH Bastion</SelectItem>
               </SelectContent>
             </Select>
+            {isSSH && (
+              <p className="text-xs text-muted-foreground">
+                An SSH bastion is a dial path, not a database. Other databases
+                can be reached "via" it. It never appears in access-request
+                lists.
+              </p>
+            )}
           </div>
           <div className="space-y-2">
             <Label htmlFor="name">Name</Label>
@@ -341,19 +381,21 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               placeholder="Production database"
             />
           </div>
-          <div className="flex items-center justify-between rounded-lg border p-3">
-            <div className="space-y-0.5">
-              <Label htmlFor="listable">Listable</Label>
-              <p className="text-sm text-muted-foreground">
-                Show in the access-request dropdown for non-admin users
-              </p>
+          {!isSSH && (
+            <div className="flex items-center justify-between rounded-lg border p-3">
+              <div className="space-y-0.5">
+                <Label htmlFor="listable">Listable</Label>
+                <p className="text-sm text-muted-foreground">
+                  Show in the access-request dropdown for non-admin users
+                </p>
+              </div>
+              <Switch
+                id="listable"
+                checked={listable}
+                onCheckedChange={setListable}
+              />
             </div>
-            <Switch
-              id="listable"
-              checked={listable}
-              onCheckedChange={setListable}
-            />
-          </div>
+          )}
           <div className="grid grid-cols-3 gap-2">
             <div className="col-span-2 space-y-2">
               <Label htmlFor="host">Host</Label>
@@ -376,7 +418,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
               />
             </div>
           </div>
-          {protocol !== "oracle" && (
+          {!isSSH && protocol !== "oracle" && (
             <div className="space-y-2">
               <Label htmlFor="databaseName">Database Name</Label>
               <Input
@@ -426,16 +468,44 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
             />
           </div>
           <div className="space-y-2">
-            <Label htmlFor="password">Password</Label>
+            <Label htmlFor="password">
+              Password{isSSH ? " (optional if using a key)" : ""}
+            </Label>
             <Input
               id="password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              required
+              required={!isSSH}
             />
           </div>
-          {protocol !== "oracle" && (
+          {isSSH && (
+            <>
+              <div className="space-y-2">
+                <Label htmlFor="sshPrivateKey">SSH Private Key (PEM)</Label>
+                <textarea
+                  id="sshPrivateKey"
+                  className="flex min-h-[96px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  value={sshPrivateKey}
+                  onChange={(e) => setSshPrivateKey(e.target.value)}
+                  placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+                />
+                <p className="text-xs text-muted-foreground">
+                  Write-only: the stored key is never shown again.
+                </p>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="sshPassphrase">Key Passphrase (optional)</Label>
+                <Input
+                  id="sshPassphrase"
+                  type="password"
+                  value={sshPassphrase}
+                  onChange={(e) => setSshPassphrase(e.target.value)}
+                />
+              </div>
+            </>
+          )}
+          {!isSSH && protocol !== "oracle" && (
             <div className="space-y-2">
               <Label htmlFor="sslMode">SSL Mode</Label>
               <Select value={sslMode} onValueChange={setSslMode}>
@@ -450,6 +520,31 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
                   <SelectItem value="verify-full">Verify Full</SelectItem>
                 </SelectContent>
               </Select>
+            </div>
+          )}
+          {!isSSH && (
+            <div className="space-y-2">
+              <Label htmlFor="viaUid">Via SSH server</Label>
+              <Select
+                value={viaUid || "none"}
+                onValueChange={(v) => setViaUid(v === "none" ? "" : v)}
+              >
+                <SelectTrigger>
+                  <SelectValue placeholder="Direct (no tunnel)" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">Direct (no tunnel)</SelectItem>
+                  {(sshServers ?? []).map((srv) => (
+                    <SelectItem key={srv.uid} value={srv.uid}>
+                      {srv.name} ({srv.host})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-xs text-muted-foreground">
+                Tunnel this database's connection through an SSH bastion. Create
+                one by adding a server with protocol "SSH Bastion".
+              </p>
             </div>
           )}
         </div>

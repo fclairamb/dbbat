@@ -162,7 +162,7 @@ export function useDatabases() {
   return useQuery({
     queryKey: ["databases"],
     queryFn: async (): Promise<(Database | DatabaseLimited)[]> => {
-      const response = await apiClient.GET("/databases");
+      const response = await apiClient.GET("/servers");
       if (response.error) {
         throw new Error(response.error.message || "Failed to load databases");
       }
@@ -175,7 +175,7 @@ export function useDatabase(uid: string) {
   return useQuery({
     queryKey: ["databases", uid],
     queryFn: async (): Promise<Database | DatabaseLimited> => {
-      const response = await apiClient.GET("/databases/{uid}", {
+      const response = await apiClient.GET("/servers/{uid}", {
         params: { path: { uid } },
       });
       if (response.error || !response.data) {
@@ -191,7 +191,7 @@ export function useDatabaseConnection(uid: string | undefined) {
   return useQuery({
     queryKey: ["databases", uid, "connection"],
     queryFn: async (): Promise<ConnectionInfo> => {
-      const response = await apiClient.GET("/databases/{uid}/connection", {
+      const response = await apiClient.GET("/servers/{uid}/connection", {
         params: { path: { uid: uid! } },
       });
       if (response.error || !response.data) {
@@ -218,7 +218,7 @@ export function useCreateDatabase(options?: {
 
   return useMutation({
     mutationFn: async (data: CreateDatabaseRequest): Promise<Database> => {
-      const response = await apiClient.POST("/databases", {
+      const response = await apiClient.POST("/servers", {
         body: data,
       });
       if (response.error || !response.data) {
@@ -245,7 +245,7 @@ export function useUpdateDatabase(
 
   return useMutation({
     mutationFn: async (data: UpdateDatabaseRequest): Promise<void> => {
-      const response = await apiClient.PUT("/databases/{uid}", {
+      const response = await apiClient.PUT("/servers/{uid}", {
         params: { path: { uid } },
         body: data,
       });
@@ -270,7 +270,7 @@ export function useDeleteDatabase(options?: {
 
   return useMutation({
     mutationFn: async (uid: string): Promise<void> => {
-      const response = await apiClient.DELETE("/databases/{uid}", {
+      const response = await apiClient.DELETE("/servers/{uid}", {
         params: { path: { uid } },
       });
       if (response.error) {
@@ -282,6 +282,22 @@ export function useDeleteDatabase(options?: {
       options?.onSuccess?.();
     },
     onError: options?.onError,
+  });
+}
+
+// SSH servers (bastions). These are excluded from the regular database list;
+// used by the "via SSH server" selector and admin SSH management.
+export function useSSHServers(enabled = true) {
+  return useQuery({
+    queryKey: ["ssh-servers"],
+    queryFn: async (): Promise<Database[]> => {
+      const response = await apiClient.GET("/ssh-servers");
+      if (response.error) {
+        throw new Error(response.error.message || "Failed to load ssh servers");
+      }
+      return response.data?.servers || [];
+    },
+    enabled,
   });
 }
 
