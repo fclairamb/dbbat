@@ -21,7 +21,21 @@ func (s *Store) CreateServer(ctx context.Context, db *Server, encryptionKey []by
 		return nil, ErrTargetMatchesStorage
 	}
 
+	// Validate the SSH tunnel reference before doing any work.
+	if db.ViaUID != nil {
+		if err := s.validateViaUID(ctx, uuid.Nil, *db.ViaUID); err != nil {
+			return nil, err
+		}
+	}
+
 	plainPassword := db.Password
+
+	// Capture plaintext SSH secrets (if any) before they are cleared; they are
+	// encrypted after the UID is known, exactly like the password.
+	var sshPlain *SSHServerData
+	if sd := db.SSHData(); sd != nil && (sd.PrivateKey != "" || sd.Passphrase != "") {
+		sshPlain = sd
+	}
 
 	result := &Server{
 		Name:              db.Name,
@@ -33,6 +47,7 @@ func (s *Store) CreateServer(ctx context.Context, db *Server, encryptionKey []by
 		SSLMode:           db.SSLMode,
 		Protocol:          db.Protocol,
 		OracleServiceName: db.OracleServiceName,
+		ViaUID:            db.ViaUID,
 		ProtocolData:      db.ProtocolData,
 		Listable:          db.Listable,
 		CreatedBy:         db.CreatedBy,
@@ -76,11 +91,139 @@ func (s *Store) CreateServer(ctx context.Context, db *Server, encryptionKey []by
 		return nil, fmt.Errorf("failed to update encrypted password: %w", err)
 	}
 
+	// Encrypt SSH secrets (AAD-bound to the UID) and persist protocol_data.
+	if sshPlain != nil {
+		if err := encryptSSHSecrets(result.UID, result.ProtocolData.SSH, encryptionKey); err != nil {
+			return nil, err
+		}
+		if _, err := tx.NewUpdate().
+			Model(result).
+			Column("protocol_data").
+			WherePK().
+			Exec(ctx); err != nil {
+			return nil, fmt.Errorf("failed to persist ssh secrets: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return result, nil
+}
+
+// encryptSSHSecrets encrypts the plaintext PrivateKey/Passphrase on sd in place
+// (AAD-bound to the server UID) and clears the plaintext fields, mirroring the
+// password-encryption pattern.
+func encryptSSHSecrets(uid uuid.UUID, sd *SSHServerData, encryptionKey []byte) error {
+	aad := crypto.ServerAAD(uid.String())
+	if sd.PrivateKey != "" {
+		enc, err := crypto.Encrypt([]byte(sd.PrivateKey), encryptionKey, aad)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt ssh private key: %w", err)
+		}
+		sd.PrivateKeyEncrypted = enc
+		sd.PrivateKey = ""
+	}
+	if sd.Passphrase != "" {
+		enc, err := crypto.Encrypt([]byte(sd.Passphrase), encryptionKey, aad)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt ssh passphrase: %w", err)
+		}
+		sd.PassphraseEncrypted = enc
+		sd.Passphrase = ""
+	}
+	return nil
+}
+
+// DecryptSSHSecrets decrypts the SSH private key and passphrase into the
+// in-memory PrivateKey/Passphrase fields (AAD-bound to the server UID). No-op
+// when the server has no SSH material.
+func (db *Server) DecryptSSHSecrets(encryptionKey []byte) error {
+	sd := db.SSHData()
+	if sd == nil {
+		return nil
+	}
+	aad := crypto.ServerAAD(db.UID.String())
+	if len(sd.PrivateKeyEncrypted) > 0 {
+		pt, err := crypto.Decrypt(sd.PrivateKeyEncrypted, encryptionKey, aad)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt ssh private key: %w", err)
+		}
+		sd.PrivateKey = string(pt)
+	}
+	if len(sd.PassphraseEncrypted) > 0 {
+		pt, err := crypto.Decrypt(sd.PassphraseEncrypted, encryptionKey, aad)
+		if err != nil {
+			return fmt.Errorf("failed to decrypt ssh passphrase: %w", err)
+		}
+		sd.Passphrase = string(pt)
+	}
+	return nil
+}
+
+// SetKnownHostKey persists the TOFU-learned SSH host key for an SSH server row,
+// merging into protocol_data.ssh.known_host_key without disturbing other keys.
+func (s *Store) SetKnownHostKey(ctx context.Context, uid uuid.UUID, hostKey string) error {
+	_, err := s.db.NewUpdate().
+		Model((*Server)(nil)).
+		Where("uid = ?", uid).
+		Set("protocol_data = coalesce(protocol_data, '{}'::jsonb) || "+
+			"jsonb_build_object('ssh', coalesce(protocol_data->'ssh', '{}'::jsonb) || "+
+			"jsonb_build_object('known_host_key', ?::text))", hostKey).
+		Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to store ssh host key: %w", err)
+	}
+	return nil
+}
+
+// validateViaUID verifies that viaUID references an existing SSH server and
+// that the via chain neither loops nor passes back through selfUID (pass
+// uuid.Nil for selfUID on create, when the row has no UID yet).
+func (s *Store) validateViaUID(ctx context.Context, selfUID, viaUID uuid.UUID) error {
+	seen := map[uuid.UUID]bool{}
+	cur := viaUID
+	for {
+		if selfUID != uuid.Nil && cur == selfUID {
+			return ErrServerViaCycle
+		}
+		if seen[cur] {
+			return ErrServerViaCycle
+		}
+		seen[cur] = true
+
+		via, err := s.GetServerByUID(ctx, cur)
+		if err != nil {
+			return err
+		}
+		if via.Protocol != ProtocolSSH {
+			return ErrServerViaNotSSH
+		}
+		if via.ViaUID == nil {
+			return nil
+		}
+		cur = *via.ViaUID
+	}
+}
+
+// ListSSHServers returns every SSH bastion row (protocol = 'ssh'), for the
+// admin SSH-server management view and the "via SSH server" selector. These
+// rows are excluded from every grantable/connectable target listing.
+func (s *Store) ListSSHServers(ctx context.Context) ([]Server, error) {
+	var servers []Server
+	err := s.db.NewSelect().
+		Model(&servers).
+		Where("protocol = ?", ProtocolSSH).
+		Order("name ASC").
+		Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list ssh servers: %w", err)
+	}
+	if servers == nil {
+		servers = []Server{}
+	}
+	return servers, nil
 }
 
 // GetServerByName retrieves a database by name
@@ -89,6 +232,8 @@ func (s *Store) GetServerByName(ctx context.Context, name string) (*Server, erro
 	err := s.db.NewSelect().
 		Model(db).
 		Where("name = ?", name).
+		// Targets only: an SSH bastion is a dial path, never connectable by name.
+		Where("protocol <> ?", ProtocolSSH).
 		Scan(ctx)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -152,6 +297,8 @@ func (s *Store) ListListableServers(ctx context.Context) ([]Server, error) {
 	err := s.db.NewSelect().
 		Model(&databases).
 		Where("listable = ?", true).
+		// Targets only: SSH bastions are never grantable/listable targets.
+		Where("protocol <> ?", ProtocolSSH).
 		Order("name ASC").
 		Scan(ctx)
 	if err != nil {
@@ -179,11 +326,14 @@ func (s *Store) GetServerByUID(ctx context.Context, uid uuid.UUID) (*Server, err
 	return db, nil
 }
 
-// ListServers retrieves all databases
+// ListServers retrieves all database *targets* (every protocol except 'ssh').
+// SSH bastions are managed separately via ListSSHServers so they never leak
+// into grantable/connectable target contexts (dropdowns, admin database list).
 func (s *Store) ListServers(ctx context.Context) ([]Server, error) {
 	var databases []Server
 	err := s.db.NewSelect().
 		Model(&databases).
+		Where("protocol <> ?", ProtocolSSH).
 		Order("name ASC").
 		Scan(ctx)
 	if err != nil {
@@ -237,6 +387,13 @@ func (s *Store) UpdateServer(ctx context.Context, uid uuid.UUID, updates ServerU
 	// verify the resulting configuration doesn't match the storage DSN
 	if err := s.checkStorageDSNConflict(ctx, uid, updates); err != nil {
 		return err
+	}
+
+	// Validate a new via_uid (must reference an ssh row, no cycle through self).
+	if updates.ViaUID != nil {
+		if err := s.validateViaUID(ctx, uid, *updates.ViaUID); err != nil {
+			return err
+		}
 	}
 
 	q := s.db.NewUpdate().
@@ -298,6 +455,45 @@ func (s *Store) UpdateServer(ctx context.Context, uid uuid.UUID, updates ServerU
 
 	if updates.Listable != nil {
 		q = q.Set("listable = ?", *updates.Listable)
+	}
+
+	if updates.ClearViaUID {
+		q = q.Set("via_uid = NULL")
+	} else if updates.ViaUID != nil {
+		q = q.Set("via_uid = ?", *updates.ViaUID)
+	}
+
+	// SSH secrets: encrypt (AAD-bound to the UID) and write the merged
+	// protocol_data. Load-modify-write preserves any other protocol_data keys
+	// (e.g. mongodb.auth_source) while staying clear of fragile jsonb SQL.
+	if updates.SSHPrivateKey != nil || updates.SSHPassphrase != nil {
+		current, err := s.GetServerByUID(ctx, uid)
+		if err != nil {
+			return err
+		}
+		if current.ProtocolData == nil {
+			current.ProtocolData = &ServerProtocolData{}
+		}
+		if current.ProtocolData.SSH == nil {
+			current.ProtocolData.SSH = &SSHServerData{}
+		}
+		sd := current.ProtocolData.SSH
+		aad := crypto.ServerAAD(uid.String())
+		if updates.SSHPrivateKey != nil {
+			enc, err := crypto.Encrypt([]byte(*updates.SSHPrivateKey), encryptionKey, aad)
+			if err != nil {
+				return fmt.Errorf("failed to encrypt ssh private key: %w", err)
+			}
+			sd.PrivateKeyEncrypted = enc
+		}
+		if updates.SSHPassphrase != nil {
+			enc, err := crypto.Encrypt([]byte(*updates.SSHPassphrase), encryptionKey, aad)
+			if err != nil {
+				return fmt.Errorf("failed to encrypt ssh passphrase: %w", err)
+			}
+			sd.PassphraseEncrypted = enc
+		}
+		q = q.Set("protocol_data = ?", current.ProtocolData)
 	}
 
 	result, err := q.Exec(ctx)
