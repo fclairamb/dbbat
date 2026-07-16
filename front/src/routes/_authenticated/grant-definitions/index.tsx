@@ -151,6 +151,18 @@ function GrantDefinitionsPage() {
       ),
     },
     {
+      key: "auto_approve",
+      header: "Auto-approve",
+      cell: (d: GrantDefinition) =>
+        d.auto_approve ? (
+          <span className="text-xs bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 px-1.5 py-0.5 rounded">
+            auto-approved
+          </span>
+        ) : (
+          <span className="text-xs text-muted-foreground italic">manual</span>
+        ),
+    },
+    {
       key: "is_active",
       header: "Status",
       cell: (d: GrantDefinition) =>
@@ -287,6 +299,9 @@ function DefinitionDialog({
     return "m";
   });
   const [controls, setControls] = useState<string[]>(editing?.controls ?? []);
+  const [autoApprove, setAutoApprove] = useState(
+    editing?.auto_approve ?? false
+  );
   const [maxQueries, setMaxQueries] = useState<string>(
     editing?.max_query_counts != null ? String(editing.max_query_counts) : ""
   );
@@ -348,6 +363,7 @@ function DefinitionDialog({
       max_bytes_transferred: maxBytesValue
         ? parseInt(maxBytesValue) * unitMult
         : null,
+      auto_approve: autoApprove,
     };
 
     if (editing) {
@@ -439,6 +455,24 @@ function DefinitionDialog({
               ))}
             </div>
           </div>
+          <div className="flex items-center gap-2">
+            <Checkbox
+              id="def-auto-approve"
+              checked={autoApprove}
+              onCheckedChange={(v) => setAutoApprove(!!v)}
+              data-testid="grant-definition-auto-approve"
+            />
+            <Label htmlFor="def-auto-approve" className="cursor-pointer">
+              Auto-approve requests
+            </Label>
+          </div>
+          {autoApprove && (
+            <p className="text-xs text-muted-foreground">
+              Requests against this definition skip admin review and are
+              approved instantly. A justification will be required from
+              requesters.
+            </p>
+          )}
           <div className="grid grid-cols-2 gap-4">
             <div className="space-y-2">
               <Label htmlFor="def-max-q">Max Queries</Label>

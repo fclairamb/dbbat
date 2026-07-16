@@ -253,9 +253,16 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
   const [databaseId, setDatabaseId] = useState("");
   const [justification, setJustification] = useState("");
 
+  const selectedDefinition = definitions.find((d) => d.uid === definitionId);
+  const justificationRequired = selectedDefinition?.auto_approve ?? false;
+
   const create = useCreateGrantRequest({
-    onSuccess: () => {
-      toast.success("Request submitted");
+    onSuccess: (req) => {
+      toast.success(
+        req.status === "approved"
+          ? "Request submitted and auto-approved — access is active now."
+          : "Request submitted"
+      );
       onClose();
     },
     onError: (e) => toast.error(e.message),
@@ -276,8 +283,9 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
         <DialogHeader>
           <DialogTitle>Request access</DialogTitle>
           <DialogDescription>
-            Pick a grant definition and a database. An admin will approve or
-            deny.
+            {justificationRequired
+              ? "This definition auto-approves requests — access will be active immediately after you submit."
+              : "Pick a grant definition and a database. An admin will approve or deny."}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-4">
@@ -320,13 +328,17 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
             </Select>
           </div>
           <div className="space-y-2">
-            <Label htmlFor="justification">Justification (optional)</Label>
+            <Label htmlFor="justification">
+              Justification {justificationRequired ? "" : "(optional)"}
+            </Label>
             <Textarea
               id="justification"
               value={justification}
               onChange={(e) => setJustification(e.target.value)}
               maxLength={1000}
+              required={justificationRequired}
               placeholder="Investigating bug X, need read-only access for an hour."
+              data-testid="grant-request-justification"
             />
           </div>
         </div>
@@ -336,7 +348,12 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
           </Button>
           <Button
             type="submit"
-            disabled={create.isPending || !definitionId || !databaseId}
+            disabled={
+              create.isPending ||
+              !definitionId ||
+              !databaseId ||
+              (justificationRequired && !justification.trim())
+            }
             data-testid="grant-request-submit"
           >
             Submit
