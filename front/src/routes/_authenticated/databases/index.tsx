@@ -291,6 +291,8 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
         username,
         password: password || undefined,
         protocol,
+        ssl_mode: "",
+        listable: false,
         ssh_private_key: sshPrivateKey || undefined,
         ssh_passphrase: sshPassphrase || undefined,
       });
