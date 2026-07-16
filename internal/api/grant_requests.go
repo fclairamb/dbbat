@@ -370,7 +370,7 @@ func (s *Server) autoApproveGrantRequest(ctx context.Context, request *store.Gra
 
 	ev := s.loadEventContext(ctx, updated, nil)
 	ev.Action = notify.GrantActionApproved
-	s.notifyAsync(ev)
+	s.notifyAsync(ev) //nolint:contextcheck // notifyAsync detaches by design
 
 	return &decideOutcome{Request: updated, Grant: grant, Event: ev, Action: notify.GrantActionApproved}, nil
 }
