@@ -18,6 +18,10 @@ type CreateGrantDefinitionRequest struct {
 	Controls            []string `json:"controls"`
 	MaxQueryCounts      *int64   `json:"max_query_counts"`
 	MaxBytesTransferred *int64   `json:"max_bytes_transferred"`
+	// AutoApprove, when true, makes grant requests against this definition
+	// skip the pending/admin-approval step and materialize the grant
+	// instantly.
+	AutoApprove bool `json:"auto_approve"`
 }
 
 // UpdateGrantDefinitionRequest is the JSON body for PATCH
@@ -95,6 +99,7 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		Controls:            req.Controls,
 		MaxQueryCounts:      req.MaxQueryCounts,
 		MaxBytesTransferred: req.MaxBytesTransferred,
+		AutoApprove:         req.AutoApprove,
 		CreatedBy:           currentUser.UID,
 	}
 
@@ -113,6 +118,7 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		"name":                 created.Name,
 		"duration_seconds":     created.DurationSeconds,
 		"controls":             created.Controls,
+		"auto_approve":         created.AutoApprove,
 	})
 
 	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
@@ -225,6 +231,7 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 	def.Controls = req.Controls
 	def.MaxQueryCounts = req.MaxQueryCounts
 	def.MaxBytesTransferred = req.MaxBytesTransferred
+	def.AutoApprove = req.AutoApprove
 
 	if err := s.store.UpdateGrantDefinition(c.Request.Context(), def); err != nil {
 		writeInternalError(c, s.logger, err, "failed to update grant definition")
@@ -237,6 +244,7 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 	details, _ := json.Marshal(map[string]any{
 		"grant_definition_uid": def.UID,
 		"name":                 def.Name,
+		"auto_approve":         def.AutoApprove,
 	})
 
 	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{

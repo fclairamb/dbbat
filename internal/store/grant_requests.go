@@ -129,6 +129,30 @@ func (s *Store) HasPendingRequest(ctx context.Context, userID, definitionID, dat
 // Wrapped in a transaction so a partial failure (request flipped, grant
 // not created) can't leak.
 func (s *Store) ApproveGrantRequest(ctx context.Context, uid, decidedBy uuid.UUID) (*Grant, *GrantRequest, error) {
+	return s.approveGrantRequestTx(ctx, uid, &decidedBy, decidedBy)
+}
+
+// AutoApproveGrantRequest is like ApproveGrantRequest but for definitions
+// flagged AutoApprove: there is no human decider, so decided_by is left
+// NULL (nobody decided — the definition's policy did). The resulting
+// grant still needs a non-nil granted_by column, so it's attributed to
+// the requester themselves (a self-service grant, not an admin-approved
+// one — the audit trail's `via: auto_approve` marker is what distinguishes
+// it).
+func (s *Store) AutoApproveGrantRequest(ctx context.Context, uid, requesterID uuid.UUID) (*Grant, *GrantRequest, error) {
+	return s.approveGrantRequestTx(ctx, uid, nil, requesterID)
+}
+
+// approveGrantRequestTx is the shared transition + grant-materialization
+// logic behind ApproveGrantRequest and AutoApproveGrantRequest. decidedBy
+// is nil for an automatic approval (no human made the call); grantedBy is
+// always a real UID since access_grants.granted_by is NOT NULL.
+func (s *Store) approveGrantRequestTx(
+	ctx context.Context,
+	uid uuid.UUID,
+	decidedBy *uuid.UUID,
+	grantedBy uuid.UUID,
+) (*Grant, *GrantRequest, error) {
 	var (
 		grant   *Grant
 		request *GrantRequest
@@ -157,7 +181,7 @@ func (s *Store) ApproveGrantRequest(ctx context.Context, uid, decidedBy uuid.UUI
 			return ErrDefinitionInactive
 		}
 
-		newGrant := BuildGrantFromDefinition(def, req.UserID, req.DatabaseID, decidedBy, time.Now())
+		newGrant := BuildGrantFromDefinition(def, req.UserID, req.DatabaseID, grantedBy, time.Now())
 
 		if _, err := tx.NewInsert().Model(newGrant).Returning("*").Exec(ctx); err != nil {
 			return fmt.Errorf("create grant: %w", err)
@@ -166,7 +190,7 @@ func (s *Store) ApproveGrantRequest(ctx context.Context, uid, decidedBy uuid.UUI
 		now := time.Now()
 		req.Status = GrantRequestApproved
 		req.DecidedAt = &now
-		req.DecidedBy = &decidedBy
+		req.DecidedBy = decidedBy
 		req.ResultingGrantID = &newGrant.UID
 
 		if _, err := tx.NewUpdate().Model(req).

@@ -395,9 +395,13 @@ type GrantDefinition struct {
 	Controls            []string  `bun:"controls,array,notnull,default:'{}'" json:"controls"`
 	MaxQueryCounts      *int64    `bun:"max_query_counts" json:"max_query_counts"`
 	MaxBytesTransferred *int64    `bun:"max_bytes_transferred" json:"max_bytes_transferred"`
-	IsActive            bool      `bun:"is_active,notnull,default:true" json:"is_active"`
-	CreatedBy           uuid.UUID `bun:"created_by,notnull,type:uuid" json:"created_by"`
-	CreatedAt           time.Time `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	// AutoApprove, when set, makes grant requests against this definition
+	// bypass the pending/admin-approval step: the request is approved and
+	// the grant materialized instantly at request time.
+	AutoApprove bool      `bun:"auto_approve,notnull,default:false" json:"auto_approve"`
+	IsActive    bool      `bun:"is_active,notnull,default:true" json:"is_active"`
+	CreatedBy   uuid.UUID `bun:"created_by,notnull,type:uuid" json:"created_by"`
+	CreatedAt   time.Time `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 }
 
 // GrantDefinitionFilter narrows ListGrantDefinitions queries.
