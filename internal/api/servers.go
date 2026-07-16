@@ -12,35 +12,48 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
-// CreateDatabaseRequest represents the request to create a database
+// CreateDatabaseRequest represents the request to create a database (or, when
+// protocol is "ssh", an SSH bastion). Password is optional for SSH rows that
+// authenticate with a private key.
 type CreateDatabaseRequest struct {
-	Name              string `json:"name" binding:"required"`
-	Description       string `json:"description"`
-	Host              string `json:"host" binding:"required"`
-	Port              int    `json:"port"`
-	DatabaseName      string `json:"database_name"`
-	Username          string `json:"username" binding:"required"`
-	Password          string `json:"password" binding:"required"`
-	SSLMode           string `json:"ssl_mode"`
-	Protocol          string `json:"protocol"`
-	OracleServiceName string `json:"oracle_service_name"`
-	MongoAuthSource   string `json:"mongo_auth_source"`
-	Listable          *bool  `json:"listable"`
+	Name              string     `json:"name" binding:"required"`
+	Description       string     `json:"description"`
+	Host              string     `json:"host" binding:"required"`
+	Port              int        `json:"port"`
+	DatabaseName      string     `json:"database_name"`
+	Username          string     `json:"username" binding:"required"`
+	Password          string     `json:"password"`
+	SSLMode           string     `json:"ssl_mode"`
+	Protocol          string     `json:"protocol"`
+	OracleServiceName string     `json:"oracle_service_name"`
+	MongoAuthSource   string     `json:"mongo_auth_source"`
+	Listable          *bool      `json:"listable"`
+	ViaUID            *uuid.UUID `json:"via_uid"`
+	// SSH bastion secrets (write-only, never returned).
+	SSHPrivateKey string `json:"ssh_private_key"`
+	SSHPassphrase string `json:"ssh_passphrase"`
 }
 
 // UpdateDatabaseRequest represents the request to update a database
 type UpdateDatabaseRequest struct {
-	Description       *string `json:"description"`
-	Host              *string `json:"host"`
-	Port              *int    `json:"port"`
-	DatabaseName      *string `json:"database_name"`
-	Username          *string `json:"username"`
-	Password          *string `json:"password"`
-	SSLMode           *string `json:"ssl_mode"`
-	Protocol          *string `json:"protocol"`
-	OracleServiceName *string `json:"oracle_service_name"`
-	MongoAuthSource   *string `json:"mongo_auth_source"`
-	Listable          *bool   `json:"listable"`
+	Description       *string    `json:"description"`
+	Host              *string    `json:"host"`
+	Port              *int       `json:"port"`
+	DatabaseName      *string    `json:"database_name"`
+	Username          *string    `json:"username"`
+	Password          *string    `json:"password"`
+	SSLMode           *string    `json:"ssl_mode"`
+	Protocol          *string    `json:"protocol"`
+	OracleServiceName *string    `json:"oracle_service_name"`
+	MongoAuthSource   *string    `json:"mongo_auth_source"`
+	Listable          *bool      `json:"listable"`
+	ViaUID            *uuid.UUID `json:"via_uid"`
+	// ClearViaUID, when true, removes the SSH tunnel (direct dial). Distinct
+	// from an omitted via_uid, which leaves the tunnel unchanged.
+	ClearViaUID bool `json:"clear_via_uid"`
+	// SSH bastion secrets (write-only, never returned).
+	SSHPrivateKey *string `json:"ssh_private_key"`
+	SSHPassphrase *string `json:"ssh_passphrase"`
 }
 
 // DatabaseResponse represents a database with full details (admin only)
@@ -58,6 +71,10 @@ type DatabaseResponse struct {
 	MongoAuthSource   string     `json:"mongo_auth_source,omitempty"`
 	Listable          bool       `json:"listable"`
 	CreatedBy         *uuid.UUID `json:"created_by,omitempty"`
+	ViaUID            *uuid.UUID `json:"via_uid,omitempty"`
+	// SSHKnownHostKey is the TOFU-pinned bastion host key (read-only). Secrets
+	// (private key, passphrase) are never returned.
+	SSHKnownHostKey string `json:"ssh_known_host_key,omitempty"`
 }
 
 // DatabaseLimitedResponse represents a database with limited info (non-admin)
@@ -90,7 +107,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 
 	if !isSupportedProtocol(req.Protocol) {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
-			"protocol must be one of: postgresql, oracle, mysql, mariadb, mongodb")
+			"protocol must be one of: postgresql, oracle, mysql, mariadb, mongodb, ssh")
 		return
 	}
 
@@ -106,6 +123,14 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 
 	// Validate required fields per protocol
 	switch req.Protocol {
+	case store.ProtocolSSH:
+		// SSH bastions have no database_name/ssl_mode; they need a private key
+		// or a password to authenticate to the bastion.
+		if req.SSHPrivateKey == "" && req.Password == "" {
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError,
+				"ssh_private_key or password is required for ssh servers")
+			return
+		}
 	case store.ProtocolOracle:
 		if req.OracleServiceName == "" && req.DatabaseName == "" {
 			writeError(c, http.StatusBadRequest, ErrCodeValidationError,
@@ -139,10 +164,20 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 	if req.MongoAuthSource != "" {
 		protocolData = &store.ServerProtocolData{MongoDB: &store.MongoDatabaseData{AuthSource: req.MongoAuthSource}}
 	}
+	if req.Protocol == store.ProtocolSSH && (req.SSHPrivateKey != "" || req.SSHPassphrase != "") {
+		if protocolData == nil {
+			protocolData = &store.ServerProtocolData{}
+		}
+		protocolData.SSH = &store.SSHServerData{PrivateKey: req.SSHPrivateKey, Passphrase: req.SSHPassphrase}
+	}
 
 	listable := true
 	if req.Listable != nil {
 		listable = *req.Listable
+	}
+	// SSH bastions are never grantable/connectable targets.
+	if req.Protocol == store.ProtocolSSH {
+		listable = false
 	}
 
 	db := &store.Server{
@@ -156,6 +191,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		SSLMode:           req.SSLMode,
 		Protocol:          req.Protocol,
 		OracleServiceName: oracleServiceName,
+		ViaUID:            req.ViaUID,
 		ProtocolData:      protocolData,
 		Listable:          listable,
 		CreatedBy:         &currentUser.UID,
@@ -165,6 +201,10 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, store.ErrTargetMatchesStorage) {
 			writeError(c, http.StatusBadRequest, ErrCodeTargetMatchesSelf, "target database cannot match DBBat storage database")
+			return
+		}
+		if errors.Is(err, store.ErrServerViaNotSSH) || errors.Is(err, store.ErrServerViaCycle) {
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
 			return
 		}
 		writeInternalError(c, s.logger, err, "failed to create database")
@@ -356,6 +396,10 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		OracleServiceName: req.OracleServiceName,
 		MongoAuthSource:   req.MongoAuthSource,
 		Listable:          req.Listable,
+		ViaUID:            req.ViaUID,
+		ClearViaUID:       req.ClearViaUID,
+		SSHPrivateKey:     req.SSHPrivateKey,
+		SSHPassphrase:     req.SSHPassphrase,
 	}
 
 	if err := s.store.UpdateServer(c.Request.Context(), uid, updates, s.encryptionKey); err != nil {
@@ -365,6 +409,10 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		}
 		if errors.Is(err, store.ErrServerNotFound) {
 			writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
+			return
+		}
+		if errors.Is(err, store.ErrServerViaNotSSH) || errors.Is(err, store.ErrServerViaCycle) {
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
 			return
 		}
 		writeInternalError(c, s.logger, err, "failed to update database")
@@ -482,6 +530,11 @@ func toDatabaseResponse(db *store.Server) DatabaseResponse {
 		mongoAuthSource = data.AuthSource
 	}
 
+	var knownHostKey string
+	if sd := db.SSHData(); sd != nil {
+		knownHostKey = sd.KnownHostKey
+	}
+
 	return DatabaseResponse{
 		UID:               db.UID,
 		Name:              db.Name,
@@ -496,7 +549,26 @@ func toDatabaseResponse(db *store.Server) DatabaseResponse {
 		MongoAuthSource:   mongoAuthSource,
 		Listable:          db.Listable,
 		CreatedBy:         db.CreatedBy,
+		ViaUID:            db.ViaUID,
+		SSHKnownHostKey:   knownHostKey,
 	}
+}
+
+// handleListSSHServers lists SSH bastion rows (admin only). These are excluded
+// from the regular database listing and every grantable/connectable target
+// context; they appear only here, for management and the "via SSH server"
+// selector.
+func (s *Server) handleListSSHServers(c *gin.Context) {
+	servers, err := s.store.ListSSHServers(c.Request.Context())
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to list ssh servers")
+		return
+	}
+	response := make([]DatabaseResponse, len(servers))
+	for i := range servers {
+		response[i] = toDatabaseResponse(&servers[i])
+	}
+	successResponse(c, gin.H{"servers": response})
 }
 
 // toDatabaseLimitedResponse converts a Server to a limited response (non-admin)
@@ -513,7 +585,7 @@ func toDatabaseLimitedResponse(db *store.Server) DatabaseLimitedResponse {
 // of truth for the enum.
 func isSupportedProtocol(protocol string) bool {
 	switch protocol {
-	case store.ProtocolPostgreSQL, store.ProtocolOracle, store.ProtocolMySQL, store.ProtocolMariaDB, store.ProtocolMongoDB:
+	case store.ProtocolPostgreSQL, store.ProtocolOracle, store.ProtocolMySQL, store.ProtocolMariaDB, store.ProtocolMongoDB, store.ProtocolSSH:
 		return true
 	default:
 		return false
@@ -536,6 +608,8 @@ func defaultPortFor(protocol string) int {
 		// to avoid clashing with a local mongod, but Server.Port is the
 		// upstream target's port, which conventionally is 27017.
 		return 27017
+	case store.ProtocolSSH:
+		return 22
 	default:
 		return 0
 	}

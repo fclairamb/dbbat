@@ -158,6 +158,13 @@ func (s *Server) handleCreateGrantRequest(c *gin.Context) {
 		return
 	}
 
+	// The target must be a database, never an SSH bastion (a dial path).
+	if target, err := s.store.GetServerByUID(ctx, req.DatabaseID); err == nil && target.IsSSH() {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "cannot request access to an ssh server")
+
+		return
+	}
+
 	pending, err := s.store.HasPendingRequest(ctx, currentUser.UID, req.GrantDefinitionID, req.DatabaseID)
 	if err != nil {
 		writeInternalError(c, s.logger, err, "failed to check pending requests")

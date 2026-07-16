@@ -52,6 +52,12 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 		return
 	}
 
+	// The target must be a database, never an SSH bastion (a dial path).
+	if target, err := s.store.GetServerByUID(c.Request.Context(), req.DatabaseID); err == nil && target.IsSSH() {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "cannot grant access to an ssh server")
+		return
+	}
+
 	currentUser := getCurrentUser(c)
 	grant := &store.Grant{
 		UserID:              req.UserID,
