@@ -417,15 +417,23 @@ func userLabel(u *store.User) string {
 	return u.Username
 }
 
+// isAutoApproved reports whether an approved event has no human decider —
+// i.e. the definition's AutoApprove policy decided it, not an admin.
+func isAutoApproved(ev GrantRequestEvent) bool {
+	return ev.Action == GrantActionApproved && ev.Decider == nil
+}
+
 func statusEmoji(ev GrantRequestEvent) string {
-	switch ev.Action {
-	case GrantActionCreated:
+	switch {
+	case isAutoApproved(ev):
+		return "⚡"
+	case ev.Action == GrantActionCreated:
 		return "🔐"
-	case GrantActionApproved:
+	case ev.Action == GrantActionApproved:
 		return "✅"
-	case GrantActionDenied:
+	case ev.Action == GrantActionDenied:
 		return "❌"
-	case GrantActionCancelled:
+	case ev.Action == GrantActionCancelled:
 		return "🚫"
 	default:
 		return "❔"
@@ -433,6 +441,10 @@ func statusEmoji(ev GrantRequestEvent) string {
 }
 
 func statusLabel(ev GrantRequestEvent) string {
+	if isAutoApproved(ev) {
+		return "auto-approved"
+	}
+
 	switch ev.Action {
 	case GrantActionCreated:
 		return "pending"
