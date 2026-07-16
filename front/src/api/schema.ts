@@ -1289,6 +1289,12 @@ export interface components {
             max_query_counts?: number | null;
             /** Format: int64 */
             max_bytes_transferred?: number | null;
+            /**
+             * @description When true, grant requests against this definition skip the pending/admin-approval
+             *     step and are approved (and the grant materialized) instantly at request time.
+             * @default false
+             */
+            auto_approve: boolean;
             /** @description Soft-deleted definitions have is_active=false; they remain referenced by historical grant requests. */
             readonly is_active: boolean;
             /** Format: uuid */
@@ -1307,6 +1313,12 @@ export interface components {
             max_query_counts?: number | null;
             /** Format: int64 */
             max_bytes_transferred?: number | null;
+            /**
+             * @description When true, grant requests against this definition skip the pending/admin-approval
+             *     step and are approved (and the grant materialized) instantly at request time.
+             * @default false
+             */
+            auto_approve: boolean;
         };
         AccessGrant: {
             /**

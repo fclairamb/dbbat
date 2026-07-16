@@ -2555,6 +2555,12 @@ components:
           type: integer
           format: int64
           nullable: true
+        auto_approve:
+          type: boolean
+          default: false
+          description: |
+            When true, grant requests against this definition skip the pending/admin-approval
+            step and are approved (and the grant materialized) instantly at request time.
         is_active:
           type: boolean
           readOnly: true
@@ -2601,6 +2607,12 @@ components:
           type: integer
           format: int64
           nullable: true
+        auto_approve:
+          type: boolean
+          default: false
+          description: |
+            When true, grant requests against this definition skip the pending/admin-approval
+            step and are approved (and the grant materialized) instantly at request time.
       required:
         - name
         - duration_seconds
