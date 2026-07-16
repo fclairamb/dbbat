@@ -79,7 +79,7 @@ func (s *Session) connectUpstream() error {
 
 	addr := net.JoinHostPort(s.database.Host, strconv.Itoa(s.database.Port))
 
-	conn, err := s.dialUpstream(addr)
+	conn, err := s.dialUpstream()
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrUpstreamConnect, err)
 	}
@@ -111,8 +111,9 @@ func (s *Session) connectUpstream() error {
 
 // dialUpstream opens the TCP (optionally TLS) connection per the database's
 // ssl_mode, mirroring the MySQL upstream mapping.
-func (s *Session) dialUpstream(addr string) (net.Conn, error) {
-	conn, err := net.Dial("tcp", addr)
+func (s *Session) dialUpstream() (net.Conn, error) {
+	// Dial directly, or tunnel through an SSH bastion when via_uid is set.
+	conn, err := shared.DialUpstream(s.ctx, s.server.store, s.server.encryptionKey, s.database)
 	if err != nil {
 		return nil, err
 	}

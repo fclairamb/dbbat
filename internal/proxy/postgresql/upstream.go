@@ -24,10 +24,9 @@ func (s *Session) connectUpstream() error {
 		return fmt.Errorf("failed to decrypt database password: %w", err)
 	}
 
-	// Connect to upstream
-	addr := net.JoinHostPort(s.database.Host, fmt.Sprintf("%d", s.database.Port))
-
-	conn, err := net.Dial("tcp", addr)
+	// Connect to upstream (directly, or tunneled through an SSH bastion when the
+	// server row's via_uid is set).
+	conn, err := shared.DialUpstream(s.ctx, s.store, s.encryptionKey, s.database)
 	if err != nil {
 		return fmt.Errorf("failed to connect to upstream: %w", err)
 	}

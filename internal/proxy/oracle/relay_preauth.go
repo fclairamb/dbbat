@@ -7,8 +7,32 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"time"
+
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/store"
 )
+
+// dialUpstreamAddr dials an Oracle upstream address directly, or tunnels it
+// through the session server's SSH bastion (via_uid) when one is configured.
+// Redirect targets returned by the listener are dialed through the same bastion.
+func dialUpstreamAddr(s *session, addr string) (net.Conn, error) {
+	if s.database == nil || s.database.ViaUID == nil {
+		return net.DialTimeout("tcp", addr, 10*time.Second)
+	}
+
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("parse upstream addr %s: %w", addr, err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("parse upstream port %s: %w", portStr, err)
+	}
+	target := &store.Server{Host: host, Port: port, ViaUID: s.database.ViaUID}
+	return shared.DialUpstream(s.ctx, s.store, s.encryptionKey, target)
+}
 
 // relayPreAuthNegotiation establishes a transparent TCP relay between the client
 // and upstream for the pre-authentication TNS/TTC negotiation phase.
@@ -495,7 +519,7 @@ func dialUpstreamWithRedirect(s *session, addr string, connectPkt *TNSPacket) (n
 	currentConnect := connectPkt.Raw
 
 	for redirects := 0; redirects <= maxRedirects; redirects++ {
-		conn, err := net.DialTimeout("tcp", currentAddr, 10*time.Second)
+		conn, err := dialUpstreamAddr(s, currentAddr)
 		if err != nil {
 			return nil, nil, fmt.Errorf("dial upstream %s: %w", currentAddr, err)
 		}

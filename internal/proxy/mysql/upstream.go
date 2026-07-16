@@ -1,6 +1,7 @@
 package mysql
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"log/slog"
@@ -50,11 +51,20 @@ func (s *Session) connectUpstream() error {
 
 	addr := net.JoinHostPort(s.database.Host, strconv.Itoa(s.database.Port))
 
-	conn, err := gomysqlclient.Connect(
+	// Inject a Dialer so the upstream TCP connection can be tunneled through an
+	// SSH bastion when the server row's via_uid is set (plain dial otherwise).
+	dialer := func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return shared.DialUpstream(ctx, s.server.store, s.server.encryptionKey, s.database)
+	}
+
+	conn, err := gomysqlclient.ConnectWithDialer(
+		s.ctx,
+		"tcp",
 		addr,
 		s.database.Username,
 		s.database.Password,
 		s.database.DatabaseName,
+		dialer,
 		s.applyUpstreamOptions,
 	)
 	if err != nil {
