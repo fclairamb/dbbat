@@ -34,6 +34,7 @@ func (s *Store) CreateGrantDefinition(ctx context.Context, def *GrantDefinition)
 		Controls:            controls,
 		MaxQueryCounts:      def.MaxQueryCounts,
 		MaxBytesTransferred: def.MaxBytesTransferred,
+		AutoApprove:         def.AutoApprove,
 		IsActive:            true,
 		CreatedBy:           def.CreatedBy,
 		CreatedAt:           time.Now(),
@@ -105,7 +106,7 @@ func (s *Store) UpdateGrantDefinition(ctx context.Context, def *GrantDefinition)
 	// the model's `bun:"controls,array"` tag uses on Insert.
 	res, err := s.db.NewUpdate().
 		Model(def).
-		Column("name", "description", "duration_seconds", "controls", "max_query_counts", "max_bytes_transferred").
+		Column("name", "description", "duration_seconds", "controls", "max_query_counts", "max_bytes_transferred", "auto_approve").
 		Where("uid = ?", def.UID).
 		Exec(ctx)
 	if err != nil {

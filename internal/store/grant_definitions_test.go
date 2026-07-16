@@ -53,6 +53,43 @@ func TestCreateGrantDefinition(t *testing.T) {
 	if created.Name != "Read-only 1h" {
 		t.Errorf("Name = %q, want Read-only 1h", created.Name)
 	}
+
+	if created.AutoApprove {
+		t.Error("AutoApprove should default to false")
+	}
+}
+
+func TestCreateGrantDefinition_AutoApprove(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "autoapprove")
+
+	def := &GrantDefinition{
+		Name:            "Auto-approved read-only",
+		DurationSeconds: 3600,
+		Controls:        []string{ControlReadOnly},
+		AutoApprove:     true,
+		CreatedBy:       admin.UID,
+	}
+
+	created, err := store.CreateGrantDefinition(ctx, def)
+	if err != nil {
+		t.Fatalf("CreateGrantDefinition() error = %v", err)
+	}
+
+	if !created.AutoApprove {
+		t.Error("AutoApprove should be true")
+	}
+
+	fetched, err := store.GetGrantDefinition(ctx, created.UID)
+	if err != nil {
+		t.Fatalf("GetGrantDefinition() error = %v", err)
+	}
+
+	if !fetched.AutoApprove {
+		t.Error("AutoApprove should round-trip through storage as true")
+	}
 }
 
 func TestCreateGrantDefinition_DuplicateActiveName(t *testing.T) {

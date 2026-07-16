@@ -464,6 +464,45 @@ func TestNotifier_DecidedRenderDropsButtons(t *testing.T) {
 	}
 }
 
+func TestNotifier_AutoApprovedRenderHasNoButtonsOrDeciderLine(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeSlack(t)
+
+	n := &SlackNotifier{
+		client:      fake.client(),
+		channel:     "#dbbat",
+		publicURL:   "https://example.com",
+		interactive: true,
+		log:         nopLogger(),
+	}
+
+	ev := sampleEvent(GrantActionApproved)
+	ev.Interactive = true
+	// Decider left nil: auto-approved by the definition's policy, not a
+	// human — this is the code path handleCreateGrantRequest exercises when
+	// def.AutoApprove is set.
+
+	n.NotifyGrantRequest(context.Background(), ev)
+
+	if got := fake.updateCount(); got != 1 {
+		t.Fatalf("update calls = %d, want 1", got)
+	}
+
+	blocks := fake.updateCalls[0].Get("blocks")
+	if strings.Contains(blocks, ActionApprove) || strings.Contains(blocks, ActionDeny) {
+		t.Errorf("auto-approved render should have no action buttons: %s", blocks)
+	}
+
+	if strings.Contains(blocks, "Approved by") {
+		t.Errorf("auto-approved render should not claim a human decider: %s", blocks)
+	}
+
+	if !strings.Contains(blocks, "auto-approved") {
+		t.Errorf("auto-approved render should say so in the status label: %s", blocks)
+	}
+}
+
 func TestNotifier_MentionLineFallsBackToUsername(t *testing.T) {
 	t.Parallel()
 
