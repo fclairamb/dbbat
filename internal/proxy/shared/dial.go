@@ -22,6 +22,13 @@ const dialTimeout = 30 * time.Second
 // differs from the TOFU-pinned one recorded on first connect.
 var ErrSSHHostKeyMismatch = errors.New("ssh: host key mismatch with pinned known_host_key")
 
+// ErrBastionNotSSH is returned when a via_uid resolves to a non-ssh row.
+var ErrBastionNotSSH = errors.New("ssh: via_uid does not reference an ssh server")
+
+// ErrNoSSHAuthMethod is returned when a bastion row has neither a private key
+// nor a password to authenticate with.
+var ErrNoSSHAuthMethod = errors.New("ssh: bastion has no usable auth method (private key or password)")
+
 // ServerResolver resolves server rows and persists TOFU host keys. Satisfied by
 // *store.Store; an interface so the dialer can be unit-tested with a fake.
 type ServerResolver interface {
@@ -130,7 +137,7 @@ func (d *Dialer) sshClientFor(
 		return nil, fmt.Errorf("failed to load ssh bastion: %w", err)
 	}
 	if bastion.Protocol != store.ProtocolSSH {
-		return nil, fmt.Errorf("via_uid %s is not an ssh server", uid)
+		return nil, fmt.Errorf("%w: %s", ErrBastionNotSSH, uid)
 	}
 	if err := bastion.DecryptSSHSecrets(encryptionKey); err != nil {
 		return nil, err
@@ -236,7 +243,7 @@ func sshAuthMethods(bastion *store.Server) ([]ssh.AuthMethod, error) {
 	}
 
 	if len(methods) == 0 {
-		return nil, errors.New("ssh bastion has no usable auth method (private key or password)")
+		return nil, ErrNoSSHAuthMethod
 	}
 	return methods, nil
 }

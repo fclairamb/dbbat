@@ -19,6 +19,11 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
+var (
+	errTestServerNotFound = errors.New("test: server not found")
+	errTestUnknownKey     = errors.New("test: unknown key")
+)
+
 // fakeResolver is an in-memory ServerResolver for the dialer tests.
 type fakeResolver struct {
 	mu       sync.Mutex
@@ -38,7 +43,7 @@ func (f *fakeResolver) GetServerByUID(_ context.Context, uid uuid.UUID) (*store.
 	defer f.mu.Unlock()
 	srv, ok := f.servers[uid]
 	if !ok {
-		return nil, errors.New("not found")
+		return nil, errTestServerNotFound
 	}
 	// Return a shallow copy so callers mutating decrypted fields don't race the map.
 	cp := *srv
@@ -111,7 +116,7 @@ func startFakeSSHServer(t *testing.T, clientPub ssh.PublicKey) *fakeSSHServer {
 			if string(key.Marshal()) == string(clientPub.Marshal()) {
 				return &ssh.Permissions{}, nil
 			}
-			return nil, errors.New("unknown key")
+			return nil, errTestUnknownKey
 		},
 	}
 	cfg.AddHostKey(hostSigner)
@@ -234,6 +239,7 @@ func splitHostPort(t *testing.T, addr string) (string, int) {
 }
 
 func TestDialUpstream_Direct(t *testing.T) {
+	t.Parallel()
 	echo := startEchoTarget(t)
 	host, port := splitHostPort(t, echo.Addr().String())
 
@@ -248,6 +254,7 @@ func TestDialUpstream_Direct(t *testing.T) {
 }
 
 func TestDialUpstream_ThroughSSHBastion(t *testing.T) {
+	t.Parallel()
 	echo := startEchoTarget(t)
 	targetHost, targetPort := splitHostPort(t, echo.Addr().String())
 
@@ -300,6 +307,7 @@ func TestDialUpstream_ThroughSSHBastion(t *testing.T) {
 }
 
 func TestDialUpstream_HostKeyMismatch(t *testing.T) {
+	t.Parallel()
 	echo := startEchoTarget(t)
 	targetHost, targetPort := splitHostPort(t, echo.Addr().String())
 

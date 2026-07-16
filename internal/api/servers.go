@@ -121,36 +121,10 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		return
 	}
 
-	// Validate required fields per protocol
-	switch req.Protocol {
-	case store.ProtocolSSH:
-		// SSH bastions have no database_name/ssl_mode; they need a private key
-		// or a password to authenticate to the bastion.
-		if req.SSHPrivateKey == "" && req.Password == "" {
-			writeError(c, http.StatusBadRequest, ErrCodeValidationError,
-				"ssh_private_key or password is required for ssh servers")
-			return
-		}
-	case store.ProtocolOracle:
-		if req.OracleServiceName == "" && req.DatabaseName == "" {
-			writeError(c, http.StatusBadRequest, ErrCodeValidationError,
-				"oracle_service_name or database_name is required for Oracle databases")
-			return
-		}
-
-		if req.OracleServiceName == "" {
-			req.OracleServiceName = req.DatabaseName
-		}
-	default:
-		if req.DatabaseName == "" {
-			writeError(c, http.StatusBadRequest, ErrCodeValidationError,
-				"database_name is required for "+req.Protocol+" databases")
-			return
-		}
-
-		if req.SSLMode == "" {
-			req.SSLMode = "prefer"
-		}
+	// Validate required fields per protocol (mutates req to fill defaults).
+	if errMsg := validateCreateProtocolFields(&req); errMsg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, errMsg)
+		return
 	}
 
 	currentUser := getCurrentUser(c)
@@ -578,6 +552,34 @@ func toDatabaseLimitedResponse(db *store.Server) DatabaseLimitedResponse {
 		Name:        db.Name,
 		Description: db.Description,
 	}
+}
+
+// validateCreateProtocolFields validates and defaults the per-protocol fields
+// of a create request in place, returning an error message (empty when valid).
+func validateCreateProtocolFields(req *CreateDatabaseRequest) string {
+	switch req.Protocol {
+	case store.ProtocolSSH:
+		// SSH bastions have no database_name/ssl_mode; they need a private key
+		// or a password to authenticate to the bastion.
+		if req.SSHPrivateKey == "" && req.Password == "" {
+			return "ssh_private_key or password is required for ssh servers"
+		}
+	case store.ProtocolOracle:
+		if req.OracleServiceName == "" && req.DatabaseName == "" {
+			return "oracle_service_name or database_name is required for Oracle databases"
+		}
+		if req.OracleServiceName == "" {
+			req.OracleServiceName = req.DatabaseName
+		}
+	default:
+		if req.DatabaseName == "" {
+			return "database_name is required for " + req.Protocol + " databases"
+		}
+		if req.SSLMode == "" {
+			req.SSLMode = "prefer"
+		}
+	}
+	return ""
 }
 
 // isSupportedProtocol reports whether the given protocol is one the proxy

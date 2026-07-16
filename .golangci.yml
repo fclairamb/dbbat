@@ -284,7 +284,7 @@ linters:
         path: internal/store/store\.go
       - linters:
           - contextcheck
-        path: internal/store/databases\.go
+        path: internal/store/servers\.go
       - linters:
           - contextcheck
         path: _test\.go

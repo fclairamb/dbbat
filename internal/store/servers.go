@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/uptrace/bun"
 
 	"github.com/fclairamb/dbbat/internal/crypto"
 )
@@ -401,25 +402,7 @@ func (s *Store) UpdateServer(ctx context.Context, uid uuid.UUID, updates ServerU
 		Where("uid = ?", uid).
 		Set("updated_at = ?", time.Now())
 
-	if updates.Description != nil {
-		q = q.Set("description = ?", *updates.Description)
-	}
-
-	if updates.Host != nil {
-		q = q.Set("host = ?", *updates.Host)
-	}
-
-	if updates.Port != nil {
-		q = q.Set("port = ?", *updates.Port)
-	}
-
-	if updates.DatabaseName != nil {
-		q = q.Set("database_name = ?", *updates.DatabaseName)
-	}
-
-	if updates.Username != nil {
-		q = q.Set("username = ?", *updates.Username)
-	}
+	q = applyServerColumnUpdates(q, updates)
 
 	if updates.Password != nil {
 		aad := crypto.ServerAAD(uid.String())
@@ -430,70 +413,14 @@ func (s *Store) UpdateServer(ctx context.Context, uid uuid.UUID, updates ServerU
 		q = q.Set("password_encrypted = ?", passwordEncrypted)
 	}
 
-	if updates.SSLMode != nil {
-		q = q.Set("ssl_mode = ?", *updates.SSLMode)
-	}
-
-	if updates.Protocol != nil {
-		q = q.Set("protocol = ?", *updates.Protocol)
-	}
-
-	if updates.OracleServiceName != nil {
-		q = q.Set("oracle_service_name = ?", *updates.OracleServiceName)
-	}
-
-	if updates.MongoAuthSource != nil {
-		// Merge into protocol_data.mongodb.auth_source rather than overwriting
-		// the whole jsonb column, so other protocol_data keys survive.
-		q = q.Set(
-			"protocol_data = coalesce(protocol_data, '{}'::jsonb) || "+
-				"jsonb_build_object('mongodb', coalesce(protocol_data->'mongodb', '{}'::jsonb) || "+
-				"jsonb_build_object('auth_source', ?::text))",
-			*updates.MongoAuthSource,
-		)
-	}
-
-	if updates.Listable != nil {
-		q = q.Set("listable = ?", *updates.Listable)
-	}
-
-	if updates.ClearViaUID {
-		q = q.Set("via_uid = NULL")
-	} else if updates.ViaUID != nil {
-		q = q.Set("via_uid = ?", *updates.ViaUID)
-	}
-
 	// SSH secrets: encrypt (AAD-bound to the UID) and write the merged
-	// protocol_data. Load-modify-write preserves any other protocol_data keys
-	// (e.g. mongodb.auth_source) while staying clear of fragile jsonb SQL.
+	// protocol_data, preserving any other protocol_data keys.
 	if updates.SSHPrivateKey != nil || updates.SSHPassphrase != nil {
-		current, err := s.GetServerByUID(ctx, uid)
+		pd, err := s.mergedSSHSecrets(ctx, uid, updates, encryptionKey)
 		if err != nil {
 			return err
 		}
-		if current.ProtocolData == nil {
-			current.ProtocolData = &ServerProtocolData{}
-		}
-		if current.ProtocolData.SSH == nil {
-			current.ProtocolData.SSH = &SSHServerData{}
-		}
-		sd := current.ProtocolData.SSH
-		aad := crypto.ServerAAD(uid.String())
-		if updates.SSHPrivateKey != nil {
-			enc, err := crypto.Encrypt([]byte(*updates.SSHPrivateKey), encryptionKey, aad)
-			if err != nil {
-				return fmt.Errorf("failed to encrypt ssh private key: %w", err)
-			}
-			sd.PrivateKeyEncrypted = enc
-		}
-		if updates.SSHPassphrase != nil {
-			enc, err := crypto.Encrypt([]byte(*updates.SSHPassphrase), encryptionKey, aad)
-			if err != nil {
-				return fmt.Errorf("failed to encrypt ssh passphrase: %w", err)
-			}
-			sd.PassphraseEncrypted = enc
-		}
-		q = q.Set("protocol_data = ?", current.ProtocolData)
+		q = q.Set("protocol_data = ?", pd)
 	}
 
 	result, err := q.Exec(ctx)
@@ -511,6 +438,89 @@ func (s *Store) UpdateServer(ctx context.Context, uid uuid.UUID, updates ServerU
 	}
 
 	return nil
+}
+
+// applyServerColumnUpdates adds the plain (non-encrypted) column setters to an
+// update query. Password and SSH-secret columns are handled by the caller,
+// which needs the encryption key.
+func applyServerColumnUpdates(q *bun.UpdateQuery, updates ServerUpdate) *bun.UpdateQuery {
+	if updates.Description != nil {
+		q = q.Set("description = ?", *updates.Description)
+	}
+	if updates.Host != nil {
+		q = q.Set("host = ?", *updates.Host)
+	}
+	if updates.Port != nil {
+		q = q.Set("port = ?", *updates.Port)
+	}
+	if updates.DatabaseName != nil {
+		q = q.Set("database_name = ?", *updates.DatabaseName)
+	}
+	if updates.Username != nil {
+		q = q.Set("username = ?", *updates.Username)
+	}
+	if updates.SSLMode != nil {
+		q = q.Set("ssl_mode = ?", *updates.SSLMode)
+	}
+	if updates.Protocol != nil {
+		q = q.Set("protocol = ?", *updates.Protocol)
+	}
+	if updates.OracleServiceName != nil {
+		q = q.Set("oracle_service_name = ?", *updates.OracleServiceName)
+	}
+	if updates.MongoAuthSource != nil {
+		// Merge into protocol_data.mongodb.auth_source rather than overwriting
+		// the whole jsonb column, so other protocol_data keys survive.
+		q = q.Set(
+			"protocol_data = coalesce(protocol_data, '{}'::jsonb) || "+
+				"jsonb_build_object('mongodb', coalesce(protocol_data->'mongodb', '{}'::jsonb) || "+
+				"jsonb_build_object('auth_source', ?::text))",
+			*updates.MongoAuthSource,
+		)
+	}
+	if updates.Listable != nil {
+		q = q.Set("listable = ?", *updates.Listable)
+	}
+	if updates.ClearViaUID {
+		q = q.Set("via_uid = NULL")
+	} else if updates.ViaUID != nil {
+		q = q.Set("via_uid = ?", *updates.ViaUID)
+	}
+	return q
+}
+
+// mergedSSHSecrets loads the server's current protocol_data, encrypts any
+// provided SSH secrets (AAD-bound to the UID) into protocol_data.ssh, and
+// returns the merged struct — preserving other protocol_data keys.
+func (s *Store) mergedSSHSecrets(ctx context.Context, uid uuid.UUID, updates ServerUpdate, encryptionKey []byte) (*ServerProtocolData, error) {
+	current, err := s.GetServerByUID(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	if current.ProtocolData == nil {
+		current.ProtocolData = &ServerProtocolData{}
+	}
+	if current.ProtocolData.SSH == nil {
+		current.ProtocolData.SSH = &SSHServerData{}
+	}
+	sd := current.ProtocolData.SSH
+	aad := crypto.ServerAAD(uid.String())
+
+	if updates.SSHPrivateKey != nil {
+		enc, err := crypto.Encrypt([]byte(*updates.SSHPrivateKey), encryptionKey, aad)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encrypt ssh private key: %w", err)
+		}
+		sd.PrivateKeyEncrypted = enc
+	}
+	if updates.SSHPassphrase != nil {
+		enc, err := crypto.Encrypt([]byte(*updates.SSHPassphrase), encryptionKey, aad)
+		if err != nil {
+			return nil, fmt.Errorf("failed to encrypt ssh passphrase: %w", err)
+		}
+		sd.PassphraseEncrypted = enc
+	}
+	return current.ProtocolData, nil
 }
 
 // DeleteServer deletes a database
