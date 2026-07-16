@@ -185,7 +185,7 @@ func (s *Store) DropAllTables(ctx context.Context) error {
 		"oauth_states",
 		"user_identities",
 		"global_parameters",
-		"databases",
+		"servers",
 		"users",
 		"bun_migrations",
 		"bun_migration_locks",
