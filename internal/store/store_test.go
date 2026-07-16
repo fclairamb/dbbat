@@ -271,8 +271,8 @@ func TestParsePostgresDSN(t *testing.T) {
 			if got.Port != tt.wantPort {
 				t.Errorf("parsePostgresDSN() Port = %v, want %v", got.Port, tt.wantPort)
 			}
-			if got.Database != tt.wantDB {
-				t.Errorf("parsePostgresDSN() Database = %v, want %v", got.Database, tt.wantDB)
+			if got.Server != tt.wantDB {
+				t.Errorf("parsePostgresDSN() Server = %v, want %v", got.Server, tt.wantDB)
 			}
 		})
 	}

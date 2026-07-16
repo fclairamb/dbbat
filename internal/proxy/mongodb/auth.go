@@ -245,7 +245,7 @@ func (s *Session) authenticateAPIKey(username, key string) (*store.User, error) 
 //  2. username "user#database" hint;
 //  3. the user's single active grant;
 //  4. otherwise fail.
-func (s *Session) resolveDatabase(user *store.User, userDBHint string) (*store.Database, error) {
+func (s *Session) resolveDatabase(user *store.User, userDBHint string) (*store.Server, error) {
 	name := ""
 
 	switch {
@@ -256,7 +256,7 @@ func (s *Session) resolveDatabase(user *store.User, userDBHint string) (*store.D
 	}
 
 	if name != "" {
-		db, err := s.server.store.GetDatabaseByName(s.ctx, name)
+		db, err := s.server.store.GetServerByName(s.ctx, name)
 		if err != nil || db.Protocol != store.ProtocolMongoDB {
 			return nil, ErrDatabaseNotResolvable
 		}
@@ -269,16 +269,16 @@ func (s *Session) resolveDatabase(user *store.User, userDBHint string) (*store.D
 
 // resolveSingleGrantDatabase returns the database of the user's single active
 // MongoDB grant, or an error if there is not exactly one.
-func (s *Session) resolveSingleGrantDatabase(user *store.User) (*store.Database, error) {
+func (s *Session) resolveSingleGrantDatabase(user *store.User) (*store.Server, error) {
 	grants, err := s.server.store.ListGrants(s.ctx, store.GrantFilter{UserID: &user.UID, ActiveOnly: true})
 	if err != nil {
 		return nil, ErrDatabaseNotResolvable
 	}
 
-	var resolved *store.Database
+	var resolved *store.Server
 
 	for i := range grants {
-		db, err := s.server.store.GetDatabaseByUID(s.ctx, grants[i].DatabaseID)
+		db, err := s.server.store.GetServerByUID(s.ctx, grants[i].DatabaseID)
 		if err != nil || db.Protocol != store.ProtocolMongoDB {
 			continue
 		}

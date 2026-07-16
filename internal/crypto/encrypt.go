@@ -86,11 +86,11 @@ func Decrypt(ciphertext []byte, key []byte, aad []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
-// DatabaseAAD returns the AAD for encrypting database credentials.
+// ServerAAD returns the AAD for encrypting database credentials.
 // This binds the ciphertext to a specific database UID, preventing
 // credential transplant attacks where encrypted passwords are swapped
 // between database rows.
-func DatabaseAAD(databaseUID string) []byte {
+func ServerAAD(databaseUID string) []byte {
 	return []byte(fmt.Sprintf("database:%s", databaseUID))
 }
 

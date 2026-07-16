@@ -230,7 +230,7 @@ func (s *Server) setupRouter() *gin.Engine {
 			// Admin password reset (requires web session, not API key)
 			users.POST("/:uid/reset-password", s.requireAdmin(), s.handleResetPassword)
 
-			// Database endpoints
+			// Server endpoints
 			databases := authenticated.Group("/databases")
 			databases.POST("", s.requireAdmin(), s.handleCreateDatabase)
 			databases.GET("", s.handleListDatabases)

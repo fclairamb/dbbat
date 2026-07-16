@@ -159,7 +159,7 @@ func setupFixtureWithDumpDir(ctx context.Context, t *testing.T, mysqlImage, dbPr
 		encryptionKey[i] = byte(i + 1)
 	}
 
-	db, err := dataStore.CreateDatabase(ctx, &store.Database{
+	db, err := dataStore.CreateServer(ctx, &store.Server{
 		Name:         "testdb",
 		Host:         upstreamHost,
 		Port:         upstreamPort,
@@ -441,7 +441,7 @@ func TestIntegration_ReadOnlyGrant_BlocksWrite(t *testing.T) {
 		require.NoError(t, f.store.RevokeGrant(ctx, g.UID, user.UID))
 	}
 
-	databases, err := f.store.ListDatabases(ctx)
+	databases, err := f.store.ListServers(ctx)
 	require.NoError(t, err)
 	require.NotEmpty(t, databases)
 

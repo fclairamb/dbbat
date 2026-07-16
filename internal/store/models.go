@@ -163,6 +163,9 @@ const (
 	ProtocolMySQL      = "mysql"
 	ProtocolMariaDB    = "mariadb"
 	ProtocolMongoDB    = "mongodb"
+	// ProtocolSSH marks a row that is an SSH bastion (a dial path), not a
+	// grantable/connectable database target.
+	ProtocolSSH = "ssh"
 )
 
 // IsMySQLFamily reports whether the given protocol speaks the MySQL wire
@@ -174,38 +177,47 @@ func IsMySQLFamily(protocol string) bool {
 	return protocol == ProtocolMySQL || protocol == ProtocolMariaDB
 }
 
-// Database represents a target database configuration
-type Database struct {
-	bun.BaseModel `bun:"table:databases,alias:d"`
+// Server represents a target dbbat knows how to reach: a database target
+// (protocol postgresql|oracle|mysql|mariadb|mongodb) or an SSH bastion
+// (protocol ssh). Both share the same storage shape — host, port, username,
+// encrypted secret — with the protocol column as discriminator. ViaUID, when
+// set, points at an SSH server row: "dial this server through that bastion".
+type Server struct {
+	bun.BaseModel `bun:"table:servers,alias:d"`
 
-	UID               uuid.UUID `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
-	Name              string    `bun:"name,notnull,unique" json:"name"`
-	Description       string    `bun:"description" json:"description"`
-	Host              string    `bun:"host,notnull" json:"host"`
-	Port              int       `bun:"port,notnull" json:"port"`
-	DatabaseName      string    `bun:"database_name,notnull" json:"database_name"`
-	Username          string    `bun:"username,notnull" json:"username"`
-	Password          string    `bun:"-" json:"-"`                          // Decrypted, not stored
-	PasswordEncrypted []byte    `bun:"password_encrypted,notnull" json:"-"` // Encrypted form
-	SSLMode           string    `bun:"ssl_mode,notnull,default:'prefer'" json:"ssl_mode"`
-	Protocol          string    `bun:"protocol,notnull,default:'postgresql'" json:"protocol"`
-	OracleServiceName *string   `bun:"oracle_service_name" json:"oracle_service_name,omitempty"`
-	// ProtocolData holds protocol-specific per-database settings (MongoDB
-	// upstream authSource, etc.) in a single generic jsonb column — mirroring
-	// User.ProtocolData — rather than a dedicated column per setting.
-	ProtocolData *DatabaseProtocolData `bun:"protocol_data,type:jsonb,nullzero" json:"-"`
-	Listable     bool                  `bun:"listable,notnull" json:"listable"`
-	CreatedBy    *uuid.UUID            `bun:"created_by,type:uuid" json:"created_by"`
-	CreatedAt    time.Time             `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
-	UpdatedAt    time.Time             `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
-	DeletedAt    *time.Time            `bun:"deleted_at,soft_delete" json:"-"`
+	UID         uuid.UUID `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	Name        string    `bun:"name,notnull,unique" json:"name"`
+	Description string    `bun:"description" json:"description"`
+	Host        string    `bun:"host,notnull" json:"host"`
+	Port        int       `bun:"port,notnull" json:"port"`
+	// DatabaseName is the target database name; nullable/empty for SSH bastions.
+	DatabaseName      string `bun:"database_name" json:"database_name"`
+	Username          string `bun:"username,notnull" json:"username"`
+	Password          string `bun:"-" json:"-"`                          // Decrypted, not stored
+	PasswordEncrypted []byte `bun:"password_encrypted,notnull" json:"-"` // Encrypted form
+	// SSLMode is meaningful for database targets only; nullable for SSH bastions.
+	SSLMode           string  `bun:"ssl_mode" json:"ssl_mode"`
+	Protocol          string  `bun:"protocol,notnull,default:'postgresql'" json:"protocol"`
+	OracleServiceName *string `bun:"oracle_service_name" json:"oracle_service_name,omitempty"`
+	// ViaUID references an SSH server row to tunnel through; nil = direct dial.
+	ViaUID *uuid.UUID `bun:"via_uid,type:uuid" json:"via_uid,omitempty"`
+	// ProtocolData holds protocol-specific per-server settings (MongoDB upstream
+	// authSource, SSH key material, etc.) in a single generic jsonb column —
+	// mirroring User.ProtocolData — rather than a dedicated column per setting.
+	ProtocolData *ServerProtocolData `bun:"protocol_data,type:jsonb,nullzero" json:"-"`
+	Listable     bool                `bun:"listable,notnull" json:"listable"`
+	CreatedBy    *uuid.UUID          `bun:"created_by,type:uuid" json:"created_by"`
+	CreatedAt    time.Time           `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	UpdatedAt    time.Time           `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
+	DeletedAt    *time.Time          `bun:"deleted_at,soft_delete" json:"-"`
 }
 
-// DatabaseProtocolData is per-protocol material attached to a database, stored
+// ServerProtocolData is per-protocol material attached to a server, stored
 // as a single jsonb column so protocol-specific settings don't proliferate as
 // table columns — mirrors UserProtocolData. Absent protocols are omitted.
-type DatabaseProtocolData struct {
+type ServerProtocolData struct {
 	MongoDB *MongoDatabaseData `json:"mongodb,omitempty"`
+	SSH     *SSHServerData     `json:"ssh,omitempty"`
 }
 
 // MongoDatabaseData holds MongoDB-specific per-database settings.
@@ -215,8 +227,24 @@ type MongoDatabaseData struct {
 	AuthSource string `json:"auth_source,omitempty"`
 }
 
-// MongoData returns the database's MongoDB protocol material, or nil if absent.
-func (db *Database) MongoData() *MongoDatabaseData {
+// SSHServerData holds the material for an SSH bastion row. The private key and
+// passphrase are password-equivalent secrets, encrypted at rest with the dbbat
+// master key (AAD-bound to the server UID), mirroring the encrypted database
+// password. KnownHostKey is the bastion's public host key, learned on first
+// connect (TOFU) and verified on every subsequent connect; it is public
+// challenge material, stored in clear and surfaced read-only in the API/UI.
+type SSHServerData struct {
+	PrivateKeyEncrypted []byte `json:"private_key_encrypted,omitempty"`
+	PassphraseEncrypted []byte `json:"passphrase_encrypted,omitempty"`
+	KnownHostKey        string `json:"known_host_key,omitempty"`
+	// PrivateKey / Passphrase are the decrypted, in-memory-only forms (never
+	// serialized to jsonb — omitted via the encrypted round-trip helpers).
+	PrivateKey string `json:"-"`
+	Passphrase string `json:"-"`
+}
+
+// MongoData returns the server's MongoDB protocol material, or nil if absent.
+func (db *Server) MongoData() *MongoDatabaseData {
 	if db.ProtocolData == nil {
 		return nil
 	}
@@ -224,8 +252,23 @@ func (db *Database) MongoData() *MongoDatabaseData {
 	return db.ProtocolData.MongoDB
 }
 
-// DatabaseUpdate represents fields that can be updated
-type DatabaseUpdate struct {
+// SSHData returns the server's SSH protocol material, or nil if absent.
+func (db *Server) SSHData() *SSHServerData {
+	if db.ProtocolData == nil {
+		return nil
+	}
+
+	return db.ProtocolData.SSH
+}
+
+// IsSSH reports whether this server row is an SSH bastion rather than a
+// database target.
+func (db *Server) IsSSH() bool {
+	return db.Protocol == ProtocolSSH
+}
+
+// ServerUpdate represents fields that can be updated
+type ServerUpdate struct {
 	Description       *string
 	Host              *string
 	Port              *int
@@ -237,6 +280,11 @@ type DatabaseUpdate struct {
 	OracleServiceName *string
 	MongoAuthSource   *string
 	Listable          *bool
+	ViaUID            *uuid.UUID // Set to tunnel through an SSH server
+	ClearViaUID       bool       // When true, clears via_uid (direct dial)
+	// SSH secrets (plaintext, to encrypt). Set on SSH server rows.
+	SSHPrivateKey *string
+	SSHPassphrase *string
 }
 
 // Connection represents a connection through the proxy

@@ -6,7 +6,7 @@ import "errors"
 // Store errors.
 var (
 	ErrUserNotFound         = errors.New("user not found")
-	ErrDatabaseNotFound     = errors.New("database not found")
+	ErrServerNotFound       = errors.New("database not found")
 	ErrGrantNotFound        = errors.New("grant not found")
 	ErrNoActiveGrant        = errors.New("no active grant found")
 	ErrGrantAlreadyRevoked  = errors.New("grant not found or already revoked")

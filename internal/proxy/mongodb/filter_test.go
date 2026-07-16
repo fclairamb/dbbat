@@ -16,7 +16,7 @@ import (
 func TestFilterListDatabasesReply(t *testing.T) {
 	t.Parallel()
 
-	s := &Session{database: &store.Database{DatabaseName: "app"}}
+	s := &Session{database: &store.Server{DatabaseName: "app"}}
 
 	replyDoc := bson.D{
 		{Key: "databases", Value: bson.A{
@@ -70,7 +70,7 @@ func TestFilterListDatabasesReply(t *testing.T) {
 func TestFilterListDatabasesReplyErrorReply(t *testing.T) {
 	t.Parallel()
 
-	s := &Session{database: &store.Database{DatabaseName: "app"}}
+	s := &Session{database: &store.Server{DatabaseName: "app"}}
 
 	raw, err := buildOpMsgReply(1, 2, bson.D{{Key: "ok", Value: 0.0}, {Key: "errmsg", Value: "nope"}})
 	require.NoError(t, err)

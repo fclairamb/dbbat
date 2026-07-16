@@ -135,9 +135,9 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		oracleServiceName = &req.OracleServiceName
 	}
 
-	var protocolData *store.DatabaseProtocolData
+	var protocolData *store.ServerProtocolData
 	if req.MongoAuthSource != "" {
-		protocolData = &store.DatabaseProtocolData{MongoDB: &store.MongoDatabaseData{AuthSource: req.MongoAuthSource}}
+		protocolData = &store.ServerProtocolData{MongoDB: &store.MongoDatabaseData{AuthSource: req.MongoAuthSource}}
 	}
 
 	listable := true
@@ -145,7 +145,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		listable = *req.Listable
 	}
 
-	db := &store.Database{
+	db := &store.Server{
 		Name:              req.Name,
 		Description:       req.Description,
 		Host:              req.Host,
@@ -161,7 +161,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		CreatedBy:         &currentUser.UID,
 	}
 
-	result, err := s.store.CreateDatabase(c.Request.Context(), db, s.encryptionKey)
+	result, err := s.store.CreateServer(c.Request.Context(), db, s.encryptionKey)
 	if err != nil {
 		if errors.Is(err, store.ErrTargetMatchesStorage) {
 			writeError(c, http.StatusBadRequest, ErrCodeTargetMatchesSelf, "target database cannot match DBBat storage database")
@@ -194,7 +194,7 @@ func (s *Server) handleListDatabases(c *gin.Context) {
 
 	// Admin sees full details for every database, including non-listable ones.
 	if currentUser.IsAdmin() {
-		databases, err := s.store.ListDatabases(c.Request.Context())
+		databases, err := s.store.ListServers(c.Request.Context())
 		if err != nil {
 			writeInternalError(c, s.logger, err, "failed to list databases")
 			return
@@ -208,7 +208,7 @@ func (s *Server) handleListDatabases(c *gin.Context) {
 	}
 
 	// Non-admin: only listable databases, limited response (no host/port/creds).
-	databases, err := s.store.ListListableDatabases(c.Request.Context())
+	databases, err := s.store.ListListableServers(c.Request.Context())
 	if err != nil {
 		writeInternalError(c, s.logger, err, "failed to list databases")
 		return
@@ -230,7 +230,7 @@ func (s *Server) handleGetDatabase(c *gin.Context) {
 
 	currentUser := getCurrentUser(c)
 
-	db, err := s.store.GetDatabaseByUID(c.Request.Context(), uid)
+	db, err := s.store.GetServerByUID(c.Request.Context(), uid)
 	if err != nil {
 		writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
 		return
@@ -264,7 +264,7 @@ func (s *Server) handleGetDatabase(c *gin.Context) {
 
 // validateDemoModeUpdate checks if a database update is allowed in demo mode.
 // Returns an error message if validation fails, empty string if allowed.
-func (s *Server) validateDemoModeUpdate(db *store.Database, req UpdateDatabaseRequest) string {
+func (s *Server) validateDemoModeUpdate(db *store.Server, req UpdateDatabaseRequest) string {
 	if s.config == nil || !s.config.IsDemoMode() {
 		return ""
 	}
@@ -293,7 +293,7 @@ func (s *Server) validateDemoModeUpdate(db *store.Database, req UpdateDatabaseRe
 		database = *req.DatabaseName
 	}
 
-	errorMsg := fmt.Sprintf("you can only use %s:%s@%s/%s in demo mode", target.Username, target.Password, target.Host, target.Database)
+	errorMsg := fmt.Sprintf("you can only use %s:%s@%s/%s in demo mode", target.Username, target.Password, target.Host, target.Server)
 
 	// If password is being changed, validate full credentials
 	if req.Password != nil {
@@ -310,7 +310,7 @@ func (s *Server) validateDemoModeUpdate(db *store.Database, req UpdateDatabaseRe
 	if req.Host != nil && host != target.Host {
 		return errorMsg
 	}
-	if req.DatabaseName != nil && database != target.Database {
+	if req.DatabaseName != nil && database != target.Server {
 		return errorMsg
 	}
 
@@ -333,7 +333,7 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 
 	// Check demo mode restrictions if credentials are being updated
 	if s.config != nil && s.config.IsDemoMode() && (req.Username != nil || req.Password != nil || req.Host != nil || req.DatabaseName != nil) {
-		db, err := s.store.GetDatabaseByUID(c.Request.Context(), uid)
+		db, err := s.store.GetServerByUID(c.Request.Context(), uid)
 		if err != nil {
 			writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
 			return
@@ -344,7 +344,7 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		}
 	}
 
-	updates := store.DatabaseUpdate{
+	updates := store.ServerUpdate{
 		Description:       req.Description,
 		Host:              req.Host,
 		Port:              req.Port,
@@ -358,12 +358,12 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		Listable:          req.Listable,
 	}
 
-	if err := s.store.UpdateDatabase(c.Request.Context(), uid, updates, s.encryptionKey); err != nil {
+	if err := s.store.UpdateServer(c.Request.Context(), uid, updates, s.encryptionKey); err != nil {
 		if errors.Is(err, store.ErrTargetMatchesStorage) {
 			writeError(c, http.StatusBadRequest, ErrCodeTargetMatchesSelf, "target database cannot match DBBat storage database")
 			return
 		}
-		if errors.Is(err, store.ErrDatabaseNotFound) {
+		if errors.Is(err, store.ErrServerNotFound) {
 			writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
 			return
 		}
@@ -396,14 +396,14 @@ func (s *Server) handleDeleteDatabase(c *gin.Context) {
 
 	// Check demo mode restrictions
 	if s.config != nil && s.config.IsDemoMode() {
-		db, err := s.store.GetDatabaseByUID(c.Request.Context(), uid)
+		db, err := s.store.GetServerByUID(c.Request.Context(), uid)
 		if err == nil && db.Name == "demo_db" {
 			writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot delete the demo database in demo mode")
 			return
 		}
 	}
 
-	if err := s.store.DeleteDatabase(c.Request.Context(), uid); err != nil {
+	if err := s.store.DeleteServer(c.Request.Context(), uid); err != nil {
 		writeInternalError(c, s.logger, err, "failed to delete database")
 		return
 	}
@@ -436,7 +436,7 @@ func (s *Server) handleGetDatabaseConnection(c *gin.Context) {
 	ctx := c.Request.Context()
 	currentUser := getCurrentUser(c)
 
-	db, err := s.store.GetDatabaseByUID(ctx, uid)
+	db, err := s.store.GetServerByUID(ctx, uid)
 	if err != nil {
 		writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
 		return
@@ -470,8 +470,8 @@ func (s *Server) handleGetDatabaseConnection(c *gin.Context) {
 	c.JSON(http.StatusOK, info)
 }
 
-// toDatabaseResponse converts a Database to a DatabaseResponse (admin only, without password)
-func toDatabaseResponse(db *store.Database) DatabaseResponse {
+// toDatabaseResponse converts a Server to a DatabaseResponse (admin only, without password)
+func toDatabaseResponse(db *store.Server) DatabaseResponse {
 	var oracleServiceName string
 	if db.OracleServiceName != nil {
 		oracleServiceName = *db.OracleServiceName
@@ -499,8 +499,8 @@ func toDatabaseResponse(db *store.Database) DatabaseResponse {
 	}
 }
 
-// toDatabaseLimitedResponse converts a Database to a limited response (non-admin)
-func toDatabaseLimitedResponse(db *store.Database) DatabaseLimitedResponse {
+// toDatabaseLimitedResponse converts a Server to a limited response (non-admin)
+func toDatabaseLimitedResponse(db *store.Server) DatabaseLimitedResponse {
 	return DatabaseLimitedResponse{
 		UID:         db.UID,
 		Name:        db.Name,
@@ -533,7 +533,7 @@ func defaultPortFor(protocol string) int {
 		return 3306
 	case store.ProtocolMongoDB:
 		// MongoDB's standard target port. The proxy listener defaults to 27018
-		// to avoid clashing with a local mongod, but Database.Port is the
+		// to avoid clashing with a local mongod, but Server.Port is the
 		// upstream target's port, which conventionally is 27017.
 		return 27017
 	default:

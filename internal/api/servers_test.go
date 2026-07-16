@@ -19,9 +19,9 @@ import (
 var dbTestEncryptionKey = []byte("dbtest-key-012345678901234567890")
 
 // createTestDBEntry inserts a database directly via the store for API tests.
-func createTestDBEntry(t *testing.T, dataStore *store.Store, name string, listable bool) *store.Database {
+func createTestDBEntry(t *testing.T, dataStore *store.Store, name string, listable bool) *store.Server {
 	t.Helper()
-	db := &store.Database{
+	db := &store.Server{
 		Name:         name,
 		Host:         "db.example.com",
 		Port:         5432,
@@ -32,7 +32,7 @@ func createTestDBEntry(t *testing.T, dataStore *store.Store, name string, listab
 		Protocol:     store.ProtocolPostgreSQL,
 		Listable:     listable,
 	}
-	created, err := dataStore.CreateDatabase(context.Background(), db, dbTestEncryptionKey)
+	created, err := dataStore.CreateServer(context.Background(), db, dbTestEncryptionKey)
 	require.NoError(t, err, "createTestDBEntry %q", name)
 	return created
 }
@@ -82,7 +82,7 @@ func TestListDatabases_AdminSeesAll(t *testing.T) { //nolint:paralleltest // sha
 }
 
 // TestCreateDatabase_MongoDBProtocol exercises the HTTP handler
-// (handleCreateDatabase), not store.CreateDatabase directly, to prove the
+// (handleCreateDatabase), not store.CreateServer directly, to prove the
 // create path accepts protocol "mongodb". This case previously returned HTTP
 // 400 because isSupportedProtocol omitted store.ProtocolMongoDB.
 func TestCreateDatabase_MongoDBProtocol(t *testing.T) { //nolint:paralleltest // shared migration lock
@@ -124,9 +124,9 @@ func TestCreateDatabase_MongoDBProtocol(t *testing.T) { //nolint:paralleltest //
 	assert.Equal(t, store.ProtocolMongoDB, resp["protocol"], "response must echo the mongodb protocol")
 
 	// And the persisted row must carry the mongodb protocol too.
-	dbs, err := dataStore.ListDatabases(context.Background())
+	dbs, err := dataStore.ListServers(context.Background())
 	require.NoError(t, err)
-	var found *store.Database
+	var found *store.Server
 	for i := range dbs {
 		if dbs[i].Name == "mongo-db-"+suffix {
 			found = &dbs[i]

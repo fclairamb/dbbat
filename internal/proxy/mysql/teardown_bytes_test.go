@@ -68,7 +68,7 @@ func TestRecordDisconnect_FlushesUnrecordedBytes(t *testing.T) {
 		key[i] = byte(i + 1)
 	}
 
-	db, err := dataStore.CreateDatabase(ctx, &store.Database{
+	db, err := dataStore.CreateServer(ctx, &store.Server{
 		Name:         "mysqlteardowndb",
 		Host:         "localhost",
 		Port:         3306,

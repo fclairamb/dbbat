@@ -47,8 +47,8 @@ func (s *Server) loadEventContext(ctx context.Context, req *store.GrantRequest, 
 		ev.Definition = def
 	}
 
-	if db, err := s.store.GetDatabaseByUID(ctx, req.DatabaseID); err == nil {
-		ev.Database = db
+	if db, err := s.store.GetServerByUID(ctx, req.DatabaseID); err == nil {
+		ev.Server = db
 	}
 
 	if u, err := s.store.GetUserByUID(ctx, req.UserID); err == nil {

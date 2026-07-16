@@ -8,7 +8,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func setupRequestFixtures(t *testing.T, ctx context.Context, s *Store, suffix string) (*User, *User, *Database, *GrantDefinition) {
+func setupRequestFixtures(t *testing.T, ctx context.Context, s *Store, suffix string) (*User, *User, *Server, *GrantDefinition) {
 	t.Helper()
 
 	admin := createTestAdmin(t, ctx, s, "req_admin_"+suffix)
@@ -20,7 +20,7 @@ func setupRequestFixtures(t *testing.T, ctx context.Context, s *Store, suffix st
 
 	key := testEncryptionKey()
 
-	db, err := s.CreateDatabase(ctx, &Database{
+	db, err := s.CreateServer(ctx, &Server{
 		Name:         "reqdb_" + suffix,
 		Host:         "localhost",
 		Port:         5432,
@@ -30,7 +30,7 @@ func setupRequestFixtures(t *testing.T, ctx context.Context, s *Store, suffix st
 		SSLMode:      "disable",
 	}, key)
 	if err != nil {
-		t.Fatalf("CreateDatabase: %v", err)
+		t.Fatalf("CreateServer: %v", err)
 	}
 
 	def, err := s.CreateGrantDefinition(ctx, &GrantDefinition{

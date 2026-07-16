@@ -12,10 +12,10 @@ import (
 	"github.com/fclairamb/dbbat/internal/crypto"
 )
 
-// CreateDatabase creates a new database configuration.
+// CreateServer creates a new database configuration.
 // It uses a transaction to ensure the password is encrypted with AAD bound to the database UID.
 // Returns ErrTargetMatchesStorage if the target database matches the DBBat storage database.
-func (s *Store) CreateDatabase(ctx context.Context, db *Database, encryptionKey []byte) (*Database, error) {
+func (s *Store) CreateServer(ctx context.Context, db *Server, encryptionKey []byte) (*Server, error) {
 	// Security check: prevent configuring the storage database as a target
 	if s.MatchesStorageDSN(db.Host, db.Port, db.DatabaseName) {
 		return nil, ErrTargetMatchesStorage
@@ -23,7 +23,7 @@ func (s *Store) CreateDatabase(ctx context.Context, db *Database, encryptionKey 
 
 	plainPassword := db.Password
 
-	result := &Database{
+	result := &Server{
 		Name:              db.Name,
 		Description:       db.Description,
 		Host:              db.Host,
@@ -59,7 +59,7 @@ func (s *Store) CreateDatabase(ctx context.Context, db *Database, encryptionKey 
 	}
 
 	// Now encrypt password with AAD bound to the database UID
-	aad := crypto.DatabaseAAD(result.UID.String())
+	aad := crypto.ServerAAD(result.UID.String())
 	passwordEncrypted, err := crypto.Encrypt([]byte(plainPassword), encryptionKey, aad)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt password: %w", err)
@@ -83,30 +83,30 @@ func (s *Store) CreateDatabase(ctx context.Context, db *Database, encryptionKey 
 	return result, nil
 }
 
-// GetDatabaseByName retrieves a database by name
-func (s *Store) GetDatabaseByName(ctx context.Context, name string) (*Database, error) {
-	db := new(Database)
+// GetServerByName retrieves a database by name
+func (s *Store) GetServerByName(ctx context.Context, name string) (*Server, error) {
+	db := new(Server)
 	err := s.db.NewSelect().
 		Model(db).
 		Where("name = ?", name).
 		Scan(ctx)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrDatabaseNotFound
+			return nil, ErrServerNotFound
 		}
 		return nil, fmt.Errorf("failed to get database: %w", err)
 	}
 	return db, nil
 }
 
-// GetDatabaseByOracleServiceName retrieves an Oracle database by its service name.
+// GetServerByOracleServiceName retrieves an Oracle database by its service name.
 //
 // CAUTION: several dbbat databases may share one upstream service name (a
 // mutualized Oracle instance); this returns an arbitrary matching row in that
 // case. Resolution paths that must be deterministic should use
-// ListDatabasesByOracleServiceName and disambiguate explicitly.
-func (s *Store) GetDatabaseByOracleServiceName(ctx context.Context, serviceName string) (*Database, error) {
-	db := new(Database)
+// ListServersByOracleServiceName and disambiguate explicitly.
+func (s *Store) GetServerByOracleServiceName(ctx context.Context, serviceName string) (*Server, error) {
+	db := new(Server)
 	err := s.db.NewSelect().
 		Model(db).
 		Where("oracle_service_name = ?", serviceName).
@@ -114,7 +114,7 @@ func (s *Store) GetDatabaseByOracleServiceName(ctx context.Context, serviceName 
 		Scan(ctx)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrDatabaseNotFound
+			return nil, ErrServerNotFound
 		}
 
 		return nil, fmt.Errorf("failed to get database by oracle service name: %w", err)
@@ -123,13 +123,13 @@ func (s *Store) GetDatabaseByOracleServiceName(ctx context.Context, serviceName 
 	return db, nil
 }
 
-// ListDatabasesByOracleServiceName retrieves every Oracle database registered
+// ListServersByOracleServiceName retrieves every Oracle database registered
 // with the given upstream service name, ordered by name for determinism.
 // Multiple dbbat logical databases can share one upstream SERVICE_NAME (e.g.
 // several schemas of a mutualized Oracle instance behind MUTU01), so callers
 // must handle 0, 1, or N results.
-func (s *Store) ListDatabasesByOracleServiceName(ctx context.Context, serviceName string) ([]Database, error) {
-	var databases []Database
+func (s *Store) ListServersByOracleServiceName(ctx context.Context, serviceName string) ([]Server, error) {
+	var databases []Server
 
 	err := s.db.NewSelect().
 		Model(&databases).
@@ -144,11 +144,11 @@ func (s *Store) ListDatabasesByOracleServiceName(ctx context.Context, serviceNam
 	return databases, nil
 }
 
-// ListListableDatabases retrieves databases that are marked as listable.
+// ListListableServers retrieves databases that are marked as listable.
 // Used by the non-admin listing path so any authenticated user can discover
 // databases available to request access to.
-func (s *Store) ListListableDatabases(ctx context.Context) ([]Database, error) {
-	var databases []Database
+func (s *Store) ListListableServers(ctx context.Context) ([]Server, error) {
+	var databases []Server
 	err := s.db.NewSelect().
 		Model(&databases).
 		Where("listable = ?", true).
@@ -158,30 +158,30 @@ func (s *Store) ListListableDatabases(ctx context.Context) ([]Database, error) {
 		return nil, fmt.Errorf("failed to list listable databases: %w", err)
 	}
 	if databases == nil {
-		databases = []Database{}
+		databases = []Server{}
 	}
 	return databases, nil
 }
 
-// GetDatabaseByUID retrieves a database by UID
-func (s *Store) GetDatabaseByUID(ctx context.Context, uid uuid.UUID) (*Database, error) {
-	db := new(Database)
+// GetServerByUID retrieves a database by UID
+func (s *Store) GetServerByUID(ctx context.Context, uid uuid.UUID) (*Server, error) {
+	db := new(Server)
 	err := s.db.NewSelect().
 		Model(db).
 		Where("uid = ?", uid).
 		Scan(ctx)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrDatabaseNotFound
+			return nil, ErrServerNotFound
 		}
 		return nil, fmt.Errorf("failed to get database: %w", err)
 	}
 	return db, nil
 }
 
-// ListDatabases retrieves all databases
-func (s *Store) ListDatabases(ctx context.Context) ([]Database, error) {
-	var databases []Database
+// ListServers retrieves all databases
+func (s *Store) ListServers(ctx context.Context) ([]Server, error) {
+	var databases []Server
 	err := s.db.NewSelect().
 		Model(&databases).
 		Order("name ASC").
@@ -190,18 +190,18 @@ func (s *Store) ListDatabases(ctx context.Context) ([]Database, error) {
 		return nil, fmt.Errorf("failed to list databases: %w", err)
 	}
 	if databases == nil {
-		databases = []Database{}
+		databases = []Server{}
 	}
 	return databases, nil
 }
 
 // checkStorageDSNConflict verifies that a database update won't result in matching the storage DSN.
-func (s *Store) checkStorageDSNConflict(ctx context.Context, uid uuid.UUID, updates DatabaseUpdate) error {
+func (s *Store) checkStorageDSNConflict(ctx context.Context, uid uuid.UUID, updates ServerUpdate) error {
 	if updates.Host == nil && updates.Port == nil && updates.DatabaseName == nil {
 		return nil
 	}
 
-	current, err := s.GetDatabaseByUID(ctx, uid)
+	current, err := s.GetServerByUID(ctx, uid)
 	if err != nil {
 		return err
 	}
@@ -230,9 +230,9 @@ func valueOrDefaultInt(ptr *int, def int) int {
 	return def
 }
 
-// UpdateDatabase updates a database.
+// UpdateServer updates a database.
 // Returns ErrTargetMatchesStorage if the update would cause the target to match the DBBat storage database.
-func (s *Store) UpdateDatabase(ctx context.Context, uid uuid.UUID, updates DatabaseUpdate, encryptionKey []byte) error {
+func (s *Store) UpdateServer(ctx context.Context, uid uuid.UUID, updates ServerUpdate, encryptionKey []byte) error {
 	// Security check: if host, port, or database name are being updated,
 	// verify the resulting configuration doesn't match the storage DSN
 	if err := s.checkStorageDSNConflict(ctx, uid, updates); err != nil {
@@ -240,7 +240,7 @@ func (s *Store) UpdateDatabase(ctx context.Context, uid uuid.UUID, updates Datab
 	}
 
 	q := s.db.NewUpdate().
-		Model((*Database)(nil)).
+		Model((*Server)(nil)).
 		Where("uid = ?", uid).
 		Set("updated_at = ?", time.Now())
 
@@ -265,7 +265,7 @@ func (s *Store) UpdateDatabase(ctx context.Context, uid uuid.UUID, updates Datab
 	}
 
 	if updates.Password != nil {
-		aad := crypto.DatabaseAAD(uid.String())
+		aad := crypto.ServerAAD(uid.String())
 		passwordEncrypted, err := crypto.Encrypt([]byte(*updates.Password), encryptionKey, aad)
 		if err != nil {
 			return fmt.Errorf("failed to encrypt password: %w", err)
@@ -311,16 +311,16 @@ func (s *Store) UpdateDatabase(ctx context.Context, uid uuid.UUID, updates Datab
 	}
 
 	if rowsAffected == 0 {
-		return ErrDatabaseNotFound
+		return ErrServerNotFound
 	}
 
 	return nil
 }
 
-// DeleteDatabase deletes a database
-func (s *Store) DeleteDatabase(ctx context.Context, uid uuid.UUID) error {
+// DeleteServer deletes a database
+func (s *Store) DeleteServer(ctx context.Context, uid uuid.UUID) error {
 	result, err := s.db.NewDelete().
-		Model((*Database)(nil)).
+		Model((*Server)(nil)).
 		Where("uid = ?", uid).
 		Exec(ctx)
 	if err != nil {
@@ -333,7 +333,7 @@ func (s *Store) DeleteDatabase(ctx context.Context, uid uuid.UUID) error {
 	}
 
 	if rowsAffected == 0 {
-		return ErrDatabaseNotFound
+		return ErrServerNotFound
 	}
 
 	return nil
@@ -342,7 +342,7 @@ func (s *Store) DeleteDatabase(ctx context.Context, uid uuid.UUID) error {
 // MongoAuthSourceOrDefault returns the upstream MongoDB SCRAM authSource
 // configured for this database, defaulting to "admin" (the MongoDB convention
 // where service/root users are created) when unset.
-func (db *Database) MongoAuthSourceOrDefault() string {
+func (db *Server) MongoAuthSourceOrDefault() string {
 	if data := db.MongoData(); data != nil && data.AuthSource != "" {
 		return data.AuthSource
 	}
@@ -351,8 +351,8 @@ func (db *Database) MongoAuthSourceOrDefault() string {
 }
 
 // DecryptPassword decrypts a database password using AAD bound to the database UID.
-func (db *Database) DecryptPassword(encryptionKey []byte) error {
-	aad := crypto.DatabaseAAD(db.UID.String())
+func (db *Server) DecryptPassword(encryptionKey []byte) error {
+	aad := crypto.ServerAAD(db.UID.String())
 	plaintext, err := crypto.Decrypt(db.PasswordEncrypted, encryptionKey, aad)
 	if err != nil {
 		return fmt.Errorf("failed to decrypt password: %w", err)

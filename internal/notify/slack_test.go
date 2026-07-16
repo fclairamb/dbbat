@@ -143,7 +143,7 @@ func sampleEvent(action GrantAction) GrantRequestEvent {
 			Name:            "Read-only 1h",
 			DurationSeconds: 3600,
 		},
-		Database: &store.Database{Name: "prod-db"},
+		Server: &store.Server{Name: "prod-db"},
 		Requester: &store.User{
 			UID:      uuid.New(),
 			Username: "alice",

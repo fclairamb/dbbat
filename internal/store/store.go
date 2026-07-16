@@ -244,9 +244,9 @@ func (s *Store) MigrationStatus(ctx context.Context) ([]MigrationInfo, error) {
 
 // DSNComponents holds parsed PostgreSQL DSN components for comparison
 type DSNComponents struct {
-	Host     string
-	Port     string
-	Database string
+	Host   string
+	Port   string
+	Server string
 }
 
 // parsePostgresDSN parses a PostgreSQL DSN and extracts host, port, and database.
@@ -268,9 +268,9 @@ func parsePostgresDSN(dsn string) (*DSNComponents, error) {
 		database := strings.TrimPrefix(u.Path, "/")
 
 		return &DSNComponents{
-			Host:     normalizeHost(host),
-			Port:     port,
-			Database: database,
+			Host:   normalizeHost(host),
+			Port:   port,
+			Server: database,
 		}, nil
 	}
 
@@ -297,7 +297,7 @@ func parsePostgresDSN(dsn string) (*DSNComponents, error) {
 		case "port":
 			components.Port = value
 		case "dbname", "database":
-			components.Database = value
+			components.Server = value
 		}
 	}
 
@@ -331,5 +331,5 @@ func (s *Store) MatchesStorageDSN(host string, port int, databaseName string) bo
 
 	return storage.Host == targetHost &&
 		storage.Port == targetPort &&
-		storage.Database == databaseName
+		storage.Server == databaseName
 }

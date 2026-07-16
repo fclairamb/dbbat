@@ -221,7 +221,7 @@ func (s *Server) buildConnectionsForUser(ctx context.Context, user *store.User, 
 
 	var connections []ConnectionInfo
 	for _, dbUID := range dbUIDs {
-		db, err := s.store.GetDatabaseByUID(ctx, dbUID)
+		db, err := s.store.GetServerByUID(ctx, dbUID)
 		if err != nil {
 			continue
 		}

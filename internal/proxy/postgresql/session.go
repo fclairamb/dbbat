@@ -84,7 +84,7 @@ type Session struct {
 
 	// Session state
 	user                   *store.User
-	database               *store.Database
+	database               *store.Server
 	grant                  *store.Grant
 	connectionUID          uuid.UUID
 	clientBackend          *pgproto3.Backend  // To communicate with client (we're the server)

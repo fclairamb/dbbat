@@ -266,7 +266,7 @@ func aggregatePipelineWrites(body bson.Raw) bool {
 // ValidateMongoCommand enforces grant controls and the $db policy on a MongoDB
 // command (contract §2). It operates on the command name and the kind-0 body.
 // db is the session's resolved target database; grant carries the controls.
-func ValidateMongoCommand(cmd, dbName string, body bson.Raw, db *store.Database, grant *store.Grant) error {
+func ValidateMongoCommand(cmd, dbName string, body bson.Raw, db *store.Server, grant *store.Grant) error {
 	class := classifyMongoCommand(cmd, body)
 
 	switch class {
@@ -307,7 +307,7 @@ func ValidateMongoCommand(cmd, dbName string, body bson.Raw, db *store.Database,
 // mongoDatabaseAllowed enforces the $db policy (contract §2): allow the
 // configured database; allow admin only for diagnostics; deny local/config and
 // anything else.
-func mongoDatabaseAllowed(dbName string, class mongoCmdClass, db *store.Database) bool {
+func mongoDatabaseAllowed(dbName string, class mongoCmdClass, db *store.Server) bool {
 	switch dbName {
 	case "":
 		return true

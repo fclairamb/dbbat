@@ -25,8 +25,8 @@ func makeUser() *store.User {
 	return &store.User{UID: uuid.New(), Username: "alice"}
 }
 
-func makeDB(protocol, dbName, sslMode string) *store.Database {
-	return &store.Database{
+func makeDB(protocol, dbName, sslMode string) *store.Server {
+	return &store.Server{
 		UID:          uuid.New(),
 		Name:         dbName,
 		DatabaseName: dbName,

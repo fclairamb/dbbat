@@ -58,12 +58,12 @@ func TestHelloCompressionNegotiation(t *testing.T) {
 func TestMongoAuthSourceOrDefault(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, "admin", (&store.Database{}).MongoAuthSourceOrDefault())
+	assert.Equal(t, "admin", (&store.Server{}).MongoAuthSourceOrDefault())
 
-	withCustom := &store.Database{ProtocolData: &store.DatabaseProtocolData{MongoDB: &store.MongoDatabaseData{AuthSource: "services"}}}
+	withCustom := &store.Server{ProtocolData: &store.ServerProtocolData{MongoDB: &store.MongoDatabaseData{AuthSource: "services"}}}
 	assert.Equal(t, "services", withCustom.MongoAuthSourceOrDefault())
 
-	withEmpty := &store.Database{ProtocolData: &store.DatabaseProtocolData{MongoDB: &store.MongoDatabaseData{AuthSource: ""}}}
+	withEmpty := &store.Server{ProtocolData: &store.ServerProtocolData{MongoDB: &store.MongoDatabaseData{AuthSource: ""}}}
 	assert.Equal(t, "admin", withEmpty.MongoAuthSourceOrDefault())
 }
 

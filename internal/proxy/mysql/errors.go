@@ -6,8 +6,8 @@ import "errors"
 var (
 	// ErrUserNotFound — the username from HandshakeResponse41 has no DBBat user.
 	ErrUserNotFound = errors.New("user not found")
-	// ErrDatabaseNotFound — no DBBat database matches the requested schema name.
-	ErrDatabaseNotFound = errors.New("database not found")
+	// ErrServerNotFound — no DBBat database matches the requested schema name.
+	ErrServerNotFound = errors.New("database not found")
 	// ErrNoActiveGrant — the user has no current grant on the requested database.
 	ErrNoActiveGrant = errors.New("no active grant")
 	// ErrInvalidPassword — the supplied password failed Argon2id verification.
