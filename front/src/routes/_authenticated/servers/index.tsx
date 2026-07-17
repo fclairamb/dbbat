@@ -54,8 +54,8 @@ import { toast } from "sonner";
 import { CopyableField } from "@/components/shared/CopyableField";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 
-export const Route = createFileRoute("/_authenticated/databases/")({
-  component: DatabasesPage,
+export const Route = createFileRoute("/_authenticated/servers/")({
+  component: ServersPage,
 });
 
 type DatabaseItem = Database | DatabaseLimited;
@@ -111,7 +111,7 @@ const PROTOCOL_USERNAME_PLACEHOLDER: Record<Protocol, string> = {
   ssh: "www-data",
 };
 
-function DatabasesPage() {
+function ServersPage() {
   const { user } = useAuth();
   const { data: databases, isLoading } = useDatabases();
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -120,6 +120,59 @@ function DatabasesPage() {
 
   const canCreate = canCreateDatabase(user?.roles);
   const canDelete = canDeleteDatabase(user?.roles);
+
+  // SSH bastions are admin-only (GET /ssh-servers requires the admin role),
+  // matching the create/delete-database gating already in place.
+  const { data: sshServers, isLoading: sshLoading } = useSSHServers(canCreate);
+
+  const sshColumns: Column<Database>[] = [
+    {
+      key: "name",
+      header: "Name",
+      cell: (srv) => <span className="font-medium">{srv.name}</span>,
+    },
+    {
+      key: "description",
+      header: "Description",
+      cell: (srv) => (
+        <span className="text-muted-foreground">{srv.description || "-"}</span>
+      ),
+    },
+    {
+      key: "host",
+      header: "Host",
+      cell: (srv) => (
+        <span className="font-mono text-sm">
+          {srv.host}:{srv.port}
+        </span>
+      ),
+    },
+    {
+      key: "username",
+      header: "Username",
+      cell: (srv) => <span className="font-mono text-sm">{srv.username}</span>,
+    },
+    {
+      key: "actions",
+      header: "",
+      cell: (srv) => (
+        <PermissionButton
+          variant="ghost"
+          size="icon"
+          disabled={!canDelete}
+          disabledReason={getDisabledReason("delete-database", user?.roles)}
+          enabledTooltip={getActionTooltip("delete-database")}
+          onClick={(e) => {
+            e.stopPropagation();
+            setDeleteDb(srv);
+          }}
+        >
+          <Trash2 className="h-4 w-4" />
+        </PermissionButton>
+      ),
+      className: "w-10",
+    },
+  ];
 
   const columns: Column<DatabaseItem>[] = [
     {
@@ -216,8 +269,8 @@ function DatabasesPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Databases"
-        description="Manage target database configurations"
+        title="Servers"
+        description="Manage target database configurations and SSH bastions"
         actions={
           <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
             <DialogTrigger asChild>
@@ -243,6 +296,25 @@ function DatabasesPage() {
         emptyMessage="No databases configured"
         onRowClick={(db) => setDetailDb(db)}
       />
+
+      {canCreate && (
+        <div className="space-y-3" data-testid="ssh-servers-section">
+          <div>
+            <h2 className="text-lg font-semibold">SSH Servers</h2>
+            <p className="text-sm text-muted-foreground">
+              Bastions used as tunnels to reach databases. Created via the "SSH
+              Bastion" protocol above.
+            </p>
+          </div>
+          <DataTable
+            columns={sshColumns}
+            data={sshServers ?? []}
+            isLoading={sshLoading}
+            rowKey={(srv) => srv.uid}
+            emptyMessage="No SSH servers configured"
+          />
+        </div>
+      )}
 
       <DeleteDatabaseDialog db={deleteDb} onClose={() => setDeleteDb(null)} />
       <DatabaseDetailsDialog db={detailDb} onClose={() => setDetailDb(null)} />
@@ -665,9 +737,11 @@ function DeleteDatabaseDialog({
   db: DatabaseItem | null;
   onClose: () => void;
 }) {
+  const isSSH = !!db && isFullDatabase(db) && db.protocol === "ssh";
+
   const deleteDb = useDeleteDatabase({
     onSuccess: () => {
-      toast.success("Database deleted successfully");
+      toast.success(isSSH ? "SSH server deleted successfully" : "Database deleted successfully");
       onClose();
     },
     onError: (error) => {
@@ -679,9 +753,9 @@ function DeleteDatabaseDialog({
     <AlertDialog open={!!db} onOpenChange={() => onClose()}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Delete Database</AlertDialogTitle>
+          <AlertDialogTitle>{isSSH ? "Delete SSH Server" : "Delete Database"}</AlertDialogTitle>
           <AlertDialogDescription>
-            Are you sure you want to delete database "{db?.name}"? This action
+            Are you sure you want to delete {isSSH ? "SSH server" : "database"} "{db?.name}"? This action
             cannot be undone.
           </AlertDialogDescription>
         </AlertDialogHeader>

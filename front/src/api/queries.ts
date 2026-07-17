@@ -228,6 +228,7 @@ export function useCreateDatabase(options?: {
     },
     onSuccess: (db) => {
       queryClient.invalidateQueries({ queryKey: ["databases"] });
+      queryClient.invalidateQueries({ queryKey: ["ssh-servers"] });
       options?.onSuccess?.(db);
     },
     onError: options?.onError,
@@ -256,6 +257,7 @@ export function useUpdateDatabase(
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["databases"] });
       queryClient.invalidateQueries({ queryKey: ["databases", uid] });
+      queryClient.invalidateQueries({ queryKey: ["ssh-servers"] });
       options?.onSuccess?.();
     },
     onError: options?.onError,
@@ -279,6 +281,7 @@ export function useDeleteDatabase(options?: {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["databases"] });
+      queryClient.invalidateQueries({ queryKey: ["ssh-servers"] });
       options?.onSuccess?.();
     },
     onError: options?.onError,
