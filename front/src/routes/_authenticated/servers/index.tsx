@@ -4,6 +4,7 @@ import {
   useDatabases,
   useDatabaseConnection,
   useCreateDatabase,
+  useUpdateDatabase,
   useDeleteDatabase,
   useSSHServers,
   type Database,
@@ -17,6 +18,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import {
   canCreateDatabase,
   canDeleteDatabase,
+  canUpdateDatabase,
   getDisabledReason,
   getActionTooltip,
 } from "@/lib/permissions";
@@ -49,7 +51,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Plus, Trash2, AlertCircle } from "lucide-react";
+import { Plus, Trash2, Pencil, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
 import { CopyableField } from "@/components/shared/CopyableField";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -117,9 +119,11 @@ function ServersPage() {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [deleteDb, setDeleteDb] = useState<DatabaseItem | null>(null);
   const [detailDb, setDetailDb] = useState<DatabaseItem | null>(null);
+  const [editSshServer, setEditSshServer] = useState<Database | null>(null);
 
   const canCreate = canCreateDatabase(user?.roles);
   const canDelete = canDeleteDatabase(user?.roles);
+  const canUpdate = canUpdateDatabase(user?.roles);
 
   // SSH bastions are admin-only (GET /ssh-servers requires the admin role),
   // matching the create/delete-database gating already in place.
@@ -156,21 +160,38 @@ function ServersPage() {
       key: "actions",
       header: "",
       cell: (srv) => (
-        <PermissionButton
-          variant="ghost"
-          size="icon"
-          disabled={!canDelete}
-          disabledReason={getDisabledReason("delete-database", user?.roles)}
-          enabledTooltip={getActionTooltip("delete-database")}
-          onClick={(e) => {
-            e.stopPropagation();
-            setDeleteDb(srv);
-          }}
-        >
-          <Trash2 className="h-4 w-4" />
-        </PermissionButton>
+        <div className="flex items-center gap-1">
+          <PermissionButton
+            data-testid={`ssh-server-edit-${srv.uid}`}
+            variant="ghost"
+            size="icon"
+            disabled={!canUpdate}
+            disabledReason={getDisabledReason("update-database", user?.roles)}
+            enabledTooltip={getActionTooltip("update-database")}
+            onClick={(e) => {
+              e.stopPropagation();
+              setEditSshServer(srv);
+            }}
+          >
+            <Pencil className="h-4 w-4" />
+          </PermissionButton>
+          <PermissionButton
+            data-testid={`ssh-server-delete-${srv.uid}`}
+            variant="ghost"
+            size="icon"
+            disabled={!canDelete}
+            disabledReason={getDisabledReason("delete-database", user?.roles)}
+            enabledTooltip={getActionTooltip("delete-database")}
+            onClick={(e) => {
+              e.stopPropagation();
+              setDeleteDb(srv);
+            }}
+          >
+            <Trash2 className="h-4 w-4" />
+          </PermissionButton>
+        </div>
       ),
-      className: "w-10",
+      className: "w-20",
     },
   ];
 
@@ -319,6 +340,10 @@ function ServersPage() {
 
       <DeleteDatabaseDialog db={deleteDb} onClose={() => setDeleteDb(null)} />
       <DatabaseDetailsDialog db={detailDb} onClose={() => setDetailDb(null)} />
+      <EditSSHServerDialog
+        server={editSshServer}
+        onClose={() => setEditSshServer(null)}
+      />
     </div>
   );
 }
@@ -772,5 +797,164 @@ function DeleteDatabaseDialog({
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
+  );
+}
+
+function EditSSHServerDialog({
+  server,
+  onClose,
+}: {
+  server: Database | null;
+  onClose: () => void;
+}) {
+  return (
+    <Dialog open={!!server} onOpenChange={() => onClose()}>
+      {/* Keyed on the server UID so the form state re-initializes fresh
+          (from `server`'s current values) every time a different bastion is
+          opened for editing, without needing an effect to re-seed state. */}
+      {server && (
+        <EditSSHServerForm key={server.uid} server={server} onClose={onClose} />
+      )}
+    </Dialog>
+  );
+}
+
+function EditSSHServerForm({
+  server,
+  onClose,
+}: {
+  server: Database;
+  onClose: () => void;
+}) {
+  const [description, setDescription] = useState(server.description || "");
+  const [host, setHost] = useState(server.host || "");
+  const [port, setPort] = useState(String(server.port ?? ""));
+  const [username, setUsername] = useState(server.username || "");
+  const [password, setPassword] = useState("");
+  const [sshPrivateKey, setSshPrivateKey] = useState("");
+  const [sshPassphrase, setSshPassphrase] = useState("");
+
+  const updateServer = useUpdateDatabase(server.uid, {
+    onSuccess: () => {
+      toast.success("SSH server updated successfully");
+      onClose();
+    },
+    onError: (error) => {
+      toast.error(error.message);
+    },
+  });
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    updateServer.mutate({
+      description: description || undefined,
+      host,
+      port: parseInt(port, 10),
+      username,
+      password: password || undefined,
+      ssh_private_key: sshPrivateKey || undefined,
+      ssh_passphrase: sshPassphrase || undefined,
+    });
+  };
+
+  return (
+    <DialogContent data-testid="ssh-server-edit-dialog" className="max-w-md">
+      <form onSubmit={handleSubmit}>
+        <DialogHeader>
+          <DialogTitle>Edit SSH Server</DialogTitle>
+          <DialogDescription>
+            Update the bastion "{server.name}"'s connection details.
+          </DialogDescription>
+        </DialogHeader>
+          <div className="space-y-4 py-4 max-h-[60vh] overflow-y-auto">
+            <div className="space-y-2">
+              <Label htmlFor="edit-ssh-description">Description</Label>
+              <Input
+                id="edit-ssh-description"
+                data-testid="ssh-server-edit-description-input"
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+              />
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <div className="col-span-2 space-y-2">
+                <Label htmlFor="edit-ssh-host">Host</Label>
+                <Input
+                  id="edit-ssh-host"
+                  value={host}
+                  onChange={(e) => setHost(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="edit-ssh-port">Port</Label>
+                <Input
+                  id="edit-ssh-port"
+                  type="number"
+                  value={port}
+                  onChange={(e) => setPort(e.target.value)}
+                  required
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-ssh-username">Username</Label>
+              <Input
+                id="edit-ssh-username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                required
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-ssh-password">
+                Password (leave blank to keep unchanged)
+              </Label>
+              <Input
+                id="edit-ssh-password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-ssh-private-key">
+                SSH Private Key (PEM, leave blank to keep unchanged)
+              </Label>
+              <textarea
+                id="edit-ssh-private-key"
+                className="flex min-h-[96px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                value={sshPrivateKey}
+                onChange={(e) => setSshPrivateKey(e.target.value)}
+                placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+              />
+              <p className="text-xs text-muted-foreground">
+                Write-only: the stored key is never shown again.
+              </p>
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-ssh-passphrase">Key Passphrase</Label>
+              <Input
+                id="edit-ssh-passphrase"
+                type="password"
+                value={sshPassphrase}
+                onChange={(e) => setSshPassphrase(e.target.value)}
+              />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={onClose}>
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              data-testid="ssh-server-edit-submit"
+              disabled={updateServer.isPending}
+            >
+              Save
+            </Button>
+          </DialogFooter>
+      </form>
+    </DialogContent>
   );
 }
