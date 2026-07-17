@@ -275,6 +275,7 @@ function ServersPage() {
           <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
             <DialogTrigger asChild>
               <PermissionButton
+                data-testid="add-database-button"
                 disabled={!canCreate}
                 disabledReason={getDisabledReason("create-database", user?.roles)}
                 enabledTooltip={getActionTooltip("create-database")}
@@ -416,7 +417,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
                 }
               }}
             >
-              <SelectTrigger>
+              <SelectTrigger data-testid="protocol-select">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -425,7 +426,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
                 <SelectItem value="mysql">MySQL</SelectItem>
                 <SelectItem value="mariadb">MariaDB</SelectItem>
                 <SelectItem value="mongodb">MongoDB</SelectItem>
-                <SelectItem value="ssh">SSH Bastion</SelectItem>
+                <SelectItem value="ssh" data-testid="protocol-option-ssh">SSH Bastion</SelectItem>
               </SelectContent>
             </Select>
             {isSSH && (
@@ -440,6 +441,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
             <Label htmlFor="name">Name</Label>
             <Input
               id="name"
+              data-testid="database-name-input"
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="production-db"
@@ -626,7 +628,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
           <Button type="button" variant="outline" onClick={onClose}>
             Cancel
           </Button>
-          <Button type="submit" disabled={createDb.isPending}>
+          <Button type="submit" data-testid="database-create-submit" disabled={createDb.isPending}>
             Create
           </Button>
         </DialogFooter>
