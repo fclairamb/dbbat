@@ -152,7 +152,7 @@ e2e/
 ├── login.spec.ts        # Login flow tests
 ├── navigation.spec.ts   # Navigation tests
 ├── users.spec.ts        # User management tests
-├── databases.spec.ts    # Database configuration tests
+├── servers.spec.ts      # Database/SSH server configuration tests
 ├── grants.spec.ts       # Access grants tests
 └── observability.spec.ts # Connections/queries/audit tests
 ```

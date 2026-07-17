@@ -1,30 +1,40 @@
 import { test, expect } from "./fixtures";
 
-test.describe("Databases Management", () => {
-  test("should display databases list page", async ({ authenticatedPage }) => {
-    await authenticatedPage.goto("databases");
+test.describe("Servers Management", () => {
+  test("should display servers list page", async ({ authenticatedPage }) => {
+    await authenticatedPage.goto("servers");
 
     // Wait for page to load
     await authenticatedPage.waitForLoadState("networkidle");
 
-    // Take screenshot of databases page
+    // Take screenshot of servers page
     await authenticatedPage.screenshot({
-      path: "test-results/screenshots/databases-list.png",
+      path: "test-results/screenshots/servers-list.png",
       fullPage: true,
     });
 
-    // Verify we're on the databases page
-    await expect(authenticatedPage).toHaveURL(/\/databases/);
+    // Verify we're on the servers page
+    await expect(authenticatedPage).toHaveURL(/\/servers/);
 
     // Check for page content
     const pageContent = await authenticatedPage.textContent("body");
     expect(pageContent).toBeTruthy();
   });
 
-  test("should show create database button or form", async ({
+  test("old /databases links redirect to /servers", async ({
     authenticatedPage,
   }) => {
     await authenticatedPage.goto("databases");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    await expect(authenticatedPage).toHaveURL(/\/servers/);
+    await expect(authenticatedPage).not.toHaveURL(/\/databases/);
+  });
+
+  test("should show create database button or form", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
     await authenticatedPage.waitForLoadState("networkidle");
 
     // Look for create/add button
@@ -37,7 +47,7 @@ test.describe("Databases Management", () => {
 
       // Take screenshot of create database dialog/form
       await authenticatedPage.screenshot({
-        path: "test-results/screenshots/databases-create-dialog.png",
+        path: "test-results/screenshots/servers-create-dialog.png",
       });
 
       // Look for form fields typical for database configuration
@@ -51,7 +61,7 @@ test.describe("Databases Management", () => {
   test("connection URL shows the {DBBAT_KEY} placeholder", async ({
     authenticatedPage,
   }) => {
-    await authenticatedPage.goto("databases");
+    await authenticatedPage.goto("servers");
     await authenticatedPage.waitForLoadState("networkidle");
 
     // Open the first database's detail dialog by clicking its table row.
@@ -75,17 +85,45 @@ test.describe("Databases Management", () => {
   test("should display database configuration options", async ({
     authenticatedPage,
   }) => {
-    await authenticatedPage.goto("databases");
+    await authenticatedPage.goto("servers");
     await authenticatedPage.waitForLoadState("networkidle");
 
     // Take screenshot
     await authenticatedPage.screenshot({
-      path: "test-results/screenshots/databases-overview.png",
+      path: "test-results/screenshots/servers-overview.png",
       fullPage: true,
     });
 
     // Verify database-related content is present
     const content = await authenticatedPage.textContent("body");
     expect(content).toBeTruthy();
+  });
+
+  test("creating an SSH bastion shows it in the SSH servers section", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const sshSection = authenticatedPage.getByTestId("ssh-servers-section");
+    await expect(sshSection).toBeVisible();
+
+    const name = `e2e-bastion-${Date.now()}`;
+
+    await authenticatedPage.getByTestId("add-database-button").click();
+
+    // Select "SSH Bastion" protocol.
+    await authenticatedPage.getByTestId("protocol-select").click();
+    await authenticatedPage.getByTestId("protocol-option-ssh").click();
+
+    await authenticatedPage.getByTestId("database-name-input").fill(name);
+    await authenticatedPage.locator("#host").fill("bastion.example.com");
+    await authenticatedPage.locator("#username").fill("bastion-user");
+
+    await authenticatedPage.getByTestId("database-create-submit").click();
+
+    // Dialog should close and the new bastion should show up in the SSH
+    // servers section (not in the databases table above it).
+    await expect(sshSection.getByText(name)).toBeVisible({ timeout: 10000 });
   });
 });

@@ -17,15 +17,15 @@ test.describe("Navigation", () => {
       });
     }
 
-    // Test navigation to Databases
-    const databasesLink = authenticatedPage.getByRole("link", {
-      name: /databases/i,
+    // Test navigation to Servers
+    const serversLink = authenticatedPage.getByRole("link", {
+      name: /servers/i,
     });
-    if (await databasesLink.isVisible()) {
-      await databasesLink.click();
-      await expect(authenticatedPage).toHaveURL(/\/app\/databases/);
+    if (await serversLink.isVisible()) {
+      await serversLink.click();
+      await expect(authenticatedPage).toHaveURL(/\/app\/servers/);
       await authenticatedPage.screenshot({
-        path: "test-results/screenshots/nav-databases.png",
+        path: "test-results/screenshots/nav-servers.png",
       });
     }
 
