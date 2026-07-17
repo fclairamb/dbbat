@@ -126,4 +126,44 @@ test.describe("Servers Management", () => {
     // servers section (not in the databases table above it).
     await expect(sshSection.getByText(name)).toBeVisible({ timeout: 10000 });
   });
+
+  test("editing an SSH bastion updates it in the SSH servers section", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const sshSection = authenticatedPage.getByTestId("ssh-servers-section");
+    await expect(sshSection).toBeVisible();
+
+    const name = `e2e-bastion-edit-${Date.now()}`;
+    const updatedDescription = `updated description ${Date.now()}`;
+
+    // Create a bastion to edit.
+    await authenticatedPage.getByTestId("add-database-button").click();
+    await authenticatedPage.getByTestId("protocol-select").click();
+    await authenticatedPage.getByTestId("protocol-option-ssh").click();
+    await authenticatedPage.getByTestId("database-name-input").fill(name);
+    await authenticatedPage.locator("#host").fill("bastion.example.com");
+    await authenticatedPage.locator("#username").fill("bastion-user");
+    await authenticatedPage.getByTestId("database-create-submit").click();
+
+    const row = sshSection.locator("tr", { hasText: name });
+    await expect(row).toBeVisible({ timeout: 10000 });
+
+    // Open the edit dialog for that row and change its description.
+    await row.locator('[data-testid^="ssh-server-edit-"]').click();
+
+    const editDialog = authenticatedPage.getByTestId("ssh-server-edit-dialog");
+    await expect(editDialog).toBeVisible();
+    await authenticatedPage
+      .getByTestId("ssh-server-edit-description-input")
+      .fill(updatedDescription);
+    await authenticatedPage.getByTestId("ssh-server-edit-submit").click();
+
+    await expect(editDialog).not.toBeVisible();
+    await expect(row.getByText(updatedDescription)).toBeVisible({
+      timeout: 10000,
+    });
+  });
 });
