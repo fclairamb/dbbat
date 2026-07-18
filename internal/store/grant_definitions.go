@@ -45,8 +45,12 @@ func (s *Store) CreateGrantDefinition(ctx context.Context, def *GrantDefinition)
 		Returning("*").
 		Exec(ctx)
 	if err != nil {
-		// Bun surfaces the unique-violation as a generic error string; the
-		// caller doesn't need to disambiguate further than "duplicate name".
+		// A name collision against an existing active definition violates the
+		// partial unique index; surface it as a typed sentinel so the API can
+		// return 409 DUPLICATE_NAME instead of an opaque 500.
+		if isUniqueViolation(err, "grant_definitions_active_name_uniq") {
+			return nil, ErrGrantDefinitionDuplicate
+		}
 		return nil, fmt.Errorf("create grant definition: %w", err)
 	}
 

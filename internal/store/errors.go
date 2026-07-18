@@ -28,6 +28,10 @@ var (
 	// ErrServerNameConflict is returned when creating or renaming a server to a
 	// name that is already taken (violates the servers_name_key unique constraint).
 	ErrServerNameConflict = errors.New("a server with this name already exists")
+	// ErrUserNameConflict is returned when creating a user whose username is
+	// already taken by an active (non-soft-deleted) user (violates the
+	// users_username_active_uq unique index).
+	ErrUserNameConflict = errors.New("a user with this username already exists")
 )
 
 // isUniqueViolation reports whether err is a PostgreSQL unique-constraint

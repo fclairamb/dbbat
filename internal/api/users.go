@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"slices"
 
@@ -55,6 +56,10 @@ func (s *Server) handleCreateUser(c *gin.Context) {
 	// Create user
 	user, err := s.store.CreateUser(c.Request.Context(), req.Username, passwordHash, req.Roles)
 	if err != nil {
+		if errors.Is(err, store.ErrUserNameConflict) {
+			writeError(c, http.StatusConflict, ErrCodeDuplicateName, err.Error())
+			return
+		}
 		writeInternalError(c, s.logger, err, "failed to create user")
 		return
 	}

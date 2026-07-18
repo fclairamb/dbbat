@@ -108,10 +108,10 @@ func TestCreateGrantDefinition_DuplicateActiveName(t *testing.T) {
 		t.Fatalf("first create: %v", err)
 	}
 
-	// Second active with same name → unique-violation surfaces as a non-nil
-	// error (we don't check the exact error class because bun wraps it).
-	if _, err := store.CreateGrantDefinition(ctx, def); err == nil {
-		t.Fatal("expected error on duplicate active name, got nil")
+	// Second active with same name → unique-violation mapped to the typed
+	// ErrGrantDefinitionDuplicate sentinel (surfaced as 409 DUPLICATE_NAME).
+	if _, err := store.CreateGrantDefinition(ctx, def); !errors.Is(err, ErrGrantDefinitionDuplicate) {
+		t.Fatalf("expected ErrGrantDefinitionDuplicate on duplicate active name, got %v", err)
 	}
 }
 

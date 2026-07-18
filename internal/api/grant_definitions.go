@@ -106,8 +106,13 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 	created, err := s.store.CreateGrantDefinition(c.Request.Context(), def)
 	if err != nil {
 		// A name collision against an existing active definition surfaces as
-		// a unique-violation here. The audit log still works — but treat it
-		// as a 409 so the client can react.
+		// a unique-violation, mapped to a typed sentinel by the store; return
+		// a 409 so the client can react rather than an opaque 500.
+		if errors.Is(err, store.ErrGrantDefinitionDuplicate) {
+			writeError(c, http.StatusConflict, ErrCodeDuplicateName, err.Error())
+
+			return
+		}
 		writeInternalError(c, s.logger, err, "failed to create grant definition")
 
 		return

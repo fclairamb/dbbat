@@ -36,6 +36,9 @@ func (s *Store) CreateUser(ctx context.Context, username, passwordHash string, r
 		Returning("*").
 		Exec(ctx)
 	if err != nil {
+		if isUniqueViolation(err, "users_username_active_uq") {
+			return nil, ErrUserNameConflict
+		}
 		return nil, fmt.Errorf("failed to create user: %w", err)
 	}
 
