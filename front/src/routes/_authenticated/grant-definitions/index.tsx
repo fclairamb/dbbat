@@ -17,6 +17,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Switch } from "@/components/ui/switch";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import {
   Dialog,
   DialogContent,
@@ -88,6 +94,8 @@ function GrantDefinitionsPage() {
   const [deactivating, setDeactivating] = useState<GrantDefinition | null>(
     null
   );
+  const [confirmingAutoApprove, setConfirmingAutoApprove] =
+    useState<GrantDefinition | null>(null);
 
   const deactivate = useDeactivateGrantDefinition({
     onSuccess: () => {
@@ -96,6 +104,31 @@ function GrantDefinitionsPage() {
     },
     onError: (e) => toast.error(e.message),
   });
+
+  const updateAutoApprove = useUpdateGrantDefinition({
+    onSuccess: (def) => {
+      toast.success(
+        def.auto_approve
+          ? "Auto-approve enabled"
+          : "Auto-approve disabled"
+      );
+      setConfirmingAutoApprove(null);
+    },
+    onError: (e) => toast.error(e.message),
+  });
+
+  const toggleAutoApprove = (d: GrantDefinition, next: boolean) => {
+    const body: CreateGrantDefinitionRequest = {
+      name: d.name,
+      description: d.description,
+      duration_seconds: d.duration_seconds,
+      controls: d.controls,
+      max_query_counts: d.max_query_counts,
+      max_bytes_transferred: d.max_bytes_transferred,
+      auto_approve: next,
+    };
+    updateAutoApprove.mutate({ uid: d.uid, body });
+  };
 
   const columns: Column<GrantDefinition>[] = [
     {
@@ -154,7 +187,33 @@ function GrantDefinitionsPage() {
       key: "auto_approve",
       header: "Auto-approve",
       cell: (d: GrantDefinition) =>
-        d.auto_approve ? (
+        isAdmin && d.is_active ? (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <div className="flex items-center gap-2">
+                <Switch
+                  checked={d.auto_approve}
+                  disabled={updateAutoApprove.isPending}
+                  onCheckedChange={(checked) => {
+                    if (checked) {
+                      setConfirmingAutoApprove(d);
+                    } else {
+                      toggleAutoApprove(d, false);
+                    }
+                  }}
+                  data-testid={`grant-definition-auto-approve-${d.uid}`}
+                />
+                <span className="text-xs text-muted-foreground">
+                  {d.auto_approve ? "auto-approved" : "manual"}
+                </span>
+              </div>
+            </TooltipTrigger>
+            <TooltipContent>
+              Requests against this definition skip admin review and are
+              approved instantly when this is on.
+            </TooltipContent>
+          </Tooltip>
+        ) : d.auto_approve ? (
           <span className="text-xs bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 px-1.5 py-0.5 rounded">
             auto-approved
           </span>
@@ -267,6 +326,35 @@ function GrantDefinitionsPage() {
               onClick={() => deactivating && deactivate.mutate(deactivating.uid)}
             >
               Deactivate
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog
+        open={!!confirmingAutoApprove}
+        onOpenChange={(o) => !o && setConfirmingAutoApprove(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Enable auto-approve?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Grant requests against "{confirmingAutoApprove?.name}" will skip
+              admin review and be approved instantly at request time. This
+              removes human review for this definition — requesters will
+              still be required to provide a justification.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() =>
+                confirmingAutoApprove &&
+                toggleAutoApprove(confirmingAutoApprove, true)
+              }
+              data-testid="confirm-grant-definition-auto-approve"
+            >
+              Enable auto-approve
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
