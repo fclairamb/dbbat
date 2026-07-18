@@ -173,19 +173,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 
 	result, err := s.store.CreateServer(c.Request.Context(), db, s.encryptionKey)
 	if err != nil {
-		if errors.Is(err, store.ErrTargetMatchesStorage) {
-			writeError(c, http.StatusBadRequest, ErrCodeTargetMatchesSelf, "target database cannot match DBBat storage database")
-			return
-		}
-		if errors.Is(err, store.ErrServerViaNotSSH) || errors.Is(err, store.ErrServerViaCycle) {
-			writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
-			return
-		}
-		if errors.Is(err, store.ErrServerNameConflict) {
-			writeError(c, http.StatusConflict, ErrCodeDuplicateName, err.Error())
-			return
-		}
-		writeInternalError(c, s.logger, err, "failed to create database")
+		s.writeCreateServerError(c, err)
 		return
 	}
 
@@ -202,6 +190,21 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 	})
 
 	successResponse(c, toDatabaseResponse(result))
+}
+
+// writeCreateServerError maps a CreateServer store error to the appropriate
+// HTTP status/error code, falling back to a generic 500.
+func (s *Server) writeCreateServerError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, store.ErrTargetMatchesStorage):
+		writeError(c, http.StatusBadRequest, ErrCodeTargetMatchesSelf, "target database cannot match DBBat storage database")
+	case errors.Is(err, store.ErrServerViaNotSSH) || errors.Is(err, store.ErrServerViaCycle):
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
+	case errors.Is(err, store.ErrServerNameConflict):
+		writeError(c, http.StatusConflict, ErrCodeDuplicateName, err.Error())
+	default:
+		writeInternalError(c, s.logger, err, "failed to create database")
+	}
 }
 
 // handleListDatabases lists databases based on user role.
