@@ -655,6 +655,22 @@ export function useConnections(filters?: {
   });
 }
 
+export function useConnection(uid: string) {
+  return useQuery({
+    queryKey: ["connections", uid],
+    queryFn: async (): Promise<Connection> => {
+      const response = await apiClient.GET("/connections/{uid}", {
+        params: { path: { uid } },
+      });
+      if (response.error || !response.data) {
+        throw new Error(response.error?.message || "Failed to load connection");
+      }
+      return response.data;
+    },
+    enabled: !!uid,
+  });
+}
+
 // ============================================================================
 // Queries
 // ============================================================================

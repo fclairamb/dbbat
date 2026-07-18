@@ -1,6 +1,12 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { useQueryDetails, useQueryRows } from "@/api";
+import {
+  useQueryDetails,
+  useQueryRows,
+  useConnection,
+  useUsers,
+  useDatabases,
+} from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { PageLoader, LoadingSpinner } from "@/components/shared/LoadingSpinner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -36,6 +42,9 @@ function QueryDetailPage() {
   const { user } = useAuth();
   const { uid } = Route.useParams();
   const { data: query, isLoading: isLoadingQuery } = useQueryDetails(uid);
+  const { data: connection } = useConnection(query?.connection_id ?? "");
+  const { data: users } = useUsers();
+  const { data: databases } = useDatabases();
 
   // Publish a "Queries › SELECT …" breadcrumb once the SQL text is loaded.
   useBreadcrumbTitle(
@@ -43,15 +52,24 @@ function QueryDetailPage() {
     query?.sql_text ? sqlPreview(query.sql_text) : undefined,
   );
 
-  // Publish a "Connection <short-uid>" crumb between "Queries" and the SQL
-  // preview once the query (and its required connection_id) has loaded.
+  // Publish a connection crumb between "Queries" and the SQL preview once
+  // the query (and its required connection_id) has loaded. It links to the
+  // connection's own detail page, and its label upgrades from the short UID
+  // (loading fallback) to the resolved "username @ database" form once the
+  // connection has been fetched.
+  const connectionLabel = connection
+    ? `${users?.find((u) => u.uid === connection.user_id)?.username ?? connection.user_id} @ ${databases?.find((d) => d.uid === connection.database_id)?.name ?? connection.database_id}`
+    : query
+      ? query.connection_id.slice(0, 8)
+      : undefined;
+
   useBreadcrumbItems(
     `/queries/${uid}`,
     query
       ? [
           {
-            title: `Connection ${query.connection_id.slice(0, 8)}`,
-            href: `/queries?connection_id=${query.connection_id}`,
+            title: connectionLabel ?? query.connection_id.slice(0, 8),
+            href: `/connections/${query.connection_id}`,
           },
         ]
       : undefined,

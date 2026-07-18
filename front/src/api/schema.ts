@@ -734,6 +734,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/connections/{uid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Connection UID */
+                uid: components["parameters"]["ConnectionUID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Get connection details
+         * @description Retrieves a specific connection.
+         *
+         *     Connectors can only fetch their own connections. Connections
+         *     belonging to another user are reported as `404 Not Found` (not
+         *     `403 Forbidden`) so their existence isn't leaked.
+         */
+        get: operations["getConnection"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/queries": {
         parameters: {
             query?: never;
@@ -1875,6 +1902,15 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
+        /** @description Conflict with the current state (e.g. a resource with that name already exists) */
+        Conflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
         /** @description Rate limit exceeded */
         RateLimited: {
             headers: {
@@ -1909,6 +1945,8 @@ export interface components {
         DatabaseUID: string;
         /** @description Grant UID */
         GrantUID: string;
+        /** @description Connection UID */
+        ConnectionUID: string;
         /** @description Query UID */
         QueryUID: string;
         /** @description Maximum number of results to return */
@@ -1967,11 +2005,13 @@ export type ResponseAuthRateLimited = components['responses']['AuthRateLimited']
 export type ResponseForbidden = components['responses']['Forbidden'];
 export type ResponsePasswordChangeRequired = components['responses']['PasswordChangeRequired'];
 export type ResponseNotFound = components['responses']['NotFound'];
+export type ResponseConflict = components['responses']['Conflict'];
 export type ResponseRateLimited = components['responses']['RateLimited'];
 export type ResponseInternalError = components['responses']['InternalError'];
 export type ParameterUserUid = components['parameters']['UserUID'];
 export type ParameterDatabaseUid = components['parameters']['DatabaseUID'];
 export type ParameterGrantUid = components['parameters']['GrantUID'];
+export type ParameterConnectionUid = components['parameters']['ConnectionUID'];
 export type ParameterQueryUid = components['parameters']['QueryUID'];
 export type ParameterLimit = components['parameters']['Limit'];
 export type ParameterOffset = components['parameters']['Offset'];
@@ -2319,6 +2359,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
         };
@@ -2593,6 +2634,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
         };
@@ -2854,6 +2896,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
             500: components["responses"]["InternalError"];
         };
     };
@@ -3278,6 +3321,34 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getConnection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Connection UID */
+                uid: components["parameters"]["ConnectionUID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Connection details */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Connection"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
         };

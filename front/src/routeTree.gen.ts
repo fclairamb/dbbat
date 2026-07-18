@@ -24,6 +24,7 @@ import { Route as AuthenticatedConnectionsIndexRouteImport } from './routes/_aut
 import { Route as AuthenticatedAuditIndexRouteImport } from './routes/_authenticated/audit/index'
 import { Route as AuthenticatedApiKeysIndexRouteImport } from './routes/_authenticated/api-keys/index'
 import { Route as AuthenticatedQueriesUidRouteImport } from './routes/_authenticated/queries/$uid'
+import { Route as AuthenticatedConnectionsUidRouteImport } from './routes/_authenticated/connections/$uid'
 
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
@@ -108,10 +109,17 @@ const AuthenticatedQueriesUidRoute = AuthenticatedQueriesUidRouteImport.update({
   path: '/queries/$uid',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
+const AuthenticatedConnectionsUidRoute =
+  AuthenticatedConnectionsUidRouteImport.update({
+    id: '/connections/$uid',
+    path: '/connections/$uid',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AuthenticatedIndexRoute
   '/login': typeof LoginRoute
+  '/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/api-keys/': typeof AuthenticatedApiKeysIndexRoute
   '/audit/': typeof AuthenticatedAuditIndexRoute
@@ -128,6 +136,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/': typeof AuthenticatedIndexRoute
+  '/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/api-keys': typeof AuthenticatedApiKeysIndexRoute
   '/audit': typeof AuthenticatedAuditIndexRoute
@@ -146,6 +155,7 @@ export interface FileRoutesById {
   '/_authenticated': typeof AuthenticatedRouteWithChildren
   '/login': typeof LoginRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
+  '/_authenticated/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/_authenticated/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/_authenticated/api-keys/': typeof AuthenticatedApiKeysIndexRoute
   '/_authenticated/audit/': typeof AuthenticatedAuditIndexRoute
@@ -164,6 +174,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/login'
+    | '/connections/$uid'
     | '/queries/$uid'
     | '/api-keys/'
     | '/audit/'
@@ -180,6 +191,7 @@ export interface FileRouteTypes {
   to:
     | '/login'
     | '/'
+    | '/connections/$uid'
     | '/queries/$uid'
     | '/api-keys'
     | '/audit'
@@ -197,6 +209,7 @@ export interface FileRouteTypes {
     | '/_authenticated'
     | '/login'
     | '/_authenticated/'
+    | '/_authenticated/connections/$uid'
     | '/_authenticated/queries/$uid'
     | '/_authenticated/api-keys/'
     | '/_authenticated/audit/'
@@ -323,11 +336,19 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedQueriesUidRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/connections/$uid': {
+      id: '/_authenticated/connections/$uid'
+      path: '/connections/$uid'
+      fullPath: '/connections/$uid'
+      preLoaderRoute: typeof AuthenticatedConnectionsUidRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
   }
 }
 
 interface AuthenticatedRouteChildren {
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
+  AuthenticatedConnectionsUidRoute: typeof AuthenticatedConnectionsUidRoute
   AuthenticatedQueriesUidRoute: typeof AuthenticatedQueriesUidRoute
   AuthenticatedApiKeysIndexRoute: typeof AuthenticatedApiKeysIndexRoute
   AuthenticatedAuditIndexRoute: typeof AuthenticatedAuditIndexRoute
@@ -344,6 +365,7 @@ interface AuthenticatedRouteChildren {
 
 const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
+  AuthenticatedConnectionsUidRoute: AuthenticatedConnectionsUidRoute,
   AuthenticatedQueriesUidRoute: AuthenticatedQueriesUidRoute,
   AuthenticatedApiKeysIndexRoute: AuthenticatedApiKeysIndexRoute,
   AuthenticatedAuditIndexRoute: AuthenticatedAuditIndexRoute,
