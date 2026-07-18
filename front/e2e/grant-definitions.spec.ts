@@ -309,3 +309,78 @@ test.describe("Grant Definition edit dialog prefill", () => {
     await expect(page.locator("#def-read_only")).not.toBeChecked();
   });
 });
+
+test.describe("Grant Definition inline auto-approve toggle", () => {
+  test("toggling the inline switch enables auto-approve and a subsequent request is approved instantly", async ({
+    authenticatedPage: page,
+  }) => {
+    await page.goto(DEFS_URL);
+    await page.waitForLoadState("networkidle");
+
+    const name = `E2E AutoApprove ${Date.now()}`;
+
+    // Create a manual (non-auto-approve) definition via the dialog.
+    await openCreateDialog(page);
+    await fillDefinition(page, {
+      name,
+      description: "starts manual, flipped via inline toggle",
+      durationValue: "1",
+      durationUnitLabel: "Hours",
+      controls: ["read_only"],
+    });
+    await submitDialog(page);
+
+    const row = rowByName(page, name);
+    await expect(row).toBeVisible();
+    const toggle = row.locator('[data-testid^="grant-definition-auto-approve-"]');
+    await expect(toggle).toBeVisible();
+    await expect(toggle).toHaveAttribute("data-state", "unchecked");
+
+    // Flip it on: a confirmation dialog must appear before it takes effect.
+    await toggle.click();
+    await page.waitForSelector('[role="alertdialog"]');
+    await expect(
+      page.getByTestId("confirm-grant-definition-auto-approve")
+    ).toBeVisible();
+    await page.getByTestId("confirm-grant-definition-auto-approve").click();
+    await expect(page.locator('[role="alertdialog"]')).toBeHidden();
+
+    await expect(toggle).toHaveAttribute("data-state", "checked");
+
+    // A request against this now-auto-approved definition should be approved
+    // instantly rather than landing in the pending queue.
+    await page.goto("grant-requests");
+    await page.waitForLoadState("networkidle");
+    await page.getByTestId("request-grant-button").click();
+    await page.waitForSelector('[role="dialog"]');
+
+    await page.getByTestId("grant-request-definition").click();
+    await page.getByRole("option", { name }).click();
+
+    await page.getByTestId("grant-request-database").click();
+    await page.getByRole("option").first().click();
+
+    await page
+      .getByTestId("grant-request-justification")
+      .fill("E2E auto-approve verification");
+    await page.getByTestId("grant-request-submit").click();
+    await expect(page.locator('[role="dialog"]')).toBeHidden();
+
+    // Switch to "All" so the (already-resolved) request is visible, then
+    // confirm it shows as approved, not pending.
+    await page.getByRole("button", { name: "All" }).click();
+    const requestRow = page.locator("tr", { hasText: name });
+    await expect(requestRow.first()).toBeVisible();
+    await expect(requestRow.first()).toContainText("approved");
+
+    // Flip it back off: no confirmation dialog should be required this time.
+    await page.goto(DEFS_URL);
+    await page.waitForLoadState("networkidle");
+    const toggleAfter = rowByName(page, name).locator(
+      '[data-testid^="grant-definition-auto-approve-"]'
+    );
+    await toggleAfter.click();
+    await expect(page.locator('[role="alertdialog"]')).toHaveCount(0);
+    await expect(toggleAfter).toHaveAttribute("data-state", "unchecked");
+  });
+});
