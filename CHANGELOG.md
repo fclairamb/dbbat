@@ -1,27 +1,30 @@
 # Changelog
 
-## [Unreleased]
+## [0.17.0](https://github.com/fclairamb/dbbat/compare/v0.16.0...v0.17.0) (2026-07-18)
 
 ### ⚠ BREAKING CHANGES
 
-* **api:** `/api/v1/databases` is renamed to `/api/v1/servers` (and `/api/v1/ssh-servers` is added for bastion management); no `/databases` alias is kept
+* **api:** `/api/v1/databases` is renamed to `/api/v1/servers` (and `/api/v1/ssh-servers` is added for bastion management); no `/databases` alias is kept ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
 
 ### Features
 
-* **grants:** grant definitions can be flagged `auto_approve` — matching requests are instantly approved with no admin decision needed, with a required justification, a Slack notification without action buttons, and a dedicated audit trail
-* **ui:** inline auto-approve toggle on the grant-definitions table, plus an "approve & enable auto-approve" action on pending grant requests
-* **proxy,store,api,ui:** SSH tunnel support for upstream connections across all four proxied protocols (PostgreSQL, Oracle, MySQL, MongoDB) — the `databases` table/model is renamed to `servers`, gains a self-referencing `via_uid` for SSH bastions, and a shared pooled dialer with host-key TOFU routes upstream connections through the tunnel when configured
-* **ui:** the "Databases" page becomes `/servers`, listing SSH bastions alongside database servers, with create/edit UI for SSH servers; `/databases` redirects to `/servers`
-* **api:** creating a server, grant definition, or user with a name that already exists now returns `409 DUPLICATE_NAME` instead of a generic error
-* **ui:** the query detail breadcrumb now shows the connection it belongs to
-* **api,ui:** connections now have a detail page, with connector access properly scoped
+* **grants:** grant definitions can be flagged `auto_approve` — matching requests are instantly approved with no admin decision needed, with a required justification, a Slack notification without action buttons, and a dedicated audit trail ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
+* **ui:** inline auto-approve toggle on the grant-definitions table, plus an "approve & enable auto-approve" action on pending grant requests ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
+* **proxy,store,api,ui:** SSH tunnel support for upstream connections across all four proxied protocols (PostgreSQL, Oracle, MySQL, MongoDB) — the `databases` table/model is renamed to `servers`, gains a self-referencing `via_uid` for SSH bastions, and a shared pooled dialer with host-key TOFU routes upstream connections through the tunnel when configured ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
+* **ui:** the "Databases" page becomes `/servers`, listing SSH bastions alongside database servers, with create/edit UI for SSH servers; `/databases` redirects to `/servers` ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
+* **api:** creating a server, grant definition, or user with a name that already exists now returns `409 DUPLICATE_NAME` instead of a generic error ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
+* **ui:** the query detail breadcrumb now shows the connection it belongs to ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
+* **api,ui:** connections now have a detail page, with connector access properly scoped ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
 
 ### Bug Fixes
 
-* **ui:** the SSH server create dialog now includes `ssl_mode`/`listable` defaults in its payload
-* **store:** the test-mode wipe now also drops the legacy `databases` table
-* **ci:** pin the `bun-version` used in CI to avoid a `setup-bun` latest-tag lookup failure
-* **dev:** `make dev` no longer depends on `scripts/run-backend-dev.sh`
+* **api:** block admin password change in demo mode ([#257](https://github.com/fclairamb/dbbat/issues/257)) ([55d6ee1](https://github.com/fclairamb/dbbat/commit/55d6ee1f0ef84bc168bd087800582605f3a94b6e))
+* **api:** silence exhaustive lint on grant-status switch ([#260](https://github.com/fclairamb/dbbat/issues/260)) ([83a5e14](https://github.com/fclairamb/dbbat/commit/83a5e1466fb025d028b4165dce7200b7b10f88c8))
+* **deps:** update module github.com/go-mysql-org/go-mysql to v1.16.0 ([#259](https://github.com/fclairamb/dbbat/issues/259)) ([c986832](https://github.com/fclairamb/dbbat/commit/c986832538ecc4086d6a192f91bf54ec214f0a33))
+* **ui:** the SSH server create dialog now includes `ssl_mode`/`listable` defaults in its payload ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
+* **store:** the test-mode wipe now also drops the legacy `databases` table ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
+* **ci:** pin the `bun-version` used in CI to avoid a `setup-bun` latest-tag lookup failure ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
+* **dev:** `make dev` no longer depends on `scripts/run-backend-dev.sh` ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
 
 ## [0.16.0](https://github.com/fclairamb/dbbat/compare/v0.15.5...v0.16.0) (2026-07-14)
 
