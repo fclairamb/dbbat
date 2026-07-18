@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { Plus, Check, X, Ban } from "lucide-react";
+import { Plus, Check, X, Ban, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -12,7 +12,9 @@ import {
   useApproveGrantRequest,
   useDenyGrantRequest,
   useCancelGrantRequest,
+  useUpdateGrantDefinition,
   type GrantRequest,
+  type CreateGrantDefinitionRequest,
 } from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { DataTable, type Column } from "@/components/shared/DataTable";
@@ -35,6 +37,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useAuth } from "@/contexts/AuthContext";
 import {
   canApproveGrantRequest,
@@ -93,6 +100,34 @@ function GrantRequestsPage() {
     onSuccess: () => toast.success("Cancelled"),
     onError: (e) => toast.error(e.message),
   });
+  const updateDefinition = useUpdateGrantDefinition({
+    onError: (e) => toast.error(e.message),
+  });
+
+  // Approve a pending request and, in the same action, flip its definition to
+  // auto-approve so future requests against it skip review entirely.
+  const approveAndEnableAutoApprove = (r: GrantRequest) => {
+    const def = defMap[r.grant_definition_id];
+    if (!def) return;
+    const body: CreateGrantDefinitionRequest = {
+      name: def.name,
+      description: def.description,
+      duration_seconds: def.duration_seconds,
+      controls: def.controls,
+      max_query_counts: def.max_query_counts,
+      max_bytes_transferred: def.max_bytes_transferred,
+      auto_approve: true,
+    };
+    updateDefinition.mutate(
+      { uid: def.uid, body },
+      {
+        onSuccess: () => {
+          toast.success("Auto-approve enabled for this definition");
+          approve.mutate(r.uid);
+        },
+      }
+    );
+  };
 
   const columns: Column<GrantRequest>[] = [
     {
@@ -108,8 +143,22 @@ function GrantRequestsPage() {
     {
       key: "definition",
       header: "Definition",
-      cell: (r: GrantRequest) =>
-        defMap[r.grant_definition_id]?.name ?? r.grant_definition_id.slice(0, 8),
+      cell: (r: GrantRequest) => {
+        const def = defMap[r.grant_definition_id];
+        return (
+          <div className="flex items-center gap-1.5">
+            <span>{def?.name ?? r.grant_definition_id.slice(0, 8)}</span>
+            {def?.auto_approve && (
+              <span
+                className="text-xs bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400 px-1.5 py-0.5 rounded"
+                data-testid={`request-definition-auto-approve-${r.uid}`}
+              >
+                auto-approve
+              </span>
+            )}
+          </div>
+        );
+      },
     },
     {
       key: "justification",
@@ -155,6 +204,29 @@ function GrantRequestsPage() {
                 >
                   <Check className="h-4 w-4 text-green-600" />
                 </Button>
+                {!defMap[r.grant_definition_id]?.auto_approve && (
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => approveAndEnableAutoApprove(r)}
+                        disabled={
+                          updateDefinition.isPending || approve.isPending
+                        }
+                        data-testid={`approve-and-enable-auto-approve-${r.uid}`}
+                        title="Approve and enable auto-approve for this definition"
+                      >
+                        <ShieldCheck className="h-4 w-4 text-blue-600" />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                      Approve this request and enable auto-approve on "
+                      {defMap[r.grant_definition_id]?.name ?? "this definition"}
+                      " so future requests skip review.
+                    </TooltipContent>
+                  </Tooltip>
+                )}
                 <Button
                   size="sm"
                   variant="ghost"
