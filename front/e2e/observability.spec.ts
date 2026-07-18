@@ -45,10 +45,10 @@ test.describe("Observability Features", () => {
     const headerRow = authenticatedPage.locator("thead tr");
     await expect(headerRow.getByText("User", { exact: true })).toBeVisible();
     await expect(
-      headerRow.getByText("Database", { exact: true })
+      headerRow.getByText("Database", { exact: true }),
     ).toBeVisible();
     await expect(
-      headerRow.getByText("Connection", { exact: true })
+      headerRow.getByText("Connection", { exact: true }),
     ).toBeVisible();
 
     const rows = authenticatedPage.locator("tbody tr");
@@ -75,7 +75,7 @@ test.describe("Observability Features", () => {
 
     // Filter badge confirms the connection-scoped view is active.
     await expect(
-      authenticatedPage.getByText("Filtered by connection")
+      authenticatedPage.getByText("Filtered by connection"),
     ).toBeVisible();
   });
 
@@ -87,12 +87,12 @@ test.describe("Observability Features", () => {
     // still show the "Queries" parent crumb and must not collapse the detail
     // segment to the literal "Details".
     await authenticatedPage.goto(
-      "queries/00000000-0000-0000-0000-000000000000"
+      "queries/00000000-0000-0000-0000-000000000000",
     );
     await authenticatedPage.waitForLoadState("networkidle");
 
     const breadcrumb = authenticatedPage.locator(
-      'nav[aria-label="breadcrumb"]'
+      'nav[aria-label="breadcrumb"]',
     );
     await expect(breadcrumb).toBeVisible();
 
@@ -122,23 +122,74 @@ test.describe("Observability Features", () => {
 
     // Click the first query row to open its detail page.
     await rowLinks.first().click();
-    await expect(authenticatedPage).toHaveURL(
-      /\/queries\/[0-9a-f-]{36}$/
-    );
+    await expect(authenticatedPage).toHaveURL(/\/queries\/[0-9a-f-]{36}$/);
     await authenticatedPage.waitForLoadState("networkidle");
 
     const breadcrumb = authenticatedPage.locator(
-      'nav[aria-label="breadcrumb"]'
+      'nav[aria-label="breadcrumb"]',
     );
     // "Queries" parent + a non-empty preview leaf (the SQL text, not "Details").
     await expect(
-      breadcrumb.getByRole("link", { name: "Queries" })
+      breadcrumb.getByRole("link", { name: "Queries" }),
     ).toBeVisible();
     await expect(breadcrumb).not.toContainText("Details");
     // The leaf (current-page) crumb carries the SQL preview.
     const leaf = breadcrumb.locator('[aria-current="page"]');
     await expect(leaf).toBeVisible();
     await expect(leaf).not.toHaveText("");
+  });
+
+  test("query detail breadcrumb shows the owning connection and links to its filtered queries list", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("queries");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const rowLinks = authenticatedPage.locator("tbody tr td a");
+    if ((await rowLinks.count()) === 0) {
+      test.skip(true, "No query rows available in this environment");
+      return;
+    }
+
+    // Grab the connection id from the list row's own connection link so we
+    // can assert the breadcrumb crumb matches it exactly.
+    const firstRow = authenticatedPage.locator("tbody tr").first();
+    const listConnectionHref = await firstRow
+      .locator("a")
+      .last()
+      .getAttribute("href");
+    const connectionId = listConnectionHref?.match(
+      /connection_id=([^&]+)/,
+    )?.[1];
+    expect(connectionId).toBeTruthy();
+
+    await rowLinks.first().click();
+    await expect(authenticatedPage).toHaveURL(/\/queries\/[0-9a-f-]{36}$/);
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const breadcrumb = authenticatedPage.locator(
+      'nav[aria-label="breadcrumb"]',
+    );
+    await expect(breadcrumb).toBeVisible();
+
+    // "Connection <short-uid>" sits between "Queries" and the SQL-preview leaf.
+    const connectionCrumb = breadcrumb.getByRole("link", {
+      name: `Connection ${connectionId!.slice(0, 8)}`,
+    });
+    await expect(connectionCrumb).toBeVisible();
+    await expect(connectionCrumb).toHaveAttribute(
+      "href",
+      `/queries?connection_id=${connectionId}`,
+    );
+
+    await connectionCrumb.click();
+    await expect(authenticatedPage).toHaveURL(
+      new RegExp(`connection_id=${connectionId}`),
+    );
+    await authenticatedPage.waitForLoadState("networkidle");
+    await expect(
+      authenticatedPage.getByText("Filtered by connection"),
+    ).toBeVisible();
   });
 
   test("should display audit log page", async ({ authenticatedPage }) => {
@@ -251,7 +302,9 @@ test.describe("Adaptive Auto-Refresh Feature", () => {
     await authenticatedPage.waitForLoadState("networkidle");
 
     // Find the auto-refresh badge
-    const autoRefreshBadge = authenticatedPage.getByText(/Next:|Auto-refresh: OFF/);
+    const autoRefreshBadge = authenticatedPage.getByText(
+      /Next:|Auto-refresh: OFF/,
+    );
     await expect(autoRefreshBadge).toBeVisible();
 
     // Initially, auto-refresh should be enabled (showing countdown)
@@ -298,7 +351,9 @@ test.describe("Adaptive Auto-Refresh Feature", () => {
     await authenticatedPage.waitForLoadState("networkidle");
 
     // Find the auto-refresh badge
-    const autoRefreshBadge = authenticatedPage.getByText(/Next:|Auto-refresh: OFF/);
+    const autoRefreshBadge = authenticatedPage.getByText(
+      /Next:|Auto-refresh: OFF/,
+    );
     await expect(autoRefreshBadge).toBeVisible();
 
     // Make sure auto-refresh is enabled
@@ -341,7 +396,9 @@ test.describe("Adaptive Auto-Refresh Feature", () => {
     await authenticatedPage.waitForLoadState("networkidle");
 
     // Find the auto-refresh badge
-    const autoRefreshBadge = authenticatedPage.getByText(/Next:|Auto-refresh: OFF/);
+    const autoRefreshBadge = authenticatedPage.getByText(
+      /Next:|Auto-refresh: OFF/,
+    );
     const refreshButton = authenticatedPage.getByRole("button", {
       name: "Refresh",
     });
@@ -400,7 +457,9 @@ test.describe("Adaptive Auto-Refresh Feature", () => {
     await authenticatedPage.goto("connections");
     await authenticatedPage.waitForLoadState("networkidle");
 
-    const autoRefreshBadge = authenticatedPage.getByText(/Next:|Auto-refresh: OFF/);
+    const autoRefreshBadge = authenticatedPage.getByText(
+      /Next:|Auto-refresh: OFF/,
+    );
     const refreshButton = authenticatedPage.getByRole("button", {
       name: "Refresh",
     });
@@ -448,7 +507,9 @@ test.describe("Adaptive Auto-Refresh Feature", () => {
     await authenticatedPage.goto("connections");
     await authenticatedPage.waitForLoadState("networkidle");
 
-    const autoRefreshBadge = authenticatedPage.getByText(/Next:|Auto-refresh: OFF/);
+    const autoRefreshBadge = authenticatedPage.getByText(
+      /Next:|Auto-refresh: OFF/,
+    );
 
     // Make sure auto-refresh is enabled first
     let badgeText = await autoRefreshBadge.textContent();
@@ -492,7 +553,9 @@ test.describe("Adaptive Auto-Refresh Feature", () => {
     await authenticatedPage.waitForLoadState("networkidle");
 
     // Auto-refresh should still be off after navigation
-    const autoRefreshBadgeAfterNav = authenticatedPage.getByText(/Next:|Auto-refresh: OFF/);
+    const autoRefreshBadgeAfterNav = authenticatedPage.getByText(
+      /Next:|Auto-refresh: OFF/,
+    );
     const badgeTextAfterNav = await autoRefreshBadgeAfterNav.textContent();
     expect(badgeTextAfterNav).toContain("Auto-refresh: OFF");
 
@@ -509,7 +572,9 @@ test.describe("Adaptive Auto-Refresh Feature", () => {
     await authenticatedPage.goto("connections");
     await authenticatedPage.waitForLoadState("networkidle");
 
-    const autoRefreshBadge = authenticatedPage.getByText(/Next:|Auto-refresh: OFF/);
+    const autoRefreshBadge = authenticatedPage.getByText(
+      /Next:|Auto-refresh: OFF/,
+    );
 
     // Make sure auto-refresh is disabled
     let badgeText = await autoRefreshBadge.textContent();
@@ -532,7 +597,9 @@ test.describe("Adaptive Auto-Refresh Feature", () => {
     await authenticatedPage.goto("queries");
     await authenticatedPage.waitForLoadState("networkidle");
 
-    const autoRefreshBadge = authenticatedPage.getByText(/Next:|Auto-refresh: OFF/);
+    const autoRefreshBadge = authenticatedPage.getByText(
+      /Next:|Auto-refresh: OFF/,
+    );
     await expect(autoRefreshBadge).toBeVisible();
 
     // Toggle
@@ -553,7 +620,9 @@ test.describe("Adaptive Auto-Refresh Feature", () => {
     await authenticatedPage.goto("audit");
     await authenticatedPage.waitForLoadState("networkidle");
 
-    const autoRefreshBadge = authenticatedPage.getByText(/Next:|Auto-refresh: OFF/);
+    const autoRefreshBadge = authenticatedPage.getByText(
+      /Next:|Auto-refresh: OFF/,
+    );
     await expect(autoRefreshBadge).toBeVisible();
 
     // Toggle
@@ -579,7 +648,9 @@ test.describe("Adaptive Auto-Refresh Feature", () => {
     const refreshButton = authenticatedPage.getByRole("button", {
       name: "Refresh",
     });
-    const autoRefreshBadge = authenticatedPage.getByText(/Next:|Auto-refresh: OFF/);
+    const autoRefreshBadge = authenticatedPage.getByText(
+      /Next:|Auto-refresh: OFF/,
+    );
 
     // Verify button is enabled initially
     await expect(refreshButton).toBeEnabled();
@@ -624,7 +695,9 @@ test.describe("Adaptive Auto-Refresh Feature", () => {
     const refreshButton = authenticatedPage.getByRole("button", {
       name: "Refresh",
     });
-    const autoRefreshBadge = authenticatedPage.getByText(/Next:|Auto-refresh: OFF/);
+    const autoRefreshBadge = authenticatedPage.getByText(
+      /Next:|Auto-refresh: OFF/,
+    );
 
     // Ensure auto-refresh is enabled
     let badgeText = await autoRefreshBadge.textContent();
