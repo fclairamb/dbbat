@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.17.0](https://github.com/fclairamb/dbbat/compare/v0.16.0...v0.17.0) (2026-07-18)
+
+
+### Features
+
+* auto-approved grants, SSH tunnels, and server management UI ([#262](https://github.com/fclairamb/dbbat/issues/262)) ([7d5008b](https://github.com/fclairamb/dbbat/commit/7d5008b7b5456ae9d2654f76f9626ab70a7f9a44))
+
+
+### Bug Fixes
+
+* **api:** block admin password change in demo mode ([#257](https://github.com/fclairamb/dbbat/issues/257)) ([55d6ee1](https://github.com/fclairamb/dbbat/commit/55d6ee1f0ef84bc168bd087800582605f3a94b6e))
+* **api:** silence exhaustive lint on grant-status switch ([#260](https://github.com/fclairamb/dbbat/issues/260)) ([83a5e14](https://github.com/fclairamb/dbbat/commit/83a5e1466fb025d028b4165dce7200b7b10f88c8))
+* **deps:** update module github.com/go-mysql-org/go-mysql to v1.16.0 ([#259](https://github.com/fclairamb/dbbat/issues/259)) ([c986832](https://github.com/fclairamb/dbbat/commit/c986832538ecc4086d6a192f91bf54ec214f0a33))
+
 ## [Unreleased]
 
 ### ⚠ BREAKING CHANGES
