@@ -1,5 +1,28 @@
 # Changelog
 
+## [Unreleased]
+
+### ⚠ BREAKING CHANGES
+
+* **api:** `/api/v1/databases` is renamed to `/api/v1/servers` (and `/api/v1/ssh-servers` is added for bastion management); no `/databases` alias is kept
+
+### Features
+
+* **grants:** grant definitions can be flagged `auto_approve` — matching requests are instantly approved with no admin decision needed, with a required justification, a Slack notification without action buttons, and a dedicated audit trail
+* **ui:** inline auto-approve toggle on the grant-definitions table, plus an "approve & enable auto-approve" action on pending grant requests
+* **proxy,store,api,ui:** SSH tunnel support for upstream connections across all four proxied protocols (PostgreSQL, Oracle, MySQL, MongoDB) — the `databases` table/model is renamed to `servers`, gains a self-referencing `via_uid` for SSH bastions, and a shared pooled dialer with host-key TOFU routes upstream connections through the tunnel when configured
+* **ui:** the "Databases" page becomes `/servers`, listing SSH bastions alongside database servers, with create/edit UI for SSH servers; `/databases` redirects to `/servers`
+* **api:** creating a server, grant definition, or user with a name that already exists now returns `409 DUPLICATE_NAME` instead of a generic error
+* **ui:** the query detail breadcrumb now shows the connection it belongs to
+* **api,ui:** connections now have a detail page, with connector access properly scoped
+
+### Bug Fixes
+
+* **ui:** the SSH server create dialog now includes `ssl_mode`/`listable` defaults in its payload
+* **store:** the test-mode wipe now also drops the legacy `databases` table
+* **ci:** pin the `bun-version` used in CI to avoid a `setup-bun` latest-tag lookup failure
+* **dev:** `make dev` no longer depends on `scripts/run-backend-dev.sh`
+
 ## [0.16.0](https://github.com/fclairamb/dbbat/compare/v0.15.5...v0.16.0) (2026-07-14)
 
 Lands the batch of work accumulated on local `main` in one squash-merged PR ([#255](https://github.com/fclairamb/dbbat/issues/255)) ([e6cbeeb](https://github.com/fclairamb/dbbat/commit/e6cbeebef133018297c8102c6b6a73303db298fe)); the individual changes are broken out below.
