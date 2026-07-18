@@ -2,6 +2,8 @@ package store
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -102,6 +104,23 @@ func (s *Store) IncrementConnectionBytes(ctx context.Context, uid uuid.UUID, byt
 		return fmt.Errorf("failed to increment connection bytes: %w", err)
 	}
 	return nil
+}
+
+// GetConnectionByUID retrieves a single connection by UID
+func (s *Store) GetConnectionByUID(ctx context.Context, uid uuid.UUID) (*Connection, error) {
+	conn := &Connection{}
+	err := s.db.NewSelect().
+		Model(conn).
+		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, disconnected_at, queries, bytes_transferred").
+		Where("uid = ?", uid).
+		Scan(ctx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrConnectionNotFound
+		}
+		return nil, fmt.Errorf("failed to get connection: %w", err)
+	}
+	return conn, nil
 }
 
 // ListConnections retrieves connections with optional filters

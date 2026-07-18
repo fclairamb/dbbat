@@ -109,6 +109,41 @@ func TestCloseConnection(t *testing.T) {
 	})
 }
 
+func TestGetConnectionByUID(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "getconn")
+
+	conn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.5")
+	if err != nil {
+		t.Fatalf("CreateConnection() error = %v", err)
+	}
+
+	t.Run("get existing connection", func(t *testing.T) {
+		found, err := store.GetConnectionByUID(ctx, conn.UID)
+		if err != nil {
+			t.Fatalf("GetConnectionByUID() error = %v", err)
+		}
+		if found.UID != conn.UID {
+			t.Errorf("GetConnectionByUID() UID = %s, want %s", found.UID, conn.UID)
+		}
+		if found.UserID != user.UID {
+			t.Errorf("GetConnectionByUID() UserID = %s, want %s", found.UserID, user.UID)
+		}
+		if !strings.HasPrefix(found.SourceIP, "10.0.0.5") {
+			t.Errorf("GetConnectionByUID() SourceIP = %q, want prefix %q", found.SourceIP, "10.0.0.5")
+		}
+	})
+
+	t.Run("get non-existing connection", func(t *testing.T) {
+		_, err := store.GetConnectionByUID(ctx, uuid.New())
+		if !errors.Is(err, ErrConnectionNotFound) {
+			t.Errorf("GetConnectionByUID() error = %v, want %v", err, ErrConnectionNotFound)
+		}
+	})
+}
+
 func TestListConnections(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()

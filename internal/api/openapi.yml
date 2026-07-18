@@ -1518,6 +1518,39 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /connections/{uid}:
+    parameters:
+      - $ref: '#/components/parameters/ConnectionUID'
+
+    get:
+      tags:
+        - Connections
+      summary: Get connection details
+      description: |
+        Retrieves a specific connection.
+
+        Connectors can only fetch their own connections. Connections
+        belonging to another user are reported as `404 Not Found` (not
+        `403 Forbidden`) so their existence isn't leaked.
+      operationId: getConnection
+      responses:
+        '200':
+          description: Connection details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Connection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /queries:
     get:
       tags:
@@ -2033,6 +2066,15 @@ components:
       in: path
       required: true
       description: Grant UID
+      schema:
+        type: string
+        format: uuid
+
+    ConnectionUID:
+      name: uid
+      in: path
+      required: true
+      description: Connection UID
       schema:
         type: string
         format: uuid
