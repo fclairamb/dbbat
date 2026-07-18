@@ -302,7 +302,7 @@ function ServersPage() {
                 enabledTooltip={getActionTooltip("create-database")}
               >
                 <Plus className="mr-2 h-4 w-4" />
-                Add Database
+                Add Server
               </PermissionButton>
             </DialogTrigger>
             <CreateDatabaseDialog onClose={() => setIsCreateOpen(false)} />
@@ -422,7 +422,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
     <DialogContent className="max-w-md">
       <form onSubmit={handleSubmit}>
         <DialogHeader>
-          <DialogTitle>Add Database</DialogTitle>
+          <DialogTitle>Add Server</DialogTitle>
           <DialogDescription>
             Configure a new target database connection.
           </DialogDescription>

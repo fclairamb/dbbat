@@ -71,6 +71,9 @@ func (s *Store) CreateServer(ctx context.Context, db *Server, encryptionKey []by
 		Returning("*").
 		Exec(ctx)
 	if err != nil {
+		if isUniqueViolation(err, "servers_name_key") {
+			return nil, ErrServerNameConflict
+		}
 		return nil, fmt.Errorf("failed to create database: %w", err)
 	}
 

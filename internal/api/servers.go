@@ -181,6 +181,10 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 			writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
 			return
 		}
+		if errors.Is(err, store.ErrServerNameConflict) {
+			writeError(c, http.StatusConflict, ErrCodeDuplicateName, err.Error())
+			return
+		}
 		writeInternalError(c, s.logger, err, "failed to create database")
 		return
 	}

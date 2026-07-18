@@ -731,3 +731,39 @@ func TestListDatabasesByOracleServiceName(t *testing.T) {
 		}
 	})
 }
+
+// TestCreateServer_DuplicateName verifies that inserting a second server with an
+// already-taken name surfaces the typed ErrServerNameConflict (mapped to a 409
+// by the API) rather than an opaque database error.
+func TestCreateServer_DuplicateName(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+	key := testEncryptionKey()
+
+	first := &Server{
+		Name:         "dupe",
+		Host:         "localhost",
+		Port:         5432,
+		DatabaseName: "mydb",
+		Username:     "dbuser",
+		Password:     "secret",
+		SSLMode:      "prefer",
+	}
+	if _, err := store.CreateServer(ctx, first, key); err != nil {
+		t.Fatalf("CreateServer(first) error = %v", err)
+	}
+
+	second := &Server{
+		Name:         "dupe",
+		Host:         "otherhost",
+		Port:         5433,
+		DatabaseName: "otherdb",
+		Username:     "dbuser2",
+		Password:     "secret2",
+		SSLMode:      "prefer",
+	}
+	_, err := store.CreateServer(ctx, second, key)
+	if !errors.Is(err, ErrServerNameConflict) {
+		t.Fatalf("CreateServer(duplicate) error = %v, want ErrServerNameConflict", err)
+	}
+}
