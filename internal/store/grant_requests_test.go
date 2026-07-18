@@ -8,7 +8,7 @@ import (
 	"github.com/google/uuid"
 )
 
-func setupRequestFixtures(t *testing.T, ctx context.Context, s *Store, suffix string) (*User, *User, *Database, *GrantDefinition) {
+func setupRequestFixtures(t *testing.T, ctx context.Context, s *Store, suffix string) (*User, *User, *Server, *GrantDefinition) {
 	t.Helper()
 
 	admin := createTestAdmin(t, ctx, s, "req_admin_"+suffix)
@@ -20,7 +20,7 @@ func setupRequestFixtures(t *testing.T, ctx context.Context, s *Store, suffix st
 
 	key := testEncryptionKey()
 
-	db, err := s.CreateDatabase(ctx, &Database{
+	db, err := s.CreateServer(ctx, &Server{
 		Name:         "reqdb_" + suffix,
 		Host:         "localhost",
 		Port:         5432,
@@ -30,7 +30,7 @@ func setupRequestFixtures(t *testing.T, ctx context.Context, s *Store, suffix st
 		SSLMode:      "disable",
 	}, key)
 	if err != nil {
-		t.Fatalf("CreateDatabase: %v", err)
+		t.Fatalf("CreateServer: %v", err)
 	}
 
 	def, err := s.CreateGrantDefinition(ctx, &GrantDefinition{
@@ -115,6 +115,64 @@ func TestApproveGrantRequest_CreatesGrant(t *testing.T) {
 	// Second approve should be a no-op error
 	if _, _, err := store.ApproveGrantRequest(ctx, req.UID, admin.UID); !errors.Is(err, ErrInvalidTransition) {
 		t.Errorf("double-approve err = %v, want ErrInvalidTransition", err)
+	}
+}
+
+func TestAutoApproveGrantRequest_CreatesGrantWithNoDecider(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin, user, db, _ := setupRequestFixtures(t, ctx, store, "auto")
+
+	def, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
+		Name:            "auto-approve-def",
+		DurationSeconds: 3600,
+		Controls:        []string{ControlReadOnly},
+		AutoApprove:     true,
+		CreatedBy:       admin.UID,
+	})
+	if err != nil {
+		t.Fatalf("CreateGrantDefinition: %v", err)
+	}
+
+	req, err := store.CreateGrantRequest(ctx, &GrantRequest{
+		UserID:            user.UID,
+		GrantDefinitionID: def.UID,
+		DatabaseID:        db.UID,
+		Justification:     "auto-approved routine access",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	grant, updated, err := store.AutoApproveGrantRequest(ctx, req.UID, user.UID)
+	if err != nil {
+		t.Fatalf("AutoApproveGrantRequest: %v", err)
+	}
+
+	if grant == nil || grant.UID == uuid.Nil {
+		t.Fatal("grant not created")
+	}
+
+	if grant.GrantedBy != user.UID {
+		t.Errorf("grant.GrantedBy = %v, want requester %v", grant.GrantedBy, user.UID)
+	}
+
+	if updated.Status != GrantRequestApproved {
+		t.Errorf("status = %q, want approved", updated.Status)
+	}
+
+	if updated.DecidedBy != nil {
+		t.Errorf("DecidedBy = %v, want nil (no human decider)", *updated.DecidedBy)
+	}
+
+	if updated.ResultingGrantID == nil || *updated.ResultingGrantID != grant.UID {
+		t.Error("resulting_grant_id not linked")
+	}
+
+	// Second approve should fail — already decided.
+	if _, _, err := store.AutoApproveGrantRequest(ctx, req.UID, user.UID); !errors.Is(err, ErrInvalidTransition) {
+		t.Errorf("double auto-approve err = %v, want ErrInvalidTransition", err)
 	}
 }
 

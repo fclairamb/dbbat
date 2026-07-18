@@ -1,6 +1,12 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { useQueryDetails, useQueryRows } from "@/api";
+import {
+  useQueryDetails,
+  useQueryRows,
+  useConnection,
+  useUsers,
+  useDatabases,
+} from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { PageLoader, LoadingSpinner } from "@/components/shared/LoadingSpinner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -19,7 +25,10 @@ import { format } from "date-fns";
 import { useAuth } from "@/contexts/AuthContext";
 import { canViewQueries } from "@/lib/permissions";
 import { AccessDenied } from "@/components/shared/AccessDenied";
-import { useBreadcrumbTitle } from "@/contexts/BreadcrumbContext";
+import {
+  useBreadcrumbItems,
+  useBreadcrumbTitle,
+} from "@/contexts/BreadcrumbContext";
 import { sqlPreview } from "@/lib/sql";
 
 const DEFAULT_PAGE_SIZE = 100;
@@ -33,11 +42,37 @@ function QueryDetailPage() {
   const { user } = useAuth();
   const { uid } = Route.useParams();
   const { data: query, isLoading: isLoadingQuery } = useQueryDetails(uid);
+  const { data: connection } = useConnection(query?.connection_id ?? "");
+  const { data: users } = useUsers();
+  const { data: databases } = useDatabases();
 
   // Publish a "Queries › SELECT …" breadcrumb once the SQL text is loaded.
   useBreadcrumbTitle(
     `/queries/${uid}`,
-    query?.sql_text ? sqlPreview(query.sql_text) : undefined
+    query?.sql_text ? sqlPreview(query.sql_text) : undefined,
+  );
+
+  // Publish a connection crumb between "Queries" and the SQL preview once
+  // the query (and its required connection_id) has loaded. It links to the
+  // connection's own detail page, and its label upgrades from the short UID
+  // (loading fallback) to the resolved "username @ database" form once the
+  // connection has been fetched.
+  const connectionLabel = connection
+    ? `${users?.find((u) => u.uid === connection.user_id)?.username ?? connection.user_id} @ ${databases?.find((d) => d.uid === connection.database_id)?.name ?? connection.database_id}`
+    : query
+      ? query.connection_id.slice(0, 8)
+      : undefined;
+
+  useBreadcrumbItems(
+    `/queries/${uid}`,
+    query
+      ? [
+          {
+            title: connectionLabel ?? query.connection_id.slice(0, 8),
+            href: `/connections/${query.connection_id}`,
+          },
+        ]
+      : undefined,
   );
 
   // Rows pagination state (local, not URL-based)
@@ -247,11 +282,13 @@ function QueryDetailPage() {
                 </div>
 
                 <div className="flex items-center gap-4">
-                  {firstRowNum != null && lastRowNum != null && totalRows > 0 && (
-                    <span className="text-sm text-muted-foreground">
-                      Rows {firstRowNum}-{lastRowNum} of {totalRows}
-                    </span>
-                  )}
+                  {firstRowNum != null &&
+                    lastRowNum != null &&
+                    totalRows > 0 && (
+                      <span className="text-sm text-muted-foreground">
+                        Rows {firstRowNum}-{lastRowNum} of {totalRows}
+                      </span>
+                    )}
 
                   <div className="flex items-center gap-1">
                     {hasPrevious && (

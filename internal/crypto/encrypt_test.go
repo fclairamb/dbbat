@@ -258,9 +258,9 @@ func TestDatabaseAAD(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		aad := DatabaseAAD(tt.uid)
+		aad := ServerAAD(tt.uid)
 		if string(aad) != tt.expected {
-			t.Errorf("DatabaseAAD(%s) = %q, want %q", tt.uid, aad, tt.expected)
+			t.Errorf("ServerAAD(%s) = %q, want %q", tt.uid, aad, tt.expected)
 		}
 	}
 }

@@ -263,14 +263,14 @@ func TestRunUpstreamClientAuthHandshake(t *testing.T) {
 	encryptionKey := bytes.Repeat([]byte{0x99}, 32)
 
 	dbUID := uuid.New()
-	aad := dbbcrypto.DatabaseAAD(dbUID.String())
+	aad := dbbcrypto.ServerAAD(dbUID.String())
 
 	encPw, err := dbbcrypto.Encrypt([]byte(password), encryptionKey, aad)
 	if err != nil {
 		t.Fatalf("encrypt password: %v", err)
 	}
 
-	db := &store.Database{
+	db := &store.Server{
 		UID:               dbUID,
 		Username:          username,
 		PasswordEncrypted: encPw,

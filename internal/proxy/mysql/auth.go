@@ -184,16 +184,16 @@ func (h *dbbatAuthHandler) OnAuthSuccess(_ *gomysqlserver.Conn) error {
 	s := h.session
 
 	if s.requestedDB == "" {
-		return ErrDatabaseNotFound
+		return ErrServerNotFound
 	}
 
-	db, err := s.server.store.GetDatabaseByName(s.ctx, s.requestedDB)
+	db, err := s.server.store.GetServerByName(s.ctx, s.requestedDB)
 	if err != nil {
-		return ErrDatabaseNotFound
+		return ErrServerNotFound
 	}
 
 	if !store.IsMySQLFamily(db.Protocol) {
-		return ErrDatabaseNotFound
+		return ErrServerNotFound
 	}
 
 	s.database = db

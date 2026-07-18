@@ -79,9 +79,11 @@ func setupTestServer(t *testing.T) (*Server, *store.Store) {
 		"query_rows",
 		"queries",
 		"connections",
+		"grant_requests",
 		"access_grants",
+		"grant_definitions",
 		"audit_log",
-		"databases",
+		"servers",
 		"users",
 	}
 

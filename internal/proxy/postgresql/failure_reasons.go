@@ -17,8 +17,8 @@ const (
 	FailureReasonQueryQuotaExceeded = "query_quota_exceeded" // Max queries reached
 	FailureReasonBytesQuotaExceeded = "bytes_quota_exceeded" // Max bytes reached
 
-	// Database failures
-	FailureReasonDatabaseNotFound   = "database_not_found"   // Database config doesn't exist
-	FailureReasonDatabaseDisabled   = "database_disabled"    // Database disabled by admin
+	// Server failures
+	FailureReasonDatabaseNotFound   = "database_not_found"   // Server config doesn't exist
+	FailureReasonDatabaseDisabled   = "database_disabled"    // Server disabled by admin
 	FailureReasonUpstreamConnFailed = "upstream_conn_failed" // Can't connect to target database
 )

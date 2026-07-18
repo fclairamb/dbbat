@@ -156,7 +156,7 @@ func TestApplyUpstreamOptions_ProgramNameAttributeWiring(t *testing.T) {
 	// through a real upstream-facing handshake.
 	s := &Session{
 		user:       &store.User{Username: dbbatUsername},
-		database:   &store.Database{SSLMode: "disable"},
+		database:   &store.Server{SSLMode: "disable"},
 		serverConn: scRes.conn,
 	}
 

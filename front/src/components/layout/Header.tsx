@@ -11,20 +11,20 @@ import {
 import { Link, useMatches } from "@tanstack/react-router";
 import { useBreadcrumbContext } from "@/contexts/BreadcrumbContext";
 
-interface BreadcrumbItem {
+interface Crumb {
   title: string;
   href?: string;
 }
 
 export function Header() {
   const matches = useMatches();
-  const { titles } = useBreadcrumbContext();
+  const { entries } = useBreadcrumbContext();
 
   // Build breadcrumbs from the deepest matched route's pathname, split into
   // cumulative segments. Building from segments (rather than from the router
   // matches) guarantees a crumb for every path level — including parent
   // segments like "/queries" that have no layout route of their own.
-  const breadcrumbs: BreadcrumbItem[] = [];
+  const breadcrumbs: Crumb[] = [];
   const deepest = matches[matches.length - 1];
   const pathname = deepest?.pathname ?? "/";
   const segments = pathname.split("/").filter(Boolean);
@@ -33,11 +33,18 @@ export function Header() {
     breadcrumbs.push({ title: "Dashboard", href: "/" });
   } else {
     let href = "";
+    const leafHref = `/${segments.join("/")}`;
     for (const segment of segments) {
       href += `/${segment}`;
+      // A page may publish extra crumbs (e.g. the connection a query belongs
+      // to) to insert right before its own leaf crumb.
+      const parents = entries[href]?.parents;
+      if (href === leafHref && parents?.length) {
+        breadcrumbs.push(...parents);
+      }
       // A page may publish a friendlier crumb (e.g. a SQL preview) for its own
       // path via the breadcrumb context; fall back to a formatted segment.
-      const title = titles[href] || formatSegment(segment);
+      const title = entries[href]?.title || formatSegment(segment);
       if (title) {
         breadcrumbs.push({ title, href });
       }
@@ -79,7 +86,7 @@ function formatSegment(segment: string): string {
   // breadcrumb look identical).
   if (
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-      segment
+      segment,
     )
   ) {
     return segment.slice(0, 8);

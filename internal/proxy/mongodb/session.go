@@ -51,7 +51,7 @@ type Session struct {
 
 	// Populated as auth progresses.
 	user          *store.User
-	database      *store.Database
+	database      *store.Server
 	grant         *store.Grant
 	authenticated bool
 	// authSource is the SASL authSource the client used; forwarded to the

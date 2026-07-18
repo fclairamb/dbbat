@@ -67,6 +67,35 @@ func (s *Server) handleListConnections(c *gin.Context) {
 	successResponse(c, gin.H{"connections": connections})
 }
 
+// handleGetConnection retrieves a single connection based on user role.
+// Connectors may only fetch their own connections; a connection belonging to
+// another user is reported as 404 (not 403) so its existence isn't leaked,
+// matching handleListConnections' filtering behavior.
+func (s *Server) handleGetConnection(c *gin.Context) {
+	uid, err := parseUIDParam(c)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid connection UID")
+		return
+	}
+
+	currentUser := getCurrentUser(c)
+
+	conn, err := s.store.GetConnectionByUID(c.Request.Context(), uid)
+	if err != nil {
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "connection not found")
+		return
+	}
+
+	// Connector can only see their own connections. Report 404, not 403, so
+	// connectors can't learn that a connection they don't own exists.
+	if !currentUser.IsAdmin() && !currentUser.IsViewer() && conn.UserID != currentUser.UID {
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "connection not found")
+		return
+	}
+
+	successResponse(c, conn)
+}
+
 // handleListQueries lists queries with optional filters
 func (s *Server) handleListQueries(c *gin.Context) {
 	filter := store.QueryFilter{}

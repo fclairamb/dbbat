@@ -356,7 +356,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/databases": {
+    "/servers": {
         parameters: {
             query?: never;
             header?: never;
@@ -385,7 +385,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/databases/{uid}": {
+    "/servers/{uid}": {
         parameters: {
             query?: never;
             header?: never;
@@ -734,6 +734,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/connections/{uid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Connection UID */
+                uid: components["parameters"]["ConnectionUID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Get connection details
+         * @description Retrieves a specific connection.
+         *
+         *     Connectors can only fetch their own connections. Connections
+         *     belonging to another user are reported as `404 Not Found` (not
+         *     `403 Forbidden`) so their existence isn't leaked.
+         */
+        get: operations["getConnection"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/queries": {
         parameters: {
             query?: never;
@@ -836,7 +863,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/databases/{uid}/connection": {
+    "/servers/{uid}/connection": {
         parameters: {
             query?: never;
             header?: never;
@@ -851,6 +878,29 @@ export interface paths {
          *     - If the protocol proxy is disabled (resolved port = 0): returns 409.
          */
         get: operations["getDatabaseConnection"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/ssh-servers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List SSH bastion servers (admin only)
+         * @description Returns SSH bastion rows (protocol `ssh`). These are excluded from the
+         *     regular database listing and every grantable/connectable target
+         *     context; they appear only here, for management and the "via SSH server"
+         *     selector. Secrets (private key, passphrase) are never returned.
+         */
+        get: operations["listSSHServers"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1128,10 +1178,10 @@ export interface components {
             /** @description SSL mode (disable, prefer, require, etc.) */
             ssl_mode?: string;
             /**
-             * @description Database protocol
+             * @description Server protocol (ssh = an SSH bastion, not a database target)
              * @enum {string}
              */
-            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb";
+            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "ssh";
             /** @description Oracle SERVICE_NAME (Oracle only) */
             oracle_service_name?: string;
             /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
@@ -1146,6 +1196,13 @@ export interface components {
              * @description User who created this configuration
              */
             created_by?: string | null;
+            /**
+             * Format: uuid
+             * @description SSH server (bastion) UID to tunnel through; null for a direct dial
+             */
+            via_uid?: string | null;
+            /** @description TOFU-pinned SSH bastion host key (read-only; ssh servers only) */
+            ssh_known_host_key?: string;
         };
         /** @description Limited database info for non-admin users */
         DatabaseLimited: {
@@ -1176,18 +1233,18 @@ export interface components {
             /** @description Target database username */
             username: string;
             /** @description Target database password (encrypted at rest) */
-            password: string;
+            password?: string;
             /**
              * @description SSL mode
              * @default prefer
              */
             ssl_mode: string;
             /**
-             * @description Database protocol
+             * @description Server protocol (ssh = an SSH bastion, not a database target)
              * @default postgresql
              * @enum {string}
              */
-            protocol: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb";
+            protocol: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "ssh";
             /** @description Oracle SERVICE_NAME (required for Oracle) */
             oracle_service_name?: string;
             /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
@@ -1197,6 +1254,15 @@ export interface components {
              * @default true
              */
             listable: boolean;
+            /**
+             * Format: uuid
+             * @description SSH server (bastion) UID to tunnel through; null for a direct dial
+             */
+            via_uid?: string | null;
+            /** @description SSH private key (PEM) for an ssh server; write-only, never returned */
+            ssh_private_key?: string;
+            /** @description Passphrase for the SSH private key; write-only, never returned */
+            ssh_passphrase?: string;
         };
         UpdateDatabaseRequest: {
             /** @description Description */
@@ -1214,16 +1280,27 @@ export interface components {
             /** @description SSL mode */
             ssl_mode?: string;
             /**
-             * @description Database protocol
+             * @description Server protocol
              * @enum {string}
              */
-            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb";
+            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "ssh";
             /** @description Oracle SERVICE_NAME */
             oracle_service_name?: string;
             /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
             mongo_auth_source?: string;
             /** @description Whether this database appears in the grant-request dropdown for non-admin users */
             listable?: boolean;
+            /**
+             * Format: uuid
+             * @description SSH server (bastion) UID to tunnel through
+             */
+            via_uid?: string | null;
+            /** @description When true, removes the SSH tunnel (direct dial) */
+            clear_via_uid?: boolean;
+            /** @description SSH private key (PEM); write-only, never returned */
+            ssh_private_key?: string;
+            /** @description Passphrase for the SSH private key; write-only, never returned */
+            ssh_passphrase?: string;
         };
         /**
          * @description Control types that can be applied to a grant:
@@ -1289,6 +1366,12 @@ export interface components {
             max_query_counts?: number | null;
             /** Format: int64 */
             max_bytes_transferred?: number | null;
+            /**
+             * @description When true, grant requests against this definition skip the pending/admin-approval
+             *     step and are approved (and the grant materialized) instantly at request time.
+             * @default false
+             */
+            auto_approve: boolean;
             /** @description Soft-deleted definitions have is_active=false; they remain referenced by historical grant requests. */
             readonly is_active: boolean;
             /** Format: uuid */
@@ -1307,6 +1390,12 @@ export interface components {
             max_query_counts?: number | null;
             /** Format: int64 */
             max_bytes_transferred?: number | null;
+            /**
+             * @description When true, grant requests against this definition skip the pending/admin-approval
+             *     step and are approved (and the grant materialized) instantly at request time.
+             * @default false
+             */
+            auto_approve: boolean;
         };
         AccessGrant: {
             /**
@@ -1813,6 +1902,15 @@ export interface components {
                 "application/json": components["schemas"]["Error"];
             };
         };
+        /** @description Conflict with the current state (e.g. a resource with that name already exists) */
+        Conflict: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["Error"];
+            };
+        };
         /** @description Rate limit exceeded */
         RateLimited: {
             headers: {
@@ -1847,6 +1945,8 @@ export interface components {
         DatabaseUID: string;
         /** @description Grant UID */
         GrantUID: string;
+        /** @description Connection UID */
+        ConnectionUID: string;
         /** @description Query UID */
         QueryUID: string;
         /** @description Maximum number of results to return */
@@ -1905,11 +2005,13 @@ export type ResponseAuthRateLimited = components['responses']['AuthRateLimited']
 export type ResponseForbidden = components['responses']['Forbidden'];
 export type ResponsePasswordChangeRequired = components['responses']['PasswordChangeRequired'];
 export type ResponseNotFound = components['responses']['NotFound'];
+export type ResponseConflict = components['responses']['Conflict'];
 export type ResponseRateLimited = components['responses']['RateLimited'];
 export type ResponseInternalError = components['responses']['InternalError'];
 export type ParameterUserUid = components['parameters']['UserUID'];
 export type ParameterDatabaseUid = components['parameters']['DatabaseUID'];
 export type ParameterGrantUid = components['parameters']['GrantUID'];
+export type ParameterConnectionUid = components['parameters']['ConnectionUID'];
 export type ParameterQueryUid = components['parameters']['QueryUID'];
 export type ParameterLimit = components['parameters']['Limit'];
 export type ParameterOffset = components['parameters']['Offset'];
@@ -2257,6 +2359,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
         };
@@ -2531,6 +2634,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
         };
@@ -2792,6 +2896,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
             500: components["responses"]["InternalError"];
         };
     };
@@ -3220,6 +3325,34 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    getConnection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Connection UID */
+                uid: components["parameters"]["ConnectionUID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Connection details */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Connection"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     listQueries: {
         parameters: {
             query?: {
@@ -3404,6 +3537,31 @@ export interface operations {
                     };
                 };
             };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listSSHServers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of SSH servers */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        servers?: components["schemas"]["Database"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalError"];
         };
     };

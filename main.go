@@ -140,7 +140,7 @@ func CmdRun() {
 			},
 			{
 				Name:  "db",
-				Usage: "Database migration commands",
+				Usage: "Server migration commands",
 				Commands: []*cli.Command{
 					{
 						Name:  "migrate",
@@ -275,7 +275,7 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	defer dataStore.Close()
 
-	logger.InfoContext(ctx, "Database connection established")
+	logger.InfoContext(ctx, "Server connection established")
 
 	// Check for database configurations that match the storage DSN
 	checkDatabaseConfigurations(ctx, dataStore, logger)
@@ -620,7 +620,7 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	logger.InfoContext(ctx, "Created connector user (username: connector, password: connector)")
 
 	// 4. Create proxy_target database configuration
-	targetDB, err := dataStore.CreateDatabase(ctx, &store.Database{
+	targetDB, err := dataStore.CreateServer(ctx, &store.Server{
 		Name:         "proxy_target",
 		Description:  "Target test database from docker-compose",
 		Host:         "localhost",
@@ -773,7 +773,7 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	logger.InfoContext(ctx, "Created connector user (username: connector, password: connector)")
 
 	// 4. Create demo_db database configuration using demo target
-	demoDB, err := dataStore.CreateDatabase(ctx, &store.Database{
+	demoDB, err := dataStore.CreateServer(ctx, &store.Server{
 		Name:         "demo_db",
 		Description:  "Demo database",
 		Host:         demoTarget.Host,
@@ -904,7 +904,7 @@ func runDumpAnonymise(cmd *cli.Command) error {
 // Logs a warning for each match found. This handles databases that were configured
 // before the storage DSN validation was added.
 func checkDatabaseConfigurations(ctx context.Context, dataStore *store.Store, logger *slog.Logger) {
-	databases, err := dataStore.ListDatabases(ctx)
+	databases, err := dataStore.ListServers(ctx)
 	if err != nil {
 		logger.WarnContext(ctx, "failed to check database configurations", slog.Any("error", err))
 		return

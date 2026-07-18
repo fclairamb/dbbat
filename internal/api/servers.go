@@ -12,35 +12,48 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
-// CreateDatabaseRequest represents the request to create a database
+// CreateDatabaseRequest represents the request to create a database (or, when
+// protocol is "ssh", an SSH bastion). Password is optional for SSH rows that
+// authenticate with a private key.
 type CreateDatabaseRequest struct {
-	Name              string `json:"name" binding:"required"`
-	Description       string `json:"description"`
-	Host              string `json:"host" binding:"required"`
-	Port              int    `json:"port"`
-	DatabaseName      string `json:"database_name"`
-	Username          string `json:"username" binding:"required"`
-	Password          string `json:"password" binding:"required"`
-	SSLMode           string `json:"ssl_mode"`
-	Protocol          string `json:"protocol"`
-	OracleServiceName string `json:"oracle_service_name"`
-	MongoAuthSource   string `json:"mongo_auth_source"`
-	Listable          *bool  `json:"listable"`
+	Name              string     `json:"name" binding:"required"`
+	Description       string     `json:"description"`
+	Host              string     `json:"host" binding:"required"`
+	Port              int        `json:"port"`
+	DatabaseName      string     `json:"database_name"`
+	Username          string     `json:"username" binding:"required"`
+	Password          string     `json:"password"`
+	SSLMode           string     `json:"ssl_mode"`
+	Protocol          string     `json:"protocol"`
+	OracleServiceName string     `json:"oracle_service_name"`
+	MongoAuthSource   string     `json:"mongo_auth_source"`
+	Listable          *bool      `json:"listable"`
+	ViaUID            *uuid.UUID `json:"via_uid"`
+	// SSH bastion secrets (write-only, never returned).
+	SSHPrivateKey string `json:"ssh_private_key"`
+	SSHPassphrase string `json:"ssh_passphrase"`
 }
 
 // UpdateDatabaseRequest represents the request to update a database
 type UpdateDatabaseRequest struct {
-	Description       *string `json:"description"`
-	Host              *string `json:"host"`
-	Port              *int    `json:"port"`
-	DatabaseName      *string `json:"database_name"`
-	Username          *string `json:"username"`
-	Password          *string `json:"password"`
-	SSLMode           *string `json:"ssl_mode"`
-	Protocol          *string `json:"protocol"`
-	OracleServiceName *string `json:"oracle_service_name"`
-	MongoAuthSource   *string `json:"mongo_auth_source"`
-	Listable          *bool   `json:"listable"`
+	Description       *string    `json:"description"`
+	Host              *string    `json:"host"`
+	Port              *int       `json:"port"`
+	DatabaseName      *string    `json:"database_name"`
+	Username          *string    `json:"username"`
+	Password          *string    `json:"password"`
+	SSLMode           *string    `json:"ssl_mode"`
+	Protocol          *string    `json:"protocol"`
+	OracleServiceName *string    `json:"oracle_service_name"`
+	MongoAuthSource   *string    `json:"mongo_auth_source"`
+	Listable          *bool      `json:"listable"`
+	ViaUID            *uuid.UUID `json:"via_uid"`
+	// ClearViaUID, when true, removes the SSH tunnel (direct dial). Distinct
+	// from an omitted via_uid, which leaves the tunnel unchanged.
+	ClearViaUID bool `json:"clear_via_uid"`
+	// SSH bastion secrets (write-only, never returned).
+	SSHPrivateKey *string `json:"ssh_private_key"`
+	SSHPassphrase *string `json:"ssh_passphrase"`
 }
 
 // DatabaseResponse represents a database with full details (admin only)
@@ -58,6 +71,10 @@ type DatabaseResponse struct {
 	MongoAuthSource   string     `json:"mongo_auth_source,omitempty"`
 	Listable          bool       `json:"listable"`
 	CreatedBy         *uuid.UUID `json:"created_by,omitempty"`
+	ViaUID            *uuid.UUID `json:"via_uid,omitempty"`
+	// SSHKnownHostKey is the TOFU-pinned bastion host key (read-only). Secrets
+	// (private key, passphrase) are never returned.
+	SSHKnownHostKey string `json:"ssh_known_host_key,omitempty"`
 }
 
 // DatabaseLimitedResponse represents a database with limited info (non-admin)
@@ -90,7 +107,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 
 	if !isSupportedProtocol(req.Protocol) {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
-			"protocol must be one of: postgresql, oracle, mysql, mariadb, mongodb")
+			"protocol must be one of: postgresql, oracle, mysql, mariadb, mongodb, ssh")
 		return
 	}
 
@@ -104,28 +121,10 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		return
 	}
 
-	// Validate required fields per protocol
-	switch req.Protocol {
-	case store.ProtocolOracle:
-		if req.OracleServiceName == "" && req.DatabaseName == "" {
-			writeError(c, http.StatusBadRequest, ErrCodeValidationError,
-				"oracle_service_name or database_name is required for Oracle databases")
-			return
-		}
-
-		if req.OracleServiceName == "" {
-			req.OracleServiceName = req.DatabaseName
-		}
-	default:
-		if req.DatabaseName == "" {
-			writeError(c, http.StatusBadRequest, ErrCodeValidationError,
-				"database_name is required for "+req.Protocol+" databases")
-			return
-		}
-
-		if req.SSLMode == "" {
-			req.SSLMode = "prefer"
-		}
+	// Validate required fields per protocol (mutates req to fill defaults).
+	if errMsg := validateCreateProtocolFields(&req); errMsg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, errMsg)
+		return
 	}
 
 	currentUser := getCurrentUser(c)
@@ -135,17 +134,27 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		oracleServiceName = &req.OracleServiceName
 	}
 
-	var protocolData *store.DatabaseProtocolData
+	var protocolData *store.ServerProtocolData
 	if req.MongoAuthSource != "" {
-		protocolData = &store.DatabaseProtocolData{MongoDB: &store.MongoDatabaseData{AuthSource: req.MongoAuthSource}}
+		protocolData = &store.ServerProtocolData{MongoDB: &store.MongoDatabaseData{AuthSource: req.MongoAuthSource}}
+	}
+	if req.Protocol == store.ProtocolSSH && (req.SSHPrivateKey != "" || req.SSHPassphrase != "") {
+		if protocolData == nil {
+			protocolData = &store.ServerProtocolData{}
+		}
+		protocolData.SSH = &store.SSHServerData{PrivateKey: req.SSHPrivateKey, Passphrase: req.SSHPassphrase}
 	}
 
 	listable := true
 	if req.Listable != nil {
 		listable = *req.Listable
 	}
+	// SSH bastions are never grantable/connectable targets.
+	if req.Protocol == store.ProtocolSSH {
+		listable = false
+	}
 
-	db := &store.Database{
+	db := &store.Server{
 		Name:              req.Name,
 		Description:       req.Description,
 		Host:              req.Host,
@@ -156,18 +165,15 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		SSLMode:           req.SSLMode,
 		Protocol:          req.Protocol,
 		OracleServiceName: oracleServiceName,
+		ViaUID:            req.ViaUID,
 		ProtocolData:      protocolData,
 		Listable:          listable,
 		CreatedBy:         &currentUser.UID,
 	}
 
-	result, err := s.store.CreateDatabase(c.Request.Context(), db, s.encryptionKey)
+	result, err := s.store.CreateServer(c.Request.Context(), db, s.encryptionKey)
 	if err != nil {
-		if errors.Is(err, store.ErrTargetMatchesStorage) {
-			writeError(c, http.StatusBadRequest, ErrCodeTargetMatchesSelf, "target database cannot match DBBat storage database")
-			return
-		}
-		writeInternalError(c, s.logger, err, "failed to create database")
+		s.writeCreateServerError(c, err)
 		return
 	}
 
@@ -186,6 +192,21 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 	successResponse(c, toDatabaseResponse(result))
 }
 
+// writeCreateServerError maps a CreateServer store error to the appropriate
+// HTTP status/error code, falling back to a generic 500.
+func (s *Server) writeCreateServerError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, store.ErrTargetMatchesStorage):
+		writeError(c, http.StatusBadRequest, ErrCodeTargetMatchesSelf, "target database cannot match DBBat storage database")
+	case errors.Is(err, store.ErrServerViaNotSSH) || errors.Is(err, store.ErrServerViaCycle):
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
+	case errors.Is(err, store.ErrServerNameConflict):
+		writeError(c, http.StatusConflict, ErrCodeDuplicateName, err.Error())
+	default:
+		writeInternalError(c, s.logger, err, "failed to create database")
+	}
+}
+
 // handleListDatabases lists databases based on user role.
 // Admins receive all databases (including non-listable) with full details.
 // All other authenticated users receive only listable databases with limited details.
@@ -194,7 +215,7 @@ func (s *Server) handleListDatabases(c *gin.Context) {
 
 	// Admin sees full details for every database, including non-listable ones.
 	if currentUser.IsAdmin() {
-		databases, err := s.store.ListDatabases(c.Request.Context())
+		databases, err := s.store.ListServers(c.Request.Context())
 		if err != nil {
 			writeInternalError(c, s.logger, err, "failed to list databases")
 			return
@@ -208,7 +229,7 @@ func (s *Server) handleListDatabases(c *gin.Context) {
 	}
 
 	// Non-admin: only listable databases, limited response (no host/port/creds).
-	databases, err := s.store.ListListableDatabases(c.Request.Context())
+	databases, err := s.store.ListListableServers(c.Request.Context())
 	if err != nil {
 		writeInternalError(c, s.logger, err, "failed to list databases")
 		return
@@ -230,7 +251,7 @@ func (s *Server) handleGetDatabase(c *gin.Context) {
 
 	currentUser := getCurrentUser(c)
 
-	db, err := s.store.GetDatabaseByUID(c.Request.Context(), uid)
+	db, err := s.store.GetServerByUID(c.Request.Context(), uid)
 	if err != nil {
 		writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
 		return
@@ -264,7 +285,7 @@ func (s *Server) handleGetDatabase(c *gin.Context) {
 
 // validateDemoModeUpdate checks if a database update is allowed in demo mode.
 // Returns an error message if validation fails, empty string if allowed.
-func (s *Server) validateDemoModeUpdate(db *store.Database, req UpdateDatabaseRequest) string {
+func (s *Server) validateDemoModeUpdate(db *store.Server, req UpdateDatabaseRequest) string {
 	if s.config == nil || !s.config.IsDemoMode() {
 		return ""
 	}
@@ -293,7 +314,7 @@ func (s *Server) validateDemoModeUpdate(db *store.Database, req UpdateDatabaseRe
 		database = *req.DatabaseName
 	}
 
-	errorMsg := fmt.Sprintf("you can only use %s:%s@%s/%s in demo mode", target.Username, target.Password, target.Host, target.Database)
+	errorMsg := fmt.Sprintf("you can only use %s:%s@%s/%s in demo mode", target.Username, target.Password, target.Host, target.Server)
 
 	// If password is being changed, validate full credentials
 	if req.Password != nil {
@@ -310,7 +331,7 @@ func (s *Server) validateDemoModeUpdate(db *store.Database, req UpdateDatabaseRe
 	if req.Host != nil && host != target.Host {
 		return errorMsg
 	}
-	if req.DatabaseName != nil && database != target.Database {
+	if req.DatabaseName != nil && database != target.Server {
 		return errorMsg
 	}
 
@@ -333,7 +354,7 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 
 	// Check demo mode restrictions if credentials are being updated
 	if s.config != nil && s.config.IsDemoMode() && (req.Username != nil || req.Password != nil || req.Host != nil || req.DatabaseName != nil) {
-		db, err := s.store.GetDatabaseByUID(c.Request.Context(), uid)
+		db, err := s.store.GetServerByUID(c.Request.Context(), uid)
 		if err != nil {
 			writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
 			return
@@ -344,7 +365,7 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		}
 	}
 
-	updates := store.DatabaseUpdate{
+	updates := store.ServerUpdate{
 		Description:       req.Description,
 		Host:              req.Host,
 		Port:              req.Port,
@@ -356,15 +377,23 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		OracleServiceName: req.OracleServiceName,
 		MongoAuthSource:   req.MongoAuthSource,
 		Listable:          req.Listable,
+		ViaUID:            req.ViaUID,
+		ClearViaUID:       req.ClearViaUID,
+		SSHPrivateKey:     req.SSHPrivateKey,
+		SSHPassphrase:     req.SSHPassphrase,
 	}
 
-	if err := s.store.UpdateDatabase(c.Request.Context(), uid, updates, s.encryptionKey); err != nil {
+	if err := s.store.UpdateServer(c.Request.Context(), uid, updates, s.encryptionKey); err != nil {
 		if errors.Is(err, store.ErrTargetMatchesStorage) {
 			writeError(c, http.StatusBadRequest, ErrCodeTargetMatchesSelf, "target database cannot match DBBat storage database")
 			return
 		}
-		if errors.Is(err, store.ErrDatabaseNotFound) {
+		if errors.Is(err, store.ErrServerNotFound) {
 			writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
+			return
+		}
+		if errors.Is(err, store.ErrServerViaNotSSH) || errors.Is(err, store.ErrServerViaCycle) {
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
 			return
 		}
 		writeInternalError(c, s.logger, err, "failed to update database")
@@ -396,14 +425,14 @@ func (s *Server) handleDeleteDatabase(c *gin.Context) {
 
 	// Check demo mode restrictions
 	if s.config != nil && s.config.IsDemoMode() {
-		db, err := s.store.GetDatabaseByUID(c.Request.Context(), uid)
+		db, err := s.store.GetServerByUID(c.Request.Context(), uid)
 		if err == nil && db.Name == "demo_db" {
 			writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot delete the demo database in demo mode")
 			return
 		}
 	}
 
-	if err := s.store.DeleteDatabase(c.Request.Context(), uid); err != nil {
+	if err := s.store.DeleteServer(c.Request.Context(), uid); err != nil {
 		writeInternalError(c, s.logger, err, "failed to delete database")
 		return
 	}
@@ -436,7 +465,7 @@ func (s *Server) handleGetDatabaseConnection(c *gin.Context) {
 	ctx := c.Request.Context()
 	currentUser := getCurrentUser(c)
 
-	db, err := s.store.GetDatabaseByUID(ctx, uid)
+	db, err := s.store.GetServerByUID(ctx, uid)
 	if err != nil {
 		writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
 		return
@@ -470,8 +499,8 @@ func (s *Server) handleGetDatabaseConnection(c *gin.Context) {
 	c.JSON(http.StatusOK, info)
 }
 
-// toDatabaseResponse converts a Database to a DatabaseResponse (admin only, without password)
-func toDatabaseResponse(db *store.Database) DatabaseResponse {
+// toDatabaseResponse converts a Server to a DatabaseResponse (admin only, without password)
+func toDatabaseResponse(db *store.Server) DatabaseResponse {
 	var oracleServiceName string
 	if db.OracleServiceName != nil {
 		oracleServiceName = *db.OracleServiceName
@@ -480,6 +509,11 @@ func toDatabaseResponse(db *store.Database) DatabaseResponse {
 	var mongoAuthSource string
 	if data := db.MongoData(); data != nil {
 		mongoAuthSource = data.AuthSource
+	}
+
+	var knownHostKey string
+	if sd := db.SSHData(); sd != nil {
+		knownHostKey = sd.KnownHostKey
 	}
 
 	return DatabaseResponse{
@@ -496,11 +530,30 @@ func toDatabaseResponse(db *store.Database) DatabaseResponse {
 		MongoAuthSource:   mongoAuthSource,
 		Listable:          db.Listable,
 		CreatedBy:         db.CreatedBy,
+		ViaUID:            db.ViaUID,
+		SSHKnownHostKey:   knownHostKey,
 	}
 }
 
-// toDatabaseLimitedResponse converts a Database to a limited response (non-admin)
-func toDatabaseLimitedResponse(db *store.Database) DatabaseLimitedResponse {
+// handleListSSHServers lists SSH bastion rows (admin only). These are excluded
+// from the regular database listing and every grantable/connectable target
+// context; they appear only here, for management and the "via SSH server"
+// selector.
+func (s *Server) handleListSSHServers(c *gin.Context) {
+	servers, err := s.store.ListSSHServers(c.Request.Context())
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to list ssh servers")
+		return
+	}
+	response := make([]DatabaseResponse, len(servers))
+	for i := range servers {
+		response[i] = toDatabaseResponse(&servers[i])
+	}
+	successResponse(c, gin.H{"servers": response})
+}
+
+// toDatabaseLimitedResponse converts a Server to a limited response (non-admin)
+func toDatabaseLimitedResponse(db *store.Server) DatabaseLimitedResponse {
 	return DatabaseLimitedResponse{
 		UID:         db.UID,
 		Name:        db.Name,
@@ -508,12 +561,40 @@ func toDatabaseLimitedResponse(db *store.Database) DatabaseLimitedResponse {
 	}
 }
 
+// validateCreateProtocolFields validates and defaults the per-protocol fields
+// of a create request in place, returning an error message (empty when valid).
+func validateCreateProtocolFields(req *CreateDatabaseRequest) string {
+	switch req.Protocol {
+	case store.ProtocolSSH:
+		// SSH bastions have no database_name/ssl_mode; they need a private key
+		// or a password to authenticate to the bastion.
+		if req.SSHPrivateKey == "" && req.Password == "" {
+			return "ssh_private_key or password is required for ssh servers"
+		}
+	case store.ProtocolOracle:
+		if req.OracleServiceName == "" && req.DatabaseName == "" {
+			return "oracle_service_name or database_name is required for Oracle databases"
+		}
+		if req.OracleServiceName == "" {
+			req.OracleServiceName = req.DatabaseName
+		}
+	default:
+		if req.DatabaseName == "" {
+			return "database_name is required for " + req.Protocol + " databases"
+		}
+		if req.SSLMode == "" {
+			req.SSLMode = "prefer"
+		}
+	}
+	return ""
+}
+
 // isSupportedProtocol reports whether the given protocol is one the proxy
 // can serve. Kept as a helper so the create + update paths share one source
 // of truth for the enum.
 func isSupportedProtocol(protocol string) bool {
 	switch protocol {
-	case store.ProtocolPostgreSQL, store.ProtocolOracle, store.ProtocolMySQL, store.ProtocolMariaDB, store.ProtocolMongoDB:
+	case store.ProtocolPostgreSQL, store.ProtocolOracle, store.ProtocolMySQL, store.ProtocolMariaDB, store.ProtocolMongoDB, store.ProtocolSSH:
 		return true
 	default:
 		return false
@@ -533,9 +614,11 @@ func defaultPortFor(protocol string) int {
 		return 3306
 	case store.ProtocolMongoDB:
 		// MongoDB's standard target port. The proxy listener defaults to 27018
-		// to avoid clashing with a local mongod, but Database.Port is the
+		// to avoid clashing with a local mongod, but Server.Port is the
 		// upstream target's port, which conventionally is 27017.
 		return 27017
+	case store.ProtocolSSH:
+		return 22
 	default:
 		return 0
 	}

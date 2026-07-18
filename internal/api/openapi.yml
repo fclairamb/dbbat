@@ -398,6 +398,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -662,7 +664,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /databases:
+  /servers:
     post:
       tags:
         - Databases
@@ -688,6 +690,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':
@@ -726,7 +730,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /databases/{uid}:
+  /servers/{uid}:
     parameters:
       - $ref: '#/components/parameters/DatabaseUID'
 
@@ -979,6 +983,8 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -1512,6 +1518,39 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /connections/{uid}:
+    parameters:
+      - $ref: '#/components/parameters/ConnectionUID'
+
+    get:
+      tags:
+        - Connections
+      summary: Get connection details
+      description: |
+        Retrieves a specific connection.
+
+        Connectors can only fetch their own connections. Connections
+        belonging to another user are reported as `404 Not Found` (not
+        `403 Forbidden`) so their existence isn't leaked.
+      operationId: getConnection
+      responses:
+        '200':
+          description: Connection details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Connection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /queries:
     get:
       tags:
@@ -1727,7 +1766,7 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /databases/{uid}/connection:
+  /servers/{uid}/connection:
     get:
       tags:
         - Databases
@@ -1768,6 +1807,39 @@ paths:
                 properties:
                   error:
                     type: string
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /ssh-servers:
+    get:
+      tags:
+        - Databases
+      summary: List SSH bastion servers (admin only)
+      description: |
+        Returns SSH bastion rows (protocol `ssh`). These are excluded from the
+        regular database listing and every grantable/connectable target
+        context; they appear only here, for management and the "via SSH server"
+        selector. Secrets (private key, passphrase) are never returned.
+      operationId: listSSHServers
+      security:
+        - basicAuth: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of SSH servers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  servers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Database'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -1994,6 +2066,15 @@ components:
       in: path
       required: true
       description: Grant UID
+      schema:
+        type: string
+        format: uuid
+
+    ConnectionUID:
+      name: uid
+      in: path
+      required: true
+      description: Connection UID
       schema:
         type: string
         format: uuid
@@ -2314,8 +2395,8 @@ components:
           description: SSL mode (disable, prefer, require, etc.)
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql, mariadb, mongodb]
-          description: Database protocol
+          enum: [postgresql, oracle, mysql, mariadb, mongodb, ssh]
+          description: Server protocol (ssh = an SSH bastion, not a database target)
         oracle_service_name:
           type: string
           description: Oracle SERVICE_NAME (Oracle only)
@@ -2331,6 +2412,14 @@ components:
           format: uuid
           nullable: true
           description: User who created this configuration
+        via_uid:
+          type: string
+          format: uuid
+          nullable: true
+          description: SSH server (bastion) UID to tunnel through; null for a direct dial
+        ssh_known_host_key:
+          type: string
+          description: TOFU-pinned SSH bastion host key (read-only; ssh servers only)
       required:
         - uid
         - name
@@ -2384,9 +2473,9 @@ components:
           description: SSL mode
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql, mariadb, mongodb]
+          enum: [postgresql, oracle, mysql, mariadb, mongodb, ssh]
           default: postgresql
-          description: Database protocol
+          description: Server protocol (ssh = an SSH bastion, not a database target)
         oracle_service_name:
           type: string
           description: Oracle SERVICE_NAME (required for Oracle)
@@ -2397,11 +2486,21 @@ components:
           type: boolean
           default: true
           description: Whether this database appears in the grant-request dropdown for non-admin users
+        via_uid:
+          type: string
+          format: uuid
+          nullable: true
+          description: SSH server (bastion) UID to tunnel through; null for a direct dial
+        ssh_private_key:
+          type: string
+          description: SSH private key (PEM) for an ssh server; write-only, never returned
+        ssh_passphrase:
+          type: string
+          description: Passphrase for the SSH private key; write-only, never returned
       required:
         - name
         - host
         - username
-        - password
 
     UpdateDatabaseRequest:
       type: object
@@ -2429,8 +2528,8 @@ components:
           description: SSL mode
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql, mariadb, mongodb]
-          description: Database protocol
+          enum: [postgresql, oracle, mysql, mariadb, mongodb, ssh]
+          description: Server protocol
         oracle_service_name:
           type: string
           description: Oracle SERVICE_NAME
@@ -2440,6 +2539,20 @@ components:
         listable:
           type: boolean
           description: Whether this database appears in the grant-request dropdown for non-admin users
+        via_uid:
+          type: string
+          format: uuid
+          nullable: true
+          description: SSH server (bastion) UID to tunnel through
+        clear_via_uid:
+          type: boolean
+          description: When true, removes the SSH tunnel (direct dial)
+        ssh_private_key:
+          type: string
+          description: SSH private key (PEM); write-only, never returned
+        ssh_passphrase:
+          type: string
+          description: Passphrase for the SSH private key; write-only, never returned
 
     # Grant schemas
     GrantControl:
@@ -2555,6 +2668,12 @@ components:
           type: integer
           format: int64
           nullable: true
+        auto_approve:
+          type: boolean
+          default: false
+          description: |
+            When true, grant requests against this definition skip the pending/admin-approval
+            step and are approved (and the grant materialized) instantly at request time.
         is_active:
           type: boolean
           readOnly: true
@@ -2601,6 +2720,12 @@ components:
           type: integer
           format: int64
           nullable: true
+        auto_approve:
+          type: boolean
+          default: false
+          description: |
+            When true, grant requests against this definition skip the pending/admin-approval
+            step and are approved (and the grant materialized) instantly at request time.
       required:
         - name
         - duration_seconds
@@ -3326,6 +3451,13 @@ components:
 
     NotFound:
       description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    Conflict:
+      description: Conflict with the current state (e.g. a resource with that name already exists)
       content:
         application/json:
           schema:

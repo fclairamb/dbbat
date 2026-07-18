@@ -27,7 +27,7 @@ type Session struct {
 
 	// Populated as the handshake progresses.
 	user         *store.User
-	database     *store.Database
+	database     *store.Server
 	grant        *store.Grant
 	requestedDB  string // captured by Handler.UseDB during handshake
 	authComplete bool

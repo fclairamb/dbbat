@@ -36,7 +36,7 @@ type session struct {
 	// Connection metadata
 	serviceName   string
 	username      string
-	database      *store.Database
+	database      *store.Server
 	user          *store.User
 	grant         *store.Grant
 	connectionUID uuid.UUID
@@ -48,7 +48,7 @@ type session struct {
 	// disambiguateDatabase, which filters the candidates by the connecting
 	// user's active grants once AUTH Phase 1 has revealed the username.
 	// Empty when the connect string resolved to exactly one database.
-	databaseCandidates []store.Database
+	databaseCandidates []store.Server
 
 	// upstreamCustomHash records whether the upstream's Set Protocol response
 	// had caps[4]&0x20 set (customHash). Captured during the pre-auth relay
@@ -429,7 +429,7 @@ func (s *session) resolveDatabase(connectPayload []byte) error {
 
 	s.logger = s.logger.With("service_name", s.serviceName)
 
-	db, err := s.store.GetDatabaseByName(s.ctx, s.serviceName)
+	db, err := s.store.GetServerByName(s.ctx, s.serviceName)
 	if err == nil {
 		s.database = db
 
@@ -440,11 +440,11 @@ func (s *session) resolveDatabase(connectPayload []byte) error {
 	// name may be shared by several dbbat databases (mutualized instance), in
 	// which case the true database can only be chosen once the username is
 	// known (AUTH Phase 1) — see disambiguateDatabase.
-	candidates, err := s.store.ListDatabasesByOracleServiceName(s.ctx, s.serviceName)
+	candidates, err := s.store.ListServersByOracleServiceName(s.ctx, s.serviceName)
 	if err != nil || len(candidates) == 0 {
 		s.sendRefuse(ORA12514, "database not found")
 
-		return fmt.Errorf("%w: %s", ErrDatabaseNotFound, s.serviceName)
+		return fmt.Errorf("%w: %s", ErrServerNotFound, s.serviceName)
 	}
 
 	if len(candidates) == 1 {
@@ -509,7 +509,7 @@ func (s *session) disambiguateDatabase(phase1Pkt *TNSPacket) error {
 		return fmt.Errorf("user lookup failed for %s: %w", username, err)
 	}
 
-	var matched []*store.Database
+	var matched []*store.Server
 
 	for i := range s.databaseCandidates {
 		if _, err := s.store.GetActiveGrant(s.ctx, user.UID, s.databaseCandidates[i].UID); err == nil {

@@ -165,7 +165,7 @@ func TestIntegration_ProxyPassthrough(t *testing.T) {
 	user, err := dataStore.CreateUser(ctx, "SYSTEM", "$argon2id$v=19$m=4096,t=3,p=1$salt$hash", []string{"connector"})
 	require.NoError(t, err)
 
-	db, err := dataStore.CreateDatabase(ctx, &store.Database{
+	db, err := dataStore.CreateServer(ctx, &store.Server{
 		Name:         "XEPDB1",
 		Host:         oracleHost,
 		Port:         oraclePort,

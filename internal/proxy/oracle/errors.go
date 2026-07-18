@@ -56,8 +56,8 @@ var (
 	ErrQueryLimitExceed = errors.New("query limit exceeded")
 	// ErrDataLimitExceed indicates the grant's data transfer quota has been reached.
 	ErrDataLimitExceed = errors.New("data transfer limit exceeded")
-	// ErrDatabaseNotFound indicates the requested database was not found in the store.
-	ErrDatabaseNotFound = errors.New("database not found")
+	// ErrServerNotFound indicates the requested database was not found in the store.
+	ErrServerNotFound = errors.New("database not found")
 	// ErrUserNotFound indicates the requested user was not found in the store.
 	ErrUserNotFound = errors.New("user not found")
 	// ErrAmbiguousServiceName indicates a service name shared by several dbbat

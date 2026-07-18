@@ -1,0 +1,1 @@
+ALTER TABLE grant_definitions ADD COLUMN auto_approve BOOLEAN NOT NULL DEFAULT FALSE;

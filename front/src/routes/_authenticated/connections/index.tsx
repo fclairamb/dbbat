@@ -174,7 +174,7 @@ function ConnectionsPage() {
         isLoading={isLoading}
         rowKey={(c) => c.uid}
         emptyMessage="No connections found"
-        rowHref={(c) => `/queries?connection_id=${c.uid}`}
+        rowHref={(c) => `/connections/${c.uid}`}
       />
 
       {/* Pagination */}

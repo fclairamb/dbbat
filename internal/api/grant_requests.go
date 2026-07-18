@@ -47,8 +47,8 @@ func (s *Server) loadEventContext(ctx context.Context, req *store.GrantRequest, 
 		ev.Definition = def
 	}
 
-	if db, err := s.store.GetDatabaseByUID(ctx, req.DatabaseID); err == nil {
-		ev.Database = db
+	if db, err := s.store.GetServerByUID(ctx, req.DatabaseID); err == nil {
+		ev.Server = db
 	}
 
 	if u, err := s.store.GetUserByUID(ctx, req.UserID); err == nil {
@@ -151,6 +151,20 @@ func (s *Server) handleCreateGrantRequest(c *gin.Context) {
 		return
 	}
 
+	if def.AutoApprove && req.Justification == "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
+			"justification is required for auto-approved grant definitions")
+
+		return
+	}
+
+	// The target must be a database, never an SSH bastion (a dial path).
+	if target, err := s.store.GetServerByUID(ctx, req.DatabaseID); err == nil && target.IsSSH() {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "cannot request access to an ssh server")
+
+		return
+	}
+
 	pending, err := s.store.HasPendingRequest(ctx, currentUser.UID, req.GrantDefinitionID, req.DatabaseID)
 	if err != nil {
 		writeInternalError(c, s.logger, err, "failed to check pending requests")
@@ -188,6 +202,30 @@ func (s *Server) handleCreateGrantRequest(c *gin.Context) {
 		PerformedBy: &currentUser.UID,
 		Details:     details,
 	})
+
+	if def.AutoApprove {
+		outcome, err := s.autoApproveGrantRequest(ctx, created, currentUser)
+		if err != nil {
+			// The request row already exists as pending; degrade to the
+			// normal flow (log + notify as pending) rather than failing the
+			// whole HTTP request over what's likely a rare race (e.g. the
+			// definition was deactivated a moment after we checked).
+			s.logger.ErrorContext(ctx, "auto-approve grant request failed",
+				slog.String("grant_request_uid", created.UID.String()), slog.Any("error", err))
+
+			ev := s.loadEventContext(ctx, created, nil)
+			ev.Action = notify.GrantActionCreated
+			s.notifyAsync(ev)
+
+			successResponse(c, created)
+
+			return
+		}
+
+		successResponse(c, outcome.Request)
+
+		return
+	}
 
 	ev := s.loadEventContext(ctx, created, nil)
 	ev.Action = notify.GrantActionCreated
@@ -271,8 +309,9 @@ func (s *Server) handleGetGrantRequest(c *gin.Context) {
 type decisionSource string
 
 const (
-	decisionSourceWeb   decisionSource = "web"
-	decisionSourceSlack decisionSource = "slack"
+	decisionSourceWeb         decisionSource = "web"
+	decisionSourceSlack       decisionSource = "slack"
+	decisionSourceAutoApprove decisionSource = "auto_approve"
 )
 
 // decideOutcome is the result of a shared approve/deny decision. It carries
@@ -312,6 +351,35 @@ func (s *Server) approveGrantRequest(ctx context.Context, uid uuid.UUID, decider
 	s.notifyAsync(ev) //nolint:contextcheck // notifyAsync detaches by design
 
 	return &decideOutcome{Request: request, Grant: grant, Event: ev, Action: notify.GrantActionApproved}, nil
+}
+
+// autoApproveGrantRequest runs the auto-approve decision for a just-created
+// request whose definition has AutoApprove set: store transition (no human
+// decider — decided_by stays nil), audit event marked `via: auto_approve`,
+// and async notification (rendered as an already-approved message, so no
+// Approve/Deny buttons ever appear for it).
+func (s *Server) autoApproveGrantRequest(ctx context.Context, request *store.GrantRequest, requester *store.User) (*decideOutcome, error) {
+	grant, updated, err := s.store.AutoApproveGrantRequest(ctx, request.UID, requester.UID)
+	if err != nil {
+		return nil, err
+	}
+
+	details := decisionDetails(map[string]any{
+		"grant_request_uid":  updated.UID,
+		"resulting_grant_id": grant.UID,
+	}, decisionSourceAutoApprove)
+
+	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{
+		EventType: "grant_request.approved",
+		UserID:    &updated.UserID,
+		Details:   details,
+	})
+
+	ev := s.loadEventContext(ctx, updated, nil)
+	ev.Action = notify.GrantActionApproved
+	s.notifyAsync(ev) //nolint:contextcheck // notifyAsync detaches by design
+
+	return &decideOutcome{Request: updated, Grant: grant, Event: ev, Action: notify.GrantActionApproved}, nil
 }
 
 // denyGrantRequest runs the deny decision: store transition, audit event

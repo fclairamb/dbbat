@@ -60,7 +60,7 @@ Before running tests, ensure:
 | `login.spec.ts` | Login flow and authentication tests |
 | `navigation.spec.ts` | Navigation between main sections |
 | `users.spec.ts` | User management tests |
-| `databases.spec.ts` | Database configuration tests |
+| `servers.spec.ts` | Database/SSH server configuration tests |
 | `grants.spec.ts` | Access grant management tests |
 | `observability.spec.ts` | Connections, queries, and audit log tests |
 
@@ -221,9 +221,9 @@ test-results/screenshots/
 ├── login-error.png
 ├── login-success.png
 ├── nav-users.png
-├── nav-databases.png
+├── nav-servers.png
 ├── users-list.png
-├── databases-create-dialog.png
+├── servers-create-dialog.png
 └── ...
 ```
 

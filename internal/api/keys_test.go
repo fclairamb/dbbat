@@ -37,7 +37,7 @@ func TestBuildConnectionsForUser_DisabledProtocol(t *testing.T) {
 		ListenPG: "", // disabled
 	}
 
-	db := &store.Database{
+	db := &store.Server{
 		Name:         "disabled-pg",
 		DatabaseName: "mydb",
 		Protocol:     store.ProtocolPostgreSQL,

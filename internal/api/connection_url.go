@@ -25,7 +25,7 @@ const keyPlaceholder = "{DBBAT_KEY}"
 // When apiKey is "", the placeholder "{DBBAT_KEY}" is substituted in the password slot.
 // Returns (ConnectionInfo{}, false) when the protocol's resolved port is 0.
 func BuildConnectionURL(
-	db *store.Database,
+	db *store.Server,
 	user *store.User,
 	endpoints store.ResolvedEndpoints,
 	apiKey string,
@@ -114,7 +114,7 @@ func BuildConnectionURL(
 		}
 		// Advertise the dbbat logical database name, not the raw upstream
 		// service name: the Oracle session resolver tries an exact
-		// GetDatabaseByName lookup first, so the logical name is unambiguous
+		// GetServerByName lookup first, so the logical name is unambiguous
 		// even when several dbbat databases proxy the same upstream
 		// SERVICE_NAME (e.g. five databases sharing a mutualized MUTU01).
 		// A raw service name would resolve to an arbitrary one of them.

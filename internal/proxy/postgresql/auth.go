@@ -50,7 +50,7 @@ func (s *Session) authenticate() error {
 	s.user = user
 
 	// Look up database configuration
-	database, err := s.store.GetDatabaseByName(s.ctx, databaseName)
+	database, err := s.store.GetServerByName(s.ctx, databaseName)
 	if err != nil {
 		s.sendError("database not found")
 

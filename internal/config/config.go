@@ -787,7 +787,7 @@ type DemoTarget struct {
 	Username string
 	Password string
 	Host     string
-	Database string
+	Server   string
 }
 
 // DefaultDemoTargetDB is the default value for DemoTargetDB.
@@ -840,7 +840,7 @@ func ParseDemoTargetDB(s string) *DemoTarget {
 		Username: userPass[:colonIdx],
 		Password: userPass[colonIdx+1:],
 		Host:     hostDB[:slashIdx],
-		Database: hostDB[slashIdx+1:],
+		Server:   hostDB[slashIdx+1:],
 	}
 }
 
@@ -856,8 +856,8 @@ func (c *Config) ValidateDemoTarget(username, password, host, database string) s
 		return ""
 	}
 
-	if username != target.Username || password != target.Password || host != target.Host || database != target.Database {
-		return fmt.Sprintf("you can only use %s:%s@%s/%s in demo mode", target.Username, target.Password, target.Host, target.Database)
+	if username != target.Username || password != target.Password || host != target.Host || database != target.Server {
+		return fmt.Sprintf("you can only use %s:%s@%s/%s in demo mode", target.Username, target.Password, target.Host, target.Server)
 	}
 
 	return ""

@@ -185,7 +185,8 @@ func (s *Store) DropAllTables(ctx context.Context) error {
 		"oauth_states",
 		"user_identities",
 		"global_parameters",
-		"databases",
+		"servers",
+		"databases", // pre-20260716120000 table name; drop in case of a stale dev DB
 		"users",
 		"bun_migrations",
 		"bun_migration_locks",
@@ -244,9 +245,9 @@ func (s *Store) MigrationStatus(ctx context.Context) ([]MigrationInfo, error) {
 
 // DSNComponents holds parsed PostgreSQL DSN components for comparison
 type DSNComponents struct {
-	Host     string
-	Port     string
-	Database string
+	Host   string
+	Port   string
+	Server string
 }
 
 // parsePostgresDSN parses a PostgreSQL DSN and extracts host, port, and database.
@@ -268,9 +269,9 @@ func parsePostgresDSN(dsn string) (*DSNComponents, error) {
 		database := strings.TrimPrefix(u.Path, "/")
 
 		return &DSNComponents{
-			Host:     normalizeHost(host),
-			Port:     port,
-			Database: database,
+			Host:   normalizeHost(host),
+			Port:   port,
+			Server: database,
 		}, nil
 	}
 
@@ -297,7 +298,7 @@ func parsePostgresDSN(dsn string) (*DSNComponents, error) {
 		case "port":
 			components.Port = value
 		case "dbname", "database":
-			components.Database = value
+			components.Server = value
 		}
 	}
 
@@ -331,5 +332,5 @@ func (s *Store) MatchesStorageDSN(host string, port int, databaseName string) bo
 
 	return storage.Host == targetHost &&
 		storage.Port == targetPort &&
-		storage.Database == databaseName
+		storage.Server == databaseName
 }

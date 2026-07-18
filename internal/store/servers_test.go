@@ -27,7 +27,7 @@ func TestCreateDatabase(t *testing.T) {
 	}
 
 	t.Run("create database", func(t *testing.T) {
-		db := &Database{
+		db := &Server{
 			Name:         "testdb",
 			Description:  "Test database",
 			Host:         "localhost",
@@ -39,29 +39,29 @@ func TestCreateDatabase(t *testing.T) {
 			CreatedBy:    &user.UID,
 		}
 
-		created, err := store.CreateDatabase(ctx, db, key)
+		created, err := store.CreateServer(ctx, db, key)
 		if err != nil {
-			t.Fatalf("CreateDatabase() error = %v", err)
+			t.Fatalf("CreateServer() error = %v", err)
 		}
 
 		if created.UID == uuid.Nil {
-			t.Error("CreateDatabase() db.UID = uuid.Nil")
+			t.Error("CreateServer() db.UID = uuid.Nil")
 		}
 		if created.Name != "testdb" {
-			t.Errorf("CreateDatabase() db.Name = %q, want %q", created.Name, "testdb")
+			t.Errorf("CreateServer() db.Name = %q, want %q", created.Name, "testdb")
 		}
 		if created.Host != "localhost" {
-			t.Errorf("CreateDatabase() db.Host = %q, want %q", created.Host, "localhost")
+			t.Errorf("CreateServer() db.Host = %q, want %q", created.Host, "localhost")
 		}
 		if created.Port != 5432 {
-			t.Errorf("CreateDatabase() db.Port = %d, want %d", created.Port, 5432)
+			t.Errorf("CreateServer() db.Port = %d, want %d", created.Port, 5432)
 		}
 		if len(created.PasswordEncrypted) == 0 {
-			t.Error("CreateDatabase() db.PasswordEncrypted is empty")
+			t.Error("CreateServer() db.PasswordEncrypted is empty")
 		}
 
 		// Verify password is encrypted properly with AAD
-		aad := crypto.DatabaseAAD(created.UID.String())
+		aad := crypto.ServerAAD(created.UID.String())
 		decrypted, err := crypto.Decrypt(created.PasswordEncrypted, key, aad)
 		if err != nil {
 			t.Fatalf("Decrypt() error = %v", err)
@@ -72,7 +72,7 @@ func TestCreateDatabase(t *testing.T) {
 	})
 
 	t.Run("duplicate name", func(t *testing.T) {
-		db := &Database{
+		db := &Server{
 			Name:         "duplicate",
 			Host:         "localhost",
 			Port:         5432,
@@ -82,15 +82,15 @@ func TestCreateDatabase(t *testing.T) {
 			SSLMode:      "disable",
 		}
 
-		_, err := store.CreateDatabase(ctx, db, key)
+		_, err := store.CreateServer(ctx, db, key)
 		if err != nil {
-			t.Fatalf("CreateDatabase() first call error = %v", err)
+			t.Fatalf("CreateServer() first call error = %v", err)
 		}
 
 		db.DatabaseName = "db2"
-		_, err = store.CreateDatabase(ctx, db, key)
+		_, err = store.CreateServer(ctx, db, key)
 		if err == nil {
-			t.Error("CreateDatabase() expected error for duplicate name")
+			t.Error("CreateServer() expected error for duplicate name")
 		}
 	})
 }
@@ -101,7 +101,7 @@ func TestCreateDatabase_Protocols(t *testing.T) {
 	key := testEncryptionKey()
 
 	t.Run("postgresql default", func(t *testing.T) {
-		db := &Database{
+		db := &Server{
 			Name:         "pg-db",
 			Host:         "localhost",
 			Port:         5432,
@@ -110,17 +110,17 @@ func TestCreateDatabase_Protocols(t *testing.T) {
 			Password:     "pgpass",
 			SSLMode:      "prefer",
 		}
-		created, err := store.CreateDatabase(ctx, db, key)
+		created, err := store.CreateServer(ctx, db, key)
 		if err != nil {
-			t.Fatalf("CreateDatabase() error = %v", err)
+			t.Fatalf("CreateServer() error = %v", err)
 		}
 		if created.Protocol != ProtocolPostgreSQL {
 			t.Errorf("Protocol = %q, want %q", created.Protocol, ProtocolPostgreSQL)
 		}
 
-		found, err := store.GetDatabaseByUID(ctx, created.UID)
+		found, err := store.GetServerByUID(ctx, created.UID)
 		if err != nil {
-			t.Fatalf("GetDatabaseByUID() error = %v", err)
+			t.Fatalf("GetServerByUID() error = %v", err)
 		}
 		if found.Protocol != ProtocolPostgreSQL {
 			t.Errorf("Protocol after read = %q, want %q", found.Protocol, ProtocolPostgreSQL)
@@ -128,7 +128,7 @@ func TestCreateDatabase_Protocols(t *testing.T) {
 	})
 
 	t.Run("postgresql explicit", func(t *testing.T) {
-		db := &Database{
+		db := &Server{
 			Name:         "pg-db-explicit",
 			Host:         "localhost",
 			Port:         5432,
@@ -138,9 +138,9 @@ func TestCreateDatabase_Protocols(t *testing.T) {
 			SSLMode:      "prefer",
 			Protocol:     ProtocolPostgreSQL,
 		}
-		created, err := store.CreateDatabase(ctx, db, key)
+		created, err := store.CreateServer(ctx, db, key)
 		if err != nil {
-			t.Fatalf("CreateDatabase() error = %v", err)
+			t.Fatalf("CreateServer() error = %v", err)
 		}
 		if created.Protocol != ProtocolPostgreSQL {
 			t.Errorf("Protocol = %q, want %q", created.Protocol, ProtocolPostgreSQL)
@@ -149,7 +149,7 @@ func TestCreateDatabase_Protocols(t *testing.T) {
 
 	t.Run("oracle", func(t *testing.T) {
 		serviceName := "ORCL"
-		db := &Database{
+		db := &Server{
 			Name:              "ora-db",
 			Host:              "oracle-host",
 			Port:              1521,
@@ -158,9 +158,9 @@ func TestCreateDatabase_Protocols(t *testing.T) {
 			Protocol:          ProtocolOracle,
 			OracleServiceName: &serviceName,
 		}
-		created, err := store.CreateDatabase(ctx, db, key)
+		created, err := store.CreateServer(ctx, db, key)
 		if err != nil {
-			t.Fatalf("CreateDatabase() error = %v", err)
+			t.Fatalf("CreateServer() error = %v", err)
 		}
 		if created.Protocol != ProtocolOracle {
 			t.Errorf("Protocol = %q, want %q", created.Protocol, ProtocolOracle)
@@ -169,9 +169,9 @@ func TestCreateDatabase_Protocols(t *testing.T) {
 			t.Errorf("OracleServiceName = %v, want %q", created.OracleServiceName, "ORCL")
 		}
 
-		found, err := store.GetDatabaseByUID(ctx, created.UID)
+		found, err := store.GetServerByUID(ctx, created.UID)
 		if err != nil {
-			t.Fatalf("GetDatabaseByUID() error = %v", err)
+			t.Fatalf("GetServerByUID() error = %v", err)
 		}
 		if found.Protocol != ProtocolOracle {
 			t.Errorf("Protocol after read = %q, want %q", found.Protocol, ProtocolOracle)
@@ -182,7 +182,7 @@ func TestCreateDatabase_Protocols(t *testing.T) {
 	})
 
 	t.Run("update protocol", func(t *testing.T) {
-		db := &Database{
+		db := &Server{
 			Name:         "update-proto",
 			Host:         "localhost",
 			Port:         5432,
@@ -191,24 +191,24 @@ func TestCreateDatabase_Protocols(t *testing.T) {
 			Password:     "pass",
 			Protocol:     ProtocolPostgreSQL,
 		}
-		created, err := store.CreateDatabase(ctx, db, key)
+		created, err := store.CreateServer(ctx, db, key)
 		if err != nil {
-			t.Fatalf("CreateDatabase() error = %v", err)
+			t.Fatalf("CreateServer() error = %v", err)
 		}
 
 		newProto := ProtocolOracle
 		serviceName := "TEST01"
-		err = store.UpdateDatabase(ctx, created.UID, DatabaseUpdate{
+		err = store.UpdateServer(ctx, created.UID, ServerUpdate{
 			Protocol:          &newProto,
 			OracleServiceName: &serviceName,
 		}, key)
 		if err != nil {
-			t.Fatalf("UpdateDatabase() error = %v", err)
+			t.Fatalf("UpdateServer() error = %v", err)
 		}
 
-		found, err := store.GetDatabaseByUID(ctx, created.UID)
+		found, err := store.GetServerByUID(ctx, created.UID)
 		if err != nil {
-			t.Fatalf("GetDatabaseByUID() error = %v", err)
+			t.Fatalf("GetServerByUID() error = %v", err)
 		}
 		if found.Protocol != ProtocolOracle {
 			t.Errorf("Protocol after update = %q, want %q", found.Protocol, ProtocolOracle)
@@ -225,7 +225,7 @@ func TestGetDatabaseByName(t *testing.T) {
 	key := testEncryptionKey()
 
 	// Create a test database
-	db := &Database{
+	db := &Server{
 		Name:         "findbyname",
 		Description:  "Find me by name",
 		Host:         "dbhost",
@@ -235,32 +235,32 @@ func TestGetDatabaseByName(t *testing.T) {
 		Password:     "targetpass",
 		SSLMode:      "require",
 	}
-	created, err := store.CreateDatabase(ctx, db, key)
+	created, err := store.CreateServer(ctx, db, key)
 	if err != nil {
-		t.Fatalf("CreateDatabase() error = %v", err)
+		t.Fatalf("CreateServer() error = %v", err)
 	}
 
 	t.Run("existing database", func(t *testing.T) {
-		found, err := store.GetDatabaseByName(ctx, "findbyname")
+		found, err := store.GetServerByName(ctx, "findbyname")
 		if err != nil {
-			t.Fatalf("GetDatabaseByName() error = %v", err)
+			t.Fatalf("GetServerByName() error = %v", err)
 		}
 
 		if found.UID != created.UID {
-			t.Errorf("GetDatabaseByName() db.UID = %s, want %s", found.UID, created.UID)
+			t.Errorf("GetServerByName() db.UID = %s, want %s", found.UID, created.UID)
 		}
 		if found.Host != "dbhost" {
-			t.Errorf("GetDatabaseByName() db.Host = %q, want %q", found.Host, "dbhost")
+			t.Errorf("GetServerByName() db.Host = %q, want %q", found.Host, "dbhost")
 		}
 		if found.Port != 5433 {
-			t.Errorf("GetDatabaseByName() db.Port = %d, want %d", found.Port, 5433)
+			t.Errorf("GetServerByName() db.Port = %d, want %d", found.Port, 5433)
 		}
 	})
 
 	t.Run("non-existing database", func(t *testing.T) {
-		_, err := store.GetDatabaseByName(ctx, "nonexistent")
-		if !errors.Is(err, ErrDatabaseNotFound) {
-			t.Errorf("GetDatabaseByName() error = %v, want %v", err, ErrDatabaseNotFound)
+		_, err := store.GetServerByName(ctx, "nonexistent")
+		if !errors.Is(err, ErrServerNotFound) {
+			t.Errorf("GetServerByName() error = %v, want %v", err, ErrServerNotFound)
 		}
 	})
 }
@@ -271,7 +271,7 @@ func TestGetDatabaseByUID(t *testing.T) {
 	key := testEncryptionKey()
 
 	// Create a test database
-	db := &Database{
+	db := &Server{
 		Name:         "findbyid",
 		Host:         "localhost",
 		Port:         5432,
@@ -280,26 +280,26 @@ func TestGetDatabaseByUID(t *testing.T) {
 		Password:     "pass",
 		SSLMode:      "disable",
 	}
-	created, err := store.CreateDatabase(ctx, db, key)
+	created, err := store.CreateServer(ctx, db, key)
 	if err != nil {
-		t.Fatalf("CreateDatabase() error = %v", err)
+		t.Fatalf("CreateServer() error = %v", err)
 	}
 
 	t.Run("existing database", func(t *testing.T) {
-		found, err := store.GetDatabaseByUID(ctx, created.UID)
+		found, err := store.GetServerByUID(ctx, created.UID)
 		if err != nil {
-			t.Fatalf("GetDatabaseByUID() error = %v", err)
+			t.Fatalf("GetServerByUID() error = %v", err)
 		}
 
 		if found.Name != "findbyid" {
-			t.Errorf("GetDatabaseByUID() db.Name = %q, want %q", found.Name, "findbyid")
+			t.Errorf("GetServerByUID() db.Name = %q, want %q", found.Name, "findbyid")
 		}
 	})
 
 	t.Run("non-existing database", func(t *testing.T) {
-		_, err := store.GetDatabaseByUID(ctx, uuid.New())
-		if !errors.Is(err, ErrDatabaseNotFound) {
-			t.Errorf("GetDatabaseByUID() error = %v, want %v", err, ErrDatabaseNotFound)
+		_, err := store.GetServerByUID(ctx, uuid.New())
+		if !errors.Is(err, ErrServerNotFound) {
+			t.Errorf("GetServerByUID() error = %v, want %v", err, ErrServerNotFound)
 		}
 	})
 }
@@ -310,18 +310,18 @@ func TestListDatabases(t *testing.T) {
 	key := testEncryptionKey()
 
 	t.Run("empty list", func(t *testing.T) {
-		dbs, err := store.ListDatabases(ctx)
+		dbs, err := store.ListServers(ctx)
 		if err != nil {
-			t.Fatalf("ListDatabases() error = %v", err)
+			t.Fatalf("ListServers() error = %v", err)
 		}
 		if len(dbs) != 0 {
-			t.Errorf("ListDatabases() len = %d, want 0", len(dbs))
+			t.Errorf("ListServers() len = %d, want 0", len(dbs))
 		}
 	})
 
 	// Create some databases
 	for _, name := range []string{"db_alpha", "db_beta"} {
-		db := &Database{
+		db := &Server{
 			Name:         name,
 			Host:         "localhost",
 			Port:         5432,
@@ -330,27 +330,27 @@ func TestListDatabases(t *testing.T) {
 			Password:     "pass",
 			SSLMode:      "disable",
 		}
-		_, err := store.CreateDatabase(ctx, db, key)
+		_, err := store.CreateServer(ctx, db, key)
 		if err != nil {
-			t.Fatalf("CreateDatabase() error = %v", err)
+			t.Fatalf("CreateServer() error = %v", err)
 		}
 	}
 
 	t.Run("with databases", func(t *testing.T) {
-		dbs, err := store.ListDatabases(ctx)
+		dbs, err := store.ListServers(ctx)
 		if err != nil {
-			t.Fatalf("ListDatabases() error = %v", err)
+			t.Fatalf("ListServers() error = %v", err)
 		}
 		if len(dbs) != 2 {
-			t.Errorf("ListDatabases() len = %d, want 2", len(dbs))
+			t.Errorf("ListServers() len = %d, want 2", len(dbs))
 		}
 
 		// Should be ordered by name
 		if dbs[0].Name != "db_alpha" {
-			t.Errorf("ListDatabases()[0].Name = %q, want %q", dbs[0].Name, "db_alpha")
+			t.Errorf("ListServers()[0].Name = %q, want %q", dbs[0].Name, "db_alpha")
 		}
 		if dbs[1].Name != "db_beta" {
-			t.Errorf("ListDatabases()[1].Name = %q, want %q", dbs[1].Name, "db_beta")
+			t.Errorf("ListServers()[1].Name = %q, want %q", dbs[1].Name, "db_beta")
 		}
 	})
 }
@@ -361,7 +361,7 @@ func TestUpdateDatabase(t *testing.T) {
 	key := testEncryptionKey()
 
 	// Create a test database
-	db := &Database{
+	db := &Server{
 		Name:         "toupdate",
 		Description:  "Original description",
 		Host:         "oldhost",
@@ -371,19 +371,19 @@ func TestUpdateDatabase(t *testing.T) {
 		Password:     "oldpass",
 		SSLMode:      "disable",
 	}
-	created, err := store.CreateDatabase(ctx, db, key)
+	created, err := store.CreateServer(ctx, db, key)
 	if err != nil {
-		t.Fatalf("CreateDatabase() error = %v", err)
+		t.Fatalf("CreateServer() error = %v", err)
 	}
 
 	t.Run("update description", func(t *testing.T) {
 		newDesc := "New description"
-		err := store.UpdateDatabase(ctx, created.UID, DatabaseUpdate{Description: &newDesc}, key)
+		err := store.UpdateServer(ctx, created.UID, ServerUpdate{Description: &newDesc}, key)
 		if err != nil {
-			t.Fatalf("UpdateDatabase() error = %v", err)
+			t.Fatalf("UpdateServer() error = %v", err)
 		}
 
-		found, _ := store.GetDatabaseByUID(ctx, created.UID)
+		found, _ := store.GetServerByUID(ctx, created.UID)
 		if found.Description != "New description" {
 			t.Errorf("db.Description = %q, want %q", found.Description, "New description")
 		}
@@ -392,12 +392,12 @@ func TestUpdateDatabase(t *testing.T) {
 	t.Run("update host and port", func(t *testing.T) {
 		newHost := "newhost"
 		newPort := 5433
-		err := store.UpdateDatabase(ctx, created.UID, DatabaseUpdate{Host: &newHost, Port: &newPort}, key)
+		err := store.UpdateServer(ctx, created.UID, ServerUpdate{Host: &newHost, Port: &newPort}, key)
 		if err != nil {
-			t.Fatalf("UpdateDatabase() error = %v", err)
+			t.Fatalf("UpdateServer() error = %v", err)
 		}
 
-		found, _ := store.GetDatabaseByUID(ctx, created.UID)
+		found, _ := store.GetServerByUID(ctx, created.UID)
 		if found.Host != "newhost" {
 			t.Errorf("db.Host = %q, want %q", found.Host, "newhost")
 		}
@@ -408,12 +408,12 @@ func TestUpdateDatabase(t *testing.T) {
 
 	t.Run("update password", func(t *testing.T) {
 		newPass := "newsecretpass"
-		err := store.UpdateDatabase(ctx, created.UID, DatabaseUpdate{Password: &newPass}, key)
+		err := store.UpdateServer(ctx, created.UID, ServerUpdate{Password: &newPass}, key)
 		if err != nil {
-			t.Fatalf("UpdateDatabase() error = %v", err)
+			t.Fatalf("UpdateServer() error = %v", err)
 		}
 
-		found, _ := store.GetDatabaseByUID(ctx, created.UID)
+		found, _ := store.GetServerByUID(ctx, created.UID)
 		err = found.DecryptPassword(key)
 		if err != nil {
 			t.Fatalf("DecryptPassword() error = %v", err)
@@ -425,9 +425,9 @@ func TestUpdateDatabase(t *testing.T) {
 
 	t.Run("non-existing database", func(t *testing.T) {
 		newHost := "host"
-		err := store.UpdateDatabase(ctx, uuid.New(), DatabaseUpdate{Host: &newHost}, key)
-		if !errors.Is(err, ErrDatabaseNotFound) {
-			t.Errorf("UpdateDatabase() error = %v, want %v", err, ErrDatabaseNotFound)
+		err := store.UpdateServer(ctx, uuid.New(), ServerUpdate{Host: &newHost}, key)
+		if !errors.Is(err, ErrServerNotFound) {
+			t.Errorf("UpdateServer() error = %v, want %v", err, ErrServerNotFound)
 		}
 	})
 }
@@ -438,7 +438,7 @@ func TestDeleteDatabase(t *testing.T) {
 	key := testEncryptionKey()
 
 	// Create a test database
-	db := &Database{
+	db := &Server{
 		Name:         "todelete",
 		Host:         "localhost",
 		Port:         5432,
@@ -447,27 +447,27 @@ func TestDeleteDatabase(t *testing.T) {
 		Password:     "pass",
 		SSLMode:      "disable",
 	}
-	created, err := store.CreateDatabase(ctx, db, key)
+	created, err := store.CreateServer(ctx, db, key)
 	if err != nil {
-		t.Fatalf("CreateDatabase() error = %v", err)
+		t.Fatalf("CreateServer() error = %v", err)
 	}
 
 	t.Run("delete existing database", func(t *testing.T) {
-		err := store.DeleteDatabase(ctx, created.UID)
+		err := store.DeleteServer(ctx, created.UID)
 		if err != nil {
-			t.Fatalf("DeleteDatabase() error = %v", err)
+			t.Fatalf("DeleteServer() error = %v", err)
 		}
 
-		_, err = store.GetDatabaseByUID(ctx, created.UID)
-		if !errors.Is(err, ErrDatabaseNotFound) {
-			t.Errorf("GetDatabaseByUID() error = %v, want %v", err, ErrDatabaseNotFound)
+		_, err = store.GetServerByUID(ctx, created.UID)
+		if !errors.Is(err, ErrServerNotFound) {
+			t.Errorf("GetServerByUID() error = %v, want %v", err, ErrServerNotFound)
 		}
 	})
 
 	t.Run("delete non-existing database", func(t *testing.T) {
-		err := store.DeleteDatabase(ctx, uuid.New())
-		if !errors.Is(err, ErrDatabaseNotFound) {
-			t.Errorf("DeleteDatabase() error = %v, want %v", err, ErrDatabaseNotFound)
+		err := store.DeleteServer(ctx, uuid.New())
+		if !errors.Is(err, ErrServerNotFound) {
+			t.Errorf("DeleteServer() error = %v, want %v", err, ErrServerNotFound)
 		}
 	})
 }
@@ -478,7 +478,7 @@ func TestDecryptPassword(t *testing.T) {
 	key := testEncryptionKey()
 
 	// Create a test database
-	db := &Database{
+	db := &Server{
 		Name:         "decrypttest",
 		Host:         "localhost",
 		Port:         5432,
@@ -487,9 +487,9 @@ func TestDecryptPassword(t *testing.T) {
 		Password:     "mysecretpassword",
 		SSLMode:      "disable",
 	}
-	created, err := store.CreateDatabase(ctx, db, key)
+	created, err := store.CreateServer(ctx, db, key)
 	if err != nil {
-		t.Fatalf("CreateDatabase() error = %v", err)
+		t.Fatalf("CreateServer() error = %v", err)
 	}
 
 	t.Run("decrypt password", func(t *testing.T) {
@@ -526,7 +526,7 @@ func TestCreateDatabase_DefaultListable(t *testing.T) {
 	suffix := uuid.NewString()[:8]
 
 	// Create without explicitly setting Listable — should default to true.
-	db := &Database{
+	db := &Server{
 		Name:         "listable-default-" + suffix,
 		Host:         "localhost",
 		Port:         5432,
@@ -537,21 +537,21 @@ func TestCreateDatabase_DefaultListable(t *testing.T) {
 		Listable:     true, // explicit true mirrors what the handler sets when req.Listable==nil
 	}
 
-	created, err := s.CreateDatabase(ctx, db, key)
+	created, err := s.CreateServer(ctx, db, key)
 	if err != nil {
-		t.Fatalf("CreateDatabase() error = %v", err)
+		t.Fatalf("CreateServer() error = %v", err)
 	}
 	if !created.Listable {
-		t.Error("CreateDatabase() Listable = false, want true (default)")
+		t.Error("CreateServer() Listable = false, want true (default)")
 	}
 
 	// Re-fetch to confirm DB persisted it correctly.
-	found, err := s.GetDatabaseByUID(ctx, created.UID)
+	found, err := s.GetServerByUID(ctx, created.UID)
 	if err != nil {
-		t.Fatalf("GetDatabaseByUID() error = %v", err)
+		t.Fatalf("GetServerByUID() error = %v", err)
 	}
 	if !found.Listable {
-		t.Error("GetDatabaseByUID() Listable = false, want true after create")
+		t.Error("GetServerByUID() Listable = false, want true after create")
 	}
 }
 
@@ -562,8 +562,8 @@ func TestUpdateDatabase_Listable(t *testing.T) {
 	ctx := context.Background()
 	key := testEncryptionKey()
 
-	newDB := func(name string, listable bool) *Database {
-		return &Database{
+	newDB := func(name string, listable bool) *Server {
+		return &Server{
 			Name:         name,
 			Host:         "localhost",
 			Port:         5432,
@@ -577,17 +577,17 @@ func TestUpdateDatabase_Listable(t *testing.T) {
 
 	t.Run("true to false", func(t *testing.T) {
 		t.Parallel()
-		created, err := s.CreateDatabase(ctx, newDB("lu-true-to-false-"+uuid.NewString()[:8], true), key)
+		created, err := s.CreateServer(ctx, newDB("lu-true-to-false-"+uuid.NewString()[:8], true), key)
 		if err != nil {
-			t.Fatalf("CreateDatabase() error = %v", err)
+			t.Fatalf("CreateServer() error = %v", err)
 		}
 		f := false
-		if err := s.UpdateDatabase(ctx, created.UID, DatabaseUpdate{Listable: &f}, key); err != nil {
-			t.Fatalf("UpdateDatabase() error = %v", err)
+		if err := s.UpdateServer(ctx, created.UID, ServerUpdate{Listable: &f}, key); err != nil {
+			t.Fatalf("UpdateServer() error = %v", err)
 		}
-		found, err := s.GetDatabaseByUID(ctx, created.UID)
+		found, err := s.GetServerByUID(ctx, created.UID)
 		if err != nil {
-			t.Fatalf("GetDatabaseByUID() error = %v", err)
+			t.Fatalf("GetServerByUID() error = %v", err)
 		}
 		if found.Listable {
 			t.Error("Listable = true after setting to false")
@@ -596,17 +596,17 @@ func TestUpdateDatabase_Listable(t *testing.T) {
 
 	t.Run("false to true", func(t *testing.T) {
 		t.Parallel()
-		created, err := s.CreateDatabase(ctx, newDB("lu-false-to-true-"+uuid.NewString()[:8], false), key)
+		created, err := s.CreateServer(ctx, newDB("lu-false-to-true-"+uuid.NewString()[:8], false), key)
 		if err != nil {
-			t.Fatalf("CreateDatabase() error = %v", err)
+			t.Fatalf("CreateServer() error = %v", err)
 		}
 		tr := true
-		if err := s.UpdateDatabase(ctx, created.UID, DatabaseUpdate{Listable: &tr}, key); err != nil {
-			t.Fatalf("UpdateDatabase() error = %v", err)
+		if err := s.UpdateServer(ctx, created.UID, ServerUpdate{Listable: &tr}, key); err != nil {
+			t.Fatalf("UpdateServer() error = %v", err)
 		}
-		found, err := s.GetDatabaseByUID(ctx, created.UID)
+		found, err := s.GetServerByUID(ctx, created.UID)
 		if err != nil {
-			t.Fatalf("GetDatabaseByUID() error = %v", err)
+			t.Fatalf("GetServerByUID() error = %v", err)
 		}
 		if !found.Listable {
 			t.Error("Listable = false after setting to true")
@@ -622,8 +622,8 @@ func TestListListableDatabases(t *testing.T) {
 	key := testEncryptionKey()
 	suffix := uuid.NewString()[:8]
 
-	mkDB := func(name string, listable bool) *Database {
-		return &Database{
+	mkDB := func(name string, listable bool) *Server {
+		return &Server{
 			Name:         name + "-" + suffix,
 			Host:         "localhost",
 			Port:         5432,
@@ -635,27 +635,27 @@ func TestListListableDatabases(t *testing.T) {
 		}
 	}
 
-	_, err := s.CreateDatabase(ctx, mkDB("listable-a", true), key)
+	_, err := s.CreateServer(ctx, mkDB("listable-a", true), key)
 	if err != nil {
-		t.Fatalf("CreateDatabase(listable-a) error = %v", err)
+		t.Fatalf("CreateServer(listable-a) error = %v", err)
 	}
-	_, err = s.CreateDatabase(ctx, mkDB("listable-b", true), key)
+	_, err = s.CreateServer(ctx, mkDB("listable-b", true), key)
 	if err != nil {
-		t.Fatalf("CreateDatabase(listable-b) error = %v", err)
+		t.Fatalf("CreateServer(listable-b) error = %v", err)
 	}
-	hidden, err := s.CreateDatabase(ctx, mkDB("hidden", false), key)
+	hidden, err := s.CreateServer(ctx, mkDB("hidden", false), key)
 	if err != nil {
-		t.Fatalf("CreateDatabase(hidden) error = %v", err)
+		t.Fatalf("CreateServer(hidden) error = %v", err)
 	}
 
-	all, err := s.ListListableDatabases(ctx)
+	all, err := s.ListListableServers(ctx)
 	if err != nil {
-		t.Fatalf("ListListableDatabases() error = %v", err)
+		t.Fatalf("ListListableServers() error = %v", err)
 	}
 
 	for _, db := range all {
 		if db.UID == hidden.UID {
-			t.Error("ListListableDatabases() returned a non-listable database")
+			t.Error("ListListableServers() returned a non-listable database")
 		}
 	}
 
@@ -667,7 +667,7 @@ func TestListListableDatabases(t *testing.T) {
 		}
 	}
 	if listableCount < 2 {
-		t.Errorf("ListListableDatabases() returned %d listable DBs, want ≥2", listableCount)
+		t.Errorf("ListListableServers() returned %d listable DBs, want ≥2", listableCount)
 	}
 }
 
@@ -682,8 +682,8 @@ func TestListDatabasesByOracleServiceName(t *testing.T) {
 	key := testEncryptionKey()
 
 	svc := "MUTU01_TEST"
-	mkOra := func(name string) *Database {
-		return &Database{
+	mkOra := func(name string) *Server {
+		return &Server{
 			Name:              name,
 			Host:              "orahost",
 			Port:              1521,
@@ -697,15 +697,15 @@ func TestListDatabasesByOracleServiceName(t *testing.T) {
 	}
 
 	for _, name := range []string{"abyla_i3f_t", "abyla_glh_t", "abyla_onv_t"} {
-		if _, err := s.CreateDatabase(ctx, mkOra(name), key); err != nil {
-			t.Fatalf("CreateDatabase(%s) error = %v", name, err)
+		if _, err := s.CreateServer(ctx, mkOra(name), key); err != nil {
+			t.Fatalf("CreateServer(%s) error = %v", name, err)
 		}
 	}
 
 	t.Run("returns all databases sharing the service name, ordered", func(t *testing.T) {
-		dbs, err := s.ListDatabasesByOracleServiceName(ctx, svc)
+		dbs, err := s.ListServersByOracleServiceName(ctx, svc)
 		if err != nil {
-			t.Fatalf("ListDatabasesByOracleServiceName() error = %v", err)
+			t.Fatalf("ListServersByOracleServiceName() error = %v", err)
 		}
 
 		if len(dbs) != 3 {
@@ -721,13 +721,49 @@ func TestListDatabasesByOracleServiceName(t *testing.T) {
 	})
 
 	t.Run("unknown service name returns empty slice", func(t *testing.T) {
-		dbs, err := s.ListDatabasesByOracleServiceName(ctx, "NO_SUCH_SERVICE")
+		dbs, err := s.ListServersByOracleServiceName(ctx, "NO_SUCH_SERVICE")
 		if err != nil {
-			t.Fatalf("ListDatabasesByOracleServiceName() error = %v", err)
+			t.Fatalf("ListServersByOracleServiceName() error = %v", err)
 		}
 
 		if len(dbs) != 0 {
 			t.Errorf("got %d databases, want 0", len(dbs))
 		}
 	})
+}
+
+// TestCreateServer_DuplicateName verifies that inserting a second server with an
+// already-taken name surfaces the typed ErrServerNameConflict (mapped to a 409
+// by the API) rather than an opaque database error.
+func TestCreateServer_DuplicateName(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+	key := testEncryptionKey()
+
+	first := &Server{
+		Name:         "dupe",
+		Host:         "localhost",
+		Port:         5432,
+		DatabaseName: "mydb",
+		Username:     "dbuser",
+		Password:     "secret",
+		SSLMode:      "prefer",
+	}
+	if _, err := store.CreateServer(ctx, first, key); err != nil {
+		t.Fatalf("CreateServer(first) error = %v", err)
+	}
+
+	second := &Server{
+		Name:         "dupe",
+		Host:         "otherhost",
+		Port:         5433,
+		DatabaseName: "otherdb",
+		Username:     "dbuser2",
+		Password:     "secret2",
+		SSLMode:      "prefer",
+	}
+	_, err := store.CreateServer(ctx, second, key)
+	if !errors.Is(err, ErrServerNameConflict) {
+		t.Fatalf("CreateServer(duplicate) error = %v, want ErrServerNameConflict", err)
+	}
 }

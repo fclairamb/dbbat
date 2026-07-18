@@ -57,7 +57,7 @@ import { useTheme } from "@/hooks/use-theme";
 const mainNavItems = [
   { title: "Dashboard", icon: LayoutDashboard, href: "/" },
   { title: "Users", icon: Users, href: "/users" },
-  { title: "Databases", icon: Database, href: "/databases" },
+  { title: "Servers", icon: Database, href: "/servers" },
   { title: "Grants", icon: Shield, href: "/grants" },
   { title: "Grant Definitions", icon: Shield, href: "/grant-definitions" },
   { title: "Grant Requests", icon: Shield, href: "/grant-requests" },

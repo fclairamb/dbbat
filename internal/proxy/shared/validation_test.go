@@ -185,7 +185,7 @@ func mongoBody(t *testing.T, d bson.D) bson.Raw {
 func TestValidateMongoCommand_Classification(t *testing.T) {
 	t.Parallel()
 
-	db := &store.Database{Name: "app", DatabaseName: "app"}
+	db := &store.Server{Name: "app", DatabaseName: "app"}
 	full := &store.Grant{Controls: []string{}}
 	readOnly := &store.Grant{Controls: []string{store.ControlReadOnly}}
 	noDDL := &store.Grant{Controls: []string{store.ControlBlockDDL}}
@@ -228,7 +228,7 @@ func TestValidateMongoCommand_Classification(t *testing.T) {
 func TestValidateMongoCommand_DBEnforcement(t *testing.T) {
 	t.Parallel()
 
-	db := &store.Database{Name: "app", DatabaseName: "app"}
+	db := &store.Server{Name: "app", DatabaseName: "app"}
 	full := &store.Grant{Controls: []string{}}
 
 	// admin allowed for diagnostics only.

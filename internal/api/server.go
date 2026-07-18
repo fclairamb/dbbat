@@ -230,14 +230,21 @@ func (s *Server) setupRouter() *gin.Engine {
 			// Admin password reset (requires web session, not API key)
 			users.POST("/:uid/reset-password", s.requireAdmin(), s.handleResetPassword)
 
-			// Database endpoints
-			databases := authenticated.Group("/databases")
+			// Server endpoints. The table now holds SSH bastions too (protocol
+			// 'ssh'); the route is /servers. Database *targets* are listed here
+			// (SSH rows are excluded by the store's targets-only scope).
+			databases := authenticated.Group("/servers")
 			databases.POST("", s.requireAdmin(), s.handleCreateDatabase)
 			databases.GET("", s.handleListDatabases)
 			databases.GET("/:uid", s.handleGetDatabase)
 			databases.PUT("/:uid", s.requireAdmin(), s.handleUpdateDatabase)
 			databases.DELETE("/:uid", s.requireAdmin(), s.handleDeleteDatabase)
 			databases.GET("/:uid/connection", s.handleGetDatabaseConnection)
+
+			// SSH bastion management (admin). Kept on a separate path because a
+			// static /servers/ssh segment would conflict with /servers/:uid.
+			sshServers := authenticated.Group("/ssh-servers")
+			sshServers.GET("", s.requireAdmin(), s.handleListSSHServers)
 
 			// Grant endpoints
 			grants := authenticated.Group("/grants")
@@ -279,6 +286,7 @@ func (s *Server) setupRouter() *gin.Engine {
 			// Observability endpoints
 			// Connections: admin/viewer see all, connector sees own only (filtered in handler)
 			authenticated.GET("/connections", s.handleListConnections)
+			authenticated.GET("/connections/:uid", s.handleGetConnection)
 			authenticated.GET("/connections/:uid/dump", s.requireAdminOrViewer(), s.handleGetConnectionDump)
 			authenticated.DELETE("/connections/:uid/dump", s.requireAdmin(), s.handleDeleteConnectionDump)
 			// Queries: admin/viewer only

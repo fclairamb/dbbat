@@ -10,7 +10,7 @@ import (
 )
 
 // createTestUserAndDatabase creates a user and database for grant testing.
-func createTestUserAndDatabase(t *testing.T, ctx context.Context, store *Store, suffix string) (*User, *Database) {
+func createTestUserAndDatabase(t *testing.T, ctx context.Context, store *Store, suffix string) (*User, *Server) {
 	t.Helper()
 	key := testEncryptionKey()
 
@@ -19,7 +19,7 @@ func createTestUserAndDatabase(t *testing.T, ctx context.Context, store *Store, 
 		t.Fatalf("CreateUser() error = %v", err)
 	}
 
-	db := &Database{
+	db := &Server{
 		Name:         "grantdb_" + suffix,
 		Host:         "localhost",
 		Port:         5432,
@@ -28,9 +28,9 @@ func createTestUserAndDatabase(t *testing.T, ctx context.Context, store *Store, 
 		Password:     "pass",
 		SSLMode:      "disable",
 	}
-	database, err := store.CreateDatabase(ctx, db, key)
+	database, err := store.CreateServer(ctx, db, key)
 	if err != nil {
-		t.Fatalf("CreateDatabase() error = %v", err)
+		t.Fatalf("CreateServer() error = %v", err)
 	}
 
 	return user, database

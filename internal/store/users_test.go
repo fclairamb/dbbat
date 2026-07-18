@@ -87,8 +87,8 @@ func TestCreateUser(t *testing.T) {
 		}
 
 		_, err = store.CreateUser(ctx, "duplicate", "hash2", []string{RoleConnector})
-		if err == nil {
-			t.Error("CreateUser() expected error for duplicate username")
+		if !errors.Is(err, ErrUserNameConflict) {
+			t.Errorf("CreateUser() error = %v, want ErrUserNameConflict for duplicate username", err)
 		}
 	})
 }

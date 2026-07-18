@@ -71,7 +71,7 @@ type GrantRequestEvent struct {
 	Action     GrantAction
 	Request    *store.GrantRequest
 	Definition *store.GrantDefinition
-	Database   *store.Database
+	Server     *store.Server
 	Requester  *store.User
 	// Decider is set when Action is approved/denied/canceled.
 	Decider *store.User
@@ -296,11 +296,11 @@ func buildBlocks(ev GrantRequestEvent, publicURL string) []slack.Block {
 	return blocks
 }
 
-// mainSectionText renders the *Database* / *Definition* / … detail section.
+// mainSectionText renders the *Server* / *Definition* / … detail section.
 func mainSectionText(ev GrantRequestEvent) string {
 	dbName := "—"
-	if ev.Database != nil {
-		dbName = ev.Database.Name
+	if ev.Server != nil {
+		dbName = ev.Server.Name
 	}
 
 	defName := "—"
@@ -313,7 +313,7 @@ func mainSectionText(ev GrantRequestEvent) string {
 	}
 
 	mainText := fmt.Sprintf(
-		"*Database*: %s\n*Definition*: %s\n*Duration*: %s\n*Status*: %s",
+		"*Server*: %s\n*Definition*: %s\n*Duration*: %s\n*Status*: %s",
 		dbName, defName, durationText, statusLabel(ev),
 	)
 
@@ -348,8 +348,8 @@ func mentionLine(ev GrantRequestEvent) string {
 	requester := slackMention(ev.RequesterSlackID, userLabel(ev.Requester))
 
 	dbName := "—"
-	if ev.Database != nil {
-		dbName = ev.Database.Name
+	if ev.Server != nil {
+		dbName = ev.Server.Name
 	}
 
 	defName := "access"
@@ -417,15 +417,23 @@ func userLabel(u *store.User) string {
 	return u.Username
 }
 
+// isAutoApproved reports whether an approved event has no human decider —
+// i.e. the definition's AutoApprove policy decided it, not an admin.
+func isAutoApproved(ev GrantRequestEvent) bool {
+	return ev.Action == GrantActionApproved && ev.Decider == nil
+}
+
 func statusEmoji(ev GrantRequestEvent) string {
-	switch ev.Action {
-	case GrantActionCreated:
+	switch {
+	case isAutoApproved(ev):
+		return "⚡"
+	case ev.Action == GrantActionCreated:
 		return "🔐"
-	case GrantActionApproved:
+	case ev.Action == GrantActionApproved:
 		return "✅"
-	case GrantActionDenied:
+	case ev.Action == GrantActionDenied:
 		return "❌"
-	case GrantActionCancelled:
+	case ev.Action == GrantActionCancelled:
 		return "🚫"
 	default:
 		return "❔"
@@ -433,6 +441,10 @@ func statusEmoji(ev GrantRequestEvent) string {
 }
 
 func statusLabel(ev GrantRequestEvent) string {
+	if isAutoApproved(ev) {
+		return "auto-approved"
+	}
+
 	switch ev.Action {
 	case GrantActionCreated:
 		return "pending"
