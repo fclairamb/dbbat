@@ -82,11 +82,14 @@ test.describe("Grant Requests: approve and enable auto-approve", () => {
     await expect(approveEnableButton).toBeVisible();
     await approveEnableButton.click();
 
-    // The request should transition to approved.
-    await expect(pendingRow).toContainText("approved", { timeout: 10000 });
+    // The request is now approved, so it drops out of the "Pending" tab's
+    // filtered view. Switch to "All" to see its resolved state.
+    await page.getByRole("button", { name: "All" }).click();
+    const resolvedRow = page.locator("tr", { hasText: name }).first();
+    await expect(resolvedRow).toContainText("approved", { timeout: 10000 });
 
     // Definition badge in this same row should now show "auto-approve".
-    await expect(pendingRow).toContainText("auto-approve");
+    await expect(resolvedRow).toContainText("auto-approve");
 
     // The grant-definitions table should also reflect the toggle as on.
     await page.goto(DEFS_URL);

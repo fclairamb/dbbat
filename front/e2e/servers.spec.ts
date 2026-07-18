@@ -119,6 +119,7 @@ test.describe("Servers Management", () => {
     await authenticatedPage.getByTestId("database-name-input").fill(name);
     await authenticatedPage.locator("#host").fill("bastion.example.com");
     await authenticatedPage.locator("#username").fill("bastion-user");
+    await authenticatedPage.locator("#password").fill("bastion-password");
 
     await authenticatedPage.getByTestId("database-create-submit").click();
 
@@ -146,6 +147,7 @@ test.describe("Servers Management", () => {
     await authenticatedPage.getByTestId("database-name-input").fill(name);
     await authenticatedPage.locator("#host").fill("bastion.example.com");
     await authenticatedPage.locator("#username").fill("bastion-user");
+    await authenticatedPage.locator("#password").fill("bastion-password");
     await authenticatedPage.getByTestId("database-create-submit").click();
 
     const row = sshSection.locator("tr", { hasText: name });

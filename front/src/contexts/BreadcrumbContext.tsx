@@ -130,29 +130,39 @@ export function useBreadcrumbContext(): BreadcrumbContextType {
 function useBreadcrumbPatch(pathname: string, patch: BreadcrumbPatch): void {
   const { setBreadcrumb } = useBreadcrumbContext();
   const lastPublished = useRef<BreadcrumbPatch | null>(null);
+  // Callers may pass a fresh object/array literal each render. Keying the
+  // effect on a value-based snapshot (rather than `patch` itself) stops it
+  // from re-running — and unconditionally clearing-then-resetting the
+  // published crumb — on every render that doesn't actually change the
+  // content.
+  const patchRef = useRef(patch);
+  patchRef.current = patch;
+  const patchKey = JSON.stringify(patch);
 
   useEffect(() => {
+    const currentPatch = patchRef.current;
     if (
       lastPublished.current === null ||
       !patchAppliesNoChange(
         // Compare as if `lastPublished` were a full entry containing only
         // the patched keys, against the new patch.
         lastPublished.current as BreadcrumbEntry,
-        patch,
+        currentPatch,
       )
     ) {
-      lastPublished.current = patch;
-      setBreadcrumb(pathname, patch);
+      lastPublished.current = currentPatch;
+      setBreadcrumb(pathname, currentPatch);
     }
     return () => {
       const clear: BreadcrumbPatch = {};
-      for (const key of Object.keys(patch) as (keyof BreadcrumbEntry)[]) {
+      for (const key of Object.keys(currentPatch) as (keyof BreadcrumbEntry)[]) {
         clear[key] = undefined;
       }
       lastPublished.current = null;
       setBreadcrumb(pathname, clear);
     };
-  }, [pathname, patch, setBreadcrumb]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- patchKey is a value-based snapshot of patch, read via patchRef
+  }, [pathname, patchKey, setBreadcrumb]);
 }
 
 /**
