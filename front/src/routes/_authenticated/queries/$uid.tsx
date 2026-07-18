@@ -19,7 +19,10 @@ import { format } from "date-fns";
 import { useAuth } from "@/contexts/AuthContext";
 import { canViewQueries } from "@/lib/permissions";
 import { AccessDenied } from "@/components/shared/AccessDenied";
-import { useBreadcrumbTitle } from "@/contexts/BreadcrumbContext";
+import {
+  useBreadcrumbItems,
+  useBreadcrumbTitle,
+} from "@/contexts/BreadcrumbContext";
 import { sqlPreview } from "@/lib/sql";
 
 const DEFAULT_PAGE_SIZE = 100;
@@ -37,7 +40,21 @@ function QueryDetailPage() {
   // Publish a "Queries › SELECT …" breadcrumb once the SQL text is loaded.
   useBreadcrumbTitle(
     `/queries/${uid}`,
-    query?.sql_text ? sqlPreview(query.sql_text) : undefined
+    query?.sql_text ? sqlPreview(query.sql_text) : undefined,
+  );
+
+  // Publish a "Connection <short-uid>" crumb between "Queries" and the SQL
+  // preview once the query (and its required connection_id) has loaded.
+  useBreadcrumbItems(
+    `/queries/${uid}`,
+    query
+      ? [
+          {
+            title: `Connection ${query.connection_id.slice(0, 8)}`,
+            href: `/queries?connection_id=${query.connection_id}`,
+          },
+        ]
+      : undefined,
   );
 
   // Rows pagination state (local, not URL-based)
@@ -247,11 +264,13 @@ function QueryDetailPage() {
                 </div>
 
                 <div className="flex items-center gap-4">
-                  {firstRowNum != null && lastRowNum != null && totalRows > 0 && (
-                    <span className="text-sm text-muted-foreground">
-                      Rows {firstRowNum}-{lastRowNum} of {totalRows}
-                    </span>
-                  )}
+                  {firstRowNum != null &&
+                    lastRowNum != null &&
+                    totalRows > 0 && (
+                      <span className="text-sm text-muted-foreground">
+                        Rows {firstRowNum}-{lastRowNum} of {totalRows}
+                      </span>
+                    )}
 
                   <div className="flex items-center gap-1">
                     {hasPrevious && (
