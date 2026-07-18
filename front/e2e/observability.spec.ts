@@ -175,7 +175,7 @@ test.describe("Observability Features", () => {
     // A connection crumb sits between "Queries" and the SQL-preview leaf,
     // linking to the connection's own detail page (not the filtered list).
     const connectionCrumb = breadcrumb.locator(
-      `a[href="/connections/${connectionId}"]`,
+      `a[href="/app/connections/${connectionId}"]`,
     );
     await expect(connectionCrumb).toBeVisible();
 
@@ -220,7 +220,7 @@ test.describe("Observability Features", () => {
 
     const rowLink = rows.first().locator("a").first();
     const href = await rowLink.getAttribute("href");
-    expect(href).toMatch(/^\/connections\/[0-9a-f-]{36}$/);
+    expect(href).toMatch(/^\/app\/connections\/[0-9a-f-]{36}$/);
 
     await rowLink.click();
     await expect(authenticatedPage).toHaveURL(/\/connections\/[0-9a-f-]{36}$/);
@@ -232,7 +232,7 @@ test.describe("Observability Features", () => {
 
   test("a connector cannot open another user's connection page", async ({
     authenticatedPage,
-    page,
+    browser,
   }) => {
     // Test mode seeds one query/connection executed by the admin user
     // (seedSampleQuery in main.go). Grab its connection id as the admin.
@@ -258,7 +258,12 @@ test.describe("Observability Features", () => {
     // Log in as the connector user (a distinct, non-owning user) and try to
     // open the admin's connection directly. It must be reported as not
     // found — connectors must not be able to distinguish "doesn't exist"
-    // from "exists but isn't mine".
+    // from "exists but isn't mine". This needs a genuinely separate browser
+    // context: `authenticatedPage`'s fixture is built on top of the base
+    // `page` fixture and hands back that same Page, so reusing `page` here
+    // would still be signed in as admin and never show the login form.
+    const connectorContext = await browser.newContext();
+    const page = await connectorContext.newPage();
     await page.goto("/");
     await page.waitForLoadState("domcontentloaded");
     await page.getByTestId("login-logo").waitFor({ state: "visible" });
@@ -273,6 +278,7 @@ test.describe("Observability Features", () => {
     await page.waitForLoadState("networkidle");
 
     await expect(page.getByText("Connection not found")).toBeVisible();
+    await connectorContext.close();
   });
 
   test("should display audit log page", async ({ authenticatedPage }) => {
