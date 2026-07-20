@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-24.04
     if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please-')
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
 
       - uses: actions/setup-go@v7.0.0
         with:
@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-24.04
     if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please-')
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
 
       - uses: oven-sh/setup-bun@v2.2.0
         with:
@@ -83,7 +83,7 @@ jobs:
     runs-on: ubuntu-24.04
     if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please-')
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
 
       - uses: actions/setup-go@v7.0.0
         with:
@@ -106,7 +106,7 @@ jobs:
     needs: [frontend]
     if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please-')
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0 # Needed for git log to get commit timestamp
 
@@ -145,7 +145,7 @@ jobs:
     needs: [build]
     if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please-')
     steps:
-      - uses: actions/checkout@v7.0.0
+      - uses: actions/checkout@v7.0.1
 
       - uses: oven-sh/setup-bun@v2.2.0
         with:
