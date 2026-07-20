@@ -91,6 +91,41 @@ test.describe("Navigation", () => {
     expect(navText).toBeTruthy();
   });
 
+  test("should render a valid breadcrumb without nested list items", async ({
+    authenticatedPage,
+  }) => {
+    const page = authenticatedPage;
+
+    // Collect React's invalid-nesting / hydration complaints, if any.
+    const nestingErrors: string[] = [];
+    page.on("console", (msg) => {
+      const text = msg.text();
+      if (
+        /cannot contain a nested/i.test(text) ||
+        /cannot be a descendant of/i.test(text) ||
+        /hydration/i.test(text)
+      ) {
+        nestingErrors.push(text);
+      }
+    });
+
+    // A nested page guarantees more than one crumb, so a separator is rendered.
+    await page.goto("/app/queries");
+    await page.waitForLoadState("networkidle");
+
+    const breadcrumb = page.locator('nav[aria-label="breadcrumb"] ol');
+    await expect(breadcrumb).toBeVisible();
+
+    // The separator must be a sibling of the item, never nested inside it.
+    await expect(breadcrumb.locator("li li")).toHaveCount(0);
+    // Sanity check: a separator is actually present on this multi-crumb page.
+    await expect(breadcrumb.locator('li[role="presentation"]')).not.toHaveCount(
+      0,
+    );
+
+    expect(nestingErrors).toEqual([]);
+  });
+
   test("should show the generic proxy tagline in the sidebar", async ({ authenticatedPage }) => {
     // The sidebar subtitle should reflect that DBBat proxies more than just
     // PostgreSQL (it also proxies Oracle and MySQL/MariaDB).
