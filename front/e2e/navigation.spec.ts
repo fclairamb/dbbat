@@ -109,8 +109,10 @@ test.describe("Navigation", () => {
       }
     });
 
-    // A nested page guarantees more than one crumb, so a separator is rendered.
-    await page.goto("/app/queries");
+    // A two-segment path guarantees more than one crumb, so a separator is
+    // rendered. The breadcrumb is derived from the pathname, so this holds even
+    // if the detail page itself has no data to show for that uid.
+    await page.goto("/app/queries/00000000-0000-0000-0000-000000000000");
     await page.waitForLoadState("networkidle");
 
     const breadcrumb = page.locator('nav[aria-label="breadcrumb"] ol');
