@@ -328,6 +328,24 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
   const selectedDefinition = definitions.find((d) => d.uid === definitionId);
   const justificationRequired = selectedDefinition?.auto_approve ?? false;
 
+  // A definition can be scoped to specific databases; an empty scope means
+  // every database. Narrow the picker so an out-of-scope pick (which the API
+  // rejects with 403) is not even offered.
+  const scopedDatabaseUids = selectedDefinition?.database_uids ?? [];
+  const selectableDatabases =
+    scopedDatabaseUids.length === 0
+      ? databases
+      : databases.filter((d) => scopedDatabaseUids.includes(d.uid));
+
+  // Switching to a definition that excludes the currently picked database
+  // must clear the stale selection rather than submit it.
+  if (
+    databaseId &&
+    !selectableDatabases.some((d) => d.uid === databaseId)
+  ) {
+    setDatabaseId("");
+  }
+
   const create = useCreateGrantRequest({
     onSuccess: (req) => {
       toast.success(
@@ -388,10 +406,16 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
               required
             >
               <SelectTrigger data-testid="grant-request-database">
-                <SelectValue placeholder="Select a database" />
+                <SelectValue
+                  placeholder={
+                    selectableDatabases.length === 0 && definitionId
+                      ? "No database in this definition's scope"
+                      : "Select a database"
+                  }
+                />
               </SelectTrigger>
               <SelectContent>
-                {databases.map((d) => (
+                {selectableDatabases.map((d) => (
                   <SelectItem key={d.uid} value={d.uid}>
                     {d.name}
                   </SelectItem>

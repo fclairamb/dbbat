@@ -476,6 +476,105 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/user-groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List user groups (admin) */
+        get: operations["listUserGroups"];
+        put?: never;
+        /**
+         * Create user group (admin)
+         * @description Creates a user group. Groups are organizational (data-analysts, SRE, …)
+         *     and are deliberately distinct from the functional `roles`
+         *     (admin/viewer/connector). Their purpose is to scope grant definitions.
+         */
+        post: operations["createUserGroup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/user-groups/{uid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        /** Get user group by UID (admin) */
+        get: operations["getUserGroup"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete user group (admin)
+         * @description Hard-deletes the group; memberships cascade away. Grant definitions
+         *     scoped to the group keep the now-dangling uid, so they match nobody
+         *     (fail closed) until an admin edits them.
+         */
+        delete: operations["deleteUserGroup"];
+        options?: never;
+        head?: never;
+        /**
+         * Update user group (admin)
+         * @description Replaces name and description. `member_uids` replaces membership
+         *     wholesale when present; omit it to leave membership untouched.
+         */
+        patch: operations["updateUserGroup"];
+        trace?: never;
+    };
+    "/user-groups/{uid}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        /** List group members (admin) */
+        get: operations["listUserGroupMembers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/user-groups/{uid}/members/{user_uid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+                user_uid: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Add a user to a group (admin)
+         * @description Idempotent — re-adding an existing member is a no-op.
+         */
+        put: operations["addUserGroupMember"];
+        post?: never;
+        /**
+         * Remove a user from a group (admin)
+         * @description Idempotent — removing a non-member is a no-op.
+         */
+        delete: operations["removeUserGroupMember"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/grant-definitions": {
         parameters: {
             query?: never;
@@ -486,7 +585,9 @@ export interface paths {
         /**
          * List grant definitions
          * @description Lists grant definitions. Non-admins always receive only active
-         *     definitions. Admins can pass `active_only=true` to apply the same
+         *     definitions that are in scope for their user groups (out-of-scope
+         *     definitions are invisible, not greyed out); admin listings are
+         *     unfiltered. Admins can pass `active_only=true` to apply the same
          *     filter for the request UI; otherwise both active and deactivated
          *     definitions are returned.
          */
@@ -553,6 +654,11 @@ export interface paths {
          * @description Any authenticated user can request access by selecting a grant
          *     definition and a database. An admin then approves or denies. On
          *     approval, dbbat creates a real AccessGrant from the definition.
+         *
+         *     A definition scoped to user groups and/or databases can only be
+         *     requested by a member of one of those groups, and only against one of
+         *     those databases — otherwise the request is rejected with 403. This
+         *     also gates the auto-approve path, where no human ever reviews.
          */
         post: operations["createGrantRequest"];
         delete?: never;
@@ -1183,11 +1289,41 @@ export interface components {
             /** @description User roles */
             roles?: ("admin" | "viewer" | "connector")[];
         };
+        /**
+         * @description Organizational grouping of users, used to scope grant definitions.
+         *     Distinct from `roles`, which are functional (admin/viewer/connector).
+         */
+        UserGroup: {
+            /** Format: uuid */
+            uid: string;
+            name: string;
+            description: string;
+            /** @description UIDs of the users belonging to this group. */
+            member_uids: string[];
+            /** Format: uuid */
+            readonly created_by?: string | null;
+            /** Format: date-time */
+            readonly created_at: string;
+        };
+        CreateUserGroupRequest: {
+            name: string;
+            description?: string;
+            /**
+             * @description Replaces the group's membership. On update, omit to leave
+             *     membership untouched; an explicit empty array empties the group.
+             */
+            member_uids?: string[];
+        };
         UpdateUserRequest: {
             /** @description New password */
             password?: string;
             /** @description New roles (admin only) */
             roles?: ("admin" | "viewer" | "connector")[];
+            /**
+             * @description Replaces the user's group memberships wholesale (admin only).
+             *     Omit to leave membership untouched.
+             */
+            group_uids?: string[];
         };
         /** @description Full database details (admin only) */
         Database: {
@@ -1455,6 +1591,18 @@ export interface components {
              * @default false
              */
             auto_approve: boolean;
+            /**
+             * @description Restricts this definition to members of these user groups. An empty
+             *     array means every user, which is how every pre-scoping definition
+             *     keeps behaving. A dangling uid (deleted group) matches nobody, so
+             *     the definition fails closed.
+             */
+            group_uids: string[];
+            /**
+             * @description Restricts this definition to these databases. An empty array means
+             *     every database.
+             */
+            database_uids: string[];
             /** @description Soft-deleted definitions have is_active=false; they remain referenced by historical grant requests. */
             readonly is_active: boolean;
             /** Format: uuid */
@@ -1479,6 +1627,18 @@ export interface components {
              * @default false
              */
             auto_approve: boolean;
+            /**
+             * @description Restricts this definition to members of these user groups. An empty
+             *     array means every user, which is how every pre-scoping definition
+             *     keeps behaving. A dangling uid (deleted group) matches nobody, so
+             *     the definition fails closed.
+             */
+            group_uids?: string[];
+            /**
+             * @description Restricts this definition to these databases. An empty array means
+             *     every database.
+             */
+            database_uids?: string[];
         };
         AccessGrant: {
             /**
@@ -2052,6 +2212,8 @@ export type PreLoginPasswordChangeRequest = components['schemas']['PreLoginPassw
 export type ResetPasswordRequest = components['schemas']['ResetPasswordRequest'];
 export type User = components['schemas']['User'];
 export type CreateUserRequest = components['schemas']['CreateUserRequest'];
+export type UserGroup = components['schemas']['UserGroup'];
+export type CreateUserGroupRequest = components['schemas']['CreateUserGroupRequest'];
 export type UpdateUserRequest = components['schemas']['UpdateUserRequest'];
 export type Database = components['schemas']['Database'];
 export type ConnectionTestResult = components['schemas']['ConnectionTestResult'];
@@ -2460,13 +2622,15 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description User details */
+            /** @description User details, with the groups the user belongs to */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["User"];
+                    "application/json": components["schemas"]["User"] & {
+                        groups: components["schemas"]["UserGroup"][];
+                    };
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -2928,6 +3092,220 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    listUserGroups: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of user groups */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        user_groups?: components["schemas"]["UserGroup"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createUserGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateUserGroupRequest"];
+            };
+        };
+        responses: {
+            /** @description Group created */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserGroup"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getUserGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Group details */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserGroup"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteUserGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Group deleted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateUserGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateUserGroupRequest"];
+            };
+        };
+        responses: {
+            /** @description Group updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserGroup"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listUserGroupMembers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Members of the group */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        users?: components["schemas"]["User"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    addUserGroupMember: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+                user_uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Member added */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    removeUserGroupMember: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+                user_uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Member removed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
     listGrantDefinitions: {
         parameters: {
             query?: {
@@ -3115,6 +3493,15 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            /** @description The definition's group/database scope does not cover this user or database */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
             /** @description A pending request already exists for this user/database/definition */
             409: {
                 headers: {
@@ -3175,7 +3562,11 @@ export interface operations {
             };
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            /** @description Not pending or definition inactive */
+            /**
+             * @description Not pending, definition inactive, or the definition's scope no
+             *     longer covers the requester or the database (scope is re-checked
+             *     at approve time so a tightened scope hard-blocks pending requests).
+             */
             409: {
                 headers: {
                     [name: string]: unknown;

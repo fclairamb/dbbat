@@ -13,6 +13,7 @@ import { Route as LoginRouteImport } from './routes/login'
 import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
 import { Route as AuthenticatedUsersIndexRouteImport } from './routes/_authenticated/users/index'
+import { Route as AuthenticatedUserGroupsIndexRouteImport } from './routes/_authenticated/user-groups/index'
 import { Route as AuthenticatedSettingsIndexRouteImport } from './routes/_authenticated/settings/index'
 import { Route as AuthenticatedServersIndexRouteImport } from './routes/_authenticated/servers/index'
 import { Route as AuthenticatedQueriesIndexRouteImport } from './routes/_authenticated/queries/index'
@@ -45,6 +46,12 @@ const AuthenticatedUsersIndexRoute = AuthenticatedUsersIndexRouteImport.update({
   path: '/users/',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
+const AuthenticatedUserGroupsIndexRoute =
+  AuthenticatedUserGroupsIndexRouteImport.update({
+    id: '/user-groups/',
+    path: '/user-groups/',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
 const AuthenticatedSettingsIndexRoute =
   AuthenticatedSettingsIndexRouteImport.update({
     id: '/settings/',
@@ -131,6 +138,7 @@ export interface FileRoutesByFullPath {
   '/queries/': typeof AuthenticatedQueriesIndexRoute
   '/servers/': typeof AuthenticatedServersIndexRoute
   '/settings/': typeof AuthenticatedSettingsIndexRoute
+  '/user-groups/': typeof AuthenticatedUserGroupsIndexRoute
   '/users/': typeof AuthenticatedUsersIndexRoute
 }
 export interface FileRoutesByTo {
@@ -148,6 +156,7 @@ export interface FileRoutesByTo {
   '/queries': typeof AuthenticatedQueriesIndexRoute
   '/servers': typeof AuthenticatedServersIndexRoute
   '/settings': typeof AuthenticatedSettingsIndexRoute
+  '/user-groups': typeof AuthenticatedUserGroupsIndexRoute
   '/users': typeof AuthenticatedUsersIndexRoute
 }
 export interface FileRoutesById {
@@ -167,6 +176,7 @@ export interface FileRoutesById {
   '/_authenticated/queries/': typeof AuthenticatedQueriesIndexRoute
   '/_authenticated/servers/': typeof AuthenticatedServersIndexRoute
   '/_authenticated/settings/': typeof AuthenticatedSettingsIndexRoute
+  '/_authenticated/user-groups/': typeof AuthenticatedUserGroupsIndexRoute
   '/_authenticated/users/': typeof AuthenticatedUsersIndexRoute
 }
 export interface FileRouteTypes {
@@ -186,6 +196,7 @@ export interface FileRouteTypes {
     | '/queries/'
     | '/servers/'
     | '/settings/'
+    | '/user-groups/'
     | '/users/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -203,6 +214,7 @@ export interface FileRouteTypes {
     | '/queries'
     | '/servers'
     | '/settings'
+    | '/user-groups'
     | '/users'
   id:
     | '__root__'
@@ -221,6 +233,7 @@ export interface FileRouteTypes {
     | '/_authenticated/queries/'
     | '/_authenticated/servers/'
     | '/_authenticated/settings/'
+    | '/_authenticated/user-groups/'
     | '/_authenticated/users/'
   fileRoutesById: FileRoutesById
 }
@@ -257,6 +270,13 @@ declare module '@tanstack/react-router' {
       path: '/users'
       fullPath: '/users/'
       preLoaderRoute: typeof AuthenticatedUsersIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/user-groups/': {
+      id: '/_authenticated/user-groups/'
+      path: '/user-groups'
+      fullPath: '/user-groups/'
+      preLoaderRoute: typeof AuthenticatedUserGroupsIndexRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/settings/': {
@@ -360,6 +380,7 @@ interface AuthenticatedRouteChildren {
   AuthenticatedQueriesIndexRoute: typeof AuthenticatedQueriesIndexRoute
   AuthenticatedServersIndexRoute: typeof AuthenticatedServersIndexRoute
   AuthenticatedSettingsIndexRoute: typeof AuthenticatedSettingsIndexRoute
+  AuthenticatedUserGroupsIndexRoute: typeof AuthenticatedUserGroupsIndexRoute
   AuthenticatedUsersIndexRoute: typeof AuthenticatedUsersIndexRoute
 }
 
@@ -378,6 +399,7 @@ const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedQueriesIndexRoute: AuthenticatedQueriesIndexRoute,
   AuthenticatedServersIndexRoute: AuthenticatedServersIndexRoute,
   AuthenticatedSettingsIndexRoute: AuthenticatedSettingsIndexRoute,
+  AuthenticatedUserGroupsIndexRoute: AuthenticatedUserGroupsIndexRoute,
   AuthenticatedUsersIndexRoute: AuthenticatedUsersIndexRoute,
 }
 

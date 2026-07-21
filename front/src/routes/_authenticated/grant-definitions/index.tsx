@@ -4,6 +4,8 @@ import { Plus, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import {
+  useDatabases,
+  useUserGroups,
   useGrantDefinitions,
   useCreateGrantDefinition,
   useUpdateGrantDefinition,
@@ -13,6 +15,7 @@ import {
 } from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { DataTable, type Column } from "@/components/shared/DataTable";
+import { MultiSelect } from "@/components/shared/MultiSelect";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -126,6 +129,9 @@ function GrantDefinitionsPage() {
       max_query_counts: d.max_query_counts,
       max_bytes_transferred: d.max_bytes_transferred,
       auto_approve: next,
+      // Preserve scope: this is a targeted toggle, not a full edit.
+      group_uids: d.group_uids,
+      database_uids: d.database_uids,
     };
     updateAutoApprove.mutate({ uid: d.uid, body });
   };
@@ -181,6 +187,32 @@ function GrantDefinitionsPage() {
       header: "Max Data",
       cell: (d: GrantDefinition) => (
         <UsageLimit limit={d.max_bytes_transferred} format={formatBytes} />
+      ),
+    },
+    {
+      key: "scope",
+      header: "Scope",
+      cell: (d: GrantDefinition) => (
+        <div className="flex flex-col gap-0.5 text-xs">
+          <span>
+            {d.group_uids.length === 0 ? (
+              <span className="text-muted-foreground italic">all users</span>
+            ) : (
+              `${d.group_uids.length} group${d.group_uids.length > 1 ? "s" : ""}`
+            )}
+          </span>
+          <span>
+            {d.database_uids.length === 0 ? (
+              <span className="text-muted-foreground italic">
+                all databases
+              </span>
+            ) : (
+              `${d.database_uids.length} database${
+                d.database_uids.length > 1 ? "s" : ""
+              }`
+            )}
+          </span>
+        </div>
       ),
     },
     {
@@ -387,6 +419,14 @@ function DefinitionDialog({
     return "m";
   });
   const [controls, setControls] = useState<string[]>(editing?.controls ?? []);
+  const [groupUids, setGroupUids] = useState<string[]>(
+    editing?.group_uids ?? []
+  );
+  const [databaseUids, setDatabaseUids] = useState<string[]>(
+    editing?.database_uids ?? []
+  );
+  const { data: groups = [] } = useUserGroups();
+  const { data: databases = [] } = useDatabases();
   const [autoApprove, setAutoApprove] = useState(
     editing?.auto_approve ?? false
   );
@@ -452,6 +492,8 @@ function DefinitionDialog({
         ? parseInt(maxBytesValue) * unitMult
         : null,
       auto_approve: autoApprove,
+      group_uids: groupUids,
+      database_uids: databaseUids,
     };
 
     if (editing) {
@@ -542,6 +584,34 @@ function DefinitionDialog({
                 </div>
               ))}
             </div>
+          </div>
+          <div className="space-y-2">
+            <Label>Restrict to groups</Label>
+            <p className="text-xs text-muted-foreground">
+              Leave empty to let every user request this definition.
+            </p>
+            <MultiSelect
+              options={groups.map((g) => ({ value: g.uid, label: g.name }))}
+              selected={groupUids}
+              onChange={setGroupUids}
+              placeholder="Every user"
+              emptyMessage="No groups defined yet — this definition applies to every user."
+              testId="grant-definition-groups"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>Restrict to databases</Label>
+            <p className="text-xs text-muted-foreground">
+              Leave empty to allow this definition against every database.
+            </p>
+            <MultiSelect
+              options={databases.map((d) => ({ value: d.uid, label: d.name }))}
+              selected={databaseUids}
+              onChange={setDatabaseUids}
+              placeholder="Every database"
+              emptyMessage="No databases configured yet."
+              testId="grant-definition-databases"
+            />
           </div>
           <div className="flex items-center gap-2">
             <Checkbox

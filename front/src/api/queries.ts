@@ -6,6 +6,9 @@ import type { components } from "./schema";
 export type User = components["schemas"]["User"];
 export type CreateUserRequest = components["schemas"]["CreateUserRequest"];
 export type UpdateUserRequest = components["schemas"]["UpdateUserRequest"];
+export type UserGroup = components["schemas"]["UserGroup"];
+export type CreateUserGroupRequest =
+  components["schemas"]["CreateUserGroupRequest"];
 export type Database = components["schemas"]["Database"];
 export type DatabaseLimited = components["schemas"]["DatabaseLimited"];
 export type CreateDatabaseRequest =
@@ -413,6 +416,106 @@ export function useRevokeGrant(options?: {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["grants"] });
+      options?.onSuccess?.();
+    },
+    onError: options?.onError,
+  });
+}
+
+// ============================================================================
+// User Groups
+// ============================================================================
+
+export function useUserGroups(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["user-groups"],
+    queryFn: async (): Promise<UserGroup[]> => {
+      const response = await apiClient.GET("/user-groups");
+      if (response.error) {
+        throw new Error(response.error.message || "Failed to load user groups");
+      }
+      return response.data?.user_groups || [];
+    },
+    enabled: options?.enabled ?? true,
+  });
+}
+
+export function useCreateUserGroup(options?: {
+  onSuccess?: (group: UserGroup) => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (data: CreateUserGroupRequest): Promise<UserGroup> => {
+      const response = await apiClient.POST("/user-groups", { body: data });
+      if (response.error || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to create user group"
+        );
+      }
+      return response.data;
+    },
+    onSuccess: (group) => {
+      queryClient.invalidateQueries({ queryKey: ["user-groups"] });
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+      options?.onSuccess?.(group);
+    },
+    onError: options?.onError,
+  });
+}
+
+export function useUpdateUserGroup(options?: {
+  onSuccess?: (group: UserGroup) => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (args: {
+      uid: string;
+      body: CreateUserGroupRequest;
+    }): Promise<UserGroup> => {
+      const response = await apiClient.PATCH("/user-groups/{uid}", {
+        params: { path: { uid: args.uid } },
+        body: args.body,
+      });
+      if (response.error || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to update user group"
+        );
+      }
+      return response.data;
+    },
+    onSuccess: (group) => {
+      queryClient.invalidateQueries({ queryKey: ["user-groups"] });
+      queryClient.invalidateQueries({ queryKey: ["users"] });
+      options?.onSuccess?.(group);
+    },
+    onError: options?.onError,
+  });
+}
+
+export function useDeleteUserGroup(options?: {
+  onSuccess?: () => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (uid: string): Promise<void> => {
+      const response = await apiClient.DELETE("/user-groups/{uid}", {
+        params: { path: { uid } },
+      });
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to delete user group"
+        );
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["user-groups"] });
+      queryClient.invalidateQueries({ queryKey: ["users"] });
       options?.onSuccess?.();
     },
     onError: options?.onError,

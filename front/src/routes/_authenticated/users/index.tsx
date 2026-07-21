@@ -4,6 +4,7 @@ import {
   useUsers,
   useCreateUser,
   useUpdateUser,
+  useUserGroups,
   useDeleteUser,
   type User,
 } from "@/api";
@@ -47,6 +48,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { ResetPasswordDialog } from "@/components/shared/ResetPasswordDialog";
+import { MultiSelect } from "@/components/shared/MultiSelect";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -411,6 +413,14 @@ function EditUserDialog({
 }) {
   const [roles, setRoles] = useState<UserRole[]>(toUserRoles(targetUser.roles));
   const [confirmSelfDemote, setConfirmSelfDemote] = useState(false);
+  // The groups listing carries membership, so we can seed the selection
+  // without a second per-user round-trip.
+  const { data: groups = [] } = useUserGroups();
+  const [groupUids, setGroupUids] = useState<string[] | null>(null);
+  const currentGroupUids = groups
+    .filter((g) => g.member_uids.includes(targetUser.uid))
+    .map((g) => g.uid);
+  const selectedGroupUids = groupUids ?? currentGroupUids;
 
   const updateUser = useUpdateUser(targetUser.uid, {
     onSuccess: () => {
@@ -427,7 +437,7 @@ function EditUserDialog({
     targetUser.uid === currentUserUid && wasAdmin && !roles.includes("admin");
 
   const submit = () => {
-    updateUser.mutate({ roles });
+    updateUser.mutate({ roles, group_uids: selectedGroupUids });
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -467,6 +477,21 @@ function EditUserDialog({
               lockedRole={isLastAdmin ? "admin" : undefined}
               lockedReason="Cannot remove the admin role from the last administrator"
             />
+            <div className="space-y-2">
+              <Label>Groups</Label>
+              <p className="text-xs text-muted-foreground">
+                Groups are organizational and gate which grant definitions this
+                user can request. Roles above stay functional.
+              </p>
+              <MultiSelect
+                options={groups.map((g) => ({ value: g.uid, label: g.name }))}
+                selected={selectedGroupUids}
+                onChange={setGroupUids}
+                placeholder="No groups"
+                emptyMessage="No user groups defined yet."
+                testId="edit-user-groups"
+              />
+            </div>
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={onClose}>
