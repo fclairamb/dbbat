@@ -65,6 +65,8 @@ tags:
     description: Authentication (login, logout, session management)
   - name: Users
     description: User management
+  - name: User Groups
+    description: Organizational user groups used to scope grant definitions
   - name: Databases
     description: Database configuration management
   - name: Grants
@@ -446,11 +448,20 @@ paths:
       operationId: getUser
       responses:
         '200':
-          description: User details
+          description: User details, with the groups the user belongs to
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/User'
+                allOf:
+                  - $ref: '#/components/schemas/User'
+                  - type: object
+                    properties:
+                      groups:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/UserGroup'
+                    required:
+                      - groups
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -953,6 +964,235 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /user-groups:
+    post:
+      tags:
+        - User Groups
+      summary: Create user group (admin)
+      description: |
+        Creates a user group. Groups are organizational (data-analysts, SRE, …)
+        and are deliberately distinct from the functional `roles`
+        (admin/viewer/connector). Their purpose is to scope grant definitions.
+      operationId: createUserGroup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserGroupRequest'
+      responses:
+        '200':
+          description: Group created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserGroup'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags:
+        - User Groups
+      summary: List user groups (admin)
+      operationId: listUserGroups
+      responses:
+        '200':
+          description: List of user groups
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user_groups:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UserGroup'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /user-groups/{uid}:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+
+    get:
+      tags:
+        - User Groups
+      summary: Get user group by UID (admin)
+      operationId: getUserGroup
+      responses:
+        '200':
+          description: Group details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserGroup'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags:
+        - User Groups
+      summary: Update user group (admin)
+      description: |
+        Replaces name and description. `member_uids` replaces membership
+        wholesale when present; omit it to leave membership untouched.
+      operationId: updateUserGroup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserGroupRequest'
+      responses:
+        '200':
+          description: Group updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserGroup'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+    delete:
+      tags:
+        - User Groups
+      summary: Delete user group (admin)
+      description: |
+        Hard-deletes the group; memberships cascade away. Grant definitions
+        scoped to the group keep the now-dangling uid, so they match nobody
+        (fail closed) until an admin edits them.
+      operationId: deleteUserGroup
+      responses:
+        '200':
+          description: Group deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /user-groups/{uid}/members:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+
+    get:
+      tags:
+        - User Groups
+      summary: List group members (admin)
+      operationId: listUserGroupMembers
+      responses:
+        '200':
+          description: Members of the group
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /user-groups/{uid}/members/{user_uid}:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: user_uid
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+
+    put:
+      tags:
+        - User Groups
+      summary: Add a user to a group (admin)
+      description: Idempotent — re-adding an existing member is a no-op.
+      operationId: addUserGroupMember
+      responses:
+        '200':
+          description: Member added
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags:
+        - User Groups
+      summary: Remove a user from a group (admin)
+      description: Idempotent — removing a non-member is a no-op.
+      operationId: removeUserGroupMember
+      responses:
+        '200':
+          description: Member removed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /grant-definitions:
     post:
       tags:
@@ -994,7 +1234,9 @@ paths:
       summary: List grant definitions
       description: |
         Lists grant definitions. Non-admins always receive only active
-        definitions. Admins can pass `active_only=true` to apply the same
+        definitions that are in scope for their user groups (out-of-scope
+        definitions are invisible, not greyed out); admin listings are
+        unfiltered. Admins can pass `active_only=true` to apply the same
         filter for the request UI; otherwise both active and deactivated
         definitions are returned.
       operationId: listGrantDefinitions
@@ -1108,6 +1350,11 @@ paths:
         Any authenticated user can request access by selecting a grant
         definition and a database. An admin then approves or denies. On
         approval, dbbat creates a real AccessGrant from the definition.
+
+        A definition scoped to user groups and/or databases can only be
+        requested by a member of one of those groups, and only against one of
+        those databases — otherwise the request is rejected with 403. This
+        also gates the auto-approve path, where no human ever reviews.
       operationId: createGrantRequest
       requestBody:
         required: true
@@ -1126,6 +1373,12 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: The definition's group/database scope does not cover this user or database
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '409':
           description: A pending request already exists for this user/database/definition
           content:
@@ -1233,7 +1486,10 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: Not pending or definition inactive
+          description: |
+            Not pending, definition inactive, or the definition's scope no
+            longer covers the requester or the database (scope is re-checked
+            at approve time so a tightened scope hard-blocks pending requests).
           content:
             application/json:
               schema:
@@ -2399,6 +2655,61 @@ components:
         - username
         - password
 
+    UserGroup:
+      type: object
+      description: |
+        Organizational grouping of users, used to scope grant definitions.
+        Distinct from `roles`, which are functional (admin/viewer/connector).
+      properties:
+        uid:
+          type: string
+          format: uuid
+        name:
+          type: string
+          maxLength: 64
+        description:
+          type: string
+        member_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: UIDs of the users belonging to this group.
+        created_by:
+          type: string
+          format: uuid
+          readOnly: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+        - uid
+        - name
+        - description
+        - member_uids
+        - created_at
+
+    CreateUserGroupRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 64
+        description:
+          type: string
+        member_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            Replaces the group's membership. On update, omit to leave
+            membership untouched; an explicit empty array empties the group.
+      required:
+        - name
+
     UpdateUserRequest:
       type: object
       properties:
@@ -2411,6 +2722,14 @@ components:
             type: string
             enum: [admin, viewer, connector]
           description: New roles (admin only)
+        group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            Replaces the user's group memberships wholesale (admin only).
+            Omit to leave membership untouched.
 
     # Database schemas
     Database:
@@ -2800,6 +3119,24 @@ components:
           description: |
             When true, grant requests against this definition skip the pending/admin-approval
             step and are approved (and the grant materialized) instantly at request time.
+        group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            Restricts this definition to members of these user groups. An empty
+            array means every user, which is how every pre-scoping definition
+            keeps behaving. A dangling uid (deleted group) matches nobody, so
+            the definition fails closed.
+        database_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            Restricts this definition to these databases. An empty array means
+            every database.
         is_active:
           type: boolean
           readOnly: true
@@ -2817,6 +3154,8 @@ components:
         - name
         - duration_seconds
         - controls
+        - group_uids
+        - database_uids
         - is_active
         - created_by
         - created_at
@@ -2852,6 +3191,24 @@ components:
           description: |
             When true, grant requests against this definition skip the pending/admin-approval
             step and are approved (and the grant materialized) instantly at request time.
+        group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            Restricts this definition to members of these user groups. An empty
+            array means every user, which is how every pre-scoping definition
+            keeps behaving. A dangling uid (deleted group) matches nobody, so
+            the definition fails closed.
+        database_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            Restricts this definition to these databases. An empty array means
+            every database.
       required:
         - name
         - duration_seconds
