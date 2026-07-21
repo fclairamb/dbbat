@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -40,8 +41,15 @@ type pendingQuery struct {
 
 // preparedStatement tracks a prepared statement with its type information.
 type preparedStatement struct {
-	sql      string
+	sql string
+	// typeOIDs are the parameter types the *client* declared in Parse. Most
+	// modern drivers (pgx included) leave this empty and let the server infer
+	// the types.
 	typeOIDs []uint32
+	// resolvedOIDs are the parameter types the *server* reported in the
+	// ParameterDescription answering a Describe('S'). They are the fallback
+	// used to decode binary bind parameters when typeOIDs is empty.
+	resolvedOIDs []uint32
 }
 
 // portalState tracks a portal with its bound parameters.
@@ -62,9 +70,18 @@ type copyState struct {
 
 // extendedQueryState tracks state for Extended Query Protocol.
 type extendedQueryState struct {
+	// mu guards preparedStatements and pendingDescribes, which are touched from
+	// both proxy goroutines: the client→upstream one on Parse/Bind/Execute/
+	// Close/Describe, and the upstream→client one on ParameterDescription.
+	mu                 sync.Mutex
 	preparedStatements map[string]*preparedStatement // stmt name -> prepared statement
 	portals            map[string]*portalState       // portal name -> portal state
 	pendingQueries     []*pendingQuery               // Queue for multiple Execute before Sync
+	// pendingDescribes is a FIFO of statement names for which the client sent
+	// Describe('S', name) and the server has not yet answered with a
+	// ParameterDescription. The server answers describes in order, so the head
+	// of the queue names the statement the next ParameterDescription belongs to.
+	pendingDescribes []string
 }
 
 // Session represents a proxy session.
@@ -311,6 +328,8 @@ func (s *Session) proxyClientToUpstream() error {
 			s.handleBind(m)
 		case *pgproto3.Execute:
 			interceptErr = s.handleExecute(m)
+		case *pgproto3.Describe:
+			s.handleDescribe(m)
 		case *pgproto3.Close:
 			s.handleClose(m)
 		case *pgproto3.CopyData:
@@ -417,6 +436,12 @@ func (s *Session) proxyUpstreamToClient() error {
 
 		// Capture query result data for logging
 		switch m := msg.(type) {
+		case *pgproto3.ParameterDescription:
+			// Server-resolved bind parameter types for the statement the client
+			// most recently described. Recorded so binary bind values can be
+			// decoded even when the client declared no types in Parse.
+			s.handleParameterDescription(m)
+
 		case *pgproto3.RowDescription:
 			// Capture column metadata for the current/pending query
 			query := s.getCurrentPendingQuery()
