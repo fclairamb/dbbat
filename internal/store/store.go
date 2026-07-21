@@ -184,6 +184,8 @@ func (s *Store) DropAllTables(ctx context.Context) error {
 		"audit_log",
 		"oauth_states",
 		"user_identities",
+		"user_group_members",
+		"user_groups",
 		"global_parameters",
 		"servers",
 		"databases", // pre-20260716120000 table name; drop in case of a stale dev DB

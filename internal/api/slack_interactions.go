@@ -35,7 +35,9 @@ const (
 	msgNoLongerPending = "This request is no longer pending."
 	msgRequestNotFound = "That grant request no longer exists."
 	msgDefinitionGone  = "The grant definition is no longer active, so this request can't be approved."
-	msgDecideFailed    = "Something went wrong deciding this request. Try again from the dbbat UI."
+	msgOutOfScope      = "The grant definition's scope no longer covers this user or database, " +
+		"so this request can't be approved. Create a direct grant instead."
+	msgDecideFailed = "Something went wrong deciding this request. Try again from the dbbat UI."
 )
 
 // slackDecider is the slice of decision behavior the interaction handler
@@ -312,6 +314,8 @@ func (s *Server) handleSlackDecisionError(
 		s.postEphemeral(ctx, responseURL, msgRequestNotFound)
 	case errors.Is(err, store.ErrDefinitionInactive):
 		s.postEphemeral(ctx, responseURL, msgDefinitionGone)
+	case errors.Is(err, ErrRequestOutOfScope):
+		s.postEphemeral(ctx, responseURL, msgOutOfScope)
 	default:
 		s.logger.WarnContext(ctx, "slack interaction: decide failed", slog.Any("error", err))
 		s.postEphemeral(ctx, responseURL, msgDecideFailed)

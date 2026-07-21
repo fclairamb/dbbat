@@ -82,7 +82,7 @@ Keys are:
 |------|-------------|
 | `admin` | Full access to all resources and operations |
 | `viewer` | Read-only access to observability data (queries, connections, audit) |
-| `connector` | Can only connect to databases with active grants |
+| `connector` | Can only connect to servers with active grants |
 
 Users can have multiple roles. Permissions are additive.
 
@@ -91,15 +91,21 @@ Users can have multiple roles. Permissions are additive.
 | Resource | Admin | Viewer | Connector |
 |----------|-------|--------|-----------|
 | All users | Full | List only | Own only |
-| All databases | Full details | Name/description | Granted only |
+| All servers | Full details | Name/description | Granted only |
+| SSH servers | Full details | None | None |
 | All grants | Full | Full | Own only |
 | All queries | Full | Full | None |
 | All connections | Full | Full | Own only |
 | Audit log | Full | Full | None |
+| API keys | Own keys (all users with `?all_users=true`) | Own keys | Own keys |
+
+**SSH servers are admin-only.** A server with `protocol: ssh` is a bastion definition, not a proxied target: it can never be the target of a grant, and non-admins never see it. Its only role is to be referenced by another server's `via_uid`.
+
+**API key listing is caller-scoped.** `GET /api/v1/keys` returns only the calling user's own keys, including for admins. Admins can pass `?all_users=true` to list every user's keys.
 
 ## Access Grants
 
-Grants control which users can connect to which databases through the proxy.
+Grants control which users can connect to which servers through the proxy.
 
 ### Grant Constraints
 
@@ -118,9 +124,30 @@ Grants control which users can connect to which databases through the proxy.
 1. Admin creates grant with constraints
 2. Grant becomes active at `starts_at`
 3. User can connect and execute queries
-4. Quotas are enforced per-query
+4. Quotas and the time window are enforced **mid-stream**, not only between commands
 5. Grant expires at `expires_at` or when revoked
-6. Revoked grants record `revoked_at` and `revoked_by` for audit
+6. Revoking a grant blocks further queries **and disconnects sessions already live** under it, across all protocols
+7. Revoked grants record `revoked_at` and `revoked_by` for audit
+
+### Mid-stream limit enforcement
+
+Grant time windows and byte quotas are checked continuously while data flows, not only at the boundary between commands. A single long query that streams past its remaining time or byte budget is cut off partway through its result set rather than being allowed to run to completion.
+
+Bytes already transferred by such an aborted query are still persisted, so quota accounting stays accurate even when the query never finished.
+
+The same applies to revocation: revoking a grant does not merely refuse new connections — sessions already established under that grant are torn down.
+
+## Upstream Identity
+
+DBBat encodes the acting DBBat username into the upstream connection metadata, so monitoring on the database side attributes queries to the real human rather than to a shared service account:
+
+| Engine | Field carrying the DBBat username |
+|--------|-----------------------------------|
+| PostgreSQL | `application_name` |
+| MySQL / MariaDB | `program_name` |
+| Oracle | `AUTH_PROGRAM_NM` |
+
+This means `pg_stat_activity`, `performance_schema.session_connect_attrs`, `v$session`, and engine-level audit logs all name the individual user. Auditability therefore does not depend solely on DBBat's own records — the upstream database keeps a correlatable trace of its own.
 
 ## Read-Only Mode
 
@@ -224,6 +251,26 @@ DBBat supports PostgreSQL SSL modes for upstream connections:
 - **Oracle listener**: plain TNS only. Same recommendation.
 - **MySQL listener**: TLS termination is built in. Configure `DBB_MYSQL_TLS_CERT_FILE` / `DBB_MYSQL_TLS_KEY_FILE` (PEM-encoded) for production. If unset, the proxy auto-generates a self-signed cert and an RSA-2048 keypair at startup — fine for development, not for production. `DBB_MYSQL_TLS_DISABLE=true` refuses TLS and stays plaintext-only.
 
+### SSH Bastions
+
+A server can set `via_uid` pointing at another server whose `protocol` is `ssh`. Its upstream connection is then dialled through that SSH bastion. This works for all four proxied protocols (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB).
+
+#### Host-key trust model (TOFU)
+
+Bastion host keys are pinned **trust-on-first-use**:
+
+- The first successful connection to a bastion records the host key it presented.
+- Every later connection must present that same key, or the connection is refused.
+- The pinned key is exposed read-only on the server as `ssh_known_host_key`, so operators can inspect and compare it out of band.
+
+What this **does** protect against: a man-in-the-middle appearing *after* the key was pinned, and silent substitution of the bastion.
+
+What this **does not** protect against: an attacker already in position on the very first connection — that key is trusted without prior knowledge. Verify `ssh_known_host_key` against the bastion's real fingerprint after creating the server, particularly on untrusted networks.
+
+#### Private key storage
+
+SSH private keys and their passphrases are **write-only**. They can be set or replaced through the API, but are never returned by any read endpoint — the same encryption-at-rest treatment as target database credentials.
+
 ## Security Checklist
 
 ### Deployment
@@ -242,6 +289,14 @@ DBBat supports PostgreSQL SSL modes for upstream connections:
 - [ ] Review audit logs regularly
 - [ ] Rotate API keys periodically
 - [ ] Monitor for blocked query attempts
+
+### SSH Bastions
+
+- [ ] Verify `ssh_known_host_key` against the bastion's real host-key fingerprint after first connection
+- [ ] Use a dedicated, unprivileged SSH account for DBBat on each bastion
+- [ ] Prefer key authentication over passwords; keep the private key write-only in DBBat and never re-export it
+- [ ] Restrict the bastion account to port forwarding only (no shell), and to the target host/port
+- [ ] Remember that SSH servers are admin-only and can never be granted to a user directly
 
 ### For Target Databases
 

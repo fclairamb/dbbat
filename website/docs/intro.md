@@ -33,6 +33,8 @@ DBBat addresses all these needs without requiring changes to your application co
 
 Each engine has its own listener and is enabled independently via `DBB_LISTEN_PG` / `DBB_LISTEN_ORA` / `DBB_LISTEN_MYSQL` / `DBB_LISTEN_MONGO`. Setting the variable to an empty string disables that proxy.
 
+**Any of the four can be reached through an SSH tunnel.** Register an SSH bastion as a server with `protocol: ssh`, then set the target server's `via_uid` to it — DBBat dials the upstream through the bastion. Bastion host keys are pinned trust-on-first-use.
+
 For protocol-level details, see:
 - [Oracle proxy notes (TNS/TTC)](https://github.com/fclairamb/dbbat/blob/main/docs/oracle.md)
 - [MySQL proxy notes](https://github.com/fclairamb/dbbat/blob/main/docs/mysql.md)
@@ -59,12 +61,13 @@ mongosh / driver     ─►  DBBat (SCRAM-SHA-256 / PLAIN-TLS) ─► MongoDB up
 - Optional Slack OAuth for sign-in, with auto-provisioning configurable per default-role
 - API keys (`dbb_…`) for programmatic access; intentionally cannot create or revoke other keys
 
-### Database Configuration
+### Server Configuration
 
-- Store multiple target database connection details — one entry per database
-- Credentials encrypted at rest with AES-256-GCM (AAD-bound to the database UID, so a stolen ciphertext cannot be transplanted)
-- A `protocol` field marks each entry as `postgresql`, `oracle`, `mysql`, `mariadb`, or `mongodb`
-- For Oracle, an `oracle_service_name` is stored alongside the database name; for MongoDB, an optional `mongo_auth_source` selects the upstream auth database (defaults to `admin`)
+- Store multiple target connection details — one server entry per database
+- Credentials encrypted at rest with AES-256-GCM (AAD-bound to the server UID, so a stolen ciphertext cannot be transplanted)
+- A `protocol` field marks each entry as `postgresql`, `oracle`, `mysql`, `mariadb`, `mongodb`, or `ssh`
+- An `ssh` entry is a bastion definition rather than a proxied target: another server's `via_uid` points at it, and that server's upstream connection is then dialled through the tunnel
+- For Oracle, an `oracle_service_name` is stored alongside the server name; for MongoDB, an optional `mongo_auth_source` selects the upstream auth database (defaults to `admin`)
 
 ### Connection & Query Tracking
 
@@ -75,13 +78,17 @@ mongosh / driver     ─►  DBBat (SCRAM-SHA-256 / PLAIN-TLS) ─► MongoDB up
 
 ### Access Control
 
-- Grant time-windowed access (`starts_at`, `expires_at`) to specific databases
+- Grant time-windowed access (`starts_at`, `expires_at`) to specific servers
 - Apply any combination of controls:
   - `read_only`: regex SQL inspection + PostgreSQL `default_transaction_read_only` + MySQL/MariaDB write blocks
   - `block_copy`: forbid `COPY` (PostgreSQL) and `LOAD DATA` / `SELECT … INTO OUTFILE` (MySQL)
   - `block_ddl`: forbid `CREATE`, `ALTER`, `DROP`, `TRUNCATE`
 - Optional quotas: `max_query_counts`, `max_bytes_transferred`
+- **Grant definitions**: reusable templates describing what a user may request, so access does not have to be hand-crafted each time
+- **Self-service grant requests**: users request access against a definition instead of pinging an admin
+- **Auto-approve**: a grant definition can be flagged `auto_approve`, so matching requests are approved instantly. A justification is still required, the resulting grant is audit-tagged `via: auto_approve`, and the Slack notification is sent without Approve/Deny buttons
 - Automatic expiration or manual revocation, with audit log entries for every change
+- Revocation is immediate: it blocks further queries **and tears down sessions already live** under the grant, across all protocols
 
 ### Session Packet Dumps
 
@@ -91,7 +98,8 @@ Optional per-session binary dumps of the post-auth command stream, written as `.
 
 - Full OpenAPI 3.0 specification, served at `/api/openapi.yml`
 - Swagger UI at `/api/docs`
-- Embedded React frontend at `/app` for grant/user/database management and query browsing
+- Embedded React frontend at `/app` for grant/user/server management and query browsing — servers live at `/servers`
+- Connection detail pages, reachable from the query list and from a query's breadcrumb
 - All API endpoints versioned under `/api/v1/`
 
 ## How It Works
@@ -99,11 +107,12 @@ Optional per-session binary dumps of the post-auth command stream, written as `.
 Everything described here can be done via the REST API or the web UI.
 
 1. **Admin creates a user**
-2. **Admin configures a target database** (protocol, host, port, credentials, optional `oracle_service_name`)
-3. **Admin grants the user access** to the database with a time window, controls, and optional quotas
-4. **User connects** with `psql` / `sqlplus` / `mysql` / `mongosh` / any client, using their DBBat credentials (or an API key)
-5. **DBBat authenticates** the user, checks for a valid grant, and connects to the upstream using the stored encrypted credentials
-6. **DBBat proxies** all queries to the target database, logging everything
+2. **Admin configures a target server** (protocol, host, port, credentials, optional `oracle_service_name`)
+3. *(Optional)* **Admin adds an SSH bastion server** (`protocol: ssh`) and sets the target's `via_uid` to it, so the upstream connection is dialled through the tunnel
+4. **Admin grants the user access** to the server with a time window, controls, and optional quotas — or the user requests it themselves against a grant definition
+5. **User connects** with `psql` / `sqlplus` / `mysql` / `mongosh` / any client, using their DBBat credentials (or an API key)
+6. **DBBat authenticates** the user, checks for a valid grant, and connects to the upstream using the stored encrypted credentials
+7. **DBBat proxies** all queries to the target database, logging everything
 
 ## Security
 

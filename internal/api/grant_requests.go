@@ -113,6 +113,40 @@ type DenyGrantRequestRequest struct {
 
 const maxJustificationLen = 1000
 
+// enforceRequestScope writes an error response and returns false when the
+// definition's group/database scope does not cover this requester and target.
+// This is the security-critical gate: it also covers the auto-approve path,
+// where no human ever reviews the request.
+func (s *Server) enforceRequestScope(
+	c *gin.Context,
+	def *store.GrantDefinition,
+	requester *store.User,
+	databaseID uuid.UUID,
+) bool {
+	groupUIDs, err := s.store.ListUserGroupUIDs(c.Request.Context(), requester.UID)
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to list user groups")
+
+		return false
+	}
+
+	if !def.AppliesToGroups(groupUIDs) {
+		writeError(c, http.StatusForbidden, ErrCodeForbidden,
+			"this grant definition is not available to your user groups")
+
+		return false
+	}
+
+	if !def.AppliesToDatabase(databaseID) {
+		writeError(c, http.StatusForbidden, ErrCodeForbidden,
+			"this grant definition cannot be requested for this database")
+
+		return false
+	}
+
+	return true
+}
+
 // handleCreateGrantRequest — any authenticated user can request access.
 func (s *Server) handleCreateGrantRequest(c *gin.Context) {
 	var req CreateGrantRequestRequest
@@ -155,6 +189,10 @@ func (s *Server) handleCreateGrantRequest(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
 			"justification is required for auto-approved grant definitions")
 
+		return
+	}
+
+	if !s.enforceRequestScope(c, def, currentUser, req.DatabaseID) {
 		return
 	}
 
@@ -324,11 +362,48 @@ type decideOutcome struct {
 	Action  notify.GrantAction       // approved | denied
 }
 
+// ErrRequestOutOfScope is returned when a pending request no longer matches
+// its definition's scope — typically because an admin tightened the scope
+// after the request was filed. It hard-blocks the approval rather than
+// silently granting access the current policy no longer allows; an admin who
+// still wants to grant it can always create a direct grant.
+var ErrRequestOutOfScope = errors.New("grant request is out of the definition's scope")
+
+// checkRequestInScope re-validates a pending request against its definition's
+// current group/database scope. A missing request or definition is left to the
+// store transition to report, so error mapping stays in one place.
+func (s *Server) checkRequestInScope(ctx context.Context, uid uuid.UUID) error {
+	request, err := s.store.GetGrantRequest(ctx, uid)
+	if err != nil {
+		return nil //nolint:nilerr // the store transition reports not-found
+	}
+
+	def, err := s.store.GetGrantDefinition(ctx, request.GrantDefinitionID)
+	if err != nil {
+		return nil //nolint:nilerr // the store transition reports not-found
+	}
+
+	groupUIDs, err := s.store.ListUserGroupUIDs(ctx, request.UserID)
+	if err != nil {
+		return err
+	}
+
+	if !def.AppliesTo(groupUIDs, request.DatabaseID) {
+		return ErrRequestOutOfScope
+	}
+
+	return nil
+}
+
 // approveGrantRequest runs the approve decision: store transition, audit
 // event (with source), and async notification. It returns the raw store
 // error unmapped so each caller can translate it to its own transport
 // (HTTP status vs Slack ephemeral). Mirrors the deny path below.
 func (s *Server) approveGrantRequest(ctx context.Context, uid uuid.UUID, decider *store.User, source decisionSource) (*decideOutcome, error) {
+	if err := s.checkRequestInScope(ctx, uid); err != nil {
+		return nil, err
+	}
+
 	grant, request, err := s.store.ApproveGrantRequest(ctx, uid, decider.UID)
 	if err != nil {
 		return nil, err
@@ -443,6 +518,9 @@ func (s *Server) handleApproveGrantRequest(c *gin.Context) {
 			writeError(c, http.StatusConflict, ErrCodeConflict, "grant request is not pending")
 		case errors.Is(err, store.ErrDefinitionInactive):
 			writeError(c, http.StatusConflict, ErrCodeConflict, "grant definition is no longer active")
+		case errors.Is(err, ErrRequestOutOfScope):
+			writeError(c, http.StatusConflict, ErrCodeConflict,
+				"the grant definition's scope no longer covers this user or database")
 		default:
 			writeInternalError(c, s.logger, err, "failed to approve grant request")
 		}

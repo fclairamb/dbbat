@@ -65,8 +65,12 @@ jobs:
         run: bun run lint
         working-directory: front
 
+      - name: Type-check frontend
+        run: bun run typecheck
+        working-directory: front
+
       - name: Build frontend
-        run: bun run build:no-check
+        run: bun run build
         working-directory: front
 
       - name: Upload frontend artifacts
@@ -91,6 +95,12 @@ jobs:
 
       - name: Run tests
         run: go test -race -coverprofile=coverage.out ./...
+
+      # Integration-tagged tests need live databases and so never run here, but
+      # they must at least keep compiling — otherwise they rot silently until
+      # someone tries to run them.
+      - name: Vet integration-tagged build
+        run: go vet -tags integration ./...
 
       - name: Upload coverage
         uses: codecov/codecov-action@v7.0.0

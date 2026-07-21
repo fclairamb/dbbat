@@ -25,6 +25,7 @@ import {
   canViewQueries,
   canViewAudit,
   canManageGrantDefinitions,
+  canManageUserGroups,
 } from "@/lib/permissions";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -57,6 +58,7 @@ import { useTheme } from "@/hooks/use-theme";
 const mainNavItems = [
   { title: "Dashboard", icon: LayoutDashboard, href: "/" },
   { title: "Users", icon: Users, href: "/users" },
+  { title: "User Groups", icon: Users, href: "/user-groups" },
   { title: "Servers", icon: Database, href: "/servers" },
   { title: "Grants", icon: Shield, href: "/grants" },
   { title: "Grant Definitions", icon: Shield, href: "/grant-definitions" },
@@ -88,6 +90,10 @@ export function AppSidebar() {
     // Only show Users page to admins
     if (item.href === "/users") {
       return hasRole(user?.roles, "admin");
+    }
+    // Groups gate which definitions a user can request — admin-only
+    if (item.href === "/user-groups") {
+      return canManageUserGroups(user?.roles);
     }
     // Grant definitions are admin-only — non-admins don't manage templates
     if (item.href === "/grant-definitions") {

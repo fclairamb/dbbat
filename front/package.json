@@ -7,6 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "build:no-check": "vite build",
+    "typecheck": "tsc -b --noEmit",
     "lint": "eslint .",
     "preview": "vite preview",
     "generate-client": "openapi-typescript ../internal/api/openapi.yml -o ./src/api/schema.ts --root-types --root-types-no-schema-prefix",

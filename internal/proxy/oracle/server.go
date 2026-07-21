@@ -25,13 +25,16 @@ type Server struct {
 	queryStorage  config.QueryStorageConfig
 	dumpConfig    config.DumpConfig
 	logger        *slog.Logger
-	mu            sync.Mutex
-	listener      net.Listener
-	listenAddr    string
-	wg            sync.WaitGroup
-	shutdown      chan struct{}
-	ctx           context.Context //nolint:containedctx
-	cancel        context.CancelFunc
+	// listenerMu guards listener, which is written by Start and read
+	// concurrently by Addr/Shutdown (e.g. tests polling Addr while Start runs
+	// in a goroutine).
+	listenerMu sync.Mutex
+	listener   net.Listener
+	listenAddr string
+	wg         sync.WaitGroup
+	shutdown   chan struct{}
+	ctx        context.Context //nolint:containedctx
+	cancel     context.CancelFunc
 }
 
 // NewServer creates a new Oracle proxy server.
@@ -70,10 +73,8 @@ func (s *Server) Start(addr string) error {
 		return fmt.Errorf("failed to listen: %w", err)
 	}
 
-	s.mu.Lock()
-	s.listener = listener
+	s.setListener(listener)
 	s.listenAddr = addr
-	s.mu.Unlock()
 	s.logger.InfoContext(s.ctx, "Oracle proxy server listening", slog.String("addr", addr),
 		slog.String("dump_dir", s.dumpConfig.Dir))
 
@@ -113,11 +114,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	close(s.shutdown)
 	s.cancel()
 
-	s.mu.Lock()
-	listener := s.listener
-	s.mu.Unlock()
-
-	if listener != nil {
+	if listener := s.getListener(); listener != nil {
 		if err := listener.Close(); err != nil {
 			s.logger.ErrorContext(ctx, "failed to close listener", slog.Any("error", err))
 		}
@@ -144,14 +141,27 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // Addr returns the listener address, useful for tests with ":0" port.
 func (s *Server) Addr() net.Addr {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.listener != nil {
-		return s.listener.Addr()
+	listener := s.getListener()
+	if listener == nil {
+		return nil
 	}
 
-	return nil
+	return listener.Addr()
+}
+
+// setListener stores the active listener under the guard.
+func (s *Server) setListener(l net.Listener) {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+	s.listener = l
+}
+
+// getListener reads the active listener under the guard.
+func (s *Server) getListener() net.Listener {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+
+	return s.listener
 }
 
 // handleConnection handles a single Oracle client connection.

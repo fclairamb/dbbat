@@ -5,11 +5,13 @@ package oracle
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -33,6 +35,27 @@ func oracleTestImage() string {
 	}
 
 	return defaultOracleImage
+}
+
+// oracleTestService returns the PDB service name exposed by the test image:
+// gvenzl's XE images serve XEPDB1, the Free (23ai) images FREEPDB1, and the
+// enterprise image is started below with ORACLE_PDB=ORCLPDB1.
+// ORACLE_TEST_SERVICE overrides the guess.
+func oracleTestService() string {
+	if svc := os.Getenv("ORACLE_TEST_SERVICE"); svc != "" {
+		return svc
+	}
+
+	image := oracleTestImage()
+
+	switch {
+	case strings.Contains(image, "enterprise"):
+		return "ORCLPDB1"
+	case strings.Contains(image, "oracle-free"):
+		return "FREEPDB1"
+	default:
+		return "XEPDB1"
+	}
 }
 
 // startOracleContainer starts an Oracle XE container for testing.
@@ -77,7 +100,65 @@ func startOracleContainer(t *testing.T) (testcontainers.Container, string, int) 
 
 	t.Logf("Oracle container ready: image=%s host=%s port=%s", image, host, port.Port())
 
-	return container, host, port.Int()
+	return container, host, int(port.Num())
+}
+
+// buildTNSConnect constructs a TNS Connect packet payload for the given service
+// name. It used to live in upstream_auth.go, but upstream connection setup now
+// goes through go-ora, so the only remaining user is this raw-socket test.
+//
+// The payload is a 50-byte Connect header followed by the connect descriptor,
+// so the descriptor starts at offset 58 of the packet (8-byte TNS header + 50)
+// — the canonical value Oracle listeners expect in the data-offset field.
+// This is a simplified version — real Connect packets carry many more fields.
+//
+// The announced TNS version is deliberately 313 (12c-era): from 315 onwards
+// Oracle switches to the extended Connect format (4-byte lengths, connect data
+// sent after the announced packet length — see readExtendedConnectData), which
+// this builder does not emit. Announcing 315+ here makes a 23ai listener drop
+// the connection outright; 313 and below get a normal Accept.
+func buildTNSConnect(serviceName string) []byte {
+	descriptor := fmt.Sprintf(
+		"(DESCRIPTION=(CONNECT_DATA=(SERVICE_NAME=%s)"+
+			"(CID=(PROGRAM=dbbat)(HOST=dbbat-test)(USER=dbbat))))",
+		serviceName,
+	)
+	descriptorBytes := []byte(descriptor)
+	headerLen := 50
+
+	header := make([]byte, headerLen)
+	// Version (2 bytes) — TNS 313; see the note above about 315+
+	binary.BigEndian.PutUint16(header[0:2], 313)
+	// Compatible version (2 bytes)
+	binary.BigEndian.PutUint16(header[2:4], 300)
+	// Service options (2 bytes)
+	binary.BigEndian.PutUint16(header[4:6], 0)
+	// SDU size (2 bytes) — 8192
+	binary.BigEndian.PutUint16(header[6:8], 8192)
+	// TDU size (2 bytes) — 65535
+	binary.BigEndian.PutUint16(header[8:10], 65535)
+	// Protocol characteristics (2 bytes)
+	binary.BigEndian.PutUint16(header[10:12], 0x8001)
+	// Max packets before ACK (2 bytes)
+	binary.BigEndian.PutUint16(header[12:14], 0)
+	// Byte order/endianness (2 bytes)
+	binary.BigEndian.PutUint16(header[14:16], 1)
+	// Data length (2 bytes) — connect descriptor length
+	binary.BigEndian.PutUint16(header[16:18], uint16(len(descriptorBytes)))
+	// Data offset (2 bytes) — offset from start of the TNS packet to the descriptor
+	binary.BigEndian.PutUint16(header[18:20], uint16(tnsHeaderSize+headerLen))
+	// Max receivable connect data (4 bytes)
+	binary.BigEndian.PutUint32(header[20:24], 0)
+	// Connect flags 0 and 1
+	header[24] = 0x41
+	header[25] = 0x41
+	// Remaining bytes are zero (trace info, padding, etc.)
+
+	result := make([]byte, 0, len(header)+len(descriptorBytes))
+	result = append(result, header...)
+	result = append(result, descriptorBytes...)
+
+	return result
 }
 
 // TestIntegration_OracleContainer verifies we can start and connect to Oracle directly.
@@ -85,7 +166,7 @@ func TestIntegration_OracleContainer(t *testing.T) {
 	container, host, port := startOracleContainer(t)
 	defer func() { _ = container.Terminate(context.Background()) }()
 
-	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/XEPDB1", host, port)
+	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/%s", host, port, oracleTestService())
 	db, err := sql.Open("oracle", dsn)
 	require.NoError(t, err)
 	defer db.Close()
@@ -105,11 +186,11 @@ func TestIntegration_TNSCapture(t *testing.T) {
 	container, host, port := startOracleContainer(t)
 	defer func() { _ = container.Terminate(context.Background()) }()
 
-	conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", host, port))
+	conn, err := net.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	require.NoError(t, err)
 	defer conn.Close()
 
-	connectPayload := buildTNSConnect("XEPDB1")
+	connectPayload := buildTNSConnect(oracleTestService())
 	connectPkt := encodeTNSPacket(TNSPacketTypeConnect, connectPayload)
 
 	_, err = conn.Write(connectPkt)
@@ -165,18 +246,31 @@ func TestIntegration_ProxyPassthrough(t *testing.T) {
 	user, err := dataStore.CreateUser(ctx, "SYSTEM", "$argon2id$v=19$m=4096,t=3,p=1$salt$hash", []string{"connector"})
 	require.NoError(t, err)
 
+	// Server credentials are AES-256-GCM encrypted at rest, so both the store
+	// and the proxy need the same 32-byte key.
+	encryptionKey := []byte("0123456789012345678901234567890X")
+
+	service := oracleTestService()
 	db, err := dataStore.CreateServer(ctx, &store.Server{
-		Name:         "XEPDB1",
-		Host:         oracleHost,
-		Port:         oraclePort,
-		DatabaseName: "XEPDB1",
-		Username:     "system",
-		Protocol:     store.ProtocolOracle,
-	}, nil)
+		Name:              service,
+		Host:              oracleHost,
+		Port:              oraclePort,
+		DatabaseName:      service,
+		OracleServiceName: &service,
+		Username:          "system",
+		Password:          "oracle",
+		Protocol:          store.ProtocolOracle,
+	}, encryptionKey)
 	require.NoError(t, err)
 
-	_, err = dataStore.CreateGrant(ctx, user.UID, db.UID, user.UID, []string{},
-		time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour), nil, nil)
+	_, err = dataStore.CreateGrant(ctx, &store.Grant{
+		UserID:     user.UID,
+		DatabaseID: db.UID,
+		GrantedBy:  user.UID,
+		Controls:   []string{},
+		StartsAt:   time.Now().Add(-time.Hour),
+		ExpiresAt:  time.Now().Add(24 * time.Hour),
+	})
 	require.NoError(t, err)
 
 	queryStorage := config.QueryStorageConfig{
@@ -185,7 +279,7 @@ func TestIntegration_ProxyPassthrough(t *testing.T) {
 		MaxResultBytes: 1048576,
 	}
 
-	proxy := NewServer(dataStore, nil, nil, queryStorage, slog.Default())
+	proxy := NewServer(dataStore, encryptionKey, nil, queryStorage, config.DumpConfig{}, slog.Default())
 	go func() { _ = proxy.Start(":0") }()
 	defer func() { _ = proxy.Shutdown(ctx) }()
 
@@ -196,7 +290,7 @@ func TestIntegration_ProxyPassthrough(t *testing.T) {
 	require.NoError(t, err)
 	defer proxyConn.Close()
 
-	connectPayload := buildTNSConnect("XEPDB1")
+	connectPayload := buildTNSConnect(oracleTestService())
 	_, err = proxyConn.Write(encodeTNSPacket(TNSPacketTypeConnect, connectPayload))
 	require.NoError(t, err)
 
@@ -227,7 +321,7 @@ func TestIntegration_ConcurrentSessions(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 
-			dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/XEPDB1", host, port)
+			dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/%s", host, port, oracleTestService())
 			db, err := sql.Open("oracle", dsn)
 			if err != nil {
 				errs[idx] = err
@@ -251,7 +345,7 @@ func TestIntegration_LargeResultSet(t *testing.T) {
 	container, host, port := startOracleContainer(t)
 	defer func() { _ = container.Terminate(context.Background()) }()
 
-	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/XEPDB1", host, port)
+	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/%s", host, port, oracleTestService())
 	db, err := sql.Open("oracle", dsn)
 	require.NoError(t, err)
 	defer db.Close()
@@ -274,7 +368,7 @@ func TestIntegration_MultipleDataTypes(t *testing.T) {
 	container, host, port := startOracleContainer(t)
 	defer func() { _ = container.Terminate(context.Background()) }()
 
-	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/XEPDB1", host, port)
+	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/%s", host, port, oracleTestService())
 	db, err := sql.Open("oracle", dsn)
 	require.NoError(t, err)
 	defer db.Close()
@@ -310,7 +404,7 @@ func TestIntegration_VersionDetection(t *testing.T) {
 	container, host, port := startOracleContainer(t)
 	defer func() { _ = container.Terminate(context.Background()) }()
 
-	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/XEPDB1", host, port)
+	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/%s", host, port, oracleTestService())
 	db, err := sql.Open("oracle", dsn)
 	require.NoError(t, err)
 	defer db.Close()

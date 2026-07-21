@@ -24,6 +24,9 @@ type CreateUserRequest struct {
 type UpdateUserRequest struct {
 	Password *string  `json:"password"`
 	Roles    []string `json:"roles"`
+	// GroupUIDs, when non-nil, replaces the user's group memberships
+	// wholesale. Admin-only, like Roles.
+	GroupUIDs []uuid.UUID `json:"group_uids"`
 }
 
 // setMongoVerifier derives and stores the user's MongoDB SCRAM-SHA-256 verifier
@@ -117,7 +120,22 @@ func (s *Server) handleGetUser(c *gin.Context) {
 		return
 	}
 
-	successResponse(c, user)
+	// Groups ride along on the detail response so the user editor can render
+	// (and edit) membership without a second round-trip.
+	groups, err := s.store.ListGroupsForUser(c.Request.Context(), uid)
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to list user groups")
+		return
+	}
+
+	successResponse(c, userDetailResponse{User: user, Groups: groups})
+}
+
+// userDetailResponse is a user plus the groups they belong to.
+type userDetailResponse struct {
+	*store.User
+
+	Groups []store.UserGroup `json:"groups"`
 }
 
 // handleUpdateUser updates a user
@@ -151,16 +169,12 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 
 	currentUser := getCurrentUser(c)
 
-	// Non-admins can only update their own password
-	if !currentUser.IsAdmin() {
-		if uid != currentUser.UID {
-			writeError(c, http.StatusForbidden, ErrCodeForbidden, "can only update your own user")
-			return
-		}
-		if req.Roles != nil {
-			writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot change roles")
-			return
-		}
+	if !s.checkSelfUpdateAllowed(c, uid, currentUser, &req) {
+		return
+	}
+
+	if !s.checkGroupsExist(c, req.GroupUIDs) {
+		return
 	}
 
 	// Prevent a roles update that would leave the instance without any admin
@@ -187,6 +201,13 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 		return
 	}
 
+	if req.GroupUIDs != nil {
+		if err := s.store.SetUserGroups(c.Request.Context(), uid, req.GroupUIDs); err != nil {
+			writeInternalError(c, s.logger, err, "failed to update user groups")
+			return
+		}
+	}
+
 	// Refresh the MongoDB SCRAM verifier when the password changed.
 	if req.Password != nil {
 		s.setMongoVerifier(c, uid, *req.Password)
@@ -203,7 +224,69 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 		Details:     details,
 	})
 
+	// Membership is access-relevant (it gates grant definitions), so record
+	// it as its own event rather than burying it in user.updated.
+	if req.GroupUIDs != nil {
+		groupDetails, _ := json.Marshal(map[string]interface{}{
+			"user_uid":   uid,
+			"group_uids": req.GroupUIDs,
+		})
+		_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
+			EventType:   "user_group.membership_set",
+			UserID:      &uid,
+			PerformedBy: &currentUser.UID,
+			Details:     groupDetails,
+		})
+	}
+
 	successResponse(c, gin.H{"message": "user updated"})
+}
+
+// checkSelfUpdateAllowed enforces the non-admin restrictions on a user
+// update: you may only touch your own account, and only your password —
+// roles and groups are both access-control levers, so both stay admin-only.
+// Writes an error response and returns false when the update is refused.
+func (s *Server) checkSelfUpdateAllowed(
+	c *gin.Context,
+	uid uuid.UUID,
+	currentUser *store.User,
+	req *UpdateUserRequest,
+) bool {
+	if currentUser.IsAdmin() {
+		return true
+	}
+
+	if uid != currentUser.UID {
+		writeError(c, http.StatusForbidden, ErrCodeForbidden, "can only update your own user")
+		return false
+	}
+
+	if req.Roles != nil {
+		writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot change roles")
+		return false
+	}
+
+	if req.GroupUIDs != nil {
+		writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot change groups")
+		return false
+	}
+
+	return true
+}
+
+// checkGroupsExist writes an error response and returns false when any uid
+// does not name a real group. Membership gates which grant definitions a user
+// may request, so a bogus uid must not be silently persisted.
+func (s *Server) checkGroupsExist(c *gin.Context, groupUIDs []uuid.UUID) bool {
+	for _, groupUID := range groupUIDs {
+		if _, err := s.store.GetUserGroup(c.Request.Context(), groupUID); err != nil {
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError,
+				"user group does not exist: "+groupUID.String())
+			return false
+		}
+	}
+
+	return true
 }
 
 // rejectLastAdminDemotion writes an error response and returns true when the

@@ -168,4 +168,50 @@ test.describe("Servers Management", () => {
       timeout: 10000,
     });
   });
+
+  test("testing an unreachable SSH bastion reports the failing stage", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const sshSection = authenticatedPage.getByTestId("ssh-servers-section");
+    await expect(sshSection).toBeVisible();
+
+    const name = `e2e-bastion-test-${Date.now()}`;
+
+    // 127.0.0.1:1 has nothing listening: the check must fail loudly rather than
+    // report the write-and-hope success this feature exists to eliminate.
+    await authenticatedPage.getByTestId("add-database-button").click();
+    await authenticatedPage.getByTestId("protocol-select").click();
+    await authenticatedPage.getByTestId("protocol-option-ssh").click();
+    await authenticatedPage.getByTestId("database-name-input").fill(name);
+    await authenticatedPage.locator("#host").fill("127.0.0.1");
+    await authenticatedPage.locator("#port").fill("1");
+    await authenticatedPage.locator("#username").fill("bastion-user");
+    await authenticatedPage.locator("#password").fill("bastion-password");
+    await authenticatedPage.getByTestId("database-create-submit").click();
+
+    const row = sshSection.locator("tr", { hasText: name });
+    await expect(row).toBeVisible({ timeout: 10000 });
+
+    const testButton = row.locator('[data-testid^="ssh-server-test-"]');
+    await expect(testButton).toBeVisible();
+
+    const [response] = await Promise.all([
+      authenticatedPage.waitForResponse(
+        (r) => /\/api\/v1\/servers\/[^/]+\/test$/.test(r.url())
+      ),
+      testButton.click(),
+    ]);
+
+    expect(response.status()).toBe(200);
+
+    const body = await response.json();
+    expect(body.ok).toBe(false);
+    expect(["bastion_dial", "config"]).toContain(body.stage);
+    expect(typeof body.message).toBe("string");
+    // The stored credentials must never come back out.
+    expect(JSON.stringify(body)).not.toContain("bastion-password");
+  });
 });

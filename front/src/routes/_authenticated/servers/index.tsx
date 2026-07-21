@@ -7,6 +7,8 @@ import {
   useUpdateDatabase,
   useDeleteDatabase,
   useSSHServers,
+  useTestServerConnection,
+  type ConnectionTestResult,
   type Database,
   type DatabaseLimited,
 } from "@/api";
@@ -51,7 +53,14 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Plus, Trash2, Pencil, AlertCircle } from "lucide-react";
+import {
+  Plus,
+  Trash2,
+  Pencil,
+  AlertCircle,
+  PlugZap,
+  Loader2,
+} from "lucide-react";
 import { toast } from "sonner";
 import { CopyableField } from "@/components/shared/CopyableField";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -161,6 +170,12 @@ function ServersPage() {
       header: "",
       cell: (srv) => (
         <div className="flex items-center gap-1">
+          <TestConnectionButton
+            uid={srv.uid}
+            testId={`ssh-server-test-${srv.uid}`}
+            canTest={canUpdate}
+            disabledReason={getDisabledReason("update-database", user?.roles)}
+          />
           <PermissionButton
             data-testid={`ssh-server-edit-${srv.uid}`}
             variant="ghost"
@@ -269,21 +284,31 @@ function ServersPage() {
       key: "actions",
       header: "",
       cell: (db) => (
-        <PermissionButton
-          variant="ghost"
-          size="icon"
-          disabled={!canDelete}
-          disabledReason={getDisabledReason("delete-database", user?.roles)}
-          enabledTooltip={getActionTooltip("delete-database")}
-          onClick={(e) => {
-            e.stopPropagation();
-            setDeleteDb(db);
-          }}
-        >
-          <Trash2 className="h-4 w-4" />
-        </PermissionButton>
+        <div className="flex items-center gap-1">
+          {canUpdate && (
+            <TestConnectionButton
+              uid={db.uid}
+              testId={`database-test-${db.uid}`}
+              canTest={canUpdate}
+              disabledReason={getDisabledReason("update-database", user?.roles)}
+            />
+          )}
+          <PermissionButton
+            variant="ghost"
+            size="icon"
+            disabled={!canDelete}
+            disabledReason={getDisabledReason("delete-database", user?.roles)}
+            enabledTooltip={getActionTooltip("delete-database")}
+            onClick={(e) => {
+              e.stopPropagation();
+              setDeleteDb(db);
+            }}
+          >
+            <Trash2 className="h-4 w-4" />
+          </PermissionButton>
+        </div>
       ),
-      className: "w-10",
+      className: "w-20",
     },
   ];
 
@@ -345,6 +370,71 @@ function ServersPage() {
         onClose={() => setEditSshServer(null)}
       />
     </div>
+  );
+}
+
+// STAGE_LABEL turns a failed check's stage into the thing the admin should go
+// look at. The stage — not the message — is what identifies the wrong field.
+const STAGE_LABEL: Record<string, string> = {
+  config: "Configuration",
+  bastion_dial: "Reaching the SSH bastion",
+  bastion_auth: "SSH authentication",
+  target_dial: "Reaching the database",
+  target_auth: "Database authentication",
+};
+
+function describeTestResult(result: ConnectionTestResult): string {
+  const stage = STAGE_LABEL[result.stage ?? ""] ?? result.stage ?? "";
+  return stage ? `${stage}: ${result.message}` : (result.message ?? "");
+}
+
+// TestConnectionButton dials the server for real and reports the staged
+// outcome. Rendered per row, so each button owns its own mutation state.
+function TestConnectionButton({
+  uid,
+  testId,
+  canTest,
+  disabledReason,
+}: {
+  uid: string;
+  testId: string;
+  canTest: boolean;
+  disabledReason?: string;
+}) {
+  const testConnection = useTestServerConnection(uid);
+
+  return (
+    <PermissionButton
+      data-testid={testId}
+      variant="ghost"
+      size="icon"
+      disabled={!canTest || testConnection.isPending}
+      disabledReason={disabledReason}
+      enabledTooltip="Test this server's connectivity"
+      onClick={(e) => {
+        e.stopPropagation();
+        testConnection.mutate(undefined, {
+          onSuccess: (result) => {
+            if (result.ok) {
+              toast.success(
+                result.host_key_pinned
+                  ? `${result.message} (host key pinned)`
+                  : result.message
+              );
+              return;
+            }
+            toast.error(describeTestResult(result));
+          },
+          onError: (error: Error) => toast.error(error.message),
+        });
+      }}
+    >
+      {testConnection.isPending ? (
+        <Loader2 className="h-4 w-4 animate-spin" />
+      ) : (
+        <PlugZap className="h-4 w-4" />
+      )}
+    </PermissionButton>
   );
 }
 

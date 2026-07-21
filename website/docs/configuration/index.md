@@ -119,11 +119,20 @@ See [Session Packet Dumps](/docs/features/session-dumps) for what gets captured.
 When configured, DBBat posts each grant request to a Slack channel and updates
 that message as the request is decided.
 
+:::note Auto-approved requests
+Grant definitions can be flagged `auto_approve`. A request matching such a
+definition is approved instantly at request time — there is no admin decision to
+make, so its Slack notification carries **no Approve/Deny buttons**, whether or
+not a signing secret or app token is configured. A justification is still
+required, and the approval gets its own audit trail tagged `via: auto_approve`
+(as opposed to `via: slack` or a web-UI decision).
+:::
+
 | Variable | Description |
 |----------|-------------|
 | `DBB_SLACK_NOTIFY_BOT_TOKEN` | Bot user OAuth token (`xoxb-…`). Empty disables notifications. |
 | `DBB_SLACK_NOTIFY_CHANNEL` | Channel id or `#name` to post to (default `#dbbat`). Required when the bot token is set. |
-| `DBB_PUBLIC_URL` | Externally reachable base URL, used for the "Review in dbbat" deep-link. Required when the bot token is set. |
+| `DBB_PUBLIC_URL` | Externally reachable base URL, used for the "Review in dbbat" deep-link. Required when the bot token is set, unless the `public.web_ui_url` parameter is set (see [Global Parameters](#global-parameters)) — that parameter takes precedence when both are present. |
 | `DBB_SLACK_SIGNING_SECRET` | App signing secret. When set, notification messages carry **✅ Approve / ❌ Deny** buttons and DBBat serves `POST /api/v1/slack/interactions` to receive clicks. Empty keeps the link-through-UI flow (no buttons, no inbound endpoint). Requires the bot token — setting it without one fails at startup. The legacy name `DBB_SLACK_NOTIFY_SIGNING_SECRET` is also accepted as an alias; if both are set, the canonical `DBB_SLACK_SIGNING_SECRET` wins. |
 | `DBB_SLACK_NOTIFY_APP_TOKEN` | App-level token (`xapp-…`, scope `connections:write`). When set, DBBat opens an outbound **Socket Mode** connection and receives Approve/Deny clicks over it — no inbound reachability or signing secret needed. Renders the buttons on its own. Requires the bot token — setting it without one fails at startup. |
 
@@ -158,6 +167,10 @@ approve or deny; anyone else who clicks gets an ephemeral error. A decision made
 from a button is identical to one made in the web UI (same audit event, tagged
 `via: slack`), updates the original message in place (removing the buttons), and
 posts a reply in the message thread.
+
+Requests matching an `auto_approve` grant definition never reach this flow: they
+are already approved when the message is posted, so it carries no buttons and is
+never "decided". Their audit event is tagged `via: auto_approve`.
 
 **Deployment note:** button clicks require *Slack's servers* to reach
 `DBB_PUBLIC_URL` (inbound), whereas the deep-link only needs *users' browsers*
@@ -237,6 +250,30 @@ Load with the `--config` flag:
 ```bash
 dbbat serve --config /etc/dbbat/config.yaml
 ```
+
+## Global Parameters
+
+Since v0.16.0, some settings live in the database rather than in the environment,
+so an operator can change them at runtime without a restart. They are managed
+through `GET`, `PUT`, and `DELETE` on `/api/v1/parameters`, and the effective
+values are exposed by `GET /api/v1/instance`.
+
+| Parameter | Description |
+|-----------|-------------|
+| `public.web_ui_url` | Externally reachable base URL of the web UI, used for Slack deep-links. **Takes precedence over `DBB_PUBLIC_URL`** when set. |
+
+```bash
+# Read the current parameters
+curl -H "Authorization: Bearer $TOKEN" http://localhost:4200/api/v1/parameters
+
+# Set the public web UI URL
+curl -X PUT http://localhost:4200/api/v1/parameters \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"public.web_ui_url": "https://dbbat.example.com"}'
+```
+
+Deleting the parameter falls back to `DBB_PUBLIC_URL`.
 
 ## Generating an Encryption Key
 

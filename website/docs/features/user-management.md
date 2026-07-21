@@ -1,12 +1,12 @@
 ---
-sidebar_position: 3
+sidebar_position: 4
 ---
 
 # User Management
 
 DBBat maintains its own user database, separate from target database users. This separation provides:
 
-- Independent credentials for proxy access (one DBBat login, many target databases)
+- Independent credentials for proxy access (one DBBat login, many target servers)
 - Central user management across PostgreSQL, Oracle, MySQL/MariaDB, and MongoDB targets
 - Audit trail of user actions
 
@@ -18,7 +18,7 @@ Each user carries one or more roles. Roles are **additive**.
 |------|-------------|
 | `admin` | Full access to all resources and operations |
 | `viewer` | Read-only access to observability data (connections, queries, audit) |
-| `connector` | Can only connect through the proxy to databases with active grants |
+| `connector` | Can only connect through the proxy to servers with active grants |
 
 A user can have multiple roles (e.g. `["admin", "connector"]` so an admin can also connect through the proxy).
 
@@ -36,6 +36,8 @@ curl -X POST http://localhost:4200/api/v1/users \
     "roles": ["connector"]
   }'
 ```
+
+Usernames are unique: creating a user whose username already exists returns `409 DUPLICATE_NAME`.
 
 ## User Fields
 
@@ -124,6 +126,23 @@ curl -X POST http://localhost:4200/api/v1/keys \
 ```
 
 The full key is **only returned once**. Store it securely.
+
+### Listing keys
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" http://localhost:4200/api/v1/keys
+```
+
+The list is **scoped to the caller's own keys by default — for everyone, including admins**. An admin who wants to see every user's keys must ask for it explicitly:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:4200/api/v1/keys?all_users=true"
+```
+
+`?all_users=true` is admin-only.
+
+### Restrictions
 
 API keys carry their owner's roles, but with two intentional restrictions:
 

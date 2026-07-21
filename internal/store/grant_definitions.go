@@ -27,6 +27,16 @@ func (s *Store) CreateGrantDefinition(ctx context.Context, def *GrantDefinition)
 		controls = []string{}
 	}
 
+	groupUIDs := def.GroupUIDs
+	if groupUIDs == nil {
+		groupUIDs = []uuid.UUID{}
+	}
+
+	databaseUIDs := def.DatabaseUIDs
+	if databaseUIDs == nil {
+		databaseUIDs = []uuid.UUID{}
+	}
+
 	result := &GrantDefinition{
 		Name:                def.Name,
 		Description:         def.Description,
@@ -35,6 +45,8 @@ func (s *Store) CreateGrantDefinition(ctx context.Context, def *GrantDefinition)
 		MaxQueryCounts:      def.MaxQueryCounts,
 		MaxBytesTransferred: def.MaxBytesTransferred,
 		AutoApprove:         def.AutoApprove,
+		GroupUIDs:           groupUIDs,
+		DatabaseUIDs:        databaseUIDs,
 		IsActive:            true,
 		CreatedBy:           def.CreatedBy,
 		CreatedAt:           time.Now(),
@@ -106,11 +118,20 @@ func (s *Store) UpdateGrantDefinition(ctx context.Context, def *GrantDefinition)
 		def.Controls = []string{}
 	}
 
+	if def.GroupUIDs == nil {
+		def.GroupUIDs = []uuid.UUID{}
+	}
+
+	if def.DatabaseUIDs == nil {
+		def.DatabaseUIDs = []uuid.UUID{}
+	}
+
 	// Use Column-based update so bun applies the same array marshaling that
 	// the model's `bun:"controls,array"` tag uses on Insert.
 	res, err := s.db.NewUpdate().
 		Model(def).
-		Column("name", "description", "duration_seconds", "controls", "max_query_counts", "max_bytes_transferred", "auto_approve").
+		Column("name", "description", "duration_seconds", "controls", "max_query_counts",
+			"max_bytes_transferred", "auto_approve", "group_uids", "database_uids").
 		Where("uid = ?", def.UID).
 		Exec(ctx)
 	if err != nil {

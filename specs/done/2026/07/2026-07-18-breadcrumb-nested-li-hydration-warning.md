@@ -41,3 +41,16 @@ e.g.:
 
 Verify by loading any page with a multi-crumb breadcrumb (e.g. a query detail page) and
 confirming the "nested `<li>`" console errors are gone.
+
+## Implementation Plan
+
+1. **Fix the markup** in `front/src/components/layout/Header.tsx`: wrap each crumb in a
+   `React.Fragment` keyed by `crumb.href || index`, emitting `<BreadcrumbSeparator />` (when
+   `index > 0`) as a *sibling* of `<BreadcrumbItem>` so both are direct children of the
+   `<ol>` rendered by `BreadcrumbList`. No change needed in
+   `front/src/components/ui/breadcrumb.tsx` (it already matches upstream shadcn/ui).
+2. **E2E coverage** in `front/e2e/navigation.spec.ts`: add a test that navigates to a
+   multi-crumb page, asserts the breadcrumb `<ol>` has no `li li` descendants, and asserts
+   no React "cannot contain a nested" / "hydration" console error is emitted.
+3. **QA**: `make build-front` plus `bun run lint` from `front/`; run only the touched
+   Playwright spec if the e2e harness can run locally.

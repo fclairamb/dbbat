@@ -65,6 +65,8 @@ tags:
     description: Authentication (login, logout, session management)
   - name: Users
     description: User management
+  - name: User Groups
+    description: Organizational user groups used to scope grant definitions
   - name: Databases
     description: Database configuration management
   - name: Grants
@@ -446,11 +448,20 @@ paths:
       operationId: getUser
       responses:
         '200':
-          description: User details
+          description: User details, with the groups the user belongs to
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/User'
+                allOf:
+                  - $ref: '#/components/schemas/User'
+                  - type: object
+                    properties:
+                      groups:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/UserGroup'
+                    required:
+                      - groups
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -953,6 +964,235 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /user-groups:
+    post:
+      tags:
+        - User Groups
+      summary: Create user group (admin)
+      description: |
+        Creates a user group. Groups are organizational (data-analysts, SRE, …)
+        and are deliberately distinct from the functional `roles`
+        (admin/viewer/connector). Their purpose is to scope grant definitions.
+      operationId: createUserGroup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserGroupRequest'
+      responses:
+        '200':
+          description: Group created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserGroup'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    get:
+      tags:
+        - User Groups
+      summary: List user groups (admin)
+      operationId: listUserGroups
+      responses:
+        '200':
+          description: List of user groups
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user_groups:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UserGroup'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /user-groups/{uid}:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+
+    get:
+      tags:
+        - User Groups
+      summary: Get user group by UID (admin)
+      operationId: getUserGroup
+      responses:
+        '200':
+          description: Group details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserGroup'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      tags:
+        - User Groups
+      summary: Update user group (admin)
+      description: |
+        Replaces name and description. `member_uids` replaces membership
+        wholesale when present; omit it to leave membership untouched.
+      operationId: updateUserGroup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUserGroupRequest'
+      responses:
+        '200':
+          description: Group updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserGroup'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+    delete:
+      tags:
+        - User Groups
+      summary: Delete user group (admin)
+      description: |
+        Hard-deletes the group; memberships cascade away. Grant definitions
+        scoped to the group keep the now-dangling uid, so they match nobody
+        (fail closed) until an admin edits them.
+      operationId: deleteUserGroup
+      responses:
+        '200':
+          description: Group deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /user-groups/{uid}/members:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+
+    get:
+      tags:
+        - User Groups
+      summary: List group members (admin)
+      operationId: listUserGroupMembers
+      responses:
+        '200':
+          description: Members of the group
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /user-groups/{uid}/members/{user_uid}:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: user_uid
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+
+    put:
+      tags:
+        - User Groups
+      summary: Add a user to a group (admin)
+      description: Idempotent — re-adding an existing member is a no-op.
+      operationId: addUserGroupMember
+      responses:
+        '200':
+          description: Member added
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags:
+        - User Groups
+      summary: Remove a user from a group (admin)
+      description: Idempotent — removing a non-member is a no-op.
+      operationId: removeUserGroupMember
+      responses:
+        '200':
+          description: Member removed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /grant-definitions:
     post:
       tags:
@@ -994,7 +1234,9 @@ paths:
       summary: List grant definitions
       description: |
         Lists grant definitions. Non-admins always receive only active
-        definitions. Admins can pass `active_only=true` to apply the same
+        definitions that are in scope for their user groups (out-of-scope
+        definitions are invisible, not greyed out); admin listings are
+        unfiltered. Admins can pass `active_only=true` to apply the same
         filter for the request UI; otherwise both active and deactivated
         definitions are returned.
       operationId: listGrantDefinitions
@@ -1108,6 +1350,11 @@ paths:
         Any authenticated user can request access by selecting a grant
         definition and a database. An admin then approves or denies. On
         approval, dbbat creates a real AccessGrant from the definition.
+
+        A definition scoped to user groups and/or databases can only be
+        requested by a member of one of those groups, and only against one of
+        those databases — otherwise the request is rejected with 403. This
+        also gates the auto-approve path, where no human ever reviews.
       operationId: createGrantRequest
       requestBody:
         required: true
@@ -1126,6 +1373,12 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: The definition's group/database scope does not cover this user or database
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '409':
           description: A pending request already exists for this user/database/definition
           content:
@@ -1233,7 +1486,10 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
-          description: Not pending or definition inactive
+          description: |
+            Not pending, definition inactive, or the definition's scope no
+            longer covers the requester or the database (scope is re-checked
+            at approve time so a tightened scope hard-blocks pending requests).
           content:
             application/json:
               schema:
@@ -1810,6 +2066,57 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /servers/{uid}/test:
+    post:
+      tags:
+        - Databases
+      summary: Test that a server is actually reachable and usable (admin only)
+      description: |
+        Validates a server row by dialing it for real, so provisioning is not write-and-hope.
+
+        - `protocol: ssh` rows: dials the bastion (through its own `via_uid` chain when set),
+          completes the SSH handshake with the stored key or password, and — on the first
+          success — pins the presented host key into `ssh_known_host_key`, so TOFU pinning
+          happens under admin supervision rather than implicitly on a user's first query.
+        - Database rows: dials the target (through the bastion when `via_uid` is set) and
+          performs a real protocol-level login with the stored credentials — PostgreSQL,
+          MySQL / MariaDB, MongoDB and Oracle are all probed. A protocol dbbat has no probe
+          for would be reported reachability-only, with code `auth_not_verified`.
+          An Oracle row with neither `oracle_service_name` nor `database_name` cannot be
+          probed at all and reports `stage: config`, `code: missing_config`.
+
+        A failed check is still HTTP 200 with `ok: false` — the staged result *is* the answer.
+        `stage` and `code` tell the admin which field is wrong. No credential or key material is
+        ever returned.
+      operationId: testServerConnection
+      security:
+        - basicAuth: []
+        - bearerAuth: []
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Connectivity check result (successful or failed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectionTestResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /ssh-servers:
     get:
       tags:
@@ -2350,6 +2657,61 @@ components:
         - username
         - password
 
+    UserGroup:
+      type: object
+      description: |
+        Organizational grouping of users, used to scope grant definitions.
+        Distinct from `roles`, which are functional (admin/viewer/connector).
+      properties:
+        uid:
+          type: string
+          format: uuid
+        name:
+          type: string
+          maxLength: 64
+        description:
+          type: string
+        member_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: UIDs of the users belonging to this group.
+        created_by:
+          type: string
+          format: uuid
+          readOnly: true
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+          readOnly: true
+      required:
+        - uid
+        - name
+        - description
+        - member_uids
+        - created_at
+
+    CreateUserGroupRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          maxLength: 64
+        description:
+          type: string
+        member_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            Replaces the group's membership. On update, omit to leave
+            membership untouched; an explicit empty array empties the group.
+      required:
+        - name
+
     UpdateUserRequest:
       type: object
       properties:
@@ -2362,6 +2724,14 @@ components:
             type: string
             enum: [admin, viewer, connector]
           description: New roles (admin only)
+        group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            Replaces the user's group memberships wholesale (admin only).
+            Omit to leave membership untouched.
 
     # Database schemas
     Database:
@@ -2420,9 +2790,75 @@ components:
         ssh_known_host_key:
           type: string
           description: TOFU-pinned SSH bastion host key (read-only; ssh servers only)
+        connection_test:
+          allOf:
+            - $ref: '#/components/schemas/ConnectionTestResult'
+          description: >-
+            Present only when the create/update request set `test_connection: true`
       required:
         - uid
         - name
+
+    ConnectionTestResult:
+      type: object
+      description: |
+        Staged outcome of a connectivity check. Carries no secret material: only the stage
+        reached, a machine-readable code, a human-readable message, and the bastion's public
+        host key.
+      properties:
+        ok:
+          type: boolean
+          description: Whether the check succeeded end to end
+        stage:
+          type: string
+          enum: [config, bastion_dial, bastion_auth, target_dial, target_auth]
+          description: |
+            How far the check got. On failure this is the stage that failed, which is what tells
+            the admin which field they got wrong:
+            - `config`: the row is unusable before any packet is sent (no credentials, unparseable key, via_uid cycle)
+            - `bastion_dial`: the SSH bastion could not be reached (DNS, routing, firewall)
+            - `bastion_auth`: the SSH handshake failed (host-key mismatch or rejected credentials)
+            - `target_dial`: the database target could not be reached (through the tunnel when via_uid is set)
+            - `target_auth`: the database handshake or login failed
+        code:
+          type: string
+          enum:
+            - ok
+            - dns_failure
+            - timeout
+            - unreachable
+            - host_key_mismatch
+            - auth_rejected
+            - bad_private_key
+            - no_auth_method
+            - missing_config
+            - via_cycle
+            - via_not_ssh
+            - handshake_failed
+            - db_auth_failed
+            - db_handshake_failed
+            - auth_not_verified
+            - internal_error
+          description: Machine-readable classification within the stage; `ok` on success
+        message:
+          type: string
+          description: Human-readable explanation, safe to display to an admin
+        host_key_pinned:
+          type: boolean
+          description: True when this check performed the TOFU pin (first successful connect to a bastion)
+        ssh_known_host_key:
+          type: string
+          description: The bastion's public host key after the check (ssh servers only)
+        duration_ms:
+          type: integer
+          format: int64
+          description: How long the check took, in milliseconds
+      required:
+        - ok
+        - stage
+        - code
+        - message
+        - duration_ms
 
     DatabaseLimited:
       type: object
@@ -2497,6 +2933,12 @@ components:
         ssh_passphrase:
           type: string
           description: Passphrase for the SSH private key; write-only, never returned
+        test_connection:
+          type: boolean
+          description: |
+            Optional; defaults to false when omitted. When true, the API dials the newly created
+            row once and returns the staged outcome as `connection_test` in the response.
+            Never fatal: the row is created either way.
       required:
         - name
         - host
@@ -2553,6 +2995,12 @@ components:
         ssh_passphrase:
           type: string
           description: Passphrase for the SSH private key; write-only, never returned
+        test_connection:
+          type: boolean
+          description: |
+            Optional; defaults to false when omitted. When true, the API dials the updated row
+            once and returns the staged outcome as `connection_test` in the response.
+            Never fatal.
 
     # Grant schemas
     GrantControl:
@@ -2674,6 +3122,24 @@ components:
           description: |
             When true, grant requests against this definition skip the pending/admin-approval
             step and are approved (and the grant materialized) instantly at request time.
+        group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            Restricts this definition to members of these user groups. An empty
+            array means every user, which is how every pre-scoping definition
+            keeps behaving. A dangling uid (deleted group) matches nobody, so
+            the definition fails closed.
+        database_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            Restricts this definition to these databases. An empty array means
+            every database.
         is_active:
           type: boolean
           readOnly: true
@@ -2691,6 +3157,8 @@ components:
         - name
         - duration_seconds
         - controls
+        - group_uids
+        - database_uids
         - is_active
         - created_by
         - created_at
@@ -2726,6 +3194,24 @@ components:
           description: |
             When true, grant requests against this definition skip the pending/admin-approval
             step and are approved (and the grant materialized) instantly at request time.
+        group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            Restricts this definition to members of these user groups. An empty
+            array means every user, which is how every pre-scoping definition
+            keeps behaving. A dangling uid (deleted group) matches nobody, so
+            the definition fails closed.
+        database_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            Restricts this definition to these databases. An empty array means
+            every database.
       required:
         - name
         - duration_seconds

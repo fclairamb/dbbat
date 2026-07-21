@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -107,23 +108,73 @@ func (s *Session) handleParse(msg *pgproto3.Parse) error {
 		return ErrCopyNotPermitted
 	}
 
-	// Store the prepared statement with type OIDs
+	// Store the prepared statement with type OIDs. The OID slice is copied
+	// because pgproto3 reuses message buffers across Receive calls.
+	s.extendedState.mu.Lock()
 	s.extendedState.preparedStatements[msg.Name] = &preparedStatement{
 		sql:      sqlText,
-		typeOIDs: msg.ParameterOIDs,
+		typeOIDs: slices.Clone(msg.ParameterOIDs),
 	}
+	s.extendedState.mu.Unlock()
 
 	return nil
 }
 
+// handleDescribe handles Describe messages for Extended Query Protocol.
+//
+// A Describe('S', name) is answered by the server with a ParameterDescription
+// carrying the resolved parameter OIDs. Portal describes ('P') never produce
+// one, so only statement describes are queued.
+func (s *Session) handleDescribe(msg *pgproto3.Describe) {
+	if msg.ObjectType != 'S' {
+		return
+	}
+
+	s.extendedState.mu.Lock()
+	s.extendedState.pendingDescribes = append(s.extendedState.pendingDescribes, msg.Name)
+	s.extendedState.mu.Unlock()
+}
+
+// handleParameterDescription records the server-resolved parameter OIDs on the
+// statement named by the oldest outstanding Describe. This is what lets the
+// proxy decode binary bind values for clients — pgx among them — that send
+// Parse with an empty ParameterOIDs list and let the server infer the types.
+func (s *Session) handleParameterDescription(msg *pgproto3.ParameterDescription) {
+	s.extendedState.mu.Lock()
+	defer s.extendedState.mu.Unlock()
+
+	if len(s.extendedState.pendingDescribes) == 0 {
+		return
+	}
+
+	name := s.extendedState.pendingDescribes[0]
+	s.extendedState.pendingDescribes = s.extendedState.pendingDescribes[1:]
+
+	stmt := s.extendedState.preparedStatements[name]
+	if stmt == nil {
+		return
+	}
+
+	// Copy: pgproto3 reuses message buffers across Receive calls.
+	stmt.resolvedOIDs = slices.Clone(msg.ParameterOIDs)
+}
+
 // handleBind handles Bind messages (portal creation) for Extended Query Protocol.
 func (s *Session) handleBind(msg *pgproto3.Bind) {
+	s.extendedState.mu.Lock()
 	stmt := s.extendedState.preparedStatements[msg.PreparedStatement]
 
+	// Prefer the client-declared types; fall back to the ones the server
+	// resolved via ParameterDescription when the client declared none.
 	var typeOIDs []uint32
+
 	if stmt != nil {
 		typeOIDs = stmt.typeOIDs
+		if len(typeOIDs) == 0 {
+			typeOIDs = stmt.resolvedOIDs
+		}
 	}
+	s.extendedState.mu.Unlock()
 
 	// Build parameters structure
 	var params *store.QueryParameters
@@ -178,7 +229,10 @@ func (s *Session) handleExecute(msg *pgproto3.Execute) error {
 	}
 
 	// Look up the statement
+	s.extendedState.mu.Lock()
 	stmt := s.extendedState.preparedStatements[portal.stmtName]
+	s.extendedState.mu.Unlock()
+
 	sqlText := ""
 	if stmt != nil {
 		sqlText = stmt.sql
@@ -202,7 +256,9 @@ func (s *Session) handleExecute(msg *pgproto3.Execute) error {
 func (s *Session) handleClose(msg *pgproto3.Close) {
 	switch msg.ObjectType {
 	case 'S': // Statement
+		s.extendedState.mu.Lock()
 		delete(s.extendedState.preparedStatements, msg.Name)
+		s.extendedState.mu.Unlock()
 	case 'P': // Portal
 		delete(s.extendedState.portals, msg.Name)
 	}

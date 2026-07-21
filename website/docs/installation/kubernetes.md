@@ -29,6 +29,13 @@ DBBat exposes five listeners by default. Each can be disabled by setting the mat
 
 The wire protocols (PostgreSQL, Oracle TNS, MySQL, MongoDB) generally cannot share an HTTP Ingress — see "Exposing the proxy listeners" below for the options.
 
+:::note SSH-tunnelled upstreams
+These are *inbound* listeners. If any target server is configured with a `via_uid`
+(reached through an [SSH bastion](/docs/configuration/servers#ssh-tunnels)), the
+DBBat pod also needs **egress on port 22** to that bastion — allow it in your
+NetworkPolicy and any egress firewall.
+:::
+
 ## Encryption Key Management
 
 DBBat requires a 32-byte AES-256 encryption key to encrypt database credentials at rest. Proper key management is critical for security.
@@ -392,6 +399,15 @@ and no gateway change is needed.
 
 The proxy listeners (PostgreSQL `5434`, Oracle `1522`, MySQL/MariaDB `3307`, MongoDB `27018`) cannot be exposed via a standard HTTP Ingress — they speak TCP/wire protocols, not HTTP. Options:
 
+:::note Egress for SSH tunnels
+Exposing the listeners only covers traffic *into* the pod. Upstreams configured
+with a `via_uid` are dialled through an
+[SSH bastion](/docs/configuration/servers#ssh-tunnels), which requires **egress
+on port 22** from the DBBat pod to the bastion host. Connections to a bastion are
+pooled and reused across sessions, so this is a small number of long-lived
+outbound connections rather than one per client.
+:::
+
 ### Option 1: LoadBalancer Service
 
 ```yaml
@@ -543,6 +559,6 @@ spec:
 
 ## Next Steps
 
-- [Configure databases](/docs/configuration/databases)
+- [Configure servers](/docs/configuration/servers)
 - [Set up access control](/docs/features/access-control)
 - [API documentation](/docs/api)

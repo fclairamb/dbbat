@@ -1,3 +1,4 @@
+import { Fragment } from "react";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { Separator } from "@/components/ui/separator";
 import {
@@ -58,21 +59,26 @@ export function Header() {
       <Breadcrumb>
         <BreadcrumbList>
           {breadcrumbs.map((crumb, index) => (
-            <BreadcrumbItem key={crumb.href || index}>
+            // The separator must be a *sibling* of the item, not nested inside
+            // it: both render an <li>, and an <li> inside an <li> is invalid
+            // HTML that React reports as a hydration error.
+            <Fragment key={crumb.href || index}>
               {index > 0 && <BreadcrumbSeparator />}
-              {index === breadcrumbs.length - 1 ? (
-                <BreadcrumbPage>{crumb.title}</BreadcrumbPage>
-              ) : (
-                <BreadcrumbLink asChild>
-                  {/* exact match only: a parent crumb (e.g. "Queries" on a
-                      /queries/:id detail page) must not be marked
-                      aria-current="page" — only the leaf crumb is. */}
-                  <Link to={crumb.href || "/"} activeOptions={{ exact: true }}>
-                    {crumb.title}
-                  </Link>
-                </BreadcrumbLink>
-              )}
-            </BreadcrumbItem>
+              <BreadcrumbItem>
+                {index === breadcrumbs.length - 1 ? (
+                  <BreadcrumbPage>{crumb.title}</BreadcrumbPage>
+                ) : (
+                  <BreadcrumbLink asChild>
+                    {/* exact match only: a parent crumb (e.g. "Queries" on a
+                        /queries/:id detail page) must not be marked
+                        aria-current="page" — only the leaf crumb is. */}
+                    <Link to={crumb.href || "/"} activeOptions={{ exact: true }}>
+                      {crumb.title}
+                    </Link>
+                  </BreadcrumbLink>
+                )}
+              </BreadcrumbItem>
+            </Fragment>
           ))}
         </BreadcrumbList>
       </Breadcrumb>

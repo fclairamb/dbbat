@@ -338,6 +338,30 @@ The Oracle proxy has been tested with:
 
 For debugging, enable `DBB_LOG_LEVEL=debug` to see TTC function codes and SQL extraction details.
 
+### Integration tests
+
+`internal/proxy/oracle/*_integration_test.go` and `integration_test.go` are behind the
+`integration` build tag and start a real Oracle in Docker via testcontainers, so `make test`
+never runs them. CI does run `go vet -tags integration ./...` so the tagged build cannot rot
+silently — but that only compiles them.
+
+```bash
+# default image: gvenzl/oracle-xe:18.4.0-slim (amd64 only)
+go test -tags integration ./internal/proxy/oracle/
+
+# on Apple Silicon, use the Free image — it has an arm64 build
+ORACLE_TEST_IMAGE=gvenzl/oracle-free:23-slim go test -tags integration -timeout 40m ./internal/proxy/oracle/
+```
+
+| Variable | Purpose |
+|----------|---------|
+| `ORACLE_TEST_IMAGE` | Container image to start (default `gvenzl/oracle-xe:18.4.0-slim`) |
+| `ORACLE_TEST_SERVICE` | PDB service name; inferred from the image otherwise (`XEPDB1` for XE, `FREEPDB1` for Free, `ORCLPDB1` for enterprise) |
+
+Note that `buildTNSConnect` in the test file announces TNS version 313 on purpose: from 315
+onwards Oracle expects the extended Connect format (see "TNS Version >= 315" above), which
+that simplified builder does not emit, and a 23ai listener drops the connection outright.
+
 ### Pre-auth relay (Oracle 23ai)
 
 The pre-auth negotiation is **not** strict request/response: a single client packet can

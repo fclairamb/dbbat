@@ -62,7 +62,18 @@ If both cert/key paths are empty (and TLS isn't disabled), the proxy auto-genera
 
 For production, supply a real certificate via the env vars. For development, the auto-generated cert is fine — clients will need `--ssl-mode=DISABLED` or the equivalent skip-verify option (or trust the cert).
 
-Upstream connections **may** use TLS independently — the existing `databases.ssl_mode` column controls upstream encryption. The proxy honors the upstream SSL mode regardless of the client-side TLS state.
+Upstream connections **may** use TLS independently — the `servers.ssl_mode` column controls upstream encryption, honored regardless of the client-side TLS state. `applyUpstreamOptions` (`internal/proxy/mysql/upstream.go`) maps the value onto the go-mysql client:
+
+| `ssl_mode` | Upstream behaviour |
+|-----------|--------------------|
+| `require` | TLS, **certificate not verified** (`UseSSL(true)`); fails if the upstream doesn't offer TLS |
+| `verify-ca`, `verify-full` | TLS with hostname + chain verification (`ServerName` = the server row's `host`, system root pool, TLS 1.2 floor); fails if the upstream doesn't offer TLS |
+| `disable`, `prefer`, `allow`, empty | plaintext |
+
+Two MySQL-specific notes versus the PG proxy:
+
+- **`prefer`/`allow` do not attempt opportunistic TLS.** The client doesn't negotiate a TLS upgrade for these values, so they stay plaintext — use `require` or better when the upstream link matters.
+- **`verify-ca` is treated as `verify-full`.** Both verify the hostname (Go's stdlib doesn't cleanly express CA-only verification), and there is no per-server CA bundle yet.
 
 ## Connection Flow
 
@@ -162,7 +173,7 @@ Always blocked, regardless of grant controls (even for non-read-only grants):
 
 ## Database Model
 
-No new MySQL-specific columns. The existing `databases` table fields are sufficient:
+No new MySQL-specific columns. The existing `servers` table fields are sufficient:
 - `host`, `port`, `database_name`, `username`, `password_encrypted`, `ssl_mode` — all generic
 - `protocol` — accepts `mysql` and `mariadb`
 
@@ -221,14 +232,32 @@ When `DBB_DUMP_DIR` is set, the MySQL proxy writes a per-session `.dbbat-dump` f
 
 ## Testing
 
-Integration tests use the `testcontainers-go` MySQL module:
+### Integration tests
+
+`internal/proxy/mysql/integration_test.go` sits behind the `integration` build tag, so `make test` never runs it. CI runs `go vet -tags integration ./...`, which only proves it compiles — run it for real before trusting it:
+
+```bash
+# needs Docker; starts a MySQL upstream + a PostgreSQL container for dbbat's own store
+go test -tags integration -timeout 40m ./internal/proxy/mysql/
+
+# run the same matrix against another server version
+MYSQL_TEST_IMAGE=mysql:9 MARIADB_TEST_IMAGE=mariadb:11 go test -tags integration -timeout 40m ./internal/proxy/mysql/
+```
+
+| Variable | Purpose |
+|----------|---------|
+| `MYSQL_TEST_IMAGE` | MySQL upstream image (default `mysql:8.4`) |
+| `MARIADB_TEST_IMAGE` | MariaDB upstream image for `TestIntegration_MariaDB` (default `mariadb:10.11`) |
+
+The suite covers the TLS handshake, query + prepared-statement (binary row) capture, `read_only` enforcement, `LOAD DATA LOCAL INFILE` blocking, session dumps, and the MariaDB flavour. Both default images have arm64 builds, so it runs unmodified on Apple Silicon (verified on 2026-07-21).
+
+It uses the `testcontainers-go` MySQL module:
 
 ```go
-container, err := mysql.RunContainer(ctx,
-    testcontainers.WithImage("mysql:8.4"),
-    mysql.WithDatabase("testdb"),
-    mysql.WithUsername("test"),
-    mysql.WithPassword("test"),
+container, err := tcmysql.Run(ctx, "mysql:8.4",
+    tcmysql.WithDatabase("testdb"),
+    tcmysql.WithUsername("root"),
+    tcmysql.WithPassword("rootpw"),
 )
 ```
 

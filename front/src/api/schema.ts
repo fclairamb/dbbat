@@ -476,6 +476,105 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/user-groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List user groups (admin) */
+        get: operations["listUserGroups"];
+        put?: never;
+        /**
+         * Create user group (admin)
+         * @description Creates a user group. Groups are organizational (data-analysts, SRE, …)
+         *     and are deliberately distinct from the functional `roles`
+         *     (admin/viewer/connector). Their purpose is to scope grant definitions.
+         */
+        post: operations["createUserGroup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/user-groups/{uid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        /** Get user group by UID (admin) */
+        get: operations["getUserGroup"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete user group (admin)
+         * @description Hard-deletes the group; memberships cascade away. Grant definitions
+         *     scoped to the group keep the now-dangling uid, so they match nobody
+         *     (fail closed) until an admin edits them.
+         */
+        delete: operations["deleteUserGroup"];
+        options?: never;
+        head?: never;
+        /**
+         * Update user group (admin)
+         * @description Replaces name and description. `member_uids` replaces membership
+         *     wholesale when present; omit it to leave membership untouched.
+         */
+        patch: operations["updateUserGroup"];
+        trace?: never;
+    };
+    "/user-groups/{uid}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        /** List group members (admin) */
+        get: operations["listUserGroupMembers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/user-groups/{uid}/members/{user_uid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+                user_uid: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Add a user to a group (admin)
+         * @description Idempotent — re-adding an existing member is a no-op.
+         */
+        put: operations["addUserGroupMember"];
+        post?: never;
+        /**
+         * Remove a user from a group (admin)
+         * @description Idempotent — removing a non-member is a no-op.
+         */
+        delete: operations["removeUserGroupMember"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/grant-definitions": {
         parameters: {
             query?: never;
@@ -486,7 +585,9 @@ export interface paths {
         /**
          * List grant definitions
          * @description Lists grant definitions. Non-admins always receive only active
-         *     definitions. Admins can pass `active_only=true` to apply the same
+         *     definitions that are in scope for their user groups (out-of-scope
+         *     definitions are invisible, not greyed out); admin listings are
+         *     unfiltered. Admins can pass `active_only=true` to apply the same
          *     filter for the request UI; otherwise both active and deactivated
          *     definitions are returned.
          */
@@ -553,6 +654,11 @@ export interface paths {
          * @description Any authenticated user can request access by selecting a grant
          *     definition and a database. An admin then approves or denies. On
          *     approval, dbbat creates a real AccessGrant from the definition.
+         *
+         *     A definition scoped to user groups and/or databases can only be
+         *     requested by a member of one of those groups, and only against one of
+         *     those databases — otherwise the request is rejected with 403. This
+         *     also gates the auto-approve path, where no human ever reviews.
          */
         post: operations["createGrantRequest"];
         delete?: never;
@@ -886,6 +992,41 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/servers/{uid}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test that a server is actually reachable and usable (admin only)
+         * @description Validates a server row by dialing it for real, so provisioning is not write-and-hope.
+         *
+         *     - `protocol: ssh` rows: dials the bastion (through its own `via_uid` chain when set),
+         *       completes the SSH handshake with the stored key or password, and — on the first
+         *       success — pins the presented host key into `ssh_known_host_key`, so TOFU pinning
+         *       happens under admin supervision rather than implicitly on a user's first query.
+         *     - Database rows: dials the target (through the bastion when `via_uid` is set) and
+         *       performs a real protocol-level login with the stored credentials — PostgreSQL,
+         *       MySQL / MariaDB, MongoDB and Oracle are all probed. A protocol dbbat has no probe
+         *       for would be reported reachability-only, with code `auth_not_verified`.
+         *       An Oracle row with neither `oracle_service_name` nor `database_name` cannot be
+         *       probed at all and reports `stage: config`, `code: missing_config`.
+         *
+         *     A failed check is still HTTP 200 with `ok: false` — the staged result *is* the answer.
+         *     `stage` and `code` tell the admin which field is wrong. No credential or key material is
+         *     ever returned.
+         */
+        post: operations["testServerConnection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/ssh-servers": {
         parameters: {
             query?: never;
@@ -1150,11 +1291,41 @@ export interface components {
             /** @description User roles */
             roles?: ("admin" | "viewer" | "connector")[];
         };
+        /**
+         * @description Organizational grouping of users, used to scope grant definitions.
+         *     Distinct from `roles`, which are functional (admin/viewer/connector).
+         */
+        UserGroup: {
+            /** Format: uuid */
+            uid: string;
+            name: string;
+            description: string;
+            /** @description UIDs of the users belonging to this group. */
+            member_uids: string[];
+            /** Format: uuid */
+            readonly created_by?: string | null;
+            /** Format: date-time */
+            readonly created_at: string;
+        };
+        CreateUserGroupRequest: {
+            name: string;
+            description?: string;
+            /**
+             * @description Replaces the group's membership. On update, omit to leave
+             *     membership untouched; an explicit empty array empties the group.
+             */
+            member_uids?: string[];
+        };
         UpdateUserRequest: {
             /** @description New password */
             password?: string;
             /** @description New roles (admin only) */
             roles?: ("admin" | "viewer" | "connector")[];
+            /**
+             * @description Replaces the user's group memberships wholesale (admin only).
+             *     Omit to leave membership untouched.
+             */
+            group_uids?: string[];
         };
         /** @description Full database details (admin only) */
         Database: {
@@ -1203,6 +1374,44 @@ export interface components {
             via_uid?: string | null;
             /** @description TOFU-pinned SSH bastion host key (read-only; ssh servers only) */
             ssh_known_host_key?: string;
+            /** @description Present only when the create/update request set `test_connection: true` */
+            connection_test?: components["schemas"]["ConnectionTestResult"];
+        };
+        /**
+         * @description Staged outcome of a connectivity check. Carries no secret material: only the stage
+         *     reached, a machine-readable code, a human-readable message, and the bastion's public
+         *     host key.
+         */
+        ConnectionTestResult: {
+            /** @description Whether the check succeeded end to end */
+            ok: boolean;
+            /**
+             * @description How far the check got. On failure this is the stage that failed, which is what tells
+             *     the admin which field they got wrong:
+             *     - `config`: the row is unusable before any packet is sent (no credentials, unparseable key, via_uid cycle)
+             *     - `bastion_dial`: the SSH bastion could not be reached (DNS, routing, firewall)
+             *     - `bastion_auth`: the SSH handshake failed (host-key mismatch or rejected credentials)
+             *     - `target_dial`: the database target could not be reached (through the tunnel when via_uid is set)
+             *     - `target_auth`: the database handshake or login failed
+             * @enum {string}
+             */
+            stage: "config" | "bastion_dial" | "bastion_auth" | "target_dial" | "target_auth";
+            /**
+             * @description Machine-readable classification within the stage; `ok` on success
+             * @enum {string}
+             */
+            code: "ok" | "dns_failure" | "timeout" | "unreachable" | "host_key_mismatch" | "auth_rejected" | "bad_private_key" | "no_auth_method" | "missing_config" | "via_cycle" | "via_not_ssh" | "handshake_failed" | "db_auth_failed" | "db_handshake_failed" | "auth_not_verified" | "internal_error";
+            /** @description Human-readable explanation, safe to display to an admin */
+            message: string;
+            /** @description True when this check performed the TOFU pin (first successful connect to a bastion) */
+            host_key_pinned?: boolean;
+            /** @description The bastion's public host key after the check (ssh servers only) */
+            ssh_known_host_key?: string;
+            /**
+             * Format: int64
+             * @description How long the check took, in milliseconds
+             */
+            duration_ms: number;
         };
         /** @description Limited database info for non-admin users */
         DatabaseLimited: {
@@ -1263,6 +1472,12 @@ export interface components {
             ssh_private_key?: string;
             /** @description Passphrase for the SSH private key; write-only, never returned */
             ssh_passphrase?: string;
+            /**
+             * @description Optional; defaults to false when omitted. When true, the API dials the newly created
+             *     row once and returns the staged outcome as `connection_test` in the response.
+             *     Never fatal: the row is created either way.
+             */
+            test_connection?: boolean;
         };
         UpdateDatabaseRequest: {
             /** @description Description */
@@ -1301,6 +1516,12 @@ export interface components {
             ssh_private_key?: string;
             /** @description Passphrase for the SSH private key; write-only, never returned */
             ssh_passphrase?: string;
+            /**
+             * @description Optional; defaults to false when omitted. When true, the API dials the updated row
+             *     once and returns the staged outcome as `connection_test` in the response.
+             *     Never fatal.
+             */
+            test_connection?: boolean;
         };
         /**
          * @description Control types that can be applied to a grant:
@@ -1372,6 +1593,18 @@ export interface components {
              * @default false
              */
             auto_approve: boolean;
+            /**
+             * @description Restricts this definition to members of these user groups. An empty
+             *     array means every user, which is how every pre-scoping definition
+             *     keeps behaving. A dangling uid (deleted group) matches nobody, so
+             *     the definition fails closed.
+             */
+            group_uids: string[];
+            /**
+             * @description Restricts this definition to these databases. An empty array means
+             *     every database.
+             */
+            database_uids: string[];
             /** @description Soft-deleted definitions have is_active=false; they remain referenced by historical grant requests. */
             readonly is_active: boolean;
             /** Format: uuid */
@@ -1396,6 +1629,18 @@ export interface components {
              * @default false
              */
             auto_approve: boolean;
+            /**
+             * @description Restricts this definition to members of these user groups. An empty
+             *     array means every user, which is how every pre-scoping definition
+             *     keeps behaving. A dangling uid (deleted group) matches nobody, so
+             *     the definition fails closed.
+             */
+            group_uids?: string[];
+            /**
+             * @description Restricts this definition to these databases. An empty array means
+             *     every database.
+             */
+            database_uids?: string[];
         };
         AccessGrant: {
             /**
@@ -1969,8 +2214,11 @@ export type PreLoginPasswordChangeRequest = components['schemas']['PreLoginPassw
 export type ResetPasswordRequest = components['schemas']['ResetPasswordRequest'];
 export type User = components['schemas']['User'];
 export type CreateUserRequest = components['schemas']['CreateUserRequest'];
+export type UserGroup = components['schemas']['UserGroup'];
+export type CreateUserGroupRequest = components['schemas']['CreateUserGroupRequest'];
 export type UpdateUserRequest = components['schemas']['UpdateUserRequest'];
 export type Database = components['schemas']['Database'];
+export type ConnectionTestResult = components['schemas']['ConnectionTestResult'];
 export type DatabaseLimited = components['schemas']['DatabaseLimited'];
 export type CreateDatabaseRequest = components['schemas']['CreateDatabaseRequest'];
 export type UpdateDatabaseRequest = components['schemas']['UpdateDatabaseRequest'];
@@ -2376,13 +2624,15 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description User details */
+            /** @description User details, with the groups the user belongs to */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["User"];
+                    "application/json": components["schemas"]["User"] & {
+                        groups: components["schemas"]["UserGroup"][];
+                    };
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -2844,6 +3094,220 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
+    listUserGroups: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of user groups */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        user_groups?: components["schemas"]["UserGroup"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createUserGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateUserGroupRequest"];
+            };
+        };
+        responses: {
+            /** @description Group created */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserGroup"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getUserGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Group details */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserGroup"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteUserGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Group deleted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateUserGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateUserGroupRequest"];
+            };
+        };
+        responses: {
+            /** @description Group updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserGroup"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listUserGroupMembers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Members of the group */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        users?: components["schemas"]["User"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    addUserGroupMember: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+                user_uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Member added */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    removeUserGroupMember: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+                user_uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Member removed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
     listGrantDefinitions: {
         parameters: {
             query?: {
@@ -3031,6 +3495,15 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            /** @description The definition's group/database scope does not cover this user or database */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
             /** @description A pending request already exists for this user/database/definition */
             409: {
                 headers: {
@@ -3091,7 +3564,11 @@ export interface operations {
             };
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
-            /** @description Not pending or definition inactive */
+            /**
+             * @description Not pending, definition inactive, or the definition's scope no
+             *     longer covers the requester or the database (scope is re-checked
+             *     at approve time so a tightened scope hard-blocks pending requests).
+             */
             409: {
                 headers: {
                     [name: string]: unknown;
@@ -3537,6 +4014,33 @@ export interface operations {
                     };
                 };
             };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    testServerConnection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Connectivity check result (successful or failed) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectionTestResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };
     };

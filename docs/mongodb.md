@@ -46,7 +46,7 @@ database UID) and authenticates with SCRAM-SHA-256 as a client, SASLprep-ing the
 password. The upstream `authSource` defaults to `admin` (where MongoDB
 service/root users are typically defined, e.g. `MONGO_INITDB_ROOT_USERNAME`) and
 is configurable per database via the `mongo_auth_source` API field (stored in
-the generic `databases.protocol_data` jsonb column) for targets whose proxy
+the generic `servers.protocol_data` jsonb column) for targets whose proxy
 user lives in a different auth database.
 
 ### Target-database resolution
@@ -217,9 +217,25 @@ unacknowledged (`w:0`/`moreToCome`) writes, `zlib` wire compression,
 enforcement, `$db` violations, wrong-password failures, session dumps, and
 mid-session quota/revocation teardown.
 
+The tagged suite is excluded from `make test`. CI only runs
+`go vet -tags integration ./...`, which proves it compiles, not that it works —
+run it for real with Docker available:
+
+```bash
+go test -tags integration -timeout 40m ./internal/proxy/mongodb/
+```
+
 Set `MONGO_TEST_IMAGE=mongo:8` (or `mongo:6`) to run the same matrix against
 another server version:
 
 ```
 MONGO_TEST_IMAGE=mongo:8 go test -tags integration ./internal/proxy/mongodb/...
 ```
+
+| Variable | Purpose |
+|----------|---------|
+| `MONGO_TEST_IMAGE` | Upstream MongoDB image (default `mongo:7`) |
+
+The default `mongo:7` and the `postgres:15-alpine` store container both have
+arm64 builds, so the suite runs unmodified on Apple Silicon (verified on
+2026-07-21).

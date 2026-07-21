@@ -1,5 +1,5 @@
 ---
-sidebar_position: 2
+sidebar_position: 3
 ---
 
 # Query Logging
@@ -13,7 +13,7 @@ For each query, DBBat records:
 - **SQL text**: the complete query as sent by the client (or the prepared statement text for binary protocols)
 - **Parameters**: bound parameters for prepared/extended-query statements (PostgreSQL extended query, MySQL `COM_STMT_EXECUTE`)
 - **User**: which DBBat user executed the query
-- **Database**: which target database the query ran against
+- **Database**: which target server the query ran against
 - **Connection**: the connection UID (links to connection metadata)
 - **Started at**: when the query started
 - **Duration**: how long the query took (milliseconds)
@@ -36,6 +36,8 @@ curl -H "Authorization: Bearer $TOKEN" \
   "http://localhost:4200/api/v1/queries"
 ```
 
+The global list resolves and returns **user**, **server** and **connection** columns alongside each query, so a single call is enough to see who ran what, where, and under which session — no follow-up lookups needed to make the list readable.
+
 ### Filtering
 
 ```bash
@@ -43,9 +45,9 @@ curl -H "Authorization: Bearer $TOKEN" \
 curl -H "Authorization: Bearer $TOKEN" \
   "http://localhost:4200/api/v1/queries?user_id=$USER_UID"
 
-# By database
+# By server
 curl -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:4200/api/v1/queries?database_id=$DB_UID"
+  "http://localhost:4200/api/v1/queries?database_id=$SERVER_UID"
 
 # By time range (RFC 3339)
 curl -H "Authorization: Bearer $TOKEN" \
@@ -84,6 +86,8 @@ Response:
 }
 ```
 
+Every query names its owning connection through `connection_id`. In the web UI the query-detail page surfaces that link in its breadcrumb, so you can walk from a single statement back up to the session that issued it.
+
 ## Query Result Rows
 
 Result rows are stored separately and fetched on demand with cursor-based pagination — capped at 1000 rows or 1 MB per response, whichever comes first.
@@ -117,12 +121,33 @@ curl -H "Authorization: Bearer $TOKEN" \
   http://localhost:4200/api/v1/connections
 ```
 
+A single connection can also be fetched directly:
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:4200/api/v1/connections/$CONN_UID
+```
+
+The web UI has a matching connection detail page.
+
 Connection metadata includes:
 - Source IP address
 - Connecting user
-- Target database
+- Target server
 - Connection start, last-activity, and disconnect timestamps
 - Aggregated query count and bytes transferred
+
+## Upstream Identity
+
+DBBat does not only log queries on its own side — it also tags the upstream connection with the DBBat username, so the target database's own monitoring attributes activity to the real human instead of to the shared credentials DBBat connects with:
+
+| Engine | Field carrying the DBBat username |
+|--------|-----------------------------------|
+| PostgreSQL | `application_name` |
+| MySQL / MariaDB | `program_name` |
+| Oracle | `AUTH_PROGRAM_NM` |
+
+This makes DBBat's query log correlatable with what a DBA sees in `pg_stat_activity`, `v$session`, `SHOW PROCESSLIST`, or engine-level audit logs — useful when someone spots a heavy query upstream and needs to know who to talk to.
 
 ## Use Cases
 

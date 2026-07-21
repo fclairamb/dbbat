@@ -47,6 +47,7 @@ export const canUpdateUser = (roles: string[] | undefined): boolean => hasRole(r
 export const canUpdateDatabase = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canResetPassword = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canManageGrantDefinitions = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
+export const canManageUserGroups = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canApproveGrantRequest = (roles: string[] | undefined): boolean => hasRole(roles, 'admin');
 export const canRequestGrant = (roles: string[] | undefined): boolean =>
   hasAnyRole(roles, ['admin', 'connector', 'viewer']);

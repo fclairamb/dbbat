@@ -32,6 +32,10 @@ type CreateDatabaseRequest struct {
 	// SSH bastion secrets (write-only, never returned).
 	SSHPrivateKey string `json:"ssh_private_key"`
 	SSHPassphrase string `json:"ssh_passphrase"`
+	// TestConnection asks the API to validate the row by actually dialing it
+	// once created. Opt-in, and never fatal: the outcome comes back as a
+	// connection_test object alongside the created server.
+	TestConnection bool `json:"test_connection"`
 }
 
 // UpdateDatabaseRequest represents the request to update a database
@@ -54,6 +58,9 @@ type UpdateDatabaseRequest struct {
 	// SSH bastion secrets (write-only, never returned).
 	SSHPrivateKey *string `json:"ssh_private_key"`
 	SSHPassphrase *string `json:"ssh_passphrase"`
+	// TestConnection asks the API to validate the row by actually dialing it
+	// once updated. Opt-in, and never fatal.
+	TestConnection bool `json:"test_connection"`
 }
 
 // DatabaseResponse represents a database with full details (admin only)
@@ -75,6 +82,8 @@ type DatabaseResponse struct {
 	// SSHKnownHostKey is the TOFU-pinned bastion host key (read-only). Secrets
 	// (private key, passphrase) are never returned.
 	SSHKnownHostKey string `json:"ssh_known_host_key,omitempty"`
+	// ConnectionTest is present only when the request set test_connection.
+	ConnectionTest *ConnectionTestResponse `json:"connection_test,omitempty"`
 }
 
 // DatabaseLimitedResponse represents a database with limited info (non-admin)
@@ -189,7 +198,10 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		Details:     details,
 	})
 
-	successResponse(c, toDatabaseResponse(result))
+	resp := toDatabaseResponse(result)
+	resp.ConnectionTest = s.maybeInlineConnectionTest(c, req.TestConnection, result.UID)
+
+	successResponse(c, resp)
 }
 
 // writeCreateServerError maps a CreateServer store error to the appropriate
@@ -404,13 +416,19 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 	currentUser := getCurrentUser(c)
 	details, _ := json.Marshal(map[string]interface{}{
 		"database_uid":   uid,
-		"updated_fields": req,
+		"updated_fields": redactUpdateForAudit(req),
 	})
 	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
 		EventType:   "database.updated",
 		PerformedBy: &currentUser.UID,
 		Details:     details,
 	})
+
+	if test := s.maybeInlineConnectionTest(c, req.TestConnection, uid); test != nil {
+		successResponse(c, gin.H{"message": "database updated", "connection_test": test})
+
+		return
+	}
 
 	successResponse(c, gin.H{"message": "database updated"})
 }
@@ -587,6 +605,51 @@ func validateCreateProtocolFields(req *CreateDatabaseRequest) string {
 		}
 	}
 	return ""
+}
+
+// redactUpdateForAudit returns a copy of an update request safe to persist in
+// the audit log: the secret-bearing fields (database password, SSH private key,
+// SSH passphrase) are replaced by a boolean "this field was changed" marker.
+// The audit record needs to know *that* a credential was rotated, never what
+// it was rotated to.
+func redactUpdateForAudit(req UpdateDatabaseRequest) map[string]any {
+	out := map[string]any{}
+
+	addPtr := func(key string, value any, set bool) {
+		if set {
+			out[key] = value
+		}
+	}
+
+	addPtr("description", req.Description, req.Description != nil)
+	addPtr("host", req.Host, req.Host != nil)
+	addPtr("port", req.Port, req.Port != nil)
+	addPtr("database_name", req.DatabaseName, req.DatabaseName != nil)
+	addPtr("username", req.Username, req.Username != nil)
+	addPtr("ssl_mode", req.SSLMode, req.SSLMode != nil)
+	addPtr("protocol", req.Protocol, req.Protocol != nil)
+	addPtr("oracle_service_name", req.OracleServiceName, req.OracleServiceName != nil)
+	addPtr("mongo_auth_source", req.MongoAuthSource, req.MongoAuthSource != nil)
+	addPtr("listable", req.Listable, req.Listable != nil)
+	addPtr("via_uid", req.ViaUID, req.ViaUID != nil)
+
+	if req.ClearViaUID {
+		out["clear_via_uid"] = true
+	}
+
+	if req.Password != nil {
+		out["password_changed"] = true
+	}
+
+	if req.SSHPrivateKey != nil {
+		out["ssh_private_key_changed"] = true
+	}
+
+	if req.SSHPassphrase != nil {
+		out["ssh_passphrase_changed"] = true
+	}
+
+	return out
 }
 
 // isSupportedProtocol reports whether the given protocol is one the proxy

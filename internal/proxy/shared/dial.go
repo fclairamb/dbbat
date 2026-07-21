@@ -97,6 +97,33 @@ func (d *Dialer) DialUpstream(ctx context.Context, resolver ServerResolver, encr
 	return conn, nil
 }
 
+// ConnectBastion dials (or reuses a pooled connection to) the SSH bastion row
+// identified by uid, completing the handshake and — on first connect — pinning
+// the presented host key via resolver.SetKnownHostKey.
+//
+// It exists so a connectivity check can validate a `protocol: ssh` row on its
+// own, with no database target behind it. Callers that want to force a real
+// dial (rather than reuse a pooled client) must use a fresh Dialer.
+func (d *Dialer) ConnectBastion(
+	ctx context.Context,
+	resolver ServerResolver,
+	encryptionKey []byte,
+	uid uuid.UUID,
+) (*ssh.Client, error) {
+	return d.sshClientFor(ctx, resolver, encryptionKey, uid, nil)
+}
+
+// Close tears down every pooled bastion client. Used by short-lived dialers
+// (connectivity checks) so a probe does not leak an SSH connection.
+func (d *Dialer) Close() {
+	d.mu.Lock()
+	for uid, c := range d.clients {
+		_ = c.Close()
+		delete(d.clients, uid)
+	}
+	d.mu.Unlock()
+}
+
 // drop removes a (presumed dead) client from the pool and closes it.
 func (d *Dialer) drop(uid uuid.UUID) {
 	d.mu.Lock()
@@ -184,11 +211,23 @@ func (d *Dialer) sshClientFor(
 		return nil, fmt.Errorf("failed to reach ssh bastion %s: %w", bastionAddr, err)
 	}
 
+	// ssh.NewClientConn has no context parameter, so a bastion that accepts the
+	// TCP connection and then goes silent would block for cfg.Timeout regardless
+	// of the caller's deadline. Project the context deadline onto the raw
+	// connection for the duration of the handshake, then clear it — the pooled
+	// client must not inherit a deadline.
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = rawConn.SetDeadline(deadline)
+	}
+
 	sshConn, chans, reqs, err := ssh.NewClientConn(rawConn, bastionAddr, cfg)
 	if err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("ssh handshake with %s failed: %w", bastionAddr, err)
 	}
+
+	_ = rawConn.SetDeadline(time.Time{})
+
 	client := ssh.NewClient(sshConn, chans, reqs)
 
 	// TOFU: persist the host key learned on first connect.
