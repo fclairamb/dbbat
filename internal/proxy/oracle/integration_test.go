@@ -246,14 +246,21 @@ func TestIntegration_ProxyPassthrough(t *testing.T) {
 	user, err := dataStore.CreateUser(ctx, "SYSTEM", "$argon2id$v=19$m=4096,t=3,p=1$salt$hash", []string{"connector"})
 	require.NoError(t, err)
 
+	// Server credentials are AES-256-GCM encrypted at rest, so both the store
+	// and the proxy need the same 32-byte key.
+	encryptionKey := []byte("0123456789012345678901234567890X")
+
+	service := oracleTestService()
 	db, err := dataStore.CreateServer(ctx, &store.Server{
-		Name:         oracleTestService(),
-		Host:         oracleHost,
-		Port:         oraclePort,
-		DatabaseName: oracleTestService(),
-		Username:     "system",
-		Protocol:     store.ProtocolOracle,
-	}, nil)
+		Name:              service,
+		Host:              oracleHost,
+		Port:              oraclePort,
+		DatabaseName:      service,
+		OracleServiceName: &service,
+		Username:          "system",
+		Password:          "oracle",
+		Protocol:          store.ProtocolOracle,
+	}, encryptionKey)
 	require.NoError(t, err)
 
 	_, err = dataStore.CreateGrant(ctx, &store.Grant{
@@ -272,7 +279,7 @@ func TestIntegration_ProxyPassthrough(t *testing.T) {
 		MaxResultBytes: 1048576,
 	}
 
-	proxy := NewServer(dataStore, nil, nil, queryStorage, config.DumpConfig{}, slog.Default())
+	proxy := NewServer(dataStore, encryptionKey, nil, queryStorage, config.DumpConfig{}, slog.Default())
 	go func() { _ = proxy.Start(":0") }()
 	defer func() { _ = proxy.Shutdown(ctx) }()
 
