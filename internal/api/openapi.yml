@@ -1810,6 +1810,55 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /servers/{uid}/test:
+    post:
+      tags:
+        - Databases
+      summary: Test that a server is actually reachable and usable (admin only)
+      description: |
+        Validates a server row by dialing it for real, so provisioning is not write-and-hope.
+
+        - `protocol: ssh` rows: dials the bastion (through its own `via_uid` chain when set),
+          completes the SSH handshake with the stored key or password, and — on the first
+          success — pins the presented host key into `ssh_known_host_key`, so TOFU pinning
+          happens under admin supervision rather than implicitly on a user's first query.
+        - Database rows: dials the target (through the bastion when `via_uid` is set) and, for
+          PostgreSQL / MySQL / MariaDB / MongoDB, performs a real protocol-level login with the
+          stored credentials. Oracle has no standalone dial path, so the check is
+          reachability-only and reports code `auth_not_verified`.
+
+        A failed check is still HTTP 200 with `ok: false` — the staged result *is* the answer.
+        `stage` and `code` tell the admin which field is wrong. No credential or key material is
+        ever returned.
+      operationId: testServerConnection
+      security:
+        - basicAuth: []
+        - bearerAuth: []
+      parameters:
+        - name: uid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Connectivity check result (successful or failed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConnectionTestResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /ssh-servers:
     get:
       tags:
@@ -2420,9 +2469,74 @@ components:
         ssh_known_host_key:
           type: string
           description: TOFU-pinned SSH bastion host key (read-only; ssh servers only)
+        connection_test:
+          allOf:
+            - $ref: '#/components/schemas/ConnectionTestResult'
+          description: >-
+            Present only when the create/update request set `test_connection: true`
       required:
         - uid
         - name
+
+    ConnectionTestResult:
+      type: object
+      description: |
+        Staged outcome of a connectivity check. Carries no secret material: only the stage
+        reached, a machine-readable code, a human-readable message, and the bastion's public
+        host key.
+      properties:
+        ok:
+          type: boolean
+          description: Whether the check succeeded end to end
+        stage:
+          type: string
+          enum: [config, bastion_dial, bastion_auth, target_dial, target_auth]
+          description: |
+            How far the check got. On failure this is the stage that failed, which is what tells
+            the admin which field they got wrong:
+            - `config`: the row is unusable before any packet is sent (no credentials, unparseable key, via_uid cycle)
+            - `bastion_dial`: the SSH bastion could not be reached (DNS, routing, firewall)
+            - `bastion_auth`: the SSH handshake failed (host-key mismatch or rejected credentials)
+            - `target_dial`: the database target could not be reached (through the tunnel when via_uid is set)
+            - `target_auth`: the database handshake or login failed
+        code:
+          type: string
+          enum:
+            - ok
+            - dns_failure
+            - timeout
+            - unreachable
+            - host_key_mismatch
+            - auth_rejected
+            - bad_private_key
+            - no_auth_method
+            - via_cycle
+            - via_not_ssh
+            - handshake_failed
+            - db_auth_failed
+            - db_handshake_failed
+            - auth_not_verified
+            - internal_error
+          description: Machine-readable classification within the stage; `ok` on success
+        message:
+          type: string
+          description: Human-readable explanation, safe to display to an admin
+        host_key_pinned:
+          type: boolean
+          description: True when this check performed the TOFU pin (first successful connect to a bastion)
+        ssh_known_host_key:
+          type: string
+          description: The bastion's public host key after the check (ssh servers only)
+        duration_ms:
+          type: integer
+          format: int64
+          description: How long the check took, in milliseconds
+      required:
+        - ok
+        - stage
+        - code
+        - message
+        - duration_ms
 
     DatabaseLimited:
       type: object
@@ -2497,6 +2611,12 @@ components:
         ssh_passphrase:
           type: string
           description: Passphrase for the SSH private key; write-only, never returned
+        test_connection:
+          type: boolean
+          default: false
+          description: |
+            When true, the API dials the newly created row once and returns the staged outcome
+            as `connection_test` in the response. Never fatal: the row is created either way.
       required:
         - name
         - host
@@ -2553,6 +2673,12 @@ components:
         ssh_passphrase:
           type: string
           description: Passphrase for the SSH private key; write-only, never returned
+        test_connection:
+          type: boolean
+          default: false
+          description: |
+            When true, the API dials the updated row once and returns the staged outcome as
+            `connection_test` in the response. Never fatal.
 
     # Grant schemas
     GrantControl:
