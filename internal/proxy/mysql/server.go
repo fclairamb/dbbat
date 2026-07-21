@@ -38,11 +38,15 @@ type Server struct {
 	tlsConfig     *tls.Config
 	rsaPrivateKey *rsa.PrivateKey
 
-	listener net.Listener
-	wg       sync.WaitGroup
-	shutdown chan struct{}
-	ctx      context.Context //nolint:containedctx // Context is needed for the server lifecycle
-	cancel   context.CancelFunc
+	// listenerMu guards listener, which is written by Start and read
+	// concurrently by Addr/Shutdown (e.g. tests polling Addr while Start runs
+	// in a goroutine).
+	listenerMu sync.Mutex
+	listener   net.Listener
+	wg         sync.WaitGroup
+	shutdown   chan struct{}
+	ctx        context.Context //nolint:containedctx // Context is needed for the server lifecycle
+	cancel     context.CancelFunc
 }
 
 // NewServer creates a new MySQL proxy server.
@@ -87,7 +91,7 @@ func (s *Server) Start(addr string) error {
 		return fmt.Errorf("failed to listen: %w", err)
 	}
 
-	s.listener = listener
+	s.setListener(listener)
 	s.logger.InfoContext(s.ctx, "MySQL proxy server listening", slog.String("addr", addr))
 
 	if s.dumpConfig.Dir != "" {
@@ -120,11 +124,27 @@ func (s *Server) Start(addr string) error {
 // started accepting connections yet. Useful in tests that pass ":0" for the
 // listen address and need to discover the OS-assigned port.
 func (s *Server) Addr() net.Addr {
-	if s.listener == nil {
+	listener := s.getListener()
+	if listener == nil {
 		return nil
 	}
 
-	return s.listener.Addr()
+	return listener.Addr()
+}
+
+// setListener stores the active listener under the guard.
+func (s *Server) setListener(l net.Listener) {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+	s.listener = l
+}
+
+// getListener reads the active listener under the guard.
+func (s *Server) getListener() net.Listener {
+	s.listenerMu.Lock()
+	defer s.listenerMu.Unlock()
+
+	return s.listener
 }
 
 // Shutdown gracefully shuts down the server.
@@ -132,8 +152,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	close(s.shutdown)
 	s.cancel()
 
-	if s.listener != nil {
-		if err := s.listener.Close(); err != nil {
+	if listener := s.getListener(); listener != nil {
+		if err := listener.Close(); err != nil {
 			s.logger.ErrorContext(ctx, "failed to close MySQL listener", slog.Any("error", err))
 		}
 	}
