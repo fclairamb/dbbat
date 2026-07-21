@@ -2078,10 +2078,12 @@ paths:
           completes the SSH handshake with the stored key or password, and — on the first
           success — pins the presented host key into `ssh_known_host_key`, so TOFU pinning
           happens under admin supervision rather than implicitly on a user's first query.
-        - Database rows: dials the target (through the bastion when `via_uid` is set) and, for
-          PostgreSQL / MySQL / MariaDB / MongoDB, performs a real protocol-level login with the
-          stored credentials. Oracle has no standalone dial path, so the check is
-          reachability-only and reports code `auth_not_verified`.
+        - Database rows: dials the target (through the bastion when `via_uid` is set) and
+          performs a real protocol-level login with the stored credentials — PostgreSQL,
+          MySQL / MariaDB, MongoDB and Oracle are all probed. A protocol dbbat has no probe
+          for would be reported reachability-only, with code `auth_not_verified`.
+          An Oracle row with neither `oracle_service_name` nor `database_name` cannot be
+          probed at all and reports `stage: config`, `code: missing_config`.
 
         A failed check is still HTTP 200 with `ok: false` — the staged result *is* the answer.
         `stage` and `code` tell the admin which field is wrong. No credential or key material is
@@ -2829,6 +2831,7 @@ components:
             - auth_rejected
             - bad_private_key
             - no_auth_method
+            - missing_config
             - via_cycle
             - via_not_ssh
             - handshake_failed
