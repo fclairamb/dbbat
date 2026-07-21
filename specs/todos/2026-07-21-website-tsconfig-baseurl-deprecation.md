@@ -27,3 +27,14 @@ moment typechecking is wired into the website pipeline.
 - Verify with `cd website && bun run typecheck` and `bun run build`.
 
 No GitHub issue exists for this yet — one should be filed if it is not picked up soon.
+
+## Implementation Plan
+
+- Confirmed `tsc` emits a single `TS5101` at `website/tsconfig.json(4,5)` — the local
+  file's `baseUrl: "."`. The base `@docusaurus/tsconfig` also sets `baseUrl: "."` plus
+  `paths: { "@site/*": ["./*"] }`, but its occurrence is not what tsc flags here.
+- Fix: remove the redundant `baseUrl` from the local `website/tsconfig.json`. The local
+  file defines no `paths`, so nothing local depends on it. `@site/*` / `@theme/*`
+  resolution is provided by the base config + `@docusaurus/module-type-aliases`, which
+  TS 5.x+/6.x resolves without a `baseUrl`.
+- Verify: `cd website && bun run typecheck` (primary gate) and `bun run build`.
