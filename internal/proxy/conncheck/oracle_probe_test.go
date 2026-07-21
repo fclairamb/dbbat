@@ -15,6 +15,11 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
+var (
+	errShortTNSPacket = errors.New("conncheck test: short tns packet")
+	errProbeFailure   = errors.New("conncheck test: probe failure")
+)
+
 // tnsRefuseListener is a minimal TNS listener: it reads the client's Connect
 // packet and answers with a Refuse packet carrying oraCode.
 //
@@ -65,7 +70,7 @@ func readTNSPacket(c net.Conn) error {
 
 	total := int(binary.BigEndian.Uint16(header[0:2]))
 	if total < 8 {
-		return errors.New("short tns packet")
+		return errShortTNSPacket
 	}
 
 	_, err := io.ReadFull(c, make([]byte, total-8))
@@ -237,7 +242,7 @@ func TestIsDBAuthRejection_OracleCodes(t *testing.T) {
 			"ORA-10171: some unrelated internal error", false,
 		},
 	} {
-		if got := isDBAuthRejection(errors.New(tc.msg)); got != tc.want {
+		if got := isDBAuthRejection(fmt.Errorf("%w: %s", errProbeFailure, tc.msg)); got != tc.want {
 			t.Errorf("%s: isDBAuthRejection(%q) = %v, want %v", name, tc.msg, got, tc.want)
 		}
 	}

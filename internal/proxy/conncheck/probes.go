@@ -201,7 +201,7 @@ func probeOracle(ctx context.Context, srv *store.Server, dial dialFunc) error {
 	opts := map[string]string{"PROGRAM": probeAppName()}
 
 	// Deliberately no TIMEOUT/READ TIMEOUT option: it makes go-ora arm real
-	// socket deadlines, which an SSH-tunneled conn cannot honour. The conncheck
+	// socket deadlines, which an SSH-tunneled conn cannot honor. The conncheck
 	// harness bounds the probe by closing the transport instead.
 	switch srv.SSLMode {
 	case "require":
@@ -252,7 +252,7 @@ func oracleServiceName(srv *store.Server) string {
 // write — the zero time (meaning "no deadline") when no timeout is configured —
 // while golang.org/x/crypto/ssh channels reject SetDeadline outright. Clearing
 // a deadline that never existed is a no-op, so swallowing the error there is
-// safe; a *real* deadline that the transport cannot honour is still reported,
+// safe; a *real* deadline that the transport cannot honor is still reported,
 // so a future caller cannot silently lose its timeout.
 type tolerantDeadlineConn struct {
 	net.Conn
