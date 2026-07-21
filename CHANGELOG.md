@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.0](https://github.com/fclairamb/dbbat/compare/v0.17.0...v0.18.0) (2026-07-21)
+
+
+### Features
+
+* user groups, grant scoping, and server connectivity checks ([#266](https://github.com/fclairamb/dbbat/issues/266)) ([421ceae](https://github.com/fclairamb/dbbat/commit/421ceae8d72ab0e45c625b74383a5e1ed1303429))
+
 ## [Unreleased]
 
 ### Features
