@@ -37,6 +37,27 @@ func oracleTestImage() string {
 	return defaultOracleImage
 }
 
+// oracleTestService returns the PDB service name exposed by the test image:
+// gvenzl's XE images serve XEPDB1, the Free (23ai) images FREEPDB1, and the
+// enterprise image is started below with ORACLE_PDB=ORCLPDB1.
+// ORACLE_TEST_SERVICE overrides the guess.
+func oracleTestService() string {
+	if svc := os.Getenv("ORACLE_TEST_SERVICE"); svc != "" {
+		return svc
+	}
+
+	image := oracleTestImage()
+
+	switch {
+	case strings.Contains(image, "enterprise"):
+		return "ORCLPDB1"
+	case strings.Contains(image, "oracle-free"):
+		return "FREEPDB1"
+	default:
+		return "XEPDB1"
+	}
+}
+
 // startOracleContainer starts an Oracle XE container for testing.
 func startOracleContainer(t *testing.T) (testcontainers.Container, string, int) {
 	t.Helper()
@@ -139,7 +160,7 @@ func TestIntegration_OracleContainer(t *testing.T) {
 	container, host, port := startOracleContainer(t)
 	defer func() { _ = container.Terminate(context.Background()) }()
 
-	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/XEPDB1", host, port)
+	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/%s", host, port, oracleTestService())
 	db, err := sql.Open("oracle", dsn)
 	require.NoError(t, err)
 	defer db.Close()
@@ -163,7 +184,7 @@ func TestIntegration_TNSCapture(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Close()
 
-	connectPayload := buildTNSConnect("XEPDB1")
+	connectPayload := buildTNSConnect(oracleTestService())
 	connectPkt := encodeTNSPacket(TNSPacketTypeConnect, connectPayload)
 
 	_, err = conn.Write(connectPkt)
@@ -220,10 +241,10 @@ func TestIntegration_ProxyPassthrough(t *testing.T) {
 	require.NoError(t, err)
 
 	db, err := dataStore.CreateServer(ctx, &store.Server{
-		Name:         "XEPDB1",
+		Name:         oracleTestService(),
 		Host:         oracleHost,
 		Port:         oraclePort,
-		DatabaseName: "XEPDB1",
+		DatabaseName: oracleTestService(),
 		Username:     "system",
 		Protocol:     store.ProtocolOracle,
 	}, nil)
@@ -256,7 +277,7 @@ func TestIntegration_ProxyPassthrough(t *testing.T) {
 	require.NoError(t, err)
 	defer proxyConn.Close()
 
-	connectPayload := buildTNSConnect("XEPDB1")
+	connectPayload := buildTNSConnect(oracleTestService())
 	_, err = proxyConn.Write(encodeTNSPacket(TNSPacketTypeConnect, connectPayload))
 	require.NoError(t, err)
 
@@ -287,7 +308,7 @@ func TestIntegration_ConcurrentSessions(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 
-			dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/XEPDB1", host, port)
+			dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/%s", host, port, oracleTestService())
 			db, err := sql.Open("oracle", dsn)
 			if err != nil {
 				errs[idx] = err
@@ -311,7 +332,7 @@ func TestIntegration_LargeResultSet(t *testing.T) {
 	container, host, port := startOracleContainer(t)
 	defer func() { _ = container.Terminate(context.Background()) }()
 
-	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/XEPDB1", host, port)
+	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/%s", host, port, oracleTestService())
 	db, err := sql.Open("oracle", dsn)
 	require.NoError(t, err)
 	defer db.Close()
@@ -334,7 +355,7 @@ func TestIntegration_MultipleDataTypes(t *testing.T) {
 	container, host, port := startOracleContainer(t)
 	defer func() { _ = container.Terminate(context.Background()) }()
 
-	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/XEPDB1", host, port)
+	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/%s", host, port, oracleTestService())
 	db, err := sql.Open("oracle", dsn)
 	require.NoError(t, err)
 	defer db.Close()
@@ -370,7 +391,7 @@ func TestIntegration_VersionDetection(t *testing.T) {
 	container, host, port := startOracleContainer(t)
 	defer func() { _ = container.Terminate(context.Background()) }()
 
-	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/XEPDB1", host, port)
+	dsn := fmt.Sprintf("oracle://system:oracle@%s:%d/%s", host, port, oracleTestService())
 	db, err := sql.Open("oracle", dsn)
 	require.NoError(t, err)
 	defer db.Close()

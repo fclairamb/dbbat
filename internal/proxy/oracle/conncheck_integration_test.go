@@ -32,7 +32,7 @@ func TestIntegration_ConnCheckOracleLogin(t *testing.T) {
 	container, host, port := startOracleContainer(t)
 	defer func() { _ = container.Terminate(context.Background()) }()
 
-	service := "XEPDB1"
+	service := oracleTestService()
 
 	newServer := func(password string) *store.Server {
 		return &store.Server{
