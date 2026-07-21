@@ -4,8 +4,14 @@ package postgresql
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
+	"math/big"
 	"net"
 	"os"
 	"path/filepath"
@@ -93,6 +99,92 @@ func runPostgresContainer(ctx context.Context, t *testing.T, image, dbName strin
 	return c, host, int(port.Num())
 }
 
+// runTLSPostgresContainer starts a PostgreSQL container with ssl=on, using a
+// self-signed cert generated here. The cert/key are mounted read-only and then
+// copied+chowned by the container command, because Postgres refuses a key file
+// that isn't owned by the server user with 0600 permissions — and bind mounts
+// keep the host's ownership.
+func runTLSPostgresContainer(ctx context.Context, t *testing.T, dbName string) (testcontainers.Container, string, int) {
+	t.Helper()
+
+	certPEM, keyPEM := selfSignedCert(t)
+
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "server.crt")
+	keyPath := filepath.Join(dir, "server.key")
+	require.NoError(t, os.WriteFile(certPath, certPEM, 0o644))
+	require.NoError(t, os.WriteFile(keyPath, keyPEM, 0o644))
+
+	const bootstrap = `cp /tls/server.crt /tls/server.key /var/lib/postgresql/ && ` +
+		`chown postgres:postgres /var/lib/postgresql/server.crt /var/lib/postgresql/server.key && ` +
+		`chmod 600 /var/lib/postgresql/server.key && ` +
+		`exec docker-entrypoint.sh postgres -c ssl=on ` +
+		`-c ssl_cert_file=/var/lib/postgresql/server.crt ` +
+		`-c ssl_key_file=/var/lib/postgresql/server.key`
+
+	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image:        pgImage(),
+			ExposedPorts: []string{"5432/tcp"},
+			Entrypoint:   []string{"/bin/sh", "-c"},
+			Cmd:          []string{bootstrap},
+			Env: map[string]string{
+				"POSTGRES_DB":       dbName,
+				"POSTGRES_USER":     upstreamUsr,
+				"POSTGRES_PASSWORD": upstreamPwd,
+			},
+			Files: []testcontainers.ContainerFile{
+				{HostFilePath: certPath, ContainerFilePath: "/tls/server.crt", FileMode: 0o644},
+				{HostFilePath: keyPath, ContainerFilePath: "/tls/server.key", FileMode: 0o644},
+			},
+			WaitingFor: wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(120 * time.Second),
+		},
+		Started: true,
+	})
+	require.NoError(t, err, "start TLS postgres container")
+
+	host, err := c.Host(ctx)
+	require.NoError(t, err)
+
+	port, err := c.MappedPort(ctx, "5432")
+	require.NoError(t, err)
+
+	t.Logf("TLS PostgreSQL container ready: host=%s port=%s", host, port.Port())
+
+	return c, host, int(port.Num())
+}
+
+// selfSignedCert returns a PEM cert/key pair valid for localhost and 127.0.0.1.
+func selfSignedCert(t *testing.T) (certPEM, keyPEM []byte) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "localhost"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(24 * time.Hour),
+		KeyUsage:              x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IsCA:                  true,
+		DNSNames:              []string{"localhost"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	require.NoError(t, err)
+
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+
+	return certPEM, keyPEM
+}
+
 // fixture wires up: a storage container + dbbat store, a user/database/grant,
 // an upstream PostgreSQL container, and a started proxy.
 type fixture struct {
@@ -111,10 +203,44 @@ func setupFixture(ctx context.Context, t *testing.T) *fixture {
 	return setupFixtureWithDumpDir(ctx, t, "")
 }
 
+// fixtureOpts tweaks what setupFixtureWith builds.
+type fixtureOpts struct {
+	// dumpDir, when non-empty, enables per-session dump files.
+	dumpDir string
+	// tlsUpstream starts the upstream Postgres with ssl=on and a self-signed cert.
+	tlsUpstream bool
+	// sslMode is the server row's ssl_mode (defaults to "disable").
+	sslMode string
+}
+
 func setupFixtureWithDumpDir(ctx context.Context, t *testing.T, dumpDir string) *fixture {
 	t.Helper()
 
-	upstream, upstreamHost, upstreamPort := runPostgresContainer(ctx, t, pgImage(), upstreamDB)
+	return setupFixtureWith(ctx, t, fixtureOpts{dumpDir: dumpDir})
+}
+
+func setupFixtureWith(ctx context.Context, t *testing.T, opts fixtureOpts) *fixture {
+	t.Helper()
+
+	dumpDir := opts.dumpDir
+
+	sslMode := opts.sslMode
+	if sslMode == "" {
+		sslMode = "disable"
+	}
+
+	var (
+		upstream     testcontainers.Container
+		upstreamHost string
+		upstreamPort int
+	)
+
+	if opts.tlsUpstream {
+		upstream, upstreamHost, upstreamPort = runTLSPostgresContainer(ctx, t, upstreamDB)
+	} else {
+		upstream, upstreamHost, upstreamPort = runPostgresContainer(ctx, t, pgImage(), upstreamDB)
+	}
+
 	t.Cleanup(func() { _ = upstream.Terminate(context.Background()) })
 
 	storeContainer, storeHost, storePort := runPostgresContainer(ctx, t, storageImage(), "dbbat_test")
@@ -147,7 +273,7 @@ func setupFixtureWithDumpDir(ctx context.Context, t *testing.T, dumpDir string) 
 		Username:     upstreamUsr,
 		Password:     upstreamPwd,
 		Protocol:     store.ProtocolPostgreSQL,
-		SSLMode:      "disable",
+		SSLMode:      sslMode,
 	}, encKey)
 	require.NoError(t, err)
 
@@ -545,6 +671,48 @@ func TestIntegration_SessionDump(t *testing.T) {
 
 		return false
 	}, 5*time.Second, 100*time.Millisecond, "expected a non-empty .dbbat-dump file in %s", dumpDir)
+}
+
+// TestIntegration_UpstreamTLS_Require verifies that ssl_mode=require actually
+// encrypts the proxy→upstream leg: pg_stat_ssl for the backend serving our
+// proxied session must report ssl=true.
+func TestIntegration_UpstreamTLS_Require(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixtureWith(ctx, t, fixtureOpts{tlsUpstream: true, sslMode: "require"})
+
+	conn := f.mustConnect(ctx, fixturePass)
+
+	var ssl bool
+	require.NoError(t, conn.QueryRow(ctx,
+		"SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()").Scan(&ssl))
+	assert.True(t, ssl, "upstream connection should be TLS-encrypted under ssl_mode=require")
+}
+
+// TestIntegration_UpstreamTLS_Disable is the counterpart: with ssl_mode=disable
+// against the very same TLS-capable upstream, no SSLRequest is sent and the
+// backend reports an unencrypted connection.
+func TestIntegration_UpstreamTLS_Disable(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixtureWith(ctx, t, fixtureOpts{tlsUpstream: true, sslMode: "disable"})
+
+	conn := f.mustConnect(ctx, fixturePass)
+
+	var ssl bool
+	require.NoError(t, conn.QueryRow(ctx,
+		"SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()").Scan(&ssl))
+	assert.False(t, ssl, "upstream connection should stay plaintext under ssl_mode=disable")
+}
+
+// TestIntegration_UpstreamTLS_VerifyFullRejectsSelfSigned verifies that
+// verify-full really validates the upstream chain: the container's self-signed
+// cert isn't in the system pool, so the session must fail rather than silently
+// downgrade to an unverified tunnel.
+func TestIntegration_UpstreamTLS_VerifyFullRejectsSelfSigned(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixtureWith(ctx, t, fixtureOpts{tlsUpstream: true, sslMode: "verify-full"})
+
+	_, err := f.connect(ctx, fixtureUser, fixturePass)
+	require.Error(t, err, "verify-full must reject an untrusted upstream certificate")
 }
 
 // TestIntegration_RevocationKillsSession verifies revoking the grant mid-session
