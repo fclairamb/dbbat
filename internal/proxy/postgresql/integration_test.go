@@ -523,11 +523,10 @@ func TestIntegration_ExtendedProtocol_Capture(t *testing.T) {
 
 	// The INSERT binds "answer" in text format, so it is captured verbatim.
 	//
-	// Note: pgx sends Parse with an empty ParameterOIDs list (it lets the server
-	// infer the types), so binary-format parameters like the int4 42 are logged
-	// opaquely as "(oid:0)<base64>" — the proxy never sees a resolved OID. That
-	// is a known observability gap, tracked in
-	// specs/todos/2026-07-21-resolve-bind-parameter-oids-from-parameterdescription.md.
+	// pgx sends Parse with an empty ParameterOIDs list (it lets the server infer
+	// the types), so the int4 42 is bound in binary format with no client-declared
+	// type. The proxy resolves it from the server's ParameterDescription, which is
+	// why it is logged as "42" rather than an opaque "(oid:0)<base64>" blob.
 	require.Eventually(t, func() bool {
 		queries, err := f.store.ListQueries(ctx, store.QueryFilter{Limit: 200})
 		if err != nil {
@@ -543,18 +542,26 @@ func TestIntegration_ExtendedProtocol_Capture(t *testing.T) {
 				continue
 			}
 
+			var sawLabel, sawID bool
+
 			for _, v := range queries[i].Parameters.Values {
-				if v == "answer" {
-					return true
+				switch v {
+				case "answer":
+					sawLabel = true
+				case "42":
+					sawID = true
 				}
+			}
+
+			if sawLabel && sawID {
+				return true
 			}
 		}
 
 		return false
-	}, 5*time.Second, 100*time.Millisecond, "extended-protocol query should be logged with its bind parameters")
+	}, 5*time.Second, 100*time.Millisecond, "extended-protocol query should log both bind parameters decoded")
 
-	// The SELECT's bind parameter is captured too, even though its type is not
-	// resolvable (binary format, no declared OID).
+	// The SELECT's binary int4 parameter is decoded the same way.
 	require.Eventually(t, func() bool {
 		queries, err := f.store.ListQueries(ctx, store.QueryFilter{Limit: 200})
 		if err != nil {
@@ -566,13 +573,14 @@ func TestIntegration_ExtendedProtocol_Capture(t *testing.T) {
 				continue
 			}
 
-			if queries[i].Parameters != nil && len(queries[i].Parameters.Values) == 1 {
+			params := queries[i].Parameters
+			if params != nil && len(params.Values) == 1 && params.Values[0] == "42" {
 				return true
 			}
 		}
 
 		return false
-	}, 5*time.Second, 100*time.Millisecond, "extended-protocol SELECT should record one bind parameter")
+	}, 5*time.Second, 100*time.Millisecond, "extended-protocol SELECT should record its bind parameter decoded as 42")
 }
 
 // TestIntegration_ReadOnlyGrant_BlocksWrite verifies a read_only grant rejects

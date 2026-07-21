@@ -932,6 +932,151 @@ func TestHandleBind_MapsPortal(t *testing.T) {
 	}
 }
 
+// TestHandleParameterDescription_ResolvesBindOIDs covers the pgx-style flow:
+// Parse declares no parameter types, the client describes the statement, and
+// the server answers with the resolved OIDs. Bind must then decode the binary
+// value instead of storing an opaque base64 blob.
+func TestHandleParameterDescription_ResolvesBindOIDs(t *testing.T) {
+	t.Parallel()
+
+	s := newTestSession("write")
+
+	// pgx sends Parse with an empty ParameterOIDs list.
+	if err := s.handleParse(&pgproto3.Parse{Name: "stmt1", Query: "SELECT * FROM users WHERE id = $1"}); err != nil {
+		t.Fatalf("handleParse() error = %v", err)
+	}
+
+	s.handleDescribe(&pgproto3.Describe{ObjectType: 'S', Name: "stmt1"})
+	s.handleParameterDescription(&pgproto3.ParameterDescription{ParameterOIDs: []uint32{23}})
+
+	stmt := s.extendedState.preparedStatements["stmt1"]
+	if stmt == nil || len(stmt.resolvedOIDs) != 1 || stmt.resolvedOIDs[0] != 23 {
+		t.Fatalf("resolved OIDs not recorded: %+v", stmt)
+	}
+
+	if len(s.extendedState.pendingDescribes) != 0 {
+		t.Errorf("pending describe not consumed: %v", s.extendedState.pendingDescribes)
+	}
+
+	s.handleBind(&pgproto3.Bind{
+		DestinationPortal:    "portal1",
+		PreparedStatement:    "stmt1",
+		ParameterFormatCodes: []int16{1}, // binary
+		Parameters:           [][]byte{{0, 0, 0, 42}},
+	})
+
+	portal := s.extendedState.portals["portal1"]
+	if portal == nil || portal.parameters == nil {
+		t.Fatal("portal parameters not captured")
+	}
+
+	if portal.parameters.Values[0] != "42" {
+		t.Errorf("parameter value = %q, want %q", portal.parameters.Values[0], "42")
+	}
+
+	if len(portal.parameters.TypeOIDs) != 1 || portal.parameters.TypeOIDs[0] != 23 {
+		t.Errorf("stored TypeOIDs = %v, want [23]", portal.parameters.TypeOIDs)
+	}
+}
+
+// TestHandleParameterDescription_ClientOIDsWin verifies that a client which
+// does declare parameter types keeps the pre-existing behaviour: its own OIDs
+// are used even if the server reports different ones.
+func TestHandleParameterDescription_ClientOIDsWin(t *testing.T) {
+	t.Parallel()
+
+	s := newTestSession("write")
+
+	if err := s.handleParse(&pgproto3.Parse{
+		Name:          "stmt1",
+		Query:         "SELECT * FROM users WHERE id = $1",
+		ParameterOIDs: []uint32{25}, // text
+	}); err != nil {
+		t.Fatalf("handleParse() error = %v", err)
+	}
+
+	s.handleDescribe(&pgproto3.Describe{ObjectType: 'S', Name: "stmt1"})
+	s.handleParameterDescription(&pgproto3.ParameterDescription{ParameterOIDs: []uint32{23}})
+
+	s.handleBind(&pgproto3.Bind{
+		DestinationPortal:    "portal1",
+		PreparedStatement:    "stmt1",
+		ParameterFormatCodes: []int16{1},
+		Parameters:           [][]byte{[]byte("hello")},
+	})
+
+	portal := s.extendedState.portals["portal1"]
+	if portal == nil || portal.parameters == nil {
+		t.Fatal("portal parameters not captured")
+	}
+
+	if portal.parameters.Values[0] != "hello" {
+		t.Errorf("parameter value = %q, want %q (client-declared text OID must win)", portal.parameters.Values[0], "hello")
+	}
+}
+
+// TestHandleDescribe_IgnoresPortals ensures Describe('P') is not queued: the
+// server never answers a portal describe with a ParameterDescription, so
+// queueing it would desynchronise the FIFO.
+func TestHandleDescribe_IgnoresPortals(t *testing.T) {
+	t.Parallel()
+
+	s := newTestSession("write")
+
+	s.handleDescribe(&pgproto3.Describe{ObjectType: 'P', Name: "portal1"})
+
+	if len(s.extendedState.pendingDescribes) != 0 {
+		t.Errorf("portal describe should not be queued, got %v", s.extendedState.pendingDescribes)
+	}
+}
+
+// TestHandleParameterDescription_Unmatched checks the no-op paths: an
+// unsolicited ParameterDescription, and one naming a statement that has since
+// been closed.
+func TestHandleParameterDescription_Unmatched(t *testing.T) {
+	t.Parallel()
+
+	s := newTestSession("write")
+
+	// No outstanding describe: must not panic and must not create state.
+	s.handleParameterDescription(&pgproto3.ParameterDescription{ParameterOIDs: []uint32{23}})
+
+	if len(s.extendedState.preparedStatements) != 0 {
+		t.Errorf("unsolicited ParameterDescription created state: %v", s.extendedState.preparedStatements)
+	}
+
+	// Describe for a statement that gets closed before the answer arrives.
+	s.handleDescribe(&pgproto3.Describe{ObjectType: 'S', Name: "gone"})
+	s.handleParameterDescription(&pgproto3.ParameterDescription{ParameterOIDs: []uint32{23}})
+
+	if len(s.extendedState.pendingDescribes) != 0 {
+		t.Errorf("pending describe not consumed: %v", s.extendedState.pendingDescribes)
+	}
+}
+
+// TestHandleParameterDescription_CopiesOIDs guards against pgproto3 buffer
+// reuse: the stored OIDs must not alias the message's slice.
+func TestHandleParameterDescription_CopiesOIDs(t *testing.T) {
+	t.Parallel()
+
+	s := newTestSession("write")
+
+	if err := s.handleParse(&pgproto3.Parse{Name: "stmt1", Query: "SELECT $1"}); err != nil {
+		t.Fatalf("handleParse() error = %v", err)
+	}
+
+	oids := []uint32{23}
+	s.handleDescribe(&pgproto3.Describe{ObjectType: 'S', Name: "stmt1"})
+	s.handleParameterDescription(&pgproto3.ParameterDescription{ParameterOIDs: oids})
+
+	// Simulate pgproto3 reusing the backing array for the next message.
+	oids[0] = 25
+
+	if got := s.extendedState.preparedStatements["stmt1"].resolvedOIDs[0]; got != 23 {
+		t.Errorf("resolvedOIDs aliased the message buffer: got %d, want 23", got)
+	}
+}
+
 func TestHandleExecute_QueuesQuery(t *testing.T) {
 	t.Parallel()
 
