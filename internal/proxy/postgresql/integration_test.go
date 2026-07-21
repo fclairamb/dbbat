@@ -157,7 +157,7 @@ func runTLSPostgresContainer(ctx context.Context, t *testing.T, dbName string) (
 }
 
 // selfSignedCert returns a PEM cert/key pair valid for localhost and 127.0.0.1.
-func selfSignedCert(t *testing.T) (certPEM, keyPEM []byte) {
+func selfSignedCert(t *testing.T) ([]byte, []byte) {
 	t.Helper()
 
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -179,8 +179,8 @@ func selfSignedCert(t *testing.T) (certPEM, keyPEM []byte) {
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	require.NoError(t, err)
 
-	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 
 	return certPEM, keyPEM
 }
