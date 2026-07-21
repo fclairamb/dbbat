@@ -6,7 +6,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -184,6 +183,6 @@ func TestRedactUpdateForAudit(t *testing.T) {
 	assert.Equal(t, true, out["ssh_passphrase_changed"])
 
 	// Non-secret fields stay visible — the audit trail still says what changed.
-	assert.True(t, strings.Contains(rendered, "db.internal"))
+	assert.Contains(t, rendered, "db.internal")
 	assert.NotContains(t, out, "database_name")
 }
