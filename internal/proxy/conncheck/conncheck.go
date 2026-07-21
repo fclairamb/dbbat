@@ -17,6 +17,7 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -228,32 +229,83 @@ func (c *Checker) checkTarget(ctx context.Context, dialer *shared.Dialer, srv *s
 
 	// Decrypt the target's own password for the login probe. Bastion secrets are
 	// decrypted inside the shared dialer.
-	if err := srv.DecryptPassword(c.encryptionKey); err != nil {
-		return Result{
-			Stage:   StageConfig,
-			Code:    CodeInternal,
-			Message: "failed to decrypt the stored database password",
+	// An empty ciphertext means "no password stored" — a legitimate configuration
+	// (trust/peer auth), not a decryption failure.
+	if len(srv.PasswordEncrypted) > 0 {
+		if err := srv.DecryptPassword(c.encryptionKey); err != nil {
+			return Result{
+				Stage:   StageConfig,
+				Code:    CodeInternal,
+				Message: "failed to decrypt the stored database password",
+			}
 		}
 	}
 
 	// Track the dial separately from the login so a refused TCP connection is
-	// reported as target_dial, not as an auth failure.
-	var dialErr error
+	// reported as target_dial, not as an auth failure. Conns are kept so the
+	// timeout path can force them shut: a connection tunnelled over SSH does not
+	// support deadlines (golang.org/x/crypto/ssh channels reject SetDeadline),
+	// so a database library blocked on a read cannot be unstuck by the context
+	// alone — closing the transport underneath it is what unblocks it.
+	var (
+		mu      sync.Mutex
+		dialErr error
+		conns   []net.Conn
+	)
+
 	dial := func(dialCtx context.Context) (net.Conn, error) {
 		conn, err := dialer.DialUpstream(dialCtx, c.resolver, c.encryptionKey, srv)
+
+		mu.Lock()
 		if err != nil {
 			dialErr = err
+		} else {
+			conns = append(conns, conn)
 		}
+		mu.Unlock()
 
 		return conn, err
 	}
 
-	if err := probe(ctx, srv, dial); err != nil {
-		if dialErr != nil {
-			return classifyDialError(dialErr, srv.ViaUID != nil)
+	done := make(chan error, 1)
+
+	go func() { done <- probe(ctx, srv, dial) }()
+
+	var probeErr error
+
+	select {
+	case probeErr = <-done:
+	case <-ctx.Done():
+		mu.Lock()
+		for _, conn := range conns {
+			_ = conn.Close()
+		}
+		mu.Unlock()
+
+		// Give the probe a moment to unwind on the closed transport; either way
+		// the answer is a timeout.
+		select {
+		case <-done:
+		case <-time.After(time.Second):
 		}
 
-		return classifyTargetError(err)
+		return Result{
+			Stage:   StageTargetAuth,
+			Code:    CodeTimeout,
+			Message: "the target accepted the connection but the database handshake did not complete in time",
+		}
+	}
+
+	if probeErr != nil {
+		mu.Lock()
+		failedDial := dialErr
+		mu.Unlock()
+
+		if failedDial != nil {
+			return classifyDialError(failedDial, srv.ViaUID != nil)
+		}
+
+		return classifyTargetError(probeErr)
 	}
 
 	return Result{
@@ -305,6 +357,12 @@ func classifySSHError(err error) Result {
 	// Handshake-stage failures carry the "ssh handshake" prefix from the dialer;
 	// anything earlier is a dial-stage failure.
 	if strings.Contains(err.Error(), "ssh handshake") {
+		// A handshake that stalls (host accepts the TCP connection then goes
+		// silent) is a timeout, not an auth problem — say so.
+		if netRes := classifyNetworkError(err, StageBastionAuth); netRes.Code != CodeInternal {
+			return netRes
+		}
+
 		if isAuthRejection(err) {
 			return Result{
 				Stage:   StageBastionAuth,

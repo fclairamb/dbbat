@@ -211,11 +211,23 @@ func (d *Dialer) sshClientFor(
 		return nil, fmt.Errorf("failed to reach ssh bastion %s: %w", bastionAddr, err)
 	}
 
+	// ssh.NewClientConn has no context parameter, so a bastion that accepts the
+	// TCP connection and then goes silent would block for cfg.Timeout regardless
+	// of the caller's deadline. Project the context deadline onto the raw
+	// connection for the duration of the handshake, then clear it — the pooled
+	// client must not inherit a deadline.
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = rawConn.SetDeadline(deadline)
+	}
+
 	sshConn, chans, reqs, err := ssh.NewClientConn(rawConn, bastionAddr, cfg)
 	if err != nil {
 		_ = rawConn.Close()
 		return nil, fmt.Errorf("ssh handshake with %s failed: %w", bastionAddr, err)
 	}
+
+	_ = rawConn.SetDeadline(time.Time{})
+
 	client := ssh.NewClient(sshConn, chans, reqs)
 
 	// TOFU: persist the host key learned on first connect.
