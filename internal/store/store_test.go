@@ -98,6 +98,8 @@ func setupTestStore(t *testing.T) *Store {
 		"audit_log",
 		"servers",
 		"user_identities",
+		"user_group_members",
+		"user_groups",
 		"oauth_states",
 		"api_keys",
 		"users",

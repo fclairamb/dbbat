@@ -84,6 +84,8 @@ func setupTestServer(t *testing.T) (*Server, *store.Store) {
 		"grant_definitions",
 		"audit_log",
 		"servers",
+		"user_group_members",
+		"user_groups",
 		"users",
 	}
 
