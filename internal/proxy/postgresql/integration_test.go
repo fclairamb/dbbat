@@ -6,8 +6,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -118,8 +120,8 @@ func setupFixtureWithDumpDir(ctx context.Context, t *testing.T, dumpDir string) 
 	storeContainer, storeHost, storePort := runPostgresContainer(ctx, t, storageImage(), "dbbat_test")
 	t.Cleanup(func() { _ = storeContainer.Terminate(context.Background()) })
 
-	storeDSN := fmt.Sprintf("postgres://%s:%s@%s:%d/dbbat_test?sslmode=disable",
-		upstreamUsr, upstreamPwd, storeHost, storePort)
+	storeDSN := fmt.Sprintf("postgres://%s:%s@%s/dbbat_test?sslmode=disable",
+		upstreamUsr, upstreamPwd, net.JoinHostPort(storeHost, strconv.Itoa(storePort)))
 
 	dataStore, err := store.New(ctx, storeDSN)
 	require.NoError(t, err)
@@ -212,11 +214,11 @@ func (f *fixture) connect(ctx context.Context, username, password string) (*pgx.
 	return pgx.Connect(ctx, f.dsn(username, password, "require"))
 }
 
-// mustConnect fails the test if the connection can't be established.
-func (f *fixture) mustConnect(ctx context.Context, username, password string) *pgx.Conn {
+// mustConnect fails the test if the fixture user can't connect.
+func (f *fixture) mustConnect(ctx context.Context, password string) *pgx.Conn {
 	f.t.Helper()
 
-	conn, err := f.connect(ctx, username, password)
+	conn, err := f.connect(ctx, fixtureUser, password)
 	require.NoError(f.t, err)
 	f.t.Cleanup(func() { _ = conn.Close(context.Background()) })
 
@@ -257,7 +259,7 @@ func TestIntegration_ProxyAuth_Password(t *testing.T) {
 	ctx := context.Background()
 	f := setupFixture(ctx, t)
 
-	conn := f.mustConnect(ctx, fixtureUser, fixturePass)
+	conn := f.mustConnect(ctx, fixturePass)
 
 	var got int
 	require.NoError(t, conn.QueryRow(ctx, "SELECT 1").Scan(&got))
@@ -288,7 +290,7 @@ func TestIntegration_ProxyAuth_APIKey(t *testing.T) {
 	_, plainKey, err := f.store.CreateAPIKey(ctx, f.user.UID, "test-key", nil, f.encKey)
 	require.NoError(t, err)
 
-	conn := f.mustConnect(ctx, fixtureUser, plainKey)
+	conn := f.mustConnect(ctx, plainKey)
 
 	var got int
 	require.NoError(t, conn.QueryRow(ctx, "SELECT 1").Scan(&got))
@@ -324,7 +326,7 @@ func TestIntegration_QueryAndCapture(t *testing.T) {
 	ctx := context.Background()
 	f := setupFixture(ctx, t)
 
-	conn := f.mustConnect(ctx, fixtureUser, fixturePass)
+	conn := f.mustConnect(ctx, fixturePass)
 
 	_, err := conn.Exec(ctx, "CREATE TABLE widgets (id serial primary key, name text, qty int)")
 	require.NoError(t, err)
@@ -379,7 +381,7 @@ func TestIntegration_ExtendedProtocol_Capture(t *testing.T) {
 	ctx := context.Background()
 	f := setupFixture(ctx, t)
 
-	conn := f.mustConnect(ctx, fixtureUser, fixturePass)
+	conn := f.mustConnect(ctx, fixturePass)
 
 	_, err := conn.Exec(ctx, "CREATE TABLE prepared (id int, label text)")
 	require.NoError(t, err)
@@ -454,14 +456,14 @@ func TestIntegration_ReadOnlyGrant_BlocksWrite(t *testing.T) {
 	f := setupFixture(ctx, t)
 
 	// Seed a table before the grant is narrowed.
-	seed := f.mustConnect(ctx, fixtureUser, fixturePass)
+	seed := f.mustConnect(ctx, fixturePass)
 	_, err := seed.Exec(ctx, "CREATE TABLE ro (id int)")
 	require.NoError(t, err)
 	require.NoError(t, seed.Close(ctx))
 
 	f.replaceGrant(ctx, []string{"read_only"})
 
-	conn := f.mustConnect(ctx, fixtureUser, fixturePass)
+	conn := f.mustConnect(ctx, fixturePass)
 
 	var got int
 	require.NoError(t, conn.QueryRow(ctx, "SELECT count(*) FROM ro").Scan(&got))
@@ -477,14 +479,14 @@ func TestIntegration_BlockDDL_BlocksCreateTable(t *testing.T) {
 	ctx := context.Background()
 	f := setupFixture(ctx, t)
 
-	seed := f.mustConnect(ctx, fixtureUser, fixturePass)
+	seed := f.mustConnect(ctx, fixturePass)
 	_, err := seed.Exec(ctx, "CREATE TABLE ddl (id int)")
 	require.NoError(t, err)
 	require.NoError(t, seed.Close(ctx))
 
 	f.replaceGrant(ctx, []string{"block_ddl"})
 
-	conn := f.mustConnect(ctx, fixtureUser, fixturePass)
+	conn := f.mustConnect(ctx, fixturePass)
 
 	_, err = conn.Exec(ctx, "INSERT INTO ddl (id) VALUES (1)")
 	require.NoError(t, err, "DML should still be allowed under block_ddl")
@@ -498,14 +500,14 @@ func TestIntegration_BlockCopy_BlocksCopy(t *testing.T) {
 	ctx := context.Background()
 	f := setupFixture(ctx, t)
 
-	seed := f.mustConnect(ctx, fixtureUser, fixturePass)
+	seed := f.mustConnect(ctx, fixturePass)
 	_, err := seed.Exec(ctx, "CREATE TABLE cp (id int)")
 	require.NoError(t, err)
 	require.NoError(t, seed.Close(ctx))
 
 	f.replaceGrant(ctx, []string{"block_copy"})
 
-	conn := f.mustConnect(ctx, fixtureUser, fixturePass)
+	conn := f.mustConnect(ctx, fixturePass)
 
 	_, err = conn.Exec(ctx, "COPY cp TO STDOUT")
 	require.Error(t, err, "COPY must be refused under a block_copy grant")
@@ -551,7 +553,7 @@ func TestIntegration_RevocationKillsSession(t *testing.T) {
 	ctx := context.Background()
 	f := setupFixture(ctx, t)
 
-	conn := f.mustConnect(ctx, fixtureUser, fixturePass)
+	conn := f.mustConnect(ctx, fixturePass)
 
 	var got int
 	require.NoError(t, conn.QueryRow(ctx, "SELECT 1").Scan(&got))
