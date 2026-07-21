@@ -1,6 +1,6 @@
 // Package conncheck validates that a configured server row is actually
 // reachable and usable: that an SSH bastion accepts the stored key, and that a
-// database target can be dialled (and authenticated against) — optionally
+// database target can be dialed (and authenticated against) — optionally
 // through that bastion.
 //
 // It exists so provisioning is not write-and-hope: creating a bastion with a
@@ -243,7 +243,7 @@ func (c *Checker) checkTarget(ctx context.Context, dialer *shared.Dialer, srv *s
 
 	// Track the dial separately from the login so a refused TCP connection is
 	// reported as target_dial, not as an auth failure. Conns are kept so the
-	// timeout path can force them shut: a connection tunnelled over SSH does not
+	// timeout path can force them shut: a connection tunneled over SSH does not
 	// support deadlines (golang.org/x/crypto/ssh channels reject SetDeadline),
 	// so a database library blocked on a read cannot be unstuck by the context
 	// alone — closing the transport underneath it is what unblocks it.
@@ -484,7 +484,7 @@ func classifyTargetError(err error) Result {
 	}
 }
 
-// isTimeout reports whether err is a net.Error signalling a timeout.
+// isTimeout reports whether err is a net.Error signaling a timeout.
 func isTimeout(err error) bool {
 	var netErr net.Error
 

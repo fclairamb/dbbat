@@ -61,7 +61,7 @@ func probePostgres(ctx context.Context, srv *store.Server, dial dialFunc) error 
 	}
 
 	cfg.Host = srv.Host
-	cfg.Port = uint16(srv.Port) //nolint:gosec // port is a validated 1..65535 column
+	cfg.Port = uint16(srv.Port)
 	cfg.User = srv.Username
 	cfg.Password = srv.Password
 	cfg.Database = srv.DatabaseName
@@ -88,7 +88,7 @@ func probePostgres(ctx context.Context, srv *store.Server, dial dialFunc) error 
 func postgresTLSConfig(srv *store.Server) *tls.Config {
 	switch srv.SSLMode {
 	case "require":
-		return &tls.Config{InsecureSkipVerify: true} //nolint:gosec // "require" is encryption without verification, by definition
+		return &tls.Config{InsecureSkipVerify: true}
 	case "verify-ca", "verify-full":
 		return &tls.Config{MinVersion: tls.VersionTLS12, ServerName: srv.Host}
 	default:
@@ -116,7 +116,7 @@ func probeMySQL(ctx context.Context, srv *store.Server, dial dialFunc) error {
 			case "verify-ca", "verify-full":
 				c.SetTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12, ServerName: srv.Host})
 			}
-			// Same defence-in-depth as the proxy: never let an upstream ask the
+			// Same defense-in-depth as the proxy: never let an upstream ask the
 			// dbbat host to read local files.
 			c.UnsetCapability(gomysql.CLIENT_LOCAL_FILES)
 			c.SetAttributes(map[string]string{"program_name": probeAppName()})
