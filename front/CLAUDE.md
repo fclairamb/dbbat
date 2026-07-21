@@ -487,7 +487,8 @@ Ensure you're accessing the app at `http://localhost:5173/app/` (with the base p
 |--------|-------------|
 | `dev` | Start development server with hot reload |
 | `build` | Build for production (with type checking) |
-| `build:no-check` | Build for production (skip type checking) |
+| `build:no-check` | Build for production (skip type checking) — local escape hatch only, not used by CI or `make build-front` |
+| `typecheck` | Run TypeScript type checking only (`tsc -b --noEmit`) |
 | `lint` | Run ESLint on all source files |
 | `preview` | Preview production build locally |
 | `generate-client` | Generate TypeScript types from OpenAPI spec |

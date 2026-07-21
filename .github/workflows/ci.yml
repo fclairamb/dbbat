@@ -65,8 +65,12 @@ jobs:
         run: bun run lint
         working-directory: front
 
+      - name: Type-check frontend
+        run: bun run typecheck
+        working-directory: front
+
       - name: Build frontend
-        run: bun run build:no-check
+        run: bun run build
         working-directory: front
 
       - name: Upload frontend artifacts

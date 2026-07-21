@@ -13,9 +13,10 @@ bun install
 echo "Generating API types..."
 bun run generate-client
 
-# Build the frontend
+# Build the frontend (type-checked: tsc -b && vite build)
+# Use `bun run build:no-check` directly for fast local iteration.
 echo "Building frontend..."
-bun run build:no-check
+bun run build
 
 # Copy to backend resources
 echo "Copying to backend resources..."
