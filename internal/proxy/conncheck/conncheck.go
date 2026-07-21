@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -527,11 +528,25 @@ func isAuthRejection(err error) bool {
 		strings.Contains(msg, "permission denied")
 }
 
+// oracleAuthErrorRe matches the Oracle error codes that mean "the credentials
+// or the account are the problem", in both renderings go-ora produces: the
+// server's own zero-padded text (`ORA-01017: invalid username/password`) and
+// go-ora's internal table for listener refusals, which pads nothing
+// (`ORA-1017`). Listener/service errors (12514, 12505, 12541, ...) are
+// deliberately absent: those are handshake failures pointing at the host, port
+// or service name, not at the credentials.
+var oracleAuthErrorRe = regexp.MustCompile(`ora-0*(1017|1005|1004|1045|1031|9911|28000|28001|28009)\b`)
+
 // isDBAuthRejection reports whether a database handshake failure was a
 // credential/permission rejection. Covers the PostgreSQL SQLSTATE class 28
-// wording, MySQL 1045/1044, and the MongoDB SCRAM failure text.
+// wording, MySQL 1045/1044, the MongoDB SCRAM failure text, and the Oracle
+// ORA- codes above.
 func isDBAuthRejection(err error) bool {
 	msg := strings.ToLower(err.Error())
+
+	if oracleAuthErrorRe.MatchString(msg) {
+		return true
+	}
 
 	for _, needle := range []string{
 		"password authentication failed",

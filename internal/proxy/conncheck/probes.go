@@ -3,13 +3,16 @@ package conncheck
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
+	"time"
 
 	gomysqlclient "github.com/go-mysql-org/go-mysql/client"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/jackc/pgx/v5/pgconn"
+	goora "github.com/sijms/go-ora/v2"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
@@ -17,6 +20,12 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 	"github.com/fclairamb/dbbat/internal/version"
 )
+
+// errOracleConnectorShape guards against a go-ora upgrade changing what
+// NewConnector returns: without the concrete type we cannot inject the
+// transport, and a probe that silently dialed on its own would bypass the SSH
+// tunnel entirely.
+var errOracleConnectorShape = errors.New("go-ora connector does not expose a dialer hook")
 
 // dialFunc opens the transport to the target — directly or through the SSH
 // bastion chain. The probes never dial themselves: they inject this so the
@@ -28,8 +37,7 @@ type dialFunc func(ctx context.Context) (net.Conn, error)
 type probe func(ctx context.Context, srv *store.Server, dial dialFunc) error
 
 // probeFor returns the login probe for a protocol, or nil when dbbat has no
-// standalone dial path for it (Oracle: its TTC handshake only exists inside a
-// live proxy session, so a check there is reachability-only).
+// standalone dial path for it.
 func probeFor(protocol string) probe {
 	switch protocol {
 	case store.ProtocolPostgreSQL:
@@ -38,6 +46,8 @@ func probeFor(protocol string) probe {
 		return probeMySQL
 	case store.ProtocolMongoDB:
 		return probeMongo
+	case store.ProtocolOracle:
+		return probeOracle
 	default:
 		return nil
 	}
@@ -166,4 +176,95 @@ type dialerFunc func(ctx context.Context) (net.Conn, error)
 // DialContext satisfies options.ContextDialer.
 func (d dialerFunc) DialContext(ctx context.Context, _, _ string) (net.Conn, error) {
 	return d(ctx)
+}
+
+// probeOracle runs a real TNS Connect + TTC login against the target with
+// go-ora, the same client library the Oracle proxy's own test suite drives.
+//
+// The proxy itself cannot be reused here: its TNS/TTC handshake only exists
+// inside a live session with a downstream client attached (it relays the
+// client's own Connect descriptor byte-for-byte). go-ora is the standalone
+// client half of that same protocol, and it accepts an injected transport, so
+// the probe still goes through the exact SSH tunnel a real session would.
+func probeOracle(ctx context.Context, srv *store.Server, dial dialFunc) error {
+	opts := map[string]string{"PROGRAM": probeAppName()}
+
+	// Deliberately no TIMEOUT/READ TIMEOUT option: it makes go-ora arm real
+	// socket deadlines, which an SSH-tunneled conn cannot honour. The conncheck
+	// harness bounds the probe by closing the transport instead.
+	switch srv.SSLMode {
+	case "require":
+		opts["SSL"] = "TRUE"
+		opts["SSL VERIFY"] = "FALSE"
+	case "verify-ca", "verify-full":
+		opts["SSL"] = "TRUE"
+		opts["SSL VERIFY"] = "TRUE"
+	}
+
+	dsn := goora.BuildUrl(srv.Host, srv.Port, oracleServiceName(srv), srv.Username, srv.Password, opts)
+
+	connector, ok := goora.NewConnector(dsn).(*goora.OracleConnector)
+	if !ok {
+		return errOracleConnectorShape
+	}
+
+	connector.Dialer(dialerFunc(func(dialCtx context.Context) (net.Conn, error) {
+		conn, err := dial(dialCtx)
+		if err != nil {
+			return nil, err
+		}
+
+		return tolerantDeadlineConn{Conn: conn}, nil
+	}))
+
+	conn, err := connector.Connect(ctx)
+	if err != nil {
+		return err
+	}
+
+	return conn.Close()
+}
+
+// oracleServiceName resolves the service name to present upstream, mirroring
+// the proxy's own SERVICE_NAME rewrite: the dedicated column when set, the
+// database name otherwise.
+func oracleServiceName(srv *store.Server) string {
+	if srv.OracleServiceName != nil && *srv.OracleServiceName != "" {
+		return *srv.OracleServiceName
+	}
+
+	return srv.DatabaseName
+}
+
+// tolerantDeadlineConn makes a conn that cannot do deadlines usable by a client
+// that sets them unconditionally. go-ora arms a deadline before every read and
+// write — the zero time (meaning "no deadline") when no timeout is configured —
+// while golang.org/x/crypto/ssh channels reject SetDeadline outright. Clearing
+// a deadline that never existed is a no-op, so swallowing the error there is
+// safe; a *real* deadline that the transport cannot honour is still reported,
+// so a future caller cannot silently lose its timeout.
+type tolerantDeadlineConn struct {
+	net.Conn
+}
+
+func (c tolerantDeadlineConn) SetDeadline(t time.Time) error {
+	return ignoreZeroDeadline(c.Conn.SetDeadline(t), t)
+}
+
+func (c tolerantDeadlineConn) SetReadDeadline(t time.Time) error {
+	return ignoreZeroDeadline(c.Conn.SetReadDeadline(t), t)
+}
+
+func (c tolerantDeadlineConn) SetWriteDeadline(t time.Time) error {
+	return ignoreZeroDeadline(c.Conn.SetWriteDeadline(t), t)
+}
+
+// ignoreZeroDeadline drops the error from clearing a deadline on a transport
+// that does not support them.
+func ignoreZeroDeadline(err error, t time.Time) error {
+	if err != nil && t.IsZero() {
+		return nil
+	}
+
+	return err
 }
