@@ -41,3 +41,29 @@ connection).
   suites, since the vet step only proves they compile.
 
 No GitHub issue exists for this yet — one should be filed.
+
+## Implementation Plan
+
+1. **Run what exists.** `go test -tags integration ./internal/proxy/mongodb/`
+   and `./internal/proxy/mysql/` live on Docker (arm64, OrbStack), fix whatever
+   breaks.
+2. **PostgreSQL has no tagged suite at all** — `internal/proxy/postgresql/`
+   contains zero `//go:build integration` files, so "run the PostgreSQL
+   integration suite" is impossible as written. Write one, mirroring the MySQL /
+   MongoDB fixtures: PG storage container + PG upstream container + started
+   proxy, `PGPROXY_TEST_IMAGE` env override for the upstream image. Cover
+   auth (password + `dbb_` API key + wrong password), a query round-trip with
+   query-log/result capture, extended-protocol (prepared statement) capture, a
+   `read_only` grant blocking a write, `block_ddl` blocking a DDL, TLS
+   termination at the proxy, and per-session dump files.
+3. `postgresql.Server` has no `Addr()` accessor (MySQL and MongoDB both do), so
+   a `:0` listen address can't be discovered by a test — add it, mirroring
+   `internal/proxy/mysql/server.go`.
+4. **Document how to run each suite** next to the protocol notes in
+   `docs/mysql.md` and `docs/mongodb.md`, plus a PostgreSQL equivalent, matching
+   the "Integration tests" section added to `docs/oracle.md`.
+5. **Scheduled CI job** that actually *runs* the tagged suites (nightly cron,
+   not per-PR — they take minutes and need Docker), since the existing vet step
+   only proves they compile.
+6. QA: `make build-binary`, `make lint`, `make test`,
+   `go vet -tags integration ./...`, then the three tagged suites.
