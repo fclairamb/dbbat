@@ -28,13 +28,24 @@ moment typechecking is wired into the website pipeline.
 
 No GitHub issue exists for this yet — one should be filed if it is not picked up soon.
 
-## Implementation Plan
+## Implementation Plan (as shipped)
 
-- Confirmed `tsc` emits a single `TS5101` at `website/tsconfig.json(4,5)` — the local
-  file's `baseUrl: "."`. The base `@docusaurus/tsconfig` also sets `baseUrl: "."` plus
-  `paths: { "@site/*": ["./*"] }`, but its occurrence is not what tsc flags here.
-- Fix: remove the redundant `baseUrl` from the local `website/tsconfig.json`. The local
-  file defines no `paths`, so nothing local depends on it. `@site/*` / `@theme/*`
-  resolution is provided by the base config + `@docusaurus/module-type-aliases`, which
-  TS 5.x+/6.x resolves without a `baseUrl`.
-- Verify: `cd website && bun run typecheck` (primary gate) and `bun run build`.
+The spec's preferred fix — "just delete the local `baseUrl`" — was tried and does **not**
+work. Findings and the actual fix:
+
+- Deleting the local `baseUrl` did not silence `TS5101`: the deprecated `baseUrl` also
+  lives in the vendored `@docusaurus/tsconfig` base config (`node_modules`, uneditable),
+  which tsc still flags after the local one is gone.
+- Worse, the local `baseUrl: "."` is **load-bearing**: it anchors the base config's
+  inherited `paths: { "@site/*": ["./*"] }` to this project dir. Removing it re-anchors
+  `@site/*` to the base config's own dir, breaking `@site/...` module resolution.
+- Fix applied (the spec's documented escape hatch): keep `baseUrl: "."` in
+  `website/tsconfig.json` and add `"ignoreDeprecations": "6.0"` (with an explanatory
+  comment + TODO to drop both once Docusaurus ships a tsconfig without `baseUrl`).
+- Silencing the config error unmasked pre-existing React 19 errors (tsc had been bailing
+  at the config error before ever typechecking sources): `Cannot find namespace 'JSX'`.
+  Fixed by switching `JSX.Element` → `ReactNode` (imported from `react`) in
+  `website/src/pages/index.tsx` and `website/src/components/HomepageFeatures/index.tsx`.
+- Verified: `cd website && bun run typecheck` and `bun run build` both pass.
+- Follow-up (out of scope here): file the upstream Docusaurus issue about the base
+  config's deprecated `baseUrl`, per the note above.
