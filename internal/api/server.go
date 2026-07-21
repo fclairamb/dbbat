@@ -230,6 +230,18 @@ func (s *Server) setupRouter() *gin.Engine {
 			// Admin password reset (requires web session, not API key)
 			users.POST("/:uid/reset-password", s.requireAdmin(), s.handleResetPassword)
 
+			// User group endpoints — organizational groupings used to scope
+			// grant definitions. Admin-only: membership is access-relevant.
+			userGroups := authenticated.Group("/user-groups")
+			userGroups.POST("", s.requireAdmin(), s.handleCreateUserGroup)
+			userGroups.GET("", s.requireAdmin(), s.handleListUserGroups)
+			userGroups.GET("/:uid", s.requireAdmin(), s.handleGetUserGroup)
+			userGroups.PATCH("/:uid", s.requireAdmin(), s.handleUpdateUserGroup)
+			userGroups.DELETE("/:uid", s.requireAdmin(), s.handleDeleteUserGroup)
+			userGroups.GET("/:uid/members", s.requireAdmin(), s.handleListUserGroupMembers)
+			userGroups.PUT("/:uid/members/:user_uid", s.requireAdmin(), s.handleAddUserGroupMember)
+			userGroups.DELETE("/:uid/members/:user_uid", s.requireAdmin(), s.handleRemoveUserGroupMember)
+
 			// Server endpoints. The table now holds SSH bastions too (protocol
 			// 'ssh'); the route is /servers. Database *targets* are listed here
 			// (SSH rows are excluded by the store's targets-only scope).

@@ -213,6 +213,39 @@ func (s *Store) ListGroupsForUser(ctx context.Context, userUID uuid.UUID) ([]Use
 	return groups, nil
 }
 
+// SetGroupMembers replaces a group's membership with exactly the given set of
+// users, in one transaction so the group is never transiently empty (an empty
+// group is a real access-control state, not a transient one).
+func (s *Store) SetGroupMembers(ctx context.Context, groupUID uuid.UUID, userUIDs []uuid.UUID) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("set group members: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.NewDelete().
+		Model((*UserGroupMember)(nil)).
+		Where("group_uid = ?", groupUID).
+		Exec(ctx); err != nil {
+		return fmt.Errorf("set group members (clear): %w", err)
+	}
+
+	for _, userUID := range userUIDs {
+		if _, err := tx.NewInsert().
+			Model(&UserGroupMember{GroupUID: groupUID, UserUID: userUID}).
+			On("CONFLICT (group_uid, user_uid) DO NOTHING").
+			Exec(ctx); err != nil {
+			return fmt.Errorf("set group members (insert): %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("set group members (commit): %w", err)
+	}
+
+	return nil
+}
+
 // SetUserGroups replaces a user's group memberships with exactly the given
 // set, in one transaction so the user is never transiently ungrouped.
 func (s *Store) SetUserGroups(ctx context.Context, userUID uuid.UUID, groupUIDs []uuid.UUID) error {

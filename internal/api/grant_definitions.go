@@ -1,14 +1,40 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/store"
 )
+
+// validateDefinitionScope checks that every scoped group and database uid
+// actually exists, so an admin can't silently create a definition that is
+// scoped to nothing (which would fail closed and look like a bug).
+func (s *Server) validateDefinitionScope(ctx context.Context, req *CreateGrantDefinitionRequest) string {
+	for _, groupUID := range req.GroupUIDs {
+		if _, err := s.store.GetUserGroup(ctx, groupUID); err != nil {
+			return "user group does not exist: " + groupUID.String()
+		}
+	}
+
+	for _, dbUID := range req.DatabaseUIDs {
+		target, err := s.store.GetServerByUID(ctx, dbUID)
+		if err != nil {
+			return "database does not exist: " + dbUID.String()
+		}
+
+		if target.IsSSH() {
+			return "cannot scope a grant definition to an ssh server: " + dbUID.String()
+		}
+	}
+
+	return ""
+}
 
 // CreateGrantDefinitionRequest is the JSON body for POST /grant-definitions.
 type CreateGrantDefinitionRequest struct {
@@ -22,6 +48,13 @@ type CreateGrantDefinitionRequest struct {
 	// skip the pending/admin-approval step and materialize the grant
 	// instantly.
 	AutoApprove bool `json:"auto_approve"`
+	// GroupUIDs restricts the definition to members of these user groups.
+	// Empty/omitted = every user, which is how every pre-scoping definition
+	// keeps behaving.
+	GroupUIDs []uuid.UUID `json:"group_uids"`
+	// DatabaseUIDs restricts the definition to these databases.
+	// Empty/omitted = every database.
+	DatabaseUIDs []uuid.UUID `json:"database_uids"`
 }
 
 // UpdateGrantDefinitionRequest is the JSON body for PATCH
@@ -90,6 +123,12 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		return
 	}
 
+	if msg := s.validateDefinitionScope(c.Request.Context(), &req); msg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
+
+		return
+	}
+
 	currentUser := getCurrentUser(c)
 
 	def := &store.GrantDefinition{
@@ -100,6 +139,8 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		MaxQueryCounts:      req.MaxQueryCounts,
 		MaxBytesTransferred: req.MaxBytesTransferred,
 		AutoApprove:         req.AutoApprove,
+		GroupUIDs:           req.GroupUIDs,
+		DatabaseUIDs:        req.DatabaseUIDs,
 		CreatedBy:           currentUser.UID,
 	}
 
@@ -124,6 +165,8 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		"duration_seconds":     created.DurationSeconds,
 		"controls":             created.Controls,
 		"auto_approve":         created.AutoApprove,
+		"group_uids":           created.GroupUIDs,
+		"database_uids":        created.DatabaseUIDs,
 	})
 
 	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
@@ -156,6 +199,28 @@ func (s *Server) handleListGrantDefinitions(c *gin.Context) {
 		return
 	}
 
+	// Admins manage every definition, so their listing stays unfiltered.
+	// Everyone else only sees the definitions their groups put in scope —
+	// invisible rather than greyed out.
+	if !currentUser.IsAdmin() {
+		groupUIDs, err := s.store.ListUserGroupUIDs(c.Request.Context(), currentUser.UID)
+		if err != nil {
+			writeInternalError(c, s.logger, err, "failed to list user groups")
+
+			return
+		}
+
+		visible := make([]store.GrantDefinition, 0, len(defs))
+
+		for i := range defs {
+			if defs[i].AppliesToGroups(groupUIDs) {
+				visible = append(visible, defs[i])
+			}
+		}
+
+		defs = visible
+	}
+
 	successResponse(c, gin.H{"grant_definitions": defs})
 }
 
@@ -183,12 +248,30 @@ func (s *Server) handleGetGrantDefinition(c *gin.Context) {
 
 	currentUser := getCurrentUser(c)
 
-	if !currentUser.IsAdmin() && !def.IsActive {
-		// Hide deactivated definitions from non-admins entirely; the listing
-		// endpoint already filters them, so a direct GET should match.
-		writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
+	if !currentUser.IsAdmin() {
+		if !def.IsActive {
+			// Hide deactivated definitions from non-admins entirely; the
+			// listing endpoint already filters them, so a direct GET should
+			// match.
+			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
 
-		return
+			return
+		}
+
+		groupUIDs, err := s.store.ListUserGroupUIDs(c.Request.Context(), currentUser.UID)
+		if err != nil {
+			writeInternalError(c, s.logger, err, "failed to list user groups")
+
+			return
+		}
+
+		// Out-of-scope definitions are invisible in the listing; a direct GET
+		// must not be a way around that.
+		if !def.AppliesToGroups(groupUIDs) {
+			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
+
+			return
+		}
 	}
 
 	successResponse(c, def)
@@ -217,6 +300,12 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 		return
 	}
 
+	if msg := s.validateDefinitionScope(c.Request.Context(), &req); msg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
+
+		return
+	}
+
 	def, err := s.store.GetGrantDefinition(c.Request.Context(), uid)
 	if err != nil {
 		if errors.Is(err, store.ErrGrantDefinitionNotFound) {
@@ -237,6 +326,8 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 	def.MaxQueryCounts = req.MaxQueryCounts
 	def.MaxBytesTransferred = req.MaxBytesTransferred
 	def.AutoApprove = req.AutoApprove
+	def.GroupUIDs = req.GroupUIDs
+	def.DatabaseUIDs = req.DatabaseUIDs
 
 	if err := s.store.UpdateGrantDefinition(c.Request.Context(), def); err != nil {
 		writeInternalError(c, s.logger, err, "failed to update grant definition")
@@ -250,6 +341,8 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 		"grant_definition_uid": def.UID,
 		"name":                 def.Name,
 		"auto_approve":         def.AutoApprove,
+		"group_uids":           def.GroupUIDs,
+		"database_uids":        def.DatabaseUIDs,
 	})
 
 	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
