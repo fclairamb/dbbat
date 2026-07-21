@@ -1,0 +1,56 @@
+name: Integration tests
+
+# The `-tags integration` suites start real databases with testcontainers, so
+# they are far too slow for the per-PR CI job (which only runs
+# `go vet -tags integration ./...` — proving they compile, not that they work).
+# This workflow actually runs them, nightly and on demand.
+
+on:
+  schedule:
+    # 03:17 UTC daily — off the hour to avoid the GitHub-wide cron stampede.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "Package pattern to run (default: all non-Oracle proxies)"
+        required: false
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    runs-on: ubuntu-24.04
+    strategy:
+      # One protocol failing should not hide the state of the others.
+      fail-fast: false
+      matrix:
+        package:
+          - ./internal/proxy/postgresql/
+          - ./internal/proxy/mysql/
+          - ./internal/proxy/mongodb/
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: "1.26"
+
+      - name: Run integration suite
+        run: go test -tags integration -timeout 40m -count=1 -v ${{ github.event.inputs.package || matrix.package }}
+
+  # The Oracle suite is kept out of the matrix above: its default image is
+  # amd64-only and slow to boot, so it gets its own job with a longer budget.
+  oracle:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: "1.26"
+
+      - name: Run Oracle integration suite
+        run: go test -tags integration -timeout 60m -count=1 -v ./internal/proxy/oracle/
