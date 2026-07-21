@@ -96,11 +96,11 @@ curl -X PUT http://localhost:4200/api/v1/auth/password \
 ```
 :::
 
-### Configure a Target Database
+### Configure a Target Server
 
 ```bash
 # PostgreSQL target
-curl -X POST http://localhost:4200/api/v1/databases \
+curl -X POST http://localhost:4200/api/v1/servers \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -116,7 +116,7 @@ curl -X POST http://localhost:4200/api/v1/databases \
   }'
 ```
 
-For Oracle add `"protocol": "oracle"` plus `"oracle_service_name": "ORCL"`. For MySQL/MariaDB use `"protocol": "mysql"` (or `"mariadb"`) and port `3306`.
+For Oracle add `"protocol": "oracle"` plus `"oracle_service_name": "ORCL"`. For MySQL/MariaDB use `"protocol": "mysql"` (or `"mariadb"`) and port `3306`. For MongoDB use `"protocol": "mongodb"` and port `27017`. Targets that are only reachable through a jump host can be pointed at an `ssh` bastion — see [Server Configuration](/docs/configuration/databases#ssh-tunnels).
 
 ### Create a Test User and Grant Access
 
@@ -135,7 +135,7 @@ curl -X PUT http://localhost:4200/api/v1/auth/password \
 
 # Get the database UID
 DB_UID=$(curl -s -H "Authorization: Bearer $TOKEN" \
-  http://localhost:4200/api/v1/databases | jq -r '.databases[0].uid')
+  http://localhost:4200/api/v1/servers | jq -r '.databases[0].uid')
 
 # Create a grant (empty controls = full write access)
 curl -X POST http://localhost:4200/api/v1/grants \

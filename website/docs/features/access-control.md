@@ -102,7 +102,13 @@ Limit the volume of data returned through the proxy:
 
 When exceeded, subsequent queries return an error. The byte counter accumulates response sizes from the upstream database.
 
-Counters (`query_count`, `bytes_transferred`) are exposed on the grant object so admins can see usage in real time.
+Counters (`query_count`, `bytes_transferred`) are exposed on the grant object so admins can see usage in real time, and the web UI renders them as usage bars (warning at ≥80%, destructive at ≥100%, explicit `unlimited` marker when no limit is set).
+
+### Mid-stream enforcement
+
+Time and bandwidth limits are enforced **mid-stream**, not only between commands. A single `SELECT` streaming far more data than the grant allows is cut off partway through rather than being allowed to complete — so one runaway query cannot blow past a byte quota, and a grant expiring mid-transfer stops that transfer.
+
+The bytes already transferred by a query aborted this way are still persisted, so quota accounting stays accurate.
 
 ## Revoking Grants
 
@@ -113,7 +119,9 @@ curl -X DELETE http://localhost:4200/api/v1/grants/$GRANT_UID \
   -H "Authorization: Bearer $TOKEN"
 ```
 
-The grant record is preserved for audit (with `revoked_at` and `revoked_by` populated); only new connections are refused.
+The grant record is preserved for audit (with `revoked_at` and `revoked_by` populated).
+
+Revocation takes effect immediately across all proxied protocols: further queries are blocked **and sessions already connected under that grant are disconnected**. You do not have to wait for the user to reconnect for a revocation to bite.
 
 ## Listing Grants
 

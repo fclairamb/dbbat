@@ -59,7 +59,7 @@ Users have one or more roles that determine their access:
 
 ## Password Change Requirement
 
-Users must change their initial password before logging in. Login attempts from users who haven't changed their password will receive a `403 Forbidden` response with error code `password_change_required`.
+Users must change their initial password before logging in. Login attempts from users who haven't changed their password will receive a `403 Forbidden` response with error code `PASSWORD_CHANGE_REQUIRED`.
 
 Users must then call `PUT /auth/password` with their username and credentials to change their password before they can log in.
 
@@ -420,12 +420,13 @@ The full API key is only returned once in this response. Store it securely as it
 GET /api/v1/keys
 ```
 
-Returns a list of API keys. Non-admins can only see their own keys.
+Returns a list of API keys, scoped to the caller's own keys by default — **including for admins**. Admins can pass `all_users=true` to review every user's keys.
 
 **Query Parameters:**
 
 | Parameter | Description |
 |-----------|-------------|
+| `all_users` | Admin only: return every user's keys instead of just the caller's (default: false) |
 | `user_id` | Filter by user UID (admin only) |
 | `include_all` | Include revoked and expired keys (default: false) |
 
@@ -449,15 +450,19 @@ Revokes an API key. Requires Web Session or Basic Auth (API keys cannot revoke A
 
 ---
 
-## Databases
+## Servers
 
-### Create Database
+:::warning Renamed in v0.17.0
+These endpoints were previously served under `/api/v1/databases`. The path is now `/api/v1/servers` and no alias is kept for the old one. The JSON response key is still `databases`.
+:::
+
+### Create Server
 
 ```
-POST /api/v1/databases
+POST /api/v1/servers
 ```
 
-Creates a new database configuration. **Requires admin role.**
+Creates a new server configuration. **Requires admin role.**
 
 **Request:**
 
@@ -475,7 +480,11 @@ Creates a new database configuration. **Requires admin role.**
 }
 ```
 
-`protocol` accepts `postgresql` (default), `oracle`, `mysql`, or `mariadb`. For Oracle, also provide `oracle_service_name` so TNS clients can route by service name.
+`protocol` accepts `postgresql` (default), `oracle`, `mysql`, `mariadb`, or `mongodb`. For Oracle, also provide `oracle_service_name` so TNS clients can route by service name. For MongoDB, optionally set `mongo_auth_source` (defaults to `admin`).
+
+Set `via_uid` to the UID of an SSH bastion to tunnel the upstream connection through it — see [SSH servers](#ssh-servers) below.
+
+If the name is already taken, the request fails with `409 DUPLICATE_NAME`.
 
 **Response:**
 
@@ -491,39 +500,40 @@ Creates a new database configuration. **Requires admin role.**
   "username": "app_user",
   "ssl_mode": "require",
   "oracle_service_name": null,
+  "via_uid": null,
   "created_by": "660e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
-### List Databases
+### List Servers
 
 ```
-GET /api/v1/databases
+GET /api/v1/servers
 ```
 
-Returns a list of database configurations. Response varies by role:
+Returns a list of database server configurations. SSH bastions are excluded — they are listed only under [`/api/v1/ssh-servers`](#ssh-servers). Response varies by role:
 
 | Role | Response |
 |------|----------|
-| Admin | Full details (host, port, database_name, username, ssl_mode, protocol, oracle_service_name) |
+| Admin | Full details (host, port, database_name, username, ssl_mode, protocol, oracle_service_name, via_uid) |
 | Viewer | Limited info (uid, name, description) |
-| Connector | Only databases with active grants (limited info) |
+| Connector | Only servers with active grants (limited info) |
 
-### Get Database
-
-```
-GET /api/v1/databases/:uid
-```
-
-Retrieves a specific database configuration. Response varies by role (same as list).
-
-### Update Database
+### Get Server
 
 ```
-PUT /api/v1/databases/:uid
+GET /api/v1/servers/:uid
 ```
 
-Updates a database configuration. **Requires admin role.**
+Retrieves a specific server configuration. Response varies by role (same as list).
+
+### Update Server
+
+```
+PUT /api/v1/servers/:uid
+```
+
+Updates a server configuration. **Requires admin role.**
 
 **Request:**
 
@@ -535,13 +545,68 @@ Updates a database configuration. **Requires admin role.**
 }
 ```
 
-### Delete Database
+### Delete Server
 
 ```
-DELETE /api/v1/databases/:uid
+DELETE /api/v1/servers/:uid
 ```
 
-Deletes a database configuration. **Requires admin role.**
+Deletes a server configuration. **Requires admin role.**
+
+To remove a tunnel without deleting the server, send `"clear_via_uid": true` on update — the server goes back to a direct dial.
+
+---
+
+## SSH Servers
+
+SSH bastions let DBBat reach upstreams that aren't directly routable. They are stored as servers with protocol `ssh`, but are kept out of the regular server listing and out of every grantable/connectable target context — you cannot grant access *to* a bastion, only *through* one.
+
+### List SSH Servers
+
+```
+GET /api/v1/ssh-servers
+```
+
+Returns the SSH bastion rows. **Requires admin role.** Secrets (private key, passphrase) are never returned.
+
+```json
+{
+  "servers": [
+    {
+      "uid": "770e8400-e29b-41d4-a716-446655440000",
+      "name": "prod-bastion",
+      "protocol": "ssh",
+      "host": "bastion.example.com",
+      "port": 22,
+      "username": "ec2-user",
+      "ssh_known_host_key": "ssh-ed25519 AAAAC3Nza..."
+    }
+  ]
+}
+```
+
+### Create SSH Server
+
+```
+POST /api/v1/ssh-servers
+```
+
+**Requires admin role.**
+
+```json
+{
+  "name": "prod-bastion",
+  "host": "bastion.example.com",
+  "port": 22,
+  "username": "ec2-user",
+  "ssh_private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\n...",
+  "ssh_passphrase": "optional"
+}
+```
+
+`ssh_private_key` and `ssh_passphrase` are write-only and never returned. The bastion's host key is pinned on first successful connection (trust on first use) and reported back as the read-only `ssh_known_host_key`.
+
+Tunnelled connections are pooled and shared across sessions, so many proxied clients reuse a single SSH connection per bastion. Tunnelling is supported for all four proxied protocols.
 
 ---
 
@@ -632,6 +697,84 @@ DELETE /api/v1/grants/:uid
 
 Revokes an access grant. **Requires admin role.**
 
+Revocation takes effect immediately: further queries are blocked and any session already connected under that grant is disconnected, across all proxied protocols.
+
+---
+
+## Grant Definitions
+
+Definitions are admin-managed templates describing a *shape* of grant (controls, duration, quotas). Users can only request access by picking an active definition. Direct admin grant creation via `POST /api/v1/grants` bypasses definitions entirely.
+
+### Create Grant Definition
+
+```
+POST /api/v1/grant-definitions
+```
+
+**Requires admin role.**
+
+```json
+{
+  "name": "read-only-1h",
+  "controls": ["read_only"],
+  "max_query_counts": 1000,
+  "max_bytes_transferred": 10485760,
+  "auto_approve": false
+}
+```
+
+When `auto_approve` is `true`, requests against this definition skip the pending/admin-approval step entirely and the grant is materialized instantly at request time. Auto-approved requests still require a justification, are recorded in a dedicated audit trail, and post a Slack notification — without Approve/Deny buttons, since there is nothing to decide.
+
+A duplicate name returns `409 DUPLICATE_NAME`.
+
+### List Grant Definitions
+
+```
+GET /api/v1/grant-definitions
+```
+
+Non-admins always receive only active definitions. Admins receive both active and deactivated ones, unless `active_only=true` is passed.
+
+Deactivated definitions have `is_active: false`; they are soft-deleted so historical grant requests keep referencing them.
+
+---
+
+## Grant Requests
+
+### Submit a Grant Request
+
+```
+POST /api/v1/grant-requests
+```
+
+Any authenticated user can request access by selecting a definition and a server.
+
+```json
+{
+  "grant_definition_id": "550e8400-e29b-41d4-a716-446655440000",
+  "database_id": "660e8400-e29b-41d4-a716-446655440000",
+  "justification": "Investigating ticket SUP-4821"
+}
+```
+
+If the linked definition has `auto_approve` enabled, the response comes back already `approved` with `resulting_grant_id` populated — no admin action needed. Otherwise the request is `pending`.
+
+Returns `409` if a pending request already exists for the same user/server/definition.
+
+### Approve / Deny / Cancel
+
+```
+POST /api/v1/grant-requests/:uid/approve
+POST /api/v1/grant-requests/:uid/deny
+POST /api/v1/grant-requests/:uid/cancel
+```
+
+Approval atomically transitions pending → approved and builds a real grant from the definition plus the request's user and server. Returns `409` if the request is no longer pending or its definition has been deactivated.
+
+Admins can also approve a request *and* flip its definition to auto-approve in one action from the web UI, so future requests of the same shape are instant.
+
+Status values: `pending`, `approved`, `denied`, `cancelled`, `expired`.
+
 ---
 
 ## Connections
@@ -672,6 +815,16 @@ Returns a list of proxy connections. Connectors can only see their own connectio
   ]
 }
 ```
+
+### Get Connection
+
+```
+GET /api/v1/connections/:uid
+```
+
+Retrieves a single connection. Connectors can only retrieve their own connections.
+
+The web UI exposes this as a connection detail page, and the query detail breadcrumb links back to the connection a query belongs to.
 
 ---
 
@@ -823,46 +976,56 @@ Returns a list of audit log events. **Requires admin or viewer role.**
 
 ### Standard Error
 
+Every error response uses the same envelope:
+
 ```json
 {
-  "error": "error message here"
+  "code": "VALIDATION_ERROR",
+  "message": "Human-readable explanation",
+  "detail": "Optional additional context",
+  "retry_after": 60
 }
 ```
+
+| Field | Description |
+|-------|-------------|
+| `code` | Machine-readable error code (see below). Match on this, not on `message`. |
+| `message` | Human-readable explanation, safe to surface to users. |
+| `detail` | Optional extra context. Omitted when empty. |
+| `retry_after` | Seconds to wait before retrying. Only present on `RATE_LIMITED`. |
+
+### Error Codes
+
+| Code | Typical status | Meaning |
+|------|----------------|---------|
+| `VALIDATION_ERROR` | 400 | Invalid input |
+| `UNAUTHORIZED` | 401 | Authentication required |
+| `INVALID_CREDENTIALS` | 401 | Wrong username or password |
+| `FORBIDDEN` | 403 | Insufficient permissions |
+| `PASSWORD_CHANGE_REQUIRED` | 403 | The user must change their password first |
+| `WEAK_PASSWORD` | 400 | Password does not meet requirements |
+| `NOT_FOUND` | 404 | Resource does not exist |
+| `CONFLICT` | 409 | State conflict (e.g. transitioning a non-pending grant request) |
+| `DUPLICATE_NAME` | 409 | A resource with that name already exists |
+| `TARGET_MATCHES_SELF` | 400 | The target points at DBBat's own storage database |
+| `GRANT_EXPIRED` | 403 | The access grant has expired |
+| `QUOTA_EXCEEDED` | 403 | A usage quota was exceeded |
+| `RATE_LIMITED` | 429 | Too many requests; see `retry_after` |
+| `OAUTH_FAILED` | 401 | OAuth authentication failed |
+| `OAUTH_STATE_MISMATCH` | 401 | Invalid or expired OAuth state |
+| `OAUTH_PROVIDER_ERROR` | 401 | The OAuth provider returned an error |
+| `OAUTH_USER_NOT_LINKED` | 401 | No account is linked to that OAuth identity |
+| `OAUTH_WRONG_WORKSPACE` | 401 | The wrong OAuth workspace was used |
+| `INTERNAL_ERROR` | 500 | Unexpected server error (details are logged, never returned) |
 
 ### Rate Limit Error
 
 ```json
 {
-  "error": "rate_limit_exceeded",
-  "message": "Too many requests. Please retry after 60 seconds.",
+  "code": "RATE_LIMITED",
+  "message": "Too many requests. Try again later.",
   "retry_after": 60
 }
 ```
 
-### Authentication Rate Limit Error
-
-```json
-{
-  "error": "auth_rate_limited",
-  "message": "Too many failed login attempts. Try again in 30 seconds.",
-  "retry_after": 30
-}
-```
-
-### Password Change Required Error
-
-```json
-{
-  "error": "password_change_required",
-  "message": "You must change your password before accessing the API"
-}
-```
-
-### Weak Password Error
-
-```json
-{
-  "error": "weak_password",
-  "message": "Password does not meet security requirements"
-}
-```
+A `Retry-After` header carries the same value.

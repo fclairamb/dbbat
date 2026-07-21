@@ -40,22 +40,29 @@ DBBat acts as a monitoring proxy that allows controlled developer access to prod
 
 Each engine has its own listener; enable only the ones you need by setting the matching `DBB_LISTEN_*` environment variable. PostgreSQL is enabled by default; Oracle/MySQL/MongoDB listen on their default ports unless explicitly disabled in config.
 
+Any of these upstreams can be reached directly or through an **SSH bastion** — see [SSH tunnels](#3b-reach-a-server-through-an-ssh-bastion-optional).
+
 ## Features
 
 - **Multi-engine proxy**: PostgreSQL, Oracle, MySQL/MariaDB, MongoDB on independent listeners
 - **User Management**: Local user database with username/password (Argon2id) and `admin`/`viewer`/`connector` roles
 - **API Keys**: Long-lived bearer tokens (`dbb_…`) for programmatic access; cannot create or revoke other keys (security restriction)
 - **Slack OAuth (optional)**: Sign-in via Slack workspace, optional auto-provisioning
-- **Database Configuration**: Store target database connections with AES-256-GCM encrypted credentials; `protocol` field per database (`postgresql`, `oracle`, `mysql`, `mariadb`, `mongodb`)
+- **Slack Grant Approvals (optional)**: Grant requests notify a Slack channel with Approve/Deny buttons (inbound endpoint or Socket Mode); auto-approved requests notify without buttons
+- **Server Configuration**: Store target server connections with AES-256-GCM encrypted credentials; `protocol` field per server (`postgresql`, `oracle`, `mysql`, `mariadb`, `mongodb`, `ssh`)
+- **SSH Tunnels**: Route upstream connections for any protocol through an SSH bastion (`via_uid`), with host-key TOFU pinning and a shared pooled dialer
 - **Connection & Query Tracking**: Logs every connection, every query (SQL text, parameters, duration, rows affected, errors), and optionally captures result rows (`query_rows` table) up to configurable size limits
 - **Access Control**: Time-windowed grants (`starts_at` / `expires_at`), independent controls (`read_only`, `block_copy`, `block_ddl`), and optional quotas (`max_query_counts`, `max_bytes_transferred`)
+- **Grant Requests & Auto-Approval**: Users request access against grant definitions; definitions flagged `auto_approve` skip admin review and materialize the grant instantly, with a required justification and a dedicated audit trail
+- **Live Enforcement**: Limits are enforced mid-stream (not just between commands), and revoking a grant blocks further queries and disconnects sessions already in flight
+- **Upstream Identity**: The dbbat username is encoded into the upstream connection metadata (`application_name` / `program_name` / `AUTH_PROGRAM_NM`), so target-side monitoring attributes queries to the real person
 - **Read-only enforcement**: Defense in depth — SQL inspection, PostgreSQL `default_transaction_read_only`, MySQL/MariaDB blocks for `LOAD DATA`/`SELECT … INTO OUTFILE`/etc., and proxy-side opt-out from `LOCAL INFILE`
 - **Audit Trail**: Append-only audit log of user, grant, and database changes
 - **Rate Limiting**: Per-user request limits and exponential backoff on failed login
 - **Authentication Cache**: Optional in-memory cache (TTL + max size) shared across REST and proxy auth paths
 - **Session Packet Dumps**: Optional binary capture of post-auth session traffic (`.dbbat-dump` files); same format across all protocols (see [docs/dump-format.md](docs/dump-format.md)) with `dbbat dump anonymise` for sharing
 - **REST API**: OpenAPI 3.0 documented (`/api/docs`), versioned under `/api/v1/`
-- **Web UI**: Embedded React frontend served at `/app`
+- **Web UI**: Embedded React frontend served at `/app` — servers (`/servers`, listing SSH bastions alongside database servers), grants, connections and queries all have detail pages
 - **Demo / Test modes**: Self-provisioning sample data for safe trials and E2E testing
 
 ## Quick Start
@@ -83,6 +90,8 @@ See [docker-compose installation](https://dbbat.com/docs/installation/docker-com
 
 All API endpoints are under `/api/v1/`. See the [API Reference](https://dbbat.com/docs/api) for complete documentation.
 
+> **Breaking change in v0.17.0:** `/api/v1/databases` was renamed to `/api/v1/servers`, and `/api/v1/ssh-servers` was added for bastion management. No `/databases` alias is kept — update any scripts that used the old path.
+
 ### 1. Login and get a token
 
 ```bash
@@ -104,10 +113,10 @@ curl -X POST http://localhost:4200/api/v1/users \
   }'
 ```
 
-### 3. Configure a Target Database
+### 3. Configure a Target Server
 
 ```bash
-curl -X POST http://localhost:4200/api/v1/databases \
+curl -X POST http://localhost:4200/api/v1/servers \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -124,6 +133,32 @@ curl -X POST http://localhost:4200/api/v1/databases \
 ```
 
 For Oracle, set `"protocol": "oracle"` and add `"oracle_service_name": "ORCL"`. For MySQL/MariaDB, set `"protocol": "mysql"` (or `"mariadb"`) and use port `3306`. For MongoDB, set `"protocol": "mongodb"`, use port `27017`, and optionally add `"mongo_auth_source": "admin"`.
+
+Creating a server whose name is already taken returns `409 DUPLICATE_NAME` (same for grant definitions and users).
+
+### 3b. Reach a Server Through an SSH Bastion (optional)
+
+Servers that aren't directly reachable can be dialled through an SSH tunnel. Register the bastion via `/api/v1/ssh-servers`, then point the database server at it with `via_uid`:
+
+```bash
+BASTION=$(curl -s -X POST http://localhost:4200/api/v1/ssh-servers \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "prod-bastion",
+    "host": "bastion.example.com",
+    "port": 22,
+    "username": "ec2-user",
+    "ssh_private_key": "-----BEGIN OPENSSH PRIVATE KEY-----\n..."
+  }' | jq -r '.uid')
+
+curl -X POST http://localhost:4200/api/v1/servers \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\": \"prod-behind-bastion\", \"protocol\": \"postgresql\", \"host\": \"10.0.1.20\", \"port\": 5432, \"database_name\": \"myapp\", \"username\": \"readonly_user\", \"password\": \"dbpass\", \"via_uid\": \"$BASTION\"}"
+```
+
+Tunnelling works for all four protocols. The bastion host key is pinned on first use (TOFU) and connections are pooled and shared across sessions. `ssh_private_key` and `ssh_passphrase` are write-only and never returned. Set `"clear_via_uid": true` on update to go back to a direct dial.
 
 ### 4. Grant Access
 
@@ -195,13 +230,14 @@ See [Configuration](https://dbbat.com/docs/configuration) for the full set, incl
 ## Architecture
 
 ```
-psql / pg client     ─►  DBBat (auth + grant check + log) ─► PostgreSQL upstream
-sqlplus / go-ora     ─►  DBBat (TNS service-name routing)  ─► Oracle upstream
-mysql / mariadb cli  ─►  DBBat (caching_sha2_password)     ─► MySQL / MariaDB upstream
-mongosh / driver     ─►  DBBat (SCRAM-SHA-256 / PLAIN-TLS) ─► MongoDB upstream
+psql / pg client     ─►  DBBat (auth + grant check + log) ─┐
+sqlplus / go-ora     ─►  DBBat (TNS service-name routing)  ─┤   direct dial   ┌─► PostgreSQL / Oracle
+mysql / mariadb cli  ─►  DBBat (caching_sha2_password)     ─┼───────────────► ┤
+mongosh / driver     ─►  DBBat (SCRAM-SHA-256 / PLAIN-TLS) ─┘   or SSH tunnel └─► MySQL / MariaDB / MongoDB
+                                                                 (via_uid)
 ```
 
-DBBat is a single Go binary backed by a PostgreSQL store (users, databases, grants, connections, queries, audit, dumps).
+DBBat is a single Go binary backed by a PostgreSQL store (users, servers, grants, connections, queries, audit, dumps).
 
 ## Development
 

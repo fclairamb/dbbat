@@ -15,6 +15,7 @@ Each query incurs additional latency from:
 | Grant/quota validation | < 0.1ms (in-memory after first lookup) |
 | Query logging (async) | Negligible (non-blocking) |
 | Result row capture | Proportional to result size |
+| SSH tunnel hop (when `via_uid` is set) | One extra network hop to the bastion, plus SSH encryption/decryption of the forwarded stream |
 
 **Estimated total overhead**: 1-5ms per query in typical deployments, plus time proportional to result set size.
 
@@ -26,20 +27,22 @@ DBBat captures and stores all query results for audit purposes:
 - Each row is serialized and written to the database asynchronously
 - Large result sets (thousands of rows, megabytes of data) will have noticeable overhead
 
-### No Connection Pooling
+### Connection Handling
 
-DBBat maintains a 1:1 mapping between client connections and upstream PostgreSQL connections:
+DBBat maintains a 1:1 mapping between client connections and upstream **database** connections, for every engine (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB):
 
 - Each client connection opens a dedicated upstream connection
-- No connection reuse or pooling between different client sessions
+- No database connection reuse or pooling between different client sessions
 - Connection establishment adds latency on first connect
+
+**SSH transport connections are the exception.** When a server is reached through an SSH bastion (`via_uid`), the SSH transport itself is pooled: a single SSH connection to a given bastion is shared by many proxied sessions, and each session opens its own forwarded channel over it. The database connections carried inside remain 1:1 — only the SSH transport underneath is reused. The first session to a bastion pays the SSH handshake; later ones do not.
 
 ## What's NOT Affected
 
-- **Query execution time**: PostgreSQL processes queries identically
-- **Query planning**: No impact on PostgreSQL's query optimizer
-- **Index usage**: PostgreSQL uses indexes the same way
-- **Transaction semantics**: Full ACID compliance preserved
+- **Query execution time**: the upstream engine processes queries identically
+- **Query planning**: no impact on the upstream query optimizer
+- **Index usage**: the engine uses indexes the same way
+- **Transaction semantics**: full ACID compliance preserved
 
 ## Appropriate Use Cases
 

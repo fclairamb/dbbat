@@ -14,10 +14,12 @@ DBBat ships with four independent listeners — one per wire protocol family. En
 | MariaDB | MySQL wire (same listener) | `:3307` | `DBB_LISTEN_MYSQL` | Shares the MySQL listener. `STMT_BULK_EXECUTE` is refused — clients need batch-rewriting disabled. |
 | MongoDB | MongoDB wire (`OP_MSG`, hand-rolled) | `:27018` | `DBB_LISTEN_MONGO` | Clients authenticate with `SCRAM-SHA-256` or `PLAIN`-over-TLS; upstream via `SCRAM-SHA-256`. Every command is classified, logged, and grant-checked. |
 
+**Any of these four can be reached through an SSH tunnel.** Point a server's `via_uid` at an SSH bastion server and its upstream connection is dialled through that bastion — see [SSH Tunnelling](#ssh-tunnelling) below.
+
 The same auth + grant + query-logging pipeline runs across all four protocols, so:
 
 - **One user store** (Argon2id passwords, roles, optional Slack OAuth) authenticates against any engine.
-- **One database catalogue** holds target connections; a `protocol` field marks the engine.
+- **One server catalogue** holds target connections; a `protocol` field marks the engine.
 - **One grant model** applies the same controls (`read_only`, `block_copy`, `block_ddl`) and quotas regardless of upstream engine.
 - **One query log** records every statement (`COM_QUERY`, `COM_STMT_EXECUTE`, PostgreSQL Simple/Extended Query, Oracle TTC Execute) in the same `queries` table.
 - **One dump format** captures session traffic for any engine — see [the dump-format spec](https://github.com/fclairamb/dbbat/blob/main/docs/dump-format.md).
@@ -102,8 +104,18 @@ Implemented as a hand-rolled MongoDB wire proxy in `internal/proxy/mongodb`. See
 - **Auth termination**: two client mechanisms are terminated at the proxy:
   - **`SCRAM-SHA-256`** (driver default) — DBBat runs the server side of SCRAM against a stored verifier in `users.protocol_data.mongodb`, so the cleartext password never crosses the wire (TLS optional). Verifiers exist only for passwords set after this shipped.
   - **`PLAIN`-over-TLS** (`authMechanism=PLAIN`) — the driver sends the cleartext password (hence the TLS requirement), verified via the same Argon2id path as the other proxies. `dbb_` API keys work as the password.
-- **Upstream**: DBBat authenticates to the target with `SCRAM-SHA-256` using the decrypted stored credentials. The upstream `authSource` defaults to `admin` and is overridable per database via `mongo_auth_source`.
+- **Upstream**: DBBat authenticates to the target with `SCRAM-SHA-256` using the decrypted stored credentials. The upstream `authSource` defaults to `admin` and is overridable per server via `mongo_auth_source`.
 - **Target-database resolution**: Mongo has no pre-auth database field, so the SASL `authSource` carries the DBBat database name (or a `dbbatuser#databasename` username, or the user's single active MongoDB grant).
+
+## SSH Tunnelling
+
+A target that is not directly reachable from DBBat can be dialled through an SSH bastion. This is transport-level and engine-agnostic: it works identically for PostgreSQL, Oracle, MySQL/MariaDB, and MongoDB.
+
+- **Bastion entries** live in the same server catalogue, with `protocol: ssh`. They describe how to reach the bastion (host, port, SSH user, credentials) and nothing else — an SSH server is never itself a proxied target and can never be granted to a user. Managing them requires the `admin` role; they are also exposed under `/api/v1/ssh-servers`.
+- **`via_uid`** on a database server points at such a bastion. When set, DBBat opens the upstream connection through the tunnel instead of dialling the target directly.
+- **Host-key pinning (TOFU)**: the host key presented on the first successful connection is pinned, and every later connection must match it. The pinned key is readable as `ssh_known_host_key` so it can be checked against the bastion's real fingerprint.
+- **Private keys and passphrases are write-only** — settable through the API, never returned by a read.
+- **Pooled dialer**: one SSH transport connection per bastion is shared across many proxied sessions, each session getting its own forwarded channel. The database connections carried inside stay 1:1 with client sessions.
 
 ## Picking a Port
 
