@@ -446,15 +446,92 @@ type GrantDefinition struct {
 	// AutoApprove, when set, makes grant requests against this definition
 	// bypass the pending/admin-approval step: the request is approved and
 	// the grant materialized instantly at request time.
-	AutoApprove bool      `bun:"auto_approve,notnull,default:false" json:"auto_approve"`
-	IsActive    bool      `bun:"is_active,notnull,default:true" json:"is_active"`
-	CreatedBy   uuid.UUID `bun:"created_by,notnull,type:uuid" json:"created_by"`
-	CreatedAt   time.Time `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	AutoApprove bool `bun:"auto_approve,notnull,default:false" json:"auto_approve"`
+	// GroupUIDs restricts which users may request this definition: a user
+	// must belong to at least one of the listed groups. Empty = every user
+	// (the pre-scoping behavior, which every existing definition keeps).
+	//
+	// Stored as an array on the definition rather than a join table on
+	// purpose: an empty scope means "everyone", so a cascade-on-delete join
+	// table would fail *open* when a group is deleted. A dangling uid here
+	// matches nobody, so the definition fails closed until an admin fixes it.
+	GroupUIDs []uuid.UUID `bun:"group_uids,array,notnull,default:'{}'" json:"group_uids"`
+	// DatabaseUIDs restricts which databases this definition can be
+	// requested against. Empty = every database.
+	DatabaseUIDs []uuid.UUID `bun:"database_uids,array,notnull,default:'{}'" json:"database_uids"`
+	IsActive     bool        `bun:"is_active,notnull,default:true" json:"is_active"`
+	CreatedBy    uuid.UUID   `bun:"created_by,notnull,type:uuid" json:"created_by"`
+	CreatedAt    time.Time   `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+}
+
+// AppliesToGroups reports whether a user belonging to the given groups is
+// within this definition's group scope. An empty scope applies to everyone.
+func (d *GrantDefinition) AppliesToGroups(userGroupUIDs []uuid.UUID) bool {
+	if len(d.GroupUIDs) == 0 {
+		return true
+	}
+
+	for _, scoped := range d.GroupUIDs {
+		for _, owned := range userGroupUIDs {
+			if scoped == owned {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// AppliesToDatabase reports whether the given database is within this
+// definition's database scope. An empty scope applies to every database.
+func (d *GrantDefinition) AppliesToDatabase(databaseUID uuid.UUID) bool {
+	if len(d.DatabaseUIDs) == 0 {
+		return true
+	}
+
+	for _, scoped := range d.DatabaseUIDs {
+		if scoped == databaseUID {
+			return true
+		}
+	}
+
+	return false
+}
+
+// AppliesTo reports whether this definition can be requested by a user in the
+// given groups against the given database. Both scopes must pass; an empty
+// scope on either axis is unrestricted, which is what keeps every
+// pre-existing (unscoped) definition behaving exactly as before.
+func (d *GrantDefinition) AppliesTo(userGroupUIDs []uuid.UUID, databaseUID uuid.UUID) bool {
+	return d.AppliesToGroups(userGroupUIDs) && d.AppliesToDatabase(databaseUID)
 }
 
 // GrantDefinitionFilter narrows ListGrantDefinitions queries.
 type GrantDefinitionFilter struct {
 	ActiveOnly bool
+}
+
+// UserGroup is an organizational grouping of users (data-analysts, SRE, …),
+// deliberately kept apart from User.Roles, which are functional
+// (admin/viewer/connector). Groups exist to scope grant definitions.
+type UserGroup struct {
+	bun.BaseModel `bun:"table:user_groups,alias:ug"`
+
+	UID         uuid.UUID  `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	Name        string     `bun:"name,notnull" json:"name"`
+	Description string     `bun:"description,notnull,default:''" json:"description"`
+	CreatedBy   *uuid.UUID `bun:"created_by,type:uuid" json:"created_by,omitempty"`
+	CreatedAt   time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+}
+
+// UserGroupMember is the group ↔ user join row. Membership *is* a join table
+// (queried in both directions), and cascading deletes are safe here precisely
+// because definition scope does not live in it.
+type UserGroupMember struct {
+	bun.BaseModel `bun:"table:user_group_members,alias:ugm"`
+
+	GroupUID uuid.UUID `bun:"group_uid,pk,type:uuid" json:"group_uid"`
+	UserUID  uuid.UUID `bun:"user_uid,pk,type:uuid" json:"user_uid"`
 }
 
 // GrantRequestStatus enumerates the lifecycle states a request can be in.
