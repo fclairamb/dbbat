@@ -27,7 +27,25 @@ The TLS upgrade is **mid-connection**, not at the listener level — that's how 
 
 ### Upstream TLS
 
-**Out of scope here.** The proxy currently dials the upstream PostgreSQL plaintext. The `databases.ssl_mode` column exists in the store but is not yet wired through `internal/proxy/postgresql/upstream.go`; that's a separate change set.
+The proxy→upstream leg is encrypted independently of the client→proxy leg, driven by the `servers.ssl_mode` column. `connectUpstream` dials (directly, or through an SSH bastion when `via_uid` is set) and then calls `negotiateUpstreamSSL` **before** the `StartupMessage` — Postgres expects the 8-byte `SSLRequest` preamble on a fresh connection, not interleaved with protocol traffic. See `internal/proxy/postgresql/upstream_tls.go` and `upstream.go`.
+
+Semantics mirror libpq's `sslmode`:
+
+| `ssl_mode` | Probe sent | Upstream answers `'S'` | Upstream answers `'N'` |
+|-----------|-----------|------------------------|------------------------|
+| `disable` | no | — (stays plaintext) | — |
+| `allow`, `prefer`, empty | yes | TLS, **certificate not verified** | continue plaintext |
+| `require` | yes | TLS, **certificate not verified** | fail (`ErrUpstreamTLSRequired`) |
+| `verify-ca`, `verify-full` | yes | TLS with full chain **and** hostname verification | fail (`ErrUpstreamTLSRequired`) |
+
+Details:
+
+- **`verify-ca` is treated as `verify-full`.** Go's stdlib doesn't cleanly express "verify the CA but not the hostname", so both modes verify the hostname too — stricter than libpq, but safer.
+- **`ServerName`** for the verifying modes is the server row's `host` value, and the system root pool is used (no per-server CA bundle yet).
+- **TLS 1.2 is the floor** (`MinVersion: tls.VersionTLS12`); non-verifying modes set `InsecureSkipVerify` to get libpq-parity encryption-without-authentication.
+- Any response byte other than `'S'` or `'N'` fails with `ErrUpstreamSSLResponse`.
+- The default for new server rows is `prefer`, which means an upstream that declines TLS **silently downgrades to plaintext** — use `require` or better when the upstream link matters.
+- **No SCRAM channel binding upstream.** `upstream_scram.go` sends the `n,,` gs2 header (client doesn't support channel binding), so `SCRAM-SHA-256-PLUS` is never selected even inside a TLS tunnel — binding to a certificate we deliberately don't verify would silently upgrade `require`'s "encrypt only" guarantee. An upstream offering *only* `SCRAM-SHA-256-PLUS` fails with `ErrSCRAMNoSupportedMechanism`.
 
 ### Operator notes
 
