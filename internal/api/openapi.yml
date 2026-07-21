@@ -2932,10 +2932,10 @@ components:
           description: Passphrase for the SSH private key; write-only, never returned
         test_connection:
           type: boolean
-          default: false
           description: |
-            When true, the API dials the newly created row once and returns the staged outcome
-            as `connection_test` in the response. Never fatal: the row is created either way.
+            Optional; defaults to false when omitted. When true, the API dials the newly created
+            row once and returns the staged outcome as `connection_test` in the response.
+            Never fatal: the row is created either way.
       required:
         - name
         - host
@@ -2994,10 +2994,10 @@ components:
           description: Passphrase for the SSH private key; write-only, never returned
         test_connection:
           type: boolean
-          default: false
           description: |
-            When true, the API dials the updated row once and returns the staged outcome as
-            `connection_test` in the response. Never fatal.
+            Optional; defaults to false when omitted. When true, the API dials the updated row
+            once and returns the staged outcome as `connection_test` in the response.
+            Never fatal.
 
     # Grant schemas
     GrantControl:

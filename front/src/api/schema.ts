@@ -1471,11 +1471,11 @@ export interface components {
             /** @description Passphrase for the SSH private key; write-only, never returned */
             ssh_passphrase?: string;
             /**
-             * @description When true, the API dials the newly created row once and returns the staged outcome
-             *     as `connection_test` in the response. Never fatal: the row is created either way.
-             * @default false
+             * @description Optional; defaults to false when omitted. When true, the API dials the newly created
+             *     row once and returns the staged outcome as `connection_test` in the response.
+             *     Never fatal: the row is created either way.
              */
-            test_connection: boolean;
+            test_connection?: boolean;
         };
         UpdateDatabaseRequest: {
             /** @description Description */
@@ -1515,11 +1515,11 @@ export interface components {
             /** @description Passphrase for the SSH private key; write-only, never returned */
             ssh_passphrase?: string;
             /**
-             * @description When true, the API dials the updated row once and returns the staged outcome as
-             *     `connection_test` in the response. Never fatal.
-             * @default false
+             * @description Optional; defaults to false when omitted. When true, the API dials the updated row
+             *     once and returns the staged outcome as `connection_test` in the response.
+             *     Never fatal.
              */
-            test_connection: boolean;
+            test_connection?: boolean;
         };
         /**
          * @description Control types that can be applied to a grant:
