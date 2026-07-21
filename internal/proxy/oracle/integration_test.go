@@ -111,6 +111,12 @@ func startOracleContainer(t *testing.T) (testcontainers.Container, string, int) 
 // so the descriptor starts at offset 58 of the packet (8-byte TNS header + 50)
 // — the canonical value Oracle listeners expect in the data-offset field.
 // This is a simplified version — real Connect packets carry many more fields.
+//
+// The announced TNS version is deliberately 313 (12c-era): from 315 onwards
+// Oracle switches to the extended Connect format (4-byte lengths, connect data
+// sent after the announced packet length — see readExtendedConnectData), which
+// this builder does not emit. Announcing 315+ here makes a 23ai listener drop
+// the connection outright; 313 and below get a normal Accept.
 func buildTNSConnect(serviceName string) []byte {
 	descriptor := fmt.Sprintf(
 		"(DESCRIPTION=(CONNECT_DATA=(SERVICE_NAME=%s)"+
@@ -121,8 +127,8 @@ func buildTNSConnect(serviceName string) []byte {
 	headerLen := 50
 
 	header := make([]byte, headerLen)
-	// Version (2 bytes) — TNS 315
-	binary.BigEndian.PutUint16(header[0:2], 315)
+	// Version (2 bytes) — TNS 313; see the note above about 315+
+	binary.BigEndian.PutUint16(header[0:2], 313)
 	// Compatible version (2 bytes)
 	binary.BigEndian.PutUint16(header[2:4], 300)
 	// Service options (2 bytes)
