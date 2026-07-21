@@ -26,3 +26,20 @@ guarding the listener with `setListener`/`getListener` helpers.
 - Consider the same audit for `oracle` and `mongodb` proxy servers.
 
 No GitHub issue exists for this yet — one should be filed.
+
+## Implementation Plan
+
+Mirror commit `1619a95` (the PG proxy fix) in `internal/proxy/mysql/server.go`:
+
+1. Add a `listenerMu sync.Mutex` field guarding `listener` (with a doc comment
+   explaining Start writes it while Addr/Shutdown read it concurrently).
+2. Add `setListener`/`getListener` helpers that lock/unlock the mutex.
+3. In `Start`, replace `s.listener = listener` with `s.setListener(listener)`.
+4. In `Addr` and `Shutdown`, read the listener via `getListener()` instead of
+   touching `s.listener` directly.
+5. Run `gofmt`, `make build-binary`, `make lint`, `make test`,
+   `go vet -tags integration ./...`, and a MySQL integration test under
+   `-race` that exercises `Addr()` to confirm race-cleanliness.
+
+Oracle/MongoDB audit is out of scope here; capture as a separate follow-up if
+the same pattern exists there.
