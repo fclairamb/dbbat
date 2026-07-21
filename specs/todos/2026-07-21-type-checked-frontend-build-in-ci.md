@@ -41,3 +41,23 @@ own verification pass rather than riding along with a schema fix.
 
 No GitHub issue exists for this yet — one should be filed, along with one for
 the original type-check failure spec.
+
+## Implementation Plan
+
+1. **Baseline** — run `cd front && bun run build` on the clean tree to confirm
+   `tsc -b` is already green (it is; ~5s wall clock, of which `tsc` is a small
+   fraction). No pre-existing type errors to fix or defer.
+2. **Add a dedicated `typecheck` script** to `front/package.json`
+   (`tsc -b --noEmit`) so type errors can be surfaced independently of
+   bundling. Document it in `front/CLAUDE.md`'s scripts table.
+3. **Flip the local build** — `scripts/build-frontend.sh` runs `bun run build`
+   instead of `bun run build:no-check`, so `make build-front` / `make build-app`
+   are type-checked. `build:no-check` stays in `package.json` as an escape
+   hatch for fast local iteration.
+4. **Flip CI** — in `.github/workflows/ci.yml`, the `frontend` job gains an
+   explicit `Type-check frontend` step (`bun run typecheck`) right after lint,
+   and the build step switches to `bun run build`. Type errors then show up as
+   their own failing step rather than buried in a bundling failure.
+5. **Verify the gate bites** — temporarily introduce a deliberate type error,
+   confirm `make build-front` (and `bun run typecheck`) go red, then revert.
+   Re-run `make build-front`, `cd front && bun run build`, `bun run lint`.
