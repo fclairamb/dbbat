@@ -132,6 +132,15 @@ func New(resolver shared.ServerResolver, encryptionKey []byte) *Checker {
 	return &Checker{resolver: resolver, encryptionKey: encryptionKey, timeout: DefaultTimeout}
 }
 
+// WithTimeout returns a copy of the checker bounded by d. Callers serving an
+// HTTP request use it to stay inside their own write timeout.
+func (c *Checker) WithTimeout(d time.Duration) *Checker {
+	cp := *c
+	cp.timeout = d
+
+	return &cp
+}
+
 // Check validates srv: an SSH bastion handshake for `protocol: ssh` rows, or a
 // target dial (through the bastion chain when via_uid is set) plus a
 // protocol-level login for database rows.

@@ -240,6 +240,9 @@ func (s *Server) setupRouter() *gin.Engine {
 			databases.PUT("/:uid", s.requireAdmin(), s.handleUpdateDatabase)
 			databases.DELETE("/:uid", s.requireAdmin(), s.handleDeleteDatabase)
 			databases.GET("/:uid/connection", s.handleGetDatabaseConnection)
+			// Provisioning-time connectivity validation (admin): dial the row for
+			// real rather than trusting that it was typed correctly.
+			databases.POST("/:uid/test", s.requireAdmin(), s.handleTestServerConnection)
 
 			// SSH bastion management (admin). Kept on a separate path because a
 			// static /servers/ssh segment would conflict with /servers/:uid.
