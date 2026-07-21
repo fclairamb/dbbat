@@ -28,3 +28,20 @@ listener with `setListener`/`getListener` helpers used in `Start`/`Addr`/`Shutdo
 - Verify under `-race` with an integration test that exercises `Addr()`.
 
 No GitHub issue exists for this yet — one should be filed.
+
+## Implementation Plan
+
+- **Oracle** (`internal/proxy/oracle/server.go`): the `listener` field is already
+  guarded by a general `mu sync.Mutex` in `Start`/`Addr`/`Shutdown`, so it is
+  already race-clean. For consistency with the PG/MySQL fix, rename `mu` to
+  `listenerMu`, add `setListener`/`getListener` helpers, and route `Start`,
+  `Addr`, and `Shutdown` through them. The write-only `listenAddr` field is never
+  read concurrently and stays a plain assignment.
+- **MongoDB** (`internal/proxy/mongodb/server.go`): the `listener` field is fully
+  unguarded — `Start` writes it, `Addr`/`Shutdown` read it without any lock. Add
+  `listenerMu sync.Mutex`, `setListener`/`getListener` helpers, and route
+  `Start`/`Addr`/`Shutdown` through them, mirroring MySQL exactly.
+- Verify race-cleanliness by running the existing integration tests
+  (`TestIntegration_ProxyPassthrough` for Oracle, `TestIntegration_*` for MongoDB)
+  under `-tags integration -race`, which exercise the `go Start()` + poll `Addr()`
+  pattern.
