@@ -31,7 +31,7 @@ The wire protocols (PostgreSQL, Oracle TNS, MySQL, MongoDB) generally cannot sha
 
 :::note SSH-tunnelled upstreams
 These are *inbound* listeners. If any target server is configured with a `via_uid`
-(reached through an [SSH bastion](/docs/configuration/databases#ssh-tunnels)), the
+(reached through an [SSH bastion](/docs/configuration/servers#ssh-tunnels)), the
 DBBat pod also needs **egress on port 22** to that bastion — allow it in your
 NetworkPolicy and any egress firewall.
 :::
@@ -402,7 +402,7 @@ The proxy listeners (PostgreSQL `5434`, Oracle `1522`, MySQL/MariaDB `3307`, Mon
 :::note Egress for SSH tunnels
 Exposing the listeners only covers traffic *into* the pod. Upstreams configured
 with a `via_uid` are dialled through an
-[SSH bastion](/docs/configuration/databases#ssh-tunnels), which requires **egress
+[SSH bastion](/docs/configuration/servers#ssh-tunnels), which requires **egress
 on port 22** from the DBBat pod to the bastion host. Connections to a bastion are
 pooled and reused across sessions, so this is a small number of long-lived
 outbound connections rather than one per client.
@@ -559,6 +559,6 @@ spec:
 
 ## Next Steps
 
-- [Configure servers](/docs/configuration/databases)
+- [Configure servers](/docs/configuration/servers)
 - [Set up access control](/docs/features/access-control)
 - [API documentation](/docs/api)

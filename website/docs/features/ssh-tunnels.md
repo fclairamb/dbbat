@@ -118,6 +118,6 @@ They surface only under `/api/v1/ssh-servers` and in the "via SSH server" select
 
 ## See Also
 
-- [Server Configuration](/docs/configuration/databases) — full field reference
+- [Server Configuration](/docs/configuration/servers) — full field reference
 - [Security](/docs/security) — trust model and hardening checklist
 - [API Reference](/docs/api) — `/api/v1/ssh-servers` endpoints

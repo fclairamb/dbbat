@@ -116,7 +116,7 @@ curl -X POST http://localhost:4200/api/v1/servers \
   }'
 ```
 
-For Oracle add `"protocol": "oracle"` plus `"oracle_service_name": "ORCL"`. For MySQL/MariaDB use `"protocol": "mysql"` (or `"mariadb"`) and port `3306`. For MongoDB use `"protocol": "mongodb"` and port `27017`. Targets that are only reachable through a jump host can be pointed at an `ssh` bastion — see [Server Configuration](/docs/configuration/databases#ssh-tunnels).
+For Oracle add `"protocol": "oracle"` plus `"oracle_service_name": "ORCL"`. For MySQL/MariaDB use `"protocol": "mysql"` (or `"mariadb"`) and port `3306`. For MongoDB use `"protocol": "mongodb"` and port `27017`. Targets that are only reachable through a jump host can be pointed at an `ssh` bastion — see [Server Configuration](/docs/configuration/servers#ssh-tunnels).
 
 ### Create a Test User and Grant Access
 
