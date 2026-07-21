@@ -41,3 +41,24 @@ The TLS upgrade is **mid-connection**, not at the listener level — that's how 
 DBBat sends `AuthenticationCleartextPassword` (`R`) to the client. Inside a TLS tunnel this is safe; over plaintext the password travels in the clear, which is why TLS support exists.
 
 Both DBBat user passwords (Argon2id) and DBBat API keys (prefix `dbb_`) are accepted as the password. API key verification is independent of the user password path.
+
+## Testing
+
+### Integration tests
+
+`internal/proxy/postgresql/integration_test.go` sits behind the `integration` build tag, so `make test` never runs it. CI runs `go vet -tags integration ./...`, which only proves it compiles — run it for real before trusting it:
+
+```bash
+# needs Docker; starts a PostgreSQL upstream + a PostgreSQL container for dbbat's own store
+go test -tags integration -timeout 40m ./internal/proxy/postgresql/
+
+# run the same matrix against another server version
+PG_TEST_IMAGE=postgres:17 go test -tags integration -timeout 40m ./internal/proxy/postgresql/
+```
+
+| Variable | Purpose |
+|----------|---------|
+| `PG_TEST_IMAGE` | Upstream PostgreSQL image the proxy connects to (default `postgres:16-alpine`) |
+| `DBBAT_STORE_TEST_IMAGE` | Image backing dbbat's own store (default `postgres:15-alpine`) |
+
+The suite dials **through** the proxy with `jackc/pgx/v5` and covers password / `dbb_` API-key / wrong-password auth, `sslmode=require` (proxy-terminated TLS) and `sslmode=disable`, refusal of an unknown database name, simple-protocol query + result-row capture, extended-protocol (Parse/Bind/Execute) bind-parameter capture, the `read_only`, `block_ddl` and `block_copy` grant controls, per-session `.dbbat-dump` files, and mid-session grant revocation tearing the connection down. Both default images have arm64 builds, so it runs unmodified on Apple Silicon (verified on 2026-07-21).

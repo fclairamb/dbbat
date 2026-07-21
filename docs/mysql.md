@@ -221,14 +221,32 @@ When `DBB_DUMP_DIR` is set, the MySQL proxy writes a per-session `.dbbat-dump` f
 
 ## Testing
 
-Integration tests use the `testcontainers-go` MySQL module:
+### Integration tests
+
+`internal/proxy/mysql/integration_test.go` sits behind the `integration` build tag, so `make test` never runs it. CI runs `go vet -tags integration ./...`, which only proves it compiles — run it for real before trusting it:
+
+```bash
+# needs Docker; starts a MySQL upstream + a PostgreSQL container for dbbat's own store
+go test -tags integration -timeout 40m ./internal/proxy/mysql/
+
+# run the same matrix against another server version
+MYSQL_TEST_IMAGE=mysql:9 MARIADB_TEST_IMAGE=mariadb:11 go test -tags integration -timeout 40m ./internal/proxy/mysql/
+```
+
+| Variable | Purpose |
+|----------|---------|
+| `MYSQL_TEST_IMAGE` | MySQL upstream image (default `mysql:8.4`) |
+| `MARIADB_TEST_IMAGE` | MariaDB upstream image for `TestIntegration_MariaDB` (default `mariadb:10.11`) |
+
+The suite covers the TLS handshake, query + prepared-statement (binary row) capture, `read_only` enforcement, `LOAD DATA LOCAL INFILE` blocking, session dumps, and the MariaDB flavour. Both default images have arm64 builds, so it runs unmodified on Apple Silicon (verified on 2026-07-21).
+
+It uses the `testcontainers-go` MySQL module:
 
 ```go
-container, err := mysql.RunContainer(ctx,
-    testcontainers.WithImage("mysql:8.4"),
-    mysql.WithDatabase("testdb"),
-    mysql.WithUsername("test"),
-    mysql.WithPassword("test"),
+container, err := tcmysql.Run(ctx, "mysql:8.4",
+    tcmysql.WithDatabase("testdb"),
+    tcmysql.WithUsername("root"),
+    tcmysql.WithPassword("rootpw"),
 )
 ```
 
