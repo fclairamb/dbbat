@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+* **user-groups:** add user groups with full CRUD — new `user_groups` tables plus grant-definition scope columns (migrations + store).
+* **grants:** grant definitions can now be scoped to specific user groups and databases, surfaced through the API and a new UI admin page with scope pickers.
+* **proxy,api,ui:** add server connectivity testing — a `POST /servers/{uid}/test` endpoint with an opt-in inline check, a staged connectivity check that probes SSH bastions and DB targets (including an Oracle login probe), and a per-server "Test connection" action in the UI with staged feedback.
+
+### Bug Fixes
+
+* **postgresql:** resolve bind-parameter OIDs from `ParameterDescription` so prepared statements report correct parameter types.
+* **proxy:** guard the PostgreSQL, MySQL, Oracle and MongoDB proxy listeners with a mutex to fix an `Addr`/`Start` data race.
+* **api:** make `test_connection` optional in the database request schemas.
+* **ui:** render the breadcrumb separator as a sibling of the item so it aligns correctly.
+* **docs:** silence the `baseUrl` deprecation and fix React 19 JSX types in the website typecheck.
+
 ## [0.17.0](https://github.com/fclairamb/dbbat/compare/v0.16.0...v0.17.0) (2026-07-18)
 
 ### ⚠ BREAKING CHANGES
