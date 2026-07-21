@@ -1,6 +1,12 @@
 {
   "extends": "@docusaurus/tsconfig",
   "compilerOptions": {
-    "baseUrl": "."
+    // `baseUrl` is required so the inherited `@site/*` path mapping from
+    // @docusaurus/tsconfig resolves against this project dir. TypeScript 6.x
+    // flags `baseUrl` as deprecated (TS5101); silence it until Docusaurus ships
+    // a tsconfig that no longer relies on it.
+    // TODO: drop both once @docusaurus/tsconfig stops setting `baseUrl`.
+    "baseUrl": ".",
+    "ignoreDeprecations": "6.0"
   }
 }
