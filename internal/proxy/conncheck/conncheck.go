@@ -89,6 +89,9 @@ const (
 	// CodeDBHandshakeFailed means the target was reachable but the protocol
 	// handshake did not complete (wrong port, TLS mismatch, not a database).
 	CodeDBHandshakeFailed Code = "db_handshake_failed"
+	// CodeMissingConfig means the row is missing a field the protocol needs
+	// before anything can be dialed (an Oracle row with no service name).
+	CodeMissingConfig Code = "missing_config"
 	// CodeUnsupported means no protocol-level probe exists for this protocol;
 	// reachability was verified but credentials were not.
 	CodeUnsupported Code = "auth_not_verified"
@@ -473,6 +476,17 @@ func classifyNetworkError(err error, stage Stage) Result {
 // classifyTargetError maps a protocol-level login failure. Auth rejections are
 // distinguished from handshake failures because they point at different fields.
 func classifyTargetError(err error) Result {
+	// An incomplete row is caught before any packet is sent, so it belongs to
+	// the config stage — reporting it at target_auth would send the admin
+	// looking at the network.
+	if errors.Is(err, errMissingConfig) {
+		return Result{
+			Stage:   StageConfig,
+			Code:    CodeMissingConfig,
+			Message: sanitize(err),
+		}
+	}
+
 	if res := classifyNetworkError(err, StageTargetAuth); res.Code != CodeInternal {
 		// A timeout mid-handshake is still a handshake problem, but the network
 		// classification is the more useful message.

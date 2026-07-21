@@ -527,7 +527,7 @@ func TestCheck_TargetThroughTunnel_DialFails(t *testing.T) {
 	target := &store.Server{
 		UID: uuid.New(), Host: deadHost, Port: deadPort,
 		Protocol: store.ProtocolOracle, ViaUID: &bastion.UID,
-		Username: "scott",
+		Username: "scott", DatabaseName: "ORCLPDB1",
 	}
 
 	res := New(resolver, testKey()).Check(context.Background(), target)
@@ -554,9 +554,12 @@ func TestCheck_TargetThroughTunnel_NoProbeReachabilityOnly(t *testing.T) {
 	resolver := newFakeResolver()
 	bastion := newBastion(resolver, bastionHost, bastionPort, pk)
 
+	// A protocol dbbat has no login probe for: reachability is all the check can
+	// honestly claim. Every protocol dbbat actually proxies now has a probe, so
+	// this arm is exercised with a synthetic protocol rather than a real one.
 	target := &store.Server{
 		UID: uuid.New(), Host: targetHost, Port: targetPort,
-		Protocol: store.ProtocolOracle, ViaUID: &bastion.UID, Username: "scott",
+		Protocol: "some-future-protocol", ViaUID: &bastion.UID, Username: "scott",
 	}
 
 	res := New(resolver, testKey()).Check(context.Background(), target)

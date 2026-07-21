@@ -27,6 +27,12 @@ import (
 // tunnel entirely.
 var errOracleConnectorShape = errors.New("go-ora connector does not expose a dialer hook")
 
+// errMissingConfig marks a probe that could not even be attempted because the
+// server row is incomplete. It is reported at the config stage: nothing was
+// dialed, so calling it a handshake failure would point the admin at the
+// network instead of at the field they left empty.
+var errMissingConfig = errors.New("conncheck: incomplete server configuration")
+
 // dialFunc opens the transport to the target — directly or through the SSH
 // bastion chain. The probes never dial themselves: they inject this so the
 // tunnel is exercised by the exact same code path the proxies use.
@@ -187,6 +193,11 @@ func (d dialerFunc) DialContext(ctx context.Context, _, _ string) (net.Conn, err
 // client half of that same protocol, and it accepts an injected transport, so
 // the probe still goes through the exact SSH tunnel a real session would.
 func probeOracle(ctx context.Context, srv *store.Server, dial dialFunc) error {
+	service := oracleServiceName(srv)
+	if service == "" {
+		return fmt.Errorf("%w: set the Oracle service name (or a database name to use as one)", errMissingConfig)
+	}
+
 	opts := map[string]string{"PROGRAM": probeAppName()}
 
 	// Deliberately no TIMEOUT/READ TIMEOUT option: it makes go-ora arm real
@@ -201,7 +212,7 @@ func probeOracle(ctx context.Context, srv *store.Server, dial dialFunc) error {
 		opts["SSL VERIFY"] = "TRUE"
 	}
 
-	dsn := goora.BuildUrl(srv.Host, srv.Port, oracleServiceName(srv), srv.Username, srv.Password, opts)
+	dsn := goora.BuildUrl(srv.Host, srv.Port, service, srv.Username, srv.Password, opts)
 
 	connector, ok := goora.NewConnector(dsn).(*goora.OracleConnector)
 	if !ok {
