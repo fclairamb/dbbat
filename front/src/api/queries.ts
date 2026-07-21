@@ -29,6 +29,8 @@ export type CreateAPIKeyRequest = components["schemas"]["CreateAPIKeyRequest"];
 export type CreateAPIKeyResponse =
   components["schemas"]["CreateAPIKeyResponse"];
 export type ConnectionInfo = components["schemas"]["ConnectionInfo"];
+export type ConnectionTestResult =
+  components["schemas"]["ConnectionTestResult"];
 
 // ============================================================================
 // Auth Providers
@@ -285,6 +287,33 @@ export function useDeleteDatabase(options?: {
       options?.onSuccess?.();
     },
     onError: options?.onError,
+  });
+}
+
+// Connectivity check: dials the server for real (SSH handshake for a bastion,
+// tunnel + database login for a target) and returns the staged outcome. A
+// failed check is a successful request with `ok: false` — only a transport or
+// authorization failure rejects.
+export function useTestServerConnection(uid: string) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (): Promise<ConnectionTestResult> => {
+      const response = await apiClient.POST("/servers/{uid}/test", {
+        params: { path: { uid } },
+      });
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to test the connection"
+        );
+      }
+      return response.data as ConnectionTestResult;
+    },
+    onSuccess: () => {
+      // A first successful bastion check pins the host key, so the row changed.
+      queryClient.invalidateQueries({ queryKey: ["ssh-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["databases"] });
+    },
   });
 }
 

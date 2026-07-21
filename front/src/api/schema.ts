@@ -886,6 +886,39 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/servers/{uid}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Test that a server is actually reachable and usable (admin only)
+         * @description Validates a server row by dialing it for real, so provisioning is not write-and-hope.
+         *
+         *     - `protocol: ssh` rows: dials the bastion (through its own `via_uid` chain when set),
+         *       completes the SSH handshake with the stored key or password, and — on the first
+         *       success — pins the presented host key into `ssh_known_host_key`, so TOFU pinning
+         *       happens under admin supervision rather than implicitly on a user's first query.
+         *     - Database rows: dials the target (through the bastion when `via_uid` is set) and, for
+         *       PostgreSQL / MySQL / MariaDB / MongoDB, performs a real protocol-level login with the
+         *       stored credentials. Oracle has no standalone dial path, so the check is
+         *       reachability-only and reports code `auth_not_verified`.
+         *
+         *     A failed check is still HTTP 200 with `ok: false` — the staged result *is* the answer.
+         *     `stage` and `code` tell the admin which field is wrong. No credential or key material is
+         *     ever returned.
+         */
+        post: operations["testServerConnection"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/ssh-servers": {
         parameters: {
             query?: never;
@@ -1203,6 +1236,44 @@ export interface components {
             via_uid?: string | null;
             /** @description TOFU-pinned SSH bastion host key (read-only; ssh servers only) */
             ssh_known_host_key?: string;
+            /** @description Present only when the create/update request set `test_connection: true` */
+            connection_test?: components["schemas"]["ConnectionTestResult"];
+        };
+        /**
+         * @description Staged outcome of a connectivity check. Carries no secret material: only the stage
+         *     reached, a machine-readable code, a human-readable message, and the bastion's public
+         *     host key.
+         */
+        ConnectionTestResult: {
+            /** @description Whether the check succeeded end to end */
+            ok: boolean;
+            /**
+             * @description How far the check got. On failure this is the stage that failed, which is what tells
+             *     the admin which field they got wrong:
+             *     - `config`: the row is unusable before any packet is sent (no credentials, unparseable key, via_uid cycle)
+             *     - `bastion_dial`: the SSH bastion could not be reached (DNS, routing, firewall)
+             *     - `bastion_auth`: the SSH handshake failed (host-key mismatch or rejected credentials)
+             *     - `target_dial`: the database target could not be reached (through the tunnel when via_uid is set)
+             *     - `target_auth`: the database handshake or login failed
+             * @enum {string}
+             */
+            stage: "config" | "bastion_dial" | "bastion_auth" | "target_dial" | "target_auth";
+            /**
+             * @description Machine-readable classification within the stage; `ok` on success
+             * @enum {string}
+             */
+            code: "ok" | "dns_failure" | "timeout" | "unreachable" | "host_key_mismatch" | "auth_rejected" | "bad_private_key" | "no_auth_method" | "via_cycle" | "via_not_ssh" | "handshake_failed" | "db_auth_failed" | "db_handshake_failed" | "auth_not_verified" | "internal_error";
+            /** @description Human-readable explanation, safe to display to an admin */
+            message: string;
+            /** @description True when this check performed the TOFU pin (first successful connect to a bastion) */
+            host_key_pinned?: boolean;
+            /** @description The bastion's public host key after the check (ssh servers only) */
+            ssh_known_host_key?: string;
+            /**
+             * Format: int64
+             * @description How long the check took, in milliseconds
+             */
+            duration_ms: number;
         };
         /** @description Limited database info for non-admin users */
         DatabaseLimited: {
@@ -1263,6 +1334,12 @@ export interface components {
             ssh_private_key?: string;
             /** @description Passphrase for the SSH private key; write-only, never returned */
             ssh_passphrase?: string;
+            /**
+             * @description When true, the API dials the newly created row once and returns the staged outcome
+             *     as `connection_test` in the response. Never fatal: the row is created either way.
+             * @default false
+             */
+            test_connection: boolean;
         };
         UpdateDatabaseRequest: {
             /** @description Description */
@@ -1301,6 +1378,12 @@ export interface components {
             ssh_private_key?: string;
             /** @description Passphrase for the SSH private key; write-only, never returned */
             ssh_passphrase?: string;
+            /**
+             * @description When true, the API dials the updated row once and returns the staged outcome as
+             *     `connection_test` in the response. Never fatal.
+             * @default false
+             */
+            test_connection: boolean;
         };
         /**
          * @description Control types that can be applied to a grant:
@@ -1971,6 +2054,7 @@ export type User = components['schemas']['User'];
 export type CreateUserRequest = components['schemas']['CreateUserRequest'];
 export type UpdateUserRequest = components['schemas']['UpdateUserRequest'];
 export type Database = components['schemas']['Database'];
+export type ConnectionTestResult = components['schemas']['ConnectionTestResult'];
 export type DatabaseLimited = components['schemas']['DatabaseLimited'];
 export type CreateDatabaseRequest = components['schemas']['CreateDatabaseRequest'];
 export type UpdateDatabaseRequest = components['schemas']['UpdateDatabaseRequest'];
@@ -3537,6 +3621,33 @@ export interface operations {
                     };
                 };
             };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    testServerConnection: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Connectivity check result (successful or failed) */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConnectionTestResult"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
             500: components["responses"]["InternalError"];
         };
     };
