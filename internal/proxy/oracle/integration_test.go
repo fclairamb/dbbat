@@ -5,11 +5,13 @@ package oracle
 import (
 	"context"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -77,7 +79,59 @@ func startOracleContainer(t *testing.T) (testcontainers.Container, string, int) 
 
 	t.Logf("Oracle container ready: image=%s host=%s port=%s", image, host, port.Port())
 
-	return container, host, port.Int()
+	return container, host, int(port.Num())
+}
+
+// buildTNSConnect constructs a TNS Connect packet payload for the given service
+// name. It used to live in upstream_auth.go, but upstream connection setup now
+// goes through go-ora, so the only remaining user is this raw-socket test.
+//
+// The payload is a 50-byte Connect header followed by the connect descriptor,
+// so the descriptor starts at offset 58 of the packet (8-byte TNS header + 50)
+// — the canonical value Oracle listeners expect in the data-offset field.
+// This is a simplified version — real Connect packets carry many more fields.
+func buildTNSConnect(serviceName string) []byte {
+	descriptor := fmt.Sprintf(
+		"(DESCRIPTION=(CONNECT_DATA=(SERVICE_NAME=%s)"+
+			"(CID=(PROGRAM=dbbat)(HOST=dbbat-test)(USER=dbbat))))",
+		serviceName,
+	)
+	descriptorBytes := []byte(descriptor)
+	headerLen := 50
+
+	header := make([]byte, headerLen)
+	// Version (2 bytes) — TNS 315
+	binary.BigEndian.PutUint16(header[0:2], 315)
+	// Compatible version (2 bytes)
+	binary.BigEndian.PutUint16(header[2:4], 300)
+	// Service options (2 bytes)
+	binary.BigEndian.PutUint16(header[4:6], 0)
+	// SDU size (2 bytes) — 8192
+	binary.BigEndian.PutUint16(header[6:8], 8192)
+	// TDU size (2 bytes) — 65535
+	binary.BigEndian.PutUint16(header[8:10], 65535)
+	// Protocol characteristics (2 bytes)
+	binary.BigEndian.PutUint16(header[10:12], 0x8001)
+	// Max packets before ACK (2 bytes)
+	binary.BigEndian.PutUint16(header[12:14], 0)
+	// Byte order/endianness (2 bytes)
+	binary.BigEndian.PutUint16(header[14:16], 1)
+	// Data length (2 bytes) — connect descriptor length
+	binary.BigEndian.PutUint16(header[16:18], uint16(len(descriptorBytes)))
+	// Data offset (2 bytes) — offset from start of the TNS packet to the descriptor
+	binary.BigEndian.PutUint16(header[18:20], uint16(tnsHeaderSize+headerLen))
+	// Max receivable connect data (4 bytes)
+	binary.BigEndian.PutUint32(header[20:24], 0)
+	// Connect flags 0 and 1
+	header[24] = 0x41
+	header[25] = 0x41
+	// Remaining bytes are zero (trace info, padding, etc.)
+
+	result := make([]byte, 0, len(header)+len(descriptorBytes))
+	result = append(result, header...)
+	result = append(result, descriptorBytes...)
+
+	return result
 }
 
 // TestIntegration_OracleContainer verifies we can start and connect to Oracle directly.
@@ -105,7 +159,7 @@ func TestIntegration_TNSCapture(t *testing.T) {
 	container, host, port := startOracleContainer(t)
 	defer func() { _ = container.Terminate(context.Background()) }()
 
-	conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", host, port))
+	conn, err := net.Dial("tcp", net.JoinHostPort(host, strconv.Itoa(port)))
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -175,8 +229,14 @@ func TestIntegration_ProxyPassthrough(t *testing.T) {
 	}, nil)
 	require.NoError(t, err)
 
-	_, err = dataStore.CreateGrant(ctx, user.UID, db.UID, user.UID, []string{},
-		time.Now().Add(-time.Hour), time.Now().Add(24*time.Hour), nil, nil)
+	_, err = dataStore.CreateGrant(ctx, &store.Grant{
+		UserID:     user.UID,
+		DatabaseID: db.UID,
+		GrantedBy:  user.UID,
+		Controls:   []string{},
+		StartsAt:   time.Now().Add(-time.Hour),
+		ExpiresAt:  time.Now().Add(24 * time.Hour),
+	})
 	require.NoError(t, err)
 
 	queryStorage := config.QueryStorageConfig{
@@ -185,7 +245,7 @@ func TestIntegration_ProxyPassthrough(t *testing.T) {
 		MaxResultBytes: 1048576,
 	}
 
-	proxy := NewServer(dataStore, nil, nil, queryStorage, slog.Default())
+	proxy := NewServer(dataStore, nil, nil, queryStorage, config.DumpConfig{}, slog.Default())
 	go func() { _ = proxy.Start(":0") }()
 	defer func() { _ = proxy.Shutdown(ctx) }()
 
