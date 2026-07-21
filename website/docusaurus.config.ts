@@ -16,11 +16,30 @@ const config: Config = {
   trailingSlash: false,
 
   onBrokenLinks: "throw",
-  onBrokenMarkdownLinks: "warn",
+
+  markdown: {
+    hooks: {
+      onBrokenMarkdownLinks: "warn",
+    },
+  },
 
   future: {
     v4: true,
   },
+
+  plugins: [
+    [
+      "@docusaurus/plugin-client-redirects",
+      {
+        redirects: [
+          {
+            from: "/docs/configuration/databases",
+            to: "/docs/configuration/servers",
+          },
+        ],
+      },
+    ],
+  ],
 
   i18n: {
     defaultLocale: "en",
