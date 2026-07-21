@@ -317,7 +317,7 @@ func TestIntegration_FindInsert(t *testing.T) {
 	client := f.dialThrough(fixtureUser, fixturePass)
 	defer func() { _ = client.Disconnect(ctx) }()
 
-	coll := client.Server(testDBName).Collection("widgets")
+	coll := client.Database(testDBName).Collection("widgets")
 
 	_, err := coll.InsertOne(ctx, bson.D{{Key: "name", Value: "gadget"}, {Key: "qty", Value: 7}})
 	require.NoError(t, err)
@@ -367,7 +367,7 @@ func TestIntegration_ReadOnlyGrant_BlocksWrite(t *testing.T) {
 	// A read still works.
 	require.NoError(t, client.Ping(ctx, nil))
 
-	_, err := client.Server(testDBName).Collection("widgets").
+	_, err := client.Database(testDBName).Collection("widgets").
 		InsertOne(ctx, bson.D{{Key: "x", Value: 1}})
 	require.Error(t, err, "insert must be refused under read-only grant")
 }
@@ -382,7 +382,7 @@ func TestIntegration_BlockDDL_BlocksCreateIndex(t *testing.T) {
 	client := f.dialThrough(fixtureUser, fixturePass)
 	defer func() { _ = client.Disconnect(ctx) }()
 
-	_, err := client.Server(testDBName).Collection("widgets").Indexes().
+	_, err := client.Database(testDBName).Collection("widgets").Indexes().
 		CreateOne(ctx, mongo.IndexModel{Keys: bson.D{{Key: "name", Value: 1}}})
 	require.Error(t, err, "createIndexes must be refused under block_ddl grant")
 }
@@ -396,7 +396,7 @@ func TestIntegration_DBViolation_Denied(t *testing.T) {
 	client := f.dialThrough(fixtureUser, fixturePass)
 	defer func() { _ = client.Disconnect(ctx) }()
 
-	err := client.Server("local").Collection("startup_log").
+	err := client.Database("local").Collection("startup_log").
 		FindOne(ctx, bson.D{}).Err()
 	require.Error(t, err, "access to the local database must be denied")
 }
@@ -409,7 +409,7 @@ func TestIntegration_SessionDump(t *testing.T) {
 
 	client := f.dialThrough(fixtureUser, fixturePass)
 	require.NoError(t, client.Ping(ctx, nil))
-	_, err := client.Server(testDBName).Collection("widgets").InsertOne(ctx, bson.D{{Key: "a", Value: 1}})
+	_, err := client.Database(testDBName).Collection("widgets").InsertOne(ctx, bson.D{{Key: "a", Value: 1}})
 	require.NoError(t, err)
 	require.NoError(t, client.Disconnect(ctx))
 
@@ -443,7 +443,7 @@ func TestIntegration_RevocationKillsSession(t *testing.T) {
 	client := f.dialThrough(fixtureUser, fixturePass)
 	defer func() { _ = client.Disconnect(ctx) }()
 
-	coll := client.Server(testDBName).Collection("widgets")
+	coll := client.Database(testDBName).Collection("widgets")
 	_, err := coll.InsertOne(ctx, bson.D{{Key: "before", Value: 1}})
 	require.NoError(t, err)
 
@@ -478,7 +478,7 @@ func TestIntegration_SCRAMAuth(t *testing.T) {
 
 	require.NoError(t, client.Ping(ctx, nil))
 
-	_, err := client.Server(testDBName).Collection("scram").
+	_, err := client.Database(testDBName).Collection("scram").
 		InsertOne(ctx, bson.D{{Key: "via", Value: "scram"}})
 	require.NoError(t, err, "SCRAM-authenticated write should succeed")
 }
@@ -507,7 +507,7 @@ func TestIntegration_UnacknowledgedWrite(t *testing.T) {
 	client := f.dialThrough(fixtureUser, fixturePass)
 	defer func() { _ = client.Disconnect(ctx) }()
 
-	unack := client.Server(testDBName).
+	unack := client.Database(testDBName).
 		Collection("unack", options.Collection().SetWriteConcern(writeconcern.Unacknowledged()))
 
 	// A w:0 insert sets moreToCome and expects no reply; it must return promptly
@@ -536,7 +536,7 @@ func TestIntegration_UnacknowledgedWrite(t *testing.T) {
 	require.Eventually(t, func() bool {
 		var got bson.M
 
-		return client.Server(testDBName).Collection("unack").
+		return client.Database(testDBName).Collection("unack").
 			FindOne(ctx, bson.D{{Key: "fire", Value: "forget"}}).Decode(&got) == nil
 	}, 3*time.Second, 100*time.Millisecond, "unacknowledged write should reach upstream")
 }
@@ -551,7 +551,7 @@ func TestIntegration_ListDatabasesFiltered(t *testing.T) {
 	defer func() { _ = client.Disconnect(ctx) }()
 
 	// Materialize the target database so it appears in listDatabases.
-	_, err := client.Server(testDBName).Collection("seed").
+	_, err := client.Database(testDBName).Collection("seed").
 		InsertOne(ctx, bson.D{{Key: "x", Value: 1}})
 	require.NoError(t, err)
 
@@ -587,7 +587,7 @@ func TestIntegration_Compression(t *testing.T) {
 
 	require.NoError(t, client.Ping(ctx, nil))
 
-	coll := client.Server(testDBName).Collection("compressed")
+	coll := client.Database(testDBName).Collection("compressed")
 	_, err = coll.InsertOne(ctx, bson.D{{Key: "payload", Value: strings.Repeat("dbbat-", 512)}})
 	require.NoError(t, err)
 
@@ -606,7 +606,7 @@ func TestIntegration_GetMoreLineage(t *testing.T) {
 	client := f.dialThrough(fixtureUser, fixturePass)
 	defer func() { _ = client.Disconnect(ctx) }()
 
-	coll := client.Server(testDBName).Collection("paged")
+	coll := client.Database(testDBName).Collection("paged")
 	for i := 0; i < 5; i++ {
 		_, err := coll.InsertOne(ctx, bson.D{{Key: "i", Value: i}})
 		require.NoError(t, err)
