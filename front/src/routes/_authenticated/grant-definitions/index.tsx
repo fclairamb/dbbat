@@ -515,7 +515,7 @@ function DefinitionDialog({
             request grants by picking one.
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-4 py-4">
+        <div className="space-y-4 py-4 max-h-[60vh] overflow-y-auto">
           <div className="space-y-2">
             <Label htmlFor="def-name">Name</Label>
             <Input

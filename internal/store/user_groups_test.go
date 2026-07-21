@@ -96,7 +96,7 @@ func TestGrantDefinitionAppliesTo(t *testing.T) {
 	}
 }
 
-func TestUserGroupCRUD(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestUserGroupCRUD(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -156,7 +156,7 @@ func TestUserGroupCRUD(t *testing.T) { //nolint:paralleltest // shared migration
 	}
 }
 
-func TestUserGroupMembership(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestUserGroupMembership(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -220,7 +220,7 @@ func TestUserGroupMembership(t *testing.T) { //nolint:paralleltest // shared mig
 	}
 }
 
-func TestSetGroupMembersAndSetUserGroups(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestSetGroupMembersAndSetUserGroups(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -298,7 +298,7 @@ func TestSetGroupMembersAndSetUserGroups(t *testing.T) { //nolint:paralleltest /
 	}
 }
 
-func TestUserGroupDeletionCascadesMembershipButNotScope(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestUserGroupDeletionCascadesMembershipButNotScope(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -359,7 +359,7 @@ func TestUserGroupDeletionCascadesMembershipButNotScope(t *testing.T) { //nolint
 	}
 }
 
-func TestGrantDefinitionScopePersistence(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestGrantDefinitionScopePersistence(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 

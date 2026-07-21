@@ -82,7 +82,10 @@ func TestUserGroupsCRUDEndpoints(t *testing.T) { //nolint:paralleltest // shared
 	})
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
-	groupUID, err := uuid.Parse(resp["uid"].(string))
+	rawUID, ok := resp["uid"].(string)
+	require.True(t, ok, "response should carry a uid")
+
+	groupUID, err := uuid.Parse(rawUID)
 	require.NoError(t, err)
 	require.Len(t, resp["member_uids"], 1)
 
@@ -171,8 +174,15 @@ func TestListGrantDefinitions_FiltersByGroupScope(t *testing.T) { //nolint:paral
 		require.True(t, ok)
 
 		out := make([]string, 0, len(list))
+
 		for _, item := range list {
-			out = append(out, item.(map[string]any)["name"].(string))
+			def, ok := item.(map[string]any)
+			require.True(t, ok)
+
+			name, ok := def["name"].(string)
+			require.True(t, ok)
+
+			out = append(out, name)
 		}
 
 		return out
@@ -275,7 +285,8 @@ func TestApproveGrantRequest_ConflictsWhenScopeTightened(t *testing.T) { //nolin
 	})
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
-	requestUID := resp["uid"].(string)
+	requestUID, ok := resp["uid"].(string)
+	require.True(t, ok, "response should carry a uid")
 
 	// An admin tightens the scope *after* the request was filed.
 	group, err := dataStore.CreateUserGroup(ctx, &store.UserGroup{Name: "late-" + suffix})

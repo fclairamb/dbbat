@@ -113,6 +113,40 @@ type DenyGrantRequestRequest struct {
 
 const maxJustificationLen = 1000
 
+// enforceRequestScope writes an error response and returns false when the
+// definition's group/database scope does not cover this requester and target.
+// This is the security-critical gate: it also covers the auto-approve path,
+// where no human ever reviews the request.
+func (s *Server) enforceRequestScope(
+	c *gin.Context,
+	def *store.GrantDefinition,
+	requester *store.User,
+	databaseID uuid.UUID,
+) bool {
+	groupUIDs, err := s.store.ListUserGroupUIDs(c.Request.Context(), requester.UID)
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to list user groups")
+
+		return false
+	}
+
+	if !def.AppliesToGroups(groupUIDs) {
+		writeError(c, http.StatusForbidden, ErrCodeForbidden,
+			"this grant definition is not available to your user groups")
+
+		return false
+	}
+
+	if !def.AppliesToDatabase(databaseID) {
+		writeError(c, http.StatusForbidden, ErrCodeForbidden,
+			"this grant definition cannot be requested for this database")
+
+		return false
+	}
+
+	return true
+}
+
 // handleCreateGrantRequest — any authenticated user can request access.
 func (s *Server) handleCreateGrantRequest(c *gin.Context) {
 	var req CreateGrantRequestRequest
@@ -158,26 +192,7 @@ func (s *Server) handleCreateGrantRequest(c *gin.Context) {
 		return
 	}
 
-	// Scope check. This is the security-critical gate: it also covers the
-	// auto-approve path below, where no human ever reviews the request.
-	groupUIDs, err := s.store.ListUserGroupUIDs(ctx, currentUser.UID)
-	if err != nil {
-		writeInternalError(c, s.logger, err, "failed to list user groups")
-
-		return
-	}
-
-	if !def.AppliesToGroups(groupUIDs) {
-		writeError(c, http.StatusForbidden, ErrCodeForbidden,
-			"this grant definition is not available to your user groups")
-
-		return
-	}
-
-	if !def.AppliesToDatabase(req.DatabaseID) {
-		writeError(c, http.StatusForbidden, ErrCodeForbidden,
-			"this grant definition cannot be requested for this database")
-
+	if !s.enforceRequestScope(c, def, currentUser, req.DatabaseID) {
 		return
 	}
 

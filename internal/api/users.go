@@ -169,32 +169,12 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 
 	currentUser := getCurrentUser(c)
 
-	// Non-admins can only update their own password
-	if !currentUser.IsAdmin() {
-		if uid != currentUser.UID {
-			writeError(c, http.StatusForbidden, ErrCodeForbidden, "can only update your own user")
-			return
-		}
-		if req.Roles != nil {
-			writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot change roles")
-			return
-		}
-		if req.GroupUIDs != nil {
-			writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot change groups")
-			return
-		}
+	if !s.checkSelfUpdateAllowed(c, uid, currentUser, &req) {
+		return
 	}
 
-	// Group membership gates which grant definitions a user may request, so
-	// a bogus uid must not be silently persisted.
-	if req.GroupUIDs != nil {
-		for _, groupUID := range req.GroupUIDs {
-			if _, err := s.store.GetUserGroup(c.Request.Context(), groupUID); err != nil {
-				writeError(c, http.StatusBadRequest, ErrCodeValidationError,
-					"user group does not exist: "+groupUID.String())
-				return
-			}
-		}
+	if !s.checkGroupsExist(c, req.GroupUIDs) {
+		return
 	}
 
 	// Prevent a roles update that would leave the instance without any admin
@@ -260,6 +240,53 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 	}
 
 	successResponse(c, gin.H{"message": "user updated"})
+}
+
+// checkSelfUpdateAllowed enforces the non-admin restrictions on a user
+// update: you may only touch your own account, and only your password —
+// roles and groups are both access-control levers, so both stay admin-only.
+// Writes an error response and returns false when the update is refused.
+func (s *Server) checkSelfUpdateAllowed(
+	c *gin.Context,
+	uid uuid.UUID,
+	currentUser *store.User,
+	req *UpdateUserRequest,
+) bool {
+	if currentUser.IsAdmin() {
+		return true
+	}
+
+	if uid != currentUser.UID {
+		writeError(c, http.StatusForbidden, ErrCodeForbidden, "can only update your own user")
+		return false
+	}
+
+	if req.Roles != nil {
+		writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot change roles")
+		return false
+	}
+
+	if req.GroupUIDs != nil {
+		writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot change groups")
+		return false
+	}
+
+	return true
+}
+
+// checkGroupsExist writes an error response and returns false when any uid
+// does not name a real group. Membership gates which grant definitions a user
+// may request, so a bogus uid must not be silently persisted.
+func (s *Server) checkGroupsExist(c *gin.Context, groupUIDs []uuid.UUID) bool {
+	for _, groupUID := range groupUIDs {
+		if _, err := s.store.GetUserGroup(c.Request.Context(), groupUID); err != nil {
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError,
+				"user group does not exist: "+groupUID.String())
+			return false
+		}
+	}
+
+	return true
 }
 
 // rejectLastAdminDemotion writes an error response and returns true when the

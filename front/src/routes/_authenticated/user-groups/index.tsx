@@ -257,7 +257,7 @@ function GroupDialog({
             everyone.
           </DialogDescription>
         </DialogHeader>
-        <div className="space-y-4 py-4">
+        <div className="space-y-4 py-4 max-h-[60vh] overflow-y-auto">
           <div className="space-y-2">
             <Label htmlFor="group-name">Name</Label>
             <Input

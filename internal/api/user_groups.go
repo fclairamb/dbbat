@@ -330,13 +330,13 @@ func (s *Server) handleDeleteUserGroup(c *gin.Context) {
 }
 
 // parseMemberParams pulls the (group uid, user uid) pair out of the URL.
-func parseMemberParams(c *gin.Context) (groupUID, userUID uuid.UUID, err error) {
-	groupUID, err = uuid.Parse(c.Param("uid"))
+func parseMemberParams(c *gin.Context) (uuid.UUID, uuid.UUID, error) {
+	groupUID, err := uuid.Parse(c.Param("uid"))
 	if err != nil {
 		return uuid.Nil, uuid.Nil, ErrInvalidUID
 	}
 
-	userUID, err = uuid.Parse(c.Param("user_uid"))
+	userUID, err := uuid.Parse(c.Param("user_uid"))
 	if err != nil {
 		return uuid.Nil, uuid.Nil, ErrInvalidUID
 	}
