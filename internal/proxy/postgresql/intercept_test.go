@@ -980,7 +980,7 @@ func TestHandleParameterDescription_ResolvesBindOIDs(t *testing.T) {
 }
 
 // TestHandleParameterDescription_ClientOIDsWin verifies that a client which
-// does declare parameter types keeps the pre-existing behaviour: its own OIDs
+// does declare parameter types keeps the pre-existing behavior: its own OIDs
 // are used even if the server reports different ones.
 func TestHandleParameterDescription_ClientOIDsWin(t *testing.T) {
 	t.Parallel()

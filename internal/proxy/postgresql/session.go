@@ -417,6 +417,23 @@ func (s *Session) getCurrentPendingQuery() *pendingQuery {
 	return nil
 }
 
+// captureRowDescription records the result column metadata of the current or
+// pending query so DataRow values can later be decoded and named.
+func (s *Session) captureRowDescription(msg *pgproto3.RowDescription) {
+	query := s.getCurrentPendingQuery()
+	if query == nil {
+		return
+	}
+
+	query.columnNames = make([]string, len(msg.Fields))
+	query.columnOIDs = make([]uint32, len(msg.Fields))
+
+	for i, field := range msg.Fields {
+		query.columnNames[i] = string(field.Name)
+		query.columnOIDs[i] = field.DataTypeOID
+	}
+}
+
 // proxyUpstreamToClient proxies messages from upstream to client.
 //
 //nolint:gocognit,cyclop // Protocol handling with many message types inherently has high complexity
@@ -443,16 +460,7 @@ func (s *Session) proxyUpstreamToClient() error {
 			s.handleParameterDescription(m)
 
 		case *pgproto3.RowDescription:
-			// Capture column metadata for the current/pending query
-			query := s.getCurrentPendingQuery()
-			if query != nil {
-				query.columnNames = make([]string, len(m.Fields))
-				query.columnOIDs = make([]uint32, len(m.Fields))
-				for i, field := range m.Fields {
-					query.columnNames[i] = string(field.Name)
-					query.columnOIDs[i] = field.DataTypeOID
-				}
-			}
+			s.captureRowDescription(m)
 
 		case *pgproto3.CommandComplete:
 			// Parse rows affected from CommandTag (e.g., "UPDATE 5")
