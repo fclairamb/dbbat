@@ -203,6 +203,116 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/cli": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Start a CLI authorization request
+         * @description Opens a device-flow style authorization request that lets an external
+         *     tool obtain an API key through a browser approval, instead of manual
+         *     copy/paste.
+         *
+         *     The caller opens `authorize_url` in a browser (or shows it to the
+         *     user, e.g. over SSH); a logged-in user approves or denies it there.
+         *     The caller then polls `POST /auth/cli/poll` with `poll_token` until
+         *     it resolves. `user_code` is a short human-checkable code shown on
+         *     both sides so the approving user can catch a mismatched or
+         *     attacker-initiated request.
+         *
+         *     Unauthenticated — opening a request grants nothing by itself.
+         */
+        post: operations["createCLIAuthRequest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/cli/poll": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Poll a CLI authorization request
+         * @description Checks on (and, once resolved, retrieves) the result of a CLI
+         *     authorization request using its poll token. Approved and denied
+         *     results are delivered exactly once — the underlying request is
+         *     consumed on the terminal read, so a repeated poll for an
+         *     already-delivered result reports `expired`.
+         *
+         *     Unauthenticated — the poll token itself is the capability.
+         */
+        post: operations["pollCLIAuthRequest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/cli/{uid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description CLI authorization request ID */
+                uid: string;
+            };
+            cookie?: never;
+        };
+        /**
+         * Get CLI authorization request details
+         * @description Returns the public details (name, user code, status) of a pending or
+         *     resolved CLI authorization request, for the approval page to render.
+         *     Never returns the poll token or the minted key.
+         */
+        get: operations["getCLIAuthRequest"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/cli/{uid}/respond": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description CLI authorization request ID */
+                uid: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve or deny a CLI authorization request
+         * @description Approves or denies a pending CLI authorization request. On approval,
+         *     mints a real API key owned by the approving user, exactly as
+         *     `POST /keys` would.
+         *
+         *     Requires Web Session or Basic Auth (API keys cannot perform this
+         *     operation, same restriction as direct API key creation).
+         */
+        post: operations["respondToCLIAuthRequest"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/slack/interactions": {
         parameters: {
             query?: never;
@@ -1830,6 +1940,50 @@ export interface components {
             /** @description True when there are more than 50 connections (list is truncated) */
             connections_truncated: boolean;
         };
+        CreateCLIAuthRequestRequest: {
+            /** @description Human-readable label for the request (e.g. "my-tool on host"), shown on the approval page */
+            name: string;
+        };
+        CreateCLIAuthRequestResponse: {
+            /**
+             * Format: uuid
+             * @description Public request identifier, embedded in authorize_url
+             */
+            request_id: string;
+            /** @description Browser URL to open for the user to approve or deny the request */
+            authorize_url: string;
+            /** @description Secret token used to poll for the result. Never display or log this value. */
+            poll_token: string;
+            /** @description Short human-checkable code, also shown on the approval page, to catch a mismatched request */
+            user_code: string;
+            /**
+             * Format: date-time
+             * @description When the request stops being valid
+             */
+            expires_at: string;
+            /** @description Suggested delay between polls */
+            interval_seconds: number;
+        };
+        PollCLIAuthRequestRequest: {
+            poll_token: string;
+        };
+        PollCLIAuthRequestResponse: {
+            /** @enum {string} */
+            status: "pending" | "approved" | "denied" | "expired";
+            /** @description The minted API key (only present when status is approved, and only once) */
+            key?: string;
+        };
+        CLIAuthRequestInfo: {
+            name: string;
+            user_code: string;
+            /** @enum {string} */
+            status: "pending" | "approved" | "denied";
+            /** Format: date-time */
+            expires_at: string;
+        };
+        RespondToCLIAuthRequestRequest: {
+            approve: boolean;
+        };
         Connection: {
             /**
              * Format: uuid
@@ -2232,6 +2386,12 @@ export type CreateGrantRequest = components['schemas']['CreateGrantRequest'];
 export type ApiKey = components['schemas']['APIKey'];
 export type CreateApiKeyRequest = components['schemas']['CreateAPIKeyRequest'];
 export type CreateApiKeyResponse = components['schemas']['CreateAPIKeyResponse'];
+export type CreateCliAuthRequestRequest = components['schemas']['CreateCLIAuthRequestRequest'];
+export type CreateCliAuthRequestResponse = components['schemas']['CreateCLIAuthRequestResponse'];
+export type PollCliAuthRequestRequest = components['schemas']['PollCLIAuthRequestRequest'];
+export type PollCliAuthRequestResponse = components['schemas']['PollCLIAuthRequestResponse'];
+export type CliAuthRequestInfo = components['schemas']['CLIAuthRequestInfo'];
+export type RespondToCliAuthRequestRequest = components['schemas']['RespondToCLIAuthRequestRequest'];
 export type Connection = components['schemas']['Connection'];
 export type Query = components['schemas']['Query'];
 export type QueryParameters = components['schemas']['QueryParameters'];
@@ -2516,6 +2676,116 @@ export interface operations {
                 };
                 content?: never;
             };
+        };
+    };
+    createCLIAuthRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateCLIAuthRequestRequest"];
+            };
+        };
+        responses: {
+            /** @description CLI authorization request created */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreateCLIAuthRequestResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    pollCLIAuthRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PollCLIAuthRequestRequest"];
+            };
+        };
+        responses: {
+            /** @description Current status of the request */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PollCLIAuthRequestResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getCLIAuthRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description CLI authorization request ID */
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description CLI authorization request details */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CLIAuthRequestInfo"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    respondToCLIAuthRequest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description CLI authorization request ID */
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RespondToCLIAuthRequestRequest"];
+            };
+        };
+        responses: {
+            /** @description Response recorded */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
         };
     };
     slackInteractions: {

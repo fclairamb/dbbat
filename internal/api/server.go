@@ -191,6 +191,18 @@ func (s *Server) setupRouter() *gin.Engine {
 			auth.GET("/"+name+"/callback", s.handleOAuthCallback(name))
 		}
 
+		// CLI authorization (device-flow style): lets external tools obtain
+		// an API key through a browser approval instead of manual
+		// copy/paste. The create endpoint is IP rate limited like other
+		// unauthenticated auth endpoints; the poll endpoint deliberately is
+		// not — see handlePollCLIAuthRequest for why.
+		if s.rateLimiter != nil {
+			auth.POST("/cli", s.rateLimiter.PreAuthMiddleware(), s.handleCreateCLIAuthRequest)
+		} else {
+			auth.POST("/cli", s.handleCreateCLIAuthRequest)
+		}
+		auth.POST("/cli/poll", s.handlePollCLIAuthRequest)
+
 		// Slack interactivity webhook (unauthenticated at the middleware
 		// layer — the Slack request signature is the authentication). Only
 		// registered when interactivity is configured (signing secret or
@@ -218,6 +230,10 @@ func (s *Server) setupRouter() *gin.Engine {
 			authenticatedAuth := authenticated.Group("/auth")
 			authenticatedAuth.POST("/logout", s.handleLogout)
 			authenticatedAuth.GET("/me", s.handleMe)
+			// CLI authorization approval page + action (Web Session or Basic
+			// Auth only — mints a real API key, like direct key creation).
+			authenticatedAuth.GET("/cli/:uid", s.handleGetCLIAuthRequest)
+			authenticatedAuth.POST("/cli/:uid/respond", s.requireWebSessionOrBasicAuth(), s.handleRespondToCLIAuthRequest)
 
 			// User endpoints
 			users := authenticated.Group("/users")

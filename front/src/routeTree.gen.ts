@@ -26,6 +26,7 @@ import { Route as AuthenticatedAuditIndexRouteImport } from './routes/_authentic
 import { Route as AuthenticatedApiKeysIndexRouteImport } from './routes/_authenticated/api-keys/index'
 import { Route as AuthenticatedQueriesUidRouteImport } from './routes/_authenticated/queries/$uid'
 import { Route as AuthenticatedConnectionsUidRouteImport } from './routes/_authenticated/connections/$uid'
+import { Route as AuthenticatedCliAuthUidRouteImport } from './routes/_authenticated/cli-auth/$uid'
 
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
@@ -122,10 +123,16 @@ const AuthenticatedConnectionsUidRoute =
     path: '/connections/$uid',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
+const AuthenticatedCliAuthUidRoute = AuthenticatedCliAuthUidRouteImport.update({
+  id: '/cli-auth/$uid',
+  path: '/cli-auth/$uid',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AuthenticatedIndexRoute
   '/login': typeof LoginRoute
+  '/cli-auth/$uid': typeof AuthenticatedCliAuthUidRoute
   '/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/api-keys/': typeof AuthenticatedApiKeysIndexRoute
@@ -144,6 +151,7 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/login': typeof LoginRoute
   '/': typeof AuthenticatedIndexRoute
+  '/cli-auth/$uid': typeof AuthenticatedCliAuthUidRoute
   '/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/api-keys': typeof AuthenticatedApiKeysIndexRoute
@@ -164,6 +172,7 @@ export interface FileRoutesById {
   '/_authenticated': typeof AuthenticatedRouteWithChildren
   '/login': typeof LoginRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
+  '/_authenticated/cli-auth/$uid': typeof AuthenticatedCliAuthUidRoute
   '/_authenticated/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/_authenticated/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/_authenticated/api-keys/': typeof AuthenticatedApiKeysIndexRoute
@@ -184,6 +193,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/login'
+    | '/cli-auth/$uid'
     | '/connections/$uid'
     | '/queries/$uid'
     | '/api-keys/'
@@ -202,6 +212,7 @@ export interface FileRouteTypes {
   to:
     | '/login'
     | '/'
+    | '/cli-auth/$uid'
     | '/connections/$uid'
     | '/queries/$uid'
     | '/api-keys'
@@ -221,6 +232,7 @@ export interface FileRouteTypes {
     | '/_authenticated'
     | '/login'
     | '/_authenticated/'
+    | '/_authenticated/cli-auth/$uid'
     | '/_authenticated/connections/$uid'
     | '/_authenticated/queries/$uid'
     | '/_authenticated/api-keys/'
@@ -363,11 +375,19 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedConnectionsUidRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
+    '/_authenticated/cli-auth/$uid': {
+      id: '/_authenticated/cli-auth/$uid'
+      path: '/cli-auth/$uid'
+      fullPath: '/cli-auth/$uid'
+      preLoaderRoute: typeof AuthenticatedCliAuthUidRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
   }
 }
 
 interface AuthenticatedRouteChildren {
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
+  AuthenticatedCliAuthUidRoute: typeof AuthenticatedCliAuthUidRoute
   AuthenticatedConnectionsUidRoute: typeof AuthenticatedConnectionsUidRoute
   AuthenticatedQueriesUidRoute: typeof AuthenticatedQueriesUidRoute
   AuthenticatedApiKeysIndexRoute: typeof AuthenticatedApiKeysIndexRoute
@@ -386,6 +406,7 @@ interface AuthenticatedRouteChildren {
 
 const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
+  AuthenticatedCliAuthUidRoute: AuthenticatedCliAuthUidRoute,
   AuthenticatedConnectionsUidRoute: AuthenticatedConnectionsUidRoute,
   AuthenticatedQueriesUidRoute: AuthenticatedQueriesUidRoute,
   AuthenticatedApiKeysIndexRoute: AuthenticatedApiKeysIndexRoute,

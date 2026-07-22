@@ -332,6 +332,159 @@ paths:
         '302':
           description: Redirect to app with session token
 
+  /auth/cli:
+    post:
+      tags:
+        - Auth
+      summary: Start a CLI authorization request
+      description: |
+        Opens a device-flow style authorization request that lets an external
+        tool obtain an API key through a browser approval, instead of manual
+        copy/paste.
+
+        The caller opens `authorize_url` in a browser (or shows it to the
+        user, e.g. over SSH); a logged-in user approves or denies it there.
+        The caller then polls `POST /auth/cli/poll` with `poll_token` until
+        it resolves. `user_code` is a short human-checkable code shown on
+        both sides so the approving user can catch a mismatched or
+        attacker-initiated request.
+
+        Unauthenticated — opening a request grants nothing by itself.
+      operationId: createCLIAuthRequest
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCLIAuthRequestRequest'
+      responses:
+        '201':
+          description: CLI authorization request created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateCLIAuthRequestResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/cli/poll:
+    post:
+      tags:
+        - Auth
+      summary: Poll a CLI authorization request
+      description: |
+        Checks on (and, once resolved, retrieves) the result of a CLI
+        authorization request using its poll token. Approved and denied
+        results are delivered exactly once — the underlying request is
+        consumed on the terminal read, so a repeated poll for an
+        already-delivered result reports `expired`.
+
+        Unauthenticated — the poll token itself is the capability.
+      operationId: pollCLIAuthRequest
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PollCLIAuthRequestRequest'
+      responses:
+        '200':
+          description: Current status of the request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PollCLIAuthRequestResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/cli/{uid}:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        description: CLI authorization request ID
+        schema:
+          type: string
+          format: uuid
+
+    get:
+      tags:
+        - Auth
+      summary: Get CLI authorization request details
+      description: |
+        Returns the public details (name, user code, status) of a pending or
+        resolved CLI authorization request, for the approval page to render.
+        Never returns the poll token or the minted key.
+      operationId: getCLIAuthRequest
+      responses:
+        '200':
+          description: CLI authorization request details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CLIAuthRequestInfo'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /auth/cli/{uid}/respond:
+    parameters:
+      - name: uid
+        in: path
+        required: true
+        description: CLI authorization request ID
+        schema:
+          type: string
+          format: uuid
+
+    post:
+      tags:
+        - Auth
+      summary: Approve or deny a CLI authorization request
+      description: |
+        Approves or denies a pending CLI authorization request. On approval,
+        mints a real API key owned by the approving user, exactly as
+        `POST /keys` would.
+
+        Requires Web Session or Basic Auth (API keys cannot perform this
+        operation, same restriction as direct API key creation).
+      operationId: respondToCLIAuthRequest
+      security:
+        - basicAuth: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RespondToCLIAuthRequestRequest'
+      responses:
+        '204':
+          description: Response recorded
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /slack/interactions:
     post:
       tags:
@@ -3437,6 +3590,94 @@ components:
         - created_at
         - connections
         - connections_truncated
+
+    # CLI authorization (device-flow style API key provisioning) schemas
+    CreateCLIAuthRequestRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Human-readable label for the request (e.g. "my-tool on host"), shown on the approval page
+      required:
+        - name
+
+    CreateCLIAuthRequestResponse:
+      type: object
+      properties:
+        request_id:
+          type: string
+          format: uuid
+          description: Public request identifier, embedded in authorize_url
+        authorize_url:
+          type: string
+          description: Browser URL to open for the user to approve or deny the request
+        poll_token:
+          type: string
+          description: Secret token used to poll for the result. Never display or log this value.
+        user_code:
+          type: string
+          description: Short human-checkable code, also shown on the approval page, to catch a mismatched request
+        expires_at:
+          type: string
+          format: date-time
+          description: When the request stops being valid
+        interval_seconds:
+          type: integer
+          description: Suggested delay between polls
+      required:
+        - request_id
+        - authorize_url
+        - poll_token
+        - user_code
+        - expires_at
+        - interval_seconds
+
+    PollCLIAuthRequestRequest:
+      type: object
+      properties:
+        poll_token:
+          type: string
+      required:
+        - poll_token
+
+    PollCLIAuthRequestResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [pending, approved, denied, expired]
+        key:
+          type: string
+          description: The minted API key (only present when status is approved, and only once)
+      required:
+        - status
+
+    CLIAuthRequestInfo:
+      type: object
+      properties:
+        name:
+          type: string
+        user_code:
+          type: string
+        status:
+          type: string
+          enum: [pending, approved, denied]
+        expires_at:
+          type: string
+          format: date-time
+      required:
+        - name
+        - user_code
+        - status
+        - expires_at
+
+    RespondToCLIAuthRequestRequest:
+      type: object
+      properties:
+        approve:
+          type: boolean
+      required:
+        - approve
 
     # Connection schemas
     Connection:

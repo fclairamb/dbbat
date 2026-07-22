@@ -30,6 +30,19 @@ export const Route = createFileRoute("/login")({
 
 type ViewState = "login" | "password-change";
 
+// getSafeRedirectTarget reads the `redirect` param the _authenticated guard
+// attaches when it bounces an unauthenticated visitor here, so a successful
+// login can send them back to the page they originally asked for instead of
+// always landing on the dashboard. Restricted to same-app paths (must start
+// with "/" but not "//") to avoid turning this into an open redirect.
+function getSafeRedirectTarget(): string {
+  const redirect = new URLSearchParams(window.location.search).get("redirect");
+  if (redirect && redirect.startsWith("/") && !redirect.startsWith("//")) {
+    return redirect;
+  }
+  return "/";
+}
+
 function oauthErrorMessage(code: string): string {
   switch (code) {
     case "slack_denied":
@@ -54,6 +67,11 @@ function LoginPage() {
   const navigate = useNavigate();
   // Read session_expired directly from URL to avoid TanStack Router's search param normalization
   const sessionExpired = new URLSearchParams(window.location.search).get("session_expired") === "true";
+  // Captured once at mount (lazy initializer), before any navigation can change
+  // the URL — reading it fresh on every redirect would see the post-navigation
+  // URL (no more `redirect` param) and silently fall back to "/", clobbering
+  // the correct destination.
+  const [redirectTarget] = useState(() => getSafeRedirectTarget());
   const { login, isLoading, isAuthenticated, refreshUser } = useAuth();
   const { data: versionInfo } = useVersion();
   const { data: providers } = useAuthProviders();
@@ -73,9 +91,9 @@ function LoginPage() {
   // callback and direct navigation by already-authenticated users).
   useEffect(() => {
     if (!isLoading && isAuthenticated) {
-      navigate({ to: "/" });
+      navigate({ to: redirectTarget });
     }
-  }, [isAuthenticated, isLoading, navigate]);
+  }, [isAuthenticated, isLoading, navigate, redirectTarget]);
 
   // Handle OAuth callback token — just store it and trigger a session refresh.
   // The reactive effect above handles the navigation once isAuthenticated is committed.
@@ -116,7 +134,7 @@ function LoginPage() {
 
     try {
       await login(username, password);
-      navigate({ to: "/" });
+      navigate({ to: redirectTarget });
     } catch (err) {
       const errorMessage =
         err instanceof Error ? err.message : "Login failed";
@@ -173,7 +191,7 @@ function LoginPage() {
 
       // Login with the new password
       await login(username, newPassword);
-      navigate({ to: "/" });
+      navigate({ to: redirectTarget });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Password change failed");
     } finally {

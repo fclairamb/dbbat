@@ -34,6 +34,7 @@ export type CreateAPIKeyResponse =
 export type ConnectionInfo = components["schemas"]["ConnectionInfo"];
 export type ConnectionTestResult =
   components["schemas"]["ConnectionTestResult"];
+export type CLIAuthRequestInfo = components["schemas"]["CLIAuthRequestInfo"];
 
 // ============================================================================
 // Auth Providers
@@ -993,6 +994,53 @@ export function useRevokeAPIKey(options?: {
       queryClient.invalidateQueries({ queryKey: ["api-keys"] });
       options?.onSuccess?.();
     },
+    onError: options?.onError,
+  });
+}
+
+// ============================================================================
+// CLI Authorization
+// ============================================================================
+
+export function useCLIAuthRequest(uid: string) {
+  return useQuery({
+    queryKey: ["cli-auth", uid],
+    queryFn: async (): Promise<CLIAuthRequestInfo> => {
+      const response = await apiClient.GET("/auth/cli/{uid}", {
+        params: { path: { uid } },
+      });
+      if (response.error || !response.data) {
+        throw new Error(
+          response.error?.message || "CLI authorization request not found"
+        );
+      }
+      return response.data;
+    },
+    enabled: !!uid,
+    retry: false,
+  });
+}
+
+export function useRespondToCLIAuthRequest(
+  uid: string,
+  options?: {
+    onSuccess?: () => void;
+    onError?: (error: Error) => void;
+  }
+) {
+  return useMutation({
+    mutationFn: async (approve: boolean): Promise<void> => {
+      const response = await apiClient.POST("/auth/cli/{uid}/respond", {
+        params: { path: { uid } },
+        body: { approve },
+      });
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to respond to CLI authorization request"
+        );
+      }
+    },
+    onSuccess: options?.onSuccess,
     onError: options?.onError,
   });
 }
