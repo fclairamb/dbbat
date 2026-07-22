@@ -203,7 +203,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/auth/cli": {
+    "/auth/device": {
         parameters: {
             query?: never;
             header?: never;
@@ -213,28 +213,31 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Start a CLI authorization request
-         * @description Opens a device-flow style authorization request that lets an external
-         *     tool obtain an API key through a browser approval, instead of manual
-         *     copy/paste.
+         * Device authorization request (RFC 8628)
+         * @description Starts an OAuth 2.0 Device Authorization Grant (RFC 8628). Lets an
+         *     external tool (CLI or desktop app) obtain an API key through a browser
+         *     approval instead of manual copy/paste.
          *
-         *     The caller opens `authorize_url` in a browser (or shows it to the
-         *     user, e.g. over SSH); a logged-in user approves or denies it there.
-         *     The caller then polls `POST /auth/cli/poll` with `poll_token` until
-         *     it resolves. `user_code` is a short human-checkable code shown on
-         *     both sides so the approving user can catch a mismatched or
-         *     attacker-initiated request.
+         *     The client opens `verification_uri_complete` in a browser (or shows the
+         *     user `verification_uri` + `user_code`, e.g. over SSH); a logged-in user
+         *     approves or denies it there. The client then polls
+         *     `POST /auth/device/token` with `device_code` until it resolves.
          *
          *     Unauthenticated — opening a request grants nothing by itself.
+         *
+         *     Note: `client_name` is a dbbat extension used as the consent-page label;
+         *     `client_id` is accepted for OAuth compatibility but ignored (dbbat is
+         *     not a multi-client authorization server). Bodies are JSON rather than
+         *     RFC 8628's form-encoding, matching the rest of the dbbat API.
          */
-        post: operations["createCLIAuthRequest"];
+        post: operations["deviceAuthorization"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/auth/cli/poll": {
+    "/auth/device/token": {
         parameters: {
             query?: never;
             header?: never;
@@ -244,69 +247,53 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Poll a CLI authorization request
-         * @description Checks on (and, once resolved, retrieves) the result of a CLI
-         *     authorization request using its poll token. Approved and denied
-         *     results are delivered exactly once — the underlying request is
-         *     consumed on the terminal read, so a repeated poll for an
-         *     already-delivered result reports `expired`.
+         * Device token endpoint (RFC 8628)
+         * @description The RFC 8628 token endpoint. The client polls it with the
+         *     `device_code`; it answers with a standard OAuth error while the request
+         *     is pending and a Bearer token once approved.
          *
-         *     Unauthenticated — the poll token itself is the capability.
+         *     Error responses use the OAuth `{error, error_description}` shape (a
+         *     deliberate deviation from dbbat's usual `{code, message}` envelope):
+         *     `authorization_pending` (still waiting), `access_denied` (user denied),
+         *     `expired_token` (unknown/expired device_code — also returned once a
+         *     result has already been delivered, since it's consumed on read), and
+         *     `unsupported_grant_type`.
+         *
+         *     Unauthenticated — the `device_code` itself is the capability.
          */
-        post: operations["pollCLIAuthRequest"];
+        post: operations["deviceToken"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/auth/cli/{uid}": {
+    "/auth/device/consent": {
         parameters: {
             query?: never;
             header?: never;
-            path: {
-                /** @description CLI authorization request ID */
-                uid: string;
-            };
+            path?: never;
             cookie?: never;
         };
         /**
-         * Get CLI authorization request details
-         * @description Returns the public details (name, user code, status) of a pending or
-         *     resolved CLI authorization request, for the approval page to render.
-         *     Never returns the poll token or the minted key.
+         * Get device authorization consent details
+         * @description Returns the public details (client name, user code, status) of a
+         *     pending or resolved device authorization request, for the consent page
+         *     to render. Looked up by `user_code` (case-insensitive, dashes optional).
+         *     Never returns the device code or the minted key.
          */
-        get: operations["getCLIAuthRequest"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/auth/cli/{uid}/respond": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description CLI authorization request ID */
-                uid: string;
-            };
-            cookie?: never;
-        };
-        get?: never;
+        get: operations["getDeviceConsent"];
         put?: never;
         /**
-         * Approve or deny a CLI authorization request
-         * @description Approves or denies a pending CLI authorization request. On approval,
-         *     mints a real API key owned by the approving user, exactly as
-         *     `POST /keys` would.
+         * Approve or deny a device authorization request
+         * @description Approves or denies a pending device authorization request, keyed by
+         *     `user_code`. On approval, mints a real API key owned by the approving
+         *     user, exactly as `POST /keys` would.
          *
          *     Requires Web Session or Basic Auth (API keys cannot perform this
          *     operation, same restriction as direct API key creation).
          */
-        post: operations["respondToCLIAuthRequest"];
+        post: operations["deviceConsent"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1940,48 +1927,57 @@ export interface components {
             /** @description True when there are more than 50 connections (list is truncated) */
             connections_truncated: boolean;
         };
-        CreateCLIAuthRequestRequest: {
-            /** @description Human-readable label for the request (e.g. "my-tool on host"), shown on the approval page */
-            name: string;
+        DeviceAuthorizationRequest: {
+            /** @description Human-readable label for the requesting app (e.g. "stn on host"), shown on the consent page. dbbat extension. */
+            client_name?: string;
+            /** @description Accepted for OAuth compatibility but ignored. */
+            client_id?: string;
         };
-        CreateCLIAuthRequestResponse: {
-            /**
-             * Format: uuid
-             * @description Public request identifier, embedded in authorize_url
-             */
-            request_id: string;
-            /** @description Browser URL to open for the user to approve or deny the request */
-            authorize_url: string;
-            /** @description Secret token used to poll for the result. Never display or log this value. */
-            poll_token: string;
-            /** @description Short human-checkable code, also shown on the approval page, to catch a mismatched request */
+        DeviceAuthorizationResponse: {
+            /** @description Secret code the client polls the token endpoint with. Never display or log this value. */
+            device_code: string;
+            /** @description Short human-checkable code the user enters/verifies in the browser (e.g. "WDJP-4KXR") */
             user_code: string;
+            /** @description Browser URL the user opens and enters the user_code at */
+            verification_uri: string;
+            /** @description verification_uri with the user_code pre-filled — open this directly */
+            verification_uri_complete: string;
+            /** @description Seconds until the request expires */
+            expires_in: number;
+            /** @description Minimum seconds to wait between polls */
+            interval: number;
+        };
+        DeviceTokenRequest: {
             /**
-             * Format: date-time
-             * @description When the request stops being valid
+             * @description Must be "urn:ietf:params:oauth:grant-type:device_code"
+             * @enum {string}
              */
-            expires_at: string;
-            /** @description Suggested delay between polls */
-            interval_seconds: number;
+            grant_type: "urn:ietf:params:oauth:grant-type:device_code";
+            device_code: string;
+            /** @description Accepted for OAuth compatibility but ignored. */
+            client_id?: string;
         };
-        PollCLIAuthRequestRequest: {
-            poll_token: string;
-        };
-        PollCLIAuthRequestResponse: {
+        DeviceTokenResponse: {
+            /** @description The minted API key (dbb_...), delivered exactly once */
+            access_token: string;
             /** @enum {string} */
-            status: "pending" | "approved" | "denied" | "expired";
-            /** @description The minted API key (only present when status is approved, and only once) */
-            key?: string;
+            token_type: "Bearer";
         };
-        CLIAuthRequestInfo: {
-            name: string;
+        OAuthError: {
+            /** @description OAuth error code */
+            error: string;
+            error_description?: string;
+        };
+        DeviceConsentInfo: {
+            client_name: string;
             user_code: string;
             /** @enum {string} */
             status: "pending" | "approved" | "denied";
             /** Format: date-time */
             expires_at: string;
         };
-        RespondToCLIAuthRequestRequest: {
+        DeviceConsentRequest: {
+            user_code: string;
             approve: boolean;
         };
         Connection: {
@@ -2386,12 +2382,13 @@ export type CreateGrantRequest = components['schemas']['CreateGrantRequest'];
 export type ApiKey = components['schemas']['APIKey'];
 export type CreateApiKeyRequest = components['schemas']['CreateAPIKeyRequest'];
 export type CreateApiKeyResponse = components['schemas']['CreateAPIKeyResponse'];
-export type CreateCliAuthRequestRequest = components['schemas']['CreateCLIAuthRequestRequest'];
-export type CreateCliAuthRequestResponse = components['schemas']['CreateCLIAuthRequestResponse'];
-export type PollCliAuthRequestRequest = components['schemas']['PollCLIAuthRequestRequest'];
-export type PollCliAuthRequestResponse = components['schemas']['PollCLIAuthRequestResponse'];
-export type CliAuthRequestInfo = components['schemas']['CLIAuthRequestInfo'];
-export type RespondToCliAuthRequestRequest = components['schemas']['RespondToCLIAuthRequestRequest'];
+export type DeviceAuthorizationRequest = components['schemas']['DeviceAuthorizationRequest'];
+export type DeviceAuthorizationResponse = components['schemas']['DeviceAuthorizationResponse'];
+export type DeviceTokenRequest = components['schemas']['DeviceTokenRequest'];
+export type DeviceTokenResponse = components['schemas']['DeviceTokenResponse'];
+export type OAuthError = components['schemas']['OAuthError'];
+export type DeviceConsentInfo = components['schemas']['DeviceConsentInfo'];
+export type DeviceConsentRequest = components['schemas']['DeviceConsentRequest'];
 export type Connection = components['schemas']['Connection'];
 export type Query = components['schemas']['Query'];
 export type QueryParameters = components['schemas']['QueryParameters'];
@@ -2678,26 +2675,26 @@ export interface operations {
             };
         };
     };
-    createCLIAuthRequest: {
+    deviceAuthorization: {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody: {
+        requestBody?: {
             content: {
-                "application/json": components["schemas"]["CreateCLIAuthRequestRequest"];
+                "application/json": components["schemas"]["DeviceAuthorizationRequest"];
             };
         };
         responses: {
-            /** @description CLI authorization request created */
-            201: {
+            /** @description Device authorization request created */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["CreateCLIAuthRequestResponse"];
+                    "application/json": components["schemas"]["DeviceAuthorizationResponse"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -2705,7 +2702,7 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
-    pollCLIAuthRequest: {
+    deviceToken: {
         parameters: {
             query?: never;
             header?: never;
@@ -2714,42 +2711,54 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["PollCLIAuthRequestRequest"];
+                "application/json": components["schemas"]["DeviceTokenRequest"];
             };
         };
         responses: {
-            /** @description Current status of the request */
+            /** @description Authorization approved; access token issued */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["PollCLIAuthRequestResponse"];
+                    "application/json": components["schemas"]["DeviceTokenResponse"];
                 };
             };
-            400: components["responses"]["BadRequest"];
+            /**
+             * @description Pending or errored, as an OAuth error object. `error` is one of
+             *     `authorization_pending`, `access_denied`, `expired_token`,
+             *     `unsupported_grant_type`, `invalid_request`.
+             */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthError"];
+                };
+            };
             500: components["responses"]["InternalError"];
         };
     };
-    getCLIAuthRequest: {
+    getDeviceConsent: {
         parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description CLI authorization request ID */
-                uid: string;
+            query: {
+                /** @description The user code shown to the user (case-insensitive, dashes optional) */
+                user_code: string;
             };
+            header?: never;
+            path?: never;
             cookie?: never;
         };
         requestBody?: never;
         responses: {
-            /** @description CLI authorization request details */
+            /** @description Device authorization consent details */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["CLIAuthRequestInfo"];
+                    "application/json": components["schemas"]["DeviceConsentInfo"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -2757,19 +2766,16 @@ export interface operations {
             404: components["responses"]["NotFound"];
         };
     };
-    respondToCLIAuthRequest: {
+    deviceConsent: {
         parameters: {
             query?: never;
             header?: never;
-            path: {
-                /** @description CLI authorization request ID */
-                uid: string;
-            };
+            path?: never;
             cookie?: never;
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["RespondToCLIAuthRequestRequest"];
+                "application/json": components["schemas"]["DeviceConsentRequest"];
             };
         };
         responses: {

@@ -332,39 +332,42 @@ paths:
         '302':
           description: Redirect to app with session token
 
-  /auth/cli:
+  /auth/device:
     post:
       tags:
         - Auth
-      summary: Start a CLI authorization request
+      summary: Device authorization request (RFC 8628)
       description: |
-        Opens a device-flow style authorization request that lets an external
-        tool obtain an API key through a browser approval, instead of manual
-        copy/paste.
+        Starts an OAuth 2.0 Device Authorization Grant (RFC 8628). Lets an
+        external tool (CLI or desktop app) obtain an API key through a browser
+        approval instead of manual copy/paste.
 
-        The caller opens `authorize_url` in a browser (or shows it to the
-        user, e.g. over SSH); a logged-in user approves or denies it there.
-        The caller then polls `POST /auth/cli/poll` with `poll_token` until
-        it resolves. `user_code` is a short human-checkable code shown on
-        both sides so the approving user can catch a mismatched or
-        attacker-initiated request.
+        The client opens `verification_uri_complete` in a browser (or shows the
+        user `verification_uri` + `user_code`, e.g. over SSH); a logged-in user
+        approves or denies it there. The client then polls
+        `POST /auth/device/token` with `device_code` until it resolves.
 
         Unauthenticated — opening a request grants nothing by itself.
-      operationId: createCLIAuthRequest
+
+        Note: `client_name` is a dbbat extension used as the consent-page label;
+        `client_id` is accepted for OAuth compatibility but ignored (dbbat is
+        not a multi-client authorization server). Bodies are JSON rather than
+        RFC 8628's form-encoding, matching the rest of the dbbat API.
+      operationId: deviceAuthorization
       security: []
       requestBody:
-        required: true
+        required: false
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateCLIAuthRequestRequest'
+              $ref: '#/components/schemas/DeviceAuthorizationRequest'
       responses:
-        '201':
-          description: CLI authorization request created
+        '200':
+          description: Device authorization request created
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CreateCLIAuthRequestResponse'
+                $ref: '#/components/schemas/DeviceAuthorizationResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
         '429':
@@ -372,65 +375,76 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /auth/cli/poll:
+  /auth/device/token:
     post:
       tags:
         - Auth
-      summary: Poll a CLI authorization request
+      summary: Device token endpoint (RFC 8628)
       description: |
-        Checks on (and, once resolved, retrieves) the result of a CLI
-        authorization request using its poll token. Approved and denied
-        results are delivered exactly once — the underlying request is
-        consumed on the terminal read, so a repeated poll for an
-        already-delivered result reports `expired`.
+        The RFC 8628 token endpoint. The client polls it with the
+        `device_code`; it answers with a standard OAuth error while the request
+        is pending and a Bearer token once approved.
 
-        Unauthenticated — the poll token itself is the capability.
-      operationId: pollCLIAuthRequest
+        Error responses use the OAuth `{error, error_description}` shape (a
+        deliberate deviation from dbbat's usual `{code, message}` envelope):
+        `authorization_pending` (still waiting), `access_denied` (user denied),
+        `expired_token` (unknown/expired device_code — also returned once a
+        result has already been delivered, since it's consumed on read), and
+        `unsupported_grant_type`.
+
+        Unauthenticated — the `device_code` itself is the capability.
+      operationId: deviceToken
       security: []
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/PollCLIAuthRequestRequest'
+              $ref: '#/components/schemas/DeviceTokenRequest'
       responses:
         '200':
-          description: Current status of the request
+          description: Authorization approved; access token issued
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PollCLIAuthRequestResponse'
+                $ref: '#/components/schemas/DeviceTokenResponse'
         '400':
-          $ref: '#/components/responses/BadRequest'
+          description: |
+            Pending or errored, as an OAuth error object. `error` is one of
+            `authorization_pending`, `access_denied`, `expired_token`,
+            `unsupported_grant_type`, `invalid_request`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthError'
         '500':
           $ref: '#/components/responses/InternalError'
 
-  /auth/cli/{uid}:
-    parameters:
-      - name: uid
-        in: path
-        required: true
-        description: CLI authorization request ID
-        schema:
-          type: string
-          format: uuid
-
+  /auth/device/consent:
     get:
       tags:
         - Auth
-      summary: Get CLI authorization request details
+      summary: Get device authorization consent details
       description: |
-        Returns the public details (name, user code, status) of a pending or
-        resolved CLI authorization request, for the approval page to render.
-        Never returns the poll token or the minted key.
-      operationId: getCLIAuthRequest
+        Returns the public details (client name, user code, status) of a
+        pending or resolved device authorization request, for the consent page
+        to render. Looked up by `user_code` (case-insensitive, dashes optional).
+        Never returns the device code or the minted key.
+      operationId: getDeviceConsent
+      parameters:
+        - name: user_code
+          in: query
+          required: true
+          description: The user code shown to the user (case-insensitive, dashes optional)
+          schema:
+            type: string
       responses:
         '200':
-          description: CLI authorization request details
+          description: Device authorization consent details
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/CLIAuthRequestInfo'
+                $ref: '#/components/schemas/DeviceConsentInfo'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -438,28 +452,18 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
-  /auth/cli/{uid}/respond:
-    parameters:
-      - name: uid
-        in: path
-        required: true
-        description: CLI authorization request ID
-        schema:
-          type: string
-          format: uuid
-
     post:
       tags:
         - Auth
-      summary: Approve or deny a CLI authorization request
+      summary: Approve or deny a device authorization request
       description: |
-        Approves or denies a pending CLI authorization request. On approval,
-        mints a real API key owned by the approving user, exactly as
-        `POST /keys` would.
+        Approves or denies a pending device authorization request, keyed by
+        `user_code`. On approval, mints a real API key owned by the approving
+        user, exactly as `POST /keys` would.
 
         Requires Web Session or Basic Auth (API keys cannot perform this
         operation, same restriction as direct API key creation).
-      operationId: respondToCLIAuthRequest
+      operationId: deviceConsent
       security:
         - basicAuth: []
         - bearerAuth: []
@@ -468,7 +472,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/RespondToCLIAuthRequestRequest'
+              $ref: '#/components/schemas/DeviceConsentRequest'
       responses:
         '204':
           description: Response recorded
@@ -3591,71 +3595,90 @@ components:
         - connections
         - connections_truncated
 
-    # CLI authorization (device-flow style API key provisioning) schemas
-    CreateCLIAuthRequestRequest:
+    # OAuth 2.0 Device Authorization Grant (RFC 8628) schemas
+    DeviceAuthorizationRequest:
       type: object
       properties:
-        name:
+        client_name:
           type: string
-          description: Human-readable label for the request (e.g. "my-tool on host"), shown on the approval page
-      required:
-        - name
+          description: Human-readable label for the requesting app (e.g. "stn on host"), shown on the consent page. dbbat extension.
+        client_id:
+          type: string
+          description: Accepted for OAuth compatibility but ignored.
 
-    CreateCLIAuthRequestResponse:
+    DeviceAuthorizationResponse:
       type: object
       properties:
-        request_id:
+        device_code:
           type: string
-          format: uuid
-          description: Public request identifier, embedded in authorize_url
-        authorize_url:
-          type: string
-          description: Browser URL to open for the user to approve or deny the request
-        poll_token:
-          type: string
-          description: Secret token used to poll for the result. Never display or log this value.
+          description: Secret code the client polls the token endpoint with. Never display or log this value.
         user_code:
           type: string
-          description: Short human-checkable code, also shown on the approval page, to catch a mismatched request
-        expires_at:
+          description: Short human-checkable code the user enters/verifies in the browser (e.g. "WDJP-4KXR")
+        verification_uri:
           type: string
-          format: date-time
-          description: When the request stops being valid
-        interval_seconds:
+          description: Browser URL the user opens and enters the user_code at
+        verification_uri_complete:
+          type: string
+          description: verification_uri with the user_code pre-filled — open this directly
+        expires_in:
           type: integer
-          description: Suggested delay between polls
+          description: Seconds until the request expires
+        interval:
+          type: integer
+          description: Minimum seconds to wait between polls
       required:
-        - request_id
-        - authorize_url
-        - poll_token
+        - device_code
         - user_code
-        - expires_at
-        - interval_seconds
+        - verification_uri
+        - verification_uri_complete
+        - expires_in
+        - interval
 
-    PollCLIAuthRequestRequest:
+    DeviceTokenRequest:
       type: object
       properties:
-        poll_token:
+        grant_type:
+          type: string
+          description: Must be "urn:ietf:params:oauth:grant-type:device_code"
+          enum: ["urn:ietf:params:oauth:grant-type:device_code"]
+        device_code:
+          type: string
+        client_id:
+          type: string
+          description: Accepted for OAuth compatibility but ignored.
+      required:
+        - grant_type
+        - device_code
+
+    DeviceTokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: The minted API key (dbb_...), delivered exactly once
+        token_type:
+          type: string
+          enum: [Bearer]
+      required:
+        - access_token
+        - token_type
+
+    OAuthError:
+      type: object
+      properties:
+        error:
+          type: string
+          description: OAuth error code
+        error_description:
           type: string
       required:
-        - poll_token
+        - error
 
-    PollCLIAuthRequestResponse:
+    DeviceConsentInfo:
       type: object
       properties:
-        status:
-          type: string
-          enum: [pending, approved, denied, expired]
-        key:
-          type: string
-          description: The minted API key (only present when status is approved, and only once)
-      required:
-        - status
-
-    CLIAuthRequestInfo:
-      type: object
-      properties:
-        name:
+        client_name:
           type: string
         user_code:
           type: string
@@ -3666,17 +3689,20 @@ components:
           type: string
           format: date-time
       required:
-        - name
+        - client_name
         - user_code
         - status
         - expires_at
 
-    RespondToCLIAuthRequestRequest:
+    DeviceConsentRequest:
       type: object
       properties:
+        user_code:
+          type: string
         approve:
           type: boolean
       required:
+        - user_code
         - approve
 
     # Connection schemas

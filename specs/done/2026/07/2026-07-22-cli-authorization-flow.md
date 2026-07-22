@@ -1,5 +1,13 @@
 # CLI authorization flow (device-flow style API key provisioning)
 
+> **Superseded by
+> [device-authorization-flow-standardization](2026-07-23-device-authorization-flow-standardization.md).**
+> The bespoke `/auth/cli` endpoints described below were replaced, in the same
+> branch/PR, by the standard OAuth 2.0 Device Authorization Grant (RFC 8628) at
+> `/auth/device`. This document is kept for the design rationale; the endpoint
+> names, field names, and store/API/route/frontend symbols it references no
+> longer exist. See the superseding spec for the current shape.
+
 ## Goal
 
 Let any command-line tool or script obtain a `dbb_` API key for a user without manual

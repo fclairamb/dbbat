@@ -34,7 +34,7 @@ export type CreateAPIKeyResponse =
 export type ConnectionInfo = components["schemas"]["ConnectionInfo"];
 export type ConnectionTestResult =
   components["schemas"]["ConnectionTestResult"];
-export type CLIAuthRequestInfo = components["schemas"]["CLIAuthRequestInfo"];
+export type DeviceConsentInfo = components["schemas"]["DeviceConsentInfo"];
 
 // ============================================================================
 // Auth Providers
@@ -999,30 +999,30 @@ export function useRevokeAPIKey(options?: {
 }
 
 // ============================================================================
-// CLI Authorization
+// Device Authorization (RFC 8628)
 // ============================================================================
 
-export function useCLIAuthRequest(uid: string) {
+export function useDeviceConsent(userCode: string) {
   return useQuery({
-    queryKey: ["cli-auth", uid],
-    queryFn: async (): Promise<CLIAuthRequestInfo> => {
-      const response = await apiClient.GET("/auth/cli/{uid}", {
-        params: { path: { uid } },
+    queryKey: ["device-consent", userCode],
+    queryFn: async (): Promise<DeviceConsentInfo> => {
+      const response = await apiClient.GET("/auth/device/consent", {
+        params: { query: { user_code: userCode } },
       });
       if (response.error || !response.data) {
         throw new Error(
-          response.error?.message || "CLI authorization request not found"
+          response.error?.message || "Device authorization request not found"
         );
       }
       return response.data;
     },
-    enabled: !!uid,
+    enabled: !!userCode,
     retry: false,
   });
 }
 
-export function useRespondToCLIAuthRequest(
-  uid: string,
+export function useRespondToDeviceConsent(
+  userCode: string,
   options?: {
     onSuccess?: () => void;
     onError?: (error: Error) => void;
@@ -1030,13 +1030,13 @@ export function useRespondToCLIAuthRequest(
 ) {
   return useMutation({
     mutationFn: async (approve: boolean): Promise<void> => {
-      const response = await apiClient.POST("/auth/cli/{uid}/respond", {
-        params: { path: { uid } },
-        body: { approve },
+      const response = await apiClient.POST("/auth/device/consent", {
+        body: { user_code: userCode, approve },
       });
       if (response.error) {
         throw new Error(
-          response.error.message || "Failed to respond to CLI authorization request"
+          response.error.message ||
+            "Failed to respond to device authorization request"
         );
       }
     },

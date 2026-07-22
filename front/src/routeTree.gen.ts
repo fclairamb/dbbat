@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
+import { Route as AuthenticatedDeviceRouteImport } from './routes/_authenticated/device'
 import { Route as AuthenticatedUsersIndexRouteImport } from './routes/_authenticated/users/index'
 import { Route as AuthenticatedUserGroupsIndexRouteImport } from './routes/_authenticated/user-groups/index'
 import { Route as AuthenticatedSettingsIndexRouteImport } from './routes/_authenticated/settings/index'
@@ -26,7 +27,6 @@ import { Route as AuthenticatedAuditIndexRouteImport } from './routes/_authentic
 import { Route as AuthenticatedApiKeysIndexRouteImport } from './routes/_authenticated/api-keys/index'
 import { Route as AuthenticatedQueriesUidRouteImport } from './routes/_authenticated/queries/$uid'
 import { Route as AuthenticatedConnectionsUidRouteImport } from './routes/_authenticated/connections/$uid'
-import { Route as AuthenticatedCliAuthUidRouteImport } from './routes/_authenticated/cli-auth/$uid'
 
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
@@ -40,6 +40,11 @@ const AuthenticatedRoute = AuthenticatedRouteImport.update({
 const AuthenticatedIndexRoute = AuthenticatedIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
+const AuthenticatedDeviceRoute = AuthenticatedDeviceRouteImport.update({
+  id: '/device',
+  path: '/device',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
 const AuthenticatedUsersIndexRoute = AuthenticatedUsersIndexRouteImport.update({
@@ -123,16 +128,11 @@ const AuthenticatedConnectionsUidRoute =
     path: '/connections/$uid',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
-const AuthenticatedCliAuthUidRoute = AuthenticatedCliAuthUidRouteImport.update({
-  id: '/cli-auth/$uid',
-  path: '/cli-auth/$uid',
-  getParentRoute: () => AuthenticatedRoute,
-} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AuthenticatedIndexRoute
   '/login': typeof LoginRoute
-  '/cli-auth/$uid': typeof AuthenticatedCliAuthUidRoute
+  '/device': typeof AuthenticatedDeviceRoute
   '/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/api-keys/': typeof AuthenticatedApiKeysIndexRoute
@@ -150,8 +150,8 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/login': typeof LoginRoute
+  '/device': typeof AuthenticatedDeviceRoute
   '/': typeof AuthenticatedIndexRoute
-  '/cli-auth/$uid': typeof AuthenticatedCliAuthUidRoute
   '/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/api-keys': typeof AuthenticatedApiKeysIndexRoute
@@ -171,8 +171,8 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_authenticated': typeof AuthenticatedRouteWithChildren
   '/login': typeof LoginRoute
+  '/_authenticated/device': typeof AuthenticatedDeviceRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
-  '/_authenticated/cli-auth/$uid': typeof AuthenticatedCliAuthUidRoute
   '/_authenticated/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/_authenticated/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/_authenticated/api-keys/': typeof AuthenticatedApiKeysIndexRoute
@@ -193,7 +193,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/login'
-    | '/cli-auth/$uid'
+    | '/device'
     | '/connections/$uid'
     | '/queries/$uid'
     | '/api-keys/'
@@ -211,8 +211,8 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/login'
+    | '/device'
     | '/'
-    | '/cli-auth/$uid'
     | '/connections/$uid'
     | '/queries/$uid'
     | '/api-keys'
@@ -231,8 +231,8 @@ export interface FileRouteTypes {
     | '__root__'
     | '/_authenticated'
     | '/login'
+    | '/_authenticated/device'
     | '/_authenticated/'
-    | '/_authenticated/cli-auth/$uid'
     | '/_authenticated/connections/$uid'
     | '/_authenticated/queries/$uid'
     | '/_authenticated/api-keys/'
@@ -275,6 +275,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof AuthenticatedIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/device': {
+      id: '/_authenticated/device'
+      path: '/device'
+      fullPath: '/device'
+      preLoaderRoute: typeof AuthenticatedDeviceRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/users/': {
@@ -375,19 +382,12 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedConnectionsUidRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
-    '/_authenticated/cli-auth/$uid': {
-      id: '/_authenticated/cli-auth/$uid'
-      path: '/cli-auth/$uid'
-      fullPath: '/cli-auth/$uid'
-      preLoaderRoute: typeof AuthenticatedCliAuthUidRouteImport
-      parentRoute: typeof AuthenticatedRoute
-    }
   }
 }
 
 interface AuthenticatedRouteChildren {
+  AuthenticatedDeviceRoute: typeof AuthenticatedDeviceRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
-  AuthenticatedCliAuthUidRoute: typeof AuthenticatedCliAuthUidRoute
   AuthenticatedConnectionsUidRoute: typeof AuthenticatedConnectionsUidRoute
   AuthenticatedQueriesUidRoute: typeof AuthenticatedQueriesUidRoute
   AuthenticatedApiKeysIndexRoute: typeof AuthenticatedApiKeysIndexRoute
@@ -405,8 +405,8 @@ interface AuthenticatedRouteChildren {
 }
 
 const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
+  AuthenticatedDeviceRoute: AuthenticatedDeviceRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
-  AuthenticatedCliAuthUidRoute: AuthenticatedCliAuthUidRoute,
   AuthenticatedConnectionsUidRoute: AuthenticatedConnectionsUidRoute,
   AuthenticatedQueriesUidRoute: AuthenticatedQueriesUidRoute,
   AuthenticatedApiKeysIndexRoute: AuthenticatedApiKeysIndexRoute,
