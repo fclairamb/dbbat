@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/fclairamb/dbbat/compare/v0.18.0...v0.19.0) (2026-07-22)
+
+
+### Features
+
+* **auth:** device authorization flow (RFC 8628) for API key provisioning ([#269](https://github.com/fclairamb/dbbat/issues/269)) ([5fa16ee](https://github.com/fclairamb/dbbat/commit/5fa16ee2a919f5e397f8b60bfeea8d148b9eaf99))
+
 ## [Unreleased]
 
 ### Features
