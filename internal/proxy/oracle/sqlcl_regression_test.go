@@ -53,12 +53,12 @@ func TestDecodeQueryResultV2_ModernDescribeColumns(t *testing.T) {
 	t.Parallel()
 
 	res := decodeQueryResultV2(mustHex(t, modernSQLclDescribeFixture))
-	if res == nil { //nolint:staticcheck // SA5011 false positive: t.Fatal exits the goroutine, res is never nil past this point
+	if res == nil {
 		t.Fatal("decodeQueryResultV2 returned nil")
 	}
 
 	wantNames := []string{"M", "A"}
-	if len(res.Columns) != len(wantNames) { //nolint:staticcheck // SA5011 false positive: t.Fatal above exits the goroutine
+	if len(res.Columns) != len(wantNames) {
 		t.Fatalf("columns = %v, want %v", res.Columns, wantNames)
 	}
 
@@ -94,11 +94,11 @@ func TestDecodeQueryResultV2_ModernDescribeRows(t *testing.T) {
 	t.Parallel()
 
 	res := decodeQueryResultV2(mustHex(t, modernSQLclRowFixture))
-	if res == nil { //nolint:staticcheck // SA5011 false positive: t.Fatal exits the goroutine, res is never nil past this point
+	if res == nil {
 		t.Fatal("decodeQueryResultV2 returned nil")
 	}
 
-	if len(res.Rows) != 1 { //nolint:staticcheck // SA5011 false positive: t.Fatal above exits the goroutine
+	if len(res.Rows) != 1 {
 		t.Fatalf("rows = %v, want one row", res.Rows)
 	}
 
