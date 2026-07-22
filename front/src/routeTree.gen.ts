@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as LoginRouteImport } from './routes/login'
 import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
+import { Route as AuthenticatedDeviceRouteImport } from './routes/_authenticated/device'
 import { Route as AuthenticatedUsersIndexRouteImport } from './routes/_authenticated/users/index'
 import { Route as AuthenticatedUserGroupsIndexRouteImport } from './routes/_authenticated/user-groups/index'
 import { Route as AuthenticatedSettingsIndexRouteImport } from './routes/_authenticated/settings/index'
@@ -39,6 +40,11 @@ const AuthenticatedRoute = AuthenticatedRouteImport.update({
 const AuthenticatedIndexRoute = AuthenticatedIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
+const AuthenticatedDeviceRoute = AuthenticatedDeviceRouteImport.update({
+  id: '/device',
+  path: '/device',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
 const AuthenticatedUsersIndexRoute = AuthenticatedUsersIndexRouteImport.update({
@@ -126,6 +132,7 @@ const AuthenticatedConnectionsUidRoute =
 export interface FileRoutesByFullPath {
   '/': typeof AuthenticatedIndexRoute
   '/login': typeof LoginRoute
+  '/device': typeof AuthenticatedDeviceRoute
   '/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/queries/$uid': typeof AuthenticatedQueriesUidRoute
   '/api-keys/': typeof AuthenticatedApiKeysIndexRoute
@@ -143,6 +150,7 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/login': typeof LoginRoute
+  '/device': typeof AuthenticatedDeviceRoute
   '/': typeof AuthenticatedIndexRoute
   '/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/queries/$uid': typeof AuthenticatedQueriesUidRoute
@@ -163,6 +171,7 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/_authenticated': typeof AuthenticatedRouteWithChildren
   '/login': typeof LoginRoute
+  '/_authenticated/device': typeof AuthenticatedDeviceRoute
   '/_authenticated/': typeof AuthenticatedIndexRoute
   '/_authenticated/connections/$uid': typeof AuthenticatedConnectionsUidRoute
   '/_authenticated/queries/$uid': typeof AuthenticatedQueriesUidRoute
@@ -184,6 +193,7 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/login'
+    | '/device'
     | '/connections/$uid'
     | '/queries/$uid'
     | '/api-keys/'
@@ -201,6 +211,7 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/login'
+    | '/device'
     | '/'
     | '/connections/$uid'
     | '/queries/$uid'
@@ -220,6 +231,7 @@ export interface FileRouteTypes {
     | '__root__'
     | '/_authenticated'
     | '/login'
+    | '/_authenticated/device'
     | '/_authenticated/'
     | '/_authenticated/connections/$uid'
     | '/_authenticated/queries/$uid'
@@ -263,6 +275,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof AuthenticatedIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/device': {
+      id: '/_authenticated/device'
+      path: '/device'
+      fullPath: '/device'
+      preLoaderRoute: typeof AuthenticatedDeviceRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/users/': {
@@ -367,6 +386,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface AuthenticatedRouteChildren {
+  AuthenticatedDeviceRoute: typeof AuthenticatedDeviceRoute
   AuthenticatedIndexRoute: typeof AuthenticatedIndexRoute
   AuthenticatedConnectionsUidRoute: typeof AuthenticatedConnectionsUidRoute
   AuthenticatedQueriesUidRoute: typeof AuthenticatedQueriesUidRoute
@@ -385,6 +405,7 @@ interface AuthenticatedRouteChildren {
 }
 
 const AuthenticatedRouteChildren: AuthenticatedRouteChildren = {
+  AuthenticatedDeviceRoute: AuthenticatedDeviceRoute,
   AuthenticatedIndexRoute: AuthenticatedIndexRoute,
   AuthenticatedConnectionsUidRoute: AuthenticatedConnectionsUidRoute,
   AuthenticatedQueriesUidRoute: AuthenticatedQueriesUidRoute,

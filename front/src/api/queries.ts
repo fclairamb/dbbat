@@ -34,6 +34,7 @@ export type CreateAPIKeyResponse =
 export type ConnectionInfo = components["schemas"]["ConnectionInfo"];
 export type ConnectionTestResult =
   components["schemas"]["ConnectionTestResult"];
+export type DeviceConsentInfo = components["schemas"]["DeviceConsentInfo"];
 
 // ============================================================================
 // Auth Providers
@@ -993,6 +994,53 @@ export function useRevokeAPIKey(options?: {
       queryClient.invalidateQueries({ queryKey: ["api-keys"] });
       options?.onSuccess?.();
     },
+    onError: options?.onError,
+  });
+}
+
+// ============================================================================
+// Device Authorization (RFC 8628)
+// ============================================================================
+
+export function useDeviceConsent(userCode: string) {
+  return useQuery({
+    queryKey: ["device-consent", userCode],
+    queryFn: async (): Promise<DeviceConsentInfo> => {
+      const response = await apiClient.GET("/auth/device/consent", {
+        params: { query: { user_code: userCode } },
+      });
+      if (response.error || !response.data) {
+        throw new Error(
+          response.error?.message || "Device authorization request not found"
+        );
+      }
+      return response.data;
+    },
+    enabled: !!userCode,
+    retry: false,
+  });
+}
+
+export function useRespondToDeviceConsent(
+  userCode: string,
+  options?: {
+    onSuccess?: () => void;
+    onError?: (error: Error) => void;
+  }
+) {
+  return useMutation({
+    mutationFn: async (approve: boolean): Promise<void> => {
+      const response = await apiClient.POST("/auth/device/consent", {
+        body: { user_code: userCode, approve },
+      });
+      if (response.error) {
+        throw new Error(
+          response.error.message ||
+            "Failed to respond to device authorization request"
+        );
+      }
+    },
+    onSuccess: options?.onSuccess,
     onError: options?.onError,
   });
 }

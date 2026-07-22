@@ -332,6 +332,163 @@ paths:
         '302':
           description: Redirect to app with session token
 
+  /auth/device:
+    post:
+      tags:
+        - Auth
+      summary: Device authorization request (RFC 8628)
+      description: |
+        Starts an OAuth 2.0 Device Authorization Grant (RFC 8628). Lets an
+        external tool (CLI or desktop app) obtain an API key through a browser
+        approval instead of manual copy/paste.
+
+        The client opens `verification_uri_complete` in a browser (or shows the
+        user `verification_uri` + `user_code`, e.g. over SSH); a logged-in user
+        approves or denies it there. The client then polls
+        `POST /auth/device/token` with `device_code` until it resolves.
+
+        Unauthenticated — opening a request grants nothing by itself.
+
+        Note: `client_name` is a dbbat extension used as the consent-page label;
+        `client_id` is accepted for OAuth compatibility but ignored (dbbat is
+        not a multi-client authorization server). Bodies are JSON rather than
+        RFC 8628's form-encoding, matching the rest of the dbbat API.
+      operationId: deviceAuthorization
+      security: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceAuthorizationRequest'
+      responses:
+        '200':
+          description: Device authorization request created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceAuthorizationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/device/token:
+    post:
+      tags:
+        - Auth
+      summary: Device token endpoint (RFC 8628)
+      description: |
+        The RFC 8628 token endpoint. The client polls it with the
+        `device_code`; it answers with a standard OAuth error while the request
+        is pending and a Bearer token once approved.
+
+        Error responses use the OAuth `{error, error_description}` shape (a
+        deliberate deviation from dbbat's usual `{code, message}` envelope):
+        `authorization_pending` (still waiting), `access_denied` (user denied),
+        `expired_token` (unknown/expired device_code — also returned once a
+        result has already been delivered, since it's consumed on read), and
+        `unsupported_grant_type`.
+
+        Unauthenticated — the `device_code` itself is the capability.
+      operationId: deviceToken
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceTokenRequest'
+      responses:
+        '200':
+          description: Authorization approved; access token issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceTokenResponse'
+        '400':
+          description: |
+            Pending or errored, as an OAuth error object. `error` is one of
+            `authorization_pending`, `access_denied`, `expired_token`,
+            `unsupported_grant_type`, `invalid_request`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OAuthError'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /auth/device/consent:
+    get:
+      tags:
+        - Auth
+      summary: Get device authorization consent details
+      description: |
+        Returns the public details (client name, user code, status) of a
+        pending or resolved device authorization request, for the consent page
+        to render. Looked up by `user_code` (case-insensitive, dashes optional).
+        Never returns the device code or the minted key.
+      operationId: getDeviceConsent
+      parameters:
+        - name: user_code
+          in: query
+          required: true
+          description: The user code shown to the user (case-insensitive, dashes optional)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Device authorization consent details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeviceConsentInfo'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    post:
+      tags:
+        - Auth
+      summary: Approve or deny a device authorization request
+      description: |
+        Approves or denies a pending device authorization request, keyed by
+        `user_code`. On approval, mints a real API key owned by the approving
+        user, exactly as `POST /keys` would.
+
+        Requires Web Session or Basic Auth (API keys cannot perform this
+        operation, same restriction as direct API key creation).
+      operationId: deviceConsent
+      security:
+        - basicAuth: []
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeviceConsentRequest'
+      responses:
+        '204':
+          description: Response recorded
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /slack/interactions:
     post:
       tags:
@@ -3437,6 +3594,116 @@ components:
         - created_at
         - connections
         - connections_truncated
+
+    # OAuth 2.0 Device Authorization Grant (RFC 8628) schemas
+    DeviceAuthorizationRequest:
+      type: object
+      properties:
+        client_name:
+          type: string
+          description: Human-readable label for the requesting app (e.g. "stn on host"), shown on the consent page. dbbat extension.
+        client_id:
+          type: string
+          description: Accepted for OAuth compatibility but ignored.
+
+    DeviceAuthorizationResponse:
+      type: object
+      properties:
+        device_code:
+          type: string
+          description: Secret code the client polls the token endpoint with. Never display or log this value.
+        user_code:
+          type: string
+          description: Short human-checkable code the user enters/verifies in the browser (e.g. "WDJP-4KXR")
+        verification_uri:
+          type: string
+          description: Browser URL the user opens and enters the user_code at
+        verification_uri_complete:
+          type: string
+          description: verification_uri with the user_code pre-filled — open this directly
+        expires_in:
+          type: integer
+          description: Seconds until the request expires
+        interval:
+          type: integer
+          description: Minimum seconds to wait between polls
+      required:
+        - device_code
+        - user_code
+        - verification_uri
+        - verification_uri_complete
+        - expires_in
+        - interval
+
+    DeviceTokenRequest:
+      type: object
+      properties:
+        grant_type:
+          type: string
+          description: Must be "urn:ietf:params:oauth:grant-type:device_code"
+          enum: ["urn:ietf:params:oauth:grant-type:device_code"]
+        device_code:
+          type: string
+        client_id:
+          type: string
+          description: Accepted for OAuth compatibility but ignored.
+      required:
+        - grant_type
+        - device_code
+
+    DeviceTokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: The minted API key (dbb_...), delivered exactly once
+        token_type:
+          type: string
+          enum: [Bearer]
+      required:
+        - access_token
+        - token_type
+
+    OAuthError:
+      type: object
+      properties:
+        error:
+          type: string
+          description: OAuth error code
+        error_description:
+          type: string
+      required:
+        - error
+
+    DeviceConsentInfo:
+      type: object
+      properties:
+        client_name:
+          type: string
+        user_code:
+          type: string
+        status:
+          type: string
+          enum: [pending, approved, denied]
+        expires_at:
+          type: string
+          format: date-time
+      required:
+        - client_name
+        - user_code
+        - status
+        - expires_at
+
+    DeviceConsentRequest:
+      type: object
+      properties:
+        user_code:
+          type: string
+        approve:
+          type: boolean
+      required:
+        - user_code
+        - approve
 
     # Connection schemas
     Connection:

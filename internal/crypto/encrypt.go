@@ -107,3 +107,10 @@ func APIKeyAAD(keyPrefix string) []byte {
 func UserAAD(userUID string) []byte {
 	return []byte(fmt.Sprintf("user:%s", userUID))
 }
+
+// DeviceAuthAAD returns the AAD for encrypting a freshly minted API key while
+// it sits in a pending device authorization request. This binds the ciphertext
+// to the specific request UID, preventing a key transplant between requests.
+func DeviceAuthAAD(requestUID string) []byte {
+	return []byte(fmt.Sprintf("deviceauth:%s", requestUID))
+}

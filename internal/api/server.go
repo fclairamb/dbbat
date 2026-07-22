@@ -191,6 +191,19 @@ func (s *Server) setupRouter() *gin.Engine {
 			auth.GET("/"+name+"/callback", s.handleOAuthCallback(name))
 		}
 
+		// OAuth 2.0 Device Authorization Grant (RFC 8628): lets external
+		// tools (CLI, desktop apps) obtain an API key through a browser
+		// approval instead of manual copy/paste. The authorization request
+		// endpoint is IP rate limited like other unauthenticated auth
+		// endpoints; the token (poll) endpoint deliberately is not — see
+		// handleDeviceToken for why.
+		if s.rateLimiter != nil {
+			auth.POST("/device", s.rateLimiter.PreAuthMiddleware(), s.handleDeviceAuthorization)
+		} else {
+			auth.POST("/device", s.handleDeviceAuthorization)
+		}
+		auth.POST("/device/token", s.handleDeviceToken)
+
 		// Slack interactivity webhook (unauthenticated at the middleware
 		// layer — the Slack request signature is the authentication). Only
 		// registered when interactivity is configured (signing secret or
@@ -218,6 +231,12 @@ func (s *Server) setupRouter() *gin.Engine {
 			authenticatedAuth := authenticated.Group("/auth")
 			authenticatedAuth.POST("/logout", s.handleLogout)
 			authenticatedAuth.GET("/me", s.handleMe)
+			// Device authorization consent page + decision. GET is any
+			// authenticated user (the page is behind login); POST mints a
+			// real API key, so it requires Web Session or Basic Auth, like
+			// direct key creation.
+			authenticatedAuth.GET("/device/consent", s.handleGetDeviceConsent)
+			authenticatedAuth.POST("/device/consent", s.requireWebSessionOrBasicAuth(), s.handleDeviceConsent)
 
 			// User endpoints
 			users := authenticated.Group("/users")
