@@ -5,14 +5,8 @@
 
 ### Features
 
-* **auth:** device authorization flow (RFC 8628) for API key provisioning ([#269](https://github.com/fclairamb/dbbat/issues/269)) ([5fa16ee](https://github.com/fclairamb/dbbat/commit/5fa16ee2a919f5e397f8b60bfeea8d148b9eaf99))
-
-## [Unreleased]
-
-### Features
-
-* **auth:** add a device authorization flow for API key provisioning, following the OAuth 2.0 Device Authorization Grant (RFC 8628). A CLI or desktop app opens a request (`POST /auth/device`), the user approves it in the browser on a consent page (with a manual code-entry fallback), and the app polls the token endpoint (`POST /auth/device/token`) for a `dbb_` key — no manual copy/paste from the web UI. Approval mints a key owned by the approving user; the key is delivered exactly once and never transits a browser URL, and the flow works over SSH/headless.
-* **auth:** the login redirect now preserves the originally requested URL, so opening a deep link (such as the device consent page) while logged out returns you to that page after signing in instead of dropping you on the dashboard.
+* **auth:** add a device authorization flow for API key provisioning, following the OAuth 2.0 Device Authorization Grant (RFC 8628). A CLI or desktop app opens a request (`POST /auth/device`), the user approves it in the browser on a consent page (with a manual code-entry fallback), and the app polls the token endpoint (`POST /auth/device/token`) for a `dbb_` key — no manual copy/paste from the web UI. Approval mints a key owned by the approving user; the key is delivered exactly once and never transits a browser URL, and the flow works over SSH/headless ([#269](https://github.com/fclairamb/dbbat/issues/269)) ([5fa16ee](https://github.com/fclairamb/dbbat/commit/5fa16ee2a919f5e397f8b60bfeea8d148b9eaf99)).
+* **auth:** the login redirect now preserves the originally requested URL, so opening a deep link (such as the device consent page) while logged out returns you to that page after signing in instead of dropping you on the dashboard ([#269](https://github.com/fclairamb/dbbat/issues/269)).
 
 ## [0.18.0](https://github.com/fclairamb/dbbat/compare/v0.17.0...v0.18.0) (2026-07-21)
 
