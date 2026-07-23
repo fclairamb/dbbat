@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.1](https://github.com/fclairamb/dbbat/compare/v0.19.0...v0.19.1) (2026-07-23)
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/sijms/go-ora/v2 to v3 ([#268](https://github.com/fclairamb/dbbat/issues/268)) ([7458000](https://github.com/fclairamb/dbbat/commit/7458000ee8763c051102a0837ebc3e77f56d780a))
+
 ## [0.19.0](https://github.com/fclairamb/dbbat/compare/v0.18.0...v0.19.0) (2026-07-22)
 
 
