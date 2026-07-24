@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import type { Query, User, Database } from "@/api";
+import type { Query, User } from "@/api";
 import type { Column } from "@/components/shared/DataTable";
 import { Badge } from "@/components/ui/badge";
 import { formatDistanceToNow } from "date-fns";
@@ -8,7 +8,9 @@ const DEFAULT_PAGE_SIZE = 50;
 
 interface BuildQueryColumnsOptions {
   users: User[] | undefined;
-  databases: Database[] | undefined;
+  // Accepts both the full Database shape and the limited one returned to
+  // non-admin roles — only uid/name are used here.
+  databases: { uid: string; name: string }[] | undefined;
   size?: number;
 }
 
