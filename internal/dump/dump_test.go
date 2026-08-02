@@ -451,16 +451,35 @@ func TestCleanupOldFiles(t *testing.T) {
 	recentPath := filepath.Join(dir, uuid.New().String()+FileExt)
 	require.NoError(t, os.WriteFile(recentPath, []byte("recent"), 0o644))
 
+	// Create an old legacy-extension file (pre-pcapng leftover): should be reaped too
+	oldLegacyPath := filepath.Join(dir, uuid.New().String()+legacyFileExt)
+	require.NoError(t, os.WriteFile(oldLegacyPath, []byte("legacy"), 0o644))
+	oldLegacy := time.Now().Add(-2 * time.Hour)
+	require.NoError(t, os.Chtimes(oldLegacyPath, oldLegacy, oldLegacy))
+
+	// Create a recent legacy-extension file: should be left alone
+	recentLegacyPath := filepath.Join(dir, uuid.New().String()+legacyFileExt)
+	require.NoError(t, os.WriteFile(recentLegacyPath, []byte("legacy recent"), 0o644))
+
 	// Create a non-dump file (should be ignored)
 	nonDump := filepath.Join(dir, "notes.txt")
 	require.NoError(t, os.WriteFile(nonDump, []byte("note"), 0o644))
 
 	deleted, err := CleanupOldFiles(dir, 1*time.Hour)
 	require.NoError(t, err)
-	assert.Equal(t, 3, deleted)
+	assert.Equal(t, 4, deleted)
 
 	entries, _ := os.ReadDir(dir)
-	assert.Len(t, entries, 2)
+	assert.Len(t, entries, 3)
+
+	remaining := make(map[string]bool)
+	for _, e := range entries {
+		remaining[e.Name()] = true
+	}
+	assert.True(t, remaining[filepath.Base(recentPath)], "recent .pcapng file should survive")
+	assert.True(t, remaining[filepath.Base(recentLegacyPath)], "recent legacy file should survive")
+	assert.True(t, remaining["notes.txt"], "non-dump file should survive")
+	assert.False(t, remaining[filepath.Base(oldLegacyPath)], "old legacy file should be reaped")
 }
 
 func TestWriter_ConcurrentWrites(t *testing.T) {
