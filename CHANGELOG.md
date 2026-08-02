@@ -5,9 +5,7 @@
 
 ### Bug Fixes
 
-* **deps:** update module github.com/sijms/go-ora/v2 to v3 ([#268](https://github.com/fclairamb/dbbat/issues/268)) ([7458000](https://github.com/fclairamb/dbbat/commit/7458000ee8763c051102a0837ebc3e77f56d780a))
-* **deps:** update module github.com/sijms/go-ora/v2 to v3 ([#272](https://github.com/fclairamb/dbbat/issues/272)) ([43b1aba](https://github.com/fclairamb/dbbat/commit/43b1abab7e071938d08433d614550809b3188a25))
-* **deps:** update module github.com/sijms/go-ora/v3 to v3.0.1 ([#276](https://github.com/fclairamb/dbbat/issues/276)) ([c62e489](https://github.com/fclairamb/dbbat/commit/c62e489cad4a3b09781c5c349caa7a97c753ae47))
+* **deps:** complete the `go-ora` v2→v3 migration — the earlier version bumps ([#268](https://github.com/fclairamb/dbbat/issues/268), [#276](https://github.com/fclairamb/dbbat/issues/276)) only added the `v3` module requirement without touching any `.../v2` imports, which left the build broken; this rewrites the Oracle conncheck probe and test suite to import `v3` and drops the now-unused `v2` requirement ([#272](https://github.com/fclairamb/dbbat/issues/272)) ([43b1aba](https://github.com/fclairamb/dbbat/commit/43b1abab7e071938d08433d614550809b3188a25))
 * **ui:** show full query columns on the home page ([#274](https://github.com/fclairamb/dbbat/issues/274)) ([ab7f879](https://github.com/fclairamb/dbbat/commit/ab7f87961acdb99e17f862696a8bb04ec981641b))
 
 ## [0.19.0](https://github.com/fclairamb/dbbat/compare/v0.18.0...v0.19.0) (2026-07-22)
