@@ -30,6 +30,10 @@ func NewCountingConn(conn net.Conn, bytesRead, bytesWritten *atomic.Int64) *Coun
 	}
 }
 
+// Unwrap exposes the wrapped conn so helpers that need the raw socket
+// (EnableClientKeepAlive) can walk down the wrapper chain.
+func (c *CountingConn) Unwrap() net.Conn { return c.Conn }
+
 // Read implements net.Conn. Successful byte counts are added to the read
 // counter even when the call returns an error (n > 0 with err is a valid
 // outcome on a closing conn — those bytes did cross the wire).
