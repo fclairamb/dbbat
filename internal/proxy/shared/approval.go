@@ -315,7 +315,20 @@ func (g *ApprovalGate) Hold(ctx context.Context, req HoldRequest) (uuid.UUID, er
 
 				return pending.UID, &ApprovalDeniedError{Reason: d.Reason, By: d.ByName}
 			default:
-				// abandoned, or anything unexpected: fail closed.
+				// Abandoned, or anything unexpected: fail closed.
+				//
+				// Persist here, do not merely announce. Approve/deny arrive
+				// from the API, which has already written the row; an
+				// *abandon* delivered through the registry has no such
+				// writer — that is how an out-of-band cancel (PostgreSQL
+				// CancelRequest, MySQL KILL QUERY, Mongo killOperations) and
+				// the shutdown drain reach a parked session. Skipping the
+				// write would unblock the session correctly while leaving
+				// approval_status = 'pending' forever: a phantom hold that
+				// haunts /queries/pending, the watch panel and the global
+				// badge, and that a later POST /approve would happily
+				// "release" although nothing is waiting on it.
+				g.persistResolution(ctx, pending.UID, store.ApprovalAbandoned, d.By, d.Reason)
 				g.announceResolved(ctx, pending.UID, store.ApprovalAbandoned, d)
 
 				return pending.UID, ErrApprovalAbandoned
@@ -346,23 +359,44 @@ func (g *ApprovalGate) Hold(ctx context.Context, req HoldRequest) (uuid.UUID, er
 
 // abandon records and announces a hold that ended without a human decision.
 func (g *ApprovalGate) abandon(ctx context.Context, queryUID uuid.UUID, reason string) {
-	// The session's own context may already be canceled; use a detached one
-	// so the row never stays 'pending' forever after a disconnect.
-	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
+	g.persistResolution(ctx, queryUID, store.ApprovalAbandoned, nil, reason)
 
-	if err := g.deps.Store.ResolveQueryApproval(writeCtx, queryUID, store.ApprovalAbandoned, nil, reason); err != nil &&
-		!errors.Is(err, store.ErrQueryNotPending) {
-		g.log(ctx, "failed to mark approval abandoned", slog.Any("error", err))
-	}
-
-	g.announceResolved(writeCtx, queryUID, store.ApprovalAbandoned, approval.Decision{
+	g.announceResolved(ctx, queryUID, store.ApprovalAbandoned, approval.Decision{
 		QueryUID: queryUID,
 		Status:   store.ApprovalAbandoned,
 		Reason:   reason,
 		At:       time.Now(),
 	})
 }
+
+// persistResolution writes the terminal approval state. The store's
+// compare-and-set on approval_status = 'pending' makes this safe to call even
+// when the API already wrote the same decision (approve/deny): the second
+// write simply affects no rows.
+//
+// The session's own context may already be canceled — a client disconnect and
+// a shutdown drain both arrive that way — so the write runs on a detached
+// context. Otherwise the row would stay 'pending' forever in exactly the cases
+// where nothing else will ever fix it.
+func (g *ApprovalGate) persistResolution(
+	ctx context.Context, queryUID uuid.UUID, status string, by *uuid.UUID, reason string,
+) {
+	if g.deps.Store == nil {
+		return
+	}
+
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resolutionWriteTimeout)
+	defer cancel()
+
+	if err := g.deps.Store.ResolveQueryApproval(writeCtx, queryUID, status, by, reason); err != nil &&
+		!errors.Is(err, store.ErrQueryNotPending) {
+		g.log(ctx, "failed to persist approval resolution",
+			slog.String("status", status), slog.Any("error", err))
+	}
+}
+
+// resolutionWriteTimeout bounds the detached terminal-state write.
+const resolutionWriteTimeout = 5 * time.Second
 
 // publishPending announces a newly parked statement on both topics and to the
 // other replicas.
@@ -425,7 +459,13 @@ func (g *ApprovalGate) notifyReplicas(ctx context.Context, channel, eventType st
 		return
 	}
 
-	err := g.deps.Store.NotifyEvent(ctx, channel, store.EventNotification{
+	// Detached: a resolution is fanned out precisely when the session is
+	// ending (disconnect, shutdown), so a canceled session context must not
+	// swallow the notification other replicas are waiting for.
+	notifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), resolutionWriteTimeout)
+	defer cancel()
+
+	err := g.deps.Store.NotifyEvent(notifyCtx, channel, store.EventNotification{
 		Topic:    events.TopicApprovalsPending,
 		Type:     eventType,
 		QueryUID: queryUID,

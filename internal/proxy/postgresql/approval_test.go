@@ -88,6 +88,28 @@ func (f *fakeHoldStore) resolutions() []string {
 	return append([]string(nil), f.resolved...)
 }
 
+// waitResolution blocks until the gate has written a terminal state, then
+// returns it. Persisting is what stops a released hold from lingering as a
+// phantom 'pending' row, so the tests assert on the *write*, not merely on the
+// session unblocking.
+func (f *fakeHoldStore) waitResolution(t *testing.T) string {
+	t.Helper()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := f.resolutions(); len(got) > 0 {
+			return got[0]
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	t.Fatal("the hold ended without persisting a terminal approval_status — " +
+		"the row would stay 'pending' forever and reappear in /queries/pending")
+
+	return ""
+}
+
 // heldSession builds a Session wired for approval holds over a real TCP pair,
 // so Park/Unpark and disconnect detection run for real.
 func heldSession(t *testing.T, patterns []string) (*Session, net.Conn, *fakeHoldStore, *approval.Registry) {
@@ -420,6 +442,43 @@ func TestCancelRequestReleasesHold(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("a held query must remain cancellable")
+	}
+
+	// A cancel resolves straight through the registry, so nothing else writes
+	// the row: the gate has to.
+	if got := st.waitResolution(t); got != store.ApprovalAbandoned {
+		t.Fatalf("cancelled hold persisted as %q, want abandoned", got)
+	}
+}
+
+func TestShutdownDrainPersistsAbandoned(t *testing.T) {
+	t.Parallel()
+
+	sess, _, st, reg := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
+
+	errc := make(chan error, 1)
+	go func() { errc <- sess.handleQuery(&pgproto3.Query{String: "DELETE FROM users"}) }()
+
+	st.waitPending(t)
+
+	// This is what main.go's approvalDrain does on SIGTERM.
+	if released := reg.ResolveAll(
+		store.ApprovalAbandoned, "dbbat is shutting down; the statement was not executed", nil, "",
+	); len(released) != 1 {
+		t.Fatalf("drain released %d holds, want 1", len(released))
+	}
+
+	select {
+	case err := <-errc:
+		if !errors.Is(err, shared.ErrApprovalAbandoned) {
+			t.Fatalf("got %v, want ErrApprovalAbandoned", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("shutdown would hang on a parked query")
+	}
+
+	if got := st.waitResolution(t); got != store.ApprovalAbandoned {
+		t.Fatalf("drained hold persisted as %q, want abandoned", got)
 	}
 }
 

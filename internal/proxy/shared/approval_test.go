@@ -286,6 +286,54 @@ func TestHoldAbandonedOnClientDisconnect(t *testing.T) {
 	}
 }
 
+func TestRegistryDeliveredAbandonIsPersisted(t *testing.T) {
+	t.Parallel()
+
+	gate, st, reg := testGate(t, []string{`(?i)DELETE`})
+
+	errc := make(chan error, 1)
+
+	go func() {
+		_, err := gate.Hold(context.Background(), HoldRequest{
+			SQL: "DELETE FROM users", Pattern: `(?i)DELETE`, Guard: NewLimitGuard(nil, nil, nil),
+		})
+		errc <- err
+	}()
+
+	pending := waitForPending(t, st)
+
+	// This is the shape of an out-of-band cancel and of the shutdown drain:
+	// the decision arrives through the registry, and nothing else writes the
+	// row. If the gate does not persist it, the hold stays 'pending' forever.
+	reg.Resolve(approval.Decision{
+		QueryUID: pending.UID, Status: store.ApprovalAbandoned, Reason: "canceled by the client",
+	})
+
+	select {
+	case err := <-errc:
+		if !errors.Is(err, ErrApprovalAbandoned) {
+			t.Fatalf("got %v, want ErrApprovalAbandoned", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("registry-delivered abandon never released the hold")
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := st.resolutions(); len(got) > 0 {
+			if got[0] != store.ApprovalAbandoned {
+				t.Fatalf("persisted %q, want abandoned", got[0])
+			}
+
+			return
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	t.Fatal("terminal state never persisted — the row would haunt /queries/pending")
+}
+
 func TestHoldIgnoresDecisionForAnotherQuery(t *testing.T) {
 	t.Parallel()
 
