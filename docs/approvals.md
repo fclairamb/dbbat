@@ -269,7 +269,13 @@ dropping** — a lost pending event means a live database connection waits on
 somebody who never learned about it.
 
 Publishing is non-blocking and never returns an error to the session: **a
-broken stream must never break a database connection.**
+broken stream must never break a database connection.** That is structural,
+not conventional: `Broker.Publish` only touches in-memory state. The per-topic
+authorization re-check — which reads the store — runs in each socket's own
+write loop, immediately before the write, so a slow database costs one client
+latency and can never stall a proxy session parked on a hold. Decisions are
+memoized for two seconds, bounding both the database load on a busy stream and
+how long a reader whose access was revoked can keep receiving.
 
 Clients treat the stream as best-effort for history and authoritative only for
 "what is pending now". On any gap — a `lagged` frame or a reconnect — refetch

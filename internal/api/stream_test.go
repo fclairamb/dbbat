@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -102,5 +103,67 @@ func TestMayReadTopicAuthorization(t *testing.T) {
 
 	if s.mayReadTopic(ctx, admin, "not-a-topic") {
 		t.Fatal("unknown topics must be refused")
+	}
+}
+
+func TestTopicAuthCacheMemoizesWithinTTL(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+
+	cache := newTopicAuthCache(func(string) bool {
+		calls++
+
+		return true
+	})
+
+	for range 5 {
+		if !cache.allowed("connections") {
+			t.Fatal("allowed = false")
+		}
+	}
+
+	if calls != 1 {
+		t.Fatalf("lookup ran %d times within the TTL, want 1 — every event would be a store round-trip", calls)
+	}
+}
+
+func TestTopicAuthCacheRefreshesAfterTTL(t *testing.T) {
+	t.Parallel()
+
+	allow := true
+
+	cache := newTopicAuthCache(func(string) bool { return allow })
+
+	if !cache.allowed("connections") {
+		t.Fatal("first lookup denied")
+	}
+
+	allow = false
+
+	// Age the entry past the TTL: the re-check is the PII containment
+	// guarantee, so a revoked reader must stop receiving within seconds.
+	cache.mu.Lock()
+	cache.entries["connections"] = topicAuthEntry{allowed: true, at: time.Now().Add(-2 * topicAuthTTL)}
+	cache.mu.Unlock()
+
+	if cache.allowed("connections") {
+		t.Fatal("a stale entry outlived the TTL — a revoked reader would keep receiving")
+	}
+}
+
+func TestTopicAuthCacheIsPerTopic(t *testing.T) {
+	t.Parallel()
+
+	cache := newTopicAuthCache(func(topic string) bool {
+		return topic == "connections"
+	})
+
+	if !cache.allowed("connections") {
+		t.Fatal("allowed topic denied")
+	}
+
+	if cache.allowed("approvals/pending") {
+		t.Fatal("a decision leaked across topics")
 	}
 }

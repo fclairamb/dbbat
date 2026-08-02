@@ -16,7 +16,10 @@
 //   - Authorization is *not* the broker's job. Subscribers carry an authorizer
 //     supplied by the API layer, re-evaluated on every send, because sql_text
 //     routinely carries PII and the stream must never be a wider read path
-//     than GET /api/v1/queries.
+//     than GET /api/v1/queries. That re-check runs in the *transport's* write
+//     loop, never on the publish path: the API's authorizer does store
+//     round-trips, and calling it inline from Publish would let a slow
+//     database stall a proxy session holding a query.
 package events
 
 import (
@@ -180,9 +183,12 @@ func (b *Broker) deliver(ev Event) {
 }
 
 // Authorizer decides whether a subscriber may currently receive a topic. It is
-// evaluated at subscribe time *and* again on every send, so a user whose role
-// or ownership changed mid-stream stops receiving immediately rather than at
-// the next reconnect.
+// evaluated at subscribe time *and* again immediately before each send, so a
+// user whose role or ownership changed mid-stream stops receiving at once
+// rather than at the next reconnect.
+//
+// It may be expensive (the API implementation reads the store), so the broker
+// never calls it while publishing — see Authorized.
 type Authorizer func(topic string) bool
 
 // Subscribe registers a new subscriber. The returned *Subscriber must be
@@ -292,9 +298,26 @@ func (s *Subscriber) Dropped() int64 {
 	return s.dropped.Swap(0)
 }
 
+// Authorized re-evaluates the subscriber's access to a topic. The transport
+// calls it immediately before writing each event — that is the actual moment
+// of send, and it is a goroutine the session does not wait on, so an expensive
+// authorizer costs latency on one client's stream and nothing else.
+func (s *Subscriber) Authorized(topic string) bool {
+	if s.authorize == nil {
+		return true
+	}
+
+	return s.authorize(topic)
+}
+
 // offer attempts a non-blocking delivery. This is the whole backpressure
 // policy: never block the publisher, drop-and-count on overflow, except for
 // drop-exempt topics which spill into an unbounded priority list.
+//
+// Everything here is in-memory by construction. The authorization re-check
+// deliberately does *not* happen at this point: it can touch the database, and
+// this runs on whichever goroutine published — including a proxy session
+// parked on an approval hold.
 func (s *Subscriber) offer(ev Event) {
 	s.mu.RLock()
 	closed := s.closed
@@ -302,12 +325,6 @@ func (s *Subscriber) offer(ev Event) {
 	s.mu.RUnlock()
 
 	if closed || !subscribed {
-		return
-	}
-
-	// Re-check on send: a subscription authorized a minute ago may no longer
-	// be (role change, grant revoked, connection reassigned).
-	if s.authorize != nil && !s.authorize(ev.Topic) {
 		return
 	}
 

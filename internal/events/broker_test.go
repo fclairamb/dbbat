@@ -116,7 +116,7 @@ func TestApprovalsPendingIsExemptFromDropping(t *testing.T) {
 	}
 }
 
-func TestAuthorizerIsRecheckedOnSend(t *testing.T) {
+func TestAuthorizedReflectsRevocation(t *testing.T) {
 	t.Parallel()
 
 	b := New()
@@ -136,16 +136,56 @@ func TestAuthorizerIsRecheckedOnSend(t *testing.T) {
 		t.Fatal("subscribe refused while authorized")
 	}
 
+	if !sub.Authorized("connections") {
+		t.Fatal("Authorized disagreed with Subscribe")
+	}
+
 	mu.Lock()
 	allowed = false
 	mu.Unlock()
 
+	// The transport asks again immediately before each write; a reader whose
+	// access was revoked mid-stream must stop receiving at once, not at the
+	// next reconnect.
+	if sub.Authorized("connections") {
+		t.Fatal("Authorized still true after access was revoked")
+	}
+}
+
+func TestPublishNeverCallsTheAuthorizer(t *testing.T) {
+	t.Parallel()
+
+	b := New()
+
+	calls := make(chan struct{}, 16)
+
+	sub := b.Subscribe(func(string) bool {
+		// The API's authorizer reads the store. If the broker called it on
+		// the publish path, a slow database would stall the proxy session
+		// that published — including one parked on an approval hold.
+		calls <- struct{}{}
+
+		return true
+	}, 8)
+	defer sub.Close()
+
+	sub.Subscribe("connections")
+
+	// Drain the subscribe-time call.
+	<-calls
+
+	b.Publish("connections", EventConnection, nil)
 	b.Publish("connections", EventConnection, nil)
 
 	select {
-	case ev := <-sub.Events():
-		t.Fatalf("event delivered after authorization was revoked: %+v", ev)
+	case <-calls:
+		t.Fatal("Publish called the authorizer — publishing must be purely in-memory")
 	case <-time.After(50 * time.Millisecond):
+	}
+
+	// The events are still queued for the transport, which does the re-check.
+	if len(sub.Events()) != 2 {
+		t.Fatalf("queued %d events, want 2", len(sub.Events()))
 	}
 }
 

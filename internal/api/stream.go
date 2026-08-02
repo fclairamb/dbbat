@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -123,9 +124,17 @@ func (s *Server) handleStream(c *gin.Context) {
 	// Authorization is re-evaluated on every send, not just at subscribe:
 	// sql_text routinely carries PII, and the stream must never become a
 	// wider read path than GET /api/v1/queries.
-	sub := s.broker.Subscribe(func(topic string) bool {
+	//
+	// The decision is memoized for a couple of seconds. mayReadTopic reads the
+	// store, and this socket may see thousands of events a second on a busy
+	// connection; without the memo each one would be a database round-trip.
+	// The TTL is the bound on how long a revoked reader can keep receiving —
+	// seconds, not until reconnect.
+	authorize := newTopicAuthCache(func(topic string) bool {
 		return s.mayReadTopic(ctx, user, topic)
-	}, events.DefaultBuffer)
+	})
+
+	sub := s.broker.Subscribe(authorize.allowed, events.DefaultBuffer)
 	defer sub.Close()
 
 	go s.streamReadLoop(ctx, cancel, conn, sub)
@@ -222,17 +231,68 @@ func (s *Server) flushStream(conn *websocket.Conn, sub *events.Subscriber, ev ev
 		}
 	}
 
-	if err := writeStreamEvent(conn, ev); err != nil {
-		return false
+	// Re-check at the actual moment of send. This runs in the socket's own
+	// write loop, never on the publishing goroutine, so an authorizer that
+	// touches the database can never stall a proxy session.
+	if sub.Authorized(ev.Topic) {
+		if err := writeStreamEvent(conn, ev); err != nil {
+			return false
+		}
 	}
 
 	for _, extra := range sub.TakePriority() {
+		if !sub.Authorized(extra.Topic) {
+			continue
+		}
+
 		if err := writeStreamEvent(conn, extra); err != nil {
 			return false
 		}
 	}
 
 	return true
+}
+
+// topicAuthCache memoizes per-topic authorization decisions for a short
+// window. It exists so the send-time re-check stays a real re-check without
+// costing a store round-trip per event.
+type topicAuthCache struct {
+	lookup func(topic string) bool
+
+	mu      sync.Mutex
+	entries map[string]topicAuthEntry
+}
+
+type topicAuthEntry struct {
+	allowed bool
+	at      time.Time
+}
+
+// topicAuthTTL bounds how stale an authorization decision may be. Short enough
+// that a revoked reader stops receiving within seconds; long enough that a
+// busy stream is not a database load generator.
+const topicAuthTTL = 2 * time.Second
+
+func newTopicAuthCache(lookup func(topic string) bool) *topicAuthCache {
+	return &topicAuthCache{lookup: lookup, entries: make(map[string]topicAuthEntry)}
+}
+
+func (c *topicAuthCache) allowed(topic string) bool {
+	c.mu.Lock()
+	entry, ok := c.entries[topic]
+	c.mu.Unlock()
+
+	if ok && time.Since(entry.at) < topicAuthTTL {
+		return entry.allowed
+	}
+
+	allowed := c.lookup(topic)
+
+	c.mu.Lock()
+	c.entries[topic] = topicAuthEntry{allowed: allowed, at: time.Now()}
+	c.mu.Unlock()
+
+	return allowed
 }
 
 func writeStreamEvent(conn *websocket.Conn, ev events.Event) error {
