@@ -8,7 +8,7 @@ DBBat ships with four independent listeners — one per wire protocol family. En
 
 | Engine | Protocol | Default proxy port | Env var | Status |
 |--------|----------|--------------------|---------|--------|
-| PostgreSQL | PostgreSQL wire (`pgx/v5`) | `:5434` | `DBB_LISTEN_PG` | First-class. Auth terminated at the proxy. MD5 and SCRAM clients work transparently. |
+| PostgreSQL | PostgreSQL wire (`pgx/v5`) | `:5433` | `DBB_LISTEN_PG` | First-class. Auth terminated at the proxy. MD5 and SCRAM clients work transparently. |
 | Oracle | TNS / TTC | `:1522` | `DBB_LISTEN_ORA` | Hand-rolled TTC parser. End-to-end with `go-ora`; other clients reach AUTH but cannot yet execute queries (see notes below). |
 | MySQL | MySQL wire (`go-mysql-org/go-mysql`) | `:3307` | `DBB_LISTEN_MYSQL` | `caching_sha2_password` (default), `mysql_clear_password`. TLS terminated at the proxy. `mysql_native_password` not supported. |
 | MariaDB | MySQL wire (same listener) | `:3307` | `DBB_LISTEN_MYSQL` | Shares the MySQL listener. `STMT_BULK_EXECUTE` is refused — clients need batch-rewriting disabled. |
@@ -123,10 +123,14 @@ Default ports are chosen to avoid colliding with a co-located database server:
 
 | Service | Default port |
 |---------|--------------|
-| PostgreSQL proxy | 5434 (PostgreSQL itself usually binds 5432) |
+| PostgreSQL proxy | 5433 (PostgreSQL itself usually binds 5432) |
 | Oracle proxy | 1522 (Oracle listener usually binds 1521) |
 | MySQL/MariaDB proxy | 3307 (MySQL/MariaDB usually bind 3306) |
 | MongoDB proxy | 27018 (MongoDB itself usually binds 27017) |
 | REST API + web UI | 4200 |
 
 Override any of them with the matching `DBB_LISTEN_*` environment variable.
+
+`5433` is also the conventional port for pgbouncer. On a host that already runs
+pgbouncer, set `DBB_LISTEN_PG` to a free port (e.g. `:5434`) to avoid a
+collision.

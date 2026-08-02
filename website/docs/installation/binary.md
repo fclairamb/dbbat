@@ -35,7 +35,7 @@ By default, DBBat listens on:
 
 | Service | Address |
 |---------|---------|
-| PostgreSQL proxy | `:5434` |
+| PostgreSQL proxy | `:5433` |
 | Oracle proxy | `:1522` |
 | MySQL / MariaDB proxy | `:3307` |
 | MongoDB proxy | `:27018` |
@@ -64,7 +64,7 @@ CLI flags override env vars; env vars override the config file. Common flags:
 
 ```bash
 ./dbbat serve \
-  --listen-addr :5434 \
+  --listen-addr :5433 \
   --api-addr :4200 \
   --dsn "postgres://user:pass@localhost:5432/dbbat" \
   --keyfile /etc/dbbat/key
@@ -76,7 +76,7 @@ DBBat supports YAML, JSON, and TOML configuration files:
 
 ```yaml
 # /etc/dbbat/config.yaml
-listen_pg: ":5434"
+listen_pg: ":5433"
 listen_ora: ":1522"
 listen_mysql: ":3307"
 listen_mongo: ":27018"
@@ -114,7 +114,7 @@ Restart=on-failure
 RestartSec=5
 Environment=DBB_DSN=postgres://user:pass@localhost:5432/dbbat
 Environment=DBB_KEYFILE=/etc/dbbat/key
-Environment=DBB_LISTEN_PG=:5434
+Environment=DBB_LISTEN_PG=:5433
 Environment=DBB_LISTEN_ORA=:1522
 Environment=DBB_LISTEN_MYSQL=:3307
 Environment=DBB_LISTEN_MONGO=:27018

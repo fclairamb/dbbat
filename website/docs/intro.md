@@ -25,7 +25,7 @@ DBBat addresses all these needs without requiring changes to your application co
 
 | Engine | Protocol | Default proxy port | Notes |
 |--------|----------|--------------------|-------|
-| PostgreSQL | PostgreSQL wire (`pgx/v5`) | `:5434` | First-class — auth terminated at the proxy, MD5/SCRAM clients work |
+| PostgreSQL | PostgreSQL wire (`pgx/v5`) | `:5433` | First-class — auth terminated at the proxy, MD5/SCRAM clients work |
 | Oracle | TNS / TTC | `:1522` | O5LOGON proxy auth, hand-rolled TTC parser. End-to-end with `go-ora`; other clients reach AUTH but do not yet execute queries |
 | MySQL | MySQL wire (`go-mysql-org/go-mysql`) | `:3307` | `caching_sha2_password` (default), `mysql_clear_password`. TLS terminated at the proxy. `mysql_native_password` not supported |
 | MariaDB | MySQL wire (same listener) | `:3307` | Same as MySQL — `STMT_BULK_EXECUTE` refused (clients need batch-rewriting off) |

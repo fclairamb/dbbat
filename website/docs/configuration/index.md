@@ -27,7 +27,7 @@ Configuration is loaded in this priority order (highest wins):
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DBB_LISTEN_PG` | PostgreSQL proxy listen address | `:5434` |
+| `DBB_LISTEN_PG` | PostgreSQL proxy listen address | `:5433` |
 | `DBB_LISTEN_ORA` | Oracle proxy listen address. Empty value disables the Oracle proxy. | `:1522` |
 | `DBB_LISTEN_MYSQL` | MySQL/MariaDB proxy listen address. Empty value disables it. | `:3307` |
 | `DBB_LISTEN_MONGO` | MongoDB proxy listen address. Empty value disables it. | `:27018` |
@@ -202,7 +202,7 @@ DBBat supports YAML, JSON, and TOML configuration files.
 ### YAML Example
 
 ```yaml
-listen_pg: ":5434"
+listen_pg: ":5433"
 listen_ora: ":1522"
 listen_mysql: ":3307"
 listen_mongo: ":27018"
