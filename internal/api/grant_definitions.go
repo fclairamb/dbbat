@@ -22,6 +22,12 @@ func (s *Server) validateDefinitionScope(ctx context.Context, req *CreateGrantDe
 		}
 	}
 
+	for _, groupUID := range req.ApproverGroupUIDs {
+		if _, err := s.store.GetUserGroup(ctx, groupUID); err != nil {
+			return "approver group does not exist: " + groupUID.String()
+		}
+	}
+
 	for _, dbUID := range req.DatabaseUIDs {
 		target, err := s.store.GetServerByUID(ctx, dbUID)
 		if err != nil {
@@ -55,6 +61,14 @@ type CreateGrantDefinitionRequest struct {
 	// DatabaseUIDs restricts the definition to these databases.
 	// Empty/omitted = every database.
 	DatabaseUIDs []uuid.UUID `json:"database_uids"`
+	// ApprovalPatterns are RE2 patterns that suspend a matching statement
+	// until a second human approves it. Empty/omitted = no approval gating.
+	// Compiled here so a bad pattern is a 400 rather than a runtime surprise
+	// on the proxy hot path.
+	ApprovalPatterns []string `json:"approval_patterns"`
+	// ApproverGroupUIDs lists groups whose members may resolve those holds,
+	// in addition to admins. Empty/omitted = admins only.
+	ApproverGroupUIDs []uuid.UUID `json:"approver_group_uids"`
 }
 
 // UpdateGrantDefinitionRequest is the JSON body for PATCH
@@ -104,6 +118,10 @@ func validateDefinitionRequest(req *CreateGrantDefinitionRequest) string {
 		return "max_bytes_transferred must be > 0 or omitted"
 	}
 
+	if err := store.ValidateApprovalPatterns(req.ApprovalPatterns); err != nil {
+		return err.Error()
+	}
+
 	return ""
 }
 
@@ -141,6 +159,8 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		AutoApprove:         req.AutoApprove,
 		GroupUIDs:           req.GroupUIDs,
 		DatabaseUIDs:        req.DatabaseUIDs,
+		ApprovalPatterns:    normalizeStrings(req.ApprovalPatterns),
+		ApproverGroupUIDs:   normalizeUUIDs(req.ApproverGroupUIDs),
 		CreatedBy:           currentUser.UID,
 	}
 
@@ -328,6 +348,8 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 	def.AutoApprove = req.AutoApprove
 	def.GroupUIDs = req.GroupUIDs
 	def.DatabaseUIDs = req.DatabaseUIDs
+	def.ApprovalPatterns = normalizeStrings(req.ApprovalPatterns)
+	def.ApproverGroupUIDs = normalizeUUIDs(req.ApproverGroupUIDs)
 
 	if err := s.store.UpdateGrantDefinition(c.Request.Context(), def); err != nil {
 		writeInternalError(c, s.logger, err, "failed to update grant definition")
@@ -388,4 +410,23 @@ func (s *Server) handleDeactivateGrantDefinition(c *gin.Context) {
 	})
 
 	successResponse(c, gin.H{"message": "grant definition deactivated"})
+}
+
+// normalizeStrings turns a nil slice into an empty one so bun writes '{}'
+// rather than NULL into a NOT NULL array column.
+func normalizeStrings(in []string) []string {
+	if in == nil {
+		return []string{}
+	}
+
+	return in
+}
+
+// normalizeUUIDs is normalizeStrings for uuid slices.
+func normalizeUUIDs(in []uuid.UUID) []uuid.UUID {
+	if in == nil {
+		return []uuid.UUID{}
+	}
+
+	return in
 }

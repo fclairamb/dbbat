@@ -21,6 +21,11 @@ type CreateGrantRequest struct {
 	ExpiresAt           time.Time `json:"expires_at" binding:"required"`
 	MaxQueryCounts      *int64    `json:"max_query_counts"`
 	MaxBytesTransferred *int64    `json:"max_bytes_transferred"`
+	// ApprovalPatterns / ApproverGroupUIDs let a direct admin grant carry
+	// four-eyes gating too. Admin grants bypass definitions entirely, so
+	// without this the control would be unreachable for them.
+	ApprovalPatterns  []string    `json:"approval_patterns"`
+	ApproverGroupUIDs []uuid.UUID `json:"approver_group_uids"`
 }
 
 // handleCreateGrant creates a new access grant
@@ -42,6 +47,20 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 		}
 		if !valid {
 			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid control: "+control)
+			return
+		}
+	}
+
+	if err := store.ValidateApprovalPatterns(req.ApprovalPatterns); err != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
+
+		return
+	}
+
+	for _, groupUID := range req.ApproverGroupUIDs {
+		if _, err := s.store.GetUserGroup(c.Request.Context(), groupUID); err != nil {
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "approver group does not exist: "+groupUID.String())
+
 			return
 		}
 	}
@@ -68,6 +87,8 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 		ExpiresAt:           req.ExpiresAt,
 		MaxQueryCounts:      req.MaxQueryCounts,
 		MaxBytesTransferred: req.MaxBytesTransferred,
+		ApprovalPatterns:    normalizeStrings(req.ApprovalPatterns),
+		ApproverGroupUIDs:   normalizeUUIDs(req.ApproverGroupUIDs),
 	}
 
 	result, err := s.store.CreateGrant(c.Request.Context(), grant)
