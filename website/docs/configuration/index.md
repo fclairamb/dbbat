@@ -56,7 +56,7 @@ If neither is set, DBBat generates a key on first start and writes it to `~/.dbb
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DBB_DUMP_DIR` | Directory for `.dbbat-dump` files. Empty = disabled. | _disabled_ |
+| `DBB_DUMP_DIR` | Directory for `.pcapng` session captures. Empty = disabled. | _disabled_ |
 | `DBB_DUMP_MAX_SIZE` | Max dump file size per session, in bytes | `10485760` (10 MB) |
 | `DBB_DUMP_RETENTION` | Auto-delete dumps older than this (Go duration) | `24h` |
 

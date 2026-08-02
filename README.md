@@ -60,7 +60,7 @@ Any of these upstreams can be reached directly or through an **SSH bastion** —
 - **Audit Trail**: Append-only audit log of user, grant, and database changes
 - **Rate Limiting**: Per-user request limits and exponential backoff on failed login
 - **Authentication Cache**: Optional in-memory cache (TTL + max size) shared across REST and proxy auth paths
-- **Session Packet Dumps**: Optional binary capture of post-auth session traffic (`.dbbat-dump` files); same format across all protocols (see [docs/dump-format.md](docs/dump-format.md)) with `dbbat dump anonymise` for sharing
+- **Session Packet Captures**: Optional capture of post-auth session traffic as tcpdump-compatible `.pcapng` files, so Wireshark dissects them out of the box; same format across all protocols (see [docs/dump-format.md](docs/dump-format.md)) with `dbbat dump anonymise` for sharing
 - **REST API**: OpenAPI 3.0 documented (`/api/docs`), versioned under `/api/v1/`
 - **Web UI**: Embedded React frontend served at `/app` — servers (`/servers`, listing SSH bastions alongside database servers), grants, connections and queries all have detail pages
 - **Demo / Test modes**: Self-provisioning sample data for safe trials and E2E testing

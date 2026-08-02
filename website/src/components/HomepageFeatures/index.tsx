@@ -82,7 +82,7 @@ const FeatureList: FeatureItem[] = [
     description: (
       <>
         Optional per-session binary capture of the post-auth command stream.
-        Same <code>.dbbat-dump</code> format across all protocols, with a CLI
+        Same <code>.pcapng</code> format across all protocols, with a CLI
         anonymiser for safe sharing.
       </>
     ),

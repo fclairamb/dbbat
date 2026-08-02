@@ -39,7 +39,7 @@ For protocol-level details, see:
 - [Oracle proxy notes (TNS/TTC)](https://github.com/fclairamb/dbbat/blob/main/docs/oracle.md)
 - [MySQL proxy notes](https://github.com/fclairamb/dbbat/blob/main/docs/mysql.md)
 - [MongoDB proxy notes](https://github.com/fclairamb/dbbat/blob/main/docs/mongodb.md)
-- [Dump file format](https://github.com/fclairamb/dbbat/blob/main/docs/dump-format.md)
+- [Session capture format](https://github.com/fclairamb/dbbat/blob/main/docs/dump-format.md)
 
 ## Core Features
 
@@ -92,7 +92,7 @@ mongosh / driver     ─►  DBBat (SCRAM-SHA-256 / PLAIN-TLS) ─► MongoDB up
 
 ### Session Packet Dumps
 
-Optional per-session binary dumps of the post-auth command stream, written as `.dbbat-dump` files. Same format across all protocols (see [the dump-format spec](https://github.com/fclairamb/dbbat/blob/main/docs/dump-format.md)). Use `dbbat dump anonymise <input>` to strip session metadata before sharing a capture.
+Optional per-session captures of the post-auth command stream, written as tcpdump-compatible `.pcapng` files that Wireshark dissects natively. Same format across all protocols (see [the capture-format spec](https://github.com/fclairamb/dbbat/blob/main/docs/dump-format.md)). Use `dbbat dump anonymise <input>` to strip session metadata and the synthesized addresses before sharing a capture.
 
 ### REST API + Web UI
 

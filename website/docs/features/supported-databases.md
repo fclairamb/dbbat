@@ -22,7 +22,7 @@ The same auth + grant + query-logging pipeline runs across all four protocols, s
 - **One server catalogue** holds target connections; a `protocol` field marks the engine.
 - **One grant model** applies the same controls (`read_only`, `block_copy`, `block_ddl`) and quotas regardless of upstream engine.
 - **One query log** records every statement (`COM_QUERY`, `COM_STMT_EXECUTE`, PostgreSQL Simple/Extended Query, Oracle TTC Execute) in the same `queries` table.
-- **One dump format** captures session traffic for any engine — see [the dump-format spec](https://github.com/fclairamb/dbbat/blob/main/docs/dump-format.md).
+- **One capture format** records session traffic for any engine as standard pcapng — see [the capture-format spec](https://github.com/fclairamb/dbbat/blob/main/docs/dump-format.md).
 
 ## PostgreSQL
 

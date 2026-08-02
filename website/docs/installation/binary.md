@@ -56,8 +56,8 @@ Set `DBB_LISTEN_*=""` to disable a listener you don't need.
 ./dbbat db status     # Show migration status
 
 # Dump utilities
-./dbbat dump anonymise capture.dbbat-dump            # writes capture.anonymised.dbbat-dump
-./dbbat dump anonymise capture.dbbat-dump out.dump   # explicit output path
+./dbbat dump anonymise capture.pcapng                # writes capture.anonymised.pcapng
+./dbbat dump anonymise capture.pcapng out.pcapng     # explicit output path
 ```
 
 CLI flags override env vars; env vars override the config file. Common flags:

@@ -881,7 +881,7 @@ func seedSampleQuery(ctx context.Context, dataStore *store.Store, userID, databa
 	return nil
 }
 
-var errDumpAnonymiseUsage = errors.New("usage: dbbat dump anonymise <input-file> [output-file]")
+var errDumpAnonymiseUsage = errors.New("usage: dbbat dump anonymise [--keep-addresses] <input-file> [output-file]")
 
 func runDumpAnonymise(cmd *cli.Command) error {
 	args := cmd.Args()

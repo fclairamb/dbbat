@@ -228,7 +228,7 @@ If the test fails after a `go.mod` upgrade: either pin go-mysql back, or extend 
 
 ## Session Packet Dumps
 
-When `DBB_DUMP_DIR` is set, the MySQL proxy writes a per-session `.dbbat-dump` file containing the post-auth command-phase byte stream (matching the PG and Oracle proxies). The filename is the connection UID. Wiring is in `session.go: startDumpIfConfigured` — it swaps the underlying `net.Conn` on the live `packet.Conn` for a `dump.TapConn` after `recordConnection` runs, so the auth handshake itself is never captured. For TLS-upgraded connections the tap sees TLS records, which still preserves timing and packet boundaries.
+When `DBB_DUMP_DIR` is set, the MySQL proxy writes a per-session `.pcapng` capture file containing the post-auth command-phase byte stream (matching the PG and Oracle proxies). The filename is the connection UID. Wiring is in `session.go: startDumpIfConfigured` — it swaps the underlying `net.Conn` on the live `packet.Conn` for a `dump.TapConn` after `recordConnection` runs, so the auth handshake itself is never captured. For TLS-upgraded connections the tap sees TLS records, which still preserves timing and packet boundaries.
 
 ## Testing
 

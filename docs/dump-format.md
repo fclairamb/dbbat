@@ -1,65 +1,85 @@
-# DBBat Dump Format v2
+# DBBat Session Capture Format
 
-Binary capture format for database proxy sessions. Protocol-agnostic: the same format works for PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, and any future protocol.
+Session captures are plain **pcapng** files. Anything that reads pcapng —
+`tcpdump`, Wireshark, `tshark`, `capinfos`, `editcap`, scapy, `gopacket` — reads a
+dbbat capture with no dbbat-specific tooling, and Wireshark applies its native
+PostgreSQL, Oracle TNS, MySQL and MongoDB dissectors to the payloads.
+
+The format is protocol-agnostic: PostgreSQL, Oracle, MySQL/MariaDB, MongoDB and
+any future protocol all produce the same file structure.
 
 ## Design Principles
 
-- **Single format for all protocols** — protocol-specific metadata lives in a JSON header, not in the binary framing.
-- **Streamable writes** — packets are appended individually, no buffering required.
-- **Compact** — packet data stays binary. No base64 bloat.
-- **Self-describing** — JSON header is human-readable and forward-compatible (unknown keys are ignored).
+- **Standard on the wire** — no bespoke framing. Debugging a capture is a
+  `tshark -r` away.
+- **Single format for all protocols** — protocol-specific metadata lives in the
+  session metadata blob, not in the framing.
+- **Streamable writes** — packets are appended and flushed individually; a
+  capture of a live session is readable while the session is still running.
+- **Self-describing** — the session metadata is human-readable JSON and
+  forward-compatible (unknown keys are ignored).
 
 ## File Extension
 
-`.dbbat-dump` (unchanged from v1)
+`.pcapng`
 
-## Layout
+Captures are named `<connection-uid>.pcapng` inside `DBB_DUMP_DIR`.
+
+## Why pcapng and not classic pcap
+
+Classic pcap has a single global header, microsecond timestamps and no
+per-packet metadata. pcapng gives us the three things this format needs:
+
+| Need | pcapng feature |
+|------|----------------|
+| Session metadata (session id, protocol, connection details) | Section Header Block `opt_comment` |
+| Per-packet direction | Enhanced Packet Block `epb_flags` |
+| Nanosecond timestamps | Interface Description Block `if_tsresol = 9` |
+
+## Block Layout
 
 ```
-┌──────────────────────────────────────────┐
-│ Magic              16 bytes              │
-│ Format version      2 bytes              │
-│ Header length       4 bytes              │
-├──────────────────────────────────────────┤
-│ JSON header        (header length) bytes │
-├──────────────────────────────────────────┤
-│ Packet 1           variable              │
-│ Packet 2           variable              │
-│ ...                                      │
-│ EOF marker         13 bytes              │
-└──────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│ Section Header Block (SHB)                                │
+│   shb_userappl = "dbbat"                                  │
+│   opt_comment  = <session metadata JSON>                  │
+├───────────────────────────────────────────────────────────┤
+│ Interface Description Block (IDB)                         │
+│   LinkType  = LINKTYPE_ETHERNET (1)                       │
+│   if_name   = <protocol identifier>                       │
+│   if_tsresol = 9  (nanoseconds)                           │
+│   snaplen   = 262144                                      │
+├───────────────────────────────────────────────────────────┤
+│ Enhanced Packet Block  (one per captured payload)         │
+│ Enhanced Packet Block                                     │
+│ ...                                                       │
+└───────────────────────────────────────────────────────────┘
 ```
 
-## File Header
+There is no end-of-file marker: the capture ends at EOF, so a truncated or
+still-growing file is still readable up to its last complete block.
 
-| Offset | Size | Type | Field | Description |
-|--------|------|------|-------|-------------|
-| 0 | 16 | bytes | Magic | `DBBAT_DUMP\x00\x00\x00\x00\x00\x00` |
-| 16 | 2 | uint16 BE | Version | `2` |
-| 18 | 4 | uint32 BE | Header length | Byte length of the JSON header that follows |
-| 22 | N | UTF-8 | JSON header | Session metadata (see below) |
+The interface must advertise a non-zero snap length — Apple's libpcap rejects
+captures whose interface declares an unlimited (`0`) snap length.
 
-The magic string is always 16 bytes. The first 10 bytes (`DBBAT_DUMP`) are the significant portion; the remaining 6 bytes are null padding reserved for future use.
+## Session Metadata
 
-### Version History
-
-| Version | Description |
-|---------|-------------|
-| 1 | Original format with fixed binary header (Oracle-specific fields) |
-| 2 | JSON metadata header, protocol-agnostic |
-
-## JSON Header
-
-The JSON header is a single JSON object encoded as UTF-8 with no trailing null. Its byte length is given by the header length field.
+The session metadata is a single JSON object stored in the SHB `opt_comment`
+option. Wireshark shows it under *Statistics → Capture File Properties*;
+`capinfos` prints it as "Capture comment".
 
 ### Required Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `session_id` | string | UUID v4 identifying the proxy session |
+| `session_id` | string | UUID identifying the proxy session |
 | `protocol` | string | Protocol identifier (see below) |
 | `start_time` | string | RFC 3339 timestamp with nanosecond precision |
 | `connection` | object | Protocol-specific connection metadata |
+
+`start_time` is the reference for every packet timestamp. pcapng timestamps are
+unsigned offsets from the Unix epoch, so a zero or pre-epoch start time is
+normalised to the write time.
 
 ### Protocol Identifiers
 
@@ -67,12 +87,14 @@ The JSON header is a single JSON object encoded as UTF-8 with no trailing null. 
 |-------|----------|
 | `oracle` | Oracle TNS/TTC |
 | `postgresql` | PostgreSQL wire protocol |
+| `mysql` | MySQL / MariaDB |
+| `mongodb` | MongoDB wire protocol |
 
-New protocols add a new identifier. No format version bump needed.
+New protocols add a new identifier. No format change needed.
 
 ### Connection Object
 
-The `connection` object contains protocol-specific fields. Readers must ignore unknown keys.
+Protocol-specific. Readers must ignore unknown keys.
 
 #### Oracle
 
@@ -116,66 +138,113 @@ The `connection` object contains protocol-specific fields. Readers must ignore u
 
 ### Extensibility
 
-Additional top-level keys or connection keys may be added at any time. Readers must tolerate and ignore unknown keys. Examples of future additions:
+Additional top-level keys or connection keys may be added at any time. Readers
+must tolerate and ignore unknown keys. Examples of future additions:
 
 - `proxy_version` — dbbat version that wrote the file
 - `connection.tls` — whether the upstream connection used TLS
 - `connection.client_addr` — client source address
 - `labels` — user-defined key/value tags
 
-## Packet Stream
+## Header Synthesis
 
-Immediately after the JSON header, the packet stream begins. Each packet is a fixed-size frame followed by variable-length data.
+dbbat taps the proxied connection at the application layer: it sees payload
+bytes, not frames. To produce a file that standard tooling can dissect, every
+captured payload is wrapped in a fabricated Ethernet / IPv4 / TCP header stack.
 
-### Packet Frame (13 bytes)
-
-| Offset | Size | Type | Field | Description |
-|--------|------|------|-------|-------------|
-| 0 | 8 | int64 BE | Relative time | Nanoseconds since `start_time` |
-| 8 | 1 | uint8 | Direction | `0x00` = client → server, `0x01` = server → client |
-| 9 | 4 | uint32 BE | Data length | Byte length of packet data that follows |
-
-Followed by `data_length` bytes of raw packet data (opaque to the format — interpretation depends on the protocol).
-
-### EOF Marker
-
-The last entry in the packet stream signals end-of-file:
+**None of the addressing is observed — all of it is synthesized.**
 
 | Field | Value |
 |-------|-------|
-| Relative time | Nanoseconds since `start_time` (capture duration) |
-| Direction | `0xFF` |
-| Data length | `0x00000000` |
+| Client MAC | `02:db:ba:70:00:01` (locally administered) |
+| Server MAC | `02:db:ba:70:00:02` |
+| Client IP | `10.77.0.1` |
+| Client port | `54321` |
+| Server IP | the upstream host from `connection.upstream_addr` when it is a literal IPv4 address, otherwise `10.77.0.2` |
+| Server port | the upstream port from `connection.upstream_addr`, otherwise the protocol default (oracle 1521, postgresql 5432, mysql 3306, mongodb 27017) |
+| IP TTL | 64 |
+| TCP flags | `PSH` + `ACK` |
+| TCP window | 65535 |
+| Checksums | computed (IPv4 and TCP) |
 
-The EOF marker is 13 bytes, identical in structure to a normal packet frame. Readers stop when they encounter `direction = 0xFF`.
+Keeping the real server port matters: Wireshark's dissector heuristics key off
+it, and that is what makes a capture show up as PGSQL / TNS / MySQL / Mongo
+without a manual "Decode As".
 
-### Maximum Packet Size
+### Direction
 
-Data length is a uint32, giving a theoretical maximum of ~4 GB per packet. In practice, database wire protocols use much smaller packets (Oracle TNS: up to 64 KB typically, PostgreSQL: up to 1 GB messages). Implementations may enforce a lower limit via configuration (`DBB_ORACLE_DUMP_MAX_SIZE`, etc.).
+Direction is recorded twice, redundantly:
+
+- **Addressing** — client→server frames go from the client endpoint to the
+  server endpoint; server→client frames are the mirror image.
+- **`epb_flags`** — bits 0-1 of the Enhanced Packet Block flags option, read
+  from the proxy's point of view: `inbound` (`01`) for client→server, `outbound`
+  (`10`) for server→client.
+
+Readers prefer `epb_flags` and fall back to the source port.
+
+### Sequence numbers
+
+Each direction keeps its own TCP sequence number, starting at 1 and advancing by
+the payload length of every segment; the acknowledgement number is the peer
+direction's next sequence number. Sequences are therefore contiguous and
+gap-free, which is what lets Wireshark reassemble each half of the conversation
+and run message-spanning dissectors over it.
+
+No three-way handshake, FIN or RST is synthesized — the capture starts
+mid-stream, which reassembly handles.
+
+### Segmentation
+
+A payload larger than 65495 bytes (65535 − 20 IPv4 header − 20 TCP header) does
+not fit in one IPv4 datagram and is split across consecutive TCP segments with
+advancing sequence numbers. Readers therefore see more packets than the writer
+was handed; concatenating the segments of a direction reproduces the original
+byte stream exactly.
+
+## Timestamps
+
+Every Enhanced Packet Block carries the absolute nanosecond timestamp
+`start_time + <offset since session start>`. The dbbat reader re-derives the
+relative offset by subtracting the `start_time` from the metadata.
 
 ## File Size Enforcement
 
-Writers may enforce a maximum file size. When the next packet would exceed the limit, the writer silently skips it and writes the EOF marker on close. The `max_size` limit applies to the entire file (header + packets).
+Writers may enforce a maximum file size (`DBB_DUMP_MAX_SIZE`). When the next
+packet's block would push the file past the limit, the writer silently skips it.
+The limit applies to the whole file, headers included. A size-capped capture is
+still a valid pcapng — it simply stops early.
 
-## Reading Algorithm
+## Reading
 
+With standard tooling:
+
+```bash
+tcpdump -nr <capture>.pcapng                       # packet list
+capinfos <capture>.pcapng                          # shows the metadata as "Capture comment"
+tshark -r <capture>.pcapng -V                      # full dissection
+tshark -r <capture>.pcapng -z follow,tcp,raw,0     # reassembled byte stream
 ```
-1. Read 16 bytes → verify magic
-2. Read 2 bytes  → format version (must be 2)
-3. Read 4 bytes  → header_length
-4. Read header_length bytes → parse as JSON
-5. Loop:
-   a. Read 13 bytes → packet frame
-   b. If direction == 0xFF → EOF, stop
-   c. Read data_length bytes → packet data
-   d. Yield (relative_time, direction, data)
+
+With `scripts/replay_dump.py` (no dependencies) for a dbbat-flavoured summary:
+
+```bash
+python3 scripts/replay_dump.py <capture>.pcapng
 ```
 
-## Backward Compatibility
+Programmatically, `internal/dump.Reader` yields `(RelativeNs, Direction, Data)`
+per payload, stripping the synthesized headers back off.
 
-Version 2 files are **not** backward-compatible with version 1 readers. The magic is identical, so readers must check the version field:
+## Anonymisation
 
-- Version 1: fixed binary header (legacy, Oracle-only)
-- Version 2: JSON header (this spec)
+`dbbat dump anonymise <input> [output]` produces a shareable copy:
 
-Implementations should support reading both versions during the migration period.
+- the session metadata is reduced to `session_id` and `protocol` — the
+  connection object (database, user, service name, upstream address) is dropped;
+- the capture is rebased onto the Unix epoch, so the wall-clock time of the
+  session is gone while relative timing is preserved;
+- **the synthesized IP addresses and ports are re-generated** from the fake
+  endpoints, because the server side otherwise encodes the real upstream host
+  and port. Pass `--keep-addresses` to opt out.
+
+Payload bytes are never modified.

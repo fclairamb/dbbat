@@ -52,7 +52,7 @@ PR titles MUST follow the conventional commit format:
 - **Config**: `knadh/koanf`
 - **Logging**: `log/slog`
 - **Frontend**: React 19 + TypeScript + Vite (see `front/CLAUDE.md`)
-- **Dump format**: Protocol-agnostic binary capture (`docs/dump-format.md`)
+- **Capture format**: Protocol-agnostic pcapng, readable by tcpdump/Wireshark (`docs/dump-format.md`)
 
 ## Project Structure
 
@@ -131,7 +131,7 @@ This applies even when the current task is otherwise complete — capture the fo
 ./dbbat db migrate                 # Run pending migrations
 ./dbbat db rollback                # Rollback last migration group
 ./dbbat db status                  # Show migration status
-./dbbat dump anonymise <in> [out]  # Strip session metadata from a .dbbat-dump
+./dbbat dump anonymise <in> [out]  # Strip session metadata from a .pcapng capture
 ```
 
 ## Environment Variables
