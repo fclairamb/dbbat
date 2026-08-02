@@ -5,6 +5,9 @@ on:
     branches: [main, chore/add-cname]
     paths:
       - "website/**"
+      # website/docs/changelog.md embeds the root CHANGELOG.md, which
+      # release-please updates without touching website/**.
+      - "CHANGELOG.md"
       - ".github/workflows/website.yml"
   workflow_dispatch:
 
