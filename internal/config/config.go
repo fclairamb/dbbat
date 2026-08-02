@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/knadh/koanf/parsers/json"
 	"github.com/knadh/koanf/parsers/toml/v2"
@@ -165,6 +166,60 @@ func (c SlackNotifyConfig) Interactive() bool {
 	return c.BotToken != "" && (c.SigningSecret != "" || c.AppToken != "")
 }
 
+// ApprovalConfig configures pattern-triggered approval holds — the four-eyes
+// control that suspends a matching statement mid-flight until a second human
+// approves it.
+//
+// Enabled defaults to **false**. This feature blocks a live database
+// connection on a human being; it ships off and gets turned on deliberately,
+// per deployment.
+type ApprovalConfig struct {
+	// Enabled turns the approval gate on. When false, approval patterns on
+	// grants are inert: nothing is ever held.
+	Enabled bool `koanf:"enabled"`
+	// SlackDelay is how long a hold must remain pending before a Slack
+	// notification fires. Zero disables Slack escalation entirely. There is
+	// no presence detection: if an admin was watching, they had this long to
+	// act, and resolving the hold cancels the pending notification.
+	SlackDelay string `koanf:"slack_delay"`
+	// SlackSQL includes the (truncated) SQL text in the Slack message.
+	// Default on. Slack is a lower trust boundary than the dbbat UI and this
+	// feature pipes production query text into it, so it is switchable off.
+	SlackSQL bool `koanf:"slack_sql"`
+}
+
+// Default approval-hold settings.
+const (
+	// DefaultApprovalSlackDelay is how long a hold waits before escalating.
+	DefaultApprovalSlackDelay = "30s"
+	// ApprovalSlackSQLMaxLen bounds the SQL text copied into Slack.
+	ApprovalSlackSQLMaxLen = 500
+)
+
+// SlackDelayDuration parses SlackDelay, falling back to the default on a
+// malformed value (a typo must not silently disable escalation). A zero or
+// negative value disables escalation, which is an explicit opt-out.
+func (c ApprovalConfig) SlackDelayDuration() time.Duration {
+	if c.SlackDelay == "" {
+		d, _ := time.ParseDuration(DefaultApprovalSlackDelay)
+
+		return d
+	}
+
+	d, err := time.ParseDuration(c.SlackDelay)
+	if err != nil {
+		fallback, _ := time.ParseDuration(DefaultApprovalSlackDelay)
+
+		return fallback
+	}
+
+	if d < 0 {
+		return 0
+	}
+
+	return d
+}
+
 // DumpConfig holds configuration for session packet dumps.
 type DumpConfig struct {
 	// Dir is the directory for dump files. Empty = disabled.
@@ -315,6 +370,9 @@ type Config struct {
 
 	// PG holds PostgreSQL proxy specific configuration.
 	PG PGConfig `koanf:"pg"`
+
+	// Approval holds pattern-triggered approval-hold configuration.
+	Approval ApprovalConfig `koanf:"approval"`
 }
 
 // Default query storage limits.
@@ -403,6 +461,13 @@ func defaultConfig() Config {
 			MaxSize:   DefaultDumpMaxSize,
 			Retention: DefaultDumpRetention,
 		},
+		Approval: ApprovalConfig{
+			// Off by default: a hold blocks a live database connection on a
+			// human. Operators opt in.
+			Enabled:    false,
+			SlackDelay: DefaultApprovalSlackDelay,
+			SlackSQL:   true,
+		},
 	}
 }
 
@@ -470,6 +535,10 @@ func envTransform(k, v string) (string, any) {
 	// pg_tls_* -> pg.tls.*
 	if strings.HasPrefix(key, "pg_tls_") {
 		return "pg.tls." + strings.TrimPrefix(key, "pg_tls_"), v
+	}
+	// approval_* -> approval.*
+	if strings.HasPrefix(key, "approval_") {
+		return "approval." + strings.TrimPrefix(key, "approval_"), v
 	}
 	return key, v
 }
