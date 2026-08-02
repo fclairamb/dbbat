@@ -1,0 +1,437 @@
+package shared
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+
+	"github.com/fclairamb/dbbat/internal/approval"
+	"github.com/fclairamb/dbbat/internal/events"
+	"github.com/fclairamb/dbbat/internal/store"
+)
+
+// fakeApprovalStore records what the gate persisted without needing a DB.
+type fakeApprovalStore struct {
+	mu       sync.Mutex
+	created  []*store.Query
+	resolved []struct {
+		uid    uuid.UUID
+		status string
+		reason string
+	}
+	createErr error
+	notifies  atomic.Int64
+}
+
+func (f *fakeApprovalStore) CreatePendingQuery(_ context.Context, q *store.Query, pattern string) (*store.Query, error) {
+	if f.createErr != nil {
+		return nil, f.createErr
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := *q
+	out.UID = uuid.New()
+	status := store.ApprovalPending
+	out.ApprovalStatus = &status
+	out.ApprovalPattern = &pattern
+
+	if out.ExecutedAt.IsZero() {
+		out.ExecutedAt = time.Now()
+	}
+
+	f.created = append(f.created, &out)
+
+	return &out, nil
+}
+
+func (f *fakeApprovalStore) ResolveQueryApproval(_ context.Context, uid uuid.UUID, status string, _ *uuid.UUID, reason string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.resolved = append(f.resolved, struct {
+		uid    uuid.UUID
+		status string
+		reason string
+	}{uid, status, reason})
+
+	return nil
+}
+
+func (f *fakeApprovalStore) NotifyEvent(_ context.Context, _ string, _ store.EventNotification) error {
+	f.notifies.Add(1)
+
+	return nil
+}
+
+func (f *fakeApprovalStore) lastCreated() *store.Query {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if len(f.created) == 0 {
+		return nil
+	}
+
+	return f.created[len(f.created)-1]
+}
+
+func (f *fakeApprovalStore) resolutions() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := make([]string, 0, len(f.resolved))
+	for _, r := range f.resolved {
+		out = append(out, r.status)
+	}
+
+	return out
+}
+
+func testGate(t *testing.T, patterns []string) (*ApprovalGate, *fakeApprovalStore, *approval.Registry, *events.Broker) {
+	t.Helper()
+
+	st := &fakeApprovalStore{}
+	reg := approval.NewRegistry()
+	broker := events.New()
+
+	grant := &store.Grant{ApprovalPatterns: patterns}
+	user := &store.User{UID: uuid.New(), Username: "alice"}
+
+	gate := NewApprovalGate(ApprovalDeps{
+		Enabled:      true,
+		Store:        st,
+		Registry:     reg,
+		Broker:       broker,
+		PollInterval: 10 * time.Millisecond,
+	}, grant, uuid.New(), user, "prod")
+
+	return gate, st, reg, broker
+}
+
+func TestGateInactiveWithoutPatternsOrFlag(t *testing.T) {
+	grant := &store.Grant{ApprovalPatterns: []string{"(?i)DELETE"}}
+
+	off := NewApprovalGate(ApprovalDeps{Enabled: false}, grant, uuid.New(), nil, "")
+	if off.Active() {
+		t.Fatal("gate must be inert when the feature flag is off")
+	}
+
+	if _, ok := off.Match("DELETE FROM users"); ok {
+		t.Fatal("disabled gate matched")
+	}
+
+	empty := NewApprovalGate(ApprovalDeps{Enabled: true}, &store.Grant{}, uuid.New(), nil, "")
+	if empty.Active() {
+		t.Fatal("gate with no patterns must be inert")
+	}
+}
+
+func TestGateMatchesNormalizedSQL(t *testing.T) {
+	gate, _, _, _ := testGate(t, []string{`(?i)^DELETE\s+FROM\s+users`})
+
+	pattern, ok := gate.Match("   DELETE FROM users WHERE 1=1  ")
+	if !ok {
+		t.Fatal("leading whitespace defeated the pattern — normalization is wrong")
+	}
+
+	if pattern != `(?i)^DELETE\s+FROM\s+users` {
+		t.Fatalf("wrong pattern reported: %q", pattern)
+	}
+
+	if _, ok := gate.Match("SELECT 1"); ok {
+		t.Fatal("unrelated statement matched")
+	}
+}
+
+func TestGateSkipsUncompilablePattern(t *testing.T) {
+	gate := NewApprovalGate(ApprovalDeps{Enabled: true}, &store.Grant{
+		ApprovalPatterns: []string{"(unclosed", `(?i)DROP`},
+	}, uuid.New(), nil, "")
+
+	if !gate.Active() {
+		t.Fatal("one bad pattern must not disable the gate")
+	}
+
+	if _, ok := gate.Match("DROP TABLE t"); !ok {
+		t.Fatal("valid pattern lost")
+	}
+}
+
+func TestHoldApproved(t *testing.T) {
+	gate, st, reg, _ := testGate(t, []string{`(?i)DELETE`})
+
+	type result struct {
+		uid uuid.UUID
+		err error
+	}
+
+	res := make(chan result, 1)
+
+	go func() {
+		uid, err := gate.Hold(context.Background(), HoldRequest{
+			SQL:     "DELETE FROM users",
+			Pattern: `(?i)DELETE`,
+			Guard:   NewLimitGuard(nil, nil, nil),
+		})
+		res <- result{uid, err}
+	}()
+
+	pending := waitForPending(t, st)
+	by := uuid.New()
+
+	if !reg.Resolve(approval.Decision{
+		QueryUID: pending.UID, Status: store.ApprovalApproved, By: &by, ByName: "bob",
+	}) {
+		t.Fatal("resolve found no hold")
+	}
+
+	select {
+	case r := <-res:
+		if r.err != nil {
+			t.Fatalf("approved hold returned %v", r.err)
+		}
+		if r.uid != pending.UID {
+			t.Fatal("hold returned a different query uid")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("approved hold never released")
+	}
+}
+
+func TestHoldDeniedCarriesReasonAndApprover(t *testing.T) {
+	gate, st, reg, _ := testGate(t, []string{`(?i)DELETE`})
+
+	errc := make(chan error, 1)
+
+	go func() {
+		_, err := gate.Hold(context.Background(), HoldRequest{
+			SQL: "DELETE FROM users", Pattern: `(?i)DELETE`, Guard: NewLimitGuard(nil, nil, nil),
+		})
+		errc <- err
+	}()
+
+	pending := waitForPending(t, st)
+	reg.Resolve(approval.Decision{
+		QueryUID: pending.UID, Status: store.ApprovalDenied, ByName: "bob", Reason: "not during business hours",
+	})
+
+	select {
+	case err := <-errc:
+		if !errors.Is(err, ErrApprovalDenied) {
+			t.Fatalf("got %v, want ErrApprovalDenied", err)
+		}
+
+		var denied *ApprovalDeniedError
+		if !errors.As(err, &denied) {
+			t.Fatalf("got %T, want *ApprovalDeniedError", err)
+		}
+
+		if denied.Reason != "not during business hours" || denied.By != "bob" {
+			t.Fatalf("lost approver context: %+v", denied)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("denied hold never released")
+	}
+}
+
+func TestHoldAbandonedOnClientDisconnect(t *testing.T) {
+	gate, st, _, _ := testGate(t, []string{`(?i)DELETE`})
+
+	gone := make(chan struct{})
+	errc := make(chan error, 1)
+
+	go func() {
+		_, err := gate.Hold(context.Background(), HoldRequest{
+			SQL: "DELETE FROM users", Pattern: `(?i)DELETE`,
+			ClientGone: gone, Guard: NewLimitGuard(nil, nil, nil),
+		})
+		errc <- err
+	}()
+
+	waitForPending(t, st)
+	close(gone)
+
+	select {
+	case err := <-errc:
+		if !errors.Is(err, ErrApprovalAbandoned) {
+			t.Fatalf("got %v, want ErrApprovalAbandoned", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("hold did not end on client disconnect")
+	}
+
+	if got := st.resolutions(); len(got) == 0 || got[0] != store.ApprovalAbandoned {
+		t.Fatalf("row not marked abandoned: %v", got)
+	}
+}
+
+func TestHoldIgnoresDecisionForAnotherQuery(t *testing.T) {
+	gate, st, reg, _ := testGate(t, []string{`(?i)DELETE`})
+
+	errc := make(chan error, 1)
+
+	go func() {
+		_, err := gate.Hold(context.Background(), HoldRequest{
+			SQL: "DELETE FROM users", Pattern: `(?i)DELETE`, Guard: NewLimitGuard(nil, nil, nil),
+		})
+		errc <- err
+	}()
+
+	pending := waitForPending(t, st)
+
+	// Deliver a decision naming a *different* query straight into this
+	// hold's channel — the substitution a timing-influencing client would
+	// need for a TOCTOU attack.
+	reg.Resolve(approval.Decision{QueryUID: uuid.New(), Status: store.ApprovalApproved, ByName: "mallory"})
+
+	select {
+	case err := <-errc:
+		t.Fatalf("hold released on a foreign approval (err=%v) — TOCTOU guard missing", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	// The real decision still works.
+	reg.Resolve(approval.Decision{QueryUID: pending.UID, Status: store.ApprovalApproved, ByName: "bob"})
+
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatalf("legitimate approval failed: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("legitimate approval never released the hold")
+	}
+}
+
+func TestHoldTripsOnGrantExpiryWhileParked(t *testing.T) {
+	gate, st, _, _ := testGate(t, []string{`(?i)DELETE`})
+
+	expired := &store.Grant{ExpiresAt: time.Now().Add(80 * time.Millisecond)}
+	guard := NewLimitGuard(expired, nil, nil)
+
+	errc := make(chan error, 1)
+
+	go func() {
+		_, err := gate.Hold(context.Background(), HoldRequest{
+			SQL: "DELETE FROM users", Pattern: `(?i)DELETE`, Guard: guard,
+		})
+		errc <- err
+	}()
+
+	waitForPending(t, st)
+
+	select {
+	case err := <-errc:
+		if !errors.Is(err, ErrGrantExpired) {
+			t.Fatalf("got %v, want ErrGrantExpired", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("grant expiry did not trip while parked — quotas would be bypassed by the hold")
+	}
+}
+
+func TestHoldEndsOnContextCancel(t *testing.T) {
+	gate, st, _, _ := testGate(t, []string{`(?i)DELETE`})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errc := make(chan error, 1)
+
+	go func() {
+		_, err := gate.Hold(ctx, HoldRequest{
+			SQL: "DELETE FROM users", Pattern: `(?i)DELETE`, Guard: NewLimitGuard(nil, nil, nil),
+		})
+		errc <- err
+	}()
+
+	waitForPending(t, st)
+	cancel()
+
+	select {
+	case err := <-errc:
+		if !errors.Is(err, ErrApprovalAbandoned) {
+			t.Fatalf("got %v, want ErrApprovalAbandoned", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("shutdown would hang on a parked query")
+	}
+}
+
+func TestHoldFailsClosedWhenPersistFails(t *testing.T) {
+	st := &fakeApprovalStore{createErr: errors.New("db down")}
+
+	gate := NewApprovalGate(ApprovalDeps{
+		Enabled: true, Store: st, Registry: approval.NewRegistry(), Broker: events.New(),
+	}, &store.Grant{ApprovalPatterns: []string{"x"}}, uuid.New(), nil, "")
+
+	_, err := gate.Hold(context.Background(), HoldRequest{SQL: "x", Pattern: "x", Guard: NewLimitGuard(nil, nil, nil)})
+	if !errors.Is(err, ErrApprovalUnavailable) {
+		t.Fatalf("got %v — a statement must never be forwarded because the bookkeeping broke", err)
+	}
+}
+
+func TestHoldPublishesOnBothTopics(t *testing.T) {
+	st := &fakeApprovalStore{}
+	reg := approval.NewRegistry()
+	broker := events.New()
+	connUID := uuid.New()
+
+	gate := NewApprovalGate(ApprovalDeps{
+		Enabled: true, Store: st, Registry: reg, Broker: broker, PollInterval: 10 * time.Millisecond,
+	}, &store.Grant{ApprovalPatterns: []string{"(?i)DELETE"}}, connUID, &store.User{UID: uuid.New(), Username: "alice"}, "prod")
+
+	sub := broker.Subscribe(func(string) bool { return true }, 64)
+	defer sub.Close()
+	sub.Subscribe(events.TopicApprovalsPending)
+	sub.Subscribe(events.ConnectionQueriesTopic(connUID.String()))
+
+	go func() {
+		_, _ = gate.Hold(context.Background(), HoldRequest{
+			SQL: "DELETE FROM users", Pattern: "(?i)DELETE", Guard: NewLimitGuard(nil, nil, nil),
+		})
+	}()
+
+	pending := waitForPending(t, st)
+
+	seenTopics := map[string]bool{}
+	deadline := time.After(3 * time.Second)
+
+	for len(seenTopics) < 2 {
+		select {
+		case ev := <-sub.Events():
+			if ev.Type == events.EventApprovalPending {
+				seenTopics[ev.Topic] = true
+
+				if ev.Data["query_uid"] != pending.UID.String() {
+					t.Fatalf("event carries the wrong query uid: %v", ev.Data["query_uid"])
+				}
+			}
+		case <-deadline:
+			t.Fatalf("only saw topics %v", seenTopics)
+		}
+	}
+
+	reg.Resolve(approval.Decision{QueryUID: pending.UID, Status: store.ApprovalApproved, ByName: "bob"})
+}
+
+func waitForPending(t *testing.T, st *fakeApprovalStore) *store.Query {
+	t.Helper()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if q := st.lastCreated(); q != nil {
+			return q
+		}
+
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	t.Fatal("gate never persisted a pending query")
+
+	return nil
+}
