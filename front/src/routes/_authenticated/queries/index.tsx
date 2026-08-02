@@ -1,13 +1,13 @@
 import { useRef, useCallback } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useQueries, useUsers, useDatabases, type Query } from "@/api";
-import { DataTable, type Column } from "@/components/shared/DataTable";
+import { useQueries, useUsers, useDatabases } from "@/api";
+import { DataTable } from "@/components/shared/DataTable";
+import { buildQueryColumns } from "@/components/shared/queryColumns";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { AdaptiveRefresh } from "@/components/shared/AdaptiveRefresh";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { X, ChevronLeft, ChevronRight } from "lucide-react";
-import { formatDistanceToNow } from "date-fns";
 import { useAuth } from "@/contexts/AuthContext";
 import { canViewQueries } from "@/lib/permissions";
 import { AccessDenied } from "@/components/shared/AccessDenied";
@@ -35,11 +35,6 @@ function QueriesPage() {
   const { data: users } = useUsers();
   const { data: databases } = useDatabases();
 
-  const getUserName = (uid: string | null | undefined) =>
-    uid ? users?.find((u) => u.uid === uid)?.username ?? uid : "-";
-  const getDbName = (uid: string | null | undefined) =>
-    uid ? databases?.find((d) => d.uid === uid)?.name ?? uid : "-";
-
   const isFirstPage = !before;
 
   const previousFirstUid = useRef<string | null>(null);
@@ -63,83 +58,7 @@ function QueriesPage() {
     return <AccessDenied requiredRole="viewer" />;
   }
 
-  const columns: Column<Query>[] = [
-    {
-      key: "sql_text",
-      header: "Query",
-      cell: (q) => (
-        <div className="max-w-md">
-          <span className="font-mono text-xs break-all line-clamp-2">
-            {q.sql_text}
-          </span>
-        </div>
-      ),
-    },
-    {
-      key: "user",
-      header: "User",
-      cell: (q) => (
-        <span className="font-medium whitespace-nowrap">
-          {getUserName(q.user_id)}
-        </span>
-      ),
-    },
-    {
-      key: "database",
-      header: "Database",
-      cell: (q) => (
-        <span className="font-mono text-sm whitespace-nowrap">
-          {getDbName(q.database_id)}
-        </span>
-      ),
-    },
-    {
-      key: "connection",
-      header: "Connection",
-      cell: (q) => (
-        <Link
-          to="/queries"
-          search={{ connection_id: q.connection_id, before: undefined, size }}
-          className="relative z-10 font-mono text-xs text-muted-foreground hover:text-foreground hover:underline whitespace-nowrap"
-        >
-          {q.connection_id.slice(0, 8)}
-        </Link>
-      ),
-    },
-    {
-      key: "executed_at",
-      header: "Executed",
-      cell: (q) => (
-        <span className="text-sm text-muted-foreground whitespace-nowrap">
-          {formatDistanceToNow(new Date(q.executed_at), { addSuffix: true })}
-        </span>
-      ),
-    },
-    {
-      key: "duration_ms",
-      header: "Duration",
-      cell: (q) => (
-        <span className="text-sm whitespace-nowrap">
-          {q.duration_ms != null ? `${q.duration_ms.toFixed(1)}ms` : "-"}
-        </span>
-      ),
-    },
-    {
-      key: "rows_affected",
-      header: "Rows",
-      cell: (q) => <span className="text-sm">{q.rows_affected ?? "-"}</span>,
-    },
-    {
-      key: "status",
-      header: "Status",
-      cell: (q) =>
-        q.error ? (
-          <Badge variant="destructive">Error</Badge>
-        ) : (
-          <Badge variant="secondary">OK</Badge>
-        ),
-    },
-  ];
+  const columns = buildQueryColumns({ users, databases, size });
 
   const lastUid = queries && queries.length > 0 ? queries[queries.length - 1].uid : undefined;
   const hasMore = queries && queries.length >= size;

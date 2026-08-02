@@ -1,12 +1,10 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useUsers, useConnections, useQueries, useDatabases } from "@/api";
 import { StatCard } from "@/components/shared/StatCard";
-import { DataTable, type Column } from "@/components/shared/DataTable";
+import { DataTable } from "@/components/shared/DataTable";
+import { buildQueryColumns } from "@/components/shared/queryColumns";
 import { PageHeader } from "@/components/shared/PageHeader";
-import { Badge } from "@/components/ui/badge";
 import { Users, Database, Activity, Search } from "lucide-react";
-import { formatDistanceToNow } from "date-fns";
-import type { Query } from "@/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { canViewQueries } from "@/lib/permissions";
 
@@ -32,46 +30,7 @@ function DashboardPage() {
   const activeConnections =
     connections?.filter((c) => !c.disconnected_at).length ?? 0;
 
-  const queryColumns: Column<Query>[] = [
-    {
-      key: "sql_text",
-      header: "Query",
-      cell: (q) => (
-        <span className="font-mono text-xs truncate max-w-xs block">
-          {q.sql_text.substring(0, 60)}
-          {q.sql_text.length > 60 ? "..." : ""}
-        </span>
-      ),
-    },
-    {
-      key: "executed_at",
-      header: "Executed",
-      cell: (q) => (
-        <span className="text-sm text-muted-foreground">
-          {formatDistanceToNow(new Date(q.executed_at), { addSuffix: true })}
-        </span>
-      ),
-    },
-    {
-      key: "duration_ms",
-      header: "Duration",
-      cell: (q) => (
-        <span className="text-sm">
-          {q.duration_ms ? `${q.duration_ms.toFixed(1)}ms` : "-"}
-        </span>
-      ),
-    },
-    {
-      key: "status",
-      header: "Status",
-      cell: (q) =>
-        q.error ? (
-          <Badge variant="destructive">Error</Badge>
-        ) : (
-          <Badge variant="secondary">OK</Badge>
-        ),
-    },
-  ];
+  const queryColumns = buildQueryColumns({ users, databases });
 
   return (
     <div className="space-y-6">
