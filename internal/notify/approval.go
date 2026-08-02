@@ -32,14 +32,29 @@ type ApprovalHold struct {
 	StartedAt     time.Time
 }
 
-// slackPoster is the slice of *slack.Client the escalator uses. An interface
-// so the post/update state machine — whose whole point is that a resolved hold
-// never leaves a live Approve button behind — can be tested without Slack.
+// slackPoster is the escalator's entire outbound surface. It takes rendered
+// blocks rather than opaque slack.MsgOptions so a test can assert on what
+// Slack would actually display — the state machine's whole point is that a
+// resolved hold never leaves a live Approve button, and never asserts an
+// outcome that did not happen.
 type slackPoster interface {
-	PostMessageContext(ctx context.Context, channelID string, options ...slack.MsgOption) (string, string, error)
-	UpdateMessageContext(
-		ctx context.Context, channelID, timestamp string, options ...slack.MsgOption,
-	) (string, string, string, error)
+	postBlocks(ctx context.Context, channel string, blocks []slack.Block) (string, string, error)
+	updateBlocks(ctx context.Context, channel, ts string, blocks []slack.Block) error
+}
+
+// clientPoster adapts *slack.Client to slackPoster.
+type clientPoster struct {
+	client *slack.Client
+}
+
+func (c clientPoster) postBlocks(ctx context.Context, channel string, blocks []slack.Block) (string, string, error) {
+	return c.client.PostMessageContext(ctx, channel, slack.MsgOptionBlocks(blocks...))
+}
+
+func (c clientPoster) updateBlocks(ctx context.Context, channel, ts string, blocks []slack.Block) error {
+	_, _, _, err := c.client.UpdateMessageContext(ctx, channel, ts, slack.MsgOptionBlocks(blocks...))
+
+	return err
 }
 
 // ApprovalEscalator posts a Slack message for a hold that is still pending
@@ -79,6 +94,21 @@ type escalation struct {
 	channel string
 	ts      string
 	posted  bool
+
+	// inFlight is true while the Slack post is on the wire. A resolution
+	// landing in that window has no message to edit yet, so it parks the
+	// outcome below and fire applies it the instant the post returns.
+	inFlight bool
+
+	// resolved and the three fields under it record that parked outcome.
+	// They exist so the follow-up edit states the *real* result: a message
+	// that confidently asserts the wrong outcome is the same class of problem
+	// as a stale Approve button, and an approved hold rendering "abandoned —
+	// the client gave up" is exactly that.
+	resolved   bool
+	status     string
+	resolvedBy string
+	reason     string
 }
 
 // NewApprovalEscalator returns an escalator, or nil when escalation is
@@ -90,7 +120,7 @@ func NewApprovalEscalator(notifier *SlackNotifier, delay time.Duration, includeS
 	}
 
 	return newApprovalEscalator(
-		notifier.client, notifier.channel, notifier.publicURL, notifier.Interactive(),
+		clientPoster{notifier.client}, notifier.channel, notifier.publicURL, notifier.Interactive(),
 		delay, includeSQL, log,
 	)
 }
@@ -146,6 +176,10 @@ func (e *ApprovalEscalator) Schedule(ctx context.Context, hold ApprovalHold) {
 func (e *ApprovalEscalator) fire(ctx context.Context, queryUID uuid.UUID) {
 	e.mu.Lock()
 	esc, ok := e.pending[queryUID]
+
+	if ok {
+		esc.inFlight = true
+	}
 	e.mu.Unlock()
 
 	if !ok {
@@ -154,10 +188,19 @@ func (e *ApprovalEscalator) fire(ctx context.Context, queryUID uuid.UUID) {
 
 	blocks := e.buildHoldBlocks(esc.hold, "", "", "")
 
-	channel, ts, err := e.poster.PostMessageContext(
-		ctx, e.channel, slack.MsgOptionBlocks(blocks...),
-	)
+	channel, ts, err := e.poster.postBlocks(ctx, e.channel, blocks)
 	if err != nil {
+		e.mu.Lock()
+		esc.inFlight = false
+
+		// A resolution arrived while the post was failing: there is no
+		// message to edit, so stop tracking the hold rather than leaving an
+		// entry that can never be resolved.
+		if esc.resolved {
+			delete(e.pending, queryUID)
+		}
+		e.mu.Unlock()
+
 		if e.log != nil {
 			e.log.WarnContext(ctx, "approval escalation post failed", slog.Any("error", err))
 		}
@@ -166,19 +209,22 @@ func (e *ApprovalEscalator) fire(ctx context.Context, queryUID uuid.UUID) {
 	}
 
 	e.mu.Lock()
+	esc.channel = channel
+	esc.ts = ts
+	esc.posted = true
+	esc.inFlight = false
 
 	// Resolved while the post was in flight — edit it straight away rather
-	// than leaving a live Approve button on a dead hold.
-	current, still := e.pending[queryUID]
-	if still {
-		current.channel = channel
-		current.ts = ts
-		current.posted = true
+	// than leaving a live Approve button on a dead hold. The outcome parked by
+	// Resolved is used verbatim, so the edit states what actually happened.
+	resolved, status, by, reason := esc.resolved, esc.status, esc.resolvedBy, esc.reason
+	if resolved {
+		delete(e.pending, queryUID)
 	}
 	e.mu.Unlock()
 
-	if !still {
-		e.updateMessage(ctx, channel, ts, esc.hold, "abandoned", "", "resolved before the notification landed")
+	if resolved {
+		e.updateMessage(ctx, channel, ts, esc.hold, status, by, reason)
 	}
 }
 
@@ -194,16 +240,30 @@ func (e *ApprovalEscalator) Resolved(ctx context.Context, queryUID uuid.UUID, st
 	}
 
 	e.mu.Lock()
+
 	esc, ok := e.pending[queryUID]
-
-	if ok {
-		delete(e.pending, queryUID)
-	}
-	e.mu.Unlock()
-
 	if !ok {
+		e.mu.Unlock()
+
 		return
 	}
+
+	// The post is on the wire: there is no message to edit yet. Park the real
+	// outcome and let fire apply it — it holds the channel/ts the moment they
+	// exist. Rendering a placeholder here would publish a message asserting an
+	// outcome that never happened.
+	if esc.inFlight {
+		esc.resolved = true
+		esc.status = status
+		esc.resolvedBy = byName
+		esc.reason = reason
+		e.mu.Unlock()
+
+		return
+	}
+
+	delete(e.pending, queryUID)
+	e.mu.Unlock()
 
 	if esc.timer != nil {
 		esc.timer.Stop()
@@ -223,7 +283,7 @@ func (e *ApprovalEscalator) updateMessage(ctx context.Context, channel, ts strin
 
 	blocks := e.buildHoldBlocks(hold, status, byName, reason)
 
-	if _, _, _, err := e.poster.UpdateMessageContext(ctx, channel, ts, slack.MsgOptionBlocks(blocks...)); err != nil {
+	if err := e.poster.updateBlocks(ctx, channel, ts, blocks); err != nil {
 		if e.log != nil {
 			e.log.WarnContext(ctx, "approval escalation update failed", slog.Any("error", err))
 		}

@@ -3,6 +3,7 @@ package notify
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -15,10 +16,11 @@ import (
 // post open so the "resolved while the post is in flight" race is reproducible
 // rather than incidental.
 type fakeSlackPoster struct {
-	mu      sync.Mutex
-	posts   int
-	updates int
-	lastTS  string
+	mu         sync.Mutex
+	posts      int
+	updates    int
+	lastTS     string
+	lastUpdate []slack.Block
 
 	// releasePost, when non-nil, blocks PostMessageContext until closed.
 	releasePost chan struct{}
@@ -36,8 +38,8 @@ func newFakeSlackPoster() *fakeSlackPoster {
 	return &fakeSlackPoster{posting: make(chan struct{})}
 }
 
-func (f *fakeSlackPoster) PostMessageContext(
-	_ context.Context, channelID string, _ ...slack.MsgOption,
+func (f *fakeSlackPoster) postBlocks(
+	_ context.Context, channel string, _ []slack.Block,
 ) (string, string, error) {
 	f.postingOnce.Do(func() { close(f.posting) })
 
@@ -55,17 +57,55 @@ func (f *fakeSlackPoster) PostMessageContext(
 	f.lastTS = ts
 	f.mu.Unlock()
 
-	return channelID, ts, nil
+	return channel, ts, nil
 }
 
-func (f *fakeSlackPoster) UpdateMessageContext(
-	_ context.Context, channelID, timestamp string, _ ...slack.MsgOption,
-) (string, string, string, error) {
+func (f *fakeSlackPoster) updateBlocks(_ context.Context, _, _ string, blocks []slack.Block) error {
 	f.mu.Lock()
 	f.updates++
+	f.lastUpdate = blocks
 	f.mu.Unlock()
 
-	return channelID, timestamp, "", nil
+	return nil
+}
+
+// blockText flattens every text object in a Block Kit message so a test can
+// assert on what a human would read.
+func blockText(blocks []slack.Block) string {
+	var b strings.Builder
+
+	for _, block := range blocks {
+		switch v := block.(type) {
+		case *slack.HeaderBlock:
+			if v.Text != nil {
+				b.WriteString(v.Text.Text)
+				b.WriteString("\n")
+			}
+		case *slack.SectionBlock:
+			if v.Text != nil {
+				b.WriteString(v.Text.Text)
+				b.WriteString("\n")
+			}
+		case *slack.ContextBlock:
+			if v.ContextElements.Elements != nil {
+				for _, el := range v.ContextElements.Elements {
+					if txt, ok := el.(*slack.TextBlockObject); ok {
+						b.WriteString(txt.Text)
+						b.WriteString("\n")
+					}
+				}
+			}
+		}
+	}
+
+	return b.String()
+}
+
+func (f *fakeSlackPoster) update() []slack.Block {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.lastUpdate
 }
 
 func (f *fakeSlackPoster) counts() (int, int) {
@@ -163,6 +203,15 @@ func TestResolvingAfterThePostUpdatesInPlace(t *testing.T) {
 	fake.waitFor(t, func(posts, updates int) bool { return posts == 1 && updates == 1 },
 		"the resolved hold left a stale, still-actionable Slack message")
 
+	rendered := blockText(fake.update())
+	if !strings.Contains(rendered, "denied") || !strings.Contains(rendered, "prod freeze") {
+		t.Fatalf("the edit lost the real outcome: %s", rendered)
+	}
+
+	if hasActionBlock(fake.update()) {
+		t.Fatalf("the edit left a live Approve button: %s", rendered)
+	}
+
 	esc.mu.Lock()
 	remaining := len(esc.pending)
 	esc.mu.Unlock()
@@ -172,7 +221,7 @@ func TestResolvingAfterThePostUpdatesInPlace(t *testing.T) {
 	}
 }
 
-func TestResolvingWhileThePostIsInFlightStillUpdates(t *testing.T) {
+func TestResolvingWhileThePostIsInFlightRendersTheRealOutcome(t *testing.T) {
 	t.Parallel()
 
 	fake := newFakeSlackPoster()
@@ -184,21 +233,92 @@ func TestResolvingWhileThePostIsInFlightStillUpdates(t *testing.T) {
 	esc.Schedule(context.Background(), hold)
 
 	// Wait until the post is genuinely in flight, then resolve — the narrow
-	// window where the escalation is no longer tracked but the message is
-	// about to exist. Getting this wrong leaves a live Approve button on a
-	// hold nobody is waiting for.
+	// window where the message does not exist yet but is about to. Getting
+	// this wrong leaves a live Approve button on a hold nobody is waiting for.
 	select {
 	case <-fake.posting:
 	case <-time.After(3 * time.Second):
 		t.Fatal("the escalation timer never fired")
 	}
 
-	esc.Resolved(context.Background(), hold.QueryUID, "abandoned", "", "client gave up")
+	// Deliberately an *approval*: the message must say so. Publishing a
+	// placeholder outcome here would assert that an approved statement was
+	// abandoned — wrong in the direction that matters.
+	esc.Resolved(context.Background(), hold.QueryUID, "approved", "bob", "on-call fix")
 
 	close(fake.releasePost)
 
 	fake.waitFor(t, func(posts, updates int) bool { return posts == 1 && updates == 1 },
 		"a hold resolved mid-post left its Slack message un-updated")
+
+	rendered := blockText(fake.update())
+
+	if !strings.Contains(rendered, "approved") {
+		t.Fatalf("the edit does not say the hold was approved: %s", rendered)
+	}
+
+	if strings.Contains(rendered, "abandoned") || strings.Contains(rendered, "gave up") {
+		t.Fatalf("the edit claims an outcome that never happened: %s", rendered)
+	}
+
+	if !strings.Contains(rendered, "bob") {
+		t.Fatalf("the edit does not name the approver: %s", rendered)
+	}
+
+	if !strings.Contains(rendered, "on-call fix") {
+		t.Fatalf("the edit dropped the resolution reason: %s", rendered)
+	}
+
+	// And the buttons are gone, exactly as on the non-racing path.
+	if hasActionBlock(fake.update()) {
+		t.Fatalf("the edit left a live Approve button: %s", rendered)
+	}
+
+	esc.mu.Lock()
+	remaining := len(esc.pending)
+	esc.mu.Unlock()
+
+	if remaining != 0 {
+		t.Fatalf("%d escalation(s) still tracked after a mid-post resolution", remaining)
+	}
+}
+
+func TestResolvingMidPostSurvivesAFailedPost(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeSlackPoster()
+	fake.releasePost = make(chan struct{})
+	fake.postErr = errSlackDown
+
+	esc := testEscalator(fake, 10*time.Millisecond)
+
+	hold := testHold()
+	esc.Schedule(context.Background(), hold)
+
+	select {
+	case <-fake.posting:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the escalation timer never fired")
+	}
+
+	esc.Resolved(context.Background(), hold.QueryUID, "approved", "bob", "")
+	close(fake.releasePost)
+
+	// Nothing was ever posted, so nothing can be edited — and the hold must
+	// not stay tracked forever waiting for a message that will never exist.
+	time.Sleep(80 * time.Millisecond)
+
+	if _, updates := fake.counts(); updates != 0 {
+		t.Fatalf("updated a message that was never posted (%d updates)", updates)
+	}
+
+	esc.mu.Lock()
+	remaining := len(esc.pending)
+	esc.mu.Unlock()
+
+	if remaining != 0 {
+		t.Fatalf("%d escalation(s) leaked after a failed post was resolved mid-flight", remaining)
+	}
 }
 
 func TestFailedPostLeavesNothingTracked(t *testing.T) {
