@@ -340,7 +340,14 @@ func (s *Server) StartEventListener(ctx context.Context) {
 
 // republish turns a cross-replica notification into local events.
 func (s *Server) republish(ctx context.Context, n store.EventNotification) {
+	// Connection lifecycle notifications carry no query; republish them as-is.
 	if n.QueryUID == uuid.Nil {
+		if n.Type == events.EventConnection && n.ConnUID != uuid.Nil {
+			s.broker.PublishLocal(events.TopicConnections, events.EventConnection, map[string]any{
+				"connection_uid": n.ConnUID.String(),
+			})
+		}
+
 		return
 	}
 
