@@ -364,7 +364,7 @@ const DefaultLogLevel = "info"
 // defaultConfig returns a Config with default values.
 func defaultConfig() Config {
 	return Config{
-		ListenPG:     ":5434",
+		ListenPG:     ":5433",
 		ListenAPI:    ":4200",
 		ListenOracle: ":1522",
 		ListenMySQL:  ":3307",

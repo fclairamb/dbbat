@@ -184,8 +184,8 @@ func TestDefaultValues(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if cfg.ListenPG != ":5434" {
-		t.Errorf("Load() ListenPG = %v, want :5434", cfg.ListenPG)
+	if cfg.ListenPG != ":5433" {
+		t.Errorf("Load() ListenPG = %v, want :5433", cfg.ListenPG)
 	}
 
 	if cfg.ListenAPI != ":4200" {
