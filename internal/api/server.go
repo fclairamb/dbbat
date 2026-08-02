@@ -368,7 +368,6 @@ func (s *Server) setupRouter() *gin.Engine {
 			// middleware here — a connector may watch their own connection.
 			authenticated.GET("/stream", s.handleStream)
 
-
 			// Approval holds. Deliberately *not* behind requireAdmin: an
 			// approver-group member who is neither admin nor viewer must be
 			// able to resolve the holds they are responsible for. Each handler
