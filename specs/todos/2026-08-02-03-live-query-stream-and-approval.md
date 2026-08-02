@@ -314,3 +314,119 @@ One scope note: approval gates the *statement*, not the *data*. An approved
 - **No approval timeout.** The hold ends on approve, deny, or client disconnect.
 - **The approver is persisted and broadcast** on the stream with the resolution
   event.
+
+---
+
+## Implementation Plan
+
+### Transport decision — WebSocket, flagged
+
+The "Honest assessment" argues SSE would fit better (99% server→client, browser
+auto-reconnect, no upgrade handshake, works with the gin stack unchanged). That
+argument is recorded and accepted as a *trade-off*, not acted on: the spec title
+and §1 mandate WebSocket, so WebSocket ships.
+
+The mitigation is that **nothing above the socket knows it is a socket**. The
+wire envelope (`subscribe` / `unsubscribe` / `subscribed` / `event` / `lagged`,
+`{type, topic, seq, data}`) is transport-agnostic, the broker
+(`internal/events`) has no HTTP types in its API, and the frontend hook
+(`useEventStream`) exposes `subscribe(topic, cb)` with no WebSocket in its
+public surface. Swapping to SSE later is then confined to
+`internal/api/stream.go` + the hook's internals. This is also written up in
+`docs/approvals.md`.
+
+### Steps (each independently committable)
+
+1. **Migration** (`internal/migrations/sql/20260802000000_query_approvals.*.sql`)
+   — `queries`: `approval_status` (CHECK `null|pending|approved|denied|abandoned`),
+   `approval_pattern`, `resolved_by uuid`, `resolved_at timestamptz`,
+   `resolution_reason text`; `grant_definitions` + `access_grants`:
+   `approval_patterns text[] not null default '{}'`,
+   `approver_group_uids uuid[] not null default '{}'`; partial index
+   `queries (approval_status) WHERE approval_status = 'pending'`.
+
+2. **Store model + CRUD** — fields on `Query`, `AccessGrant`, `GrantDefinition`;
+   mirror both new fields in `BuildGrantFromDefinition` and `CreateGrant`;
+   `CreateQuery` writes the approval columns; new store methods
+   `ResolveQueryApproval`, `ListPendingApprovalQueries`, `AbandonQueryApproval`,
+   `MarkQueryPending`. `ListQueries` selects the new columns.
+   Pattern validation helper `store.ValidateApprovalPatterns` (RE2 compile +
+   length cap) so a bad pattern is a 400 at definition-save time.
+
+3. **`internal/events` broker** — `Event`, `Broker`, `Subscriber`.
+   Non-blocking `Publish`; bounded 256-slot per-subscriber buffer; overflow
+   drops and bumps a `dropped` counter surfaced as `{"type":"lagged"}`; the
+   `approvals/pending` topic is exempt (unbounded overflow list). Monotonic
+   per-broker `seq`. A `Forwarder` hook for cross-replica fan-out.
+
+4. **Cross-replica fan-out** (`internal/store/notify.go`) — `pgdriver.Listener`
+   on channels `dbbat_query_events` / `dbbat_approval_events`; payload is a tiny
+   JSON `{topic, query_uid}`; receivers re-read the query row and republish
+   locally. `Store.NotifyEvent` is the publish side. Both are best-effort.
+
+5. **`internal/approval` registry** — process-local map `query uid → hold`.
+   `Register` returns a decision channel + release func; `Resolve` delivers a
+   decision to a local waiter; `PendingUIDs`; `DenyAll` / `AbandonAll` used on
+   shutdown. Self-approval and UID-mismatch checks live above it (API + gate).
+
+6. **`shared.WatchedConn` + keepalive** (`internal/proxy/shared/watch.go`) —
+   `net.Conn` wrapper with a pushback queue. `Park()` spawns a reader goroutine
+   that reads into the pushback queue and closes a `gone` channel on EOF/error;
+   `Unpark()` interrupts it with a zero read deadline and leaves the captured
+   bytes queued for replay in stream order. `EnableKeepAlive(conn)` sets 30 s
+   idle / 10 s interval / 3 probes on the underlying `*net.TCPConn`.
+
+7. **`shared.ApprovalGate`** (`internal/proxy/shared/approval.go`) — compiled
+   patterns cached per session; `Match(sql)`; `Hold(...)` persists the query row
+   with `approval_status='pending'`, publishes to both topics, arms the Slack
+   timer, then blocks on a select over `{decision, client-gone, limit-guard
+   tick (quota/expiry/revocation), ctx/shutdown}`. Asserts the resolved UID is
+   its own. Fails closed: only an explicit `approved` decision returns nil.
+   Returns `ErrApprovalDenied` / `ErrApprovalAbandoned` / the guard error.
+
+8. **Feature flag + config** — `DBB_APPROVAL_ENABLED` (default **false**),
+   `DBB_APPROVAL_SLACK_DELAY` (default `30s`, `0` disables),
+   `DBB_APPROVAL_SLACK_SQL` (default true).
+
+9. **PostgreSQL wiring** — gate call in `handleQuery` and `handleExecute`
+   (after static validation, before forwarding); `WatchedConn` under the
+   counting conn; keepalive on accept; `CancelRequest` on a second TCP
+   connection resolves the hold as abandoned/cancelled.
+
+10. **API: approve/deny/pending/deny-all** (`internal/api/approvals.go`) —
+    `POST /queries/{uid}/approve`, `POST /queries/{uid}/deny`,
+    `GET /queries/pending`, `POST /queries/pending/deny-all`. Approver check =
+    admin OR member of the grant's `approver_group_uids`; self-approval always
+    403. Writes `audit_logs`, updates the row, publishes a resolution event,
+    NOTIFYs other replicas.
+
+11. **API: `GET /api/v1/stream`** (`internal/api/stream.go`) — WebSocket upgrade
+    behind the existing auth middleware; per-topic authorization at subscribe
+    *and* on every send; ping/pong keepalive; write deadline.
+
+12. **Slack escalation** (`internal/notify/approval.go` + gate timer) — one
+    timer per hold on the replica owning the session; posts with user, database,
+    truncated SQL (off via `DBB_APPROVAL_SLACK_SQL`), deep link
+    `${DBB_PUBLIC_URL}/app/connections/<uid>?watch=1`, Approve/Deny buttons when
+    interactive; `chat.update` in place on *any* resolution.
+
+13. **Oracle / MySQL / MongoDB wiring** — same gate, per §3's line references.
+    Done last, as the spec directs.
+
+14. **Shutdown** — proxies deny-or-abandon held queries on drain rather than
+    hanging.
+
+15. **Frontend** — `useEventStream` hook, watch panel on the connection detail
+    page (pinned pending queries, Approve/Deny, elapsed-held counter,
+    `abandoned` styled distinctly from `denied`), global pending indicator in
+    the layout.
+
+16. **Docs** — `docs/approvals.md` (per-protocol hold semantics, transport
+    trade-off, operator note on `idle_in_transaction_session_timeout` /
+    `wait_timeout` being the real backstop), `internal/api/openapi.yml`, and the
+    `CLAUDE.md` env-var table.
+
+17. **Tests** — unit tests per package, plus end-to-end held-query tests on
+    PostgreSQL (approve, deny, client-disconnect → `abandoned`), self-approval
+    rejection and the UID-mismatch (TOCTOU) assertion; Playwright spec for the
+    watch panel.
