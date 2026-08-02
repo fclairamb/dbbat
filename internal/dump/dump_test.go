@@ -512,3 +512,98 @@ func TestWriter_ConcurrentWrites(t *testing.T) {
 
 	assert.Equal(t, goroutines*packetsPerGoroutine, count)
 }
+
+// TestWriter_EpbFlagsDirection asserts the direction really rides in the pcapng
+// epb_flags option, independently of the reader's source-port fallback.
+func TestWriter_EpbFlagsDirection(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "flags"+FileExt)
+
+	w, err := NewWriter(path, Header{
+		SessionID:  uuid.New().String(),
+		Protocol:   ProtocolMongo,
+		StartTime:  time.Now(),
+		Connection: map[string]any{},
+	}, 0)
+	require.NoError(t, err)
+	require.NoError(t, w.WritePacket(DirClientToServer, []byte{1}))
+	require.NoError(t, w.WritePacket(DirServerToClient, []byte{2}))
+	require.NoError(t, w.Close())
+
+	f, err := os.Open(path)
+	require.NoError(t, err)
+
+	defer func() { _ = f.Close() }()
+
+	ng, err := pcapgo.NewNgReader(f, pcapgo.DefaultNgReaderOptions)
+	require.NoError(t, err)
+
+	var directions []pcapgo.NgEpbFlag
+
+	for {
+		_, _, opts, err := ng.ReadPacketDataWithOptions()
+		if err != nil {
+			require.ErrorIs(t, err, io.EOF)
+
+			break
+		}
+
+		require.NotNil(t, opts.Flags, "every packet must carry epb_flags")
+		directions = append(directions, opts.Flags.Direction)
+	}
+
+	assert.Equal(t, []pcapgo.NgEpbFlag{
+		pcapgo.NgEpbFlagDirectionInbound,
+		pcapgo.NgEpbFlagDirectionOutbound,
+	}, directions)
+}
+
+// TestReader_DirectionFromFlagsOverridesAddressing proves the reader trusts
+// epb_flags rather than inferring direction from the synthesized addressing.
+func TestReader_DirectionFromFlagsOverridesAddressing(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "flagsonly"+FileExt)
+
+	f, err := os.Create(path)
+	require.NoError(t, err)
+
+	metadata := `{"session_id":"s","protocol":"mysql","start_time":"2026-08-02T00:00:00Z","connection":{}}`
+
+	ng, err := pcapgo.NewNgWriterInterface(f, pcapgo.NgInterface{
+		LinkType:            layers.LinkTypeEthernet,
+		SnapLength:          snapLength,
+		TimestampResolution: 9,
+	}, pcapgo.NgWriterOptions{SectionInfo: pcapgo.NgSectionInfo{Comment: metadata}})
+	require.NoError(t, err)
+
+	// Frame the payload as if it came *from* the client endpoint, but flag it
+	// as server->client. The flag must win.
+	fr := newFramer(newEndpoints(Header{Protocol: ProtocolMySQL}, true))
+	frames, err := fr.frames(DirClientToServer, []byte{0xAA})
+	require.NoError(t, err)
+	require.Len(t, frames, 1)
+
+	require.NoError(t, ng.WritePacketWithOptions(gopacket.CaptureInfo{
+		Timestamp:     time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC),
+		CaptureLength: len(frames[0]),
+		Length:        len(frames[0]),
+	}, frames[0], pcapgo.NgPacketOptions{
+		Flags: &pcapgo.NgEpbFlags{Direction: pcapgo.NgEpbFlagDirectionOutbound},
+	}))
+	require.NoError(t, ng.Flush())
+	require.NoError(t, f.Close())
+
+	r, err := OpenReader(path)
+	require.NoError(t, err)
+
+	defer func() { _ = r.Close() }()
+
+	pkt, err := r.ReadPacket()
+	require.NoError(t, err)
+	assert.Equal(t, DirServerToClient, pkt.Direction)
+	assert.Equal(t, []byte{0xAA}, pkt.Data)
+}

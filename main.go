@@ -165,27 +165,7 @@ func CmdRun() {
 					},
 				},
 			},
-			{
-				Name:  "dump",
-				Usage: "Session capture (pcapng) commands",
-				Commands: []*cli.Command{
-					{
-						Name:      "anonymise",
-						Aliases:   []string{"anonymize"},
-						Usage:     "Create an anonymised copy of a capture (strips session metadata and, by default, the synthesized addresses)",
-						ArgsUsage: "<input-file> [output-file]",
-						Flags: []cli.Flag{
-							&cli.BoolFlag{
-								Name:  "keep-addresses",
-								Usage: "keep the synthesized IP addresses and ports (they may encode the real upstream)",
-							},
-						},
-						Action: func(_ context.Context, cmd *cli.Command) error {
-							return runDumpAnonymise(cmd)
-						},
-					},
-				},
-			},
+			dumpCommand(),
 		},
 		Action: func(ctx context.Context, _ *cli.Command) error {
 			// Default action is to serve
@@ -879,6 +859,31 @@ func seedSampleQuery(ctx context.Context, dataStore *store.Store, userID, databa
 		return fmt.Errorf("failed to close sample connection: %w", err)
 	}
 	return nil
+}
+
+// dumpCommand builds the `dbbat dump` command tree.
+func dumpCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "dump",
+		Usage: "Session capture (pcapng) commands",
+		Commands: []*cli.Command{
+			{
+				Name:      "anonymise",
+				Aliases:   []string{"anonymize"},
+				Usage:     "Create an anonymised copy of a capture (strips session metadata and, by default, the synthesized addresses)",
+				ArgsUsage: "<input-file> [output-file]",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{
+						Name:  "keep-addresses",
+						Usage: "keep the synthesized IP addresses and ports (they may encode the real upstream)",
+					},
+				},
+				Action: func(_ context.Context, cmd *cli.Command) error {
+					return runDumpAnonymise(cmd)
+				},
+			},
+		},
+	}
 }
 
 var errDumpAnonymiseUsage = errors.New("usage: dbbat dump anonymise [--keep-addresses] <input-file> [output-file]")
