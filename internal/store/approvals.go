@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/uptrace/bun/dialect/pgdialect"
 )
 
 // Approval hold states. These match the queries_approval_status_check CHECK
@@ -226,4 +227,26 @@ func (s *Store) GetQueryWithOwner(ctx context.Context, uid uuid.UUID) (*Query, e
 	}
 
 	return result, nil
+}
+
+// HasApproverGroups reports whether any live grant names one of the given
+// groups as an approver group. Used to gate subscription to the
+// approvals/pending topic for non-admins: a user who approves nothing must not
+// be able to watch every held statement in the fleet.
+func (s *Store) HasApproverGroups(ctx context.Context, groupUIDs []uuid.UUID) (bool, error) {
+	if len(groupUIDs) == 0 {
+		return false, nil
+	}
+
+	exists, err := s.db.NewSelect().
+		Model((*AccessGrant)(nil)).
+		Where("revoked_at IS NULL").
+		Where("expires_at > NOW()").
+		Where("approver_group_uids && ?", pgdialect.Array(groupUIDs)).
+		Exists(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to check approver groups: %w", err)
+	}
+
+	return exists, nil
 }

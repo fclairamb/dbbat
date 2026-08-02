@@ -15,10 +15,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/auth"
 	"github.com/fclairamb/dbbat/internal/auth/slack"
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/events"
 	"github.com/fclairamb/dbbat/internal/notify"
 	"github.com/fclairamb/dbbat/internal/store"
 	"github.com/fclairamb/dbbat/internal/version"
@@ -47,6 +49,27 @@ type Server struct {
 	// socketCancel stops the Slack Socket Mode connection on shutdown; nil
 	// when Socket Mode is not running.
 	socketCancel context.CancelFunc
+
+	// broker fans live events to /api/v1/stream subscribers.
+	broker *events.Broker
+	// approvals wakes proxy sessions parked on an approval decision that
+	// happen to live on this replica. Decisions for sessions on other
+	// replicas travel over LISTEN/NOTIFY.
+	approvals *approval.Registry
+	// approvalNotifier updates a posted Slack escalation in place when a hold
+	// resolves. nil when Slack is not configured.
+	approvalNotifier approvalEscalator
+	// listenCancel stops the cross-replica LISTEN loop on shutdown.
+	listenCancel context.CancelFunc
+}
+
+// SetEventPlumbing installs the shared broker and approval registry. Called by
+// the process wiring so the API and the proxies publish into — and resolve
+// against — the same instances.
+func (s *Server) SetEventPlumbing(broker *events.Broker, registry *approval.Registry, notifier approvalEscalator) {
+	s.broker = broker
+	s.approvals = registry
+	s.approvalNotifier = notifier
 }
 
 // NewServer creates a new API server.
@@ -95,6 +118,10 @@ func NewServer(dataStore *store.Store, encryptionKey []byte, logger *slog.Logger
 	}
 
 	return &Server{
+		// A broker and registry always exist so handlers never nil-check; the
+		// process wiring replaces them with the shared instances.
+		broker:             events.New(),
+		approvals:          approval.NewRegistry(),
 		store:              dataStore,
 		encryptionKey:      encryptionKey,
 		logger:             logger,
@@ -125,6 +152,10 @@ func (s *Server) Start(addr string) error {
 		IdleTimeout:  httpIdleTimeout,
 	}
 
+	// Subscribe to cross-replica events so a hold on another pod reaches the
+	// admins connected here.
+	s.StartEventListener(context.Background())
+
 	// Start the outbound Slack Socket Mode connection (no-op unless an
 	// app-level token is configured). Runs for the server's lifetime.
 	s.startSocketMode()
@@ -142,6 +173,10 @@ func (s *Server) Start(addr string) error {
 func (s *Server) Shutdown(ctx context.Context) error {
 	if s.socketCancel != nil {
 		s.socketCancel()
+	}
+
+	if s.listenCancel != nil {
+		s.listenCancel()
 	}
 
 	if s.httpServer != nil {
@@ -324,6 +359,20 @@ func (s *Server) setupRouter() *gin.Engine {
 			authenticated.GET("/connections/:uid", s.handleGetConnection)
 			authenticated.GET("/connections/:uid/dump", s.requireAdminOrViewer(), s.handleGetConnectionDump)
 			authenticated.DELETE("/connections/:uid/dump", s.requireAdmin(), s.handleDeleteConnectionDump)
+			// Live event stream (WebSocket). Per-topic authorization happens
+			// inside the handler and is re-checked on every send, so no role
+			// middleware here — a connector may watch their own connection.
+			authenticated.GET("/stream", s.handleStream)
+
+			// Approval holds. Deliberately *not* behind requireAdmin: an
+			// approver-group member who is neither admin nor viewer must be
+			// able to resolve the holds they are responsible for. Each handler
+			// does the real check (and always rejects self-approval).
+			authenticated.GET("/queries/pending", s.handleListPendingApprovals)
+			authenticated.POST("/queries/pending/deny-all", s.requireAdmin(), s.handleDenyAllPending)
+			authenticated.POST("/queries/:uid/approve", s.handleApproveQuery)
+			authenticated.POST("/queries/:uid/deny", s.handleDenyQuery)
+
 			// Queries: admin/viewer only
 			authenticated.GET("/queries", s.requireAdminOrViewer(), s.handleListQueries)
 			authenticated.GET("/queries/:uid", s.requireAdminOrViewer(), s.handleGetQuery)
