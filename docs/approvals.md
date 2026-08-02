@@ -155,10 +155,37 @@ Direct admin grants accept `approval_patterns` / `approver_group_uids` on
 Patterns are Go `regexp` (RE2 — no catastrophic backtracking, which matters
 when the input is attacker-influenced SQL). They are compiled at
 definition-save time, so a bad pattern is a `400`, not a runtime surprise.
-Matching runs on the same normalized SQL text (trimmed) the existing static
-validators use.
 
 Bounds: at most 32 patterns per definition, 512 characters each.
+
+### Write your patterns case-insensitively
+
+**Matching is case-sensitive unless you make it otherwise.** The statement is
+only *trimmed* before matching (`shared.NormalizeSQL`) — it is not
+upper-cased. This differs from the static controls (`read_only`, `block_ddl`,
+`block_copy`), which upper-case the statement before their keyword-prefix
+checks and are therefore case-insensitive for free.
+
+The divergence is deliberate: an approval pattern is a full regexp an operator
+writes and then reads back against the SQL shown in `/queries`, so silently
+matching against a rewritten string would make patterns behave differently from
+what the UI displays. But it has one sharp edge:
+
+```
+^DELETE          ← matches "DELETE FROM users", NOT "delete from users"
+(?i)^DELETE      ← matches both. Write this one.
+```
+
+Prefix essentially every pattern with `(?i)`. The definition form's placeholder
+shows the same convention, and so does every example in this document:
+
+```
+(?i)^\s*DELETE\s+FROM
+(?i)^\s*(GRANT|REVOKE)
+```
+
+A pattern that misses is a hold that never happens — it fails *open* relative
+to your intent, so this is worth getting right.
 
 ```jsonc
 // POST /api/v1/grant-definitions

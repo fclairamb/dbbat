@@ -193,11 +193,19 @@ func (g *ApprovalGate) Match(sql string) (string, bool) {
 	return "", false
 }
 
-// NormalizeSQL is the canonical normalization applied before pattern matching.
-// Kept deliberately minimal — the static validators only trim before their own
-// prefix/regex checks, and silently rewriting a statement before matching it
-// would make patterns behave differently from what an operator can read in
-// /queries.
+// NormalizeSQL is the canonical normalization applied before pattern matching:
+// a trim, and nothing else.
+//
+// Note the deliberate divergence from the static validators (IsWriteQuery,
+// IsDDLQuery, IsPasswordChangeQuery), which upper-case before their
+// keyword-prefix checks and are therefore case-insensitive for free. An
+// approval pattern is a full regexp an operator writes and then reads back
+// against the SQL shown in /queries, so rewriting the statement first would
+// make patterns behave differently from what the UI displays.
+//
+// The cost is that `^DELETE` does not match `delete from …`. Patterns should
+// carry `(?i)` — which the definition form's placeholder and docs/approvals.md
+// both teach — because a pattern that misses is a hold that never happens.
 func NormalizeSQL(sql string) string {
 	return strings.TrimSpace(sql)
 }
