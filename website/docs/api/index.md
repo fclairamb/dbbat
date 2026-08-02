@@ -6,6 +6,17 @@ sidebar_position: 1
 
 DBBat provides a comprehensive REST API for managing users, databases, grants, and viewing observability data.
 
+## llms.txt
+
+Both `https://dbbat.com/llms.txt` and every running DBBat instance's own `GET /llms.txt`
+follow the [llms.txt convention](https://llmstxt.org/) — a titled, annotated link index
+meant for an agent (or a human) to paste into a prompt instead of crawling the site. An
+agent talking to a specific instance should fetch that instance's `/llms.txt` first: it is
+a local, unauthenticated 200 with the instance's version, web UI, and OpenAPI spec
+location, and it links onward to `https://dbbat.com/llms.txt` and `llms-full.txt` for the
+full documentation. `llms-full.txt` concatenates every doc page into one file and is the
+more useful of the two for an agent that wants the whole picture in one fetch.
+
 ## Base URL
 
 All API endpoints are versioned under `/api/v1/`:
