@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/fclairamb/dbbat/internal/dump"
@@ -23,6 +24,10 @@ type pendingQuery struct {
 	// cursorID is the server cursor a getMore iterates (item 6); 0 for other
 	// commands. Used to drop the cursor→origin link once the cursor is drained.
 	cursorID int64
+	// approvalUID is the row an approval hold already inserted for this
+	// command (uuid.Nil when no hold happened). Non-nil means the completion
+	// path must UPDATE that row rather than INSERT a second one.
+	approvalUID uuid.UUID
 }
 
 // pumpClientToUpstream reads each client message, classifies + validates it
@@ -83,14 +88,30 @@ func (s *Session) handleClientOpMsg(m *message) error {
 		return s.rejectCommand(m, cmd, body, moreToCome, verr)
 	}
 
+	// A killOperations aimed at this session may be releasing a command parked
+	// on a human. Handle it before forwarding.
+	if cmd == "killOperations" && s.KillHeldQuery() {
+		s.logger.InfoContext(s.ctx, "killOperations released an approval hold")
+	}
+
+	sqlText := buildSQLText(cmd, body)
+
+	// Approval hold — after the static validators, before the command is
+	// forwarded upstream.
+	approvalUID, herr := s.holdIfNeeded(sqlText)
+	if herr != nil {
+		return s.rejectHeldCommand(m, cmd, body, moreToCome, approvalUID, herr)
+	}
+
 	// Register for result capture before forwarding so a fast upstream reply
 	// never races an unregistered query.
 	pq := &pendingQuery{
-		command:    cmd,
-		sqlText:    buildSQLText(cmd, body),
-		params:     extractParams(body),
-		start:      time.Now(),
-		moreToCome: moreToCome,
+		command:     cmd,
+		sqlText:     sqlText,
+		params:      extractParams(body),
+		start:       time.Now(),
+		moreToCome:  moreToCome,
+		approvalUID: approvalUID,
 	}
 
 	// Link a getMore to the find/aggregate cursor it iterates (item 6).
@@ -179,4 +200,62 @@ func (s *Session) pendingCommand(responseTo int32) string {
 	}
 
 	return ""
+}
+
+// holdIfNeeded runs the approval gate for one MongoDB command.
+func (s *Session) holdIfNeeded(sqlText string) (uuid.UUID, error) {
+	if !s.approvalGate.Active() {
+		return uuid.Nil, nil
+	}
+
+	pattern, matched := s.approvalGate.Match(sqlText)
+	if !matched {
+		return uuid.Nil, nil
+	}
+
+	var gone <-chan struct{}
+
+	if s.watched != nil {
+		gone = s.watched.Park()
+		defer s.watched.Unpark()
+	}
+
+	return s.approvalGate.Hold(s.ctx, shared.HoldRequest{
+		SQL:        sqlText,
+		Pattern:    pattern,
+		StartedAt:  time.Now(),
+		ClientGone: gone,
+		Guard:      s.guard,
+		OnPending:  s.setHeldQuery,
+	})
+}
+
+// rejectHeldCommand returns the hold's outcome to the client. When the gate
+// already persisted a row for the command, the completion is written onto that
+// row rather than inserting a duplicate.
+func (s *Session) rejectHeldCommand(
+	m *message, cmd string, body bson.Raw, moreToCome bool, approvalUID uuid.UUID, cause error,
+) error {
+	if approvalUID != uuid.Nil && s.server != nil && s.server.store != nil {
+		errStr := cause.Error()
+
+		go func() {
+			if err := s.server.store.UpdateQueryCompletion(s.ctx, approvalUID, nil, nil, &errStr); err != nil {
+				s.logger.DebugContext(s.ctx, "failed to complete held command", slog.Any("error", err))
+			}
+		}()
+
+		// The row already exists; only send the protocol-native error.
+		s.logger.InfoContext(s.ctx, "MongoDB command blocked by approval hold",
+			slog.String("command", cmd),
+			slog.Any("error", cause))
+
+		if moreToCome {
+			return nil
+		}
+
+		return s.replyOpMsg(m.requestID, unauthorizedDoc(cause.Error()))
+	}
+
+	return s.rejectCommand(m, cmd, body, moreToCome, cause)
 }

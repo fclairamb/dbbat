@@ -15,8 +15,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/xdg-go/scram"
 
+	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
@@ -107,15 +109,60 @@ type Session struct {
 
 	logger *slog.Logger
 	ctx    context.Context //nolint:containedctx // Session-scoped context
+
+	// watched sits below the counting conn (and below TLS) so an approval
+	// hold can keep reading the client socket while the session goroutine is
+	// parked on a human.
+	watched *shared.WatchedConn
+
+	// approvalGate implements pattern-triggered approval holds; stream
+	// publishes this session's activity to the live event stream.
+	approvalGate *shared.ApprovalGate
+	stream       *shared.StreamPublisher
+
+	// heldQueryUID is the command currently parked on a human, uuid.Nil
+	// otherwise. Read by the killOperations path.
+	heldMu       sync.Mutex
+	heldQueryUID uuid.UUID
+}
+
+// setHeldQuery records (or clears) the command currently parked on a human.
+func (s *Session) setHeldQuery(uid uuid.UUID) {
+	s.heldMu.Lock()
+	s.heldQueryUID = uid
+	s.heldMu.Unlock()
+}
+
+// KillHeldQuery ends a command parked on a human, in response to a MongoDB
+// killOperations. Reports whether anything was parked.
+func (s *Session) KillHeldQuery() bool {
+	s.heldMu.Lock()
+	uid := s.heldQueryUID
+	s.heldMu.Unlock()
+
+	if uid == uuid.Nil || s.server == nil || s.server.approvalDeps.Registry == nil {
+		return false
+	}
+
+	return s.server.approvalDeps.Registry.Resolve(approval.Decision{
+		QueryUID: uid,
+		Status:   store.ApprovalAbandoned,
+		Reason:   "cancelled by the client (killOperations)",
+		At:       time.Now(),
+	})
 }
 
 func newSession(rawConn net.Conn, server *Server) *Session {
 	bytesFromClient := &atomic.Int64{}
 	bytesToClient := &atomic.Int64{}
 
+	watched := shared.NewWatchedConn(rawConn)
+	_ = shared.EnableClientKeepAlive(rawConn)
+
 	s := &Session{
 		server:          server,
-		clientConn:      shared.NewCountingConn(rawConn, bytesFromClient, bytesToClient),
+		watched:         watched,
+		clientConn:      shared.NewCountingConn(watched, bytesFromClient, bytesToClient),
 		bytesFromClient: bytesFromClient,
 		bytesToClient:   bytesToClient,
 		connID:          server.connCounter.Add(1),
@@ -473,6 +520,15 @@ func (s *Session) recordConnection() error {
 
 	s.connection = conn
 
+	dbName := ""
+	if s.database != nil {
+		dbName = s.database.Name
+	}
+
+	s.approvalGate = shared.NewApprovalGate(s.server.approvalDeps, s.grant, conn.UID, s.user, dbName)
+	s.stream = shared.NewStreamPublisher(s.server.approvalDeps, conn.UID, s.user, dbName)
+	s.stream.Connection(s.ctx, shared.ConnectionOpened)
+
 	return nil
 }
 
@@ -486,6 +542,8 @@ func (s *Session) deregisterRevocation() {
 }
 
 func (s *Session) recordDisconnect() {
+	s.stream.Connection(s.ctx, shared.ConnectionClosed)
+
 	if s.connection == nil {
 		return
 	}

@@ -11,6 +11,7 @@ import (
 	"net"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -140,6 +141,23 @@ type session struct {
 	// auth/handshake traffic, which is the right place for it).
 	lastBytesSnapshot int64
 
+	// watched sits below the counting conn so an approval hold can keep
+	// reading the client socket while the session goroutine is parked on a
+	// human. Oracle clients are among the least forgiving about a silent
+	// connection, which makes disconnect detection matter more here, not less.
+	watched *shared.WatchedConn
+
+	// approvalDeps/approvalGate implement pattern-triggered approval holds;
+	// stream publishes this session's activity to the live event stream.
+	approvalDeps shared.ApprovalDeps
+	approvalGate *shared.ApprovalGate
+	stream       *shared.StreamPublisher
+
+	// heldQueryUID is the statement currently parked on a human, uuid.Nil
+	// otherwise.
+	heldMu       sync.Mutex
+	heldQueryUID uuid.UUID
+
 	// guard enforces the grant's time-window and bandwidth limits mid-stream.
 	guard *shared.LimitGuard
 
@@ -179,8 +197,12 @@ func newSession(
 	bytesFromClient := &atomic.Int64{}
 	bytesToClient := &atomic.Int64{}
 
+	watched := shared.NewWatchedConn(clientConn)
+	_ = shared.EnableClientKeepAlive(clientConn)
+
 	return &session{
-		clientConn:      shared.NewCountingConn(clientConn, bytesFromClient, bytesToClient),
+		watched:         watched,
+		clientConn:      shared.NewCountingConn(watched, bytesFromClient, bytesToClient),
 		store:           dataStore,
 		encryptionKey:   encryptionKey,
 		logger:          logger,
@@ -1091,6 +1113,15 @@ func (s *session) proxyMessages() error {
 	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag())
 
+	databaseName := ""
+	if s.database != nil {
+		databaseName = s.database.Name
+	}
+
+	s.approvalGate = shared.NewApprovalGate(s.approvalDeps, s.grant, s.connectionUID, s.user, databaseName)
+	s.stream = shared.NewStreamPublisher(s.approvalDeps, s.connectionUID, s.user, databaseName)
+	s.stream.Connection(s.ctx, shared.ConnectionOpened)
+
 	watchCtx, cancelWatch := context.WithCancel(s.ctx)
 	defer cancelWatch()
 
@@ -1467,6 +1498,8 @@ func (s *session) sendRefuse(oraCode uint16, reason string) {
 
 // cleanup closes upstream connection and updates records.
 func (s *session) cleanup() {
+	s.stream.Connection(s.ctx, shared.ConnectionClosed)
+
 	if s.grant != nil && s.revocation != nil {
 		s.store.Revocations().Deregister(s.grant.UID, s.revocation)
 	}

@@ -78,6 +78,13 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 	// Complete previous query if still pending (sets duration)
 	s.flushPendingQuery()
 
+	// Approval hold — after the static validators, before anything reaches
+	// upstream.
+	approvalUID, herr := s.holdIfNeeded(result.SQL)
+	if herr != nil {
+		return herr
+	}
+
 	// Track the cursor
 	cursor := &trackedCursor{
 		cursorID:   result.CursorID,
@@ -92,7 +99,15 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 		cursor:    cursor,
 		startTime: time.Now(),
 	}
-	s.persistQueryRecord()
+
+	// An approval hold already inserted the row; reuse it rather than writing
+	// a second one for the same statement.
+	if approvalUID != uuid.Nil {
+		s.tracker.pendingQuery.queryUID = approvalUID
+		s.tracker.pendingQuery.queryPersisted = true
+	} else {
+		s.persistQueryRecord()
+	}
 
 	return nil
 }
@@ -131,6 +146,11 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 	// Complete previous query if still pending (sets duration)
 	s.flushPendingQuery()
 
+	approvalUID, herr := s.holdIfNeeded(result.SQL)
+	if herr != nil {
+		return herr
+	}
+
 	// Track as pending query and persist immediately
 	cursor := &trackedCursor{
 		sql:        result.SQL,
@@ -141,7 +161,13 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 		cursor:    cursor,
 		startTime: time.Now(),
 	}
-	s.persistQueryRecord()
+
+	if approvalUID != uuid.Nil {
+		s.tracker.pendingQuery.queryUID = approvalUID
+		s.tracker.pendingQuery.queryPersisted = true
+	} else {
+		s.persistQueryRecord()
+	}
 
 	return nil
 }
@@ -340,6 +366,8 @@ func (s *session) persistQueryRecord() {
 	}
 
 	pending.queryUID = created.UID
+
+	s.stream.Query(created.UID, query)
 }
 
 // completeQuery finalizes a query record with duration and updates connection stats.
@@ -580,4 +608,42 @@ func (s *session) checkQuotas() error {
 	}
 
 	return nil
+}
+
+// holdIfNeeded runs the approval gate for one statement, after the static
+// validators and before anything is forwarded upstream. Returns the uid of the
+// pending row the gate created (uuid.Nil when no hold happened).
+func (s *session) holdIfNeeded(sql string) (uuid.UUID, error) {
+	if !s.approvalGate.Active() {
+		return uuid.Nil, nil
+	}
+
+	pattern, matched := s.approvalGate.Match(sql)
+	if !matched {
+		return uuid.Nil, nil
+	}
+
+	var gone <-chan struct{}
+
+	if s.watched != nil {
+		gone = s.watched.Park()
+		defer s.watched.Unpark()
+	}
+
+	return s.approvalGate.Hold(s.ctx, shared.HoldRequest{
+		SQL:        sql,
+		Pattern:    pattern,
+		StartedAt:  time.Now(),
+		ClientGone: gone,
+		Guard:      s.guard,
+		OnPending:  s.setHeldQuery,
+	})
+}
+
+// setHeldQuery records the currently parked statement so an out-of-band
+// cancellation path can end it.
+func (s *session) setHeldQuery(uid uuid.UUID) {
+	s.heldMu.Lock()
+	s.heldQueryUID = uid
+	s.heldMu.Unlock()
 }

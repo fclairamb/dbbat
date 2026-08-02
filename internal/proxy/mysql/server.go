@@ -15,6 +15,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -22,6 +23,14 @@ import (
 // authenticates them against the DBBat user store, and proxies commands to
 // the upstream MySQL database configured for the requested schema.
 type Server struct {
+	// approvalDeps carries the approval-hold collaborators. Zero value =
+	// feature off, which is the default.
+	approvalDeps shared.ApprovalDeps
+
+	// sessions maps client connection ids to live sessions so KILL QUERY can
+	// reach a statement parked on an approval hold.
+	sessions *sessionRegistry
+
 	store         *store.Store
 	encryptionKey []byte
 	queryStorage  config.QueryStorageConfig
@@ -78,6 +87,7 @@ func NewServer(
 		shutdown:      make(chan struct{}),
 		ctx:           ctx,
 		cancel:        cancel,
+		sessions:      newSessionRegistry(),
 	}
 	s.gomysqlServer = newGoMySQLServer(s, tlsConfig, rsaKey)
 
@@ -219,4 +229,10 @@ func (s *Server) runDumpCleanup() {
 			return
 		}
 	}
+}
+
+// SetApprovalDeps installs the approval-hold collaborators. A server without
+// them never holds anything.
+func (s *Server) SetApprovalDeps(deps shared.ApprovalDeps) {
+	s.approvalDeps = deps
 }

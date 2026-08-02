@@ -370,13 +370,13 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		slog.Bool("tls", !cfg.PG.TLS.Disable))
 
 	// Start Oracle proxy server (if configured)
-	oracleServer := startOracleProxy(ctx, cfg, dataStore, proxyAuthCache, logger)
+	oracleServer := startOracleProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, logger)
 
 	// Start MySQL proxy server (if configured)
-	mysqlServer := startMySQLProxy(ctx, cfg, dataStore, proxyAuthCache, logger)
+	mysqlServer := startMySQLProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, logger)
 
 	// Start MongoDB proxy server (if configured)
-	mongoServer := startMongoProxy(ctx, cfg, dataStore, proxyAuthCache, logger)
+	mongoServer := startMongoProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, logger)
 
 	// Wait for shutdown signal and gracefully stop all servers
 	servers := []shutdownable{approvalDrain{approvals, logger}, apiServer, proxyServer}
@@ -420,12 +420,13 @@ func awaitShutdown(ctx context.Context, logger *slog.Logger, servers ...shutdown
 	return nil
 }
 
-func startOracleProxy(ctx context.Context, cfg *config.Config, dataStore *store.Store, authCache *cache.AuthCache, logger *slog.Logger) *oracle.Server {
+func startOracleProxy(ctx context.Context, cfg *config.Config, dataStore *store.Store, authCache *cache.AuthCache, approvalDeps shared.ApprovalDeps, logger *slog.Logger) *oracle.Server {
 	if cfg.ListenOracle == "" {
 		return nil
 	}
 
 	srv := oracle.NewServer(dataStore, cfg.EncryptionKey, authCache, cfg.QueryStorage, cfg.Dump, logger)
+	srv.SetApprovalDeps(approvalDeps)
 
 	go func() {
 		if err := srv.Start(cfg.ListenOracle); err != nil {
@@ -439,7 +440,7 @@ func startOracleProxy(ctx context.Context, cfg *config.Config, dataStore *store.
 	return srv
 }
 
-func startMySQLProxy(ctx context.Context, cfg *config.Config, dataStore *store.Store, authCache *cache.AuthCache, logger *slog.Logger) *mysql.Server {
+func startMySQLProxy(ctx context.Context, cfg *config.Config, dataStore *store.Store, authCache *cache.AuthCache, approvalDeps shared.ApprovalDeps, logger *slog.Logger) *mysql.Server {
 	if cfg.ListenMySQL == "" {
 		return nil
 	}
@@ -449,6 +450,8 @@ func startMySQLProxy(ctx context.Context, cfg *config.Config, dataStore *store.S
 		logger.ErrorContext(ctx, "MySQL proxy server init failed", slog.Any("error", err))
 		os.Exit(1)
 	}
+
+	srv.SetApprovalDeps(approvalDeps)
 
 	go func() {
 		if err := srv.Start(cfg.ListenMySQL); err != nil {
@@ -464,7 +467,7 @@ func startMySQLProxy(ctx context.Context, cfg *config.Config, dataStore *store.S
 	return srv
 }
 
-func startMongoProxy(ctx context.Context, cfg *config.Config, dataStore *store.Store, authCache *cache.AuthCache, logger *slog.Logger) *mongodb.Server {
+func startMongoProxy(ctx context.Context, cfg *config.Config, dataStore *store.Store, authCache *cache.AuthCache, approvalDeps shared.ApprovalDeps, logger *slog.Logger) *mongodb.Server {
 	if cfg.ListenMongo == "" {
 		return nil
 	}
@@ -474,6 +477,8 @@ func startMongoProxy(ctx context.Context, cfg *config.Config, dataStore *store.S
 		logger.ErrorContext(ctx, "MongoDB proxy server init failed", slog.Any("error", err))
 		os.Exit(1)
 	}
+
+	srv.SetApprovalDeps(approvalDeps)
 
 	go func() {
 		if err := srv.Start(cfg.ListenMongo); err != nil {

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/fclairamb/dbbat/internal/store"
@@ -265,15 +266,29 @@ func (s *Session) recordQuery(pq *pendingQuery, rows []store.QueryRow, rowsAffec
 	}
 
 	go func() {
-		created, err := s.server.store.CreateQuery(s.ctx, record)
-		if err != nil {
-			s.logger.ErrorContext(s.ctx, "create query log failed", slog.Any("error", err))
+		queryUID := pq.approvalUID
 
-			return
+		if queryUID != uuid.Nil {
+			// An approval hold already inserted this row before the command
+			// ran; complete it in place.
+			if err := s.server.store.UpdateQueryCompletion(s.ctx, queryUID, &durationMs, rowsAffected, queryError); err != nil {
+				s.logger.ErrorContext(s.ctx, "complete held command failed", slog.Any("error", err))
+			}
+		} else {
+			created, err := s.server.store.CreateQuery(s.ctx, record)
+			if err != nil {
+				s.logger.ErrorContext(s.ctx, "create query log failed", slog.Any("error", err))
+
+				return
+			}
+
+			queryUID = created.UID
 		}
 
+		s.stream.Query(queryUID, record)
+
 		if len(rows) > 0 {
-			if err := s.server.store.StoreQueryRows(s.ctx, created.UID, rows); err != nil {
+			if err := s.server.store.StoreQueryRows(s.ctx, queryUID, rows); err != nil {
 				s.logger.ErrorContext(s.ctx, "store query rows failed", slog.Any("error", err))
 			}
 		}

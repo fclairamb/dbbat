@@ -6,7 +6,9 @@ import (
 	"time"
 
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
+	"github.com/google/uuid"
 
+	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -159,6 +161,29 @@ func (h *handler) runIntercepted(
 		return nil, err
 	}
 
+	// A KILL aimed at another connection may be releasing a statement parked
+	// on a human. Handle that before running the statement upstream; the KILL
+	// itself still goes through, so a genuinely running query is killed too.
+	if s.releaseHoldForKill(sql) {
+		s.logger.InfoContext(s.ctx, "KILL released an approval hold", slog.String("sql", sql))
+	}
+
+	// Approval hold — after the static validators, before the statement is
+	// executed upstream. The row it creates is completed in place afterwards.
+	approvalUID, herr := s.holdIfNeeded(sql, params)
+	if herr != nil {
+		if approvalUID == uuid.Nil {
+			errStr := herr.Error()
+			h.recordQuery(sql, params, time.Now(), nil, nil, &errStr)
+		} else {
+			// The hold already persisted (and resolved) the row; recording a
+			// second one would duplicate the statement in /queries.
+			h.completeHeldQuery(approvalUID, herr)
+		}
+
+		return nil, herr
+	}
+
 	start := time.Now()
 	result, err := exec()
 	if err != nil {
@@ -177,9 +202,72 @@ func (h *handler) runIntercepted(
 
 	capturedRows, _, _ := h.captureRows(result)
 
-	h.recordQuery(sql, params, start, capturedRows, rowsAffected, nil)
+	h.recordQueryWithUID(approvalUID, sql, params, start, capturedRows, rowsAffected, nil)
 
 	return result, nil
+}
+
+// holdIfNeeded runs the approval gate for one MySQL statement.
+func (s *Session) holdIfNeeded(sql string, params *store.QueryParameters) (uuid.UUID, error) {
+	if !s.approvalGate.Active() {
+		return uuid.Nil, nil
+	}
+
+	pattern, matched := s.approvalGate.Match(sql)
+	if !matched {
+		return uuid.Nil, nil
+	}
+
+	var gone <-chan struct{}
+
+	if s.watched != nil {
+		gone = s.watched.Park()
+		defer s.watched.Unpark()
+	}
+
+	return s.approvalGate.Hold(s.ctx, shared.HoldRequest{
+		SQL:        sql,
+		Params:     params,
+		Pattern:    pattern,
+		StartedAt:  time.Now(),
+		ClientGone: gone,
+		Guard:      s.guard,
+		OnPending:  s.setHeldQuery,
+	})
+}
+
+// completeHeldQuery records the outcome on the row an approval hold already
+// created, rather than inserting a duplicate.
+func (h *handler) completeHeldQuery(queryUID uuid.UUID, cause error) {
+	s := h.session
+
+	if s.server == nil || s.server.store == nil {
+		return
+	}
+
+	errStr := cause.Error()
+
+	go func() {
+		if err := s.server.store.UpdateQueryCompletion(s.ctx, queryUID, nil, nil, &errStr); err != nil {
+			s.logger.DebugContext(s.ctx, "failed to complete held query", slog.Any("error", err))
+		}
+	}()
+}
+
+// KillHeldQuery ends a statement parked on a human in response to a
+// MySQL KILL QUERY. Reports whether anything was parked.
+func (s *Session) KillHeldQuery() bool {
+	uid := s.heldQuery()
+	if uid == uuid.Nil || s.server == nil || s.server.approvalDeps.Registry == nil {
+		return false
+	}
+
+	return s.server.approvalDeps.Registry.Resolve(approval.Decision{
+		QueryUID: uid,
+		Status:   store.ApprovalAbandoned,
+		Reason:   "cancelled by the client (KILL QUERY)",
+		At:       time.Now(),
+	})
 }
 
 // recordQuery inserts a single query log row (asynchronously) with all
@@ -196,6 +284,21 @@ func (h *handler) runIntercepted(
 // error packets. Replaces the previous JSON-encoded row size which only
 // counted the captured-row payload.
 func (h *handler) recordQuery(
+	sql string,
+	params *store.QueryParameters,
+	start time.Time,
+	capturedRows []store.QueryRow,
+	rowsAffected *int64,
+	queryError *string,
+) {
+	h.recordQueryWithUID(uuid.Nil, sql, params, start, capturedRows, rowsAffected, queryError)
+}
+
+// recordQueryWithUID is recordQuery with an optional pre-existing row uid: when
+// an approval hold already inserted the statement, the completion is an UPDATE
+// on that row instead of a second INSERT.
+func (h *handler) recordQueryWithUID(
+	queryUID uuid.UUID,
 	sql string,
 	params *store.QueryParameters,
 	start time.Time,
@@ -226,15 +329,25 @@ func (h *handler) recordQuery(
 	}
 
 	go func() {
-		created, err := s.server.store.CreateQuery(s.ctx, record)
-		if err != nil {
-			s.logger.ErrorContext(s.ctx, "create query log failed", slog.Any("error", err))
+		if queryUID != uuid.Nil {
+			if err := s.server.store.UpdateQueryCompletion(s.ctx, queryUID, &durationMs, rowsAffected, queryError); err != nil {
+				s.logger.ErrorContext(s.ctx, "complete held query failed", slog.Any("error", err))
+			}
+		} else {
+			created, err := s.server.store.CreateQuery(s.ctx, record)
+			if err != nil {
+				s.logger.ErrorContext(s.ctx, "create query log failed", slog.Any("error", err))
 
-			return
+				return
+			}
+
+			queryUID = created.UID
 		}
 
+		s.stream.Query(queryUID, record)
+
 		if len(capturedRows) > 0 {
-			if err := s.server.store.StoreQueryRows(s.ctx, created.UID, capturedRows); err != nil {
+			if err := s.server.store.StoreQueryRows(s.ctx, queryUID, capturedRows); err != nil {
 				s.logger.ErrorContext(s.ctx, "store query rows failed", slog.Any("error", err))
 			}
 		}
