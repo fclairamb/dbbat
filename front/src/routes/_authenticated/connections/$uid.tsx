@@ -13,15 +13,23 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { format, formatDistanceToNow } from "date-fns";
 import { useBreadcrumbTitle } from "@/contexts/BreadcrumbContext";
+import { ConnectionWatchPanel } from "@/components/shared/ConnectionWatchPanel";
 
 const RECENT_QUERIES_LIMIT = 50;
 
 export const Route = createFileRoute("/_authenticated/connections/$uid")({
+  // ?watch=1 opens the live panel straight away — that's the deep link Slack
+  // approval notifications point at, so the approver lands on the hold rather
+  // than on a page they then have to activate.
+  validateSearch: (search: Record<string, unknown>) => ({
+    watch: search.watch === "1" || search.watch === 1 || search.watch === true,
+  }),
   component: ConnectionDetailPage,
 });
 
 function ConnectionDetailPage() {
   const { uid } = Route.useParams();
+  const { watch } = Route.useSearch();
   const { data: connection, isLoading: isLoadingConnection } =
     useConnection(uid);
   const { data: users } = useUsers();
@@ -189,6 +197,8 @@ function ConnectionDetailPage() {
           </dl>
         </CardContent>
       </Card>
+
+      <ConnectionWatchPanel connectionUid={uid} defaultWatching={watch} />
 
       <Card>
         <CardHeader>

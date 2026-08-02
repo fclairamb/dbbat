@@ -1202,3 +1202,108 @@ export function useVersion() {
     retry: false,
   });
 }
+
+// ============================================================================
+// Approval holds
+//
+// A query matching one of the grant's approval patterns is parked mid-flight
+// until a second human resolves it. There is no timeout: a hold ends on
+// approve, deny, or the client giving up (which shows as `abandoned`, and must
+// read differently from `denied` — nothing ran, and nobody is waiting anymore).
+// ============================================================================
+
+/**
+ * The set of queries currently awaiting a decision. This is authoritative;
+ * the live stream is only a hint that it changed, so every stream gap and
+ * reconnect refetches this.
+ */
+export function usePendingApprovals(options?: {
+  enabled?: boolean;
+  refetchInterval?: number | false;
+}) {
+  return useQuery({
+    queryKey: ["queries", "pending"],
+    queryFn: async (): Promise<Query[]> => {
+      const response = await apiClient.GET("/queries/pending");
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to load pending approvals",
+        );
+      }
+      return response.data?.queries || [];
+    },
+    enabled: options?.enabled ?? true,
+    refetchInterval: options?.refetchInterval ?? false,
+    retry: false,
+  });
+}
+
+/** Releases a held statement; it then runs. Self-approval is refused (403). */
+export function useApproveQuery(options?: { onSuccess?: () => void }) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (uid: string): Promise<void> => {
+      const response = await apiClient.POST("/queries/{uid}/approve", {
+        params: { path: { uid } },
+      });
+      if (response.error) {
+        throw new Error(response.error.message || "Failed to approve query");
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["queries"] });
+      options?.onSuccess?.();
+    },
+  });
+}
+
+/** Rejects a held statement; the client gets the reason as a native error. */
+export function useDenyQuery(options?: { onSuccess?: () => void }) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (vars: {
+      uid: string;
+      reason?: string;
+    }): Promise<void> => {
+      const response = await apiClient.POST("/queries/{uid}/deny", {
+        params: { path: { uid: vars.uid } },
+        body: { reason: vars.reason },
+      });
+      if (response.error) {
+        throw new Error(response.error.message || "Failed to deny query");
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["queries"] });
+      options?.onSuccess?.();
+    },
+  });
+}
+
+/**
+ * Bulk deny — the safety valve for "clear every hold now". Admin only.
+ */
+export function useDenyAllPendingApprovals(options?: {
+  onSuccess?: () => void;
+}) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (reason?: string): Promise<void> => {
+      const response = await apiClient.POST("/queries/pending/deny-all", {
+        body: { reason },
+      });
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to deny pending approvals",
+        );
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["queries"] });
+      options?.onSuccess?.();
+    },
+  });
+}
