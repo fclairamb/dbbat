@@ -53,6 +53,7 @@ PR titles MUST follow the conventional commit format:
 - **Logging**: `log/slog`
 - **Frontend**: React 19 + TypeScript + Vite (see `front/CLAUDE.md`)
 - **Capture format**: Protocol-agnostic pcapng, readable by tcpdump/Wireshark (`docs/dump-format.md`)
+- **Live stream + approvals**: WebSocket event stream and pattern-triggered approval holds (`docs/approvals.md`)
 
 ## Project Structure
 
@@ -65,6 +66,8 @@ dbbat/
 │   ├── migrations/sql/      # SQL migration files (up/down)
 │   ├── store/               # Database models and CRUD operations
 │   ├── cache/               # Auth cache shared by API + proxies
+│   ├── events/              # In-process topic broker behind GET /api/v1/stream
+│   ├── approval/            # Registry of queries parked awaiting a human
 │   ├── dump/                # Session packet dump format (read/write/anonymise)
 │   ├── api/                 # REST API handlers and middleware
 │   │   └── openapi.yml      # OpenAPI 3.0 specification
@@ -165,6 +168,9 @@ This applies even when the current task is otherwise complete — capture the fo
 | `DBB_SLACK_SIGNING_SECRET` | Slack app signing secret; enables Approve/Deny buttons + inbound interactions endpoint. Empty = link-through-UI (no buttons). Requires the bot token. Legacy alias `DBB_SLACK_NOTIFY_SIGNING_SECRET` is also accepted; the canonical name wins if both are set. | No |
 | `DBB_SLACK_NOTIFY_APP_TOKEN` | Slack app-level token (`xapp-...`, scope `connections:write`); enables **Socket Mode** — receives Approve/Deny clicks over an outbound WebSocket instead of the inbound endpoint (for deployments Slack can't reach inbound). Requires the bot token. | No |
 | `DBB_PUBLIC_URL` | Externally reachable base URL; used for deep-links in Slack notifications | If notify enabled |
+| `DBB_APPROVAL_ENABLED` | Enable pattern-triggered approval holds (four-eyes on a statement). **Off by default** — a hold blocks a live database connection on a human. See `docs/approvals.md` | No |
+| `DBB_APPROVAL_SLACK_DELAY` | How long a hold stays pending before escalating to Slack (default: `30s`; `0` disables) | No |
+| `DBB_APPROVAL_SLACK_SQL` | Include the (truncated) SQL text in the Slack escalation (default: `true`) | No |
 
 Note: If no encryption key is provided, one is created at `~/.dbbat/key`.
 
@@ -208,6 +214,10 @@ The same auth + grant + query-logging pipeline runs across all four protocols (`
 - Time-windowed grants (`starts_at`, `expires_at`)
 - Controls: `read_only`, `block_copy`, `block_ddl` (combinable; empty = full write)
 - Optional quotas: `max_query_counts`, `max_bytes_transferred`
+- Optional **approval holds**: RE2 patterns on the grant that suspend a matching
+  statement mid-flight until a second human approves it. Self-approval is always
+  rejected; a hold has no timeout. Off by default (`DBB_APPROVAL_ENABLED`) —
+  see `docs/approvals.md`
 
 ### Security
 - User passwords: Argon2id hashed
