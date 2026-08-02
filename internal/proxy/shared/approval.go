@@ -219,6 +219,12 @@ type HoldRequest struct {
 	ClientGone <-chan struct{}
 	// Guard keeps quotas, expiry and revocation running while parked.
 	Guard *LimitGuard
+	// OnPending, when set, is called with the pending row's uid the instant
+	// it exists — before the session blocks. Protocols use it to publish the
+	// uid to their out-of-band cancellation path (PostgreSQL CancelRequest,
+	// MySQL KILL QUERY, Mongo killOperations), which must be able to end a
+	// hold that has not returned yet.
+	OnPending func(queryUID uuid.UUID)
 }
 
 // Hold persists the statement as pending, announces it, and blocks until a
@@ -259,6 +265,12 @@ func (g *ApprovalGate) Hold(ctx context.Context, req HoldRequest) (uuid.UUID, er
 
 	decisions, release := g.deps.Registry.Register(pending.UID)
 	defer release()
+
+	// Announce the uid to the protocol's cancellation path before blocking.
+	if req.OnPending != nil {
+		req.OnPending(pending.UID)
+		defer req.OnPending(uuid.Nil)
+	}
 
 	g.publishPending(ctx, pending, req)
 

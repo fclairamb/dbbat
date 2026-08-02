@@ -213,6 +213,11 @@ func (s *Session) processUpstreamAuthMessage(
 				return false, fmt.Errorf("failed to forward backend key data: %w", err)
 			}
 
+			// Remember the key we just handed the client: a CancelRequest
+			// carrying it arrives on a *different* connection and has to be
+			// routed back to this session.
+			s.noteCancelKey(s.bufferedBackendKeyData)
+
 			s.bufferedBackendKeyData = nil
 		}
 

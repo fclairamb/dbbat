@@ -37,6 +37,11 @@ type pendingQuery struct {
 	capturedBytes int64            // Total bytes captured
 	rowNumber     int              // Current row counter
 	truncated     bool             // True if limits exceeded
+
+	// approvalUID is the uid of the row an approval hold already inserted for
+	// this statement (uuid.Nil when no hold happened). Non-nil means the
+	// completion path must UPDATE that row rather than INSERT a second one.
+	approvalUID uuid.UUID
 }
 
 // preparedStatement tracks a prepared statement with its type information.
@@ -117,6 +122,29 @@ type Session struct {
 	guard                  *shared.LimitGuard          // Mid-stream time/bandwidth limit enforcement
 	revocation             *cache.RevocationHandle     // Signaled when this session's grant is revoked mid-flight
 
+	// watched sits below the counting conn (and below TLS) so an approval
+	// hold can keep reading the client socket while the session goroutine is
+	// blocked on a human. Without it a client FIN would go unnoticed and the
+	// hold — which has no timeout by design — would never end.
+	watched *shared.WatchedConn
+
+	// approvalDeps/approvalGate implement pattern-triggered approval holds.
+	// The gate is built once the grant is known; before that it is inert.
+	approvalDeps shared.ApprovalDeps
+	approvalGate *shared.ApprovalGate
+
+	// heldQueryUID is the uid of the statement currently parked on a human,
+	// uuid.Nil when nothing is parked. Read by the out-of-band CancelRequest
+	// path, which arrives on a different TCP connection entirely.
+	heldMu       sync.Mutex
+	heldQueryUID uuid.UUID
+
+	// cancels routes PostgreSQL CancelRequests (separate TCP connection) back
+	// to the session that owns the BackendKeyData they carry.
+	cancels     *cancelRegistry
+	cancelKeyMu sync.Mutex
+	cancelKey   *cancelKey
+
 	// Wire-level byte counters for the client-facing socket. Reads count as
 	// bytes-from-client (queries the client sent), writes count as
 	// bytes-to-client (responses the proxy returned). Together they capture
@@ -152,9 +180,20 @@ func NewSession(
 	// pgproto3 backend reads is counted. The TLS upgrade in handleSSLRequest
 	// reassigns clientConn to a tls.Conn that wraps this CountingConn, so
 	// encrypted bytes still flow through the counter post-upgrade.
-	counted := shared.NewCountingConn(clientConn, bytesFromClient, bytesToClient)
+	//
+	// WatchedConn goes *under* the counter (and therefore under any later TLS
+	// upgrade) so a parked hold reads raw transport bytes it never has to
+	// decrypt, and so replayed bytes are counted exactly once, on replay.
+	watched := shared.NewWatchedConn(clientConn)
+	counted := shared.NewCountingConn(watched, bytesFromClient, bytesToClient)
+
+	// Without keepalive, a hard-killed client or a dead network path never
+	// produces a FIN, and "held until the client disconnects" silently means
+	// "held forever".
+	_ = shared.EnableClientKeepAlive(clientConn)
 
 	return &Session{
+		watched:         watched,
 		clientConn:      counted,
 		clientReader:    bufio.NewReader(counted),
 		store:           dataStore,
@@ -257,6 +296,13 @@ func (s *Session) proxyMessages() error {
 	// error frame).
 	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag())
+
+	// The approval gate compiles the grant's patterns once, here, so the
+	// per-statement cost of the (overwhelmingly common) no-pattern case is a
+	// single nil check on the hot path.
+	s.approvalGate = shared.NewApprovalGate(
+		s.approvalDeps, s.grant, s.connectionUID, s.user, s.database.Name,
+	)
 
 	watchCtx, cancelWatch := context.WithCancel(s.ctx)
 	defer cancelWatch()
@@ -686,6 +732,8 @@ func (s *Session) persistAbortedQuery(cause error) {
 
 // cleanup closes connections and updates records.
 func (s *Session) cleanup() {
+	s.releaseCancelKey()
+
 	if s.grant != nil && s.revocation != nil {
 		s.store.Revocations().Deregister(s.grant.UID, s.revocation)
 	}
@@ -861,6 +909,22 @@ func (s *Session) receiveStartupMessage() (pgproto3.FrontendMessage, error) {
 
 	if _, err := io.ReadFull(s.clientReader, msgBuf[4:]); err != nil {
 		return nil, err
+	}
+
+	// A CancelRequest arrives on its own TCP connection and is *not* a
+	// StartupMessage — decoding it as one would fail on the magic version.
+	// Recognising it is what keeps a parked statement cancellable: the held
+	// session's own socket is blocked, so this is the only channel left.
+	if len(msgBuf) >= 8 {
+		version := int(msgBuf[4])<<24 | int(msgBuf[5])<<16 | int(msgBuf[6])<<8 | int(msgBuf[7])
+		if version == pgCancelRequestCode {
+			cancel := &pgproto3.CancelRequest{}
+			if err := cancel.Decode(msgBuf[4:]); err != nil {
+				return nil, err
+			}
+
+			return cancel, nil
+		}
 	}
 
 	startup := &pgproto3.StartupMessage{}

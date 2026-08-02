@@ -3,6 +3,7 @@ package postgresql
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -13,6 +14,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -28,6 +30,14 @@ type Server struct {
 	// tlsConfig terminates client TLS at the proxy. nil when TLS is
 	// disabled — sessions then refuse SSLRequest with 'N' as before.
 	tlsConfig *tls.Config
+
+	// approvalDeps carries the approval-hold collaborators (broker, registry,
+	// store, Slack escalator). Zero value = feature off.
+	approvalDeps shared.ApprovalDeps
+
+	// cancels routes PostgreSQL CancelRequests, which arrive on their own TCP
+	// connection, back to the session that owns the backend key.
+	cancels *cancelRegistry
 
 	// listenerMu guards listener, which is written by Start and read
 	// concurrently by Addr/Shutdown (e.g. tests polling Addr while Start runs
@@ -68,7 +78,14 @@ func NewServer(
 		shutdown:      make(chan struct{}),
 		ctx:           ctx,
 		cancel:        cancel,
+		cancels:       newCancelRegistry(),
 	}, nil
+}
+
+// SetApprovalDeps installs the approval-hold collaborators. Called by the
+// wiring in main; a server without them simply never holds anything.
+func (s *Server) SetApprovalDeps(deps shared.ApprovalDeps) {
+	s.approvalDeps = deps
 }
 
 // Start starts the proxy server.
@@ -182,7 +199,17 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	s.logger.DebugContext(s.ctx, "New connection", slog.Any("remote_addr", clientConn.RemoteAddr()))
 
 	session := NewSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.queryStorage, s.dumpConfig, s.authCache, s.tlsConfig)
+	session.approvalDeps = s.approvalDeps
+	session.cancels = s.cancels
+
 	if err := session.Run(); err != nil {
+		// A CancelRequest is a normal, expected one-shot connection, not a
+		// session failure — logging it as an error would be noise on every
+		// client-side Ctrl-C.
+		if errors.Is(err, ErrCancelRequestHandled) {
+			return
+		}
+
 		s.logger.ErrorContext(s.ctx, "Session error", slog.Any("error", err), slog.Any("remote_addr", clientConn.RemoteAddr()))
 	}
 }

@@ -69,11 +69,19 @@ func (s *Session) handleQuery(query *pgproto3.Query) error {
 		return ErrCopyNotPermitted
 	}
 
+	// Approval hold — last, after every cheap deterministic deny, and before
+	// a single byte reaches upstream. Blocks until a human decides.
+	approvalUID, err := s.holdIfNeeded(sqlText, nil)
+	if err != nil {
+		return err
+	}
+
 	// Start tracking query for logging
 	s.currentQuery = &pendingQuery{
 		sql:          sqlText,
 		startTime:    time.Now(),
 		capturedRows: make([]store.QueryRow, 0), // Initialize for capture
+		approvalUID:  approvalUID,
 	}
 
 	return nil
@@ -240,12 +248,21 @@ func (s *Session) handleExecute(msg *pgproto3.Execute) error {
 		s.logger.WarnContext(s.ctx, "execute for unknown statement", slog.String("portal", msg.Portal), slog.String("stmt", portal.stmtName))
 	}
 
+	// Approval hold at Execute, deliberately not at Parse: at Parse time the
+	// bind parameters are not yet known, and the SQL that ultimately runs is
+	// the portal's.
+	approvalUID, err := s.holdIfNeeded(sqlText, portal.parameters)
+	if err != nil {
+		return err
+	}
+
 	// Queue the query for logging (will be popped on CommandComplete)
 	query := &pendingQuery{
 		sql:          sqlText,
 		startTime:    time.Now(),
 		parameters:   portal.parameters,
 		capturedRows: make([]store.QueryRow, 0), // Initialize for capture
+		approvalUID:  approvalUID,
 	}
 	s.extendedState.pendingQueries = append(s.extendedState.pendingQueries, query)
 
@@ -320,6 +337,7 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 	duration := float64(time.Since(s.currentQuery.startTime).Milliseconds())
 
 	query := &store.Query{
+		UID:          s.currentQuery.approvalUID,
 		ConnectionID: s.connectionUID,
 		SQLText:      s.currentQuery.sql,
 		Parameters:   s.currentQuery.parameters,
@@ -365,10 +383,24 @@ func (s *Session) persistQueryAsync(query *store.Query, capturedRows []store.Que
 	}
 
 	go func() {
-		createdQuery, err := s.store.CreateQuery(s.ctx, query)
-		if err != nil {
-			s.logger.ErrorContext(s.ctx, "failed to log query", slog.Any("error", err))
-			return
+		queryUID := query.UID
+
+		if queryUID != uuid.Nil {
+			// The row already exists: an approval hold persisted it as
+			// pending before the statement ran, so complete it in place
+			// rather than inserting a duplicate.
+			if err := s.store.UpdateQueryCompletion(s.ctx, queryUID, query.DurationMs, query.RowsAffected, query.Error); err != nil {
+				s.logger.ErrorContext(s.ctx, "failed to complete held query", slog.Any("error", err))
+			}
+		} else {
+			createdQuery, err := s.store.CreateQuery(s.ctx, query)
+			if err != nil {
+				s.logger.ErrorContext(s.ctx, "failed to log query", slog.Any("error", err))
+
+				return
+			}
+
+			queryUID = createdQuery.UID
 		}
 
 		// Store captured result rows
@@ -378,7 +410,7 @@ func (s *Session) persistQueryAsync(query *store.Query, capturedRows []store.Que
 				capturedRows[i].RowNumber = i + 1
 			}
 
-			if err := s.store.StoreQueryRows(s.ctx, createdQuery.UID, capturedRows); err != nil {
+			if err := s.store.StoreQueryRows(s.ctx, queryUID, capturedRows); err != nil {
 				s.logger.ErrorContext(s.ctx, "failed to store query rows", slog.Any("error", err))
 			}
 		}
