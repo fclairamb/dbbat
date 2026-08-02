@@ -139,7 +139,7 @@ This applies even when the current task is otherwise complete — capture the fo
 | Variable | Description | Required |
 |----------|-------------|----------|
 | `DBB_DSN` | PostgreSQL DSN for DBBat storage | Yes |
-| `DBB_LISTEN_PG` | PostgreSQL proxy listen address (default: `:5434`) | No |
+| `DBB_LISTEN_PG` | PostgreSQL proxy listen address (default: `:5433`) | No |
 | `DBB_LISTEN_ORA` | Oracle proxy listen address (default: `:1522`; empty disables) | No |
 | `DBB_LISTEN_MYSQL` | MySQL/MariaDB proxy listen address (default: `:3307`; empty disables) | No |
 | `DBB_LISTEN_MONGO` | MongoDB proxy listen address (default: `:27018`; empty disables) | No |

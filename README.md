@@ -32,7 +32,7 @@ DBBat acts as a monitoring proxy that allows controlled developer access to prod
 
 | Engine | Protocol | Default proxy port | Notes |
 |--------|----------|--------------------|-------|
-| PostgreSQL | PostgreSQL wire (`pgx/v5`) | `:5434` (`DBB_LISTEN_PG`) | First-class support; auth terminated at proxy |
+| PostgreSQL | PostgreSQL wire (`pgx/v5`) | `:5433` (`DBB_LISTEN_PG`) | First-class support; auth terminated at proxy |
 | Oracle | TNS / TTC | `:1522` (`DBB_LISTEN_ORA`) | O5LOGON proxy auth; `go-ora` end-to-end (other clients reach AUTH only — see [docs/oracle.md](docs/oracle.md)) |
 | MySQL | MySQL wire (`go-mysql-org/go-mysql`) | `:3307` (`DBB_LISTEN_MYSQL`) | `caching_sha2_password` (default), `mysql_clear_password`; TLS terminated at proxy |
 | MariaDB | MySQL wire (same listener) | `:3307` (`DBB_LISTEN_MYSQL`) | Same as MySQL — `mysql_native_password` not supported, `STMT_BULK_EXECUTE` refused |
@@ -72,7 +72,7 @@ Any of these upstreams can be reached directly or through an **SSH bastion** —
 ```bash
 docker run -d \
   -e DBB_DSN="postgres://user:pass@host:5432/dbbat?sslmode=require" \
-  -p 5434:5434 \
+  -p 5433:5433 \
   -p 1522:1522 \
   -p 3307:3307 \
   -p 27018:27018 \
@@ -80,7 +80,7 @@ docker run -d \
   ghcr.io/fclairamb/dbbat
 ```
 
-Ports: `5434` PostgreSQL proxy, `1522` Oracle proxy, `3307` MySQL/MariaDB proxy, `27018` MongoDB proxy, `4200` REST API + web UI.
+Ports: `5433` PostgreSQL proxy, `1522` Oracle proxy, `3307` MySQL/MariaDB proxy, `27018` MongoDB proxy, `4200` REST API + web UI.
 
 ### Running with Docker Compose
 
@@ -183,7 +183,7 @@ curl -X POST http://localhost:4200/api/v1/grants \
 
 ```bash
 # PostgreSQL
-psql -h localhost -p 5434 -U developer -d production
+psql -h localhost -p 5433 -U developer -d production
 
 # Oracle (go-ora-style easy connect)
 # Use the database name (or its oracle_service_name) as SERVICE_NAME
@@ -201,7 +201,7 @@ mongosh "mongodb://developer:temppass123@localhost:27018/?authSource=production&
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DBB_DSN` | PostgreSQL DSN for DBBat storage | Required |
-| `DBB_LISTEN_PG` | PostgreSQL proxy listen address | `:5434` |
+| `DBB_LISTEN_PG` | PostgreSQL proxy listen address | `:5433` |
 | `DBB_LISTEN_ORA` | Oracle proxy listen address (empty disables) | `:1522` |
 | `DBB_LISTEN_MYSQL` | MySQL/MariaDB proxy listen address (empty disables) | `:3307` |
 | `DBB_LISTEN_MONGO` | MongoDB proxy listen address (empty disables) | `:27018` |
