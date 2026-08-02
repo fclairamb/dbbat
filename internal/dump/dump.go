@@ -5,17 +5,9 @@ import (
 	"time"
 )
 
-// File format constants.
-const (
-	magic        = "DBBAT_DUMP\x00\x00\x00\x00\x00\x00" // 16 bytes
-	magicSize    = 16
-	minMagic     = 10 // length of "DBBAT_DUMP"
-	version      = uint16(2)
-	versionLen   = 2
-	headerLenLen = 4
-	FileExt      = ".dbbat-dump"
-	eofMarker    = byte(0xFF)
-)
+// FileExt is the extension used for session capture files. Captures are plain
+// pcapng, readable by tcpdump/Wireshark/tshark without any dbbat tooling.
+const FileExt = ".pcapng"
 
 // Packet direction constants.
 const (
@@ -31,16 +23,12 @@ const (
 	ProtocolMongo      = "mongodb"
 )
 
-// Packet frame size: 8 (relativeNs) + 1 (direction) + 4 (length).
-const packetFrameSize = 13
+// ErrMissingMetadata is returned when a capture carries no dbbat session
+// metadata in its Section Header Block comment.
+var ErrMissingMetadata = errors.New("capture has no dbbat session metadata")
 
-// Errors.
-var (
-	ErrInvalidMagic       = errors.New("invalid dump file magic")
-	ErrUnsupportedVersion = errors.New("unsupported dump format version")
-)
-
-// Header holds the JSON-serializable session metadata.
+// Header holds the JSON-serializable session metadata. It is stored as a JSON
+// blob in the pcapng Section Header Block comment (opt_comment).
 type Header struct {
 	SessionID  string         `json:"session_id"`
 	Protocol   string         `json:"protocol"`
@@ -48,9 +36,9 @@ type Header struct {
 	Connection map[string]any `json:"connection"`
 }
 
-// Packet represents a single captured packet.
+// Packet represents a single captured application-layer payload.
 type Packet struct {
 	RelativeNs int64  // Nanoseconds since session start
 	Direction  byte   // DirClientToServer or DirServerToClient
-	Data       []byte // Raw protocol bytes
+	Data       []byte // Raw protocol bytes (TCP payload, synthesized headers stripped)
 }

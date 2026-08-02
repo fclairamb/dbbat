@@ -1,162 +1,196 @@
 package dump
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"sync"
 	"time"
+
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/layers"
+	"github.com/gopacket/gopacket/pcapgo"
 )
 
-// Writer writes packet dumps to a binary file.
+// application is advertised in the Section Header Block shb_userappl option.
+const application = "dbbat"
+
+// epbOverhead is the fixed pcapng cost of one Enhanced Packet Block:
+// 8 (block type + length) + 20 (interface, timestamp, capture/original length)
+// + 8 (epb_flags option) + 4 (end-of-options) + 4 (trailing block length).
+const epbOverhead = 44
+
+// directionFlags maps a dump direction to the pcapng epb_flags direction bits.
+// Traffic is described from the proxy's point of view: what dbbat receives from
+// the client is inbound, what it receives from the upstream server is outbound.
+func directionFlags(direction byte) *pcapgo.NgEpbFlags {
+	dir := pcapgo.NgEpbFlagDirectionInbound
+	if direction == DirServerToClient {
+		dir = pcapgo.NgEpbFlagDirectionOutbound
+	}
+
+	return &pcapgo.NgEpbFlags{Direction: dir}
+}
+
+// countingWriter counts every byte handed to the underlying writer.
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+
+	if err != nil {
+		return n, fmt.Errorf("write capture: %w", err)
+	}
+
+	return n, nil
+}
+
+// Writer writes a session capture as a pcapng file. Application payloads are
+// wrapped in synthesized Ethernet/IPv4/TCP headers (see synth.go) and the
+// session metadata is stored as a JSON blob in the Section Header Block comment.
 type Writer struct {
 	file      *os.File
+	counter   *countingWriter
+	ng        *pcapgo.NgWriter
+	framer    *framer
 	startTime time.Time
 	maxSize   int64
-	written   int64
 	mu        sync.Mutex
 }
 
-// NewWriter creates a new dump file and writes the file header + JSON header.
+// NewWriter creates a new capture file and writes the pcapng section header
+// (carrying the session metadata) and interface description.
 func NewWriter(path string, header Header, maxSize int64) (*Writer, error) {
+	return newWriter(path, header, maxSize, newEndpoints(header, false))
+}
+
+func newWriter(path string, header Header, maxSize int64, ep endpoints) (*Writer, error) {
+	// pcapng timestamps are unsigned microseconds/nanoseconds since the Unix
+	// epoch: a zero or pre-epoch start time would not round-trip. Normalise it
+	// (and record the normalised value in the metadata) so the capture stays
+	// readable by standard tooling.
+	if header.StartTime.Before(time.Unix(0, 0)) {
+		header.StartTime = time.Now()
+	}
+
+	metadata, err := json.Marshal(header)
+	if err != nil {
+		return nil, fmt.Errorf("marshal session metadata: %w", err)
+	}
+
 	f, err := os.Create(path)
 	if err != nil {
-		return nil, fmt.Errorf("create dump file: %w", err)
+		return nil, fmt.Errorf("create capture file: %w", err)
 	}
 
-	w := &Writer{
-		file:      f,
-		startTime: header.StartTime,
-		maxSize:   maxSize,
+	counter := &countingWriter{w: f}
+
+	intfName := header.Protocol
+	if intfName == "" {
+		intfName = application
 	}
 
-	if err := w.writeHeader(header); err != nil {
+	ng, err := pcapgo.NewNgWriterInterface(counter, pcapgo.NgInterface{
+		Name:                intfName,
+		Description:         "dbbat proxied session (synthesized TCP/IP headers)",
+		LinkType:            layers.LinkTypeEthernet,
+		SnapLength:          snapLength,
+		TimestampResolution: 9,
+	}, pcapgo.NgWriterOptions{SectionInfo: pcapgo.NgSectionInfo{
+		Application: application,
+		Comment:     string(metadata),
+	}})
+	if err != nil {
 		_ = f.Close()
 		_ = os.Remove(path)
 
-		return nil, err
+		return nil, fmt.Errorf("write pcapng header: %w", err)
 	}
 
-	return w, nil
+	if err := ng.Flush(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+
+		return nil, fmt.Errorf("flush pcapng header: %w", err)
+	}
+
+	return &Writer{
+		file:      f,
+		counter:   counter,
+		ng:        ng,
+		framer:    newFramer(ep),
+		startTime: header.StartTime,
+		maxSize:   maxSize,
+	}, nil
 }
 
-func (w *Writer) writeHeader(header Header) error {
-	// Magic (16 bytes)
-	if _, err := w.file.Write([]byte(magic)); err != nil {
-		return fmt.Errorf("write magic: %w", err)
-	}
-
-	// Version (uint16 BE)
-	var vBuf [versionLen]byte
-	binary.BigEndian.PutUint16(vBuf[:], version)
-
-	if _, err := w.file.Write(vBuf[:]); err != nil {
-		return fmt.Errorf("write version: %w", err)
-	}
-
-	// JSON header
-	jsonData, err := json.Marshal(header)
-	if err != nil {
-		return fmt.Errorf("marshal header: %w", err)
-	}
-
-	// Header length (uint32 BE)
-	var hLenBuf [headerLenLen]byte
-	binary.BigEndian.PutUint32(hLenBuf[:], uint32(len(jsonData)))
-
-	if _, err := w.file.Write(hLenBuf[:]); err != nil {
-		return fmt.Errorf("write header length: %w", err)
-	}
-
-	// JSON data
-	if _, err := w.file.Write(jsonData); err != nil {
-		return fmt.Errorf("write header json: %w", err)
-	}
-
-	// Track written bytes for max size enforcement
-	n, _ := w.file.Seek(0, io.SeekCurrent)
-	w.written = n
-
-	return nil
-}
-
-// WritePacket appends a single packet to the dump file. Thread-safe.
-// Silently skips if maxSize would be exceeded.
+// WritePacket appends a single application payload to the capture. Thread-safe.
+// Silently skips the packet if maxSize would be exceeded.
 func (w *Writer) WritePacket(direction byte, data []byte) error {
+	return w.writeAt(time.Since(w.startTime).Nanoseconds(), direction, data)
+}
+
+// writeAt appends a payload with an explicit offset from the session start.
+func (w *Writer) writeAt(relativeNs int64, direction byte, data []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	frameTotal := int64(packetFrameSize + len(data))
-	if w.maxSize > 0 && w.written+frameTotal > w.maxSize {
+	frames, err := w.framer.frames(direction, data)
+	if err != nil {
+		return err
+	}
+
+	total := int64(0)
+	for _, frame := range frames {
+		total += int64(epbOverhead + len(frame) + (4-len(frame)&3)&3)
+	}
+
+	if w.maxSize > 0 && w.counter.n+total > w.maxSize {
 		return nil // silently skip
 	}
 
-	var buf [packetFrameSize]byte
+	timestamp := w.startTime.Add(time.Duration(relativeNs))
+	flags := directionFlags(direction)
 
-	// RelativeNs (int64 BE)
-	relNs := time.Since(w.startTime).Nanoseconds()
-	binary.BigEndian.PutUint64(buf[:8], uint64(relNs))
+	for _, frame := range frames {
+		ci := gopacket.CaptureInfo{
+			Timestamp:      timestamp,
+			CaptureLength:  len(frame),
+			Length:         len(frame),
+			InterfaceIndex: 0,
+		}
 
-	// Direction (uint8)
-	buf[8] = direction
-
-	// Length (uint32 BE)
-	binary.BigEndian.PutUint32(buf[9:13], uint32(len(data)))
-
-	if _, err := w.file.Write(buf[:]); err != nil {
-		return fmt.Errorf("write packet frame: %w", err)
+		if err := w.ng.WritePacketWithOptions(ci, frame, pcapgo.NgPacketOptions{Flags: flags}); err != nil {
+			return fmt.Errorf("write packet block: %w", err)
+		}
 	}
 
-	if _, err := w.file.Write(data); err != nil {
-		return fmt.Errorf("write packet data: %w", err)
+	if err := w.ng.Flush(); err != nil {
+		return fmt.Errorf("flush capture: %w", err)
 	}
-
-	w.written += frameTotal
 
 	return nil
 }
 
-// Close writes the EOF marker and closes the file.
+// Close flushes any buffered block and closes the file.
 func (w *Writer) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	var buf [packetFrameSize]byte
+	if err := w.ng.Flush(); err != nil {
+		_ = w.file.Close()
 
-	relNs := time.Since(w.startTime).Nanoseconds()
-	binary.BigEndian.PutUint64(buf[:8], uint64(relNs))
-
-	buf[8] = eofMarker
-	binary.BigEndian.PutUint32(buf[9:13], 0)
-
-	_, _ = w.file.Write(buf[:])
-
-	return w.file.Close()
-}
-
-// writePacketRaw writes a packet with a pre-encoded timestamp (for dump transformation).
-func (w *Writer) writePacketRaw(relativeNsBuf []byte, direction byte, data []byte) error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	frameTotal := int64(packetFrameSize + len(data))
-
-	var buf [packetFrameSize]byte
-	copy(buf[:8], relativeNsBuf)
-	buf[8] = direction
-	binary.BigEndian.PutUint32(buf[9:13], uint32(len(data)))
-
-	if _, err := w.file.Write(buf[:]); err != nil {
-		return fmt.Errorf("write packet frame: %w", err)
+		return fmt.Errorf("flush capture: %w", err)
 	}
 
-	if _, err := w.file.Write(data); err != nil {
-		return fmt.Errorf("write packet data: %w", err)
+	if err := w.file.Close(); err != nil {
+		return fmt.Errorf("close capture file: %w", err)
 	}
-
-	w.written += frameTotal
 
 	return nil
 }

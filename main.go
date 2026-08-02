@@ -167,13 +167,19 @@ func CmdRun() {
 			},
 			{
 				Name:  "dump",
-				Usage: "Dump file commands",
+				Usage: "Session capture (pcapng) commands",
 				Commands: []*cli.Command{
 					{
 						Name:      "anonymise",
 						Aliases:   []string{"anonymize"},
-						Usage:     "Create an anonymised copy of a dump file (strips connection metadata)",
+						Usage:     "Create an anonymised copy of a capture (strips session metadata and, by default, the synthesized addresses)",
 						ArgsUsage: "<input-file> [output-file]",
+						Flags: []cli.Flag{
+							&cli.BoolFlag{
+								Name:  "keep-addresses",
+								Usage: "keep the synthesized IP addresses and ports (they may encode the real upstream)",
+							},
+						},
 						Action: func(_ context.Context, cmd *cli.Command) error {
 							return runDumpAnonymise(cmd)
 						},
@@ -891,11 +897,18 @@ func runDumpAnonymise(cmd *cli.Command) error {
 		outputPath = inputPath[:len(inputPath)-len(ext)] + ".anonymised" + ext
 	}
 
-	if err := dump.Anonymise(inputPath, outputPath); err != nil {
+	rewriteAddresses := !cmd.Bool("keep-addresses")
+
+	if err := dump.Anonymise(inputPath, outputPath, rewriteAddresses); err != nil {
 		return fmt.Errorf("anonymise failed: %w", err)
 	}
 
-	slog.InfoContext(context.Background(), "Anonymised dump written", "path", outputPath)
+	slog.InfoContext(
+		context.Background(),
+		"Anonymised capture written",
+		"path", outputPath,
+		"addresses_rewritten", rewriteAddresses,
+	)
 
 	return nil
 }

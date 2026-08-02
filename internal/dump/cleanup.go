@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// CleanupOldFiles deletes .dbbat-dump files older than the retention period.
+// CleanupOldFiles deletes .pcapng capture files older than the retention period.
 // Returns the number of files deleted.
 func CleanupOldFiles(dir string, retention time.Duration) (int, error) {
 	entries, err := os.ReadDir(dir)
