@@ -255,6 +255,10 @@ func (s *Server) setupRouter() *gin.Engine {
 
 		// All other routes require authentication
 		authenticated := v1.Group("")
+		// Browsers can't set an Authorization header on a WebSocket handshake,
+		// so /stream carries its bearer token in Sec-WebSocket-Protocol; this
+		// promotes it before the normal auth middleware runs.
+		authenticated.Use(s.streamAuthMiddleware())
 		authenticated.Use(s.authMiddleware())
 		// Add rate limiting after authentication (uses user ID for rate limiting)
 		if s.rateLimiter != nil {
@@ -363,6 +367,7 @@ func (s *Server) setupRouter() *gin.Engine {
 			// inside the handler and is re-checked on every send, so no role
 			// middleware here — a connector may watch their own connection.
 			authenticated.GET("/stream", s.handleStream)
+
 
 			// Approval holds. Deliberately *not* behind requireAdmin: an
 			// approver-group member who is neither admin nor viewer must be

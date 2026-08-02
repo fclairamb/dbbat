@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -33,6 +34,45 @@ const (
 	streamWriteBuffer    = 4096
 )
 
+// streamAuthSubprotocol prefixes the WebSocket subprotocol a browser uses to
+// carry its bearer token.
+//
+// Browsers cannot set an Authorization header on a WebSocket handshake, and
+// putting a session token in the query string would leak it into access logs,
+// proxy logs and Referer headers. Sec-WebSocket-Protocol is the standard
+// workaround: it is a real request header, it never appears in the URL, and the
+// server must echo the selected value back.
+const streamAuthSubprotocol = "dbbat.auth.bearer."
+
+// streamAuthMiddleware promotes a bearer token carried in
+// Sec-WebSocket-Protocol into a normal Authorization header, so the ordinary
+// auth middleware handles the stream exactly like every other endpoint.
+func (s *Server) streamAuthMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.GetHeader("Authorization") != "" {
+			c.Next()
+
+			return
+		}
+
+		for _, proto := range strings.Split(c.GetHeader("Sec-WebSocket-Protocol"), ",") {
+			proto = strings.TrimSpace(proto)
+			if token, ok := strings.CutPrefix(proto, streamAuthSubprotocol); ok && token != "" {
+				c.Request.Header.Set("Authorization", "Bearer "+token)
+				c.Set(contextKeyStreamSubprotocol, proto)
+
+				break
+			}
+		}
+
+		c.Next()
+	}
+}
+
+// contextKeyStreamSubprotocol carries the subprotocol value that must be
+// echoed back on a successful upgrade.
+const contextKeyStreamSubprotocol = "stream_subprotocol"
+
 // streamCommand is a client→server control message.
 type streamCommand struct {
 	Type  string `json:"type"`
@@ -57,7 +97,17 @@ func (s *Server) handleStream(c *gin.Context) {
 		return
 	}
 
-	conn, err := streamUpgrader.Upgrade(c.Writer, c.Request, nil)
+	// Echo the auth subprotocol back; a browser closes the socket if the
+	// server selects nothing when the client offered a protocol.
+	var respHeader http.Header
+
+	if proto, ok := c.Get(contextKeyStreamSubprotocol); ok {
+		if value, ok := proto.(string); ok {
+			respHeader = http.Header{"Sec-WebSocket-Protocol": []string{value}}
+		}
+	}
+
+	conn, err := streamUpgrader.Upgrade(c.Writer, c.Request, respHeader)
 	if err != nil {
 		// Upgrade already wrote a response.
 		s.logger.DebugContext(c.Request.Context(), "stream upgrade failed", slog.Any("error", err))
