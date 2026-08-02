@@ -215,9 +215,13 @@ func streamReadLoopHarness(t *testing.T, authorize events.Authorizer) (*websocke
 		srv.streamReadLoop(ctx, cancel, conn, sub)
 	}))
 
-	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(httpSrv.URL, "http"), nil)
+	client, resp, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(httpSrv.URL, "http"), nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)
+	}
+
+	if resp != nil && resp.Body != nil {
+		_ = resp.Body.Close()
 	}
 
 	<-ready

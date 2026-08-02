@@ -52,6 +52,7 @@ func (c clientPoster) postBlocks(ctx context.Context, channel string, blocks []s
 }
 
 func (c clientPoster) updateBlocks(ctx context.Context, channel, ts string, blocks []slack.Block) error {
+	//nolint:dogsled // chat.update returns channel/ts/text we have no use for
 	_, _, _, err := c.client.UpdateMessageContext(ctx, channel, ts, slack.MsgOptionBlocks(blocks...))
 
 	return err
