@@ -169,7 +169,7 @@ service:
   proxy:
     enabled: true
     type: ClusterIP  # or NodePort, LoadBalancer
-    port: 5434
+    port: 5433
     annotations: {}
 ```
 
@@ -399,10 +399,10 @@ Default credentials: `admin` / `admin` (change immediately!)
 
 ```bash
 # Port-forward the proxy service
-kubectl port-forward --namespace dbbat svc/dbbat-pg 5434:5434
+kubectl port-forward --namespace dbbat svc/dbbat-pg 5433:5433
 
 # Connect with psql
-psql -h localhost -p 5434 -U <username> -d <database>
+psql -h localhost -p 5433 -U <username> -d <database>
 ```
 
 ## Configuration Parameters
@@ -425,7 +425,7 @@ psql -h localhost -p 5434 -U <username> -d <database>
 | `service.api.port` | API service port | `8080` |
 | `service.proxy.enabled` | Enable proxy service | `true` |
 | `service.proxy.type` | Proxy service type | `ClusterIP` |
-| `service.proxy.port` | Proxy service port | `5434` |
+| `service.proxy.port` | Proxy service port | `5433` |
 | `ingress.enabled` | Enable ingress | `false` |
 | `ingress.className` | Ingress class name | `""` |
 | `httpRoute.enabled` | Enable HTTPRoute (Gateway API) | `false` |
