@@ -283,6 +283,13 @@ This matters more than it looks: `sql_text` routinely contains PII, credentials
 and business data, so the stream must never become a wider read path than
 `GET /api/v1/queries` already is.
 
+Topic names are validated for shape before anything else happens (`connections`,
+`approvals/pending`, or `connection/<uuid>/queries`, at most 128 characters), so
+an unknown topic is answered `{"error":"unknown topic"}` without reaching the
+store or the per-socket authorization memo. A socket may hold at most 64
+subscriptions, and the memo itself is capped at 128 entries — together those
+stop a client from making its own socket accumulate state.
+
 There is deliberately **no global all-queries topic**. A busy proxy issues
 thousands of statements a second, each carrying full SQL text; firehosing that
 would be both a throughput problem and a data-exposure one.

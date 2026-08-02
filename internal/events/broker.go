@@ -27,6 +27,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // Topic names and prefixes. The namespace is the extension point; nothing else
@@ -65,6 +67,34 @@ const DefaultBuffer = 256
 // ConnectionQueriesTopic builds the per-connection query topic name.
 func ConnectionQueriesTopic(connectionUID string) string {
 	return TopicConnectionPrefix + connectionUID + TopicConnectionSuffix
+}
+
+// MaxTopicLength bounds a topic name. The longest legitimate one is
+// connection/<uuid>/queries; anything materially longer is a client trying to
+// make the server remember something.
+const MaxTopicLength = 128
+
+// ValidTopic reports whether a topic name is one this server can ever serve.
+// It is a pure string check with no I/O, so the transport can reject junk
+// before it reaches anything that allocates or hits the database.
+func ValidTopic(topic string) bool {
+	if len(topic) == 0 || len(topic) > MaxTopicLength {
+		return false
+	}
+
+	if topic == TopicApprovalsPending || topic == TopicConnections {
+		return true
+	}
+
+	uid, ok := ConnectionUIDFromTopic(topic)
+	if !ok {
+		return false
+	}
+
+	// A connection topic addresses a uuid, nothing else.
+	_, err := uuid.Parse(uid)
+
+	return err == nil
 }
 
 // ConnectionUIDFromTopic extracts the connection uid from a

@@ -1,6 +1,7 @@
 package events
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -261,5 +262,37 @@ func TestTopicHelpers(t *testing.T) {
 
 	if _, ok := ConnectionUIDFromTopic("connection//queries"); ok {
 		t.Fatal("empty uid must not parse")
+	}
+}
+
+func TestValidTopic(t *testing.T) {
+	t.Parallel()
+
+	valid := []string{
+		TopicApprovalsPending,
+		TopicConnections,
+		ConnectionQueriesTopic("6f1b0a52-4e0d-4a6e-9f38-2c4a1b7d9e01"),
+	}
+
+	for _, topic := range valid {
+		if !ValidTopic(topic) {
+			t.Fatalf("rejected a real topic: %q", topic)
+		}
+	}
+
+	invalid := []string{
+		"",
+		"nonsense",
+		"connection//queries",
+		"connection/not-a-uuid/queries",
+		"connection/6f1b0a52-4e0d-4a6e-9f38-2c4a1b7d9e01/rows",
+		"approvals/pending ", // trailing space
+		strings.Repeat("x", MaxTopicLength+1),
+	}
+
+	for _, topic := range invalid {
+		if ValidTopic(topic) {
+			t.Fatalf("accepted junk as a topic: %q", topic)
+		}
 	}
 }

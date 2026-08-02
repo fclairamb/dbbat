@@ -2,13 +2,17 @@ package api
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 
 	"github.com/fclairamb/dbbat/internal/events"
 	"github.com/fclairamb/dbbat/internal/store"
@@ -165,5 +169,170 @@ func TestTopicAuthCacheIsPerTopic(t *testing.T) {
 
 	if cache.allowed("approvals/pending") {
 		t.Fatal("a decision leaked across topics")
+	}
+}
+
+func TestTopicAuthCacheIsBounded(t *testing.T) {
+	t.Parallel()
+
+	cache := newTopicAuthCache(func(string) bool { return false })
+
+	// Denials are cached too, so an unbounded map is memory a client controls.
+	for i := range maxTopicAuthEntries * 4 {
+		cache.allowed(fmt.Sprintf("connection/%d/queries", i))
+	}
+
+	if got := cache.size(); got > maxTopicAuthEntries {
+		t.Fatalf("cache grew to %d entries, cap is %d", got, maxTopicAuthEntries)
+	}
+}
+
+// streamReadLoopHarness stands up a real WebSocket wired to the production
+// read loop, with no store behind it — everything under test here is string
+// handling and bookkeeping.
+func streamReadLoopHarness(t *testing.T, authorize events.Authorizer) (*websocket.Conn, *events.Subscriber) {
+	t.Helper()
+
+	srv := &Server{logger: slog.New(slog.DiscardHandler)}
+	broker := events.New()
+	sub := broker.Subscribe(authorize, 8)
+
+	ready := make(chan struct{})
+
+	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := streamUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+
+		defer func() { _ = conn.Close() }()
+
+		close(ready)
+
+		ctx, cancel := context.WithCancel(r.Context())
+		defer cancel()
+
+		srv.streamReadLoop(ctx, cancel, conn, sub)
+	}))
+
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(httpSrv.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+
+	<-ready
+
+	t.Cleanup(func() {
+		_ = client.Close()
+		sub.Close()
+		httpSrv.Close()
+	})
+
+	return client, sub
+}
+
+func TestSubscribeRejectsUnknownTopicsWithoutRemembering(t *testing.T) {
+	t.Parallel()
+
+	var lookups int
+
+	cache := newTopicAuthCache(func(string) bool {
+		lookups++
+
+		return true
+	})
+
+	client, sub := streamReadLoopHarness(t, cache.allowed)
+
+	const flood = 500
+
+	for i := range flood {
+		// Distinct junk, each near the read limit — the shape of the attack
+		// that would otherwise grow the per-socket cache for the socket's
+		// lifetime.
+		topic := fmt.Sprintf("%s-%d", strings.Repeat("z", 200), i)
+
+		if err := client.WriteJSON(map[string]string{"type": "subscribe", "topic": topic}); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+
+		var ack map[string]any
+		if err := client.ReadJSON(&ack); err != nil {
+			t.Fatalf("read %d: %v", i, err)
+		}
+
+		if ack["error"] != "unknown topic" {
+			t.Fatalf("junk topic %d was not rejected: %v", i, ack)
+		}
+	}
+
+	if got := cache.size(); got != 0 {
+		t.Fatalf("junk topics left %d authorization entries behind", got)
+	}
+
+	if lookups != 0 {
+		t.Fatalf("junk topics reached the (store-backed) authorizer %d times", lookups)
+	}
+
+	if got := len(sub.Topics()); got != 0 {
+		t.Fatalf("junk topics were subscribed: %d", got)
+	}
+}
+
+func TestSubscribeIsCappedPerSocket(t *testing.T) {
+	t.Parallel()
+
+	client, sub := streamReadLoopHarness(t, func(string) bool { return true })
+
+	refused := 0
+
+	for i := range maxTopicsPerSocket + 10 {
+		topic := events.ConnectionQueriesTopic(uuid.New().String())
+
+		if err := client.WriteJSON(map[string]string{"type": "subscribe", "topic": topic}); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+
+		var ack map[string]any
+		if err := client.ReadJSON(&ack); err != nil {
+			t.Fatalf("read %d: %v", i, err)
+		}
+
+		if ack["error"] == "too many subscriptions" {
+			refused++
+		}
+	}
+
+	if refused == 0 {
+		t.Fatal("a socket could subscribe without limit")
+	}
+
+	if got := len(sub.Topics()); got > maxTopicsPerSocket {
+		t.Fatalf("held %d topics, cap is %d", got, maxTopicsPerSocket)
+	}
+}
+
+func TestSubscribeAcceptsAWellFormedTopic(t *testing.T) {
+	t.Parallel()
+
+	client, sub := streamReadLoopHarness(t, func(string) bool { return true })
+
+	topic := events.ConnectionQueriesTopic(uuid.New().String())
+
+	if err := client.WriteJSON(map[string]string{"type": "subscribe", "topic": topic}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	var ack map[string]any
+	if err := client.ReadJSON(&ack); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+
+	if ack["error"] != nil {
+		t.Fatalf("a legitimate topic was refused: %v", ack)
+	}
+
+	if len(sub.Topics()) != 1 {
+		t.Fatalf("subscription not recorded: %v", sub.Topics())
 	}
 }

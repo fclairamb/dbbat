@@ -161,10 +161,17 @@ func (s *Server) streamReadLoop(ctx context.Context, cancel context.CancelFunc, 
 
 		switch cmd.Type {
 		case "subscribe":
-			ok := sub.Subscribe(cmd.Topic)
-
 			ack := map[string]any{"type": "subscribed", "topic": cmd.Topic, "error": nil}
-			if !ok {
+
+			switch {
+			case !events.ValidTopic(cmd.Topic):
+				// Rejected before anything remembers it. Without this, an
+				// authenticated client could make the socket accumulate one
+				// authorization-cache entry per distinct junk string.
+				ack["error"] = "unknown topic"
+			case len(sub.Topics()) >= maxTopicsPerSocket:
+				ack["error"] = "too many subscriptions"
+			case !sub.Subscribe(cmd.Topic):
 				ack["error"] = "forbidden"
 			}
 
@@ -253,9 +260,23 @@ func (s *Server) flushStream(conn *websocket.Conn, sub *events.Subscriber, ev ev
 	return true
 }
 
+// maxTopicsPerSocket bounds how many topics one socket may hold at once.
+// Comfortably above any real UI (a watch panel plus the global indicator is
+// two) and low enough that no client can turn a socket into a memory sink.
+const maxTopicsPerSocket = 64
+
+// maxTopicAuthEntries bounds the memo below. Reached only by a client cycling
+// through many distinct valid topics; the oldest entry is then evicted, which
+// costs a re-lookup and nothing else.
+const maxTopicAuthEntries = 128
+
 // topicAuthCache memoizes per-topic authorization decisions for a short
 // window. It exists so the send-time re-check stays a real re-check without
 // costing a store round-trip per event.
+//
+// It is bounded on purpose. The map is per-socket and freed on disconnect, but
+// it caches denials as well as grants, so an unbounded version would let an
+// authenticated client grow it for the socket's lifetime.
 type topicAuthCache struct {
 	lookup func(topic string) bool
 
@@ -289,10 +310,48 @@ func (c *topicAuthCache) allowed(topic string) bool {
 	allowed := c.lookup(topic)
 
 	c.mu.Lock()
+	c.evictLocked()
 	c.entries[topic] = topicAuthEntry{allowed: allowed, at: time.Now()}
 	c.mu.Unlock()
 
 	return allowed
+}
+
+// evictLocked keeps the memo under maxTopicAuthEntries, dropping expired
+// entries first and then the oldest. Caller holds c.mu.
+func (c *topicAuthCache) evictLocked() {
+	if len(c.entries) < maxTopicAuthEntries {
+		return
+	}
+
+	now := time.Now()
+
+	for topic, entry := range c.entries {
+		if now.Sub(entry.at) >= topicAuthTTL {
+			delete(c.entries, topic)
+		}
+	}
+
+	for len(c.entries) >= maxTopicAuthEntries {
+		oldest := ""
+		oldestAt := time.Time{}
+
+		for topic, entry := range c.entries {
+			if oldest == "" || entry.at.Before(oldestAt) {
+				oldest, oldestAt = topic, entry.at
+			}
+		}
+
+		delete(c.entries, oldest)
+	}
+}
+
+// size reports how many decisions are memoized. Test/telemetry helper.
+func (c *topicAuthCache) size() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return len(c.entries)
 }
 
 func writeStreamEvent(conn *websocket.Conn, ev events.Event) error {
