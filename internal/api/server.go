@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"embed"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -376,6 +377,46 @@ func (s *Server) handleVersion(c *gin.Context) {
 	})
 }
 
+// llmsTxtTemplate is the body of the instance-local GET /llms.txt endpoint
+// (see the llms.txt convention at https://llmstxt.org/). It intentionally
+// omits listen addresses, public endpoints, and enabled proxies — this route
+// is unauthenticated and must not become a side channel for instance
+// topology (that's what the authenticated GET /api/v1/instance is for).
+const llmsTxtTemplate = `# DBBat (this instance)
+
+> Transparent database proxy for PostgreSQL, Oracle, MySQL/MariaDB and MongoDB.
+> Every query logged, every connection tracked, access granted for a limited time.
+
+This is a running DBBat instance, version %s.
+
+## This instance
+- [Web UI](%s/)
+- [OpenAPI spec](/api/openapi.yml)
+- [API reference (Swagger UI)](/api/docs)
+- [Version info](/api/v1/version)
+
+## Documentation
+- [Full documentation index](https://dbbat.com/llms.txt)
+- [Full documentation text](https://dbbat.com/llms-full.txt)
+- [Website](https://dbbat.com)
+`
+
+// handleLLMsTxt serves a small instance-local llms.txt so an agent (or a
+// human) pointed at a running DBBat instance gets a clean doc map instead of
+// a 404 or having to crawl the SPA. Deliberately not a redirect to
+// dbbat.com: instances are typically VPN-gated with restricted outbound
+// internet, so a redirect can resolve to a timeout that looks like it
+// worked. See specs/todos/2026-08-02-02-llms-txt.md for the rationale.
+func (s *Server) handleLLMsTxt(c *gin.Context) {
+	baseURL := "/app"
+	if s.config != nil && s.config.BaseURL != "" {
+		baseURL = s.config.BaseURL
+	}
+
+	body := fmt.Sprintf(llmsTxtTemplate, version.Version, baseURL)
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(body))
+}
+
 // handleOpenAPISpec serves the OpenAPI specification.
 func (s *Server) handleOpenAPISpec(c *gin.Context) {
 	c.Data(http.StatusOK, "application/x-yaml", openapiSpec)
@@ -493,6 +534,10 @@ func (s *Server) setupFrontendRoutes(router *gin.Engine) {
 	router.GET("/", func(c *gin.Context) {
 		c.Redirect(http.StatusFound, baseURL+"/")
 	})
+
+	// llms.txt (https://llmstxt.org/) — unauthenticated, always a local 200,
+	// never a redirect to dbbat.com (see handleLLMsTxt).
+	router.GET("/llms.txt", s.handleLLMsTxt)
 
 	// Serve all routes under base URL
 	router.GET(baseURL+"/*filepath", func(c *gin.Context) {
