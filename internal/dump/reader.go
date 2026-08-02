@@ -105,10 +105,11 @@ func (r *Reader) ReadPacket() (*Packet, error) {
 // back to the synthesized addressing when the option is absent.
 func (r *Reader) direction(opts pcapgo.NgPacketOptions) byte {
 	if opts.Flags != nil {
-		switch opts.Flags.Direction {
-		case pcapgo.NgEpbFlagDirectionInbound:
+		if opts.Flags.Direction == pcapgo.NgEpbFlagDirectionInbound {
 			return DirClientToServer
-		case pcapgo.NgEpbFlagDirectionOutbound:
+		}
+
+		if opts.Flags.Direction == pcapgo.NgEpbFlagDirectionOutbound {
 			return DirServerToClient
 		}
 	}
