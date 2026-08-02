@@ -1,0 +1,209 @@
+package events
+
+import (
+	"sync"
+	"testing"
+	"time"
+)
+
+func allow(string) bool { return true }
+
+func TestPublishDeliversToSubscribedTopicOnly(t *testing.T) {
+	b := New()
+
+	sub := b.Subscribe(allow, 8)
+	defer sub.Close()
+
+	if !sub.Subscribe("connections") {
+		t.Fatal("subscribe refused")
+	}
+
+	b.Publish("connections", EventConnection, map[string]any{"x": 1})
+	b.Publish("approvals/pending", EventApprovalPending, map[string]any{"x": 2})
+
+	select {
+	case ev := <-sub.Events():
+		if ev.Topic != "connections" {
+			t.Fatalf("got topic %q", ev.Topic)
+		}
+		if ev.Seq == 0 {
+			t.Fatal("seq not assigned")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no event")
+	}
+
+	select {
+	case ev := <-sub.Events():
+		t.Fatalf("unexpected event on unsubscribed topic: %+v", ev)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestPublishNeverBlocksAndDropsOnOverflow(t *testing.T) {
+	b := New()
+
+	sub := b.Subscribe(allow, 2)
+	defer sub.Close()
+	sub.Subscribe("connections")
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		for i := 0; i < 100; i++ {
+			b.Publish("connections", EventConnection, map[string]any{"i": i})
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Publish blocked — the proxy hot path would have stalled")
+	}
+
+	if got := sub.Dropped(); got == 0 {
+		t.Fatal("expected drops on an overflowed subscriber")
+	}
+
+	// Dropped resets.
+	if got := sub.Dropped(); got != 0 {
+		t.Fatalf("Dropped did not reset: %d", got)
+	}
+}
+
+func TestApprovalsPendingIsExemptFromDropping(t *testing.T) {
+	b := New()
+
+	sub := b.Subscribe(allow, 1)
+	defer sub.Close()
+	sub.Subscribe(TopicApprovalsPending)
+
+	const n = 20
+	for i := 0; i < n; i++ {
+		b.Publish(TopicApprovalsPending, EventApprovalPending, map[string]any{"i": i})
+	}
+
+	if got := sub.Dropped(); got != 0 {
+		t.Fatalf("approvals/pending must never drop, got %d drops", got)
+	}
+
+	seen := 0
+
+	for {
+		select {
+		case <-sub.Events():
+			seen++
+
+			continue
+		default:
+		}
+
+		break
+	}
+
+	seen += len(sub.TakePriority())
+
+	if seen != n {
+		t.Fatalf("lost pending events: saw %d of %d", seen, n)
+	}
+}
+
+func TestAuthorizerIsRecheckedOnSend(t *testing.T) {
+	b := New()
+
+	var mu sync.Mutex
+	allowed := true
+
+	sub := b.Subscribe(func(string) bool {
+		mu.Lock()
+		defer mu.Unlock()
+
+		return allowed
+	}, 8)
+	defer sub.Close()
+
+	if !sub.Subscribe("connections") {
+		t.Fatal("subscribe refused while authorized")
+	}
+
+	mu.Lock()
+	allowed = false
+	mu.Unlock()
+
+	b.Publish("connections", EventConnection, nil)
+
+	select {
+	case ev := <-sub.Events():
+		t.Fatalf("event delivered after authorization was revoked: %+v", ev)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestSubscribeRefusedWhenUnauthorized(t *testing.T) {
+	b := New()
+
+	sub := b.Subscribe(func(string) bool { return false }, 4)
+	defer sub.Close()
+
+	if sub.Subscribe("connections") {
+		t.Fatal("subscribe should have been refused")
+	}
+}
+
+func TestForwarderSeesLocalPublishesOnly(t *testing.T) {
+	b := New()
+
+	var (
+		mu  sync.Mutex
+		got []Event
+	)
+
+	b.SetForwarder(func(ev Event) {
+		mu.Lock()
+		got = append(got, ev)
+		mu.Unlock()
+	})
+
+	b.Publish("connections", EventConnection, nil)
+	b.PublishLocal("connections", EventConnection, nil)
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if len(got) != 1 {
+		t.Fatalf("forwarder saw %d events, want 1 (PublishLocal must not re-forward)", len(got))
+	}
+}
+
+func TestCloseIsIdempotent(t *testing.T) {
+	b := New()
+	sub := b.Subscribe(allow, 4)
+	sub.Close()
+	sub.Close()
+
+	if b.SubscriberCount() != 0 {
+		t.Fatal("subscriber not detached")
+	}
+}
+
+func TestTopicHelpers(t *testing.T) {
+	topic := ConnectionQueriesTopic("abc")
+	if topic != "connection/abc/queries" {
+		t.Fatalf("got %q", topic)
+	}
+
+	uid, ok := ConnectionUIDFromTopic(topic)
+	if !ok || uid != "abc" {
+		t.Fatalf("got %q ok=%v", uid, ok)
+	}
+
+	if _, ok := ConnectionUIDFromTopic("connections"); ok {
+		t.Fatal("connections must not parse as a per-connection topic")
+	}
+
+	if _, ok := ConnectionUIDFromTopic("connection//queries"); ok {
+		t.Fatal("empty uid must not parse")
+	}
+}
