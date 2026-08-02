@@ -3,7 +3,7 @@ package oracle
 import (
 	"testing"
 
-	goora "github.com/sijms/go-ora/v2/converters"
+	goora "github.com/sijms/go-ora/v3/converters"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

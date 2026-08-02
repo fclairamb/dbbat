@@ -12,7 +12,7 @@ import (
 	gomysqlclient "github.com/go-mysql-org/go-mysql/client"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	"github.com/jackc/pgx/v5/pgconn"
-	goora "github.com/sijms/go-ora/v2"
+	goora "github.com/sijms/go-ora/v3"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
