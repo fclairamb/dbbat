@@ -124,6 +124,14 @@ func (s *Server) serveSlackInteraction(c *gin.Context, signingSecret string, dec
 		return
 	}
 
+	// Query-approval buttons ride the same endpoint as grant-request ones,
+	// distinguished by action id.
+	if s.dispatchSlackQueryDecision(callback) {
+		c.Status(http.StatusOK)
+
+		return
+	}
+
 	action, requestUID, ok := slackDecisionFromCallback(callback)
 	if !ok {
 		// Not one of our block_actions (or a non-UUID value) — ignore
@@ -462,4 +470,91 @@ func derefStr(s *string) string {
 	}
 
 	return *s
+}
+
+// slackQueryDecisionFromCallback extracts a (status, query uid) pair from a
+// block_actions callback carrying one of the query-approval action IDs. The
+// action ids are distinct from the grant-request ones precisely so the two
+// flows can share one inbound endpoint without ambiguity.
+func slackQueryDecisionFromCallback(cb slack.InteractionCallback) (string, uuid.UUID, bool) {
+	if cb.Type != slack.InteractionTypeBlockActions {
+		return "", uuid.Nil, false
+	}
+
+	for _, ba := range cb.ActionCallback.BlockActions {
+		if ba == nil {
+			continue
+		}
+
+		var status string
+
+		switch ba.ActionID {
+		case notify.ActionApproveQuery:
+			status = store.ApprovalApproved
+		case notify.ActionDenyQuery:
+			status = store.ApprovalDenied
+		default:
+			continue
+		}
+
+		uid, err := uuid.Parse(ba.Value)
+		if err != nil {
+			return "", uuid.Nil, false
+		}
+
+		return status, uid, true
+	}
+
+	return "", uuid.Nil, false
+}
+
+// processSlackQueryDecision resolves a held query from a verified Slack button
+// click. It repeats every authorization check the REST path makes — arriving
+// over Slack is not an authorization.
+func (s *Server) processSlackQueryDecision(ctx context.Context, slackUserID, responseURL, status string, queryUID uuid.UUID) {
+	user, err := s.userBySlackID(ctx, slackUserID)
+	if err != nil {
+		s.postEphemeral(ctx, responseURL, fmt.Sprintf(msgNotLinked, s.publicURLForMessage(ctx)))
+
+		return
+	}
+
+	err = s.ResolveQueryApprovalAs(ctx, user, queryUID, status, "resolved from Slack")
+
+	switch {
+	case err == nil:
+		s.postEphemeral(ctx, responseURL, "Query "+status+".")
+	case errors.Is(err, store.ErrQueryNotPending):
+		// The commonest race by far: the client gave up while the message sat
+		// in Slack. Say so plainly — "abandoned" must not read as a failure.
+		s.postEphemeral(ctx, responseURL, "That query is no longer waiting — it was already resolved or the client gave up.")
+	case errors.Is(err, ErrSelfApproval):
+		s.postEphemeral(ctx, responseURL, "You cannot resolve your own query.")
+	case errors.Is(err, ErrNotAnApprover):
+		s.postEphemeral(ctx, responseURL, "You are not an approver for this query.")
+	default:
+		s.logger.WarnContext(ctx, "slack query decision failed", slog.Any("error", err))
+		s.postEphemeral(ctx, responseURL, msgDecideFailed)
+	}
+}
+
+// dispatchSlackQueryDecision routes a callback to the query-approval flow,
+// reporting whether it handled it. Shared by the HTTP and Socket Mode paths.
+func (s *Server) dispatchSlackQueryDecision(callback slack.InteractionCallback) bool {
+	status, queryUID, ok := slackQueryDecisionFromCallback(callback)
+	if !ok {
+		return false
+	}
+
+	slackUserID := callback.User.ID
+	responseURL := callback.ResponseURL
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), slackInteractionTimeout)
+		defer cancel()
+
+		s.processSlackQueryDecision(ctx, slackUserID, responseURL, status, queryUID)
+	}()
+
+	return true
 }

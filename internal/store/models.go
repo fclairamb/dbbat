@@ -489,8 +489,8 @@ type GrantDefinition struct {
 	// Empty = admins only.
 	ApproverGroupUIDs []uuid.UUID `bun:"approver_group_uids,array,notnull,default:'{}'" json:"approver_group_uids"`
 	IsActive          bool        `bun:"is_active,notnull,default:true" json:"is_active"`
-	CreatedBy    uuid.UUID   `bun:"created_by,notnull,type:uuid" json:"created_by"`
-	CreatedAt    time.Time   `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	CreatedBy         uuid.UUID   `bun:"created_by,notnull,type:uuid" json:"created_by"`
+	CreatedAt         time.Time   `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 }
 
 // AppliesToGroups reports whether a user belonging to the given groups is

@@ -104,7 +104,7 @@ func (s *Server) resolveQuery(c *gin.Context, status, reason string) {
 		return
 	}
 
-	if err := s.store.ResolveQueryApproval(ctx, uid, status, &currentUser.UID, reason); err != nil {
+	if err := s.applyQueryDecision(ctx, query, currentUser, status, reason); err != nil {
 		if errors.Is(err, store.ErrQueryNotPending) {
 			// Somebody (or the client's own disconnect) got there first.
 			writeError(c, http.StatusConflict, ErrCodeConflict, "query is no longer awaiting approval")
@@ -116,8 +116,6 @@ func (s *Server) resolveQuery(c *gin.Context, status, reason string) {
 
 		return
 	}
-
-	s.broadcastResolution(ctx, query, status, currentUser, reason)
 
 	successResponse(c, gin.H{
 		"query_uid":         uid,
@@ -169,19 +167,65 @@ func (s *Server) handleDenyAllPending(c *gin.Context) {
 			continue
 		}
 
-		if err := s.store.ResolveQueryApproval(ctx, q.UID, store.ApprovalDenied, &currentUser.UID, reason); err != nil {
+		if err := s.applyQueryDecision(ctx, q, currentUser, store.ApprovalDenied, reason); err != nil {
 			skipped++
 
 			continue
 		}
-
-		s.broadcastResolution(ctx, q, store.ApprovalDenied, currentUser, reason)
 
 		denied++
 	}
 
 	successResponse(c, gin.H{"denied": denied, "skipped": skipped})
 }
+
+// applyQueryDecision persists the decision and announces it. Shared by the
+// REST handlers and the Slack Approve/Deny buttons so the two paths cannot
+// drift on audit, fan-out or message updating.
+func (s *Server) applyQueryDecision(ctx context.Context, query *store.Query, by *store.User, status, reason string) error {
+	if err := s.store.ResolveQueryApproval(ctx, query.UID, status, &by.UID, reason); err != nil {
+		return err
+	}
+
+	s.broadcastResolution(ctx, query, status, by, reason)
+
+	return nil
+}
+
+// ResolveQueryApprovalAs authorizes and applies a decision for a user that did
+// not come through the HTTP handlers (today: a Slack button click). It repeats
+// every check the REST path makes — pending state, self-approval, approver
+// membership — because "it came from Slack" is not an authorization.
+func (s *Server) ResolveQueryApprovalAs(ctx context.Context, user *store.User, queryUID uuid.UUID, status, reason string) error {
+	query, err := s.store.GetQueryWithOwner(ctx, queryUID)
+	if err != nil {
+		return err
+	}
+
+	if query.ApprovalStatus == nil || *query.ApprovalStatus != store.ApprovalPending {
+		return store.ErrQueryNotPending
+	}
+
+	if query.UserID != nil && *query.UserID == user.UID {
+		return ErrSelfApproval
+	}
+
+	if !s.mayApproveQuery(ctx, user, query) {
+		return ErrNotAnApprover
+	}
+
+	return s.applyQueryDecision(ctx, query, user, status, reason)
+}
+
+// Approval authorization errors surfaced outside the HTTP handlers.
+var (
+	// ErrSelfApproval is returned when the requester tries to resolve their
+	// own held statement. Four-eyes means four eyes, admin or not.
+	ErrSelfApproval = errors.New("you cannot resolve your own query")
+	// ErrNotAnApprover is returned when the user is neither an admin nor a
+	// member of the grant's approver groups.
+	ErrNotAnApprover = errors.New("you are not an approver for this query")
+)
 
 // broadcastResolution writes the audit trail, wakes the parked session
 // (locally and on every other replica) and publishes the resolution event.
@@ -311,4 +355,3 @@ func (s *Server) mayViewQuery(ctx context.Context, user *store.User, query *stor
 type approvalEscalator interface {
 	Resolved(ctx context.Context, queryUID uuid.UUID, status, byName, reason string)
 }
-
