@@ -46,12 +46,12 @@ func (h *handler) UseDB(dbName string) error {
 	syntheticSQL := "USE " + dbName
 
 	if dbName == h.session.database.Name || dbName == h.session.database.DatabaseName {
-		h.recordQuery(syntheticSQL, nil, time.Now(), nil, nil, nil)
+		h.recordQuery(syntheticSQL, nil, time.Now(), nil)
 
 		return nil
 	}
 
-	h.recordQuery(syntheticSQL, nil, time.Now(), nil, nil, ptrErrString(ErrSwitchDatabaseDenied))
+	h.recordQuery(syntheticSQL, nil, time.Now(), ptrErrString(ErrSwitchDatabaseDenied))
 
 	return ErrSwitchDatabaseDenied
 }
@@ -80,12 +80,12 @@ func (h *handler) HandleStmtPrepare(query string) (int, int, any, error) {
 	stmt, err := h.session.upstreamConn.Prepare(query)
 	if err != nil {
 		errStr := err.Error()
-		h.recordQuery(syntheticSQL, nil, start, nil, nil, &errStr)
+		h.recordQuery(syntheticSQL, nil, start, &errStr)
 
 		return 0, 0, nil, err
 	}
 
-	h.recordQuery(syntheticSQL, nil, start, nil, nil, nil)
+	h.recordQuery(syntheticSQL, nil, start, nil)
 
 	return stmt.ParamNum(), stmt.ColumnNum(), stmt, nil
 }
@@ -142,21 +142,21 @@ func (h *handler) runIntercepted(
 	// before the watchdog force-closes the connection.
 	if s.revocation.Revoked() {
 		errStr := shared.ErrGrantRevoked.Error()
-		h.recordQuery(sql, params, time.Now(), nil, nil, &errStr)
+		h.recordQuery(sql, params, time.Now(), &errStr)
 
 		return nil, shared.ErrGrantRevoked
 	}
 
 	if err := checkQuotas(s.grant); err != nil {
 		errStr := err.Error()
-		h.recordQuery(sql, params, time.Now(), nil, nil, &errStr)
+		h.recordQuery(sql, params, time.Now(), &errStr)
 
 		return nil, err
 	}
 
 	if err := shared.ValidateMySQLQuery(sql, s.grant); err != nil {
 		errStr := err.Error()
-		h.recordQuery(sql, params, time.Now(), nil, nil, &errStr)
+		h.recordQuery(sql, params, time.Now(), &errStr)
 
 		return nil, err
 	}
@@ -174,7 +174,7 @@ func (h *handler) runIntercepted(
 	if herr != nil {
 		if approvalUID == uuid.Nil {
 			errStr := herr.Error()
-			h.recordQuery(sql, params, time.Now(), nil, nil, &errStr)
+			h.recordQuery(sql, params, time.Now(), &errStr)
 		} else {
 			// The hold already persisted (and resolved) the row; recording a
 			// second one would duplicate the statement in /queries.
@@ -188,7 +188,7 @@ func (h *handler) runIntercepted(
 	result, err := exec()
 	if err != nil {
 		errStr := err.Error()
-		h.recordQuery(sql, params, start, nil, nil, &errStr)
+		h.recordQuery(sql, params, start, &errStr)
 
 		return result, err
 	}
@@ -265,7 +265,7 @@ func (s *Session) KillHeldQuery() bool {
 	return s.server.approvalDeps.Registry.Resolve(approval.Decision{
 		QueryUID: uid,
 		Status:   store.ApprovalAbandoned,
-		Reason:   "cancelled by the client (KILL QUERY)",
+		Reason:   "canceled by the client (KILL QUERY)",
 		At:       time.Now(),
 	})
 }
@@ -283,15 +283,8 @@ func (s *Session) KillHeldQuery() bool {
 // full result-set response (header packets, row packets, EOF/OK), and any
 // error packets. Replaces the previous JSON-encoded row size which only
 // counted the captured-row payload.
-func (h *handler) recordQuery(
-	sql string,
-	params *store.QueryParameters,
-	start time.Time,
-	capturedRows []store.QueryRow,
-	rowsAffected *int64,
-	queryError *string,
-) {
-	h.recordQueryWithUID(uuid.Nil, sql, params, start, capturedRows, rowsAffected, queryError)
+func (h *handler) recordQuery(sql string, params *store.QueryParameters, start time.Time, queryError *string) {
+	h.recordQueryWithUID(uuid.Nil, sql, params, start, nil, nil, queryError)
 }
 
 // recordQueryWithUID is recordQuery with an optional pre-existing row uid: when

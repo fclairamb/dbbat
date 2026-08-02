@@ -335,7 +335,7 @@ func (s *Server) mayApproveQuery(ctx context.Context, user *store.User, query *s
 
 // mayViewQuery reports whether the user may *see* a pending query. Reading is
 // wider than resolving — viewers already read every query through
-// GET /api/v1/queries, so denying them the pending list would be theatre — but
+// GET /api/v1/queries, so denying them the pending list would be theater — but
 // it is never wider than that: an ordinary connector sees only holds they are
 // an approver for.
 func (s *Server) mayViewQuery(ctx context.Context, user *store.User, query *store.Query) bool {

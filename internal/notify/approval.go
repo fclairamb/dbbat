@@ -321,10 +321,10 @@ func formatHeldFor(since time.Time) string {
 	return d.String()
 }
 
-func truncateSQL(sql string, max int) string {
-	if len(sql) <= max {
+func truncateSQL(sql string, limit int) string {
+	if len(sql) <= limit {
 		return sql
 	}
 
-	return sql[:max] + " …(truncated)"
+	return sql[:limit] + " …(truncated)"
 }

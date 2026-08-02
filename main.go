@@ -298,40 +298,7 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		}
 	}
 
-	// Shared event plumbing. One broker and one approval registry per
-	// process: the API publishes and resolves against exactly the same
-	// instances the proxies do, and cross-replica traffic rides LISTEN/NOTIFY
-	// on the store connection.
-	broker := events.New()
-	approvals := approval.NewRegistry()
-
-	// Start API server
-	apiServer := api.NewServer(dataStore, cfg.EncryptionKey, logger, cfg)
-
-	// Reuse the API server's Slack client rather than opening a second one.
-	escalator := notify.NewApprovalEscalator(
-		apiServer.Notifier(),
-		cfg.Approval.SlackDelayDuration(),
-		cfg.Approval.SlackSQL,
-		logger,
-	)
-
-	apiServer.SetEventPlumbing(broker, approvals, escalator)
-
-	approvalDeps := shared.ApprovalDeps{
-		Enabled:   cfg.Approval.Enabled,
-		Store:     dataStore,
-		Registry:  approvals,
-		Broker:    broker,
-		Escalator: escalatorAdapter{escalator},
-		Logger:    logger,
-	}
-
-	if cfg.Approval.Enabled {
-		logger.InfoContext(ctx, "approval holds enabled",
-			slog.Duration("slack_delay", cfg.Approval.SlackDelayDuration()),
-			slog.Bool("slack_sql", cfg.Approval.SlackSQL))
-	}
+	apiServer, approvals, approvalDeps := buildEventPlumbing(ctx, cfg, dataStore, logger)
 
 	go func() {
 		if err := apiServer.Start(cfg.ListenAPI); err != nil {
@@ -378,17 +345,9 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	// Start MongoDB proxy server (if configured)
 	mongoServer := startMongoProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, logger)
 
-	// Wait for shutdown signal and gracefully stop all servers
-	servers := []shutdownable{approvalDrain{approvals, logger}, apiServer, proxyServer}
-	if oracleServer != nil {
-		servers = append(servers, oracleServer)
-	}
-	if mysqlServer != nil {
-		servers = append(servers, mysqlServer)
-	}
-	if mongoServer != nil {
-		servers = append(servers, mongoServer)
-	}
+	// Draining releases parked queries first, then stops the servers.
+	servers := collectServers(approvalDrain{approvals, logger}, apiServer, proxyServer,
+		oracleServer, mysqlServer, mongoServer)
 
 	return awaitShutdown(ctx, logger, servers...)
 }
@@ -1021,4 +980,71 @@ func (d approvalDrain) Shutdown(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// buildEventPlumbing constructs the API server together with the one broker,
+// one approval registry and one Slack escalator the whole process shares. They
+// have to be the same instances across the API and every proxy: a decision
+// taken over REST must wake the session parked in the proxy, and both sides
+// publish into the same stream.
+func buildEventPlumbing(
+	ctx context.Context, cfg *config.Config, dataStore *store.Store, logger *slog.Logger,
+) (*api.Server, *approval.Registry, shared.ApprovalDeps) {
+	broker := events.New()
+	approvals := approval.NewRegistry()
+
+	apiServer := api.NewServer(dataStore, cfg.EncryptionKey, logger, cfg)
+
+	// Reuse the API server's Slack client rather than opening a second one.
+	escalator := notify.NewApprovalEscalator(
+		apiServer.Notifier(),
+		cfg.Approval.SlackDelayDuration(),
+		cfg.Approval.SlackSQL,
+		logger,
+	)
+
+	apiServer.SetEventPlumbing(broker, approvals, escalator)
+
+	if cfg.Approval.Enabled {
+		logger.InfoContext(ctx, "approval holds enabled",
+			slog.Duration("slack_delay", cfg.Approval.SlackDelayDuration()),
+			slog.Bool("slack_sql", cfg.Approval.SlackSQL))
+	}
+
+	return apiServer, approvals, shared.ApprovalDeps{
+		Enabled:   cfg.Approval.Enabled,
+		Store:     dataStore,
+		Registry:  approvals,
+		Broker:    broker,
+		Escalator: escalatorAdapter{escalator},
+		Logger:    logger,
+	}
+}
+
+// collectServers drops the nil entries (proxies whose listener is disabled)
+// from a shutdown list. A typed-nil pointer in a shutdownable slice would
+// panic on Shutdown, so the filter checks each concrete pointer.
+func collectServers(
+	drain approvalDrain,
+	apiServer *api.Server,
+	pgServer *postgresql.Server,
+	oracleServer *oracle.Server,
+	mysqlServer *mysql.Server,
+	mongoServer *mongodb.Server,
+) []shutdownable {
+	servers := []shutdownable{drain, apiServer, pgServer}
+
+	if oracleServer != nil {
+		servers = append(servers, oracleServer)
+	}
+
+	if mysqlServer != nil {
+		servers = append(servers, mysqlServer)
+	}
+
+	if mongoServer != nil {
+		servers = append(servers, mongoServer)
+	}
+
+	return servers
 }

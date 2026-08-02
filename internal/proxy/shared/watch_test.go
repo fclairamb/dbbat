@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-func tcpPair(t *testing.T) (client, server net.Conn) {
+func tcpPair(t *testing.T) (net.Conn, net.Conn) {
 	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -29,7 +29,7 @@ func tcpPair(t *testing.T) (client, server net.Conn) {
 		ch <- res{c, err}
 	}()
 
-	client, err = net.Dial("tcp", ln.Addr().String())
+	client, err := net.Dial("tcp", ln.Addr().String())
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -48,6 +48,8 @@ func tcpPair(t *testing.T) (client, server net.Conn) {
 }
 
 func TestParkDetectsClientDisconnect(t *testing.T) {
+	t.Parallel()
+
 	client, server := tcpPair(t)
 
 	w := NewWatchedConn(server)
@@ -63,6 +65,8 @@ func TestParkDetectsClientDisconnect(t *testing.T) {
 }
 
 func TestParkQueuesPipelinedBytesForReplay(t *testing.T) {
+	t.Parallel()
+
 	client, server := tcpPair(t)
 
 	w := NewWatchedConn(server)
@@ -99,6 +103,8 @@ func TestParkQueuesPipelinedBytesForReplay(t *testing.T) {
 }
 
 func TestReadPreservesStreamOrderAcrossPark(t *testing.T) {
+	t.Parallel()
+
 	client, server := tcpPair(t)
 
 	w := NewWatchedConn(server)
@@ -144,6 +150,8 @@ func TestReadPreservesStreamOrderAcrossPark(t *testing.T) {
 }
 
 func TestReadReportsEOFOnlyAfterReplayDrained(t *testing.T) {
+	t.Parallel()
+
 	client, server := tcpPair(t)
 
 	w := NewWatchedConn(server)
@@ -174,6 +182,8 @@ func TestReadReportsEOFOnlyAfterReplayDrained(t *testing.T) {
 }
 
 func TestParkOnAlreadyDeadConnFiresImmediately(t *testing.T) {
+	t.Parallel()
+
 	client, server := tcpPair(t)
 
 	w := NewWatchedConn(server)
@@ -190,6 +200,8 @@ func TestParkOnAlreadyDeadConnFiresImmediately(t *testing.T) {
 }
 
 func TestUnparkWithoutParkIsNoop(t *testing.T) {
+	t.Parallel()
+
 	_, server := tcpPair(t)
 
 	w := NewWatchedConn(server)
@@ -197,6 +209,8 @@ func TestUnparkWithoutParkIsNoop(t *testing.T) {
 }
 
 func TestEnableClientKeepAliveOnTCP(t *testing.T) {
+	t.Parallel()
+
 	_, server := tcpPair(t)
 
 	if err := EnableClientKeepAlive(server); err != nil {
@@ -210,6 +224,8 @@ func TestEnableClientKeepAliveOnTCP(t *testing.T) {
 }
 
 func TestEnableClientKeepAliveOnNonTCPIsNoop(t *testing.T) {
+	t.Parallel()
+
 	c1, c2 := net.Pipe()
 	defer func() { _ = c1.Close(); _ = c2.Close() }()
 
@@ -219,6 +235,8 @@ func TestEnableClientKeepAliveOnNonTCPIsNoop(t *testing.T) {
 }
 
 func TestConcurrentReadWhileParkedIsRejected(t *testing.T) {
+	t.Parallel()
+
 	_, server := tcpPair(t)
 
 	w := NewWatchedConn(server)

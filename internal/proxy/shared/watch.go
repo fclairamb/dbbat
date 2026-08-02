@@ -222,9 +222,9 @@ func (w *WatchedConn) Unpark() {
 	}
 
 	// Interrupt the blocked Read. Only a deadline can do that portably.
-	_ = w.Conn.SetReadDeadline(time.Now())
+	_ = w.SetReadDeadline(time.Now())
 	<-stopped
-	_ = w.Conn.SetReadDeadline(time.Time{})
+	_ = w.SetReadDeadline(time.Time{})
 
 	w.mu.Lock()
 	w.parked = false

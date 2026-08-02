@@ -209,12 +209,12 @@ func (s *Server) mayReadTopic(ctx context.Context, user *store.User, topic strin
 		return false
 	}
 
-	switch {
-	case topic == events.TopicConnections:
+	switch topic {
+	case events.TopicConnections:
 		// Connection open/close — admin only.
 		return user.IsAdmin()
 
-	case topic == events.TopicApprovalsPending:
+	case events.TopicApprovalsPending:
 		// Admins, plus anybody who is an approver on at least one live grant.
 		// Membership is what the approve endpoint checks too.
 		return user.IsAdmin() || s.isApproverSomewhere(ctx, user)

@@ -920,7 +920,7 @@ func (s *Session) receiveStartupMessage() (pgproto3.FrontendMessage, error) {
 
 	// A CancelRequest arrives on its own TCP connection and is *not* a
 	// StartupMessage — decoding it as one would fail on the magic version.
-	// Recognising it is what keeps a parked statement cancellable: the held
+	// Recognizing it is what keeps a parked statement cancellable: the held
 	// session's own socket is blocked, so this is the only channel left.
 	if len(msgBuf) >= 8 {
 		version := int(msgBuf[4])<<24 | int(msgBuf[5])<<16 | int(msgBuf[6])<<8 | int(msgBuf[7])

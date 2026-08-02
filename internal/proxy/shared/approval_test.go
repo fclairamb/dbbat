@@ -15,6 +15,9 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
+// errTestStoreDown stands in for a store outage in the fail-closed test.
+var errTestStoreDown = errors.New("db down")
+
 // fakeApprovalStore records what the gate persisted without needing a DB.
 type fakeApprovalStore struct {
 	mu       sync.Mutex
@@ -93,7 +96,7 @@ func (f *fakeApprovalStore) resolutions() []string {
 	return out
 }
 
-func testGate(t *testing.T, patterns []string) (*ApprovalGate, *fakeApprovalStore, *approval.Registry, *events.Broker) {
+func testGate(t *testing.T, patterns []string) (*ApprovalGate, *fakeApprovalStore, *approval.Registry) {
 	t.Helper()
 
 	st := &fakeApprovalStore{}
@@ -111,10 +114,12 @@ func testGate(t *testing.T, patterns []string) (*ApprovalGate, *fakeApprovalStor
 		PollInterval: 10 * time.Millisecond,
 	}, grant, uuid.New(), user, "prod")
 
-	return gate, st, reg, broker
+	return gate, st, reg
 }
 
 func TestGateInactiveWithoutPatternsOrFlag(t *testing.T) {
+	t.Parallel()
+
 	grant := &store.Grant{ApprovalPatterns: []string{"(?i)DELETE"}}
 
 	off := NewApprovalGate(ApprovalDeps{Enabled: false}, grant, uuid.New(), nil, "")
@@ -133,7 +138,9 @@ func TestGateInactiveWithoutPatternsOrFlag(t *testing.T) {
 }
 
 func TestGateMatchesNormalizedSQL(t *testing.T) {
-	gate, _, _, _ := testGate(t, []string{`(?i)^DELETE\s+FROM\s+users`})
+	t.Parallel()
+
+	gate, _, _ := testGate(t, []string{`(?i)^DELETE\s+FROM\s+users`})
 
 	pattern, ok := gate.Match("   DELETE FROM users WHERE 1=1  ")
 	if !ok {
@@ -150,6 +157,8 @@ func TestGateMatchesNormalizedSQL(t *testing.T) {
 }
 
 func TestGateSkipsUncompilablePattern(t *testing.T) {
+	t.Parallel()
+
 	gate := NewApprovalGate(ApprovalDeps{Enabled: true}, &store.Grant{
 		ApprovalPatterns: []string{"(unclosed", `(?i)DROP`},
 	}, uuid.New(), nil, "")
@@ -164,7 +173,9 @@ func TestGateSkipsUncompilablePattern(t *testing.T) {
 }
 
 func TestHoldApproved(t *testing.T) {
-	gate, st, reg, _ := testGate(t, []string{`(?i)DELETE`})
+	t.Parallel()
+
+	gate, st, reg := testGate(t, []string{`(?i)DELETE`})
 
 	type result struct {
 		uid uuid.UUID
@@ -205,7 +216,9 @@ func TestHoldApproved(t *testing.T) {
 }
 
 func TestHoldDeniedCarriesReasonAndApprover(t *testing.T) {
-	gate, st, reg, _ := testGate(t, []string{`(?i)DELETE`})
+	t.Parallel()
+
+	gate, st, reg := testGate(t, []string{`(?i)DELETE`})
 
 	errc := make(chan error, 1)
 
@@ -241,7 +254,9 @@ func TestHoldDeniedCarriesReasonAndApprover(t *testing.T) {
 }
 
 func TestHoldAbandonedOnClientDisconnect(t *testing.T) {
-	gate, st, _, _ := testGate(t, []string{`(?i)DELETE`})
+	t.Parallel()
+
+	gate, st, _ := testGate(t, []string{`(?i)DELETE`})
 
 	gone := make(chan struct{})
 	errc := make(chan error, 1)
@@ -272,7 +287,9 @@ func TestHoldAbandonedOnClientDisconnect(t *testing.T) {
 }
 
 func TestHoldIgnoresDecisionForAnotherQuery(t *testing.T) {
-	gate, st, reg, _ := testGate(t, []string{`(?i)DELETE`})
+	t.Parallel()
+
+	gate, st, reg := testGate(t, []string{`(?i)DELETE`})
 
 	errc := make(chan error, 1)
 
@@ -310,7 +327,9 @@ func TestHoldIgnoresDecisionForAnotherQuery(t *testing.T) {
 }
 
 func TestHoldTripsOnGrantExpiryWhileParked(t *testing.T) {
-	gate, st, _, _ := testGate(t, []string{`(?i)DELETE`})
+	t.Parallel()
+
+	gate, st, _ := testGate(t, []string{`(?i)DELETE`})
 
 	expired := &store.Grant{ExpiresAt: time.Now().Add(80 * time.Millisecond)}
 	guard := NewLimitGuard(expired, nil, nil)
@@ -337,7 +356,9 @@ func TestHoldTripsOnGrantExpiryWhileParked(t *testing.T) {
 }
 
 func TestHoldEndsOnContextCancel(t *testing.T) {
-	gate, st, _, _ := testGate(t, []string{`(?i)DELETE`})
+	t.Parallel()
+
+	gate, st, _ := testGate(t, []string{`(?i)DELETE`})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
@@ -363,7 +384,9 @@ func TestHoldEndsOnContextCancel(t *testing.T) {
 }
 
 func TestHoldFailsClosedWhenPersistFails(t *testing.T) {
-	st := &fakeApprovalStore{createErr: errors.New("db down")}
+	t.Parallel()
+
+	st := &fakeApprovalStore{createErr: errTestStoreDown}
 
 	gate := NewApprovalGate(ApprovalDeps{
 		Enabled: true, Store: st, Registry: approval.NewRegistry(), Broker: events.New(),
@@ -376,6 +399,8 @@ func TestHoldFailsClosedWhenPersistFails(t *testing.T) {
 }
 
 func TestHoldPublishesOnBothTopics(t *testing.T) {
+	t.Parallel()
+
 	st := &fakeApprovalStore{}
 	reg := approval.NewRegistry()
 	broker := events.New()

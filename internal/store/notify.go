@@ -20,7 +20,7 @@ import (
 //
 // The payload is deliberately just the topic plus the query uid: NOTIFY
 // payloads are capped at 8000 bytes and, more importantly, SQL text has no
-// business travelling through the database's notification queue where it would
+// business traveling through the database's notification queue where it would
 // be visible to anything with LISTEN privileges. Receivers re-read the row.
 const (
 	// NotifyChannelQueries carries per-connection query events.

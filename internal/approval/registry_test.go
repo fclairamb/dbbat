@@ -8,6 +8,8 @@ import (
 )
 
 func TestResolveDeliversToParkedSession(t *testing.T) {
+	t.Parallel()
+
 	r := NewRegistry()
 	uid := uuid.New()
 
@@ -32,6 +34,8 @@ func TestResolveDeliversToParkedSession(t *testing.T) {
 }
 
 func TestResolveUnknownUIDIsNotAnError(t *testing.T) {
+	t.Parallel()
+
 	r := NewRegistry()
 
 	if r.Resolve(Decision{QueryUID: uuid.New(), Status: "approved"}) {
@@ -40,6 +44,8 @@ func TestResolveUnknownUIDIsNotAnError(t *testing.T) {
 }
 
 func TestSecondResolveLoses(t *testing.T) {
+	t.Parallel()
+
 	r := NewRegistry()
 	uid := uuid.New()
 
@@ -61,6 +67,8 @@ func TestSecondResolveLoses(t *testing.T) {
 }
 
 func TestReleaseRemovesHold(t *testing.T) {
+	t.Parallel()
+
 	r := NewRegistry()
 	uid := uuid.New()
 
@@ -77,6 +85,8 @@ func TestReleaseRemovesHold(t *testing.T) {
 }
 
 func TestResolveAllDrainsEveryHold(t *testing.T) {
+	t.Parallel()
+
 	r := NewRegistry()
 
 	chans := make([]<-chan Decision, 0, 3)
@@ -110,6 +120,8 @@ func TestResolveAllDrainsEveryHold(t *testing.T) {
 }
 
 func TestHeldSince(t *testing.T) {
+	t.Parallel()
+
 	r := NewRegistry()
 	uid := uuid.New()
 
@@ -127,6 +139,8 @@ func TestHeldSince(t *testing.T) {
 }
 
 func TestNilRegistryIsSafe(t *testing.T) {
+	t.Parallel()
+
 	var r *Registry
 
 	ch, release := r.Register(uuid.New())

@@ -21,7 +21,7 @@ import (
 // reaches the client as a protocol-native error rather than a dropped socket.
 var (
 	// ErrApprovalAbandoned means the hold ended without a human decision —
-	// the client disconnected, the query was cancelled, the grant expired, or
+	// the client disconnected, the query was canceled, the grant expired, or
 	// the server drained. Nothing was ever forwarded upstream. It is rendered
 	// distinctly from "denied" everywhere: to whoever finally looks at it, a
 	// query nobody is waiting for anymore is a different thing from a query a
@@ -155,7 +155,7 @@ func NewApprovalGate(deps ApprovalDeps, grant *store.Grant, connectionUID uuid.U
 		re, err := regexp.Compile(src)
 		if err != nil {
 			if deps.Logger != nil {
-				deps.Logger.Warn("skipping invalid approval pattern",
+				deps.Logger.WarnContext(context.Background(), "skipping invalid approval pattern",
 					slog.String("pattern", src), slog.Any("error", err))
 			}
 
@@ -237,8 +237,6 @@ type HoldRequest struct {
 // query uid equals the one this call created. That last clause is the TOCTOU
 // guard: a client able to influence timing must not be able to have somebody
 // else's approval released against its statement.
-//
-//nolint:funlen,gocognit // the select loop is the feature; splitting it hides the exit conditions
 func (g *ApprovalGate) Hold(ctx context.Context, req HoldRequest) (uuid.UUID, error) {
 	if g.deps.Store == nil || g.deps.Registry == nil {
 		return uuid.Nil, ErrApprovalUnavailable

@@ -147,7 +147,7 @@ func (s *Session) KillHeldQuery() bool {
 	return s.server.approvalDeps.Registry.Resolve(approval.Decision{
 		QueryUID: uid,
 		Status:   store.ApprovalAbandoned,
-		Reason:   "cancelled by the client (killOperations)",
+		Reason:   "canceled by the client (killOperations)",
 		At:       time.Now(),
 	})
 }

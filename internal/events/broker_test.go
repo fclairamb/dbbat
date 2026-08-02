@@ -9,6 +9,8 @@ import (
 func allow(string) bool { return true }
 
 func TestPublishDeliversToSubscribedTopicOnly(t *testing.T) {
+	t.Parallel()
+
 	b := New()
 
 	sub := b.Subscribe(allow, 8)
@@ -41,6 +43,8 @@ func TestPublishDeliversToSubscribedTopicOnly(t *testing.T) {
 }
 
 func TestPublishNeverBlocksAndDropsOnOverflow(t *testing.T) {
+	t.Parallel()
+
 	b := New()
 
 	sub := b.Subscribe(allow, 2)
@@ -74,6 +78,8 @@ func TestPublishNeverBlocksAndDropsOnOverflow(t *testing.T) {
 }
 
 func TestApprovalsPendingIsExemptFromDropping(t *testing.T) {
+	t.Parallel()
+
 	b := New()
 
 	sub := b.Subscribe(allow, 1)
@@ -111,6 +117,8 @@ func TestApprovalsPendingIsExemptFromDropping(t *testing.T) {
 }
 
 func TestAuthorizerIsRecheckedOnSend(t *testing.T) {
+	t.Parallel()
+
 	b := New()
 
 	var mu sync.Mutex
@@ -142,6 +150,8 @@ func TestAuthorizerIsRecheckedOnSend(t *testing.T) {
 }
 
 func TestSubscribeRefusedWhenUnauthorized(t *testing.T) {
+	t.Parallel()
+
 	b := New()
 
 	sub := b.Subscribe(func(string) bool { return false }, 4)
@@ -153,6 +163,8 @@ func TestSubscribeRefusedWhenUnauthorized(t *testing.T) {
 }
 
 func TestForwarderSeesLocalPublishesOnly(t *testing.T) {
+	t.Parallel()
+
 	b := New()
 
 	var (
@@ -178,6 +190,8 @@ func TestForwarderSeesLocalPublishesOnly(t *testing.T) {
 }
 
 func TestCloseIsIdempotent(t *testing.T) {
+	t.Parallel()
+
 	b := New()
 	sub := b.Subscribe(allow, 4)
 	sub.Close()
@@ -189,6 +203,8 @@ func TestCloseIsIdempotent(t *testing.T) {
 }
 
 func TestTopicHelpers(t *testing.T) {
+	t.Parallel()
+
 	topic := ConnectionQueriesTopic("abc")
 	if topic != "connection/abc/queries" {
 		t.Fatalf("got %q", topic)

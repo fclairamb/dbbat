@@ -3,7 +3,6 @@ package postgresql
 import (
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"net"
 	"sync"
@@ -91,7 +90,7 @@ func (f *fakeHoldStore) resolutions() []string {
 
 // heldSession builds a Session wired for approval holds over a real TCP pair,
 // so Park/Unpark and disconnect detection run for real.
-func heldSession(t *testing.T, patterns []string) (*Session, net.Conn, *fakeHoldStore, *approval.Registry, *events.Broker) {
+func heldSession(t *testing.T, patterns []string) (*Session, net.Conn, *fakeHoldStore, *approval.Registry) {
 	t.Helper()
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -143,7 +142,7 @@ func heldSession(t *testing.T, patterns []string) (*Session, net.Conn, *fakeHold
 	sess := &Session{
 		clientConn: watched,
 		watched:    watched,
-		logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		logger:     slog.New(slog.DiscardHandler),
 		ctx:        context.Background(),
 		grant:      grant,
 		guard:      shared.NewLimitGuard(grant, nil, nil),
@@ -164,11 +163,13 @@ func heldSession(t *testing.T, patterns []string) (*Session, net.Conn, *fakeHold
 		sess.approvalDeps, grant, uuid.New(), &store.User{UID: uuid.New(), Username: "alice"}, "prod",
 	)
 
-	return sess, client, st, reg, broker
+	return sess, client, st, reg
 }
 
 func TestSimpleQueryHeldThenApproved(t *testing.T) {
-	sess, _, st, reg, _ := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
+	t.Parallel()
+
+	sess, _, st, reg := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
 
 	errc := make(chan error, 1)
 	go func() { errc <- sess.handleQuery(&pgproto3.Query{String: "DELETE FROM users"}) }()
@@ -204,7 +205,9 @@ func TestSimpleQueryHeldThenApproved(t *testing.T) {
 }
 
 func TestSimpleQueryHeldThenDenied(t *testing.T) {
-	sess, _, st, reg, _ := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
+	t.Parallel()
+
+	sess, _, st, reg := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
 
 	errc := make(chan error, 1)
 	go func() { errc <- sess.handleQuery(&pgproto3.Query{String: "DELETE FROM users"}) }()
@@ -233,7 +236,9 @@ func TestSimpleQueryHeldThenDenied(t *testing.T) {
 }
 
 func TestHeldQueryAbandonedOnClientDisconnect(t *testing.T) {
-	sess, client, st, _, _ := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
+	t.Parallel()
+
+	sess, client, st, _ := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
 
 	errc := make(chan error, 1)
 	go func() { errc <- sess.handleQuery(&pgproto3.Query{String: "DELETE FROM users"}) }()
@@ -259,7 +264,9 @@ func TestHeldQueryAbandonedOnClientDisconnect(t *testing.T) {
 }
 
 func TestHeldQueryIgnoresForeignApproval(t *testing.T) {
-	sess, _, st, reg, _ := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
+	t.Parallel()
+
+	sess, _, st, reg := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
 
 	errc := make(chan error, 1)
 	go func() { errc <- sess.handleQuery(&pgproto3.Query{String: "DELETE FROM users"}) }()
@@ -287,7 +294,9 @@ func TestHeldQueryIgnoresForeignApproval(t *testing.T) {
 }
 
 func TestPipelinedBytesSurviveTheHold(t *testing.T) {
-	sess, client, st, reg, _ := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
+	t.Parallel()
+
+	sess, client, st, reg := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
 
 	errc := make(chan error, 1)
 	go func() { errc <- sess.handleQuery(&pgproto3.Query{String: "DELETE FROM users"}) }()
@@ -332,7 +341,9 @@ func TestPipelinedBytesSurviveTheHold(t *testing.T) {
 }
 
 func TestNoHoldWhenPatternDoesNotMatch(t *testing.T) {
-	sess, _, st, _, _ := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
+	t.Parallel()
+
+	sess, _, st, _ := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
 
 	if err := sess.handleQuery(&pgproto3.Query{String: "SELECT 1"}); err != nil {
 		t.Fatalf("unrelated statement blocked: %v", err)
@@ -347,7 +358,9 @@ func TestNoHoldWhenPatternDoesNotMatch(t *testing.T) {
 }
 
 func TestExecuteHoldsAtBindTimeNotParseTime(t *testing.T) {
-	sess, _, st, reg, _ := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
+	t.Parallel()
+
+	sess, _, st, reg := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
 
 	// Parse must not hold: the bind parameters are not known yet and the SQL
 	// that ultimately runs is the portal's.
@@ -385,7 +398,9 @@ func TestExecuteHoldsAtBindTimeNotParseTime(t *testing.T) {
 }
 
 func TestCancelRequestReleasesHold(t *testing.T) {
-	sess, _, st, _, _ := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
+	t.Parallel()
+
+	sess, _, st, _ := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
 
 	errc := make(chan error, 1)
 	go func() { errc <- sess.handleQuery(&pgproto3.Query{String: "DELETE FROM users"}) }()
@@ -409,7 +424,9 @@ func TestCancelRequestReleasesHold(t *testing.T) {
 }
 
 func TestGrantExpiryEndsHold(t *testing.T) {
-	sess, _, st, _, _ := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
+	t.Parallel()
+
+	sess, _, st, _ := heldSession(t, []string{`(?i)^DELETE\s+FROM`})
 
 	sess.grant.ExpiresAt = time.Now().Add(80 * time.Millisecond)
 	sess.guard = shared.NewLimitGuard(sess.grant, nil, nil)
@@ -430,6 +447,8 @@ func TestGrantExpiryEndsHold(t *testing.T) {
 }
 
 func TestCancelRegistryRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	reg := newCancelRegistry()
 	sess := &Session{cancels: reg}
 

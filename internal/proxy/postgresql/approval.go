@@ -132,7 +132,7 @@ func (s *Session) cancelHeldQuery() bool {
 	return s.approvalDeps.Registry.Resolve(approval.Decision{
 		QueryUID: uid,
 		Status:   store.ApprovalAbandoned,
-		Reason:   "cancelled by the client (CancelRequest)",
+		Reason:   "canceled by the client (CancelRequest)",
 		At:       time.Now(),
 	})
 }
@@ -176,7 +176,7 @@ func (s *Session) holdIfNeeded(sql string, params *store.QueryParameters) (uuid.
 
 // handleCancelRequest routes an out-of-band CancelRequest to the session that
 // owns the key, ending any statement it has parked on a human and forwarding
-// the cancel upstream so a genuinely running query is cancelled too.
+// the cancel upstream so a genuinely running query is canceled too.
 func (s *Session) handleCancelRequest(msg *pgproto3.CancelRequest) {
 	key := cancelKey{processID: msg.ProcessID, secretKey: string(msg.SecretKey)}
 
