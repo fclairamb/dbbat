@@ -22,7 +22,7 @@ var rawExpected = []string{"48656c6c6f", "deadbeef"}
 func TestDumpReplay_Raw(t *testing.T) {
 	t.Parallel()
 
-	td := loadTestDump(t, "go_ora_raw.dbbat-dump")
+	td := loadTestDump(t, "go_ora_raw.pcapng")
 
 	rows := replayCapturedRows(t, td, rawSQLMarker)
 

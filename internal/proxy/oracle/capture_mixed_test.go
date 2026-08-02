@@ -53,7 +53,7 @@ func mixedExpectedRow(n int) mixedRow {
 func TestDumpReplay_Mixed(t *testing.T) {
 	t.Parallel()
 
-	td := loadTestDump(t, "go_ora_mixed.dbbat-dump")
+	td := loadTestDump(t, "go_ora_mixed.pcapng")
 
 	rows := replayCapturedRows(t, td, mixedSQLMarker)
 

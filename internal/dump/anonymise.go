@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 )
 
 // Anonymise reads a capture and writes an anonymised copy.
@@ -11,7 +12,8 @@ import (
 // Packet payloads and their relative timing are preserved verbatim. The session
 // metadata carried in the pcapng Section Header Block comment is reduced to the
 // session ID and the protocol: the connection object (database, user, service
-// name, upstream address…) is dropped.
+// name, upstream address…) is dropped, and the capture is rebased onto the Unix
+// epoch so the wall-clock time of the session leaks nothing.
 //
 // When rewriteAddresses is true — the default for the CLI — the synthesized
 // IPv4 addresses and TCP ports are re-generated from the fake endpoints too,
@@ -29,7 +31,7 @@ func Anonymise(inputPath, outputPath string, rewriteAddresses bool) error {
 	stripped := Header{
 		SessionID:  original.SessionID,
 		Protocol:   original.Protocol,
-		StartTime:  original.StartTime,
+		StartTime:  time.Unix(0, 0).UTC(),
 		Connection: map[string]any{},
 	}
 

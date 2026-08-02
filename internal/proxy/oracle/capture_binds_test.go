@@ -18,7 +18,7 @@ import (
 func TestDumpReplay_Binds(t *testing.T) {
 	t.Parallel()
 
-	td := loadTestDump(t, "go_ora_binds.dbbat-dump")
+	td := loadTestDump(t, "go_ora_binds.pcapng")
 
 	var got []string
 

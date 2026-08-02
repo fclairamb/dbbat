@@ -667,7 +667,7 @@ func TestIntegration_SessionDump(t *testing.T) {
 		}
 
 		for _, e := range entries {
-			if !strings.HasSuffix(e.Name(), ".dbbat-dump") {
+			if !strings.HasSuffix(e.Name(), ".pcapng") {
 				continue
 			}
 
@@ -678,7 +678,7 @@ func TestIntegration_SessionDump(t *testing.T) {
 		}
 
 		return false
-	}, 5*time.Second, 100*time.Millisecond, "expected a non-empty .dbbat-dump file in %s", dumpDir)
+	}, 5*time.Second, 100*time.Millisecond, "expected a non-empty .pcapng file in %s", dumpDir)
 }
 
 // TestIntegration_UpstreamTLS_Require verifies that ssl_mode=require actually
