@@ -403,6 +403,10 @@ func (s *Session) persistQueryAsync(query *store.Query, capturedRows []store.Que
 			queryUID = createdQuery.UID
 		}
 
+		// Announce it on the connection's watch topic. Publishing is
+		// non-blocking and cannot fail the session.
+		s.stream.Query(queryUID, query)
+
 		// Store captured result rows
 		if len(capturedRows) > 0 {
 			// Assign row numbers

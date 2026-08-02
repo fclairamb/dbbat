@@ -133,6 +133,10 @@ type Session struct {
 	approvalDeps shared.ApprovalDeps
 	approvalGate *shared.ApprovalGate
 
+	// stream publishes this session's queries and lifecycle to the live
+	// event stream. Best-effort and non-blocking, always.
+	stream *shared.StreamPublisher
+
 	// heldQueryUID is the uid of the statement currently parked on a human,
 	// uuid.Nil when nothing is parked. Read by the out-of-band CancelRequest
 	// path, which arrives on a different TCP connection entirely.
@@ -303,6 +307,8 @@ func (s *Session) proxyMessages() error {
 	s.approvalGate = shared.NewApprovalGate(
 		s.approvalDeps, s.grant, s.connectionUID, s.user, s.database.Name,
 	)
+	s.stream = shared.NewStreamPublisher(s.approvalDeps, s.connectionUID, s.user, s.database.Name)
+	s.stream.Connection(s.ctx, shared.ConnectionOpened)
 
 	watchCtx, cancelWatch := context.WithCancel(s.ctx)
 	defer cancelWatch()
@@ -733,6 +739,7 @@ func (s *Session) persistAbortedQuery(cause error) {
 // cleanup closes connections and updates records.
 func (s *Session) cleanup() {
 	s.releaseCancelKey()
+	s.stream.Connection(s.ctx, shared.ConnectionClosed)
 
 	if s.grant != nil && s.revocation != nil {
 		s.store.Revocations().Deregister(s.grant.UID, s.revocation)
