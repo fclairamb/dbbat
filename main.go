@@ -16,14 +16,18 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/fclairamb/dbbat/internal/api"
+	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/dump"
+	"github.com/fclairamb/dbbat/internal/events"
+	"github.com/fclairamb/dbbat/internal/notify"
 	"github.com/fclairamb/dbbat/internal/proxy/mongodb"
 	"github.com/fclairamb/dbbat/internal/proxy/mysql"
 	"github.com/fclairamb/dbbat/internal/proxy/oracle"
 	"github.com/fclairamb/dbbat/internal/proxy/postgresql"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -294,8 +298,40 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		}
 	}
 
+	// Shared event plumbing. One broker and one approval registry per
+	// process: the API publishes and resolves against exactly the same
+	// instances the proxies do, and cross-replica traffic rides LISTEN/NOTIFY
+	// on the store connection.
+	broker := events.New()
+	approvals := approval.NewRegistry()
+
 	// Start API server
 	apiServer := api.NewServer(dataStore, cfg.EncryptionKey, logger, cfg)
+
+	// Reuse the API server's Slack client rather than opening a second one.
+	escalator := notify.NewApprovalEscalator(
+		apiServer.Notifier(),
+		cfg.Approval.SlackDelayDuration(),
+		cfg.Approval.SlackSQL,
+		logger,
+	)
+
+	apiServer.SetEventPlumbing(broker, approvals, escalator)
+
+	approvalDeps := shared.ApprovalDeps{
+		Enabled:   cfg.Approval.Enabled,
+		Store:     dataStore,
+		Registry:  approvals,
+		Broker:    broker,
+		Escalator: escalatorAdapter{escalator},
+		Logger:    logger,
+	}
+
+	if cfg.Approval.Enabled {
+		logger.InfoContext(ctx, "approval holds enabled",
+			slog.Duration("slack_delay", cfg.Approval.SlackDelayDuration()),
+			slog.Bool("slack_sql", cfg.Approval.SlackSQL))
+	}
 
 	go func() {
 		if err := apiServer.Start(cfg.ListenAPI); err != nil {
@@ -320,6 +356,8 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		os.Exit(1)
 	}
 
+	proxyServer.SetApprovalDeps(approvalDeps)
+
 	go func() {
 		if err := proxyServer.Start(cfg.ListenPG); err != nil {
 			logger.ErrorContext(context.Background(), "Proxy server error", slog.Any("error", err))
@@ -341,7 +379,7 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	mongoServer := startMongoProxy(ctx, cfg, dataStore, proxyAuthCache, logger)
 
 	// Wait for shutdown signal and gracefully stop all servers
-	servers := []shutdownable{apiServer, proxyServer}
+	servers := []shutdownable{approvalDrain{approvals, logger}, apiServer, proxyServer}
 	if oracleServer != nil {
 		servers = append(servers, oracleServer)
 	}
@@ -936,4 +974,46 @@ func checkDatabaseConfigurations(ctx context.Context, dataStore *store.Store, lo
 				slog.String("recommendation", "use a separate database for DBBat storage to prevent privilege escalation"))
 		}
 	}
+}
+
+// escalatorAdapter bridges the proxy's escalator interface to the notify
+// package's concrete type without either side importing the other.
+type escalatorAdapter struct {
+	inner *notify.ApprovalEscalator
+}
+
+func (a escalatorAdapter) Schedule(ctx context.Context, hold shared.ApprovalHoldInfo) {
+	a.inner.Schedule(ctx, notify.ApprovalHold{
+		QueryUID:      hold.QueryUID,
+		ConnectionUID: hold.ConnectionUID,
+		Username:      hold.Username,
+		DatabaseName:  hold.DatabaseName,
+		SQL:           hold.SQL,
+		Pattern:       hold.Pattern,
+		StartedAt:     hold.StartedAt,
+	})
+}
+
+func (a escalatorAdapter) Resolved(ctx context.Context, queryUID uuid.UUID, status, byName, reason string) {
+	a.inner.Resolved(ctx, queryUID, status, byName, reason)
+}
+
+// approvalDrain releases every parked statement on shutdown. Draining must
+// explicitly abandon held queries rather than hang the shutdown — or, worse,
+// silently let them through.
+type approvalDrain struct {
+	registry *approval.Registry
+	logger   *slog.Logger
+}
+
+func (d approvalDrain) Shutdown(ctx context.Context) error {
+	released := d.registry.ResolveAll(
+		store.ApprovalAbandoned, "dbbat is shutting down; the statement was not executed", nil, "",
+	)
+
+	if len(released) > 0 {
+		d.logger.WarnContext(ctx, "abandoned held queries on shutdown", slog.Int("count", len(released)))
+	}
+
+	return nil
 }

@@ -723,3 +723,10 @@ func getContentType(path string) string {
 		return "application/octet-stream"
 	}
 }
+
+// Notifier exposes the server's Slack client so the process wiring can build
+// the approval escalator on top of it instead of opening a second connection.
+// nil when Slack notifications are disabled.
+func (s *Server) Notifier() *notify.SlackNotifier {
+	return s.notifier
+}
