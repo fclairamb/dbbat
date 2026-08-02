@@ -156,6 +156,30 @@ func TestGateMatchesNormalizedSQL(t *testing.T) {
 	}
 }
 
+func TestGateMatchingIsCaseSensitiveWithoutTheInlineFlag(t *testing.T) {
+	t.Parallel()
+
+	// Documented sharp edge: NormalizeSQL only trims, so a pattern without
+	// (?i) misses lower-case SQL. Pinned here because a pattern that misses
+	// is a hold that never happens.
+	strict, _, _ := testGate(t, []string{`^DELETE\s+FROM`})
+
+	if _, ok := strict.Match("DELETE FROM users"); !ok {
+		t.Fatal("upper-case statement did not match")
+	}
+
+	if _, ok := strict.Match("delete from users"); ok {
+		t.Fatal("matching is documented as case-sensitive; this test pins that contract")
+	}
+
+	// …and (?i), which the docs and the UI placeholder both teach, fixes it.
+	lenient, _, _ := testGate(t, []string{`(?i)^DELETE\s+FROM`})
+
+	if _, ok := lenient.Match("delete from users"); !ok {
+		t.Fatal("(?i) failed to make the pattern case-insensitive")
+	}
+}
+
 func TestGateSkipsUncompilablePattern(t *testing.T) {
 	t.Parallel()
 

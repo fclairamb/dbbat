@@ -32,6 +32,16 @@ type ApprovalHold struct {
 	StartedAt     time.Time
 }
 
+// slackPoster is the slice of *slack.Client the escalator uses. An interface
+// so the post/update state machine — whose whole point is that a resolved hold
+// never leaves a live Approve button behind — can be tested without Slack.
+type slackPoster interface {
+	PostMessageContext(ctx context.Context, channelID string, options ...slack.MsgOption) (string, string, error)
+	UpdateMessageContext(
+		ctx context.Context, channelID, timestamp string, options ...slack.MsgOption,
+	) (string, string, string, error)
+}
+
 // ApprovalEscalator posts a Slack message for a hold that is still pending
 // after a fixed delay, and updates that message in place the moment the hold
 // resolves — by any route.
@@ -46,8 +56,11 @@ type ApprovalHold struct {
 // replica running the parked session — the session is pinned to one pod
 // anyway, so no election is needed.
 type ApprovalEscalator struct {
-	notifier *SlackNotifier
-	delay    time.Duration
+	poster      slackPoster
+	channel     string
+	publicURL   string
+	interactive bool
+	delay       time.Duration
 	// includeSQL controls whether query text is copied into Slack. Slack is a
 	// lower trust boundary than the dbbat UI and this feature pipes production
 	// SQL into it, so it is switchable off.
@@ -76,12 +89,31 @@ func NewApprovalEscalator(notifier *SlackNotifier, delay time.Duration, includeS
 		return nil
 	}
 
+	return newApprovalEscalator(
+		notifier.client, notifier.channel, notifier.publicURL, notifier.Interactive(),
+		delay, includeSQL, log,
+	)
+}
+
+// newApprovalEscalator is the injectable constructor behind
+// NewApprovalEscalator.
+func newApprovalEscalator(
+	poster slackPoster,
+	channel, publicURL string,
+	interactive bool,
+	delay time.Duration,
+	includeSQL bool,
+	log *slog.Logger,
+) *ApprovalEscalator {
 	return &ApprovalEscalator{
-		notifier:   notifier,
-		delay:      delay,
-		includeSQL: includeSQL,
-		log:        log,
-		pending:    make(map[uuid.UUID]*escalation),
+		poster:      poster,
+		channel:     channel,
+		publicURL:   publicURL,
+		interactive: interactive,
+		delay:       delay,
+		includeSQL:  includeSQL,
+		log:         log,
+		pending:     make(map[uuid.UUID]*escalation),
 	}
 }
 
@@ -122,8 +154,8 @@ func (e *ApprovalEscalator) fire(ctx context.Context, queryUID uuid.UUID) {
 
 	blocks := e.buildHoldBlocks(esc.hold, "", "", "")
 
-	channel, ts, err := e.notifier.client.PostMessageContext(
-		ctx, e.notifier.channel, slack.MsgOptionBlocks(blocks...),
+	channel, ts, err := e.poster.PostMessageContext(
+		ctx, e.channel, slack.MsgOptionBlocks(blocks...),
 	)
 	if err != nil {
 		if e.log != nil {
@@ -191,7 +223,7 @@ func (e *ApprovalEscalator) updateMessage(ctx context.Context, channel, ts strin
 
 	blocks := e.buildHoldBlocks(hold, status, byName, reason)
 
-	if _, _, _, err := e.notifier.client.UpdateMessageContext(ctx, channel, ts, slack.MsgOptionBlocks(blocks...)); err != nil {
+	if _, _, _, err := e.poster.UpdateMessageContext(ctx, channel, ts, slack.MsgOptionBlocks(blocks...)); err != nil {
 		if e.log != nil {
 			e.log.WarnContext(ctx, "approval escalation update failed", slog.Any("error", err))
 		}
@@ -236,11 +268,11 @@ func (e *ApprovalEscalator) buildHoldBlocks(hold ApprovalHold, status, byName, r
 		))
 	}
 
-	if status == "" && e.notifier.Interactive() {
+	if status == "" && e.interactive {
 		blocks = append(blocks, approvalActionsBlock(hold.QueryUID.String()))
 	}
 
-	link := fmt.Sprintf("%s/app/connections/%s?watch=1", e.notifier.publicURL, hold.ConnectionUID)
+	link := fmt.Sprintf("%s/app/connections/%s?watch=1", e.publicURL, hold.ConnectionUID)
 	blocks = append(blocks, slack.NewContextBlock("",
 		slack.NewTextBlockObject("mrkdwn", fmt.Sprintf("<%s|Watch this connection in dbbat →>", link), false, false),
 	))

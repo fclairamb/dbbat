@@ -447,7 +447,7 @@ func TestCancelRequestReleasesHold(t *testing.T) {
 	// A cancel resolves straight through the registry, so nothing else writes
 	// the row: the gate has to.
 	if got := st.waitResolution(t); got != store.ApprovalAbandoned {
-		t.Fatalf("cancelled hold persisted as %q, want abandoned", got)
+		t.Fatalf("canceled hold persisted as %q, want abandoned", got)
 	}
 }
 
