@@ -46,6 +46,14 @@ func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 		DurationMs:   query.DurationMs,
 		RowsAffected: query.RowsAffected,
 		Error:        query.Error,
+		// Carried through so a caller that already knows the approval outcome
+		// (an approved hold logged by a protocol that inserts on completion)
+		// doesn't lose it.
+		ApprovalStatus:   query.ApprovalStatus,
+		ApprovalPattern:  query.ApprovalPattern,
+		ResolvedBy:       query.ResolvedBy,
+		ResolvedAt:       query.ResolvedAt,
+		ResolutionReason: query.ResolutionReason,
 	}
 
 	if result.ExecutedAt.IsZero() {
@@ -118,7 +126,8 @@ func (s *Store) ListQueries(ctx context.Context, filter QueryFilter) ([]Query, e
 	var queries []Query
 	q := s.db.NewSelect().
 		Model(&queries).
-		ColumnExpr("q.uid, q.connection_id, q.sql_text, q.parameters, q.executed_at, q.duration_ms, q.rows_affected, q.error, c.user_id, c.database_id").
+		ColumnExpr("q.uid, q.connection_id, q.sql_text, q.parameters, q.executed_at, q.duration_ms, q.rows_affected, q.error, " +
+			"q.approval_status, q.approval_pattern, q.resolved_by, q.resolved_at, q.resolution_reason, c.user_id, c.database_id").
 		Join("JOIN connections c ON q.connection_id = c.uid")
 
 	if filter.ConnectionID != nil {

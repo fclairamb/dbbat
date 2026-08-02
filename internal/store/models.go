@@ -334,6 +334,16 @@ type Query struct {
 	CopyFormat    *string          `bun:"copy_format" json:"copy_format,omitempty"`       // 'text', 'csv', 'binary', or nil for non-COPY
 	CopyDirection *string          `bun:"copy_direction" json:"copy_direction,omitempty"` // 'in', 'out', or nil for non-COPY
 
+	// Approval hold fields. ApprovalStatus is nil for the overwhelming
+	// majority of queries (no pattern matched); when set it is one of
+	// ApprovalPending / ApprovalApproved / ApprovalDenied / ApprovalAbandoned.
+	// There is deliberately no "timeout" state — see docs/approvals.md.
+	ApprovalStatus   *string    `bun:"approval_status" json:"approval_status,omitempty"`
+	ApprovalPattern  *string    `bun:"approval_pattern" json:"approval_pattern,omitempty"`
+	ResolvedBy       *uuid.UUID `bun:"resolved_by,type:uuid" json:"resolved_by,omitempty"`
+	ResolvedAt       *time.Time `bun:"resolved_at" json:"resolved_at,omitempty"`
+	ResolutionReason *string    `bun:"resolution_reason" json:"resolution_reason,omitempty"`
+
 	// Joined fields populated only by ListQueries (via a JOIN on connections);
 	// not stored on the queries table itself.
 	UserID     *uuid.UUID `bun:"user_id,scanonly" json:"user_id,omitempty"`
@@ -392,6 +402,16 @@ type AccessGrant struct {
 	MaxQueryCounts      *int64     `bun:"max_query_counts" json:"max_query_counts"`
 	MaxBytesTransferred *int64     `bun:"max_bytes_transferred" json:"max_bytes_transferred"`
 	CreatedAt           time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+
+	// ApprovalPatterns are RE2 patterns that suspend a matching statement
+	// until an approver resolves it. Mirrored from the grant definition at
+	// materialization time — exactly like Controls / MaxQueryCounts — because
+	// the proxy session holds nothing but a *Grant, and admin-created grants
+	// bypass definitions entirely.
+	ApprovalPatterns []string `bun:"approval_patterns,array,notnull,default:'{}'" json:"approval_patterns"`
+	// ApproverGroupUIDs lists groups whose members may resolve holds on this
+	// grant, in addition to admins. Empty = admins only.
+	ApproverGroupUIDs []uuid.UUID `bun:"approver_group_uids,array,notnull,default:'{}'" json:"approver_group_uids"`
 
 	// Computed fields (not stored in DB)
 	QueryCount       int64 `bun:"-" json:"query_count"`
@@ -459,7 +479,16 @@ type GrantDefinition struct {
 	// DatabaseUIDs restricts which databases this definition can be
 	// requested against. Empty = every database.
 	DatabaseUIDs []uuid.UUID `bun:"database_uids,array,notnull,default:'{}'" json:"database_uids"`
-	IsActive     bool        `bun:"is_active,notnull,default:true" json:"is_active"`
+	// ApprovalPatterns are SQL patterns (RE2) that suspend a matching
+	// statement until an admin or an approver-group member approves it.
+	// Empty = no approval gating. Validated at save time so a bad pattern is
+	// a 400 rather than a runtime surprise on the proxy hot path.
+	ApprovalPatterns []string `bun:"approval_patterns,array,notnull,default:'{}'" json:"approval_patterns"`
+	// ApproverGroupUIDs lists groups whose members may resolve holds on
+	// grants built from this definition, *in addition to* admins.
+	// Empty = admins only.
+	ApproverGroupUIDs []uuid.UUID `bun:"approver_group_uids,array,notnull,default:'{}'" json:"approver_group_uids"`
+	IsActive          bool        `bun:"is_active,notnull,default:true" json:"is_active"`
 	CreatedBy    uuid.UUID   `bun:"created_by,notnull,type:uuid" json:"created_by"`
 	CreatedAt    time.Time   `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 }
