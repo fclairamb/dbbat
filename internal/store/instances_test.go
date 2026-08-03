@@ -9,36 +9,60 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// looksStale asks the database the same question the reclaim asks: is this
+// registry row past the grace period? Evaluated entirely on the database clock,
+// so the answer does not depend on the test process's own time.
+func looksStale(t *testing.T, ctx context.Context, store *Store, instanceID string) bool {
+	t.Helper()
+
+	var stale bool
+	err := store.db.QueryRowContext(ctx,
+		"SELECT last_seen_at < now() - make_interval(secs => ?) FROM instances WHERE instance_id = ?",
+		InstanceStaleAfter.Seconds(), instanceID).Scan(&stale)
+	require.NoError(t, err)
+
+	return stale
+}
+
 func TestInstanceRegistry(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
 	store.SetInstanceID("registry-a")
 
-	t.Run("register creates the row", func(t *testing.T) {
+	t.Run("register creates a row that is alive", func(t *testing.T) {
 		require.NoError(t, store.RegisterInstance(ctx))
 
 		inst, err := store.GetInstance(ctx, "registry-a")
 		require.NoError(t, err)
 		require.NotNil(t, inst)
-		assert.WithinDuration(t, time.Now(), inst.LastSeenAt, time.Minute)
-		assert.WithinDuration(t, time.Now(), inst.StartedAt, time.Minute)
+		assert.False(t, looksStale(t, ctx, store, "registry-a"),
+			"a just-registered instance must never look dead")
+		assert.WithinDuration(t, inst.StartedAt, inst.LastSeenAt, time.Second)
 	})
 
-	t.Run("heartbeat moves last_seen_at without rewriting started_at", func(t *testing.T) {
-		backdated := time.Now().Add(-2 * time.Hour).Truncate(time.Microsecond)
+	t.Run("heartbeat revives a stale row without rewriting started_at", func(t *testing.T) {
+		// Age the row past the grace period on the database clock, so it is
+		// stale by exactly the predicate the reclaim uses.
 		_, err := store.db.ExecContext(ctx,
-			"UPDATE instances SET started_at = ?, last_seen_at = ? WHERE instance_id = ?",
-			backdated, backdated, "registry-a")
+			`UPDATE instances
+			 SET started_at = now() - make_interval(secs => ?), last_seen_at = now() - make_interval(secs => ?)
+			 WHERE instance_id = ?`,
+			(InstanceStaleAfter + time.Hour).Seconds(), (InstanceStaleAfter + time.Hour).Seconds(), "registry-a")
 		require.NoError(t, err)
+		require.True(t, looksStale(t, ctx, store, "registry-a"), "the row should be stale before the heartbeat")
+
+		before, err := store.GetInstance(ctx, "registry-a")
+		require.NoError(t, err)
+		require.NotNil(t, before)
 
 		require.NoError(t, store.HeartbeatInstance(ctx))
 
 		inst, err := store.GetInstance(ctx, "registry-a")
 		require.NoError(t, err)
 		require.NotNil(t, inst)
-		assert.WithinDuration(t, time.Now(), inst.LastSeenAt, time.Minute, "the heartbeat should refresh liveness")
-		assert.WithinDuration(t, backdated, inst.StartedAt, time.Millisecond,
+		assert.False(t, looksStale(t, ctx, store, "registry-a"), "the heartbeat should refresh liveness")
+		assert.WithinDuration(t, before.StartedAt, inst.StartedAt, time.Millisecond,
 			"the heartbeat must keep describing the run that started")
 	})
 
@@ -59,21 +83,23 @@ func TestInstanceRegistry(t *testing.T) {
 	})
 
 	t.Run("register resets started_at on a restart", func(t *testing.T) {
+		_, err := store.db.ExecContext(ctx,
+			"UPDATE instances SET started_at = now() - make_interval(secs => ?) WHERE instance_id = ?",
+			(72 * time.Hour).Seconds(), "registry-a")
+		require.NoError(t, err)
+
 		before, err := store.GetInstance(ctx, "registry-a")
 		require.NoError(t, err)
 		require.NotNil(t, before)
-
-		_, err = store.db.ExecContext(ctx,
-			"UPDATE instances SET started_at = ? WHERE instance_id = ?",
-			time.Now().Add(-72*time.Hour), "registry-a")
-		require.NoError(t, err)
 
 		require.NoError(t, store.RegisterInstance(ctx))
 
 		after, err := store.GetInstance(ctx, "registry-a")
 		require.NoError(t, err)
 		require.NotNil(t, after)
-		assert.WithinDuration(t, time.Now(), after.StartedAt, time.Minute)
+		assert.True(t, after.StartedAt.After(before.StartedAt.Add(time.Hour)),
+			"a restart on the same id must reset started_at, not keep the previous run's")
+		assert.WithinDuration(t, after.StartedAt, after.LastSeenAt, time.Second)
 	})
 
 	t.Run("an unset instance id registers nothing", func(t *testing.T) {
@@ -93,8 +119,8 @@ func TestPruneStaleInstances(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	registerInstanceAs(t, ctx, store, "prune-live", time.Now())
-	registerInstanceAs(t, ctx, store, "prune-stale", time.Now().Add(-InstanceStaleAfter-time.Minute))
+	registerInstanceAs(t, ctx, store, "prune-live", 0)
+	registerInstanceAs(t, ctx, store, "prune-stale", InstanceStaleAfter+time.Minute)
 
 	pruned, err := store.PruneStaleInstances(ctx)
 	require.NoError(t, err)

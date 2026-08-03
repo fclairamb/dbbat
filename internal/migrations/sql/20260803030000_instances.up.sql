@@ -21,19 +21,28 @@ CREATE TABLE IF NOT EXISTS instances (
 
 --bun:split
 
--- Seed the registry from whoever currently owns an open connection, so the
--- rolling upgrade onto this migration cannot reclaim a live session.
+-- Seed the registry from every instance id the connections table has ever
+-- recorded, so the rolling upgrade onto this migration cannot reclaim a live
+-- session.
 --
--- The instances that own the open connections at this instant have not had a
--- chance to register themselves yet — the replicas still running the previous
--- build never will, and rows predating the instance_id column carry '' and have
--- no owner at all. Without this seed the first process to start on the new code
--- would see "no instances row" for every one of them and close connections that
--- are still being served. Seeding gives them all a fresh last_seen_at, i.e. the
--- full grace period to prove they are alive by heartbeating. Whatever does not
--- (a dead pod, a legacy '' row) simply goes stale and is reclaimed later.
+-- No replica still running the previous build can register itself — that code
+-- does not know this table exists — so at this instant every one of them looks
+-- dead, and rows predating the instance_id column carry '' and have no owner at
+-- all. Without a seed, the first process to start on the new code would see "no
+-- instances row" for all of them and close connections that are still being
+-- served. Seeding gives each a fresh last_seen_at: the full grace period to
+-- prove it is alive by heartbeating, which in practice means being replaced by
+-- a new-build pod before the rollout ends. Whatever does not (a dead pod, a
+-- legacy '' row) goes stale and is reclaimed later, and the stale rows are
+-- pruned by the next startup reconcile.
+--
+-- Seeding from the whole table rather than only the currently-open connections
+-- is deliberate: a replica that happens to be idle at this instant owns no open
+-- connection, would not be seeded, and could accept a session a moment later
+-- with no registry row to protect it. Every replica that has served anything in
+-- the retained history is covered this way. DISTINCT over connections is a
+-- one-off scan of an already-indexed table, and the extra rows cost one prune.
 INSERT INTO instances (instance_id, started_at, last_seen_at)
 SELECT DISTINCT instance_id, now(), now()
 FROM connections
-WHERE disconnected_at IS NULL
 ON CONFLICT (instance_id) DO NOTHING;

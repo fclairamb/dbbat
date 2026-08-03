@@ -34,6 +34,24 @@ const InstanceHeartbeatInterval = 30 * time.Second
 // before the rollout has replaced them.
 const InstanceStaleAfter = 30 * InstanceHeartbeatInterval
 
+// instanceNow is the SQL expression every timestamp in the instance registry is
+// written and compared against.
+//
+// One clock, the database's — never the process's. The heartbeat is written by
+// one replica and judged by another, so mixing time bases would subtract the
+// clock skew between them straight out of the grace period: a replica whose
+// clock runs 5 minutes behind the reconciling one would be declared dead after
+// 10 minutes of heartbeating, not 15. Both replicas already share the store, so
+// its clock is the one thing they cannot disagree about. The migration that
+// seeds the registry uses now() for the same reason.
+const instanceNow = "now()"
+
+// instanceStaleCutoff is the SQL expression for "last seen before the grace
+// period", evaluated on the database clock to match instanceNow.
+func instanceStaleCutoff() string {
+	return fmt.Sprintf("%s - make_interval(secs => %f)", instanceNow, InstanceStaleAfter.Seconds())
+}
+
 // RegisterInstance records this process in the instance registry, resetting
 // started_at: the row means "this process, this run".
 //
@@ -48,11 +66,11 @@ func (s *Store) RegisterInstance(ctx context.Context) error {
 		return nil
 	}
 
-	now := time.Now()
-	inst := &Instance{InstanceID: s.instanceID, StartedAt: now, LastSeenAt: now}
-
 	_, err := s.db.NewInsert().
-		Model(inst).
+		Model(&Instance{InstanceID: s.instanceID}).
+		// The database clock, never the process clock: see instanceNow.
+		Value("started_at", instanceNow).
+		Value("last_seen_at", instanceNow).
 		On("CONFLICT (instance_id) DO UPDATE").
 		Set("started_at = EXCLUDED.started_at").
 		Set("last_seen_at = EXCLUDED.last_seen_at").
@@ -76,11 +94,10 @@ func (s *Store) HeartbeatInstance(ctx context.Context) error {
 		return nil
 	}
 
-	now := time.Now()
-	inst := &Instance{InstanceID: s.instanceID, StartedAt: now, LastSeenAt: now}
-
 	_, err := s.db.NewInsert().
-		Model(inst).
+		Model(&Instance{InstanceID: s.instanceID}).
+		Value("started_at", instanceNow).
+		Value("last_seen_at", instanceNow).
 		On("CONFLICT (instance_id) DO UPDATE").
 		Set("last_seen_at = EXCLUDED.last_seen_at").
 		Exec(ctx)
@@ -141,7 +158,7 @@ func (s *Store) GetInstance(ctx context.Context, instanceID string) (*Instance, 
 func (s *Store) PruneStaleInstances(ctx context.Context) (int64, error) {
 	result, err := s.db.NewDelete().
 		Model((*Instance)(nil)).
-		Where("last_seen_at < ?", time.Now().Add(-InstanceStaleAfter)).
+		Where("last_seen_at < " + instanceStaleCutoff()).
 		Exec(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("failed to prune stale instances: %w", err)

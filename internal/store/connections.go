@@ -116,11 +116,22 @@ func (o OrphanedConnections) Total() int64 {
 // guarantees a non-empty id for any serving process (hostname, else the
 // FallbackInstanceID constant), a store with an empty instance id refuses to
 // register or reconcile at all, and RegisterInstance refuses to write a row for
-// it — so nothing can ever make it look fresh. The one moment such rows could
-// have belonged to a live session is the upgrade that introduced the column,
-// and the 20260803030000_instances migration covers it by seeding the registry
-// (empty id included) from the open connections, which buys every one of those
-// owners a full grace period.
+// it — so nothing can ever make it look fresh.
+//
+// The one moment such rows could have belonged to a live session is the upgrade
+// that introduces this liveness tracking, since no replica on the previous
+// build can register itself. The 20260803030000_instances migration covers that
+// by seeding the registry — the empty id included — from every instance id the
+// connections table has recorded, which buys each of those owners a full grace
+// period. The coverage is not total, and cannot be: an old-build replica that
+// has never recorded a connection is not seeded, so if it accepts its first
+// session between the migration and the next process start, that session is
+// reclaimed through the no-registry-row branch, which by design has no grace
+// period at all (a deleted row means a clean shutdown, and reclaiming it
+// immediately is the point). Giving that branch a grace period would trade a
+// window that lasts one upgrade, and only for a replica that has served nothing
+// since the retention horizon, against permanently delaying the case this
+// feature is built for. The window is left open knowingly.
 //
 // A store whose own instance id is empty is refused outright (zero, nil).
 // Reconciling would then treat the empty id as this process's identity, which
@@ -141,17 +152,20 @@ func (s *Store) CloseOrphanedConnections(ctx context.Context) (OrphanedConnectio
 
 	counts.Own = own
 
-	staleBefore := time.Now().Add(-InstanceStaleAfter)
-
 	reclaimed, err := s.closeOrphans(ctx, func(q *bun.UpdateQuery) *bun.UpdateQuery {
 		// Own rows are handled above; excluding them here keeps the two counts
 		// disjoint (and this instance is registered, so it would not match).
+		//
+		// The staleness cutoff is computed by the database, not by this
+		// process: the heartbeat it is being compared against was written by
+		// another replica, and clock skew between the two would come straight
+		// out of the grace period. See instanceNow.
 		return q.Where("instance_id <> ?", s.instanceID).
 			Where(`NOT EXISTS (
 				SELECT 1 FROM instances AS live
 				WHERE live.instance_id = c.instance_id
-				  AND live.last_seen_at >= ?
-			)`, staleBefore)
+				  AND live.last_seen_at >= ` + instanceStaleCutoff() + `
+			)`)
 	})
 	if err != nil {
 		return counts, err

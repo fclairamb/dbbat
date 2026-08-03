@@ -83,7 +83,15 @@ traffic before anything touched its sessions.
 A plain Kubernetes Deployment, which mints a new pod name on every restart, is
 therefore handled as well as a StatefulSet or an explicit `DBB_INSTANCE_ID`: the
 replacement pod does not recognise its predecessor's id, but it can see that the
-predecessor stopped heartbeating. Connections recorded before instance tracking
+predecessor stopped heartbeating.
+
+:::warning
+If you set `DBB_INSTANCE_ID` explicitly, it must be **unique per running
+process** — never the same value on several replicas. An instance always treats
+open connections carrying its own id as its own previous run's leftovers, so
+two live replicas sharing an id will close each other's sessions. The default
+(the hostname) is already unique; there is no reason to pin it.
+::: Connections recorded before instance tracking
 existed carry an empty instance id; they have no owner and never will, so they
 are reclaimed the same way.
 

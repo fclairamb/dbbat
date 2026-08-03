@@ -122,11 +122,15 @@ func backdateConnection(t *testing.T, ctx context.Context, store *Store, uid uui
 	require.NoError(t, err)
 }
 
-// registerInstanceAs writes a registry row for another instance id, with the
-// given last_seen_at, without disturbing the store's own instance id. A
-// last_seen_at in the recent past means "alive and heartbeating"; one older
-// than InstanceStaleAfter means "gone".
-func registerInstanceAs(t *testing.T, ctx context.Context, store *Store, instanceID string, lastSeen time.Time) {
+// registerInstanceAs writes a registry row for another instance id, last seen
+// lastSeenAgo before now, without disturbing the store's own instance id. Zero
+// means "alive and heartbeating right now"; more than InstanceStaleAfter means
+// "gone".
+//
+// The backdating is done in SQL, against the same database clock the heartbeat
+// and the staleness cutoff use — a test that mixed in the Go clock would be
+// testing a time base the code no longer has.
+func registerInstanceAs(t *testing.T, ctx context.Context, store *Store, instanceID string, lastSeenAgo time.Duration) {
 	t.Helper()
 
 	previous := store.InstanceID()
@@ -135,7 +139,8 @@ func registerInstanceAs(t *testing.T, ctx context.Context, store *Store, instanc
 	store.SetInstanceID(previous)
 
 	_, err := store.db.ExecContext(ctx,
-		"UPDATE instances SET last_seen_at = ? WHERE instance_id = ?", lastSeen, instanceID)
+		"UPDATE instances SET last_seen_at = now() - make_interval(secs => ?) WHERE instance_id = ?",
+		lastSeenAgo.Seconds(), instanceID)
 	require.NoError(t, err)
 }
 
@@ -177,7 +182,7 @@ func TestCloseOrphanedConnections(t *testing.T) {
 	backdateConnection(t, ctx, store, otherReplica.UID, stopped)
 
 	store.SetInstanceID("instance-a")
-	registerInstanceAs(t, ctx, store, "instance-b", time.Now())
+	registerInstanceAs(t, ctx, store, "instance-b", 0)
 	require.NoError(t, store.RegisterInstance(ctx))
 
 	closed, err := store.CloseOrphanedConnections(ctx)
@@ -264,16 +269,16 @@ func TestCloseOrphanedConnectionsReclaimsDeadInstances(t *testing.T) {
 	// A replica that is up and heartbeating. Its sessions must survive: closing
 	// them would let the retention sweep delete a connection a live session is
 	// still writing queries against.
-	registerInstanceAs(t, ctx, store, "live-instance", time.Now())
+	registerInstanceAs(t, ctx, store, "live-instance", 0)
 	liveConn := openConnectionFor("live-instance", "10.1.0.1")
 
 	// A replica that registered and then stopped heartbeating — a crashed pod.
-	registerInstanceAs(t, ctx, store, "stale-instance", time.Now().Add(-InstanceStaleAfter-time.Minute))
+	registerInstanceAs(t, ctx, store, "stale-instance", InstanceStaleAfter+time.Minute)
 	staleConn := openConnectionFor("stale-instance", "10.1.0.2")
 
 	// A replica that shut down cleanly and deleted its registration. No row at
 	// all, so it is gone immediately rather than after the grace period.
-	registerInstanceAs(t, ctx, store, "gone-instance", time.Now())
+	registerInstanceAs(t, ctx, store, "gone-instance", 0)
 	goneConn := openConnectionFor("gone-instance", "10.1.0.3")
 	store.SetInstanceID("gone-instance")
 	require.NoError(t, store.DeregisterInstance(ctx))

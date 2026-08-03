@@ -676,16 +676,28 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 // two runs of the same process must agree on the id, or a restart would never
 // recognize (and therefore never reclaim) the connections its predecessor left
 // open.
+//
+// It is also the one way replicas can end up sharing an id without anyone
+// asking for it — every replica that cannot read its hostname lands here — and
+// a shared id defeats the reconcile's own-instance branch. Reaching it at all
+// takes a broken container; see resolveInstanceID.
 const FallbackInstanceID = "dbbat"
 
 // resolveInstanceID fills in the instance id when it was not configured.
 //
-// The hostname is the right default: under Kubernetes it is the pod name, so
-// two replicas sharing a store never collide. Note what that does and does not
-// buy — see Store.CloseOrphanedConnections for the full picture. A plain
-// Deployment mints a new pod name on every restart, so a replacement pod does
-// not reclaim its predecessor's orphans; a StatefulSet, a fixed
-// DBB_INSTANCE_ID, or a single host does.
+// The hostname is the right default, and the property that matters is that two
+// replicas sharing a store never collide — under Kubernetes it is the pod name,
+// so they cannot. A pod name that changes on every restart is not a problem:
+// Store.CloseOrphanedConnections tracks instance liveness in the instances
+// table, so a replacement pod reclaims its predecessor's orphans without
+// recognizing its id.
+//
+// Uniqueness is the requirement, stability is not. Do not set the same
+// DBB_INSTANCE_ID on several replicas to make them "recognize" each other: the
+// own-instance branch of the reconcile closes every open connection carrying
+// this id with no liveness check at all, so a starting replica would close a
+// live peer's sessions. FallbackInstanceID below is the accidental path into
+// the same state. See specs/todos/2026-08-03-shared-instance-id-reconcile.md.
 func resolveInstanceID(configured string) string {
 	if configured = strings.TrimSpace(configured); configured != "" {
 		return configured
