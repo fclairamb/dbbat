@@ -759,6 +759,7 @@ func TestLoadWithBaseURL(t *testing.T) {
 	}
 }
 
+//nolint:paralleltest // Can't use t.Parallel() since we manipulate environment variables
 func TestLoadInstanceID(t *testing.T) {
 	validKey := make([]byte, 32)
 	for i := range validKey {
@@ -807,7 +808,7 @@ func TestLoadInstanceID(t *testing.T) {
 
 	t.Run("resolveInstanceID falls back to a stable constant", func(t *testing.T) {
 		// Stability matters: a random per-run id would mean a restarted
-		// process never recognises its own orphaned connections.
+		// process never recognizes its own orphaned connections.
 		if got := resolveInstanceID("   "); got == "" {
 			t.Error("resolveInstanceID() returned an empty id")
 		}

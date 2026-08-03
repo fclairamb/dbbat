@@ -674,7 +674,7 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 // FallbackInstanceID is used when no DBB_INSTANCE_ID is set and the hostname
 // cannot be read. It is deliberately a constant rather than a random value:
 // two runs of the same process must agree on the id, or a restart would never
-// recognise (and therefore never reclaim) the connections its predecessor left
+// recognize (and therefore never reclaim) the connections its predecessor left
 // open.
 const FallbackInstanceID = "dbbat"
 
