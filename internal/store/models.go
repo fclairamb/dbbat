@@ -300,6 +300,12 @@ type Connection struct {
 	DisconnectedAt   *time.Time `bun:"disconnected_at" json:"disconnected_at"`
 	Queries          int64      `bun:"queries,notnull,default:0" json:"queries"`
 	BytesTransferred int64      `bun:"bytes_transferred,notnull,default:0" json:"bytes_transferred"`
+
+	// InstanceID is the dbbat process that opened this connection. It scopes
+	// the startup reconcile (Store.CloseOrphanedConnections) so a replica can
+	// never close another replica's live sessions. Internal bookkeeping, not
+	// part of the API surface — hence json:"-".
+	InstanceID string `bun:"instance_id,notnull,default:''" json:"-"`
 }
 
 // ConnectionFilter represents filters for listing connections

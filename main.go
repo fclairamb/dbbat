@@ -244,11 +244,13 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		slog.String("api_addr", cfg.ListenAPI),
 		slog.Any("run_mode", cfg.RunMode),
 		slog.String("log_level", cfg.LogLevel),
+		slog.String("instance_id", cfg.InstanceID),
 	)
 
 	// Initialize store (with table drop if in test or demo mode)
 	storeOpts := store.Options{
 		DropTablesFirst: cfg.RunMode == config.RunModeTest || cfg.RunMode == config.RunModeDemo,
+		InstanceID:      cfg.InstanceID,
 	}
 	if cfg.RunMode == config.RunModeTest {
 		logger.InfoContext(ctx, "Test mode enabled, will drop all tables before migration")
@@ -269,6 +271,11 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	// Check for database configurations that match the storage DSN
 	checkDatabaseConfigurations(ctx, dataStore, logger)
+
+	// Close the connections a previous run of this instance left open. Must
+	// happen before any proxy accepts, so a session opened by this run can
+	// never be caught by it.
+	reconcileOrphanedConnections(ctx, dataStore, logger)
 
 	// Ensure default admin exists
 	defaultPassword := "admin"
@@ -353,6 +360,37 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		oracleServer, mysqlServer, mongoServer, sweeper)
 
 	return awaitShutdown(ctx, logger, servers...)
+}
+
+// reconcileOrphanedConnections closes the connection rows this instance left
+// open when it last stopped. Without it a crash, a kill or a pod reschedule
+// leaves disconnected_at NULL forever, and the retention sweep — which
+// deliberately never reaps a connection that still looks open — can never
+// remove those rows.
+//
+// The reconcile is scoped to this instance id (DBB_INSTANCE_ID, defaulting to
+// the hostname), because dbbat runs with more than one replica against a shared
+// store: a blanket update would let a starting replica close another replica's
+// live sessions. See store.CloseOrphanedConnections for what that does and does
+// not reclaim.
+//
+// A failure here is logged, not fatal: stale bookkeeping must not stop the
+// proxy from serving traffic.
+func reconcileOrphanedConnections(ctx context.Context, dataStore *store.Store, logger *slog.Logger) {
+	closed, err := dataStore.CloseOrphanedConnections(ctx)
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to reconcile orphaned connections", slog.Any("error", err))
+
+		return
+	}
+
+	if closed > 0 {
+		// Worth info level: a large count means the previous run did not shut
+		// down cleanly.
+		logger.InfoContext(ctx, "Closed connections left open by a previous run",
+			slog.Int64("connections", closed),
+			slog.String("instance_id", dataStore.InstanceID()))
+	}
 }
 
 // shutdownable is implemented by servers that support graceful shutdown.
