@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strconv"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -1621,44 +1624,33 @@ func TestHandleExecute_InitializesCapturedRows(t *testing.T) {
 	}
 }
 
-func TestResultCapture_RefusesWhenLimitsExceeded(t *testing.T) {
+func TestResultCapture_KeepsPrefixWhenLimitsExceeded(t *testing.T) {
 	t.Parallel()
 
-	// Test that when limits are exceeded, all captured rows are discarded
-	query := &pendingQuery{
-		sql:          "SELECT * FROM big_table",
-		capturedRows: make([]store.QueryRow, 0),
+	// A result set past the row limit keeps the prefix it already captured
+	// (and flags it) rather than discarding everything.
+	const maxRows = 5
+
+	s := newTestSession("write")
+	s.queryStorage.StoreResults = true
+	s.queryStorage.MaxResultRows = maxRows
+	s.queryStorage.MaxResultBytes = 1 << 20
+
+	require.NoError(t, s.handleQuery(&pgproto3.Query{String: "SELECT id FROM big_table"}))
+
+	s.captureRowDescription(&pgproto3.RowDescription{
+		Fields: []pgproto3.FieldDescription{{Name: []byte("id"), DataTypeOID: 23}},
+	})
+
+	for i := range 10 {
+		s.captureDataRow(&pgproto3.DataRow{Values: [][]byte{[]byte(strconv.Itoa(i))}})
 	}
 
-	maxRows := 5
-
-	// Simulate capturing rows until limit is exceeded
-	for i := 0; i < 10; i++ {
-		if query.truncated {
-			// Already truncated, no more rows should be captured
-			break
-		}
-
-		if query.rowNumber >= maxRows {
-			// Limits exceeded - discard all captured rows
-			query.truncated = true
-			query.capturedRows = nil
-		} else {
-			query.capturedRows = append(query.capturedRows, store.QueryRow{
-				RowNumber: i + 1,
-				RowData:   []byte(`{"id":1}`),
-			})
-			query.rowNumber++
-		}
-	}
-
-	// Verify all rows were discarded
-	if query.capturedRows != nil {
-		t.Errorf("capturedRows should be nil when limits exceeded, got %d rows", len(query.capturedRows))
-	}
-	if !query.truncated {
-		t.Error("truncated should be true")
-	}
+	query := s.currentQuery
+	require.NotNil(t, query)
+	assert.True(t, query.truncated, "truncated should be set once the limit is hit")
+	assert.Len(t, query.capturedRows, maxRows, "the captured prefix must be kept, not discarded")
+	assert.Equal(t, maxRows, query.rowNumber)
 }
 
 func TestParseCopyColumnNames(t *testing.T) {

@@ -486,6 +486,49 @@ func (s *Session) captureRowDescription(msg *pgproto3.RowDescription) {
 	}
 }
 
+// captureDataRow records one upstream result row against the pending query,
+// honoring the result-storage limits.
+//
+// When a limit is reached the rows already captured are KEPT and capture simply
+// stops — every other capture path (COPY, MySQL, MongoDB, Oracle) behaves this
+// way, and discarding here meant the very queries a sample is most useful for
+// (the huge ones) stored nothing at all. The truncation is persisted as
+// queries.results_truncated so a short row set is never mistaken for a complete
+// one.
+func (s *Session) captureDataRow(msg *pgproto3.DataRow) {
+	// Compute the row's payload size for the result-capture limits only —
+	// wire-level bytes_transferred is tracked via the CountingConn around
+	// clientConn, not field-summed here.
+	rowSize := int64(0)
+	for _, val := range msg.Values {
+		rowSize += int64(len(val))
+	}
+
+	query := s.getCurrentPendingQuery()
+	if query == nil || !s.queryStorage.StoreResults || query.truncated {
+		return
+	}
+
+	// Check if this row would exceed limits
+	if query.rowNumber >= s.queryStorage.MaxResultRows ||
+		query.capturedBytes+rowSize > s.queryStorage.MaxResultBytes {
+		query.truncated = true
+
+		s.logger.WarnContext(s.ctx, "result capture truncated - limits exceeded",
+			slog.Int("rows_captured", query.rowNumber),
+			slog.Int64("bytes_captured", query.capturedBytes),
+			slog.Int("max_rows", s.queryStorage.MaxResultRows),
+			slog.Int64("max_bytes", s.queryStorage.MaxResultBytes))
+
+		return
+	}
+
+	row := s.convertDataRow(msg.Values, query.columnNames, query.columnOIDs)
+	query.capturedRows = append(query.capturedRows, row)
+	query.capturedBytes += rowSize
+	query.rowNumber++
+}
+
 // proxyUpstreamToClient proxies messages from upstream to client.
 //
 //nolint:gocognit,cyclop // Protocol handling with many message types inherently has high complexity
@@ -534,40 +577,7 @@ func (s *Session) proxyUpstreamToClient() error {
 			}
 
 		case *pgproto3.DataRow:
-			// Compute the row's payload size for the result-capture limits
-			// only — wire-level bytes_transferred is tracked via the
-			// CountingConn around clientConn, not field-summed here.
-			rowSize := int64(0)
-			for _, val := range m.Values {
-				rowSize += int64(len(val))
-			}
-
-			// Capture row data if enabled and within limits
-			query := s.getCurrentPendingQuery()
-			if query != nil && s.queryStorage.StoreResults && !query.truncated {
-				// Check if this row would exceed limits
-				if query.rowNumber >= s.queryStorage.MaxResultRows ||
-					query.capturedBytes+rowSize > s.queryStorage.MaxResultBytes {
-					// Limits exceeded: keep the prefix already captured and stop
-					// appending. Every other capture path (COPY, MySQL, MongoDB,
-					// Oracle) keeps its prefix; discarding here meant the very
-					// queries a sample is most useful for stored nothing at all.
-					// The !query.truncated guard above stops further capture, and
-					// the flag is persisted as queries.results_truncated so a
-					// short row set is never mistaken for an empty result.
-					query.truncated = true
-					s.logger.WarnContext(s.ctx, "result capture truncated - limits exceeded",
-						slog.Int("rows_captured", query.rowNumber),
-						slog.Int64("bytes_captured", query.capturedBytes),
-						slog.Int("max_rows", s.queryStorage.MaxResultRows),
-						slog.Int64("max_bytes", s.queryStorage.MaxResultBytes))
-				} else {
-					row := s.convertDataRow(m.Values, query.columnNames, query.columnOIDs)
-					query.capturedRows = append(query.capturedRows, row)
-					query.capturedBytes += rowSize
-					query.rowNumber++
-				}
-			}
+			s.captureDataRow(m)
 
 		case *pgproto3.CopyOutResponse:
 			// Server is starting a COPY TO operation (sending data to client)
