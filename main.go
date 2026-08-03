@@ -272,9 +272,15 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	// Check for database configurations that match the storage DSN
 	checkDatabaseConfigurations(ctx, dataStore, logger)
 
-	// Close the connections a previous run of this instance left open. Must
-	// happen before any proxy accepts, so a session opened by this run can
-	// never be caught by it.
+	// Announce this process in the instance registry before anything else looks
+	// at it: the reconcile below reads the registry, and every other replica
+	// uses it to decide whether our connections are still live.
+	heartbeat := startInstanceHeartbeat(ctx, dataStore, logger)
+
+	// Close the connections left open by a process that is no longer running —
+	// this instance's previous run, plus any instance the registry proves is
+	// gone. Must happen before any proxy accepts, so a session opened by this
+	// run can never be caught by it.
 	reconcileOrphanedConnections(ctx, dataStore, logger)
 
 	// Ensure default admin exists
@@ -357,22 +363,27 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	// Draining releases parked queries first, then stops the servers.
 	servers := collectServers(approvalDrain{approvals, logger}, apiServer, proxyServer,
-		oracleServer, mysqlServer, mongoServer, sweeper)
+		oracleServer, mysqlServer, mongoServer, sweeper, heartbeat)
 
 	return awaitShutdown(ctx, logger, servers...)
 }
 
-// reconcileOrphanedConnections closes the connection rows this instance left
-// open when it last stopped. Without it a crash, a kill or a pod reschedule
-// leaves disconnected_at NULL forever, and the retention sweep — which
-// deliberately never reaps a connection that still looks open — can never
+// reconcileOrphanedConnections closes the connection rows left open by a
+// process that is no longer running. Without it a crash, a kill or a pod
+// reschedule leaves disconnected_at NULL forever, and the retention sweep —
+// which deliberately never reaps a connection that still looks open — can never
 // remove those rows.
 //
-// The reconcile is scoped to this instance id (DBB_INSTANCE_ID, defaulting to
-// the hostname), because dbbat runs with more than one replica against a shared
-// store: a blanket update would let a starting replica close another replica's
-// live sessions. See store.CloseOrphanedConnections for what that does and does
-// not reclaim.
+// It covers this instance id's own leftovers (DBB_INSTANCE_ID, defaulting to
+// the hostname) plus those of any instance the registry proves is gone. dbbat
+// runs with more than one replica against a shared store, so a blanket update
+// would let a starting replica close another replica's live sessions; liveness,
+// tracked by the instance heartbeat, is what makes widening it safe. See
+// store.CloseOrphanedConnections.
+//
+// The two counts are logged separately, and reclaims are logged even when the
+// own count is zero: connections reclaimed from another instance mean a process
+// died without shutting down, which is worth noticing on its own.
 //
 // A failure here is logged, not fatal: stale bookkeeping must not stop the
 // proxy from serving traffic.
@@ -384,12 +395,25 @@ func reconcileOrphanedConnections(ctx context.Context, dataStore *store.Store, l
 		return
 	}
 
-	if closed > 0 {
+	if closed.Own > 0 {
 		// Worth info level: a large count means the previous run did not shut
 		// down cleanly.
 		logger.InfoContext(ctx, "Closed connections left open by a previous run",
-			slog.Int64("connections", closed),
+			slog.Int64("connections", closed.Own),
 			slog.String("instance_id", dataStore.InstanceID()))
+	}
+
+	if closed.Reclaimed > 0 {
+		logger.InfoContext(ctx, "Reclaimed connections left open by instances that are gone",
+			slog.Int64("connections", closed.Reclaimed),
+			slog.Duration("stale_after", store.InstanceStaleAfter))
+	}
+
+	// Housekeeping, after the reclaim so it still saw the rows it judged.
+	if pruned, err := dataStore.PruneStaleInstances(ctx); err != nil {
+		logger.WarnContext(ctx, "failed to prune stale instances", slog.Any("error", err))
+	} else if pruned > 0 {
+		logger.DebugContext(ctx, "Pruned stale instance registrations", slog.Int64("instances", pruned))
 	}
 }
 
@@ -1073,6 +1097,7 @@ func collectServers(
 	mysqlServer *mysql.Server,
 	mongoServer *mongodb.Server,
 	sweeper *queryRetentionSweeper,
+	heartbeat *instanceHeartbeat,
 ) []shutdownable {
 	servers := []shutdownable{drain, apiServer, pgServer}
 
@@ -1090,6 +1115,13 @@ func collectServers(
 
 	if sweeper != nil {
 		servers = append(servers, sweeper)
+	}
+
+	// Last on purpose: deregistering tells the other replicas our connections
+	// are fair game, which must not happen while the proxies are still draining
+	// live sessions.
+	if heartbeat != nil {
+		servers = append(servers, heartbeat)
 	}
 
 	return servers
