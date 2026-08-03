@@ -41,8 +41,8 @@ const InstanceStaleAfter = 30 * InstanceHeartbeatInterval
 // the row exists this process looks dead to every other replica, so the window
 // between the first connection it opens and its registration must be zero.
 //
-// An empty instance id is refused: '' is not an identity, and registering it
-// would make the legacy no-owner rows (below) look alive forever.
+// An empty instance id is refused: it is not an identity, and registering it
+// would make the legacy no-owner connection rows look alive forever.
 func (s *Store) RegisterInstance(ctx context.Context) error {
 	if s.instanceID == "" {
 		return nil

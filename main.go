@@ -272,16 +272,9 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	// Check for database configurations that match the storage DSN
 	checkDatabaseConfigurations(ctx, dataStore, logger)
 
-	// Announce this process in the instance registry before anything else looks
-	// at it: the reconcile below reads the registry, and every other replica
-	// uses it to decide whether our connections are still live.
-	heartbeat := startInstanceHeartbeat(ctx, dataStore, logger)
-
-	// Close the connections left open by a process that is no longer running —
-	// this instance's previous run, plus any instance the registry proves is
-	// gone. Must happen before any proxy accepts, so a session opened by this
-	// run can never be caught by it.
-	reconcileOrphanedConnections(ctx, dataStore, logger)
+	// Announce this process, then close what dead processes left open. Both
+	// must happen before any proxy accepts.
+	heartbeat := registerAndReconcile(ctx, dataStore, logger)
 
 	// Ensure default admin exists
 	defaultPassword := "admin"
@@ -366,6 +359,25 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		oracleServer, mysqlServer, mongoServer, sweeper, heartbeat)
 
 	return awaitShutdown(ctx, logger, servers...)
+}
+
+// registerAndReconcile puts this process in the instance registry and then
+// clears the connection rows left behind by processes that are gone.
+//
+// The order matters twice over. The reconcile reads the registry, so our own
+// row has to be there first; and every other replica reads the registry to
+// decide whether our connections are live, so the row must exist before this
+// process opens any. Both therefore run before any proxy accepts — a session
+// opened by this run can never be caught by its own reconcile.
+//
+// Returns the heartbeat that keeps our row fresh, for the shutdown sequence to
+// stop last of all. Nil when there is no instance id to register.
+func registerAndReconcile(ctx context.Context, dataStore *store.Store, logger *slog.Logger) *instanceHeartbeat {
+	heartbeat := startInstanceHeartbeat(ctx, dataStore, logger)
+
+	reconcileOrphanedConnections(ctx, dataStore, logger)
+
+	return heartbeat
 }
 
 // reconcileOrphanedConnections closes the connection rows left open by a

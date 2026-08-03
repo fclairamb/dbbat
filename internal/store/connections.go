@@ -109,21 +109,22 @@ func (o OrphanedConnections) Total() int64 {
 // a candidate: it would have to fail every heartbeat for a quarter of an hour
 // while still serving traffic.
 //
-// Legacy rows with instance_id = '' — created before the instance_id column
-// existed — are folded into the "no instances row" case rather than being given
-// a separate opt-in switch. That is a deliberate choice, and it is safe because
-// '' can never be alive: config.resolveInstanceID guarantees a non-empty id for
-// any serving process (hostname, else the FallbackInstanceID constant), a store
-// with an empty instance id refuses to register or reconcile at all, and
-// RegisterInstance refuses to write a '' row — so nothing can ever make ''
-// look fresh. The one moment '' rows could have belonged to a live session is
-// the upgrade that introduced the column, and the 20260803030000_instances
-// migration covers it by seeding the registry (including '') from the open
-// connections, which buys every one of those owners a full grace period.
+// Legacy rows carrying an empty instance id — created before the instance_id
+// column existed — are folded into the "no instances row" case rather than
+// being given a separate opt-in switch. That is a deliberate choice, and it is
+// safe because the empty id can never be alive: config.resolveInstanceID
+// guarantees a non-empty id for any serving process (hostname, else the
+// FallbackInstanceID constant), a store with an empty instance id refuses to
+// register or reconcile at all, and RegisterInstance refuses to write a row for
+// it — so nothing can ever make it look fresh. The one moment such rows could
+// have belonged to a live session is the upgrade that introduced the column,
+// and the 20260803030000_instances migration covers it by seeding the registry
+// (empty id included) from the open connections, which buys every one of those
+// owners a full grace period.
 //
-// An empty instance id is refused outright (zero, nil). Reconciling would then
-// key off '' as if it were this process's identity, which is exactly the
-// blanket update this design exists to prevent.
+// A store whose own instance id is empty is refused outright (zero, nil).
+// Reconciling would then treat the empty id as this process's identity, which
+// is exactly the blanket update this design exists to prevent.
 func (s *Store) CloseOrphanedConnections(ctx context.Context) (OrphanedConnections, error) {
 	var counts OrphanedConnections
 
