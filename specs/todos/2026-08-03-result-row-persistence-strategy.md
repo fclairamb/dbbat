@@ -156,3 +156,72 @@ rather than overloading it.
   and the row-numbering / `CreateQuery` ordering constraint.
 - `internal/proxy/mysql/intercept.go:350`, `internal/proxy/mongodb/result.go:302`.
 - `internal/store/queries.go:77` — `StoreQueryRows`, unchanged.
+
+## Implementation Plan
+
+### Contradiction resolved: `StoreQueryRows` *does* change signature
+
+The `## Files` list above says `StoreQueryRows` is "unchanged", while
+"Three things that will bite" #3 says it must accept rows carrying their own
+`query_id` so one process-wide writer can batch across sessions. **The detailed
+section wins**: the `## Files` annotation is stale. `StoreQueryRows` becomes
+`StoreQueryRows(ctx, rows []store.PendingQueryRow)` where each row carries its
+`QueryID`, and a single process-wide `shared.RowWriter` (built in `main.go`,
+handed to all four proxy servers) batches across protocols and sessions.
+
+### Steps (each independently committable)
+
+1. **Migration + model** — `queries.results_dropped BOOLEAN NOT NULL DEFAULT
+   FALSE` (`internal/migrations/sql/20260803040000_queries_results_dropped.{up,down}.sql`),
+   `store.Query.ResultsDropped`, and the column added to `ListQueries`'
+   explicit column list. "Dropped" is deliberately a second column, never an
+   overload of `results_truncated`.
+2. **Store signature** — `PendingQueryRow{QueryID, RowNumber, RowData,
+   RowSizeBytes}`; `StoreQueryRows(ctx, rows []PendingQueryRow)`;
+   `UpdateQueryCompletion(..., resultsTruncated, resultsDropped bool)`.
+3. **`shared.RowWriter`** (`internal/proxy/shared/rowwriter.go`) — bounded
+   channel, single drain goroutine, opportunistic drain:
+   - `MaxBatchRows = 1000`, `MaxBatchBytes = 8 MiB` — both named constants,
+     either trips the flush.
+   - `QueueCapacityRows = 4096` plus a `MaxQueuedBytes = 32 MiB` in-flight byte
+     budget, because a row cap alone does not bound memory for wide rows.
+   - `(*QuerySink).Add(row) bool` — **non-blocking**, drops and marks the sink
+     degraded when the queue is full. This is the only entry point used from a
+     capture path that runs inline with forwarding rows to the client.
+   - `(*QuerySink).AddAll(ctx, rows)` — blocking send, only for off-hot-path
+     bulk submission (MySQL/MongoDB/COPY already run in a background
+     goroutine and would otherwise lose most of a materialised result set).
+   - `(*QuerySink).Flush(ctx)` — the **flush barrier**: a sentinel queued in
+     the same FIFO channel, so everything submitted before it has been
+     inserted (or failed) by the time it returns.
+   - `(*QuerySink).Dropped()` — true when any row was dropped at submit time,
+     when a batch insert failed, or when the parent query record failed.
+   - Parent-FK ordering: a sink is created unresolved
+     (`writer.NewSink()`) and the producer calls `Resolve(uid)` / `Fail()`.
+     The drain goroutine awaits resolution before a row is included in a
+     batch, so the parent `queries` row always exists first, and the producer
+     never blocks on it.
+4. **Oracle** (`internal/proxy/oracle/intercept.go`) — `captureRow` swaps its
+   per-row `StoreQueryRows` for `sink.Add`; `completeQuery`'s goroutine flushes
+   the barrier before `finalizeQuery` writes completion.
+5. **PostgreSQL** (`session.go` / `intercept.go`) — `capturedRows` is gone.
+   `captureDataRow` assigns `RowNumber` from the running `rowNumber` counter
+   (bite #1) and `Add`s to the sink; the first captured row kicks off an
+   asynchronous `CreateQuery` (bite #3 ordering — the parent is created ahead
+   of the first flush, exactly as Oracle's `persistQueryRecord` does), and
+   `persistQueryAsync` takes the UPDATE branch for it. COPY rows keep being
+   built at query end and go out via `AddAll` after the parent exists.
+   `Flush` runs before completion is written (bite #2).
+6. **MySQL** (`internal/proxy/mysql/intercept.go`) — rows routed through the
+   writer with `AddAll` + `Flush` before the stream announcement.
+7. **MongoDB** (`internal/proxy/mongodb/result.go`) — same routing.
+8. **API/UI** — `results_dropped` in `internal/api/openapi.yml`, regenerated
+   `front/src/api/schema.ts`, and a distinct "Partial" badge next to the
+   existing "Truncated" badge on the query detail page.
+9. **Docs** — `website/docs/features/query-logging.md` and the protocol notes
+   that describe per-row streaming.
+10. **Tests** — drain-loop unit tests (batch of 1 when idle, full batches under
+    load, both caps tripping, non-blocking drop when full), plus the three
+    bite-items: contiguous row numbers across a flush boundary, no rows landing
+    after completion, and no row inserted before its parent query exists.
+    Per-protocol coverage for Oracle and PostgreSQL.
