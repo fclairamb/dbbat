@@ -819,12 +819,21 @@ func (s *Session) persistAbortedQuery(cause error) {
 	// Wire-level diff since the previous query end: the aborted query's text
 	// plus every response byte streamed before the abort.
 	total := s.bytesFromClient.Load() + s.bytesToClient.Load()
-	bytesTransferred := total - s.lastBytesSnapshot
-	if bytesTransferred <= 0 {
-		return
-	}
 
-	s.lastBytesSnapshot = total
+	bytesTransferred := total - s.lastBytesSnapshot
+	if bytesTransferred > 0 {
+		s.lastBytesSnapshot = total
+	} else {
+		// Nothing new to attribute. Still log the abort when result capture
+		// already inserted a queries row for this statement: skipping would
+		// leave that row with no duration, no error and no capture flags,
+		// which reads as a query that is still running.
+		if query.rowSink == nil {
+			return
+		}
+
+		bytesTransferred = 0
+	}
 
 	// Extended Query Protocol leaves the in-flight query in the pending queue
 	// (currentQuery is nil until CommandComplete/ErrorResponse pops it); logQuery

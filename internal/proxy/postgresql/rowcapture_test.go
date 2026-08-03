@@ -3,10 +3,13 @@ package postgresql
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -16,6 +19,9 @@ import (
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
+
+// errAbortedForTest stands in for the mid-stream cause of an abort.
+var errAbortedForTest = errors.New("grant expired")
 
 // captureRowStore records the batches the shared writer hands it.
 type captureRowStore struct {
@@ -210,4 +216,47 @@ func TestPGCapture_NoStoreFailsTheSinkInsteadOfWedgingTheWriter(t *testing.T) {
 	sink.Flush(context.Background())
 	assert.Empty(t, rowStore.rows(), "no row may be inserted without a parent query")
 	assert.True(t, sink.Dropped(), "rows with no parent are dropped, and the query says so")
+}
+
+// TestPersistAbortedQuery_CompletesARecordItAlreadyCreated covers the seam the
+// eager parent insert opened: capture creates the queries row on its first row,
+// so an abort that attributes no new bytes must still log the outcome. Skipping
+// it would leave a row with no duration, no error and no capture flags — a
+// query that reads as still running.
+func TestPersistAbortedQuery_CompletesARecordItAlreadyCreated(t *testing.T) {
+	t.Parallel()
+
+	rowStore := &captureRowStore{}
+	writer := shared.NewRowWriter(rowStore, slog.Default())
+
+	t.Cleanup(func() { writer.Close(context.Background()) })
+
+	newAbortSession := func(withSink bool) *Session {
+		s := newTestSession("write")
+		s.ctx = context.Background()
+		s.bytesFromClient = &atomic.Int64{}
+		s.bytesToClient = &atomic.Int64{}
+		s.currentQuery = &pendingQuery{sql: "SELECT 1", startTime: time.Now()}
+
+		if withSink {
+			s.currentQuery.rowSink = writer.NewSinkFor(uuid.New())
+		}
+
+		return s
+	}
+
+	// No new bytes and a capture already in flight: the abort must be logged.
+	withRecord := newAbortSession(true)
+	withRecord.persistAbortedQuery(errAbortedForTest)
+
+	assert.Equal(t, int64(1), withRecord.grant.QueryCount,
+		"an abort on a query whose record already exists must still be completed")
+
+	// No new bytes and nothing captured: nothing was ever inserted, so there
+	// is still nothing to log.
+	withoutRecord := newAbortSession(false)
+	withoutRecord.persistAbortedQuery(errAbortedForTest)
+
+	assert.Equal(t, int64(0), withoutRecord.grant.QueryCount,
+		"an abort with no record and no bytes stays unlogged")
 }
