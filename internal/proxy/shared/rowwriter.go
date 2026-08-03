@@ -482,6 +482,18 @@ func (s *QuerySink) Dropped() bool {
 	return s.dropped.Load()
 }
 
+// QueryUID reports the uid of the query record this sink's rows hang from,
+// blocking until it is known. It reports false when there is no sink, when the
+// record could not be created, or when nothing resolved it in time — in which
+// case the caller owns creating the record itself.
+func (s *QuerySink) QueryUID(ctx context.Context) (uuid.UUID, bool) {
+	if s == nil {
+		return uuid.Nil, false
+	}
+
+	return s.await(ctx)
+}
+
 // markDropped is how the drain goroutine reports a loss back to the capture.
 func (s *QuerySink) markDropped() {
 	if s == nil {

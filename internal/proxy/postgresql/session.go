@@ -31,12 +31,18 @@ type pendingQuery struct {
 	parameters *store.QueryParameters
 
 	// Result capture state
-	columnNames   []string         // From RowDescription
-	columnOIDs    []uint32         // Type OIDs for decoding
-	capturedRows  []store.QueryRow // Accumulated result rows
-	capturedBytes int64            // Total bytes captured
-	rowNumber     int              // Current row counter
-	truncated     bool             // True if limits exceeded
+	columnNames   []string // From RowDescription
+	columnOIDs    []uint32 // Type OIDs for decoding
+	capturedBytes int64    // Total bytes captured
+	rowNumber     int      // Current row counter
+	truncated     bool     // True if limits exceeded
+
+	// rowSink streams captured rows to the shared batching writer instead of
+	// holding the whole capture in RAM until the query ends. Created on the
+	// first captured row (see ensureRowSink), which is also where the parent
+	// queries row starts being inserted — query_rows.query_id is a foreign
+	// key, so the parent has to exist before the first batch flushes.
+	rowSink *shared.QuerySink
 
 	// approvalUID is the uid of the row an approval hold already inserted for
 	// this statement (uuid.Nil when no hold happened). Non-nil means the
@@ -159,6 +165,11 @@ type Session struct {
 	// proxyUpstreamToClient).
 	bytesFromClient *atomic.Int64
 	bytesToClient   *atomic.Int64
+
+	// rowWriter batches captured result rows off the data path. Shared with
+	// every other session and protocol in the process.
+	rowWriter *shared.RowWriter
+
 	// lastBytesSnapshot is the cumulative client-side byte count at the end
 	// of the previous query. Per-query bytes = current cumulative - snapshot.
 	// Only mutated from the upstream→client goroutine where logQuery runs,
@@ -177,6 +188,7 @@ func NewSession(
 	dumpConfig config.DumpConfig,
 	authCache *cache.AuthCache,
 	tlsConfig *tls.Config,
+	rowWriter *shared.RowWriter,
 ) *Session {
 	bytesFromClient := &atomic.Int64{}
 	bytesToClient := &atomic.Int64{}
@@ -208,6 +220,7 @@ func NewSession(
 		dumpConfig:      dumpConfig,
 		authCache:       authCache,
 		tlsConfig:       tlsConfig,
+		rowWriter:       rowWriter,
 		bytesFromClient: bytesFromClient,
 		bytesToClient:   bytesToClient,
 		extendedState: &extendedQueryState{
@@ -524,9 +537,83 @@ func (s *Session) captureDataRow(msg *pgproto3.DataRow) {
 	}
 
 	row := s.convertDataRow(msg.Values, query.columnNames, query.columnOIDs)
-	query.capturedRows = append(query.capturedRows, row)
+
 	query.capturedBytes += rowSize
 	query.rowNumber++
+
+	// Row numbers are a producer-side running counter: batches flush while
+	// the result set is still streaming, so there is no slice left at the end
+	// to number after the fact.
+	row.RowNumber = query.rowNumber
+
+	// Non-blocking: this runs inline with forwarding rows to the client, so a
+	// slow moment in dbbat's own storage must never stall the customer's
+	// query. A refused row marks the capture as having dropped rows, which is
+	// reported separately from truncation.
+	s.ensureRowSink(query).Add(row)
+}
+
+// ensureRowSink returns the query's handle on the shared row writer, creating
+// it — and starting the parent queries row's INSERT — on first use.
+//
+// The parent record is inserted asynchronously: it must exist before the first
+// batch of rows flushes, but PostgreSQL's capture path runs inline with
+// forwarding rows to the client and must not acquire a synchronous store
+// round-trip it never had. The writer holds the query's rows until the sink is
+// resolved, which is what keeps the query_rows -> queries foreign key
+// satisfied without coupling the two.
+//
+// Returns nil when there is no writer, in which case rows are simply not
+// captured.
+func (s *Session) ensureRowSink(query *pendingQuery) *shared.QuerySink {
+	if query.rowSink != nil {
+		return query.rowSink
+	}
+
+	if s.rowWriter == nil {
+		return nil
+	}
+
+	// An approval hold already inserted this statement's row, so the parent
+	// is there and nothing else needs creating.
+	if query.approvalUID != uuid.Nil {
+		query.rowSink = s.rowWriter.NewSinkFor(query.approvalUID)
+
+		return query.rowSink
+	}
+
+	sink := s.rowWriter.NewSink()
+	query.rowSink = sink
+
+	if s.store == nil || s.connectionUID == uuid.Nil {
+		// Nothing to hang rows from. Fail the sink rather than leaving it
+		// unresolved, which would make the shared writer wait on it.
+		sink.Fail()
+
+		return sink
+	}
+
+	record := &store.Query{
+		ConnectionID: s.connectionUID,
+		SQLText:      query.sql,
+		Parameters:   query.parameters,
+		ExecutedAt:   query.startTime,
+	}
+
+	go func() {
+		created, err := s.store.CreateQuery(s.ctx, record)
+		if err != nil {
+			s.logger.ErrorContext(s.ctx, "failed to create query record for result capture",
+				slog.Any("error", err))
+			sink.Fail()
+
+			return
+		}
+
+		sink.Resolve(created.UID)
+	}()
+
+	return sink
 }
 
 // proxyUpstreamToClient proxies messages from upstream to client.

@@ -78,10 +78,9 @@ func (s *Session) handleQuery(query *pgproto3.Query) error {
 
 	// Start tracking query for logging
 	s.currentQuery = &pendingQuery{
-		sql:          sqlText,
-		startTime:    time.Now(),
-		capturedRows: make([]store.QueryRow, 0), // Initialize for capture
-		approvalUID:  approvalUID,
+		sql:         sqlText,
+		startTime:   time.Now(),
+		approvalUID: approvalUID,
 	}
 
 	return nil
@@ -258,11 +257,10 @@ func (s *Session) handleExecute(msg *pgproto3.Execute) error {
 
 	// Queue the query for logging (will be popped on CommandComplete)
 	query := &pendingQuery{
-		sql:          sqlText,
-		startTime:    time.Now(),
-		parameters:   portal.parameters,
-		capturedRows: make([]store.QueryRow, 0), // Initialize for capture
-		approvalUID:  approvalUID,
+		sql:         sqlText,
+		startTime:   time.Now(),
+		parameters:  portal.parameters,
+		approvalUID: approvalUID,
 	}
 	s.extendedState.pendingQueries = append(s.extendedState.pendingQueries, query)
 
@@ -354,14 +352,12 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 		query.CopyFormat = &format
 	}
 
-	// Capture rows - either from regular query or COPY operation
-	var capturedRows []store.QueryRow
+	// COPY rows are the one capture that is still built at query end: the
+	// chunks only become rows once the stream is complete. Regular result rows
+	// have been streaming to the row writer all along.
+	var copyRows []store.QueryRow
 	if s.copyState != nil && len(s.copyState.dataChunks) > 0 {
-		// Parse COPY data into rows
-		capturedRows = s.parseCopyDataToRows()
-	} else {
-		// Regular query rows
-		capturedRows = s.currentQuery.capturedRows
+		copyRows = s.parseCopyDataToRows()
 	}
 
 	// Record whether capture stopped on a storage limit. Read after the rows
@@ -372,7 +368,7 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 	}
 
 	// Persist asynchronously so the proxy isn't blocked on the store write.
-	s.persistQueryAsync(query, capturedRows, bytesTransferred)
+	s.persistQueryAsync(query, s.currentQuery.rowSink, copyRows, bytesTransferred)
 
 	// Update local grant state for in-session quota checks
 	s.grant.QueryCount++
@@ -384,55 +380,118 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 // is no connection record to write against — the mid-stream abort path
 // (persistAbortedQuery) reuses logQuery purely for its in-memory grant
 // accounting in unit contexts that have no store.
-func (s *Session) persistQueryAsync(query *store.Query, capturedRows []store.QueryRow, bytesTransferred int64) {
+//
+// Ordering matters here, in three ways:
+//
+//   - The parent queries row must exist before any captured row is inserted
+//     (query_rows.query_id is a foreign key). For a result-set capture that
+//     already happened, asynchronously, on the first captured row; this
+//     function only picks up the uid it produced.
+//   - The tail of the capture must land before the query reads as complete,
+//     which is what the sink's flush barrier gives us. Without it the UI would
+//     show a finished query with rows still arriving.
+//   - Rows the writer had to drop are known only after that barrier, so the
+//     completion write is what records results_dropped.
+func (s *Session) persistQueryAsync(
+	query *store.Query,
+	sink *shared.QuerySink,
+	copyRows []store.QueryRow,
+	bytesTransferred int64,
+) {
 	if s.store == nil || s.connectionUID == uuid.Nil {
+		// No store to write to: release anything the capture queued rather
+		// than leaving the sink unresolved forever.
+		sink.Fail()
+
 		return
 	}
 
 	go func() {
-		queryUID := query.UID
+		queryUID, exists := s.resolveQueryRecord(query, sink, len(copyRows) > 0)
+		if queryUID == uuid.Nil {
+			return
+		}
 
-		if queryUID != uuid.Nil {
-			// The row already exists: an approval hold persisted it as
-			// pending before the statement ran, so complete it in place
-			// rather than inserting a duplicate.
+		// The parent row exists now, so COPY rows have somewhere to go. This
+		// send blocks rather than dropping: the rows are already resident in
+		// memory, and losing a capture that used to be stored whole would be
+		// a regression.
+		sink.AddAll(s.ctx, copyRows)
+
+		// Flush barrier: everything captured for this query is durable (or
+		// definitively lost) once this returns.
+		sink.Flush(s.ctx)
+
+		query.ResultsDropped = sink.Dropped()
+
+		// A record that was inserted complete only needs a completion write
+		// when the capture turned out to be partial after the fact.
+		if exists || query.ResultsDropped {
 			if err := s.store.UpdateQueryCompletion(
-				s.ctx, queryUID, query.DurationMs, query.RowsAffected, query.Error, query.ResultsTruncated, false,
+				s.ctx, queryUID, query.DurationMs, query.RowsAffected, query.Error,
+				query.ResultsTruncated, query.ResultsDropped,
 			); err != nil {
-				s.logger.ErrorContext(s.ctx, "failed to complete held query", slog.Any("error", err))
+				s.logger.ErrorContext(s.ctx, "failed to complete query", slog.Any("error", err))
 			}
-		} else {
-			createdQuery, err := s.store.CreateQuery(s.ctx, query)
-			if err != nil {
-				s.logger.ErrorContext(s.ctx, "failed to log query", slog.Any("error", err))
-
-				return
-			}
-
-			queryUID = createdQuery.UID
 		}
 
-		// Announce it on the connection's watch topic. Publishing is
-		// non-blocking and cannot fail the session.
+		// Announce it on the connection's watch topic, after the rows landed
+		// so a watcher never sees a complete query with rows still in flight.
+		// Publishing is non-blocking and cannot fail the session.
 		s.stream.Query(queryUID, query)
-
-		// Store captured result rows
-		if len(capturedRows) > 0 {
-			// Assign row numbers
-			for i := range capturedRows {
-				capturedRows[i].RowNumber = i + 1
-			}
-
-			if err := s.store.StoreQueryRows(s.ctx, store.PendingRows(queryUID, capturedRows)); err != nil {
-				s.logger.ErrorContext(s.ctx, "failed to store query rows", slog.Any("error", err))
-			}
-		}
 
 		// Update connection stats
 		if err := s.store.IncrementConnectionStats(s.ctx, s.connectionUID, bytesTransferred); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
 		}
 	}()
+}
+
+// resolveQueryRecord returns the uid of this query's row, inserting it when
+// nothing has yet. The second result reports whether the row predates this
+// call — i.e. whether it still needs a completion UPDATE.
+//
+// A uuid.Nil result means the insert failed and the query cannot be logged.
+func (s *Session) resolveQueryRecord(
+	query *store.Query,
+	sink *shared.QuerySink,
+	hasPendingRows bool,
+) (uuid.UUID, bool) {
+	// An approval hold persisted the statement as pending before it ran.
+	if query.UID != uuid.Nil {
+		return query.UID, true
+	}
+
+	// Result capture inserted the row on its first captured row.
+	if uid, ok := sink.QueryUID(s.ctx); ok {
+		return uid, true
+	}
+
+	record := query
+
+	if hasPendingRows {
+		// Insert the parent bare and complete it after the rows land, so the
+		// query never reads as finished while its rows are still arriving.
+		bare := *query
+		bare.DurationMs = nil
+		bare.RowsAffected = nil
+		bare.Error = nil
+		bare.ResultsTruncated = false
+		bare.ResultsDropped = false
+		record = &bare
+	}
+
+	created, err := s.store.CreateQuery(s.ctx, record)
+	if err != nil {
+		s.logger.ErrorContext(s.ctx, "failed to log query", slog.Any("error", err))
+		sink.Fail()
+
+		return uuid.Nil, false
+	}
+
+	sink.Resolve(created.UID)
+
+	return created.UID, hasPendingRows
 }
 
 // copyFormatToString converts COPY format byte to string.

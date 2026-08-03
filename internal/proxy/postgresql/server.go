@@ -27,6 +27,11 @@ type Server struct {
 	authCache     *cache.AuthCache
 	logger        *slog.Logger
 
+	// rowWriter batches captured result rows off the capture path. Defaults
+	// to a writer private to this server; main.go replaces it with the
+	// process-wide one so batches span protocols as well as sessions.
+	rowWriter *shared.RowWriter
+
 	// tlsConfig terminates client TLS at the proxy. nil when TLS is
 	// disabled — sessions then refuse SSLRequest with 'N' as before.
 	tlsConfig *tls.Config
@@ -67,8 +72,14 @@ func NewServer(
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	var rowWriter *shared.RowWriter
+	if dataStore != nil {
+		rowWriter = shared.NewRowWriter(dataStore, logger)
+	}
+
 	return &Server{
 		store:         dataStore,
+		rowWriter:     rowWriter,
 		encryptionKey: encryptionKey,
 		queryStorage:  queryStorage,
 		dumpConfig:    dumpConfig,
@@ -86,6 +97,22 @@ func NewServer(
 // wiring in main; a server without them simply never holds anything.
 func (s *Server) SetApprovalDeps(deps shared.ApprovalDeps) {
 	s.approvalDeps = deps
+}
+
+// SetRowWriter installs the process-wide result-row writer, replacing (and
+// shutting down) the private one NewServer created. Batching across every
+// protocol is where the design pays off most: a busy proxy with many small
+// result sets then issues one INSERT per ~1000 rows overall rather than one
+// per query.
+func (s *Server) SetRowWriter(writer *shared.RowWriter) {
+	if writer == nil || writer == s.rowWriter {
+		return
+	}
+
+	previous := s.rowWriter
+	s.rowWriter = writer
+
+	previous.Close(s.ctx)
 }
 
 // Start starts the proxy server.
@@ -198,7 +225,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 	s.logger.DebugContext(s.ctx, "New connection", slog.Any("remote_addr", clientConn.RemoteAddr()))
 
-	session := NewSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.queryStorage, s.dumpConfig, s.authCache, s.tlsConfig)
+	session := NewSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.queryStorage, s.dumpConfig, s.authCache, s.tlsConfig, s.rowWriter)
 	session.approvalDeps = s.approvalDeps
 	session.cancels = s.cancels
 

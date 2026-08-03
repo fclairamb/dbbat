@@ -1581,7 +1581,7 @@ func TestConvertDataRow_TypeDecoding(t *testing.T) {
 	}
 }
 
-func TestHandleQuery_InitializesCapturedRows(t *testing.T) {
+func TestHandleQuery_StartsQueryTracking(t *testing.T) {
 	t.Parallel()
 
 	s := newTestSession("write")
@@ -1595,12 +1595,18 @@ func TestHandleQuery_InitializesCapturedRows(t *testing.T) {
 		t.Fatal("currentQuery not set")
 	}
 
-	if s.currentQuery.capturedRows == nil {
-		t.Error("capturedRows not initialized")
+	// Rows stream to the shared writer as they arrive, so nothing is
+	// accumulated here and the sink only appears on the first captured row.
+	if s.currentQuery.rowSink != nil {
+		t.Error("row sink must not be created before the first captured row")
+	}
+
+	if s.currentQuery.rowNumber != 0 {
+		t.Errorf("rowNumber = %d, want 0", s.currentQuery.rowNumber)
 	}
 }
 
-func TestHandleExecute_InitializesCapturedRows(t *testing.T) {
+func TestHandleExecute_StartsQueryTracking(t *testing.T) {
 	t.Parallel()
 
 	s := newTestSession("write")
@@ -1619,8 +1625,8 @@ func TestHandleExecute_InitializesCapturedRows(t *testing.T) {
 	}
 
 	pending := s.extendedState.pendingQueries[0]
-	if pending.capturedRows == nil {
-		t.Error("capturedRows not initialized")
+	if pending.rowSink != nil {
+		t.Error("row sink must not be created before the first captured row")
 	}
 }
 
@@ -1649,8 +1655,7 @@ func TestResultCapture_KeepsPrefixWhenLimitsExceeded(t *testing.T) {
 	query := s.currentQuery
 	require.NotNil(t, query)
 	assert.True(t, query.truncated, "truncated should be set once the limit is hit")
-	assert.Len(t, query.capturedRows, maxRows, "the captured prefix must be kept, not discarded")
-	assert.Equal(t, maxRows, query.rowNumber)
+	assert.Equal(t, maxRows, query.rowNumber, "the captured prefix must be kept, not discarded")
 }
 
 // copyRowValues decodes the "name" column of each captured COPY row.
