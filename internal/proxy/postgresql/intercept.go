@@ -356,7 +356,7 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 
 	// Capture rows - either from regular query or COPY operation
 	var capturedRows []store.QueryRow
-	if s.copyState != nil && !s.copyState.truncated && len(s.copyState.dataChunks) > 0 {
+	if s.copyState != nil && len(s.copyState.dataChunks) > 0 {
 		// Parse COPY data into rows
 		capturedRows = s.parseCopyDataToRows()
 	} else {
@@ -555,8 +555,14 @@ func (s *Session) captureCopyData(data []byte) {
 
 	// Check if this chunk would exceed limits
 	if s.copyState.totalBytes+dataSize > s.queryStorage.MaxResultBytes {
+		// Limits exceeded: keep the chunks already buffered and stop appending.
+		// Every other capture path (DataRow, MySQL, MongoDB, Oracle) keeps its
+		// prefix; discarding here meant the very queries a sample is most
+		// useful for stored nothing at all. parseCopyDataToRows drops the
+		// trailing partial line, and the flag is persisted as
+		// queries.results_truncated so a short row set is never mistaken for a
+		// complete result.
 		s.copyState.truncated = true
-		s.copyState.dataChunks = nil // Discard captured data
 		s.logger.WarnContext(s.ctx, "COPY data capture truncated - byte limit exceeded",
 			slog.Int64("total_bytes", s.copyState.totalBytes),
 			slog.Int64("max_bytes", s.queryStorage.MaxResultBytes))
@@ -631,8 +637,25 @@ func (s *Session) parseCopyDataToRows() []store.QueryRow {
 		fullData = append(fullData, chunk...)
 	}
 
+	data := string(fullData)
+
+	// A byte-limit truncation stops mid-stream, so the buffered prefix almost
+	// always ends mid-line. Drop everything after the last \n: the complete
+	// rows before it are kept, the partial tail is never emitted as a
+	// malformed row. (Only the byte limit can have set this before parsing —
+	// the row limit below sets it while iterating.)
+	if s.copyState.truncated {
+		lastNewline := strings.LastIndexByte(data, '\n')
+		if lastNewline < 0 {
+			// Not a single complete row was buffered.
+			return nil
+		}
+
+		data = data[:lastNewline+1]
+	}
+
 	// Split into lines (COPY text format uses \n as row separator)
-	lines := strings.Split(string(fullData), "\n")
+	lines := strings.Split(data, "\n")
 	rows := make([]store.QueryRow, 0, len(lines))
 
 	for i, line := range lines {
