@@ -364,6 +364,13 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 		capturedRows = s.currentQuery.capturedRows
 	}
 
+	// Record whether capture stopped on a storage limit. Read after the rows
+	// are built because parseCopyDataToRows can itself hit the row limit.
+	query.ResultsTruncated = s.currentQuery.truncated
+	if s.copyState != nil && s.copyState.truncated {
+		query.ResultsTruncated = true
+	}
+
 	// Persist asynchronously so the proxy isn't blocked on the store write.
 	s.persistQueryAsync(query, capturedRows, bytesTransferred)
 
@@ -389,7 +396,9 @@ func (s *Session) persistQueryAsync(query *store.Query, capturedRows []store.Que
 			// The row already exists: an approval hold persisted it as
 			// pending before the statement ran, so complete it in place
 			// rather than inserting a duplicate.
-			if err := s.store.UpdateQueryCompletion(s.ctx, queryUID, query.DurationMs, query.RowsAffected, query.Error); err != nil {
+			if err := s.store.UpdateQueryCompletion(
+				s.ctx, queryUID, query.DurationMs, query.RowsAffected, query.Error, query.ResultsTruncated,
+			); err != nil {
 				s.logger.ErrorContext(s.ctx, "failed to complete held query", slog.Any("error", err))
 			}
 		} else {
@@ -634,6 +643,10 @@ func (s *Session) parseCopyDataToRows() []store.QueryRow {
 
 		// Check max rows limit
 		if len(rows) >= s.queryStorage.MaxResultRows {
+			// Flagged on the copy state so logQuery persists
+			// results_truncated for the row it is about to write.
+			s.copyState.truncated = true
+
 			s.logger.WarnContext(s.ctx, "COPY row capture truncated - row limit exceeded",
 				slog.Int("rows_captured", len(rows)),
 				slog.Int("max_rows", s.queryStorage.MaxResultRows))

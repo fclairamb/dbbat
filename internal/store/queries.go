@@ -46,6 +46,9 @@ func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 		DurationMs:   query.DurationMs,
 		RowsAffected: query.RowsAffected,
 		Error:        query.Error,
+		// Set by protocols that insert the row after the result set has been
+		// read, so they already know capture hit a limit.
+		ResultsTruncated: query.ResultsTruncated,
 		// Carried through so a caller that already knows the approval outcome
 		// (an approved hold logged by a protocol that inserts on completion)
 		// doesn't lose it.
@@ -99,10 +102,22 @@ func (s *Store) StoreQueryRows(ctx context.Context, queryUID uuid.UUID, rows []Q
 }
 
 // UpdateQueryCompletion updates a query with duration, rows affected, and error.
-func (s *Store) UpdateQueryCompletion(ctx context.Context, uid uuid.UUID, durationMs *float64, rowsAffected *int64, queryError *string) error {
+//
+// resultsTruncated is written unconditionally (unlike the pointer arguments,
+// which are only written when set): protocols that persist the row before the
+// result set is read only learn about a capture limit here.
+func (s *Store) UpdateQueryCompletion(
+	ctx context.Context,
+	uid uuid.UUID,
+	durationMs *float64,
+	rowsAffected *int64,
+	queryError *string,
+	resultsTruncated bool,
+) error {
 	q := s.db.NewUpdate().
 		Model((*Query)(nil)).
-		Where("uid = ?", uid)
+		Where("uid = ?", uid).
+		Set("results_truncated = ?", resultsTruncated)
 
 	if durationMs != nil {
 		q = q.Set("duration_ms = ?", *durationMs)
@@ -127,6 +142,7 @@ func (s *Store) ListQueries(ctx context.Context, filter QueryFilter) ([]Query, e
 	q := s.db.NewSelect().
 		Model(&queries).
 		ColumnExpr("q.uid, q.connection_id, q.sql_text, q.parameters, q.executed_at, q.duration_ms, q.rows_affected, q.error, " +
+			"q.results_truncated, " +
 			"q.approval_status, q.approval_pattern, q.resolved_by, q.resolved_at, q.resolution_reason, c.user_id, c.database_id").
 		Join("JOIN connections c ON q.connection_id = c.uid")
 

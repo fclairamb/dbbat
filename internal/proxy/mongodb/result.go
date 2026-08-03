@@ -56,7 +56,8 @@ func (s *Session) captureResult(m *message) {
 	}
 
 	rowsAffected := rowsAffectedFrom(body)
-	rows := s.captureCursorRows(body)
+	rows, truncated := s.captureCursorRows(body)
+	pq.resultsTruncated = truncated
 
 	// Maintain find→getMore cursor lineage (item 6) before logging so the
 	// origin's own row carries its cursor_id.
@@ -179,37 +180,42 @@ func rowsAffectedFrom(body bson.Raw) *int64 {
 
 // captureCursorRows re-encodes the documents in cursor.firstBatch /
 // cursor.nextBatch as Extended JSON QueryRows, honoring the query-storage
-// limits.
-func (s *Session) captureCursorRows(body bson.Raw) []store.QueryRow {
+// limits. The second return reports that a limit was hit, so the rows are a
+// prefix of the batch rather than the whole of it.
+func (s *Session) captureCursorRows(body bson.Raw) ([]store.QueryRow, bool) {
 	q := s.server.queryStorage
 	if !q.StoreResults {
-		return nil
+		return nil, false
 	}
 
 	cursor, ok := body.Lookup("cursor").DocumentOK()
 	if !ok {
-		return nil
+		return nil, false
 	}
 
 	batch, ok := cursor.Lookup("firstBatch").ArrayOK()
 	if !ok {
 		batch, ok = cursor.Lookup("nextBatch").ArrayOK()
 		if !ok {
-			return nil
+			return nil, false
 		}
 	}
 
 	values, err := batch.Values()
 	if err != nil {
-		return nil
+		return nil, false
 	}
 
 	rows := make([]store.QueryRow, 0, len(values))
 
 	var totalBytes int64
 
+	var truncated bool
+
 	for i, v := range values {
 		if q.MaxResultRows > 0 && i >= q.MaxResultRows {
+			truncated = true
+
 			break
 		}
 
@@ -227,6 +233,8 @@ func (s *Session) captureCursorRows(body bson.Raw) []store.QueryRow {
 
 		size := int64(len(extJSON))
 		if q.MaxResultBytes > 0 && totalBytes+size > q.MaxResultBytes {
+			truncated = true
+
 			break
 		}
 
@@ -238,7 +246,7 @@ func (s *Session) captureCursorRows(body bson.Raw) []store.QueryRow {
 		totalBytes += size
 	}
 
-	return rows
+	return rows, truncated
 }
 
 // recordQuery inserts a single query log row (asynchronously) with completion
@@ -256,13 +264,14 @@ func (s *Session) recordQuery(pq *pendingQuery, rows []store.QueryRow, rowsAffec
 	durationMs := float64(time.Since(pq.start).Microseconds()) / 1000.0
 
 	record := &store.Query{
-		ConnectionID: s.connection.UID,
-		SQLText:      pq.sqlText,
-		Parameters:   pq.params,
-		ExecutedAt:   pq.start,
-		DurationMs:   &durationMs,
-		RowsAffected: rowsAffected,
-		Error:        queryError,
+		ConnectionID:     s.connection.UID,
+		SQLText:          pq.sqlText,
+		Parameters:       pq.params,
+		ExecutedAt:       pq.start,
+		DurationMs:       &durationMs,
+		RowsAffected:     rowsAffected,
+		Error:            queryError,
+		ResultsTruncated: pq.resultsTruncated,
 	}
 
 	go func() {
@@ -271,7 +280,9 @@ func (s *Session) recordQuery(pq *pendingQuery, rows []store.QueryRow, rowsAffec
 		if queryUID != uuid.Nil {
 			// An approval hold already inserted this row before the command
 			// ran; complete it in place.
-			if err := s.server.store.UpdateQueryCompletion(s.ctx, queryUID, &durationMs, rowsAffected, queryError); err != nil {
+			if err := s.server.store.UpdateQueryCompletion(
+				s.ctx, queryUID, &durationMs, rowsAffected, queryError, pq.resultsTruncated,
+			); err != nil {
 				s.logger.ErrorContext(s.ctx, "complete held command failed", slog.Any("error", err))
 			}
 		} else {

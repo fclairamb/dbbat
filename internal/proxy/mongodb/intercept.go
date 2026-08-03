@@ -28,6 +28,9 @@ type pendingQuery struct {
 	// command (uuid.Nil when no hold happened). Non-nil means the completion
 	// path must UPDATE that row rather than INSERT a second one.
 	approvalUID uuid.UUID
+	// resultsTruncated reports that cursor-row capture stopped on a storage
+	// limit, so the rows stored are a prefix of the batch the client received.
+	resultsTruncated bool
 }
 
 // pumpClientToUpstream reads each client message, classifies + validates it
@@ -240,7 +243,7 @@ func (s *Session) rejectHeldCommand(
 		errStr := cause.Error()
 
 		go func() {
-			if err := s.server.store.UpdateQueryCompletion(s.ctx, approvalUID, nil, nil, &errStr); err != nil {
+			if err := s.server.store.UpdateQueryCompletion(s.ctx, approvalUID, nil, nil, &errStr, false); err != nil {
 				s.logger.DebugContext(s.ctx, "failed to complete held command", slog.Any("error", err))
 			}
 		}()

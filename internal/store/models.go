@@ -334,6 +334,12 @@ type Query struct {
 	CopyFormat    *string          `bun:"copy_format" json:"copy_format,omitempty"`       // 'text', 'csv', 'binary', or nil for non-COPY
 	CopyDirection *string          `bun:"copy_direction" json:"copy_direction,omitempty"` // 'in', 'out', or nil for non-COPY
 
+	// ResultsTruncated is true when result capture stopped on a storage limit
+	// (max_result_rows / max_result_bytes). The rows that were captured before
+	// the limit are still stored, so this is what tells a short — or empty —
+	// row set apart from a query that genuinely returned that much.
+	ResultsTruncated bool `bun:"results_truncated,notnull,default:false" json:"results_truncated"`
+
 	// Approval hold fields. ApprovalStatus is nil for the overwhelming
 	// majority of queries (no pattern matched); when set it is one of
 	// ApprovalPending / ApprovalApproved / ApprovalDenied / ApprovalAbandoned.

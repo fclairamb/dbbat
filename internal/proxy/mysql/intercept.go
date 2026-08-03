@@ -200,9 +200,9 @@ func (h *handler) runIntercepted(
 		rowsAffected = &ra
 	}
 
-	capturedRows, _, _ := h.captureRows(result)
+	capturedRows, _, truncated := h.captureRows(result)
 
-	h.recordQueryWithUID(approvalUID, sql, params, start, capturedRows, rowsAffected, nil)
+	h.recordQueryWithUID(approvalUID, sql, params, start, capturedRows, truncated, rowsAffected, nil)
 
 	return result, nil
 }
@@ -248,7 +248,7 @@ func (h *handler) completeHeldQuery(queryUID uuid.UUID, cause error) {
 	errStr := cause.Error()
 
 	go func() {
-		if err := s.server.store.UpdateQueryCompletion(s.ctx, queryUID, nil, nil, &errStr); err != nil {
+		if err := s.server.store.UpdateQueryCompletion(s.ctx, queryUID, nil, nil, &errStr, false); err != nil {
 			s.logger.DebugContext(s.ctx, "failed to complete held query", slog.Any("error", err))
 		}
 	}()
@@ -284,18 +284,22 @@ func (s *Session) KillHeldQuery() bool {
 // error packets. Replaces the previous JSON-encoded row size which only
 // counted the captured-row payload.
 func (h *handler) recordQuery(sql string, params *store.QueryParameters, start time.Time, queryError *string) {
-	h.recordQueryWithUID(uuid.Nil, sql, params, start, nil, nil, queryError)
+	h.recordQueryWithUID(uuid.Nil, sql, params, start, nil, false, nil, queryError)
 }
 
 // recordQueryWithUID is recordQuery with an optional pre-existing row uid: when
 // an approval hold already inserted the statement, the completion is an UPDATE
 // on that row instead of a second INSERT.
+//
+// resultsTruncated reports that capture stopped on a storage limit, so the
+// stored rows are a prefix of what the client actually received.
 func (h *handler) recordQueryWithUID(
 	queryUID uuid.UUID,
 	sql string,
 	params *store.QueryParameters,
 	start time.Time,
 	capturedRows []store.QueryRow,
+	resultsTruncated bool,
 	rowsAffected *int64,
 	queryError *string,
 ) {
@@ -312,18 +316,21 @@ func (h *handler) recordQueryWithUID(
 	durationMs := float64(time.Since(start).Microseconds()) / 1000.0
 
 	record := &store.Query{
-		ConnectionID: s.connection.UID,
-		SQLText:      sql,
-		Parameters:   params,
-		ExecutedAt:   start,
-		DurationMs:   &durationMs,
-		RowsAffected: rowsAffected,
-		Error:        queryError,
+		ConnectionID:     s.connection.UID,
+		SQLText:          sql,
+		Parameters:       params,
+		ExecutedAt:       start,
+		DurationMs:       &durationMs,
+		RowsAffected:     rowsAffected,
+		Error:            queryError,
+		ResultsTruncated: resultsTruncated,
 	}
 
 	go func() {
 		if queryUID != uuid.Nil {
-			if err := s.server.store.UpdateQueryCompletion(s.ctx, queryUID, &durationMs, rowsAffected, queryError); err != nil {
+			if err := s.server.store.UpdateQueryCompletion(
+				s.ctx, queryUID, &durationMs, rowsAffected, queryError, resultsTruncated,
+			); err != nil {
 				s.logger.ErrorContext(s.ctx, "complete held query failed", slog.Any("error", err))
 			}
 		} else {

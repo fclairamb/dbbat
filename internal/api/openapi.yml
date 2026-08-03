@@ -4201,6 +4201,14 @@ components:
           type: string
           nullable: true
           description: Error message if query failed
+        results_truncated:
+          type: boolean
+          description: >-
+            True when result capture stopped on a storage limit
+            (`max_result_rows` / `max_result_bytes`). The rows captured before
+            the limit are still stored, so this is what distinguishes a
+            prefix — or an empty capture — from a query that genuinely
+            returned that many rows.
         approval_status:
           type: string
           nullable: true

@@ -400,18 +400,20 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 	// If the query record was already created (rows were streamed), update it.
 	// Otherwise, create it now (no-result queries like DML).
 	if pending.queryPersisted && pending.queryUID != uuid.Nil {
-		// Update with duration, error, rows affected
-		go s.finalizeQuery(pending.queryUID, &duration, rowsAffected, queryError, bytesTransferred)
+		// Update with duration, error, rows affected. results_truncated is only
+		// known now: the row was inserted before any row was streamed.
+		go s.finalizeQuery(pending.queryUID, &duration, rowsAffected, queryError, pending.truncated, bytesTransferred)
 	} else if s.store != nil {
 		// Create the query record (no rows to stream)
 		query := &store.Query{
-			ConnectionID: s.connectionUID,
-			SQLText:      pending.cursor.sql,
-			ExecutedAt:   pending.startTime,
-			DurationMs:   &duration,
-			RowsAffected: rowsAffected,
-			Error:        queryError,
-			Parameters:   formatOracleBinds(pending.cursor.bindValues),
+			ConnectionID:     s.connectionUID,
+			SQLText:          pending.cursor.sql,
+			ExecutedAt:       pending.startTime,
+			DurationMs:       &duration,
+			RowsAffected:     rowsAffected,
+			Error:            queryError,
+			Parameters:       formatOracleBinds(pending.cursor.bindValues),
+			ResultsTruncated: pending.truncated,
 		}
 
 		go func() {
@@ -432,9 +434,17 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 	}
 }
 
-// finalizeQuery updates a query record with completion data (duration, error).
-func (s *session) finalizeQuery(queryUID uuid.UUID, duration *float64, rowsAffected *int64, queryError *string, bytesTransferred int64) {
-	if err := s.store.UpdateQueryCompletion(s.ctx, queryUID, duration, rowsAffected, queryError); err != nil {
+// finalizeQuery updates a query record with completion data (duration, error,
+// and whether row capture stopped on a storage limit).
+func (s *session) finalizeQuery(
+	queryUID uuid.UUID,
+	duration *float64,
+	rowsAffected *int64,
+	queryError *string,
+	resultsTruncated bool,
+	bytesTransferred int64,
+) {
+	if err := s.store.UpdateQueryCompletion(s.ctx, queryUID, duration, rowsAffected, queryError, resultsTruncated); err != nil {
 		s.logger.ErrorContext(s.ctx, "failed to finalize query", slog.Any("error", err))
 	}
 
