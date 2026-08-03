@@ -34,7 +34,7 @@ func createQueryWithRows(
 		{RowNumber: 1, RowData: json.RawMessage(`{"a":1}`), RowSizeBytes: 7},
 		{RowNumber: 2, RowData: json.RawMessage(`{"a":2}`), RowSizeBytes: 7},
 	}
-	require.NoError(t, store.StoreQueryRows(ctx, PendingRows(query.UID, rows)))
+	require.NoError(t, store.StoreQueryRows(ctx, pendingRows(query.UID, rows)))
 
 	return query
 }

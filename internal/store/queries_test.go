@@ -83,6 +83,23 @@ func TestCreateQuery(t *testing.T) {
 	})
 }
 
+// pendingRows stamps captured rows with the query they belong to. Production
+// code never needs this: every proxy hands rows to shared.RowWriter, which
+// stamps them from the sink. Tests still call StoreQueryRows directly.
+func pendingRows(queryUID uuid.UUID, rows []QueryRow) []PendingQueryRow {
+	pending := make([]PendingQueryRow, len(rows))
+	for i, row := range rows {
+		pending[i] = PendingQueryRow{
+			QueryID:      queryUID,
+			RowNumber:    row.RowNumber,
+			RowData:      row.RowData,
+			RowSizeBytes: row.RowSizeBytes,
+		}
+	}
+
+	return pending
+}
+
 func TestStoreQueryRows(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
@@ -106,7 +123,7 @@ func TestStoreQueryRows(t *testing.T) {
 			{RowNumber: 3, RowData: json.RawMessage(`{"id": 3, "name": "item3"}`), RowSizeBytes: 30},
 		}
 
-		err := store.StoreQueryRows(ctx, PendingRows(created.UID, rows))
+		err := store.StoreQueryRows(ctx, pendingRows(created.UID, rows))
 		if err != nil {
 			t.Fatalf("StoreQueryRows() error = %v", err)
 		}
@@ -133,7 +150,7 @@ func TestStoreQueryRows(t *testing.T) {
 			t.Fatalf("CreateQuery() error = %v", err)
 		}
 
-		err = store.StoreQueryRows(ctx, PendingRows(created2.UID, []QueryRow{}))
+		err = store.StoreQueryRows(ctx, pendingRows(created2.UID, []QueryRow{}))
 		if err != nil {
 			t.Fatalf("StoreQueryRows() error = %v", err)
 		}
@@ -392,7 +409,7 @@ func TestGetQueryWithRows(t *testing.T) {
 		{RowNumber: 2, RowData: json.RawMessage(`{"id": 2, "value": "b"}`), RowSizeBytes: 25},
 		{RowNumber: 3, RowData: json.RawMessage(`{"id": 3, "value": "c"}`), RowSizeBytes: 25},
 	}
-	err = store.StoreQueryRows(ctx, PendingRows(created.UID, rows))
+	err = store.StoreQueryRows(ctx, pendingRows(created.UID, rows))
 	if err != nil {
 		t.Fatalf("StoreQueryRows() error = %v", err)
 	}
@@ -476,7 +493,7 @@ func TestGetQueryRows(t *testing.T) {
 			RowSizeBytes: 10,
 		}
 	}
-	err = store.StoreQueryRows(ctx, PendingRows(created.UID, rows))
+	err = store.StoreQueryRows(ctx, pendingRows(created.UID, rows))
 	if err != nil {
 		t.Fatalf("StoreQueryRows() error = %v", err)
 	}
@@ -665,7 +682,7 @@ func TestGetQueryRowsDataSizeLimit(t *testing.T) {
 			RowSizeBytes: int64(len(jsonData)),
 		}
 	}
-	err = store.StoreQueryRows(ctx, PendingRows(created.UID, rows))
+	err = store.StoreQueryRows(ctx, pendingRows(created.UID, rows))
 	if err != nil {
 		t.Fatalf("StoreQueryRows() error = %v", err)
 	}
@@ -709,7 +726,7 @@ func TestGetQueryRowsDataSizeLimit(t *testing.T) {
 			{RowNumber: 1, RowData: json.RawMessage(`{"data": "` + string(hugeData) + `"}`), RowSizeBytes: int64(len(hugeData))},
 			{RowNumber: 2, RowData: json.RawMessage(`{"id": 2}`), RowSizeBytes: 10},
 		}
-		err = store.StoreQueryRows(ctx, PendingRows(created2.UID, hugeRows))
+		err = store.StoreQueryRows(ctx, pendingRows(created2.UID, hugeRows))
 		if err != nil {
 			t.Fatalf("StoreQueryRows() error = %v", err)
 		}

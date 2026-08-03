@@ -411,27 +411,6 @@ type PendingQueryRow struct {
 	RowSizeBytes int64
 }
 
-// PendingRows stamps a slice of captured rows with the query they belong to.
-// Convenience for the callers that build a whole result set at once (MySQL,
-// MongoDB, PostgreSQL COPY) before handing it to the row writer.
-func PendingRows(queryUID uuid.UUID, rows []QueryRow) []PendingQueryRow {
-	if len(rows) == 0 {
-		return nil
-	}
-
-	pending := make([]PendingQueryRow, len(rows))
-	for i, row := range rows {
-		pending[i] = PendingQueryRow{
-			QueryID:      queryUID,
-			RowNumber:    row.RowNumber,
-			RowData:      row.RowData,
-			RowSizeBytes: row.RowSizeBytes,
-		}
-	}
-
-	return pending
-}
-
 // QueryWithRows combines a query with its result rows
 type QueryWithRows struct {
 	Query
