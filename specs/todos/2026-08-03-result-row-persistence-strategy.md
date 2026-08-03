@@ -50,10 +50,61 @@ No GitHub issue filed yet — one should be opened.
 
 ## Implementation
 
-- Add a small `rowbuf` writer in `internal/proxy/shared/` holding a slice plus
-  running byte count, with `Add(row)` flushing via `StoreQueryRows` once it
-  crosses a threshold (start at 1000 rows / 8 MB, both configurable), and
-  `Flush()` for the tail at query end.
+### The writer: a bounded channel drained opportunistically
+
+Rather than a fixed flush threshold, use a buffered channel and have the writer
+drain whatever happens to be queued — batches size themselves to load, with no
+timer to tune:
+
+```go
+row := <-ch                       // block for the first row
+batch := append(batch[:0], row)
+for len(batch) < maxBatch && batchBytes < maxBatchBytes {
+    select {
+    case r := <-ch:
+        batch = append(batch, r)
+        batchBytes += r.RowSizeBytes
+    default:                      // nothing queued right now — flush what we have
+        break
+    }
+}
+store.StoreQueryRows(ctx, batch)
+```
+
+Idle producer → batches of 1 and minimal latency; fast producer → full batches.
+The channel cap bounds in-flight memory directly, which is what replaces
+PostgreSQL's unbounded `capturedRows` hold.
+
+Sizing: cap the drain at **~1000 rows or a byte budget (~8 MB), whichever trips
+first** — not a few dozen. Batching only pays by amortizing the round-trip, and
+a bulk insert of 1000 small JSONB rows costs barely more than one of 50; at
+~1ms/insert a 50-row cap ceilings throughput near 50k rows/s, which is over a
+minute of pure insert time on a multi-million-row capture. The byte budget
+matters as much as the row count: 1000 rows is nothing for a single-column
+select and tens of MB for wide rows.
+
+**Send non-blocking, drop on full — do not let the store stall the proxy.**
+A blocking send turns a slow moment in dbbat's own storage into a stall on the
+customer's query, since the capture path runs inline with forwarding rows to the
+client. PostgreSQL has no such coupling today (its persist is fully async after
+the query completes), and this work must not introduce one:
+
+```go
+select {
+case ch <- row:
+default:
+    pending.capturedDropped = true   // degrade capture, never the data path
+}
+```
+
+Record "dropped" **distinctly from "truncated"** — truncated means a configured
+limit was reached, dropped means the writer fell behind. Both make the capture
+partial but for opposite reasons, and conflating them makes the UI lie. Build on
+the existing `results_truncated` column (added in
+[`2026-08-03-pg-result-capture-keep-rows-on-limit.md`](specs/done/2026/08/2026-08-03-pg-result-capture-keep-rows-on-limit.md))
+rather than overloading it.
+
+### Wiring it in
 - **Oracle** ([`intercept.go:341`](internal/proxy/oracle/intercept.go:341)):
   replace the per-row call with `rowbuf.Add`, and flush in `finalizeQuery`. This
   is the biggest win and the lowest risk — the row numbering already increments
@@ -72,7 +123,30 @@ No GitHub issue filed yet — one should be opened.
   swap; lower priority, a MySQL result set is materialised by the driver anyway.
 - **MongoDB**: already per-reply; just route it through the same writer.
 - Behaviour to preserve: `results_truncated` must still be accurate, and a
-  failed flush must not kill the session (today's calls only log).
+  failed flush must not kill the session (today's calls only log). A failed
+  batch now loses 1..N rows mid-capture, so mark the query partial rather than
+  only logging.
+
+### Three things that will bite
+
+1. **Row numbers must become a producer-side running counter.** PostgreSQL
+   assigns them after the fact
+   ([`intercept.go:422`](internal/proxy/postgresql/intercept.go:422),
+   `capturedRows[i].RowNumber = i + 1`); once batches flush early those rows are
+   already gone from the slice.
+2. **A flush barrier is needed at query end**, not just a channel close — the
+   tail must land before the query reads as complete, or the UI shows a finished
+   query with rows still arriving.
+3. **Cross-query batching needs a signature change.**
+   `StoreQueryRows(ctx, queryUID, rows)`
+   ([`queries.go:77`](internal/store/queries.go:77)) takes a single query UID, so
+   a drained batch spanning concurrent sessions cannot go out in one call. Have
+   it accept rows carrying their own `query_id` instead; that unlocks **one
+   process-wide writer** whose batches span sessions, which is where this design
+   pays off most — a busy proxy with many small result sets currently issues one
+   INSERT per query and would issue one per ~1000 rows overall. Note the FK
+   ordering constraint: the parent `queries` row must exist before any of its
+   rows flush.
 
 ## Files
 
