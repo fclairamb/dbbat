@@ -1964,6 +1964,101 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /connections/{uid}/dump:
+    parameters:
+      - $ref: '#/components/parameters/ConnectionUID'
+
+    get:
+      tags:
+        - Connections
+      summary: Download the session capture
+      description: |
+        Downloads the raw packet capture recorded for a connection.
+
+        The body is a standard **pcapng** file (media type
+        `application/x-pcapng`, extension `.pcapng`) — not a bespoke dbbat
+        format. Anything that reads pcapng reads it: `tcpdump`, Wireshark,
+        `tshark`, `capinfos`, `editcap`, scapy, `gopacket`. Wireshark applies
+        its native PostgreSQL, Oracle TNS, MySQL and MongoDB dissectors to the
+        payloads. The same file structure is produced for every protocol; see
+        `docs/dump-format.md` in the dbbat repository for the full reference
+        (packet framing, the session metadata block, and the
+        `dbbat dump anonymise` command).
+
+        Captures are only written when the server is started with a dump
+        directory configured (`DBB_DUMP_DIR`), are capped per session
+        (`DBB_DUMP_MAX_SIZE`) and are reaped once older than
+        `DBB_DUMP_RETENTION` (24h by default). `404 Not Found` is therefore
+        returned in two distinct cases: dumps are disabled server-wide
+        (`dumps are not enabled`), or no capture exists — or no longer
+        exists — for this connection (`no dump available for this
+        connection`).
+
+        Requires admin or viewer role.
+      operationId: getConnectionDump
+      responses:
+        '200':
+          description: The pcapng session capture
+          headers:
+            Content-Disposition:
+              description: |
+                Always `attachment; filename="<uid>.pcapng"`, where `<uid>` is
+                the connection UID from the path.
+              schema:
+                type: string
+              example: attachment; filename="7a1f1c9e-8f3a-4d2b-9f21-0c5e6b3d4a77.pcapng"
+          content:
+            application/x-pcapng:
+              schema:
+                type: string
+                format: binary
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    delete:
+      tags:
+        - Connections
+      summary: Delete the session capture
+      description: |
+        Deletes the pcapng capture recorded for a connection.
+
+        Only the capture file is removed — the connection record and its
+        logged queries are left untouched. The deletion is immediate and
+        cannot be undone. Captures are also removed automatically once they
+        are older than `DBB_DUMP_RETENTION`.
+
+        As with the download, `404 Not Found` covers both dumps being
+        disabled server-wide and no capture being available for this
+        connection.
+
+        Requires admin role.
+      operationId: deleteConnectionDump
+      responses:
+        '204':
+          description: Capture deleted
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /stream:
     get:
       tags:
