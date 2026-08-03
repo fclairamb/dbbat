@@ -548,10 +548,15 @@ func (s *Session) proxyUpstreamToClient() error {
 				// Check if this row would exceed limits
 				if query.rowNumber >= s.queryStorage.MaxResultRows ||
 					query.capturedBytes+rowSize > s.queryStorage.MaxResultBytes {
-					// Limits exceeded - discard all captured rows and stop capturing
+					// Limits exceeded: keep the prefix already captured and stop
+					// appending. Every other capture path (COPY, MySQL, MongoDB,
+					// Oracle) keeps its prefix; discarding here meant the very
+					// queries a sample is most useful for stored nothing at all.
+					// The !query.truncated guard above stops further capture, and
+					// the flag is persisted as queries.results_truncated so a
+					// short row set is never mistaken for an empty result.
 					query.truncated = true
-					query.capturedRows = nil // Discard all previously captured rows
-					s.logger.WarnContext(s.ctx, "result capture refused - limits exceeded",
+					s.logger.WarnContext(s.ctx, "result capture truncated - limits exceeded",
 						slog.Int("rows_captured", query.rowNumber),
 						slog.Int64("bytes_captured", query.capturedBytes),
 						slog.Int("max_rows", s.queryStorage.MaxResultRows),
