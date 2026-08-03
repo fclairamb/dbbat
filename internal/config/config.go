@@ -362,6 +362,13 @@ type Config struct {
 	// RunMode controls whether test data is provisioned on startup.
 	RunMode RunMode `koanf:"run_mode"`
 
+	// InstanceID identifies this dbbat process among the replicas sharing the
+	// same store. It is stamped on every connection row so the startup
+	// reconcile of crash-orphaned connections only ever touches connections
+	// this instance opened. Defaults to the hostname, which is the pod name
+	// under Kubernetes. Empty is not a valid runtime value — Load fills it in.
+	InstanceID string `koanf:"instance_id"`
+
 	// DemoTargetDB specifies the only allowed database target in demo mode.
 	// Format: "user:password@host/dbname" (e.g., "demo:demo@localhost/demo")
 	// Only applies when RunMode is "demo". If empty, defaults to "demo:demo@localhost/demo".
@@ -659,7 +666,38 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 	// Normalize base URL
 	cfg.BaseURL = normalizeBaseURL(cfg.BaseURL)
 
+	cfg.InstanceID = resolveInstanceID(cfg.InstanceID)
+
 	return cfg, nil
+}
+
+// FallbackInstanceID is used when no DBB_INSTANCE_ID is set and the hostname
+// cannot be read. It is deliberately a constant rather than a random value:
+// two runs of the same process must agree on the id, or a restart would never
+// recognise (and therefore never reclaim) the connections its predecessor left
+// open.
+const FallbackInstanceID = "dbbat"
+
+// resolveInstanceID fills in the instance id when it was not configured.
+//
+// The hostname is the right default: under Kubernetes it is the pod name, so
+// two replicas sharing a store never collide. Note what that does and does not
+// buy — see Store.CloseOrphanedConnections for the full picture. A plain
+// Deployment mints a new pod name on every restart, so a replacement pod does
+// not reclaim its predecessor's orphans; a StatefulSet, a fixed
+// DBB_INSTANCE_ID, or a single host does.
+func resolveInstanceID(configured string) string {
+	if configured = strings.TrimSpace(configured); configured != "" {
+		return configured
+	}
+
+	if hostname, err := os.Hostname(); err == nil {
+		if hostname = strings.TrimSpace(hostname); hostname != "" {
+			return hostname
+		}
+	}
+
+	return FallbackInstanceID
 }
 
 // loadConfigFile loads configuration from a file based on its extension.
