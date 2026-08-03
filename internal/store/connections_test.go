@@ -6,8 +6,11 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCreateConnection(t *testing.T) {
@@ -107,6 +110,146 @@ func TestCloseConnection(t *testing.T) {
 			t.Errorf("CloseConnection() error = %v, want %v", err, ErrConnectionNotFound)
 		}
 	})
+}
+
+// backdateConnection rewrites a connection's clock so a session that stopped
+// talking in the past can be simulated: CreateConnection always stamps "now".
+func backdateConnection(t *testing.T, ctx context.Context, store *Store, uid uuid.UUID, at time.Time) {
+	t.Helper()
+
+	_, err := store.db.ExecContext(ctx,
+		"UPDATE connections SET connected_at = ?, last_activity_at = ? WHERE uid = ?", at, at, uid)
+	require.NoError(t, err)
+}
+
+// TestCloseOrphanedConnections covers the startup reconcile of connections a
+// previous run left open — including the guarantee that it can never touch a
+// connection belonging to another replica sharing the same store.
+func TestCloseOrphanedConnections(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "orphans")
+
+	// Postgres timestamptz keeps microseconds; truncate so comparisons are
+	// about the value rather than Go's nanosecond tail.
+	stopped := time.Now().Add(-48 * time.Hour).Truncate(time.Microsecond)
+	cleanlyClosedAt := time.Now().Add(-36 * time.Hour).Truncate(time.Microsecond)
+
+	// (1) The crash orphan: opened by this instance, never closed.
+	store.SetInstanceID("instance-a")
+
+	orphan, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.1")
+	require.NoError(t, err)
+	backdateConnection(t, ctx, store, orphan.UID, stopped)
+
+	// (2) A connection this instance already closed cleanly.
+	alreadyClosed, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.2")
+	require.NoError(t, err)
+	backdateConnection(t, ctx, store, alreadyClosed.UID, stopped)
+	_, err = store.db.ExecContext(ctx,
+		"UPDATE connections SET disconnected_at = ? WHERE uid = ?", cleanlyClosedAt, alreadyClosed.UID)
+	require.NoError(t, err)
+
+	// (3) A live connection owned by another replica sharing this store.
+	store.SetInstanceID("instance-b")
+
+	otherReplica, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.3")
+	require.NoError(t, err)
+	backdateConnection(t, ctx, store, otherReplica.UID, stopped)
+
+	store.SetInstanceID("instance-a")
+
+	closed, err := store.CloseOrphanedConnections(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), closed, "only instance-a's still-open connection should be reconciled")
+
+	t.Run("an open connection is closed at its last_activity_at", func(t *testing.T) {
+		got, err := store.GetConnectionByUID(ctx, orphan.UID)
+		require.NoError(t, err)
+		require.NotNil(t, got.DisconnectedAt, "the orphan should no longer look open")
+		// last_activity_at, not now(): retention has to measure from when the
+		// session actually stopped talking.
+		assert.WithinDuration(t, stopped, *got.DisconnectedAt, time.Millisecond)
+		assert.False(t, got.DisconnectedAt.After(time.Now().Add(-24*time.Hour)),
+			"disconnected_at must not be reset to the restart time")
+	})
+
+	t.Run("an already-closed connection keeps its original timestamp", func(t *testing.T) {
+		got, err := store.GetConnectionByUID(ctx, alreadyClosed.UID)
+		require.NoError(t, err)
+		require.NotNil(t, got.DisconnectedAt)
+		assert.WithinDuration(t, cleanlyClosedAt, *got.DisconnectedAt, time.Millisecond,
+			"the reconcile must not overwrite a clean teardown's timestamp")
+	})
+
+	t.Run("another instance's live connection is untouched", func(t *testing.T) {
+		got, err := store.GetConnectionByUID(ctx, otherReplica.UID)
+		require.NoError(t, err)
+		assert.Nil(t, got.DisconnectedAt,
+			"starting one replica must never close another replica's live connections")
+		assert.Equal(t, "instance-b", got.InstanceID)
+	})
+
+	t.Run("running it again is a no-op", func(t *testing.T) {
+		again, err := store.CloseOrphanedConnections(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), again)
+	})
+
+	t.Run("an unset instance id reconciles nothing", func(t *testing.T) {
+		// Refusing here is what keeps an unconfigured process from performing
+		// the blanket update the instance scoping exists to prevent.
+		store.SetInstanceID("")
+
+		none, err := store.CloseOrphanedConnections(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), none)
+
+		got, err := store.GetConnectionByUID(ctx, otherReplica.UID)
+		require.NoError(t, err)
+		assert.Nil(t, got.DisconnectedAt)
+	})
+}
+
+// TestCloseOrphanedConnectionsAreReapedByRetention is the point of the whole
+// exercise: an orphan is invisible to the retention sweep until the reconcile
+// gives it a disconnected_at, and reapable immediately afterwards.
+func TestCloseOrphanedConnectionsAreReapedByRetention(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "orphan-reap")
+
+	store.SetInstanceID("instance-a")
+
+	orphan, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.9")
+	require.NoError(t, err)
+
+	long := time.Now().Add(-48 * time.Hour)
+	createQueryWithRows(t, ctx, store, orphan.UID, "SELECT 'orphan'", long)
+	backdateConnection(t, ctx, store, orphan.UID, long)
+
+	// Before the reconcile the row still looks live, so the sweep leaves it
+	// alone however old it is — that is exactly the leak.
+	result, err := store.CleanupOldQueryRows(ctx, 24*time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), result.Connections, "an open connection is never reaped")
+
+	_, err = store.GetConnectionByUID(ctx, orphan.UID)
+	require.NoError(t, err, "the orphan survives the sweep while disconnected_at is NULL")
+
+	closed, err := store.CloseOrphanedConnections(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), closed)
+
+	// Now it is past the cutoff and closed, so the next sweep takes it.
+	result, err = store.CleanupOldQueryRows(ctx, 24*time.Hour)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), result.Connections)
+
+	_, err = store.GetConnectionByUID(ctx, orphan.UID)
+	require.ErrorIs(t, err, ErrConnectionNotFound, "the reconciled orphan should be gone")
 }
 
 func TestGetConnectionByUID(t *testing.T) {
