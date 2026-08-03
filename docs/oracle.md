@@ -292,6 +292,17 @@ Client                          DBBat Proxy                     Oracle
 
 The proxy is fully transparent — it forwards raw TNS packets without modification. SQL extraction and row capture happen by inspecting copies of the data, never altering the traffic.
 
+Captured rows do not go to the database one at a time. `captureRow` hands each
+row to the process-wide batching writer (`internal/proxy/shared/rowwriter.go`),
+which flushes ~1000 rows (or ~8 MB) at a time and never blocks the capture
+path: on a full queue the row is dropped and the query is flagged
+`results_dropped`. The parent `queries` row is still created before the first
+row is queued (`persistQueryRecord`), because `query_rows.query_id` is a
+foreign key, and `completeQuery` waits on the writer's flush barrier before
+marking the query complete. Before this, every captured row cost a synchronous
+INSERT round-trip inline with the proxy — up to `max_result_rows` (100 000 by
+default) of them on a single query.
+
 ### Database resolution and shared service names
 
 The service name from the TNS Connect descriptor is first matched against dbbat

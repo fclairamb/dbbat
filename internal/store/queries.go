@@ -80,7 +80,7 @@ func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 //
 // Each row carries its own QueryID rather than the whole slice sharing one, so
 // a batch may span several queries — and therefore several concurrent
-// sessions. That is what lets a single process-wide writer amortise the
+// sessions. That is what lets a single process-wide writer amortize the
 // round-trip across a busy proxy instead of issuing one INSERT per query.
 //
 // Every referenced query must already exist: query_rows.query_id is a foreign

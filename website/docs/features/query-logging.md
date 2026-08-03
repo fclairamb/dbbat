@@ -20,6 +20,7 @@ For each query, DBBat records:
 - **Rows affected**: number of rows returned or modified
 - **Error**: error text if the query failed
 - **Result rows**: optionally captured up to `query_storage.max_result_rows` / `max_result_bytes`
+- **Capture completeness**: `results_truncated` and `results_dropped` (see [Partial captures](#partial-captures))
 
 ### Engine-specific notes
 
@@ -111,6 +112,31 @@ Response:
 ```
 
 Pass the `next_cursor` value back as `?cursor=…` to fetch the next page.
+
+Rows are persisted by one batched writer shared by every protocol and session.
+It flushes whenever ~1000 rows or ~8 MB have accumulated, or as soon as the
+queue runs dry — so an idle proxy writes rows immediately, and a busy one
+amortizes the round-trip across queries. Capture never holds a whole result set
+in memory waiting for the query to end, and never blocks the query on DBBat's
+own storage.
+
+### Partial captures
+
+Two independent flags say a stored result set is not the whole story. They are
+deliberately separate, because they mean opposite things:
+
+| Flag | Meaning |
+|---|---|
+| `results_truncated` | Capture stopped at a configured limit (`max_result_rows` / `max_result_bytes`). The stored rows are the beginning of the result set. Expected and explainable. |
+| `results_dropped` | DBBat lost rows it meant to keep: row storage fell behind the proxy (the writer's queue was full) or a batch insert failed. The stored rows have gaps. |
+
+A drop never affects the client: the rows still reach the database client
+untouched. DBBat degrades its own capture rather than stalling a customer's
+query behind its storage — so `results_dropped` is a signal that DBBat's store
+is under-provisioned for the traffic, not that anything went wrong upstream.
+
+Both flags are on the query record and are surfaced as badges on the query
+detail page.
 
 ## Retention
 

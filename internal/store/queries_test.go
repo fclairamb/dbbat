@@ -140,6 +140,140 @@ func TestStoreQueryRows(t *testing.T) {
 	})
 }
 
+// TestStoreQueryRows_BatchSpansQueries covers the signature that makes one
+// process-wide row writer possible: rows carry their own query id, so a single
+// INSERT can cover several concurrent queries.
+func TestStoreQueryRows_BatchSpansQueries(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn := createTestConnection(t, ctx, store, "batch-span")
+
+	first, err := store.CreateQuery(ctx, &Query{
+		ConnectionID: conn.UID,
+		SQLText:      "SELECT 1",
+		ExecutedAt:   time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("CreateQuery() error = %v", err)
+	}
+
+	second, err := store.CreateQuery(ctx, &Query{
+		ConnectionID: conn.UID,
+		SQLText:      "SELECT 2",
+		ExecutedAt:   time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("CreateQuery() error = %v", err)
+	}
+
+	mixed := []PendingQueryRow{
+		{QueryID: first.UID, RowNumber: 1, RowData: json.RawMessage(`{"n": 1}`), RowSizeBytes: 8},
+		{QueryID: second.UID, RowNumber: 1, RowData: json.RawMessage(`{"n": 2}`), RowSizeBytes: 8},
+		{QueryID: first.UID, RowNumber: 2, RowData: json.RawMessage(`{"n": 3}`), RowSizeBytes: 8},
+	}
+
+	if err := store.StoreQueryRows(ctx, mixed); err != nil {
+		t.Fatalf("StoreQueryRows() error = %v", err)
+	}
+
+	firstRows, err := store.GetQueryWithRows(ctx, first.UID)
+	if err != nil {
+		t.Fatalf("GetQueryWithRows() error = %v", err)
+	}
+
+	if len(firstRows.Rows) != 2 {
+		t.Errorf("first query rows = %d, want 2", len(firstRows.Rows))
+	}
+
+	secondRows, err := store.GetQueryWithRows(ctx, second.UID)
+	if err != nil {
+		t.Fatalf("GetQueryWithRows() error = %v", err)
+	}
+
+	if len(secondRows.Rows) != 1 {
+		t.Errorf("second query rows = %d, want 1", len(secondRows.Rows))
+	}
+}
+
+// TestQueryPartialCaptureFlags pins the distinction the UI depends on:
+// truncation (a configured limit) and dropping (dbbat losing rows) are two
+// independent columns, never one overloaded flag.
+func TestQueryPartialCaptureFlags(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn := createTestConnection(t, ctx, store, "partial-flags")
+
+	created, err := store.CreateQuery(ctx, &Query{
+		ConnectionID:     conn.UID,
+		SQLText:          "SELECT * FROM big",
+		ExecutedAt:       time.Now(),
+		ResultsTruncated: true,
+		ResultsDropped:   true,
+	})
+	if err != nil {
+		t.Fatalf("CreateQuery() error = %v", err)
+	}
+
+	if !created.ResultsTruncated || !created.ResultsDropped {
+		t.Fatalf("CreateQuery() truncated=%v dropped=%v, want both true",
+			created.ResultsTruncated, created.ResultsDropped)
+	}
+
+	fetched, err := store.GetQuery(ctx, created.UID)
+	if err != nil {
+		t.Fatalf("GetQuery() error = %v", err)
+	}
+
+	if !fetched.ResultsTruncated || !fetched.ResultsDropped {
+		t.Errorf("GetQuery() truncated=%v dropped=%v, want both true",
+			fetched.ResultsTruncated, fetched.ResultsDropped)
+	}
+
+	// A completion write moves the two independently: this capture was
+	// dropped, not truncated.
+	if err := store.UpdateQueryCompletion(ctx, created.UID, nil, nil, nil, false, true); err != nil {
+		t.Fatalf("UpdateQueryCompletion() error = %v", err)
+	}
+
+	fetched, err = store.GetQuery(ctx, created.UID)
+	if err != nil {
+		t.Fatalf("GetQuery() error = %v", err)
+	}
+
+	if fetched.ResultsTruncated {
+		t.Error("UpdateQueryCompletion() left results_truncated set")
+	}
+
+	if !fetched.ResultsDropped {
+		t.Error("UpdateQueryCompletion() cleared results_dropped")
+	}
+
+	// And the flags survive the list projection, which selects columns
+	// explicitly.
+	listed, err := store.ListQueries(ctx, QueryFilter{ConnectionID: &conn.UID})
+	if err != nil {
+		t.Fatalf("ListQueries() error = %v", err)
+	}
+
+	found := false
+
+	for _, q := range listed {
+		if q.UID == created.UID {
+			found = true
+
+			if !q.ResultsDropped {
+				t.Error("ListQueries() dropped the results_dropped column")
+			}
+		}
+	}
+
+	if !found {
+		t.Error("ListQueries() did not return the query")
+	}
+}
+
 func TestListQueries(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
