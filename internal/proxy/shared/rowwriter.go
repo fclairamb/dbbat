@@ -36,12 +36,19 @@ const (
 	MaxQueuedBytes = 32 << 20
 )
 
-// sinkResolveTimeout bounds how long the drain goroutine waits for a query
-// record to exist before giving up on its rows. Resolution normally happens
-// long before the rows reach the head of a batch (the producer starts the
-// parent INSERT as soon as it captures its first row), so this only exists so
-// that a producer that dies without resolving its sink can never wedge the
-// process-wide writer.
+// sinkResolveTimeout bounds how long the drain goroutine waits for query
+// records to exist before giving up on the rows that need them. Resolution
+// normally happens long before the rows reach the head of a batch (the
+// producer starts the parent INSERT as soon as it captures its first row), so
+// this only exists so that a producer that dies without resolving its sink can
+// never wedge the process-wide writer.
+//
+// The bound is per flush, not per row: one deadline is computed when a batch
+// starts landing and shared by every row in it, and a sink that misses it is
+// failed outright so its remaining rows — and its rows in later batches —
+// resolve instantly. There is exactly one drain goroutine for the whole
+// process, so a per-row bound would let a single dead producer stall all row
+// persistence for (timeout x rows), which is hours rather than seconds.
 const sinkResolveTimeout = 30 * time.Second
 
 // RowStore is the slice of the store the row writer needs.
@@ -228,10 +235,13 @@ func (w *RowWriter) flush(batch *rowBatch) {
 	rows := make([]store.PendingQueryRow, 0, len(batch.items))
 	contributors := make([]*QuerySink, 0, 4)
 
+	// One deadline for the whole batch: see sinkResolveTimeout.
+	deadline := time.Now().Add(sinkResolveTimeout)
+
 	for _, item := range batch.items {
 		w.queuedBytes.Add(-item.row.RowSizeBytes)
 
-		queryUID, ok := item.sink.await(w.ctx)
+		queryUID, ok := item.sink.await(w.ctx, deadline)
 		if !ok {
 			// The parent query record never materialized, so the row has
 			// nowhere to go.
@@ -491,7 +501,7 @@ func (s *QuerySink) QueryUID(ctx context.Context) (uuid.UUID, bool) {
 		return uuid.Nil, false
 	}
 
-	return s.await(ctx)
+	return s.await(ctx, time.Now().Add(sinkResolveTimeout))
 }
 
 // markDropped is how the drain goroutine reports a loss back to the capture.
@@ -504,19 +514,38 @@ func (s *QuerySink) markDropped() {
 }
 
 // await blocks until the sink knows its parent query uid, reporting false if
-// the record failed, the writer shut down, or nothing resolved it in time.
-func (s *QuerySink) await(ctx context.Context) (uuid.UUID, bool) {
-	timer := time.NewTimer(sinkResolveTimeout)
+// the record failed, the writer shut down, or deadline passed first.
+//
+// The already-resolved case — which is every row in a healthy process — takes
+// the fast path and allocates nothing. A sink that misses the deadline is
+// failed, so the answer is cached: no later row of that sink waits again.
+func (s *QuerySink) await(ctx context.Context, deadline time.Time) (uuid.UUID, bool) {
+	select {
+	case <-s.ready:
+		return s.resolution()
+	default:
+	}
+
+	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
 
 	select {
 	case <-s.ready:
+		return s.resolution()
 	case <-ctx.Done():
 		return uuid.Nil, false
 	case <-timer.C:
+		// Nobody is going to resolve this. Fail it so the sink's remaining
+		// rows — here and in later batches — are dropped immediately instead
+		// of each paying the wait again.
+		s.Fail()
+
 		return uuid.Nil, false
 	}
+}
 
+// resolution reads a sink that is known to be resolved (ready is closed).
+func (s *QuerySink) resolution() (uuid.UUID, bool) {
 	if s.failed.Load() {
 		return uuid.Nil, false
 	}

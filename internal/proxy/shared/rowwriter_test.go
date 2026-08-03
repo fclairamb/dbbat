@@ -444,3 +444,65 @@ func TestRowWriter_CloseDrainsWhatIsQueued(t *testing.T) {
 	assert.False(t, sink.Add(testRow(101, 4)), "a closed writer accepts nothing")
 	assert.True(t, sink.Dropped())
 }
+
+// TestRowWriter_UnresolvedSinkIsBoundedOncePerSink pins the shape of the
+// resolve bound: there is one drain goroutine for the whole process, so a
+// producer that dies without resolving its sink must cost one wait, not one
+// per queued row. The sink is failed on expiry, which is what caches the
+// answer for its remaining rows.
+func TestRowWriter_UnresolvedSinkIsBoundedOncePerSink(t *testing.T) {
+	t.Parallel()
+
+	fake := &fakeRowStore{}
+	w := NewRowWriter(fake, slog.Default())
+
+	defer w.Close(context.Background())
+
+	sink := w.NewSink()
+
+	for i := 1; i <= 20; i++ {
+		require.True(t, sink.Add(testRow(i, 8)))
+	}
+
+	// Expire the wait by hand rather than sleeping out sinkResolveTimeout.
+	_, ok := sink.await(context.Background(), time.Now())
+	assert.False(t, ok, "an unresolved sink past its deadline must not resolve")
+	assert.True(t, sink.Dropped(), "the expired sink is failed, so its rows are dropped")
+
+	// Every later row of the same sink now answers instantly.
+	start := time.Now()
+
+	for range 100 {
+		_, ok := sink.await(context.Background(), time.Now().Add(time.Hour))
+		require.False(t, ok)
+	}
+
+	assert.Less(t, time.Since(start), time.Second, "a failed sink must answer from cache, not wait again")
+
+	sink.Flush(context.Background())
+	assert.Equal(t, 0, fake.rowCount(), "rows with no parent query are never inserted")
+}
+
+// TestRowWriter_ResolvedSinkAwaitIsAllocationFree guards the fast path the
+// drain goroutine takes for every row in a healthy process.
+// Deliberately not parallel: testing.AllocsPerRun panics when the test is.
+//
+//nolint:paralleltest // AllocsPerRun cannot run in a parallel test
+func TestRowWriter_ResolvedSinkAwaitIsAllocationFree(t *testing.T) {
+	fake := &fakeRowStore{}
+	w := NewRowWriter(fake, slog.Default())
+
+	defer w.Close(context.Background())
+
+	queryUID := uuid.New()
+	sink := w.NewSinkFor(queryUID)
+
+	allocs := testing.AllocsPerRun(100, func() {
+		uid, ok := sink.await(context.Background(), time.Now().Add(time.Hour))
+		if !ok || uid != queryUID {
+			t.Error("a resolved sink must answer immediately")
+		}
+	})
+
+	assert.Zero(t, allocs, "awaiting a resolved sink must not allocate a timer per row")
+}
