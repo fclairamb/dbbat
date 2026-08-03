@@ -315,6 +315,10 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	logger.InfoContext(ctx, "API server started", slog.String("addr", cfg.ListenAPI))
 
+	// One result-row writer for the whole process: batches span protocols,
+	// sessions and queries (see shared.RowWriter).
+	rowWriter := shared.NewRowWriter(dataStore, logger)
+
 	// Create auth cache for proxy server (shared cache config with API)
 	proxyAuthCache := cache.NewAuthCache(cache.AuthCacheConfig{
 		Enabled:    cfg.AuthCache.Enabled,
@@ -330,6 +334,7 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	}
 
 	proxyServer.SetApprovalDeps(approvalDeps)
+	proxyServer.SetRowWriter(rowWriter)
 
 	go func() {
 		if err := proxyServer.Start(cfg.ListenPG); err != nil {
@@ -343,20 +348,20 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		slog.Bool("tls", !cfg.PG.TLS.Disable))
 
 	// Start Oracle proxy server (if configured)
-	oracleServer := startOracleProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, logger)
+	oracleServer := startOracleProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
 
 	// Start MySQL proxy server (if configured)
-	mysqlServer := startMySQLProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, logger)
+	mysqlServer := startMySQLProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
 
 	// Start MongoDB proxy server (if configured)
-	mongoServer := startMongoProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, logger)
+	mongoServer := startMongoProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
 
 	// One retention sweep for the whole process (nil when disabled, the default).
 	sweeper := startQueryRetentionSweep(ctx, cfg, dataStore, logger)
 
 	// Draining releases parked queries first, then stops the servers.
 	servers := collectServers(approvalDrain{approvals, logger}, apiServer, proxyServer,
-		oracleServer, mysqlServer, mongoServer, sweeper, heartbeat)
+		oracleServer, mysqlServer, mongoServer, rowWriter, sweeper, heartbeat)
 
 	return awaitShutdown(ctx, logger, servers...)
 }
@@ -456,13 +461,22 @@ func awaitShutdown(ctx context.Context, logger *slog.Logger, servers ...shutdown
 	return nil
 }
 
-func startOracleProxy(ctx context.Context, cfg *config.Config, dataStore *store.Store, authCache *cache.AuthCache, approvalDeps shared.ApprovalDeps, logger *slog.Logger) *oracle.Server {
+func startOracleProxy(
+	ctx context.Context,
+	cfg *config.Config,
+	dataStore *store.Store,
+	authCache *cache.AuthCache,
+	approvalDeps shared.ApprovalDeps,
+	rowWriter *shared.RowWriter,
+	logger *slog.Logger,
+) *oracle.Server {
 	if cfg.ListenOracle == "" {
 		return nil
 	}
 
 	srv := oracle.NewServer(dataStore, cfg.EncryptionKey, authCache, cfg.QueryStorage, cfg.Dump, logger)
 	srv.SetApprovalDeps(approvalDeps)
+	srv.SetRowWriter(rowWriter)
 
 	go func() {
 		if err := srv.Start(cfg.ListenOracle); err != nil {
@@ -476,7 +490,15 @@ func startOracleProxy(ctx context.Context, cfg *config.Config, dataStore *store.
 	return srv
 }
 
-func startMySQLProxy(ctx context.Context, cfg *config.Config, dataStore *store.Store, authCache *cache.AuthCache, approvalDeps shared.ApprovalDeps, logger *slog.Logger) *mysql.Server {
+func startMySQLProxy(
+	ctx context.Context,
+	cfg *config.Config,
+	dataStore *store.Store,
+	authCache *cache.AuthCache,
+	approvalDeps shared.ApprovalDeps,
+	rowWriter *shared.RowWriter,
+	logger *slog.Logger,
+) *mysql.Server {
 	if cfg.ListenMySQL == "" {
 		return nil
 	}
@@ -488,6 +510,7 @@ func startMySQLProxy(ctx context.Context, cfg *config.Config, dataStore *store.S
 	}
 
 	srv.SetApprovalDeps(approvalDeps)
+	srv.SetRowWriter(rowWriter)
 
 	go func() {
 		if err := srv.Start(cfg.ListenMySQL); err != nil {
@@ -503,7 +526,15 @@ func startMySQLProxy(ctx context.Context, cfg *config.Config, dataStore *store.S
 	return srv
 }
 
-func startMongoProxy(ctx context.Context, cfg *config.Config, dataStore *store.Store, authCache *cache.AuthCache, approvalDeps shared.ApprovalDeps, logger *slog.Logger) *mongodb.Server {
+func startMongoProxy(
+	ctx context.Context,
+	cfg *config.Config,
+	dataStore *store.Store,
+	authCache *cache.AuthCache,
+	approvalDeps shared.ApprovalDeps,
+	rowWriter *shared.RowWriter,
+	logger *slog.Logger,
+) *mongodb.Server {
 	if cfg.ListenMongo == "" {
 		return nil
 	}
@@ -515,6 +546,7 @@ func startMongoProxy(ctx context.Context, cfg *config.Config, dataStore *store.S
 	}
 
 	srv.SetApprovalDeps(approvalDeps)
+	srv.SetRowWriter(rowWriter)
 
 	go func() {
 		if err := srv.Start(cfg.ListenMongo); err != nil {
@@ -1098,6 +1130,18 @@ func buildEventPlumbing(
 	}
 }
 
+// rowWriterCloser adapts the shared result-row writer to the shutdown list.
+type rowWriterCloser struct {
+	writer *shared.RowWriter
+}
+
+// Shutdown drains whatever rows are still queued and stops the writer.
+func (c rowWriterCloser) Shutdown(ctx context.Context) error {
+	c.writer.Close(ctx)
+
+	return nil
+}
+
 // collectServers drops the nil entries (proxies whose listener is disabled)
 // from a shutdown list. A typed-nil pointer in a shutdownable slice would
 // panic on Shutdown, so the filter checks each concrete pointer.
@@ -1108,6 +1152,7 @@ func collectServers(
 	oracleServer *oracle.Server,
 	mysqlServer *mysql.Server,
 	mongoServer *mongodb.Server,
+	rowWriter *shared.RowWriter,
 	sweeper *queryRetentionSweeper,
 	heartbeat *instanceHeartbeat,
 ) []shutdownable {
@@ -1123,6 +1168,12 @@ func collectServers(
 
 	if mongoServer != nil {
 		servers = append(servers, mongoServer)
+	}
+
+	// After every proxy: the batched capture has to drain once no session can
+	// queue another row, or the tail of the last queries is lost.
+	if rowWriter != nil {
+		servers = append(servers, rowWriterCloser{rowWriter})
 	}
 
 	if sweeper != nil {
