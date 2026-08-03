@@ -308,6 +308,19 @@ type Connection struct {
 	InstanceID string `bun:"instance_id,notnull,default:''" json:"-"`
 }
 
+// Instance is one dbbat process sharing this store. The row is upserted at
+// startup, refreshed by a heartbeat, and deleted on a clean shutdown, so its
+// presence and freshness answer "is this process still alive?" — which is what
+// lets the startup reconcile reclaim the connections of an instance that is
+// provably gone. See Store.CloseOrphanedConnections.
+type Instance struct {
+	bun.BaseModel `bun:"table:instances,alias:i"`
+
+	InstanceID string    `bun:"instance_id,pk" json:"instance_id"`
+	StartedAt  time.Time `bun:"started_at,notnull,default:current_timestamp" json:"started_at"`
+	LastSeenAt time.Time `bun:"last_seen_at,notnull,default:current_timestamp" json:"last_seen_at"`
+}
+
 // ConnectionFilter represents filters for listing connections
 type ConnectionFilter struct {
 	UserID     *uuid.UUID
