@@ -315,8 +315,7 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	logger.InfoContext(ctx, "API server started", slog.String("addr", cfg.ListenAPI))
 
-	// One result-row writer for the whole process: batches span protocols,
-	// sessions and queries (see shared.RowWriter).
+	// One result-row writer for the whole process (see shared.RowWriter).
 	rowWriter := shared.NewRowWriter(dataStore, logger)
 
 	// Create auth cache for proxy server (shared cache config with API)
@@ -326,26 +325,8 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		MaxSize:    cfg.AuthCache.MaxSize,
 	})
 
-	// Start proxy server
-	proxyServer, err := postgresql.NewServer(dataStore, cfg.EncryptionKey, cfg.QueryStorage, cfg.Dump, proxyAuthCache, cfg.PG, logger)
-	if err != nil {
-		logger.ErrorContext(ctx, "PostgreSQL proxy server init failed", slog.Any("error", err))
-		os.Exit(1)
-	}
-
-	proxyServer.SetApprovalDeps(approvalDeps)
-	proxyServer.SetRowWriter(rowWriter)
-
-	go func() {
-		if err := proxyServer.Start(cfg.ListenPG); err != nil {
-			logger.ErrorContext(context.Background(), "Proxy server error", slog.Any("error", err))
-			os.Exit(1)
-		}
-	}()
-
-	logger.InfoContext(ctx, "Proxy server started",
-		slog.String("addr", cfg.ListenPG),
-		slog.Bool("tls", !cfg.PG.TLS.Disable))
+	// Start the PostgreSQL proxy server
+	proxyServer := startPostgresProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
 
 	// Start Oracle proxy server (if configured)
 	oracleServer := startOracleProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
@@ -459,6 +440,41 @@ func awaitShutdown(ctx context.Context, logger *slog.Logger, servers ...shutdown
 	logger.InfoContext(shutdownCtx, "Shutdown complete")
 
 	return nil
+}
+
+// startPostgresProxy builds and starts the PostgreSQL proxy. Unlike the other
+// three it has no listener-disabled case: PostgreSQL is dbbat's default
+// protocol and DBB_LISTEN_PG always has a value.
+func startPostgresProxy(
+	ctx context.Context,
+	cfg *config.Config,
+	dataStore *store.Store,
+	authCache *cache.AuthCache,
+	approvalDeps shared.ApprovalDeps,
+	rowWriter *shared.RowWriter,
+	logger *slog.Logger,
+) *postgresql.Server {
+	srv, err := postgresql.NewServer(dataStore, cfg.EncryptionKey, cfg.QueryStorage, cfg.Dump, authCache, cfg.PG, logger)
+	if err != nil {
+		logger.ErrorContext(ctx, "PostgreSQL proxy server init failed", slog.Any("error", err))
+		os.Exit(1)
+	}
+
+	srv.SetApprovalDeps(approvalDeps)
+	srv.SetRowWriter(rowWriter)
+
+	go func() {
+		if err := srv.Start(cfg.ListenPG); err != nil {
+			logger.ErrorContext(context.Background(), "Proxy server error", slog.Any("error", err))
+			os.Exit(1)
+		}
+	}()
+
+	logger.InfoContext(ctx, "Proxy server started",
+		slog.String("addr", cfg.ListenPG),
+		slog.Bool("tls", !cfg.PG.TLS.Disable))
+
+	return srv
 }
 
 func startOracleProxy(
