@@ -1653,6 +1653,112 @@ func TestResultCapture_KeepsPrefixWhenLimitsExceeded(t *testing.T) {
 	assert.Equal(t, maxRows, query.rowNumber)
 }
 
+// copyRowValues decodes the "name" column of each captured COPY row.
+func copyRowValues(t *testing.T, rows []store.QueryRow) []string {
+	t.Helper()
+
+	values := make([]string, 0, len(rows))
+
+	for _, row := range rows {
+		var decoded map[string]interface{}
+		require.NoError(t, json.Unmarshal(row.RowData, &decoded))
+		require.Contains(t, decoded, "name")
+
+		name, ok := decoded["name"].(string)
+		require.True(t, ok, "name column should decode as a string")
+		values = append(values, name)
+	}
+
+	return values
+}
+
+func TestParseCopyDataToRows_ByteLimit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		chunks    [][]byte
+		truncated bool
+		expected  []string
+	}{
+		{
+			// The byte limit cuts the stream mid-line: the whole rows before
+			// the last \n are kept, the partial tail is dropped.
+			name:      "truncated mid-line keeps whole rows only",
+			chunks:    [][]byte{[]byte("1\talice\n2\tbob\n"), []byte("3\tcar")},
+			truncated: true,
+			expected:  []string{"alice", "bob"},
+		},
+		{
+			// Nothing complete was buffered - better zero rows than one
+			// malformed one.
+			name:      "truncated with no newline yields no rows",
+			chunks:    [][]byte{[]byte("1\tali")},
+			truncated: true,
+			expected:  []string{},
+		},
+		{
+			name:      "truncated on a row boundary keeps every row",
+			chunks:    [][]byte{[]byte("1\talice\n2\tbob\n")},
+			truncated: true,
+			expected:  []string{"alice", "bob"},
+		},
+		{
+			// A complete capture still parses a trailing line with no final
+			// newline.
+			name:      "not truncated keeps the trailing line",
+			chunks:    [][]byte{[]byte("1\talice\n2\tbob")},
+			truncated: false,
+			expected:  []string{"alice", "bob"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := newTestSession("read")
+			s.queryStorage.StoreResults = true
+			s.queryStorage.MaxResultRows = 100
+			s.queryStorage.MaxResultBytes = 1 << 20
+			s.copyState = &copyState{
+				direction:   "out",
+				format:      0,
+				columnNames: []string{"id", "name"},
+				dataChunks:  tc.chunks,
+				truncated:   tc.truncated,
+			}
+
+			rows := s.parseCopyDataToRows()
+
+			assert.Equal(t, tc.expected, copyRowValues(t, rows))
+			assert.NotContains(t, copyRowValues(t, rows), "car", "partial row must not be emitted")
+		})
+	}
+}
+
+func TestCaptureCopyData_KeepsPrefixWhenByteLimitExceeded(t *testing.T) {
+	t.Parallel()
+
+	s := newTestSession("read")
+	s.queryStorage.StoreResults = true
+	s.queryStorage.MaxResultRows = 100
+	s.queryStorage.MaxResultBytes = 16
+	s.copyState = &copyState{
+		direction:   "out",
+		format:      0,
+		columnNames: []string{"id", "name"},
+	}
+
+	s.captureCopyData([]byte("1\talice\n2\tbob\n"))
+	s.captureCopyData([]byte("3\tcarol\n4\tdave\n"))
+
+	require.True(t, s.copyState.truncated, "the byte limit must flag the capture as truncated")
+	require.NotEmpty(t, s.copyState.dataChunks, "the captured prefix must be kept, not discarded")
+
+	assert.Equal(t, []string{"alice", "bob"}, copyRowValues(t, s.parseCopyDataToRows()))
+}
+
 func TestParseCopyColumnNames(t *testing.T) {
 	t.Parallel()
 
