@@ -50,6 +50,45 @@ type QueryStorageConfig struct {
 
 	// StoreResults enables/disables result storage globally.
 	StoreResults bool `koanf:"store_results"`
+
+	// Retention is how long query history (and the captured result rows
+	// hanging off it) is kept, as a Go duration (e.g. "720h").
+	//
+	// Empty or "0" means keep forever, and that is the default: dbbat is an
+	// audit tool, so an upgrade must never silently start deleting history.
+	// Operators opt in — "720h" (30 days) is a reasonable starting point.
+	Retention string `koanf:"retention"`
+}
+
+// DefaultQueryStorageRetention keeps query history forever. Retention is
+// opt-in: see QueryStorageConfig.Retention.
+const DefaultQueryStorageRetention = "0"
+
+// RetentionDuration parses Retention into a duration. A zero or negative
+// result means "disabled — keep forever", and no sweep is scheduled.
+//
+// A malformed value also disables the sweep (with a warning) rather than
+// falling back to some built-in period: this sweep permanently deletes audit
+// data, so a typo must never be interpreted as "delete more".
+func (c QueryStorageConfig) RetentionDuration() time.Duration {
+	if c.Retention == "" {
+		return 0
+	}
+
+	d, err := time.ParseDuration(c.Retention)
+	if err != nil {
+		slog.WarnContext(context.Background(), "invalid query storage retention, keeping query history forever",
+			slog.String("retention", c.Retention),
+			slog.Any("error", err))
+
+		return 0
+	}
+
+	if d < 0 {
+		return 0
+	}
+
+	return d
 }
 
 // RateLimitConfig holds configuration for API rate limiting.
@@ -433,6 +472,7 @@ func defaultConfig() Config {
 			MaxResultRows:  DefaultMaxResultRows,
 			MaxResultBytes: DefaultMaxResultBytes,
 			StoreResults:   true,
+			Retention:      DefaultQueryStorageRetention,
 		},
 		RateLimit: RateLimitConfig{
 			Enabled:               DefaultRateLimitEnabled,
