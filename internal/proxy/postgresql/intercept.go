@@ -352,12 +352,27 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 		query.CopyFormat = &format
 	}
 
+	// recordPending: result capture opened a sink, which means it also started
+	// inserting the parent queries row. The completion path waits for that uid
+	// instead of inserting a second row — but only when capture is what opened
+	// the sink, never for a COPY sink opened just below.
+	recordPending := s.currentQuery.rowSink != nil
+
 	// COPY rows are the one capture that is still built at query end: the
 	// chunks only become rows once the stream is complete. Regular result rows
 	// have been streaming to the row writer all along.
+	//
+	// A COPY never emits a DataRow, so captureDataRow never ran and the query
+	// has no sink yet — one has to be opened here or the rows would have
+	// nowhere to go.
+
 	var copyRows []store.QueryRow
 	if s.copyState != nil && len(s.copyState.dataChunks) > 0 {
 		copyRows = s.parseCopyDataToRows()
+
+		if len(copyRows) > 0 && s.currentQuery.rowSink == nil {
+			s.currentQuery.rowSink = s.rowWriter.NewSink()
+		}
 	}
 
 	// Record whether capture stopped on a storage limit. Read after the rows
@@ -368,7 +383,7 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 	}
 
 	// Persist asynchronously so the proxy isn't blocked on the store write.
-	s.persistQueryAsync(query, s.currentQuery.rowSink, copyRows, bytesTransferred)
+	s.persistQueryAsync(query, s.currentQuery.rowSink, recordPending, copyRows, bytesTransferred)
 
 	// Update local grant state for in-session quota checks
 	s.grant.QueryCount++
@@ -395,6 +410,7 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 func (s *Session) persistQueryAsync(
 	query *store.Query,
 	sink *shared.QuerySink,
+	recordPending bool,
 	copyRows []store.QueryRow,
 	bytesTransferred int64,
 ) {
@@ -407,7 +423,7 @@ func (s *Session) persistQueryAsync(
 	}
 
 	go func() {
-		queryUID, exists := s.resolveQueryRecord(query, sink, len(copyRows) > 0)
+		queryUID, exists := s.resolveQueryRecord(query, sink, recordPending, len(copyRows) > 0)
 		if queryUID == uuid.Nil {
 			return
 		}
@@ -455,16 +471,26 @@ func (s *Session) persistQueryAsync(
 func (s *Session) resolveQueryRecord(
 	query *store.Query,
 	sink *shared.QuerySink,
+	recordPending bool,
 	hasPendingRows bool,
 ) (uuid.UUID, bool) {
 	// An approval hold persisted the statement as pending before it ran.
 	if query.UID != uuid.Nil {
+		// Harmless when the sink already carries this uid; essential for a
+		// COPY, whose sink is opened unresolved at query end.
+		sink.Resolve(query.UID)
+
 		return query.UID, true
 	}
 
-	// Result capture inserted the row on its first captured row.
-	if uid, ok := sink.QueryUID(s.ctx); ok {
-		return uid, true
+	// Result capture inserted the row on its first captured row. Only wait
+	// for that when capture actually started one — a COPY's sink is opened
+	// unresolved at query end, and waiting on it would deadlock against the
+	// insert this function is about to do.
+	if recordPending {
+		if uid, ok := sink.QueryUID(s.ctx); ok {
+			return uid, true
+		}
 	}
 
 	record := query
