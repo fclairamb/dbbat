@@ -274,21 +274,33 @@ func (s *Session) recordQuery(pq *pendingQuery, rows []store.QueryRow, rowsAffec
 		ResultsTruncated: pq.resultsTruncated,
 	}
 
-	go func() {
-		queryUID := pq.approvalUID
+	// When there are rows to store, the record goes in without its completion
+	// fields and is completed after the rows land: a query must never read as
+	// finished while its rows are still arriving.
+	hasRows := len(rows) > 0
 
-		if queryUID != uuid.Nil {
-			// An approval hold already inserted this row before the command
-			// ran; complete it in place.
-			if err := s.server.store.UpdateQueryCompletion(
-				s.ctx, queryUID, &durationMs, rowsAffected, queryError, pq.resultsTruncated, false,
-			); err != nil {
-				s.logger.ErrorContext(s.ctx, "complete held command failed", slog.Any("error", err))
+	go func() {
+		sink := s.server.rowWriter.NewSink()
+
+		queryUID := pq.approvalUID
+		held := queryUID != uuid.Nil
+
+		if !held {
+			insert := record
+
+			if hasRows {
+				bare := *record
+				bare.DurationMs = nil
+				bare.RowsAffected = nil
+				bare.Error = nil
+				bare.ResultsTruncated = false
+				insert = &bare
 			}
-		} else {
-			created, err := s.server.store.CreateQuery(s.ctx, record)
+
+			created, err := s.server.store.CreateQuery(s.ctx, insert)
 			if err != nil {
 				s.logger.ErrorContext(s.ctx, "create query log failed", slog.Any("error", err))
+				sink.Fail()
 
 				return
 			}
@@ -296,13 +308,28 @@ func (s *Session) recordQuery(pq *pendingQuery, rows []store.QueryRow, rowsAffec
 			queryUID = created.UID
 		}
 
-		s.stream.Query(queryUID, record)
+		sink.Resolve(queryUID)
 
-		if len(rows) > 0 {
-			if err := s.server.store.StoreQueryRows(s.ctx, store.PendingRows(queryUID, rows)); err != nil {
-				s.logger.ErrorContext(s.ctx, "store query rows failed", slog.Any("error", err))
+		// Blocking hand-off: the reply's rows are already resident, so
+		// queueing them costs no extra memory and dropping them would lose a
+		// capture that used to be stored whole.
+		sink.AddAll(s.ctx, rows)
+		sink.Flush(s.ctx)
+
+		record.ResultsDropped = sink.Dropped()
+
+		// A held row always needs its completion write. A row inserted here
+		// needs one only when it went in bare (rows to store) or when the
+		// writer turned out to have dropped some.
+		if held || hasRows || record.ResultsDropped {
+			if err := s.server.store.UpdateQueryCompletion(
+				s.ctx, queryUID, &durationMs, rowsAffected, queryError, pq.resultsTruncated, record.ResultsDropped,
+			); err != nil {
+				s.logger.ErrorContext(s.ctx, "complete command log failed", slog.Any("error", err))
 			}
 		}
+
+		s.stream.Query(queryUID, record)
 
 		if bytesTransferred > 0 {
 			if err := s.server.store.IncrementConnectionStats(s.ctx, s.connection.UID, bytesTransferred); err != nil {

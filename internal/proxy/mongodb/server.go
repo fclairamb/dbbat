@@ -35,6 +35,11 @@ type Server struct {
 	authCache     *cache.AuthCache
 	logger        *slog.Logger
 
+	// rowWriter batches captured result rows off the capture path. Defaults
+	// to a writer private to this server; main.go replaces it with the
+	// process-wide one so batches span protocols as well as sessions.
+	rowWriter *shared.RowWriter
+
 	// tlsConfig supports client-facing TLS termination. Nil when TLS is
 	// explicitly disabled in config.
 	tlsConfig *tls.Config
@@ -76,8 +81,14 @@ func NewServer(
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	var rowWriter *shared.RowWriter
+	if dataStore != nil {
+		rowWriter = shared.NewRowWriter(dataStore, logger)
+	}
+
 	return &Server{
 		store:         dataStore,
+		rowWriter:     rowWriter,
 		encryptionKey: encryptionKey,
 		queryStorage:  queryStorage,
 		dumpConfig:    dumpConfig,
@@ -231,4 +242,20 @@ func (s *Server) runDumpCleanup() {
 // them never holds anything.
 func (s *Server) SetApprovalDeps(deps shared.ApprovalDeps) {
 	s.approvalDeps = deps
+}
+
+// SetRowWriter installs the process-wide result-row writer, replacing (and
+// shutting down) the private one NewServer created. Batching across every
+// protocol is where the design pays off most: a busy proxy with many small
+// result sets then issues one INSERT per ~1000 rows overall rather than one
+// per query.
+func (s *Server) SetRowWriter(writer *shared.RowWriter) {
+	if writer == nil || writer == s.rowWriter {
+		return
+	}
+
+	previous := s.rowWriter
+	s.rowWriter = writer
+
+	previous.Close(s.ctx)
 }
