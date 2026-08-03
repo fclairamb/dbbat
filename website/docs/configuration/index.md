@@ -77,6 +77,13 @@ See [Session Packet Dumps](/docs/features/session-dumps) for what gets captured.
 | `DBB_QUERY_STORAGE_STORE_RESULTS` | Globally enable result-row capture | `true` |
 | `DBB_QUERY_STORAGE_MAX_RESULT_ROWS` | Max rows captured per query | `100000` |
 | `DBB_QUERY_STORAGE_MAX_RESULT_BYTES` | Max bytes captured per query | `104857600` (100 MB) |
+| `DBB_QUERY_STORAGE_RETENTION` | Auto-delete query history and its captured rows past this Go duration. `0` keeps everything forever. | `0` (recommended: `720h`) |
+
+Retention is **opt-in**: upgrading dbbat never starts deleting audit history on
+its own. The per-query caps above bound one query's capture; retention bounds
+the accumulation of every query ever proxied. See
+[Query Logging](/docs/features/query-logging#retention) for exactly what a sweep
+removes.
 
 ### Rate Limiting
 
@@ -213,6 +220,7 @@ query_storage:
   store_results: true
   max_result_rows: 100000
   max_result_bytes: 104857600
+  retention: "0" # keep forever; e.g. "720h" for 30 days
 
 rate_limit:
   enabled: true

@@ -112,6 +112,35 @@ Response:
 
 Pass the `next_cursor` value back as `?cursor=…` to fetch the next page.
 
+## Retention
+
+By default DBBat keeps query history forever — it is an audit trail, so nothing
+is deleted unless you ask for it. Set `DBB_QUERY_STORAGE_RETENTION` (or
+`query_storage.retention`) to a Go duration to enable a sweep:
+
+```bash
+DBB_QUERY_STORAGE_RETENTION=720h   # 30 days
+```
+
+The sweep runs once at startup and then hourly, deleting in batches:
+
+- **Queries** executed before the cutoff, along with every result row captured
+  for them (`query_rows` cascades from the query).
+- **Connections** that were closed before the cutoff, along with their queries
+  and rows.
+
+Connections that are still **open** are never deleted, however old they are —
+the session may still be live. Such a connection can therefore outlive all of
+its queries and show up with none left; its `queries` counter is a lifetime
+counter, not a count of retained rows.
+
+Set the value to `0` (the default), or leave it unset, to keep history forever.
+An unparseable value also leaves retention off and logs a warning at startup,
+rather than falling back to some other period.
+
+Note this is separate from [session packet dumps](/docs/features/session-dumps),
+which have their own `DBB_DUMP_RETENTION` (default `24h`).
+
 ## Connection Tracking
 
 Queries are linked to connections. View connection details:

@@ -103,7 +103,10 @@ CREATE INDEX idx_queries_executed_at ON queries(executed_at);
 
 --bun:split
 
--- Store query result/COPY data rows (with retention limits)
+-- Store query result/COPY data rows. Per-query capture caps come from
+-- query_storage.max_result_rows / max_result_bytes; time-based retention is
+-- opt-in via DBB_QUERY_STORAGE_RETENTION and sweeps these rows away through
+-- the ON DELETE CASCADE below.
 CREATE TABLE query_rows (
     uid UUID PRIMARY KEY,                   -- UUIDv7 generated in Go
     query_id UUID NOT NULL REFERENCES queries(uid) ON DELETE CASCADE,

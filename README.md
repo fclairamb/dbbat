@@ -213,6 +213,7 @@ mongosh "mongodb://developer:temppass123@localhost:27018/?authSource=production&
 | `DBB_DUMP_DIR` | Directory for session packet dumps (empty disables) | - |
 | `DBB_DUMP_MAX_SIZE` | Max dump file size per session, in bytes | `10485760` (10 MB) |
 | `DBB_DUMP_RETENTION` | Auto-delete dumps older than this (Go duration) | `24h` |
+| `DBB_QUERY_STORAGE_RETENTION` | Auto-delete query history and captured result rows older than this (Go duration; `0` keeps them forever) | `0` (recommended: `720h`) |
 | `DBB_MYSQL_TLS_DISABLE` | Disable MySQL TLS termination at the proxy | `false` |
 | `DBB_MYSQL_TLS_CERT_FILE` | PEM cert for MySQL TLS (auto self-signed if empty) | - |
 | `DBB_MYSQL_TLS_KEY_FILE` | PEM RSA key for MySQL TLS (auto-generated if empty) | - |
