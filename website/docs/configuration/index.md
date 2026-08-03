@@ -48,9 +48,25 @@ If neither is set, DBBat generates a key on first start and writes it to `~/.dbb
 |----------|-------------|---------|
 | `DBB_RUN_MODE` | `` (production), `test`, or `demo` | `` |
 | `DBB_LOG_LEVEL` | `debug`, `info`, `warn`, `error` | `info` |
+| `DBB_INSTANCE_ID` | Identifies this process among the replicas sharing a store | Hostname (the pod name under Kubernetes) |
 | `DBB_BASE_URL` | Base URL path the frontend is served under | `/app` |
 | `DBB_REDIRECTS` | Dev-only redirect rules (`/path:host:port[/target]`, comma-separated) | - |
 | `DBB_DEMO_TARGET_DB` | Demo-mode allowed target (`user:pass@host/dbname`) | `demo:demo@localhost/demo` |
+
+`DBB_INSTANCE_ID` is stamped on every connection dbbat records. At startup, and
+before any proxy accepts, dbbat marks the connections **its own instance id**
+left open as disconnected — a crash or a `SIGKILL` never runs the normal
+teardown, so those rows would otherwise stay "open" forever and never become
+eligible for retention. The count is logged at `info`; a large number means the
+previous run did not shut down cleanly.
+
+The scoping is deliberate and load-bearing when several replicas share one
+store: a starting replica must never close a *live* connection belonging to a
+different replica. The flip side is that connections owned by an instance id
+that never comes back are not reclaimed. Restarting on a stable identity — a
+single host, a StatefulSet, or an explicit `DBB_INSTANCE_ID` — reclaims its own
+orphans; a plain Kubernetes Deployment, which mints a new pod name on every
+restart, does not.
 
 ### Session Packet Dumps
 

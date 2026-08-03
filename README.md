@@ -210,6 +210,7 @@ mongosh "mongodb://developer:temppass123@localhost:27018/?authSource=production&
 | `DBB_KEYFILE` | Path to file containing encryption key | - |
 | `DBB_RUN_MODE` | Run mode: empty (production), `test`, or `demo` | - |
 | `DBB_LOG_LEVEL` | `debug`, `info`, `warn`, `error` | `info` |
+| `DBB_INSTANCE_ID` | Identifies this process among replicas sharing the store | Hostname |
 | `DBB_DUMP_DIR` | Directory for session packet dumps (empty disables) | - |
 | `DBB_DUMP_MAX_SIZE` | Max dump file size per session, in bytes | `10485760` (10 MB) |
 | `DBB_DUMP_RETENTION` | Auto-delete dumps older than this (Go duration) | `24h` |

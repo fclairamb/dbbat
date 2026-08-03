@@ -134,6 +134,16 @@ the session may still be live. Such a connection can therefore outlive all of
 its queries and show up with none left; its `queries` counter is a lifetime
 counter, not a count of retained rows.
 
+A crash or a `SIGKILL` never runs the normal session teardown, so those
+connections would stay "open" — and therefore un-reapable — forever. To stop
+that leak, dbbat marks the connections it left open as disconnected on its next
+start, before any proxy accepts, using each session's last activity time so
+retention still measures from when the session actually stopped. The reconcile
+is scoped to the process's own `DBB_INSTANCE_ID`
+so it can never close a live session belonging to another replica. See
+[`DBB_INSTANCE_ID`](/docs/configuration) for what that does and does not
+reclaim.
+
 Set the value to `0` (the default), or leave it unset, to keep history forever.
 An unparseable value also leaves retention off and logs a warning at startup,
 rather than falling back to some other period.
