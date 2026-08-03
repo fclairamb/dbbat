@@ -123,6 +123,11 @@ type session struct {
 	tracker      *oracleQueryTracker
 	queryStorage config.QueryStorageConfig
 
+	// rowWriter batches captured result rows. Oracle used to INSERT one row
+	// at a time, synchronously, on the capture path — up to 100 000 sequential
+	// round-trips on a single proxied query.
+	rowWriter *shared.RowWriter
+
 	// Dump
 	dumpConfig config.DumpConfig
 	dump       *dump.Writer
@@ -193,6 +198,7 @@ func newSession(
 	authCache *cache.AuthCache,
 	queryStorage config.QueryStorageConfig,
 	dumpConfig config.DumpConfig,
+	rowWriter *shared.RowWriter,
 ) *session {
 	bytesFromClient := &atomic.Int64{}
 	bytesToClient := &atomic.Int64{}
@@ -211,6 +217,7 @@ func newSession(
 		tracker:         newOracleQueryTracker(),
 		queryStorage:    queryStorage,
 		dumpConfig:      dumpConfig,
+		rowWriter:       rowWriter,
 		bytesFromClient: bytesFromClient,
 		bytesToClient:   bytesToClient,
 	}
