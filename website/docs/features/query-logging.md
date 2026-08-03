@@ -136,13 +136,14 @@ counter, not a count of retained rows.
 
 A crash or a `SIGKILL` never runs the normal session teardown, so those
 connections would stay "open" — and therefore un-reapable — forever. To stop
-that leak, dbbat marks the connections it left open as disconnected on its next
-start, before any proxy accepts, using each session's last activity time so
-retention still measures from when the session actually stopped. The reconcile
-is scoped to the process's own `DBB_INSTANCE_ID`
-so it can never close a live session belonging to another replica. See
-[`DBB_INSTANCE_ID`](/docs/configuration) for what that does and does not
-reclaim.
+that leak, dbbat marks the connections left open by a process that is no longer
+running as disconnected on its next start, before any proxy accepts, using each
+session's last activity time so retention still measures from when the session
+actually stopped. That covers both its own leftovers and those of any other
+replica that shut down cleanly or stopped heartbeating; a replica that is up and
+heartbeating is never touched, so a live session can never be closed out from
+under it. See [`DBB_INSTANCE_ID`](/docs/configuration) for the registry and the
+grace period.
 
 Set the value to `0` (the default), or leave it unset, to keep history forever.
 An unparseable value also leaves retention off and logs a warning at startup,

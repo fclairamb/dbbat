@@ -53,20 +53,39 @@ If neither is set, DBBat generates a key on first start and writes it to `~/.dbb
 | `DBB_REDIRECTS` | Dev-only redirect rules (`/path:host:port[/target]`, comma-separated) | - |
 | `DBB_DEMO_TARGET_DB` | Demo-mode allowed target (`user:pass@host/dbname`) | `demo:demo@localhost/demo` |
 
-`DBB_INSTANCE_ID` is stamped on every connection dbbat records. At startup, and
-before any proxy accepts, dbbat marks the connections **its own instance id**
-left open as disconnected — a crash or a `SIGKILL` never runs the normal
-teardown, so those rows would otherwise stay "open" forever and never become
-eligible for retention. The count is logged at `info`; a large number means the
-previous run did not shut down cleanly.
+`DBB_INSTANCE_ID` is stamped on every connection dbbat records, and identifies
+the process in the `instances` registry. Each process registers itself at
+startup, refreshes its `last_seen_at` every **30 seconds**, and deletes its row
+on a clean shutdown.
 
-The scoping is deliberate and load-bearing when several replicas share one
+At startup, and before any proxy accepts, dbbat marks as disconnected every
+connection left open by a process that is no longer running — a crash or a
+`SIGKILL` never runs the normal teardown, so those rows would otherwise stay
+"open" forever and never become eligible for retention. Two kinds are closed:
+
+- **Its own**: connections stamped with this instance id. Logged at `info`; a
+  large number means the previous run did not shut down cleanly.
+- **Reclaimed**: connections owned by another instance that is provably gone —
+  it deleted its registry row on a clean shutdown, or has not heartbeated for
+  **15 minutes** (30 missed heartbeats). Logged separately, also at `info`: a
+  non-zero count means some process died without shutting down.
+
+Sessions are closed at their last activity time, so retention still measures
+from when the session actually stopped talking.
+
+Liveness, not identity, is what makes this safe when several replicas share one
 store: a starting replica must never close a *live* connection belonging to a
-different replica. The flip side is that connections owned by an instance id
-that never comes back are not reclaimed. Restarting on a stable identity — a
-single host, a StatefulSet, or an explicit `DBB_INSTANCE_ID` — reclaims its own
-orphans; a plain Kubernetes Deployment, which mints a new pod name on every
-restart, does not.
+different replica, because such a row immediately becomes eligible for the
+retention sweep. The grace period is deliberately generous — a running replica
+would have to fail every heartbeat for a quarter of an hour while still serving
+traffic before anything touched its sessions.
+
+A plain Kubernetes Deployment, which mints a new pod name on every restart, is
+therefore handled as well as a StatefulSet or an explicit `DBB_INSTANCE_ID`: the
+replacement pod does not recognise its predecessor's id, but it can see that the
+predecessor stopped heartbeating. Connections recorded before instance tracking
+existed carry an empty instance id; they have no owner and never will, so they
+are reclaimed the same way.
 
 ### Session Packet Dumps
 
