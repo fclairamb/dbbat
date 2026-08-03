@@ -4209,6 +4209,15 @@ components:
             the limit are still stored, so this is what distinguishes a
             prefix — or an empty capture — from a query that genuinely
             returned that many rows.
+        results_dropped:
+          type: boolean
+          description: >-
+            True when dbbat lost result rows it meant to keep: the batched row
+            writer's queue was full (storage fell behind the proxy) or a batch
+            insert failed. Deliberately distinct from `results_truncated` —
+            truncation is an expected, configured prefix, a drop is dbbat
+            failing to keep up — and the two are never conflated. Rows are
+            never held back from the client to keep the capture complete.
         approval_status:
           type: string
           nullable: true

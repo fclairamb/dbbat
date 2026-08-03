@@ -2346,6 +2346,8 @@ export interface components {
             error?: string | null;
             /** @description True when result capture stopped on a storage limit (`max_result_rows` / `max_result_bytes`). The rows captured before the limit are still stored, so this is what distinguishes a prefix — or an empty capture — from a query that genuinely returned that many rows. */
             results_truncated?: boolean;
+            /** @description True when dbbat lost result rows it meant to keep: the batched row writer's queue was full (storage fell behind the proxy) or a batch insert failed. Deliberately distinct from `results_truncated` — truncation is an expected, configured prefix, a drop is dbbat failing to keep up — and the two are never conflated. Rows are never held back from the client to keep the capture complete. */
+            results_dropped?: boolean;
             /**
              * @description Approval-hold state. Absent for the overwhelming majority of queries (no approval pattern matched). `pending` means the statement is parked mid-flight waiting for a human and has NOT run. `abandoned` means the client gave up (disconnect, cancel, grant expiry, shutdown) before anyone decided — nothing ran, and it is deliberately distinct from `denied`. There is no `timeout` value: a hold has no clock of its own.
              * @enum {string|null}
