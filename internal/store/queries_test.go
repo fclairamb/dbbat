@@ -106,7 +106,7 @@ func TestStoreQueryRows(t *testing.T) {
 			{RowNumber: 3, RowData: json.RawMessage(`{"id": 3, "name": "item3"}`), RowSizeBytes: 30},
 		}
 
-		err := store.StoreQueryRows(ctx, created.UID, rows)
+		err := store.StoreQueryRows(ctx, PendingRows(created.UID, rows))
 		if err != nil {
 			t.Fatalf("StoreQueryRows() error = %v", err)
 		}
@@ -133,7 +133,7 @@ func TestStoreQueryRows(t *testing.T) {
 			t.Fatalf("CreateQuery() error = %v", err)
 		}
 
-		err = store.StoreQueryRows(ctx, created2.UID, []QueryRow{})
+		err = store.StoreQueryRows(ctx, PendingRows(created2.UID, []QueryRow{}))
 		if err != nil {
 			t.Fatalf("StoreQueryRows() error = %v", err)
 		}
@@ -258,7 +258,7 @@ func TestGetQueryWithRows(t *testing.T) {
 		{RowNumber: 2, RowData: json.RawMessage(`{"id": 2, "value": "b"}`), RowSizeBytes: 25},
 		{RowNumber: 3, RowData: json.RawMessage(`{"id": 3, "value": "c"}`), RowSizeBytes: 25},
 	}
-	err = store.StoreQueryRows(ctx, created.UID, rows)
+	err = store.StoreQueryRows(ctx, PendingRows(created.UID, rows))
 	if err != nil {
 		t.Fatalf("StoreQueryRows() error = %v", err)
 	}
@@ -342,7 +342,7 @@ func TestGetQueryRows(t *testing.T) {
 			RowSizeBytes: 10,
 		}
 	}
-	err = store.StoreQueryRows(ctx, created.UID, rows)
+	err = store.StoreQueryRows(ctx, PendingRows(created.UID, rows))
 	if err != nil {
 		t.Fatalf("StoreQueryRows() error = %v", err)
 	}
@@ -531,7 +531,7 @@ func TestGetQueryRowsDataSizeLimit(t *testing.T) {
 			RowSizeBytes: int64(len(jsonData)),
 		}
 	}
-	err = store.StoreQueryRows(ctx, created.UID, rows)
+	err = store.StoreQueryRows(ctx, PendingRows(created.UID, rows))
 	if err != nil {
 		t.Fatalf("StoreQueryRows() error = %v", err)
 	}
@@ -575,7 +575,7 @@ func TestGetQueryRowsDataSizeLimit(t *testing.T) {
 			{RowNumber: 1, RowData: json.RawMessage(`{"data": "` + string(hugeData) + `"}`), RowSizeBytes: int64(len(hugeData))},
 			{RowNumber: 2, RowData: json.RawMessage(`{"id": 2}`), RowSizeBytes: 10},
 		}
-		err = store.StoreQueryRows(ctx, created2.UID, hugeRows)
+		err = store.StoreQueryRows(ctx, PendingRows(created2.UID, hugeRows))
 		if err != nil {
 			t.Fatalf("StoreQueryRows() error = %v", err)
 		}

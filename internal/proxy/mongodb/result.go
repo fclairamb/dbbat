@@ -281,7 +281,7 @@ func (s *Session) recordQuery(pq *pendingQuery, rows []store.QueryRow, rowsAffec
 			// An approval hold already inserted this row before the command
 			// ran; complete it in place.
 			if err := s.server.store.UpdateQueryCompletion(
-				s.ctx, queryUID, &durationMs, rowsAffected, queryError, pq.resultsTruncated,
+				s.ctx, queryUID, &durationMs, rowsAffected, queryError, pq.resultsTruncated, false,
 			); err != nil {
 				s.logger.ErrorContext(s.ctx, "complete held command failed", slog.Any("error", err))
 			}
@@ -299,7 +299,7 @@ func (s *Session) recordQuery(pq *pendingQuery, rows []store.QueryRow, rowsAffec
 		s.stream.Query(queryUID, record)
 
 		if len(rows) > 0 {
-			if err := s.server.store.StoreQueryRows(s.ctx, queryUID, rows); err != nil {
+			if err := s.server.store.StoreQueryRows(s.ctx, store.PendingRows(queryUID, rows)); err != nil {
 				s.logger.ErrorContext(s.ctx, "store query rows failed", slog.Any("error", err))
 			}
 		}

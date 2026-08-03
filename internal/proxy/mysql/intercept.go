@@ -248,7 +248,7 @@ func (h *handler) completeHeldQuery(queryUID uuid.UUID, cause error) {
 	errStr := cause.Error()
 
 	go func() {
-		if err := s.server.store.UpdateQueryCompletion(s.ctx, queryUID, nil, nil, &errStr, false); err != nil {
+		if err := s.server.store.UpdateQueryCompletion(s.ctx, queryUID, nil, nil, &errStr, false, false); err != nil {
 			s.logger.DebugContext(s.ctx, "failed to complete held query", slog.Any("error", err))
 		}
 	}()
@@ -329,7 +329,7 @@ func (h *handler) recordQueryWithUID(
 	go func() {
 		if queryUID != uuid.Nil {
 			if err := s.server.store.UpdateQueryCompletion(
-				s.ctx, queryUID, &durationMs, rowsAffected, queryError, resultsTruncated,
+				s.ctx, queryUID, &durationMs, rowsAffected, queryError, resultsTruncated, false,
 			); err != nil {
 				s.logger.ErrorContext(s.ctx, "complete held query failed", slog.Any("error", err))
 			}
@@ -347,7 +347,7 @@ func (h *handler) recordQueryWithUID(
 		s.stream.Query(queryUID, record)
 
 		if len(capturedRows) > 0 {
-			if err := s.server.store.StoreQueryRows(s.ctx, queryUID, capturedRows); err != nil {
+			if err := s.server.store.StoreQueryRows(s.ctx, store.PendingRows(queryUID, capturedRows)); err != nil {
 				s.logger.ErrorContext(s.ctx, "store query rows failed", slog.Any("error", err))
 			}
 		}

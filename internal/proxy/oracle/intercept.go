@@ -338,7 +338,7 @@ func (s *session) captureRow(columns []columnDef, values []interface{}) {
 		RowSizeBytes: rowSize,
 	}
 
-	if err := s.store.StoreQueryRows(s.ctx, pending.queryUID, []store.QueryRow{row}); err != nil {
+	if err := s.store.StoreQueryRows(s.ctx, store.PendingRows(pending.queryUID, []store.QueryRow{row})); err != nil {
 		s.logger.WarnContext(s.ctx, "failed to stream row", slog.Any("error", err))
 	}
 }
@@ -444,7 +444,7 @@ func (s *session) finalizeQuery(
 	resultsTruncated bool,
 	bytesTransferred int64,
 ) {
-	if err := s.store.UpdateQueryCompletion(s.ctx, queryUID, duration, rowsAffected, queryError, resultsTruncated); err != nil {
+	if err := s.store.UpdateQueryCompletion(s.ctx, queryUID, duration, rowsAffected, queryError, resultsTruncated, false); err != nil {
 		s.logger.ErrorContext(s.ctx, "failed to finalize query", slog.Any("error", err))
 	}
 

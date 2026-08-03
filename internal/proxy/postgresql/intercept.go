@@ -397,7 +397,7 @@ func (s *Session) persistQueryAsync(query *store.Query, capturedRows []store.Que
 			// pending before the statement ran, so complete it in place
 			// rather than inserting a duplicate.
 			if err := s.store.UpdateQueryCompletion(
-				s.ctx, queryUID, query.DurationMs, query.RowsAffected, query.Error, query.ResultsTruncated,
+				s.ctx, queryUID, query.DurationMs, query.RowsAffected, query.Error, query.ResultsTruncated, false,
 			); err != nil {
 				s.logger.ErrorContext(s.ctx, "failed to complete held query", slog.Any("error", err))
 			}
@@ -423,7 +423,7 @@ func (s *Session) persistQueryAsync(query *store.Query, capturedRows []store.Que
 				capturedRows[i].RowNumber = i + 1
 			}
 
-			if err := s.store.StoreQueryRows(s.ctx, queryUID, capturedRows); err != nil {
+			if err := s.store.StoreQueryRows(s.ctx, store.PendingRows(queryUID, capturedRows)); err != nil {
 				s.logger.ErrorContext(s.ctx, "failed to store query rows", slog.Any("error", err))
 			}
 		}

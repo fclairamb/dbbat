@@ -49,6 +49,9 @@ func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 		// Set by protocols that insert the row after the result set has been
 		// read, so they already know capture hit a limit.
 		ResultsTruncated: query.ResultsTruncated,
+		// Same for a capture that lost rows because the batched row writer
+		// fell behind — known only once the rows have been handed over.
+		ResultsDropped: query.ResultsDropped,
 		// Carried through so a caller that already knows the approval outcome
 		// (an approved hold logged by a protocol that inserts on completion)
 		// doesn't lose it.
@@ -73,18 +76,26 @@ func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 	return result, nil
 }
 
-// StoreQueryRows stores result rows for a query
-func (s *Store) StoreQueryRows(ctx context.Context, queryUID uuid.UUID, rows []QueryRow) error {
+// StoreQueryRows stores captured result rows in a single bulk INSERT.
+//
+// Each row carries its own QueryID rather than the whole slice sharing one, so
+// a batch may span several queries — and therefore several concurrent
+// sessions. That is what lets a single process-wide writer amortise the
+// round-trip across a busy proxy instead of issuing one INSERT per query.
+//
+// Every referenced query must already exist: query_rows.query_id is a foreign
+// key, so the caller is responsible for creating the parent row first.
+func (s *Store) StoreQueryRows(ctx context.Context, rows []PendingQueryRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
 
-	// Convert QueryRow to QueryRowModel for bun model
+	// Convert to QueryRowModel for bun model
 	resultRows := make([]QueryRowModel, len(rows))
 	for i, row := range rows {
 		resultRows[i] = QueryRowModel{
 			UID:          newUIDv7(), // Generate UUIDv7 for each row
-			QueryID:      queryUID,
+			QueryID:      row.QueryID,
 			RowNumber:    row.RowNumber,
 			RowData:      row.RowData,
 			RowSizeBytes: row.RowSizeBytes,
@@ -103,9 +114,10 @@ func (s *Store) StoreQueryRows(ctx context.Context, queryUID uuid.UUID, rows []Q
 
 // UpdateQueryCompletion updates a query with duration, rows affected, and error.
 //
-// resultsTruncated is written unconditionally (unlike the pointer arguments,
-// which are only written when set): protocols that persist the row before the
-// result set is read only learn about a capture limit here.
+// resultsTruncated and resultsDropped are written unconditionally (unlike the
+// pointer arguments, which are only written when set): protocols that persist
+// the row before the result set is read only learn about a capture limit — or
+// about rows the writer had to drop — here.
 func (s *Store) UpdateQueryCompletion(
 	ctx context.Context,
 	uid uuid.UUID,
@@ -113,11 +125,13 @@ func (s *Store) UpdateQueryCompletion(
 	rowsAffected *int64,
 	queryError *string,
 	resultsTruncated bool,
+	resultsDropped bool,
 ) error {
 	q := s.db.NewUpdate().
 		Model((*Query)(nil)).
 		Where("uid = ?", uid).
-		Set("results_truncated = ?", resultsTruncated)
+		Set("results_truncated = ?", resultsTruncated).
+		Set("results_dropped = ?", resultsDropped)
 
 	if durationMs != nil {
 		q = q.Set("duration_ms = ?", *durationMs)
@@ -142,7 +156,7 @@ func (s *Store) ListQueries(ctx context.Context, filter QueryFilter) ([]Query, e
 	q := s.db.NewSelect().
 		Model(&queries).
 		ColumnExpr("q.uid, q.connection_id, q.sql_text, q.parameters, q.executed_at, q.duration_ms, q.rows_affected, q.error, " +
-			"q.results_truncated, " +
+			"q.results_truncated, q.results_dropped, " +
 			"q.approval_status, q.approval_pattern, q.resolved_by, q.resolved_at, q.resolution_reason, c.user_id, c.database_id").
 		Join("JOIN connections c ON q.connection_id = c.uid")
 

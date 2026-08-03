@@ -359,6 +359,13 @@ type Query struct {
 	// row set apart from a query that genuinely returned that much.
 	ResultsTruncated bool `bun:"results_truncated,notnull,default:false" json:"results_truncated"`
 
+	// ResultsDropped is true when dbbat lost rows it meant to keep: the
+	// batched row writer's queue was full (the store fell behind the proxy) or
+	// a batch insert failed. It is deliberately distinct from
+	// ResultsTruncated — truncation is an expected, configured prefix, a drop
+	// is dbbat failing to keep up — and the two are never conflated.
+	ResultsDropped bool `bun:"results_dropped,notnull,default:false" json:"results_dropped"`
+
 	// Approval hold fields. ApprovalStatus is nil for the overwhelming
 	// majority of queries (no pattern matched); when set it is one of
 	// ApprovalPending / ApprovalApproved / ApprovalDenied / ApprovalAbandoned.
@@ -391,6 +398,38 @@ type QueryRow struct {
 	RowNumber    int             `json:"row_number"`
 	RowData      json.RawMessage `json:"row_data"`
 	RowSizeBytes int64           `json:"row_size_bytes"`
+}
+
+// PendingQueryRow is a captured row on its way to storage. Unlike QueryRow it
+// carries its own parent query id, so a single INSERT can cover rows belonging
+// to different queries — which is what lets one process-wide writer batch
+// across concurrent sessions instead of one batch per query.
+type PendingQueryRow struct {
+	QueryID      uuid.UUID
+	RowNumber    int
+	RowData      json.RawMessage
+	RowSizeBytes int64
+}
+
+// PendingRows stamps a slice of captured rows with the query they belong to.
+// Convenience for the callers that build a whole result set at once (MySQL,
+// MongoDB, PostgreSQL COPY) before handing it to the row writer.
+func PendingRows(queryUID uuid.UUID, rows []QueryRow) []PendingQueryRow {
+	if len(rows) == 0 {
+		return nil
+	}
+
+	pending := make([]PendingQueryRow, len(rows))
+	for i, row := range rows {
+		pending[i] = PendingQueryRow{
+			QueryID:      queryUID,
+			RowNumber:    row.RowNumber,
+			RowData:      row.RowData,
+			RowSizeBytes: row.RowSizeBytes,
+		}
+	}
+
+	return pending
 }
 
 // QueryWithRows combines a query with its result rows
