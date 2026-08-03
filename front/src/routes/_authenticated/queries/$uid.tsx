@@ -225,9 +225,19 @@ function QueryDetailPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>
-            Result Rows
-            {totalRows > 0 && ` (${totalRows})`}
+          <CardTitle className="flex items-center gap-2">
+            <span>
+              Result Rows
+              {totalRows > 0 && ` (${totalRows})`}
+            </span>
+            {query.results_truncated && (
+              <Badge
+                variant="outline"
+                title="Result capture stopped at the configured storage limit. The rows below are the beginning of the result set, not all of it."
+              >
+                Truncated
+              </Badge>
+            )}
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -323,7 +333,9 @@ function QueryDetailPage() {
             </div>
           ) : (
             <div className="text-center text-muted-foreground py-4">
-              No result rows
+              {query.results_truncated
+                ? "No result rows were stored — capture hit the storage limit."
+                : "No result rows"}
             </div>
           )}
         </CardContent>

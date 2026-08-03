@@ -964,6 +964,65 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/connections/{uid}/dump": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Connection UID */
+                uid: components["parameters"]["ConnectionUID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Download the session capture
+         * @description Downloads the raw packet capture recorded for a connection.
+         *
+         *     The body is a standard **pcapng** file (media type
+         *     `application/x-pcapng`, extension `.pcapng`) — not a bespoke dbbat
+         *     format. Anything that reads pcapng reads it: `tcpdump`, Wireshark,
+         *     `tshark`, `capinfos`, `editcap`, scapy, `gopacket`. Wireshark applies
+         *     its native PostgreSQL, Oracle TNS, MySQL and MongoDB dissectors to the
+         *     payloads. The same file structure is produced for every protocol; see
+         *     `docs/dump-format.md` in the dbbat repository for the full reference
+         *     (packet framing, the session metadata block, and the
+         *     `dbbat dump anonymise` command).
+         *
+         *     Captures are only written when the server is started with a dump
+         *     directory configured (`DBB_DUMP_DIR`), are capped per session
+         *     (`DBB_DUMP_MAX_SIZE`) and are reaped once older than
+         *     `DBB_DUMP_RETENTION` (24h by default). `404 Not Found` is therefore
+         *     returned in two distinct cases: dumps are disabled server-wide
+         *     (`dumps are not enabled`), or no capture exists — or no longer
+         *     exists — for this connection (`no dump available for this
+         *     connection`).
+         *
+         *     Requires admin or viewer role.
+         */
+        get: operations["getConnectionDump"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete the session capture
+         * @description Deletes the pcapng capture recorded for a connection.
+         *
+         *     Only the capture file is removed — the connection record and its
+         *     logged queries are left untouched. The deletion is immediate and
+         *     cannot be undone. Captures are also removed automatically once they
+         *     are older than `DBB_DUMP_RETENTION`.
+         *
+         *     As with the download, `404 Not Found` covers both dumps being
+         *     disabled server-wide and no capture being available for this
+         *     connection.
+         *
+         *     Requires admin role.
+         */
+        delete: operations["deleteConnectionDump"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/stream": {
         parameters: {
             query?: never;
@@ -2285,6 +2344,8 @@ export interface components {
             rows_affected?: number | null;
             /** @description Error message if query failed */
             error?: string | null;
+            /** @description True when result capture stopped on a storage limit (`max_result_rows` / `max_result_bytes`). The rows captured before the limit are still stored, so this is what distinguishes a prefix — or an empty capture — from a query that genuinely returned that many rows. */
+            results_truncated?: boolean;
             /**
              * @description Approval-hold state. Absent for the overwhelming majority of queries (no approval pattern matched). `pending` means the statement is parked mid-flight waiting for a human and has NOT run. `abandoned` means the client gave up (disconnect, cancel, grant expiry, shutdown) before anyone decided — nothing ran, and it is deliberately distinct from `denied`. There is no `timeout` value: a hold has no clock of its own.
              * @enum {string|null}
@@ -4356,6 +4417,68 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            404: components["responses"]["NotFound"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getConnectionDump: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Connection UID */
+                uid: components["parameters"]["ConnectionUID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The pcapng session capture */
+            200: {
+                headers: {
+                    /**
+                     * @description Always `attachment; filename="<uid>.pcapng"`, where `<uid>` is
+                     *     the connection UID from the path.
+                     * @example attachment; filename="7a1f1c9e-8f3a-4d2b-9f21-0c5e6b3d4a77.pcapng"
+                     */
+                    "Content-Disposition"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-pcapng": string;
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    deleteConnectionDump: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Connection UID */
+                uid: components["parameters"]["ConnectionUID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Capture deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
