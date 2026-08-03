@@ -34,6 +34,8 @@ func TestQueryStorageRetentionEnvVar(t *testing.T) {
 }
 
 func TestQueryStorageRetentionDuration(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name  string
 		value string
@@ -49,8 +51,21 @@ func TestQueryStorageRetentionDuration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			cfg := QueryStorageConfig{Retention: tt.value}
 			assert.Equal(t, tt.want, cfg.RetentionDuration())
 		})
 	}
+}
+
+func TestQueryStorageRetentionMisconfigured(t *testing.T) {
+	t.Parallel()
+
+	assert.False(t, QueryStorageConfig{Retention: ""}.RetentionMisconfigured())
+	assert.False(t, QueryStorageConfig{Retention: "0"}.RetentionMisconfigured())
+	assert.False(t, QueryStorageConfig{Retention: "720h"}.RetentionMisconfigured())
+	assert.True(t, QueryStorageConfig{Retention: "30d"}.RetentionMisconfigured(),
+		"Go durations have no day unit; the operator meant to enable retention")
+	assert.True(t, QueryStorageConfig{Retention: "-1h"}.RetentionMisconfigured())
 }

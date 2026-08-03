@@ -345,9 +345,12 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	// Start MongoDB proxy server (if configured)
 	mongoServer := startMongoProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, logger)
 
+	// One retention sweep for the whole process (nil when disabled, the default).
+	sweeper := startQueryRetentionSweep(ctx, cfg, dataStore, logger)
+
 	// Draining releases parked queries first, then stops the servers.
 	servers := collectServers(approvalDrain{approvals, logger}, apiServer, proxyServer,
-		oracleServer, mysqlServer, mongoServer)
+		oracleServer, mysqlServer, mongoServer, sweeper)
 
 	return awaitShutdown(ctx, logger, servers...)
 }
@@ -1031,6 +1034,7 @@ func collectServers(
 	oracleServer *oracle.Server,
 	mysqlServer *mysql.Server,
 	mongoServer *mongodb.Server,
+	sweeper *queryRetentionSweeper,
 ) []shutdownable {
 	servers := []shutdownable{drain, apiServer, pgServer}
 
@@ -1044,6 +1048,10 @@ func collectServers(
 
 	if mongoServer != nil {
 		servers = append(servers, mongoServer)
+	}
+
+	if sweeper != nil {
+		servers = append(servers, sweeper)
 	}
 
 	return servers

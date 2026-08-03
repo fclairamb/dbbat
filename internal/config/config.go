@@ -67,9 +67,10 @@ const DefaultQueryStorageRetention = "0"
 // RetentionDuration parses Retention into a duration. A zero or negative
 // result means "disabled — keep forever", and no sweep is scheduled.
 //
-// A malformed value also disables the sweep (with a warning) rather than
-// falling back to some built-in period: this sweep permanently deletes audit
-// data, so a typo must never be interpreted as "delete more".
+// A malformed value also disables the sweep rather than falling back to some
+// built-in period: this sweep permanently deletes audit data, so a typo must
+// never be interpreted as "delete more". The caller warns about it (see
+// RetentionMisconfigured).
 func (c QueryStorageConfig) RetentionDuration() time.Duration {
 	if c.Retention == "" {
 		return 0
@@ -77,10 +78,6 @@ func (c QueryStorageConfig) RetentionDuration() time.Duration {
 
 	d, err := time.ParseDuration(c.Retention)
 	if err != nil {
-		slog.WarnContext(context.Background(), "invalid query storage retention, keeping query history forever",
-			slog.String("retention", c.Retention),
-			slog.Any("error", err))
-
 		return 0
 	}
 
@@ -89,6 +86,13 @@ func (c QueryStorageConfig) RetentionDuration() time.Duration {
 	}
 
 	return d
+}
+
+// RetentionMisconfigured reports that Retention was set to something that is
+// neither empty nor a usable positive duration — i.e. retention silently ends up
+// disabled and the operator probably did not mean that.
+func (c QueryStorageConfig) RetentionMisconfigured() bool {
+	return c.Retention != "" && c.Retention != "0" && c.RetentionDuration() <= 0
 }
 
 // RateLimitConfig holds configuration for API rate limiting.
