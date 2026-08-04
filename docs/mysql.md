@@ -62,18 +62,21 @@ If both cert/key paths are empty (and TLS isn't disabled), the proxy auto-genera
 
 For production, supply a real certificate via the env vars. For development, the auto-generated cert is fine — clients will need `--ssl-mode=DISABLED` or the equivalent skip-verify option (or trust the cert).
 
-Upstream connections **may** use TLS independently — the `servers.ssl_mode` column controls upstream encryption, honored regardless of the client-side TLS state. `applyUpstreamOptions` (`internal/proxy/mysql/upstream.go`) maps the value onto the go-mysql client:
+Upstream connections **may** use TLS independently — the `servers.ssl_mode` column controls upstream encryption, honored regardless of the client-side TLS state. The policy lives in `upstream.PlanFor` (`internal/proxy/upstream/ssl.go`) and is executed by `upstream.ConnectMySQL` — the same connector the connectivity check runs, so a green check exercises the proxy's exact login:
 
 | `ssl_mode` | Upstream behaviour |
 |-----------|--------------------|
-| `require` | TLS, **certificate not verified** (`UseSSL(true)`); fails if the upstream doesn't offer TLS |
+| `disable` | plaintext, never offers TLS |
+| `allow` | plaintext first; retried with TLS only if the server refuses insecure transport |
+| `prefer`, empty | TLS first; redials plaintext only if the server does not support TLS |
+| `require` | TLS, **certificate not verified**; fails if the upstream doesn't offer TLS |
 | `verify-ca`, `verify-full` | TLS with hostname + chain verification (`ServerName` = the server row's `host`, system root pool, TLS 1.2 floor); fails if the upstream doesn't offer TLS |
-| `disable`, `prefer`, `allow`, empty | plaintext |
 
-Two MySQL-specific notes versus the PG proxy:
+Three MySQL-specific notes versus the PG proxy:
 
-- **`prefer`/`allow` do not attempt opportunistic TLS.** The client doesn't negotiate a TLS upgrade for these values, so they stay plaintext — use `require` or better when the upstream link matters.
+- **Opportunistic TLS costs a redial.** go-mysql decides whether to encrypt from the handshake's `CLIENT_SSL` capability, and its option callback runs before that handshake is read, so `prefer` cannot be expressed as a single attempt. Only a *transport* failure may change the encryption of the retry — an authentication failure ends the chain, exactly as libpq's does.
 - **`verify-ca` is treated as `verify-full`.** Both verify the hostname (Go's stdlib doesn't cleanly express CA-only verification), and there is no per-server CA bundle yet.
+- **What actually happened is recorded.** Because `prefer` is a preference rather than a guarantee, each session stores the outcome in `connections.upstream_tls`; the row's `ssl_mode` alone cannot tell you whether a given session was encrypted.
 
 ## Connection Flow
 

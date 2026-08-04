@@ -72,7 +72,9 @@ dbbat/
 │   ├── api/                 # REST API handlers and middleware
 │   │   └── openapi.yml      # OpenAPI 3.0 specification
 │   ├── proxy/
-│   │   ├── shared/          # Auth, query interception shared across protocols
+│   │   ├── shared/          # Auth, query interception, upstream transport (dial + SSH bastion)
+│   │   ├── upstream/        # One upstream-connect path per protocol, shared by the proxies and the connectivity check (ssl_mode policy lives here)
+│   │   ├── conncheck/       # Connectivity check: runs the connectors above, classifies the failure
 │   │   ├── postgresql/      # PostgreSQL wire protocol proxy
 │   │   ├── oracle/          # Oracle TNS/TTC proxy (see docs/oracle.md)
 │   │   ├── mysql/           # MySQL/MariaDB proxy (see docs/mysql.md)
