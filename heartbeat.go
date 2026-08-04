@@ -30,6 +30,12 @@ type instanceHeartbeat struct {
 	logger   *slog.Logger
 	stop     chan struct{}
 	stopOnce sync.Once
+
+	// sharedIDCandidates maps the run id of every other registry row that
+	// carried our instance id and looked alive when we started, to the
+	// last_seen_at we saw then. Nil once the question is settled. See
+	// checkSharedInstanceID.
+	sharedIDCandidates map[string]time.Time
 }
 
 // startInstanceHeartbeat registers this process and starts refreshing its row.
@@ -51,23 +57,128 @@ func startInstanceHeartbeat(ctx context.Context, dataStore *store.Store, logger 
 	if err := dataStore.RegisterInstance(ctx); err != nil {
 		logger.ErrorContext(ctx, "failed to register this instance",
 			slog.Any("error", err),
-			slog.String("instance_id", dataStore.InstanceID()))
+			slog.String("instance_id", dataStore.InstanceID()),
+			slog.String("run_id", dataStore.RunID()))
 	}
 
 	beat := &instanceHeartbeat{
-		store:  dataStore,
-		logger: logger,
-		stop:   make(chan struct{}),
+		store:              dataStore,
+		logger:             logger,
+		stop:               make(chan struct{}),
+		sharedIDCandidates: sharedInstanceIDCandidates(ctx, dataStore, logger),
 	}
 
 	go beat.run(ctx)
 
 	logger.InfoContext(ctx, "Instance registered",
 		slog.String("instance_id", dataStore.InstanceID()),
+		slog.String("run_id", dataStore.RunID()),
 		slog.Duration("heartbeat_interval", store.InstanceHeartbeatInterval),
 		slog.Duration("stale_after", store.InstanceStaleAfter))
 
 	return beat
+}
+
+// sharedInstanceIDCandidates samples the runs that are registered under our
+// instance id, are not us, and still look alive.
+//
+// It is only a suspicion, which is why nothing is logged here: at startup a
+// fresh row carrying our id and someone else's run id is either a replica that
+// shares our DBB_INSTANCE_ID or our own predecessor, which crashed moments ago
+// and left a row that will keep its last heartbeat until it goes stale. Warning
+// straight away would cry wolf on every crash-restart of a stable instance id.
+// checkSharedInstanceID tells the two apart later.
+//
+// Call it after RegisterInstance, so our own row is already excluded. A failed
+// lookup yields no candidates: this is an advisory, and nothing downstream
+// depends on it.
+func sharedInstanceIDCandidates(ctx context.Context, dataStore *store.Store, logger *slog.Logger) map[string]time.Time {
+	peers, err := dataStore.LiveRunsSharingInstanceID(ctx)
+	if err != nil {
+		logger.WarnContext(ctx, "failed to check whether this instance id is shared",
+			slog.Any("error", err))
+
+		return nil
+	}
+
+	if len(peers) == 0 {
+		return nil
+	}
+
+	candidates := make(map[string]time.Time, len(peers))
+	for _, peer := range peers {
+		candidates[peer.RunID] = peer.LastSeenAt
+	}
+
+	return candidates
+}
+
+// checkSharedInstanceID settles the suspicion raised at startup: is another
+// process really running under our instance id?
+//
+// A live peer's last_seen_at moves; a dead run's row keeps the timestamp it
+// died with until it goes stale. So a candidate whose heartbeat has advanced
+// since we started is a live peer, and one whose heartbeat has not is our own
+// crashed predecessor — the reason this is not simply logged at registration.
+//
+// Sharing an id is no longer dangerous: both halves of the reconcile key on the
+// run id, so neither process can close the other's sessions. It is still worth
+// saying once. The operator almost certainly meant the ids to be unique — the
+// silent path here is config.FallbackInstanceID, which every replica that
+// cannot read its hostname lands on — and a shared id makes the reconcile's
+// "left open by a previous run" count read as this process's when it belongs to
+// the whole id, and collapses several replicas into one identity wherever that
+// id is shown.
+//
+// Runs once: after it warns, or after every candidate has gone, the map is
+// dropped and this becomes a no-op for the life of the process.
+func (h *instanceHeartbeat) checkSharedInstanceID(ctx context.Context) {
+	if len(h.sharedIDCandidates) == 0 {
+		return
+	}
+
+	peers, err := h.store.LiveRunsSharingInstanceID(ctx)
+	if err != nil {
+		// Keep the candidates: the next tick tries again.
+		h.logger.WarnContext(ctx, "failed to check whether this instance id is shared",
+			slog.Any("error", err))
+
+		return
+	}
+
+	var confirmed []string
+
+	// Candidates that are still around but have not moved stay under
+	// observation; those that vanished (pruned, or deregistered) are dropped.
+	remaining := make(map[string]time.Time, len(h.sharedIDCandidates))
+
+	for _, peer := range peers {
+		seenAtStartup, isCandidate := h.sharedIDCandidates[peer.RunID]
+		switch {
+		case !isCandidate:
+			// Registered after us. That process runs this same check against
+			// our row, so leaving it out here does not lose the warning.
+		case peer.LastSeenAt.After(seenAtStartup):
+			confirmed = append(confirmed, peer.RunID)
+		default:
+			remaining[peer.RunID] = seenAtStartup
+		}
+	}
+
+	if len(confirmed) == 0 {
+		h.sharedIDCandidates = remaining
+
+		return
+	}
+
+	h.sharedIDCandidates = nil
+
+	h.logger.WarnContext(ctx, "Another live process is running under this instance id",
+		slog.String("instance_id", h.store.InstanceID()),
+		slog.String("run_id", h.store.RunID()),
+		slog.Any("other_run_ids", confirmed),
+		slog.String("hint", "DBB_INSTANCE_ID must be unique per running process; "+
+			"the default (the hostname) already is"))
 }
 
 func (h *instanceHeartbeat) run(ctx context.Context) {
@@ -84,6 +195,7 @@ func (h *instanceHeartbeat) run(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			h.beat(ctx)
+			h.checkSharedInstanceID(ctx)
 		case <-reclaim.C:
 			h.reclaim(ctx)
 			reclaim.Reset(nextReclaimDelay())
@@ -123,9 +235,11 @@ func nextReclaimDelay() time.Duration {
 // would then stay open until some process happens to restart, possibly days
 // later.
 //
-// Only the liveness-checked half runs here. The own-instance half of the
-// reconcile would close this run's own live sessions, which is why it is
-// startup-only — see store.CloseOrphanedConnections.
+// Only the reclaim half runs here, and it is enough: it excludes this run, not
+// this instance id, so a previous run of our own id is reclaimed on this pass
+// like anyone else's once its registry row goes stale. The own half stays at
+// startup because that is the only moment its count means "the run I replaced"
+// — see store.CloseOrphanedConnections.
 //
 // A failure is logged at warn, not error: the next tick tries again, and
 // nothing about serving traffic depends on it.

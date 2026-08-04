@@ -399,11 +399,14 @@ func reconcileOrphanedConnections(ctx context.Context, dataStore *store.Store, l
 	}
 
 	if closed.Own > 0 {
-		// Worth info level: a large count means the previous run did not shut
-		// down cleanly.
+		// Worth info level: a large count means a previous run did not shut
+		// down cleanly. Zero does not mean the opposite — a run that crashed
+		// moments ago still looks alive in the registry, and its rows are
+		// picked up by a later reclaim rather than here.
 		logger.InfoContext(ctx, "Closed connections left open by a previous run",
 			slog.Int64("connections", closed.Own),
-			slog.String("instance_id", dataStore.InstanceID()))
+			slog.String("instance_id", dataStore.InstanceID()),
+			slog.String("run_id", dataStore.RunID()))
 	}
 
 	logReclaimedConnections(ctx, logger, closed.Reclaimed)
