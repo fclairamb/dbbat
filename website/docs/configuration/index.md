@@ -73,6 +73,15 @@ connection left open by a process that is no longer running — a crash or a
 Sessions are closed at their last activity time, so retention still measures
 from when the session actually stopped talking.
 
+The **reclaim** half does not only run at startup: every running process
+re-runs it roughly every **7.5 minutes** (half the grace period, jittered so
+replicas do not all sweep at once). Without that, the commonest crash would go
+unnoticed for as long as the deployment stayed up — a `SIGKILL`ed pod leaves a
+registry row seconds old, so its replacement sees a live-looking predecessor and
+reclaims nothing, and 15 minutes later, when the row finally goes stale, there
+is no restart left to look. The own half stays at startup by design: once a
+process is serving, its own open connections are its live sessions.
+
 Liveness, not identity, is what makes this safe when several replicas share one
 store: a starting replica must never close a *live* connection belonging to a
 different replica, because such a row immediately becomes eligible for the

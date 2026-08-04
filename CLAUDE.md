@@ -151,7 +151,7 @@ This applies even when the current task is otherwise complete — capture the fo
 | `DBB_KEYFILE` | Path to file containing encryption key | No |
 | `DBB_RUN_MODE` | Run mode: empty, `test`, or `demo` | No |
 | `DBB_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` (default: `info`) | No |
-| `DBB_INSTANCE_ID` | Identifies this process among replicas sharing the store (default: hostname). Registered in the `instances` table with a 30s heartbeat; the startup reconcile closes crash-orphaned connections owned by this id, plus those of any instance that deregistered or went 15min without a heartbeat. | No |
+| `DBB_INSTANCE_ID` | Identifies this process among replicas sharing the store (default: hostname). Registered in the `instances` table with a 30s heartbeat; the startup reconcile closes crash-orphaned connections owned by this id, plus those of any instance that deregistered or went 15min without a heartbeat. The second half also re-runs every ~7.5min while the process lives, so a crashed peer is reclaimed without waiting for an unrelated restart. | No |
 | `DBB_DUMP_DIR` | Directory for session dump files (empty = disabled) | No |
 | `DBB_DUMP_MAX_SIZE` | Max dump file size per session in bytes (default: 10MB) | No |
 | `DBB_DUMP_RETENTION` | Auto-delete dumps older than this (default: `24h`) | No |
