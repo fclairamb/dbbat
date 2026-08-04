@@ -46,6 +46,10 @@ func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 		DurationMs:   query.DurationMs,
 		RowsAffected: query.RowsAffected,
 		Error:        query.Error,
+		// COPY metadata, set by the protocols that recognise a bulk transfer
+		// (PostgreSQL today). Nil for every other statement.
+		CopyFormat:    query.CopyFormat,
+		CopyDirection: query.CopyDirection,
 		// Set by protocols that insert the row after the result set has been
 		// read, so they already know capture hit a limit.
 		ResultsTruncated: query.ResultsTruncated,
@@ -156,7 +160,7 @@ func (s *Store) ListQueries(ctx context.Context, filter QueryFilter) ([]Query, e
 	q := s.db.NewSelect().
 		Model(&queries).
 		ColumnExpr("q.uid, q.connection_id, q.sql_text, q.parameters, q.executed_at, q.duration_ms, q.rows_affected, q.error, " +
-			"q.results_truncated, q.results_dropped, " +
+			"q.results_truncated, q.results_dropped, q.copy_format, q.copy_direction, " +
 			"q.approval_status, q.approval_pattern, q.resolved_by, q.resolved_at, q.resolution_reason, c.user_id, c.database_id").
 		Join("JOIN connections c ON q.connection_id = c.uid")
 
