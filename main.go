@@ -383,6 +383,11 @@ func registerAndReconcile(ctx context.Context, dataStore *store.Store, logger *s
 // own count is zero: connections reclaimed from another instance mean a process
 // died without shutting down, which is worth noticing on its own.
 //
+// This is the startup pass only. The reclaim half also runs periodically on the
+// heartbeat loop (instanceHeartbeat.reclaim), because an instance that dies
+// while this deployment stays up would otherwise not be noticed by anyone: its
+// registry row is fresh when its replacement starts, and stale only long after.
+//
 // A failure here is logged, not fatal: stale bookkeeping must not stop the
 // proxy from serving traffic.
 func reconcileOrphanedConnections(ctx context.Context, dataStore *store.Store, logger *slog.Logger) {
@@ -401,16 +406,40 @@ func reconcileOrphanedConnections(ctx context.Context, dataStore *store.Store, l
 			slog.String("instance_id", dataStore.InstanceID()))
 	}
 
-	if closed.Reclaimed > 0 {
-		logger.InfoContext(ctx, "Reclaimed connections left open by instances that are gone",
-			slog.Int64("connections", closed.Reclaimed),
-			slog.Duration("stale_after", store.InstanceStaleAfter))
-	}
+	logReclaimedConnections(ctx, logger, closed.Reclaimed)
 
 	// Housekeeping, after the reclaim so it still saw the rows it judged.
-	if pruned, err := dataStore.PruneStaleInstances(ctx); err != nil {
+	pruneStaleInstances(ctx, dataStore, logger)
+}
+
+// logReclaimedConnections reports connections closed on behalf of an instance
+// that is provably gone. Shared by the startup reconcile and the periodic
+// reclaim on the heartbeat loop so both read identically in the logs: whenever
+// it happens, a non-zero count means a process died without shutting down.
+func logReclaimedConnections(ctx context.Context, logger *slog.Logger, reclaimed int64) {
+	if reclaimed <= 0 {
+		return
+	}
+
+	logger.InfoContext(ctx, "Reclaimed connections left open by instances that are gone",
+		slog.Int64("connections", reclaimed),
+		slog.Duration("stale_after", store.InstanceStaleAfter))
+}
+
+// pruneStaleInstances drops registry rows whose owner is past the grace period.
+// Pure housekeeping — a stale row and a missing row mean the same thing to the
+// reclaim — so a failure is a warning and the count is only worth debug level.
+// Always call it after a reclaim, never before, so the reclaim still sees the
+// rows it is judging.
+func pruneStaleInstances(ctx context.Context, dataStore *store.Store, logger *slog.Logger) {
+	pruned, err := dataStore.PruneStaleInstances(ctx)
+	if err != nil {
 		logger.WarnContext(ctx, "failed to prune stale instances", slog.Any("error", err))
-	} else if pruned > 0 {
+
+		return
+	}
+
+	if pruned > 0 {
 		logger.DebugContext(ctx, "Pruned stale instance registrations", slog.Int64("instances", pruned))
 	}
 }
