@@ -123,6 +123,25 @@ recorded before run tracking carry no run id: they are judged by their instance
 id alone, which is the rule the build that wrote them was playing by, so a
 replica that is still serving them through an upgrade keeps them.
 
+:::caution Upgrading from v0.20.x
+v0.20.x is the only released build that predates run tracking: its heartbeat
+upserts the registry row with `ON CONFLICT (instance_id)`. Once a later build's
+migration changes the registry's primary key to `(instance_id, run_id)`, that
+conflict target no longer exists, so a v0.20.x replica's heartbeats start
+failing and its row stops moving. After the 15-minute grace period above, a
+new-build replica treats it as dead and reclaims the connections it is still
+serving — and a reclaimed connection immediately becomes eligible for deletion
+by the retention sweep, even while the v0.20.x replica is still writing queries
+against it.
+
+This only bites a multi-replica deployment (`replicaCount > 1`) where a
+v0.20.x replica keeps serving for more than 15 minutes after the migration
+runs — a single-replica deployment is never affected. **Complete the upgrade
+from v0.20.x within 15 minutes, and do not roll back to v0.20.x once you have
+migrated.** Nothing is broken by running the migration itself; this is a
+rollout-window caveat, not a live bug.
+:::
+
 ### Session Packet Dumps
 
 | Variable | Description | Default |
