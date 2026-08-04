@@ -45,12 +45,25 @@ type OracleConfig struct {
 // protocol. The connector lives here anyway so the ssl_mode policy and the
 // transport injection are the shared ones, and so there is a single place to
 // look for "how does dbbat log in to an Oracle server".
+//
+// Encryption is where that divergence bites, so state it plainly: the Oracle
+// proxy has no upstream TLS at all — an Oracle session's upstream leg is
+// plaintext whatever the row's ssl_mode says, which is why its connection rows
+// hardcode upstream_tls=false. This function, which only the connectivity check
+// runs, does encrypt under require/verify-*. A green check on an Oracle row at
+// ssl_mode=require therefore proves more than a real session will do. See the
+// package doc.
 func ConnectOracle(ctx context.Context, dial DialFunc, cfg OracleConfig) (driver.Conn, error) {
 	opts := map[string]string{"PROGRAM": cfg.ProgramName}
 
 	// Deliberately no TIMEOUT/READ TIMEOUT option: it makes go-ora arm real
 	// socket deadlines, which an SSH-tunneled conn cannot honor. Callers bound
 	// the attempt by closing the transport instead.
+	//
+	// Only RequiresTLS is consulted: go-ora's SSL option is a yes/no on the DSN
+	// with no fallback, so the opportunistic modes stay plaintext rather than
+	// silently becoming mandatory-TLS. Oracle does not honor the plan's attempt
+	// order — see the Plan doc.
 	plan := PlanFor(cfg.SSLMode, cfg.Host)
 	if plan.RequiresTLS() {
 		opts["SSL"] = "TRUE"

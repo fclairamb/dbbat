@@ -34,12 +34,27 @@ func (a Attempt) Encrypted() bool { return a.TLS != nil }
 // is the *only* place dbbat decides what an ssl_mode means — every protocol,
 // on both the proxy side and the probe side, reads its policy from here.
 //
-// Protocols that negotiate encryption in band (PostgreSQL's SSLRequest) do not
-// walk the list literally: for them the whole plan collapses to "do we offer
-// TLS" plus "may we continue in plaintext when the server says no", which is
-// exactly what OffersTLS and AllowsPlaintext answer. Protocols with no in-band
-// negotiation (MySQL's capability flag, MongoDB's TLS-from-the-first-byte) walk
-// the attempts in order, redialing between them.
+// Not every protocol can honor the *order*, and that is the one place where the
+// single policy still produces more than one behavior. Read the list as the SET
+// of attempts a mode permits; the order is advisory and only binding for
+// protocols that can act on it:
+//
+//   - PostgreSQL negotiates in band (SSLRequest / 'S' / 'N') and so never walks
+//     the list: it reads OffersTLS and AllowsPlaintext and nothing else. Under
+//     `allow` it therefore behaves exactly like `prefer` — it offers TLS and
+//     upgrades if the server says yes. That is the pre-existing behavior of both
+//     the proxy and libpq-with-one-round-trip, it errs toward encryption, and
+//     re-ordering it would cost a second dial for no confidentiality gain.
+//   - MySQL (CLIENT_SSL capability) and MongoDB (TLS from the first byte)
+//     cannot negotiate in band, so they redial between attempts and DO honor the
+//     order: `allow` really is plaintext-first for them.
+//   - Oracle only reads RequiresTLS: the opportunistic modes never encrypt. See
+//     the note on ConnectOracle.
+//
+// So `allow` is the only mode whose meaning still varies by protocol, and it
+// varies within what the mode permits — never outside it. `disable`, `require`
+// and the verify-* modes have a single attempt each, so order cannot apply and
+// every protocol agrees exactly.
 type Plan struct {
 	// Mode is the ssl_mode this plan was built from, kept for error messages.
 	Mode string
@@ -52,7 +67,9 @@ type Plan struct {
 // encoding libpq's semantics once:
 //
 //   - disable:                 plaintext only, no TLS offered.
-//   - allow:                   plaintext first, TLS if the server demands it.
+//   - allow:                   plaintext and TLS both permitted, plaintext
+//     preferred — but see the Plan doc: only the redialing protocols honor that
+//     preference, and PostgreSQL treats allow as prefer.
 //   - prefer / "":             TLS first, plaintext when the server refuses.
 //   - require:                 TLS only, certificate not verified — libpq's
 //     "encrypt, don't authenticate".

@@ -10,6 +10,23 @@ import (
 // there is exactly one implementation for it to describe. A change to the table
 // below is a change to dbbat's confidentiality guarantees, on every protocol
 // and on both the proxy and the connectivity-check path.
+//
+// What every protocol honors is the attempt SET — which encryption states a
+// mode permits at all. Only the protocols that redial between attempts honor
+// the attempt ORDER:
+//
+//	protocol    | honors set | honors order | note
+//	------------|------------|--------------|--------------------------------
+//	PostgreSQL  | yes        | no           | in-band SSLRequest; allow == prefer
+//	MySQL       | yes        | yes          | redials between attempts
+//	MongoDB     | yes        | yes          | redials between attempts
+//	Oracle      | yes*       | no           | only RequiresTLS; opportunistic modes never encrypt
+//
+// (*) Oracle stays inside what the mode permits — the opportunistic modes do
+// permit plaintext — but it never takes the encrypted option they also permit.
+//
+// `allow` is therefore the only mode whose behavior still varies by protocol.
+// Every other mode has one attempt, so order cannot apply. See the Plan doc.
 func TestPlanFor(t *testing.T) {
 	t.Parallel()
 
