@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.20.0](https://github.com/fclairamb/dbbat/compare/v0.19.1...v0.20.0) (2026-08-04)
+
+
+Lands the batch of specs accumulated in `specs/todos/` in one squash-merged PR ([#280](https://github.com/fclairamb/dbbat/issues/280)) ([8ddd21b](https://github.com/fclairamb/dbbat/commit/8ddd21b7abee4abbbe30b09d007ef4a00ded4351)); the individual changes are broken out below.
+
+### ⚠ BREAKING CHANGES
+
+* **postgresql:** the default PostgreSQL proxy listen port is now `:5433` instead of `:5434`. Deployments relying on the implicit default must set `DBB_LISTEN_PG=:5434` to keep the previous behaviour. `5433` is also the conventional pgbouncer port — on a host already running one, bind the proxy elsewhere.
+* **dump:** session captures are written as pcapng, and the bespoke `.dbbat-dump` v1/v2 read path is removed — existing `.dbbat-dump` files can no longer be read by dbbat. The retention sweep does reap them, so operational dump directories drain on their own. New captures open directly in Wireshark/tcpdump/tshark, with native dissectors for the wrapped protocols.
+
+### Features
+
+* **api,proxy,ui:** live query stream over WebSocket. `GET /api/v1/stream` carries topic subscriptions (`connection/<uid>/queries`, `approvals/pending`, `connections`), with per-topic authorization evaluated at subscribe time *and* re-checked before every send, so the stream is never a wider read path than `GET /api/v1/queries`. Backed by an in-process broker with a bounded per-subscriber buffer, `lagged` notices on overflow, and PostgreSQL `LISTEN`/`NOTIFY` fan-out across replicas.
+* **grants,proxy:** pattern-triggered approval holds. Grant definitions carry RE2 patterns that suspend a matching statement mid-flight until an admin or approver-group member decides. There is no timeout — a hold ends on approve, deny, or client disconnect (recorded as `abandoned`, distinctly from `denied`). Self-approval is always rejected, the approver is persisted and broadcast, and quotas, expiry and revocation keep running while a query is parked. Ships behind `DBB_APPROVAL_ENABLED`, off by default.
+* **api:** approval endpoints — `POST /queries/{uid}/approve`, `POST /queries/{uid}/deny`, `GET /queries/pending`, and a `POST /queries/pending/deny-all` safety valve. Every decision writes an audit-log entry and publishes a resolution event.
+* **auth:** Slack escalation for pending holds, on a 30 s timer (`DBB_APPROVAL_SLACK_DELAY`), with the message updated in place the moment the hold resolves by any route — no stale Approve button. SQL text is truncated and can be switched off (`DBB_APPROVAL_SLACK_SQL`).
+* **dump:** tcpdump-compatible pcapng session captures via pure-Go `gopacket/pcapgo` — session metadata in the Section Header Block comment, per-packet direction in `epb_flags`, nanosecond timestamps, and synthesized Ethernet/IP/TCP framing so Wireshark's dissectors fire.
+* **proxy,store:** batched result-row persistence. One process-wide writer replaces both extremes — Oracle was issuing a synchronous `INSERT` per captured row (up to 100k round-trips on a single query), while PostgreSQL and MySQL held the whole capture in RAM until the query ended. A bounded channel drained opportunistically batches to load (1000 rows or 8 MB, whichever trips first), and sends are non-blocking, so dbbat's own storage can never stall a proxied query. Rows lost because the writer fell behind are recorded as `results_dropped`, distinct from `results_truncated`.
+* **docs:** auto-generated `llms.txt` and `llms-full.txt` on dbbat.com, built from the docs tree with a rot guard that fails the build if a generated URL no longer resolves. Every instance also serves an unauthenticated `GET /llms.txt` describing itself — a local response, never a redirect, carrying no instance topology.
+* **store:** crash-orphaned connections are reconciled at startup. `disconnected_at` was only ever written on clean teardown, so a crash or pod reschedule left rows open forever — invisible to the retention sweep and still counted as "currently connected". Reconciliation is scoped by an `instances` liveness registry (`DBB_INSTANCE_ID`, heartbeat plus deregister-on-shutdown) so one replica can never close another live replica's connections.
+
+### Bug Fixes
+
+* **postgresql:** a COPY capture that hit the byte limit discarded everything it had already buffered and stored zero rows. It now keeps the prefix, dropping only the trailing partial line.
+* **api:** `GET`/`DELETE /connections/{uid}/dump` had shipped entirely absent from the OpenAPI spec, so the capture-download API was invisible in Swagger UI and missing from generated clients. Documented, and a parity test now asserts in both directions that every `/api/v1` route is described and every described path is registered.
+* **dump:** the retention sweep reaps leftover `.dbbat-dump` files from before the pcapng switch, which would otherwise never expire.
+* **ui:** the connection detail page no longer stamps `?watch=false` onto its URL when the live panel is off.
+* **ci:** the website is rebuilt when the root `CHANGELOG.md` changes — the published changelog had been stuck at v0.17.0 because release commits touch no `website/` path.
+* **deps:** update module github.com/knadh/koanf/parsers/json to v1.0.1 ([#282](https://github.com/fclairamb/dbbat/issues/282)) ([6d74e51](https://github.com/fclairamb/dbbat/commit/6d74e51ee8f29565f0bde7557b824e2866c7c47a))
+
 ## [0.19.1](https://github.com/fclairamb/dbbat/compare/v0.19.0...v0.19.1) (2026-08-02)
 
 
