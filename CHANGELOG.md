@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.20.0](https://github.com/fclairamb/dbbat/compare/v0.19.1...v0.20.0) (2026-08-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* the default PostgreSQL proxy listen port is now `:5433` instead of `:5434`; set `DBB_LISTEN_PG=:5434` to keep the previous behaviour. Session captures are written as pcapng and existing `.dbbat-dump` files can no longer be read.
+
+### Features
+
+* query approval holds, pcapng session captures, and batched result-row persistence ([#280](https://github.com/fclairamb/dbbat/issues/280)) ([8ddd21b](https://github.com/fclairamb/dbbat/commit/8ddd21b7abee4abbbe30b09d007ef4a00ded4351))
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/knadh/koanf/parsers/json to v1.0.1 ([#282](https://github.com/fclairamb/dbbat/issues/282)) ([6d74e51](https://github.com/fclairamb/dbbat/commit/6d74e51ee8f29565f0bde7557b824e2866c7c47a))
+
 ## [0.19.1](https://github.com/fclairamb/dbbat/compare/v0.19.0...v0.19.1) (2026-08-02)
 
 
