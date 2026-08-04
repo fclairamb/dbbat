@@ -306,17 +306,33 @@ type Connection struct {
 	// never close another replica's live sessions. Internal bookkeeping, not
 	// part of the API surface — hence json:"-".
 	InstanceID string `bun:"instance_id,notnull,default:''" json:"-"`
+
+	// RunID is the *run* that opened this connection: a UUID minted in memory
+	// at startup, so it is unique per live process even when several replicas
+	// share an instance id. It is what lets the reconcile ask whether a live
+	// run still owns a row, rather than trusting that an id means a process.
+	//
+	// A nil pointer means the row was written before run tracking existed —
+	// deliberately distinct from a run whose id is empty. See noLiveOwner for
+	// how those rows are judged.
+	RunID *string `bun:"run_id" json:"-"`
 }
 
-// Instance is one dbbat process sharing this store. The row is upserted at
-// startup, refreshed by a heartbeat, and deleted on a clean shutdown, so its
-// presence and freshness answer "is this process still alive?" — which is what
-// lets the startup reconcile reclaim the connections of an instance that is
-// provably gone. See Store.CloseOrphanedConnections.
+// Instance is one *run* of one dbbat process sharing this store. The row is
+// upserted at startup, refreshed by a heartbeat, and deleted on a clean
+// shutdown, so its presence and freshness answer "is this run still alive?" —
+// which is what lets the startup reconcile reclaim the connections of a run
+// that is provably gone. See Store.CloseOrphanedConnections.
+//
+// The key is the pair, not the instance id: two live replicas that share an
+// instance id must both be able to prove they are alive, or the second one to
+// register would silently make the first look dead. A row whose run id is ”
+// predates run tracking (seeded by a migration, or written by an older build).
 type Instance struct {
 	bun.BaseModel `bun:"table:instances,alias:i"`
 
 	InstanceID string    `bun:"instance_id,pk" json:"instance_id"`
+	RunID      string    `bun:"run_id,pk,notnull,default:''" json:"run_id"`
 	StartedAt  time.Time `bun:"started_at,notnull,default:current_timestamp" json:"started_at"`
 	LastSeenAt time.Time `bun:"last_seen_at,notnull,default:current_timestamp" json:"last_seen_at"`
 }
