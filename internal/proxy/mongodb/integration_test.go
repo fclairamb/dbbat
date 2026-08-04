@@ -17,6 +17,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -147,6 +148,11 @@ type fixture struct {
 	user      *store.User
 	dbUID     string
 	encKey    []byte
+	// upstreamHost/upstreamPort address the mongod container directly, so a
+	// test can ask the *server* what it saw rather than trusting the proxy's
+	// own account of it.
+	upstreamHost string
+	upstreamPort int
 }
 
 func setupFixture(ctx context.Context, t *testing.T) *fixture {
@@ -255,13 +261,15 @@ func setupFixtureWith(ctx context.Context, t *testing.T, dumpDir, sslMode string
 	require.Eventually(t, func() bool { return proxy.Addr() != nil }, 2*time.Second, 50*time.Millisecond, "proxy never started listening")
 
 	return &fixture{
-		t:         t,
-		store:     dataStore,
-		proxy:     proxy,
-		proxyAddr: proxy.Addr().String(),
-		user:      user,
-		dbUID:     db.UID.String(),
-		encKey:    encKey,
+		t:            t,
+		store:        dataStore,
+		proxy:        proxy,
+		proxyAddr:    proxy.Addr().String(),
+		user:         user,
+		dbUID:        db.UID.String(),
+		encKey:       encKey,
+		upstreamHost: upstreamHost,
+		upstreamPort: upstreamPort,
 	}
 }
 
@@ -748,8 +756,9 @@ func mongoTestCertKey(t *testing.T) ([]byte, []byte) {
 }
 
 // assertRecordedUpstreamTLS checks that the session wrote down which way it
-// went. Under an opportunistic ssl_mode this row is the only place the answer
-// exists.
+// went. Under an opportunistic ssl_mode this row is the only place inside dbbat
+// where the answer exists — but it is dbbat's own account of it, so every test
+// below pairs it with upstreamTLSHandshakes, which asks the server.
 func (f *fixture) assertRecordedUpstreamTLS(ctx context.Context, want bool) {
 	f.t.Helper()
 
@@ -760,6 +769,92 @@ func (f *fixture) assertRecordedUpstreamTLS(ctx context.Context, want bool) {
 	}, 10*time.Second, 200*time.Millisecond, "connections.upstream_tls should be %v", want)
 }
 
+// upstreamTLSHandshakes asks mongod how many TLS connections it has accepted so
+// far, summed over the protocol versions it counts separately.
+//
+// MongoDB has no per-connection "am I encrypted?" command — connectionStatus
+// reports auth only, and $currentOp carries client metadata but not transport
+// state — so serverStatus().transportSecurity, a cumulative per-TLS-version
+// counter, is the server-side signal available. Reading it either side of a
+// proxied session turns it into a per-session answer: the delta is how many TLS
+// connections *that session* caused.
+//
+// The read itself goes straight to the container in plaintext, bypassing dbbat,
+// so it never perturbs the counter it is measuring.
+func (f *fixture) upstreamTLSHandshakes(ctx context.Context) int64 {
+	f.t.Helper()
+
+	client, err := mongo.Connect(options.Client().
+		SetHosts([]string{net.JoinHostPort(f.upstreamHost, strconv.Itoa(f.upstreamPort))}).
+		SetDirect(true).
+		SetServerSelectionTimeout(10 * time.Second).
+		SetAuth(options.Credential{Username: rootUser, Password: rootPass, AuthSource: "admin"}))
+	require.NoError(f.t, err)
+
+	defer func() { _ = client.Disconnect(context.WithoutCancel(ctx)) }()
+
+	var status bson.Raw
+	require.NoError(f.t, client.Database("admin").
+		RunCommand(ctx, bson.D{{Key: "serverStatus", Value: 1}}).Decode(&status))
+
+	section, err := status.LookupErr("transportSecurity")
+	require.NoError(f.t, err, "mongod did not report serverStatus().transportSecurity")
+
+	counters, ok := section.DocumentOK()
+	require.True(f.t, ok, "serverStatus().transportSecurity is not a document")
+
+	var total int64
+
+	// The counters are 64-bit, but a fresh server reports small values that the
+	// driver may hand back as int32 — accept both rather than silently reading
+	// every version as zero.
+	for _, version := range []string{"1.0", "1.1", "1.2", "1.3"} {
+		value, lookupErr := counters.LookupErr(version)
+		if lookupErr != nil {
+			continue
+		}
+
+		if n, ok := value.Int64OK(); ok {
+			total += n
+
+			continue
+		}
+
+		if n, ok := value.Int32OK(); ok {
+			total += int64(n)
+		}
+	}
+
+	return total
+}
+
+// assertUpstreamEncryption runs connect through the proxy and asserts, from both
+// ends, whether that session's upstream leg was encrypted: the server's own TLS
+// handshake counter, and the row dbbat wrote. They must agree — a mismatch means
+// dbbat is reporting an encryption state it did not achieve.
+func (f *fixture) assertUpstreamEncryption(ctx context.Context, wantTLS bool) {
+	f.t.Helper()
+
+	before := f.upstreamTLSHandshakes(ctx)
+
+	client := f.dialThrough(fixtureUser, fixturePass)
+	defer func() { _ = client.Disconnect(ctx) }()
+
+	require.NoError(f.t, client.Ping(ctx, nil))
+
+	after := f.upstreamTLSHandshakes(ctx)
+
+	if wantTLS {
+		assert.Greater(f.t, after, before,
+			"mongod should have counted a TLS handshake for the proxied session")
+	} else {
+		assert.Equal(f.t, before, after,
+			"mongod counted a TLS handshake for a session that should have stayed plaintext")
+	}
+
+	f.assertRecordedUpstreamTLS(ctx, wantTLS)
+}
+
 // TestIntegration_UpstreamTLS_Prefer is the behaviour this proxy did not have
 // before the upstream-connect paths were unified: MongoDB cannot negotiate
 // encryption in band, so prefer means "try the TLS handshake first". Against a
@@ -768,11 +863,7 @@ func TestIntegration_UpstreamTLS_Prefer(t *testing.T) {
 	ctx := context.Background()
 	f := setupFixtureWithSSLMode(ctx, t, "prefer")
 
-	client := f.dialThrough(fixtureUser, fixturePass)
-	defer func() { _ = client.Disconnect(ctx) }()
-
-	require.NoError(t, client.Ping(ctx, nil))
-	f.assertRecordedUpstreamTLS(ctx, true)
+	f.assertUpstreamEncryption(ctx, true)
 }
 
 // TestIntegration_UpstreamTLS_Require pins the mandatory mode against the same
@@ -781,11 +872,7 @@ func TestIntegration_UpstreamTLS_Require(t *testing.T) {
 	ctx := context.Background()
 	f := setupFixtureWithSSLMode(ctx, t, "require")
 
-	client := f.dialThrough(fixtureUser, fixturePass)
-	defer func() { _ = client.Disconnect(ctx) }()
-
-	require.NoError(t, client.Ping(ctx, nil))
-	f.assertRecordedUpstreamTLS(ctx, true)
+	f.assertUpstreamEncryption(ctx, true)
 }
 
 // TestIntegration_UpstreamTLS_Disable is the counterpart: against the very same
@@ -795,9 +882,5 @@ func TestIntegration_UpstreamTLS_Disable(t *testing.T) {
 	ctx := context.Background()
 	f := setupFixtureWithSSLMode(ctx, t, "disable")
 
-	client := f.dialThrough(fixtureUser, fixturePass)
-	defer func() { _ = client.Disconnect(ctx) }()
-
-	require.NoError(t, client.Ping(ctx, nil))
-	f.assertRecordedUpstreamTLS(ctx, false)
+	f.assertUpstreamEncryption(ctx, false)
 }
