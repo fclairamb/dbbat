@@ -21,9 +21,16 @@ export const Route = createFileRoute("/_authenticated/connections/$uid")({
   // ?watch=1 opens the live panel straight away — that's the deep link Slack
   // approval notifications point at, so the approver lands on the hold rather
   // than on a page they then have to activate.
-  validateSearch: (search: Record<string, unknown>) => ({
-    watch: search.watch === "1" || search.watch === 1 || search.watch === true,
-  }),
+  //
+  // The key is omitted entirely when it is off rather than returned as false:
+  // the router serializes whatever this returns, so `watch: false` would stamp
+  // `?watch=false` onto every connection detail URL. A default state does not
+  // belong in the URL — it makes shared links noisy and breaks anything
+  // matching the bare `/connections/<uid>` form.
+  validateSearch: (search: Record<string, unknown>): { watch?: true } =>
+    search.watch === "1" || search.watch === 1 || search.watch === true
+      ? { watch: true }
+      : {},
   component: ConnectionDetailPage,
 });
 
@@ -198,7 +205,7 @@ function ConnectionDetailPage() {
         </CardContent>
       </Card>
 
-      <ConnectionWatchPanel connectionUid={uid} defaultWatching={watch} />
+      <ConnectionWatchPanel connectionUid={uid} defaultWatching={watch === true} />
 
       <Card>
         <CardHeader>
