@@ -83,11 +83,10 @@ func probePostgres(ctx context.Context, srv *store.Server, dial dialFunc) error 
 	cfg.Database = srv.DatabaseName
 	cfg.ConnectTimeout = DefaultTimeout
 	cfg.RuntimeParams = map[string]string{"application_name": probeAppName()}
-	cfg.Fallbacks = nil
 	cfg.DialFunc = func(dialCtx context.Context, _, _ string) (net.Conn, error) {
 		return dial(dialCtx)
 	}
-	cfg.TLSConfig = postgresTLSConfig(srv)
+	cfg.TLSConfig, cfg.Fallbacks = postgresTLSPlan(srv)
 
 	conn, err := pgconn.ConnectConfig(ctx, cfg)
 	if err != nil {
@@ -97,18 +96,44 @@ func probePostgres(ctx context.Context, srv *store.Server, dial dialFunc) error 
 	return conn.Close(ctx)
 }
 
-// postgresTLSConfig mirrors libpq ssl_mode semantics for the probe. "prefer"
-// deliberately maps to nil (plaintext): pgconn cannot express opportunistic TLS
-// on a single config, and a probe that silently fell back would report a
-// misleading stage.
-func postgresTLSConfig(srv *store.Server) *tls.Config {
+// postgresTLSPlan mirrors libpq ssl_mode semantics for the probe, returning the
+// primary TLS config plus the fallback chain pgconn walks when the primary
+// attempt fails on anything other than authentication.
+//
+// The opportunistic modes ("prefer", "allow", and the empty default) need two
+// attempts, which is exactly what Fallbacks are for — a single pgconn.Config
+// cannot express them. Collapsing them to plaintext is not a cosmetic
+// simplification: a target whose pg_hba.conf demands encryption rejects the
+// plaintext attempt with SQLSTATE 28000, and the probe reports "the database
+// refused the stored credentials" for a target the proxy connects to fine —
+// negotiateUpstreamSSL does send the SSLRequest under "prefer".
+func postgresTLSPlan(srv *store.Server) (*tls.Config, []*pgconn.FallbackConfig) {
+	// require/prefer parity with libpq (and with upstreamTLSConfig in the
+	// proxy): encrypt without authenticating the server.
+	encrypted := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}
+
 	switch srv.SSLMode {
+	case "disable":
+		return nil, nil
 	case "require":
-		return &tls.Config{InsecureSkipVerify: true}
+		return encrypted, nil
 	case "verify-ca", "verify-full":
-		return &tls.Config{MinVersion: tls.VersionTLS12, ServerName: srv.Host}
-	default:
-		return nil
+		return &tls.Config{MinVersion: tls.VersionTLS12, ServerName: srv.Host}, nil
+	case "allow":
+		return nil, []*pgconn.FallbackConfig{postgresFallback(srv, encrypted)}
+	default: // "prefer" and the empty default: TLS first, plaintext second.
+		return encrypted, []*pgconn.FallbackConfig{postgresFallback(srv, nil)}
+	}
+}
+
+// postgresFallback builds the second attempt of an opportunistic ssl_mode. Host
+// and port only satisfy pgconn's config shape — the injected DialFunc ignores
+// them, so the fallback still runs through the same tunnel as the first try.
+func postgresFallback(srv *store.Server, tlsCfg *tls.Config) *pgconn.FallbackConfig {
+	return &pgconn.FallbackConfig{
+		Host:      srv.Host,
+		Port:      uint16(srv.Port),
+		TLSConfig: tlsCfg,
 	}
 }
 
