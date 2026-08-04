@@ -34,6 +34,23 @@ const InstanceHeartbeatInterval = 30 * time.Second
 // before the rollout has replaced them.
 const InstanceStaleAfter = 30 * InstanceHeartbeatInterval
 
+// InstanceReclaimInterval is how often a running process re-runs
+// Store.ReclaimDeadInstanceConnections and PruneStaleInstances.
+//
+// Half the grace period, so a dead instance's rows are picked up within roughly
+// one grace period of going stale rather than waiting for some unrelated
+// process to start. That matters most in the crash case: a SIGKILLed pod leaves
+// a registry row seconds old, so its immediate replacement reclaims nothing at
+// startup, and 15 minutes later — when the row finally goes stale — nothing is
+// starting any more. On a stable deployment the rows would then sit open until
+// the next restart, which may be days away.
+//
+// It is not shorter because there is nothing to gain: the rows only become
+// reclaimable after InstanceStaleAfter anyway, so polling faster would only add
+// UPDATEs that match nothing. See the jitter in the heartbeat loop for why
+// several replicas do not run it in lockstep.
+const InstanceReclaimInterval = InstanceStaleAfter / 2
+
 // instanceNow is the SQL expression every timestamp in the instance registry is
 // written and compared against.
 //

@@ -100,14 +100,77 @@ func (o OrphanedConnections) Total() int64 {
 // immediately satisfy the retention sweep's cutoff predicate, so the sweep
 // could delete a connection a live session is still writing queries against.
 //
-// The test that replaces the blanket update is liveness, not identity. A
-// running process upserts a row in `instances` at startup and refreshes it
-// every InstanceHeartbeatInterval; a clean shutdown deletes it. So another
-// instance's connections are only touched when that instance has no row at all
-// (it shut down cleanly, or never registered) or has not been seen for
-// InstanceStaleAfter — 30 missed heartbeats. A live replica is therefore never
-// a candidate: it would have to fail every heartbeat for a quarter of an hour
-// while still serving traffic.
+// The two halves have different lifetimes, which is why they are separate
+// methods. The own half is startup-only by nature: while this process runs, a
+// row carrying its instance id and no disconnected_at is a session it is
+// serving right now. The reclaim half — ReclaimDeadInstanceConnections — is
+// liveness-checked rather than identity-scoped, so it is safe at any time and
+// is also run periodically (see InstanceReclaimInterval).
+//
+// A store whose own instance id is empty is refused outright (zero, nil).
+// Reconciling would then treat the empty id as this process's identity, which
+// is exactly the blanket update this design exists to prevent.
+func (s *Store) CloseOrphanedConnections(ctx context.Context) (OrphanedConnections, error) {
+	var counts OrphanedConnections
+
+	if s.instanceID == "" {
+		return counts, nil
+	}
+
+	own, err := s.closeOwnOrphanedConnections(ctx)
+	if err != nil {
+		return counts, err
+	}
+
+	counts.Own = own
+
+	reclaimed, err := s.ReclaimDeadInstanceConnections(ctx)
+	if err != nil {
+		return counts, err
+	}
+
+	counts.Reclaimed = reclaimed
+
+	return counts, nil
+}
+
+// closeOwnOrphanedConnections closes the still-open connections carrying this
+// process's own instance id, on the assumption that they belong to its previous
+// run.
+//
+// Startup-only, and unexported for that reason: it is the one branch with no
+// liveness test — "my id" is taken to mean "my previous run", which is only
+// true before this process has accepted anything. Calling it once the proxies
+// are up would close this run's own live sessions.
+func (s *Store) closeOwnOrphanedConnections(ctx context.Context) (int64, error) {
+	if s.instanceID == "" {
+		return 0, nil
+	}
+
+	return s.closeOrphans(ctx, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+		return q.Where("instance_id = ?", s.instanceID)
+	})
+}
+
+// ReclaimDeadInstanceConnections closes the connections of *other* instances
+// the registry proves are gone, and returns how many it closed.
+//
+// Unlike the own-instance half of CloseOrphanedConnections this is not tied to
+// startup: it decides on liveness, not on identity, so it holds at any point in
+// the process's life. It runs both from the startup reconcile and on a timer
+// (InstanceReclaimInterval), because the crash case is otherwise only ever
+// noticed by an unrelated restart: a SIGKILLed pod leaves a registry row whose
+// last_seen_at is seconds old, so its replacement — starting immediately —
+// reclaims nothing, and by the time the row does go stale nothing is starting
+// any more.
+//
+// The test is liveness, not identity. A running process upserts a row in
+// `instances` at startup and refreshes it every InstanceHeartbeatInterval; a
+// clean shutdown deletes it. So another instance's connections are only touched
+// when that instance has no row at all (it shut down cleanly, or never
+// registered) or has not been seen for InstanceStaleAfter — 30 missed
+// heartbeats. A live replica is therefore never a candidate: it would have to
+// fail every heartbeat for a quarter of an hour while still serving traffic.
 //
 // Legacy rows carrying an empty instance id — created before the instance_id
 // column existed — are folded into the "no instances row" case rather than
@@ -133,47 +196,41 @@ func (o OrphanedConnections) Total() int64 {
 // since the retention horizon, against permanently delaying the case this
 // feature is built for. The window is left open knowingly.
 //
-// A store whose own instance id is empty is refused outright (zero, nil).
-// Reconciling would then treat the empty id as this process's identity, which
-// is exactly the blanket update this design exists to prevent.
-func (s *Store) CloseOrphanedConnections(ctx context.Context) (OrphanedConnections, error) {
-	var counts OrphanedConnections
-
+// A store whose own instance id is empty reclaims nothing (zero, nil), matching
+// CloseOrphanedConnections: a process with no identity of its own has no
+// business judging anyone else's.
+func (s *Store) ReclaimDeadInstanceConnections(ctx context.Context) (int64, error) {
 	if s.instanceID == "" {
-		return counts, nil
+		return 0, nil
 	}
 
-	own, err := s.closeOrphans(ctx, func(q *bun.UpdateQuery) *bun.UpdateQuery {
-		return q.Where("instance_id = ?", s.instanceID)
-	})
-	if err != nil {
-		return counts, err
-	}
-
-	counts.Own = own
-
-	reclaimed, err := s.closeOrphans(ctx, func(q *bun.UpdateQuery) *bun.UpdateQuery {
-		// Own rows are handled above; excluding them here keeps the two counts
-		// disjoint (and this instance is registered, so it would not match).
-		//
-		// The staleness cutoff is computed by the database, not by this
-		// process: the heartbeat it is being compared against was written by
-		// another replica, and clock skew between the two would come straight
-		// out of the grace period. See instanceNow.
+	return s.closeOrphans(ctx, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+		// Our own rows are excluded: at startup they are the other half's job,
+		// which keeps the two counts disjoint, and on the periodic pass they
+		// are this run's live sessions, which must never be touched. Either
+		// way we are registered and heartbeating, so the liveness clause below
+		// would spare them anyway — this is belt and braces.
 		return q.Where("instance_id <> ?", s.instanceID).
-			Where(`NOT EXISTS (
-				SELECT 1 FROM instances AS live
-				WHERE live.instance_id = c.instance_id
-				  AND live.last_seen_at >= ` + instanceStaleCutoff() + `
-			)`)
+			Where(noLiveOwner())
 	})
-	if err != nil {
-		return counts, err
-	}
+}
 
-	counts.Reclaimed = reclaimed
-
-	return counts, nil
+// noLiveOwner matches connection rows whose owning instance is not alive:
+// either it has no registry row at all (clean shutdown, never registered, or
+// the legacy empty id) or its last heartbeat predates the grace period.
+//
+// The staleness cutoff is computed by the database, not by this process: the
+// heartbeat it is being compared against was written by another replica, and
+// clock skew between the two would come straight out of the grace period. See
+// instanceNow.
+//
+// `c` is the alias bun gives the connections table in an UPDATE.
+func noLiveOwner() string {
+	return `NOT EXISTS (
+		SELECT 1 FROM instances AS live
+		WHERE live.instance_id = c.instance_id
+		  AND live.last_seen_at >= ` + instanceStaleCutoff() + `
+	)`
 }
 
 // closeOrphans runs one scoped reconcile and returns how many rows it closed.
