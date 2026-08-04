@@ -117,6 +117,20 @@ func setupFixture(ctx context.Context, t *testing.T, mysqlImage, dbProtocol stri
 func setupFixtureWithDumpDir(ctx context.Context, t *testing.T, mysqlImage, dbProtocol, dumpDir string) *fixture {
 	t.Helper()
 
+	return setupFixtureWith(ctx, t, mysqlImage, dbProtocol, dumpDir, "disable")
+}
+
+// setupFixtureWithSSLMode builds the fixture with a specific upstream ssl_mode,
+// which is what the upstream-TLS tests vary.
+func setupFixtureWithSSLMode(ctx context.Context, t *testing.T, mysqlImage, dbProtocol, sslMode string) *fixture {
+	t.Helper()
+
+	return setupFixtureWith(ctx, t, mysqlImage, dbProtocol, "", sslMode)
+}
+
+func setupFixtureWith(ctx context.Context, t *testing.T, mysqlImage, dbProtocol, dumpDir, sslMode string) *fixture {
+	t.Helper()
+
 	upstreamContainer, upstreamHost, upstreamPort := runMySQLContainer(ctx, t, mysqlImage)
 	t.Cleanup(func() { _ = upstreamContainer.Terminate(context.Background()) })
 
@@ -167,7 +181,7 @@ func setupFixtureWithDumpDir(ctx context.Context, t *testing.T, mysqlImage, dbPr
 		Username:     "root",
 		Password:     "rootpw",
 		Protocol:     dbProtocol,
-		SSLMode:      "disable",
+		SSLMode:      sslMode,
 	}, encryptionKey)
 	require.NoError(t, err)
 
@@ -537,4 +551,76 @@ func TestIntegration_MariaDB(t *testing.T) {
 	t.Logf("MariaDB version through proxy: %s", version)
 	assert.Contains(t, strings.ToLower(version), "mariadb",
 		"expected mariadb in version banner")
+}
+
+// upstreamCipher returns the TLS cipher the *upstream* session is using, empty
+// when that leg is plaintext. The query runs on the upstream connection the
+// proxy opened, so its session status describes exactly the leg under test.
+func (f *fixture) upstreamCipher(ctx context.Context, db *sql.DB) string {
+	f.t.Helper()
+
+	var name, cipher string
+	require.NoError(f.t, db.QueryRowContext(ctx,
+		"SHOW SESSION STATUS LIKE 'Ssl_cipher'").Scan(&name, &cipher))
+
+	return cipher
+}
+
+// assertRecordedUpstreamTLS checks that the session wrote down which way it
+// went. Under an opportunistic ssl_mode this row is the only place the answer
+// exists.
+func (f *fixture) assertRecordedUpstreamTLS(ctx context.Context, want bool) {
+	f.t.Helper()
+
+	require.Eventually(f.t, func() bool {
+		conns, err := f.store.ListConnections(ctx, store.ConnectionFilter{Limit: 10})
+
+		return err == nil && len(conns) > 0 && conns[0].UpstreamTLS == want
+	}, 5*time.Second, 100*time.Millisecond, "connections.upstream_tls should be %v", want)
+}
+
+// TestIntegration_UpstreamTLS_Require verifies that ssl_mode=require actually
+// encrypts the proxy→upstream leg: the upstream session must report a cipher.
+func TestIntegration_UpstreamTLS_Require(t *testing.T) {
+	ctx := context.Background()
+
+	f := setupFixtureWithSSLMode(ctx, t, mysqlImage(), store.ProtocolMySQL, "require")
+	db := f.dialTLS()
+	defer db.Close()
+
+	require.NoError(t, db.PingContext(ctx))
+	assert.NotEmpty(t, f.upstreamCipher(ctx, db),
+		"upstream connection should be TLS-encrypted under ssl_mode=require")
+	f.assertRecordedUpstreamTLS(ctx, true)
+}
+
+// TestIntegration_UpstreamTLS_Prefer is the opportunistic case this proxy did
+// not have until the upstream-connect paths were unified: against a TLS-capable
+// server, prefer must actually encrypt rather than quietly stay in plaintext.
+func TestIntegration_UpstreamTLS_Prefer(t *testing.T) {
+	ctx := context.Background()
+
+	f := setupFixtureWithSSLMode(ctx, t, mysqlImage(), store.ProtocolMySQL, "prefer")
+	db := f.dialTLS()
+	defer db.Close()
+
+	require.NoError(t, db.PingContext(ctx))
+	assert.NotEmpty(t, f.upstreamCipher(ctx, db),
+		"upstream connection should be TLS-encrypted under ssl_mode=prefer against a TLS-capable server")
+	f.assertRecordedUpstreamTLS(ctx, true)
+}
+
+// TestIntegration_UpstreamTLS_Disable is the counterpart: against the very same
+// TLS-capable upstream, disable must stay in the clear.
+func TestIntegration_UpstreamTLS_Disable(t *testing.T) {
+	ctx := context.Background()
+
+	f := setupFixtureWithSSLMode(ctx, t, mysqlImage(), store.ProtocolMySQL, "disable")
+	db := f.dialTLS()
+	defer db.Close()
+
+	require.NoError(t, db.PingContext(ctx))
+	assert.Empty(t, f.upstreamCipher(ctx, db),
+		"upstream connection should stay plaintext under ssl_mode=disable")
+	f.assertRecordedUpstreamTLS(ctx, false)
 }

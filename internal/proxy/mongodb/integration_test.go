@@ -3,10 +3,18 @@
 package mongodb
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"fmt"
 	"log/slog"
+	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,20 +62,69 @@ const (
 func runMongoContainer(ctx context.Context, t *testing.T, image string) (testcontainers.Container, string, int) {
 	t.Helper()
 
-	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        image,
-			ExposedPorts: []string{"27017/tcp"},
-			Env: map[string]string{
-				"MONGO_INITDB_ROOT_USERNAME": rootUser,
-				"MONGO_INITDB_ROOT_PASSWORD": rootPass,
-			},
-			WaitingFor: wait.ForAll(
-				wait.ForListeningPort("27017/tcp"),
-				wait.ForLog("Waiting for connections"),
-			).WithStartupTimeoutDefault(120 * time.Second),
+	return runMongoContainerWith(ctx, t, image, false)
+}
+
+// runMongoContainerWith optionally starts mongod in preferTLS mode with a
+// generated certificate, so a single container answers both an encrypted and a
+// plaintext client — which is what an opportunistic ssl_mode needs to be tested
+// against.
+func runMongoContainerWith(
+	ctx context.Context,
+	t *testing.T,
+	image string,
+	withTLS bool,
+) (testcontainers.Container, string, int) {
+	t.Helper()
+
+	req := testcontainers.ContainerRequest{
+		Image:        image,
+		ExposedPorts: []string{"27017/tcp"},
+		Env: map[string]string{
+			"MONGO_INITDB_ROOT_USERNAME": rootUser,
+			"MONGO_INITDB_ROOT_PASSWORD": rootPass,
 		},
-		Started: true,
+		WaitingFor: wait.ForAll(
+			wait.ForListeningPort("27017/tcp"),
+			wait.ForLog("Waiting for connections"),
+		).WithStartupTimeoutDefault(120 * time.Second),
+	}
+
+	if withTLS {
+		certPEM, keyPEM := mongoTestCertKey(t)
+
+		req.Files = []testcontainers.ContainerFile{
+			{
+				// mongod wants certificate and key in one file.
+				Reader:            bytes.NewReader(append(append([]byte{}, certPEM...), keyPEM...)),
+				ContainerFilePath: "/etc/mongo-test.pem",
+				FileMode:          0o644,
+			},
+			{
+				// Self-signed, so the certificate is its own chain of trust.
+				// mongod refuses to start with TLS and no --tlsCAFile
+				// (SERVER-72839), even when it never verifies a client.
+				Reader:            bytes.NewReader(certPEM),
+				ContainerFilePath: "/etc/mongo-ca.pem",
+				FileMode:          0o644,
+			},
+		}
+		req.Cmd = []string{
+			"mongod",
+			"--bind_ip_all",
+			// preferTLS, not requireTLS: one container has to answer both an
+			// encrypted and a plaintext client for the ssl_mode cases to be
+			// comparable against the same upstream.
+			"--tlsMode", "preferTLS",
+			"--tlsCertificateKeyFile", "/etc/mongo-test.pem",
+			"--tlsCAFile", "/etc/mongo-ca.pem",
+			"--tlsAllowConnectionsWithoutCertificates",
+		}
+	}
+
+	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: req,
+		Started:          true,
 	})
 	require.NoError(t, err, "start mongo container (%s)", image)
 
@@ -101,7 +158,22 @@ func setupFixture(ctx context.Context, t *testing.T) *fixture {
 func setupFixtureWithDumpDir(ctx context.Context, t *testing.T, dumpDir string) *fixture {
 	t.Helper()
 
-	upstream, upstreamHost, upstreamPort := runMongoContainer(ctx, t, mongoImage())
+	return setupFixtureWith(ctx, t, dumpDir, "disable", false)
+}
+
+// setupFixtureWithSSLMode builds the fixture against a TLS-capable upstream and
+// a specific ssl_mode on the server row — the two variables the upstream-TLS
+// tests turn.
+func setupFixtureWithSSLMode(ctx context.Context, t *testing.T, sslMode string) *fixture {
+	t.Helper()
+
+	return setupFixtureWith(ctx, t, "", sslMode, true)
+}
+
+func setupFixtureWith(ctx context.Context, t *testing.T, dumpDir, sslMode string, upstreamTLS bool) *fixture {
+	t.Helper()
+
+	upstream, upstreamHost, upstreamPort := runMongoContainerWith(ctx, t, mongoImage(), upstreamTLS)
 	t.Cleanup(func() { _ = upstream.Terminate(context.Background()) })
 
 	pgContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
@@ -149,7 +221,7 @@ func setupFixtureWithDumpDir(ctx context.Context, t *testing.T, dumpDir string) 
 		Username:     rootUser,
 		Password:     rootPass,
 		Protocol:     store.ProtocolMongoDB,
-		SSLMode:      "disable",
+		SSLMode:      sslMode,
 	}, encKey)
 	require.NoError(t, err)
 
@@ -639,4 +711,93 @@ func TestIntegration_GetMoreLineage(t *testing.T) {
 
 		return false
 	}, 3*time.Second, 100*time.Millisecond, "getMore should be linked to its originating find cursor")
+}
+
+// mongoTestCertKey generates a throwaway self-signed certificate and its key,
+// PEM-encoded separately so the caller can build both the combined
+// certificate-key file and the CA file mongod insists on.
+func mongoTestCertKey(t *testing.T) ([]byte, []byte) {
+	t.Helper()
+
+	const rsaBits = 2048
+
+	priv, err := rsa.GenerateKey(rand.Reader, rsaBits)
+	require.NoError(t, err)
+
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "dbbat-test-mongo"},
+		DNSNames:     []string{"localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	require.NoError(t, err)
+
+	var certPEM, keyPEM bytes.Buffer
+	require.NoError(t, pem.Encode(&certPEM, &pem.Block{Type: "CERTIFICATE", Bytes: der}))
+	require.NoError(t, pem.Encode(&keyPEM, &pem.Block{
+		Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv),
+	}))
+
+	return certPEM.Bytes(), keyPEM.Bytes()
+}
+
+// assertRecordedUpstreamTLS checks that the session wrote down which way it
+// went. Under an opportunistic ssl_mode this row is the only place the answer
+// exists.
+func (f *fixture) assertRecordedUpstreamTLS(ctx context.Context, want bool) {
+	f.t.Helper()
+
+	require.Eventually(f.t, func() bool {
+		conns, err := f.store.ListConnections(ctx, store.ConnectionFilter{Limit: 10})
+
+		return err == nil && len(conns) > 0 && conns[0].UpstreamTLS == want
+	}, 10*time.Second, 200*time.Millisecond, "connections.upstream_tls should be %v", want)
+}
+
+// TestIntegration_UpstreamTLS_Prefer is the behaviour this proxy did not have
+// before the upstream-connect paths were unified: MongoDB cannot negotiate
+// encryption in band, so prefer means "try the TLS handshake first". Against a
+// preferTLS mongod it must actually encrypt, and record that it did.
+func TestIntegration_UpstreamTLS_Prefer(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixtureWithSSLMode(ctx, t, "prefer")
+
+	client := f.dialThrough(fixtureUser, fixturePass)
+	defer func() { _ = client.Disconnect(ctx) }()
+
+	require.NoError(t, client.Ping(ctx, nil))
+	f.assertRecordedUpstreamTLS(ctx, true)
+}
+
+// TestIntegration_UpstreamTLS_Require pins the mandatory mode against the same
+// upstream.
+func TestIntegration_UpstreamTLS_Require(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixtureWithSSLMode(ctx, t, "require")
+
+	client := f.dialThrough(fixtureUser, fixturePass)
+	defer func() { _ = client.Disconnect(ctx) }()
+
+	require.NoError(t, client.Ping(ctx, nil))
+	f.assertRecordedUpstreamTLS(ctx, true)
+}
+
+// TestIntegration_UpstreamTLS_Disable is the counterpart: against the very same
+// TLS-capable upstream, disable must stay in the clear — a preferTLS mongod
+// accepts both, so a silent upgrade would go unnoticed without this case.
+func TestIntegration_UpstreamTLS_Disable(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixtureWithSSLMode(ctx, t, "disable")
+
+	client := f.dialThrough(fixtureUser, fixturePass)
+	defer func() { _ = client.Disconnect(ctx) }()
+
+	require.NoError(t, client.Ping(ctx, nil))
+	f.assertRecordedUpstreamTLS(ctx, false)
 }
