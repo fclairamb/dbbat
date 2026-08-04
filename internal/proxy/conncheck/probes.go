@@ -11,7 +11,6 @@ import (
 
 	gomysqlclient "github.com/go-mysql-org/go-mysql/client"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
-	"github.com/jackc/pgx/v5/pgconn"
 	goora "github.com/sijms/go-ora/v3"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -67,70 +66,30 @@ func probeAppName() string {
 	return "dbbat/" + version.Version + " connectivity-check"
 }
 
-// probePostgres opens a real startup+auth exchange with the upstream using the
-// same pgx stack the PostgreSQL proxy speaks, over the injected transport.
+// probePostgres runs the *proxy's* upstream connect — same dial, same ssl_mode
+// negotiation, same login — and hangs up the moment it succeeds. It is not a
+// reimplementation with a client library any more: a green check now means the
+// exact code path a real session takes got in.
+//
+// The probe used to build a pgconn.Config here, and that second implementation
+// is what drifted: it mapped ssl_mode=prefer to plaintext-only while the proxy
+// sent an SSLRequest, so every target whose pg_hba.conf demands encryption
+// reported "the database refused the stored credentials" for a server the proxy
+// connects to fine.
 func probePostgres(ctx context.Context, srv *store.Server, dial dialFunc) error {
-	// pgconn.Config must come from ParseConfig; every field that matters is
-	// overridden below, so the environment cannot influence the probe.
-	cfg, err := pgconn.ParseConfig("postgres://")
-	if err != nil {
-		return fmt.Errorf("build postgres probe config: %w", err)
-	}
-
-	cfg.Host = srv.Host
-	cfg.Port = uint16(srv.Port)
-	cfg.User = srv.Username
-	cfg.Password = srv.Password
-	cfg.Database = srv.DatabaseName
-	cfg.ConnectTimeout = DefaultTimeout
-	cfg.RuntimeParams = map[string]string{"application_name": probeAppName()}
-	cfg.DialFunc = func(dialCtx context.Context, _, _ string) (net.Conn, error) {
-		return dial(dialCtx)
-	}
-	cfg.TLSConfig, cfg.Fallbacks = postgresTLSPlan(srv)
-
-	conn, err := pgconn.ConnectConfig(ctx, cfg)
+	up, err := upstream.ConnectPostgres(ctx, upstream.DialFunc(dial), upstream.PostgresConfig{
+		Host:            srv.Host,
+		Username:        srv.Username,
+		Password:        srv.Password,
+		Database:        srv.DatabaseName,
+		ApplicationName: probeAppName(),
+		SSLMode:         srv.SSLMode,
+	}, nil)
 	if err != nil {
 		return err
 	}
 
-	return conn.Close(ctx)
-}
-
-// postgresTLSPlan translates the shared ssl_mode policy (upstream.PlanFor —
-// the same one the PostgreSQL proxy negotiates with) into pgconn's shape: a
-// primary TLS config plus the fallback chain pgconn walks when the primary
-// attempt fails on anything other than authentication.
-//
-// The opportunistic modes ("prefer", "allow", and the empty default) need two
-// attempts, which is exactly what Fallbacks are for — a single pgconn.Config
-// cannot express them. Collapsing them to plaintext is not a cosmetic
-// simplification: a target whose pg_hba.conf demands encryption rejects the
-// plaintext attempt with SQLSTATE 28000, and the probe reports "the database
-// refused the stored credentials" for a target the proxy connects to fine —
-// negotiateUpstreamSSL does send the SSLRequest under "prefer".
-func postgresTLSPlan(srv *store.Server) (*tls.Config, []*pgconn.FallbackConfig) {
-	attempts := upstream.PlanFor(srv.SSLMode, srv.Host).Attempts
-
-	primary := attempts[0].TLS
-
-	fallbacks := make([]*pgconn.FallbackConfig, 0, len(attempts)-1)
-	for _, a := range attempts[1:] {
-		fallbacks = append(fallbacks, postgresFallback(srv, a.TLS))
-	}
-
-	return primary, fallbacks
-}
-
-// postgresFallback builds the second attempt of an opportunistic ssl_mode. Host
-// and port only satisfy pgconn's config shape — the injected DialFunc ignores
-// them, so the fallback still runs through the same tunnel as the first try.
-func postgresFallback(srv *store.Server, tlsCfg *tls.Config) *pgconn.FallbackConfig {
-	return &pgconn.FallbackConfig{
-		Host:      srv.Host,
-		Port:      uint16(srv.Port),
-		TLSConfig: tlsCfg,
-	}
+	return up.Close()
 }
 
 // probeMySQL logs in with go-mysql's client — the same library and the same

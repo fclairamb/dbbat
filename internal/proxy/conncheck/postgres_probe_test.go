@@ -2,13 +2,14 @@ package conncheck
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/binary"
 	"errors"
 	"io"
 	"net"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -158,93 +159,120 @@ func TestProbePostgres_PreferOffersTLS(t *testing.T) {
 	}
 }
 
-// TestPostgresTLSPlan pins the ssl_mode → (primary, fallback) mapping, which is
-// where libpq parity actually lives.
-func TestPostgresTLSPlan(t *testing.T) {
-	t.Parallel()
+// The ssl_mode → attempt-plan mapping used to be pinned here, against the
+// probe's own pgconn translation of it. That translation is gone: the probe
+// calls the proxy's connector, and the policy is described once by
+// upstream.TestPlanFor. What stays in this file is the wire-level assertion
+// that a prefer-mode probe really offers TLS, plus the classification below.
 
-	srv := &store.Server{Host: "db.example.com", Port: 5432}
-
-	for _, tc := range []struct {
-		name            string
-		sslMode         string
-		wantPrimaryTLS  bool
-		wantFallbacks   int
-		wantFallbackTLS bool
-		wantServerName  string
-	}{
-		{name: "disable", sslMode: "disable", wantPrimaryTLS: false, wantFallbacks: 0},
-		{name: "require", sslMode: "require", wantPrimaryTLS: true, wantFallbacks: 0},
-		{
-			name: "verify-full pins hostname", sslMode: "verify-full",
-			wantPrimaryTLS: true, wantFallbacks: 0, wantServerName: "db.example.com",
-		},
-		{
-			name: "verify-ca pins hostname", sslMode: "verify-ca",
-			wantPrimaryTLS: true, wantFallbacks: 0, wantServerName: "db.example.com",
-		},
-		{
-			name: "prefer tries TLS then plaintext", sslMode: "prefer",
-			wantPrimaryTLS: true, wantFallbacks: 1, wantFallbackTLS: false,
-		},
-		{
-			name: "empty tries TLS then plaintext", sslMode: "",
-			wantPrimaryTLS: true, wantFallbacks: 1, wantFallbackTLS: false,
-		},
-		{
-			name: "allow tries plaintext then TLS", sslMode: "allow",
-			wantPrimaryTLS: false, wantFallbacks: 1, wantFallbackTLS: true,
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			srv := &store.Server{Host: srv.Host, Port: srv.Port, SSLMode: tc.sslMode}
-			primary, fallbacks := postgresTLSPlan(srv)
-
-			if (primary != nil) != tc.wantPrimaryTLS {
-				t.Fatalf("primary TLS = %v, want %v", primary != nil, tc.wantPrimaryTLS)
-			}
-
-			if len(fallbacks) != tc.wantFallbacks {
-				t.Fatalf("fallbacks = %d, want %d", len(fallbacks), tc.wantFallbacks)
-			}
-
-			if tc.wantFallbacks == 1 {
-				fb := fallbacks[0]
-				if (fb.TLSConfig != nil) != tc.wantFallbackTLS {
-					t.Fatalf("fallback TLS = %v, want %v", fb.TLSConfig != nil, tc.wantFallbackTLS)
-				}
-
-				if fb.Host != srv.Host || fb.Port != uint16(srv.Port) {
-					t.Fatalf("fallback target = %s:%d, want %s:%d", fb.Host, fb.Port, srv.Host, srv.Port)
-				}
-			}
-
-			assertTLSExpectations(t, primary, tc.wantServerName)
-		})
-	}
-}
-
-// assertTLSExpectations checks the parts of a probe tls.Config that carry
-// security meaning: the floor version, and whether the server is authenticated.
-func assertTLSExpectations(t *testing.T, cfg *tls.Config, wantServerName string) {
+// startPGRejectingTarget accepts one connection, refuses TLS if offered, then
+// answers the StartupMessage with a FATAL ErrorResponse — what a real Postgres
+// sends when the credentials are wrong.
+func startPGRejectingTarget(t *testing.T, message string) net.Listener {
 	t.Helper()
 
-	if cfg == nil {
-		return
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("pg listen: %v", err)
 	}
 
-	if cfg.MinVersion != tls.VersionTLS12 {
-		t.Fatalf("MinVersion = %x, want TLS 1.2", cfg.MinVersion)
+	t.Cleanup(func() { _ = ln.Close() })
+
+	go func() {
+		conn, acceptErr := ln.Accept()
+		if acceptErr != nil {
+			return
+		}
+
+		defer func() { _ = conn.Close() }()
+
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+		backend := pgproto3.NewBackend(conn, conn)
+
+		for {
+			msg, recvErr := backend.ReceiveStartupMessage()
+			if recvErr != nil {
+				return
+			}
+
+			if _, isSSL := msg.(*pgproto3.SSLRequest); isSSL {
+				if _, writeErr := conn.Write([]byte{'N'}); writeErr != nil {
+					return
+				}
+
+				continue
+			}
+
+			backend.Send(&pgproto3.ErrorResponse{Severity: "FATAL", Code: "28P01", Message: message})
+			_ = backend.Flush()
+
+			return
+		}
+	}()
+
+	return ln
+}
+
+// TestProbePostgres_ClassifiesFailures is the guard on the half of the probe
+// that is genuinely probe-specific and must survive the move onto the proxy's
+// connector: the stage/code mapping the UI keys its guidance off. A refused
+// password and a refused TLS upgrade point at different fields, so they must
+// not collapse into one code.
+func TestProbePostgres_ClassifiesFailures(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rejected credentials are an auth failure", func(t *testing.T) {
+		t.Parallel()
+
+		ln := startPGRejectingTarget(t, `password authentication failed for user "app"`)
+		host, port := splitHostPort(t, ln.Addr().String())
+
+		res := runPGProbe(t, &store.Server{
+			Protocol: store.ProtocolPostgreSQL, Host: host, Port: port,
+			Username: "app", Password: "secret", DatabaseName: "app", SSLMode: "prefer",
+		}, ln)
+
+		if res.Stage != StageTargetAuth || res.Code != CodeDBAuthFailed {
+			t.Fatalf("stage/code = %s/%s, want %s/%s", res.Stage, res.Code, StageTargetAuth, CodeDBAuthFailed)
+		}
+	})
+
+	t.Run("refused TLS is a handshake failure", func(t *testing.T) {
+		t.Parallel()
+
+		// Same target, but ssl_mode=require: it answers 'N', which is a
+		// configuration problem on the target, not a credentials problem.
+		ln := startPGRejectingTarget(t, `password authentication failed for user "app"`)
+		host, port := splitHostPort(t, ln.Addr().String())
+
+		res := runPGProbe(t, &store.Server{
+			Protocol: store.ProtocolPostgreSQL, Host: host, Port: port,
+			Username: "app", Password: "secret", DatabaseName: "app", SSLMode: "require",
+		}, ln)
+
+		if res.Stage != StageTargetAuth || res.Code != CodeDBHandshakeFailed {
+			t.Fatalf("stage/code = %s/%s, want %s/%s", res.Stage, res.Code, StageTargetAuth, CodeDBHandshakeFailed)
+		}
+	})
+}
+
+// runPGProbe drives probePostgres against ln and classifies the failure the way
+// the checker does.
+func runPGProbe(t *testing.T, srv *store.Server, ln net.Listener) Result {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err := probePostgres(ctx, srv, func(dialCtx context.Context) (net.Conn, error) {
+		var d net.Dialer
+
+		return d.DialContext(dialCtx, "tcp", ln.Addr().String())
+	})
+	if err == nil {
+		t.Fatal("probe unexpectedly succeeded against a rejecting target")
 	}
 
-	if cfg.ServerName != wantServerName {
-		t.Fatalf("ServerName = %q, want %q", cfg.ServerName, wantServerName)
-	}
-
-	// A pinned hostname means the chain must actually be verified.
-	if wantServerName != "" && cfg.InsecureSkipVerify {
-		t.Fatal("verify-ca/verify-full must not skip certificate verification")
-	}
+	return classifyTargetError(err)
 }
