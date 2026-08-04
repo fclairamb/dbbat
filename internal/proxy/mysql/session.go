@@ -260,6 +260,7 @@ func (s *Session) recordConnection() error {
 		s.user.UID,
 		s.database.UID,
 		store.ExtractSourceIP(s.clientConn.RemoteAddr()),
+		store.WithUpstreamTLS(s.upstreamTLS),
 	)
 	if err != nil {
 		return fmt.Errorf("create connection: %w", err)

@@ -4142,6 +4142,16 @@ components:
           type: integer
           format: int64
           description: Total bytes transferred
+        upstream_tls:
+          type: boolean
+          description: >-
+            Whether the proxy→upstream leg of this session was actually
+            encrypted. The server's ssl_mode states a policy, not an outcome:
+            the opportunistic modes (`prefer`, and the empty default) offer TLS
+            and fall back to plaintext when the target refuses, so only the
+            session knows which way it went. Always false for Oracle, whose
+            proxy relays the client's own TNS Connect descriptor over a plain
+            socket.
       required:
         - uid
         - user_id

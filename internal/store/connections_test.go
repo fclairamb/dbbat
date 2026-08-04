@@ -46,6 +46,43 @@ func TestCreateConnection(t *testing.T) {
 		}
 	})
 
+	// upstream_tls is what makes the opportunistic ssl_mode fallback auditable
+	// instead of silent, so it has to survive the round trip rather than be a
+	// field the insert quietly drops.
+	t.Run("records the upstream encryption state", func(t *testing.T) {
+		for _, encrypted := range []bool{true, false} {
+			conn, err := store.CreateConnection(ctx, user.UID, database.UID, "192.168.1.101",
+				WithUpstreamTLS(encrypted))
+			if err != nil {
+				t.Fatalf("CreateConnection() error = %v", err)
+			}
+
+			if conn.UpstreamTLS != encrypted {
+				t.Errorf("returned conn.UpstreamTLS = %v, want %v", conn.UpstreamTLS, encrypted)
+			}
+
+			reread, err := store.GetConnectionByUID(ctx, conn.UID)
+			if err != nil {
+				t.Fatalf("GetConnectionByUID() error = %v", err)
+			}
+
+			if reread.UpstreamTLS != encrypted {
+				t.Errorf("persisted conn.UpstreamTLS = %v, want %v", reread.UpstreamTLS, encrypted)
+			}
+		}
+	})
+
+	t.Run("defaults the upstream encryption state to false", func(t *testing.T) {
+		conn, err := store.CreateConnection(ctx, user.UID, database.UID, "192.168.1.102")
+		if err != nil {
+			t.Fatalf("CreateConnection() error = %v", err)
+		}
+
+		if conn.UpstreamTLS {
+			t.Error("a connection with no recorded encryption state must not claim to be encrypted")
+		}
+	})
+
 	t.Run("create connection with IPv6", func(t *testing.T) {
 		conn, err := store.CreateConnection(ctx, user.UID, database.UID, "::1")
 		if err != nil {

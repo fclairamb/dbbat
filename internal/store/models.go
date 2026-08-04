@@ -301,6 +301,14 @@ type Connection struct {
 	Queries          int64      `bun:"queries,notnull,default:0" json:"queries"`
 	BytesTransferred int64      `bun:"bytes_transferred,notnull,default:0" json:"bytes_transferred"`
 
+	// UpstreamTLS reports whether the proxy→upstream leg of this session was
+	// encrypted. The server row's ssl_mode states a policy, not an outcome:
+	// the opportunistic modes ("prefer", and the empty default) fall back to
+	// plaintext when the target refuses TLS, so only the session knows which
+	// way it went. Recording it is what makes that fallback auditable rather
+	// than silent.
+	UpstreamTLS bool `bun:"upstream_tls,notnull,default:false" json:"upstream_tls"`
+
 	// InstanceID is the dbbat process that opened this connection. It scopes
 	// the startup reconcile (Store.CloseOrphanedConnections) so a replica can
 	// never close another replica's live sessions. Internal bookkeeping, not

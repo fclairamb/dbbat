@@ -11,8 +11,25 @@ import (
 	"github.com/uptrace/bun"
 )
 
+// ConnectionOption sets a field on a connection row before it is inserted.
+// Variadic so the many call sites that only need the four required columns stay
+// as they are.
+type ConnectionOption func(*Connection)
+
+// WithUpstreamTLS records whether the proxy→upstream leg of the session is
+// encrypted. Only the session knows: under an opportunistic ssl_mode the row's
+// policy does not determine the outcome.
+func WithUpstreamTLS(encrypted bool) ConnectionOption {
+	return func(c *Connection) { c.UpstreamTLS = encrypted }
+}
+
 // CreateConnection creates a new connection record
-func (s *Store) CreateConnection(ctx context.Context, userID, databaseID uuid.UUID, sourceIP string) (*Connection, error) {
+func (s *Store) CreateConnection(
+	ctx context.Context,
+	userID, databaseID uuid.UUID,
+	sourceIP string,
+	opts ...ConnectionOption,
+) (*Connection, error) {
 	conn := &Connection{
 		UID:              newUIDv7(), // Generate UUIDv7 for time-ordered inserts
 		UserID:           userID,
@@ -24,6 +41,10 @@ func (s *Store) CreateConnection(ctx context.Context, userID, databaseID uuid.UU
 		BytesTransferred: 0,
 		InstanceID:       s.instanceID,
 		RunID:            s.currentRunID(),
+	}
+
+	for _, opt := range opts {
+		opt(conn)
 	}
 
 	_, err := s.db.NewInsert().
@@ -386,7 +407,7 @@ func (s *Store) GetConnectionByUID(ctx context.Context, uid uuid.UUID) (*Connect
 	conn := &Connection{}
 	err := s.db.NewSelect().
 		Model(conn).
-		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, disconnected_at, queries, bytes_transferred, instance_id").
+		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, disconnected_at, queries, bytes_transferred, instance_id, upstream_tls").
 		Where("uid = ?", uid).
 		Scan(ctx)
 	if err != nil {
@@ -403,7 +424,7 @@ func (s *Store) ListConnections(ctx context.Context, filter ConnectionFilter) ([
 	var connections []Connection
 	q := s.db.NewSelect().
 		Model(&connections).
-		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, disconnected_at, queries, bytes_transferred, instance_id")
+		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, disconnected_at, queries, bytes_transferred, instance_id, upstream_tls")
 
 	if filter.UserID != nil {
 		q = q.Where("user_id = ?", *filter.UserID)

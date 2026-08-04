@@ -257,7 +257,8 @@ func (s *Session) Run() error {
 	// Create connection record
 	sourceIP := store.ExtractSourceIP(s.clientConn.RemoteAddr())
 
-	conn, err := s.store.CreateConnection(s.ctx, s.user.UID, s.database.UID, sourceIP)
+	conn, err := s.store.CreateConnection(s.ctx, s.user.UID, s.database.UID, sourceIP,
+		store.WithUpstreamTLS(s.upstreamTLS))
 	if err != nil {
 		s.logger.ErrorContext(s.ctx, "failed to create connection record", slog.Any("error", err))
 	} else {

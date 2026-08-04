@@ -348,7 +348,11 @@ func (s *session) run() error {
 
 	// Step 7: Record connection
 	sourceIP := store.ExtractSourceIP(s.clientConn.RemoteAddr())
-	conn, err := s.store.CreateConnection(s.ctx, s.user.UID, s.database.UID, sourceIP)
+	// Oracle is the one protocol dbbat never upgrades: the proxy relays the
+	// client's own TNS Connect descriptor over a plain socket, so the
+	// upstream leg is unencrypted regardless of the row's ssl_mode.
+	conn, err := s.store.CreateConnection(s.ctx, s.user.UID, s.database.UID, sourceIP,
+		store.WithUpstreamTLS(false))
 	if err == nil {
 		s.connectionUID = conn.UID
 	}

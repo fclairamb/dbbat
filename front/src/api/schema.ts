@@ -2302,6 +2302,8 @@ export interface components {
              * @description Total bytes transferred
              */
             bytes_transferred: number;
+            /** @description Whether the proxy→upstream leg of this session was actually encrypted. The server's ssl_mode states a policy, not an outcome: the opportunistic modes (`prefer`, and the empty default) offer TLS and fall back to plaintext when the target refuses, so only the session knows which way it went. Always false for Oracle, whose proxy relays the client's own TNS Connect descriptor over a plain socket. */
+            upstream_tls?: boolean;
         };
         Query: {
             /**
@@ -2367,6 +2369,16 @@ export interface components {
             resolved_at?: string | null;
             /** @description Reason supplied by the approver (or the system, on abandon) */
             resolution_reason?: string | null;
+            /**
+             * @description Direction of a bulk transfer: `out` for `COPY … TO` (data leaving the database), `in` for `COPY … FROM`. Absent for every statement that is not a COPY.
+             * @enum {string|null}
+             */
+            copy_direction?: "in" | "out" | null;
+            /**
+             * @description Wire format the COPY used. Absent for every statement that is not a COPY.
+             * @enum {string|null}
+             */
+            copy_format?: "text" | "csv" | "binary" | "unknown" | null;
         };
         /** @description The outcome of an approve/deny decision on a held query. */
         ApprovalResolution: {
