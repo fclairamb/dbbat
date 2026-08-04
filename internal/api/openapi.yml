@@ -4248,6 +4248,21 @@ components:
           type: string
           nullable: true
           description: Reason supplied by the approver (or the system, on abandon)
+        copy_direction:
+          type: string
+          nullable: true
+          enum: [in, out]
+          description: >-
+            Direction of a bulk transfer: `out` for `COPY … TO` (data leaving
+            the database), `in` for `COPY … FROM`. Absent for every statement
+            that is not a COPY.
+        copy_format:
+          type: string
+          nullable: true
+          enum: [text, csv, binary, unknown]
+          description: >-
+            Wire format the COPY used. Absent for every statement that is not
+            a COPY.
       required:
         - uid
         - connection_id
