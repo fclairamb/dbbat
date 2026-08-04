@@ -26,7 +26,11 @@ func createTestGrantDefinition(
 	t.Helper()
 
 	def, err := dataStore.CreateGrantDefinition(context.Background(), &store.GrantDefinition{
-		Name:            name,
+		Name: name,
+		// The test names passed in are already slug-shaped (lowercase,
+		// hyphenated), so reuse them directly rather than adding a second
+		// slugification helper just for tests.
+		Slug:            name,
 		DurationSeconds: 3600,
 		Controls:        []string{store.ControlReadOnly},
 		AutoApprove:     autoApprove,
