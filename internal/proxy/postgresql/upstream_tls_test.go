@@ -170,21 +170,7 @@ func TestNegotiateUpstreamSSL_AcceptUpgradesToTLS(t *testing.T) {
 	}
 }
 
-func TestUpstreamTLSConfig_ServerNameSetForVerifyModes(t *testing.T) {
-	t.Parallel()
-
-	cfg := upstreamTLSConfig("example.com", "verify-full")
-	if cfg.ServerName != "example.com" || cfg.InsecureSkipVerify {
-		t.Fatalf("verify-full: ServerName=%q InsecureSkipVerify=%v", cfg.ServerName, cfg.InsecureSkipVerify)
-	}
-
-	cfg = upstreamTLSConfig("example.com", "verify-ca")
-	if cfg.ServerName != "example.com" || cfg.InsecureSkipVerify {
-		t.Fatalf("verify-ca: ServerName=%q InsecureSkipVerify=%v", cfg.ServerName, cfg.InsecureSkipVerify)
-	}
-
-	cfg = upstreamTLSConfig("example.com", "require")
-	if !cfg.InsecureSkipVerify {
-		t.Fatalf("require: expected InsecureSkipVerify=true")
-	}
-}
+// The ssl_mode → tls.Config mapping itself is no longer tested here: it moved
+// to upstream.PlanFor, whose table-driven test (TestPlanFor) is the one place
+// the policy is described. What stays here is how PostgreSQL *executes* that
+// policy over its in-band SSLRequest handshake.

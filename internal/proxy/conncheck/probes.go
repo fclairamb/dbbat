@@ -17,6 +17,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
 	"go.mongodb.org/mongo-driver/v2/mongo/readpref"
 
+	"github.com/fclairamb/dbbat/internal/proxy/upstream"
 	"github.com/fclairamb/dbbat/internal/store"
 	"github.com/fclairamb/dbbat/internal/version"
 )
@@ -96,7 +97,8 @@ func probePostgres(ctx context.Context, srv *store.Server, dial dialFunc) error 
 	return conn.Close(ctx)
 }
 
-// postgresTLSPlan mirrors libpq ssl_mode semantics for the probe, returning the
+// postgresTLSPlan translates the shared ssl_mode policy (upstream.PlanFor —
+// the same one the PostgreSQL proxy negotiates with) into pgconn's shape: a
 // primary TLS config plus the fallback chain pgconn walks when the primary
 // attempt fails on anything other than authentication.
 //
@@ -108,22 +110,16 @@ func probePostgres(ctx context.Context, srv *store.Server, dial dialFunc) error 
 // refused the stored credentials" for a target the proxy connects to fine —
 // negotiateUpstreamSSL does send the SSLRequest under "prefer".
 func postgresTLSPlan(srv *store.Server) (*tls.Config, []*pgconn.FallbackConfig) {
-	// require/prefer parity with libpq (and with upstreamTLSConfig in the
-	// proxy): encrypt without authenticating the server.
-	encrypted := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}
+	attempts := upstream.PlanFor(srv.SSLMode, srv.Host).Attempts
 
-	switch srv.SSLMode {
-	case "disable":
-		return nil, nil
-	case "require":
-		return encrypted, nil
-	case "verify-ca", "verify-full":
-		return &tls.Config{MinVersion: tls.VersionTLS12, ServerName: srv.Host}, nil
-	case "allow":
-		return nil, []*pgconn.FallbackConfig{postgresFallback(srv, encrypted)}
-	default: // "prefer" and the empty default: TLS first, plaintext second.
-		return encrypted, []*pgconn.FallbackConfig{postgresFallback(srv, nil)}
+	primary := attempts[0].TLS
+
+	fallbacks := make([]*pgconn.FallbackConfig, 0, len(attempts)-1)
+	for _, a := range attempts[1:] {
+		fallbacks = append(fallbacks, postgresFallback(srv, a.TLS))
 	}
+
+	return primary, fallbacks
 }
 
 // postgresFallback builds the second attempt of an opportunistic ssl_mode. Host
