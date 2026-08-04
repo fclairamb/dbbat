@@ -5,12 +5,49 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"regexp"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/store"
 )
+
+// slugMaxLength bounds how long a grant definition slug may be — long enough
+// for a descriptive handle, short enough to stay comfortable in a CLI
+// invocation or a URL path segment.
+const slugMaxLength = 64
+
+// slugPattern is the accepted shape for a grant definition slug: lowercase
+// alphanumeric segments separated by single hyphens. No leading/trailing/
+// doubled hyphens, no uppercase, no underscores or spaces — the same rules
+// as most URL-safe slug conventions, chosen so the slug is always safe to
+// drop into a path segment or a shell argument unquoted.
+var slugPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
+
+// resolveGrantDefinition looks up a grant definition by either its uid or
+// its slug. A syntactically UUID-shaped identifier is tried as a uid first;
+// if that misses, it is retried as a slug. That fallback matters because
+// the slug format also accepts UUID-shaped strings (`slugPattern` allows
+// them), so without it an operator who deliberately named a definition's
+// slug something that happens to parse as a UUID could get a confusing 404
+// on a path that would otherwise resolve it by slug.
+func (s *Server) resolveGrantDefinition(ctx context.Context, idOrSlug string) (*store.GrantDefinition, error) {
+	if uid, err := uuid.Parse(idOrSlug); err == nil {
+		def, err := s.store.GetGrantDefinition(ctx, uid)
+
+		switch {
+		case err == nil:
+			return def, nil
+		case errors.Is(err, store.ErrGrantDefinitionNotFound):
+			// Fall through to the slug lookup below.
+		default:
+			return nil, err
+		}
+	}
+
+	return s.store.GetGrantDefinitionBySlug(ctx, idOrSlug)
+}
 
 // validateDefinitionScope checks that every scoped group and database uid
 // actually exists, so an admin can't silently create a definition that is
@@ -44,7 +81,13 @@ func (s *Server) validateDefinitionScope(ctx context.Context, req *CreateGrantDe
 
 // CreateGrantDefinitionRequest is the JSON body for POST /grant-definitions.
 type CreateGrantDefinitionRequest struct {
-	Name                string   `json:"name" binding:"required"`
+	Name string `json:"name" binding:"required"`
+	// Slug is a stable, human-typeable, machine-friendly identifier for this
+	// definition — mandatory at the API level. The server never generates
+	// one; that's the frontend's job (derive-from-name until the operator
+	// edits it manually), which keeps the API contract explicit for CLI and
+	// agent callers.
+	Slug                string   `json:"slug" binding:"required"`
 	Description         string   `json:"description"`
 	DurationSeconds     int64    `json:"duration_seconds" binding:"required"`
 	Controls            []string `json:"controls"`
@@ -83,6 +126,18 @@ func validateDefinitionRequest(req *CreateGrantDefinitionRequest) string {
 
 	if len(req.Name) > 64 {
 		return "name must be at most 64 characters"
+	}
+
+	if req.Slug == "" {
+		return "slug is required"
+	}
+
+	if len(req.Slug) > slugMaxLength {
+		return "slug must be at most 64 characters"
+	}
+
+	if !slugPattern.MatchString(req.Slug) {
+		return "slug must be lowercase alphanumeric segments separated by hyphens (e.g. read-only-1h)"
 	}
 
 	if req.DurationSeconds <= 0 {
@@ -151,6 +206,7 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 
 	def := &store.GrantDefinition{
 		Name:                req.Name,
+		Slug:                req.Slug,
 		Description:         req.Description,
 		DurationSeconds:     req.DurationSeconds,
 		Controls:            req.Controls,
@@ -170,6 +226,11 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		// a unique-violation, mapped to a typed sentinel by the store; return
 		// a 409 so the client can react rather than an opaque 500.
 		if errors.Is(err, store.ErrGrantDefinitionDuplicate) {
+			writeError(c, http.StatusConflict, ErrCodeDuplicateName, err.Error())
+
+			return
+		}
+		if errors.Is(err, store.ErrGrantDefinitionSlugDuplicate) {
 			writeError(c, http.StatusConflict, ErrCodeDuplicateName, err.Error())
 
 			return
@@ -244,16 +305,10 @@ func (s *Server) handleListGrantDefinitions(c *gin.Context) {
 	successResponse(c, gin.H{"grant_definitions": defs})
 }
 
-// handleGetGrantDefinition — any authenticated user.
+// handleGetGrantDefinition — any authenticated user. The path param accepts
+// either the definition's uid or its slug.
 func (s *Server) handleGetGrantDefinition(c *gin.Context) {
-	uid, err := parseUIDParam(c)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid grant definition UID")
-
-		return
-	}
-
-	def, err := s.store.GetGrantDefinition(c.Request.Context(), uid)
+	def, err := s.resolveGrantDefinition(c.Request.Context(), c.Param("uid"))
 	if err != nil {
 		if errors.Is(err, store.ErrGrantDefinitionNotFound) {
 			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
@@ -297,15 +352,9 @@ func (s *Server) handleGetGrantDefinition(c *gin.Context) {
 	successResponse(c, def)
 }
 
-// handleUpdateGrantDefinition — admin-only.
+// handleUpdateGrantDefinition — admin-only. The path param accepts either
+// the definition's uid or its slug.
 func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
-	uid, err := parseUIDParam(c)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid grant definition UID")
-
-		return
-	}
-
 	var req UpdateGrantDefinitionRequest
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -326,7 +375,7 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 		return
 	}
 
-	def, err := s.store.GetGrantDefinition(c.Request.Context(), uid)
+	def, err := s.resolveGrantDefinition(c.Request.Context(), c.Param("uid"))
 	if err != nil {
 		if errors.Is(err, store.ErrGrantDefinitionNotFound) {
 			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
@@ -340,6 +389,7 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 	}
 
 	def.Name = req.Name
+	def.Slug = req.Slug
 	def.Description = req.Description
 	def.DurationSeconds = req.DurationSeconds
 	def.Controls = req.Controls
@@ -352,6 +402,12 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 	def.ApproverGroupUIDs = normalizeUUIDs(req.ApproverGroupUIDs)
 
 	if err := s.store.UpdateGrantDefinition(c.Request.Context(), def); err != nil {
+		if errors.Is(err, store.ErrGrantDefinitionSlugDuplicate) {
+			writeError(c, http.StatusConflict, ErrCodeDuplicateName, err.Error())
+
+			return
+		}
+
 		writeInternalError(c, s.logger, err, "failed to update grant definition")
 
 		return
@@ -376,16 +432,23 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 	successResponse(c, def)
 }
 
-// handleDeactivateGrantDefinition — admin-only soft delete.
+// handleDeactivateGrantDefinition — admin-only soft delete. The path param
+// accepts either the definition's uid or its slug.
 func (s *Server) handleDeactivateGrantDefinition(c *gin.Context) {
-	uid, err := parseUIDParam(c)
+	def, err := s.resolveGrantDefinition(c.Request.Context(), c.Param("uid"))
 	if err != nil {
-		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid grant definition UID")
+		if errors.Is(err, store.ErrGrantDefinitionNotFound) {
+			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
+
+			return
+		}
+
+		writeInternalError(c, s.logger, err, "failed to get grant definition")
 
 		return
 	}
 
-	if err := s.store.DeactivateGrantDefinition(c.Request.Context(), uid); err != nil {
+	if err := s.store.DeactivateGrantDefinition(c.Request.Context(), def.UID); err != nil {
 		if errors.Is(err, store.ErrGrantDefinitionNotFound) {
 			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
 
@@ -400,7 +463,7 @@ func (s *Server) handleDeactivateGrantDefinition(c *gin.Context) {
 	currentUser := getCurrentUser(c)
 
 	details, _ := json.Marshal(map[string]any{
-		"grant_definition_uid": uid,
+		"grant_definition_uid": def.UID,
 	})
 
 	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{

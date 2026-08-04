@@ -101,7 +101,12 @@ func (s *Server) deciderSlackID(ctx context.Context, decider *store.User) string
 
 // CreateGrantRequestRequest is the body for POST /grant-requests.
 type CreateGrantRequestRequest struct {
-	GrantDefinitionID uuid.UUID `json:"grant_definition_id" binding:"required"`
+	// GrantDefinitionID identifies the definition being requested — either
+	// its uid or its slug. Widened from uid-only to accept a slug too,
+	// rather than adding a sibling field, since this is the one place the
+	// API takes a bare definition reference as a request-body value (every
+	// other reference is a path param, resolved the same uid-or-slug way).
+	GrantDefinitionID string    `json:"grant_definition_id" binding:"required"`
 	DatabaseID        uuid.UUID `json:"database_id" binding:"required"`
 	Justification     string    `json:"justification"`
 }
@@ -166,7 +171,7 @@ func (s *Server) handleCreateGrantRequest(c *gin.Context) {
 	currentUser := getCurrentUser(c)
 	ctx := c.Request.Context()
 
-	def, err := s.store.GetGrantDefinition(ctx, req.GrantDefinitionID)
+	def, err := s.resolveGrantDefinition(ctx, req.GrantDefinitionID)
 	if err != nil {
 		if errors.Is(err, store.ErrGrantDefinitionNotFound) {
 			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "grant_definition_id does not exist")
@@ -203,7 +208,7 @@ func (s *Server) handleCreateGrantRequest(c *gin.Context) {
 		return
 	}
 
-	pending, err := s.store.HasPendingRequest(ctx, currentUser.UID, req.GrantDefinitionID, req.DatabaseID)
+	pending, err := s.store.HasPendingRequest(ctx, currentUser.UID, def.UID, req.DatabaseID)
 	if err != nil {
 		writeInternalError(c, s.logger, err, "failed to check pending requests")
 
@@ -218,7 +223,7 @@ func (s *Server) handleCreateGrantRequest(c *gin.Context) {
 
 	created, err := s.store.CreateGrantRequest(ctx, &store.GrantRequest{
 		UserID:            currentUser.UID,
-		GrantDefinitionID: req.GrantDefinitionID,
+		GrantDefinitionID: def.UID,
 		DatabaseID:        req.DatabaseID,
 		Justification:     req.Justification,
 	})
