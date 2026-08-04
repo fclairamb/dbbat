@@ -348,6 +348,108 @@ func TestCloseOrphanedConnectionsReclaimsDeadInstances(t *testing.T) {
 	})
 }
 
+// TestReclaimDeadInstanceConnectionsWithoutStartup covers the periodic reclaim:
+// the same liveness-checked sweep, run from a long-running process rather than
+// from the startup reconcile.
+//
+// That is the case the startup pass structurally cannot serve. A SIGKILLed pod
+// leaves a registry row seconds old, so its replacement — starting immediately
+// — reclaims nothing; only a later pass, once the row has gone stale, does. So
+// this test never calls CloseOrphanedConnections: the reclaim has to stand on
+// its own, without the own-instance update, which mid-life would close this
+// run's own live sessions.
+func TestReclaimDeadInstanceConnectionsWithoutStartup(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "periodic-reclaim")
+
+	stopped := time.Now().Add(-48 * time.Hour).Truncate(time.Microsecond)
+
+	openConnectionFor := func(instanceID, sourceIP string) uuid.UUID {
+		t.Helper()
+
+		previous := store.InstanceID()
+		store.SetInstanceID(instanceID)
+
+		conn, err := store.CreateConnection(ctx, user.UID, database.UID, sourceIP)
+		require.NoError(t, err)
+
+		store.SetInstanceID(previous)
+		backdateConnection(t, ctx, store, conn.UID, stopped)
+
+		return conn.UID
+	}
+
+	// This process: registered, heartbeating, and serving a session of its own.
+	// The periodic reclaim runs while that session is live, so leaving it alone
+	// is the property that makes running this outside startup safe at all.
+	store.SetInstanceID("running-instance")
+	require.NoError(t, store.RegisterInstance(ctx))
+
+	ownLive, err := store.CreateConnection(ctx, user.UID, database.UID, "10.2.0.1")
+	require.NoError(t, err)
+
+	// A peer that is up and heartbeating.
+	registerInstanceAs(t, ctx, store, "live-peer", 0)
+	peerConn := openConnectionFor("live-peer", "10.2.0.2")
+
+	// A peer that crashed: its row is still there, but long past the grace
+	// period. This is what only the periodic pass catches.
+	registerInstanceAs(t, ctx, store, "crashed-peer", InstanceStaleAfter+time.Minute)
+	crashedConn := openConnectionFor("crashed-peer", "10.2.0.3")
+
+	reclaimed, err := store.ReclaimDeadInstanceConnections(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), reclaimed, "only the crashed peer's connection should be reclaimed")
+
+	t.Run("the crashed instance's connection is closed at its last activity", func(t *testing.T) {
+		got, err := store.GetConnectionByUID(ctx, crashedConn)
+		require.NoError(t, err)
+		require.NotNil(t, got.DisconnectedAt)
+		assert.WithinDuration(t, stopped, *got.DisconnectedAt, time.Millisecond)
+	})
+
+	t.Run("a live instance's connection is untouched", func(t *testing.T) {
+		got, err := store.GetConnectionByUID(ctx, peerConn)
+		require.NoError(t, err)
+		assert.Nil(t, got.DisconnectedAt,
+			"a heartbeating instance's session must survive every periodic pass")
+	})
+
+	t.Run("this run's own live connection is untouched", func(t *testing.T) {
+		// The reason the own-instance half of the reconcile stays at startup:
+		// away from startup, our own open rows are sessions we are serving.
+		got, err := store.GetConnectionByUID(ctx, ownLive.UID)
+		require.NoError(t, err)
+		assert.Nil(t, got.DisconnectedAt,
+			"the periodic reclaim must never close the calling process's own sessions")
+	})
+
+	t.Run("running it again reclaims nothing", func(t *testing.T) {
+		// Every replica runs this on its own timer, so overlapping passes are
+		// expected; the second one has to be a no-op rather than double work.
+		again, err := store.ReclaimDeadInstanceConnections(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), again)
+	})
+
+	t.Run("an unset instance id reclaims nothing", func(t *testing.T) {
+		store.SetInstanceID("")
+
+		registerInstanceAs(t, ctx, store, "another-crashed-peer", InstanceStaleAfter+time.Minute)
+		orphan := openConnectionFor("another-crashed-peer", "10.2.0.4")
+
+		none, err := store.ReclaimDeadInstanceConnections(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), none, "a process with no identity judges nobody")
+
+		got, err := store.GetConnectionByUID(ctx, orphan)
+		require.NoError(t, err)
+		assert.Nil(t, got.DisconnectedAt)
+	})
+}
+
 // TestCloseOrphanedConnectionsAreReapedByRetention is the point of the whole
 // exercise: an orphan is invisible to the retention sweep until the reconcile
 // gives it a disconnected_at, and reapable immediately afterwards.
