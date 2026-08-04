@@ -2,16 +2,13 @@ package mysql
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	"log/slog"
 	"net"
 	"strconv"
 
-	gomysqlclient "github.com/go-mysql-org/go-mysql/client"
-	gomysql "github.com/go-mysql-org/go-mysql/mysql"
-
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/proxy/upstream"
 	"github.com/fclairamb/dbbat/internal/version"
 )
 
@@ -39,85 +36,55 @@ func buildUpstreamProgramName(username, clientProgramName string) string {
 // database configured for the session's grant. The session's encrypted
 // password is decrypted in-memory using the per-database AAD key.
 //
-// The upstream connection's authentication plugin is whatever the upstream
-// server prefers (typically caching_sha2_password for MySQL 8.x). go-mysql's
-// client handles plugin negotiation transparently — this is the
-// caching_sha2_password support we deliberately did NOT implement on the
-// server-facing side.
+// The connect itself is upstream.ConnectMySQL — the same call the connectivity
+// check makes, so the two cannot drift on TLS policy, connection attributes or
+// capability flags.
 func (s *Session) connectUpstream() error {
 	if err := s.database.DecryptPassword(s.server.encryptionKey); err != nil {
 		return fmt.Errorf("decrypt upstream password: %w", err)
 	}
 
-	addr := net.JoinHostPort(s.database.Host, strconv.Itoa(s.database.Port))
-
-	// Inject a Dialer so the upstream TCP connection can be tunneled through an
-	// SSH bastion when the server row's via_uid is set (plain dial otherwise).
-	dialer := func(ctx context.Context, _, _ string) (net.Conn, error) {
-		return shared.DialUpstream(ctx, s.server.store, s.server.encryptionKey, s.database)
-	}
-
-	conn, err := gomysqlclient.ConnectWithDialer(
-		s.ctx,
-		"tcp",
-		addr,
-		s.database.Username,
-		s.database.Password,
-		s.database.DatabaseName,
-		dialer,
-		s.applyUpstreamOptions,
-	)
+	up, err := upstream.ConnectMySQL(s.ctx, s.dialUpstream, s.upstreamConfig())
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrUpstreamConnect, err)
 	}
 
-	s.upstreamConn = conn
+	s.upstreamConn = up.Conn
+	s.upstreamTLS = up.TLS
 
 	s.logger.DebugContext(s.ctx, "upstream MySQL connected",
-		slog.String("addr", addr),
+		slog.String("addr", net.JoinHostPort(s.database.Host, strconv.Itoa(s.database.Port))),
 		slog.String("user", s.database.Username),
 		slog.String("database", s.database.DatabaseName))
 
 	return nil
 }
 
-// applyUpstreamOptions configures the upstream client connection: TLS mode
-// from the database's ssl_mode column, a connection attribute identifying
-// dbbat (and the connecting dbbat user) as the application, and explicit
-// refusal of CLIENT_LOCAL_FILES so a compromised upstream cannot ask the
-// proxy to upload arbitrary files via `LOAD DATA LOCAL INFILE` mid-query.
-func (s *Session) applyUpstreamOptions(c *gomysqlclient.Conn) error {
-	switch s.database.SSLMode {
-	case "require":
-		c.UseSSL(true) // skip cert verification
-	case "verify-ca", "verify-full":
-		c.SetTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12, ServerName: s.database.Host})
-	case "", "disable", "prefer", "allow":
-		// plaintext upstream — also the path for "prefer"/"allow" since the
-		// client doesn't currently negotiate opportunistic TLS for MySQL
-	}
-
-	// Defense-in-depth: refuse the LOCAL INFILE capability on the upstream
-	// connection. The shared SQL validator already blocks the keyword in
-	// inbound client SQL, but a malicious upstream could still issue a
-	// LOCAL_INFILE_REQUEST (0xFB) packet as part of any query response — and
-	// the go-mysql client would happily read the file from the proxy host's
-	// filesystem unless we opt out at handshake time.
-	c.UnsetCapability(gomysql.CLIENT_LOCAL_FILES)
-
-	// The client's own program_name attribute — sent during the client's
-	// handshake with dbbat and captured on s.serverConn — is the intercepted
-	// $appName, appended when present.
+// upstreamConfig projects the session's server row onto the shared connector's
+// config, which is also where the client's own program_name attribute — sent
+// during the client's handshake with dbbat and captured on s.serverConn — is
+// folded into the name dbbat advertises upstream.
+func (s *Session) upstreamConfig() upstream.MySQLConfig {
 	var clientProgramName string
 	if s.serverConn != nil {
 		clientProgramName = s.serverConn.Attributes()["program_name"]
 	}
 
-	c.SetAttributes(map[string]string{
-		"program_name": buildUpstreamProgramName(s.user.Username, clientProgramName),
-	})
+	return upstream.MySQLConfig{
+		Host:        s.database.Host,
+		Port:        s.database.Port,
+		Username:    s.database.Username,
+		Password:    s.database.Password,
+		Database:    s.database.DatabaseName,
+		ProgramName: buildUpstreamProgramName(s.user.Username, clientProgramName),
+		SSLMode:     s.database.SSLMode,
+	}
+}
 
-	return nil
+// dialUpstream opens the transport to the target: a direct TCP dial, or a
+// tunnel through the SSH bastion chain when the server row's via_uid is set.
+func (s *Session) dialUpstream(ctx context.Context) (net.Conn, error) {
+	return shared.DialUpstream(ctx, s.server.store, s.server.encryptionKey, s.database)
 }
 
 // closeUpstream closes the upstream connection if open.

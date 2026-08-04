@@ -168,8 +168,10 @@ session's last activity time so retention still measures from when the session
 actually stopped. That covers both its own leftovers and those of any other
 replica that shut down cleanly or stopped heartbeating; a replica that is up and
 heartbeating is never touched, so a live session can never be closed out from
-under it. See [`DBB_INSTANCE_ID`](/docs/configuration) for the registry and the
-grace period.
+under it. The second half is also re-run every few minutes by every running
+process, so a replica that crashes while the rest of the deployment stays up is
+reclaimed without waiting for an unrelated restart. See
+[`DBB_INSTANCE_ID`](/docs/configuration) for the registry and the grace period.
 
 Set the value to `0` (the default), or leave it unset, to keep history forever.
 An unparseable value also leaves retention off and logs a warning at startup,

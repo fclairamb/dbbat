@@ -183,10 +183,14 @@ func TestCopyCapture_RowsArePersisted(t *testing.T) {
 
 	require.NotNil(t, persisted.DurationMs, "the query must still be completed after the rows land")
 
-	// Not asserted: copy_direction / copy_format. store.CreateQuery has never
-	// copied them onto the row it inserts, so they are lost for every protocol
-	// — a pre-existing gap tracked in
-	// specs/todos/2026-08-03-create-query-drops-copy-metadata.md.
+	// The COPY metadata has to survive the *bare* insert resolveQueryRecord
+	// does when rows are still pending: that path copies the query and strips
+	// the completion fields, and the COPY fields must not be stripped with
+	// them (UpdateQueryCompletion never writes them back).
+	require.NotNil(t, persisted.CopyDirection, "the COPY direction must be persisted")
+	assert.Equal(t, "out", *persisted.CopyDirection)
+	require.NotNil(t, persisted.CopyFormat, "the COPY format must be persisted")
+	assert.Equal(t, "text", *persisted.CopyFormat)
 }
 
 // TestCopyCapture_TruncatedPrefixIsPersisted covers the interaction with the

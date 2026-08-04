@@ -119,8 +119,8 @@ func TestPruneStaleInstances(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	registerInstanceAs(t, ctx, store, "prune-live", 0)
-	registerInstanceAs(t, ctx, store, "prune-stale", InstanceStaleAfter+time.Minute)
+	registerInstanceAs(t, ctx, store, "prune-live", "prune-live-run", 0)
+	registerInstanceAs(t, ctx, store, "prune-stale", "prune-stale-run", InstanceStaleAfter+time.Minute)
 
 	pruned, err := store.PruneStaleInstances(ctx)
 	require.NoError(t, err)
@@ -133,6 +133,70 @@ func TestPruneStaleInstances(t *testing.T) {
 	stale, err := store.GetInstance(ctx, "prune-stale")
 	require.NoError(t, err)
 	assert.Nil(t, stale)
+}
+
+// TestInstanceRegistryTracksRunsSeparately covers the registry key being the
+// (instance id, run id) pair.
+//
+// One row per id was not enough: a second replica starting under a shared id
+// overwrote the first one's row, so a process that was serving traffic lost the
+// only proof it was alive, and its sessions became reclaimable.
+func TestInstanceRegistryTracksRunsSeparately(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	runsUnder := func(instanceID string) []Instance {
+		t.Helper()
+
+		var runs []Instance
+
+		require.NoError(t, store.db.NewSelect().
+			Model(&runs).
+			Where("instance_id = ?", instanceID).
+			Order("run_id").
+			Scan(ctx))
+
+		return runs
+	}
+
+	registerInstanceAs(t, ctx, store, "shared-registry", "run-one", 0)
+
+	store.SetInstanceID("shared-registry")
+	store.SetRunID("run-two")
+	require.NoError(t, store.RegisterInstance(ctx))
+
+	t.Run("registering leaves another run's row alone", func(t *testing.T) {
+		assert.Len(t, runsUnder("shared-registry"), 2)
+	})
+
+	t.Run("another live run under our id is reported", func(t *testing.T) {
+		peers, err := store.LiveRunsSharingInstanceID(ctx)
+		require.NoError(t, err)
+		require.Len(t, peers, 1, "our own row must not be reported as a peer")
+		assert.Equal(t, "run-one", peers[0].RunID)
+	})
+
+	t.Run("a run past the grace period is not a live peer", func(t *testing.T) {
+		_, err := store.db.ExecContext(ctx,
+			"UPDATE instances SET last_seen_at = now() - make_interval(secs => ?) WHERE run_id = ?",
+			(InstanceStaleAfter + time.Minute).Seconds(), "run-one")
+		require.NoError(t, err)
+
+		peers, err := store.LiveRunsSharingInstanceID(ctx)
+		require.NoError(t, err)
+		assert.Empty(t, peers)
+	})
+
+	t.Run("deregistering removes only our own run", func(t *testing.T) {
+		// Deleting every row carrying the id would deregister a live replica
+		// that shares it, and a replica with no row has all of its sessions
+		// reclaimed by the next pass.
+		require.NoError(t, store.DeregisterInstance(ctx))
+
+		remaining := runsUnder("shared-registry")
+		require.Len(t, remaining, 1)
+		assert.Equal(t, "run-one", remaining[0].RunID)
+	})
 }
 
 // TestInstanceStaleAfterIsGenerous pins the safety margin: the grace period is

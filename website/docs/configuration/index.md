@@ -53,25 +53,46 @@ If neither is set, DBBat generates a key on first start and writes it to `~/.dbb
 | `DBB_REDIRECTS` | Dev-only redirect rules (`/path:host:port[/target]`, comma-separated) | - |
 | `DBB_DEMO_TARGET_DB` | Demo-mode allowed target (`user:pass@host/dbname`) | `demo:demo@localhost/demo` |
 
-`DBB_INSTANCE_ID` is stamped on every connection dbbat records, and identifies
-the process in the `instances` registry. Each process registers itself at
-startup, refreshes its `last_seen_at` every **30 seconds**, and deletes its row
-on a clean shutdown.
+`DBB_INSTANCE_ID` is stamped on every connection dbbat records, alongside a
+**run id** — a UUID the process mints in memory at every start, which is not
+configurable. Both identify the process in the `instances` registry, which is
+keyed by the pair: each run registers itself at startup, refreshes its
+`last_seen_at` every **30 seconds**, and deletes its row on a clean shutdown.
+The run id is what makes the identity trustworthy — an instance id is unique per
+process only by convention, a run id by construction.
 
 At startup, and before any proxy accepts, dbbat marks as disconnected every
-connection left open by a process that is no longer running — a crash or a
+connection left open by a run that is no longer running — a crash or a
 `SIGKILL` never runs the normal teardown, so those rows would otherwise stay
 "open" forever and never become eligible for retention. Two kinds are closed:
 
-- **Its own**: connections stamped with this instance id. Logged at `info`; a
-  large number means the previous run did not shut down cleanly.
-- **Reclaimed**: connections owned by another instance that is provably gone —
-  it deleted its registry row on a clean shutdown, or has not heartbeated for
+- **Its own**: connections left by a *previous run* carrying this instance id.
+  Logged at `info`; a large number means an earlier run did not shut down
+  cleanly.
+- **Reclaimed**: connections owned by any other run that is provably gone — it
+  deleted its registry row on a clean shutdown, or has not heartbeated for
   **15 minutes** (30 missed heartbeats). Logged separately, also at `info`: a
   non-zero count means some process died without shutting down.
 
+Both kinds are liveness-checked, so neither closes anything a heartbeating run
+still owns. A run that crashed moments before this one started therefore looks
+alive at startup and is *not* reclaimed then — its rows are picked up by a later
+reclaim pass, once its registry row goes stale.
+
 Sessions are closed at their last activity time, so retention still measures
 from when the session actually stopped talking.
+
+The **reclaim** half does not only run at startup: every running process
+re-runs it roughly every **7.5 minutes** (half the grace period, jittered so
+replicas do not all sweep at once). Without that, the commonest crash would go
+unnoticed for as long as the deployment stayed up — a `SIGKILL`ed pod leaves a
+registry row seconds old, so its replacement sees a live-looking predecessor and
+reclaims nothing, and 15 minutes later, when the row finally goes stale, there
+is no restart left to look. That pass excludes the *current run*, not the
+current instance id, so it also reclaims a previous run of this same id — a
+stable id (a StatefulSet, or a pinned `DBB_INSTANCE_ID`) does not keep its own
+crashed run's rows open until the next restart. The own half stays at startup
+because that is the only moment its count means "the run I replaced".
 
 Liveness, not identity, is what makes this safe when several replicas share one
 store: a starting replica must never close a *live* connection belonging to a
@@ -85,15 +106,41 @@ therefore handled as well as a StatefulSet or an explicit `DBB_INSTANCE_ID`: the
 replacement pod does not recognise its predecessor's id, but it can see that the
 predecessor stopped heartbeating.
 
-:::warning
-If you set `DBB_INSTANCE_ID` explicitly, it must be **unique per running
-process** — never the same value on several replicas. An instance always treats
-open connections carrying its own id as its own previous run's leftovers, so
-two live replicas sharing an id will close each other's sessions. The default
-(the hostname) is already unique; there is no reason to pin it.
-::: Connections recorded before instance tracking
-existed carry an empty instance id; they have no owner and never will, so they
-are reclaimed the same way.
+:::tip
+`DBB_INSTANCE_ID` should be **unique per running process**, though nothing
+breaks if it is not. Two live replicas sharing an id cannot close each other's
+sessions — the reconcile keys on the run id, which no configuration can make
+them share — but they do answer to one identity in the logs and in the UI, and
+the "left open by a previous run" count then covers every run of that id rather
+than the process reporting it. A process that detects a live peer under its own
+id logs a warning once, a heartbeat after it starts. The default (the hostname)
+is already unique; there is no reason to pin it.
+:::
+
+Connections recorded before instance tracking existed carry an empty instance
+id; they have no owner and never will, so they are reclaimed the same way. Those
+recorded before run tracking carry no run id: they are judged by their instance
+id alone, which is the rule the build that wrote them was playing by, so a
+replica that is still serving them through an upgrade keeps them.
+
+:::caution Upgrading from v0.20.x
+v0.20.x is the only released build that predates run tracking: its heartbeat
+upserts the registry row with `ON CONFLICT (instance_id)`. Once a later build's
+migration changes the registry's primary key to `(instance_id, run_id)`, that
+conflict target no longer exists, so a v0.20.x replica's heartbeats start
+failing and its row stops moving. After the 15-minute grace period above, a
+new-build replica treats it as dead and reclaims the connections it is still
+serving — and a reclaimed connection immediately becomes eligible for deletion
+by the retention sweep, even while the v0.20.x replica is still writing queries
+against it.
+
+This only bites a multi-replica deployment (`replicaCount > 1`) where a
+v0.20.x replica keeps serving for more than 15 minutes after the migration
+runs — a single-replica deployment is never affected. **Complete the upgrade
+from v0.20.x within 15 minutes, and do not roll back to v0.20.x once you have
+migrated.** Nothing is broken by running the migration itself; this is a
+rollout-window caveat, not a live bug.
+:::
 
 ### Session Packet Dumps
 

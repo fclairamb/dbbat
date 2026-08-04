@@ -11,8 +11,25 @@ import (
 	"github.com/uptrace/bun"
 )
 
+// ConnectionOption sets a field on a connection row before it is inserted.
+// Variadic so the many call sites that only need the four required columns stay
+// as they are.
+type ConnectionOption func(*Connection)
+
+// WithUpstreamTLS records whether the proxy→upstream leg of the session is
+// encrypted. Only the session knows: under an opportunistic ssl_mode the row's
+// policy does not determine the outcome.
+func WithUpstreamTLS(encrypted bool) ConnectionOption {
+	return func(c *Connection) { c.UpstreamTLS = encrypted }
+}
+
 // CreateConnection creates a new connection record
-func (s *Store) CreateConnection(ctx context.Context, userID, databaseID uuid.UUID, sourceIP string) (*Connection, error) {
+func (s *Store) CreateConnection(
+	ctx context.Context,
+	userID, databaseID uuid.UUID,
+	sourceIP string,
+	opts ...ConnectionOption,
+) (*Connection, error) {
 	conn := &Connection{
 		UID:              newUIDv7(), // Generate UUIDv7 for time-ordered inserts
 		UserID:           userID,
@@ -23,6 +40,11 @@ func (s *Store) CreateConnection(ctx context.Context, userID, databaseID uuid.UU
 		Queries:          0,
 		BytesTransferred: 0,
 		InstanceID:       s.instanceID,
+		RunID:            s.currentRunID(),
+	}
+
+	for _, opt := range opts {
+		opt(conn)
 	}
 
 	_, err := s.db.NewInsert().
@@ -62,14 +84,16 @@ func (s *Store) CloseConnection(ctx context.Context, uid uuid.UUID) error {
 
 // OrphanedConnections counts what one startup reconcile closed, split by whose
 // rows they were. The two numbers mean very different things operationally:
-// Own is this instance's own previous run not shutting down cleanly, Reclaimed
-// is *another* process having died without shutting down at all.
+// Own is a previous run of this instance id not shutting down cleanly,
+// Reclaimed is *another* process having died without shutting down at all.
 type OrphanedConnections struct {
-	// Own is the number of connections this instance id left open itself.
+	// Own is the number of connections a previous run carrying this instance id
+	// left open — never this run's own, and never a live peer's, however the
+	// id came to be shared.
 	Own int64
 
-	// Reclaimed is the number of connections closed on behalf of instances that
-	// are provably gone — deregistered, or past InstanceStaleAfter.
+	// Reclaimed is the number of connections closed on behalf of runs that are
+	// provably gone — deregistered, or past InstanceStaleAfter.
 	Reclaimed int64
 }
 
@@ -100,14 +124,112 @@ func (o OrphanedConnections) Total() int64 {
 // immediately satisfy the retention sweep's cutoff predicate, so the sweep
 // could delete a connection a live session is still writing queries against.
 //
-// The test that replaces the blanket update is liveness, not identity. A
-// running process upserts a row in `instances` at startup and refreshes it
-// every InstanceHeartbeatInterval; a clean shutdown deletes it. So another
-// instance's connections are only touched when that instance has no row at all
-// (it shut down cleanly, or never registered) or has not been seen for
-// InstanceStaleAfter — 30 missed heartbeats. A live replica is therefore never
-// a candidate: it would have to fail every heartbeat for a quarter of an hour
-// while still serving traffic.
+// Why an instance id is not enough to scope it: an id is unique per live
+// process only by convention — an operator can pin DBB_INSTANCE_ID to the same
+// value on every replica, and config.FallbackInstanceID is where every replica
+// that cannot read its hostname lands. Both halves therefore key on the run
+// id, minted in memory at startup and unshareable, and both then ask the same
+// question of the registry: does a live run still own this row? Identity only
+// decides which of the two counts a row lands in.
+//
+// The two halves are separate methods because they are reported separately and
+// because only one of them belongs at startup. The own half is the previous
+// runs of this instance id; the reclaim half — ReclaimDeadInstanceConnections
+// — is everyone else, and is also run periodically (see
+// InstanceReclaimInterval), which is what eventually picks up a run that was
+// still inside its grace period when we started.
+//
+// A store whose own instance id is empty is refused outright (zero, nil).
+// Reconciling would then treat the empty id as this process's identity, which
+// is exactly the blanket update this design exists to prevent.
+func (s *Store) CloseOrphanedConnections(ctx context.Context) (OrphanedConnections, error) {
+	var counts OrphanedConnections
+
+	if s.instanceID == "" {
+		return counts, nil
+	}
+
+	own, err := s.closeOwnOrphanedConnections(ctx)
+	if err != nil {
+		return counts, err
+	}
+
+	counts.Own = own
+
+	reclaimed, err := s.ReclaimDeadInstanceConnections(ctx)
+	if err != nil {
+		return counts, err
+	}
+
+	counts.Reclaimed = reclaimed
+
+	return counts, nil
+}
+
+// closeOwnOrphanedConnections closes the still-open connections carrying this
+// process's own instance id but not its run id — its previous runs' leftovers,
+// as far as the registry can prove they are over.
+//
+// "My id, not my run" is the whole fix. An instance id is only unique per live
+// process by convention: an operator can pin the same DBB_INSTANCE_ID on every
+// replica, and config.FallbackInstanceID is reached by every replica that
+// cannot read its hostname. This branch used to close every open row carrying
+// its id with no liveness test at all, so under a shared id a starting replica
+// closed a live peer's sessions — rows that then satisfy the retention sweep's
+// cutoff while a session is still writing queries against them. The run id is
+// minted in memory and cannot be shared, so scoping by "not my run" and then
+// applying the same liveness test as the reclaim branch makes the two branches
+// uniform: a row is closed only when no live run owns it.
+//
+// The cost is that a crashed previous run is no longer reclaimed the instant we
+// restart: its registry row is seconds old, so it still looks alive, and the
+// rows wait for the grace period like any other dead run's. Nothing leaks —
+// ReclaimDeadInstanceConnections covers our own instance id's other runs too,
+// and runs on a timer — the reclaim is just no longer instantaneous. That is
+// the price of not trusting an id to mean a process, and the case it buys is
+// the one where trusting it destroys live data.
+//
+// It stays startup-only and unexported all the same: mid-life it would be
+// redundant (the periodic reclaim matches a superset of these rows), and
+// keeping it at startup is what keeps the two reported counts meaning "my own
+// previous run" and "somebody else".
+func (s *Store) closeOwnOrphanedConnections(ctx context.Context) (int64, error) {
+	if s.instanceID == "" {
+		return 0, nil
+	}
+
+	return s.closeOrphans(ctx, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+		// IS DISTINCT FROM, not <>: a NULL run_id — a row opened before run
+		// tracking existed — is one of ours to consider, and plain inequality
+		// would drop it.
+		return q.Where("instance_id = ?", s.instanceID).
+			Where("run_id IS DISTINCT FROM ?", s.runID).
+			Where(noLiveOwner(), s.instanceID, s.runID)
+	})
+}
+
+// ReclaimDeadInstanceConnections closes the connections of every run other than
+// this one that the registry proves is gone, and returns how many it closed.
+//
+// Unlike the own half of CloseOrphanedConnections this is not tied to startup:
+// everything except this run is in scope, so it holds at any point in the
+// process's life. It runs both from the startup reconcile and on a timer
+// (InstanceReclaimInterval), because the crash case is otherwise only ever
+// noticed by an unrelated restart: a SIGKILLed pod leaves a registry row whose
+// last_seen_at is seconds old, so its replacement — starting immediately —
+// reclaims nothing, and by the time the row does go stale nothing is starting
+// any more. Since a restart mints a fresh run id, that now covers our own
+// predecessor as well as other instances: a stable instance id no longer means
+// its crashed run's rows wait for a restart that may be days away.
+//
+// The test is liveness, not identity. A running process upserts a row in
+// `instances` for its (instance id, run id) at startup and refreshes it every
+// InstanceHeartbeatInterval; a clean shutdown deletes it. So another run's
+// connections are only touched when that run has no row at all (it shut down
+// cleanly, or never registered) or has not been seen for InstanceStaleAfter —
+// 30 missed heartbeats. A live replica is therefore never a candidate, even one
+// sharing our instance id: it would have to fail every heartbeat for a quarter
+// of an hour while still serving traffic.
 //
 // Legacy rows carrying an empty instance id — created before the instance_id
 // column existed — are folded into the "no instances row" case rather than
@@ -123,7 +245,13 @@ func (o OrphanedConnections) Total() int64 {
 // build can register itself. The 20260803030000_instances migration covers that
 // by seeding the registry — the empty id included — from every instance id the
 // connections table has recorded, which buys each of those owners a full grace
-// period. The coverage is not total, and cannot be: an old-build replica that
+// period. The same reasoning, and the same remedy, apply to the run id one
+// migration later: rows written before it existed carry NULL, are judged by
+// their instance id alone (see noLiveOwner), and 20260804120000 refreshes the
+// registry rows of every pre-run-tracking owner so the upgrade window is a full
+// grace period rather than an instant.
+//
+// The coverage is not total, and cannot be: an old-build replica that
 // has never recorded a connection is not seeded, so if it accepts its first
 // session between the migration and the next process start, that session is
 // reclaimed through the no-registry-row branch, which by design has no grace
@@ -133,47 +261,74 @@ func (o OrphanedConnections) Total() int64 {
 // since the retention horizon, against permanently delaying the case this
 // feature is built for. The window is left open knowingly.
 //
-// A store whose own instance id is empty is refused outright (zero, nil).
-// Reconciling would then treat the empty id as this process's identity, which
-// is exactly the blanket update this design exists to prevent.
-func (s *Store) CloseOrphanedConnections(ctx context.Context) (OrphanedConnections, error) {
-	var counts OrphanedConnections
-
+// A store whose own instance id is empty reclaims nothing (zero, nil), matching
+// CloseOrphanedConnections: a process with no identity of its own has no
+// business judging anyone else's.
+func (s *Store) ReclaimDeadInstanceConnections(ctx context.Context) (int64, error) {
 	if s.instanceID == "" {
-		return counts, nil
+		return 0, nil
 	}
 
-	own, err := s.closeOrphans(ctx, func(q *bun.UpdateQuery) *bun.UpdateQuery {
-		return q.Where("instance_id = ?", s.instanceID)
-	})
-	if err != nil {
-		return counts, err
-	}
-
-	counts.Own = own
-
-	reclaimed, err := s.closeOrphans(ctx, func(q *bun.UpdateQuery) *bun.UpdateQuery {
-		// Own rows are handled above; excluding them here keeps the two counts
-		// disjoint (and this instance is registered, so it would not match).
+	return s.closeOrphans(ctx, func(q *bun.UpdateQuery) *bun.UpdateQuery {
+		// The exclusion is this *run*, not this instance id. Our own live
+		// sessions must never be touched — on the periodic pass they are what
+		// this process is serving right now — but another run carrying our id
+		// is somebody else's, whether it is our own crashed predecessor or a
+		// replica that was handed the same DBB_INSTANCE_ID. Those are judged
+		// on liveness like everyone else's, which is also what stops a
+		// predecessor's rows from lingering until the next restart when the id
+		// is stable (a StatefulSet, or a pinned id).
 		//
-		// The staleness cutoff is computed by the database, not by this
-		// process: the heartbeat it is being compared against was written by
-		// another replica, and clock skew between the two would come straight
-		// out of the grace period. See instanceNow.
-		return q.Where("instance_id <> ?", s.instanceID).
-			Where(`NOT EXISTS (
-				SELECT 1 FROM instances AS live
-				WHERE live.instance_id = c.instance_id
-				  AND live.last_seen_at >= ` + instanceStaleCutoff() + `
-			)`)
+		// At startup this scope is a superset of the own branch's, and that is
+		// harmless: the own branch runs first and takes its rows, so the two
+		// counts stay disjoint.
+		//
+		// IS DISTINCT FROM, not <>: rows predating run tracking carry NULL.
+		return q.Where("instance_id <> ? OR run_id IS DISTINCT FROM ?", s.instanceID, s.runID).
+			Where(noLiveOwner(), s.instanceID, s.runID)
 	})
-	if err != nil {
-		return counts, err
-	}
+}
 
-	counts.Reclaimed = reclaimed
-
-	return counts, nil
+// noLiveOwner matches connection rows that no live run owns: either the owning
+// run has no registry row at all (clean shutdown, never registered, or the
+// legacy empty instance id) or its last heartbeat predates the grace period.
+//
+// Ownership is matched on the pair, so a fresh row proves only that *that run*
+// is alive. Matching on the instance id alone would be both too generous and
+// too strict: too generous because our own brand-new registration would vouch
+// for every row our id has ever opened, and too strict because a replica that
+// shares an id with a live peer could never be told apart from it.
+//
+// Rows whose run_id is NULL predate run tracking, and their owner is a build
+// that only maintains the per-id registry — so they are judged by the rule
+// their owner is playing by: any live run of that instance id keeps them. That
+// is the pre-existing behavior, kept deliberately rather than folded into the
+// stricter test, which would have declared every one of them ownerless the
+// moment this migration landed and closed sessions that were still being
+// served through the upgrade.
+//
+// Our own registry row never vouches for anything: it is excluded outright.
+// For run-matched rows that changes nothing (a row carrying our run id is out
+// of scope in both branches), but it is what stops the NULL fallback above
+// from turning our fresh registration into a permanent shield over the rows
+// our *previous* runs left behind — the leak this whole mechanism exists to
+// close.
+//
+// The staleness cutoff is computed by the database, not by this process: the
+// heartbeat it is being compared against was written by another replica, and
+// clock skew between the two would come straight out of the grace period. See
+// instanceNow.
+//
+// `c` is the alias bun gives the connections table in an UPDATE. The two
+// placeholders are this process's instance id and run id, in that order.
+func noLiveOwner() string {
+	return `NOT EXISTS (
+		SELECT 1 FROM instances AS live
+		WHERE live.instance_id = c.instance_id
+		  AND (c.run_id IS NULL OR live.run_id = c.run_id)
+		  AND (live.instance_id <> ? OR live.run_id <> ?)
+		  AND live.last_seen_at >= ` + instanceStaleCutoff() + `
+	)`
 }
 
 // closeOrphans runs one scoped reconcile and returns how many rows it closed.
@@ -252,7 +407,7 @@ func (s *Store) GetConnectionByUID(ctx context.Context, uid uuid.UUID) (*Connect
 	conn := &Connection{}
 	err := s.db.NewSelect().
 		Model(conn).
-		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, disconnected_at, queries, bytes_transferred, instance_id").
+		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, disconnected_at, queries, bytes_transferred, instance_id, upstream_tls").
 		Where("uid = ?", uid).
 		Scan(ctx)
 	if err != nil {
@@ -269,7 +424,7 @@ func (s *Store) ListConnections(ctx context.Context, filter ConnectionFilter) ([
 	var connections []Connection
 	q := s.db.NewSelect().
 		Model(&connections).
-		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, disconnected_at, queries, bytes_transferred, instance_id")
+		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, disconnected_at, queries, bytes_transferred, instance_id, upstream_tls")
 
 	if filter.UserID != nil {
 		q = q.Where("user_id = ?", *filter.UserID)

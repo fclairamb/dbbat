@@ -46,6 +46,43 @@ func TestCreateConnection(t *testing.T) {
 		}
 	})
 
+	// upstream_tls is what makes the opportunistic ssl_mode fallback auditable
+	// instead of silent, so it has to survive the round trip rather than be a
+	// field the insert quietly drops.
+	t.Run("records the upstream encryption state", func(t *testing.T) {
+		for _, encrypted := range []bool{true, false} {
+			conn, err := store.CreateConnection(ctx, user.UID, database.UID, "192.168.1.101",
+				WithUpstreamTLS(encrypted))
+			if err != nil {
+				t.Fatalf("CreateConnection() error = %v", err)
+			}
+
+			if conn.UpstreamTLS != encrypted {
+				t.Errorf("returned conn.UpstreamTLS = %v, want %v", conn.UpstreamTLS, encrypted)
+			}
+
+			reread, err := store.GetConnectionByUID(ctx, conn.UID)
+			if err != nil {
+				t.Fatalf("GetConnectionByUID() error = %v", err)
+			}
+
+			if reread.UpstreamTLS != encrypted {
+				t.Errorf("persisted conn.UpstreamTLS = %v, want %v", reread.UpstreamTLS, encrypted)
+			}
+		}
+	})
+
+	t.Run("defaults the upstream encryption state to false", func(t *testing.T) {
+		conn, err := store.CreateConnection(ctx, user.UID, database.UID, "192.168.1.102")
+		if err != nil {
+			t.Fatalf("CreateConnection() error = %v", err)
+		}
+
+		if conn.UpstreamTLS {
+			t.Error("a connection with no recorded encryption state must not claim to be encrypted")
+		}
+	})
+
 	t.Run("create connection with IPv6", func(t *testing.T) {
 		conn, err := store.CreateConnection(ctx, user.UID, database.UID, "::1")
 		if err != nil {
@@ -122,26 +159,46 @@ func backdateConnection(t *testing.T, ctx context.Context, store *Store, uid uui
 	require.NoError(t, err)
 }
 
-// registerInstanceAs writes a registry row for another instance id, last seen
-// lastSeenAgo before now, without disturbing the store's own instance id. Zero
-// means "alive and heartbeating right now"; more than InstanceStaleAfter means
-// "gone".
+// registerInstanceAs writes a registry row for another run — another instance
+// id, or another run of ours — last seen lastSeenAgo before now, without
+// disturbing the store's own identity. Zero means "alive and heartbeating right
+// now"; more than InstanceStaleAfter means "gone".
 //
 // The backdating is done in SQL, against the same database clock the heartbeat
 // and the staleness cutoff use — a test that mixed in the Go clock would be
 // testing a time base the code no longer has.
-func registerInstanceAs(t *testing.T, ctx context.Context, store *Store, instanceID string, lastSeenAgo time.Duration) {
+func registerInstanceAs(
+	t *testing.T, ctx context.Context, store *Store, instanceID, runID string, lastSeenAgo time.Duration,
+) {
 	t.Helper()
 
-	previous := store.InstanceID()
-	store.SetInstanceID(instanceID)
-	require.NoError(t, store.RegisterInstance(ctx))
-	store.SetInstanceID(previous)
+	asRun(t, store, instanceID, runID, func() {
+		require.NoError(t, store.RegisterInstance(ctx))
+	})
 
 	_, err := store.db.ExecContext(ctx,
-		"UPDATE instances SET last_seen_at = now() - make_interval(secs => ?) WHERE instance_id = ?",
-		lastSeenAgo.Seconds(), instanceID)
+		"UPDATE instances SET last_seen_at = now() - make_interval(secs => ?) WHERE instance_id = ? AND run_id = ?",
+		lastSeenAgo.Seconds(), instanceID, runID)
 	require.NoError(t, err)
+}
+
+// asRun runs fn with the store impersonating one (instance id, run id) pair,
+// then puts its own identity back. An empty run id means "a build that predates
+// run tracking": the rows it writes carry a NULL run_id.
+func asRun(t *testing.T, store *Store, instanceID, runID string, fn func()) {
+	t.Helper()
+
+	previousInstance, previousRun := store.InstanceID(), store.RunID()
+
+	store.SetInstanceID(instanceID)
+	store.SetRunID(runID)
+
+	defer func() {
+		store.SetInstanceID(previousInstance)
+		store.SetRunID(previousRun)
+	}()
+
+	fn()
 }
 
 // TestCloseOrphanedConnections covers the startup reconcile of connections a
@@ -158,36 +215,48 @@ func TestCloseOrphanedConnections(t *testing.T) {
 	stopped := time.Now().Add(-48 * time.Hour).Truncate(time.Microsecond)
 	cleanlyClosedAt := time.Now().Add(-36 * time.Hour).Truncate(time.Microsecond)
 
-	// (1) The crash orphan: opened by this instance, never closed.
-	store.SetInstanceID("instance-a")
+	var orphan, alreadyClosed, otherReplica *Connection
 
-	orphan, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.1")
-	require.NoError(t, err)
+	// (1) The crash orphan: opened by a previous run of this instance id, never
+	// closed. That run left no registry row behind, so it is provably over.
+	asRun(t, store, "instance-a", "run-1", func() {
+		var err error
+
+		orphan, err = store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.1")
+		require.NoError(t, err)
+
+		// (2) A connection that run already closed cleanly.
+		alreadyClosed, err = store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.2")
+		require.NoError(t, err)
+	})
+
 	backdateConnection(t, ctx, store, orphan.UID, stopped)
-
-	// (2) A connection this instance already closed cleanly.
-	alreadyClosed, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.2")
-	require.NoError(t, err)
 	backdateConnection(t, ctx, store, alreadyClosed.UID, stopped)
-	_, err = store.db.ExecContext(ctx,
+	_, err := store.db.ExecContext(ctx,
 		"UPDATE connections SET disconnected_at = ? WHERE uid = ?", cleanlyClosedAt, alreadyClosed.UID)
 	require.NoError(t, err)
 
 	// (3) A live connection owned by another replica sharing this store. It is
 	// registered and heartbeating, which is what marks it as alive.
-	store.SetInstanceID("instance-b")
+	asRun(t, store, "instance-b", "run-b", func() {
+		var err error
 
-	otherReplica, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.3")
-	require.NoError(t, err)
+		otherReplica, err = store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.3")
+		require.NoError(t, err)
+	})
+
 	backdateConnection(t, ctx, store, otherReplica.UID, stopped)
 
+	// This run: the same instance id as (1), a new run id — a restart.
 	store.SetInstanceID("instance-a")
-	registerInstanceAs(t, ctx, store, "instance-b", 0)
+	store.SetRunID("run-2")
+	registerInstanceAs(t, ctx, store, "instance-b", "run-b", 0)
 	require.NoError(t, store.RegisterInstance(ctx))
 
 	closed, err := store.CloseOrphanedConnections(ctx)
 	require.NoError(t, err)
-	assert.Equal(t, int64(1), closed.Own, "only instance-a's still-open connection should be reconciled")
+	assert.Equal(t, int64(1), closed.Own,
+		"only the still-open connection of instance-a's previous run should be reconciled")
 	assert.Equal(t, int64(0), closed.Reclaimed, "a heartbeating instance's connections are never reclaimed")
 
 	t.Run("an open connection is closed at its last_activity_at", func(t *testing.T) {
@@ -249,18 +318,21 @@ func TestCloseOrphanedConnectionsReclaimsDeadInstances(t *testing.T) {
 
 	stopped := time.Now().Add(-48 * time.Hour).Truncate(time.Microsecond)
 
-	// openConnectionFor opens a connection stamped with someone else's instance
-	// id, backdated so it looks like a session that stopped talking long ago.
-	openConnectionFor := func(instanceID, sourceIP string) uuid.UUID {
+	// openConnectionFor opens a connection stamped with someone else's identity,
+	// backdated so it looks like a session that stopped talking long ago. An
+	// empty run id writes a NULL one: a row from before run tracking existed.
+	openConnectionFor := func(instanceID, runID, sourceIP string) uuid.UUID {
 		t.Helper()
 
-		previous := store.InstanceID()
-		store.SetInstanceID(instanceID)
+		var conn *Connection
 
-		conn, err := store.CreateConnection(ctx, user.UID, database.UID, sourceIP)
-		require.NoError(t, err)
+		asRun(t, store, instanceID, runID, func() {
+			var err error
 
-		store.SetInstanceID(previous)
+			conn, err = store.CreateConnection(ctx, user.UID, database.UID, sourceIP)
+			require.NoError(t, err)
+		})
+
 		backdateConnection(t, ctx, store, conn.UID, stopped)
 
 		return conn.UID
@@ -269,30 +341,33 @@ func TestCloseOrphanedConnectionsReclaimsDeadInstances(t *testing.T) {
 	// A replica that is up and heartbeating. Its sessions must survive: closing
 	// them would let the retention sweep delete a connection a live session is
 	// still writing queries against.
-	registerInstanceAs(t, ctx, store, "live-instance", 0)
-	liveConn := openConnectionFor("live-instance", "10.1.0.1")
+	registerInstanceAs(t, ctx, store, "live-instance", "live-run", 0)
+	liveConn := openConnectionFor("live-instance", "live-run", "10.1.0.1")
 
 	// A replica that registered and then stopped heartbeating — a crashed pod.
-	registerInstanceAs(t, ctx, store, "stale-instance", InstanceStaleAfter+time.Minute)
-	staleConn := openConnectionFor("stale-instance", "10.1.0.2")
+	registerInstanceAs(t, ctx, store, "stale-instance", "stale-run", InstanceStaleAfter+time.Minute)
+	staleConn := openConnectionFor("stale-instance", "stale-run", "10.1.0.2")
 
 	// A replica that shut down cleanly and deleted its registration. No row at
 	// all, so it is gone immediately rather than after the grace period.
-	registerInstanceAs(t, ctx, store, "gone-instance", 0)
-	goneConn := openConnectionFor("gone-instance", "10.1.0.3")
-	store.SetInstanceID("gone-instance")
-	require.NoError(t, store.DeregisterInstance(ctx))
+	registerInstanceAs(t, ctx, store, "gone-instance", "gone-run", 0)
+	goneConn := openConnectionFor("gone-instance", "gone-run", "10.1.0.3")
+	asRun(t, store, "gone-instance", "gone-run", func() {
+		require.NoError(t, store.DeregisterInstance(ctx))
+	})
 
 	// A legacy row from before the instance_id column existed. Deliberately
 	// folded into the "no registry row" case: '' is never a live owner, since
 	// no process can register it.
-	legacyConn := openConnectionFor("", "10.1.0.4")
+	legacyConn := openConnectionFor("", "", "10.1.0.4")
 
-	// And this instance's own leftover, which is counted separately.
+	// And a leftover of a previous run of this instance id, which is counted
+	// separately.
 	store.SetInstanceID("reclaimer")
+	store.SetRunID("reclaimer-run")
 	require.NoError(t, store.RegisterInstance(ctx))
 
-	ownConn := openConnectionFor("reclaimer", "10.1.0.5")
+	ownConn := openConnectionFor("reclaimer", "reclaimer-previous-run", "10.1.0.5")
 
 	closed, err := store.CloseOrphanedConnections(ctx)
 	require.NoError(t, err)
@@ -348,6 +423,309 @@ func TestCloseOrphanedConnectionsReclaimsDeadInstances(t *testing.T) {
 	})
 }
 
+// TestReclaimDeadInstanceConnectionsWithoutStartup covers the periodic reclaim:
+// the same liveness-checked sweep, run from a long-running process rather than
+// from the startup reconcile.
+//
+// That is the case the startup pass structurally cannot serve. A SIGKILLed pod
+// leaves a registry row seconds old, so its replacement — starting immediately
+// — reclaims nothing; only a later pass, once the row has gone stale, does. So
+// this test never calls CloseOrphanedConnections: the reclaim has to stand on
+// its own, without the own-instance update, which mid-life would close this
+// run's own live sessions.
+func TestReclaimDeadInstanceConnectionsWithoutStartup(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "periodic-reclaim")
+
+	stopped := time.Now().Add(-48 * time.Hour).Truncate(time.Microsecond)
+
+	openConnectionFor := func(instanceID, runID, sourceIP string) uuid.UUID {
+		t.Helper()
+
+		var conn *Connection
+
+		asRun(t, store, instanceID, runID, func() {
+			var err error
+
+			conn, err = store.CreateConnection(ctx, user.UID, database.UID, sourceIP)
+			require.NoError(t, err)
+		})
+
+		backdateConnection(t, ctx, store, conn.UID, stopped)
+
+		return conn.UID
+	}
+
+	// This process: registered, heartbeating, and serving a session of its own.
+	// The periodic reclaim runs while that session is live, so leaving it alone
+	// is the property that makes running this outside startup safe at all.
+	store.SetInstanceID("running-instance")
+	store.SetRunID("current-run")
+	require.NoError(t, store.RegisterInstance(ctx))
+
+	ownLive, err := store.CreateConnection(ctx, user.UID, database.UID, "10.2.0.1")
+	require.NoError(t, err)
+
+	// A peer that is up and heartbeating.
+	registerInstanceAs(t, ctx, store, "live-peer", "live-peer-run", 0)
+	peerConn := openConnectionFor("live-peer", "live-peer-run", "10.2.0.2")
+
+	// A peer that crashed: its row is still there, but long past the grace
+	// period. This is what only the periodic pass catches.
+	registerInstanceAs(t, ctx, store, "crashed-peer", "crashed-peer-run", InstanceStaleAfter+time.Minute)
+	crashedConn := openConnectionFor("crashed-peer", "crashed-peer-run", "10.2.0.3")
+
+	// A previous run of *our own* instance id that crashed long enough ago to be
+	// past the grace period. The startup pass could not have taken it — when we
+	// started, its row was still fresh — and no other process will, because the
+	// id is ours. So this pass has to, which is why its scope excludes this run
+	// rather than this instance id.
+	registerInstanceAs(t, ctx, store, "running-instance", "previous-run", InstanceStaleAfter+time.Minute)
+	previousRunConn := openConnectionFor("running-instance", "previous-run", "10.2.0.5")
+
+	reclaimed, err := store.ReclaimDeadInstanceConnections(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), reclaimed,
+		"the crashed peer's and our own dead previous run's connections should be reclaimed")
+
+	t.Run("the crashed instance's connection is closed at its last activity", func(t *testing.T) {
+		got, err := store.GetConnectionByUID(ctx, crashedConn)
+		require.NoError(t, err)
+		require.NotNil(t, got.DisconnectedAt)
+		assert.WithinDuration(t, stopped, *got.DisconnectedAt, time.Millisecond)
+	})
+
+	t.Run("a live instance's connection is untouched", func(t *testing.T) {
+		got, err := store.GetConnectionByUID(ctx, peerConn)
+		require.NoError(t, err)
+		assert.Nil(t, got.DisconnectedAt,
+			"a heartbeating instance's session must survive every periodic pass")
+	})
+
+	t.Run("a dead previous run of our own instance id is reclaimed", func(t *testing.T) {
+		got, err := store.GetConnectionByUID(ctx, previousRunConn)
+		require.NoError(t, err)
+		require.NotNil(t, got.DisconnectedAt,
+			"a stable instance id must not keep its own crashed run's rows open until the next restart")
+		assert.WithinDuration(t, stopped, *got.DisconnectedAt, time.Millisecond)
+	})
+
+	t.Run("this run's own live connection is untouched", func(t *testing.T) {
+		// The line the reclaim draws is this run, not this instance id: our own
+		// open rows are sessions we are serving right now.
+		got, err := store.GetConnectionByUID(ctx, ownLive.UID)
+		require.NoError(t, err)
+		assert.Nil(t, got.DisconnectedAt,
+			"the periodic reclaim must never close the calling process's own sessions")
+	})
+
+	t.Run("running it again reclaims nothing", func(t *testing.T) {
+		// Every replica runs this on its own timer, so overlapping passes are
+		// expected; the second one has to be a no-op rather than double work.
+		again, err := store.ReclaimDeadInstanceConnections(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), again)
+	})
+
+	t.Run("an unset instance id reclaims nothing", func(t *testing.T) {
+		store.SetInstanceID("")
+
+		registerInstanceAs(t, ctx, store, "another-crashed-peer", "another-crashed-run",
+			InstanceStaleAfter+time.Minute)
+		orphan := openConnectionFor("another-crashed-peer", "another-crashed-run", "10.2.0.4")
+
+		none, err := store.ReclaimDeadInstanceConnections(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, int64(0), none, "a process with no identity judges nobody")
+
+		got, err := store.GetConnectionByUID(ctx, orphan)
+		require.NoError(t, err)
+		assert.Nil(t, got.DisconnectedAt)
+	})
+}
+
+// openBackdatedConnection opens a connection under a given (instance id, run
+// id) and backdates it, so it looks like a session that stopped talking at
+// `stopped`. An empty run id writes a NULL one: a row from a build that
+// predates run tracking.
+func openBackdatedConnection(
+	t *testing.T, ctx context.Context, store *Store,
+	user, database uuid.UUID, instanceID, runID, sourceIP string, stopped time.Time,
+) uuid.UUID {
+	t.Helper()
+
+	var conn *Connection
+
+	asRun(t, store, instanceID, runID, func() {
+		var err error
+
+		conn, err = store.CreateConnection(ctx, user, database, sourceIP)
+		require.NoError(t, err)
+	})
+
+	backdateConnection(t, ctx, store, conn.UID, stopped)
+
+	return conn.UID
+}
+
+// TestCloseOrphanedConnectionsWithSharedInstanceID is the case run ids exist
+// for: two live processes carrying one DBB_INSTANCE_ID, one of them starting.
+//
+// Before run ids the starting one closed every open row stamped with the id,
+// its peer's live sessions included — and a closed row is immediately eligible
+// for the retention sweep, which then deletes a connection a live session is
+// still writing queries against. Identity is not enough to prevent that,
+// because an instance id is unique per process only by convention.
+func TestCloseOrphanedConnectionsWithSharedInstanceID(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "shared-id")
+
+	stopped := time.Now().Add(-48 * time.Hour).Truncate(time.Microsecond)
+
+	// The peer: live, heartbeating, serving a session — under the very instance
+	// id we are about to start with.
+	registerInstanceAs(t, ctx, store, "shared", "peer-run", 0)
+	peerConn := openBackdatedConnection(t, ctx, store, user.UID, database.UID,
+		"shared", "peer-run", "10.3.0.1", stopped)
+
+	// Our own predecessor, which crashed moments ago: same id, another run, and
+	// a registry row that is still well inside the grace period.
+	registerInstanceAs(t, ctx, store, "shared", "previous-run", 0)
+	previousConn := openBackdatedConnection(t, ctx, store, user.UID, database.UID,
+		"shared", "previous-run", "10.3.0.2", stopped)
+
+	store.SetInstanceID("shared")
+	store.SetRunID("our-run")
+	require.NoError(t, store.RegisterInstance(ctx))
+
+	closed, err := store.CloseOrphanedConnections(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), closed.Total(),
+		"nothing under a shared id may be closed while every run of it still looks alive")
+
+	t.Run("a live peer sharing our instance id keeps its session", func(t *testing.T) {
+		got, err := store.GetConnectionByUID(ctx, peerConn)
+		require.NoError(t, err)
+		assert.Nil(t, got.DisconnectedAt,
+			"starting a replica must never close a live peer's session, shared id or not")
+	})
+
+	t.Run("our own predecessor is spared while its registry row is fresh", func(t *testing.T) {
+		// The price of not trusting the id: at startup a crashed predecessor
+		// and a live peer look identical, so the predecessor waits out the
+		// grace period like any other dead run instead of being closed now.
+		got, err := store.GetConnectionByUID(ctx, previousConn)
+		require.NoError(t, err)
+		assert.Nil(t, got.DisconnectedAt)
+	})
+
+	t.Run("registering does not overwrite a peer's heartbeat", func(t *testing.T) {
+		// Keyed by the pair, so all three runs of this id are represented. With
+		// one row per id, our registration would have replaced the peer's — and
+		// a peer with no row of its own has every session it is serving
+		// reclaimed by the next pass.
+		var runs int
+
+		require.NoError(t, store.db.NewSelect().
+			Model((*Instance)(nil)).
+			ColumnExpr("count(*)").
+			Where("instance_id = ?", "shared").
+			Scan(ctx, &runs))
+		assert.Equal(t, 3, runs)
+	})
+
+	t.Run("the predecessor is reclaimed once it goes stale", func(t *testing.T) {
+		_, err := store.db.ExecContext(ctx,
+			"UPDATE instances SET last_seen_at = now() - make_interval(secs => ?) WHERE run_id = ?",
+			(InstanceStaleAfter + time.Minute).Seconds(), "previous-run")
+		require.NoError(t, err)
+
+		reclaimed, err := store.ReclaimDeadInstanceConnections(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, int64(1), reclaimed,
+			"a dead run of our own id is reclaimed by the periodic pass, not left open forever")
+
+		gone, err := store.GetConnectionByUID(ctx, previousConn)
+		require.NoError(t, err)
+		require.NotNil(t, gone.DisconnectedAt)
+		assert.WithinDuration(t, stopped, *gone.DisconnectedAt, time.Millisecond)
+
+		alive, err := store.GetConnectionByUID(ctx, peerConn)
+		require.NoError(t, err)
+		assert.Nil(t, alive.DisconnectedAt, "the live peer is still off limits")
+	})
+}
+
+// TestCloseOrphanedConnectionsWithoutRunIDs covers the rows written before the
+// run_id column existed, which carry NULL.
+//
+// They are judged by the rule their owner is playing by — a build that only
+// maintains the per-id registry — so any live run of their instance id keeps
+// them. That is the pre-existing behavior, kept deliberately: the stricter
+// per-run test would have declared every one of them ownerless the moment the
+// migration landed, including the sessions an old replica was still serving
+// through the upgrade.
+//
+// The one exception is our own registration, which never vouches for a row it
+// did not open. Without it, restarting under a stable instance id would shield
+// its own pre-upgrade orphans forever — the leak all of this exists to close.
+func TestCloseOrphanedConnectionsWithoutRunIDs(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "null-run")
+
+	stopped := time.Now().Add(-48 * time.Hour).Truncate(time.Microsecond)
+
+	ownLegacy := openBackdatedConnection(t, ctx, store, user.UID, database.UID,
+		"legacy-self", "", "10.4.0.1", stopped)
+
+	registerInstanceAs(t, ctx, store, "legacy-peer", "legacy-peer-run", 0)
+	peerLegacy := openBackdatedConnection(t, ctx, store, user.UID, database.UID,
+		"legacy-peer", "", "10.4.0.2", stopped)
+
+	registerInstanceAs(t, ctx, store, "legacy-dead", "legacy-dead-run", InstanceStaleAfter+time.Minute)
+	deadLegacy := openBackdatedConnection(t, ctx, store, user.UID, database.UID,
+		"legacy-dead", "", "10.4.0.3", stopped)
+
+	store.SetInstanceID("legacy-self")
+	store.SetRunID("our-run")
+	require.NoError(t, store.RegisterInstance(ctx))
+
+	closed, err := store.CloseOrphanedConnections(ctx)
+	require.NoError(t, err)
+
+	t.Run("our own pre-upgrade rows are closed", func(t *testing.T) {
+		assert.Equal(t, int64(1), closed.Own,
+			"our fresh registration must not vouch for rows a previous build left behind")
+
+		got, err := store.GetConnectionByUID(ctx, ownLegacy)
+		require.NoError(t, err)
+		require.NotNil(t, got.DisconnectedAt)
+		assert.WithinDuration(t, stopped, *got.DisconnectedAt, time.Millisecond)
+	})
+
+	t.Run("a live instance's pre-upgrade rows are kept", func(t *testing.T) {
+		assert.Equal(t, int64(1), closed.Reclaimed, "only the dead instance's row is reclaimed")
+
+		got, err := store.GetConnectionByUID(ctx, peerLegacy)
+		require.NoError(t, err)
+		assert.Nil(t, got.DisconnectedAt,
+			"a replica mid-upgrade heartbeats its id but stamps no run id; its sessions are live")
+	})
+
+	t.Run("a dead instance's pre-upgrade rows are reclaimed", func(t *testing.T) {
+		got, err := store.GetConnectionByUID(ctx, deadLegacy)
+		require.NoError(t, err)
+		require.NotNil(t, got.DisconnectedAt)
+		assert.WithinDuration(t, stopped, *got.DisconnectedAt, time.Millisecond)
+	})
+}
+
 // TestCloseOrphanedConnectionsAreReapedByRetention is the point of the whole
 // exercise: an orphan is invisible to the retention sweep until the reconcile
 // gives it a disconnected_at, and reapable immediately afterwards.
@@ -358,9 +736,17 @@ func TestCloseOrphanedConnectionsAreReapedByRetention(t *testing.T) {
 	user, database := createTestUserAndDatabase(t, ctx, store, "orphan-reap")
 
 	store.SetInstanceID("instance-a")
+	store.SetRunID("run-2")
 
-	orphan, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.9")
-	require.NoError(t, err)
+	// Opened by the run this one replaced, which left no registry row behind.
+	var orphan *Connection
+
+	asRun(t, store, "instance-a", "run-1", func() {
+		var err error
+
+		orphan, err = store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.9")
+		require.NoError(t, err)
+	})
 
 	long := time.Now().Add(-48 * time.Hour)
 	createQueryWithRows(t, ctx, store, orphan.UID, "SELECT 'orphan'", long)

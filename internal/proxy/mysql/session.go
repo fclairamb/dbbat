@@ -42,6 +42,10 @@ type Session struct {
 	// Upstream MySQL connection.
 	upstreamConn *gomysqlclient.Conn
 
+	// upstreamTLS records whether the proxy→upstream leg ended up encrypted.
+	// Under an opportunistic ssl_mode that is not knowable from the row alone.
+	upstreamTLS bool
+
 	// DBBat connection record (insert on connect, close on disconnect).
 	connection *store.Connection
 
@@ -256,6 +260,7 @@ func (s *Session) recordConnection() error {
 		s.user.UID,
 		s.database.UID,
 		store.ExtractSourceIP(s.clientConn.RemoteAddr()),
+		store.WithUpstreamTLS(s.upstreamTLS),
 	)
 	if err != nil {
 		return fmt.Errorf("create connection: %w", err)

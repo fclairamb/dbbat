@@ -27,9 +27,11 @@ The TLS upgrade is **mid-connection**, not at the listener level — that's how 
 
 ### Upstream TLS
 
-The proxy→upstream leg is encrypted independently of the client→proxy leg, driven by the `servers.ssl_mode` column. `connectUpstream` dials (directly, or through an SSH bastion when `via_uid` is set) and then calls `negotiateUpstreamSSL` **before** the `StartupMessage` — Postgres expects the 8-byte `SSLRequest` preamble on a fresh connection, not interleaved with protocol traffic. See `internal/proxy/postgresql/upstream_tls.go` and `upstream.go`.
+The proxy→upstream leg is encrypted independently of the client→proxy leg, driven by the `servers.ssl_mode` column. `upstream.ConnectPostgres` (`internal/proxy/upstream/postgres.go`) dials (directly, or through an SSH bastion when `via_uid` is set) and negotiates SSL **before** the `StartupMessage` — Postgres expects the 8-byte `SSLRequest` preamble on a fresh connection, not interleaved with protocol traffic.
 
-Semantics mirror libpq's `sslmode`:
+That connector is also what the connectivity check runs, so a green check proves the proxy's own login path got in rather than that a second implementation could. `internal/proxy/postgresql/upstream.go` keeps only the half that needs a downstream client: replaying the server's startup state, the read-only `SET`, and the cancel-key registration.
+
+Semantics mirror libpq's `sslmode`, encoded once in `upstream.PlanFor`:
 
 | `ssl_mode` | Probe sent | Upstream answers `'S'` | Upstream answers `'N'` |
 |-----------|-----------|------------------------|------------------------|
@@ -45,7 +47,8 @@ Details:
 - **TLS 1.2 is the floor** (`MinVersion: tls.VersionTLS12`); non-verifying modes set `InsecureSkipVerify` to get libpq-parity encryption-without-authentication.
 - Any response byte other than `'S'` or `'N'` fails with `ErrUpstreamSSLResponse`.
 - The default for new server rows is `prefer`, which means an upstream that declines TLS **silently downgrades to plaintext** — use `require` or better when the upstream link matters.
-- **No SCRAM channel binding upstream.** `upstream_scram.go` sends the `n,,` gs2 header (client doesn't support channel binding), so `SCRAM-SHA-256-PLUS` is never selected even inside a TLS tunnel — binding to a certificate we deliberately don't verify would silently upgrade `require`'s "encrypt only" guarantee. An upstream offering *only* `SCRAM-SHA-256-PLUS` fails with `ErrSCRAMNoSupportedMechanism`.
+- **What actually happened is recorded.** Because `prefer` is a preference rather than a guarantee, each session stores the outcome in `connections.upstream_tls`.
+- **No SCRAM channel binding upstream.** `internal/proxy/upstream/postgres_scram.go` sends the `n,,` gs2 header (client doesn't support channel binding), so `SCRAM-SHA-256-PLUS` is never selected even inside a TLS tunnel — binding to a certificate we deliberately don't verify would silently upgrade `require`'s "encrypt only" guarantee. An upstream offering *only* `SCRAM-SHA-256-PLUS` fails with `ErrSCRAMNoSupportedMechanism`.
 
 ### Operator notes
 

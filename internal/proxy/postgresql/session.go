@@ -111,22 +111,20 @@ type Session struct {
 	tlsConfig     *tls.Config // nil when TLS is disabled
 
 	// Session state
-	user                   *store.User
-	database               *store.Server
-	grant                  *store.Grant
-	connectionUID          uuid.UUID
-	clientBackend          *pgproto3.Backend  // To communicate with client (we're the server)
-	upstreamFrontend       *pgproto3.Frontend // To communicate with upstream (we're the client)
-	authenticated          bool
-	bufferedParamStatus    []*pgproto3.ParameterStatus // Buffer for ParameterStatus during upstream auth
-	bufferedBackendKeyData *pgproto3.BackendKeyData    // Buffer for BackendKeyData during upstream auth
-	currentQuery           *pendingQuery               // Track query in progress for logging
-	extendedState          *extendedQueryState         // State for Extended Query Protocol
-	clientApplicationName  string                      // application_name provided by the client
-	copyState              *copyState                  // Track COPY operation in progress
-	upstreamSCRAM          *scramClient                // SCRAM-SHA-256 state for upstream SASL auth
-	guard                  *shared.LimitGuard          // Mid-stream time/bandwidth limit enforcement
-	revocation             *cache.RevocationHandle     // Signaled when this session's grant is revoked mid-flight
+	user                  *store.User
+	database              *store.Server
+	grant                 *store.Grant
+	connectionUID         uuid.UUID
+	clientBackend         *pgproto3.Backend  // To communicate with client (we're the server)
+	upstreamFrontend      *pgproto3.Frontend // To communicate with upstream (we're the client)
+	authenticated         bool
+	currentQuery          *pendingQuery           // Track query in progress for logging
+	extendedState         *extendedQueryState     // State for Extended Query Protocol
+	clientApplicationName string                  // application_name provided by the client
+	copyState             *copyState              // Track COPY operation in progress
+	upstreamTLS           bool                    // Whether the proxy→upstream leg ended up encrypted
+	guard                 *shared.LimitGuard      // Mid-stream time/bandwidth limit enforcement
+	revocation            *cache.RevocationHandle // Signaled when this session's grant is revoked mid-flight
 
 	// watched sits below the counting conn (and below TLS) so an approval
 	// hold can keep reading the client socket while the session goroutine is
@@ -259,7 +257,8 @@ func (s *Session) Run() error {
 	// Create connection record
 	sourceIP := store.ExtractSourceIP(s.clientConn.RemoteAddr())
 
-	conn, err := s.store.CreateConnection(s.ctx, s.user.UID, s.database.UID, sourceIP)
+	conn, err := s.store.CreateConnection(s.ctx, s.user.UID, s.database.UID, sourceIP,
+		store.WithUpstreamTLS(s.upstreamTLS))
 	if err != nil {
 		s.logger.ErrorContext(s.ctx, "failed to create connection record", slog.Any("error", err))
 	} else {

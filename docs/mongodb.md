@@ -74,6 +74,39 @@ the MySQL/PG proxies:
 - both empty (default) — an in-memory self-signed cert is generated at startup
   (fine for development; provide a real cert in production).
 
+## Upstream TLS
+
+The proxy→upstream leg is encrypted independently of the client→proxy leg,
+driven by the `servers.ssl_mode` column. `mongodb.ConnectUpstream`
+(`internal/proxy/mongodb/upstream.go`) is the single implementation: the proxy
+uses it for a live session, and the connectivity check calls it directly, so a
+green check exercises the proxy's exact dial, hello handshake and SCRAM
+exchange rather than a mongo-driver approximation of them.
+
+The policy comes from `upstream.PlanFor` (`internal/proxy/upstream/ssl.go`), the
+same table all four protocols read:
+
+| `ssl_mode` | Upstream behaviour |
+|-----------|--------------------|
+| `disable` | plaintext, never attempts TLS |
+| `allow` | plaintext first; retried with TLS if the plaintext attempt failed before authentication |
+| `prefer`, empty | TLS first; redials plaintext only if the TLS handshake itself failed |
+| `require` | TLS, **certificate not verified** |
+| `verify-ca`, `verify-full` | TLS with hostname + chain verification (`ServerName` = the server row's `host`, system root pool, TLS 1.2 floor) |
+
+Notes:
+
+- **Opportunistic TLS costs a redial.** MongoDB has no in-band negotiation — a
+  connection is TLS from the first byte or not at all — so `prefer` can only be
+  "attempt the handshake, redial plaintext when it fails".
+- **A SCRAM rejection never downgrades the retry.** Once bytes have been
+  exchanged as a client, a failure is the server's answer about us, not about
+  the transport. Same rule libpq and pgconn follow.
+- **`verify-ca` is treated as `verify-full`** (Go's stdlib doesn't cleanly
+  express CA-only verification), and there is no per-server CA bundle yet.
+- **What actually happened is recorded** in `connections.upstream_tls`, because
+  under `prefer` the row's `ssl_mode` cannot tell you.
+
 ## Topology Discovery (why we present as a standalone)
 
 Drivers discover servers from the `hello` reply and will connect *directly* to

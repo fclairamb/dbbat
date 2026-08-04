@@ -72,7 +72,9 @@ dbbat/
 │   ├── api/                 # REST API handlers and middleware
 │   │   └── openapi.yml      # OpenAPI 3.0 specification
 │   ├── proxy/
-│   │   ├── shared/          # Auth, query interception shared across protocols
+│   │   ├── shared/          # Auth, query interception, upstream transport (dial + SSH bastion)
+│   │   ├── upstream/        # One upstream-connect path per protocol, shared by the proxies and the connectivity check (ssl_mode policy lives here)
+│   │   ├── conncheck/       # Connectivity check: runs the connectors above, classifies the failure
 │   │   ├── postgresql/      # PostgreSQL wire protocol proxy
 │   │   ├── oracle/          # Oracle TNS/TTC proxy (see docs/oracle.md)
 │   │   ├── mysql/           # MySQL/MariaDB proxy (see docs/mysql.md)
@@ -151,7 +153,7 @@ This applies even when the current task is otherwise complete — capture the fo
 | `DBB_KEYFILE` | Path to file containing encryption key | No |
 | `DBB_RUN_MODE` | Run mode: empty, `test`, or `demo` | No |
 | `DBB_LOG_LEVEL` | Log level: `debug`, `info`, `warn`, `error` (default: `info`) | No |
-| `DBB_INSTANCE_ID` | Identifies this process among replicas sharing the store (default: hostname). Registered in the `instances` table with a 30s heartbeat; the startup reconcile closes crash-orphaned connections owned by this id, plus those of any instance that deregistered or went 15min without a heartbeat. | No |
+| `DBB_INSTANCE_ID` | Identifies this process among replicas sharing the store (default: hostname). Stamped on connection rows next to a non-configurable per-run UUID, and registered in the `instances` table — keyed by `(instance_id, run_id)` — with a 30s heartbeat. The reconcile closes crash-orphaned connections whose owning *run* deregistered or went 15min without a heartbeat, never a run that is still heartbeating, so replicas sharing an id are safe (just confusing). The liveness half also re-runs every ~7.5min while the process lives, covering both crashed peers and this id's own previous runs. | No |
 | `DBB_DUMP_DIR` | Directory for session dump files (empty = disabled) | No |
 | `DBB_DUMP_MAX_SIZE` | Max dump file size per session in bytes (default: 10MB) | No |
 | `DBB_DUMP_RETENTION` | Auto-delete dumps older than this (default: `24h`) | No |

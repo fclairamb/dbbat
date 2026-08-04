@@ -25,6 +25,7 @@ type Store struct {
 	authCache   *cache.AuthCache          // Optional auth cache for API key verification
 	revocations *cache.RevocationRegistry // In-process fan-out of grant revocations to live proxy sessions
 	instanceID  string                    // Identifies this process among the replicas sharing this store
+	runID       string                    // Identifies this *run*: minted here, never configurable
 }
 
 // Options configures Store creation.
@@ -69,6 +70,11 @@ func New(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
 		storageDSN:  dsn,
 		revocations: cache.NewRevocationRegistry(),
 		instanceID:  options.InstanceID,
+		// Minted here rather than taken from Options: the run id must identify
+		// one live process, and anything an operator can set — including
+		// DBB_INSTANCE_ID — can end up shared by several replicas. UUIDv7 so
+		// it also sorts by start time, which makes a registry dump readable.
+		runID: newUIDv7().String(),
 	}
 
 	// Drop all tables first if requested (for test mode)
@@ -119,6 +125,34 @@ func (s *Store) SetInstanceID(instanceID string) {
 // InstanceID returns the identifier this process stamps on connection rows.
 func (s *Store) InstanceID() string {
 	return s.instanceID
+}
+
+// SetRunID overrides the run id minted by New. Tests use it to impersonate
+// another run — a previous one of this instance id, or a live peer sharing the
+// id; a serving process never calls it, because a run id that is not unique to
+// one live process defeats the whole point of having one.
+func (s *Store) SetRunID(runID string) {
+	s.runID = runID
+}
+
+// RunID returns the identifier of this run: unique per live process, unlike the
+// instance id, which an operator can pin to the same value on every replica.
+func (s *Store) RunID() string {
+	return s.runID
+}
+
+// currentRunID is the run id to stamp on the rows this process writes, or nil
+// when it has none — a zero-value Store, which only tests build. NULL then
+// carries the same meaning as it does on a row written before run tracking
+// existed: no run vouches for it, so it is judged by its instance id alone.
+func (s *Store) currentRunID() *string {
+	if s.runID == "" {
+		return nil
+	}
+
+	runID := s.runID
+
+	return &runID
 }
 
 // Revocations returns the process-wide grant-revocation registry that live

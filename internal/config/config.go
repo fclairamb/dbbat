@@ -363,10 +363,11 @@ type Config struct {
 	RunMode RunMode `koanf:"run_mode"`
 
 	// InstanceID identifies this dbbat process among the replicas sharing the
-	// same store. It is stamped on every connection row so the startup
-	// reconcile of crash-orphaned connections only ever touches connections
-	// this instance opened. Defaults to the hostname, which is the pod name
-	// under Kubernetes. Empty is not a valid runtime value — Load fills it in.
+	// same store. It is stamped on every connection row, alongside the run id
+	// the store mints at startup, so the reconcile of crash-orphaned
+	// connections can tell a dead run's rows from a live one's. Defaults to the
+	// hostname, which is the pod name under Kubernetes. Empty is not a valid
+	// runtime value — Load fills it in.
 	InstanceID string `koanf:"instance_id"`
 
 	// DemoTargetDB specifies the only allowed database target in demo mode.
@@ -672,32 +673,37 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 }
 
 // FallbackInstanceID is used when no DBB_INSTANCE_ID is set and the hostname
-// cannot be read. It is deliberately a constant rather than a random value:
-// two runs of the same process must agree on the id, or a restart would never
-// recognize (and therefore never reclaim) the connections its predecessor left
-// open.
+// cannot be read. It is deliberately a constant rather than a random value: it
+// is what attributes a connection row to a recognizable owner, and a value that
+// changed on every start would leave a trail of ids nobody can interpret.
 //
 // It is also the one way replicas can end up sharing an id without anyone
-// asking for it — every replica that cannot read its hostname lands here — and
-// a shared id defeats the reconcile's own-instance branch. Reaching it at all
-// takes a broken container; see resolveInstanceID.
+// asking for it — every replica that cannot read its hostname lands here. That
+// is no longer dangerous: the reconcile keys on the per-run id the store mints
+// at startup, which cannot be shared, so replicas sharing this value still
+// cannot close each other's connections. It stays undesirable — several
+// processes then answer to one identity in the logs, the UI and the reclaim's
+// counts — and reaching it at all takes a broken container; see
+// resolveInstanceID.
 const FallbackInstanceID = "dbbat"
 
 // resolveInstanceID fills in the instance id when it was not configured.
 //
-// The hostname is the right default, and the property that matters is that two
-// replicas sharing a store never collide — under Kubernetes it is the pod name,
-// so they cannot. A pod name that changes on every restart is not a problem:
-// Store.CloseOrphanedConnections tracks instance liveness in the instances
-// table, so a replacement pod reclaims its predecessor's orphans without
-// recognizing its id.
+// The hostname is the right default — under Kubernetes it is the pod name, so
+// replicas sharing a store do not collide. A pod name that changes on every
+// restart is not a problem: Store.CloseOrphanedConnections tracks liveness in
+// the instances table, so a replacement pod reclaims its predecessor's orphans
+// without recognizing its id.
 //
-// Uniqueness is the requirement, stability is not. Do not set the same
-// DBB_INSTANCE_ID on several replicas to make them "recognize" each other: the
-// own-instance branch of the reconcile closes every open connection carrying
-// this id with no liveness check at all, so a starting replica would close a
-// live peer's sessions. FallbackInstanceID below is the accidental path into
-// the same state. See specs/todos/2026-08-03-shared-instance-id-reconcile.md.
+// Setting the same DBB_INSTANCE_ID on several replicas is no longer unsafe —
+// every process also mints a run id the reconcile keys on, so a starting
+// replica cannot close a live peer's sessions whatever the id says — but it is
+// still not worth doing. It buys nothing (nothing has recognized an id since
+// liveness tracking landed) and it costs clarity: several processes answer to
+// one identity in the logs and in the UI, and the reconcile's "left open by a
+// previous run" count then covers the whole id rather than this process.
+// A process that finds itself sharing an id says so once; see
+// checkSharedInstanceID.
 func resolveInstanceID(configured string) string {
 	if configured = strings.TrimSpace(configured); configured != "" {
 		return configured
