@@ -1,17 +1,38 @@
 package mysql
 
 import (
+	"context"
 	"errors"
 	"net"
+	"strconv"
 	"testing"
 
 	gomysqlclient "github.com/go-mysql-org/go-mysql/client"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
 	gomysqlserver "github.com/go-mysql-org/go-mysql/server"
 
+	"github.com/fclairamb/dbbat/internal/proxy/upstream"
 	"github.com/fclairamb/dbbat/internal/store"
 	"github.com/fclairamb/dbbat/internal/version"
 )
+
+// splitHostPort turns a listener address into the host/port pair a server row
+// carries.
+func splitHostPort(t *testing.T, addr string) (string, int) {
+	t.Helper()
+
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split %q: %v", addr, err)
+	}
+
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("port %q: %v", portStr, err)
+	}
+
+	return host, port
+}
 
 // stubCommandHandler is a no-op gomysqlserver.Handler used by the fake MySQL
 // servers in this file. Both fixtures below only need the connection
@@ -96,22 +117,22 @@ func acceptServerConn(ln net.Listener, user, password string) <-chan serverConnR
 	return resultCh
 }
 
-// TestApplyUpstreamOptions_ProgramNameAttributeWiring exercises the actual
-// wiring in applyUpstreamOptions (upstream.go), not just the pure
+// TestUpstreamConfig_ProgramNameAttributeWiring exercises the actual wiring in
+// Session.upstreamConfig (upstream.go), not just the pure
 // buildUpstreamProgramName helper already covered by
 // TestBuildUpstreamProgramName in upstream_test.go: reading the client's
 // declared program_name off s.serverConn.Attributes(), composing it with
-// s.user.Username, and calling c.SetAttributes on the upstream connection.
+// s.user.Username, and getting it onto the upstream connection's attributes.
 //
-// It drives a real go-mysql client.Conn through applyUpstreamOptions as its
-// connect Option — exactly as connectUpstream does in production — against a
-// real go-mysql server.Conn standing in for the upstream database, so the
-// attribute is round-tripped over the actual CLIENT_CONNECT_ATTRS wire
-// encoding rather than asserted via reflection or a hand-built fake.
-// s.serverConn itself is built the same way: a second real client/server
-// handshake in which the fake "client" declares its own program_name — the
-// $appName dbbat is supposed to intercept and fold into the upstream name.
-func TestApplyUpstreamOptions_ProgramNameAttributeWiring(t *testing.T) {
+// It drives the real shared connector — upstream.ConnectMySQL, exactly what
+// connectUpstream calls in production — against a real go-mysql server.Conn
+// standing in for the upstream database, so the attribute is round-tripped
+// over the actual CLIENT_CONNECT_ATTRS wire encoding rather than asserted via
+// reflection or a hand-built fake. s.serverConn itself is built the same way: a
+// second real client/server handshake in which the fake "client" declares its
+// own program_name — the $appName dbbat is supposed to intercept and fold into
+// the upstream name.
+func TestUpstreamConfig_ProgramNameAttributeWiring(t *testing.T) {
 	t.Parallel()
 
 	const (
@@ -152,7 +173,7 @@ func TestApplyUpstreamOptions_ProgramNameAttributeWiring(t *testing.T) {
 		t.Fatalf("sanity check failed: s.serverConn program_name = %q, want %q", got, clientProgramName)
 	}
 
-	// --- Step 2: build the Session under test and drive applyUpstreamOptions
+	// --- Step 2: build the Session under test and drive its upstream config
 	// through a real upstream-facing handshake.
 	s := &Session{
 		user:       &store.User{Username: dbbatUsername},
@@ -168,10 +189,23 @@ func TestApplyUpstreamOptions_ProgramNameAttributeWiring(t *testing.T) {
 
 	upstreamConnCh := acceptServerConn(upstreamLn, upstreamUser, upstreamPassword)
 
-	upstreamClient, err := gomysqlclient.Connect(
-		upstreamLn.Addr().String(), upstreamUser, upstreamPassword, "", s.applyUpstreamOptions)
+	upstreamHost, upstreamPort := splitHostPort(t, upstreamLn.Addr().String())
+
+	cfg := s.upstreamConfig()
+	cfg.Host = upstreamHost
+	cfg.Port = upstreamPort
+	cfg.Username = upstreamUser
+	cfg.Password = upstreamPassword
+	cfg.Database = ""
+
+	upstreamClient, err := upstream.ConnectMySQL(context.Background(),
+		func(ctx context.Context) (net.Conn, error) {
+			var d net.Dialer
+
+			return d.DialContext(ctx, "tcp", upstreamLn.Addr().String())
+		}, cfg)
 	if err != nil {
-		t.Fatalf("applyUpstreamOptions connect: %v", err)
+		t.Fatalf("ConnectMySQL: %v", err)
 	}
 	defer func() { _ = upstreamClient.Close() }()
 

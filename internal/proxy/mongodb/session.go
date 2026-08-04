@@ -75,7 +75,10 @@ type Session struct {
 	compressReplies  bool
 
 	// upstream is the authenticated connection to the target MongoDB.
-	upstream *upstreamConn
+	upstream *UpstreamConn
+
+	// upstreamTLS records whether the proxy→upstream leg ended up encrypted.
+	upstreamTLS bool
 
 	// connection is the DBBat audit record (insert on auth, close on teardown).
 	connection *store.Connection
@@ -493,12 +496,12 @@ func (s *Session) cumulativeClientBytes() int64 {
 }
 
 // onLimitViolation force-closes both conns when the watchdog trips.
-func (s *Session) onLimitViolation(upstream *upstreamConn, clientConn io.Closer, err error) {
+func (s *Session) onLimitViolation(up *UpstreamConn, clientConn io.Closer, err error) {
 	s.logger.WarnContext(s.ctx, "terminating MongoDB session: grant no longer valid mid-stream",
 		slog.Any("error", err))
 
-	if upstream != nil {
-		upstream.close()
+	if up != nil {
+		up.close()
 	}
 
 	if clientConn != nil {
