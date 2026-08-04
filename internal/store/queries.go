@@ -46,7 +46,7 @@ func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 		DurationMs:   query.DurationMs,
 		RowsAffected: query.RowsAffected,
 		Error:        query.Error,
-		// COPY metadata, set by the protocols that recognise a bulk transfer
+		// COPY metadata, set by the protocols that recognize a bulk transfer
 		// (PostgreSQL today). Nil for every other statement.
 		CopyFormat:    query.CopyFormat,
 		CopyDirection: query.CopyDirection,
