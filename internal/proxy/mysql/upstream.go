@@ -44,12 +44,13 @@ func (s *Session) connectUpstream() error {
 		return fmt.Errorf("decrypt upstream password: %w", err)
 	}
 
-	conn, err := upstream.ConnectMySQL(s.ctx, s.dialUpstream, s.upstreamConfig())
+	up, err := upstream.ConnectMySQL(s.ctx, s.dialUpstream, s.upstreamConfig())
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrUpstreamConnect, err)
 	}
 
-	s.upstreamConn = conn
+	s.upstreamConn = up.Conn
+	s.upstreamTLS = up.TLS
 
 	s.logger.DebugContext(s.ctx, "upstream MySQL connected",
 		slog.String("addr", net.JoinHostPort(s.database.Host, strconv.Itoa(s.database.Port))),

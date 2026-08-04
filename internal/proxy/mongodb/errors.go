@@ -42,6 +42,14 @@ var (
 	ErrTLSRequired = errors.New("dbbat: PLAIN authentication requires TLS")
 	// ErrUpstreamConnect — the outbound connection to the upstream MongoDB failed.
 	ErrUpstreamConnect = errors.New("dbbat: upstream MongoDB connection failed")
+	// ErrUpstreamTLSHandshake — the TLS handshake with the upstream failed.
+	// Distinguished from every other upstream failure because it is the one
+	// signal that may downgrade an opportunistic ssl_mode to plaintext.
+	ErrUpstreamTLSHandshake = errors.New("dbbat: upstream MongoDB TLS handshake failed")
+	// ErrUpstreamNoAttempt — the ssl_mode produced no connection attempt at
+	// all. Unreachable with a plan from upstream.PlanFor; it exists so the
+	// exhausted-loop path is not a silent nil.
+	ErrUpstreamNoAttempt = errors.New("dbbat: ssl_mode produced no upstream connection attempt")
 	// ErrCommandBlocked — a command was refused by grant controls or the
 	// always-blocked list.
 	ErrCommandBlocked = errors.New("dbbat: command not permitted")

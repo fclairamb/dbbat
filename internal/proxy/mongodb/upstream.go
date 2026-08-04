@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -114,13 +115,63 @@ type UpstreamConfig struct {
 // ConnectUpstream dials the target through dial, applies the ssl_mode policy,
 // runs the hello handshake and authenticates via SCRAM-SHA-256 (contract §5).
 // It is the one implementation the proxy and the connectivity check share.
+//
+// MongoDB has no in-band encryption negotiation: a connection is TLS from the
+// first byte or not at all. An opportunistic ssl_mode is therefore a redial —
+// attempt the TLS handshake, and fall back to plaintext only when that
+// handshake is what failed. Once bytes have been exchanged as a client, a
+// failure is the server's answer about *us*, not about the transport, so a
+// rejected credential ends the chain rather than downgrading the retry.
 func ConnectUpstream(ctx context.Context, dial upstream.DialFunc, cfg UpstreamConfig) (*UpstreamConn, error) {
-	conn, encrypted, err := dialUpstream(ctx, dial, cfg)
+	plan := upstream.PlanFor(cfg.SSLMode, cfg.Host)
+
+	var lastErr error
+
+	for i, attempt := range plan.Attempts {
+		up, err := connectUpstreamOnce(ctx, dial, cfg, attempt)
+		if err == nil {
+			return up, nil
+		}
+
+		lastErr = err
+
+		if i == len(plan.Attempts)-1 || !mongoRetryable(attempt, err) {
+			break
+		}
+	}
+
+	if lastErr == nil {
+		return nil, ErrUpstreamNoAttempt
+	}
+
+	return nil, lastErr
+}
+
+// connectUpstreamOnce runs a single attempt: dial, optional TLS handshake,
+// hello, SCRAM.
+func connectUpstreamOnce(
+	ctx context.Context,
+	dial upstream.DialFunc,
+	cfg UpstreamConfig,
+	attempt upstream.Attempt,
+) (*UpstreamConn, error) {
+	conn, err := dial(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	up := &UpstreamConn{conn: conn, reader: bufio.NewReader(conn), tls: encrypted}
+	if attempt.Encrypted() {
+		tlsConn := tls.Client(conn, attempt.TLS)
+		if err := tlsConn.HandshakeContext(ctx); err != nil {
+			_ = conn.Close()
+
+			return nil, fmt.Errorf("%w: %w", ErrUpstreamTLSHandshake, err)
+		}
+
+		conn = tlsConn
+	}
+
+	up := &UpstreamConn{conn: conn, reader: bufio.NewReader(conn), tls: attempt.Encrypted()}
 
 	if err := up.handshake(cfg.AppName); err != nil {
 		up.close()
@@ -137,32 +188,22 @@ func ConnectUpstream(ctx context.Context, dial upstream.DialFunc, cfg UpstreamCo
 	return up, nil
 }
 
-// dialUpstream opens the transport and applies the ssl_mode plan. MongoDB has
-// no in-band negotiation — a connection is TLS from the first byte or not at
-// all — so an encrypted attempt is simply a TLS handshake on a fresh conn.
-func dialUpstream(ctx context.Context, dial upstream.DialFunc, cfg UpstreamConfig) (net.Conn, bool, error) {
-	plan := upstream.PlanFor(cfg.SSLMode, cfg.Host)
-
-	conn, err := dial(ctx)
-	if err != nil {
-		return nil, false, err
+// mongoRetryable reports whether a failed attempt should be followed by the
+// next one in the plan.
+//
+//   - an encrypted attempt may fall back to plaintext when the TLS handshake
+//     itself failed — that is what a server with TLS switched off looks like;
+//   - a plaintext attempt (ssl_mode=allow) may be retried encrypted when the
+//     failure came before authentication, which is how a TLS-only server
+//     answers a plaintext client: garbage or a dropped connection during hello.
+//
+// A SCRAM rejection is never retryable in either direction.
+func mongoRetryable(attempt upstream.Attempt, err error) bool {
+	if attempt.Encrypted() {
+		return errors.Is(err, ErrUpstreamTLSHandshake)
 	}
 
-	tlsCfg := plan.TLSConfig()
-	if tlsCfg == nil || !plan.RequiresTLS() {
-		// Opportunistic modes still connect in plaintext at this phase; the
-		// TLS-first attempt chain arrives with the opportunistic-TLS work.
-		return conn, false, nil
-	}
-
-	tlsConn := tls.Client(conn, tlsCfg)
-	if err := tlsConn.HandshakeContext(ctx); err != nil {
-		_ = conn.Close()
-
-		return nil, false, err
-	}
-
-	return tlsConn, true, nil
+	return !errors.Is(err, ErrUpstreamRejected)
 }
 
 // connectUpstream opens the session's upstream connection using the shared
