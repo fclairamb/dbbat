@@ -1,6 +1,10 @@
 package postgresql
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/fclairamb/dbbat/internal/proxy/upstream"
+)
 
 // Authentication and authorization errors.
 var (
@@ -16,7 +20,6 @@ var (
 	ErrDDLNotPermitted  = errors.New("DDL operations not permitted: your access grant blocks schema modifications")
 	ErrCopyNotPermitted = errors.New("COPY not permitted: your access grant blocks COPY commands")
 
-	ErrUpstreamAuthFailed  = errors.New("upstream authentication failed")
 	ErrAPIKeyOwnerMismatch = errors.New("API key does not belong to user")
 	ErrAPIKeyVerifyFailed  = errors.New("API key verification failed")
 
@@ -30,17 +33,20 @@ var (
 	// Not a failure: a CancelRequest is a one-shot out-of-band signal on its
 	// own TCP connection, and PostgreSQL closes it without a reply.
 	ErrCancelRequestHandled = errors.New("cancel request handled")
+)
 
-	// Upstream TLS errors raised when negotiating SSL with the target
-	// Postgres server (see negotiateUpstreamSSL).
-	ErrUpstreamTLSRequired = errors.New("upstream rejected TLS but ssl_mode requires it")
-	ErrUpstreamSSLResponse = errors.New("unexpected upstream SSL response byte")
-
-	// Upstream SCRAM/SASL errors raised when authenticating with the target
-	// Postgres server using SCRAM-SHA-256.
-	ErrSCRAMNoSupportedMechanism = errors.New("upstream offered no SCRAM mechanism we support")
-	ErrSCRAMServerNonceMismatch  = errors.New("SCRAM server nonce did not extend client nonce")
-	ErrSCRAMServerSignature      = errors.New("SCRAM server signature mismatch")
-	ErrSCRAMUnexpectedMessage    = errors.New("unexpected SASL message from upstream")
-	ErrSCRAMMalformedMessage     = errors.New("malformed SCRAM message from upstream")
+// Upstream connect failures. The upstream login itself lives in
+// internal/proxy/upstream (one implementation, shared with the connectivity
+// check); these names are kept as aliases so callers and tests in this package
+// — and anything outside it that already matched on them — keep working.
+var (
+	// ErrUpstreamAuthFailed is returned when the target refused the stored
+	// database credentials.
+	ErrUpstreamAuthFailed = upstream.ErrPostgresAuthFailed
+	// ErrUpstreamTLSRequired is returned when the target refused TLS while
+	// ssl_mode demanded it.
+	ErrUpstreamTLSRequired = upstream.ErrPostgresTLSRequired
+	// ErrUpstreamSSLResponse is returned when the target answered the
+	// SSLRequest with neither 'S' nor 'N'.
+	ErrUpstreamSSLResponse = upstream.ErrPostgresSSLResponse
 )

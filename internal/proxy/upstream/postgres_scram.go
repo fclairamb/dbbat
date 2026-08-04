@@ -1,15 +1,34 @@
-package postgresql
+package upstream
 
 import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"golang.org/x/crypto/pbkdf2"
+)
+
+// Upstream SCRAM/SASL errors raised when authenticating with a target Postgres
+// server using SCRAM-SHA-256.
+var (
+	// ErrSCRAMNoSupportedMechanism means the server offered only mechanisms we
+	// decline to speak — in practice SCRAM-SHA-256-PLUS only.
+	ErrSCRAMNoSupportedMechanism = errors.New("upstream offered no SCRAM mechanism we support")
+	// ErrSCRAMServerNonceMismatch means the server's nonce did not extend ours,
+	// so the exchange is not the one we started.
+	ErrSCRAMServerNonceMismatch = errors.New("SCRAM server nonce did not extend client nonce")
+	// ErrSCRAMServerSignature means the server could not prove it holds the
+	// password — either a mismatch, or an explicit server-side rejection.
+	ErrSCRAMServerSignature = errors.New("SCRAM server signature mismatch")
+	// ErrSCRAMUnexpectedMessage means a SASL message arrived out of order.
+	ErrSCRAMUnexpectedMessage = errors.New("unexpected SASL message from upstream")
+	// ErrSCRAMMalformedMessage means a SASL payload did not parse.
+	ErrSCRAMMalformedMessage = errors.New("malformed SCRAM message from upstream")
 )
 
 // scramMechanism is the SASL mechanism dbbat speaks to upstream Postgres.
