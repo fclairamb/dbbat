@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,4 +34,41 @@ func TestNextReclaimDelay(t *testing.T) {
 
 	require.Greater(t, len(seen), 1,
 		"a fixed delay would put every replica's sweep in lockstep, which is what the jitter is for")
+}
+
+// TestClassifySharedIDCandidates covers how a live replica sharing our instance
+// id is told apart from our own crashed predecessor.
+//
+// At startup the two are indistinguishable — both leave a fresh registry row
+// carrying our id and someone else's run id — so the answer is whether the row
+// keeps moving. Getting this wrong in the loud direction would fire the warning
+// on every crash-restart of a stable instance id.
+func TestClassifySharedIDCandidates(t *testing.T) {
+	t.Parallel()
+
+	startup := time.Now().Add(-time.Minute)
+
+	candidates := map[string]time.Time{
+		"live-peer":   startup,
+		"dead-run":    startup,
+		"pruned-run":  startup,
+		"another-one": startup,
+	}
+
+	peers := []store.Instance{
+		// Heartbeated since we sampled: a process, not a corpse.
+		{InstanceID: "shared", RunID: "live-peer", LastSeenAt: startup.Add(30 * time.Second)},
+		// Frozen at the instant it died, and still inside the grace period.
+		{InstanceID: "shared", RunID: "dead-run", LastSeenAt: startup},
+		// Registered after we sampled; it warns about us instead.
+		{InstanceID: "shared", RunID: "newcomer", LastSeenAt: startup.Add(time.Minute)},
+	}
+
+	confirmed, remaining := classifySharedIDCandidates(candidates, peers)
+
+	assert.Equal(t, []string{"live-peer"}, confirmed,
+		"only a run whose heartbeat moved is another live process")
+
+	assert.Equal(t, map[string]time.Time{"dead-run": startup}, remaining,
+		"a frozen row stays under observation; rows that vanished are settled and dropped")
 }

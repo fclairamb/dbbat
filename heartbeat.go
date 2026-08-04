@@ -146,25 +146,7 @@ func (h *instanceHeartbeat) checkSharedInstanceID(ctx context.Context) {
 		return
 	}
 
-	var confirmed []string
-
-	// Candidates that are still around but have not moved stay under
-	// observation; those that vanished (pruned, or deregistered) are dropped.
-	remaining := make(map[string]time.Time, len(h.sharedIDCandidates))
-
-	for _, peer := range peers {
-		seenAtStartup, isCandidate := h.sharedIDCandidates[peer.RunID]
-		switch {
-		case !isCandidate:
-			// Registered after us. That process runs this same check against
-			// our row, so leaving it out here does not lose the warning.
-		case peer.LastSeenAt.After(seenAtStartup):
-			confirmed = append(confirmed, peer.RunID)
-		default:
-			remaining[peer.RunID] = seenAtStartup
-		}
-	}
-
+	confirmed, remaining := classifySharedIDCandidates(h.sharedIDCandidates, peers)
 	if len(confirmed) == 0 {
 		h.sharedIDCandidates = remaining
 
@@ -179,6 +161,35 @@ func (h *instanceHeartbeat) checkSharedInstanceID(ctx context.Context) {
 		slog.Any("other_run_ids", confirmed),
 		slog.String("hint", "DBB_INSTANCE_ID must be unique per running process; "+
 			"the default (the hostname) already is"))
+}
+
+// classifySharedIDCandidates splits the runs registered under our instance id
+// into those that have proven they are alive since we started — their heartbeat
+// moved — and those still under observation.
+//
+// A candidate that has disappeared from the registry is dropped: it was pruned
+// or deregistered, which settles it as dead. A run that registered after we
+// sampled is not judged here at all; it runs this same check against our row,
+// so no warning is lost.
+func classifySharedIDCandidates(
+	candidates map[string]time.Time, peers []store.Instance,
+) ([]string, map[string]time.Time) {
+	var confirmed []string
+
+	remaining := make(map[string]time.Time, len(candidates))
+
+	for _, peer := range peers {
+		seenAtStartup, isCandidate := candidates[peer.RunID]
+		switch {
+		case !isCandidate:
+		case peer.LastSeenAt.After(seenAtStartup):
+			confirmed = append(confirmed, peer.RunID)
+		default:
+			remaining[peer.RunID] = seenAtStartup
+		}
+	}
+
+	return confirmed, remaining
 }
 
 func (h *instanceHeartbeat) run(ctx context.Context) {
