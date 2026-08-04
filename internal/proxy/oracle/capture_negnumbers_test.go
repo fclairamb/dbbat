@@ -23,7 +23,7 @@ var negNumbersExpected = []string{"-42", "-3.14", "100", "-1000000"}
 func TestDumpReplay_NegNumbers(t *testing.T) {
 	t.Parallel()
 
-	td := loadTestDump(t, "go_ora_negnumbers.dbbat-dump")
+	td := loadTestDump(t, "go_ora_negnumbers.pcapng")
 
 	rows := replayCapturedRows(t, td, negNumbersSQLMarker)
 

@@ -21,7 +21,7 @@ DBBat exposes five listeners by default. Each can be disabled by setting the mat
 
 | Listener | Default port | Env var |
 |----------|-------------|---------|
-| PostgreSQL proxy | `5434` | `DBB_LISTEN_PG` |
+| PostgreSQL proxy | `5433` | `DBB_LISTEN_PG` |
 | Oracle proxy | `1522` | `DBB_LISTEN_ORA` |
 | MySQL/MariaDB proxy | `3307` | `DBB_LISTEN_MYSQL` |
 | MongoDB proxy | `27018` | `DBB_LISTEN_MONGO` |
@@ -161,7 +161,7 @@ spec:
         image: ghcr.io/fclairamb/dbbat:latest
         ports:
         - name: postgres
-          containerPort: 5434
+          containerPort: 5433
           protocol: TCP
         - name: oracle
           containerPort: 1522
@@ -187,7 +187,7 @@ spec:
               name: dbbat-key
               key: encryption-key
         - name: DBB_LISTEN_PG
-          value: ":5434"
+          value: ":5433"
         - name: DBB_LISTEN_ORA
           value: ":1522"
         - name: DBB_LISTEN_MYSQL
@@ -246,7 +246,7 @@ spec:
     app: dbbat
   ports:
   - name: postgres
-    port: 5434
+    port: 5433
     targetPort: postgres
     protocol: TCP
   - name: oracle
@@ -397,7 +397,7 @@ and no gateway change is needed.
 
 ## Exposing the Proxy Listeners
 
-The proxy listeners (PostgreSQL `5434`, Oracle `1522`, MySQL/MariaDB `3307`, MongoDB `27018`) cannot be exposed via a standard HTTP Ingress — they speak TCP/wire protocols, not HTTP. Options:
+The proxy listeners (PostgreSQL `5433`, Oracle `1522`, MySQL/MariaDB `3307`, MongoDB `27018`) cannot be exposed via a standard HTTP Ingress — they speak TCP/wire protocols, not HTTP. Options:
 
 :::note Egress for SSH tunnels
 Exposing the listeners only covers traffic *into* the pod. Upstreams configured
@@ -424,7 +424,7 @@ spec:
     app: dbbat
   ports:
   - name: postgres
-    port: 5434
+    port: 5433
     targetPort: postgres
   - name: oracle
     port: 1522
@@ -452,9 +452,9 @@ spec:
     app: dbbat
   ports:
   - name: postgres
-    port: 5434
+    port: 5433
     targetPort: postgres
-    nodePort: 30434
+    nodePort: 30433
   - name: oracle
     port: 1522
     targetPort: oracle
@@ -482,7 +482,7 @@ metadata:
   name: tcp-services
   namespace: ingress-nginx
 data:
-  "5434": "dbbat/dbbat:5434"
+  "5433": "dbbat/dbbat:5433"
   "1522": "dbbat/dbbat:1522"
   "3307": "dbbat/dbbat:3307"
   "27018": "dbbat/dbbat:27018"

@@ -129,12 +129,12 @@ func TestPublicEndpoints(t *testing.T) {
 		// Give each run a unique store to avoid conflicts.
 		s2 := setupTestStoreNoCleanup(t)
 
-		port5434 := 5434
+		port5433 := 5433
 		port1522 := 1522
 		pe := PublicEndpoints{
 			Host:     "db.example.com",
 			PGHost:   "pg.example.com",
-			PGPort:   &port5434,
+			PGPort:   &port5433,
 			OraPort:  &port1522,
 			WebUIURL: "https://dbbat.example.com",
 		}
@@ -157,7 +157,7 @@ func TestPublicEndpoints(t *testing.T) {
 		assert.Equal(t, "db.example.com", got.Host)
 		assert.Equal(t, "pg.example.com", got.PGHost)
 		require.NotNil(t, got.PGPort)
-		assert.Equal(t, 5434, *got.PGPort)
+		assert.Equal(t, 5433, *got.PGPort)
 		require.NotNil(t, got.OraPort)
 		assert.Equal(t, 1522, *got.OraPort)
 		assert.Equal(t, "https://dbbat.example.com", got.WebUIURL)
@@ -170,7 +170,7 @@ func TestResolvePublicEndpoints(t *testing.T) {
 	port9999 := 9999
 
 	cfg := &config.Config{
-		ListenPG:     ":5434",
+		ListenPG:     ":5433",
 		ListenOracle: ":1522",
 		ListenMySQL:  ":3307",
 	}
@@ -205,7 +205,7 @@ func TestResolvePublicEndpoints(t *testing.T) {
 
 		pe := PublicEndpoints{}
 		r := ResolvePublicEndpoints(pe, cfg)
-		assert.Equal(t, 5434, r.PGPort)
+		assert.Equal(t, 5433, r.PGPort)
 		assert.Equal(t, 1522, r.OraPort)
 		assert.Equal(t, 3307, r.MySQLPort)
 	})
@@ -216,12 +216,12 @@ func TestResolvePublicEndpoints(t *testing.T) {
 		emptyCfg := &config.Config{
 			ListenOracle: "",
 			ListenMySQL:  "",
-			ListenPG:     ":5434",
+			ListenPG:     ":5433",
 		}
 		r := ResolvePublicEndpoints(PublicEndpoints{}, emptyCfg)
 		assert.Equal(t, 0, r.OraPort)
 		assert.Equal(t, 0, r.MySQLPort)
-		assert.Equal(t, 5434, r.PGPort)
+		assert.Equal(t, 5433, r.PGPort)
 	})
 
 	t.Run("web_ui_url override takes priority over cfg.PublicURL", func(t *testing.T) {

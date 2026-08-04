@@ -101,6 +101,10 @@ func socketInteractionCallback(evt socketmode.Event) (slack.InteractionCallback,
 // our Approve/Deny block actions. Processing happens in a goroutine with its
 // own timeout, mirroring the HTTP path.
 func (s *Server) dispatchSlackCallback(decider slackDecider, callback slack.InteractionCallback) bool {
+	if s.dispatchSlackQueryDecision(callback) {
+		return true
+	}
+
 	action, requestUID, ok := slackDecisionFromCallback(callback)
 	if !ok {
 		return false

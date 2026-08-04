@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -282,9 +283,12 @@ func (s *Server) handleGetQueryRows(c *gin.Context) {
 	successResponse(c, result)
 }
 
-const dumpFileExt = ".dbbat-dump"
+const (
+	dumpFileExt         = dump.FileExt
+	dumpFileContentType = "application/x-pcapng"
+)
 
-// handleGetConnectionDump downloads the raw TNS dump for a connection.
+// handleGetConnectionDump downloads the raw pcapng session capture for a connection.
 func (s *Server) handleGetConnectionDump(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
@@ -308,6 +312,7 @@ func (s *Server) handleGetConnectionDump(c *gin.Context) {
 		return
 	}
 
+	c.Header("Content-Type", dumpFileContentType)
 	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, uid, dumpFileExt))
 	c.File(dumpPath)
 }

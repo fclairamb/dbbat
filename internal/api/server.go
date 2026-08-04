@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"embed"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -14,10 +15,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/auth"
 	"github.com/fclairamb/dbbat/internal/auth/slack"
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/events"
 	"github.com/fclairamb/dbbat/internal/notify"
 	"github.com/fclairamb/dbbat/internal/store"
 	"github.com/fclairamb/dbbat/internal/version"
@@ -46,6 +49,27 @@ type Server struct {
 	// socketCancel stops the Slack Socket Mode connection on shutdown; nil
 	// when Socket Mode is not running.
 	socketCancel context.CancelFunc
+
+	// broker fans live events to /api/v1/stream subscribers.
+	broker *events.Broker
+	// approvals wakes proxy sessions parked on an approval decision that
+	// happen to live on this replica. Decisions for sessions on other
+	// replicas travel over LISTEN/NOTIFY.
+	approvals *approval.Registry
+	// approvalNotifier updates a posted Slack escalation in place when a hold
+	// resolves. nil when Slack is not configured.
+	approvalNotifier approvalEscalator
+	// listenCancel stops the cross-replica LISTEN loop on shutdown.
+	listenCancel context.CancelFunc
+}
+
+// SetEventPlumbing installs the shared broker and approval registry. Called by
+// the process wiring so the API and the proxies publish into — and resolve
+// against — the same instances.
+func (s *Server) SetEventPlumbing(broker *events.Broker, registry *approval.Registry, notifier approvalEscalator) {
+	s.broker = broker
+	s.approvals = registry
+	s.approvalNotifier = notifier
 }
 
 // NewServer creates a new API server.
@@ -94,6 +118,10 @@ func NewServer(dataStore *store.Store, encryptionKey []byte, logger *slog.Logger
 	}
 
 	return &Server{
+		// A broker and registry always exist so handlers never nil-check; the
+		// process wiring replaces them with the shared instances.
+		broker:             events.New(),
+		approvals:          approval.NewRegistry(),
 		store:              dataStore,
 		encryptionKey:      encryptionKey,
 		logger:             logger,
@@ -124,6 +152,10 @@ func (s *Server) Start(addr string) error {
 		IdleTimeout:  httpIdleTimeout,
 	}
 
+	// Subscribe to cross-replica events so a hold on another pod reaches the
+	// admins connected here.
+	s.StartEventListener(context.Background())
+
 	// Start the outbound Slack Socket Mode connection (no-op unless an
 	// app-level token is configured). Runs for the server's lifetime.
 	s.startSocketMode()
@@ -141,6 +173,10 @@ func (s *Server) Start(addr string) error {
 func (s *Server) Shutdown(ctx context.Context) error {
 	if s.socketCancel != nil {
 		s.socketCancel()
+	}
+
+	if s.listenCancel != nil {
+		s.listenCancel()
 	}
 
 	if s.httpServer != nil {
@@ -219,6 +255,10 @@ func (s *Server) setupRouter() *gin.Engine {
 
 		// All other routes require authentication
 		authenticated := v1.Group("")
+		// Browsers can't set an Authorization header on a WebSocket handshake,
+		// so /stream carries its bearer token in Sec-WebSocket-Protocol; this
+		// promotes it before the normal auth middleware runs.
+		authenticated.Use(s.streamAuthMiddleware())
 		authenticated.Use(s.authMiddleware())
 		// Add rate limiting after authentication (uses user ID for rate limiting)
 		if s.rateLimiter != nil {
@@ -323,6 +363,20 @@ func (s *Server) setupRouter() *gin.Engine {
 			authenticated.GET("/connections/:uid", s.handleGetConnection)
 			authenticated.GET("/connections/:uid/dump", s.requireAdminOrViewer(), s.handleGetConnectionDump)
 			authenticated.DELETE("/connections/:uid/dump", s.requireAdmin(), s.handleDeleteConnectionDump)
+			// Live event stream (WebSocket). Per-topic authorization happens
+			// inside the handler and is re-checked on every send, so no role
+			// middleware here — a connector may watch their own connection.
+			authenticated.GET("/stream", s.handleStream)
+
+			// Approval holds. Deliberately *not* behind requireAdmin: an
+			// approver-group member who is neither admin nor viewer must be
+			// able to resolve the holds they are responsible for. Each handler
+			// does the real check (and always rejects self-approval).
+			authenticated.GET("/queries/pending", s.handleListPendingApprovals)
+			authenticated.POST("/queries/pending/deny-all", s.requireAdmin(), s.handleDenyAllPending)
+			authenticated.POST("/queries/:uid/approve", s.handleApproveQuery)
+			authenticated.POST("/queries/:uid/deny", s.handleDenyQuery)
+
 			// Queries: admin/viewer only
 			authenticated.GET("/queries", s.requireAdminOrViewer(), s.handleListQueries)
 			authenticated.GET("/queries/:uid", s.requireAdminOrViewer(), s.handleGetQuery)
@@ -374,6 +428,46 @@ func (s *Server) handleVersion(c *gin.Context) {
 		"build_time":    version.GitTime,
 		"run_mode":      runMode,
 	})
+}
+
+// llmsTxtTemplate is the body of the instance-local GET /llms.txt endpoint
+// (see the llms.txt convention at https://llmstxt.org/). It intentionally
+// omits listen addresses, public endpoints, and enabled proxies — this route
+// is unauthenticated and must not become a side channel for instance
+// topology (that's what the authenticated GET /api/v1/instance is for).
+const llmsTxtTemplate = `# DBBat (this instance)
+
+> Transparent database proxy for PostgreSQL, Oracle, MySQL/MariaDB and MongoDB.
+> Every query logged, every connection tracked, access granted for a limited time.
+
+This is a running DBBat instance, version %s.
+
+## This instance
+- [Web UI](%s/)
+- [OpenAPI spec](/api/openapi.yml)
+- [API reference (Swagger UI)](/api/docs)
+- [Version info](/api/v1/version)
+
+## Documentation
+- [Full documentation index](https://dbbat.com/llms.txt)
+- [Full documentation text](https://dbbat.com/llms-full.txt)
+- [Website](https://dbbat.com)
+`
+
+// handleLLMsTxt serves a small instance-local llms.txt so an agent (or a
+// human) pointed at a running DBBat instance gets a clean doc map instead of
+// a 404 or having to crawl the SPA. Deliberately not a redirect to
+// dbbat.com: instances are typically VPN-gated with restricted outbound
+// internet, so a redirect can resolve to a timeout that looks like it
+// worked. See specs/todos/2026-08-02-02-llms-txt.md for the rationale.
+func (s *Server) handleLLMsTxt(c *gin.Context) {
+	baseURL := "/app"
+	if s.config != nil && s.config.BaseURL != "" {
+		baseURL = s.config.BaseURL
+	}
+
+	body := fmt.Sprintf(llmsTxtTemplate, version.Version, baseURL)
+	c.Data(http.StatusOK, "text/plain; charset=utf-8", []byte(body))
 }
 
 // handleOpenAPISpec serves the OpenAPI specification.
@@ -493,6 +587,10 @@ func (s *Server) setupFrontendRoutes(router *gin.Engine) {
 	router.GET("/", func(c *gin.Context) {
 		c.Redirect(http.StatusFound, baseURL+"/")
 	})
+
+	// llms.txt (https://llmstxt.org/) — unauthenticated, always a local 200,
+	// never a redirect to dbbat.com (see handleLLMsTxt).
+	router.GET("/llms.txt", s.handleLLMsTxt)
 
 	// Serve all routes under base URL
 	router.GET(baseURL+"/*filepath", func(c *gin.Context) {
@@ -628,4 +726,11 @@ func getContentType(path string) string {
 	default:
 		return "application/octet-stream"
 	}
+}
+
+// Notifier exposes the server's Slack client so the process wiring can build
+// the approval escalator on top of it instead of opening a second connection.
+// nil when Slack notifications are disabled.
+func (s *Server) Notifier() *notify.SlackNotifier {
+	return s.notifier
 }

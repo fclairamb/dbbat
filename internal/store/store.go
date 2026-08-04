@@ -24,12 +24,20 @@ type Store struct {
 	storageDSN  string                    // Parsed storage DSN for security validation
 	authCache   *cache.AuthCache          // Optional auth cache for API key verification
 	revocations *cache.RevocationRegistry // In-process fan-out of grant revocations to live proxy sessions
+	instanceID  string                    // Identifies this process among the replicas sharing this store
 }
 
 // Options configures Store creation.
 type Options struct {
 	// DropTablesFirst drops all tables before running migrations (for test mode)
 	DropTablesFirst bool
+
+	// InstanceID identifies this dbbat process among the replicas sharing the
+	// store. It is stamped on every connection row this process opens, which is
+	// what lets CloseOrphanedConnections reconcile *its own* leftovers without
+	// touching another replica's live sessions. Empty disables that reconcile
+	// rather than widening it.
+	InstanceID string
 }
 
 // New creates a new Store instance and runs migrations
@@ -56,7 +64,12 @@ func New(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	s := &Store{db: db, storageDSN: dsn, revocations: cache.NewRevocationRegistry()}
+	s := &Store{
+		db:          db,
+		storageDSN:  dsn,
+		revocations: cache.NewRevocationRegistry(),
+		instanceID:  options.InstanceID,
+	}
 
 	// Drop all tables first if requested (for test mode)
 	if options.DropTablesFirst {
@@ -95,6 +108,17 @@ func (s *Store) DB() *bun.DB {
 // SetAuthCache sets the authentication cache for API key verification.
 func (s *Store) SetAuthCache(authCache *cache.AuthCache) {
 	s.authCache = authCache
+}
+
+// SetInstanceID sets the identifier stamped on the connection rows this process
+// opens. See Options.InstanceID.
+func (s *Store) SetInstanceID(instanceID string) {
+	s.instanceID = instanceID
+}
+
+// InstanceID returns the identifier this process stamps on connection rows.
+func (s *Store) InstanceID() string {
+	return s.instanceID
 }
 
 // Revocations returns the process-wide grant-revocation registry that live
@@ -177,6 +201,7 @@ func (s *Store) DropAllTables(ctx context.Context) error {
 		"query_rows",
 		"queries",
 		"connections",
+		"instances",
 		"grant_requests",
 		"grant_definitions",
 		"access_grants",

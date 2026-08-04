@@ -14,17 +14,27 @@ import (
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
 // Server is the Oracle proxy server.
 type Server struct {
+	// approvalDeps carries the approval-hold collaborators. Zero value =
+	// feature off, which is the default.
+	approvalDeps shared.ApprovalDeps
+
 	store         *store.Store
 	encryptionKey []byte
 	authCache     *cache.AuthCache
-	queryStorage  config.QueryStorageConfig
-	dumpConfig    config.DumpConfig
-	logger        *slog.Logger
+
+	// rowWriter batches captured result rows off the capture path. Defaults
+	// to a writer private to this server; main.go replaces it with the
+	// process-wide one so batches span protocols as well as sessions.
+	rowWriter    *shared.RowWriter
+	queryStorage config.QueryStorageConfig
+	dumpConfig   config.DumpConfig
+	logger       *slog.Logger
 	// listenerMu guards listener, which is written by Start and read
 	// concurrently by Addr/Shutdown (e.g. tests polling Addr while Start runs
 	// in a goroutine).
@@ -48,8 +58,14 @@ func NewServer(
 ) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	var rowWriter *shared.RowWriter
+	if dataStore != nil {
+		rowWriter = shared.NewRowWriter(dataStore, logger)
+	}
+
 	return &Server{
 		store:         dataStore,
+		rowWriter:     rowWriter,
 		encryptionKey: encryptionKey,
 		authCache:     authCache,
 		queryStorage:  queryStorage,
@@ -181,7 +197,8 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 	s.logger.DebugContext(s.ctx, "New Oracle connection", slog.Any("remote_addr", clientConn.RemoteAddr()))
 
-	session := newSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.authCache, s.queryStorage, s.dumpConfig)
+	session := newSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.authCache, s.queryStorage, s.dumpConfig, s.rowWriter)
+	session.approvalDeps = s.approvalDeps
 	if err := session.run(); err != nil {
 		// Health check probes (NLB, etc.) connect and immediately close — log at debug level
 		errStr := err.Error()
@@ -221,4 +238,26 @@ func (s *Server) runDumpCleanup() {
 			return
 		}
 	}
+}
+
+// SetApprovalDeps installs the approval-hold collaborators. A server without
+// them never holds anything.
+func (s *Server) SetApprovalDeps(deps shared.ApprovalDeps) {
+	s.approvalDeps = deps
+}
+
+// SetRowWriter installs the process-wide result-row writer, replacing (and
+// shutting down) the private one NewServer created. Batching across every
+// protocol is where the design pays off most: a busy proxy with many small
+// result sets then issues one INSERT per ~1000 rows overall rather than one
+// per query.
+func (s *Server) SetRowWriter(writer *shared.RowWriter) {
+	if writer == nil || writer == s.rowWriter {
+		return
+	}
+
+	previous := s.rowWriter
+	s.rowWriter = writer
+
+	previous.Close(s.ctx)
 }

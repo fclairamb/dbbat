@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/fclairamb/dbbat/internal/store"
@@ -55,7 +56,8 @@ func (s *Session) captureResult(m *message) {
 	}
 
 	rowsAffected := rowsAffectedFrom(body)
-	rows := s.captureCursorRows(body)
+	rows, truncated := s.captureCursorRows(body)
+	pq.resultsTruncated = truncated
 
 	// Maintain find→getMore cursor lineage (item 6) before logging so the
 	// origin's own row carries its cursor_id.
@@ -178,37 +180,42 @@ func rowsAffectedFrom(body bson.Raw) *int64 {
 
 // captureCursorRows re-encodes the documents in cursor.firstBatch /
 // cursor.nextBatch as Extended JSON QueryRows, honoring the query-storage
-// limits.
-func (s *Session) captureCursorRows(body bson.Raw) []store.QueryRow {
+// limits. The second return reports that a limit was hit, so the rows are a
+// prefix of the batch rather than the whole of it.
+func (s *Session) captureCursorRows(body bson.Raw) ([]store.QueryRow, bool) {
 	q := s.server.queryStorage
 	if !q.StoreResults {
-		return nil
+		return nil, false
 	}
 
 	cursor, ok := body.Lookup("cursor").DocumentOK()
 	if !ok {
-		return nil
+		return nil, false
 	}
 
 	batch, ok := cursor.Lookup("firstBatch").ArrayOK()
 	if !ok {
 		batch, ok = cursor.Lookup("nextBatch").ArrayOK()
 		if !ok {
-			return nil
+			return nil, false
 		}
 	}
 
 	values, err := batch.Values()
 	if err != nil {
-		return nil
+		return nil, false
 	}
 
 	rows := make([]store.QueryRow, 0, len(values))
 
 	var totalBytes int64
 
+	var truncated bool
+
 	for i, v := range values {
 		if q.MaxResultRows > 0 && i >= q.MaxResultRows {
+			truncated = true
+
 			break
 		}
 
@@ -226,6 +233,8 @@ func (s *Session) captureCursorRows(body bson.Raw) []store.QueryRow {
 
 		size := int64(len(extJSON))
 		if q.MaxResultBytes > 0 && totalBytes+size > q.MaxResultBytes {
+			truncated = true
+
 			break
 		}
 
@@ -237,7 +246,7 @@ func (s *Session) captureCursorRows(body bson.Raw) []store.QueryRow {
 		totalBytes += size
 	}
 
-	return rows
+	return rows, truncated
 }
 
 // recordQuery inserts a single query log row (asynchronously) with completion
@@ -255,28 +264,72 @@ func (s *Session) recordQuery(pq *pendingQuery, rows []store.QueryRow, rowsAffec
 	durationMs := float64(time.Since(pq.start).Microseconds()) / 1000.0
 
 	record := &store.Query{
-		ConnectionID: s.connection.UID,
-		SQLText:      pq.sqlText,
-		Parameters:   pq.params,
-		ExecutedAt:   pq.start,
-		DurationMs:   &durationMs,
-		RowsAffected: rowsAffected,
-		Error:        queryError,
+		ConnectionID:     s.connection.UID,
+		SQLText:          pq.sqlText,
+		Parameters:       pq.params,
+		ExecutedAt:       pq.start,
+		DurationMs:       &durationMs,
+		RowsAffected:     rowsAffected,
+		Error:            queryError,
+		ResultsTruncated: pq.resultsTruncated,
 	}
 
-	go func() {
-		created, err := s.server.store.CreateQuery(s.ctx, record)
-		if err != nil {
-			s.logger.ErrorContext(s.ctx, "create query log failed", slog.Any("error", err))
+	// When there are rows to store, the record goes in without its completion
+	// fields and is completed after the rows land: a query must never read as
+	// finished while its rows are still arriving.
+	hasRows := len(rows) > 0
 
-			return
+	go func() {
+		sink := s.server.rowWriter.NewSink()
+
+		queryUID := pq.approvalUID
+		held := queryUID != uuid.Nil
+
+		if !held {
+			insert := record
+
+			if hasRows {
+				bare := *record
+				bare.DurationMs = nil
+				bare.RowsAffected = nil
+				bare.Error = nil
+				bare.ResultsTruncated = false
+				insert = &bare
+			}
+
+			created, err := s.server.store.CreateQuery(s.ctx, insert)
+			if err != nil {
+				s.logger.ErrorContext(s.ctx, "create query log failed", slog.Any("error", err))
+				sink.Fail()
+
+				return
+			}
+
+			queryUID = created.UID
 		}
 
-		if len(rows) > 0 {
-			if err := s.server.store.StoreQueryRows(s.ctx, created.UID, rows); err != nil {
-				s.logger.ErrorContext(s.ctx, "store query rows failed", slog.Any("error", err))
+		sink.Resolve(queryUID)
+
+		// Blocking hand-off: the reply's rows are already resident, so
+		// queueing them costs no extra memory and dropping them would lose a
+		// capture that used to be stored whole.
+		sink.AddAll(s.ctx, rows)
+		sink.Flush(s.ctx)
+
+		record.ResultsDropped = sink.Dropped()
+
+		// A held row always needs its completion write. A row inserted here
+		// needs one only when it went in bare (rows to store) or when the
+		// writer turned out to have dropped some.
+		if held || hasRows || record.ResultsDropped {
+			if err := s.server.store.UpdateQueryCompletion(
+				s.ctx, queryUID, &durationMs, rowsAffected, queryError, pq.resultsTruncated, record.ResultsDropped,
+			); err != nil {
+				s.logger.ErrorContext(s.ctx, "complete command log failed", slog.Any("error", err))
 			}
 		}
+
+		s.stream.Query(queryUID, record)
 
 		if bytesTransferred > 0 {
 			if err := s.server.store.IncrementConnectionStats(s.ctx, s.connection.UID, bytesTransferred); err != nil {

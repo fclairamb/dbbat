@@ -15,6 +15,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -22,6 +23,14 @@ import (
 // authenticates them against the DBBat user store, and proxies commands to
 // the upstream MySQL database configured for the requested schema.
 type Server struct {
+	// approvalDeps carries the approval-hold collaborators. Zero value =
+	// feature off, which is the default.
+	approvalDeps shared.ApprovalDeps
+
+	// sessions maps client connection ids to live sessions so KILL QUERY can
+	// reach a statement parked on an approval hold.
+	sessions *sessionRegistry
+
 	store         *store.Store
 	encryptionKey []byte
 	queryStorage  config.QueryStorageConfig
@@ -43,10 +52,15 @@ type Server struct {
 	// in a goroutine).
 	listenerMu sync.Mutex
 	listener   net.Listener
-	wg         sync.WaitGroup
-	shutdown   chan struct{}
-	ctx        context.Context //nolint:containedctx // Context is needed for the server lifecycle
-	cancel     context.CancelFunc
+	// rowWriter batches captured result rows off the capture path. Defaults
+	// to a writer private to this server; main.go replaces it with the
+	// process-wide one so batches span protocols as well as sessions.
+	rowWriter *shared.RowWriter
+
+	wg       sync.WaitGroup
+	shutdown chan struct{}
+	ctx      context.Context //nolint:containedctx // Context is needed for the server lifecycle
+	cancel   context.CancelFunc
 }
 
 // NewServer creates a new MySQL proxy server.
@@ -66,8 +80,14 @@ func NewServer(
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	var rowWriter *shared.RowWriter
+	if dataStore != nil {
+		rowWriter = shared.NewRowWriter(dataStore, logger)
+	}
+
 	s := &Server{
 		store:         dataStore,
+		rowWriter:     rowWriter,
 		encryptionKey: encryptionKey,
 		queryStorage:  queryStorage,
 		dumpConfig:    dumpConfig,
@@ -78,6 +98,7 @@ func NewServer(
 		shutdown:      make(chan struct{}),
 		ctx:           ctx,
 		cancel:        cancel,
+		sessions:      newSessionRegistry(),
 	}
 	s.gomysqlServer = newGoMySQLServer(s, tlsConfig, rsaKey)
 
@@ -219,4 +240,26 @@ func (s *Server) runDumpCleanup() {
 			return
 		}
 	}
+}
+
+// SetApprovalDeps installs the approval-hold collaborators. A server without
+// them never holds anything.
+func (s *Server) SetApprovalDeps(deps shared.ApprovalDeps) {
+	s.approvalDeps = deps
+}
+
+// SetRowWriter installs the process-wide result-row writer, replacing (and
+// shutting down) the private one NewServer created. Batching across every
+// protocol is where the design pays off most: a busy proxy with many small
+// result sets then issues one INSERT per ~1000 rows overall rather than one
+// per query.
+func (s *Server) SetRowWriter(writer *shared.RowWriter) {
+	if writer == nil || writer == s.rowWriter {
+		return
+	}
+
+	previous := s.rowWriter
+	s.rowWriter = writer
+
+	previous.Close(s.ctx)
 }

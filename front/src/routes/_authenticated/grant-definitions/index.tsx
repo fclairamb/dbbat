@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Textarea } from "@/components/ui/textarea";
 import { Switch } from "@/components/ui/switch";
 import {
   Tooltip,
@@ -425,6 +426,13 @@ function DefinitionDialog({
   const [databaseUids, setDatabaseUids] = useState<string[]>(
     editing?.database_uids ?? []
   );
+  // One RE2 pattern per line — the shape operators actually think in.
+  const [approvalPatterns, setApprovalPatterns] = useState<string>(
+    (editing?.approval_patterns ?? []).join("\n")
+  );
+  const [approverGroupUids, setApproverGroupUids] = useState<string[]>(
+    editing?.approver_group_uids ?? []
+  );
   const { data: groups = [] } = useUserGroups();
   const { data: databases = [] } = useDatabases();
   const [autoApprove, setAutoApprove] = useState(
@@ -494,6 +502,11 @@ function DefinitionDialog({
       auto_approve: autoApprove,
       group_uids: groupUids,
       database_uids: databaseUids,
+      approval_patterns: approvalPatterns
+        .split("\n")
+        .map((p) => p.trim())
+        .filter((p) => p.length > 0),
+      approver_group_uids: approverGroupUids,
     };
 
     if (editing) {
@@ -611,6 +624,43 @@ function DefinitionDialog({
               placeholder="Every database"
               emptyMessage="No databases configured yet."
               testId="grant-definition-databases"
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="def-approval-patterns">
+              Approval patterns (one per line)
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              Statements matching any of these Go RE2 patterns are suspended
+              mid-flight until a second human approves them. Nothing runs until
+              then, and a hold has no timeout — it ends on approve, deny, or the
+              client giving up. Leave empty for no approval gating.
+            </p>
+            <Textarea
+              id="def-approval-patterns"
+              data-testid="grant-definition-approval-patterns"
+              rows={3}
+              spellCheck={false}
+              className="font-mono text-xs"
+              placeholder={"(?i)^\\s*DELETE\\s+FROM\n(?i)^\\s*(GRANT|REVOKE)\\b"}
+              value={approvalPatterns}
+              onChange={(e) => setApprovalPatterns(e.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label>Approver groups</Label>
+            <p className="text-xs text-muted-foreground">
+              Members of these groups may resolve holds on grants built from
+              this definition, in addition to admins. Self-approval is always
+              rejected.
+            </p>
+            <MultiSelect
+              options={groups.map((g) => ({ value: g.uid, label: g.name }))}
+              selected={approverGroupUids}
+              onChange={setApproverGroupUids}
+              placeholder="Admins only"
+              emptyMessage="No groups defined yet — admins only."
+              testId="grant-definition-approver-groups"
             />
           </div>
           <div className="flex items-center gap-2">

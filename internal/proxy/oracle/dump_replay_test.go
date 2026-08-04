@@ -95,10 +95,10 @@ func TestDumpReplay_Headers(t *testing.T) {
 	t.Parallel()
 
 	tests := []string{
-		"python_thin.dbbat-dump",
-		"go_ora.dbbat-dump",
-		"dbeaver.dbbat-dump",
-		"dbeaver_init.dbbat-dump",
+		"python_thin.pcapng",
+		"go_ora.pcapng",
+		"dbeaver.pcapng",
+		"dbeaver_init.pcapng",
 	}
 
 	for _, file := range tests {
@@ -117,7 +117,7 @@ func TestDumpReplay_Headers(t *testing.T) {
 func TestDumpReplay_PacketDirections(t *testing.T) {
 	t.Parallel()
 
-	tests := []string{"python_thin.dbbat-dump", "go_ora.dbbat-dump", "dbeaver.dbbat-dump"}
+	tests := []string{"python_thin.pcapng", "go_ora.pcapng", "dbeaver.pcapng"}
 
 	for _, file := range tests {
 		t.Run(file, func(t *testing.T) {
@@ -147,7 +147,7 @@ func TestDumpReplay_PacketDirections(t *testing.T) {
 func TestDumpReplay_TimestampsMonotonic(t *testing.T) {
 	t.Parallel()
 
-	for _, file := range []string{"python_thin.dbbat-dump", "go_ora.dbbat-dump", "dbeaver.dbbat-dump"} {
+	for _, file := range []string{"python_thin.pcapng", "go_ora.pcapng", "dbeaver.pcapng"} {
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
 
@@ -167,7 +167,7 @@ func TestDumpReplay_TimestampsMonotonic(t *testing.T) {
 func TestDumpReplay_TNSParsing(t *testing.T) {
 	t.Parallel()
 
-	for _, file := range []string{"python_thin.dbbat-dump", "go_ora.dbbat-dump", "dbeaver.dbbat-dump", "dbeaver_init.dbbat-dump"} {
+	for _, file := range []string{"python_thin.pcapng", "go_ora.pcapng", "dbeaver.pcapng", "dbeaver_init.pcapng"} {
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
 
@@ -202,7 +202,7 @@ func TestDumpReplay_TNSParsing(t *testing.T) {
 func TestDumpReplay_FirstPacketIsConnect(t *testing.T) {
 	t.Parallel()
 
-	for _, file := range []string{"python_thin.dbbat-dump", "go_ora.dbbat-dump", "dbeaver.dbbat-dump"} {
+	for _, file := range []string{"python_thin.pcapng", "go_ora.pcapng", "dbeaver.pcapng"} {
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
 
@@ -226,7 +226,7 @@ func TestDumpReplay_FirstPacketIsConnect(t *testing.T) {
 func TestDumpReplay_SecondPacketIsAccept(t *testing.T) {
 	t.Parallel()
 
-	for _, file := range []string{"python_thin.dbbat-dump", "go_ora.dbbat-dump", "dbeaver.dbbat-dump"} {
+	for _, file := range []string{"python_thin.pcapng", "go_ora.pcapng", "dbeaver.pcapng"} {
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
 
@@ -245,7 +245,7 @@ func TestDumpReplay_SecondPacketIsAccept(t *testing.T) {
 func TestDumpReplay_TTCFunctionCodes(t *testing.T) {
 	t.Parallel()
 
-	for _, file := range []string{"python_thin.dbbat-dump", "go_ora.dbbat-dump", "dbeaver.dbbat-dump"} {
+	for _, file := range []string{"python_thin.pcapng", "go_ora.pcapng", "dbeaver.pcapng"} {
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
 
@@ -292,7 +292,7 @@ func TestDumpReplay_TTCFunctionCodes(t *testing.T) {
 func TestDumpReplay_PiggybackExecSQL(t *testing.T) {
 	t.Parallel()
 
-	for _, file := range []string{"python_thin.dbbat-dump", "go_ora.dbbat-dump", "dbeaver.dbbat-dump"} {
+	for _, file := range []string{"python_thin.pcapng", "go_ora.pcapng", "dbeaver.pcapng"} {
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
 
@@ -368,7 +368,7 @@ func TestDumpReplay_PiggybackExecSQL(t *testing.T) {
 func TestDumpReplay_DBeaver_SelectQueries(t *testing.T) {
 	t.Parallel()
 
-	td := loadTestDump(t, "dbeaver.dbbat-dump")
+	td := loadTestDump(t, "dbeaver.pcapng")
 
 	allSQL := extractAllSQL(t, td)
 	t.Logf("Found %d SQL statements via TTC decoding", len(allSQL))
@@ -434,7 +434,7 @@ func TestDumpReplay_DBeaver_SelectQueries(t *testing.T) {
 func TestDumpReplay_PiggybackExecSQL_NoTruncation(t *testing.T) {
 	t.Parallel()
 
-	for _, file := range []string{"python_thin.dbbat-dump", "go_ora.dbbat-dump", "dbeaver.dbbat-dump"} {
+	for _, file := range []string{"python_thin.pcapng", "go_ora.pcapng", "dbeaver.pcapng"} {
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
 
@@ -459,7 +459,7 @@ func TestDumpReplay_PiggybackExecSQL_NoTruncation(t *testing.T) {
 func TestDumpReplay_AllClientPacketsArePiggyback(t *testing.T) {
 	t.Parallel()
 
-	for _, file := range []string{"python_thin.dbbat-dump", "go_ora.dbbat-dump"} {
+	for _, file := range []string{"python_thin.pcapng", "go_ora.pcapng"} {
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
 
@@ -500,7 +500,7 @@ func TestDumpReplay_AllClientPacketsArePiggyback(t *testing.T) {
 func TestDumpReplay_QueryResultParsing(t *testing.T) {
 	t.Parallel()
 
-	for _, file := range []string{"python_thin.dbbat-dump", "go_ora.dbbat-dump", "dbeaver.dbbat-dump"} {
+	for _, file := range []string{"python_thin.pcapng", "go_ora.pcapng", "dbeaver.pcapng"} {
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
 
@@ -576,7 +576,7 @@ func TestDumpReplay_QueryResultParsing(t *testing.T) {
 func TestDumpReplay_NoTNSParsePanics(t *testing.T) {
 	t.Parallel()
 
-	for _, file := range []string{"python_thin.dbbat-dump", "go_ora.dbbat-dump", "dbeaver.dbbat-dump", "dbeaver_init.dbbat-dump"} {
+	for _, file := range []string{"python_thin.pcapng", "go_ora.pcapng", "dbeaver.pcapng", "dbeaver_init.pcapng"} {
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
 
@@ -625,7 +625,7 @@ func TestDumpReplay_NoTNSParsePanics(t *testing.T) {
 func TestDumpReplay_PythonThin_SQLExtraction(t *testing.T) {
 	t.Parallel()
 
-	td := loadTestDump(t, "python_thin.dbbat-dump")
+	td := loadTestDump(t, "python_thin.pcapng")
 
 	allSQL := extractAllSQL(t, td)
 	t.Logf("Found %d SQL statements in Python thin session", len(allSQL))
@@ -656,7 +656,7 @@ func TestDumpReplay_PythonThin_SQLExtraction(t *testing.T) {
 func TestDumpReplay_GoOra_SQLExtraction(t *testing.T) {
 	t.Parallel()
 
-	td := loadTestDump(t, "go_ora.dbbat-dump")
+	td := loadTestDump(t, "go_ora.pcapng")
 
 	allSQL := extractAllSQL(t, td)
 	t.Logf("Found %d SQL statements in Go go-ora session", len(allSQL))
@@ -751,7 +751,7 @@ func extractAllSQL(t *testing.T, td *testDump) []string {
 func TestDumpReplay_V315PacketFormat(t *testing.T) {
 	t.Parallel()
 
-	for _, file := range []string{"python_thin.dbbat-dump", "go_ora.dbbat-dump", "dbeaver.dbbat-dump"} {
+	for _, file := range []string{"python_thin.pcapng", "go_ora.pcapng", "dbeaver.pcapng"} {
 		t.Run(file, func(t *testing.T) {
 			t.Parallel()
 

@@ -1,6 +1,7 @@
 import { themes as prismThemes } from "prism-react-renderer";
 import type { Config } from "@docusaurus/types";
 import type * as Preset from "@docusaurus/preset-classic";
+import llmsTxtPlugin from "./plugins/llms-txt";
 
 const config: Config = {
   title: "DBBat",
@@ -39,6 +40,7 @@ const config: Config = {
         ],
       },
     ],
+    llmsTxtPlugin,
   ],
 
   i18n: {

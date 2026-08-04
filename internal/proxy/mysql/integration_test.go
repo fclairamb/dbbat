@@ -504,7 +504,7 @@ func TestIntegration_SessionDump(t *testing.T) {
 	var dumpFile string
 
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".dbbat-dump") {
+		if strings.HasSuffix(e.Name(), ".pcapng") {
 			dumpFile = filepath.Join(dumpDir, e.Name())
 
 			break

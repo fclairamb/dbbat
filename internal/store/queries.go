@@ -46,6 +46,20 @@ func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 		DurationMs:   query.DurationMs,
 		RowsAffected: query.RowsAffected,
 		Error:        query.Error,
+		// Set by protocols that insert the row after the result set has been
+		// read, so they already know capture hit a limit.
+		ResultsTruncated: query.ResultsTruncated,
+		// Same for a capture that lost rows because the batched row writer
+		// fell behind — known only once the rows have been handed over.
+		ResultsDropped: query.ResultsDropped,
+		// Carried through so a caller that already knows the approval outcome
+		// (an approved hold logged by a protocol that inserts on completion)
+		// doesn't lose it.
+		ApprovalStatus:   query.ApprovalStatus,
+		ApprovalPattern:  query.ApprovalPattern,
+		ResolvedBy:       query.ResolvedBy,
+		ResolvedAt:       query.ResolvedAt,
+		ResolutionReason: query.ResolutionReason,
 	}
 
 	if result.ExecutedAt.IsZero() {
@@ -62,18 +76,26 @@ func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 	return result, nil
 }
 
-// StoreQueryRows stores result rows for a query
-func (s *Store) StoreQueryRows(ctx context.Context, queryUID uuid.UUID, rows []QueryRow) error {
+// StoreQueryRows stores captured result rows in a single bulk INSERT.
+//
+// Each row carries its own QueryID rather than the whole slice sharing one, so
+// a batch may span several queries — and therefore several concurrent
+// sessions. That is what lets a single process-wide writer amortize the
+// round-trip across a busy proxy instead of issuing one INSERT per query.
+//
+// Every referenced query must already exist: query_rows.query_id is a foreign
+// key, so the caller is responsible for creating the parent row first.
+func (s *Store) StoreQueryRows(ctx context.Context, rows []PendingQueryRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
 
-	// Convert QueryRow to QueryRowModel for bun model
+	// Convert to QueryRowModel for bun model
 	resultRows := make([]QueryRowModel, len(rows))
 	for i, row := range rows {
 		resultRows[i] = QueryRowModel{
 			UID:          newUIDv7(), // Generate UUIDv7 for each row
-			QueryID:      queryUID,
+			QueryID:      row.QueryID,
 			RowNumber:    row.RowNumber,
 			RowData:      row.RowData,
 			RowSizeBytes: row.RowSizeBytes,
@@ -91,10 +113,25 @@ func (s *Store) StoreQueryRows(ctx context.Context, queryUID uuid.UUID, rows []Q
 }
 
 // UpdateQueryCompletion updates a query with duration, rows affected, and error.
-func (s *Store) UpdateQueryCompletion(ctx context.Context, uid uuid.UUID, durationMs *float64, rowsAffected *int64, queryError *string) error {
+//
+// resultsTruncated and resultsDropped are written unconditionally (unlike the
+// pointer arguments, which are only written when set): protocols that persist
+// the row before the result set is read only learn about a capture limit — or
+// about rows the writer had to drop — here.
+func (s *Store) UpdateQueryCompletion(
+	ctx context.Context,
+	uid uuid.UUID,
+	durationMs *float64,
+	rowsAffected *int64,
+	queryError *string,
+	resultsTruncated bool,
+	resultsDropped bool,
+) error {
 	q := s.db.NewUpdate().
 		Model((*Query)(nil)).
-		Where("uid = ?", uid)
+		Where("uid = ?", uid).
+		Set("results_truncated = ?", resultsTruncated).
+		Set("results_dropped = ?", resultsDropped)
 
 	if durationMs != nil {
 		q = q.Set("duration_ms = ?", *durationMs)
@@ -118,7 +155,9 @@ func (s *Store) ListQueries(ctx context.Context, filter QueryFilter) ([]Query, e
 	var queries []Query
 	q := s.db.NewSelect().
 		Model(&queries).
-		ColumnExpr("q.uid, q.connection_id, q.sql_text, q.parameters, q.executed_at, q.duration_ms, q.rows_affected, q.error, c.user_id, c.database_id").
+		ColumnExpr("q.uid, q.connection_id, q.sql_text, q.parameters, q.executed_at, q.duration_ms, q.rows_affected, q.error, " +
+			"q.results_truncated, q.results_dropped, " +
+			"q.approval_status, q.approval_pattern, q.resolved_by, q.resolved_at, q.resolution_reason, c.user_id, c.database_id").
 		Join("JOIN connections c ON q.connection_id = c.uid")
 
 	if filter.ConnectionID != nil {
@@ -315,6 +354,115 @@ func (s *Store) GetQueryRows(ctx context.Context, queryUID uuid.UUID, cursor str
 	}
 
 	return result, nil
+}
+
+// RetentionBatchSize bounds a single DELETE statement issued by the retention
+// sweep. The sweep loops until nothing old is left, so this only caps how much
+// one statement locks and how much WAL it writes at once — which matters on the
+// very first run against a store that has been accumulating forever.
+const RetentionBatchSize = 1000
+
+// RetentionSweepResult reports what a retention sweep removed.
+//
+// Queries counts only queries deleted directly. Queries belonging to a reaped
+// connection go away through the connection's ON DELETE CASCADE and are counted
+// under Connections instead — as are all of their query_rows.
+type RetentionSweepResult struct {
+	// Connections is the number of closed connection records deleted.
+	Connections int64
+	// Queries is the number of query records deleted directly (i.e. queries on
+	// connections that survived the sweep).
+	Queries int64
+}
+
+// CleanupOldQueryRows deletes query history older than olderThan, together with
+// the result rows captured for it. A zero or negative duration is a no-op:
+// retention is opt-in, and the default is to keep history forever.
+//
+// The delete is driven from the parent rows, not from query_rows: both
+// query_rows.query_id -> queries.uid and queries.connection_id ->
+// connections.uid are ON DELETE CASCADE, so removing a query removes its rows
+// and removing a connection removes its queries and their rows.
+//
+// Two sweeps run, in this order:
+//
+//  1. connections closed before the cutoff — cascading to their queries and
+//     rows. This keeps the UI consistent: a closed connection never survives as
+//     an empty shell whose queries have all been reaped.
+//  2. queries executed before the cutoff that are still attached to a
+//     connection the first sweep left alone (an open, long-lived session).
+//
+// Connections that are still open (disconnected_at IS NULL) are never reaped,
+// however old they are: the session may still be live, and deleting its record
+// would break the foreign key for the next query it logs. Such a connection can
+// therefore outlive all of its queries and show up in the UI with none left —
+// its `queries` counter is a lifetime counter, not a count of retained rows.
+func (s *Store) CleanupOldQueryRows(ctx context.Context, olderThan time.Duration) (RetentionSweepResult, error) {
+	var result RetentionSweepResult
+
+	if olderThan <= 0 {
+		return result, nil
+	}
+
+	cutoff := time.Now().Add(-olderThan)
+
+	connections, err := s.deleteInBatches(ctx,
+		`DELETE FROM connections WHERE uid IN (
+			SELECT uid FROM connections
+			WHERE disconnected_at IS NOT NULL AND disconnected_at < ?
+			LIMIT ?
+		)`, cutoff)
+	result.Connections = connections
+
+	if err != nil {
+		return result, fmt.Errorf("failed to delete old connections: %w", err)
+	}
+
+	queries, err := s.deleteInBatches(ctx,
+		`DELETE FROM queries WHERE uid IN (
+			SELECT uid FROM queries
+			WHERE executed_at < ?
+			LIMIT ?
+		)`, cutoff)
+	result.Queries = queries
+
+	if err != nil {
+		return result, fmt.Errorf("failed to delete old queries: %w", err)
+	}
+
+	return result, nil
+}
+
+// deleteInBatches runs a LIMIT-ed delete statement repeatedly until it stops
+// finding rows. The statement takes the cutoff timestamp and the batch size, in
+// that order. Each iteration removes the rows it matched, so the loop strictly
+// makes progress and terminates.
+func (s *Store) deleteInBatches(ctx context.Context, query string, cutoff time.Time) (int64, error) {
+	var total int64
+
+	for {
+		res, err := s.db.ExecContext(ctx, query, cutoff, RetentionBatchSize)
+		if err != nil {
+			return total, err
+		}
+
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+
+		total += affected
+
+		if affected < RetentionBatchSize {
+			return total, nil
+		}
+
+		// Yield between batches so a large first sweep doesn't monopolise a
+		// connection, and so shutdown is observed promptly.
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+	}
 }
 
 // GetQuery retrieves a query by UID without rows

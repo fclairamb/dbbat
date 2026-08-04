@@ -93,7 +93,7 @@ func TestExtractORAMessage(t *testing.T) {
 func TestDumpReplay_DMLRowCounts(t *testing.T) {
 	t.Parallel()
 
-	td := loadTestDump(t, "go_ora_dml.dbbat-dump")
+	td := loadTestDump(t, "go_ora_dml.pcapng")
 
 	type outcome struct {
 		sqlPrefix string

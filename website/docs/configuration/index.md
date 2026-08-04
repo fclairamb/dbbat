@@ -27,7 +27,7 @@ Configuration is loaded in this priority order (highest wins):
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DBB_LISTEN_PG` | PostgreSQL proxy listen address | `:5434` |
+| `DBB_LISTEN_PG` | PostgreSQL proxy listen address | `:5433` |
 | `DBB_LISTEN_ORA` | Oracle proxy listen address. Empty value disables the Oracle proxy. | `:1522` |
 | `DBB_LISTEN_MYSQL` | MySQL/MariaDB proxy listen address. Empty value disables it. | `:3307` |
 | `DBB_LISTEN_MONGO` | MongoDB proxy listen address. Empty value disables it. | `:27018` |
@@ -48,15 +48,58 @@ If neither is set, DBBat generates a key on first start and writes it to `~/.dbb
 |----------|-------------|---------|
 | `DBB_RUN_MODE` | `` (production), `test`, or `demo` | `` |
 | `DBB_LOG_LEVEL` | `debug`, `info`, `warn`, `error` | `info` |
+| `DBB_INSTANCE_ID` | Identifies this process among the replicas sharing a store | Hostname (the pod name under Kubernetes) |
 | `DBB_BASE_URL` | Base URL path the frontend is served under | `/app` |
 | `DBB_REDIRECTS` | Dev-only redirect rules (`/path:host:port[/target]`, comma-separated) | - |
 | `DBB_DEMO_TARGET_DB` | Demo-mode allowed target (`user:pass@host/dbname`) | `demo:demo@localhost/demo` |
+
+`DBB_INSTANCE_ID` is stamped on every connection dbbat records, and identifies
+the process in the `instances` registry. Each process registers itself at
+startup, refreshes its `last_seen_at` every **30 seconds**, and deletes its row
+on a clean shutdown.
+
+At startup, and before any proxy accepts, dbbat marks as disconnected every
+connection left open by a process that is no longer running — a crash or a
+`SIGKILL` never runs the normal teardown, so those rows would otherwise stay
+"open" forever and never become eligible for retention. Two kinds are closed:
+
+- **Its own**: connections stamped with this instance id. Logged at `info`; a
+  large number means the previous run did not shut down cleanly.
+- **Reclaimed**: connections owned by another instance that is provably gone —
+  it deleted its registry row on a clean shutdown, or has not heartbeated for
+  **15 minutes** (30 missed heartbeats). Logged separately, also at `info`: a
+  non-zero count means some process died without shutting down.
+
+Sessions are closed at their last activity time, so retention still measures
+from when the session actually stopped talking.
+
+Liveness, not identity, is what makes this safe when several replicas share one
+store: a starting replica must never close a *live* connection belonging to a
+different replica, because such a row immediately becomes eligible for the
+retention sweep. The grace period is deliberately generous — a running replica
+would have to fail every heartbeat for a quarter of an hour while still serving
+traffic before anything touched its sessions.
+
+A plain Kubernetes Deployment, which mints a new pod name on every restart, is
+therefore handled as well as a StatefulSet or an explicit `DBB_INSTANCE_ID`: the
+replacement pod does not recognise its predecessor's id, but it can see that the
+predecessor stopped heartbeating.
+
+:::warning
+If you set `DBB_INSTANCE_ID` explicitly, it must be **unique per running
+process** — never the same value on several replicas. An instance always treats
+open connections carrying its own id as its own previous run's leftovers, so
+two live replicas sharing an id will close each other's sessions. The default
+(the hostname) is already unique; there is no reason to pin it.
+::: Connections recorded before instance tracking
+existed carry an empty instance id; they have no owner and never will, so they
+are reclaimed the same way.
 
 ### Session Packet Dumps
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DBB_DUMP_DIR` | Directory for `.dbbat-dump` files. Empty = disabled. | _disabled_ |
+| `DBB_DUMP_DIR` | Directory for `.pcapng` session captures. Empty = disabled. | _disabled_ |
 | `DBB_DUMP_MAX_SIZE` | Max dump file size per session, in bytes | `10485760` (10 MB) |
 | `DBB_DUMP_RETENTION` | Auto-delete dumps older than this (Go duration) | `24h` |
 
@@ -77,6 +120,13 @@ See [Session Packet Dumps](/docs/features/session-dumps) for what gets captured.
 | `DBB_QUERY_STORAGE_STORE_RESULTS` | Globally enable result-row capture | `true` |
 | `DBB_QUERY_STORAGE_MAX_RESULT_ROWS` | Max rows captured per query | `100000` |
 | `DBB_QUERY_STORAGE_MAX_RESULT_BYTES` | Max bytes captured per query | `104857600` (100 MB) |
+| `DBB_QUERY_STORAGE_RETENTION` | Auto-delete query history and its captured rows past this Go duration. `0` keeps everything forever. | `0` (recommended: `720h`) |
+
+Retention is **opt-in**: upgrading dbbat never starts deleting audit history on
+its own. The per-query caps above bound one query's capture; retention bounds
+the accumulation of every query ever proxied. See
+[Query Logging](/docs/features/query-logging#retention) for exactly what a sweep
+removes.
 
 ### Rate Limiting
 
@@ -202,7 +252,7 @@ DBBat supports YAML, JSON, and TOML configuration files.
 ### YAML Example
 
 ```yaml
-listen_pg: ":5434"
+listen_pg: ":5433"
 listen_ora: ":1522"
 listen_mysql: ":3307"
 listen_mongo: ":27018"
@@ -213,6 +263,7 @@ query_storage:
   store_results: true
   max_result_rows: 100000
   max_result_bytes: 104857600
+  retention: "0" # keep forever; e.g. "720h" for 30 days
 
 rate_limit:
   enabled: true

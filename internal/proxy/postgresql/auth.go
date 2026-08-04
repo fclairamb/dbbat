@@ -21,6 +21,16 @@ func (s *Session) authenticate() error {
 		return fmt.Errorf("failed to receive startup message: %w", err)
 	}
 
+	// A CancelRequest terminates this connection by design: it is a one-shot
+	// out-of-band signal, not a session. Handling it here is what keeps a
+	// statement parked on a human cancellable — the held session's own socket
+	// is blocked waiting for an approval that may never come.
+	if cancel, ok := startupMsg.(*pgproto3.CancelRequest); ok {
+		s.handleCancelRequest(cancel)
+
+		return ErrCancelRequestHandled
+	}
+
 	// Extract username and database from startup message
 	startup, ok := startupMsg.(*pgproto3.StartupMessage)
 	if !ok {

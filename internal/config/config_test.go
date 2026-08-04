@@ -15,7 +15,7 @@ func clearEnvVars(t *testing.T) {
 	envVars := []string{
 		"DBB_DSN", "DBB_KEY", "DBB_KEYFILE",
 		"DBB_LISTEN_PG", "DBB_LISTEN_API", "DBB_CONFIG",
-		"DBB_BASE_URL", "DBB_REDIRECTS",
+		"DBB_BASE_URL", "DBB_REDIRECTS", "DBB_INSTANCE_ID",
 	}
 
 	// Store original values and unset
@@ -184,8 +184,8 @@ func TestDefaultValues(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 
-	if cfg.ListenPG != ":5434" {
-		t.Errorf("Load() ListenPG = %v, want :5434", cfg.ListenPG)
+	if cfg.ListenPG != ":5433" {
+		t.Errorf("Load() ListenPG = %v, want :5433", cfg.ListenPG)
 	}
 
 	if cfg.ListenAPI != ":4200" {
@@ -757,6 +757,65 @@ func TestLoadWithBaseURL(t *testing.T) {
 	if cfg.BaseURL != "/myapp" {
 		t.Errorf("Load() BaseURL = %v, want /myapp", cfg.BaseURL)
 	}
+}
+
+//nolint:paralleltest // Can't use t.Parallel() since we manipulate environment variables
+func TestLoadInstanceID(t *testing.T) {
+	validKey := make([]byte, 32)
+	for i := range validKey {
+		validKey[i] = byte(i)
+	}
+	validKeyBase64 := base64.StdEncoding.EncodeToString(validKey)
+
+	t.Run("explicit value wins", func(t *testing.T) {
+		clearEnvVars(t)
+		t.Setenv("DBB_DSN", "postgres://localhost/test")
+		t.Setenv("DBB_KEY", validKeyBase64)
+		t.Setenv("DBB_INSTANCE_ID", "  replica-7  ")
+
+		cfg, err := Load(LoadOptions{})
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+
+		if cfg.InstanceID != "replica-7" {
+			t.Errorf("Load() InstanceID = %q, want %q", cfg.InstanceID, "replica-7")
+		}
+	})
+
+	t.Run("defaults to the hostname and is never empty", func(t *testing.T) {
+		clearEnvVars(t)
+		t.Setenv("DBB_DSN", "postgres://localhost/test")
+		t.Setenv("DBB_KEY", validKeyBase64)
+
+		cfg, err := Load(LoadOptions{})
+		if err != nil {
+			t.Fatalf("Load() error = %v", err)
+		}
+
+		// An empty instance id would make the connection reconcile refuse to
+		// run, so this is load-bearing rather than cosmetic.
+		if cfg.InstanceID == "" {
+			t.Fatal("Load() InstanceID is empty, want the hostname or the fallback")
+		}
+
+		if hostname, err := os.Hostname(); err == nil && hostname != "" {
+			if cfg.InstanceID != hostname {
+				t.Errorf("Load() InstanceID = %q, want hostname %q", cfg.InstanceID, hostname)
+			}
+		}
+	})
+
+	t.Run("resolveInstanceID falls back to a stable constant", func(t *testing.T) {
+		// Stability matters: a random per-run id would mean a restarted
+		// process never recognizes its own orphaned connections.
+		if got := resolveInstanceID("   "); got == "" {
+			t.Error("resolveInstanceID() returned an empty id")
+		}
+		if FallbackInstanceID == "" {
+			t.Error("FallbackInstanceID must not be empty")
+		}
+	})
 }
 
 func TestLoadWithRedirects(t *testing.T) {

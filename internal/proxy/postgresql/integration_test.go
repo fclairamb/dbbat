@@ -501,6 +501,84 @@ func TestIntegration_QueryAndCapture(t *testing.T) {
 	assert.NotEmpty(t, rows.Rows, "select should capture result rows")
 }
 
+// TestIntegration_ResultCapture_KeepsPrefixOnLimit runs a SELECT well past the
+// fixture's MaxResultRows and asserts the capture keeps the prefix (exactly
+// MaxResultRows rows) rather than discarding everything, and flags the query
+// row as truncated so the short row set can't be read as a complete result.
+func TestIntegration_ResultCapture_KeepsPrefixOnLimit(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	conn := f.mustConnect(ctx, fixturePass)
+
+	// The fixture caps capture at 1000 rows; ask for five times that.
+	const (
+		maxResultRows = 1000
+		requestedRows = 5000
+		markerSQL     = "GENERATE_SERIES(1, 5000)"
+	)
+
+	rows, err := conn.Query(ctx, "SELECT n FROM generate_series(1, 5000) AS n")
+	require.NoError(t, err)
+
+	var received int
+
+	for rows.Next() {
+		received++
+	}
+
+	require.NoError(t, rows.Err())
+	rows.Close()
+	require.Equal(t, requestedRows, received, "the client must still receive the whole result set")
+
+	var (
+		selectUID string
+		truncated bool
+	)
+
+	require.Eventually(t, func() bool {
+		queries, err := f.store.ListQueries(ctx, store.QueryFilter{Limit: 200})
+		if err != nil {
+			return false
+		}
+
+		for i := range queries {
+			if !strings.Contains(strings.ToUpper(queries[i].SQLText), markerSQL) {
+				continue
+			}
+
+			selectUID = queries[i].UID.String()
+			truncated = queries[i].ResultsTruncated
+
+			return true
+		}
+
+		return false
+	}, 10*time.Second, 100*time.Millisecond, "the oversized select should be logged")
+
+	assert.True(t, truncated, "results_truncated must be set when capture hits the row limit")
+
+	uid, err := uuid.Parse(selectUID)
+	require.NoError(t, err)
+
+	// The captured prefix is stored asynchronously; wait for it to settle.
+	var stored int64
+
+	require.Eventually(t, func() bool {
+		result, err := f.store.GetQueryRows(ctx, uid, "", 1)
+		if err != nil {
+			return false
+		}
+
+		stored = result.TotalRows
+
+		return stored > 0
+	}, 10*time.Second, 100*time.Millisecond, "the captured prefix should be stored, not discarded")
+
+	assert.EqualValues(t, maxResultRows, stored,
+		"exactly MaxResultRows rows should be kept — the prefix, not zero and not the whole set")
+}
+
 // TestIntegration_ExtendedProtocol_Capture exercises Parse/Bind/Execute
 // (pgx's default) and asserts the parameterised query and its rows are logged.
 func TestIntegration_ExtendedProtocol_Capture(t *testing.T) {
@@ -667,7 +745,7 @@ func TestIntegration_SessionDump(t *testing.T) {
 		}
 
 		for _, e := range entries {
-			if !strings.HasSuffix(e.Name(), ".dbbat-dump") {
+			if !strings.HasSuffix(e.Name(), ".pcapng") {
 				continue
 			}
 
@@ -678,7 +756,7 @@ func TestIntegration_SessionDump(t *testing.T) {
 		}
 
 		return false
-	}, 5*time.Second, 100*time.Millisecond, "expected a non-empty .dbbat-dump file in %s", dumpDir)
+	}, 5*time.Second, 100*time.Millisecond, "expected a non-empty .pcapng file in %s", dumpDir)
 }
 
 // TestIntegration_UpstreamTLS_Require verifies that ssl_mode=require actually

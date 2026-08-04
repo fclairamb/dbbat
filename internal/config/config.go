@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/knadh/koanf/parsers/json"
 	"github.com/knadh/koanf/parsers/toml/v2"
@@ -49,6 +50,49 @@ type QueryStorageConfig struct {
 
 	// StoreResults enables/disables result storage globally.
 	StoreResults bool `koanf:"store_results"`
+
+	// Retention is how long query history (and the captured result rows
+	// hanging off it) is kept, as a Go duration (e.g. "720h").
+	//
+	// Empty or "0" means keep forever, and that is the default: dbbat is an
+	// audit tool, so an upgrade must never silently start deleting history.
+	// Operators opt in — "720h" (30 days) is a reasonable starting point.
+	Retention string `koanf:"retention"`
+}
+
+// DefaultQueryStorageRetention keeps query history forever. Retention is
+// opt-in: see QueryStorageConfig.Retention.
+const DefaultQueryStorageRetention = "0"
+
+// RetentionDuration parses Retention into a duration. A zero or negative
+// result means "disabled — keep forever", and no sweep is scheduled.
+//
+// A malformed value also disables the sweep rather than falling back to some
+// built-in period: this sweep permanently deletes audit data, so a typo must
+// never be interpreted as "delete more". The caller warns about it (see
+// RetentionMisconfigured).
+func (c QueryStorageConfig) RetentionDuration() time.Duration {
+	if c.Retention == "" {
+		return 0
+	}
+
+	d, err := time.ParseDuration(c.Retention)
+	if err != nil {
+		return 0
+	}
+
+	if d < 0 {
+		return 0
+	}
+
+	return d
+}
+
+// RetentionMisconfigured reports that Retention was set to something that is
+// neither empty nor a usable positive duration — i.e. retention silently ends up
+// disabled and the operator probably did not mean that.
+func (c QueryStorageConfig) RetentionMisconfigured() bool {
+	return c.Retention != "" && c.Retention != "0" && c.RetentionDuration() <= 0
 }
 
 // RateLimitConfig holds configuration for API rate limiting.
@@ -165,6 +209,60 @@ func (c SlackNotifyConfig) Interactive() bool {
 	return c.BotToken != "" && (c.SigningSecret != "" || c.AppToken != "")
 }
 
+// ApprovalConfig configures pattern-triggered approval holds — the four-eyes
+// control that suspends a matching statement mid-flight until a second human
+// approves it.
+//
+// Enabled defaults to **false**. This feature blocks a live database
+// connection on a human being; it ships off and gets turned on deliberately,
+// per deployment.
+type ApprovalConfig struct {
+	// Enabled turns the approval gate on. When false, approval patterns on
+	// grants are inert: nothing is ever held.
+	Enabled bool `koanf:"enabled"`
+	// SlackDelay is how long a hold must remain pending before a Slack
+	// notification fires. Zero disables Slack escalation entirely. There is
+	// no presence detection: if an admin was watching, they had this long to
+	// act, and resolving the hold cancels the pending notification.
+	SlackDelay string `koanf:"slack_delay"`
+	// SlackSQL includes the (truncated) SQL text in the Slack message.
+	// Default on. Slack is a lower trust boundary than the dbbat UI and this
+	// feature pipes production query text into it, so it is switchable off.
+	SlackSQL bool `koanf:"slack_sql"`
+}
+
+// Default approval-hold settings.
+const (
+	// DefaultApprovalSlackDelay is how long a hold waits before escalating.
+	DefaultApprovalSlackDelay = "30s"
+	// ApprovalSlackSQLMaxLen bounds the SQL text copied into Slack.
+	ApprovalSlackSQLMaxLen = 500
+)
+
+// SlackDelayDuration parses SlackDelay, falling back to the default on a
+// malformed value (a typo must not silently disable escalation). A zero or
+// negative value disables escalation, which is an explicit opt-out.
+func (c ApprovalConfig) SlackDelayDuration() time.Duration {
+	if c.SlackDelay == "" {
+		d, _ := time.ParseDuration(DefaultApprovalSlackDelay)
+
+		return d
+	}
+
+	d, err := time.ParseDuration(c.SlackDelay)
+	if err != nil {
+		fallback, _ := time.ParseDuration(DefaultApprovalSlackDelay)
+
+		return fallback
+	}
+
+	if d < 0 {
+		return 0
+	}
+
+	return d
+}
+
 // DumpConfig holds configuration for session packet dumps.
 type DumpConfig struct {
 	// Dir is the directory for dump files. Empty = disabled.
@@ -264,6 +362,13 @@ type Config struct {
 	// RunMode controls whether test data is provisioned on startup.
 	RunMode RunMode `koanf:"run_mode"`
 
+	// InstanceID identifies this dbbat process among the replicas sharing the
+	// same store. It is stamped on every connection row so the startup
+	// reconcile of crash-orphaned connections only ever touches connections
+	// this instance opened. Defaults to the hostname, which is the pod name
+	// under Kubernetes. Empty is not a valid runtime value — Load fills it in.
+	InstanceID string `koanf:"instance_id"`
+
 	// DemoTargetDB specifies the only allowed database target in demo mode.
 	// Format: "user:password@host/dbname" (e.g., "demo:demo@localhost/demo")
 	// Only applies when RunMode is "demo". If empty, defaults to "demo:demo@localhost/demo".
@@ -315,6 +420,9 @@ type Config struct {
 
 	// PG holds PostgreSQL proxy specific configuration.
 	PG PGConfig `koanf:"pg"`
+
+	// Approval holds pattern-triggered approval-hold configuration.
+	Approval ApprovalConfig `koanf:"approval"`
 }
 
 // Default query storage limits.
@@ -364,7 +472,7 @@ const DefaultLogLevel = "info"
 // defaultConfig returns a Config with default values.
 func defaultConfig() Config {
 	return Config{
-		ListenPG:     ":5434",
+		ListenPG:     ":5433",
 		ListenAPI:    ":4200",
 		ListenOracle: ":1522",
 		ListenMySQL:  ":3307",
@@ -375,6 +483,7 @@ func defaultConfig() Config {
 			MaxResultRows:  DefaultMaxResultRows,
 			MaxResultBytes: DefaultMaxResultBytes,
 			StoreResults:   true,
+			Retention:      DefaultQueryStorageRetention,
 		},
 		RateLimit: RateLimitConfig{
 			Enabled:               DefaultRateLimitEnabled,
@@ -402,6 +511,13 @@ func defaultConfig() Config {
 		Dump: DumpConfig{
 			MaxSize:   DefaultDumpMaxSize,
 			Retention: DefaultDumpRetention,
+		},
+		Approval: ApprovalConfig{
+			// Off by default: a hold blocks a live database connection on a
+			// human. Operators opt in.
+			Enabled:    false,
+			SlackDelay: DefaultApprovalSlackDelay,
+			SlackSQL:   true,
 		},
 	}
 }
@@ -470,6 +586,10 @@ func envTransform(k, v string) (string, any) {
 	// pg_tls_* -> pg.tls.*
 	if strings.HasPrefix(key, "pg_tls_") {
 		return "pg.tls." + strings.TrimPrefix(key, "pg_tls_"), v
+	}
+	// approval_* -> approval.*
+	if strings.HasPrefix(key, "approval_") {
+		return "approval." + strings.TrimPrefix(key, "approval_"), v
 	}
 	return key, v
 }
@@ -546,7 +666,50 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 	// Normalize base URL
 	cfg.BaseURL = normalizeBaseURL(cfg.BaseURL)
 
+	cfg.InstanceID = resolveInstanceID(cfg.InstanceID)
+
 	return cfg, nil
+}
+
+// FallbackInstanceID is used when no DBB_INSTANCE_ID is set and the hostname
+// cannot be read. It is deliberately a constant rather than a random value:
+// two runs of the same process must agree on the id, or a restart would never
+// recognize (and therefore never reclaim) the connections its predecessor left
+// open.
+//
+// It is also the one way replicas can end up sharing an id without anyone
+// asking for it — every replica that cannot read its hostname lands here — and
+// a shared id defeats the reconcile's own-instance branch. Reaching it at all
+// takes a broken container; see resolveInstanceID.
+const FallbackInstanceID = "dbbat"
+
+// resolveInstanceID fills in the instance id when it was not configured.
+//
+// The hostname is the right default, and the property that matters is that two
+// replicas sharing a store never collide — under Kubernetes it is the pod name,
+// so they cannot. A pod name that changes on every restart is not a problem:
+// Store.CloseOrphanedConnections tracks instance liveness in the instances
+// table, so a replacement pod reclaims its predecessor's orphans without
+// recognizing its id.
+//
+// Uniqueness is the requirement, stability is not. Do not set the same
+// DBB_INSTANCE_ID on several replicas to make them "recognize" each other: the
+// own-instance branch of the reconcile closes every open connection carrying
+// this id with no liveness check at all, so a starting replica would close a
+// live peer's sessions. FallbackInstanceID below is the accidental path into
+// the same state. See specs/todos/2026-08-03-shared-instance-id-reconcile.md.
+func resolveInstanceID(configured string) string {
+	if configured = strings.TrimSpace(configured); configured != "" {
+		return configured
+	}
+
+	if hostname, err := os.Hostname(); err == nil {
+		if hostname = strings.TrimSpace(hostname); hostname != "" {
+			return hostname
+		}
+	}
+
+	return FallbackInstanceID
 }
 
 // loadConfigFile loads configuration from a file based on its extension.

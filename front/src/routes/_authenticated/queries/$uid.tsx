@@ -225,9 +225,27 @@ function QueryDetailPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>
-            Result Rows
-            {totalRows > 0 && ` (${totalRows})`}
+          <CardTitle className="flex items-center gap-2">
+            <span>
+              Result Rows
+              {totalRows > 0 && ` (${totalRows})`}
+            </span>
+            {query.results_truncated && (
+              <Badge
+                variant="outline"
+                title="Result capture stopped at the configured storage limit. The rows below are the beginning of the result set, not all of it."
+              >
+                Truncated
+              </Badge>
+            )}
+            {query.results_dropped && (
+              <Badge
+                variant="destructive"
+                title="Some rows could not be stored: result-row storage fell behind the query, or a batch failed to insert. The rows below have gaps — this is not the same as hitting the configured capture limit."
+              >
+                Rows dropped
+              </Badge>
+            )}
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -323,7 +341,11 @@ function QueryDetailPage() {
             </div>
           ) : (
             <div className="text-center text-muted-foreground py-4">
-              No result rows
+              {query.results_dropped
+                ? "No result rows were stored — row storage fell behind and the capture was dropped."
+                : query.results_truncated
+                  ? "No result rows were stored — capture hit the storage limit."
+                  : "No result rows"}
             </div>
           )}
         </CardContent>

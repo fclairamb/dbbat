@@ -22,7 +22,7 @@ var numbersExpected = []string{"3.14", "1234567.89", "1000000", "0.25"}
 func TestDumpReplay_Numbers(t *testing.T) {
 	t.Parallel()
 
-	td := loadTestDump(t, "go_ora_numbers.dbbat-dump")
+	td := loadTestDump(t, "go_ora_numbers.pcapng")
 
 	rows := replayCapturedRows(t, td, numbersSQLMarker)
 

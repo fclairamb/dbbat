@@ -29,7 +29,29 @@ func BuildGrantFromDefinition(def *GrantDefinition, userID, databaseID, grantedB
 		ExpiresAt:           now.Add(time.Duration(def.DurationSeconds) * time.Second),
 		MaxQueryCounts:      def.MaxQueryCounts,
 		MaxBytesTransferred: def.MaxBytesTransferred,
+		// Mirrored, not joined: the proxy session holds only a *Grant, and
+		// resolving patterns off the definition at query time would mean a
+		// join on the hot path plus zero coverage for direct admin grants.
+		ApprovalPatterns:  copyStrings(def.ApprovalPatterns),
+		ApproverGroupUIDs: copyUUIDs(def.ApproverGroupUIDs),
 	}
+}
+
+// copyStrings returns a non-nil copy so a mutation of the definition's slice
+// can never reach a materialized grant (and so bun writes '{}' not NULL).
+func copyStrings(in []string) []string {
+	out := make([]string, len(in))
+	copy(out, in)
+
+	return out
+}
+
+// copyUUIDs is copyStrings for uuid slices.
+func copyUUIDs(in []uuid.UUID) []uuid.UUID {
+	out := make([]uuid.UUID, len(in))
+	copy(out, in)
+
+	return out
 }
 
 // CreateGrant creates a new access grant
@@ -49,6 +71,8 @@ func (s *Store) CreateGrant(ctx context.Context, grant *Grant) (*Grant, error) {
 		ExpiresAt:           grant.ExpiresAt,
 		MaxQueryCounts:      grant.MaxQueryCounts,
 		MaxBytesTransferred: grant.MaxBytesTransferred,
+		ApprovalPatterns:    copyStrings(grant.ApprovalPatterns),
+		ApproverGroupUIDs:   copyUUIDs(grant.ApproverGroupUIDs),
 		CreatedAt:           time.Now(),
 	}
 

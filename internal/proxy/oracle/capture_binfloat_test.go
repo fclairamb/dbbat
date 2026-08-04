@@ -22,7 +22,7 @@ var binFloatExpected = []string{"1.5", "2.5", "-1.5"}
 func TestDumpReplay_BinFloat(t *testing.T) {
 	t.Parallel()
 
-	td := loadTestDump(t, "go_ora_binfloat.dbbat-dump")
+	td := loadTestDump(t, "go_ora_binfloat.pcapng")
 
 	rows := replayCapturedRows(t, td, binFloatSQLMarker)
 

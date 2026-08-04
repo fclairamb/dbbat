@@ -8,11 +8,14 @@ import (
 	"log/slog"
 	"net"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	gomysqlclient "github.com/go-mysql-org/go-mysql/client"
 	gomysqlserver "github.com/go-mysql-org/go-mysql/server"
+
+	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/dump"
@@ -67,6 +70,35 @@ type Session struct {
 	// revocation is signaled when this session's grant is revoked mid-flight,
 	// so the next command is rejected and the watchdog tears the session down.
 	revocation *cache.RevocationHandle
+
+	// watched sits below the counting conn so an approval hold can keep
+	// reading the client socket while the command goroutine is parked.
+	watched *shared.WatchedConn
+
+	// approvalGate implements pattern-triggered approval holds; stream
+	// publishes the session's activity to the live event stream.
+	approvalGate *shared.ApprovalGate
+	stream       *shared.StreamPublisher
+
+	// heldQueryUID is the statement currently parked on a human, uuid.Nil
+	// otherwise. Read by the KILL QUERY path.
+	heldMu       sync.Mutex
+	heldQueryUID uuid.UUID
+}
+
+// setHeldQuery records (or clears) the currently parked statement.
+func (s *Session) setHeldQuery(uid uuid.UUID) {
+	s.heldMu.Lock()
+	s.heldQueryUID = uid
+	s.heldMu.Unlock()
+}
+
+// heldQuery returns the currently parked statement, uuid.Nil when none.
+func (s *Session) heldQuery() uuid.UUID {
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+
+	return s.heldQueryUID
 }
 
 // cumulativeClientBytes returns the running total of bytes exchanged with
@@ -87,9 +119,13 @@ func newSession(clientConn net.Conn, server *Server) *Session {
 	bytesFromClient := &atomic.Int64{}
 	bytesToClient := &atomic.Int64{}
 
+	watched := shared.NewWatchedConn(clientConn)
+	_ = shared.EnableClientKeepAlive(clientConn)
+
 	return &Session{
 		server:          server,
-		clientConn:      shared.NewCountingConn(clientConn, bytesFromClient, bytesToClient),
+		watched:         watched,
+		clientConn:      shared.NewCountingConn(watched, bytesFromClient, bytesToClient),
 		bytesFromClient: bytesFromClient,
 		bytesToClient:   bytesToClient,
 		logger:          server.logger,
@@ -119,6 +155,11 @@ func (s *Session) Run() error {
 	}
 
 	s.serverConn = conn
+
+	// Register the connection id so a KILL QUERY issued from another
+	// connection can reach a statement this session parks on a human.
+	s.server.sessions.register(conn.ConnectionID(), s)
+	defer s.server.sessions.unregister(conn.ConnectionID())
 
 	if err := s.connectUpstream(); err != nil {
 		return err
@@ -222,6 +263,15 @@ func (s *Session) recordConnection() error {
 
 	s.connection = conn
 
+	dbName := ""
+	if s.database != nil {
+		dbName = s.database.Name
+	}
+
+	s.approvalGate = shared.NewApprovalGate(s.server.approvalDeps, s.grant, conn.UID, s.user, dbName)
+	s.stream = shared.NewStreamPublisher(s.server.approvalDeps, conn.UID, s.user, dbName)
+	s.stream.Connection(s.ctx, shared.ConnectionOpened)
+
 	return nil
 }
 
@@ -239,6 +289,8 @@ func (s *Session) recordDisconnect() {
 	if s.connection == nil {
 		return
 	}
+
+	s.stream.Connection(s.ctx, shared.ConnectionClosed)
 
 	// Flush any client-side bytes not yet attributed to a query. Two sources:
 	//   - the last query's response bytes, written by the gomysql server AFTER

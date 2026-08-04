@@ -16,14 +16,18 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/fclairamb/dbbat/internal/api"
+	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/dump"
+	"github.com/fclairamb/dbbat/internal/events"
+	"github.com/fclairamb/dbbat/internal/notify"
 	"github.com/fclairamb/dbbat/internal/proxy/mongodb"
 	"github.com/fclairamb/dbbat/internal/proxy/mysql"
 	"github.com/fclairamb/dbbat/internal/proxy/oracle"
 	"github.com/fclairamb/dbbat/internal/proxy/postgresql"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -165,21 +169,7 @@ func CmdRun() {
 					},
 				},
 			},
-			{
-				Name:  "dump",
-				Usage: "Dump file commands",
-				Commands: []*cli.Command{
-					{
-						Name:      "anonymise",
-						Aliases:   []string{"anonymize"},
-						Usage:     "Create an anonymised copy of a dump file (strips connection metadata)",
-						ArgsUsage: "<input-file> [output-file]",
-						Action: func(_ context.Context, cmd *cli.Command) error {
-							return runDumpAnonymise(cmd)
-						},
-					},
-				},
-			},
+			dumpCommand(),
 		},
 		Action: func(ctx context.Context, _ *cli.Command) error {
 			// Default action is to serve
@@ -254,11 +244,13 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		slog.String("api_addr", cfg.ListenAPI),
 		slog.Any("run_mode", cfg.RunMode),
 		slog.String("log_level", cfg.LogLevel),
+		slog.String("instance_id", cfg.InstanceID),
 	)
 
 	// Initialize store (with table drop if in test or demo mode)
 	storeOpts := store.Options{
 		DropTablesFirst: cfg.RunMode == config.RunModeTest || cfg.RunMode == config.RunModeDemo,
+		InstanceID:      cfg.InstanceID,
 	}
 	if cfg.RunMode == config.RunModeTest {
 		logger.InfoContext(ctx, "Test mode enabled, will drop all tables before migration")
@@ -279,6 +271,10 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	// Check for database configurations that match the storage DSN
 	checkDatabaseConfigurations(ctx, dataStore, logger)
+
+	// Announce this process, then close what dead processes left open. Both
+	// must happen before any proxy accepts.
+	heartbeat := registerAndReconcile(ctx, dataStore, logger)
 
 	// Ensure default admin exists
 	defaultPassword := "admin"
@@ -308,8 +304,7 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		}
 	}
 
-	// Start API server
-	apiServer := api.NewServer(dataStore, cfg.EncryptionKey, logger, cfg)
+	apiServer, approvals, approvalDeps := buildEventPlumbing(ctx, cfg, dataStore, logger)
 
 	go func() {
 		if err := apiServer.Start(cfg.ListenAPI); err != nil {
@@ -320,6 +315,9 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	logger.InfoContext(ctx, "API server started", slog.String("addr", cfg.ListenAPI))
 
+	// One result-row writer for the whole process (see shared.RowWriter).
+	rowWriter := shared.NewRowWriter(dataStore, logger)
+
 	// Create auth cache for proxy server (shared cache config with API)
 	proxyAuthCache := cache.NewAuthCache(cache.AuthCacheConfig{
 		Enabled:    cfg.AuthCache.Enabled,
@@ -327,46 +325,94 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		MaxSize:    cfg.AuthCache.MaxSize,
 	})
 
-	// Start proxy server
-	proxyServer, err := postgresql.NewServer(dataStore, cfg.EncryptionKey, cfg.QueryStorage, cfg.Dump, proxyAuthCache, cfg.PG, logger)
-	if err != nil {
-		logger.ErrorContext(ctx, "PostgreSQL proxy server init failed", slog.Any("error", err))
-		os.Exit(1)
-	}
-
-	go func() {
-		if err := proxyServer.Start(cfg.ListenPG); err != nil {
-			logger.ErrorContext(context.Background(), "Proxy server error", slog.Any("error", err))
-			os.Exit(1)
-		}
-	}()
-
-	logger.InfoContext(ctx, "Proxy server started",
-		slog.String("addr", cfg.ListenPG),
-		slog.Bool("tls", !cfg.PG.TLS.Disable))
+	// Start the PostgreSQL proxy server
+	proxyServer := startPostgresProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
 
 	// Start Oracle proxy server (if configured)
-	oracleServer := startOracleProxy(ctx, cfg, dataStore, proxyAuthCache, logger)
+	oracleServer := startOracleProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
 
 	// Start MySQL proxy server (if configured)
-	mysqlServer := startMySQLProxy(ctx, cfg, dataStore, proxyAuthCache, logger)
+	mysqlServer := startMySQLProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
 
 	// Start MongoDB proxy server (if configured)
-	mongoServer := startMongoProxy(ctx, cfg, dataStore, proxyAuthCache, logger)
+	mongoServer := startMongoProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
 
-	// Wait for shutdown signal and gracefully stop all servers
-	servers := []shutdownable{apiServer, proxyServer}
-	if oracleServer != nil {
-		servers = append(servers, oracleServer)
-	}
-	if mysqlServer != nil {
-		servers = append(servers, mysqlServer)
-	}
-	if mongoServer != nil {
-		servers = append(servers, mongoServer)
-	}
+	// One retention sweep for the whole process (nil when disabled, the default).
+	sweeper := startQueryRetentionSweep(ctx, cfg, dataStore, logger)
+
+	// Draining releases parked queries first, then stops the servers.
+	servers := collectServers(approvalDrain{approvals, logger}, apiServer, proxyServer,
+		oracleServer, mysqlServer, mongoServer, rowWriter, sweeper, heartbeat)
 
 	return awaitShutdown(ctx, logger, servers...)
+}
+
+// registerAndReconcile puts this process in the instance registry and then
+// clears the connection rows left behind by processes that are gone.
+//
+// The order matters twice over. The reconcile reads the registry, so our own
+// row has to be there first; and every other replica reads the registry to
+// decide whether our connections are live, so the row must exist before this
+// process opens any. Both therefore run before any proxy accepts — a session
+// opened by this run can never be caught by its own reconcile.
+//
+// Returns the heartbeat that keeps our row fresh, for the shutdown sequence to
+// stop last of all. Nil when there is no instance id to register.
+func registerAndReconcile(ctx context.Context, dataStore *store.Store, logger *slog.Logger) *instanceHeartbeat {
+	heartbeat := startInstanceHeartbeat(ctx, dataStore, logger)
+
+	reconcileOrphanedConnections(ctx, dataStore, logger)
+
+	return heartbeat
+}
+
+// reconcileOrphanedConnections closes the connection rows left open by a
+// process that is no longer running. Without it a crash, a kill or a pod
+// reschedule leaves disconnected_at NULL forever, and the retention sweep —
+// which deliberately never reaps a connection that still looks open — can never
+// remove those rows.
+//
+// It covers this instance id's own leftovers (DBB_INSTANCE_ID, defaulting to
+// the hostname) plus those of any instance the registry proves is gone. dbbat
+// runs with more than one replica against a shared store, so a blanket update
+// would let a starting replica close another replica's live sessions; liveness,
+// tracked by the instance heartbeat, is what makes widening it safe. See
+// store.CloseOrphanedConnections.
+//
+// The two counts are logged separately, and reclaims are logged even when the
+// own count is zero: connections reclaimed from another instance mean a process
+// died without shutting down, which is worth noticing on its own.
+//
+// A failure here is logged, not fatal: stale bookkeeping must not stop the
+// proxy from serving traffic.
+func reconcileOrphanedConnections(ctx context.Context, dataStore *store.Store, logger *slog.Logger) {
+	closed, err := dataStore.CloseOrphanedConnections(ctx)
+	if err != nil {
+		logger.ErrorContext(ctx, "failed to reconcile orphaned connections", slog.Any("error", err))
+
+		return
+	}
+
+	if closed.Own > 0 {
+		// Worth info level: a large count means the previous run did not shut
+		// down cleanly.
+		logger.InfoContext(ctx, "Closed connections left open by a previous run",
+			slog.Int64("connections", closed.Own),
+			slog.String("instance_id", dataStore.InstanceID()))
+	}
+
+	if closed.Reclaimed > 0 {
+		logger.InfoContext(ctx, "Reclaimed connections left open by instances that are gone",
+			slog.Int64("connections", closed.Reclaimed),
+			slog.Duration("stale_after", store.InstanceStaleAfter))
+	}
+
+	// Housekeeping, after the reclaim so it still saw the rows it judged.
+	if pruned, err := dataStore.PruneStaleInstances(ctx); err != nil {
+		logger.WarnContext(ctx, "failed to prune stale instances", slog.Any("error", err))
+	} else if pruned > 0 {
+		logger.DebugContext(ctx, "Pruned stale instance registrations", slog.Int64("instances", pruned))
+	}
 }
 
 // shutdownable is implemented by servers that support graceful shutdown.
@@ -396,12 +442,57 @@ func awaitShutdown(ctx context.Context, logger *slog.Logger, servers ...shutdown
 	return nil
 }
 
-func startOracleProxy(ctx context.Context, cfg *config.Config, dataStore *store.Store, authCache *cache.AuthCache, logger *slog.Logger) *oracle.Server {
+// startPostgresProxy builds and starts the PostgreSQL proxy. Unlike the other
+// three it has no listener-disabled case: PostgreSQL is dbbat's default
+// protocol and DBB_LISTEN_PG always has a value.
+func startPostgresProxy(
+	ctx context.Context,
+	cfg *config.Config,
+	dataStore *store.Store,
+	authCache *cache.AuthCache,
+	approvalDeps shared.ApprovalDeps,
+	rowWriter *shared.RowWriter,
+	logger *slog.Logger,
+) *postgresql.Server {
+	srv, err := postgresql.NewServer(dataStore, cfg.EncryptionKey, cfg.QueryStorage, cfg.Dump, authCache, cfg.PG, logger)
+	if err != nil {
+		logger.ErrorContext(ctx, "PostgreSQL proxy server init failed", slog.Any("error", err))
+		os.Exit(1)
+	}
+
+	srv.SetApprovalDeps(approvalDeps)
+	srv.SetRowWriter(rowWriter)
+
+	go func() {
+		if err := srv.Start(cfg.ListenPG); err != nil {
+			logger.ErrorContext(context.Background(), "Proxy server error", slog.Any("error", err))
+			os.Exit(1)
+		}
+	}()
+
+	logger.InfoContext(ctx, "Proxy server started",
+		slog.String("addr", cfg.ListenPG),
+		slog.Bool("tls", !cfg.PG.TLS.Disable))
+
+	return srv
+}
+
+func startOracleProxy(
+	ctx context.Context,
+	cfg *config.Config,
+	dataStore *store.Store,
+	authCache *cache.AuthCache,
+	approvalDeps shared.ApprovalDeps,
+	rowWriter *shared.RowWriter,
+	logger *slog.Logger,
+) *oracle.Server {
 	if cfg.ListenOracle == "" {
 		return nil
 	}
 
 	srv := oracle.NewServer(dataStore, cfg.EncryptionKey, authCache, cfg.QueryStorage, cfg.Dump, logger)
+	srv.SetApprovalDeps(approvalDeps)
+	srv.SetRowWriter(rowWriter)
 
 	go func() {
 		if err := srv.Start(cfg.ListenOracle); err != nil {
@@ -415,7 +506,15 @@ func startOracleProxy(ctx context.Context, cfg *config.Config, dataStore *store.
 	return srv
 }
 
-func startMySQLProxy(ctx context.Context, cfg *config.Config, dataStore *store.Store, authCache *cache.AuthCache, logger *slog.Logger) *mysql.Server {
+func startMySQLProxy(
+	ctx context.Context,
+	cfg *config.Config,
+	dataStore *store.Store,
+	authCache *cache.AuthCache,
+	approvalDeps shared.ApprovalDeps,
+	rowWriter *shared.RowWriter,
+	logger *slog.Logger,
+) *mysql.Server {
 	if cfg.ListenMySQL == "" {
 		return nil
 	}
@@ -425,6 +524,9 @@ func startMySQLProxy(ctx context.Context, cfg *config.Config, dataStore *store.S
 		logger.ErrorContext(ctx, "MySQL proxy server init failed", slog.Any("error", err))
 		os.Exit(1)
 	}
+
+	srv.SetApprovalDeps(approvalDeps)
+	srv.SetRowWriter(rowWriter)
 
 	go func() {
 		if err := srv.Start(cfg.ListenMySQL); err != nil {
@@ -440,7 +542,15 @@ func startMySQLProxy(ctx context.Context, cfg *config.Config, dataStore *store.S
 	return srv
 }
 
-func startMongoProxy(ctx context.Context, cfg *config.Config, dataStore *store.Store, authCache *cache.AuthCache, logger *slog.Logger) *mongodb.Server {
+func startMongoProxy(
+	ctx context.Context,
+	cfg *config.Config,
+	dataStore *store.Store,
+	authCache *cache.AuthCache,
+	approvalDeps shared.ApprovalDeps,
+	rowWriter *shared.RowWriter,
+	logger *slog.Logger,
+) *mongodb.Server {
 	if cfg.ListenMongo == "" {
 		return nil
 	}
@@ -450,6 +560,9 @@ func startMongoProxy(ctx context.Context, cfg *config.Config, dataStore *store.S
 		logger.ErrorContext(ctx, "MongoDB proxy server init failed", slog.Any("error", err))
 		os.Exit(1)
 	}
+
+	srv.SetApprovalDeps(approvalDeps)
+	srv.SetRowWriter(rowWriter)
 
 	go func() {
 		if err := srv.Start(cfg.ListenMongo); err != nil {
@@ -875,7 +988,32 @@ func seedSampleQuery(ctx context.Context, dataStore *store.Store, userID, databa
 	return nil
 }
 
-var errDumpAnonymiseUsage = errors.New("usage: dbbat dump anonymise <input-file> [output-file]")
+// dumpCommand builds the `dbbat dump` command tree.
+func dumpCommand() *cli.Command {
+	return &cli.Command{
+		Name:  "dump",
+		Usage: "Session capture (pcapng) commands",
+		Commands: []*cli.Command{
+			{
+				Name:      "anonymise",
+				Aliases:   []string{"anonymize"},
+				Usage:     "Create an anonymised copy of a capture (strips session metadata and, by default, the synthesized addresses)",
+				ArgsUsage: "<input-file> [output-file]",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{
+						Name:  "keep-addresses",
+						Usage: "keep the synthesized IP addresses and ports (they may encode the real upstream)",
+					},
+				},
+				Action: func(_ context.Context, cmd *cli.Command) error {
+					return runDumpAnonymise(cmd)
+				},
+			},
+		},
+	}
+}
+
+var errDumpAnonymiseUsage = errors.New("usage: dbbat dump anonymise [--keep-addresses] <input-file> [output-file]")
 
 func runDumpAnonymise(cmd *cli.Command) error {
 	args := cmd.Args()
@@ -891,11 +1029,18 @@ func runDumpAnonymise(cmd *cli.Command) error {
 		outputPath = inputPath[:len(inputPath)-len(ext)] + ".anonymised" + ext
 	}
 
-	if err := dump.Anonymise(inputPath, outputPath); err != nil {
+	rewriteAddresses := !cmd.Bool("keep-addresses")
+
+	if err := dump.Anonymise(inputPath, outputPath, rewriteAddresses); err != nil {
 		return fmt.Errorf("anonymise failed: %w", err)
 	}
 
-	slog.InfoContext(context.Background(), "Anonymised dump written", "path", outputPath)
+	slog.InfoContext(
+		context.Background(),
+		"Anonymised capture written",
+		"path", outputPath,
+		"addresses_rewritten", rewriteAddresses,
+	)
 
 	return nil
 }
@@ -918,4 +1063,145 @@ func checkDatabaseConfigurations(ctx context.Context, dataStore *store.Store, lo
 				slog.String("recommendation", "use a separate database for DBBat storage to prevent privilege escalation"))
 		}
 	}
+}
+
+// escalatorAdapter bridges the proxy's escalator interface to the notify
+// package's concrete type without either side importing the other.
+type escalatorAdapter struct {
+	inner *notify.ApprovalEscalator
+}
+
+func (a escalatorAdapter) Schedule(ctx context.Context, hold shared.ApprovalHoldInfo) {
+	a.inner.Schedule(ctx, notify.ApprovalHold{
+		QueryUID:      hold.QueryUID,
+		ConnectionUID: hold.ConnectionUID,
+		Username:      hold.Username,
+		DatabaseName:  hold.DatabaseName,
+		SQL:           hold.SQL,
+		Pattern:       hold.Pattern,
+		StartedAt:     hold.StartedAt,
+	})
+}
+
+func (a escalatorAdapter) Resolved(ctx context.Context, queryUID uuid.UUID, status, byName, reason string) {
+	a.inner.Resolved(ctx, queryUID, status, byName, reason)
+}
+
+// approvalDrain releases every parked statement on shutdown. Draining must
+// explicitly abandon held queries rather than hang the shutdown — or, worse,
+// silently let them through.
+type approvalDrain struct {
+	registry *approval.Registry
+	logger   *slog.Logger
+}
+
+func (d approvalDrain) Shutdown(ctx context.Context) error {
+	released := d.registry.ResolveAll(
+		store.ApprovalAbandoned, "dbbat is shutting down; the statement was not executed", nil, "",
+	)
+
+	if len(released) > 0 {
+		d.logger.WarnContext(ctx, "abandoned held queries on shutdown", slog.Int("count", len(released)))
+	}
+
+	return nil
+}
+
+// buildEventPlumbing constructs the API server together with the one broker,
+// one approval registry and one Slack escalator the whole process shares. They
+// have to be the same instances across the API and every proxy: a decision
+// taken over REST must wake the session parked in the proxy, and both sides
+// publish into the same stream.
+func buildEventPlumbing(
+	ctx context.Context, cfg *config.Config, dataStore *store.Store, logger *slog.Logger,
+) (*api.Server, *approval.Registry, shared.ApprovalDeps) {
+	broker := events.New()
+	approvals := approval.NewRegistry()
+
+	apiServer := api.NewServer(dataStore, cfg.EncryptionKey, logger, cfg)
+
+	// Reuse the API server's Slack client rather than opening a second one.
+	escalator := notify.NewApprovalEscalator(
+		apiServer.Notifier(),
+		cfg.Approval.SlackDelayDuration(),
+		cfg.Approval.SlackSQL,
+		logger,
+	)
+
+	apiServer.SetEventPlumbing(broker, approvals, escalator)
+
+	if cfg.Approval.Enabled {
+		logger.InfoContext(ctx, "approval holds enabled",
+			slog.Duration("slack_delay", cfg.Approval.SlackDelayDuration()),
+			slog.Bool("slack_sql", cfg.Approval.SlackSQL))
+	}
+
+	return apiServer, approvals, shared.ApprovalDeps{
+		Enabled:   cfg.Approval.Enabled,
+		Store:     dataStore,
+		Registry:  approvals,
+		Broker:    broker,
+		Escalator: escalatorAdapter{escalator},
+		Logger:    logger,
+	}
+}
+
+// rowWriterCloser adapts the shared result-row writer to the shutdown list.
+type rowWriterCloser struct {
+	writer *shared.RowWriter
+}
+
+// Shutdown drains whatever rows are still queued and stops the writer.
+func (c rowWriterCloser) Shutdown(ctx context.Context) error {
+	c.writer.Close(ctx)
+
+	return nil
+}
+
+// collectServers drops the nil entries (proxies whose listener is disabled)
+// from a shutdown list. A typed-nil pointer in a shutdownable slice would
+// panic on Shutdown, so the filter checks each concrete pointer.
+func collectServers(
+	drain approvalDrain,
+	apiServer *api.Server,
+	pgServer *postgresql.Server,
+	oracleServer *oracle.Server,
+	mysqlServer *mysql.Server,
+	mongoServer *mongodb.Server,
+	rowWriter *shared.RowWriter,
+	sweeper *queryRetentionSweeper,
+	heartbeat *instanceHeartbeat,
+) []shutdownable {
+	servers := []shutdownable{drain, apiServer, pgServer}
+
+	if oracleServer != nil {
+		servers = append(servers, oracleServer)
+	}
+
+	if mysqlServer != nil {
+		servers = append(servers, mysqlServer)
+	}
+
+	if mongoServer != nil {
+		servers = append(servers, mongoServer)
+	}
+
+	// After every proxy: the batched capture has to drain once no session can
+	// queue another row, or the tail of the last queries is lost.
+	if rowWriter != nil {
+		servers = append(servers, rowWriterCloser{rowWriter})
+	}
+
+	if sweeper != nil {
+		servers = append(servers, sweeper)
+	}
+
+	// Last on purpose: deregistering tells the other replicas our connections
+	// are fair game, which must not happen while the proxies are still draining
+	// live sessions.
+	if heartbeat != nil {
+		servers = append(servers, heartbeat)
+	}
+
+	return servers
 }

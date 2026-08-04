@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strconv"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -1578,7 +1581,7 @@ func TestConvertDataRow_TypeDecoding(t *testing.T) {
 	}
 }
 
-func TestHandleQuery_InitializesCapturedRows(t *testing.T) {
+func TestHandleQuery_StartsQueryTracking(t *testing.T) {
 	t.Parallel()
 
 	s := newTestSession("write")
@@ -1592,12 +1595,18 @@ func TestHandleQuery_InitializesCapturedRows(t *testing.T) {
 		t.Fatal("currentQuery not set")
 	}
 
-	if s.currentQuery.capturedRows == nil {
-		t.Error("capturedRows not initialized")
+	// Rows stream to the shared writer as they arrive, so nothing is
+	// accumulated here and the sink only appears on the first captured row.
+	if s.currentQuery.rowSink != nil {
+		t.Error("row sink must not be created before the first captured row")
+	}
+
+	if s.currentQuery.rowNumber != 0 {
+		t.Errorf("rowNumber = %d, want 0", s.currentQuery.rowNumber)
 	}
 }
 
-func TestHandleExecute_InitializesCapturedRows(t *testing.T) {
+func TestHandleExecute_StartsQueryTracking(t *testing.T) {
 	t.Parallel()
 
 	s := newTestSession("write")
@@ -1616,49 +1625,143 @@ func TestHandleExecute_InitializesCapturedRows(t *testing.T) {
 	}
 
 	pending := s.extendedState.pendingQueries[0]
-	if pending.capturedRows == nil {
-		t.Error("capturedRows not initialized")
+	if pending.rowSink != nil {
+		t.Error("row sink must not be created before the first captured row")
 	}
 }
 
-func TestResultCapture_RefusesWhenLimitsExceeded(t *testing.T) {
+func TestResultCapture_KeepsPrefixWhenLimitsExceeded(t *testing.T) {
 	t.Parallel()
 
-	// Test that when limits are exceeded, all captured rows are discarded
-	query := &pendingQuery{
-		sql:          "SELECT * FROM big_table",
-		capturedRows: make([]store.QueryRow, 0),
+	// A result set past the row limit keeps the prefix it already captured
+	// (and flags it) rather than discarding everything.
+	const maxRows = 5
+
+	s := newTestSession("write")
+	s.queryStorage.StoreResults = true
+	s.queryStorage.MaxResultRows = maxRows
+	s.queryStorage.MaxResultBytes = 1 << 20
+
+	require.NoError(t, s.handleQuery(&pgproto3.Query{String: "SELECT id FROM big_table"}))
+
+	s.captureRowDescription(&pgproto3.RowDescription{
+		Fields: []pgproto3.FieldDescription{{Name: []byte("id"), DataTypeOID: 23}},
+	})
+
+	for i := range 10 {
+		s.captureDataRow(&pgproto3.DataRow{Values: [][]byte{[]byte(strconv.Itoa(i))}})
 	}
 
-	maxRows := 5
+	query := s.currentQuery
+	require.NotNil(t, query)
+	assert.True(t, query.truncated, "truncated should be set once the limit is hit")
+	assert.Equal(t, maxRows, query.rowNumber, "the captured prefix must be kept, not discarded")
+}
 
-	// Simulate capturing rows until limit is exceeded
-	for i := 0; i < 10; i++ {
-		if query.truncated {
-			// Already truncated, no more rows should be captured
-			break
-		}
+// copyRowValues decodes the "name" column of each captured COPY row.
+func copyRowValues(t *testing.T, rows []store.QueryRow) []string {
+	t.Helper()
 
-		if query.rowNumber >= maxRows {
-			// Limits exceeded - discard all captured rows
-			query.truncated = true
-			query.capturedRows = nil
-		} else {
-			query.capturedRows = append(query.capturedRows, store.QueryRow{
-				RowNumber: i + 1,
-				RowData:   []byte(`{"id":1}`),
-			})
-			query.rowNumber++
-		}
+	values := make([]string, 0, len(rows))
+
+	for _, row := range rows {
+		var decoded map[string]interface{}
+		require.NoError(t, json.Unmarshal(row.RowData, &decoded))
+		require.Contains(t, decoded, "name")
+
+		name, ok := decoded["name"].(string)
+		require.True(t, ok, "name column should decode as a string")
+		values = append(values, name)
 	}
 
-	// Verify all rows were discarded
-	if query.capturedRows != nil {
-		t.Errorf("capturedRows should be nil when limits exceeded, got %d rows", len(query.capturedRows))
+	return values
+}
+
+func TestParseCopyDataToRows_ByteLimit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		chunks    [][]byte
+		truncated bool
+		expected  []string
+	}{
+		{
+			// The byte limit cuts the stream mid-line: the whole rows before
+			// the last \n are kept, the partial tail is dropped.
+			name:      "truncated mid-line keeps whole rows only",
+			chunks:    [][]byte{[]byte("1\talice\n2\tbob\n"), []byte("3\tcar")},
+			truncated: true,
+			expected:  []string{"alice", "bob"},
+		},
+		{
+			// Nothing complete was buffered - better zero rows than one
+			// malformed one.
+			name:      "truncated with no newline yields no rows",
+			chunks:    [][]byte{[]byte("1\tali")},
+			truncated: true,
+			expected:  []string{},
+		},
+		{
+			name:      "truncated on a row boundary keeps every row",
+			chunks:    [][]byte{[]byte("1\talice\n2\tbob\n")},
+			truncated: true,
+			expected:  []string{"alice", "bob"},
+		},
+		{
+			// A complete capture still parses a trailing line with no final
+			// newline.
+			name:      "not truncated keeps the trailing line",
+			chunks:    [][]byte{[]byte("1\talice\n2\tbob")},
+			truncated: false,
+			expected:  []string{"alice", "bob"},
+		},
 	}
-	if !query.truncated {
-		t.Error("truncated should be true")
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := newTestSession("read")
+			s.queryStorage.StoreResults = true
+			s.queryStorage.MaxResultRows = 100
+			s.queryStorage.MaxResultBytes = 1 << 20
+			s.copyState = &copyState{
+				direction:   "out",
+				format:      0,
+				columnNames: []string{"id", "name"},
+				dataChunks:  tc.chunks,
+				truncated:   tc.truncated,
+			}
+
+			rows := s.parseCopyDataToRows()
+
+			assert.Equal(t, tc.expected, copyRowValues(t, rows))
+			assert.NotContains(t, copyRowValues(t, rows), "car", "partial row must not be emitted")
+		})
 	}
+}
+
+func TestCaptureCopyData_KeepsPrefixWhenByteLimitExceeded(t *testing.T) {
+	t.Parallel()
+
+	s := newTestSession("read")
+	s.queryStorage.StoreResults = true
+	s.queryStorage.MaxResultRows = 100
+	s.queryStorage.MaxResultBytes = 16
+	s.copyState = &copyState{
+		direction:   "out",
+		format:      0,
+		columnNames: []string{"id", "name"},
+	}
+
+	s.captureCopyData([]byte("1\talice\n2\tbob\n"))
+	s.captureCopyData([]byte("3\tcarol\n4\tdave\n"))
+
+	require.True(t, s.copyState.truncated, "the byte limit must flag the capture as truncated")
+	require.NotEmpty(t, s.copyState.dataChunks, "the captured prefix must be kept, not discarded")
+
+	assert.Equal(t, []string{"alice", "bob"}, copyRowValues(t, s.parseCopyDataToRows()))
 }
 
 func TestParseCopyColumnNames(t *testing.T) {

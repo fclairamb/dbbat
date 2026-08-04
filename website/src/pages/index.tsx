@@ -102,7 +102,7 @@ function QuickStart() {
           <code>
             docker run
             <br />
-            &nbsp;&nbsp;-p 5434:5434&nbsp;&nbsp;# PostgreSQL proxy
+            &nbsp;&nbsp;-p 5433:5433&nbsp;&nbsp;# PostgreSQL proxy
             <br />
             &nbsp;&nbsp;-p 1522:1522&nbsp;&nbsp;# Oracle proxy
             <br />

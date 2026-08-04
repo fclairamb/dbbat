@@ -300,6 +300,25 @@ type Connection struct {
 	DisconnectedAt   *time.Time `bun:"disconnected_at" json:"disconnected_at"`
 	Queries          int64      `bun:"queries,notnull,default:0" json:"queries"`
 	BytesTransferred int64      `bun:"bytes_transferred,notnull,default:0" json:"bytes_transferred"`
+
+	// InstanceID is the dbbat process that opened this connection. It scopes
+	// the startup reconcile (Store.CloseOrphanedConnections) so a replica can
+	// never close another replica's live sessions. Internal bookkeeping, not
+	// part of the API surface — hence json:"-".
+	InstanceID string `bun:"instance_id,notnull,default:''" json:"-"`
+}
+
+// Instance is one dbbat process sharing this store. The row is upserted at
+// startup, refreshed by a heartbeat, and deleted on a clean shutdown, so its
+// presence and freshness answer "is this process still alive?" — which is what
+// lets the startup reconcile reclaim the connections of an instance that is
+// provably gone. See Store.CloseOrphanedConnections.
+type Instance struct {
+	bun.BaseModel `bun:"table:instances,alias:i"`
+
+	InstanceID string    `bun:"instance_id,pk" json:"instance_id"`
+	StartedAt  time.Time `bun:"started_at,notnull,default:current_timestamp" json:"started_at"`
+	LastSeenAt time.Time `bun:"last_seen_at,notnull,default:current_timestamp" json:"last_seen_at"`
 }
 
 // ConnectionFilter represents filters for listing connections
@@ -334,6 +353,29 @@ type Query struct {
 	CopyFormat    *string          `bun:"copy_format" json:"copy_format,omitempty"`       // 'text', 'csv', 'binary', or nil for non-COPY
 	CopyDirection *string          `bun:"copy_direction" json:"copy_direction,omitempty"` // 'in', 'out', or nil for non-COPY
 
+	// ResultsTruncated is true when result capture stopped on a storage limit
+	// (max_result_rows / max_result_bytes). The rows that were captured before
+	// the limit are still stored, so this is what tells a short — or empty —
+	// row set apart from a query that genuinely returned that much.
+	ResultsTruncated bool `bun:"results_truncated,notnull,default:false" json:"results_truncated"`
+
+	// ResultsDropped is true when dbbat lost rows it meant to keep: the
+	// batched row writer's queue was full (the store fell behind the proxy) or
+	// a batch insert failed. It is deliberately distinct from
+	// ResultsTruncated — truncation is an expected, configured prefix, a drop
+	// is dbbat failing to keep up — and the two are never conflated.
+	ResultsDropped bool `bun:"results_dropped,notnull,default:false" json:"results_dropped"`
+
+	// Approval hold fields. ApprovalStatus is nil for the overwhelming
+	// majority of queries (no pattern matched); when set it is one of
+	// ApprovalPending / ApprovalApproved / ApprovalDenied / ApprovalAbandoned.
+	// There is deliberately no "timeout" state — see docs/approvals.md.
+	ApprovalStatus   *string    `bun:"approval_status" json:"approval_status,omitempty"`
+	ApprovalPattern  *string    `bun:"approval_pattern" json:"approval_pattern,omitempty"`
+	ResolvedBy       *uuid.UUID `bun:"resolved_by,type:uuid" json:"resolved_by,omitempty"`
+	ResolvedAt       *time.Time `bun:"resolved_at" json:"resolved_at,omitempty"`
+	ResolutionReason *string    `bun:"resolution_reason" json:"resolution_reason,omitempty"`
+
 	// Joined fields populated only by ListQueries (via a JOIN on connections);
 	// not stored on the queries table itself.
 	UserID     *uuid.UUID `bun:"user_id,scanonly" json:"user_id,omitempty"`
@@ -356,6 +398,17 @@ type QueryRow struct {
 	RowNumber    int             `json:"row_number"`
 	RowData      json.RawMessage `json:"row_data"`
 	RowSizeBytes int64           `json:"row_size_bytes"`
+}
+
+// PendingQueryRow is a captured row on its way to storage. Unlike QueryRow it
+// carries its own parent query id, so a single INSERT can cover rows belonging
+// to different queries — which is what lets one process-wide writer batch
+// across concurrent sessions instead of one batch per query.
+type PendingQueryRow struct {
+	QueryID      uuid.UUID
+	RowNumber    int
+	RowData      json.RawMessage
+	RowSizeBytes int64
 }
 
 // QueryWithRows combines a query with its result rows
@@ -392,6 +445,16 @@ type AccessGrant struct {
 	MaxQueryCounts      *int64     `bun:"max_query_counts" json:"max_query_counts"`
 	MaxBytesTransferred *int64     `bun:"max_bytes_transferred" json:"max_bytes_transferred"`
 	CreatedAt           time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+
+	// ApprovalPatterns are RE2 patterns that suspend a matching statement
+	// until an approver resolves it. Mirrored from the grant definition at
+	// materialization time — exactly like Controls / MaxQueryCounts — because
+	// the proxy session holds nothing but a *Grant, and admin-created grants
+	// bypass definitions entirely.
+	ApprovalPatterns []string `bun:"approval_patterns,array,notnull,default:'{}'" json:"approval_patterns"`
+	// ApproverGroupUIDs lists groups whose members may resolve holds on this
+	// grant, in addition to admins. Empty = admins only.
+	ApproverGroupUIDs []uuid.UUID `bun:"approver_group_uids,array,notnull,default:'{}'" json:"approver_group_uids"`
 
 	// Computed fields (not stored in DB)
 	QueryCount       int64 `bun:"-" json:"query_count"`
@@ -459,9 +522,18 @@ type GrantDefinition struct {
 	// DatabaseUIDs restricts which databases this definition can be
 	// requested against. Empty = every database.
 	DatabaseUIDs []uuid.UUID `bun:"database_uids,array,notnull,default:'{}'" json:"database_uids"`
-	IsActive     bool        `bun:"is_active,notnull,default:true" json:"is_active"`
-	CreatedBy    uuid.UUID   `bun:"created_by,notnull,type:uuid" json:"created_by"`
-	CreatedAt    time.Time   `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	// ApprovalPatterns are SQL patterns (RE2) that suspend a matching
+	// statement until an admin or an approver-group member approves it.
+	// Empty = no approval gating. Validated at save time so a bad pattern is
+	// a 400 rather than a runtime surprise on the proxy hot path.
+	ApprovalPatterns []string `bun:"approval_patterns,array,notnull,default:'{}'" json:"approval_patterns"`
+	// ApproverGroupUIDs lists groups whose members may resolve holds on
+	// grants built from this definition, *in addition to* admins.
+	// Empty = admins only.
+	ApproverGroupUIDs []uuid.UUID `bun:"approver_group_uids,array,notnull,default:'{}'" json:"approver_group_uids"`
+	IsActive          bool        `bun:"is_active,notnull,default:true" json:"is_active"`
+	CreatedBy         uuid.UUID   `bun:"created_by,notnull,type:uuid" json:"created_by"`
+	CreatedAt         time.Time   `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 }
 
 // AppliesToGroups reports whether a user belonging to the given groups is

@@ -48,7 +48,7 @@ func compressedRows() []compressedRow {
 func TestDumpReplay_CompressedRows(t *testing.T) {
 	t.Parallel()
 
-	td := loadTestDump(t, "go_ora_compressed.dbbat-dump")
+	td := loadTestDump(t, "go_ora_compressed.pcapng")
 
 	rows := replayCapturedRows(t, td, compressedSQLMarker)
 	want := compressedRows()

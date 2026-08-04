@@ -83,6 +83,23 @@ func TestCreateQuery(t *testing.T) {
 	})
 }
 
+// pendingRows stamps captured rows with the query they belong to. Production
+// code never needs this: every proxy hands rows to shared.RowWriter, which
+// stamps them from the sink. Tests still call StoreQueryRows directly.
+func pendingRows(queryUID uuid.UUID, rows []QueryRow) []PendingQueryRow {
+	pending := make([]PendingQueryRow, len(rows))
+	for i, row := range rows {
+		pending[i] = PendingQueryRow{
+			QueryID:      queryUID,
+			RowNumber:    row.RowNumber,
+			RowData:      row.RowData,
+			RowSizeBytes: row.RowSizeBytes,
+		}
+	}
+
+	return pending
+}
+
 func TestStoreQueryRows(t *testing.T) {
 	store := setupTestStore(t)
 	ctx := context.Background()
@@ -106,7 +123,7 @@ func TestStoreQueryRows(t *testing.T) {
 			{RowNumber: 3, RowData: json.RawMessage(`{"id": 3, "name": "item3"}`), RowSizeBytes: 30},
 		}
 
-		err := store.StoreQueryRows(ctx, created.UID, rows)
+		err := store.StoreQueryRows(ctx, pendingRows(created.UID, rows))
 		if err != nil {
 			t.Fatalf("StoreQueryRows() error = %v", err)
 		}
@@ -133,11 +150,145 @@ func TestStoreQueryRows(t *testing.T) {
 			t.Fatalf("CreateQuery() error = %v", err)
 		}
 
-		err = store.StoreQueryRows(ctx, created2.UID, []QueryRow{})
+		err = store.StoreQueryRows(ctx, pendingRows(created2.UID, []QueryRow{}))
 		if err != nil {
 			t.Fatalf("StoreQueryRows() error = %v", err)
 		}
 	})
+}
+
+// TestStoreQueryRows_BatchSpansQueries covers the signature that makes one
+// process-wide row writer possible: rows carry their own query id, so a single
+// INSERT can cover several concurrent queries.
+func TestStoreQueryRows_BatchSpansQueries(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn := createTestConnection(t, ctx, store, "batch-span")
+
+	first, err := store.CreateQuery(ctx, &Query{
+		ConnectionID: conn.UID,
+		SQLText:      "SELECT 1",
+		ExecutedAt:   time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("CreateQuery() error = %v", err)
+	}
+
+	second, err := store.CreateQuery(ctx, &Query{
+		ConnectionID: conn.UID,
+		SQLText:      "SELECT 2",
+		ExecutedAt:   time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("CreateQuery() error = %v", err)
+	}
+
+	mixed := []PendingQueryRow{
+		{QueryID: first.UID, RowNumber: 1, RowData: json.RawMessage(`{"n": 1}`), RowSizeBytes: 8},
+		{QueryID: second.UID, RowNumber: 1, RowData: json.RawMessage(`{"n": 2}`), RowSizeBytes: 8},
+		{QueryID: first.UID, RowNumber: 2, RowData: json.RawMessage(`{"n": 3}`), RowSizeBytes: 8},
+	}
+
+	if err := store.StoreQueryRows(ctx, mixed); err != nil {
+		t.Fatalf("StoreQueryRows() error = %v", err)
+	}
+
+	firstRows, err := store.GetQueryWithRows(ctx, first.UID)
+	if err != nil {
+		t.Fatalf("GetQueryWithRows() error = %v", err)
+	}
+
+	if len(firstRows.Rows) != 2 {
+		t.Errorf("first query rows = %d, want 2", len(firstRows.Rows))
+	}
+
+	secondRows, err := store.GetQueryWithRows(ctx, second.UID)
+	if err != nil {
+		t.Fatalf("GetQueryWithRows() error = %v", err)
+	}
+
+	if len(secondRows.Rows) != 1 {
+		t.Errorf("second query rows = %d, want 1", len(secondRows.Rows))
+	}
+}
+
+// TestQueryPartialCaptureFlags pins the distinction the UI depends on:
+// truncation (a configured limit) and dropping (dbbat losing rows) are two
+// independent columns, never one overloaded flag.
+func TestQueryPartialCaptureFlags(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn := createTestConnection(t, ctx, store, "partial-flags")
+
+	created, err := store.CreateQuery(ctx, &Query{
+		ConnectionID:     conn.UID,
+		SQLText:          "SELECT * FROM big",
+		ExecutedAt:       time.Now(),
+		ResultsTruncated: true,
+		ResultsDropped:   true,
+	})
+	if err != nil {
+		t.Fatalf("CreateQuery() error = %v", err)
+	}
+
+	if !created.ResultsTruncated || !created.ResultsDropped {
+		t.Fatalf("CreateQuery() truncated=%v dropped=%v, want both true",
+			created.ResultsTruncated, created.ResultsDropped)
+	}
+
+	fetched, err := store.GetQuery(ctx, created.UID)
+	if err != nil {
+		t.Fatalf("GetQuery() error = %v", err)
+	}
+
+	if !fetched.ResultsTruncated || !fetched.ResultsDropped {
+		t.Errorf("GetQuery() truncated=%v dropped=%v, want both true",
+			fetched.ResultsTruncated, fetched.ResultsDropped)
+	}
+
+	// A completion write moves the two independently: this capture was
+	// dropped, not truncated.
+	if err := store.UpdateQueryCompletion(ctx, created.UID, nil, nil, nil, false, true); err != nil {
+		t.Fatalf("UpdateQueryCompletion() error = %v", err)
+	}
+
+	fetched, err = store.GetQuery(ctx, created.UID)
+	if err != nil {
+		t.Fatalf("GetQuery() error = %v", err)
+	}
+
+	if fetched.ResultsTruncated {
+		t.Error("UpdateQueryCompletion() left results_truncated set")
+	}
+
+	if !fetched.ResultsDropped {
+		t.Error("UpdateQueryCompletion() cleared results_dropped")
+	}
+
+	// And the flags survive the list projection, which selects columns
+	// explicitly.
+	listed, err := store.ListQueries(ctx, QueryFilter{ConnectionID: &conn.UID})
+	if err != nil {
+		t.Fatalf("ListQueries() error = %v", err)
+	}
+
+	found := false
+
+	for _, q := range listed {
+		if q.UID == created.UID {
+			found = true
+
+			if !q.ResultsDropped {
+				t.Error("ListQueries() dropped the results_dropped column")
+			}
+		}
+	}
+
+	if !found {
+		t.Error("ListQueries() did not return the query")
+	}
 }
 
 func TestListQueries(t *testing.T) {
@@ -258,7 +409,7 @@ func TestGetQueryWithRows(t *testing.T) {
 		{RowNumber: 2, RowData: json.RawMessage(`{"id": 2, "value": "b"}`), RowSizeBytes: 25},
 		{RowNumber: 3, RowData: json.RawMessage(`{"id": 3, "value": "c"}`), RowSizeBytes: 25},
 	}
-	err = store.StoreQueryRows(ctx, created.UID, rows)
+	err = store.StoreQueryRows(ctx, pendingRows(created.UID, rows))
 	if err != nil {
 		t.Fatalf("StoreQueryRows() error = %v", err)
 	}
@@ -342,7 +493,7 @@ func TestGetQueryRows(t *testing.T) {
 			RowSizeBytes: 10,
 		}
 	}
-	err = store.StoreQueryRows(ctx, created.UID, rows)
+	err = store.StoreQueryRows(ctx, pendingRows(created.UID, rows))
 	if err != nil {
 		t.Fatalf("StoreQueryRows() error = %v", err)
 	}
@@ -531,7 +682,7 @@ func TestGetQueryRowsDataSizeLimit(t *testing.T) {
 			RowSizeBytes: int64(len(jsonData)),
 		}
 	}
-	err = store.StoreQueryRows(ctx, created.UID, rows)
+	err = store.StoreQueryRows(ctx, pendingRows(created.UID, rows))
 	if err != nil {
 		t.Fatalf("StoreQueryRows() error = %v", err)
 	}
@@ -575,7 +726,7 @@ func TestGetQueryRowsDataSizeLimit(t *testing.T) {
 			{RowNumber: 1, RowData: json.RawMessage(`{"data": "` + string(hugeData) + `"}`), RowSizeBytes: int64(len(hugeData))},
 			{RowNumber: 2, RowData: json.RawMessage(`{"id": 2}`), RowSizeBytes: 10},
 		}
-		err = store.StoreQueryRows(ctx, created2.UID, hugeRows)
+		err = store.StoreQueryRows(ctx, pendingRows(created2.UID, hugeRows))
 		if err != nil {
 			t.Fatalf("StoreQueryRows() error = %v", err)
 		}

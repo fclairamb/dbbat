@@ -11,6 +11,7 @@ import {
 } from "@/components/ui/breadcrumb";
 import { Link, useMatches } from "@tanstack/react-router";
 import { useBreadcrumbContext } from "@/contexts/BreadcrumbContext";
+import { PendingApprovalsIndicator } from "@/components/shared/PendingApprovalsIndicator";
 
 interface Crumb {
   title: string;
@@ -82,6 +83,7 @@ export function Header() {
           ))}
         </BreadcrumbList>
       </Breadcrumb>
+      <PendingApprovalsIndicator />
     </header>
   );
 }

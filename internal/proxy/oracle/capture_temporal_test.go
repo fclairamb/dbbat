@@ -28,7 +28,7 @@ var temporalExpected = []string{
 func TestDumpReplay_Temporal(t *testing.T) {
 	t.Parallel()
 
-	td := loadTestDump(t, "go_ora_temporal.dbbat-dump")
+	td := loadTestDump(t, "go_ora_temporal.pcapng")
 
 	rows := replayCapturedRows(t, td, temporalSQLMarker)
 

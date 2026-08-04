@@ -9,6 +9,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/layers"
+	"github.com/gopacket/gopacket/pcapgo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -83,12 +86,24 @@ func TestWriter_MaxSize(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test"+FileExt)
 
-	w, err := NewWriter(path, Header{
+	hdr := Header{
 		SessionID:  uuid.New().String(),
 		Protocol:   ProtocolOracle,
-		StartTime:  time.Now(),
+		StartTime:  time.Date(2026, 8, 2, 12, 0, 0, 123456789, time.UTC),
 		Connection: map[string]any{"service_name": "S"},
-	}, 300)
+	}
+
+	// Measure the pcapng section/interface header so the cap can be expressed
+	// as "header + room for exactly one packet".
+	probe, err := NewWriter(path, hdr, 0)
+	require.NoError(t, err)
+	require.NoError(t, probe.Close())
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+
+	// A 100-byte payload becomes a 154-byte frame in a 200-byte packet block.
+	w, err := NewWriter(path, hdr, info.Size()+250)
 	require.NoError(t, err)
 
 	bigData := make([]byte, 100)
@@ -169,31 +184,201 @@ func TestWriter_RoundTrip(t *testing.T) {
 	assert.ErrorIs(t, err, io.EOF)
 }
 
-func TestReader_InvalidMagic(t *testing.T) {
+func TestReader_NotAPcapng(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "bad"+FileExt)
-	require.NoError(t, os.WriteFile(path, []byte("this is not a dump file!!"), 0o644))
+	require.NoError(t, os.WriteFile(path, []byte("this is not a capture file!!"), 0o644))
 
 	_, err := OpenReader(path)
-	assert.ErrorIs(t, err, ErrInvalidMagic)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read pcapng header")
 }
 
-func TestReader_UnsupportedVersion(t *testing.T) {
+func TestReader_MissingMetadata(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	path := filepath.Join(dir, "badver"+FileExt)
+	path := filepath.Join(dir, "nometa"+FileExt)
 
-	// Write valid magic + invalid version
-	data := []byte(magic)
-	data = append(data, 0x00, 0x63) // version 99
+	// A structurally valid pcapng with no dbbat metadata in its SHB comment.
+	f, err := os.Create(path)
+	require.NoError(t, err)
 
-	require.NoError(t, os.WriteFile(path, data, 0o644))
+	ng, err := pcapgo.NewNgWriter(f, layers.LinkTypeEthernet)
+	require.NoError(t, err)
+	require.NoError(t, ng.Flush())
+	require.NoError(t, f.Close())
 
-	_, err := OpenReader(path)
-	assert.ErrorIs(t, err, ErrUnsupportedVersion)
+	_, err = OpenReader(path)
+	assert.ErrorIs(t, err, ErrMissingMetadata)
+}
+
+func TestReader_CorruptMetadata(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "badmeta"+FileExt)
+
+	f, err := os.Create(path)
+	require.NoError(t, err)
+
+	ng, err := pcapgo.NewNgWriterInterface(f, pcapgo.NgInterface{
+		LinkType:            layers.LinkTypeEthernet,
+		SnapLength:          snapLength,
+		TimestampResolution: 9,
+	}, pcapgo.NgWriterOptions{SectionInfo: pcapgo.NgSectionInfo{Comment: "not json"}})
+	require.NoError(t, err)
+	require.NoError(t, ng.Flush())
+	require.NoError(t, f.Close())
+
+	_, err = OpenReader(path)
+	assert.ErrorIs(t, err, ErrMissingMetadata)
+}
+
+// TestWriter_SynthesizedHeaders locks in the wire-header synthesis rules that
+// make the capture readable by tcpdump/Wireshark: real upstream addressing,
+// direction-dependent endpoints, and monotonically advancing TCP sequences.
+func TestWriter_SynthesizedHeaders(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "synth"+FileExt)
+
+	w, err := NewWriter(path, Header{
+		SessionID: uuid.New().String(),
+		Protocol:  ProtocolPostgreSQL,
+		StartTime: time.Now(),
+		Connection: map[string]any{
+			"upstream_addr": "192.0.2.44:6543",
+		},
+	}, 0)
+	require.NoError(t, err)
+
+	require.NoError(t, w.WritePacket(DirClientToServer, []byte("hello")))
+	require.NoError(t, w.WritePacket(DirServerToClient, []byte("world!")))
+	require.NoError(t, w.WritePacket(DirClientToServer, []byte("again")))
+	require.NoError(t, w.Close())
+
+	frames := readRawFrames(t, path)
+	require.Len(t, frames, 3)
+
+	// client -> server carries the real upstream IP/port as the destination
+	assert.Equal(t, "10.77.0.1", frames[0].ip.SrcIP.String())
+	assert.Equal(t, "192.0.2.44", frames[0].ip.DstIP.String())
+	assert.Equal(t, layers.TCPPort(54321), frames[0].tcp.SrcPort)
+	assert.Equal(t, layers.TCPPort(6543), frames[0].tcp.DstPort)
+	assert.True(t, frames[0].tcp.PSH)
+	assert.True(t, frames[0].tcp.ACK)
+
+	// server -> client is the mirror image
+	assert.Equal(t, "192.0.2.44", frames[1].ip.SrcIP.String())
+	assert.Equal(t, "10.77.0.1", frames[1].ip.DstIP.String())
+	assert.Equal(t, layers.TCPPort(6543), frames[1].tcp.SrcPort)
+
+	// sequence numbers advance per direction, acks follow the peer
+	assert.Equal(t, uint32(1), frames[0].tcp.Seq)
+	assert.Equal(t, uint32(1), frames[1].tcp.Seq)
+	assert.Equal(t, uint32(6), frames[1].tcp.Ack) // acks "hello"
+	assert.Equal(t, uint32(6), frames[2].tcp.Seq) // 1 + len("hello")
+	assert.Equal(t, uint32(7), frames[2].tcp.Ack) // acks "world!"
+}
+
+// TestWriter_LargePayloadSegmentation checks that payloads too large for a
+// single IPv4 datagram are split into consecutive TCP segments.
+func TestWriter_LargePayloadSegmentation(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "big"+FileExt)
+
+	w, err := NewWriter(path, Header{
+		SessionID:  uuid.New().String(),
+		Protocol:   ProtocolMySQL,
+		StartTime:  time.Now(),
+		Connection: map[string]any{},
+	}, 0)
+	require.NoError(t, err)
+
+	payload := make([]byte, maxTCPPayload+1000)
+	for i := range payload {
+		payload[i] = byte(i)
+	}
+
+	require.NoError(t, w.WritePacket(DirServerToClient, payload))
+	require.NoError(t, w.Close())
+
+	r, err := OpenReader(path)
+	require.NoError(t, err)
+
+	defer func() { _ = r.Close() }()
+
+	var got []byte
+
+	segments := 0
+
+	for {
+		pkt, err := r.ReadPacket()
+		if err != nil {
+			require.ErrorIs(t, err, io.EOF)
+
+			break
+		}
+
+		assert.Equal(t, DirServerToClient, pkt.Direction)
+
+		got = append(got, pkt.Data...)
+		segments++
+	}
+
+	assert.Equal(t, 2, segments)
+	assert.Equal(t, payload, got)
+}
+
+type rawFrame struct {
+	ip  layers.IPv4
+	tcp layers.TCP
+}
+
+// readRawFrames decodes the synthesized link/network/transport headers straight
+// out of the pcapng file, bypassing the dump Reader.
+func readRawFrames(t *testing.T, path string) []rawFrame {
+	t.Helper()
+
+	f, err := os.Open(path)
+	require.NoError(t, err)
+
+	defer func() { _ = f.Close() }()
+
+	ng, err := pcapgo.NewNgReader(f, pcapgo.DefaultNgReaderOptions)
+	require.NoError(t, err)
+
+	var out []rawFrame
+
+	for {
+		data, _, err := ng.ReadPacketData()
+		if err != nil {
+			require.ErrorIs(t, err, io.EOF)
+
+			break
+		}
+
+		var (
+			eth layers.Ethernet
+			ip  layers.IPv4
+			tcp layers.TCP
+		)
+
+		decoded := []gopacket.LayerType{}
+		parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip, &tcp)
+		parser.IgnoreUnsupported = true
+		require.NoError(t, parser.DecodeLayers(data, &decoded))
+
+		out = append(out, rawFrame{ip: ip, tcp: tcp})
+	}
+
+	return out
 }
 
 func TestReader_EmptyConnection(t *testing.T) {
@@ -266,16 +451,35 @@ func TestCleanupOldFiles(t *testing.T) {
 	recentPath := filepath.Join(dir, uuid.New().String()+FileExt)
 	require.NoError(t, os.WriteFile(recentPath, []byte("recent"), 0o644))
 
+	// Create an old legacy-extension file (pre-pcapng leftover): should be reaped too
+	oldLegacyPath := filepath.Join(dir, uuid.New().String()+legacyFileExt)
+	require.NoError(t, os.WriteFile(oldLegacyPath, []byte("legacy"), 0o644))
+	oldLegacy := time.Now().Add(-2 * time.Hour)
+	require.NoError(t, os.Chtimes(oldLegacyPath, oldLegacy, oldLegacy))
+
+	// Create a recent legacy-extension file: should be left alone
+	recentLegacyPath := filepath.Join(dir, uuid.New().String()+legacyFileExt)
+	require.NoError(t, os.WriteFile(recentLegacyPath, []byte("legacy recent"), 0o644))
+
 	// Create a non-dump file (should be ignored)
 	nonDump := filepath.Join(dir, "notes.txt")
 	require.NoError(t, os.WriteFile(nonDump, []byte("note"), 0o644))
 
 	deleted, err := CleanupOldFiles(dir, 1*time.Hour)
 	require.NoError(t, err)
-	assert.Equal(t, 3, deleted)
+	assert.Equal(t, 4, deleted)
 
 	entries, _ := os.ReadDir(dir)
-	assert.Len(t, entries, 2)
+	assert.Len(t, entries, 3)
+
+	remaining := make(map[string]bool)
+	for _, e := range entries {
+		remaining[e.Name()] = true
+	}
+	assert.True(t, remaining[filepath.Base(recentPath)], "recent .pcapng file should survive")
+	assert.True(t, remaining[filepath.Base(recentLegacyPath)], "recent legacy file should survive")
+	assert.True(t, remaining["notes.txt"], "non-dump file should survive")
+	assert.False(t, remaining[filepath.Base(oldLegacyPath)], "old legacy file should be reaped")
 }
 
 func TestWriter_ConcurrentWrites(t *testing.T) {
@@ -326,4 +530,99 @@ func TestWriter_ConcurrentWrites(t *testing.T) {
 	}
 
 	assert.Equal(t, goroutines*packetsPerGoroutine, count)
+}
+
+// TestWriter_EpbFlagsDirection asserts the direction really rides in the pcapng
+// epb_flags option, independently of the reader's source-port fallback.
+func TestWriter_EpbFlagsDirection(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "flags"+FileExt)
+
+	w, err := NewWriter(path, Header{
+		SessionID:  uuid.New().String(),
+		Protocol:   ProtocolMongo,
+		StartTime:  time.Now(),
+		Connection: map[string]any{},
+	}, 0)
+	require.NoError(t, err)
+	require.NoError(t, w.WritePacket(DirClientToServer, []byte{1}))
+	require.NoError(t, w.WritePacket(DirServerToClient, []byte{2}))
+	require.NoError(t, w.Close())
+
+	f, err := os.Open(path)
+	require.NoError(t, err)
+
+	defer func() { _ = f.Close() }()
+
+	ng, err := pcapgo.NewNgReader(f, pcapgo.DefaultNgReaderOptions)
+	require.NoError(t, err)
+
+	var directions []pcapgo.NgEpbFlag
+
+	for {
+		_, _, opts, err := ng.ReadPacketDataWithOptions()
+		if err != nil {
+			require.ErrorIs(t, err, io.EOF)
+
+			break
+		}
+
+		require.NotNil(t, opts.Flags, "every packet must carry epb_flags")
+		directions = append(directions, opts.Flags.Direction)
+	}
+
+	assert.Equal(t, []pcapgo.NgEpbFlag{
+		pcapgo.NgEpbFlagDirectionInbound,
+		pcapgo.NgEpbFlagDirectionOutbound,
+	}, directions)
+}
+
+// TestReader_DirectionFromFlagsOverridesAddressing proves the reader trusts
+// epb_flags rather than inferring direction from the synthesized addressing.
+func TestReader_DirectionFromFlagsOverridesAddressing(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "flagsonly"+FileExt)
+
+	f, err := os.Create(path)
+	require.NoError(t, err)
+
+	metadata := `{"session_id":"s","protocol":"mysql","start_time":"2026-08-02T00:00:00Z","connection":{}}`
+
+	ng, err := pcapgo.NewNgWriterInterface(f, pcapgo.NgInterface{
+		LinkType:            layers.LinkTypeEthernet,
+		SnapLength:          snapLength,
+		TimestampResolution: 9,
+	}, pcapgo.NgWriterOptions{SectionInfo: pcapgo.NgSectionInfo{Comment: metadata}})
+	require.NoError(t, err)
+
+	// Frame the payload as if it came *from* the client endpoint, but flag it
+	// as server->client. The flag must win.
+	fr := newFramer(newEndpoints(Header{Protocol: ProtocolMySQL}, true))
+	frames, err := fr.frames(DirClientToServer, []byte{0xAA})
+	require.NoError(t, err)
+	require.Len(t, frames, 1)
+
+	require.NoError(t, ng.WritePacketWithOptions(gopacket.CaptureInfo{
+		Timestamp:     time.Date(2026, 8, 2, 0, 0, 0, 0, time.UTC),
+		CaptureLength: len(frames[0]),
+		Length:        len(frames[0]),
+	}, frames[0], pcapgo.NgPacketOptions{
+		Flags: &pcapgo.NgEpbFlags{Direction: pcapgo.NgEpbFlagDirectionOutbound},
+	}))
+	require.NoError(t, ng.Flush())
+	require.NoError(t, f.Close())
+
+	r, err := OpenReader(path)
+	require.NoError(t, err)
+
+	defer func() { _ = r.Close() }()
+
+	pkt, err := r.ReadPacket()
+	require.NoError(t, err)
+	assert.Equal(t, DirServerToClient, pkt.Direction)
+	assert.Equal(t, []byte{0xAA}, pkt.Data)
 }

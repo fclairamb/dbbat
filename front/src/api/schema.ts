@@ -964,6 +964,233 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/connections/{uid}/dump": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Connection UID */
+                uid: components["parameters"]["ConnectionUID"];
+            };
+            cookie?: never;
+        };
+        /**
+         * Download the session capture
+         * @description Downloads the raw packet capture recorded for a connection.
+         *
+         *     The body is a standard **pcapng** file (media type
+         *     `application/x-pcapng`, extension `.pcapng`) — not a bespoke dbbat
+         *     format. Anything that reads pcapng reads it: `tcpdump`, Wireshark,
+         *     `tshark`, `capinfos`, `editcap`, scapy, `gopacket`. Wireshark applies
+         *     its native PostgreSQL, Oracle TNS, MySQL and MongoDB dissectors to the
+         *     payloads. The same file structure is produced for every protocol; see
+         *     `docs/dump-format.md` in the dbbat repository for the full reference
+         *     (packet framing, the session metadata block, and the
+         *     `dbbat dump anonymise` command).
+         *
+         *     Captures are only written when the server is started with a dump
+         *     directory configured (`DBB_DUMP_DIR`), are capped per session
+         *     (`DBB_DUMP_MAX_SIZE`) and are reaped once older than
+         *     `DBB_DUMP_RETENTION` (24h by default). `404 Not Found` is therefore
+         *     returned in two distinct cases: dumps are disabled server-wide
+         *     (`dumps are not enabled`), or no capture exists — or no longer
+         *     exists — for this connection (`no dump available for this
+         *     connection`).
+         *
+         *     Requires admin or viewer role.
+         */
+        get: operations["getConnectionDump"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete the session capture
+         * @description Deletes the pcapng capture recorded for a connection.
+         *
+         *     Only the capture file is removed — the connection record and its
+         *     logged queries are left untouched. The deletion is immediate and
+         *     cannot be undone. Captures are also removed automatically once they
+         *     are older than `DBB_DUMP_RETENTION`.
+         *
+         *     As with the download, `404 Not Found` covers both dumps being
+         *     disabled server-wide and no capture being available for this
+         *     connection.
+         *
+         *     Requires admin role.
+         */
+        delete: operations["deleteConnectionDump"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/stream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Live event stream (WebSocket)
+         * @description Upgrades to a WebSocket carrying live events by topic.
+         *
+         *     **Authentication.** Browsers cannot set an `Authorization` header on a
+         *     WebSocket handshake, so the bearer token may instead be sent as a
+         *     subprotocol: `Sec-WebSocket-Protocol: dbbat.auth.bearer.<token>`. The
+         *     server echoes the selected subprotocol back. A normal `Authorization`
+         *     header also works (non-browser clients).
+         *
+         *     **Protocol.**
+         *
+         *     ```jsonc
+         *     // client → server
+         *     {"type": "subscribe",   "topic": "connection/<uid>/queries"}
+         *     {"type": "unsubscribe", "topic": "connection/<uid>/queries"}
+         *     // server → client
+         *     {"type": "subscribed",   "topic": "...", "error": null}
+         *     {"type": "unsubscribed", "topic": "..."}
+         *     {"type": "event", "topic": "...", "seq": 1234, "event": "query", "at": "...", "data": {...}}
+         *     {"type": "lagged", "dropped": 12}
+         *     ```
+         *
+         *     **Topics and who may subscribe.**
+         *
+         *     | Topic | Payload | Who |
+         *     |---|---|---|
+         *     | `connection/<uid>/queries` | every query on that connection | admin, viewer, or the connection's owner |
+         *     | `approvals/pending` | approval-pending queries, all connections | admin, or a member of an approver group |
+         *     | `connections` | connection open/close | admin |
+         *
+         *     Authorization is per-topic, evaluated at subscribe time **and
+         *     re-checked on every send** — a topic grants exactly what the equivalent
+         *     REST endpoint would, never more.
+         *
+         *     **Backpressure.** Each subscriber has a bounded send buffer. On
+         *     overflow events are dropped and a `lagged` frame is emitted; the client
+         *     should then refetch from REST. The `approvals/pending` topic is exempt
+         *     from dropping.
+         *
+         *     Event `data` carries `query_uid`, `connection_uid`, `sql_text`,
+         *     `executed_at`, `approval_required` and `approval_status`; resolution
+         *     events additionally carry `resolved_by` (`{uid, username,
+         *     display_name}`), `resolved_at` and `resolution_reason`.
+         */
+        get: operations["streamEvents"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/queries/pending": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List queries awaiting approval
+         * @description Returns every query currently parked awaiting a human decision.
+         *
+         *     This is the authoritative "what is pending now" view; the live stream
+         *     is best-effort for history, so clients refetch this on reconnect.
+         *
+         *     Admins and viewers see every hold; other users see only holds they are
+         *     an approver for.
+         */
+        get: operations["listPendingApprovals"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/queries/pending/deny-all": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Deny every pending approval
+         * @description Bulk safety valve. Because a hold has no timeout, an operator needs one
+         *     action that clears every parked statement — after a bad deploy, during
+         *     an incident, or at the end of a shift.
+         *
+         *     Requires the admin role. Holds the caller themselves requested are
+         *     skipped, as is any hold the caller is not an approver for.
+         */
+        post: operations["denyAllPendingApprovals"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/queries/{uid}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Approve a held query
+         * @description Releases a statement parked on an approval hold; it is then forwarded
+         *     upstream and runs.
+         *
+         *     Approval is **by query UID** — the approver decides on exactly the
+         *     statement they were shown, and the waiting proxy session independently
+         *     asserts the resolved UID is its own before acting.
+         *
+         *     The approver must be an admin or a member of one of the grant's
+         *     approver groups, and **may never be the user who ran the query**:
+         *     self-approval is rejected even for admins.
+         *
+         *     Writes an audit event and publishes a resolution event on the stream.
+         */
+        post: operations["approveQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/queries/{uid}/deny": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Deny a held query
+         * @description Rejects a statement parked on an approval hold. Nothing is forwarded
+         *     upstream; the client receives a protocol-native error carrying the
+         *     reason.
+         *
+         *     Same authorization rules as approve, including the self-approval
+         *     rejection.
+         */
+        post: operations["denyQuery"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/queries": {
         parameters: {
             query?: never;
@@ -1702,6 +1929,20 @@ export interface components {
              *     every database.
              */
             database_uids: string[];
+            /**
+             * @description RE2 patterns that suspend a matching statement mid-flight until an
+             *     admin or an approver-group member approves it. An empty array means
+             *     no approval gating. Validated (compiled) at save time, so a bad
+             *     pattern is a 400 rather than a runtime surprise on the proxy hot
+             *     path. Mirrored onto every grant materialized from this definition.
+             */
+            approval_patterns?: string[];
+            /**
+             * @description Groups whose members may resolve approval holds on grants built
+             *     from this definition, *in addition to* admins. An empty array means
+             *     admins only. Self-approval is always rejected.
+             */
+            approver_group_uids?: string[];
             /** @description Soft-deleted definitions have is_active=false; they remain referenced by historical grant requests. */
             readonly is_active: boolean;
             /** Format: uuid */
@@ -1738,6 +1979,20 @@ export interface components {
              *     every database.
              */
             database_uids?: string[];
+            /**
+             * @description RE2 patterns that suspend a matching statement mid-flight until an
+             *     admin or an approver-group member approves it. An empty array means
+             *     no approval gating. Validated (compiled) at save time, so a bad
+             *     pattern is a 400 rather than a runtime surprise on the proxy hot
+             *     path. Mirrored onto every grant materialized from this definition.
+             */
+            approval_patterns?: string[];
+            /**
+             * @description Groups whose members may resolve approval holds on grants built
+             *     from this definition, *in addition to* admins. An empty array means
+             *     admins only. Self-approval is always rejected.
+             */
+            approver_group_uids?: string[];
         };
         AccessGrant: {
             /**
@@ -1782,6 +2037,19 @@ export interface components {
              * @description Admin who revoked access
              */
             revoked_by?: string | null;
+            /**
+             * @description RE2 patterns that suspend a matching statement until a second human
+             *     approves it. Mirrored from the grant definition at materialization
+             *     time (like controls and quotas) so the proxy never joins back to
+             *     the definition on the hot path — and so direct admin grants, which
+             *     bypass definitions entirely, can carry patterns too.
+             */
+            approval_patterns?: string[];
+            /**
+             * @description Groups whose members may resolve holds on this grant, in addition
+             *     to admins. Empty means admins only.
+             */
+            approver_group_uids?: string[];
             /**
              * Format: int64
              * @description Maximum queries allowed (quota)
@@ -1844,6 +2112,17 @@ export interface components {
              * @description Maximum bytes transferred (quota)
              */
             max_bytes_transferred?: number;
+            /**
+             * @description RE2 patterns that suspend a matching statement until a second human
+             *     approves it. Admin grants bypass definitions entirely, so this is
+             *     the only way to put four-eyes gating on one.
+             */
+            approval_patterns?: string[];
+            /**
+             * @description Groups whose members may resolve holds on this grant, in addition
+             *     to admins. Empty means admins only.
+             */
+            approver_group_uids?: string[];
         };
         APIKey: {
             /**
@@ -2065,6 +2344,44 @@ export interface components {
             rows_affected?: number | null;
             /** @description Error message if query failed */
             error?: string | null;
+            /** @description True when result capture stopped on a storage limit (`max_result_rows` / `max_result_bytes`). The rows captured before the limit are still stored, so this is what distinguishes a prefix — or an empty capture — from a query that genuinely returned that many rows. */
+            results_truncated?: boolean;
+            /** @description True when dbbat lost result rows it meant to keep: the batched row writer's queue was full (storage fell behind the proxy) or a batch insert failed. Deliberately distinct from `results_truncated` — truncation is an expected, configured prefix, a drop is dbbat failing to keep up — and the two are never conflated. Rows are never held back from the client to keep the capture complete. */
+            results_dropped?: boolean;
+            /**
+             * @description Approval-hold state. Absent for the overwhelming majority of queries (no approval pattern matched). `pending` means the statement is parked mid-flight waiting for a human and has NOT run. `abandoned` means the client gave up (disconnect, cancel, grant expiry, shutdown) before anyone decided — nothing ran, and it is deliberately distinct from `denied`. There is no `timeout` value: a hold has no clock of its own.
+             * @enum {string|null}
+             */
+            approval_status?: "pending" | "approved" | "denied" | "abandoned" | null;
+            /** @description The grant's approval pattern that matched this statement */
+            approval_pattern?: string | null;
+            /**
+             * Format: uuid
+             * @description UID of the user who approved or denied the hold
+             */
+            resolved_by?: string | null;
+            /**
+             * Format: date-time
+             * @description When the hold was resolved
+             */
+            resolved_at?: string | null;
+            /** @description Reason supplied by the approver (or the system, on abandon) */
+            resolution_reason?: string | null;
+        };
+        /** @description The outcome of an approve/deny decision on a held query. */
+        ApprovalResolution: {
+            /** Format: uuid */
+            query_uid?: string;
+            /** @enum {string} */
+            approval_status?: "approved" | "denied";
+            resolution_reason?: string;
+            /** @description Who resolved the hold — broadcast on the stream too, so every watcher sees it. */
+            resolved_by?: {
+                /** Format: uuid */
+                uid?: string;
+                username?: string;
+                display_name?: string;
+            };
         };
         /** @description Query parameter values (for prepared statements) */
         QueryParameters: {
@@ -2391,6 +2708,7 @@ export type DeviceConsentInfo = components['schemas']['DeviceConsentInfo'];
 export type DeviceConsentRequest = components['schemas']['DeviceConsentRequest'];
 export type Connection = components['schemas']['Connection'];
 export type Query = components['schemas']['Query'];
+export type ApprovalResolution = components['schemas']['ApprovalResolution'];
 export type QueryParameters = components['schemas']['QueryParameters'];
 export type QueryWithRows = components['schemas']['QueryWithRows'];
 export type QueryRow = components['schemas']['QueryRow'];
@@ -4104,6 +4422,240 @@ export interface operations {
             404: components["responses"]["NotFound"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
+        };
+    };
+    getConnectionDump: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Connection UID */
+                uid: components["parameters"]["ConnectionUID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The pcapng session capture */
+            200: {
+                headers: {
+                    /**
+                     * @description Always `attachment; filename="<uid>.pcapng"`, where `<uid>` is
+                     *     the connection UID from the path.
+                     * @example attachment; filename="7a1f1c9e-8f3a-4d2b-9f21-0c5e6b3d4a77.pcapng"
+                     */
+                    "Content-Disposition"?: string;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/x-pcapng": string;
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    deleteConnectionDump: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Connection UID */
+                uid: components["parameters"]["ConnectionUID"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Capture deleted */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    streamEvents: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Switching protocols (WebSocket established) */
+            101: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not a WebSocket upgrade request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    listPendingApprovals: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Pending approvals */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        queries?: components["schemas"]["Query"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+        };
+    };
+    denyAllPendingApprovals: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description Reason recorded on every denied hold */
+                    reason?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Bulk denial result */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        denied?: number;
+                        skipped?: number;
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+        };
+    };
+    approveQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Query approved */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalResolution"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Not an approver, or attempted self-approval */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            /** @description The query is no longer awaiting approval (already resolved, or the client gave up) */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+        };
+    };
+    denyQuery: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: {
+            content: {
+                "application/json": {
+                    /** @description Reason shown to the client and recorded on the query */
+                    reason?: string;
+                };
+            };
+        };
+        responses: {
+            /** @description Query denied */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApprovalResolution"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            /** @description Not an approver, or attempted self-approval */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            404: components["responses"]["NotFound"];
+            /** @description The query is no longer awaiting approval */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
         };
     };
     listQueries: {

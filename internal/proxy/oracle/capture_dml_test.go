@@ -9,7 +9,7 @@
 //	go test -tags capture -timeout 120s -run TestCapture_GoOraDML -v ./internal/proxy/oracle/
 //
 // The capture relays TNS packets between a go-ora client and the Oracle
-// container, recording every packet to testdata/go_ora_dml.dbbat-dump.
+// container, recording every packet to testdata/go_ora_dml.pcapng.
 // Override the Oracle address with ORACLE_ADDR, the service name with
 // ORACLE_SERVICE (default FREEPDB1), and the output path with CAPTURE_OUT.
 package oracle
@@ -103,7 +103,7 @@ func startCaptureRelay(t *testing.T, oracleAddr string, w *dump.Writer) string {
 func TestCapture_GoOraLargeResult(t *testing.T) {
 	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
 	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
-	outPath := captureEnv("CAPTURE_OUT_LARGE", "testdata/go_ora_largeresult.dbbat-dump")
+	outPath := captureEnv("CAPTURE_OUT_LARGE", "testdata/go_ora_largeresult.pcapng")
 
 	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)
 	if err != nil {
@@ -188,7 +188,7 @@ const compressedRowsQuery = "SELECT " +
 func TestCapture_GoOraCompressedRows(t *testing.T) {
 	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
 	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
-	outPath := captureEnv("CAPTURE_OUT_COMPRESSED", "testdata/go_ora_compressed.dbbat-dump")
+	outPath := captureEnv("CAPTURE_OUT_COMPRESSED", "testdata/go_ora_compressed.pcapng")
 
 	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)
 	if err != nil {
@@ -262,7 +262,7 @@ const colCountQuery = "SELECT LEVEL AS n, LEVEL * 10 FROM dual CONNECT BY LEVEL 
 func TestCapture_GoOraColCount(t *testing.T) {
 	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
 	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
-	outPath := captureEnv("CAPTURE_OUT_COLCOUNT", "testdata/go_ora_colcount.dbbat-dump")
+	outPath := captureEnv("CAPTURE_OUT_COLCOUNT", "testdata/go_ora_colcount.pcapng")
 
 	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)
 	if err != nil {
@@ -327,7 +327,7 @@ const numbersQuery = "SELECT 3.14 AS pi, 1234567.89 AS amount, 1000000 AS millio
 func TestCapture_GoOraNumbers(t *testing.T) {
 	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
 	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
-	outPath := captureEnv("CAPTURE_OUT_NUMBERS", "testdata/go_ora_numbers.dbbat-dump")
+	outPath := captureEnv("CAPTURE_OUT_NUMBERS", "testdata/go_ora_numbers.pcapng")
 
 	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)
 	if err != nil {
@@ -385,7 +385,7 @@ const temporalQuery = "SELECT " +
 func TestCapture_GoOraTemporal(t *testing.T) {
 	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
 	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
-	outPath := captureEnv("CAPTURE_OUT_TEMPORAL", "testdata/go_ora_temporal.dbbat-dump")
+	outPath := captureEnv("CAPTURE_OUT_TEMPORAL", "testdata/go_ora_temporal.pcapng")
 
 	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)
 	if err != nil {
@@ -446,7 +446,7 @@ const mixedQuery = "SELECT " +
 func TestCapture_GoOraMixed(t *testing.T) {
 	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
 	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
-	outPath := captureEnv("CAPTURE_OUT_MIXED", "testdata/go_ora_mixed.dbbat-dump")
+	outPath := captureEnv("CAPTURE_OUT_MIXED", "testdata/go_ora_mixed.pcapng")
 
 	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)
 	if err != nil {
@@ -522,7 +522,7 @@ const negNumbersQuery = "SELECT -42 AS neg, -3.14 AS negdec, 100 AS pos, -100000
 func TestCapture_GoOraNegNumbers(t *testing.T) {
 	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
 	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
-	outPath := captureEnv("CAPTURE_OUT_NEGNUM", "testdata/go_ora_negnumbers.dbbat-dump")
+	outPath := captureEnv("CAPTURE_OUT_NEGNUM", "testdata/go_ora_negnumbers.pcapng")
 
 	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)
 	if err != nil {
@@ -580,7 +580,7 @@ const binFloatQuery = "SELECT " +
 func TestCapture_GoOraBinFloat(t *testing.T) {
 	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
 	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
-	outPath := captureEnv("CAPTURE_OUT_BINFLOAT", "testdata/go_ora_binfloat.dbbat-dump")
+	outPath := captureEnv("CAPTURE_OUT_BINFLOAT", "testdata/go_ora_binfloat.pcapng")
 
 	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)
 	if err != nil {
@@ -633,7 +633,7 @@ const rawQuery = "SELECT HEXTORAW('48656C6C6F') AS r1, HEXTORAW('DEADBEEF') AS r
 func TestCapture_GoOraRaw(t *testing.T) {
 	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
 	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
-	outPath := captureEnv("CAPTURE_OUT_RAW", "testdata/go_ora_raw.dbbat-dump")
+	outPath := captureEnv("CAPTURE_OUT_RAW", "testdata/go_ora_raw.pcapng")
 
 	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)
 	if err != nil {
@@ -682,7 +682,7 @@ const bindsQuery = "SELECT :1 || '-' || :2 AS v FROM dual"
 func TestCapture_GoOraBinds(t *testing.T) {
 	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
 	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
-	outPath := captureEnv("CAPTURE_OUT_BINDS", "testdata/go_ora_binds.dbbat-dump")
+	outPath := captureEnv("CAPTURE_OUT_BINDS", "testdata/go_ora_binds.pcapng")
 
 	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)
 	if err != nil {
@@ -723,7 +723,7 @@ func TestCapture_GoOraBinds(t *testing.T) {
 func TestCapture_GoOraDML(t *testing.T) {
 	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
 	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
-	outPath := captureEnv("CAPTURE_OUT", "testdata/go_ora_dml.dbbat-dump")
+	outPath := captureEnv("CAPTURE_OUT", "testdata/go_ora_dml.pcapng")
 
 	// Probe Oracle availability before setting anything up.
 	probe, err := net.DialTimeout("tcp", oracleAddr, 2*time.Second)

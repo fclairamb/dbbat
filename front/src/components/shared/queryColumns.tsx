@@ -2,6 +2,7 @@ import { Link } from "@tanstack/react-router";
 import type { Query, User } from "@/api";
 import type { Column } from "@/components/shared/DataTable";
 import { Badge } from "@/components/ui/badge";
+import { ApprovalStatusBadge } from "@/components/shared/ConnectionWatchPanel";
 import { formatDistanceToNow } from "date-fns";
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -93,12 +94,20 @@ export function buildQueryColumns({
     {
       key: "status",
       header: "Status",
-      cell: (q) =>
-        q.error ? (
+      cell: (q) => {
+        // The approval state wins when there is one: "pending" means the
+        // statement has not run at all, and "abandoned" (the client gave up)
+        // must never be mistaken for a plain OK — or for a denial.
+        if (q.approval_status) {
+          return <ApprovalStatusBadge status={q.approval_status} />;
+        }
+
+        return q.error ? (
           <Badge variant="destructive">Error</Badge>
         ) : (
           <Badge variant="secondary">OK</Badge>
-        ),
+        );
+      },
     },
   ];
 }

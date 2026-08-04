@@ -273,6 +273,11 @@ linters:
       - linters:
           - paralleltest
         path: internal/api/password_reset_test\.go
+      # Shares one PostgreSQL container and truncates tables between tests —
+      # running these in parallel would have them clobber each other.
+      - linters:
+          - paralleltest
+        path: internal/api/approvals_test\.go
       - linters:
           - canonicalheader
         path: internal/api/ratelimit_test\.go

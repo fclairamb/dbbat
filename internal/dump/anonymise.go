@@ -1,29 +1,46 @@
 package dump
 
 import (
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"time"
 )
 
-// Anonymise reads a dump file and writes an anonymised copy.
-// The anonymised dump preserves packet data but strips connection metadata
-// from the header, keeping only the session ID and protocol.
-func Anonymise(inputPath, outputPath string) error {
+// Anonymise reads a capture and writes an anonymised copy.
+//
+// Packet payloads and their relative timing are preserved verbatim. The session
+// metadata carried in the pcapng Section Header Block comment is reduced to the
+// session ID and the protocol: the connection object (database, user, service
+// name, upstream address…) is dropped, and the capture is rebased onto the Unix
+// epoch so the wall-clock time of the session leaks nothing.
+//
+// When rewriteAddresses is true — the default for the CLI — the synthesized
+// IPv4 addresses and TCP ports are re-generated from the fake endpoints too,
+// since the capture's server-side addressing normally encodes the real upstream
+// host and port. Pass false to keep the original addressing.
+func Anonymise(inputPath, outputPath string, rewriteAddresses bool) error {
 	reader, err := OpenReader(inputPath)
 	if err != nil {
 		return fmt.Errorf("open input: %w", err)
 	}
 	defer func() { _ = reader.Close() }()
 
-	header := reader.Header()
+	original := reader.Header()
 
-	writer, err := NewWriter(outputPath, Header{
-		SessionID:  header.SessionID,
-		Protocol:   header.Protocol,
+	stripped := Header{
+		SessionID:  original.SessionID,
+		Protocol:   original.Protocol,
+		StartTime:  time.Unix(0, 0).UTC(),
 		Connection: map[string]any{},
-	}, 0)
+	}
+
+	ep := newEndpoints(original, false)
+	if rewriteAddresses {
+		ep = newEndpoints(stripped, true)
+	}
+
+	writer, err := newWriter(outputPath, stripped, 0, ep)
 	if err != nil {
 		return fmt.Errorf("create output: %w", err)
 	}
@@ -40,15 +57,16 @@ func Anonymise(inputPath, outputPath string) error {
 			return fmt.Errorf("read packet: %w", err)
 		}
 
-		var relBuf [8]byte
-		binary.BigEndian.PutUint64(relBuf[:], uint64(pkt.RelativeNs))
-
-		if err := writer.writePacketRaw(relBuf[:], pkt.Direction, pkt.Data); err != nil {
+		if err := writer.writeAt(pkt.RelativeNs, pkt.Direction, pkt.Data); err != nil {
 			_ = writer.Close()
 
 			return fmt.Errorf("write packet: %w", err)
 		}
 	}
 
-	return writer.Close()
+	if err := writer.Close(); err != nil {
+		return fmt.Errorf("close output: %w", err)
+	}
+
+	return nil
 }

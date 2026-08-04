@@ -20,7 +20,7 @@ const colCountSQLMarker = "LEVEL * 10 FROM dual"
 func TestDumpReplay_ColCount(t *testing.T) {
 	t.Parallel()
 
-	td := loadTestDump(t, "go_ora_colcount.dbbat-dump")
+	td := loadTestDump(t, "go_ora_colcount.pcapng")
 
 	rows := replayCapturedRows(t, td, colCountSQLMarker)
 

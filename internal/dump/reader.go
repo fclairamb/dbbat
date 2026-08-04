@@ -1,113 +1,141 @@
 package dump
 
 import (
-	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/gopacket/gopacket"
+	"github.com/gopacket/gopacket/layers"
+	"github.com/gopacket/gopacket/pcapgo"
 )
 
-// Reader reads packets from a dump file.
+// Reader reads application payloads back out of a pcapng capture, undoing the
+// synthesized Ethernet/IPv4/TCP wrapping applied by Writer.
 type Reader struct {
 	file   *os.File
+	ng     *pcapgo.NgReader
 	header Header
+	parser *gopacket.DecodingLayerParser
+	eth    layers.Ethernet
+	ip4    layers.IPv4
+	tcp    layers.TCP
+	decode []gopacket.LayerType
 }
 
-// OpenReader opens a dump file and parses the header.
+// OpenReader opens a capture file and parses the session metadata carried in
+// the pcapng Section Header Block comment.
 func OpenReader(path string) (*Reader, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("open dump file: %w", err)
+		return nil, fmt.Errorf("open capture file: %w", err)
 	}
 
-	r := &Reader{file: f}
-
-	if err := r.readHeader(); err != nil {
+	ng, err := pcapgo.NewNgReader(f, pcapgo.NgReaderOptions{SkipUnknownVersion: true})
+	if err != nil {
 		_ = f.Close()
 
-		return nil, err
+		return nil, fmt.Errorf("read pcapng header: %w", err)
 	}
+
+	r := &Reader{file: f, ng: ng}
+
+	comment := ng.SectionInfo().Comment
+	if comment == "" {
+		_ = f.Close()
+
+		return nil, ErrMissingMetadata
+	}
+
+	if err := json.Unmarshal([]byte(comment), &r.header); err != nil {
+		_ = f.Close()
+
+		return nil, fmt.Errorf("%w: %w", ErrMissingMetadata, err)
+	}
+
+	r.parser = gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &r.eth, &r.ip4, &r.tcp)
+	r.parser.IgnoreUnsupported = true
 
 	return r, nil
 }
 
-func (r *Reader) readHeader() error {
-	// Magic (16 bytes)
-	magicBuf := make([]byte, magicSize)
-	if _, err := io.ReadFull(r.file, magicBuf); err != nil {
-		return fmt.Errorf("read magic: %w", err)
+// Header returns the session metadata.
+func (r *Reader) Header() Header {
+	return r.header
+}
+
+// ReadPacket returns the next application payload. Frames without a TCP payload
+// are skipped. Returns io.EOF at the end of the capture.
+func (r *Reader) ReadPacket() (*Packet, error) {
+	for {
+		data, ci, opts, err := r.ng.ReadPacketDataWithOptions()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil, io.EOF
+			}
+
+			return nil, fmt.Errorf("read packet block: %w", err)
+		}
+
+		r.decode = r.decode[:0]
+		if err := r.parser.DecodeLayers(data, &r.decode); err != nil {
+			// Frames dbbat did not synthesize (or truncated ones) are skipped
+			// rather than aborting the whole capture.
+			continue
+		}
+
+		if !hasLayer(r.decode, layers.LayerTypeTCP) || len(r.tcp.Payload) == 0 {
+			continue
+		}
+
+		payload := make([]byte, len(r.tcp.Payload))
+		copy(payload, r.tcp.Payload)
+
+		return &Packet{
+			RelativeNs: ci.Timestamp.Sub(r.header.StartTime).Nanoseconds(),
+			Direction:  r.direction(opts),
+			Data:       payload,
+		}, nil
+	}
+}
+
+// direction resolves the packet direction from the epb_flags option, falling
+// back to the synthesized addressing when the option is absent.
+func (r *Reader) direction(opts pcapgo.NgPacketOptions) byte {
+	if opts.Flags != nil {
+		if opts.Flags.Direction == pcapgo.NgEpbFlagDirectionInbound {
+			return DirClientToServer
+		}
+
+		if opts.Flags.Direction == pcapgo.NgEpbFlagDirectionOutbound {
+			return DirServerToClient
+		}
 	}
 
-	if string(magicBuf[:minMagic]) != magic[:minMagic] {
-		return ErrInvalidMagic
+	if r.tcp.SrcPort == fakeClientPort {
+		return DirClientToServer
 	}
 
-	// Version (uint16 BE)
-	var vBuf [versionLen]byte
-	if _, err := io.ReadFull(r.file, vBuf[:]); err != nil {
-		return fmt.Errorf("read version: %w", err)
-	}
+	return DirServerToClient
+}
 
-	ver := binary.BigEndian.Uint16(vBuf[:])
-	if ver != version {
-		return fmt.Errorf("%w: %d", ErrUnsupportedVersion, ver)
-	}
-
-	// Header length (uint32 BE)
-	var hLenBuf [headerLenLen]byte
-	if _, err := io.ReadFull(r.file, hLenBuf[:]); err != nil {
-		return fmt.Errorf("read header length: %w", err)
-	}
-
-	hLen := binary.BigEndian.Uint32(hLenBuf[:])
-
-	// JSON header
-	jsonBuf := make([]byte, hLen)
-	if _, err := io.ReadFull(r.file, jsonBuf); err != nil {
-		return fmt.Errorf("read header json: %w", err)
-	}
-
-	if err := json.Unmarshal(jsonBuf, &r.header); err != nil {
-		return fmt.Errorf("unmarshal header: %w", err)
+// Close closes the underlying file.
+func (r *Reader) Close() error {
+	if err := r.file.Close(); err != nil {
+		return fmt.Errorf("close capture file: %w", err)
 	}
 
 	return nil
 }
 
-// Header returns the parsed JSON header.
-func (r *Reader) Header() Header {
-	return r.header
-}
-
-// ReadPacket reads the next packet from the dump.
-// Returns io.EOF after the EOF marker.
-func (r *Reader) ReadPacket() (*Packet, error) {
-	var frameBuf [packetFrameSize]byte
-	if _, err := io.ReadFull(r.file, frameBuf[:]); err != nil {
-		return nil, fmt.Errorf("read packet frame: %w", err)
+func hasLayer(decoded []gopacket.LayerType, want gopacket.LayerType) bool {
+	for _, lt := range decoded {
+		if lt == want {
+			return true
+		}
 	}
 
-	pkt := &Packet{
-		RelativeNs: int64(binary.BigEndian.Uint64(frameBuf[:8])),
-		Direction:  frameBuf[8],
-	}
-
-	length := binary.BigEndian.Uint32(frameBuf[9:13])
-
-	if pkt.Direction == eofMarker {
-		return nil, io.EOF
-	}
-
-	pkt.Data = make([]byte, length)
-	if _, err := io.ReadFull(r.file, pkt.Data); err != nil {
-		return nil, fmt.Errorf("read packet data: %w", err)
-	}
-
-	return pkt, nil
-}
-
-// Close closes the underlying file.
-func (r *Reader) Close() error {
-	return r.file.Close()
+	return false
 }

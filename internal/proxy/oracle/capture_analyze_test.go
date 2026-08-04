@@ -17,11 +17,11 @@ import (
 )
 
 // TestAnalyzeDump prints a packet-by-packet protocol summary of a dump file.
-// Set DUMP_PATH to choose the dump (default: testdata/go_ora_dml.dbbat-dump).
+// Set DUMP_PATH to choose the dump (default: testdata/go_ora_dml.pcapng).
 //
 //	go test -tags capture -run TestAnalyzeDump -v ./internal/proxy/oracle/
 func TestAnalyzeDump(t *testing.T) {
-	path := captureEnv("DUMP_PATH", "testdata/go_ora_dml.dbbat-dump")
+	path := captureEnv("DUMP_PATH", "testdata/go_ora_dml.pcapng")
 
 	r, err := dump.OpenReader(path)
 	if err != nil {

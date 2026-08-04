@@ -70,7 +70,7 @@ secrets:
 # =============================================================================
 config:
   # -- PostgreSQL proxy listen address
-  listenPg: ":5434"
+  listenPg: ":5433"
   # -- REST API listen address
   listenApi: ":8080"
   # -- Base URL for frontend (default: /app)
@@ -98,7 +98,7 @@ service:
     enabled: true
     # -- Proxy service type (ClusterIP, NodePort, LoadBalancer)
     type: ClusterIP
-    # -- PostgreSQL proxy external port (maps to container port 5434 via DBB_LISTEN_PG)
+    # -- PostgreSQL proxy external port (maps to container port 5433 via DBB_LISTEN_PG)
     port: 5432
     # -- Proxy service annotations (e.g., cloud LB configuration, external-dns)
     annotations: {}

@@ -38,6 +38,11 @@ type pendingOracleQuery struct {
 	queryUID       uuid.UUID // Set after query record is created in DB
 	queryPersisted bool      // True after query record is created
 	lastRow        []string  // Last captured row values (for continuation packet duplicate tracking)
+
+	// rowSink batches this query's captured rows through the shared writer.
+	// Created by persistQueryRecord, i.e. only once the parent queries row
+	// exists — query_rows.query_id is a foreign key.
+	rowSink *shared.QuerySink
 }
 
 // newOracleQueryTracker creates a new query tracker.
@@ -78,6 +83,13 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 	// Complete previous query if still pending (sets duration)
 	s.flushPendingQuery()
 
+	// Approval hold — after the static validators, before anything reaches
+	// upstream.
+	approvalUID, herr := s.holdIfNeeded(result.SQL)
+	if herr != nil {
+		return herr
+	}
+
 	// Track the cursor
 	cursor := &trackedCursor{
 		cursorID:   result.CursorID,
@@ -92,7 +104,15 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 		cursor:    cursor,
 		startTime: time.Now(),
 	}
-	s.persistQueryRecord()
+
+	// An approval hold already inserted the row; reuse it rather than writing
+	// a second one for the same statement.
+	if approvalUID != uuid.Nil {
+		s.tracker.pendingQuery.queryUID = approvalUID
+		s.tracker.pendingQuery.queryPersisted = true
+	} else {
+		s.persistQueryRecord()
+	}
 
 	return nil
 }
@@ -131,6 +151,11 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 	// Complete previous query if still pending (sets duration)
 	s.flushPendingQuery()
 
+	approvalUID, herr := s.holdIfNeeded(result.SQL)
+	if herr != nil {
+		return herr
+	}
+
 	// Track as pending query and persist immediately
 	cursor := &trackedCursor{
 		sql:        result.SQL,
@@ -141,7 +166,13 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 		cursor:    cursor,
 		startTime: time.Now(),
 	}
-	s.persistQueryRecord()
+
+	if approvalUID != uuid.Nil {
+		s.tracker.pendingQuery.queryUID = approvalUID
+		s.tracker.pendingQuery.queryPersisted = true
+	} else {
+		s.persistQueryRecord()
+	}
 
 	return nil
 }
@@ -251,11 +282,16 @@ func (s *session) handleOCLOSE(cursorID uint16) {
 	delete(s.tracker.cursors, cursorID)
 }
 
-// captureRow captures a single row and streams it to the database immediately.
-// No rows are buffered in memory.
+// captureRow hands a single captured row to the shared batching writer.
+//
+// The submit is non-blocking: if the writer's queue is full the row is dropped
+// and the capture is marked degraded, because this runs inline with forwarding
+// rows to the client and a slow moment in dbbat's own storage must never
+// become a stall on the customer's query. Rows are never accumulated in
+// memory here — the writer's bounded queue is the only buffer.
 func (s *session) captureRow(columns []columnDef, values []interface{}) {
 	pending := s.tracker.pendingQuery
-	if pending == nil || pending.truncated || s.store == nil {
+	if pending == nil || pending.truncated {
 		return
 	}
 
@@ -263,13 +299,14 @@ func (s *session) captureRow(columns []columnDef, values []interface{}) {
 		return
 	}
 
-	// Ensure the query record exists in the database
+	// Ensure the query record exists in the database: query_rows.query_id is
+	// a foreign key, so the parent has to be there before any row flushes.
 	if !pending.queryPersisted {
 		s.persistQueryRecord()
 	}
 
-	if pending.queryUID == uuid.Nil {
-		return // Query record creation failed
+	if pending.rowSink == nil {
+		return // No query record — nowhere to hang the rows
 	}
 
 	rowData := make(map[string]interface{})
@@ -305,16 +342,14 @@ func (s *session) captureRow(columns []columnDef, values []interface{}) {
 	pending.rowNumber++
 	pending.capturedBytes += rowSize
 
-	// Stream row directly to database
-	row := store.QueryRow{
+	// Queue the row for the next batch. Row numbering is a producer-side
+	// running counter (pending.rowNumber), so it stays correct across flush
+	// boundaries.
+	pending.rowSink.Add(store.QueryRow{
 		RowNumber:    pending.rowNumber,
 		RowData:      jsonData,
 		RowSizeBytes: rowSize,
-	}
-
-	if err := s.store.StoreQueryRows(s.ctx, pending.queryUID, []store.QueryRow{row}); err != nil {
-		s.logger.WarnContext(s.ctx, "failed to stream row", slog.Any("error", err))
-	}
+	})
 }
 
 // persistQueryRecord creates the query record in the database before streaming rows.
@@ -340,6 +375,9 @@ func (s *session) persistQueryRecord() {
 	}
 
 	pending.queryUID = created.UID
+	pending.rowSink = s.rowWriter.NewSinkFor(created.UID)
+
+	s.stream.Query(created.UID, query)
 }
 
 // completeQuery finalizes a query record with duration and updates connection stats.
@@ -372,18 +410,20 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 	// If the query record was already created (rows were streamed), update it.
 	// Otherwise, create it now (no-result queries like DML).
 	if pending.queryPersisted && pending.queryUID != uuid.Nil {
-		// Update with duration, error, rows affected
-		go s.finalizeQuery(pending.queryUID, &duration, rowsAffected, queryError, bytesTransferred)
+		// Update with duration, error, rows affected. results_truncated is only
+		// known now: the row was inserted before any row was streamed.
+		go s.finalizeQuery(pending.queryUID, pending.rowSink, &duration, rowsAffected, queryError, pending.truncated, bytesTransferred)
 	} else if s.store != nil {
 		// Create the query record (no rows to stream)
 		query := &store.Query{
-			ConnectionID: s.connectionUID,
-			SQLText:      pending.cursor.sql,
-			ExecutedAt:   pending.startTime,
-			DurationMs:   &duration,
-			RowsAffected: rowsAffected,
-			Error:        queryError,
-			Parameters:   formatOracleBinds(pending.cursor.bindValues),
+			ConnectionID:     s.connectionUID,
+			SQLText:          pending.cursor.sql,
+			ExecutedAt:       pending.startTime,
+			DurationMs:       &duration,
+			RowsAffected:     rowsAffected,
+			Error:            queryError,
+			Parameters:       formatOracleBinds(pending.cursor.bindValues),
+			ResultsTruncated: pending.truncated,
 		}
 
 		go func() {
@@ -404,9 +444,27 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 	}
 }
 
-// finalizeQuery updates a query record with completion data (duration, error).
-func (s *session) finalizeQuery(queryUID uuid.UUID, duration *float64, rowsAffected *int64, queryError *string, bytesTransferred int64) {
-	if err := s.store.UpdateQueryCompletion(s.ctx, queryUID, duration, rowsAffected, queryError); err != nil {
+// finalizeQuery updates a query record with completion data (duration, error,
+// whether row capture stopped on a storage limit, and whether the row writer
+// had to drop rows).
+//
+// It runs in its own goroutine, which is what makes the flush barrier
+// affordable: the tail of the capture must land before the query reads as
+// complete, or the UI shows a finished query with rows still arriving.
+func (s *session) finalizeQuery(
+	queryUID uuid.UUID,
+	rowSink *shared.QuerySink,
+	duration *float64,
+	rowsAffected *int64,
+	queryError *string,
+	resultsTruncated bool,
+	bytesTransferred int64,
+) {
+	rowSink.Flush(s.ctx)
+
+	if err := s.store.UpdateQueryCompletion(
+		s.ctx, queryUID, duration, rowsAffected, queryError, resultsTruncated, rowSink.Dropped(),
+	); err != nil {
 		s.logger.ErrorContext(s.ctx, "failed to finalize query", slog.Any("error", err))
 	}
 
@@ -580,4 +638,42 @@ func (s *session) checkQuotas() error {
 	}
 
 	return nil
+}
+
+// holdIfNeeded runs the approval gate for one statement, after the static
+// validators and before anything is forwarded upstream. Returns the uid of the
+// pending row the gate created (uuid.Nil when no hold happened).
+func (s *session) holdIfNeeded(sql string) (uuid.UUID, error) {
+	if !s.approvalGate.Active() {
+		return uuid.Nil, nil
+	}
+
+	pattern, matched := s.approvalGate.Match(sql)
+	if !matched {
+		return uuid.Nil, nil
+	}
+
+	var gone <-chan struct{}
+
+	if s.watched != nil {
+		gone = s.watched.Park()
+		defer s.watched.Unpark()
+	}
+
+	return s.approvalGate.Hold(s.ctx, shared.HoldRequest{
+		SQL:        sql,
+		Pattern:    pattern,
+		StartedAt:  time.Now(),
+		ClientGone: gone,
+		Guard:      s.guard,
+		OnPending:  s.setHeldQuery,
+	})
+}
+
+// setHeldQuery records the currently parked statement so an out-of-band
+// cancellation path can end it.
+func (s *session) setHeldQuery(uid uuid.UUID) {
+	s.heldMu.Lock()
+	s.heldQueryUID = uid
+	s.heldMu.Unlock()
 }

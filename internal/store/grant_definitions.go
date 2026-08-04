@@ -47,6 +47,8 @@ func (s *Store) CreateGrantDefinition(ctx context.Context, def *GrantDefinition)
 		AutoApprove:         def.AutoApprove,
 		GroupUIDs:           groupUIDs,
 		DatabaseUIDs:        databaseUIDs,
+		ApprovalPatterns:    copyStrings(def.ApprovalPatterns),
+		ApproverGroupUIDs:   copyUUIDs(def.ApproverGroupUIDs),
 		IsActive:            true,
 		CreatedBy:           def.CreatedBy,
 		CreatedAt:           time.Now(),
@@ -126,12 +128,16 @@ func (s *Store) UpdateGrantDefinition(ctx context.Context, def *GrantDefinition)
 		def.DatabaseUIDs = []uuid.UUID{}
 	}
 
+	def.ApprovalPatterns = copyStrings(def.ApprovalPatterns)
+	def.ApproverGroupUIDs = copyUUIDs(def.ApproverGroupUIDs)
+
 	// Use Column-based update so bun applies the same array marshaling that
 	// the model's `bun:"controls,array"` tag uses on Insert.
 	res, err := s.db.NewUpdate().
 		Model(def).
 		Column("name", "description", "duration_seconds", "controls", "max_query_counts",
-			"max_bytes_transferred", "auto_approve", "group_uids", "database_uids").
+			"max_bytes_transferred", "auto_approve", "group_uids", "database_uids",
+			"approval_patterns", "approver_group_uids").
 		Where("uid = ?", def.UID).
 		Exec(ctx)
 	if err != nil {

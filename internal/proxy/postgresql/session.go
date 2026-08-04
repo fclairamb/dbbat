@@ -31,12 +31,23 @@ type pendingQuery struct {
 	parameters *store.QueryParameters
 
 	// Result capture state
-	columnNames   []string         // From RowDescription
-	columnOIDs    []uint32         // Type OIDs for decoding
-	capturedRows  []store.QueryRow // Accumulated result rows
-	capturedBytes int64            // Total bytes captured
-	rowNumber     int              // Current row counter
-	truncated     bool             // True if limits exceeded
+	columnNames   []string // From RowDescription
+	columnOIDs    []uint32 // Type OIDs for decoding
+	capturedBytes int64    // Total bytes captured
+	rowNumber     int      // Current row counter
+	truncated     bool     // True if limits exceeded
+
+	// rowSink streams captured rows to the shared batching writer instead of
+	// holding the whole capture in RAM until the query ends. Created on the
+	// first captured row (see ensureRowSink), which is also where the parent
+	// queries row starts being inserted — query_rows.query_id is a foreign
+	// key, so the parent has to exist before the first batch flushes.
+	rowSink *shared.QuerySink
+
+	// approvalUID is the uid of the row an approval hold already inserted for
+	// this statement (uuid.Nil when no hold happened). Non-nil means the
+	// completion path must UPDATE that row rather than INSERT a second one.
+	approvalUID uuid.UUID
 }
 
 // preparedStatement tracks a prepared statement with its type information.
@@ -117,6 +128,33 @@ type Session struct {
 	guard                  *shared.LimitGuard          // Mid-stream time/bandwidth limit enforcement
 	revocation             *cache.RevocationHandle     // Signaled when this session's grant is revoked mid-flight
 
+	// watched sits below the counting conn (and below TLS) so an approval
+	// hold can keep reading the client socket while the session goroutine is
+	// blocked on a human. Without it a client FIN would go unnoticed and the
+	// hold — which has no timeout by design — would never end.
+	watched *shared.WatchedConn
+
+	// approvalDeps/approvalGate implement pattern-triggered approval holds.
+	// The gate is built once the grant is known; before that it is inert.
+	approvalDeps shared.ApprovalDeps
+	approvalGate *shared.ApprovalGate
+
+	// stream publishes this session's queries and lifecycle to the live
+	// event stream. Best-effort and non-blocking, always.
+	stream *shared.StreamPublisher
+
+	// heldQueryUID is the uid of the statement currently parked on a human,
+	// uuid.Nil when nothing is parked. Read by the out-of-band CancelRequest
+	// path, which arrives on a different TCP connection entirely.
+	heldMu       sync.Mutex
+	heldQueryUID uuid.UUID
+
+	// cancels routes PostgreSQL CancelRequests (separate TCP connection) back
+	// to the session that owns the BackendKeyData they carry.
+	cancels     *cancelRegistry
+	cancelKeyMu sync.Mutex
+	cancelKey   *cancelKey
+
 	// Wire-level byte counters for the client-facing socket. Reads count as
 	// bytes-from-client (queries the client sent), writes count as
 	// bytes-to-client (responses the proxy returned). Together they capture
@@ -127,6 +165,11 @@ type Session struct {
 	// proxyUpstreamToClient).
 	bytesFromClient *atomic.Int64
 	bytesToClient   *atomic.Int64
+
+	// rowWriter batches captured result rows off the data path. Shared with
+	// every other session and protocol in the process.
+	rowWriter *shared.RowWriter
+
 	// lastBytesSnapshot is the cumulative client-side byte count at the end
 	// of the previous query. Per-query bytes = current cumulative - snapshot.
 	// Only mutated from the upstream→client goroutine where logQuery runs,
@@ -145,6 +188,7 @@ func NewSession(
 	dumpConfig config.DumpConfig,
 	authCache *cache.AuthCache,
 	tlsConfig *tls.Config,
+	rowWriter *shared.RowWriter,
 ) *Session {
 	bytesFromClient := &atomic.Int64{}
 	bytesToClient := &atomic.Int64{}
@@ -152,9 +196,20 @@ func NewSession(
 	// pgproto3 backend reads is counted. The TLS upgrade in handleSSLRequest
 	// reassigns clientConn to a tls.Conn that wraps this CountingConn, so
 	// encrypted bytes still flow through the counter post-upgrade.
-	counted := shared.NewCountingConn(clientConn, bytesFromClient, bytesToClient)
+	//
+	// WatchedConn goes *under* the counter (and therefore under any later TLS
+	// upgrade) so a parked hold reads raw transport bytes it never has to
+	// decrypt, and so replayed bytes are counted exactly once, on replay.
+	watched := shared.NewWatchedConn(clientConn)
+	counted := shared.NewCountingConn(watched, bytesFromClient, bytesToClient)
+
+	// Without keepalive, a hard-killed client or a dead network path never
+	// produces a FIN, and "held until the client disconnects" silently means
+	// "held forever".
+	_ = shared.EnableClientKeepAlive(clientConn)
 
 	return &Session{
+		watched:         watched,
 		clientConn:      counted,
 		clientReader:    bufio.NewReader(counted),
 		store:           dataStore,
@@ -165,6 +220,7 @@ func NewSession(
 		dumpConfig:      dumpConfig,
 		authCache:       authCache,
 		tlsConfig:       tlsConfig,
+		rowWriter:       rowWriter,
 		bytesFromClient: bytesFromClient,
 		bytesToClient:   bytesToClient,
 		extendedState: &extendedQueryState{
@@ -257,6 +313,15 @@ func (s *Session) proxyMessages() error {
 	// error frame).
 	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
 		WithRevocation(s.revocation.Flag())
+
+	// The approval gate compiles the grant's patterns once, here, so the
+	// per-statement cost of the (overwhelmingly common) no-pattern case is a
+	// single nil check on the hot path.
+	s.approvalGate = shared.NewApprovalGate(
+		s.approvalDeps, s.grant, s.connectionUID, s.user, s.database.Name,
+	)
+	s.stream = shared.NewStreamPublisher(s.approvalDeps, s.connectionUID, s.user, s.database.Name)
+	s.stream.Connection(s.ctx, shared.ConnectionOpened)
 
 	watchCtx, cancelWatch := context.WithCancel(s.ctx)
 	defer cancelWatch()
@@ -434,6 +499,123 @@ func (s *Session) captureRowDescription(msg *pgproto3.RowDescription) {
 	}
 }
 
+// captureDataRow records one upstream result row against the pending query,
+// honoring the result-storage limits.
+//
+// When a limit is reached the rows already captured are KEPT and capture simply
+// stops — every other capture path (COPY, MySQL, MongoDB, Oracle) behaves this
+// way, and discarding here meant the very queries a sample is most useful for
+// (the huge ones) stored nothing at all. The truncation is persisted as
+// queries.results_truncated so a short row set is never mistaken for a complete
+// one.
+func (s *Session) captureDataRow(msg *pgproto3.DataRow) {
+	// Compute the row's payload size for the result-capture limits only —
+	// wire-level bytes_transferred is tracked via the CountingConn around
+	// clientConn, not field-summed here.
+	rowSize := int64(0)
+	for _, val := range msg.Values {
+		rowSize += int64(len(val))
+	}
+
+	query := s.getCurrentPendingQuery()
+	if query == nil || !s.queryStorage.StoreResults || query.truncated {
+		return
+	}
+
+	// Check if this row would exceed limits
+	if query.rowNumber >= s.queryStorage.MaxResultRows ||
+		query.capturedBytes+rowSize > s.queryStorage.MaxResultBytes {
+		query.truncated = true
+
+		s.logger.WarnContext(s.ctx, "result capture truncated - limits exceeded",
+			slog.Int("rows_captured", query.rowNumber),
+			slog.Int64("bytes_captured", query.capturedBytes),
+			slog.Int("max_rows", s.queryStorage.MaxResultRows),
+			slog.Int64("max_bytes", s.queryStorage.MaxResultBytes))
+
+		return
+	}
+
+	row := s.convertDataRow(msg.Values, query.columnNames, query.columnOIDs)
+
+	query.capturedBytes += rowSize
+	query.rowNumber++
+
+	// Row numbers are a producer-side running counter: batches flush while
+	// the result set is still streaming, so there is no slice left at the end
+	// to number after the fact.
+	row.RowNumber = query.rowNumber
+
+	// Non-blocking: this runs inline with forwarding rows to the client, so a
+	// slow moment in dbbat's own storage must never stall the customer's
+	// query. A refused row marks the capture as having dropped rows, which is
+	// reported separately from truncation.
+	s.ensureRowSink(query).Add(row)
+}
+
+// ensureRowSink returns the query's handle on the shared row writer, creating
+// it — and starting the parent queries row's INSERT — on first use.
+//
+// The parent record is inserted asynchronously: it must exist before the first
+// batch of rows flushes, but PostgreSQL's capture path runs inline with
+// forwarding rows to the client and must not acquire a synchronous store
+// round-trip it never had. The writer holds the query's rows until the sink is
+// resolved, which is what keeps the query_rows -> queries foreign key
+// satisfied without coupling the two.
+//
+// Returns nil when there is no writer, in which case rows are simply not
+// captured.
+func (s *Session) ensureRowSink(query *pendingQuery) *shared.QuerySink {
+	if query.rowSink != nil {
+		return query.rowSink
+	}
+
+	if s.rowWriter == nil {
+		return nil
+	}
+
+	// An approval hold already inserted this statement's row, so the parent
+	// is there and nothing else needs creating.
+	if query.approvalUID != uuid.Nil {
+		query.rowSink = s.rowWriter.NewSinkFor(query.approvalUID)
+
+		return query.rowSink
+	}
+
+	sink := s.rowWriter.NewSink()
+	query.rowSink = sink
+
+	if s.store == nil || s.connectionUID == uuid.Nil {
+		// Nothing to hang rows from. Fail the sink rather than leaving it
+		// unresolved, which would make the shared writer wait on it.
+		sink.Fail()
+
+		return sink
+	}
+
+	record := &store.Query{
+		ConnectionID: s.connectionUID,
+		SQLText:      query.sql,
+		Parameters:   query.parameters,
+		ExecutedAt:   query.startTime,
+	}
+
+	go func() {
+		created, err := s.store.CreateQuery(s.ctx, record)
+		if err != nil {
+			s.logger.ErrorContext(s.ctx, "failed to create query record for result capture",
+				slog.Any("error", err))
+			sink.Fail()
+
+			return
+		}
+
+		sink.Resolve(created.UID)
+	}()
+
+	return sink
+}
+
 // proxyUpstreamToClient proxies messages from upstream to client.
 //
 //nolint:gocognit,cyclop // Protocol handling with many message types inherently has high complexity
@@ -482,35 +664,7 @@ func (s *Session) proxyUpstreamToClient() error {
 			}
 
 		case *pgproto3.DataRow:
-			// Compute the row's payload size for the result-capture limits
-			// only — wire-level bytes_transferred is tracked via the
-			// CountingConn around clientConn, not field-summed here.
-			rowSize := int64(0)
-			for _, val := range m.Values {
-				rowSize += int64(len(val))
-			}
-
-			// Capture row data if enabled and within limits
-			query := s.getCurrentPendingQuery()
-			if query != nil && s.queryStorage.StoreResults && !query.truncated {
-				// Check if this row would exceed limits
-				if query.rowNumber >= s.queryStorage.MaxResultRows ||
-					query.capturedBytes+rowSize > s.queryStorage.MaxResultBytes {
-					// Limits exceeded - discard all captured rows and stop capturing
-					query.truncated = true
-					query.capturedRows = nil // Discard all previously captured rows
-					s.logger.WarnContext(s.ctx, "result capture refused - limits exceeded",
-						slog.Int("rows_captured", query.rowNumber),
-						slog.Int64("bytes_captured", query.capturedBytes),
-						slog.Int("max_rows", s.queryStorage.MaxResultRows),
-						slog.Int64("max_bytes", s.queryStorage.MaxResultBytes))
-				} else {
-					row := s.convertDataRow(m.Values, query.columnNames, query.columnOIDs)
-					query.capturedRows = append(query.capturedRows, row)
-					query.capturedBytes += rowSize
-					query.rowNumber++
-				}
-			}
+			s.captureDataRow(m)
 
 		case *pgproto3.CopyOutResponse:
 			// Server is starting a COPY TO operation (sending data to client)
@@ -665,12 +819,21 @@ func (s *Session) persistAbortedQuery(cause error) {
 	// Wire-level diff since the previous query end: the aborted query's text
 	// plus every response byte streamed before the abort.
 	total := s.bytesFromClient.Load() + s.bytesToClient.Load()
-	bytesTransferred := total - s.lastBytesSnapshot
-	if bytesTransferred <= 0 {
-		return
-	}
 
-	s.lastBytesSnapshot = total
+	bytesTransferred := total - s.lastBytesSnapshot
+	if bytesTransferred > 0 {
+		s.lastBytesSnapshot = total
+	} else {
+		// Nothing new to attribute. Still log the abort when result capture
+		// already inserted a queries row for this statement: skipping would
+		// leave that row with no duration, no error and no capture flags,
+		// which reads as a query that is still running.
+		if query.rowSink == nil {
+			return
+		}
+
+		bytesTransferred = 0
+	}
 
 	// Extended Query Protocol leaves the in-flight query in the pending queue
 	// (currentQuery is nil until CommandComplete/ErrorResponse pops it); logQuery
@@ -686,6 +849,9 @@ func (s *Session) persistAbortedQuery(cause error) {
 
 // cleanup closes connections and updates records.
 func (s *Session) cleanup() {
+	s.releaseCancelKey()
+	s.stream.Connection(s.ctx, shared.ConnectionClosed)
+
 	if s.grant != nil && s.revocation != nil {
 		s.store.Revocations().Deregister(s.grant.UID, s.revocation)
 	}
@@ -861,6 +1027,22 @@ func (s *Session) receiveStartupMessage() (pgproto3.FrontendMessage, error) {
 
 	if _, err := io.ReadFull(s.clientReader, msgBuf[4:]); err != nil {
 		return nil, err
+	}
+
+	// A CancelRequest arrives on its own TCP connection and is *not* a
+	// StartupMessage — decoding it as one would fail on the magic version.
+	// Recognizing it is what keeps a parked statement cancellable: the held
+	// session's own socket is blocked, so this is the only channel left.
+	if len(msgBuf) >= 8 {
+		version := int(msgBuf[4])<<24 | int(msgBuf[5])<<16 | int(msgBuf[6])<<8 | int(msgBuf[7])
+		if version == pgCancelRequestCode {
+			cancel := &pgproto3.CancelRequest{}
+			if err := cancel.Decode(msgBuf[4:]); err != nil {
+				return nil, err
+			}
+
+			return cancel, nil
+		}
 	}
 
 	startup := &pgproto3.StartupMessage{}

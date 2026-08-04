@@ -26,6 +26,11 @@ var (
 	ErrUnknownStartupMagic      = errors.New("unknown length-8 startup magic")
 	ErrTooManyNegotiationRounds = errors.New("too many SSL/GSS negotiation rounds")
 
+	// ErrCancelRequestHandled ends a connection that carried a CancelRequest.
+	// Not a failure: a CancelRequest is a one-shot out-of-band signal on its
+	// own TCP connection, and PostgreSQL closes it without a reply.
+	ErrCancelRequestHandled = errors.New("cancel request handled")
+
 	// Upstream TLS errors raised when negotiating SSL with the target
 	// Postgres server (see negotiateUpstreamSSL).
 	ErrUpstreamTLSRequired = errors.New("upstream rejected TLS but ssl_mode requires it")

@@ -124,7 +124,7 @@ func replayCapturedRows(t *testing.T, td *testDump, sqlMarker string) [][]string
 func TestDumpReplay_LargeResultRows(t *testing.T) {
 	t.Parallel()
 
-	td := loadTestDump(t, "go_ora_largeresult.dbbat-dump")
+	td := loadTestDump(t, "go_ora_largeresult.pcapng")
 
 	rows := replayCapturedRows(t, td, largeResultSQLMarker)
 

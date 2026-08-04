@@ -56,25 +56,25 @@ func TestParseColumnDescribes(t *testing.T) {
 		marker string
 		want   []columnDesc
 	}{
-		{"go_ora_compressed.dbbat-dump", compressedSQLMarker, []columnDesc{
+		{"go_ora_compressed.pcapng", compressedSQLMarker, []columnDesc{
 			{"GRP", tnsTypeCHAR}, {"NUM", tnsTypeNUMBER}, {"OPT", tnsTypeVARCHAR},
 		}},
-		{"go_ora_numbers.dbbat-dump", numbersSQLMarker, []columnDesc{
+		{"go_ora_numbers.pcapng", numbersSQLMarker, []columnDesc{
 			{"PI", tnsTypeNUMBER},
 			{"AMOUNT", tnsTypeNUMBER},
 			{"MILLION", tnsTypeNUMBER},
 			{"QUARTER", tnsTypeNUMBER},
 		}},
-		{"go_ora_temporal.dbbat-dump", temporalSQLMarker, []columnDesc{
+		{"go_ora_temporal.pcapng", temporalSQLMarker, []columnDesc{
 			{"DT", tnsTypeDATE}, {"TS", tnsTypeTSDTY}, {"TSTZ", tnsTypeTSTZDTY},
 		}},
-		{"go_ora_largeresult.dbbat-dump", largeResultSQLMarker, []columnDesc{
+		{"go_ora_largeresult.pcapng", largeResultSQLMarker, []columnDesc{
 			{"ID", tnsTypeNUMBER}, {"PAYLOAD", tnsTypeVARCHAR},
 		}},
-		{"go_ora_colcount.dbbat-dump", colCountSQLMarker, []columnDesc{
+		{"go_ora_colcount.pcapng", colCountSQLMarker, []columnDesc{
 			{"N", tnsTypeNUMBER}, {"LEVEL*10", tnsTypeNUMBER},
 		}},
-		{"go_ora_mixed.dbbat-dump", mixedSQLMarker, []columnDesc{
+		{"go_ora_mixed.pcapng", mixedSQLMarker, []columnDesc{
 			{"ID", tnsTypeNUMBER},
 			{"GRP", tnsTypeNUMBER},
 			{"AMOUNT", tnsTypeNUMBER},
@@ -108,9 +108,9 @@ func TestDecodeQueryResultV2_RealColumnNames(t *testing.T) {
 		marker string
 		want   []string
 	}{
-		{"go_ora_colcount.dbbat-dump", colCountSQLMarker, []string{"N", "LEVEL*10"}},
-		{"go_ora_compressed.dbbat-dump", compressedSQLMarker, []string{"GRP", "NUM", "OPT"}},
-		{"go_ora_temporal.dbbat-dump", temporalSQLMarker, []string{"DT", "TS", "TSTZ"}},
+		{"go_ora_colcount.pcapng", colCountSQLMarker, []string{"N", "LEVEL*10"}},
+		{"go_ora_compressed.pcapng", compressedSQLMarker, []string{"GRP", "NUM", "OPT"}},
+		{"go_ora_temporal.pcapng", temporalSQLMarker, []string{"DT", "TS", "TSTZ"}},
 	}
 
 	for _, tc := range cases {

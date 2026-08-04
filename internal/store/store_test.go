@@ -103,6 +103,7 @@ func setupTestStore(t *testing.T) *Store {
 		"oauth_states",
 		"api_keys",
 		"users",
+		"instances",
 	}
 
 	for _, table := range cleanupTables {

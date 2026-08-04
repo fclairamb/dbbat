@@ -25,7 +25,7 @@ DBBat addresses all these needs without requiring changes to your application co
 
 | Engine | Protocol | Default proxy port | Notes |
 |--------|----------|--------------------|-------|
-| PostgreSQL | PostgreSQL wire (`pgx/v5`) | `:5434` | First-class — auth terminated at the proxy, MD5/SCRAM clients work |
+| PostgreSQL | PostgreSQL wire (`pgx/v5`) | `:5433` | First-class — auth terminated at the proxy, MD5/SCRAM clients work |
 | Oracle | TNS / TTC | `:1522` | O5LOGON proxy auth, hand-rolled TTC parser. End-to-end with `go-ora`; other clients reach AUTH but do not yet execute queries |
 | MySQL | MySQL wire (`go-mysql-org/go-mysql`) | `:3307` | `caching_sha2_password` (default), `mysql_clear_password`. TLS terminated at the proxy. `mysql_native_password` not supported |
 | MariaDB | MySQL wire (same listener) | `:3307` | Same as MySQL — `STMT_BULK_EXECUTE` refused (clients need batch-rewriting off) |
@@ -39,7 +39,7 @@ For protocol-level details, see:
 - [Oracle proxy notes (TNS/TTC)](https://github.com/fclairamb/dbbat/blob/main/docs/oracle.md)
 - [MySQL proxy notes](https://github.com/fclairamb/dbbat/blob/main/docs/mysql.md)
 - [MongoDB proxy notes](https://github.com/fclairamb/dbbat/blob/main/docs/mongodb.md)
-- [Dump file format](https://github.com/fclairamb/dbbat/blob/main/docs/dump-format.md)
+- [Session capture format](https://github.com/fclairamb/dbbat/blob/main/docs/dump-format.md)
 
 ## Core Features
 
@@ -92,7 +92,7 @@ mongosh / driver     ─►  DBBat (SCRAM-SHA-256 / PLAIN-TLS) ─► MongoDB up
 
 ### Session Packet Dumps
 
-Optional per-session binary dumps of the post-auth command stream, written as `.dbbat-dump` files. Same format across all protocols (see [the dump-format spec](https://github.com/fclairamb/dbbat/blob/main/docs/dump-format.md)). Use `dbbat dump anonymise <input>` to strip session metadata before sharing a capture.
+Optional per-session captures of the post-auth command stream, written as tcpdump-compatible `.pcapng` files that Wireshark dissects natively. Same format across all protocols (see [the capture-format spec](https://github.com/fclairamb/dbbat/blob/main/docs/dump-format.md)). Use `dbbat dump anonymise <input>` to strip session metadata and the synthesized addresses before sharing a capture.
 
 ### REST API + Web UI
 

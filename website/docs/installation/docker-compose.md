@@ -29,13 +29,13 @@ services:
     environment:
       DBB_DSN: postgres://dbbat:dbbat@postgres:5432/dbbat?sslmode=disable
       DBB_KEY: ${DBB_KEY:-YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY=}
-      DBB_LISTEN_PG: ":5434"
+      DBB_LISTEN_PG: ":5433"
       DBB_LISTEN_ORA: ":1522"
       DBB_LISTEN_MYSQL: ":3307"
       DBB_LISTEN_MONGO: ":27018"
       DBB_LISTEN_API: ":4200"
     ports:
-      - "5001:5434"   # PostgreSQL proxy
+      - "5001:5433"   # PostgreSQL proxy
       - "1522:1522"   # Oracle proxy
       - "3307:3307"   # MySQL / MariaDB proxy
       - "27018:27018" # MongoDB proxy

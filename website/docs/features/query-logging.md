@@ -20,6 +20,7 @@ For each query, DBBat records:
 - **Rows affected**: number of rows returned or modified
 - **Error**: error text if the query failed
 - **Result rows**: optionally captured up to `query_storage.max_result_rows` / `max_result_bytes`
+- **Capture completeness**: `results_truncated` and `results_dropped` (see [Partial captures](#partial-captures))
 
 ### Engine-specific notes
 
@@ -111,6 +112,71 @@ Response:
 ```
 
 Pass the `next_cursor` value back as `?cursor=…` to fetch the next page.
+
+Rows are persisted by one batched writer shared by every protocol and session.
+It flushes whenever ~1000 rows or ~8 MB have accumulated, or as soon as the
+queue runs dry — so an idle proxy writes rows immediately, and a busy one
+amortizes the round-trip across queries. Capture never holds a whole result set
+in memory waiting for the query to end, and never blocks the query on DBBat's
+own storage.
+
+### Partial captures
+
+Two independent flags say a stored result set is not the whole story. They are
+deliberately separate, because they mean opposite things:
+
+| Flag | Meaning |
+|---|---|
+| `results_truncated` | Capture stopped at a configured limit (`max_result_rows` / `max_result_bytes`). The stored rows are the beginning of the result set. Expected and explainable. |
+| `results_dropped` | DBBat lost rows it meant to keep: row storage fell behind the proxy (the writer's queue was full) or a batch insert failed. The stored rows have gaps. |
+
+A drop never affects the client: the rows still reach the database client
+untouched. DBBat degrades its own capture rather than stalling a customer's
+query behind its storage — so `results_dropped` is a signal that DBBat's store
+is under-provisioned for the traffic, not that anything went wrong upstream.
+
+Both flags are on the query record and are surfaced as badges on the query
+detail page.
+
+## Retention
+
+By default DBBat keeps query history forever — it is an audit trail, so nothing
+is deleted unless you ask for it. Set `DBB_QUERY_STORAGE_RETENTION` (or
+`query_storage.retention`) to a Go duration to enable a sweep:
+
+```bash
+DBB_QUERY_STORAGE_RETENTION=720h   # 30 days
+```
+
+The sweep runs once at startup and then hourly, deleting in batches:
+
+- **Queries** executed before the cutoff, along with every result row captured
+  for them (`query_rows` cascades from the query).
+- **Connections** that were closed before the cutoff, along with their queries
+  and rows.
+
+Connections that are still **open** are never deleted, however old they are —
+the session may still be live. Such a connection can therefore outlive all of
+its queries and show up with none left; its `queries` counter is a lifetime
+counter, not a count of retained rows.
+
+A crash or a `SIGKILL` never runs the normal session teardown, so those
+connections would stay "open" — and therefore un-reapable — forever. To stop
+that leak, dbbat marks the connections left open by a process that is no longer
+running as disconnected on its next start, before any proxy accepts, using each
+session's last activity time so retention still measures from when the session
+actually stopped. That covers both its own leftovers and those of any other
+replica that shut down cleanly or stopped heartbeating; a replica that is up and
+heartbeating is never touched, so a live session can never be closed out from
+under it. See [`DBB_INSTANCE_ID`](/docs/configuration) for the registry and the
+grace period.
+
+Set the value to `0` (the default), or leave it unset, to keep history forever.
+An unparseable value also leaves retention off and logs a warning at startup,
+rather than falling back to some other period.
+
+Note this is separate from [session packet dumps](/docs/features/session-dumps),
+which have their own `DBB_DUMP_RETENTION` (default `24h`).
 
 ## Connection Tracking
 
