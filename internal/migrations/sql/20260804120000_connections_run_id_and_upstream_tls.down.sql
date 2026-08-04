@@ -1,3 +1,9 @@
+-- Reverses the up-migration in the opposite order to the one it applied them.
+
+ALTER TABLE connections DROP COLUMN IF EXISTS upstream_tls;
+
+--bun:split
+
 -- Collapse the registry back to one row per instance id, keeping the freshest
 -- run of each. Required before the single-column primary key can come back:
 -- the pair key is what allows several rows per id in the first place, so a

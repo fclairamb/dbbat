@@ -3,7 +3,7 @@
 ## Goal
 
 Decide how much protection a v0.20.x replica deserves while
-`20260804120000_connections_run_id` is being rolled out, and say so somewhere an
+`20260804120000_connections_run_id_and_upstream_tls` is being rolled out, and say so somewhere an
 operator will read it (release notes, `website/docs/configuration/index.md`, or
 a longer grace period in code).
 
@@ -52,7 +52,7 @@ No GitHub issue filed yet — one should be opened.
 
 ## Files
 
-- `internal/migrations/sql/20260804120000_connections_run_id.up.sql` — the
+- `internal/migrations/sql/20260804120000_connections_run_id_and_upstream_tls.up.sql` — the
   primary-key change and the `last_seen_at` refresh that mitigates it.
 - `internal/store/instances.go` — `instanceStaleCutoff`, the upserts.
 - `internal/store/connections.go` — `noLiveOwner`.
