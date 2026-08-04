@@ -81,6 +81,88 @@ func TestCreateQuery(t *testing.T) {
 			t.Errorf("CreateQuery() query.Error = %v, want %q", created.Error, "relation does not exist")
 		}
 	})
+
+	// COPY metadata used to be dropped by CreateQuery: the columns and the
+	// model field existed, the insert just never carried them. It has to
+	// survive both the insert and the projection ListQueries applies.
+	t.Run("create query with COPY metadata", func(t *testing.T) {
+		direction := "out"
+		format := "text"
+		query := &Query{
+			ConnectionID:  conn.UID,
+			SQLText:       "COPY public.people TO stdout",
+			ExecutedAt:    time.Now(),
+			CopyDirection: &direction,
+			CopyFormat:    &format,
+		}
+
+		created, err := store.CreateQuery(ctx, query)
+		if err != nil {
+			t.Fatalf("CreateQuery() error = %v", err)
+		}
+
+		fetched, err := store.GetQueryWithRows(ctx, created.UID)
+		if err != nil {
+			t.Fatalf("GetQueryWithRows() error = %v", err)
+		}
+
+		if fetched.CopyDirection == nil || *fetched.CopyDirection != "out" {
+			t.Errorf("CreateQuery() stored copy_direction = %v, want %q", fetched.CopyDirection, "out")
+		}
+		if fetched.CopyFormat == nil || *fetched.CopyFormat != "text" {
+			t.Errorf("CreateQuery() stored copy_format = %v, want %q", fetched.CopyFormat, "text")
+		}
+
+		listed, err := store.ListQueries(ctx, QueryFilter{ConnectionID: &conn.UID})
+		if err != nil {
+			t.Fatalf("ListQueries() error = %v", err)
+		}
+
+		var found *Query
+		for i := range listed {
+			if listed[i].UID == created.UID {
+				found = &listed[i]
+
+				break
+			}
+		}
+
+		if found == nil {
+			t.Fatal("ListQueries() did not return the COPY query")
+		}
+		if found.CopyDirection == nil || *found.CopyDirection != "out" {
+			t.Errorf("ListQueries() copy_direction = %v, want %q", found.CopyDirection, "out")
+		}
+		if found.CopyFormat == nil || *found.CopyFormat != "text" {
+			t.Errorf("ListQueries() copy_format = %v, want %q", found.CopyFormat, "text")
+		}
+	})
+
+	// Non-COPY statements must stay NULL rather than acquiring an empty
+	// string: the UI keys "was this a bulk transfer?" off the column's
+	// presence.
+	t.Run("non-COPY query leaves the COPY columns null", func(t *testing.T) {
+		created, err := store.CreateQuery(ctx, &Query{
+			ConnectionID: conn.UID,
+			SQLText:      "SELECT 1",
+			ExecutedAt:   time.Now(),
+		})
+		if err != nil {
+			t.Fatalf("CreateQuery() error = %v", err)
+		}
+
+		fetched, err := store.GetQueryWithRows(ctx, created.UID)
+		if err != nil {
+			t.Fatalf("GetQueryWithRows() error = %v", err)
+		}
+
+		if fetched.CopyDirection != nil {
+			t.Errorf("CreateQuery() copy_direction = %v, want nil", *fetched.CopyDirection)
+		}
+		if fetched.CopyFormat != nil {
+			t.Errorf("CreateQuery() copy_format = %v, want nil", *fetched.CopyFormat)
+		}
+	})
 }
 
 // pendingRows stamps captured rows with the query they belong to. Production
