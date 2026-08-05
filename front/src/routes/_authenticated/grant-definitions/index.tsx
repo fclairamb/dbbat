@@ -68,6 +68,17 @@ const CONTROLS = [
   { value: "block_ddl", label: "Block DDL" },
 ];
 
+// slugify turns free text into a valid definition slug: lowercase,
+// alphanumeric segments separated by single hyphens, no leading/trailing
+// hyphen. Mirrors the server's ^[a-z0-9]+(-[a-z0-9]+)*$ validation.
+function slugify(input: string): string {
+  return input
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 function formatDuration(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
@@ -124,6 +135,7 @@ function GrantDefinitionsPage() {
   const toggleAutoApprove = (d: GrantDefinition, next: boolean) => {
     const body: CreateGrantDefinitionRequest = {
       name: d.name,
+      slug: d.slug,
       description: d.description,
       duration_seconds: d.duration_seconds,
       controls: d.controls,
@@ -150,6 +162,18 @@ function GrantDefinitionsPage() {
             </span>
           )}
         </div>
+      ),
+    },
+    {
+      key: "slug",
+      header: "Slug",
+      cell: (d: GrantDefinition) => (
+        <code
+          className="text-xs bg-secondary px-1.5 py-0.5 rounded"
+          data-testid={`grant-definition-slug-${d.uid}`}
+        >
+          {d.slug}
+        </code>
       ),
     },
     {
@@ -404,6 +428,13 @@ function DefinitionDialog({
   onClose: () => void;
 }) {
   const [name, setName] = useState(editing?.name ?? "");
+  const [slug, setSlug] = useState(editing?.slug ?? "");
+  // "Linked until touched": the slug auto-derives from the name as the
+  // operator types, right up until they edit the slug field themselves —
+  // at which point it's theirs to manage. An existing definition's slug is
+  // already touched from the start, so editing never silently re-derives
+  // it from a renamed title.
+  const [slugTouched, setSlugTouched] = useState(!!editing);
   const [description, setDescription] = useState(editing?.description ?? "");
   const [durationValue, setDurationValue] = useState<string>(() => {
     if (!editing) return "1";
@@ -476,6 +507,18 @@ function DefinitionDialog({
       prev.includes(v) ? prev.filter((c) => c !== v) : [...prev, v]
     );
 
+  const handleNameChange = (value: string) => {
+    setName(value);
+    if (!slugTouched) {
+      setSlug(slugify(value));
+    }
+  };
+
+  const handleSlugChange = (value: string) => {
+    setSlug(value);
+    setSlugTouched(true);
+  };
+
   const onSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -492,6 +535,7 @@ function DefinitionDialog({
 
     const body: CreateGrantDefinitionRequest = {
       name,
+      slug,
       description,
       duration_seconds: durationSeconds,
       controls: controls as ("read_only" | "block_copy" | "block_ddl")[],
@@ -534,12 +578,31 @@ function DefinitionDialog({
             <Input
               id="def-name"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => handleNameChange(e.target.value)}
               placeholder="Read-only 1h"
               maxLength={64}
               required
               data-testid="grant-definition-name"
             />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="def-slug">Slug</Label>
+            <Input
+              id="def-slug"
+              value={slug}
+              onChange={(e) => handleSlugChange(e.target.value)}
+              placeholder="read-only-1h"
+              maxLength={64}
+              pattern="^[a-z0-9]+(-[a-z0-9]+)*$"
+              required
+              data-testid="grant-definition-slug-input"
+            />
+            <p className="text-xs text-muted-foreground">
+              Lowercase letters, numbers, and hyphens. Auto-filled from the
+              name until you edit it — used to reference this definition
+              from the CLI, agents, or scripted API calls instead of its
+              uid.
+            </p>
           </div>
           <div className="space-y-2">
             <Label htmlFor="def-desc">Description</Label>

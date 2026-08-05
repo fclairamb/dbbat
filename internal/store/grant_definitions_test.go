@@ -29,6 +29,7 @@ func TestCreateGrantDefinition(t *testing.T) {
 
 	def := &GrantDefinition{
 		Name:                "Read-only 1h",
+		Slug:                "read-only-1h",
 		Description:         "Standard read access for an hour",
 		DurationSeconds:     3600,
 		Controls:            []string{ControlReadOnly},
@@ -67,6 +68,7 @@ func TestCreateGrantDefinition_AutoApprove(t *testing.T) {
 
 	def := &GrantDefinition{
 		Name:            "Auto-approved read-only",
+		Slug:            "auto-approved-read-only",
 		DurationSeconds: 3600,
 		Controls:        []string{ControlReadOnly},
 		AutoApprove:     true,
@@ -100,6 +102,7 @@ func TestCreateGrantDefinition_DuplicateActiveName(t *testing.T) {
 
 	def := &GrantDefinition{
 		Name:            "duplicate",
+		Slug:            "duplicate",
 		DurationSeconds: 60,
 		CreatedBy:       admin.UID,
 	}
@@ -108,9 +111,19 @@ func TestCreateGrantDefinition_DuplicateActiveName(t *testing.T) {
 		t.Fatalf("first create: %v", err)
 	}
 
+	// Second active with same name but a distinct slug, so only the name
+	// constraint is in play — otherwise both constraints would be violated
+	// and which sentinel comes back would depend on constraint-check order.
+	dup := &GrantDefinition{
+		Name:            "duplicate",
+		Slug:            "duplicate-2",
+		DurationSeconds: 60,
+		CreatedBy:       admin.UID,
+	}
+
 	// Second active with same name → unique-violation mapped to the typed
 	// ErrGrantDefinitionDuplicate sentinel (surfaced as 409 DUPLICATE_NAME).
-	if _, err := store.CreateGrantDefinition(ctx, def); !errors.Is(err, ErrGrantDefinitionDuplicate) {
+	if _, err := store.CreateGrantDefinition(ctx, dup); !errors.Is(err, ErrGrantDefinitionDuplicate) {
 		t.Fatalf("expected ErrGrantDefinitionDuplicate on duplicate active name, got %v", err)
 	}
 }
@@ -123,6 +136,7 @@ func TestListGrantDefinitions_ActiveOnly(t *testing.T) {
 
 	d1, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
 		Name:            "active",
+		Slug:            "active",
 		DurationSeconds: 60,
 		CreatedBy:       admin.UID,
 	})
@@ -132,6 +146,7 @@ func TestListGrantDefinitions_ActiveOnly(t *testing.T) {
 
 	d2, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
 		Name:            "to-deactivate",
+		Slug:            "to-deactivate",
 		DurationSeconds: 60,
 		CreatedBy:       admin.UID,
 	})
@@ -184,6 +199,7 @@ func TestUpdateGrantDefinition(t *testing.T) {
 
 	def, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
 		Name:            "original",
+		Slug:            "original",
 		DurationSeconds: 60,
 		CreatedBy:       admin.UID,
 	})
@@ -192,6 +208,7 @@ func TestUpdateGrantDefinition(t *testing.T) {
 	}
 
 	def.Name = "renamed"
+	def.Slug = "renamed"
 	def.DurationSeconds = 120
 
 	if err := store.UpdateGrantDefinition(ctx, def); err != nil {
@@ -203,8 +220,8 @@ func TestUpdateGrantDefinition(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got.Name != "renamed" || got.DurationSeconds != 120 {
-		t.Errorf("got = %+v, want renamed/120", got)
+	if got.Name != "renamed" || got.Slug != "renamed" || got.DurationSeconds != 120 {
+		t.Errorf("got = %+v, want renamed/renamed/120", got)
 	}
 }
 
@@ -215,5 +232,101 @@ func TestGetGrantDefinition_NotFound(t *testing.T) {
 	_, err := store.GetGrantDefinition(ctx, uuid.New())
 	if !errors.Is(err, ErrGrantDefinitionNotFound) {
 		t.Errorf("err = %v, want ErrGrantDefinitionNotFound", err)
+	}
+}
+
+func TestGetGrantDefinitionBySlug(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "slug_lookup")
+
+	created, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
+		Name:            "Read-only 1h",
+		Slug:            "read-only-1h-lookup",
+		DurationSeconds: 3600,
+		CreatedBy:       admin.UID,
+	})
+	if err != nil {
+		t.Fatalf("CreateGrantDefinition() error = %v", err)
+	}
+
+	got, err := store.GetGrantDefinitionBySlug(ctx, "read-only-1h-lookup")
+	if err != nil {
+		t.Fatalf("GetGrantDefinitionBySlug() error = %v", err)
+	}
+
+	if got.UID != created.UID {
+		t.Errorf("GetGrantDefinitionBySlug() UID = %v, want %v", got.UID, created.UID)
+	}
+}
+
+func TestGetGrantDefinitionBySlug_NotFound(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	_, err := store.GetGrantDefinitionBySlug(ctx, "does-not-exist")
+	if !errors.Is(err, ErrGrantDefinitionNotFound) {
+		t.Errorf("err = %v, want ErrGrantDefinitionNotFound", err)
+	}
+}
+
+func TestCreateGrantDefinition_DuplicateSlug(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "slug_dup")
+
+	if _, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
+		Name:            "first",
+		Slug:            "shared-slug",
+		DurationSeconds: 60,
+		CreatedBy:       admin.UID,
+	}); err != nil {
+		t.Fatalf("first create: %v", err)
+	}
+
+	// A distinct name (so the active-name-uniq index doesn't also fire) but
+	// the same slug → unique-violation mapped to ErrGrantDefinitionSlugDuplicate.
+	_, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
+		Name:            "second",
+		Slug:            "shared-slug",
+		DurationSeconds: 60,
+		CreatedBy:       admin.UID,
+	})
+	if !errors.Is(err, ErrGrantDefinitionSlugDuplicate) {
+		t.Fatalf("expected ErrGrantDefinitionSlugDuplicate on duplicate slug, got %v", err)
+	}
+}
+
+func TestUpdateGrantDefinition_DuplicateSlug(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "slug_update_dup")
+
+	if _, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
+		Name:            "taken",
+		Slug:            "taken-slug",
+		DurationSeconds: 60,
+		CreatedBy:       admin.UID,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	other, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
+		Name:            "other",
+		Slug:            "other-slug",
+		DurationSeconds: 60,
+		CreatedBy:       admin.UID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	other.Slug = "taken-slug"
+
+	if err := store.UpdateGrantDefinition(ctx, other); !errors.Is(err, ErrGrantDefinitionSlugDuplicate) {
+		t.Fatalf("expected ErrGrantDefinitionSlugDuplicate, got %v", err)
 	}
 }

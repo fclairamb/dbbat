@@ -18,6 +18,12 @@ var ErrGrantDefinitionNotFound = errors.New("grant definition not found")
 // definition whose name conflicts with an existing active definition.
 var ErrGrantDefinitionDuplicate = errors.New("grant definition with this name already exists")
 
+// ErrGrantDefinitionSlugDuplicate is returned when a definition's slug
+// conflicts with an existing definition's slug (the slug is unique across
+// every definition, active or not — unlike name, which is only unique
+// among active definitions).
+var ErrGrantDefinitionSlugDuplicate = errors.New("grant definition with this slug already exists")
+
 // CreateGrantDefinition inserts a new GrantDefinition. The unique-active-name
 // index enforces no two active definitions share a name; deactivated
 // definitions don't block reuse.
@@ -39,6 +45,7 @@ func (s *Store) CreateGrantDefinition(ctx context.Context, def *GrantDefinition)
 
 	result := &GrantDefinition{
 		Name:                def.Name,
+		Slug:                def.Slug,
 		Description:         def.Description,
 		DurationSeconds:     def.DurationSeconds,
 		Controls:            controls,
@@ -65,6 +72,9 @@ func (s *Store) CreateGrantDefinition(ctx context.Context, def *GrantDefinition)
 		if isUniqueViolation(err, "grant_definitions_active_name_uniq") {
 			return nil, ErrGrantDefinitionDuplicate
 		}
+		if isUniqueViolation(err, "grant_definitions_slug_uniq") {
+			return nil, ErrGrantDefinitionSlugDuplicate
+		}
 		return nil, fmt.Errorf("create grant definition: %w", err)
 	}
 
@@ -86,6 +96,28 @@ func (s *Store) GetGrantDefinition(ctx context.Context, uid uuid.UUID) (*GrantDe
 		}
 
 		return nil, fmt.Errorf("get grant definition: %w", err)
+	}
+
+	return def, nil
+}
+
+// GetGrantDefinitionBySlug fetches a definition by slug. Returns
+// ErrGrantDefinitionNotFound if no definition has that slug — same sentinel
+// as GetGrantDefinition, so callers can try one after the other without
+// distinguishing the miss.
+func (s *Store) GetGrantDefinitionBySlug(ctx context.Context, slug string) (*GrantDefinition, error) {
+	def := new(GrantDefinition)
+
+	err := s.db.NewSelect().
+		Model(def).
+		Where("slug = ?", slug).
+		Scan(ctx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrGrantDefinitionNotFound
+		}
+
+		return nil, fmt.Errorf("get grant definition by slug: %w", err)
 	}
 
 	return def, nil
@@ -135,12 +167,15 @@ func (s *Store) UpdateGrantDefinition(ctx context.Context, def *GrantDefinition)
 	// the model's `bun:"controls,array"` tag uses on Insert.
 	res, err := s.db.NewUpdate().
 		Model(def).
-		Column("name", "description", "duration_seconds", "controls", "max_query_counts",
+		Column("name", "slug", "description", "duration_seconds", "controls", "max_query_counts",
 			"max_bytes_transferred", "auto_approve", "group_uids", "database_uids",
 			"approval_patterns", "approver_group_uids").
 		Where("uid = ?", def.UID).
 		Exec(ctx)
 	if err != nil {
+		if isUniqueViolation(err, "grant_definitions_slug_uniq") {
+			return ErrGrantDefinitionSlugDuplicate
+		}
 		return fmt.Errorf("update grant definition: %w", err)
 	}
 

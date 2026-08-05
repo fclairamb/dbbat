@@ -523,13 +523,19 @@ type Grant = AccessGrant
 type GrantDefinition struct {
 	bun.BaseModel `bun:"table:grant_definitions,alias:gd"`
 
-	UID                 uuid.UUID `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
-	Name                string    `bun:"name,notnull" json:"name"`
-	Description         string    `bun:"description,notnull,default:''" json:"description"`
-	DurationSeconds     int64     `bun:"duration_seconds,notnull" json:"duration_seconds"`
-	Controls            []string  `bun:"controls,array,notnull,default:'{}'" json:"controls"`
-	MaxQueryCounts      *int64    `bun:"max_query_counts" json:"max_query_counts"`
-	MaxBytesTransferred *int64    `bun:"max_bytes_transferred" json:"max_bytes_transferred"`
+	UID  uuid.UUID `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	Name string    `bun:"name,notnull" json:"name"`
+	// Slug is a stable, human-typeable, machine-friendly identifier — the
+	// thing a CLI invocation, an agent prompt, or a runbook references
+	// instead of copying a UUID out of the UI. Mandatory and unique at the
+	// database level; the API never auto-generates it (the frontend does,
+	// from the name, until the operator edits it manually).
+	Slug                string   `bun:"slug,notnull" json:"slug"`
+	Description         string   `bun:"description,notnull,default:''" json:"description"`
+	DurationSeconds     int64    `bun:"duration_seconds,notnull" json:"duration_seconds"`
+	Controls            []string `bun:"controls,array,notnull,default:'{}'" json:"controls"`
+	MaxQueryCounts      *int64   `bun:"max_query_counts" json:"max_query_counts"`
+	MaxBytesTransferred *int64   `bun:"max_bytes_transferred" json:"max_bytes_transferred"`
 	// AutoApprove, when set, makes grant requests against this definition
 	// bypass the pending/admin-approval step: the request is approved and
 	// the grant materialized instantly at request time.

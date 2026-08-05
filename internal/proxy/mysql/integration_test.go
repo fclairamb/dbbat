@@ -50,30 +50,66 @@ func mariadbImage() string {
 	return defaultMariaDBImage
 }
 
+// mysqlWaitStrategy decides a MySQL/MariaDB container is usable only once an
+// *authenticated* round trip succeeds.
+//
+// Both server families log their "ready" line and bind the port before the
+// entrypoint has finished applying MYSQL_ROOT_PASSWORD, so the log/port pair
+// says nothing about whether the credentials the tests use already work — the
+// same window that makes the MongoDB fixture flake. It also leaves the default
+// path on the module's 60s startup budget, which a cold mysql:8.4 initdb can
+// blow through on a loaded daemon (that is how TestIntegration_MySQLContainer,
+// which runs no dbbat code at all, manages to fail).
+//
+// `mariadb` is tried before `mysql` because MariaDB 11 deprecates the mysql-*
+// symlinks; mysql:8.4 has no `mariadb` binary and falls through to the second
+// command. Errors are muted so only the exit code decides.
+func mysqlWaitStrategy(logLine string) wait.Strategy {
+	const query = `-uroot -prootpw -e "SELECT 1"`
+
+	// Per-strategy budget, then an overall cap: three independent 120s budgets
+	// would let a genuinely broken container hang the suite for six minutes.
+	const (
+		perStrategyTimeout = 120 * time.Second
+		overallDeadline    = 180 * time.Second
+	)
+
+	return wait.ForAll(
+		wait.ForLog(logLine),
+		wait.ForListeningPort("3306/tcp"),
+		wait.ForExec([]string{
+			"sh", "-c",
+			"mariadb " + query + " 2>/dev/null || mysql " + query + " 2>/dev/null",
+		}).
+			// Polls are sequential, so the interval is pure dead time between
+			// attempts rather than a guard against overlapping execs.
+			WithPollInterval(250*time.Millisecond).
+			WithStartupTimeout(perStrategyTimeout),
+	).
+		WithStartupTimeoutDefault(perStrategyTimeout).
+		WithDeadline(overallDeadline)
+}
+
 // runMySQLContainer starts a MySQL or MariaDB container with predictable
 // test credentials and returns its bound host/port.
 //
 // The testcontainers MySQL module hard-codes a "MySQL Community Server"
-// log wait that doesn't match MariaDB, so we override the wait strategy
-// when the image looks like MariaDB.
+// log wait that doesn't match MariaDB, so the ready log line is picked per
+// family before being handed to the shared readiness strategy.
 func runMySQLContainer(ctx context.Context, t *testing.T, image string) (testcontainers.Container, string, int) {
 	t.Helper()
+
+	// MariaDB never prints the module's "MySQL Community Server" line.
+	logLine := "port: 3306  MySQL Community Server"
+	if strings.Contains(strings.ToLower(image), "mariadb") {
+		logLine = "ready for connections"
+	}
 
 	opts := []testcontainers.ContainerCustomizer{
 		tcmysql.WithDatabase("testdb"),
 		tcmysql.WithUsername("root"),
 		tcmysql.WithPassword("rootpw"),
-	}
-
-	if strings.Contains(strings.ToLower(image), "mariadb") {
-		// MariaDB logs "ready for connections" before the socket is
-		// actually accepting traffic, so layer a TCP-listener check on top.
-		opts = append(opts, testcontainers.WithWaitStrategy(
-			wait.ForAll(
-				wait.ForLog("ready for connections"),
-				wait.ForListeningPort("3306/tcp"),
-			).WithStartupTimeoutDefault(120*time.Second),
-		))
+		testcontainers.WithWaitStrategy(mysqlWaitStrategy(logLine)),
 	}
 
 	c, err := tcmysql.Run(ctx, image, opts...)

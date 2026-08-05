@@ -35,6 +35,7 @@ func setupRequestFixtures(t *testing.T, ctx context.Context, s *Store, suffix st
 
 	def, err := s.CreateGrantDefinition(ctx, &GrantDefinition{
 		Name:            "req-def-" + suffix,
+		Slug:            "req-def-" + suffix,
 		DurationSeconds: 3600,
 		Controls:        []string{ControlReadOnly},
 		CreatedBy:       admin.UID,
@@ -126,6 +127,7 @@ func TestAutoApproveGrantRequest_CreatesGrantWithNoDecider(t *testing.T) {
 
 	def, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
 		Name:            "auto-approve-def",
+		Slug:            "auto-approve-def",
 		DurationSeconds: 3600,
 		Controls:        []string{ControlReadOnly},
 		AutoApprove:     true,

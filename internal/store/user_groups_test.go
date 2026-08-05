@@ -320,6 +320,7 @@ func TestUserGroupDeletionCascadesMembershipButNotScope(t *testing.T) {
 
 	def, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
 		Name:            "scoped-def",
+		Slug:            "scoped-def",
 		DurationSeconds: 3600,
 		Controls:        []string{ControlReadOnly},
 		GroupUIDs:       []uuid.UUID{group.UID},
@@ -370,6 +371,7 @@ func TestGrantDefinitionScopePersistence(t *testing.T) {
 
 	def, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
 		Name:            "persist-def",
+		Slug:            "persist-def",
 		DurationSeconds: 3600,
 		Controls:        []string{ControlReadOnly},
 		CreatedBy:       admin.UID,

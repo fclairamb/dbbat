@@ -62,6 +62,25 @@ test-e2e:
 test-e2e-oracle:
 	go test -tags integration -v -timeout 15m ./internal/proxy/oracle/...
 
+# Protocol integration suites (require Docker).
+#
+# Every test starts its own upstream container *and* its own PostgreSQL storage
+# container, so a suite is dominated by container startup rather than by the
+# assertions. On an idle laptop the MongoDB suite runs in ~4min; with other
+# containers competing for the Docker daemon it has been measured at 7min and
+# once past 12min. `go test`'s default timeout is 10 minutes, so the plain
+# `go test -tags integration ./internal/proxy/mongodb/...` panics on a busy
+# machine even when nothing is wrong. These targets carry the same -timeout 40m
+# the CI workflow uses. A run that exceeds *that* is a real regression.
+test-integration-mongodb:
+	go test -tags integration -v -timeout 40m -count=1 ./internal/proxy/mongodb/...
+
+test-integration-mysql:
+	go test -tags integration -v -timeout 40m -count=1 ./internal/proxy/mysql/...
+
+test-integration-postgresql:
+	go test -tags integration -v -timeout 40m -count=1 ./internal/proxy/postgresql/...
+
 # Run linter
 lint:
 	golangci-lint run

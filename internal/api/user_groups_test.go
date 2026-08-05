@@ -157,6 +157,7 @@ func TestListGrantDefinitions_FiltersByGroupScope(t *testing.T) { //nolint:paral
 
 	scopedDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
 		Name:            "scoped-" + suffix,
+		Slug:            "scoped-" + suffix,
 		DurationSeconds: 3600,
 		Controls:        []string{store.ControlReadOnly},
 		GroupUIDs:       []uuid.UUID{group.UID},
@@ -219,6 +220,7 @@ func TestCreateGrantRequest_RejectsOutOfScope(t *testing.T) { //nolint:parallelt
 	// scope check must hold there too.
 	def, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
 		Name:            "scoped-auto-" + suffix,
+		Slug:            "scoped-auto-" + suffix,
 		DurationSeconds: 3600,
 		Controls:        []string{store.ControlReadOnly},
 		AutoApprove:     true,
