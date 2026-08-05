@@ -232,9 +232,16 @@ DBB_DUMP_UPLOAD_URL=s3://my-bucket/dbbat-captures
 ```
 
 The scheme selects the driver (`gocloud.dev/blob`): `s3://` for S3 and
-S3-compatible stores — credentials come from the standard AWS chain — and
+S3-compatible stores — credentials come from the standard AWS chain (instance
+role, `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, `~/.aws/credentials`) — and
 `file://` for a local directory or a mounted volume. Any path after the bucket
 is used as a key prefix.
+
+The region comes from the environment (`AWS_REGION`) or from the URL:
+`s3://my-bucket/captures?region=eu-west-1`. Other driver options travel the same
+way — `&endpoint=…&awssdk=v2&use_path_style=true` for a MinIO or Ceph endpoint,
+for instance. A bucket URL dbbat cannot open is a **startup failure**, on
+purpose: silently falling back to local-only storage would look like it worked.
 
 Object keys are `<prefix>/YYYY/MM/DD/<instance-id>/<connection-uid>.pcapng`. The
 date segments exist for human browsing only: the key is recorded on the
