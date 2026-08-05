@@ -5,6 +5,9 @@ import (
 	"encoding/binary"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,9 +26,20 @@ import (
 
 // capturedRowStreamPayloads pulls the real row-stream packets of the DBeaver
 // capture's large SELECT (SEGMENT_NAME, TABLE_SIZE) and returns them with their
-// lead byte rewritten from 0x06 to 0x08 — exactly the shape that reached
-// interceptUpstreamMessage in production. The bytes after the lead byte are
+// lead byte rewritten from 0x06 to 0x08. The bytes after the lead byte are
 // untouched capture data.
+//
+// Scope of what this proves, precisely: relabeling byte 0 reproduces the
+// *routing* condition faithfully — interceptUpstreamMessage reads byte 0 as a
+// function code and hands the packet to handleResponse — so these cases prove
+// the query is not falsely completed and its rows are still decoded. They do
+// NOT prove byte-accurate capture of a genuine mid-fetch 0x08 packet: there,
+// byte 0 is row-stream *data* (a value-length prefix, or the first byte of the
+// 08 01 06 footer), whereas parseContinuationRows skips index 0 as a function
+// code and starts scanning at 1. If a real packet of that shape carries a value
+// at offset 0, the decode would be one byte out of alignment. No capture in
+// testdata contains one — every fixture's continuations are cleanly framed as
+// func=0x06 — so that alignment case is untested here rather than faked.
 func capturedRowStreamPayloads(t *testing.T) ([]columnDef, [][]byte) {
 	t.Helper()
 
@@ -145,9 +159,15 @@ func TestHandleResponse_MidFetchRowStream(t *testing.T) {
 			assert.NotEmpty(t, rowStore.rowNumbers(), "the packet's rows must be captured")
 			assert.False(t, pending.truncated, "capture must not be marked truncated")
 
-			// And nothing in those bytes may be readable as an error.
-			assert.Nil(t, parseResponseError(tt.payload),
-				"row-stream bytes must never yield an error string")
+			// And nothing in those bytes may be readable as an error: the
+			// legacy decoder either rejects them outright or finds no error.
+			resp, decErr := decodeTTCResponse(tt.payload)
+			if decErr == nil {
+				assert.False(t, resp.IsError,
+					"row-stream bytes must never yield an error string: %q", resp.ErrorMessage)
+			} else {
+				assert.ErrorIs(t, decErr, ErrNotLegacyResponse)
+			}
 		})
 	}
 }
@@ -168,6 +188,123 @@ func TestHandleResponse_MidFetchOERStillCompletes(t *testing.T) {
 	s.handleResponse(payload)
 
 	assert.Nil(t, s.tracker.pendingQuery, "an end-of-call OER must complete the query")
+}
+
+// completedQuery is what a query recorded when it finished.
+type completedQuery struct {
+	uid          uuid.UUID
+	rowsAffected *int64
+	queryError   *string
+	truncated    bool
+}
+
+// recordingCompletionStore stands in for the store on the completion path so a
+// test can assert what a completed query actually persists.
+type recordingCompletionStore struct {
+	completed chan completedQuery
+	created   chan *store.Query
+}
+
+func newRecordingCompletionStore() *recordingCompletionStore {
+	return &recordingCompletionStore{
+		completed: make(chan completedQuery, 4),
+		created:   make(chan *store.Query, 4),
+	}
+}
+
+func (r *recordingCompletionStore) CreateQuery(_ context.Context, query *store.Query) (*store.Query, error) {
+	r.created <- query
+
+	return query, nil
+}
+
+func (r *recordingCompletionStore) UpdateQueryCompletion(
+	_ context.Context,
+	uid uuid.UUID,
+	_ *float64,
+	rowsAffected *int64,
+	queryError *string,
+	resultsTruncated bool,
+	_ bool,
+) error {
+	r.completed <- completedQuery{
+		uid:          uid,
+		rowsAffected: rowsAffected,
+		queryError:   queryError,
+		truncated:    resultsTruncated,
+	}
+
+	return nil
+}
+
+func (r *recordingCompletionStore) IncrementConnectionStats(_ context.Context, _ uuid.UUID, _ int64) error {
+	return nil
+}
+
+// awaitCompletion waits for the asynchronous completion write.
+func (r *recordingCompletionStore) awaitCompletion(t *testing.T) completedQuery {
+	t.Helper()
+
+	select {
+	case got := <-r.completed:
+		return got
+	case <-time.After(5 * time.Second):
+		t.Fatal("query completion was never written")
+
+		return completedQuery{}
+	}
+}
+
+// TestHandleResponse_MidFetchErrorOERIsRecorded is the over-correction guard:
+// the dangerous way to get item 1 wrong is to swallow a genuine ORA error that
+// arrives while rows are streaming. A Response carrying an error OER must both
+// complete the query and land its message in the stored record.
+func TestHandleResponse_MidFetchErrorOERIsRecorded(t *testing.T) {
+	t.Parallel()
+
+	const message = "ORA-00942: table or view does not exist"
+
+	s, _, queryUID := newCapturingSession(t, 10000)
+
+	recorder := newRecordingCompletionStore()
+	s.completionStore = recorder
+
+	// Rows are streaming: columns are known, so the mid-fetch guard is active.
+	s.tracker.pendingQuery.cursor.columns = []columnDef{{Name: "ID"}}
+
+	oer := buildOER(oerEndOfCallBit, 1, 0, 942)
+
+	payload := make([]byte, 0, 4+len(oer)+len(message))
+	payload = append(payload, byte(TTCFuncResponse), 0x01)
+	payload = append(payload, oer...)
+	payload = append(payload, 0x00, 0x00)
+	payload = append(payload, message...)
+
+	s.handleResponse(payload)
+
+	require.Nil(t, s.tracker.pendingQuery, "an error OER must complete the query")
+
+	got := recorder.awaitCompletion(t)
+	assert.Equal(t, queryUID, got.uid)
+	require.NotNil(t, got.queryError, "a genuine mid-fetch ORA error must not be swallowed")
+	assert.Equal(t, message, *got.queryError)
+}
+
+// TestCompleteQuery_DropsNonDiagnosticError checks the sink guard end to end on
+// the Oracle path: bytes that are not readable text never reach the record.
+func TestCompleteQuery_DropsNonDiagnosticError(t *testing.T) {
+	t.Parallel()
+
+	s, _, _ := newCapturingSession(t, 10000)
+
+	recorder := newRecordingCompletionStore()
+	s.completionStore = recorder
+
+	rowData := "\x15\x03\x07\x01\xc2\x0a1-Habitation\x07Non défini"
+	s.completeQuery(nil, &rowData)
+
+	got := recorder.awaitCompletion(t)
+	assert.Nil(t, got.queryError, "row bytes must never be persisted as an error")
 }
 
 // buildMidFetchRowStreamPayload synthesizes the production packet's shape: a
@@ -239,7 +376,6 @@ func TestDecodeTTCResponse_LegacyErrorGate(t *testing.T) {
 			if !tt.wantError {
 				require.ErrorIs(t, err, ErrNotLegacyResponse,
 					"non-diagnostic bytes must be rejected, never surfaced as an error")
-				assert.Nil(t, parseResponseError(payload))
 
 				return
 			}
@@ -247,7 +383,6 @@ func TestDecodeTTCResponse_LegacyErrorGate(t *testing.T) {
 			require.NoError(t, err)
 			assert.True(t, resp.IsError)
 			assert.Equal(t, tt.message, resp.ErrorMessage)
-			require.NotNil(t, parseResponseError(payload))
 		})
 	}
 }
@@ -290,8 +425,6 @@ func TestDecodeTTCResponse_NoFabricatedErrorsInCaptures(t *testing.T) {
 					assert.False(t, resp.IsError,
 						"no capture contains a failing statement: %q", resp.ErrorMessage)
 				}
-
-				assert.Nil(t, parseResponseError(ttcPayload))
 			}
 		})
 	}

@@ -487,8 +487,29 @@ Two independent fixes, either of which alone would have prevented the production
   from the code alone. Every `0x08` Response in every capture fixture used to decode as a
   bogus `ORA-<huge number>`; a replay test now asserts none of them do.
 
-As a last line of defence, `shared.SanitizeQueryError` drops any query error string that is
-not valid UTF-8 or that carries control bytes, on every protocol's completion path.
+As a last line of defence, `shared.SanitizeQueryError` guards every protocol's completion
+path. It is deliberately **not** a plain "valid UTF-8 or drop" check, because dbbat does not
+know the session charset: a genuine diagnostic from a WE8ISO8859P1 session (the common case
+on European estates) is not valid UTF-8, and dropping it would silently lose real errors.
+Instead:
+
+- a string carrying **control bytes** (C0, DEL, C1) is dropped — no diagnostic contains
+  them, and misread row data always does;
+- a string with a **few undecodable bytes** is kept, with those bytes replaced by U+FFFD:
+  `ORA-00001: contrainte unique viol<?>e` is more useful to an operator than nothing;
+- a string that is **more than a quarter** undecodable is binary, not a sentence with
+  accents in it, and is dropped.
+
+Both outcomes are logged at debug with the length only, never the bytes.
+
+A related, pre-existing limitation sits upstream of that gate: `extractORAMessage` truncates
+an OER's message at the first non-printable byte, so a Latin-1 accent inside a genuine ORA
+message ends the extracted text there. The sanitizer never sees those bytes.
+
+Also note `cleanup()` now flushes a still-pending query. A client that disconnects mid-fetch
+used to leave the query row forever incomplete — `duration_ms` NULL and its bytes never
+charged to the connection or the grant. The fabricated completion removed above used to
+(wrongly) close such rows, which is why the leak had gone unnoticed.
 
 #### OCI wide (4-byte little-endian) TTC encoding
 

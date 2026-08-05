@@ -170,6 +170,13 @@ var oracleDiagnosticPrefixes = []string{"ORA-", "PLS-", "TNS-"}
 // misread bytes is exactly the fabrication this gate exists to prevent, and
 // genuine server errors reach dbbat through the OER path (findOERInResponse),
 // not this one.
+//
+// The trade that removes: a real legacy Response whose message is absent or
+// truncated past the end of the payload is now rejected wholesale, so it does
+// not complete the query either — the query stays pending until the next call
+// boundary (or cleanup) closes it. No capture fixture exhibits that shape, and
+// every 0x08 Response across all 16 of them used to decode to a fabricated
+// "ORA-<huge number>", so mis-firing here was the far more likely failure.
 func legacyResponseErrorMessage(payload []byte, errCode uint32) (string, bool) {
 	if errCode >= maxPlausibleORACode {
 		return "", false
