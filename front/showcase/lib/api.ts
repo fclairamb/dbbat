@@ -23,9 +23,10 @@ export interface UserRow extends Identified {
 }
 
 export interface ConnectionRow extends Identified {
-  status?: string;
-  username?: string;
-  database_name?: string;
+  user_id: string;
+  database_id: string;
+  /** Null/absent while the session is still live. */
+  disconnected_at?: string | null;
 }
 
 /** Authenticated REST client bound to one dbbat user. */

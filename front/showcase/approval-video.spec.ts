@@ -20,11 +20,11 @@ import {
   ADMIN,
   API_URL,
   BASE_URL,
-  CONNECTOR,
   SERVER_NAME,
   WORK_DIR,
   shouldFreezeClock,
 } from "./config";
+import { readState } from "./state";
 import { freezeClock } from "./fixtures";
 import { ShowcaseApi, type ConnectionRow } from "./lib/api";
 import { cursorClick, installFakeCursor } from "./lib/cursor";
@@ -61,10 +61,15 @@ test("video: an UPDATE is held for approval and released from the UI", async ({
   const client: Client = proxyClient();
   await client.connect();
 
-  let uid = "";
+  const scenario = readState();
+
   try {
     await client.query("SELECT 1");
-    uid = await waitForConnection(api);
+    const uid = await waitForConnection(
+      api,
+      scenario.serverUid,
+      scenario.connectorUid,
+    );
 
     // Land the browser straight on the watch panel: seeding the session token
     // skips a login screen nobody wants in a 25-second clip.
@@ -143,20 +148,28 @@ test("video: an UPDATE is held for approval and released from the UI", async ({
   }
 });
 
-/** Poll for the proxy session the `pg` client just opened. */
-async function waitForConnection(api: ShowcaseApi): Promise<string> {
+/**
+ * Poll for the proxy session the `pg` client just opened.
+ *
+ * Scoped to the showcase's own server row and user, and to a session that has
+ * not disconnected — global-setup's traffic run left closed connections behind
+ * and picking one of those up would produce a video of a dead page.
+ */
+async function waitForConnection(
+  api: ShowcaseApi,
+  serverUid: string,
+  userUid: string,
+): Promise<string> {
   const deadline = Date.now() + 20_000;
   while (Date.now() < deadline) {
     const body = await api.get<{ connections?: ConnectionRow[] }>(
-      "/connections",
+      `/connections?database_id=${serverUid}&user_id=${userUid}`,
     );
-    const active = (body.connections ?? []).find(
-      (c) =>
-        c.status === "active" &&
-        (c.username === undefined || c.username === CONNECTOR.username),
+    const live = (body.connections ?? []).find(
+      (c) => c.disconnected_at === null || c.disconnected_at === undefined,
     );
-    if (active) {
-      return active.uid;
+    if (live) {
+      return live.uid;
     }
     await new Promise((resolve) => setTimeout(resolve, 300));
   }

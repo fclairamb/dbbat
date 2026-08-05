@@ -31,7 +31,8 @@ export function readState(): ShowcaseState {
     return JSON.parse(readFileSync(STATE_FILE, "utf8")) as ShowcaseState;
   } catch (err) {
     throw new Error(
-      `showcase: no scenario state at ${STATE_FILE} — run the suite through its own config so global-setup executes (${String(err)})`,
+      `showcase: no scenario state at ${STATE_FILE} — run the suite through its own config so global-setup executes`,
+      { cause: err },
     );
   }
 }
