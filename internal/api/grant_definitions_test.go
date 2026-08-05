@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
 	"github.com/fclairamb/dbbat/internal/store"
@@ -104,6 +105,37 @@ func TestGetGrantDefinition_BySlug(t *testing.T) { //nolint:paralleltest // shar
 		w, _ := doJSON(t, router, http.MethodGet, "/api/v1/grant-definitions/does-not-exist", adminToken, nil)
 		require.Equal(t, http.StatusNotFound, w.Code)
 	})
+}
+
+// TestGetGrantDefinition_SlugShapedLikeUUID pins down the edge case the spec
+// calls out explicitly: the slug format also accepts UUID-shaped strings, so
+// a definition deliberately given such a slug must still resolve by slug
+// even though the path param is first tried as a uid. Without the
+// uid-miss-then-slug-retry fallback, this would be a confusing 404 instead.
+func TestGetGrantDefinition_SlugShapedLikeUUID(t *testing.T) { //nolint:paralleltest // shared migration lock
+	server, dataStore := setupTestServer(t)
+	suffix := "ggdsu"
+
+	createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	router := grantDefinitionsRouter(server)
+
+	// A syntactically valid (but otherwise unused) UUID, chosen as the slug.
+	// It satisfies the slug regex — lowercase hex segments joined by
+	// hyphens are indistinguishable from `^[a-z0-9]+(-[a-z0-9]+)*$` — and is
+	// guaranteed not to equal any definition's real uid.
+	uuidShapedSlug := uuid.New().String()
+
+	w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grant-definitions", adminToken,
+		validCreateDefinitionBody("UUID-shaped slug "+suffix, uuidShapedSlug))
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Equal(t, uuidShapedSlug, resp["slug"])
+
+	w, resp = doJSON(t, router, http.MethodGet, "/api/v1/grant-definitions/"+uuidShapedSlug, adminToken, nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Equal(t, uuidShapedSlug, resp["slug"], "the uid-shaped path param should fall back to a slug match")
+	require.NotEqual(t, uuidShapedSlug, resp["uid"], "sanity check: the slug is not this definition's real uid")
 }
 
 func TestCreateGrantRequest_BySlug(t *testing.T) { //nolint:paralleltest // shared migration lock
