@@ -2111,12 +2111,17 @@ paths:
         | Topic | Payload | Who |
         |---|---|---|
         | `connection/<uid>/queries` | every query on that connection | admin, viewer, or the connection's owner |
-        | `approvals/pending` | approval-pending queries, all connections | admin, or a member of an approver group |
+        | `approvals/pending` | approval-pending queries, all connections | admin, viewer, or a member of an approver group |
         | `connections` | connection open/close | admin |
 
-        Authorization is per-topic, evaluated at subscribe time **and
-        re-checked on every send** — a topic grants exactly what the equivalent
-        REST endpoint would, never more.
+        Authorization is evaluated at subscribe time **and re-checked on every
+        send** — a topic grants exactly what the equivalent REST endpoint
+        would, never more.
+
+        `approvals/pending` is additionally filtered **per event**: it is a
+        global fan-out, so admins and viewers receive every held statement
+        while anybody else receives only holds they are an approver for —
+        exactly the rows `GET /api/v1/queries/pending` would return them.
 
         **Backpressure.** Each subscriber has a bounded send buffer. On
         overflow events are dropped and a `lagged` frame is emitted; the client
