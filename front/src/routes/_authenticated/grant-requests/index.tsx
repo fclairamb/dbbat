@@ -111,6 +111,7 @@ function GrantRequestsPage() {
     if (!def) return;
     const body: CreateGrantDefinitionRequest = {
       name: def.name,
+      slug: def.slug,
       description: def.description,
       duration_seconds: def.duration_seconds,
       controls: def.controls,
