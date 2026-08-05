@@ -6,6 +6,7 @@ import { PageHeader } from "@/components/shared/PageHeader";
 import { AdaptiveRefresh } from "@/components/shared/AdaptiveRefresh";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { UpstreamTlsIndicator } from "@/components/shared/UpstreamTlsIndicator";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { ChevronLeft, ChevronRight } from "lucide-react";
@@ -55,6 +56,14 @@ function ConnectionsPage() {
     users?.find((u) => u.uid === uid)?.username ?? uid;
   const getDbName = (uid: string) =>
     databases?.find((d) => d.uid === uid)?.name ?? uid;
+
+  // The protocol only comes back on the full (admin) server payload — a
+  // non-admin sees uid/name/description and nothing else, so `undefined` here
+  // is a legitimate "your role can't tell", not a missing lookup.
+  const getDbProtocol = (uid: string) => {
+    const db = databases?.find((d) => d.uid === uid);
+    return db && "host" in db ? db.protocol : undefined;
+  };
 
   const filteredConnections = active
     ? connections?.filter((c) => !c.disconnected_at)
@@ -130,6 +139,16 @@ function ConnectionsPage() {
       key: "bytes",
       header: "Data",
       cell: (c) => <span>{formatBytes(c.bytes_transferred)}</span>,
+    },
+    {
+      key: "upstream_tls",
+      header: "Upstream",
+      cell: (c) => (
+        <UpstreamTlsIndicator
+          upstreamTls={c.upstream_tls}
+          protocol={getDbProtocol(c.database_id)}
+        />
+      ),
     },
   ];
 

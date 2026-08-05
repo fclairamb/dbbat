@@ -24,6 +24,11 @@ import { format, formatDistanceToNow } from "date-fns";
 import { useBreadcrumbTitle } from "@/contexts/BreadcrumbContext";
 import { useAuth } from "@/contexts/AuthContext";
 import { ConnectionWatchPanel } from "@/components/shared/ConnectionWatchPanel";
+import { UpstreamTlsIndicator } from "@/components/shared/UpstreamTlsIndicator";
+import {
+  upstreamTlsExplanation,
+  upstreamTlsState,
+} from "@/lib/upstream-tls";
 import { formatBytes } from "@/lib/utils";
 
 const RECENT_QUERIES_LIMIT = 50;
@@ -135,6 +140,17 @@ function ConnectionDetailPage() {
     },
   ];
 
+  // The protocol and ssl_mode fields only exist on the full (admin) server
+  // payload — a viewer or connector gets uid/name/description and nothing
+  // more, so both stay undefined for them and the indicator degrades to the
+  // honest, unattributed reading.
+  const server = databases?.find((d) => d.uid === connection.database_id);
+  const fullServer = server && "host" in server ? server : undefined;
+  const tlsState = upstreamTlsState(
+    connection.upstream_tls,
+    fullServer?.protocol,
+  );
+
   const end = connection.disconnected_at
     ? new Date(connection.disconnected_at)
     : new Date();
@@ -242,6 +258,38 @@ function ConnectionDetailPage() {
                 Data Transferred
               </dt>
               <dd>{formatBytes(connection.bytes_transferred)}</dd>
+            </div>
+            <div>
+              <dt className="text-sm font-medium text-muted-foreground mb-1">
+                Upstream Encryption
+              </dt>
+              <dd className="flex flex-wrap items-center gap-2">
+                <UpstreamTlsIndicator
+                  upstreamTls={connection.upstream_tls}
+                  protocol={fullServer?.protocol}
+                  sslMode={fullServer?.ssl_mode}
+                />
+                {/* The policy sits next to the outcome on purpose: "policy
+                    said prefer, outcome was plaintext" is one statement, and
+                    reading it as two separate facts is what made a silent
+                    downgrade invisible in the first place. */}
+                {fullServer && tlsState !== "not-applicable" && (
+                  <span
+                    className="text-xs text-muted-foreground"
+                    data-testid="upstream-tls-policy"
+                  >
+                    policy:{" "}
+                    <span className="font-mono">
+                      {fullServer.ssl_mode || "prefer (default)"}
+                    </span>
+                  </span>
+                )}
+              </dd>
+              {tlsState !== "encrypted" && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {upstreamTlsExplanation(tlsState)}
+                </p>
+              )}
             </div>
           </dl>
         </CardContent>
