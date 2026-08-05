@@ -314,6 +314,10 @@ func (h *handler) recordQueryWithUID(
 		return // pre-handshake or pre-connection-record; nothing to log against
 	}
 
+	// Last gate before the store: never persist an "error" that is not readable
+	// text. See shared.SanitizeQueryError.
+	queryError = shared.SanitizeQueryError(s.ctx, s.logger, queryError)
+
 	total := s.cumulativeClientBytes()
 	bytesTransferred := total - s.lastBytesSnapshot
 	s.lastBytesSnapshot = total
