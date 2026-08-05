@@ -711,9 +711,8 @@ export interface paths {
             path: {
                 /**
                  * @description Either the definition's uid or its slug. A syntactically
-                 *     UUID-shaped value is tried as a uid first, then retried as a slug
-                 *     if that misses — so a slug that happens to look like a UUID still
-                 *     resolves.
+                 *     UUID-shaped value is looked up as a uid only — slugs can never be
+                 *     UUID-shaped, so there is no fallback to attempt.
                  */
                 uid: string;
             };
@@ -1892,8 +1891,8 @@ export interface components {
         CreateGrantRequestPayload: {
             /**
              * @description Either the definition's uid or its slug. A syntactically
-             *     UUID-shaped value is tried as a uid first, then retried as a
-             *     slug if that misses.
+             *     UUID-shaped value is looked up as a uid only — slugs can never
+             *     be UUID-shaped, so there is no fallback to attempt.
              */
             grant_definition_id: string;
             /** Format: uuid */
@@ -1919,6 +1918,11 @@ export interface components {
              *     anywhere a definition uid is accepted: `GET/PATCH/DELETE
              *     /grant-definitions/{uid}` and `grant_definition_id` on
              *     `POST /grant-requests`.
+             *
+             *     Must not be a UUID (in either the canonical hyphenated form or
+             *     the bare 32-hex-digit form — both parse as one) — that would
+             *     defeat the point of a human-typeable handle and make it
+             *     ambiguous with the uid-based lookup on the endpoints above.
              */
             slug: string;
             description?: string;
@@ -1980,6 +1984,11 @@ export interface components {
              *     edits it manually, but CLI/agent/scripted callers must supply
              *     one explicitly. Must be unique across every definition, active
              *     or not.
+             *
+             *     Must not be a UUID (canonical hyphenated or bare 32-hex-digit
+             *     form) — rejected with 400 even though both forms are shaped like
+             *     valid slugs, since a UUID slug would defeat the point and be
+             *     ambiguous with uid-based lookups.
              */
             slug: string;
             description?: string;
@@ -4007,9 +4016,8 @@ export interface operations {
             path: {
                 /**
                  * @description Either the definition's uid or its slug. A syntactically
-                 *     UUID-shaped value is tried as a uid first, then retried as a slug
-                 *     if that misses — so a slug that happens to look like a UUID still
-                 *     resolves.
+                 *     UUID-shaped value is looked up as a uid only — slugs can never be
+                 *     UUID-shaped, so there is no fallback to attempt.
                  */
                 uid: string;
             };
@@ -4037,9 +4045,8 @@ export interface operations {
             path: {
                 /**
                  * @description Either the definition's uid or its slug. A syntactically
-                 *     UUID-shaped value is tried as a uid first, then retried as a slug
-                 *     if that misses — so a slug that happens to look like a UUID still
-                 *     resolves.
+                 *     UUID-shaped value is looked up as a uid only — slugs can never be
+                 *     UUID-shaped, so there is no fallback to attempt.
                  */
                 uid: string;
             };
@@ -4068,9 +4075,8 @@ export interface operations {
             path: {
                 /**
                  * @description Either the definition's uid or its slug. A syntactically
-                 *     UUID-shaped value is tried as a uid first, then retried as a slug
-                 *     if that misses — so a slug that happens to look like a UUID still
-                 *     resolves.
+                 *     UUID-shaped value is looked up as a uid only — slugs can never be
+                 *     UUID-shaped, so there is no fallback to attempt.
                  */
                 uid: string;
             };
