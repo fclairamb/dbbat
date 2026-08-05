@@ -333,6 +333,25 @@ func (u *Uploader) Open(ctx context.Context, key string) (io.ReadCloser, error) 
 	return r, nil
 }
 
+// Stat returns the size in bytes of a previously uploaded capture, without
+// reading its body. Returns fs.ErrNotExist (wrapped) when the object is gone.
+func (u *Uploader) Stat(ctx context.Context, key string) (int64, error) {
+	if u == nil || key == "" {
+		return 0, os.ErrNotExist
+	}
+
+	attrs, err := u.bucket.Attributes(ctx, key)
+	if err != nil {
+		if gcerrors.Code(err) == gcerrors.NotFound {
+			return 0, fmt.Errorf("capture %q: %w", key, os.ErrNotExist)
+		}
+
+		return 0, fmt.Errorf("stat capture %q: %w", key, err)
+	}
+
+	return attrs.Size, nil
+}
+
 // Delete removes an uploaded capture. A missing object is not an error: the
 // caller's intent (the capture should be gone) is already satisfied.
 func (u *Uploader) Delete(ctx context.Context, key string) error {

@@ -375,7 +375,10 @@ func (s *Server) setupRouter() *gin.Engine {
 			// Connections: admin/viewer see all, connector sees own only (filtered in handler)
 			authenticated.GET("/connections", s.handleListConnections)
 			authenticated.GET("/connections/:uid", s.handleGetConnection)
-			authenticated.GET("/connections/:uid/dump", s.requireAdminOrViewer(), s.handleGetConnectionDump)
+			// Capture download is admin-only (narrowed from admin-or-viewer):
+			// the raw pcapng is byte-fidelity beyond what a viewer sees on the
+			// queries pages, including the auth handshake and every result row.
+			authenticated.GET("/connections/:uid/dump", s.requireAdmin(), s.handleGetConnectionDump)
 			authenticated.DELETE("/connections/:uid/dump", s.requireAdmin(), s.handleDeleteConnectionDump)
 			// Live event stream (WebSocket). Per-topic authorization happens
 			// inside the handler and is re-checked on every send, so no role
