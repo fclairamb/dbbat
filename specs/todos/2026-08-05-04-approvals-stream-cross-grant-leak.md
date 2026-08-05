@@ -78,3 +78,64 @@ changes, this filter inherits the change automatically by staying aligned with
 No GitHub issue filed yet — this should get one, but as a security-sensitive
 disclosure consider a private channel (GitHub security advisory) rather than a
 public issue with the reproduction recipe.
+
+---
+
+## Implementation Plan
+
+1. **Make the broker's authorizer event-aware** (`internal/events/broker.go`).
+   `Authorizer` grows from `func(topic string) bool` to
+   `func(topic string, ev *Event) bool`. `Subscriber.Subscribe(topic)` passes
+   `nil` (subscribe time knows no event); `Subscriber.Authorized` takes the
+   `Event` instead of the topic string and passes `&ev`. The broker still never
+   calls the authorizer on the publish path — nothing about the backpressure or
+   drop-exemption policy changes.
+
+2. **Generalize the per-socket memo** (`internal/api/stream.go`).
+   `topicAuthCache` becomes a keyed decision cache (`authDecisionCache`) whose
+   `allowed(key string, lookup func() bool)` takes the lookup per call, so the
+   same bounded/TTL'd structure memoizes both the topic decision (`topic:<name>`)
+   and the per-event decision (`conn:<connection_uid>`). Same `topicAuthTTL`,
+   same eviction, same cap. Keying on the connection is sound because every
+   query on a connection shares its `(user, database)` pair — which is exactly
+   what `mayApproveQuery` resolves the grant from — so all events on one
+   connection have one identical decision.
+
+3. **Add the per-event rule** (`internal/api/stream.go`).
+   A `streamAuthorizer` holds the socket's user, ctx and cache and implements
+   `allowed(topic, ev)`:
+   - topic-level `mayReadTopic` first (unchanged behaviour, memoized);
+   - if there is no event, or the event is not on `approvals/pending`, that is
+     the whole answer (per-connection topics are already precise);
+   - otherwise apply `mayViewQuery` to the event's query. Admin/viewer
+     short-circuit exactly as `mayViewQuery` does; everybody else resolves
+     `data["query_uid"]` through `store.GetQueryWithOwner` and calls
+     `s.mayViewQuery` — **the same helper the REST endpoint uses**, so the two
+     cannot drift. Any missing uid, unparseable uid or store error denies.
+
+4. **Admit viewers to `approvals/pending`** in `mayReadTopic`, aligning the
+   subscribe gate with `mayViewQuery`'s viewer clause. Ordinary connectors keep
+   the `isApproverSomewhere` subscribe gate *and* now get per-grant filtering.
+
+5. **Coverage** — `announceResolved` and `broadcastResolution` publish on the
+   same topic, so the subscriber-side filter covers resolution events with no
+   change at the publisher. Same for `StartEventListener`/`republish`, which
+   goes through `PublishLocal` → `offer` → `flushStream` → `Authorized`; tested
+   rather than assumed.
+
+6. **Tests**
+   - `internal/api/stream_test.go`: unit tests on the new per-event
+     authorization (missing/blank/garbage `query_uid` denies; admin and viewer
+     pass without a store hit; memo is keyed per connection, not per topic).
+   - `internal/api/approvals_test.go` (store-backed): two users, two grants,
+     user A approver on grant A only; an event for grant B's held query is
+     refused for A and allowed for the admin — asserted through the real
+     `events.Subscriber` seam, for the direct publish path *and* for the
+     cross-replica `republish` path.
+   - `internal/proxy/shared/approval_test.go`: update the existing
+     `TestHoldPublishesOnBothTopics` authorizer to the new signature.
+
+7. **Docs** — update the topic/authorization table and the authorization
+   paragraph in `docs/approvals.md`: `approvals/pending` now reads "admin,
+   viewer, or a member of an approver group (filtered per grant)", and
+   authorization is per-topic *and* per-event.
