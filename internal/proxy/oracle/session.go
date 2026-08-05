@@ -26,13 +26,20 @@ import (
 
 // session represents a single Oracle proxy session.
 type session struct {
-	clientConn    net.Conn
-	upstreamConn  net.Conn
-	store         *store.Store
-	encryptionKey []byte
-	logger        *slog.Logger
-	ctx           context.Context //nolint:containedctx
-	authCache     *cache.AuthCache
+	clientConn   net.Conn
+	upstreamConn net.Conn
+	store        *store.Store
+	// completionStore is the slice of the store that query completion writes
+	// through. Narrowing it to an interface keeps the completion path — and in
+	// particular the error text a query ends up recording — assertable in a
+	// unit test, which matters because that is the path a mid-fetch ORA error
+	// travels. Always the session's store in production; nil in tests that
+	// don't care.
+	completionStore queryCompletionStore
+	encryptionKey   []byte
+	logger          *slog.Logger
+	ctx             context.Context //nolint:containedctx
+	authCache       *cache.AuthCache
 
 	// Connection metadata
 	serviceName   string
@@ -206,7 +213,7 @@ func newSession(
 	watched := shared.NewWatchedConn(clientConn)
 	_ = shared.EnableClientKeepAlive(clientConn)
 
-	return &session{
+	s := &session{
 		watched:         watched,
 		clientConn:      shared.NewCountingConn(watched, bytesFromClient, bytesToClient),
 		store:           dataStore,
@@ -221,6 +228,15 @@ func newSession(
 		bytesFromClient: bytesFromClient,
 		bytesToClient:   bytesToClient,
 	}
+
+	// Assigned separately so a nil store stays a nil interface rather than a
+	// non-nil interface wrapping a nil pointer, which the nil checks on the
+	// completion path rely on.
+	if dataStore != nil {
+		s.completionStore = dataStore
+	}
+
+	return s
 }
 
 // run executes the full session lifecycle with terminated authentication.
@@ -1549,6 +1565,14 @@ func (s *session) sendRefuse(oraCode uint16, reason string) {
 
 // cleanup closes upstream connection and updates records.
 func (s *session) cleanup() {
+	// Finish any query still in flight before the connection record closes.
+	// A client that disconnects mid-fetch (or an upstream that drops) otherwise
+	// leaves its row forever incomplete — duration_ms NULL, results_truncated
+	// unset, and the streamed bytes never charged to the connection or the
+	// grant, which is a way to under-report against a byte quota. Same reasoning
+	// as the completeQuery on the quota-kill path in upstreamToClient.
+	s.flushPendingQuery()
+
 	s.stream.Connection(s.ctx, shared.ConnectionClosed)
 
 	if s.grant != nil && s.revocation != nil {

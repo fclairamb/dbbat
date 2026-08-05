@@ -1,6 +1,7 @@
 package oracle
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -380,6 +381,25 @@ func (s *session) persistQueryRecord() {
 	s.stream.Query(created.UID, query)
 }
 
+// queryCompletionStore is the slice of the store that query completion writes
+// through: the create-on-completion path, the update-after-streaming path, and
+// the connection byte counter. It exists so the completion path can be driven
+// by a unit test — the error text a completed query records is the property
+// this package's mid-fetch handling hinges on.
+type queryCompletionStore interface {
+	CreateQuery(ctx context.Context, query *store.Query) (*store.Query, error)
+	UpdateQueryCompletion(
+		ctx context.Context,
+		uid uuid.UUID,
+		durationMs *float64,
+		rowsAffected *int64,
+		queryError *string,
+		resultsTruncated bool,
+		resultsDropped bool,
+	) error
+	IncrementConnectionStats(ctx context.Context, uid uuid.UUID, bytes int64) error
+}
+
 // completeQuery finalizes a query record with duration and updates connection stats.
 // Rows have already been streamed to the database during capture.
 //
@@ -416,8 +436,10 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 	if pending.queryPersisted && pending.queryUID != uuid.Nil {
 		// Update with duration, error, rows affected. results_truncated is only
 		// known now: the row was inserted before any row was streamed.
-		go s.finalizeQuery(pending.queryUID, pending.rowSink, &duration, rowsAffected, queryError, pending.truncated, bytesTransferred)
-	} else if s.store != nil {
+		if s.completionStore != nil {
+			go s.finalizeQuery(pending.queryUID, pending.rowSink, &duration, rowsAffected, queryError, pending.truncated, bytesTransferred)
+		}
+	} else if s.completionStore != nil {
 		// Create the query record (no rows to stream)
 		query := &store.Query{
 			ConnectionID:     s.connectionUID,
@@ -431,11 +453,11 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 		}
 
 		go func() {
-			if _, err := s.store.CreateQuery(s.ctx, query); err != nil {
+			if _, err := s.completionStore.CreateQuery(s.ctx, query); err != nil {
 				s.logger.ErrorContext(s.ctx, "failed to log query", slog.Any("error", err))
 			}
 
-			if err := s.store.IncrementConnectionStats(s.ctx, s.connectionUID, bytesTransferred); err != nil {
+			if err := s.completionStore.IncrementConnectionStats(s.ctx, s.connectionUID, bytesTransferred); err != nil {
 				s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
 			}
 		}()
@@ -466,13 +488,13 @@ func (s *session) finalizeQuery(
 ) {
 	rowSink.Flush(s.ctx)
 
-	if err := s.store.UpdateQueryCompletion(
+	if err := s.completionStore.UpdateQueryCompletion(
 		s.ctx, queryUID, duration, rowsAffected, queryError, resultsTruncated, rowSink.Dropped(),
 	); err != nil {
 		s.logger.ErrorContext(s.ctx, "failed to finalize query", slog.Any("error", err))
 	}
 
-	if err := s.store.IncrementConnectionStats(s.ctx, s.connectionUID, bytesTransferred); err != nil {
+	if err := s.completionStore.IncrementConnectionStats(s.ctx, s.connectionUID, bytesTransferred); err != nil {
 		s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
 	}
 }
@@ -549,37 +571,6 @@ func truncateSQL(sql string, maxLen int) string {
 	}
 
 	return sql[:maxLen] + "..."
-}
-
-// parseResponseError attempts to extract an error message from a TTC Response payload.
-// Returns the error string if present, or nil if no error.
-func parseResponseError(ttcPayload []byte) *string {
-	// Minimum response: func(1) + seq(1) + errcode(4) + cursor(2) + rowcount(4) + errflag(2) = 14
-	if len(ttcPayload) < 14 {
-		return nil
-	}
-
-	// Error code at offset 2 (after func code + sequence)
-	errCode := binary.BigEndian.Uint32(ttcPayload[2:6])
-	if errCode == 0 {
-		return nil
-	}
-
-	// Error flag at offset 12
-	errFlag := binary.BigEndian.Uint16(ttcPayload[12:14])
-	if errFlag == 0 {
-		return nil
-	}
-
-	// The fixed-offset fields above are only meaningful on a genuine legacy
-	// Response; on row-stream bytes they decode to noise. Share the same proof
-	// as decodeTTCResponse so no caller can turn row data into an error string.
-	errStr, ok := legacyResponseErrorMessage(ttcPayload, errCode)
-	if !ok {
-		return nil
-	}
-
-	return &errStr
 }
 
 // parseResponseRowsAffected attempts to extract rows affected from a TTC Response.
