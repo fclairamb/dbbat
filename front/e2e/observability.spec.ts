@@ -230,6 +230,113 @@ test.describe("Observability Features", () => {
     ).toBeVisible();
   });
 
+  // upstream_tls records an outcome, not a policy: under the opportunistic
+  // ssl_mode values dbbat offers TLS and silently falls back to plaintext when
+  // the target refuses. Test mode seeds proxy_target with ssl_mode=disable and
+  // a sample connection that never negotiated TLS, so every row here is the
+  // plaintext case — which is the one the UI must make visible.
+  test("connections list flags a plaintext upstream leg", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("connections");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const headerRow = authenticatedPage.locator("thead tr");
+    await expect(headerRow.getByText("Upstream", { exact: true })).toBeVisible();
+
+    const rows = authenticatedPage.locator("tbody tr");
+    if ((await rows.count()) === 0) {
+      test.skip(true, "No connection rows available in this environment");
+      return;
+    }
+
+    const indicator = rows
+      .first()
+      .getByTestId("upstream-tls-indicator");
+    await expect(indicator).toBeVisible();
+    // Admin sees the target's protocol (postgresql), so the plaintext leg is
+    // attributable and gets the loud state rather than the muted fallback.
+    await expect(indicator).toHaveAttribute("data-state", "plaintext");
+    await expect(indicator).toHaveText("Plaintext");
+  });
+
+  test("connection detail pairs the TLS outcome with the ssl_mode policy", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("connections");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const rows = authenticatedPage.locator("tbody tr");
+    if ((await rows.count()) === 0) {
+      test.skip(true, "No connection rows available in this environment");
+      return;
+    }
+
+    await rows.first().locator("a").first().click();
+    await expect(authenticatedPage).toHaveURL(/\/connections\/[0-9a-f-]{36}$/);
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    await expect(
+      authenticatedPage.getByText("Upstream Encryption"),
+    ).toBeVisible();
+
+    const indicator = authenticatedPage.getByTestId("upstream-tls-indicator");
+    await expect(indicator).toHaveAttribute("data-state", "plaintext");
+
+    // The policy sits next to the outcome so the two read as one statement.
+    // proxy_target is seeded with ssl_mode=disable.
+    await expect(
+      authenticatedPage.getByTestId("upstream-tls-policy"),
+    ).toContainText("disable");
+  });
+
+  test("viewer sees the plaintext leg without an unattributable warning", async ({
+    authenticatedPage,
+    browser,
+  }) => {
+    await authenticatedPage.goto("connections");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const rows = authenticatedPage.locator("tbody tr");
+    if ((await rows.count()) === 0) {
+      test.skip(true, "No connection rows available in this environment");
+      return;
+    }
+
+    const href = await rows.first().locator("a").first().getAttribute("href");
+    const connectionId = href?.match(/connections\/([0-9a-f-]{36})/)?.[1];
+    expect(connectionId).toBeTruthy();
+
+    const viewerContext = await browser.newContext();
+    const page = await viewerContext.newPage();
+    await page.goto("/");
+    await page.waitForLoadState("domcontentloaded");
+    await page.getByTestId("login-logo").waitFor({ state: "visible" });
+    await page.getByTestId("login-username").fill("viewer");
+    await page.getByTestId("login-password").fill("viewer");
+    await page.getByTestId("login-submit").click();
+    await page.waitForURL((url) => !url.pathname.includes("/login"), {
+      timeout: 10000,
+    });
+
+    await page.goto(`connections/${connectionId}`);
+    await page.waitForLoadState("networkidle");
+    await expect(page.getByText("Connection Information")).toBeVisible();
+
+    // A viewer only gets uid/name/description for a server, so the UI cannot
+    // tell a genuine downgrade from an Oracle session (always plaintext by
+    // design). It reports the honest outcome without the warning styling, and
+    // without a policy it has no business knowing.
+    const indicator = page.getByTestId("upstream-tls-indicator");
+    await expect(indicator).toHaveAttribute(
+      "data-state",
+      "plaintext-unattributed",
+    );
+    await expect(page.getByTestId("upstream-tls-policy")).toHaveCount(0);
+
+    await viewerContext.close();
+  });
+
   test("a connector cannot open another user's connection page", async ({
     authenticatedPage,
     browser,
