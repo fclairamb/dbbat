@@ -422,7 +422,16 @@ function LoginPage() {
                 variant="outline"
                 className="w-full"
                 onClick={() => {
-                  window.location.href = slackProvider.authorize_url!;
+                  // Forward the post-login target through the OAuth
+                  // round-trip: the backend stores it with the CSRF state and
+                  // the callback brings it back as ?redirect=, so a user sent
+                  // here from e.g. the device consent page still lands there
+                  // after signing in with Slack.
+                  const authorizeUrl = slackProvider.authorize_url!;
+                  window.location.href =
+                    redirectTarget !== "/"
+                      ? `${authorizeUrl}?redirect=${encodeURIComponent(redirectTarget)}`
+                      : authorizeUrl;
                 }}
                 data-testid="slack-login-button"
               >

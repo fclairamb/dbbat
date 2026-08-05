@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -28,6 +29,10 @@ const (
 	oauthStateBytes  = 32
 	oauthStateTTL    = 10 * time.Minute
 	randomPassLength = 32
+
+	// loginRedirectMaxLength bounds the post-login redirect target carried
+	// through the OAuth round-trip; anything longer is dropped, not truncated.
+	loginRedirectMaxLength = 512
 )
 
 // authProviderInfo describes an available auth method.
@@ -71,11 +76,15 @@ func (s *Server) handleOAuthAuthorize(providerName string) gin.HandlerFunc {
 			return
 		}
 
-		// Persist state for CSRF validation
+		// Persist state for CSRF validation. The state row also carries the
+		// post-login redirect target (e.g. the device consent page that
+		// bounced the user here), so the callback can send the user back to
+		// where they started instead of the dashboard.
 		oauthState := &store.OAuthState{
-			State:     stateToken,
-			Provider:  providerName,
-			ExpiresAt: time.Now().Add(oauthStateTTL),
+			State:       stateToken,
+			Provider:    providerName,
+			RedirectURL: sanitizeLoginRedirect(c.Query("redirect")),
+			ExpiresAt:   time.Now().Add(oauthStateTTL),
 		}
 
 		if _, err := s.store.CreateOAuthState(c.Request.Context(), oauthState); err != nil {
@@ -170,12 +179,19 @@ func (s *Server) handleOAuthCallback(providerName string) gin.HandlerFunc {
 			slog.String("username", user.Username),
 			slog.Any("uid", user.UID))
 
-		// 6. Redirect to frontend with token
+		// 6. Redirect to frontend with token, forwarding the redirect target
+		// captured when the flow started (re-sanitized: the column is not
+		// otherwise constrained). The login page picks `redirect` up the same
+		// way it does after a password login.
 		baseURL := "/app"
 		if s.config != nil && s.config.BaseURL != "" {
 			baseURL = s.config.BaseURL
 		}
-		c.Redirect(http.StatusFound, baseURL+"/login?token="+plainKey)
+		target := baseURL + "/login?token=" + plainKey
+		if redirectTarget := sanitizeLoginRedirect(oauthState.RedirectURL); redirectTarget != "" {
+			target += "&redirect=" + url.QueryEscape(redirectTarget)
+		}
+		c.Redirect(http.StatusFound, target)
 	}
 }
 
@@ -298,6 +314,25 @@ func (s *Server) cleanupOrphanIdentity(ctx context.Context, provider, providerID
 		return err
 	}
 	return s.store.DeleteUserIdentity(ctx, identity.UID)
+}
+
+// sanitizeLoginRedirect keeps only same-app absolute paths ("/grants", not
+// "//evil.com" or "https://evil.com") so a redirect target riding through the
+// OAuth flow can never leave the SPA — the server-side twin of the login
+// page's getSafeRedirectTarget. Backslashes are rejected too, because
+// browsers normalize "/\evil.com" to "//evil.com". Returns "" for anything
+// unusable.
+func sanitizeLoginRedirect(target string) string {
+	if target == "" || len(target) > loginRedirectMaxLength {
+		return ""
+	}
+	if !strings.HasPrefix(target, "/") || strings.HasPrefix(target, "//") {
+		return ""
+	}
+	if strings.Contains(target, "\\") {
+		return ""
+	}
+	return target
 }
 
 // generateRandomState produces a cryptographically random hex-encoded state string.
