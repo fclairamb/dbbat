@@ -363,12 +363,7 @@ func TestSubscribeAcceptsAWellFormedTopic(t *testing.T) {
 // newStreamAuthorizerFor builds the production authorizer a socket would carry
 // for this user, so the tests exercise the real seam rather than a stand-in.
 func newStreamAuthorizerFor(s *Server, user *store.User) *streamAuthorizer {
-	return &streamAuthorizer{
-		server: s,
-		ctx:    context.Background(),
-		user:   user,
-		cache:  newAuthDecisionCache(),
-	}
+	return &streamAuthorizer{server: s, user: user, cache: newAuthDecisionCache()}
 }
 
 func TestApprovalEventAuthorizationShortCircuitsForAdminAndViewer(t *testing.T) {
@@ -393,19 +388,19 @@ func TestApprovalEventAuthorizationShortCircuitsForAdminAndViewer(t *testing.T) 
 	viewer := &store.User{UID: uuid.New(), Roles: []string{store.RoleViewer}}
 	connector := &store.User{UID: uuid.New(), Roles: []string{store.RoleConnector}}
 
-	if !newStreamAuthorizerFor(s, admin).mayReadApprovalEvent(ev) {
+	if !newStreamAuthorizerFor(s, admin).mayReadApprovalEvent(context.Background(), ev) {
 		t.Fatal("admin must see every pending query, as mayViewQuery says")
 	}
 
-	if !newStreamAuthorizerFor(s, viewer).mayReadApprovalEvent(ev) {
+	if !newStreamAuthorizerFor(s, viewer).mayReadApprovalEvent(context.Background(), ev) {
 		t.Fatal("viewer must see every pending query, as mayViewQuery says")
 	}
 
-	if newStreamAuthorizerFor(s, connector).mayReadApprovalEvent(ev) {
+	if newStreamAuthorizerFor(s, connector).mayReadApprovalEvent(context.Background(), ev) {
 		t.Fatal("a connector was allowed another grant's held SQL with no store to check against")
 	}
 
-	if newStreamAuthorizerFor(s, nil).mayReadApprovalEvent(ev) {
+	if newStreamAuthorizerFor(s, nil).mayReadApprovalEvent(context.Background(), ev) {
 		t.Fatal("an unauthenticated subscriber must read nothing")
 	}
 }
@@ -428,7 +423,7 @@ func TestApprovalEventAuthorizationFailsClosedOnMalformedPayloads(t *testing.T) 
 	for name, data := range payloads {
 		ev := &events.Event{Topic: events.TopicApprovalsPending, Type: events.EventApprovalPending, Data: data}
 
-		if newStreamAuthorizerFor(s, connector).mayReadApprovalEvent(ev) {
+		if newStreamAuthorizerFor(s, connector).mayReadApprovalEvent(context.Background(), ev) {
 			t.Fatalf("%s: an unidentifiable event was allowed through — the topic carries SQL text", name)
 		}
 	}
@@ -445,13 +440,13 @@ func TestSubscribeTimeAuthorizationSkipsThePerEventRule(t *testing.T) {
 
 	auth := newStreamAuthorizerFor(s, admin)
 
-	if !auth.allowed(events.TopicApprovalsPending, nil) {
+	if !auth.allowed(context.Background(), events.TopicApprovalsPending, nil) {
 		t.Fatal("admin refused at subscribe time")
 	}
 
 	// A topic denial still wins over any per-event answer.
 	connector := newStreamAuthorizerFor(s, &store.User{UID: uuid.New(), Roles: []string{store.RoleConnector}})
-	if connector.allowed(events.TopicConnections, &events.Event{Topic: events.TopicConnections}) {
+	if connector.allowed(context.Background(), events.TopicConnections, &events.Event{Topic: events.TopicConnections}) {
 		t.Fatal("the connections topic is admin-only, event or no event")
 	}
 }

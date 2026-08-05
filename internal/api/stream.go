@@ -130,9 +130,9 @@ func (s *Server) handleStream(c *gin.Context) {
 	// connection; without the memo each one would be a database round-trip.
 	// The TTL is the bound on how long a revoked reader can keep receiving —
 	// seconds, not until reconnect.
-	authorize := &streamAuthorizer{server: s, ctx: ctx, user: user, cache: newAuthDecisionCache()}
+	authorize := &streamAuthorizer{server: s, user: user, cache: newAuthDecisionCache()}
 
-	sub := s.broker.Subscribe(authorize.allowed, events.DefaultBuffer)
+	sub := s.broker.Subscribe(authorize.authorizer(ctx), events.DefaultBuffer)
 	defer sub.Close()
 
 	go s.streamReadLoop(ctx, cancel, conn, sub)
@@ -368,18 +368,24 @@ func (c *authDecisionCache) size() int {
 // type was written to close.
 type streamAuthorizer struct {
 	server *Server
-	// ctx outlives the request (the socket does), so it is the detached
-	// context created in handleStream, not c.Request.Context().
-	ctx   context.Context
-	user  *store.User
-	cache *authDecisionCache
+	user   *store.User
+	cache  *authDecisionCache
+}
+
+// authorizer binds the socket's context, producing the events.Authorizer the
+// broker holds. The context outlives the request — the socket does — so it is
+// the detached one handleStream created, never c.Request.Context().
+func (a *streamAuthorizer) authorizer(ctx context.Context) events.Authorizer {
+	return func(topic string, ev *events.Event) bool {
+		return a.allowed(ctx, topic, ev)
+	}
 }
 
 // allowed answers both halves. ev is nil at subscribe time — there is no event
 // to judge yet — and non-nil on every send.
-func (a *streamAuthorizer) allowed(topic string, ev *events.Event) bool {
+func (a *streamAuthorizer) allowed(ctx context.Context, topic string, ev *events.Event) bool {
 	if !a.cache.allowed("topic:"+topic, func() bool {
-		return a.server.mayReadTopic(a.ctx, a.user, topic)
+		return a.server.mayReadTopic(ctx, a.user, topic)
 	}) {
 		return false
 	}
@@ -391,7 +397,7 @@ func (a *streamAuthorizer) allowed(topic string, ev *events.Event) bool {
 		return true
 	}
 
-	return a.mayReadApprovalEvent(ev)
+	return a.mayReadApprovalEvent(ctx, ev)
 }
 
 // mayReadApprovalEvent applies the REST rule — mayViewQuery, the very same
@@ -401,7 +407,7 @@ func (a *streamAuthorizer) allowed(topic string, ev *events.Event) bool {
 // Every branch that cannot reach a definite yes denies: a payload with no
 // query uid, an unparseable uid, a query that no longer exists, a store error.
 // The topic carries SQL text, so an unknown is a no.
-func (a *streamAuthorizer) mayReadApprovalEvent(ev *events.Event) bool {
+func (a *streamAuthorizer) mayReadApprovalEvent(ctx context.Context, ev *events.Event) bool {
 	if a.user == nil {
 		return false
 	}
@@ -435,7 +441,7 @@ func (a *streamAuthorizer) mayReadApprovalEvent(ev *events.Event) bool {
 			return false
 		}
 
-		query, err := a.server.store.GetQueryWithOwner(a.ctx, queryUID)
+		query, err := a.server.store.GetQueryWithOwner(ctx, queryUID)
 		if err != nil {
 			return false
 		}
@@ -448,7 +454,7 @@ func (a *streamAuthorizer) mayReadApprovalEvent(ev *events.Event) bool {
 			return false
 		}
 
-		return a.server.mayViewQuery(a.ctx, a.user, query)
+		return a.server.mayViewQuery(ctx, a.user, query)
 	})
 }
 

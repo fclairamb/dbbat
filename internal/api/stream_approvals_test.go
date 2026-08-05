@@ -200,14 +200,9 @@ func authorizedSQL(t *testing.T, sub *events.Subscriber, publish func()) []strin
 func (f *crossGrantFixture) subscribeAs(t *testing.T, broker *events.Broker, user *store.User) *events.Subscriber {
 	t.Helper()
 
-	auth := &streamAuthorizer{
-		server: f.server,
-		ctx:    context.Background(),
-		user:   user,
-		cache:  newAuthDecisionCache(),
-	}
+	auth := &streamAuthorizer{server: f.server, user: user, cache: newAuthDecisionCache()}
 
-	sub := broker.Subscribe(auth.allowed, 64)
+	sub := broker.Subscribe(auth.authorizer(context.Background()), 64)
 	t.Cleanup(sub.Close)
 
 	if !sub.Subscribe(events.TopicApprovalsPending) {
@@ -318,9 +313,9 @@ func TestApprovalEventAuthorizationMatchesREST(t *testing.T) {
 	}
 
 	for _, user := range []*store.User{f.admin, f.viewer, f.approverA} {
-		auth := &streamAuthorizer{server: f.server, ctx: ctx, user: user, cache: newAuthDecisionCache()}
+		auth := &streamAuthorizer{server: f.server, user: user, cache: newAuthDecisionCache()}
 
-		stream := auth.mayReadApprovalEvent(ev)
+		stream := auth.mayReadApprovalEvent(ctx, ev)
 		rest := f.server.mayViewQuery(ctx, user, held)
 
 		if stream != rest {
@@ -336,7 +331,7 @@ func TestApprovalEventAuthorizationIsMemoizedPerConnection(t *testing.T) {
 	f := newCrossGrantFixture(t)
 	ctx := context.Background()
 
-	auth := &streamAuthorizer{server: f.server, ctx: ctx, user: f.approverA, cache: newAuthDecisionCache()}
+	auth := &streamAuthorizer{server: f.server, user: f.approverA, cache: newAuthDecisionCache()}
 
 	evA := &events.Event{Topic: events.TopicApprovalsPending, Data: pendingEvent(f.connA, f.queryA)}
 	evB := &events.Event{Topic: events.TopicApprovalsPending, Data: pendingEvent(f.connB, f.queryB)}
@@ -344,12 +339,12 @@ func TestApprovalEventAuthorizationIsMemoizedPerConnection(t *testing.T) {
 	// Warm the allow decision first: a topic-keyed memo would then answer yes
 	// for connection B too, which is precisely the leak.
 	for range 3 {
-		if !auth.mayReadApprovalEvent(evA) {
+		if !auth.mayReadApprovalEvent(ctx, evA) {
 			t.Fatal("grant A's approver was denied grant A's own hold")
 		}
 	}
 
-	if auth.mayReadApprovalEvent(evB) {
+	if auth.mayReadApprovalEvent(ctx, evB) {
 		t.Fatal("a cached allow for connection A answered for connection B")
 	}
 
