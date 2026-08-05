@@ -421,12 +421,13 @@ func (a *streamAuthorizer) mayReadApprovalEvent(ev *events.Event) bool {
 	// Memoize per connection, not per query: every query on a connection
 	// shares its (user, database) pair, which is exactly what mayApproveQuery
 	// resolves the grant from, so one connection has one answer. Falling back
-	// to the query uid only costs a lookup.
-	key := "conn:"
-	if connUID, ok := eventUUID(ev.Data, "connection_uid"); ok {
-		key += connUID.String()
-	} else {
-		key += queryUID.String()
+	// to the query uid when the payload names no connection only costs a
+	// lookup per query.
+	connUID, hasConn := eventUUID(ev.Data, "connection_uid")
+
+	key := "conn:" + queryUID.String()
+	if hasConn {
+		key = "conn:" + connUID.String()
 	}
 
 	return a.cache.allowed(key, func() bool {
@@ -436,6 +437,14 @@ func (a *streamAuthorizer) mayReadApprovalEvent(ev *events.Event) bool {
 
 		query, err := a.server.store.GetQueryWithOwner(a.ctx, queryUID)
 		if err != nil {
+			return false
+		}
+
+		// Every publisher derives connection_uid from the query's own
+		// connection, so this always holds; asserting it means a payload that
+		// ever stopped holding it cannot cache a decision under a connection
+		// it does not belong to.
+		if hasConn && query.ConnectionID != connUID {
 			return false
 		}
 

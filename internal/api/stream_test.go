@@ -92,6 +92,10 @@ func TestMayReadTopicAuthorization(t *testing.T) {
 		t.Fatal("admin must read approvals/pending")
 	}
 
+	if !s.mayReadTopic(ctx, viewer, events.TopicApprovalsPending) {
+		t.Fatal("viewers read every pending query over REST; the topic gate must agree")
+	}
+
 	if s.mayReadTopic(ctx, nil, events.TopicApprovalsPending) {
 		t.Fatal("an unauthenticated subscriber must read nothing")
 	}
@@ -115,14 +119,16 @@ func TestTopicAuthCacheMemoizesWithinTTL(t *testing.T) {
 
 	var calls int
 
-	cache := newTopicAuthCache(func(string) bool {
+	cache := newAuthDecisionCache()
+
+	lookup := func() bool {
 		calls++
 
 		return true
-	})
+	}
 
 	for range 5 {
-		if !cache.allowed("connections") {
+		if !cache.allowed("topic:connections", lookup) {
 			t.Fatal("allowed = false")
 		}
 	}
@@ -137,9 +143,10 @@ func TestTopicAuthCacheRefreshesAfterTTL(t *testing.T) {
 
 	allow := true
 
-	cache := newTopicAuthCache(func(string) bool { return allow })
+	cache := newAuthDecisionCache()
+	lookup := func() bool { return allow }
 
-	if !cache.allowed("connections") {
+	if !cache.allowed("topic:connections", lookup) {
 		t.Fatal("first lookup denied")
 	}
 
@@ -148,38 +155,46 @@ func TestTopicAuthCacheRefreshesAfterTTL(t *testing.T) {
 	// Age the entry past the TTL: the re-check is the PII containment
 	// guarantee, so a revoked reader must stop receiving within seconds.
 	cache.mu.Lock()
-	cache.entries["connections"] = topicAuthEntry{allowed: true, at: time.Now().Add(-2 * topicAuthTTL)}
+	cache.entries["topic:connections"] = topicAuthEntry{allowed: true, at: time.Now().Add(-2 * topicAuthTTL)}
 	cache.mu.Unlock()
 
-	if cache.allowed("connections") {
+	if cache.allowed("topic:connections", lookup) {
 		t.Fatal("a stale entry outlived the TTL — a revoked reader would keep receiving")
 	}
 }
 
-func TestTopicAuthCacheIsPerTopic(t *testing.T) {
+func TestTopicAuthCacheIsPerKey(t *testing.T) {
 	t.Parallel()
 
-	cache := newTopicAuthCache(func(topic string) bool {
-		return topic == "connections"
-	})
+	cache := newAuthDecisionCache()
 
-	if !cache.allowed("connections") {
+	allowFor := func(key string) bool {
+		return cache.allowed(key, func() bool { return key == "topic:connections" })
+	}
+
+	if !allowFor("topic:connections") {
 		t.Fatal("allowed topic denied")
 	}
 
-	if cache.allowed("approvals/pending") {
+	if allowFor("topic:approvals/pending") {
 		t.Fatal("a decision leaked across topics")
+	}
+
+	// The per-event keys live in the same map; a connection the user may not
+	// see must not inherit a topic-level yes.
+	if allowFor("conn:" + uuid.New().String()) {
+		t.Fatal("a decision leaked from a topic key onto a connection key")
 	}
 }
 
 func TestTopicAuthCacheIsBounded(t *testing.T) {
 	t.Parallel()
 
-	cache := newTopicAuthCache(func(string) bool { return false })
+	cache := newAuthDecisionCache()
 
 	// Denials are cached too, so an unbounded map is memory a client controls.
 	for i := range maxTopicAuthEntries * 4 {
-		cache.allowed(fmt.Sprintf("connection/%d/queries", i))
+		cache.allowed(fmt.Sprintf("topic:connection/%d/queries", i), func() bool { return false })
 	}
 
 	if got := cache.size(); got > maxTopicAuthEntries {
@@ -240,13 +255,17 @@ func TestSubscribeRejectsUnknownTopicsWithoutRemembering(t *testing.T) {
 
 	var lookups int
 
-	cache := newTopicAuthCache(func(string) bool {
-		lookups++
+	cache := newAuthDecisionCache()
 
-		return true
-	})
+	authorize := func(topic string, _ *events.Event) bool {
+		return cache.allowed("topic:"+topic, func() bool {
+			lookups++
 
-	client, sub := streamReadLoopHarness(t, cache.allowed)
+			return true
+		})
+	}
+
+	client, sub := streamReadLoopHarness(t, authorize)
 
 	const flood = 500
 
@@ -286,7 +305,7 @@ func TestSubscribeRejectsUnknownTopicsWithoutRemembering(t *testing.T) {
 func TestSubscribeIsCappedPerSocket(t *testing.T) {
 	t.Parallel()
 
-	client, sub := streamReadLoopHarness(t, func(string) bool { return true })
+	client, sub := streamReadLoopHarness(t, func(string, *events.Event) bool { return true })
 
 	refused := 0
 
@@ -319,7 +338,7 @@ func TestSubscribeIsCappedPerSocket(t *testing.T) {
 func TestSubscribeAcceptsAWellFormedTopic(t *testing.T) {
 	t.Parallel()
 
-	client, sub := streamReadLoopHarness(t, func(string) bool { return true })
+	client, sub := streamReadLoopHarness(t, func(string, *events.Event) bool { return true })
 
 	topic := events.ConnectionQueriesTopic(uuid.New().String())
 
@@ -338,5 +357,101 @@ func TestSubscribeAcceptsAWellFormedTopic(t *testing.T) {
 
 	if len(sub.Topics()) != 1 {
 		t.Fatalf("subscription not recorded: %v", sub.Topics())
+	}
+}
+
+// newStreamAuthorizerFor builds the production authorizer a socket would carry
+// for this user, so the tests exercise the real seam rather than a stand-in.
+func newStreamAuthorizerFor(s *Server, user *store.User) *streamAuthorizer {
+	return &streamAuthorizer{
+		server: s,
+		ctx:    context.Background(),
+		user:   user,
+		cache:  newAuthDecisionCache(),
+	}
+}
+
+func TestApprovalEventAuthorizationShortCircuitsForAdminAndViewer(t *testing.T) {
+	t.Parallel()
+
+	// No store at all: admins and viewers must be decided without one (they
+	// read every pending query over REST), and everybody else must fail closed
+	// rather than panic or allow.
+	s := &Server{}
+
+	ev := &events.Event{
+		Topic: events.TopicApprovalsPending,
+		Type:  events.EventApprovalPending,
+		Data: map[string]any{
+			"query_uid":      uuid.New().String(),
+			"connection_uid": uuid.New().String(),
+			"sql_text":       "DELETE FROM salaries",
+		},
+	}
+
+	admin := &store.User{UID: uuid.New(), Roles: []string{store.RoleAdmin}}
+	viewer := &store.User{UID: uuid.New(), Roles: []string{store.RoleViewer}}
+	connector := &store.User{UID: uuid.New(), Roles: []string{store.RoleConnector}}
+
+	if !newStreamAuthorizerFor(s, admin).mayReadApprovalEvent(ev) {
+		t.Fatal("admin must see every pending query, as mayViewQuery says")
+	}
+
+	if !newStreamAuthorizerFor(s, viewer).mayReadApprovalEvent(ev) {
+		t.Fatal("viewer must see every pending query, as mayViewQuery says")
+	}
+
+	if newStreamAuthorizerFor(s, connector).mayReadApprovalEvent(ev) {
+		t.Fatal("a connector was allowed another grant's held SQL with no store to check against")
+	}
+
+	if newStreamAuthorizerFor(s, nil).mayReadApprovalEvent(ev) {
+		t.Fatal("an unauthenticated subscriber must read nothing")
+	}
+}
+
+func TestApprovalEventAuthorizationFailsClosedOnMalformedPayloads(t *testing.T) {
+	t.Parallel()
+
+	s := &Server{}
+	connector := &store.User{UID: uuid.New(), Roles: []string{store.RoleConnector}}
+
+	payloads := map[string]map[string]any{
+		"no query uid":       {"connection_uid": uuid.New().String()},
+		"empty query uid":    {"query_uid": ""},
+		"garbage query uid":  {"query_uid": "not-a-uuid"},
+		"non-string uid":     {"query_uid": 42},
+		"nothing at all":     nil,
+		"only the sql lives": {"sql_text": "DELETE FROM salaries"},
+	}
+
+	for name, data := range payloads {
+		ev := &events.Event{Topic: events.TopicApprovalsPending, Type: events.EventApprovalPending, Data: data}
+
+		if newStreamAuthorizerFor(s, connector).mayReadApprovalEvent(ev) {
+			t.Fatalf("%s: an unidentifiable event was allowed through — the topic carries SQL text", name)
+		}
+	}
+}
+
+func TestSubscribeTimeAuthorizationSkipsThePerEventRule(t *testing.T) {
+	t.Parallel()
+
+	// A viewer would pass either way, so use the one role whose two answers
+	// differ: at subscribe time there is no event to judge, and the topic gate
+	// (nil store here) is the whole answer.
+	s := &Server{}
+	admin := &store.User{UID: uuid.New(), Roles: []string{store.RoleAdmin}}
+
+	auth := newStreamAuthorizerFor(s, admin)
+
+	if !auth.allowed(events.TopicApprovalsPending, nil) {
+		t.Fatal("admin refused at subscribe time")
+	}
+
+	// A topic denial still wins over any per-event answer.
+	connector := newStreamAuthorizerFor(s, &store.User{UID: uuid.New(), Roles: []string{store.RoleConnector}})
+	if connector.allowed(events.TopicConnections, &events.Event{Topic: events.TopicConnections}) {
+		t.Fatal("the connections topic is admin-only, event or no event")
 	}
 }
