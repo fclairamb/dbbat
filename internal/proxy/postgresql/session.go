@@ -107,8 +107,11 @@ type Session struct {
 	queryStorage  config.QueryStorageConfig
 	dumpConfig    config.DumpConfig
 	dumpWriter    *dump.Writer
-	authCache     *cache.AuthCache
-	tlsConfig     *tls.Config // nil when TLS is disabled
+	// dumpUploader ships the finished capture to blob storage when the
+	// session ends. nil = local-only captures (the default).
+	dumpUploader *dump.Uploader
+	authCache    *cache.AuthCache
+	tlsConfig    *tls.Config // nil when TLS is disabled
 
 	// Session state
 	user                  *store.User
@@ -859,6 +862,10 @@ func (s *Session) cleanup() {
 		if err := s.dumpWriter.Close(); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to close dump writer", slog.Any("error", err))
 		}
+
+		// The file is complete now; hand it to the uploader. No-op when
+		// uploads are not configured, and it never blocks on the network.
+		s.dumpUploader.Finish(s.ctx, s.connectionUID)
 	}
 
 	if s.connectionUID != uuid.Nil {

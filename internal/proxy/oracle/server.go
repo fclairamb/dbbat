@@ -34,6 +34,9 @@ type Server struct {
 	rowWriter    *shared.RowWriter
 	queryStorage config.QueryStorageConfig
 	dumpConfig   config.DumpConfig
+	// dumpUploader ships finished captures from the local spool to blob
+	// storage. nil — the default — keeps them on local disk only.
+	dumpUploader *dump.Uploader
 	logger       *slog.Logger
 	// listenerMu guards listener, which is written by Start and read
 	// concurrently by Addr/Shutdown (e.g. tests polling Addr while Start runs
@@ -199,6 +202,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 	session := newSession(clientConn, s.store, s.encryptionKey, s.logger, s.ctx, s.authCache, s.queryStorage, s.dumpConfig, s.rowWriter)
 	session.approvalDeps = s.approvalDeps
+	session.dumpUploader = s.dumpUploader
 	if err := session.run(); err != nil {
 		// Health check probes (NLB, etc.) connect and immediately close — log at debug level
 		errStr := err.Error()
@@ -260,4 +264,11 @@ func (s *Server) SetRowWriter(writer *shared.RowWriter) {
 	s.rowWriter = writer
 
 	previous.Close(s.ctx)
+}
+
+// SetDumpUploader installs the process-wide capture uploader, so this proxy's
+// finished captures are shipped to blob storage on session close. Called by the
+// process wiring; nil means local-only captures, which is the default.
+func (s *Server) SetDumpUploader(uploader *dump.Uploader) {
+	s.dumpUploader = uploader
 }
