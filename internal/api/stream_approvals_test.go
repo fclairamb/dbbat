@@ -352,3 +352,47 @@ func TestApprovalEventAuthorizationIsMemoizedPerConnection(t *testing.T) {
 		t.Fatalf("memo holds %d entries, want one per connection", got)
 	}
 }
+
+// TestApprovalsStreamFiltersResolutionEvents pins the second half of the
+// audit's finding: a resolution event carries the connection uid and the
+// approver's identity, so it is filtered by exactly the same rule as the
+// pending event that preceded it — including after the hold has left the
+// pending state.
+func TestApprovalsStreamFiltersResolutionEvents(t *testing.T) {
+	f := newCrossGrantFixture(t)
+	ctx := context.Background()
+
+	if err := f.data.ResolveQueryApproval(ctx, f.queryB.UID, store.ApprovalApproved, &f.admin.UID, "ok"); err != nil {
+		t.Fatalf("resolve query B: %v", err)
+	}
+
+	resolved := map[string]any{
+		"query_uid":         f.queryB.UID.String(),
+		"connection_uid":    f.connB.UID.String(),
+		"sql_text":          f.queryB.SQLText,
+		"approval_required": true,
+		"approval_status":   store.ApprovalApproved,
+		"resolved_by":       resolverPayload(f.admin),
+	}
+
+	ev := &events.Event{
+		Topic: events.TopicApprovalsPending,
+		Type:  events.EventApprovalResolved,
+		Data:  resolved,
+	}
+
+	for _, tc := range []struct {
+		user *store.User
+		want bool
+	}{
+		{f.admin, true},
+		{f.viewer, true},
+		{f.approverA, false},
+	} {
+		auth := &streamAuthorizer{server: f.server, user: tc.user, cache: newAuthDecisionCache()}
+
+		if got := auth.mayReadApprovalEvent(ctx, ev); got != tc.want {
+			t.Fatalf("%s: resolution event visibility = %v, want %v", tc.user.Username, got, tc.want)
+		}
+	}
+}
