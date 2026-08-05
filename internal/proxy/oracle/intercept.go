@@ -395,6 +395,10 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 
 	s.tracker.pendingQuery = nil
 
+	// Last gate before the store: never persist an "error" that is not readable
+	// text. See shared.SanitizeQueryError.
+	queryError = shared.SanitizeQueryError(s.ctx, s.logger, queryError)
+
 	total := s.cumulativeClientBytes()
 	bytesTransferred := total - s.lastBytesSnapshot
 	s.lastBytesSnapshot = total
@@ -567,20 +571,13 @@ func parseResponseError(ttcPayload []byte) *string {
 		return nil
 	}
 
-	// Error message length at offset 14
-	if len(ttcPayload) < 16 {
-		errStr := fmt.Sprintf("ORA-%05d", errCode)
-		return &errStr
+	// The fixed-offset fields above are only meaningful on a genuine legacy
+	// Response; on row-stream bytes they decode to noise. Share the same proof
+	// as decodeTTCResponse so no caller can turn row data into an error string.
+	errStr, ok := legacyResponseErrorMessage(ttcPayload, errCode)
+	if !ok {
+		return nil
 	}
-
-	msgLen := binary.BigEndian.Uint16(ttcPayload[14:16])
-
-	if len(ttcPayload) >= 16+int(msgLen) && msgLen > 0 {
-		errStr := string(ttcPayload[16 : 16+msgLen])
-		return &errStr
-	}
-
-	errStr := fmt.Sprintf("ORA-%05d", errCode)
 
 	return &errStr
 }

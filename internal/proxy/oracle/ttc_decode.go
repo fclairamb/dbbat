@@ -89,18 +89,18 @@ func decodeTTCResponse(payload []byte) (*TTCResponse, error) {
 	errFlag := binary.BigEndian.Uint16(payload[12:14])
 
 	if errCode != 0 && errFlag != 0 {
+		msg, ok := legacyResponseErrorMessage(payload, errCode)
+		if !ok {
+			// The fixed-offset layout produced an "error" that is not an Oracle
+			// diagnostic, which means these bytes are not a legacy Response at
+			// all (row-stream content, or a v315+ response). Reject the whole
+			// payload rather than persisting raw bytes as Query.Error.
+			return nil, fmt.Errorf("%w: code=%d flag=%d", ErrNotLegacyResponse, errCode, errFlag)
+		}
+
 		resp.IsError = true
 		resp.ErrorCode = int(errCode)
-
-		// Try to extract error message
-		if len(payload) >= 16 {
-			msgLen := binary.BigEndian.Uint16(payload[14:16])
-			if len(payload) >= 16+int(msgLen) && msgLen > 0 {
-				resp.ErrorMessage = string(payload[16 : 16+msgLen])
-			} else {
-				resp.ErrorMessage = fmt.Sprintf("ORA-%05d", errCode)
-			}
-		}
+		resp.ErrorMessage = msg
 
 		return resp, nil
 	}
@@ -145,6 +145,67 @@ func decodeTTCResponse(payload []byte) (*TTCResponse, error) {
 	}
 
 	return resp, nil
+}
+
+// maxPlausibleORACode bounds a legacy Response error code. Oracle diagnostics
+// are at most five digits (ORA-00000..ORA-65535, PLS-/TNS- likewise), so a code
+// at or above this is arbitrary bytes read through the fixed-offset layout.
+const maxPlausibleORACode = 100000
+
+// oracleDiagnosticPrefixes are the prefixes every Oracle server diagnostic
+// message carries.
+var oracleDiagnosticPrefixes = []string{"ORA-", "PLS-", "TNS-"}
+
+// legacyResponseErrorMessage extracts the error text of a legacy TTC Response
+// and proves it is a real Oracle diagnostic before the caller treats the
+// payload as a failure.
+//
+// The legacy layout is fixed-offset and misreads anything that is not an
+// actual legacy Response — most damagingly the compressed row stream, where
+// payload[2:6] and payload[12:14] are row bytes and payload[14:16] is read as a
+// message length. Requiring a plausible code AND an ORA-/PLS-/TNS- prefixed,
+// printable message is what stops row data from being reported as an error.
+//
+// No message is synthesized from the code alone: a synthesized "ORA-NNNNN" from
+// misread bytes is exactly the fabrication this gate exists to prevent, and
+// genuine server errors reach dbbat through the OER path (findOERInResponse),
+// not this one.
+func legacyResponseErrorMessage(payload []byte, errCode uint32) (string, bool) {
+	if errCode >= maxPlausibleORACode {
+		return "", false
+	}
+
+	if len(payload) < 16 {
+		return "", false
+	}
+
+	msgLen := int(binary.BigEndian.Uint16(payload[14:16]))
+	if msgLen == 0 || 16+msgLen > len(payload) {
+		return "", false
+	}
+
+	msg := strings.TrimSpace(string(payload[16 : 16+msgLen]))
+	if !looksLikeOracleDiagnostic(msg) {
+		return "", false
+	}
+
+	return msg, true
+}
+
+// looksLikeOracleDiagnostic reports whether msg reads as an Oracle diagnostic:
+// an ORA-/PLS-/TNS- prefix and no binary content.
+func looksLikeOracleDiagnostic(msg string) bool {
+	if isBinaryData([]byte(msg)) {
+		return false
+	}
+
+	for _, prefix := range oracleDiagnosticPrefixes {
+		if strings.HasPrefix(msg, prefix) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // decodeColumnDef decodes a single column definition from a TTC response.
@@ -269,6 +330,11 @@ var (
 	ErrOALL8TooShort    = errors.New("OALL8 payload too short")
 	ErrOFETCHTooShort   = errors.New("OFETCH payload too short")
 	ErrSQLLengthInvalid = errors.New("OALL8 SQL length exceeds payload")
+	// ErrNotLegacyResponse reports that a payload does not follow the legacy
+	// fixed-offset Response layout — its "error" fields decode to something
+	// that is not an Oracle diagnostic. Callers ignore such payloads instead
+	// of acting on the misread fields.
+	ErrNotLegacyResponse = errors.New("payload is not a legacy TTC Response")
 )
 
 // OALL8Result contains the decoded fields from an OALL8 (parse+execute) message.

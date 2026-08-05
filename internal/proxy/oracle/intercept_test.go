@@ -299,7 +299,9 @@ func TestParseResponseError_NoError(t *testing.T) {
 
 func TestParseResponseError_WithError(t *testing.T) {
 	t.Parallel()
-	payload := make([]byte, 30)
+	msg := "ORA-00942: table not found"
+
+	payload := make([]byte, 16+len(msg))
 	payload[0] = byte(TTCFuncResponse)
 	payload[1] = 0x01
 
@@ -307,8 +309,6 @@ func TestParseResponseError_WithError(t *testing.T) {
 	binary.BigEndian.PutUint32(payload[2:6], 942)
 	// Error flag non-zero
 	binary.BigEndian.PutUint16(payload[12:14], 1)
-	// Error message
-	msg := "ORA-00942: table not found"
 	binary.BigEndian.PutUint16(payload[14:16], uint16(len(msg)))
 	copy(payload[16:], []byte(msg))
 
