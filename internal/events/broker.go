@@ -14,12 +14,12 @@
 //     on the proxy hot path, and a slow or broken stream subscriber must never
 //     be able to stall — let alone break — a live database connection.
 //   - Authorization is *not* the broker's job. Subscribers carry an authorizer
-//     supplied by the API layer, re-evaluated on every send, because sql_text
-//     routinely carries PII and the stream must never be a wider read path
-//     than GET /api/v1/queries. That re-check runs in the *transport's* write
-//     loop, never on the publish path: the API's authorizer does store
-//     round-trips, and calling it inline from Publish would let a slow
-//     database stall a proxy session holding a query.
+//     supplied by the API layer, re-evaluated on every send and given the whole
+//     event — not merely its topic — because sql_text routinely carries PII and
+//     the stream must never be a wider read path than GET /api/v1/queries. That
+//     re-check runs in the *transport's* write loop, never on the publish path:
+//     the API's authorizer does store round-trips, and calling it inline from
+//     Publish would let a slow database stall a proxy session holding a query.
 package events
 
 import (
@@ -212,14 +212,23 @@ func (b *Broker) deliver(ev Event) {
 	}
 }
 
-// Authorizer decides whether a subscriber may currently receive a topic. It is
-// evaluated at subscribe time *and* again immediately before each send, so a
-// user whose role or ownership changed mid-stream stops receiving at once
-// rather than at the next reconnect.
+// Authorizer decides whether a subscriber may currently receive a topic, and —
+// when an event is supplied — that particular event. It is evaluated at
+// subscribe time *and* again immediately before each send, so a user whose
+// role or ownership changed mid-stream stops receiving at once rather than at
+// the next reconnect.
+//
+// ev is nil at subscribe time, where there is no event to judge yet, and
+// non-nil for every send. The distinction is load-bearing: some topics are
+// global fan-outs whose individual events belong to different owners
+// (approvals/pending carries every held statement in the fleet), so a
+// topic-only answer would be a wider read path than the equivalent REST
+// endpoint. The broker itself stays authorization-agnostic — it only decides
+// *when* to ask.
 //
 // It may be expensive (the API implementation reads the store), so the broker
 // never calls it while publishing — see Authorized.
-type Authorizer func(topic string) bool
+type Authorizer func(topic string, ev *Event) bool
 
 // Subscribe registers a new subscriber. The returned *Subscriber must be
 // closed by the caller (typically with defer) to release broker resources.
@@ -285,7 +294,7 @@ func (s *Subscriber) Events() <-chan Event {
 // Subscribe adds a topic after re-checking authorization. Returns false when
 // the subscriber may not read that topic.
 func (s *Subscriber) Subscribe(topic string) bool {
-	if s.authorize != nil && !s.authorize(topic) {
+	if s.authorize != nil && !s.authorize(topic, nil) {
 		return false
 	}
 
@@ -328,16 +337,19 @@ func (s *Subscriber) Dropped() int64 {
 	return s.dropped.Swap(0)
 }
 
-// Authorized re-evaluates the subscriber's access to a topic. The transport
-// calls it immediately before writing each event — that is the actual moment
-// of send, and it is a goroutine the session does not wait on, so an expensive
+// Authorized re-evaluates the subscriber's access to this specific event. The
+// transport calls it immediately before writing — that is the actual moment of
+// send, and it is a goroutine the session does not wait on, so an expensive
 // authorizer costs latency on one client's stream and nothing else.
-func (s *Subscriber) Authorized(topic string) bool {
+//
+// It takes the whole event, not just its topic, because a global topic fans
+// out rows belonging to different owners and the answer differs per row.
+func (s *Subscriber) Authorized(ev Event) bool {
 	if s.authorize == nil {
 		return true
 	}
 
-	return s.authorize(topic)
+	return s.authorize(ev.Topic, &ev)
 }
 
 // offer attempts a non-blocking delivery. This is the whole backpressure

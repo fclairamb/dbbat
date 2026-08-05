@@ -121,18 +121,16 @@ func (s *Server) handleStream(c *gin.Context) {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(c.Request.Context()))
 	defer cancel()
 
-	// Authorization is re-evaluated on every send, not just at subscribe:
-	// sql_text routinely carries PII, and the stream must never become a
-	// wider read path than GET /api/v1/queries.
+	// Authorization is re-evaluated on every send, not just at subscribe, and
+	// per *event* rather than per topic: sql_text routinely carries PII, and
+	// the stream must never become a wider read path than GET /api/v1/queries.
 	//
-	// The decision is memoized for a couple of seconds. mayReadTopic reads the
+	// Decisions are memoized for a couple of seconds. The lookups read the
 	// store, and this socket may see thousands of events a second on a busy
 	// connection; without the memo each one would be a database round-trip.
 	// The TTL is the bound on how long a revoked reader can keep receiving —
 	// seconds, not until reconnect.
-	authorize := newTopicAuthCache(func(topic string) bool {
-		return s.mayReadTopic(ctx, user, topic)
-	})
+	authorize := &streamAuthorizer{server: s, ctx: ctx, user: user, cache: newAuthDecisionCache()}
 
 	sub := s.broker.Subscribe(authorize.allowed, events.DefaultBuffer)
 	defer sub.Close()
@@ -238,17 +236,18 @@ func (s *Server) flushStream(conn *websocket.Conn, sub *events.Subscriber, ev ev
 		}
 	}
 
-	// Re-check at the actual moment of send. This runs in the socket's own
-	// write loop, never on the publishing goroutine, so an authorizer that
-	// touches the database can never stall a proxy session.
-	if sub.Authorized(ev.Topic) {
+	// Re-check at the actual moment of send, against this exact event. This
+	// runs in the socket's own write loop, never on the publishing goroutine,
+	// so an authorizer that touches the database can never stall a proxy
+	// session.
+	if sub.Authorized(ev) {
 		if err := writeStreamEvent(conn, ev); err != nil {
 			return false
 		}
 	}
 
 	for _, extra := range sub.TakePriority() {
-		if !sub.Authorized(extra.Topic) {
+		if !sub.Authorized(extra) {
 			continue
 		}
 
@@ -266,20 +265,23 @@ func (s *Server) flushStream(conn *websocket.Conn, sub *events.Subscriber, ev ev
 const maxTopicsPerSocket = 64
 
 // maxTopicAuthEntries bounds the memo below. Reached only by a client cycling
-// through many distinct valid topics; the oldest entry is then evicted, which
-// costs a re-lookup and nothing else.
+// through many distinct valid topics — or watching many distinct connections;
+// the oldest entry is then evicted, which costs a re-lookup and nothing else.
 const maxTopicAuthEntries = 128
 
-// topicAuthCache memoizes per-topic authorization decisions for a short
-// window. It exists so the send-time re-check stays a real re-check without
-// costing a store round-trip per event.
+// authDecisionCache memoizes authorization decisions for a short window, keyed
+// by an opaque string. It exists so the send-time re-check stays a real
+// re-check without costing a store round-trip per event.
+//
+// Two kinds of key share it, each with its own namespace prefix: the topic
+// decision ("topic:<name>") and the per-event decision ("conn:<uid>"). Both
+// are scoped to one socket, hence to one user, so the user never has to appear
+// in the key.
 //
 // It is bounded on purpose. The map is per-socket and freed on disconnect, but
 // it caches denials as well as grants, so an unbounded version would let an
 // authenticated client grow it for the socket's lifetime.
-type topicAuthCache struct {
-	lookup func(topic string) bool
-
+type authDecisionCache struct {
 	mu      sync.Mutex
 	entries map[string]topicAuthEntry
 }
@@ -294,24 +296,26 @@ type topicAuthEntry struct {
 // busy stream is not a database load generator.
 const topicAuthTTL = 2 * time.Second
 
-func newTopicAuthCache(lookup func(topic string) bool) *topicAuthCache {
-	return &topicAuthCache{lookup: lookup, entries: make(map[string]topicAuthEntry)}
+func newAuthDecisionCache() *authDecisionCache {
+	return &authDecisionCache{entries: make(map[string]topicAuthEntry)}
 }
 
-func (c *topicAuthCache) allowed(topic string) bool {
+// allowed returns the memoized decision for key, computing it with lookup when
+// there is none or it has aged out.
+func (c *authDecisionCache) allowed(key string, lookup func() bool) bool {
 	c.mu.Lock()
-	entry, ok := c.entries[topic]
+	entry, ok := c.entries[key]
 	c.mu.Unlock()
 
 	if ok && time.Since(entry.at) < topicAuthTTL {
 		return entry.allowed
 	}
 
-	allowed := c.lookup(topic)
+	allowed := lookup()
 
 	c.mu.Lock()
 	c.evictLocked()
-	c.entries[topic] = topicAuthEntry{allowed: allowed, at: time.Now()}
+	c.entries[key] = topicAuthEntry{allowed: allowed, at: time.Now()}
 	c.mu.Unlock()
 
 	return allowed
@@ -319,16 +323,16 @@ func (c *topicAuthCache) allowed(topic string) bool {
 
 // evictLocked keeps the memo under maxTopicAuthEntries, dropping expired
 // entries first and then the oldest. Caller holds c.mu.
-func (c *topicAuthCache) evictLocked() {
+func (c *authDecisionCache) evictLocked() {
 	if len(c.entries) < maxTopicAuthEntries {
 		return
 	}
 
 	now := time.Now()
 
-	for topic, entry := range c.entries {
+	for key, entry := range c.entries {
 		if now.Sub(entry.at) >= topicAuthTTL {
-			delete(c.entries, topic)
+			delete(c.entries, key)
 		}
 	}
 
@@ -336,9 +340,9 @@ func (c *topicAuthCache) evictLocked() {
 		oldest := ""
 		oldestAt := time.Time{}
 
-		for topic, entry := range c.entries {
+		for key, entry := range c.entries {
 			if oldest == "" || entry.at.Before(oldestAt) {
-				oldest, oldestAt = topic, entry.at
+				oldest, oldestAt = key, entry.at
 			}
 		}
 
@@ -347,11 +351,112 @@ func (c *topicAuthCache) evictLocked() {
 }
 
 // size reports how many decisions are memoized. Test/telemetry helper.
-func (c *topicAuthCache) size() int {
+func (c *authDecisionCache) size() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	return len(c.entries)
+}
+
+// streamAuthorizer is one socket's authorization state: the topic rule, the
+// per-event rule, and the memo shared by both.
+//
+// It exists because the two rules are not the same question. `approvals/pending`
+// is a single global topic carrying every held statement in the fleet, so
+// "may this user subscribe" and "may this user see *this* statement" have
+// different answers, and answering only the first is the cross-grant leak this
+// type was written to close.
+type streamAuthorizer struct {
+	server *Server
+	// ctx outlives the request (the socket does), so it is the detached
+	// context created in handleStream, not c.Request.Context().
+	ctx   context.Context
+	user  *store.User
+	cache *authDecisionCache
+}
+
+// allowed answers both halves. ev is nil at subscribe time — there is no event
+// to judge yet — and non-nil on every send.
+func (a *streamAuthorizer) allowed(topic string, ev *events.Event) bool {
+	if !a.cache.allowed("topic:"+topic, func() bool {
+		return a.server.mayReadTopic(a.ctx, a.user, topic)
+	}) {
+		return false
+	}
+
+	// Per-connection topics are already precise: the topic *is* the scope, and
+	// mayReadTopic resolved that connection's ownership. Only the global
+	// approvals topic mixes owners.
+	if ev == nil || ev.Topic != events.TopicApprovalsPending {
+		return true
+	}
+
+	return a.mayReadApprovalEvent(ev)
+}
+
+// mayReadApprovalEvent applies the REST rule — mayViewQuery, the very same
+// helper GET /api/v1/queries/pending filters each row through — to one event
+// on the global approvals topic.
+//
+// Every branch that cannot reach a definite yes denies: a payload with no
+// query uid, an unparseable uid, a query that no longer exists, a store error.
+// The topic carries SQL text, so an unknown is a no.
+func (a *streamAuthorizer) mayReadApprovalEvent(ev *events.Event) bool {
+	if a.user == nil {
+		return false
+	}
+
+	// The exact short-circuit mayViewQuery itself takes, hoisted so admins and
+	// viewers never pay a store round-trip per event. It is the same clause,
+	// so the two cannot disagree.
+	if a.user.IsAdmin() || a.user.IsViewer() {
+		return true
+	}
+
+	queryUID, ok := eventUUID(ev.Data, "query_uid")
+	if !ok {
+		return false
+	}
+
+	// Memoize per connection, not per query: every query on a connection
+	// shares its (user, database) pair, which is exactly what mayApproveQuery
+	// resolves the grant from, so one connection has one answer. Falling back
+	// to the query uid only costs a lookup.
+	key := "conn:"
+	if connUID, ok := eventUUID(ev.Data, "connection_uid"); ok {
+		key += connUID.String()
+	} else {
+		key += queryUID.String()
+	}
+
+	return a.cache.allowed(key, func() bool {
+		if a.server.store == nil {
+			return false
+		}
+
+		query, err := a.server.store.GetQueryWithOwner(a.ctx, queryUID)
+		if err != nil {
+			return false
+		}
+
+		return a.server.mayViewQuery(a.ctx, a.user, query)
+	})
+}
+
+// eventUUID reads a uuid-valued field out of an event payload, reporting
+// whether it was present and well-formed.
+func eventUUID(data map[string]any, key string) (uuid.UUID, bool) {
+	raw, ok := data[key].(string)
+	if !ok || raw == "" {
+		return uuid.Nil, false
+	}
+
+	parsed, err := uuid.Parse(raw)
+	if err != nil {
+		return uuid.Nil, false
+	}
+
+	return parsed, true
 }
 
 func writeStreamEvent(conn *websocket.Conn, ev events.Event) error {
@@ -384,9 +489,16 @@ func (s *Server) mayReadTopic(ctx context.Context, user *store.User, topic strin
 		return user.IsAdmin()
 
 	case events.TopicApprovalsPending:
-		// Admins, plus anybody who is an approver on at least one live grant.
-		// Membership is what the approve endpoint checks too.
-		return user.IsAdmin() || s.isApproverSomewhere(ctx, user)
+		// Admins and viewers — the same two roles mayViewQuery lets read every
+		// pending query through GET /api/v1/queries/pending — plus anybody who
+		// is an approver on at least one live grant.
+		//
+		// This is only the *subscribe* gate, and it is deliberately coarse:
+		// the topic is a global fan-out, so passing it does not mean seeing
+		// every event on it. An approver who is neither admin nor viewer is
+		// then filtered per grant, event by event, by
+		// streamAuthorizer.mayReadApprovalEvent.
+		return user.IsAdmin() || user.IsViewer() || s.isApproverSomewhere(ctx, user)
 
 	default:
 		connUID, ok := events.ConnectionUIDFromTopic(topic)
