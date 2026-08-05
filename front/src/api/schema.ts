@@ -994,15 +994,27 @@ export interface paths {
          *     `dbbat dump anonymise` command).
          *
          *     Captures are only written when the server is started with a dump
-         *     directory configured (`DBB_DUMP_DIR`), are capped per session
-         *     (`DBB_DUMP_MAX_SIZE`) and are reaped once older than
-         *     `DBB_DUMP_RETENTION` (24h by default). `404 Not Found` is therefore
-         *     returned in two distinct cases: dumps are disabled server-wide
-         *     (`dumps are not enabled`), or no capture exists — or no longer
-         *     exists — for this connection (`no dump available for this
-         *     connection`).
+         *     directory configured (`DBB_DUMP_DIR`) and are capped per session
+         *     (`DBB_DUMP_MAX_SIZE`). `404 Not Found` is therefore returned in two
+         *     distinct cases: dumps are disabled server-wide (`dumps are not
+         *     enabled`), or no capture exists — or no longer exists — for this
+         *     connection (`no dump available for this connection`).
          *
-         *     Requires admin or viewer role.
+         *     Where a capture lives depends on the deployment. Without
+         *     `DBB_DUMP_UPLOAD_URL` it stays on the local disk of the replica that
+         *     recorded it and is reaped once older than `DBB_DUMP_RETENTION` (24h by
+         *     default). With an upload URL configured, the finished capture is moved
+         *     to blob storage (S3 or any gocloud.dev-supported bucket) when the
+         *     session closes, and this endpoint streams it back from there — so any
+         *     replica can serve it, and how long it survives is the bucket's own
+         *     lifecycle policy rather than `DBB_DUMP_RETENTION`.
+         *
+         *     **Requires admin role.** This endpoint used to be reachable by admin
+         *     or viewer roles; as of this change it is admin-only. A capture is the
+         *     raw byte stream of the session, including the authentication
+         *     handshake and every result row, at a fidelity well past the redacted,
+         *     structured view a viewer gets from the queries pages — so the API is
+         *     now the enforcement boundary rather than the UI hiding the link.
          */
         get: operations["getConnectionDump"];
         put?: never;
@@ -1011,10 +1023,13 @@ export interface paths {
          * Delete the session capture
          * @description Deletes the pcapng capture recorded for a connection.
          *
-         *     Only the capture file is removed — the connection record and its
-         *     logged queries are left untouched. The deletion is immediate and
-         *     cannot be undone. Captures are also removed automatically once they
-         *     are older than `DBB_DUMP_RETENTION`.
+         *     Only the capture is removed — the connection record and its logged
+         *     queries are left untouched. The deletion is immediate and cannot be
+         *     undone, and it covers the capture wherever it currently lives: the
+         *     local spool, the configured blob store (`DBB_DUMP_UPLOAD_URL`), or
+         *     both while an upload is in flight. Local captures are also removed
+         *     automatically once they are older than `DBB_DUMP_RETENTION`; uploaded
+         *     ones are only expired by the bucket's lifecycle policy.
          *
          *     As with the download, `404 Not Found` covers both dumps being
          *     disabled server-wide and no capture being available for this
@@ -2344,6 +2359,19 @@ export interface components {
             /** @description Whether the proxy→upstream leg of this session was actually encrypted. The server's ssl_mode states a policy, not an outcome: the opportunistic modes (`prefer`, and the empty default) offer TLS and fall back to plaintext when the target refuses, so only the session knows which way it went. Always false for Oracle, whose proxy relays the client's own TNS Connect descriptor over a plain socket. */
             upstream_tls?: boolean;
         };
+        ConnectionDetail: components["schemas"]["Connection"] & {
+            dump: components["schemas"]["DumpMetadata"];
+        };
+        /** @description Whether a raw pcapng session capture is available for download via `GET /connections/{uid}/dump`, and its size. `available: false` covers both "captures are disabled server-wide" (no `DBB_DUMP_DIR`) and "no capture exists — or no longer exists — for this connection". */
+        DumpMetadata: {
+            /** @description Whether the capture can currently be downloaded. */
+            available: boolean;
+            /**
+             * Format: int64
+             * @description Capture size in bytes. 0 when `available` is false.
+             */
+            size_bytes: number;
+        };
         Query: {
             /**
              * Format: uuid
@@ -2758,6 +2786,8 @@ export type OAuthError = components['schemas']['OAuthError'];
 export type DeviceConsentInfo = components['schemas']['DeviceConsentInfo'];
 export type DeviceConsentRequest = components['schemas']['DeviceConsentRequest'];
 export type Connection = components['schemas']['Connection'];
+export type ConnectionDetail = components['schemas']['ConnectionDetail'];
+export type DumpMetadata = components['schemas']['DumpMetadata'];
 export type Query = components['schemas']['Query'];
 export type ApprovalResolution = components['schemas']['ApprovalResolution'];
 export type QueryParameters = components['schemas']['QueryParameters'];
@@ -4481,7 +4511,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Connection"];
+                    "application/json": components["schemas"]["ConnectionDetail"];
                 };
             };
             400: components["responses"]["BadRequest"];

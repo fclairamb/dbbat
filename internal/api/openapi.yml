@@ -1957,7 +1957,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Connection'
+                $ref: '#/components/schemas/ConnectionDetail'
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -2006,7 +2006,12 @@ paths:
         replica can serve it, and how long it survives is the bucket's own
         lifecycle policy rather than `DBB_DUMP_RETENTION`.
 
-        Requires admin or viewer role.
+        **Requires admin role.** This endpoint used to be reachable by admin
+        or viewer roles; as of this change it is admin-only. A capture is the
+        raw byte stream of the session, including the authentication
+        handshake and every result row, at a fidelity well past the redacted,
+        structured view a viewer gets from the queries pages — so the API is
+        now the enforcement boundary rather than the UI hiding the link.
       operationId: getConnectionDump
       responses:
         '200':
@@ -4215,6 +4220,41 @@ components:
         - last_activity_at
         - queries
         - bytes_transferred
+
+    # ConnectionDetail is what GET /connections/{uid} returns: a Connection
+    # plus capture metadata. The list endpoint (GET /connections) returns
+    # plain Connection objects — computing dump availability (an os.Stat, or
+    # a blob HEAD for a remotely-stored capture) for every row of a paginated
+    # list would be a needless fan-out that a single detail fetch doesn't pay.
+    ConnectionDetail:
+      allOf:
+        - $ref: '#/components/schemas/Connection'
+        - type: object
+          properties:
+            dump:
+              $ref: '#/components/schemas/DumpMetadata'
+          required:
+            - dump
+
+    DumpMetadata:
+      type: object
+      description: >-
+        Whether a raw pcapng session capture is available for download via
+        `GET /connections/{uid}/dump`, and its size. `available: false`
+        covers both "captures are disabled server-wide" (no `DBB_DUMP_DIR`)
+        and "no capture exists — or no longer exists — for this connection".
+      properties:
+        available:
+          type: boolean
+          description: Whether the capture can currently be downloaded.
+        size_bytes:
+          type: integer
+          format: int64
+          description: >-
+            Capture size in bytes. 0 when `available` is false.
+      required:
+        - available
+        - size_bytes
 
     # Query schemas
     Query:
