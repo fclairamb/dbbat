@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func allow(string) bool { return true }
+func allow(string, *Event) bool { return true }
 
 func TestPublishDeliversToSubscribedTopicOnly(t *testing.T) {
 	t.Parallel()
@@ -125,7 +125,7 @@ func TestAuthorizedReflectsRevocation(t *testing.T) {
 	var mu sync.Mutex
 	allowed := true
 
-	sub := b.Subscribe(func(string) bool {
+	sub := b.Subscribe(func(string, *Event) bool {
 		mu.Lock()
 		defer mu.Unlock()
 
@@ -137,7 +137,7 @@ func TestAuthorizedReflectsRevocation(t *testing.T) {
 		t.Fatal("subscribe refused while authorized")
 	}
 
-	if !sub.Authorized("connections") {
+	if !sub.Authorized(Event{Topic: "connections"}) {
 		t.Fatal("Authorized disagreed with Subscribe")
 	}
 
@@ -148,7 +148,7 @@ func TestAuthorizedReflectsRevocation(t *testing.T) {
 	// The transport asks again immediately before each write; a reader whose
 	// access was revoked mid-stream must stop receiving at once, not at the
 	// next reconnect.
-	if sub.Authorized("connections") {
+	if sub.Authorized(Event{Topic: "connections"}) {
 		t.Fatal("Authorized still true after access was revoked")
 	}
 }
@@ -160,7 +160,7 @@ func TestPublishNeverCallsTheAuthorizer(t *testing.T) {
 
 	calls := make(chan struct{}, 16)
 
-	sub := b.Subscribe(func(string) bool {
+	sub := b.Subscribe(func(string, *Event) bool {
 		// The API's authorizer reads the store. If the broker called it on
 		// the publish path, a slow database would stall the proxy session
 		// that published — including one parked on an approval hold.
@@ -195,7 +195,7 @@ func TestSubscribeRefusedWhenUnauthorized(t *testing.T) {
 
 	b := New()
 
-	sub := b.Subscribe(func(string) bool { return false }, 4)
+	sub := b.Subscribe(func(string, *Event) bool { return false }, 4)
 	defer sub.Close()
 
 	if sub.Subscribe("connections") {

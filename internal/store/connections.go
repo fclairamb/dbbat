@@ -402,12 +402,40 @@ func (s *Store) IncrementConnectionBytes(ctx context.Context, uid uuid.UUID, byt
 	return nil
 }
 
+// SetConnectionDumpKey records where this connection's session capture was
+// uploaded. Called by the capture uploader after the object is in place and
+// before the local spool copy is removed, so a capture is always addressable in
+// exactly one place.
+//
+// A connection row that has since been reaped by the retention sweep is not an
+// error: the capture outliving its row is a retention-ordering artifact, not a
+// failed upload, and failing here would make the uploader retry forever.
+func (s *Store) SetConnectionDumpKey(ctx context.Context, uid uuid.UUID, key string) error {
+	_, err := s.db.NewUpdate().
+		Model((*Connection)(nil)).
+		Where("uid = ?", uid).
+		Set("dump_key = ?", key).
+		Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to set connection dump key: %w", err)
+	}
+
+	return nil
+}
+
+// ClearConnectionDumpKey forgets the uploaded capture of a connection, after
+// the object itself has been deleted.
+func (s *Store) ClearConnectionDumpKey(ctx context.Context, uid uuid.UUID) error {
+	return s.SetConnectionDumpKey(ctx, uid, "")
+}
+
 // GetConnectionByUID retrieves a single connection by UID
 func (s *Store) GetConnectionByUID(ctx context.Context, uid uuid.UUID) (*Connection, error) {
 	conn := &Connection{}
 	err := s.db.NewSelect().
 		Model(conn).
-		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, disconnected_at, queries, bytes_transferred, instance_id, upstream_tls").
+		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, "+
+			"disconnected_at, queries, bytes_transferred, instance_id, upstream_tls, dump_key").
 		Where("uid = ?", uid).
 		Scan(ctx)
 	if err != nil {
@@ -424,7 +452,8 @@ func (s *Store) ListConnections(ctx context.Context, filter ConnectionFilter) ([
 	var connections []Connection
 	q := s.db.NewSelect().
 		Model(&connections).
-		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, disconnected_at, queries, bytes_transferred, instance_id, upstream_tls")
+		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, " +
+			"disconnected_at, queries, bytes_transferred, instance_id, upstream_tls, dump_key")
 
 	if filter.UserID != nil {
 		q = q.Where("user_id = ?", *filter.UserID)

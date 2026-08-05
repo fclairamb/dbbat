@@ -32,8 +32,11 @@ type Server struct {
 	encryptionKey []byte
 	queryStorage  config.QueryStorageConfig
 	dumpConfig    config.DumpConfig
-	authCache     *cache.AuthCache
-	logger        *slog.Logger
+	// dumpUploader ships finished captures from the local spool to blob
+	// storage. nil — the default — keeps them on local disk only.
+	dumpUploader *dump.Uploader
+	authCache    *cache.AuthCache
+	logger       *slog.Logger
 
 	// rowWriter batches captured result rows off the capture path. Defaults
 	// to a writer private to this server; main.go replaces it with the
@@ -258,4 +261,11 @@ func (s *Server) SetRowWriter(writer *shared.RowWriter) {
 	s.rowWriter = writer
 
 	previous.Close(s.ctx)
+}
+
+// SetDumpUploader installs the process-wide capture uploader, so this proxy's
+// finished captures are shipped to blob storage on session close. Called by the
+// process wiring; nil means local-only captures, which is the default.
+func (s *Server) SetDumpUploader(uploader *dump.Uploader) {
+	s.dumpUploader = uploader
 }

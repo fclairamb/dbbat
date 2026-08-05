@@ -84,16 +84,27 @@ func TestGrantDefinitionSlugMigrationBackfill(t *testing.T) {
 		t.Fatal("no migrations discovered")
 	}
 
-	last := all[len(all)-1]
-	if last.Name != slugMigrationName {
-		t.Fatalf("expected %q to be the newest migration, newest is %q — "+
-			"update this test now that a later migration has landed", slugMigrationName, last.Name)
+	slugIndex := -1
+
+	for i, m := range all {
+		if m.Name == slugMigrationName {
+			slugIndex = i
+
+			break
+		}
+	}
+
+	if slugIndex < 0 {
+		t.Fatalf("migration %q not found — has it been renamed?", slugMigrationName)
 	}
 
 	// Apply every migration up to (but not including) the slug one, so
 	// grant_definitions exists but has no slug column — the exact state a
-	// pre-upgrade production database is in.
-	for _, m := range all[:len(all)-1] {
+	// pre-upgrade production database is in. Migrations that landed *after*
+	// the slug one are deliberately left pending: the single Migrate() call
+	// below then applies the slug migration (plus any of those later ones) as
+	// one group, which is what makes the closing Rollback() undo it.
+	for _, m := range all[:slugIndex] {
 		if err := migrator.RunMigration(ctx, m.Name); err != nil {
 			t.Fatalf("RunMigration(%s): %v", m.Name, err)
 		}
@@ -183,9 +194,10 @@ func TestGrantDefinitionSlugMigrationBackfill(t *testing.T) {
 		t.Fatalf("CreateGrantDefinition after migration: %v", err)
 	}
 
-	// The down-migration must reverse cleanly too: it ran in its own group
-	// (the plain Migrate() call above applied only the one pending
-	// migration), so Rollback() undoes exactly it.
+	// The down-migration must reverse cleanly too: it ran in the group the
+	// plain Migrate() call above created, so Rollback() undoes it (together
+	// with any migration that has since landed after it, whose own down.sql
+	// is equally under test here).
 	if _, err := migrator.Rollback(ctx); err != nil {
 		t.Fatalf("Rollback (slug): %v", err)
 	}

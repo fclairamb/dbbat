@@ -1071,3 +1071,41 @@ func TestExtractSourceIP(t *testing.T) {
 		})
 	}
 }
+
+// TestConnectionDumpKeyIsSelectedEverywhere pins the one thing an explicit
+// ColumnExpr list gets wrong silently: a column left out of it scans as the
+// zero value, so a caller reading DumpKey off a listed row would see "no
+// capture uploaded" for a capture that is sitting in the bucket. Both read
+// paths are asserted together, because forgetting one of the two is exactly
+// the mistake this guards against.
+func TestConnectionDumpKeyIsSelectedEverywhere(t *testing.T) {
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "dumpkey")
+
+	conn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.9")
+	require.NoError(t, err)
+	assert.Empty(t, conn.DumpKey, "a fresh connection has no uploaded capture")
+
+	const key = "2026/08/05/instance-a/" + "capture.pcapng"
+
+	require.NoError(t, store.SetConnectionDumpKey(ctx, conn.UID, key))
+
+	found, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	assert.Equal(t, key, found.DumpKey)
+
+	listed, err := store.ListConnections(ctx, ConnectionFilter{UserID: &user.UID})
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	assert.Equal(t, key, listed[0].DumpKey)
+
+	// Clearing it — what deleting a capture does — must round-trip too.
+	require.NoError(t, store.ClearConnectionDumpKey(ctx, conn.UID))
+
+	listed, err = store.ListConnections(ctx, ConnectionFilter{UserID: &user.UID})
+	require.NoError(t, err)
+	require.Len(t, listed, 1)
+	assert.Empty(t, listed[0].DumpKey)
+}

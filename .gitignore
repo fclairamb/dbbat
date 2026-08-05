@@ -38,6 +38,9 @@ docker-compose.override.yml
 # Logs
 logs/
 
+# Showcase runner scratch space (raw WebM, traces, scenario state)
+front/showcase/.artifacts/
+
 # Frontend build artifacts (copied from front/dist/)
 internal/api/resources/index.html
 internal/api/resources/assets/index-*

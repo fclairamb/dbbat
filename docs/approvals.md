@@ -271,17 +271,30 @@ display_name}`), `resolved_at` and `resolution_reason`.
 
 ### Topics and authorization
 
-| Topic | Payload | Who may subscribe |
-|---|---|---|
-| `connection/<uid>/queries` | every query on that connection | admin, viewer, or the connection's owner |
-| `approvals/pending` | approval-pending queries, all connections | admin, or a member of an approver group |
-| `connections` | connection open/close | admin |
+| Topic | Payload | Who may subscribe | What they then receive |
+|---|---|---|---|
+| `connection/<uid>/queries` | every query on that connection | admin, viewer, or the connection's owner | everything on the topic |
+| `approvals/pending` | approval-pending queries, all connections | admin, viewer, or a member of an approver group | admins and viewers: everything. Anybody else: **only holds they are an approver for** |
+| `connections` | connection open/close | admin | everything on the topic |
 
-Authorization is per-topic, evaluated **at subscribe time and re-checked on
-every send**. A topic grants exactly what the equivalent REST endpoint would.
-This matters more than it looks: `sql_text` routinely contains PII, credentials
-and business data, so the stream must never become a wider read path than
-`GET /api/v1/queries` already is.
+Authorization is evaluated **at subscribe time and re-checked on every send**,
+and — for `approvals/pending` — **per event**, not merely per topic. A topic
+grants exactly what the equivalent REST endpoint would. This matters more than
+it looks: `sql_text` routinely contains PII, credentials and business data, so
+the stream must never become a wider read path than `GET /api/v1/queries`
+already is.
+
+`approvals/pending` is the one topic where subscribing and receiving are
+different questions. It is a single global fan-out carrying every held
+statement in the fleet, so a topic-only rule would hand an approver of one
+low-sensitivity grant the SQL text, target database and requesting user of
+*every* hold on the instance. Each event is therefore filtered through the same
+`mayViewQuery` helper `GET /api/v1/queries/pending` filters its rows through —
+the same function, not a second implementation, so the two cannot drift. The
+decision is memoized per connection for the same couple of seconds as the topic
+decision, and anything unresolvable (no query uid, a query that no longer
+exists, a store error) is a denial. Resolution events are filtered by exactly
+the same rule, as are events forwarded from another replica.
 
 Topic names are validated for shape before anything else happens (`connections`,
 `approvals/pending`, or `connection/<uuid>/queries`, at most 128 characters), so
@@ -304,7 +317,7 @@ somebody who never learned about it.
 
 Publishing is non-blocking and never returns an error to the session: **a
 broken stream must never break a database connection.** That is structural,
-not conventional: `Broker.Publish` only touches in-memory state. The per-topic
+not conventional: `Broker.Publish` only touches in-memory state. The
 authorization re-check — which reads the store — runs in each socket's own
 write loop, immediately before the write, so a slow database costs one client
 latency and can never stall a proxy session parked on a hold. Decisions are

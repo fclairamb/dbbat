@@ -18,7 +18,8 @@ Captures are **disabled by default**. Set `DBB_DUMP_DIR` to enable, optionally t
 |----------|-------------|---------|
 | `DBB_DUMP_DIR` | Directory for `.pcapng` files. Empty = disabled. | _disabled_ |
 | `DBB_DUMP_MAX_SIZE` | Max bytes per session file. When the next packet would exceed this, it's silently skipped; the file stays a valid pcapng. | `10485760` (10 MB) |
-| `DBB_DUMP_RETENTION` | Auto-delete captures older than this Go duration (`24h`, `7d`, `1h30m`, …). | `24h` |
+| `DBB_DUMP_RETENTION` | Auto-delete captures older than this Go duration (`24h`, `7d`, `1h30m`, …). Applies to local captures only. | `24h` |
+| `DBB_DUMP_UPLOAD_URL` | Blob bucket finished captures are uploaded to, e.g. `s3://my-bucket/captures`. Empty = keep captures on local disk. | _disabled_ |
 
 ```bash
 docker run -d \
@@ -31,6 +32,37 @@ docker run -d \
 ```
 
 Each session writes a single file named `<connection-uid>.pcapng`.
+
+## Storing Captures in S3
+
+On Kubernetes, `DBB_DUMP_DIR` is ephemeral pod storage: captures die with the
+pod and are invisible to the other replicas. Set `DBB_DUMP_UPLOAD_URL` to give
+them a durable home.
+
+```bash
+docker run -d \
+  -e DBB_DSN=... \
+  -e DBB_DUMP_DIR=/var/dbbat/spool \
+  -e DBB_DUMP_UPLOAD_URL=s3://my-bucket/dbbat-captures \
+  ghcr.io/fclairamb/dbbat
+```
+
+`DBB_DUMP_DIR` then acts as a **spool**: the capture is still written to local
+disk while the session is live, and uploaded once the session closes — at which
+point the local copy is removed. Downloading a capture through the API or the UI
+works the same either way; any replica can serve an uploaded capture, because
+the object key is recorded on the connection row.
+
+- The scheme selects the driver: `s3://` for S3 and S3-compatible stores
+  (credentials come from the standard AWS chain), and `file://` for a mounted
+  volume. `gs://` and `azblob://` work too.
+- Objects are keyed `<prefix>/YYYY/MM/DD/<instance-id>/<connection-uid>.pcapng`.
+- **`DBB_DUMP_RETENTION` does not apply to the bucket.** dbbat never expires an
+  object it uploaded; configure a bucket lifecycle policy instead.
+- Captures are never streamed to the bucket mid-session, so a pod that dies
+  mid-session loses that session's capture. In exchange, a crash always leaves a
+  valid partial capture on disk rather than an unusable incomplete upload.
+- Anything left in the spool by a crashed run is uploaded at the next startup.
 
 ## What's Captured
 

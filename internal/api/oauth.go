@@ -105,35 +105,46 @@ func (s *Server) handleOAuthCallback(providerName string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		ctx := c.Request.Context()
 
-		// 1. Check for provider-side error
+		// 1. Check for provider-side error. The provider hands the state back
+		// even when it denies the request, so burn it to recover the redirect
+		// target — the user's original destination survives the failure and a
+		// retry from the login page still lands there.
 		if errParam := c.Query("error"); errParam != "" {
 			s.logger.WarnContext(ctx, "OAuth provider returned error",
 				slog.String("provider", providerName),
 				slog.String("error", errParam),
 				slog.String("description", c.Query("error_description")))
-			s.redirectWithError(c, ErrCodeOAuthProviderError)
+			s.redirectWithError(c, ErrCodeOAuthProviderError,
+				s.consumeRedirectTarget(ctx, c.Query("state"), providerName))
 			return
 		}
 
-		// 2. Validate and consume state (CSRF protection)
+		// 2. Validate and consume state (CSRF protection). Nothing is known
+		// about the flow before this point, so these two branches have no
+		// redirect target to forward.
 		stateToken := c.Query("state")
 		if stateToken == "" {
-			s.redirectWithError(c, ErrCodeOAuthStateMismatch)
+			s.redirectWithError(c, ErrCodeOAuthStateMismatch, "")
 			return
 		}
 
 		oauthState, err := s.store.ConsumeOAuthState(ctx, stateToken)
 		if err != nil {
 			if errors.Is(err, store.ErrOAuthStateNotFound) {
-				s.redirectWithError(c, ErrCodeOAuthStateMismatch)
+				s.redirectWithError(c, ErrCodeOAuthStateMismatch, "")
 				return
 			}
 			writeInternalError(c, s.logger, err, "failed to consume OAuth state")
 			return
 		}
 
+		// The state row carries the post-login redirect target captured when
+		// the flow started (e.g. the device consent page). Every failure below
+		// forwards it so the login page can retry into the same destination.
+		redirectTarget := oauthState.RedirectURL
+
 		if oauthState.Provider != providerName {
-			s.redirectWithError(c, ErrCodeOAuthStateMismatch)
+			s.redirectWithError(c, ErrCodeOAuthStateMismatch, redirectTarget)
 			return
 		}
 
@@ -147,7 +158,7 @@ func (s *Server) handleOAuthCallback(providerName string) gin.HandlerFunc {
 			s.logger.ErrorContext(ctx, "OAuth code exchange failed",
 				slog.String("provider", providerName),
 				slog.Any("error", err))
-			s.redirectWithError(c, ErrCodeOAuthFailed)
+			s.redirectWithError(c, ErrCodeOAuthFailed, redirectTarget)
 			return
 		}
 
@@ -160,10 +171,10 @@ func (s *Server) handleOAuthCallback(providerName string) gin.HandlerFunc {
 				slog.Any("error", err))
 
 			if errors.Is(err, errOAuthUserNotLinked) {
-				s.redirectWithError(c, ErrCodeOAuthUserNotLinked)
+				s.redirectWithError(c, ErrCodeOAuthUserNotLinked, redirectTarget)
 				return
 			}
-			s.redirectWithError(c, ErrCodeOAuthFailed)
+			s.redirectWithError(c, ErrCodeOAuthFailed, redirectTarget)
 			return
 		}
 
@@ -180,18 +191,9 @@ func (s *Server) handleOAuthCallback(providerName string) gin.HandlerFunc {
 			slog.Any("uid", user.UID))
 
 		// 6. Redirect to frontend with token, forwarding the redirect target
-		// captured when the flow started (re-sanitized: the column is not
-		// otherwise constrained). The login page picks `redirect` up the same
-		// way it does after a password login.
-		baseURL := "/app"
-		if s.config != nil && s.config.BaseURL != "" {
-			baseURL = s.config.BaseURL
-		}
-		target := baseURL + "/login?token=" + plainKey
-		if redirectTarget := sanitizeLoginRedirect(oauthState.RedirectURL); redirectTarget != "" {
-			target += "&redirect=" + url.QueryEscape(redirectTarget)
-		}
-		c.Redirect(http.StatusFound, target)
+		// captured when the flow started. The login page picks `redirect` up
+		// the same way it does after a password login.
+		c.Redirect(http.StatusFound, s.buildLoginRedirect("token="+plainKey, redirectTarget))
 	}
 }
 
@@ -449,11 +451,44 @@ func (s *Server) generateUniqueUsername(ctx context.Context, displayName, email 
 	return base + "." + hex.EncodeToString(suffix)
 }
 
-// redirectWithError redirects the user to the login page with an error code.
-func (s *Server) redirectWithError(c *gin.Context, code ErrorCode) {
+// redirectWithError redirects the user to the login page with an error code,
+// keeping the post-login redirect target alive so a retry from the login page
+// still lands where the user started. Pass "" when the failure happened before
+// the state row was read and no target is known.
+func (s *Server) redirectWithError(c *gin.Context, code ErrorCode, redirectTarget string) {
+	c.Redirect(http.StatusFound, s.buildLoginRedirect("error="+string(code), redirectTarget))
+}
+
+// buildLoginRedirect assembles a `/login?<query>[&redirect=...]` URL on the
+// configured base path. It is the single place the redirect target is written
+// out, and it re-sanitizes on the way — no caller, and no value read back from
+// the `oauth_states` column, can turn this into an open redirect.
+func (s *Server) buildLoginRedirect(query, redirectTarget string) string {
 	baseURL := "/app"
 	if s.config != nil && s.config.BaseURL != "" {
 		baseURL = s.config.BaseURL
 	}
-	c.Redirect(http.StatusFound, baseURL+"/login?error="+string(code))
+
+	target := baseURL + "/login?" + query
+	if safe := sanitizeLoginRedirect(redirectTarget); safe != "" {
+		target += "&redirect=" + url.QueryEscape(safe)
+	}
+	return target
+}
+
+// consumeRedirectTarget best-effort recovers the post-login redirect target
+// from a pending state row. Used by the provider-error branch, which runs
+// before the regular state validation: any problem (absent, expired, unknown
+// or foreign state) just means no target to forward, never a failed login
+// redirect.
+func (s *Server) consumeRedirectTarget(ctx context.Context, stateToken, providerName string) string {
+	if stateToken == "" {
+		return ""
+	}
+
+	oauthState, err := s.store.ConsumeOAuthState(ctx, stateToken)
+	if err != nil || oauthState.Provider != providerName {
+		return ""
+	}
+	return oauthState.RedirectURL
 }

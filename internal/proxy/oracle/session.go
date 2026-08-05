@@ -138,6 +138,9 @@ type session struct {
 	// Dump
 	dumpConfig config.DumpConfig
 	dump       *dump.Writer
+	// dumpUploader ships the finished capture to blob storage when the
+	// session ends. nil = local-only captures (the default).
+	dumpUploader *dump.Uploader
 
 	// Wire-level byte counters for the client-facing socket. Reads = bytes
 	// sent by the client; writes = bytes returned to the client. Together
@@ -1583,6 +1586,10 @@ func (s *session) cleanup() {
 		if err := s.dump.Close(); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to close dump writer", slog.Any("error", err))
 		}
+
+		// The file is complete now; hand it to the uploader. No-op when
+		// uploads are not configured, and it never blocks on the network.
+		s.dumpUploader.Finish(s.ctx, s.connectionUID)
 	}
 
 	if s.connectionUID != uuid.Nil {

@@ -20,6 +20,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/auth/slack"
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/events"
 	"github.com/fclairamb/dbbat/internal/notify"
 	"github.com/fclairamb/dbbat/internal/store"
@@ -61,6 +62,19 @@ type Server struct {
 	approvalNotifier approvalEscalator
 	// listenCancel stops the cross-replica LISTEN loop on shutdown.
 	listenCancel context.CancelFunc
+
+	// dumpStorage reads back session captures that have been uploaded to blob
+	// storage. nil when DBB_DUMP_UPLOAD_URL is unset, in which case captures
+	// only ever exist in the local spool.
+	dumpStorage *dump.Uploader
+}
+
+// SetDumpStorage installs the blob store holding uploaded session captures, so
+// downloads can fall back to it when the capture is no longer (or never was) in
+// this replica's local spool. Called by the process wiring; nil is fine and
+// means local-only captures.
+func (s *Server) SetDumpStorage(uploader *dump.Uploader) {
+	s.dumpStorage = uploader
 }
 
 // SetEventPlumbing installs the shared broker and approval registry. Called by
@@ -361,7 +375,10 @@ func (s *Server) setupRouter() *gin.Engine {
 			// Connections: admin/viewer see all, connector sees own only (filtered in handler)
 			authenticated.GET("/connections", s.handleListConnections)
 			authenticated.GET("/connections/:uid", s.handleGetConnection)
-			authenticated.GET("/connections/:uid/dump", s.requireAdminOrViewer(), s.handleGetConnectionDump)
+			// Capture download is admin-only (narrowed from admin-or-viewer):
+			// the raw pcapng is byte-fidelity beyond what a viewer sees on the
+			// queries pages, including the auth handshake and every result row.
+			authenticated.GET("/connections/:uid/dump", s.requireAdmin(), s.handleGetConnectionDump)
 			authenticated.DELETE("/connections/:uid/dump", s.requireAdmin(), s.handleDeleteConnectionDump)
 			// Live event stream (WebSocket). Per-topic authorization happens
 			// inside the handler and is re-checked on every send, so no role

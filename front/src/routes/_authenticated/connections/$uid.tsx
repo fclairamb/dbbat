@@ -4,6 +4,7 @@ import {
   useUsers,
   useDatabases,
   useQueries,
+  useDownloadConnectionDump,
   type Query,
 } from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -11,9 +12,24 @@ import { PageLoader } from "@/components/shared/LoadingSpinner";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { Download } from "lucide-react";
+import { toast } from "sonner";
 import { format, formatDistanceToNow } from "date-fns";
 import { useBreadcrumbTitle } from "@/contexts/BreadcrumbContext";
+import { useAuth } from "@/contexts/AuthContext";
 import { ConnectionWatchPanel } from "@/components/shared/ConnectionWatchPanel";
+import { UpstreamTlsIndicator } from "@/components/shared/UpstreamTlsIndicator";
+import {
+  upstreamTlsExplanation,
+  upstreamTlsState,
+} from "@/lib/upstream-tls";
+import { formatBytes } from "@/lib/utils";
 
 const RECENT_QUERIES_LIMIT = 50;
 
@@ -37,10 +53,14 @@ export const Route = createFileRoute("/_authenticated/connections/$uid")({
 function ConnectionDetailPage() {
   const { uid } = Route.useParams();
   const { watch } = Route.useSearch();
+  const { isAdmin } = useAuth();
   const { data: connection, isLoading: isLoadingConnection } =
     useConnection(uid);
   const { data: users } = useUsers();
   const { data: databases } = useDatabases();
+  const downloadDump = useDownloadConnectionDump(uid, {
+    onError: (error) => toast.error(error.message),
+  });
 
   const getUserName = (userId: string) =>
     users?.find((u) => u.uid === userId)?.username ?? userId;
@@ -120,6 +140,17 @@ function ConnectionDetailPage() {
     },
   ];
 
+  // The protocol and ssl_mode fields only exist on the full (admin) server
+  // payload — a viewer or connector gets uid/name/description and nothing
+  // more, so both stay undefined for them and the indicator degrades to the
+  // honest, unattributed reading.
+  const server = databases?.find((d) => d.uid === connection.database_id);
+  const fullServer = server && "host" in server ? server : undefined;
+  const tlsState = upstreamTlsState(
+    connection.upstream_tls,
+    fullServer?.protocol,
+  );
+
   const end = connection.disconnected_at
     ? new Date(connection.disconnected_at)
     : new Date();
@@ -133,11 +164,38 @@ function ConnectionDetailPage() {
         title={`${getUserName(connection.user_id)} @ ${getDbName(connection.database_id)}`}
         description={`Connected ${format(new Date(connection.connected_at), "PPpp")}`}
         actions={
-          connection.disconnected_at ? (
-            <Badge variant="secondary">Disconnected</Badge>
-          ) : (
-            <Badge variant="default">Active</Badge>
-          )
+          <>
+            {isAdmin && connection.dump?.available && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    data-testid="download-dump-button"
+                    disabled={downloadDump.isPending}
+                    onClick={() => downloadDump.mutate()}
+                  >
+                    <Download className="h-4 w-4 mr-1.5" />
+                    {downloadDump.isPending
+                      ? "Downloading..."
+                      : `Download capture (${formatBytes(connection.dump.size_bytes)})`}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs">
+                  Raw pcapng packet capture — opens in Wireshark or tcpdump.
+                  See docs/dump-format.md in the dbbat repository for the
+                  format reference, and use{" "}
+                  <code className="font-mono">dbbat dump anonymise</code>{" "}
+                  before sharing this file with anyone else.
+                </TooltipContent>
+              </Tooltip>
+            )}
+            {connection.disconnected_at ? (
+              <Badge variant="secondary">Disconnected</Badge>
+            ) : (
+              <Badge variant="default">Active</Badge>
+            )}
+          </>
         }
       />
 
@@ -201,6 +259,38 @@ function ConnectionDetailPage() {
               </dt>
               <dd>{formatBytes(connection.bytes_transferred)}</dd>
             </div>
+            <div>
+              <dt className="text-sm font-medium text-muted-foreground mb-1">
+                Upstream Encryption
+              </dt>
+              <dd className="flex flex-wrap items-center gap-2">
+                <UpstreamTlsIndicator
+                  upstreamTls={connection.upstream_tls}
+                  protocol={fullServer?.protocol}
+                  sslMode={fullServer?.ssl_mode}
+                />
+                {/* The policy sits next to the outcome on purpose: "policy
+                    said prefer, outcome was plaintext" is one statement, and
+                    reading it as two separate facts is what made a silent
+                    downgrade invisible in the first place. */}
+                {fullServer && tlsState !== "not-applicable" && (
+                  <span
+                    className="text-xs text-muted-foreground"
+                    data-testid="upstream-tls-policy"
+                  >
+                    policy:{" "}
+                    <span className="font-mono">
+                      {fullServer.ssl_mode || "prefer (default)"}
+                    </span>
+                  </span>
+                )}
+              </dd>
+              {tlsState !== "encrypted" && (
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {upstreamTlsExplanation(tlsState)}
+                </p>
+              )}
+            </div>
           </dl>
         </CardContent>
       </Card>
@@ -250,12 +340,4 @@ function formatDuration(durationMs: number): string {
     return `${minutes}m ${seconds % 60}s`;
   }
   return `${seconds}s`;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 }

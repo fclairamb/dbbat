@@ -304,7 +304,16 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		}
 	}
 
+	// One capture uploader for the whole process (nil when
+	// DBB_DUMP_UPLOAD_URL is unset, which is the default and means captures
+	// stay on local disk).
+	dumpUploader, err := startDumpUploader(ctx, cfg, dataStore, logger)
+	if err != nil {
+		return err
+	}
+
 	apiServer, approvals, approvalDeps := buildEventPlumbing(ctx, cfg, dataStore, logger)
+	apiServer.SetDumpStorage(dumpUploader)
 
 	go func() {
 		if err := apiServer.Start(cfg.ListenAPI); err != nil {
@@ -327,22 +336,32 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 
 	// Start the PostgreSQL proxy server
 	proxyServer := startPostgresProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
+	proxyServer.SetDumpUploader(dumpUploader)
 
 	// Start Oracle proxy server (if configured)
 	oracleServer := startOracleProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
+	if oracleServer != nil {
+		oracleServer.SetDumpUploader(dumpUploader)
+	}
 
 	// Start MySQL proxy server (if configured)
 	mysqlServer := startMySQLProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
+	if mysqlServer != nil {
+		mysqlServer.SetDumpUploader(dumpUploader)
+	}
 
 	// Start MongoDB proxy server (if configured)
 	mongoServer := startMongoProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
+	if mongoServer != nil {
+		mongoServer.SetDumpUploader(dumpUploader)
+	}
 
 	// One retention sweep for the whole process (nil when disabled, the default).
 	sweeper := startQueryRetentionSweep(ctx, cfg, dataStore, logger)
 
 	// Draining releases parked queries first, then stops the servers.
 	servers := collectServers(approvalDrain{approvals, logger}, apiServer, proxyServer,
-		oracleServer, mysqlServer, mongoServer, rowWriter, sweeper, heartbeat)
+		oracleServer, mysqlServer, mongoServer, rowWriter, sweeper, heartbeat, dumpUploader)
 
 	return awaitShutdown(ctx, logger, servers...)
 }
@@ -1203,6 +1222,7 @@ func collectServers(
 	rowWriter *shared.RowWriter,
 	sweeper *queryRetentionSweeper,
 	heartbeat *instanceHeartbeat,
+	dumpUploader *dump.Uploader,
 ) []shutdownable {
 	servers := []shutdownable{drain, apiServer, pgServer}
 
@@ -1228,6 +1248,13 @@ func collectServers(
 		servers = append(servers, sweeper)
 	}
 
+	// After the proxies, before the heartbeat: the queue can only be drained
+	// once no session can add to it, and a capture still uploading is a good
+	// reason not to hurry the rest of the shutdown.
+	if dumpUploader != nil {
+		servers = append(servers, dumpUploaderCloser{dumpUploader})
+	}
+
 	// Last on purpose: deregistering tells the other replicas our connections
 	// are fair game, which must not happen while the proxies are still draining
 	// live sessions.
@@ -1236,4 +1263,58 @@ func collectServers(
 	}
 
 	return servers
+}
+
+// startDumpUploader opens the blob store finished captures are uploaded to and
+// sweeps whatever the previous run left behind in the spool.
+//
+// The sweep has to happen here, before any proxy accepts: at that moment every
+// capture in the spool is by definition finished — no session of this run has
+// started one yet — so uploading all of them is safe. That is also the crash
+// recovery path, since a session whose process died never reached its own
+// upload.
+//
+// Returns (nil, nil) when uploading is not configured, which is the default:
+// captures then stay on local disk exactly as before.
+func startDumpUploader(
+	ctx context.Context, cfg *config.Config, dataStore *store.Store, logger *slog.Logger,
+) (*dump.Uploader, error) {
+	uploader, err := dump.OpenUploader(ctx, dump.UploaderOptions{
+		URL:        cfg.Dump.UploadURL,
+		SpoolDir:   cfg.Dump.Dir,
+		InstanceID: cfg.InstanceID,
+		Recorder:   dataStore,
+		Logger:     logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to open capture storage: %w", err)
+	}
+
+	if uploader == nil {
+		return nil, nil //nolint:nilnil // nil uploader is the documented "disabled" value
+	}
+
+	logger.InfoContext(ctx, "Session captures are uploaded to blob storage",
+		slog.String("url", cfg.Dump.UploadURL),
+		slog.String("spool", cfg.Dump.Dir))
+
+	queued, err := uploader.SweepSpool(ctx)
+	if err != nil {
+		// Not fatal: an unreadable spool must not stop the proxy from serving.
+		logger.WarnContext(ctx, "failed to sweep the capture spool", slog.Any("error", err))
+	} else if queued > 0 {
+		logger.InfoContext(ctx, "Queued captures left in the spool by a previous run",
+			slog.Int("captures", queued))
+	}
+
+	return uploader, nil
+}
+
+// dumpUploaderCloser adapts the capture uploader to the shutdown sequence.
+type dumpUploaderCloser struct {
+	uploader *dump.Uploader
+}
+
+func (d dumpUploaderCloser) Shutdown(_ context.Context) error {
+	return d.uploader.Close()
 }

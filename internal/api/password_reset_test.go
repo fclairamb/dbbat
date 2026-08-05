@@ -3,12 +3,17 @@ package api
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,86 +21,177 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
+	"github.com/uptrace/bun/driver/pgdriver"
 
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
+// testTemplateDB is migrated once and then only ever used as the source of
+// CREATE DATABASE ... TEMPLATE. Nothing may hold a connection to it: PostgreSQL
+// refuses to copy a template another session is attached to.
+const testTemplateDB = "dbbat_api_template"
+
 var (
 	testContainer       *postgres.PostgresContainer
 	testDSN             string
+	testAdminDB         *sql.DB
+	testDBSeq           atomic.Uint64
 	containerOnce       sync.Once
 	errContainerStartup error
+
+	errTemplateBusy = errors.New("template database still has open connections")
 )
 
-// setupPostgresContainer starts a PostgreSQL container for testing.
-func setupPostgresContainer(t *testing.T) string {
+// setupPostgresContainer starts the PostgreSQL container shared by this package
+// and prepares the migrated template every test is cloned from.
+func setupPostgresContainer(t *testing.T) {
 	t.Helper()
 
-	containerOnce.Do(func() {
-		ctx := context.Background()
-
-		testContainer, errContainerStartup = postgres.Run(ctx,
-			"postgres:15-alpine",
-			postgres.WithDatabase("dbbat_test"),
-			postgres.WithUsername("test"),
-			postgres.WithPassword("test"),
-			testcontainers.WithWaitStrategy(
-				wait.ForLog("database system is ready to accept connections").
-					WithOccurrence(2).
-					WithStartupTimeout(60*time.Second),
-			),
-		)
-		if errContainerStartup != nil {
-			return
-		}
-
-		testDSN, errContainerStartup = testContainer.ConnectionString(ctx, "sslmode=disable")
-	})
+	containerOnce.Do(prepareTestContainer)
 
 	if errContainerStartup != nil {
 		t.Fatalf("failed to start postgres container: %v", errContainerStartup)
 	}
+}
 
-	return testDSN
+// prepareTestContainer boots the container, opens the admin connection used to
+// create and drop the per-test databases, and migrates the template.
+func prepareTestContainer() {
+	ctx := context.Background()
+
+	testContainer, errContainerStartup = postgres.Run(ctx,
+		"postgres:15-alpine",
+		postgres.WithDatabase("dbbat_test"),
+		postgres.WithUsername("test"),
+		postgres.WithPassword("test"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(60*time.Second),
+		),
+	)
+	if errContainerStartup != nil {
+		return
+	}
+
+	testDSN, errContainerStartup = testContainer.ConnectionString(ctx, "sslmode=disable")
+	if errContainerStartup != nil {
+		return
+	}
+
+	// Attached to the container's default database, never to the template.
+	testAdminDB = sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(testDSN)))
+
+	if _, err := testAdminDB.ExecContext(ctx, "CREATE DATABASE "+testTemplateDB); err != nil {
+		errContainerStartup = fmt.Errorf("failed to create the template database: %w", err)
+
+		return
+	}
+
+	// Migrate exactly once, here. Every test then clones the finished schema,
+	// which PostgreSQL does as a file copy instead of replaying the migrations.
+	migrateStore, err := store.New(ctx, testDatabaseDSN(testTemplateDB))
+	if err != nil {
+		errContainerStartup = fmt.Errorf("failed to migrate the template database: %w", err)
+
+		return
+	}
+
+	migrateStore.Close()
+
+	errContainerStartup = waitForTemplateIdle(ctx)
+}
+
+// testDatabaseDSN points the container DSN at another database on the same
+// server.
+func testDatabaseDSN(name string) string {
+	parsed, err := url.Parse(testDSN)
+	if err != nil {
+		panic("test container DSN is not a URL: " + err.Error())
+	}
+
+	parsed.Path = "/" + name
+
+	return parsed.String()
+}
+
+// waitForTemplateIdle blocks until no backend is attached to the template.
+// Closing a *sql.DB hands its connections back for teardown; the server-side
+// backends disappear a moment later, and CREATE DATABASE ... TEMPLATE fails
+// outright if one is still there.
+func waitForTemplateIdle(ctx context.Context) error {
+	deadline := time.Now().Add(30 * time.Second)
+
+	for {
+		var backends int
+
+		row := testAdminDB.QueryRowContext(ctx,
+			"SELECT count(*) FROM pg_stat_activity WHERE datname = $1", testTemplateDB)
+		if err := row.Scan(&backends); err != nil {
+			return fmt.Errorf("failed to count template backends: %w", err)
+		}
+
+		if backends == 0 {
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			return errTemplateBusy
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// newIsolatedStore gives the calling test a private, already-migrated database.
+//
+// Most tests in this package run in parallel against the one shared container.
+// They used to share a single database and wipe every table on setup, which
+// meant one test's setup deleted a running test's rows — a user disappearing
+// mid-test surfaced as foreign-key violations on user_identities and api_keys.
+// A database per test removes the shared state instead of trying to time the
+// wipes.
+func newIsolatedStore(t *testing.T) *store.Store {
+	t.Helper()
+
+	setupPostgresContainer(t)
+
+	ctx := context.Background()
+	// Built from a literal prefix and a counter: a database name is an
+	// identifier, so it cannot go through a placeholder.
+	name := fmt.Sprintf("dbbat_api_%d", testDBSeq.Add(1))
+
+	if _, err := testAdminDB.ExecContext(ctx,
+		"CREATE DATABASE "+name+" TEMPLATE "+testTemplateDB); err != nil {
+		t.Fatalf("failed to create test database %s: %v", name, err)
+	}
+
+	dataStore, err := store.New(ctx, testDatabaseDSN(name))
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+
+	t.Cleanup(func() {
+		dataStore.Close()
+
+		// FORCE: a test that failed mid-request can leave a connection behind,
+		// and a pinned database would fail the drop and leak.
+		if _, err := testAdminDB.ExecContext(context.Background(),
+			"DROP DATABASE IF EXISTS "+name+" WITH (FORCE)"); err != nil {
+			t.Logf("failed to drop test database %s: %v", name, err)
+		}
+	})
+
+	return dataStore
 }
 
 // setupTestServer creates an API server with a real database for testing.
 func setupTestServer(t *testing.T) (*Server, *store.Store) {
 	t.Helper()
 
-	dsn := setupPostgresContainer(t)
-	ctx := context.Background()
-
-	dataStore, err := store.New(ctx, dsn)
-	if err != nil {
-		t.Fatalf("failed to create store: %v", err)
-	}
-
-	// Clean up tables
-	cleanupTables := []string{
-		"api_keys",
-		"query_rows",
-		"queries",
-		"connections",
-		"grant_requests",
-		"access_grants",
-		"grant_definitions",
-		"audit_log",
-		"servers",
-		"user_group_members",
-		"user_groups",
-		"users",
-	}
-
-	for _, table := range cleanupTables {
-		_, err := dataStore.DB().ExecContext(ctx, "DELETE FROM "+table)
-		if err != nil {
-			dataStore.Close()
-			t.Fatalf("failed to clean up table %s: %v", table, err)
-		}
-	}
+	dataStore := newIsolatedStore(t)
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	cfg := &config.Config{
@@ -103,10 +199,6 @@ func setupTestServer(t *testing.T) (*Server, *store.Store) {
 	}
 
 	server := NewServer(dataStore, nil, logger, cfg)
-
-	t.Cleanup(func() {
-		dataStore.Close()
-	})
 
 	return server, dataStore
 }

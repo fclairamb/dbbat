@@ -279,6 +279,9 @@ linters:
           - paralleltest
         path: internal/api/approvals_test\.go
       - linters:
+          - paralleltest
+        path: internal/api/stream_approvals_test\.go
+      - linters:
           - canonicalheader
         path: internal/api/ratelimit_test\.go
       - linters:

@@ -625,6 +625,12 @@ func (s *Session) closeDump() {
 	}
 
 	s.dumpWriter = nil
+
+	// The file is complete now; hand it to the uploader. No-op when uploads
+	// are not configured, and it never blocks on the network.
+	if s.connection != nil {
+		s.server.dumpUploader.Finish(s.ctx, s.connection.UID)
+	}
 }
 
 // closeUpstream closes the upstream connection if open.

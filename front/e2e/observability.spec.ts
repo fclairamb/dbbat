@@ -230,6 +230,113 @@ test.describe("Observability Features", () => {
     ).toBeVisible();
   });
 
+  // upstream_tls records an outcome, not a policy: under the opportunistic
+  // ssl_mode values dbbat offers TLS and silently falls back to plaintext when
+  // the target refuses. Test mode seeds proxy_target with ssl_mode=disable and
+  // a sample connection that never negotiated TLS, so every row here is the
+  // plaintext case — which is the one the UI must make visible.
+  test("connections list flags a plaintext upstream leg", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("connections");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const headerRow = authenticatedPage.locator("thead tr");
+    await expect(headerRow.getByText("Upstream", { exact: true })).toBeVisible();
+
+    const rows = authenticatedPage.locator("tbody tr");
+    if ((await rows.count()) === 0) {
+      test.skip(true, "No connection rows available in this environment");
+      return;
+    }
+
+    const indicator = rows
+      .first()
+      .getByTestId("upstream-tls-indicator");
+    await expect(indicator).toBeVisible();
+    // Admin sees the target's protocol (postgresql), so the plaintext leg is
+    // attributable and gets the loud state rather than the muted fallback.
+    await expect(indicator).toHaveAttribute("data-state", "plaintext");
+    await expect(indicator).toHaveText("Plaintext");
+  });
+
+  test("connection detail pairs the TLS outcome with the ssl_mode policy", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("connections");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const rows = authenticatedPage.locator("tbody tr");
+    if ((await rows.count()) === 0) {
+      test.skip(true, "No connection rows available in this environment");
+      return;
+    }
+
+    await rows.first().locator("a").first().click();
+    await expect(authenticatedPage).toHaveURL(/\/connections\/[0-9a-f-]{36}$/);
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    await expect(
+      authenticatedPage.getByText("Upstream Encryption"),
+    ).toBeVisible();
+
+    const indicator = authenticatedPage.getByTestId("upstream-tls-indicator");
+    await expect(indicator).toHaveAttribute("data-state", "plaintext");
+
+    // The policy sits next to the outcome so the two read as one statement.
+    // proxy_target is seeded with ssl_mode=disable.
+    await expect(
+      authenticatedPage.getByTestId("upstream-tls-policy"),
+    ).toContainText("disable");
+  });
+
+  test("viewer sees the plaintext leg without an unattributable warning", async ({
+    authenticatedPage,
+    browser,
+  }) => {
+    await authenticatedPage.goto("connections");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const rows = authenticatedPage.locator("tbody tr");
+    if ((await rows.count()) === 0) {
+      test.skip(true, "No connection rows available in this environment");
+      return;
+    }
+
+    const href = await rows.first().locator("a").first().getAttribute("href");
+    const connectionId = href?.match(/connections\/([0-9a-f-]{36})/)?.[1];
+    expect(connectionId).toBeTruthy();
+
+    const viewerContext = await browser.newContext();
+    const page = await viewerContext.newPage();
+    await page.goto("/");
+    await page.waitForLoadState("domcontentloaded");
+    await page.getByTestId("login-logo").waitFor({ state: "visible" });
+    await page.getByTestId("login-username").fill("viewer");
+    await page.getByTestId("login-password").fill("viewer");
+    await page.getByTestId("login-submit").click();
+    await page.waitForURL((url) => !url.pathname.includes("/login"), {
+      timeout: 10000,
+    });
+
+    await page.goto(`connections/${connectionId}`);
+    await page.waitForLoadState("networkidle");
+    await expect(page.getByText("Connection Information")).toBeVisible();
+
+    // A viewer only gets uid/name/description for a server, so the UI cannot
+    // tell a genuine downgrade from an Oracle session (always plaintext by
+    // design). It reports the honest outcome without the warning styling, and
+    // without a policy it has no business knowing.
+    const indicator = page.getByTestId("upstream-tls-indicator");
+    await expect(indicator).toHaveAttribute(
+      "data-state",
+      "plaintext-unattributed",
+    );
+    await expect(page.getByTestId("upstream-tls-policy")).toHaveCount(0);
+
+    await viewerContext.close();
+  });
+
   test("a connector cannot open another user's connection page", async ({
     authenticatedPage,
     browser,
@@ -279,6 +386,83 @@ test.describe("Observability Features", () => {
 
     await expect(page.getByText("Connection not found")).toBeVisible();
     await connectorContext.close();
+  });
+
+  // Capture download: the E2E harness (front/e2e/global-setup.ts) starts the
+  // server without DBB_DUMP_DIR, so captures are disabled server-wide and no
+  // connection in this environment ever reports dump.available. That is
+  // enough to exercise both "no button without a capture" and "no button for
+  // a non-admin" — it can't exercise "button visible + successful download",
+  // which needs an on-disk capture the harness doesn't produce. That
+  // happy-path assertion is intentionally not written here rather than
+  // faked; see specs/todos/2026-08-05-03-download-session-capture-from-ui.md.
+  test("download capture button is absent when the connection has no capture", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("connections");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const rows = authenticatedPage.locator("tbody tr");
+    if ((await rows.count()) === 0) {
+      test.skip(true, "No connection rows available in this environment");
+      return;
+    }
+
+    const rowLink = rows.first().locator("a").first();
+    await rowLink.click();
+    await expect(authenticatedPage).toHaveURL(/\/connections\/[0-9a-f-]{36}$/);
+    await authenticatedPage.waitForLoadState("networkidle");
+    await expect(
+      authenticatedPage.getByText("Connection Information"),
+    ).toBeVisible();
+
+    // Dumps are disabled in this harness, so dump.available is false even
+    // for an admin — the button must not render.
+    await expect(
+      authenticatedPage.getByTestId("download-dump-button"),
+    ).toHaveCount(0);
+  });
+
+  test("download capture button is absent for the viewer account", async ({
+    authenticatedPage,
+    browser,
+  }) => {
+    await authenticatedPage.goto("connections");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const rows = authenticatedPage.locator("tbody tr");
+    if ((await rows.count()) === 0) {
+      test.skip(true, "No connection rows available in this environment");
+      return;
+    }
+
+    const href = await rows.first().locator("a").first().getAttribute("href");
+    const connectionId = href?.match(/connections\/([0-9a-f-]{36})/)?.[1];
+    expect(connectionId).toBeTruthy();
+
+    // A genuinely separate browser context, signed in as viewer: reusing
+    // authenticatedPage's Page would stay signed in as admin.
+    const viewerContext = await browser.newContext();
+    const page = await viewerContext.newPage();
+    await page.goto("/");
+    await page.waitForLoadState("domcontentloaded");
+    await page.getByTestId("login-logo").waitFor({ state: "visible" });
+    await page.getByTestId("login-username").fill("viewer");
+    await page.getByTestId("login-password").fill("viewer");
+    await page.getByTestId("login-submit").click();
+    await page.waitForURL((url) => !url.pathname.includes("/login"), {
+      timeout: 10000,
+    });
+
+    await page.goto(`connections/${connectionId}`);
+    await page.waitForLoadState("networkidle");
+    await expect(page.getByText("Connection Information")).toBeVisible();
+
+    // Viewer role must never see the download action, regardless of whether
+    // a capture exists — the UI gate mirrors the API's admin-only narrowing.
+    await expect(page.getByTestId("download-dump-button")).toHaveCount(0);
+
+    await viewerContext.close();
   });
 
   test("should display audit log page", async ({ authenticatedPage }) => {

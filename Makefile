@@ -58,6 +58,14 @@ test-e2e:
 	@echo "Running E2E tests..."
 	@cd front && bun run test:e2e
 
+# Regenerate the website's showcase media (screenshots + approval video).
+#
+# On demand only — never wired into a release. Brings up its own throwaway
+# PostgreSQL container and its own demo-mode dbbat on non-default ports, so it
+# cannot disturb a running `make dev` stack. See scripts/showcase.sh.
+showcase:
+	@./scripts/showcase.sh
+
 # Run Oracle integration tests (requires Docker)
 test-e2e-oracle:
 	go test -tags integration -v -timeout 15m ./internal/proxy/oracle/...

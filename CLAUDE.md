@@ -107,6 +107,9 @@ make test             # Run Go unit tests
 make test-e2e         # Run Playwright E2E tests
 make lint             # Run golangci-lint
 
+# Website media (on demand only — never part of a release)
+make showcase         # Regenerate website/static/img/showcase/ from a live demo instance
+
 # Integration suites (real containers via testcontainers; `make test` skips them)
 make test-integration-mongodb      # ./internal/proxy/mongodb/...
 make test-integration-mysql        # ./internal/proxy/mysql/...
@@ -162,7 +165,8 @@ This applies even when the current task is otherwise complete — capture the fo
 | `DBB_INSTANCE_ID` | Identifies this process among replicas sharing the store (default: hostname). Stamped on connection rows next to a non-configurable per-run UUID, and registered in the `instances` table — keyed by `(instance_id, run_id)` — with a 30s heartbeat. The reconcile closes crash-orphaned connections whose owning *run* deregistered or went 15min without a heartbeat, never a run that is still heartbeating, so replicas sharing an id are safe (just confusing). The liveness half also re-runs every ~7.5min while the process lives, covering both crashed peers and this id's own previous runs. | No |
 | `DBB_DUMP_DIR` | Directory for session dump files (empty = disabled) | No |
 | `DBB_DUMP_MAX_SIZE` | Max dump file size per session in bytes (default: 10MB) | No |
-| `DBB_DUMP_RETENTION` | Auto-delete dumps older than this (default: `24h`) | No |
+| `DBB_DUMP_RETENTION` | Auto-delete dumps older than this (default: `24h`). Applies to the **local spool only** — dbbat never expires objects it uploaded | No |
+| `DBB_DUMP_UPLOAD_URL` | Blob bucket finished captures are uploaded to on session close, e.g. `s3://bucket/prefix` (also `file://`, `gs://`, `azblob://` via `gocloud.dev/blob`). Empty = local disk only, the default. Requires `DBB_DUMP_DIR`, which becomes the spool: captures are always written locally and uploaded once complete, never streamed live. Object key `<prefix>/YYYY/MM/DD/<instance-id>/<connection-uid>.pcapng`, recorded on the connection row so downloads never LIST the bucket. Remote retention is the bucket lifecycle policy. See `docs/dump-format.md` | No |
 | `DBB_QUERY_STORAGE_RETENTION` | Auto-delete query history (and captured result rows) older than this Go duration. Default `0` = keep forever; `720h` (30 days) is a reasonable opt-in value | No |
 | `DBB_MYSQL_TLS_DISABLE` | Refuse TLS upgrade on the MySQL listener (default: `false`) | No |
 | `DBB_MYSQL_TLS_CERT_FILE` | PEM cert for MySQL TLS termination (auto self-signed if empty) | No |
@@ -214,6 +218,39 @@ make test-e2e  # Builds app, starts server in test mode, runs Playwright
 ```
 
 Test mode credentials: `admin`/`admintest`, `viewer`/`viewer`, `connector`/`connector`
+
+### Website showcase media (`make showcase`)
+
+`front/showcase/` is a **separate Playwright project** that regenerates the
+website's marketing screenshots and the approval-hold video into
+`website/static/img/showcase/`. It is not part of `make test-e2e` and never
+gates CI.
+
+```bash
+make showcase                       # everything
+SHOWCASE_PROJECT=video make showcase  # just the clip
+SHOWCASE_SKIP_BUILD=1 make showcase   # reuse the existing ./dbbat
+SHOWCASE_KEEP=1 make showcase         # leave the stack up to poke at
+```
+
+`scripts/showcase.sh` owns the lifecycle: it starts its **own** throwaway
+PostgreSQL container and its **own** demo-mode dbbat on ports 8099/5499/5099,
+and removes only what it created. It never calls `docker compose` — demo mode
+drops every table on startup, so pointing it at the shared dev stack would
+destroy that database. Demo-mode credentials are `admin`/`admin`,
+`viewer`/`viewer`, `connector`/`connector`.
+
+The approval video drives a real `pg` client through the proxy to create a
+genuine hold; the terminal pane and the mouse pointer are drawn (a real
+terminal is not reproducible in CI, and Playwright records no cursor). ffmpeg
+transcodes the WebM to AV1 (`libsvtav1`) plus an H.264 fallback for Safari.
+
+Every run writes `website/static/img/showcase/manifest.json`
+(`version`/`commit`/`generatedAt`), version read from
+`.release-please-manifest.json` — regeneration is on demand, so the manifest is
+what makes staleness visible. `.github/workflows/showcase.yml` exposes the same
+pipeline as a `workflow_dispatch` job, plus a non-blocking rot guard that runs
+the suite on `front/` pull requests with the output discarded.
 
 ## Creating Migrations
 

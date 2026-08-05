@@ -482,7 +482,7 @@ func TestHoldPublishesOnBothTopics(t *testing.T) {
 		Enabled: true, Store: st, Registry: reg, Broker: broker, PollInterval: 10 * time.Millisecond,
 	}, &store.Grant{ApprovalPatterns: []string{"(?i)DELETE"}}, connUID, &store.User{UID: uuid.New(), Username: "alice"}, "prod")
 
-	sub := broker.Subscribe(func(string) bool { return true }, 64)
+	sub := broker.Subscribe(func(string, *events.Event) bool { return true }, 64)
 	defer sub.Close()
 	sub.Subscribe(events.TopicApprovalsPending)
 	sub.Subscribe(events.ConnectionQueriesTopic(connUID.String()))
