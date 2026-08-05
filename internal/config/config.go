@@ -287,7 +287,7 @@ type DumpConfig struct {
 	// UploadURL is the blob-storage bucket finished captures are uploaded to
 	// on session close, e.g. "s3://my-bucket/dbbat-captures". Empty — the
 	// default — keeps captures on local disk only, which is the historical
-	// behaviour.
+	// behavior.
 	//
 	// The scheme selects the driver (gocloud.dev/blob): "s3://" for S3 and
 	// S3-compatible stores, "file://" for a local directory (useful in tests

@@ -35,6 +35,23 @@ type Recorder interface {
 	SetConnectionDumpKey(ctx context.Context, connectionUID uuid.UUID, key string) error
 }
 
+// Uploader configuration errors.
+var (
+	// ErrNoSpoolDir is returned when uploading is configured without a local
+	// spool. Captures are written to disk first and uploaded once complete —
+	// S3 objects cannot be appended to — so there is nothing to upload
+	// without one.
+	ErrNoSpoolDir = errors.New("dump upload requires a local spool directory")
+
+	// ErrNoRecorder is returned when no Recorder is supplied: an uploaded
+	// capture whose key is stored nowhere can never be found again.
+	ErrNoRecorder = errors.New("dump upload requires a key recorder")
+
+	// ErrNoScheme is returned for an upload URL with no scheme. The scheme is
+	// what selects the driver.
+	ErrNoScheme = errors.New("dump upload URL has no scheme (expected e.g. s3://bucket/prefix)")
+)
+
 // Upload queue and retry tuning. The queue is deliberately generous and the
 // retries deliberately few: a capture that cannot be uploaded is not lost, it
 // simply stays in the spool and is picked up by the next startup sweep.
@@ -71,7 +88,7 @@ type UploaderOptions struct {
 //
 // Captures are never streamed to the bucket while the session is live: S3
 // objects cannot be appended to, so live streaming would mean multipart uploads
-// with 5 MiB parts, would lose the flush-per-packet behaviour the writer has
+// with 5 MiB parts, would lose the flush-per-packet behavior the writer has
 // today, and would strand an invisible incomplete upload on a crash. Spooling
 // to disk and uploading on close keeps the "a crash still leaves a valid
 // partial pcapng" property.
@@ -107,11 +124,11 @@ func OpenUploader(ctx context.Context, opts UploaderOptions) (*Uploader, error) 
 	}
 
 	if opts.SpoolDir == "" {
-		return nil, errors.New("dump upload requires a local spool directory")
+		return nil, ErrNoSpoolDir
 	}
 
 	if opts.Recorder == nil {
-		return nil, errors.New("dump upload requires a key recorder")
+		return nil, ErrNoRecorder
 	}
 
 	bucketURL, err := normalizeBucketURL(opts.URL)
@@ -139,10 +156,16 @@ func OpenUploader(ctx context.Context, opts UploaderOptions) (*Uploader, error) 
 		closed:     make(chan struct{}),
 	}
 
+	// Deliberately not ctx: the workers must outlive whatever context started
+	// the process wiring, and an upload triggered by a session teardown must
+	// not be canceled by that session's context going away. Shutdown is
+	// signaled by Close, not by cancellation.
+	workerCtx := context.WithoutCancel(ctx)
+
 	for range uploadWorkers {
 		u.wg.Add(1)
 
-		go u.work()
+		go u.work(workerCtx)
 	}
 
 	return u, nil
@@ -163,7 +186,7 @@ func normalizeBucketURL(raw string) (string, error) {
 	}
 
 	if u.Scheme == "" {
-		return "", fmt.Errorf("dump upload URL %q has no scheme (expected e.g. s3://bucket/prefix)", raw)
+		return "", fmt.Errorf("%q: %w", raw, ErrNoScheme)
 	}
 
 	if u.Scheme == "file" || u.Scheme == "mem" {
@@ -357,14 +380,12 @@ func (u *Uploader) Close() error {
 	return nil
 }
 
-// work drains the upload queue. Workers outlive the request context on
-// purpose: an upload triggered by a session teardown must not be cancelled by
-// that session's context going away.
-func (u *Uploader) work() {
+// work drains the upload queue.
+func (u *Uploader) work(ctx context.Context) {
 	defer u.wg.Done()
 
 	for uid := range u.jobs {
-		u.uploadWithRetry(uid)
+		u.uploadWithRetry(ctx, uid)
 	}
 }
 
@@ -372,9 +393,7 @@ func (u *Uploader) work() {
 // Giving up is not data loss: the spool file is only removed after both the
 // object and the recorded key are in place, so a capture that never uploads is
 // still served locally and still picked up by the next startup sweep.
-func (u *Uploader) uploadWithRetry(uid uuid.UUID) {
-	ctx := context.Background()
-
+func (u *Uploader) uploadWithRetry(ctx context.Context, uid uuid.UUID) {
 	for attempt := 1; attempt <= uploadAttempts; attempt++ {
 		attemptCtx, cancel := context.WithTimeout(ctx, uploadTimeout)
 		key, err := u.upload(attemptCtx, uid)
@@ -424,7 +443,7 @@ func (u *Uploader) uploadWithRetry(uid uuid.UUID) {
 func (u *Uploader) upload(ctx context.Context, uid uuid.UUID) (string, error) {
 	spoolPath := filepath.Join(u.spoolDir, uid.String()+FileExt)
 
-	f, err := os.Open(spoolPath) //nolint:gosec // path is built from a UUID
+	f, err := os.Open(spoolPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", fmt.Errorf("capture %s: %w", uid, os.ErrNotExist)

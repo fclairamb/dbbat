@@ -408,7 +408,7 @@ func (s *Store) IncrementConnectionBytes(ctx context.Context, uid uuid.UUID, byt
 // exactly one place.
 //
 // A connection row that has since been reaped by the retention sweep is not an
-// error: the capture outliving its row is a retention-ordering artefact, not a
+// error: the capture outliving its row is a retention-ordering artifact, not a
 // failed upload, and failing here would make the uploader retry forever.
 func (s *Store) SetConnectionDumpKey(ctx context.Context, uid uuid.UUID, key string) error {
 	_, err := s.db.NewUpdate().

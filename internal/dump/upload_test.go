@@ -106,6 +106,8 @@ func waitForKey(t *testing.T, rec *recorder, uid uuid.UUID) string {
 }
 
 func TestOpenUploaderDisabledByDefault(t *testing.T) {
+	t.Parallel()
+
 	// An empty URL is how "local-only captures" is expressed, and it must stay
 	// the default: a nil uploader that every call site can use unconditionally.
 	u, err := OpenUploader(t.Context(), UploaderOptions{SpoolDir: t.TempDir()})
@@ -127,6 +129,8 @@ func TestOpenUploaderDisabledByDefault(t *testing.T) {
 }
 
 func TestOpenUploaderRequiresSpoolAndRecorder(t *testing.T) {
+	t.Parallel()
+
 	_, err := OpenUploader(t.Context(), UploaderOptions{URL: "file://" + t.TempDir()})
 	require.Error(t, err)
 
@@ -138,6 +142,8 @@ func TestOpenUploaderRequiresSpoolAndRecorder(t *testing.T) {
 }
 
 func TestNormalizeBucketURL(t *testing.T) {
+	t.Parallel()
+
 	// The s3 opener reads the bucket from the host and ignores the path, so a
 	// documented "s3://bucket/prefix" has to become a prefix query parameter or
 	// every capture silently lands at the bucket root.
@@ -172,6 +178,8 @@ func TestNormalizeBucketURL(t *testing.T) {
 }
 
 func TestKeyLayout(t *testing.T) {
+	t.Parallel()
+
 	u, _, _ := newTestUploader(t)
 
 	uid := uuid.MustParse("11111111-2222-3333-4444-555555555555")
@@ -187,6 +195,8 @@ func TestKeyLayout(t *testing.T) {
 }
 
 func TestFinishUploadsRecordsAndClearsSpool(t *testing.T) {
+	t.Parallel()
+
 	u, spool, rec := newTestUploader(t)
 
 	uid := uuid.New()
@@ -213,6 +223,8 @@ func TestFinishUploadsRecordsAndClearsSpool(t *testing.T) {
 }
 
 func TestFinishUsesSpoolModTimeForTheDateSegments(t *testing.T) {
+	t.Parallel()
+
 	u, spool, rec := newTestUploader(t)
 
 	uid := uuid.New()
@@ -231,6 +243,8 @@ func TestFinishUsesSpoolModTimeForTheDateSegments(t *testing.T) {
 }
 
 func TestFinishOnMissingCaptureIsNotAnError(t *testing.T) {
+	t.Parallel()
+
 	u, _, rec := newTestUploader(t)
 
 	u.Finish(t.Context(), uuid.New())
@@ -241,6 +255,8 @@ func TestFinishOnMissingCaptureIsNotAnError(t *testing.T) {
 }
 
 func TestFinishKeepsTheCaptureWhenTheKeyCannotBeRecorded(t *testing.T) {
+	t.Parallel()
+
 	spool := t.TempDir()
 	bucketDir := t.TempDir()
 	rec := newRecorder()
@@ -266,6 +282,8 @@ func TestFinishKeepsTheCaptureWhenTheKeyCannotBeRecorded(t *testing.T) {
 }
 
 func TestSweepSpoolRecoversCapturesLeftByACrash(t *testing.T) {
+	t.Parallel()
+
 	u, spool, rec := newTestUploader(t)
 
 	first, second := uuid.New(), uuid.New()
@@ -288,6 +306,8 @@ func TestSweepSpoolRecoversCapturesLeftByACrash(t *testing.T) {
 }
 
 func TestSweepSpoolOnAMissingDirIsNotAnError(t *testing.T) {
+	t.Parallel()
+
 	rec := newRecorder()
 
 	u, err := OpenUploader(t.Context(), UploaderOptions{
@@ -305,6 +325,8 @@ func TestSweepSpoolOnAMissingDirIsNotAnError(t *testing.T) {
 }
 
 func TestDeleteRemovesTheObjectAndToleratesAMissingOne(t *testing.T) {
+	t.Parallel()
+
 	u, spool, rec := newTestUploader(t)
 
 	uid := uuid.New()
@@ -324,6 +346,8 @@ func TestDeleteRemovesTheObjectAndToleratesAMissingOne(t *testing.T) {
 }
 
 func TestCloseIsIdempotentAndStopsAcceptingWork(t *testing.T) {
+	t.Parallel()
+
 	u, spool, rec := newTestUploader(t)
 
 	require.NoError(t, u.Close())

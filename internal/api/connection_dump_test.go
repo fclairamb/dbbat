@@ -121,7 +121,7 @@ func TestGetConnectionDump_FallsBackToBlobStorage(t *testing.T) { //nolint:paral
 	require.Contains(t, w.Header().Get("Content-Disposition"), conn.UID.String()+dump.FileExt)
 }
 
-// TestGetConnectionDump_PrefersTheLocalSpool keeps the pre-existing behaviour
+// TestGetConnectionDump_PrefersTheLocalSpool keeps the pre-existing behavior
 // honest: a capture still in the spool is served without touching the bucket.
 func TestGetConnectionDump_PrefersTheLocalSpool(t *testing.T) { //nolint:paralleltest // shared database state
 	server, dataStore := setupTestServer(t)
