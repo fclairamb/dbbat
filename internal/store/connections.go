@@ -452,7 +452,8 @@ func (s *Store) ListConnections(ctx context.Context, filter ConnectionFilter) ([
 	var connections []Connection
 	q := s.db.NewSelect().
 		Model(&connections).
-		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, disconnected_at, queries, bytes_transferred, instance_id, upstream_tls")
+		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, " +
+			"disconnected_at, queries, bytes_transferred, instance_id, upstream_tls, dump_key")
 
 	if filter.UserID != nil {
 		q = q.Where("user_id = ?", *filter.UserID)
