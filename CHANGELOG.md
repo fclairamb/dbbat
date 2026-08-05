@@ -13,6 +13,17 @@
 * **oracle:** stop the legacy TTC Response decoder inventing errors from row data ([#292](https://github.com/fclairamb/dbbat/issues/292)) ([2905143](https://github.com/fclairamb/dbbat/commit/290514319ad6168080af017581dd79cc5e8ef472))
 * **proxy:** never let a connectivity probe panic take down the proxy ([#296](https://github.com/fclairamb/dbbat/issues/296)) ([aee9032](https://github.com/fclairamb/dbbat/commit/aee90326eb440d2c79bca2fd70f8987c5860e18b))
 
+
+### Upgrade notes
+
+**One migration**, `20260805000000_grant_definition_slug`. It adds `grant_definitions.slug` nullable, backfills every existing row with `legacy-<first 8 hex of uid>-<n>`, then applies `NOT NULL` + `UNIQUE`. Safe on a populated table and reversible. The backfilled values are placeholders — renaming them is the point of the feature, since a CLI or agent can then say `read-only-prod` instead of a UUID.
+
+**Creating a grant definition now requires a `slug`.** Any API client that creates definitions must send one; the server deliberately does not auto-generate it. It must be lowercase alphanumeric segments (max 64) and must **not** be a UUID — that exclusion is what keeps slugs and uids in disjoint namespaces, so resolving `/grant-definitions/{uid}` stays unambiguous. This is the one compatibility break in this release.
+
+**The Oracle fix is not retroactive.** Query rows already stored may carry fabricated `ORA-<number>` errors with row data in the error field, and their `rows_affected` and captured rows may be truncated at the misparse point with `results_truncated` left `false`. Upgrading stops new ones; it does not repair old ones. A clean-up is written up in `specs/todos/2026-08-05-clean-up-fabricated-query-errors.md` and was deliberately not executed.
+
+**Connectivity checks could previously crash the proxy.** A malformed TNS Accept packet from an Oracle host panicked go-ora on an unrecovered goroutine, taking the whole process down and dropping every live session on every protocol — reachable from `POST /servers/{uid}/test` and from `test_connection: true` on server create/update. Such a probe now reports `target_auth` / `internal_error`, with the stack trace in the server log.
+
 ## [0.21.0](https://github.com/fclairamb/dbbat/compare/v0.20.0...v0.21.0) (2026-08-05)
 
 
