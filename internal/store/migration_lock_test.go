@@ -21,9 +21,9 @@ func freshDatabaseDSN(t *testing.T, name string) string {
 	ctx := context.Background()
 	admin := setupTestStoreNoCleanup(t)
 
-	// Identifier, not a value, so it cannot be a placeholder. The name is built
-	// from a test-controlled prefix and a timestamp, and rejected below if it
-	// contains anything but the characters that makes safe.
+	// A database name is an identifier, not a value, so it cannot go through a
+	// placeholder. Callers build it from a literal prefix and a timestamp; reject
+	// anything outside the character set that makes interpolating it safe.
 	if strings.Trim(name, "abcdefghijklmnopqrstuvwxyz0123456789_") != "" {
 		t.Fatalf("unsafe database name %q", name)
 	}
@@ -59,7 +59,7 @@ func freshDatabaseDSN(t *testing.T, name string) string {
 // first-run migration race: several processes (here, goroutines) calling New at
 // the same moment against a database that has never been migrated.
 //
-// Before New serialised its schema step on an advisory lock, this failed
+// Before New serialized its schema step on an advisory lock, this failed
 // reliably — bun's migrator Init issues CREATE TABLE IF NOT EXISTS, and two of
 // those racing inside PostgreSQL surface as
 // `duplicate key value violates unique constraint "pg_class_relname_nsp_index"`
@@ -130,10 +130,10 @@ func TestNewMigratesConcurrentlyOnFreshDatabase(t *testing.T) {
 	}
 }
 
-// TestWithMigrationLockSerialisesAndReleases checks the lock's own contract:
+// TestWithMigrationLockSerializesAndReleases checks the lock's own contract:
 // only one holder at a time, and the lock is handed back on every exit path,
 // including the one where the guarded work fails.
-func TestWithMigrationLockSerialisesAndReleases(t *testing.T) {
+func TestWithMigrationLockSerializesAndReleases(t *testing.T) {
 	store := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
 

@@ -178,7 +178,7 @@ func (s *Store) Revocations() *cache.RevocationRegistry {
 	return s.revocations
 }
 
-// migrationAdvisoryLockKey is the PostgreSQL advisory-lock key that serialises
+// migrationAdvisoryLockKey is the PostgreSQL advisory-lock key that serializes
 // the schema step across every process sharing this storage database. The value
 // is the ASCII bytes of "DBBAT": arbitrary, but stable across dbbat versions
 // (changing it would let an old and a new replica migrate concurrently) and
@@ -195,7 +195,7 @@ const (
 	migrationLockPoll = 100 * time.Millisecond
 )
 
-// withMigrationLock runs fn while holding the advisory lock that serialises
+// withMigrationLock runs fn while holding the advisory lock that serializes
 // schema changes across the replicas sharing this database.
 //
 // It exists because bun's migrator is not concurrency-safe on a *fresh*
@@ -215,11 +215,11 @@ const (
 // Not being able to lock is never fatal. A role without rights to the advisory
 // lock functions, a database that does not implement them, or a peer holding
 // the lock for longer than migrationLockWait all fall through to running the
-// migrations unserialised — exactly the behaviour that predates this lock.
+// migrations unserialized — exactly the behavior that predates this lock.
 func (s *Store) withMigrationLock(ctx context.Context, fn func(context.Context) error) error {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		slog.WarnContext(ctx, "could not pin a connection for the migration lock, migrating unserialised",
+		slog.WarnContext(ctx, "could not pin a connection for the migration lock, migrating unserialized",
 			slog.Any("error", err))
 
 		return fn(ctx)
@@ -229,7 +229,7 @@ func (s *Store) withMigrationLock(ctx context.Context, fn func(context.Context) 
 
 	defer func() {
 		if locked {
-			// Released on a context detached from ctx: a caller cancelling mid-migration
+			// Released on a context detached from ctx: a caller canceling mid-migration
 			// must still give the lock back, or the next replica waits out the full
 			// migrationLockWait for nothing.
 			if _, err := conn.ExecContext(context.WithoutCancel(ctx),
@@ -263,8 +263,8 @@ func (s *Store) acquireMigrationLock(ctx context.Context, conn bun.Conn) bool {
 		err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock(?)", migrationAdvisoryLockKey).Scan(&acquired)
 		if err != nil {
 			// The functions are missing, or the role may not call them: nothing to
-			// retry, so stop asking and let the migrations run unserialised.
-			slog.WarnContext(ctx, "could not take the migration advisory lock, migrating unserialised",
+			// retry, so stop asking and let the migrations run unserialized.
+			slog.WarnContext(ctx, "could not take the migration advisory lock, migrating unserialized",
 				slog.Any("error", err))
 
 			return false
@@ -279,7 +279,7 @@ func (s *Store) acquireMigrationLock(ctx context.Context, conn bun.Conn) bool {
 		}
 
 		if time.Now().After(deadline) {
-			slog.WarnContext(ctx, "gave up waiting for the migration advisory lock, migrating unserialised",
+			slog.WarnContext(ctx, "gave up waiting for the migration advisory lock, migrating unserialized",
 				slog.Duration("waited", migrationLockWait))
 
 			return false
@@ -293,7 +293,7 @@ func (s *Store) acquireMigrationLock(ctx context.Context, conn bun.Conn) bool {
 
 		select {
 		case <-ctx.Done():
-			slog.WarnContext(ctx, "context ended while waiting for the migration advisory lock, migrating unserialised",
+			slog.WarnContext(ctx, "context ended while waiting for the migration advisory lock, migrating unserialized",
 				slog.Any("error", ctx.Err()))
 
 			return false

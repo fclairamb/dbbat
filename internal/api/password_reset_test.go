@@ -59,7 +59,7 @@ func setupPostgresContainer(t *testing.T) string {
 
 		// Migrate once, here, while we are still the only goroutine touching this
 		// container. Parallel tests each build their own store, and store.New
-		// serialises its schema step on an advisory lock — but doing it here means
+		// serializes its schema step on an advisory lock — but doing it here means
 		// the very first tests never queue behind one another for it, and a
 		// focused -run that starts two tests at once still finds the schema ready.
 		migrateStore, err := store.New(ctx, testDSN)
