@@ -80,20 +80,35 @@ func uploadCapture(
 		conn, err := dataStore.GetConnectionByUID(t.Context(), uid)
 		require.NoError(t, err)
 
-		if conn.DumpKey != "" {
-			// The local copy is only dropped once the key is stored, so by
-			// this point the bucket is the single source for this capture.
-			require.NoFileExists(t, path)
-
+		// Wait for the *terminal* state, not a mid-sequence one. The uploader
+		// records the key on the row and only then removes the spool file, so
+		// seeing the key says nothing yet about the local copy — and a caller
+		// that returned here early would be served from the very spool file it
+		// means to prove absent.
+		if conn.DumpKey != "" && !captureFileExists(t, path) {
 			return conn.DumpKey
 		}
 
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	t.Fatalf("capture for %s was never uploaded", uid)
+	t.Fatalf("capture for %s was never uploaded and dropped from the spool", uid)
 
 	return ""
+}
+
+// captureFileExists reports whether path is still on disk, failing the test on
+// any stat error other than a plain absence.
+func captureFileExists(t *testing.T, path string) bool {
+	t.Helper()
+
+	if _, err := os.Stat(path); err != nil {
+		require.ErrorIs(t, err, os.ErrNotExist)
+
+		return false
+	}
+
+	return true
 }
 
 // TestGetConnectionDump_FallsBackToBlobStorage is the case local-only storage
