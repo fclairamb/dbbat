@@ -97,9 +97,11 @@ func newPersistingSession(t *testing.T, dataStore *store.Store, name string) *Se
 	return s
 }
 
-// awaitQueryWithRows polls until the session's single query has been persisted
-// with at least wantRows rows. Persistence is asynchronous by design.
-func awaitQueryWithRows(t *testing.T, dataStore *store.Store, wantRows int) *store.QueryWithRows {
+// awaitCompletedQueryWithRows polls until the session's single query has been
+// persisted with at least wantRows rows AND completed. Persistence is
+// asynchronous by design, and for a COPY it is two writes, not one — see the
+// comment on the DurationMs check below.
+func awaitCompletedQueryWithRows(t *testing.T, dataStore *store.Store, wantRows int) *store.QueryWithRows {
 	t.Helper()
 
 	ctx := context.Background()
@@ -118,6 +120,21 @@ func awaitQueryWithRows(t *testing.T, dataStore *store.Store, wantRows int) *sto
 		}
 
 		if len(withRows.Rows) < wantRows {
+			return false
+		}
+
+		// Rows landing is NOT the end of the write sequence. A COPY whose rows
+		// are still pending is inserted *bare* by resolveQueryRecord — which
+		// explicitly zeroes ResultsTruncated/ResultsDropped and leaves
+		// DurationMs nil — and only UpdateQueryCompletion fills those in
+		// afterwards. Returning as soon as the rows arrived therefore hands the
+		// caller a half-written record, and every assertion on a completion
+		// field is then a race the test loses on a slow machine.
+		//
+		// DurationMs is the marker: it is nil on the bare insert and non-nil
+		// only once completion has run, so waiting on it means the whole record
+		// is settled.
+		if withRows.DurationMs == nil {
 			return false
 		}
 
@@ -171,7 +188,7 @@ func TestCopyCapture_RowsArePersisted(t *testing.T) {
 
 	s.logQuery(nil, nil, 128)
 
-	persisted := awaitQueryWithRows(t, dataStore, 3)
+	persisted := awaitCompletedQueryWithRows(t, dataStore, 3)
 
 	assert.Equal(t, []string{"alice", "bob", "carol"}, copyRowNames(t, persisted.Rows))
 	assert.False(t, persisted.ResultsTruncated, "a complete COPY capture is not truncated")
@@ -221,7 +238,7 @@ func TestCopyCapture_TruncatedPrefixIsPersisted(t *testing.T) {
 
 	s.logQuery(nil, nil, 128)
 
-	persisted := awaitQueryWithRows(t, dataStore, 2)
+	persisted := awaitCompletedQueryWithRows(t, dataStore, 2)
 
 	assert.Equal(t, []string{"alice", "bob"}, copyRowNames(t, persisted.Rows),
 		"the prefix captured before the limit must still be stored")
