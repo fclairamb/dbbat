@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,9 +27,10 @@ import (
 const slugMigrationName = "20260805000000"
 
 // TestGrantDefinitionSlugMigrationBackfill proves the up-migration's core
-// claim: a grant_definitions row that predates the slug column ends up with
-// slug = uid (as text) once the migration runs, and the resulting NOT NULL +
-// UNIQUE constraints don't choke on that backfilled value.
+// claims against a table that already has rows: every pre-existing row ends
+// up with a non-empty, unique, non-UUID-shaped slug once the migration
+// runs, and the resulting NOT NULL + UNIQUE constraints don't choke on any
+// of the backfilled values.
 //
 // This drives bun's migrator directly through an explicit
 // "apply every earlier migration, seed a legacy row, then apply this one"
@@ -103,17 +106,29 @@ func TestGrantDefinitionSlugMigrationBackfill(t *testing.T) {
 		t.Fatalf("CreateUser: %v", err)
 	}
 
-	// Seed a "legacy" row the way it existed before this release: a raw
-	// insert with no slug value, since the column doesn't exist yet at this
-	// point in the migration sequence.
-	var legacyUID uuid.UUID
+	// Seed several "legacy" rows the way they existed before this release:
+	// raw inserts with no slug value, since the column doesn't exist yet at
+	// this point in the migration sequence. Several rows (not just one)
+	// matters here — it's what exercises the backfill's uniqueness
+	// guarantee, which a single-row table could never catch a regression
+	// in (e.g. a version that dropped the row_number() tiebreaker and
+	// relied solely on a uid truncation would still pass with one row).
+	const legacyRowCount = 5
 
-	err = db.NewRaw(
-		"INSERT INTO grant_definitions (name, duration_seconds, created_by) VALUES (?, ?, ?) RETURNING uid",
-		"legacy-def", 3600, admin.UID,
-	).Scan(ctx, &legacyUID)
-	if err != nil {
-		t.Fatalf("seed legacy row: %v", err)
+	legacyUIDs := make([]uuid.UUID, 0, legacyRowCount)
+
+	for i := 0; i < legacyRowCount; i++ {
+		var legacyUID uuid.UUID
+
+		err = db.NewRaw(
+			"INSERT INTO grant_definitions (name, duration_seconds, created_by) VALUES (?, ?, ?) RETURNING uid",
+			fmt.Sprintf("legacy-def-%d", i), 3600, admin.UID,
+		).Scan(ctx, &legacyUID)
+		if err != nil {
+			t.Fatalf("seed legacy row %d: %v", i, err)
+		}
+
+		legacyUIDs = append(legacyUIDs, legacyUID)
 	}
 
 	// Apply the slug migration itself — this is the up.sql under test.
@@ -121,13 +136,39 @@ func TestGrantDefinitionSlugMigrationBackfill(t *testing.T) {
 		t.Fatalf("Migrate (slug): %v", err)
 	}
 
-	got, err := s.GetGrantDefinition(ctx, legacyUID)
-	if err != nil {
-		t.Fatalf("GetGrantDefinition: %v", err)
+	seenSlugs := make(map[string]uuid.UUID, legacyRowCount)
+
+	for _, legacyUID := range legacyUIDs {
+		got, err := s.GetGrantDefinition(ctx, legacyUID)
+		if err != nil {
+			t.Fatalf("GetGrantDefinition(%s): %v", legacyUID, err)
+		}
+
+		if got.Slug == "" {
+			t.Errorf("backfilled slug for %s is empty", legacyUID)
+		}
+
+		if !strings.HasPrefix(got.Slug, "legacy-") {
+			t.Errorf("backfilled slug %q for %s does not start with the placeholder prefix", got.Slug, legacyUID)
+		}
+
+		// Neither the canonical hyphenated form nor the bare 32-hex-digit
+		// form (both of which uuid.Parse accepts) should ever match a
+		// backfilled slug — the 'legacy-' prefix's non-hex letters rule
+		// both out structurally.
+		if _, err := uuid.Parse(got.Slug); err == nil {
+			t.Errorf("backfilled slug %q for %s parses as a UUID", got.Slug, legacyUID)
+		}
+
+		if prior, seen := seenSlugs[got.Slug]; seen {
+			t.Errorf("backfilled slug %q is not unique: shared by %s and %s", got.Slug, prior, legacyUID)
+		}
+
+		seenSlugs[got.Slug] = legacyUID
 	}
 
-	if got.Slug != legacyUID.String() {
-		t.Errorf("backfilled slug = %q, want %q (the uid as text)", got.Slug, legacyUID.String())
+	if len(seenSlugs) != legacyRowCount {
+		t.Errorf("got %d distinct backfilled slugs, want %d", len(seenSlugs), legacyRowCount)
 	}
 
 	// The migration's NOT NULL + UNIQUE constraints must also hold for a
@@ -173,7 +214,8 @@ func TestGrantDefinitionSlugMigrationBackfill(t *testing.T) {
 		t.Fatalf("count grant_definitions: %v", err)
 	}
 
-	if rowCount != 2 {
-		t.Errorf("grant_definitions row count after rollback = %d, want 2 (legacy + post-migration)", rowCount)
+	wantRowCount := legacyRowCount + 1 // the legacy rows plus post-migration
+	if rowCount != wantRowCount {
+		t.Errorf("grant_definitions row count after rollback = %d, want %d", rowCount, wantRowCount)
 	}
 }

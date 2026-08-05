@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -107,12 +108,12 @@ func TestGetGrantDefinition_BySlug(t *testing.T) { //nolint:paralleltest // shar
 	})
 }
 
-// TestGetGrantDefinition_SlugShapedLikeUUID pins down the edge case the spec
-// calls out explicitly: the slug format also accepts UUID-shaped strings, so
-// a definition deliberately given such a slug must still resolve by slug
-// even though the path param is first tried as a uid. Without the
-// uid-miss-then-slug-retry fallback, this would be a confusing 404 instead.
-func TestGetGrantDefinition_SlugShapedLikeUUID(t *testing.T) { //nolint:paralleltest // shared migration lock
+// TestCreateGrantDefinition_RejectsUUIDShapedSlug pins down the design
+// decision that superseded the earlier "UUID-shaped slugs fall back to a
+// slug lookup" behavior: a UUID is no longer a valid slug at all, in either
+// form uuid.Parse accepts — the canonical 36-char hyphenated layout and the
+// bare 32-hex-digit layout, both of which otherwise satisfy slugPattern.
+func TestCreateGrantDefinition_RejectsUUIDShapedSlug(t *testing.T) { //nolint:paralleltest // shared migration lock
 	server, dataStore := setupTestServer(t)
 	suffix := "ggdsu"
 
@@ -121,21 +122,22 @@ func TestGetGrantDefinition_SlugShapedLikeUUID(t *testing.T) { //nolint:parallel
 
 	router := grantDefinitionsRouter(server)
 
-	// A syntactically valid (but otherwise unused) UUID, chosen as the slug.
-	// It satisfies the slug regex — lowercase hex segments joined by
-	// hyphens are indistinguishable from `^[a-z0-9]+(-[a-z0-9]+)*$` — and is
-	// guaranteed not to equal any definition's real uid.
-	uuidShapedSlug := uuid.New().String()
+	canonical := uuid.New().String()
+	bareHex := strings.ReplaceAll(canonical, "-", "")
 
-	w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grant-definitions", adminToken,
-		validCreateDefinitionBody("UUID-shaped slug "+suffix, uuidShapedSlug))
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	require.Equal(t, uuidShapedSlug, resp["slug"])
+	t.Run("canonical hyphenated form is rejected", func(t *testing.T) { //nolint:paralleltest // shared router/store state
+		w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grant-definitions", adminToken,
+			validCreateDefinitionBody("UUID slug canonical "+suffix, canonical))
+		require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		require.Equal(t, "VALIDATION_ERROR", resp["code"])
+	})
 
-	w, resp = doJSON(t, router, http.MethodGet, "/api/v1/grant-definitions/"+uuidShapedSlug, adminToken, nil)
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	require.Equal(t, uuidShapedSlug, resp["slug"], "the uid-shaped path param should fall back to a slug match")
-	require.NotEqual(t, uuidShapedSlug, resp["uid"], "sanity check: the slug is not this definition's real uid")
+	t.Run("bare 32-hex-digit form is rejected", func(t *testing.T) { //nolint:paralleltest // shared router/store state
+		w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grant-definitions", adminToken,
+			validCreateDefinitionBody("UUID slug bare hex "+suffix, bareHex))
+		require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		require.Equal(t, "VALIDATION_ERROR", resp["code"])
+	})
 }
 
 func TestCreateGrantRequest_BySlug(t *testing.T) { //nolint:paralleltest // shared migration lock
