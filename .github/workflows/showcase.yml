@@ -162,6 +162,14 @@ jobs:
           bunx playwright install --with-deps chromium
         working-directory: front
 
+      # Cheap and deterministic, so it runs first — a type error in the runner
+      # should not cost a full stack bring-up to discover. It lives here rather
+      # than in ci.yml's frontend job on purpose: the showcase must not gate a
+      # merge.
+      - name: Type-check the showcase runner
+        run: bun run typecheck:showcase
+        working-directory: front
+
       # Output goes to a scratch directory and is never uploaded or committed:
       # this job proves the scenarios still work, it does not produce media.
       # Transcoding is skipped too — ffmpeg has nothing to do with UI drift.
