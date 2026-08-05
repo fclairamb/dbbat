@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +35,9 @@ type recordingProvider struct {
 	name      string
 	lastState string
 	user      *auth.OAuthUser
+	// exchangeErr, when set, makes ExchangeCode fail — the "code exchange
+	// blew up" branch of the callback.
+	exchangeErr error
 }
 
 func (p *recordingProvider) Name() string { return p.name }
@@ -43,6 +47,9 @@ func (p *recordingProvider) AuthorizeURL(state, _ string) string {
 }
 
 func (p *recordingProvider) ExchangeCode(_ context.Context, _, _ string) (*auth.OAuthUser, error) {
+	if p.exchangeErr != nil {
+		return nil, p.exchangeErr
+	}
 	return p.user, nil
 }
 
@@ -90,11 +97,27 @@ func TestFindOrCreateOAuthUser_OrphanIdentity(t *testing.T) {
 	assert.NotEqual(t, user.UID, newUser.UID, "a new user must be created")
 }
 
+// errTestExchangeFailed stands in for a provider token endpoint refusing the
+// authorization code.
+var errTestExchangeFailed = errors.New("token endpoint said no")
+
+// callbackOutcome selects which branch of the OAuth callback a round-trip case
+// exercises.
+type callbackOutcome int
+
+const (
+	outcomeSuccess       callbackOutcome = iota // code exchange works, session created
+	outcomeExchangeError                        // provider.ExchangeCode fails
+	outcomeProviderError                        // provider bounces back ?error=access_denied
+)
+
 // TestOAuthLoginRedirectRoundTrip covers the regression where a user bounced
 // to login from a protected page (typically the device consent page) lost that
 // destination when signing in through OAuth: the redirect target must ride the
-// state row from /auth/slack to the callback's /login?token=... redirect —
-// and unsafe targets must be dropped, not forwarded.
+// state row from /auth/slack to the callback's /login redirect — on the happy
+// path *and* on every failure, since the login page drops the error param on
+// mount and a retry would otherwise fall back to "/". Unsafe targets must be
+// dropped, not forwarded, on both paths.
 func TestOAuthLoginRedirectRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -111,7 +134,9 @@ func TestOAuthLoginRedirectRoundTrip(t *testing.T) {
 	tests := []struct {
 		name         string
 		redirect     string
+		outcome      callbackOutcome
 		wantRedirect string // expected redirect param on /login; "" = absent
+		wantError    string // expected error param; "" = expect a token instead
 	}{
 		{
 			name:         "same-app path survives the round trip",
@@ -129,6 +154,38 @@ func TestOAuthLoginRedirectRoundTrip(t *testing.T) {
 		{
 			name: "no redirect param",
 		},
+		{
+			name:         "code exchange failure keeps the target",
+			redirect:     "/device?user_code=WDJP-4KXR",
+			outcome:      outcomeExchangeError,
+			wantRedirect: "/device?user_code=WDJP-4KXR",
+			wantError:    string(ErrCodeOAuthFailed),
+		},
+		{
+			name:      "code exchange failure drops an absolute URL",
+			redirect:  "https://evil.example/phish",
+			outcome:   outcomeExchangeError,
+			wantError: string(ErrCodeOAuthFailed),
+		},
+		{
+			name:      "code exchange failure drops a protocol-relative URL",
+			redirect:  "//evil.example/phish",
+			outcome:   outcomeExchangeError,
+			wantError: string(ErrCodeOAuthFailed),
+		},
+		{
+			name:         "provider error keeps the target",
+			redirect:     "/grants",
+			outcome:      outcomeProviderError,
+			wantRedirect: "/grants",
+			wantError:    string(ErrCodeOAuthProviderError),
+		},
+		{
+			name:      "provider error drops an absolute URL",
+			redirect:  "https://evil.example/phish",
+			outcome:   outcomeProviderError,
+			wantError: string(ErrCodeOAuthProviderError),
+		},
 	}
 
 	// One provider (and route pair) per case: recordingProvider.lastState is
@@ -145,6 +202,9 @@ func TestOAuthLoginRedirectRoundTrip(t *testing.T) {
 				Email:       fmt.Sprintf("redir-%d-%s@example.com", i, suffix),
 				DisplayName: fmt.Sprintf("Redir User %d %s", i, suffix),
 			},
+		}
+		if tests[i].outcome == outcomeExchangeError {
+			providers[i].exchangeErr = errTestExchangeFailed
 		}
 		server.oauthProviders[providerName] = providers[i]
 		router.GET("/api/v1/auth/"+providerName, server.handleOAuthAuthorize(providerName))
@@ -165,16 +225,153 @@ func TestOAuthLoginRedirectRoundTrip(t *testing.T) {
 			require.Equal(t, http.StatusFound, w.Code)
 			require.NotEmpty(t, provider.lastState)
 
+			callbackTarget := "/api/v1/auth/" + provider.name + "/callback?state=" + provider.lastState
+			if tt.outcome == outcomeProviderError {
+				callbackTarget += "&error=access_denied&error_description=user+said+no"
+			} else {
+				callbackTarget += "&code=x"
+			}
+
 			w = httptest.NewRecorder()
-			router.ServeHTTP(w, httptest.NewRequest(http.MethodGet,
-				"/api/v1/auth/"+provider.name+"/callback?code=x&state="+provider.lastState, nil))
+			router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, callbackTarget, nil))
 			require.Equal(t, http.StatusFound, w.Code)
 
-			loc, err := url.Parse(w.Header().Get("Location"))
+			location := w.Header().Get("Location")
+			loc, err := url.Parse(location)
 			require.NoError(t, err)
 			assert.Equal(t, "/app/login", loc.Path)
-			assert.NotEmpty(t, loc.Query().Get("token"))
+			assert.Empty(t, loc.Host, "the login redirect must stay same-origin")
+			assert.NotContains(t, location, "evil.example",
+				"a hostile redirect target must never be echoed back")
+
+			if tt.wantError == "" {
+				assert.NotEmpty(t, loc.Query().Get("token"))
+				assert.Empty(t, loc.Query().Get("error"))
+			} else {
+				assert.Equal(t, tt.wantError, loc.Query().Get("error"))
+				assert.Empty(t, loc.Query().Get("token"))
+			}
 			assert.Equal(t, tt.wantRedirect, loc.Query().Get("redirect"))
+		})
+	}
+}
+
+// TestOAuthCallbackErrorRedirects covers the remaining callback failures: the
+// unlinked-user branch (which needs auto-create off, hence its own server) must
+// keep the redirect target, while the branches that fail before the state row
+// is read have nothing to forward.
+func TestOAuthCallbackErrorRedirects(t *testing.T) {
+	t.Parallel()
+
+	server, _ := setupTestServer(t)
+	suffix := uuid.NewString()[:8]
+
+	// Auto-create off and no matching local user: findOrCreateOAuthUser bails
+	// out with errOAuthUserNotLinked.
+	server.config = &config.Config{SlackAuth: config.SlackAuthConfig{AutoCreateUsers: false}}
+
+	providerName := "slack-nolink-" + suffix
+	provider := &recordingProvider{
+		name: providerName,
+		user: &auth.OAuthUser{
+			ProviderID:  "UNOLINK-" + suffix,
+			Email:       "nolink-" + suffix + "@example.com",
+			DisplayName: "No Link " + suffix,
+		},
+	}
+	server.oauthProviders[providerName] = provider
+
+	router := gin.New()
+	router.GET("/api/v1/auth/"+providerName, server.handleOAuthAuthorize(providerName))
+	router.GET("/api/v1/auth/"+providerName+"/callback", server.handleOAuthCallback(providerName))
+
+	get := func(target string) *url.URL {
+		t.Helper()
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, target, nil))
+		require.Equal(t, http.StatusFound, w.Code)
+		loc, err := url.Parse(w.Header().Get("Location"))
+		require.NoError(t, err)
+		return loc
+	}
+
+	// Kept sequential rather than split into parallel subtests: every case
+	// shares one provider, whose lastState is written by the authorize call.
+
+	// Unlinked user: the target captured at authorize time must survive.
+	get("/api/v1/auth/" + providerName + "?redirect=" + url.QueryEscape("/device?user_code=WDJP-4KXR"))
+	require.NotEmpty(t, provider.lastState)
+
+	loc := get("/api/v1/auth/" + providerName + "/callback?code=x&state=" + provider.lastState)
+	assert.Equal(t, "/app/login", loc.Path)
+	assert.Equal(t, string(ErrCodeOAuthUserNotLinked), loc.Query().Get("error"), "unlinked user")
+	assert.Equal(t, "/device?user_code=WDJP-4KXR", loc.Query().Get("redirect"), "unlinked user keeps the target")
+
+	// Unknown state: nothing to forward.
+	loc = get("/api/v1/auth/" + providerName + "/callback?code=x&state=deadbeef" + suffix)
+	assert.Equal(t, string(ErrCodeOAuthStateMismatch), loc.Query().Get("error"), "unknown state")
+	assert.Empty(t, loc.Query().Get("redirect"), "unknown state has nothing to forward")
+
+	// Missing state: same.
+	loc = get("/api/v1/auth/" + providerName + "/callback?code=x")
+	assert.Equal(t, string(ErrCodeOAuthStateMismatch), loc.Query().Get("error"), "missing state")
+	assert.Empty(t, loc.Query().Get("redirect"), "missing state has nothing to forward")
+
+	// Provider error without a state: still a clean login redirect, no target.
+	loc = get("/api/v1/auth/" + providerName + "/callback?error=access_denied")
+	assert.Equal(t, string(ErrCodeOAuthProviderError), loc.Query().Get("error"), "stateless provider error")
+	assert.Empty(t, loc.Query().Get("redirect"), "stateless provider error has nothing to forward")
+}
+
+// TestBuildLoginRedirectSanitizes pins the chokepoint: even a hostile value
+// read straight back from the (unconstrained) oauth_states column must not
+// make it into the Location header.
+func TestBuildLoginRedirectSanitizes(t *testing.T) {
+	t.Parallel()
+
+	server := &Server{}
+
+	tests := []struct {
+		name     string
+		query    string
+		redirect string
+		want     string
+	}{
+		{
+			name:     "safe target is forwarded and escaped",
+			query:    "error=OAUTH_FAILED",
+			redirect: "/device?user_code=WDJP-4KXR",
+			want:     "/app/login?error=OAUTH_FAILED&redirect=%2Fdevice%3Fuser_code%3DWDJP-4KXR",
+		},
+		{
+			name:     "absolute URL is dropped",
+			query:    "error=OAUTH_FAILED",
+			redirect: "https://evil.example/",
+			want:     "/app/login?error=OAUTH_FAILED",
+		},
+		{
+			name:     "protocol-relative URL is dropped",
+			query:    "error=OAUTH_FAILED",
+			redirect: "//evil.example",
+			want:     "/app/login?error=OAUTH_FAILED",
+		},
+		{
+			name:     "backslash trickery is dropped",
+			query:    "token=abc",
+			redirect: "/\\evil.example",
+			want:     "/app/login?token=abc",
+		},
+		{
+			name:  "no target",
+			query: "error=OAUTH_STATE_MISMATCH",
+			want:  "/app/login?error=OAUTH_STATE_MISMATCH",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, server.buildLoginRedirect(tt.query, tt.redirect))
 		})
 	}
 }
