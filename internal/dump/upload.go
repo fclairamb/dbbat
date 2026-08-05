@@ -86,10 +86,16 @@ type Uploader struct {
 	recorder   Recorder
 	logger     *slog.Logger
 
-	jobs   chan uuid.UUID
-	wg     sync.WaitGroup
-	closed chan struct{}
-	once   sync.Once
+	jobs chan uuid.UUID
+	wg   sync.WaitGroup
+
+	// closed is what the retry loop watches so a shutdown does not have to
+	// wait out a backoff. closeMu makes "still open?" and "enqueue" one step:
+	// checking the channel and then sending on it would be a race whose loser
+	// sends on a closed channel.
+	closeMu sync.RWMutex
+	closed  chan struct{}
+	done    bool
 }
 
 // OpenUploader opens the destination bucket and starts the upload workers.
@@ -227,10 +233,11 @@ func (u *Uploader) Finish(ctx context.Context, connectionUID uuid.UUID) {
 		return
 	}
 
-	select {
-	case <-u.closed:
+	u.closeMu.RLock()
+	defer u.closeMu.RUnlock()
+
+	if u.done {
 		return
-	default:
 	}
 
 	select {
@@ -328,19 +335,26 @@ func (u *Uploader) Close() error {
 		return nil
 	}
 
-	var err error
+	u.closeMu.Lock()
 
-	u.once.Do(func() {
-		close(u.closed)
-		close(u.jobs)
-		u.wg.Wait()
+	if u.done {
+		u.closeMu.Unlock()
 
-		if cerr := u.bucket.Close(); cerr != nil {
-			err = fmt.Errorf("close capture bucket: %w", cerr)
-		}
-	})
+		return nil
+	}
 
-	return err
+	u.done = true
+	close(u.closed)
+	close(u.jobs)
+	u.closeMu.Unlock()
+
+	u.wg.Wait()
+
+	if err := u.bucket.Close(); err != nil {
+		return fmt.Errorf("close capture bucket: %w", err)
+	}
+
+	return nil
 }
 
 // work drains the upload queue. Workers outlive the request context on
