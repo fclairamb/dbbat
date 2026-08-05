@@ -58,6 +58,45 @@ const (
 	testDBName  = "testdb"
 )
 
+// mongoWaitStrategy decides a mongo container is usable only once an
+// *authenticated* round trip succeeds.
+//
+// "Port is listening" and "Waiting for connections" are both emitted before
+// docker-entrypoint.sh has created the MONGO_INITDB_ROOT_USERNAME user: mongod
+// accepts connections during initdb and only then gets its root user. Under
+// Docker contention that window widens enough for the first proxied dial to
+// land inside it, which surfaces as a misleading
+// `(AuthenticationFailed) dbbat: upstream MongoDB connection failed` rather
+// than as a readiness timeout. The mongosh exec is the only signal that means
+// "the initdb root user exists" — if it authenticates, so can the proxy.
+//
+// mongosh ships in mongo:6 and later, which covers the whole matrix the proxy
+// supports (6.0 / 7.0 / 8.0) and therefore every image MONGO_TEST_IMAGE is
+// expected to hold. On a preferTLS container the exec still connects in
+// plaintext over the loopback, so one strategy covers both fixtures.
+func mongoWaitStrategy() wait.Strategy {
+	return wait.ForAll(
+		wait.ForListeningPort("27017/tcp"),
+		wait.ForLog("Waiting for connections"),
+		wait.ForExec([]string{
+			"mongosh",
+			"--quiet",
+			"--username", rootUser,
+			"--password", rootPass,
+			"--authenticationDatabase", "admin",
+			"--eval", "db.adminCommand({ping: 1})",
+		}).
+			// mongosh is a ~1s process; polling it at the 100ms default would
+			// mostly pile up overlapping execs on an already-busy daemon.
+			WithPollInterval(time.Second).
+			WithStartupTimeout(120 * time.Second),
+	).
+		WithStartupTimeoutDefault(120 * time.Second).
+		// Cap the whole sequence so a genuinely broken container fails in a few
+		// minutes instead of adding up three independent 120s budgets.
+		WithDeadline(180 * time.Second)
+}
+
 // runMongoContainer starts a MongoDB container with root credentials and
 // returns its bound host/port.
 func runMongoContainer(ctx context.Context, t *testing.T, image string) (testcontainers.Container, string, int) {
@@ -85,10 +124,7 @@ func runMongoContainerWith(
 			"MONGO_INITDB_ROOT_USERNAME": rootUser,
 			"MONGO_INITDB_ROOT_PASSWORD": rootPass,
 		},
-		WaitingFor: wait.ForAll(
-			wait.ForListeningPort("27017/tcp"),
-			wait.ForLog("Waiting for connections"),
-		).WithStartupTimeoutDefault(120 * time.Second),
+		WaitingFor: mongoWaitStrategy(),
 	}
 
 	if withTLS {
