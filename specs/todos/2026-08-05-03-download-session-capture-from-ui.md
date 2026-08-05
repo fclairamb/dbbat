@@ -126,3 +126,67 @@ only.
   happy-path assertion rather than faking it, and say so in the test.
 
 No GitHub issue filed yet — one should be opened when this is picked up.
+
+## Implementation Plan
+
+Starting point note: the sibling S3 spec (`specs/done/2026/08/2026-08-05-02-s3-dump-storage.md`)
+already landed local-spool-first/remote-via-`dump_key` logic inline in
+`handleGetConnectionDump` and `handleDeleteConnectionDump`. This plan factors
+that logic into the shared helper this spec asks for, instead of writing it
+from scratch.
+
+1. **`internal/dump/upload.go`** — add `(*Uploader) Stat(ctx, key) (int64, error)`,
+   nil-receiver-safe like `Open`/`Delete`, using `bucket.Attributes` and
+   returning `os.ErrNotExist` (wrapped) on `gcerrors.NotFound`. Needed so the
+   detail-page metadata can report `size_bytes` for a capture that only lives
+   remotely (no local `os.Stat` available for it).
+2. **`internal/api/observability.go`** — add a `dumpLocator` type + `(*Server)
+   resolveDump(c, uid) dumpLocator` that stats the local spool file and looks
+   up the remote key once, in one place. Route all three call sites through
+   it:
+   - `handleGetConnection` (detail only) — build a `connectionDetailResponse{
+     *store.Connection; Dump DumpMetadata }` (same embedding pattern as the
+     existing `userDetailResponse`), resolving `Dump.Available`/`SizeBytes`
+     via `resolveDump` (+ one `Uploader.Stat` round trip when the capture is
+     remote-only). List endpoint (`handleListConnections`) is untouched — it
+     keeps returning bare `store.Connection` rows.
+   - `handleGetConnectionDump` — same 404-vs-404 messages as today ("dumps
+     are not enabled" vs "no dump available…"), now sourced from
+     `resolveDump`'s local/remote fields instead of re-stating and re-joining
+     paths inline.
+   - `handleDeleteConnectionDump` — same "delete both, local and remote, if
+     present" behavior as today, now driven by the same `dumpLocator`.
+3. **`internal/api/server.go`** — narrow `GET /connections/:uid/dump` from
+   `s.requireAdminOrViewer()` to `s.requireAdmin()`. `DELETE` is already
+   admin-only.
+4. **`internal/api/openapi.yml`** — add a `ConnectionDetail` schema (`allOf`
+   `Connection` + `dump: {available, size_bytes}` object) used only by `GET
+   /connections/{uid}`; the list endpoint keeps referencing plain
+   `Connection`. Update the `GET …/dump` description to state the endpoint is
+   now admin-only (was admin-or-viewer) — a deliberate, documented narrowing.
+5. **`front/`** — regenerate `src/api/schema.ts` via `bun run generate-client`
+   after the OpenAPI change lands.
+6. **`front/src/lib/`** — new `format.ts` (or extend an existing lib file)
+   with `formatBytes`, lifted verbatim from `$uid.tsx:255`, and a new
+   `download.ts` with a `downloadBlob(blob, filename)` helper
+   (`URL.createObjectURL` → synthesized `<a download>` click →
+   `URL.revokeObjectURL` in `finally`).
+7. **`front/src/api/queries.ts`** — `useDownloadConnectionDump(uid)`: a
+   `useMutation` that calls `apiClient.GET("/connections/{uid}/dump", {
+   parseAs: "blob" })` and hands the blob to `downloadBlob`.
+8. **`front/src/routes/_authenticated/connections/$uid.tsx`** — swap the
+   local `formatBytes` for the lifted one; add a "Download capture (…)"
+   button in `PageHeader`'s `actions` slot, gated on `isAdmin &&
+   connection.dump?.available`, with `data-testid="download-dump-button"`,
+   pending state, a failure toast, and a hint line pointing at
+   `docs/dump-format.md` / `dbbat dump anonymise`.
+9. **Tests**:
+   - Go: extend `internal/api/connection_dump_test.go` (or add a new file)
+     for the detail-metadata field (disabled → `available:false`; local file
+     → `true` + correct size; remote-only → `true` + correct size via
+     `Uploader.Stat`) and a viewer-token 403 on `GET …/dump` in
+     `newDumpTestRouter`.
+   - E2E: `front/e2e/observability.spec.ts` — button absent for a capture-less
+     connection and absent for the `viewer` account; happy-path download
+     skipped with a comment if the test harness can't cheaply produce a
+     connection with an on-disk capture.
