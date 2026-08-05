@@ -1451,10 +1451,50 @@ func (s *session) handleContinuation(ttcPayload []byte) {
 	}
 }
 
+// rowStreamActive reports whether the session is in the middle of streaming a
+// result set: a query is pending, its cursor is known, and the column
+// definitions have already been decoded from the QueryResult (func=0x10) that
+// opened the fetch.
+//
+// This is the session's own notion of a call boundary: from the QueryResult
+// until the query completes, every upstream packet is row-stream content, so
+// its first byte is a value length or a stream marker — not a TTC function
+// code. Column definitions are the marker of that window because they are set
+// exactly once per fetch (handleQueryResultV2 / handleResponse) and cleared
+// with the cursor.
+func (s *session) rowStreamActive() bool {
+	pending := s.tracker.pendingQuery
+
+	return pending != nil && pending.cursor != nil && len(pending.cursor.columns) > 0
+}
+
 // handleResponse processes a legacy TTC Response (func=0x08).
 // In v315+, most responses don't follow the legacy format so we skip them.
 // Query completion is handled by handleQueryResultV2 for func=0x10.
 func (s *session) handleResponse(ttcPayload []byte) {
+	// Mid-fetch, a leading 0x08 is NOT a fresh Response: it is row-stream
+	// content — an 8-byte first column value's length prefix, or the
+	// 0x08 0x01 0x06 end-of-rows footer — that happened to land at the start
+	// of a TNS packet. Only an embedded OER, whose end-of-call bit decodeOERAt
+	// verifies, marks a real call boundary here; anything else is continuation
+	// data and is decoded as such.
+	//
+	// Without this guard the legacy fixed-offset decoder below read row bytes
+	// as an error code plus a length-prefixed message, wrote them into
+	// Query.Error, and cleared pendingQuery — which silently truncated row
+	// capture, stopped mid-stream quota enforcement, and mis-charged the rest
+	// of the stream's bytes for the remainder of the fetch.
+	if s.rowStreamActive() {
+		if oer := findOERInResponse(ttcPayload); oer != nil {
+			s.completeQueryFromOER(oer)
+			return
+		}
+
+		s.handleContinuation(ttcPayload)
+
+		return
+	}
+
 	// v315+ DML responses embed an OER (func=0x04) status block carrying the
 	// affected-row count (INSERT/UPDATE/DELETE) or the ORA error. This is the
 	// reliable source — the legacy fixed-offset layout below misreads v315+
