@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -52,6 +53,23 @@ func setupPostgresContainer(t *testing.T) string {
 		}
 
 		testDSN, errContainerStartup = testContainer.ConnectionString(ctx, "sslmode=disable")
+		if errContainerStartup != nil {
+			return
+		}
+
+		// Migrate once, here, while we are still the only goroutine touching this
+		// container. Parallel tests each build their own store, and store.New
+		// serialises its schema step on an advisory lock — but doing it here means
+		// the very first tests never queue behind one another for it, and a
+		// focused -run that starts two tests at once still finds the schema ready.
+		migrateStore, err := store.New(ctx, testDSN)
+		if err != nil {
+			errContainerStartup = fmt.Errorf("failed to migrate test database: %w", err)
+
+			return
+		}
+
+		migrateStore.Close()
 	})
 
 	if errContainerStartup != nil {

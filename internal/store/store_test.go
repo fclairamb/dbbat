@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -44,6 +45,21 @@ func setupPostgresContainer(t *testing.T) string {
 		}
 
 		testDSN, errContainerStartup = testContainer.ConnectionString(containerCtx, "sslmode=disable")
+		if errContainerStartup != nil {
+			return
+		}
+
+		// Migrate once, here, while we are still the only goroutine touching this
+		// container, so parallel tests find the schema already in place instead of
+		// queueing on New's advisory lock (or, before it existed, racing on it).
+		migrateStore, err := New(containerCtx, testDSN)
+		if err != nil {
+			errContainerStartup = fmt.Errorf("failed to migrate test database: %w", err)
+
+			return
+		}
+
+		migrateStore.Close()
 	})
 
 	if errContainerStartup != nil {
