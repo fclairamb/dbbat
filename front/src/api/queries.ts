@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "./client";
 import type { components } from "./schema";
+import { downloadBlob } from "@/lib/download";
 
 // Type aliases for convenience
 export type User = components["schemas"]["User"];
@@ -24,6 +25,7 @@ export type GrantRequest = components["schemas"]["GrantRequest"];
 export type CreateGrantRequestPayload =
   components["schemas"]["CreateGrantRequestPayload"];
 export type Connection = components["schemas"]["Connection"];
+export type ConnectionDetail = components["schemas"]["ConnectionDetail"];
 export type Query = components["schemas"]["Query"];
 export type QueryWithRows = components["schemas"]["QueryWithRows"];
 export type AuditEvent = components["schemas"]["AuditEvent"];
@@ -791,7 +793,7 @@ export function useConnections(filters?: {
 export function useConnection(uid: string) {
   return useQuery({
     queryKey: ["connections", uid],
-    queryFn: async (): Promise<Connection> => {
+    queryFn: async (): Promise<ConnectionDetail> => {
       const response = await apiClient.GET("/connections/{uid}", {
         params: { path: { uid } },
       });
@@ -801,6 +803,38 @@ export function useConnection(uid: string) {
       return response.data;
     },
     enabled: !!uid,
+  });
+}
+
+// useDownloadConnectionDump fetches the raw pcapng session capture through
+// the authenticated API client (so the bearer token and the 401 -> login
+// redirect middleware both apply, unlike a bare <a href> to the API) and
+// hands the resulting blob to the browser's native download flow.
+//
+// A capture swept by retention (or deleted) between page load and click
+// surfaces as a 404, which is worded distinctly so it reads as "gone", not
+// as a generic failure.
+export function useDownloadConnectionDump(
+  uid: string,
+  options?: { onError?: (error: Error) => void }
+) {
+  return useMutation({
+    mutationFn: async (): Promise<void> => {
+      const response = await apiClient.GET("/connections/{uid}/dump", {
+        params: { path: { uid } },
+        parseAs: "blob",
+      });
+      if (response.error || !response.data) {
+        throw new Error(
+          response.response?.status === 404
+            ? "Capture is no longer available"
+            : (response.error as { message?: string })?.message ||
+                "Failed to download capture"
+        );
+      }
+      downloadBlob(response.data, `${uid}.pcapng`);
+    },
+    onError: options?.onError,
   });
 }
 

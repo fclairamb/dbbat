@@ -4,6 +4,7 @@ import {
   useUsers,
   useDatabases,
   useQueries,
+  useDownloadConnectionDump,
   type Query,
 } from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -11,9 +12,19 @@ import { PageLoader } from "@/components/shared/LoadingSpinner";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { Download } from "lucide-react";
+import { toast } from "sonner";
 import { format, formatDistanceToNow } from "date-fns";
 import { useBreadcrumbTitle } from "@/contexts/BreadcrumbContext";
+import { useAuth } from "@/contexts/AuthContext";
 import { ConnectionWatchPanel } from "@/components/shared/ConnectionWatchPanel";
+import { formatBytes } from "@/lib/utils";
 
 const RECENT_QUERIES_LIMIT = 50;
 
@@ -37,10 +48,14 @@ export const Route = createFileRoute("/_authenticated/connections/$uid")({
 function ConnectionDetailPage() {
   const { uid } = Route.useParams();
   const { watch } = Route.useSearch();
+  const { isAdmin } = useAuth();
   const { data: connection, isLoading: isLoadingConnection } =
     useConnection(uid);
   const { data: users } = useUsers();
   const { data: databases } = useDatabases();
+  const downloadDump = useDownloadConnectionDump(uid, {
+    onError: (error) => toast.error(error.message),
+  });
 
   const getUserName = (userId: string) =>
     users?.find((u) => u.uid === userId)?.username ?? userId;
@@ -133,11 +148,38 @@ function ConnectionDetailPage() {
         title={`${getUserName(connection.user_id)} @ ${getDbName(connection.database_id)}`}
         description={`Connected ${format(new Date(connection.connected_at), "PPpp")}`}
         actions={
-          connection.disconnected_at ? (
-            <Badge variant="secondary">Disconnected</Badge>
-          ) : (
-            <Badge variant="default">Active</Badge>
-          )
+          <>
+            {isAdmin && connection.dump?.available && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    data-testid="download-dump-button"
+                    disabled={downloadDump.isPending}
+                    onClick={() => downloadDump.mutate()}
+                  >
+                    <Download className="h-4 w-4 mr-1.5" />
+                    {downloadDump.isPending
+                      ? "Downloading..."
+                      : `Download capture (${formatBytes(connection.dump.size_bytes)})`}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent className="max-w-xs">
+                  Raw pcapng packet capture — opens in Wireshark or tcpdump.
+                  See docs/dump-format.md in the dbbat repository for the
+                  format reference, and use{" "}
+                  <code className="font-mono">dbbat dump anonymise</code>{" "}
+                  before sharing this file with anyone else.
+                </TooltipContent>
+              </Tooltip>
+            )}
+            {connection.disconnected_at ? (
+              <Badge variant="secondary">Disconnected</Badge>
+            ) : (
+              <Badge variant="default">Active</Badge>
+            )}
+          </>
         }
       />
 
@@ -250,12 +292,4 @@ function formatDuration(durationMs: number): string {
     return `${minutes}m ${seconds % 60}s`;
   }
   return `${seconds}s`;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 }
