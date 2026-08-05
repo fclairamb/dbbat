@@ -24,7 +24,7 @@ import {
   SERVER_NAME,
   UPSTREAM_PORT,
   WORK_DIR,
-  fixedTime,
+  resolveFixedTime,
 } from "./config";
 import {
   ShowcaseApi,
@@ -141,7 +141,8 @@ export default async function globalSetup(): Promise<void> {
     definitionUid,
     connectorUid: userUid,
     grantUid,
-    fixedTime: fixedTime().toISOString(),
+    // Pinned only now that every row exists, so nothing renders in the future.
+    fixedTime: resolveFixedTime().toISOString(),
   });
 
   console.log("[showcase] scenario ready");

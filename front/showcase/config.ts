@@ -83,21 +83,31 @@ export const APPROVAL_PATTERN = "(?i)^\\s*UPDATE\\b";
 export const VIEWPORT = { width: 1280, height: 800 };
 
 /**
- * The wall clock the browser sees.
+ * The wall clock the browser is pinned to, when the operator names one.
  *
- * Demo data is seeded at process start, so its timestamps are relative to the
- * run. Pinning Date.now() to the run's start (truncated to the minute) is what
- * makes the "x minutes ago" labels reproducible from one regeneration to the
- * next; set SHOWCASE_FIXED_TIME to pin it somewhere else.
+ * Returns null when SHOWCASE_FIXED_TIME is unset, in which case global-setup
+ * picks the pin itself — see resolveFixedTime().
  */
-export function fixedTime(): Date {
+export function configuredFixedTime(): Date | null {
   const explicit = process.env.SHOWCASE_FIXED_TIME;
-  if (explicit) {
-    return new Date(explicit);
-  }
-  const now = new Date();
-  now.setSeconds(0, 0);
-  return now;
+  return explicit ? new Date(explicit) : null;
+}
+
+/**
+ * Choose the clock the browser will see, called once by global-setup *after*
+ * the scenario has been seeded.
+ *
+ * Pinning matters because a capture run spans a minute or two: without it, one
+ * screenshot says "less than a minute ago" and the next says "2 minutes ago"
+ * for the same row, and the diff churns on every regeneration.
+ *
+ * The pin must land *after* the seeded data, not before it — demo data is
+ * created at process start, so a pin at the run's start renders every
+ * timestamp in the future ("in less than a minute"). A few seconds past the
+ * end of seeding is both stable and truthful.
+ */
+export function resolveFixedTime(): Date {
+  return configuredFixedTime() ?? new Date(Date.now() + 5_000);
 }
 
 /**

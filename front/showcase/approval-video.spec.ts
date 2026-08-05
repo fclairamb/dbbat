@@ -88,6 +88,13 @@ test("video: an UPDATE is held for approval and released from the UI", async ({
     await expect(page.getByTestId("watch-stream-status")).toBeVisible();
 
     await mountTerminal(page, `psql — ${SERVER_NAME} (via dbbat)`);
+
+    // Park the watch panel at the top of the frame: the held statement and its
+    // Approve button render inside it, and by default they sit below the fold.
+    await page
+      .getByTestId("connection-watch-panel")
+      .evaluate((el) => el.scrollIntoView({ block: "start" }));
+
     await writeLines(
       page,
       [
@@ -131,9 +138,15 @@ test("video: an UPDATE is held for approval and released from the UI", async ({
 
     const result = await held;
     await writeLine(page, `UPDATE ${result.rowCount ?? 0}`, "ok");
-    await expect(page.getByTestId("approval-status-approved").first()).toBeVisible({
-      timeout: 20_000,
-    });
+
+    // The hold is gone and the statement has landed in the session's query
+    // history. (The live-feed row carries no "Approved" badge — the resolve
+    // event does not repeat approval_status — so the disappearance of the
+    // held card is the signal to assert on.)
+    await expect(pending).toBeHidden({ timeout: 20_000 });
+    await expect(
+      page.locator("tbody tr", { hasText: "UPDATE customers" }).first(),
+    ).toBeVisible();
     await page.waitForTimeout(1600);
   } finally {
     await client.end().catch(() => undefined);

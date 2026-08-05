@@ -79,6 +79,12 @@ const TERMINAL_SCRIPT = `
   document.head.appendChild(style);
   document.body.appendChild(el);
 
+  // The pane is fixed to the bottom of the viewport, so without this the app's
+  // last 250px sit underneath it — including, on the connection page, the
+  // Approve button the video has to click.
+  document.body.style.paddingBottom = "270px";
+  document.documentElement.style.scrollPaddingBottom = "270px";
+
   const body = el.querySelector(".dbbat-term-body");
   const title = el.querySelector(".dbbat-term-title");
   let current = null;

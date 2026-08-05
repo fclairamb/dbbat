@@ -7,8 +7,8 @@
  */
 import { test as base, expect, type Page } from "@playwright/test";
 import { loginAs } from "../e2e/fixtures";
-import { ADMIN, OUT_DIR, fixedTime, shouldFreezeClock } from "./config";
-import { installFakeCursor } from "./lib/cursor";
+import { ADMIN, OUT_DIR, shouldFreezeClock } from "./config";
+import { readState } from "./state";
 import { join } from "node:path";
 
 /**
@@ -20,7 +20,7 @@ import { join } from "node:path";
  * ago" labels read.
  */
 export async function freezeClock(page: Page): Promise<void> {
-  await page.clock.setFixedTime(fixedTime());
+  await page.clock.setFixedTime(new Date(readState().fixedTime));
 }
 
 export const test = base.extend<{ showcasePage: Page }>({
@@ -28,7 +28,8 @@ export const test = base.extend<{ showcasePage: Page }>({
     if (shouldFreezeClock("screenshot")) {
       await freezeClock(page);
     }
-    await installFakeCursor(page);
+    // No fake cursor here: it is a video affordance. In a still it just leaves
+    // an unexplained dot floating over the UI.
     await loginAs(page, ADMIN.username, ADMIN.password);
     // eslint-disable-next-line react-hooks/rules-of-hooks
     await use(page);

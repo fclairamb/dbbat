@@ -32,6 +32,16 @@ test("screenshot: adding a server", async ({ showcasePage: page }) => {
   await page.locator("#username").fill("dbbat_proxy");
   await page.locator("#password").fill("s3cret-rotated-nightly");
 
+  // Filling the tail of the form scrolls the dialog's own scroll container;
+  // rewind it so the frame shows the protocol and the name, not a mid-form
+  // slice.
+  await page
+    .locator('[role="dialog"] .overflow-y-auto')
+    .first()
+    .evaluate((el) => {
+      el.scrollTop = 0;
+    });
+
   await settle(page, 250);
   await page.screenshot({ path: asset("add-server.png") });
 

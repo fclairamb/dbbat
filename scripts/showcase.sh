@@ -39,12 +39,12 @@ SHOWCASE_BINARY="${SHOWCASE_BINARY:-${REPO_ROOT}/dbbat}"
 # A throwaway key: this instance holds nothing but demo data.
 SHOWCASE_KEY="${SHOWCASE_KEY:-MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=}"
 
-# Pin the browser clock for the whole run so "3 minutes ago" labels do not
-# churn between regenerations.
-SHOWCASE_FIXED_TIME="${SHOWCASE_FIXED_TIME:-$(date -u +%Y-%m-%dT%H:%M:00Z)}"
-
+# SHOWCASE_FIXED_TIME is intentionally NOT defaulted here. The browser clock
+# has to be pinned *after* the scenario is seeded, otherwise every timestamp
+# renders in the future ("in less than a minute"); global-setup therefore picks
+# the pin itself. Set it only to force a specific instant.
 export SHOWCASE_API_PORT SHOWCASE_PROXY_PORT SHOWCASE_PG_PORT \
-       SHOWCASE_OUT SHOWCASE_WORK SHOWCASE_FIXED_TIME
+       SHOWCASE_OUT SHOWCASE_WORK
 
 VIDEO_DIR="${SHOWCASE_WORK}/video"
 DBBAT_PID=""

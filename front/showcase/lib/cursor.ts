@@ -85,11 +85,6 @@ export async function installFakeCursor(page: Page): Promise<void> {
   await page.addInitScript(CURSOR_SCRIPT);
 }
 
-/** Draw the pointer on a page that has *already* loaded. */
-export async function installFakeCursorNow(page: Page): Promise<void> {
-  await page.evaluate(CURSOR_SCRIPT);
-}
-
 /**
  * Glide the pointer to the centre of `target`. `steps` is what makes the move
  * readable on video — a single jump reads as a teleport.
@@ -99,7 +94,12 @@ export async function moveCursorTo(
   target: Locator,
   steps = 24,
 ): Promise<void> {
-  await target.scrollIntoViewIfNeeded();
+  // `block: "center"` rather than scrollIntoViewIfNeeded: the fake terminal
+  // pane occupies the bottom of the viewport, and "if needed" happily leaves
+  // an element sitting underneath it.
+  await target.evaluate((el) =>
+    el.scrollIntoView({ block: "center", inline: "nearest" }),
+  );
   const box = await target.boundingBox();
   if (!box) {
     throw new Error("showcase: cannot move the cursor to an invisible element");
@@ -109,7 +109,14 @@ export async function moveCursorTo(
   });
 }
 
-/** Glide to `target`, pause a beat so the viewer registers it, then click. */
+/**
+ * Glide to `target`, pause a beat so the viewer registers it, then click.
+ *
+ * The click itself goes through the locator rather than through raw mouse
+ * events: a raw `mouse.down()` has no actionability check, so an overlay
+ * sitting on top of the button (the terminal pane, a toast) would silently
+ * swallow it and the video would show a click that did nothing.
+ */
 export async function cursorClick(
   page: Page,
   target: Locator,
@@ -117,7 +124,5 @@ export async function cursorClick(
 ): Promise<void> {
   await moveCursorTo(page, target);
   await page.waitForTimeout(settleMs);
-  await page.mouse.down();
-  await page.waitForTimeout(90);
-  await page.mouse.up();
+  await target.click({ timeout: 15_000 });
 }
