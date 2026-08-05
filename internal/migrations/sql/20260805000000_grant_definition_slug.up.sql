@@ -10,11 +10,43 @@ ALTER TABLE grant_definitions ADD COLUMN IF NOT EXISTS slug TEXT;
 
 --bun:split
 
--- uid::text is trivially unique (it's a UUID) and requires no coordination
--- with whatever's already stored in `name`, which is free text and not
--- unique. Operators can rename the slug to something friendlier afterward;
--- this backfill only has to satisfy the NOT NULL + UNIQUE constraints below.
-UPDATE grant_definitions SET slug = uid::text WHERE slug IS NULL;
+-- A UUID is not a valid slug (the API rejects one at request time — it would
+-- defeat the whole point of a human-typeable handle), so the backfill can't
+-- just copy uid::text wholesale the way an earlier version of this migration
+-- did. Instead: 'legacy-' + the uid's first hex group + a row number.
+--
+--   * 'legacy-' || left(gd.uid::text, 8): Postgres always renders a uuid's
+--     ::text cast in the canonical lowercase 8-4-4-4-12 hyphenated layout,
+--     so left(..., 8) is guaranteed to be exactly the first group with no
+--     hyphen in it — this DOES rely on that canonical layout, called out
+--     here rather than left implicit. It keeps the backfilled slug
+--     traceable back to the row's uid without being anywhere near
+--     UUID-shaped itself.
+--   * The 'legacy-' prefix contains letters outside a-f (l, g, y), so the
+--     result can never be interpreted as a hex string under either UUID
+--     form uuid.Parse accepts (36-char hyphenated or bare 32-hex-digit) —
+--     that's true independent of length, not just because it's short.
+--   * Uniqueness is NOT coming from the uid fragment: these are UUIDv7,
+--     whose leading hex encodes a millisecond timestamp, so two definitions
+--     created in the same millisecond would share their first 8 hex chars.
+--     The actual uniqueness guarantee is the row_number() suffix below,
+--     which is strictly distinct per row by construction regardless of any
+--     collision in the uid truncation.
+--   * The result matches slugPattern (^[a-z0-9]+(-[a-z0-9]+)*$): three
+--     non-empty lowercase-alphanumeric segments joined by single hyphens,
+--     never a leading/trailing/doubled hyphen.
+--
+-- Operators are expected to rename these — the 'legacy-' prefix makes that
+-- obvious rather than leaving a slug that looks like a deliberate choice.
+WITH legacy AS (
+    SELECT uid, row_number() OVER (ORDER BY uid) AS rn
+    FROM grant_definitions
+    WHERE slug IS NULL
+)
+UPDATE grant_definitions AS gd
+SET slug = 'legacy-' || left(gd.uid::text, 8) || '-' || legacy.rn::text
+FROM legacy
+WHERE gd.uid = legacy.uid;
 
 --bun:split
 
