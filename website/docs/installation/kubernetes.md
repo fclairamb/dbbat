@@ -438,6 +438,10 @@ spec:
   type: LoadBalancer
 ```
 
+If that load balancer is only reachable over a VPN, pin its addresses and
+publish them — see [Client-side reachability](#client-side-reachability-document-ips-not-just-the-hostname)
+below.
+
 ### Option 2: NodePort Service
 
 ```yaml
@@ -487,6 +491,61 @@ data:
   "3307": "dbbat/dbbat:3307"
   "27018": "dbbat/dbbat:27018"
 ```
+
+### Client-Side Reachability: Document IPs, Not Just the Hostname
+
+Exposing the listeners is only half the path — the *client* also has to be able
+to route to them. When the proxy endpoint is reachable only over a VPN, two
+details decide whether users can connect.
+
+**A hostname is not a route.** VPN clients route *addresses*, not DNS names:
+WireGuard's `AllowedIPs`, an IPsec split-tunnel policy and a corporate firewall
+rule all take IPs or CIDRs. So "connect to `db.example.com`, it's behind the
+VPN" is not something a user can act on. The symptom when the route is missing
+is confusing rather than obvious: the web UI keeps working (it is reached over
+ordinary HTTPS), while the SQL client hangs on the proxy port until it times
+out.
+
+**A multi-AZ load balancer has one address per zone.** An AWS NLB — and the GCP
+and Azure equivalents — allocates one IP per availability zone it is enabled in.
+With cross-zone load balancing disabled, clients are served by the zone that
+runs the DBBat pod, and DNS publishes only *that* zone's address. Resolving the
+name therefore gives you today's IP: when the pod is rescheduled to another zone
+the name resolves elsewhere, and a VPN config pinned to the previous address
+silently stops working.
+
+Pin a static address per zone so the set never changes — on AWS, one Elastic IP
+per public subnet:
+
+```yaml
+    # Subnets and EIP allocations must be listed in the SAME zone order.
+    service.beta.kubernetes.io/aws-load-balancer-subnets: prod-a-public,prod-b-public,prod-c-public
+    service.beta.kubernetes.io/aws-load-balancer-eip-allocations: eipalloc-aaa,eipalloc-bbb,eipalloc-ccc
+```
+
+Then publish the **whole** list wherever you document the connection host, and
+declare all of it on the client side:
+
+```bash
+# What DNS advertises right now: one address — the zone currently serving.
+dig +short db.example.com
+
+# The full set, from the load balancer itself.
+kubectl -n dbbat get svc dbbat-proxies \
+  -o jsonpath='{range .status.loadBalancer.ingress[*]}{.ip}{"\n"}{end}'
+```
+
+```ini
+# WireGuard client: route every zone address, not just the live one.
+[Peer]
+AllowedIPs = 203.0.113.10/32, 203.0.113.11/32, 203.0.113.12/32
+```
+
+:::tip
+A one-IP VPN config works right up to the next reschedule, so the failure looks
+like a random outage weeks after the setup was "verified". Listing every zone
+address costs nothing and removes that class of ticket entirely.
+:::
 
 ## Complete Deployment
 
