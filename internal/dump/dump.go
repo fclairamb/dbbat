@@ -9,6 +9,9 @@ import (
 // pcapng, readable by tcpdump/Wireshark/tshark without any dbbat tooling.
 const FileExt = ".pcapng"
 
+// ContentType is the MIME type captures are served and stored with.
+const ContentType = "application/x-pcapng"
+
 // Packet direction constants.
 const (
 	DirClientToServer byte = 0x00

@@ -324,6 +324,18 @@ type Connection struct {
 	// deliberately distinct from a run whose id is empty. See noLiveOwner for
 	// how those rows are judged.
 	RunID *string `bun:"run_id" json:"-"`
+
+	// DumpKey is the blob-storage object key of this session's capture, once
+	// it has been uploaded (DBB_DUMP_UPLOAD_URL). Empty means the capture — if
+	// there is one — is still in the local spool, which is also the permanent
+	// state when uploads are disabled.
+	//
+	// It is stored rather than derived because the API addresses captures by
+	// connection UID alone and cannot otherwise tell which instance wrote the
+	// object; deriving it would turn every download into a bucket LIST.
+	// Internal bookkeeping, not API surface — hence json:"-": the key exposes
+	// the bucket layout and callers already have the download endpoint.
+	DumpKey string `bun:"dump_key,notnull,default:''" json:"-"`
 }
 
 // Instance is one *run* of one dbbat process sharing this store. The row is

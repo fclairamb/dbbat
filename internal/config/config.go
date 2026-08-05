@@ -26,6 +26,12 @@ var (
 	ErrDSNRequired    = errors.New("DBB_DSN environment variable is required")
 	ErrKeyRequired    = errors.New("either DBB_KEY or DBB_KEYFILE must be set")
 	ErrInvalidKeySize = errors.New("encryption key must be 32 bytes")
+
+	// ErrDumpUploadNeedsDir is returned when an upload target is configured
+	// without a local spool. Captures are always written to disk first and
+	// uploaded once complete (S3 objects cannot be appended to), so an upload
+	// URL with no DBB_DUMP_DIR would silently capture nothing.
+	ErrDumpUploadNeedsDir = errors.New("DBB_DUMP_UPLOAD_URL requires DBB_DUMP_DIR")
 )
 
 // RunMode represents the application run mode.
@@ -272,7 +278,23 @@ type DumpConfig struct {
 	MaxSize int64 `koanf:"max_size"`
 
 	// Retention is the auto-delete duration for old dumps (e.g., "24h").
+	//
+	// It applies to the local spool only. When UploadURL is set, remote
+	// retention is the bucket's own lifecycle policy — dbbat never expires
+	// objects it uploaded, and never LISTs the bucket to look for them.
 	Retention string `koanf:"retention"`
+
+	// UploadURL is the blob-storage bucket finished captures are uploaded to
+	// on session close, e.g. "s3://my-bucket/dbbat-captures". Empty — the
+	// default — keeps captures on local disk only, which is the historical
+	// behaviour.
+	//
+	// The scheme selects the driver (gocloud.dev/blob): "s3://" for S3 and
+	// S3-compatible stores, "file://" for a local directory (useful in tests
+	// and for a mounted volume). Any path after the bucket is used as a key
+	// prefix. Requires Dir: captures are always spooled locally first and
+	// uploaded once complete.
+	UploadURL string `koanf:"upload_url"`
 }
 
 // Default dump settings.
@@ -651,6 +673,10 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 	// Validate required fields
 	if cfg.DSN == "" {
 		return nil, ErrDSNRequired
+	}
+
+	if cfg.Dump.UploadURL != "" && cfg.Dump.Dir == "" {
+		return nil, ErrDumpUploadNeedsDir
 	}
 
 	// Load encryption key from Key or KeyFile
