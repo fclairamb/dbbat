@@ -96,3 +96,51 @@ Concretely:
   still-open captures.
 
 No GitHub issue filed yet — one should be created when this is picked up.
+
+## Implementation Plan
+
+1. **Dependency**: add `gocloud.dev/blob` with the `fileblob` and `s3blob`
+   drivers (blank-imported). `file://` makes the whole upload path unit-testable
+   with no cloud dependency.
+2. **`internal/dump/upload.go`** — new `Uploader`:
+   - `OpenUploader(ctx, UploaderOptions)`; `URL` empty ⇒ `nil, nil` (local-only,
+     the default, unchanged behaviour). Every method is nil-receiver safe so the
+     four proxies and the API can call it unconditionally.
+   - URL handling: `s3://bucket/prefix` is rewritten to `s3://bucket?prefix=…`
+     before `blob.OpenBucket` (the s3 opener only reads the host); `file://`
+     and `mem://` pass through untouched.
+   - Key layout `YYYY/MM/DD/<instanceID>/<connectionUID>.pcapng`, the date taken
+     from the spool file's mtime so a retry recomputes the *same* key.
+   - `Finish(ctx, uid)` enqueues onto a buffered channel drained by a small
+     worker pool; each job does upload → record key on the connections row →
+     delete the local spool file, with bounded retries. A failure leaves the
+     spool file alone so the next startup sweep retries it.
+   - `SweepSpool(ctx)` enqueues every `*.pcapng` left in the spool dir —
+     crash recovery, run at startup before any proxy accepts.
+   - `Open`/`Delete` for the API read/delete path; `Close` drains the queue.
+3. **Store**: `dump_key` column on `connections` (migration
+   `20260805120000_connections_dump_key.{up,down}.sql`), `Connection.DumpKey`
+   field, `SetConnectionDumpKey` / `ClearConnectionDumpKey`, and `dump_key`
+   added to the explicit column lists of `GetConnectionByUID` / `ListConnections`.
+   `json:"-"` — the key is internal bookkeeping, not API surface.
+4. **Config**: `DumpConfig.UploadURL` (`DBB_DUMP_UPLOAD_URL` via the existing
+   `dump_` prefix rule). `Load` rejects an upload URL with no `DBB_DUMP_DIR`:
+   the spool is what gets uploaded.
+5. **Write path**: each proxy `Server` gains an `uploader` field + `SetUploader`
+   (same shape as `SetRowWriter`); sessions call the nil-safe
+   `uploader.Finish(ctx, uid)` right after `dumpWriter.Close()`. Nothing about
+   `dump.NewWriter` or the local write changes.
+6. **Read path**: `handleGetConnectionDump` serves the local spool first, then
+   falls back to the stored key and streams the object body.
+   `handleDeleteConnectionDump` removes both the local file and the object, and
+   clears `dump_key`. The API server gets `SetDumpStorage`.
+7. **Retention**: `CleanupOldFiles` is untouched and keeps sweeping the local
+   spool only. Documented that S3 retention is the bucket lifecycle policy.
+8. **Wiring**: `main.go` opens the uploader once, sweeps the spool, hands it to
+   the API server and the four proxies, and closes it on shutdown.
+9. **Docs**: `DBB_DUMP_UPLOAD_URL` in the root `CLAUDE.md` env table and a
+   "Where captures are stored" section in `docs/dump-format.md`.
+10. **Tests**: `internal/dump/upload_test.go` drives upload, read-through,
+    delete, key layout, URL rewriting and the crash-recovery sweep against a
+    `file://` bucket in a temp dir; `internal/config` covers the new env var and
+    the validation error.
