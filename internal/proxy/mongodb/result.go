@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"go.mongodb.org/mongo-driver/v2/bson"
 
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -256,6 +257,10 @@ func (s *Session) recordQuery(pq *pendingQuery, rows []store.QueryRow, rowsAffec
 	if s.connection == nil {
 		return
 	}
+
+	// Last gate before the store: never persist an "error" that is not readable
+	// text. See shared.SanitizeQueryError.
+	queryError = shared.SanitizeQueryError(s.ctx, s.logger, queryError)
 
 	total := s.cumulativeClientBytes()
 	bytesTransferred := total - s.lastBytesSnapshot

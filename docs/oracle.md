@@ -459,6 +459,58 @@ surfaced there: `parseRowStream` treated a leading `0x08` as the end-of-rows foo
 the full footer fixes it. SQLcl SELECT results (columns + rows, single- and multi-row) are
 now captured like any other client.
 
+#### A mid-fetch `0x08` is row data, not a Response
+
+The byte at TNS payload offset 2 is only a TTC function code **at a call boundary**. While
+a result set is streaming, that byte is row-stream content — an 8-byte value's length
+prefix, or the `08 01 06` end-of-rows footer — so a packet starting with `0x08` used to be
+routed to `handleResponse` and read through the *legacy* fixed-offset Response layout:
+`payload[2:6]` as an error code, `payload[12:14]` as an error flag, `payload[14:16]` as a
+message length. On real row data that reliably produces a nonzero code, a nonzero flag and a
+several-hundred-byte "message" of verbatim column-compressed row bytes. Observed in
+production on a healthy 57.9 s `SELECT`: `rows_affected = 5316` plus a 772-byte binary
+"error". Because the fabricated error completed the query, `pendingQuery` was cleared and,
+for the rest of the fetch, row capture stopped (without setting `results_truncated`),
+`s.guard.Check()` — gated on `pendingQuery != nil` in `upstreamToClient` — stopped enforcing
+the grant's byte cap mid-stream, and the remaining bytes were charged to the next query.
+
+Two independent fixes, either of which alone would have prevented the production symptom:
+
+- `handleResponse` checks `rowStreamActive()` (a pending query whose cursor already has
+  column definitions). Mid-stream, only an **embedded OER** — whose end-of-call bit
+  `decodeOERAt` verifies — is honoured as a call boundary; anything else is decoded as
+  continuation row data.
+- `decodeTTCResponse` (and `parseResponseError`) must *prove* a legacy error before
+  reporting one: a plausible code (< 100000) **and** an extracted message that is a
+  printable `ORA-`/`PLS-`/`TNS-` diagnostic. Otherwise the payload is rejected with
+  `ErrNotLegacyResponse` rather than surfacing misread bytes. No message is synthesized
+  from the code alone. Every `0x08` Response in every capture fixture used to decode as a
+  bogus `ORA-<huge number>`; a replay test now asserts none of them do.
+
+As a last line of defence, `shared.SanitizeQueryError` guards every protocol's completion
+path. It is deliberately **not** a plain "valid UTF-8 or drop" check, because dbbat does not
+know the session charset: a genuine diagnostic from a WE8ISO8859P1 session (the common case
+on European estates) is not valid UTF-8, and dropping it would silently lose real errors.
+Instead:
+
+- a string carrying **control bytes** (C0, DEL, C1) is dropped — no diagnostic contains
+  them, and misread row data always does;
+- a string with a **few undecodable bytes** is kept, with those bytes replaced by U+FFFD:
+  `ORA-00001: contrainte unique viol<?>e` is more useful to an operator than nothing;
+- a string that is **more than a quarter** undecodable is binary, not a sentence with
+  accents in it, and is dropped.
+
+Both outcomes are logged at debug with the length only, never the bytes.
+
+A related, pre-existing limitation sits upstream of that gate: `extractORAMessage` truncates
+an OER's message at the first non-printable byte, so a Latin-1 accent inside a genuine ORA
+message ends the extracted text there. The sanitizer never sees those bytes.
+
+Also note `cleanup()` now flushes a still-pending query. A client that disconnects mid-fetch
+used to leave the query row forever incomplete — `duration_ms` NULL and its bytes never
+charged to the connection or the grant. The fabricated completion removed above used to
+(wrongly) close such rows, which is why the leak had gone unnoticed.
+
 #### OCI wide (4-byte little-endian) TTC encoding
 
 OCI clients (sqlplus / instant client) negotiate a different TTC integer encoding than thin

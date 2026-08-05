@@ -332,6 +332,10 @@ func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransfe
 		return
 	}
 
+	// Last gate before the store: never persist an "error" that is not readable
+	// text. See shared.SanitizeQueryError.
+	queryError = shared.SanitizeQueryError(s.ctx, s.logger, queryError)
+
 	duration := float64(time.Since(s.currentQuery.startTime).Milliseconds())
 
 	query := &store.Query{
