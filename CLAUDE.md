@@ -107,6 +107,9 @@ make test             # Run Go unit tests
 make test-e2e         # Run Playwright E2E tests
 make lint             # Run golangci-lint
 
+# Website media (on demand only — never part of a release)
+make showcase         # Regenerate website/static/img/showcase/ from a live demo instance
+
 # Integration suites (real containers via testcontainers; `make test` skips them)
 make test-integration-mongodb      # ./internal/proxy/mongodb/...
 make test-integration-mysql        # ./internal/proxy/mysql/...
@@ -215,6 +218,39 @@ make test-e2e  # Builds app, starts server in test mode, runs Playwright
 ```
 
 Test mode credentials: `admin`/`admintest`, `viewer`/`viewer`, `connector`/`connector`
+
+### Website showcase media (`make showcase`)
+
+`front/showcase/` is a **separate Playwright project** that regenerates the
+website's marketing screenshots and the approval-hold video into
+`website/static/img/showcase/`. It is not part of `make test-e2e` and never
+gates CI.
+
+```bash
+make showcase                       # everything
+SHOWCASE_PROJECT=video make showcase  # just the clip
+SHOWCASE_SKIP_BUILD=1 make showcase   # reuse the existing ./dbbat
+SHOWCASE_KEEP=1 make showcase         # leave the stack up to poke at
+```
+
+`scripts/showcase.sh` owns the lifecycle: it starts its **own** throwaway
+PostgreSQL container and its **own** demo-mode dbbat on ports 8099/5499/5099,
+and removes only what it created. It never calls `docker compose` — demo mode
+drops every table on startup, so pointing it at the shared dev stack would
+destroy that database. Demo-mode credentials are `admin`/`admin`,
+`viewer`/`viewer`, `connector`/`connector`.
+
+The approval video drives a real `pg` client through the proxy to create a
+genuine hold; the terminal pane and the mouse pointer are drawn (a real
+terminal is not reproducible in CI, and Playwright records no cursor). ffmpeg
+transcodes the WebM to AV1 (`libsvtav1`) plus an H.264 fallback for Safari.
+
+Every run writes `website/static/img/showcase/manifest.json`
+(`version`/`commit`/`generatedAt`), version read from
+`.release-please-manifest.json` — regeneration is on demand, so the manifest is
+what makes staleness visible. `.github/workflows/showcase.yml` exposes the same
+pipeline as a `workflow_dispatch` job, plus a non-blocking rot guard that runs
+the suite on `front/` pull requests with the output discarded.
 
 ## Creating Migrations
 
