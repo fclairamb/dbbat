@@ -281,6 +281,83 @@ test.describe("Observability Features", () => {
     await connectorContext.close();
   });
 
+  // Capture download: the E2E harness (front/e2e/global-setup.ts) starts the
+  // server without DBB_DUMP_DIR, so captures are disabled server-wide and no
+  // connection in this environment ever reports dump.available. That is
+  // enough to exercise both "no button without a capture" and "no button for
+  // a non-admin" — it can't exercise "button visible + successful download",
+  // which needs an on-disk capture the harness doesn't produce. That
+  // happy-path assertion is intentionally not written here rather than
+  // faked; see specs/todos/2026-08-05-03-download-session-capture-from-ui.md.
+  test("download capture button is absent when the connection has no capture", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("connections");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const rows = authenticatedPage.locator("tbody tr");
+    if ((await rows.count()) === 0) {
+      test.skip(true, "No connection rows available in this environment");
+      return;
+    }
+
+    const rowLink = rows.first().locator("a").first();
+    await rowLink.click();
+    await expect(authenticatedPage).toHaveURL(/\/connections\/[0-9a-f-]{36}$/);
+    await authenticatedPage.waitForLoadState("networkidle");
+    await expect(
+      authenticatedPage.getByText("Connection Information"),
+    ).toBeVisible();
+
+    // Dumps are disabled in this harness, so dump.available is false even
+    // for an admin — the button must not render.
+    await expect(
+      authenticatedPage.getByTestId("download-dump-button"),
+    ).toHaveCount(0);
+  });
+
+  test("download capture button is absent for the viewer account", async ({
+    authenticatedPage,
+    browser,
+  }) => {
+    await authenticatedPage.goto("connections");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const rows = authenticatedPage.locator("tbody tr");
+    if ((await rows.count()) === 0) {
+      test.skip(true, "No connection rows available in this environment");
+      return;
+    }
+
+    const href = await rows.first().locator("a").first().getAttribute("href");
+    const connectionId = href?.match(/connections\/([0-9a-f-]{36})/)?.[1];
+    expect(connectionId).toBeTruthy();
+
+    // A genuinely separate browser context, signed in as viewer: reusing
+    // authenticatedPage's Page would stay signed in as admin.
+    const viewerContext = await browser.newContext();
+    const page = await viewerContext.newPage();
+    await page.goto("/");
+    await page.waitForLoadState("domcontentloaded");
+    await page.getByTestId("login-logo").waitFor({ state: "visible" });
+    await page.getByTestId("login-username").fill("viewer");
+    await page.getByTestId("login-password").fill("viewer");
+    await page.getByTestId("login-submit").click();
+    await page.waitForURL((url) => !url.pathname.includes("/login"), {
+      timeout: 10000,
+    });
+
+    await page.goto(`connections/${connectionId}`);
+    await page.waitForLoadState("networkidle");
+    await expect(page.getByText("Connection Information")).toBeVisible();
+
+    // Viewer role must never see the download action, regardless of whether
+    // a capture exists — the UI gate mirrors the API's admin-only narrowing.
+    await expect(page.getByTestId("download-dump-button")).toHaveCount(0);
+
+    await viewerContext.close();
+  });
+
   test("should display audit log page", async ({ authenticatedPage }) => {
     await authenticatedPage.goto("audit");
     await authenticatedPage.waitForLoadState("networkidle");
