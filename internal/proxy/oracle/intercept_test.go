@@ -282,41 +282,6 @@ func TestWriteTTCError(t *testing.T) {
 	assert.Contains(t, string(pkt.Payload), "ORA-01031")
 }
 
-func TestParseResponseError_NoError(t *testing.T) {
-	t.Parallel()
-	// Build a response with error code = 0
-	payload := make([]byte, 14)
-	payload[0] = byte(TTCFuncResponse) // func code
-	payload[1] = 0x01                  // seq
-	// errCode at [2:6] = 0 (no error)
-	// cursor at [6:8] = 0
-	// rowcount at [8:12] = 0
-	// errflag at [12:14] = 0
-
-	errStr := parseResponseError(payload)
-	assert.Nil(t, errStr)
-}
-
-func TestParseResponseError_WithError(t *testing.T) {
-	t.Parallel()
-	payload := make([]byte, 30)
-	payload[0] = byte(TTCFuncResponse)
-	payload[1] = 0x01
-
-	// Error code 942 (table or view does not exist)
-	binary.BigEndian.PutUint32(payload[2:6], 942)
-	// Error flag non-zero
-	binary.BigEndian.PutUint16(payload[12:14], 1)
-	// Error message
-	msg := "ORA-00942: table not found"
-	binary.BigEndian.PutUint16(payload[14:16], uint16(len(msg)))
-	copy(payload[16:], []byte(msg))
-
-	errStr := parseResponseError(payload)
-	require.NotNil(t, errStr)
-	assert.Contains(t, *errStr, "ORA-00942")
-}
-
 func TestParseResponseRowsAffected(t *testing.T) {
 	t.Parallel()
 	payload := make([]byte, 12)

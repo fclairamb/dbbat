@@ -26,13 +26,20 @@ import (
 
 // session represents a single Oracle proxy session.
 type session struct {
-	clientConn    net.Conn
-	upstreamConn  net.Conn
-	store         *store.Store
-	encryptionKey []byte
-	logger        *slog.Logger
-	ctx           context.Context //nolint:containedctx
-	authCache     *cache.AuthCache
+	clientConn   net.Conn
+	upstreamConn net.Conn
+	store        *store.Store
+	// completionStore is the slice of the store that query completion writes
+	// through. Narrowing it to an interface keeps the completion path — and in
+	// particular the error text a query ends up recording — assertable in a
+	// unit test, which matters because that is the path a mid-fetch ORA error
+	// travels. Always the session's store in production; nil in tests that
+	// don't care.
+	completionStore queryCompletionStore
+	encryptionKey   []byte
+	logger          *slog.Logger
+	ctx             context.Context //nolint:containedctx
+	authCache       *cache.AuthCache
 
 	// Connection metadata
 	serviceName   string
@@ -206,7 +213,7 @@ func newSession(
 	watched := shared.NewWatchedConn(clientConn)
 	_ = shared.EnableClientKeepAlive(clientConn)
 
-	return &session{
+	s := &session{
 		watched:         watched,
 		clientConn:      shared.NewCountingConn(watched, bytesFromClient, bytesToClient),
 		store:           dataStore,
@@ -221,6 +228,15 @@ func newSession(
 		bytesFromClient: bytesFromClient,
 		bytesToClient:   bytesToClient,
 	}
+
+	// Assigned separately so a nil store stays a nil interface rather than a
+	// non-nil interface wrapping a nil pointer, which the nil checks on the
+	// completion path rely on.
+	if dataStore != nil {
+		s.completionStore = dataStore
+	}
+
+	return s
 }
 
 // run executes the full session lifecycle with terminated authentication.
@@ -1451,10 +1467,50 @@ func (s *session) handleContinuation(ttcPayload []byte) {
 	}
 }
 
+// rowStreamActive reports whether the session is in the middle of streaming a
+// result set: a query is pending, its cursor is known, and the column
+// definitions have already been decoded from the QueryResult (func=0x10) that
+// opened the fetch.
+//
+// This is the session's own notion of a call boundary: from the QueryResult
+// until the query completes, every upstream packet is row-stream content, so
+// its first byte is a value length or a stream marker — not a TTC function
+// code. Column definitions are the marker of that window because they are set
+// exactly once per fetch (handleQueryResultV2 / handleResponse) and cleared
+// with the cursor.
+func (s *session) rowStreamActive() bool {
+	pending := s.tracker.pendingQuery
+
+	return pending != nil && pending.cursor != nil && len(pending.cursor.columns) > 0
+}
+
 // handleResponse processes a legacy TTC Response (func=0x08).
 // In v315+, most responses don't follow the legacy format so we skip them.
 // Query completion is handled by handleQueryResultV2 for func=0x10.
 func (s *session) handleResponse(ttcPayload []byte) {
+	// Mid-fetch, a leading 0x08 is NOT a fresh Response: it is row-stream
+	// content — an 8-byte first column value's length prefix, or the
+	// 0x08 0x01 0x06 end-of-rows footer — that happened to land at the start
+	// of a TNS packet. Only an embedded OER, whose end-of-call bit decodeOERAt
+	// verifies, marks a real call boundary here; anything else is continuation
+	// data and is decoded as such.
+	//
+	// Without this guard the legacy fixed-offset decoder below read row bytes
+	// as an error code plus a length-prefixed message, wrote them into
+	// Query.Error, and cleared pendingQuery — which silently truncated row
+	// capture, stopped mid-stream quota enforcement, and mis-charged the rest
+	// of the stream's bytes for the remainder of the fetch.
+	if s.rowStreamActive() {
+		if oer := findOERInResponse(ttcPayload); oer != nil {
+			s.completeQueryFromOER(oer)
+			return
+		}
+
+		s.handleContinuation(ttcPayload)
+
+		return
+	}
+
 	// v315+ DML responses embed an OER (func=0x04) status block carrying the
 	// affected-row count (INSERT/UPDATE/DELETE) or the ORA error. This is the
 	// reliable source — the legacy fixed-offset layout below misreads v315+
@@ -1509,6 +1565,14 @@ func (s *session) sendRefuse(oraCode uint16, reason string) {
 
 // cleanup closes upstream connection and updates records.
 func (s *session) cleanup() {
+	// Finish any query still in flight before the connection record closes.
+	// A client that disconnects mid-fetch (or an upstream that drops) otherwise
+	// leaves its row forever incomplete — duration_ms NULL, results_truncated
+	// unset, and the streamed bytes never charged to the connection or the
+	// grant, which is a way to under-report against a byte quota. Same reasoning
+	// as the completeQuery on the quota-kill path in upstreamToClient.
+	s.flushPendingQuery()
+
 	s.stream.Connection(s.ctx, shared.ConnectionClosed)
 
 	if s.grant != nil && s.revocation != nil {

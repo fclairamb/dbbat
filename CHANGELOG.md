@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.21.0](https://github.com/fclairamb/dbbat/compare/v0.20.0...v0.21.0) (2026-08-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* **proxy:** the instances registry primary key becomes (instance_id, run_id). A v0.20.x replica's heartbeat upserts ON CONFLICT (instance_id) and starts failing the moment this migration runs; after the 15-minute grace period a new-build replica reclaims the connections it is still serving, and a reclaimed connection immediately becomes eligible for the retention sweep. Complete the upgrade from v0.20.x within 15 minutes, and do not roll back to v0.20.x once migrated. Only affects deployments with replicaCount > 1.
+
+### Features
+
+* **proxy:** one upstream-connect path for the proxy and the connectivity probe ([#288](https://github.com/fclairamb/dbbat/issues/288)) ([766688e](https://github.com/fclairamb/dbbat/commit/766688e4d519d5baf1c72f2b561413af1b8991a5))
+
+
+### Bug Fixes
+
+* **deps:** update module github.com/knadh/koanf/parsers/toml/v2 to v2.2.2 ([#284](https://github.com/fclairamb/dbbat/issues/284)) ([12e1a7d](https://github.com/fclairamb/dbbat/commit/12e1a7d8fa14c65ee38b4de43b9f506dcf171a0b))
+* **deps:** update module github.com/knadh/koanf/parsers/yaml to v1.1.1 ([#286](https://github.com/fclairamb/dbbat/issues/286)) ([bfce514](https://github.com/fclairamb/dbbat/commit/bfce514d933c3ebcbe4baae6f404cb10a6de4a63))
+* **deps:** update module github.com/knadh/koanf/providers/env/v2 to v2.0.1 ([#287](https://github.com/fclairamb/dbbat/issues/287)) ([69cd341](https://github.com/fclairamb/dbbat/commit/69cd34140d5f60c4a4c4194018f6431509d62cc9))
+* **deps:** update module github.com/knadh/koanf/providers/structs to v1.0.1 ([#289](https://github.com/fclairamb/dbbat/issues/289)) ([15d703b](https://github.com/fclairamb/dbbat/commit/15d703b3ef02bd5632a0a4d73e4f0ebcc015befb))
+* **deps:** update module github.com/knadh/koanf/v2 to v2.3.6 ([#290](https://github.com/fclairamb/dbbat/issues/290)) ([7616b93](https://github.com/fclairamb/dbbat/commit/7616b930ac54ea53a9c019c239043607ad27d939))
+
 ## [0.20.0](https://github.com/fclairamb/dbbat/compare/v0.19.1...v0.20.0) (2026-08-04)
 
 
