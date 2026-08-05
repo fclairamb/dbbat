@@ -81,9 +81,9 @@ func mysqlWaitStrategy(logLine string) wait.Strategy {
 			"sh", "-c",
 			"mariadb " + query + " 2>/dev/null || mysql " + query + " 2>/dev/null",
 		}).
-			// The client is a fresh process per poll; 100ms would pile up
-			// overlapping execs on an already-busy daemon.
-			WithPollInterval(time.Second).
+			// Polls are sequential, so the interval is pure dead time between
+			// attempts rather than a guard against overlapping execs.
+			WithPollInterval(250*time.Millisecond).
 			WithStartupTimeout(perStrategyTimeout),
 	).
 		WithStartupTimeoutDefault(perStrategyTimeout).

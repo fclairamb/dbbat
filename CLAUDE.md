@@ -107,6 +107,12 @@ make test             # Run Go unit tests
 make test-e2e         # Run Playwright E2E tests
 make lint             # Run golangci-lint
 
+# Integration suites (real containers via testcontainers; `make test` skips them)
+make test-integration-mongodb      # ./internal/proxy/mongodb/...
+make test-integration-mysql        # ./internal/proxy/mysql/...
+make test-integration-postgresql   # ./internal/proxy/postgresql/...
+make test-e2e-oracle               # ./internal/proxy/oracle/...
+
 # Other
 make demo             # Build and run in demo mode
 make clean            # Clean build artifacts
@@ -184,6 +190,23 @@ Note: If no encryption key is provided, one is created at `~/.dbbat/key`.
 ```bash
 make test  # Uses testcontainers-go for PostgreSQL
 ```
+
+### Protocol Integration Tests
+
+Behind `//go:build integration`, so `make test` neither compiles nor runs them.
+
+```bash
+make test-integration-mongodb   # and -mysql, -postgresql, plus test-e2e-oracle
+```
+
+**Use the Make target, not a bare `go test -tags integration ./internal/proxy/...`.**
+Every test starts its own upstream container *and* its own PostgreSQL storage
+container, so a suite is dominated by container startup: the MongoDB suite
+takes ~4min idle, ~7min with other containers competing for the Docker daemon,
+and has been seen past 12min. `go test`'s default timeout is 10min, so the bare
+command panics on a busy machine even when nothing is wrong. The targets pass
+`-timeout 40m`, matching `.github/workflows/integration.yml`; a run that exceeds
+that is a real regression, not a busy laptop.
 
 ### E2E Tests
 ```bash

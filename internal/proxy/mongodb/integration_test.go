@@ -75,6 +75,13 @@ const (
 // expected to hold. On a preferTLS container the exec still connects in
 // plaintext over the loopback, so one strategy covers both fixtures.
 func mongoWaitStrategy() wait.Strategy {
+	// Per-strategy budget, then an overall cap: three independent 120s budgets
+	// would let a genuinely broken container hang the suite for six minutes.
+	const (
+		perStrategyTimeout = 120 * time.Second
+		overallDeadline    = 180 * time.Second
+	)
+
 	return wait.ForAll(
 		wait.ForListeningPort("27017/tcp"),
 		wait.ForLog("Waiting for connections"),
@@ -86,15 +93,66 @@ func mongoWaitStrategy() wait.Strategy {
 			"--authenticationDatabase", "admin",
 			"--eval", "db.adminCommand({ping: 1})",
 		}).
-			// mongosh is a ~1s process; polling it at the 100ms default would
-			// mostly pile up overlapping execs on an already-busy daemon.
-			WithPollInterval(time.Second).
-			WithStartupTimeout(120 * time.Second),
+			// Polls are sequential and mongosh is a ~1.5s process, so the
+			// interval is pure dead time between attempts rather than a guard
+			// against overlapping execs. Measured cost of this strategy is
+			// ~8s per container, nearly all of it the initdb tail the suite
+			// used to race — keep the gap short so the fixed part is small.
+			WithPollInterval(250*time.Millisecond).
+			WithStartupTimeout(perStrategyTimeout),
 	).
-		WithStartupTimeoutDefault(120 * time.Second).
-		// Cap the whole sequence so a genuinely broken container fails in a few
-		// minutes instead of adding up three independent 120s budgets.
-		WithDeadline(180 * time.Second)
+		WithStartupTimeoutDefault(perStrategyTimeout).
+		WithDeadline(overallDeadline)
+}
+
+// startMongoContainer starts a container, retrying a start that failed rather
+// than a container that came up and misbehaved.
+//
+// The mongo image's entrypoint runs a temporary mongod on 27017 for initdb and
+// then restarts the real one on the same port. On a loaded daemon the first
+// socket is occasionally not released in time and the second bind dies with
+// "Address already in use", killing the container before it ever serves a
+// client. That is a property of the machine, not of the proxy, and the suite is
+// supposed to distinguish those — so give the container another go instead of
+// reporting a red test.
+//
+// Only container *startup* is retried. Once a container is up, every failure
+// downstream is the test's own verdict and is left alone.
+func startMongoContainer(
+	ctx context.Context,
+	t *testing.T,
+	req testcontainers.ContainerRequest,
+	image string,
+) testcontainers.Container {
+	t.Helper()
+
+	const attempts = 3
+
+	var lastErr error
+
+	for attempt := 1; attempt <= attempts; attempt++ {
+		c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+			ContainerRequest: req,
+			Started:          true,
+		})
+		if err == nil {
+			return c
+		}
+
+		lastErr = err
+
+		// GenericContainer can hand back a container alongside the error when
+		// it is the wait strategy that gave up; drop it so the retry is clean.
+		if c != nil {
+			_ = c.Terminate(context.Background())
+		}
+
+		t.Logf("mongo container start attempt %d/%d failed, retrying: %v", attempt, attempts, err)
+	}
+
+	require.NoError(t, lastErr, "start mongo container (%s) after %d attempts", image, attempts)
+
+	return nil
 }
 
 // runMongoContainer starts a MongoDB container with root credentials and
@@ -159,11 +217,7 @@ func runMongoContainerWith(
 		}
 	}
 
-	c, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: req,
-		Started:          true,
-	})
-	require.NoError(t, err, "start mongo container (%s)", image)
+	c := startMongoContainer(ctx, t, req, image)
 
 	host, err := c.Host(ctx)
 	require.NoError(t, err)
