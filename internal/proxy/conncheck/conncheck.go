@@ -15,8 +15,11 @@ package conncheck
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net"
 	"regexp"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -282,7 +285,7 @@ func (c *Checker) checkTarget(ctx context.Context, dialer *shared.Dialer, srv *s
 
 	done := make(chan error, 1)
 
-	go func() { done <- probe(ctx, srv, dial) }()
+	go func() { done <- runProbe(ctx, srv, dial, probe) }()
 
 	var probeErr error
 
@@ -476,6 +479,19 @@ func classifyNetworkError(err error, stage Stage) Result {
 // classifyTargetError maps a protocol-level login failure. Auth rejections are
 // distinguished from handshake failures because they point at different fields.
 func classifyTargetError(err error) Result {
+	// A panic is unambiguous and must not be run past the network/auth
+	// heuristics below, which would dress a dbbat bug up as a problem with the
+	// admin's server row.
+	if errors.Is(err, errProbePanic) {
+		return Result{
+			Stage: StageTargetAuth,
+			Code:  CodeInternal,
+			Message: "the connectivity check crashed while talking to this target — " +
+				"this is a dbbat bug, not a problem with the server row; " +
+				"the stack trace is in the server log",
+		}
+	}
+
 	// An incomplete row is caught before any packet is sent, so it belongs to
 	// the config stage — reporting it at target_auth would send the admin
 	// looking at the network.
@@ -506,6 +522,48 @@ func classifyTargetError(err error) Result {
 		Code:    CodeDBHandshakeFailed,
 		Message: "the target was reachable but the database handshake failed: " + sanitize(err),
 	}
+}
+
+// errProbePanic marks a probe that panicked instead of returning an error.
+var errProbePanic = errors.New("conncheck: probe panicked")
+
+// runProbe executes p and converts a panic into an error.
+//
+// The probes drive third-party client libraries — go-ora, go-mysql, the Mongo
+// codec, pgproto3 — against whatever host an operator pointed a server row at,
+// and those libraries are not hardened against a malformed handshake. go-ora's
+// newAcceptPacketFromData indexes into a TNS Accept packet without a length
+// check and panics outright on a short one; the scheduled Oracle integration
+// run hit exactly that against an ordinary test container, so it does not take
+// a hostile server to reach it.
+//
+// This runs on its own goroutine, with no caller to unwind into. Without the
+// recover such a panic does not fail the check — it takes the whole proxy
+// process down, dropping every live session on every protocol, because an
+// admin pressed "test connection" (or passed test_connection: true) on a host
+// having a bad moment. A connectivity check must never be able to do that, and
+// a panic is simply a failed probe.
+func runProbe(ctx context.Context, srv *store.Server, dial dialFunc, p probe) (err error) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+
+		// The stack is the only way to identify the offending library frame,
+		// and it does not breach this package's no-secrets rule: Go renders
+		// argument words, not string contents, so a stored password passed to
+		// a client library never appears in the trace.
+		slog.ErrorContext(ctx, "connectivity probe panicked",
+			slog.String("server_uid", srv.UID.String()),
+			slog.String("protocol", srv.Protocol),
+			slog.Any("panic", r),
+			slog.String("stack", string(debug.Stack())))
+
+		err = fmt.Errorf("%w: %v", errProbePanic, r)
+	}()
+
+	return p(ctx, srv, dial)
 }
 
 // isTimeout reports whether err is a net.Error signaling a timeout.
