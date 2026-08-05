@@ -77,18 +77,27 @@ func New(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
 		runID: newUIDv7().String(),
 	}
 
-	// Drop all tables first if requested (for test mode)
-	if options.DropTablesFirst {
-		if err := s.DropAllTables(ctx); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("failed to drop tables: %w", err)
+	// Drop-then-migrate is one schema change, so it happens under a single hold
+	// of the migration lock: a replica starting next waits for the finished
+	// schema rather than observing the half-dropped one.
+	err := s.withMigrationLock(ctx, func(ctx context.Context) error {
+		// Drop all tables first if requested (for test mode)
+		if options.DropTablesFirst {
+			if err := s.DropAllTables(ctx); err != nil {
+				return fmt.Errorf("failed to drop tables: %w", err)
+			}
 		}
-	}
 
-	// Run migrations
-	if err := s.runMigrations(ctx); err != nil {
+		// Run migrations
+		if err := s.runMigrations(ctx); err != nil {
+			return fmt.Errorf("failed to run migrations: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("failed to run migrations: %w", err)
+		return nil, err
 	}
 
 	return s, nil
@@ -169,6 +178,130 @@ func (s *Store) Revocations() *cache.RevocationRegistry {
 	return s.revocations
 }
 
+// migrationAdvisoryLockKey is the PostgreSQL advisory-lock key that serialises
+// the schema step across every process sharing this storage database. The value
+// is the ASCII bytes of "DBBAT": arbitrary, but stable across dbbat versions
+// (changing it would let an old and a new replica migrate concurrently) and
+// unlikely to collide with another application's advisory locks.
+const migrationAdvisoryLockKey int64 = 0x4442424154
+
+const (
+	// migrationLockWait bounds how long we wait for a peer replica to finish its
+	// own migrations before giving up on the lock. Generous: a cold database
+	// applying every migration from scratch is the slow case we must not cut off.
+	migrationLockWait = 5 * time.Minute
+
+	// migrationLockPoll is how often we retry pg_try_advisory_lock while waiting.
+	migrationLockPoll = 100 * time.Millisecond
+)
+
+// withMigrationLock runs fn while holding the advisory lock that serialises
+// schema changes across the replicas sharing this database.
+//
+// It exists because bun's migrator is not concurrency-safe on a *fresh*
+// database: Init issues CREATE TABLE IF NOT EXISTS for bun_migrations and
+// bun_migration_locks, and two of those racing inside PostgreSQL fail with
+// `duplicate key value violates unique constraint "pg_class_relname_nsp_index"`
+// rather than politely no-opping. Migrate is no safer — nothing stops two
+// replicas from applying the same pending migration at once.
+//
+// The lock is taken on a connection pinned out of the pool, because a
+// session-level advisory lock belongs to the session that took it: taking it on
+// one pooled connection and releasing it on another would leak it for the
+// lifetime of the process. fn runs on the regular pool, so it cannot deadlock
+// against the pinned session — and PostgreSQL advisory locks are re-entrant
+// within a session anyway, so even a nested acquisition would just stack.
+//
+// Not being able to lock is never fatal. A role without rights to the advisory
+// lock functions, a database that does not implement them, or a peer holding
+// the lock for longer than migrationLockWait all fall through to running the
+// migrations unserialised — exactly the behaviour that predates this lock.
+func (s *Store) withMigrationLock(ctx context.Context, fn func(context.Context) error) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		slog.WarnContext(ctx, "could not pin a connection for the migration lock, migrating unserialised",
+			slog.Any("error", err))
+
+		return fn(ctx)
+	}
+
+	locked := s.acquireMigrationLock(ctx, conn)
+
+	defer func() {
+		if locked {
+			// Released on a context detached from ctx: a caller cancelling mid-migration
+			// must still give the lock back, or the next replica waits out the full
+			// migrationLockWait for nothing.
+			if _, err := conn.ExecContext(context.WithoutCancel(ctx),
+				"SELECT pg_advisory_unlock(?)", migrationAdvisoryLockKey); err != nil {
+				slog.WarnContext(ctx, "failed to release the migration advisory lock",
+					slog.Any("error", err))
+			}
+		}
+
+		if err := conn.Close(); err != nil {
+			slog.WarnContext(ctx, "failed to return the migration lock connection to the pool",
+				slog.Any("error", err))
+		}
+	}()
+
+	return fn(ctx)
+}
+
+// acquireMigrationLock polls pg_try_advisory_lock on the pinned connection until
+// it wins, the wait budget runs out, or the context ends. It reports whether the
+// lock is actually held — the caller unlocks only then, so a failed acquisition
+// can never unlock a peer's hold. Polling rather than blocking in
+// pg_advisory_lock keeps a stuck peer from hanging startup forever.
+func (s *Store) acquireMigrationLock(ctx context.Context, conn bun.Conn) bool {
+	deadline := time.Now().Add(migrationLockWait)
+	waited := false
+
+	for {
+		var acquired bool
+
+		err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock(?)", migrationAdvisoryLockKey).Scan(&acquired)
+		if err != nil {
+			// The functions are missing, or the role may not call them: nothing to
+			// retry, so stop asking and let the migrations run unserialised.
+			slog.WarnContext(ctx, "could not take the migration advisory lock, migrating unserialised",
+				slog.Any("error", err))
+
+			return false
+		}
+
+		if acquired {
+			if waited {
+				slog.InfoContext(ctx, "migration advisory lock acquired after waiting for another replica")
+			}
+
+			return true
+		}
+
+		if time.Now().After(deadline) {
+			slog.WarnContext(ctx, "gave up waiting for the migration advisory lock, migrating unserialised",
+				slog.Duration("waited", migrationLockWait))
+
+			return false
+		}
+
+		if !waited {
+			slog.InfoContext(ctx, "another replica is migrating, waiting for the migration advisory lock")
+
+			waited = true
+		}
+
+		select {
+		case <-ctx.Done():
+			slog.WarnContext(ctx, "context ended while waiting for the migration advisory lock, migrating unserialised",
+				slog.Any("error", ctx.Err()))
+
+			return false
+		case <-time.After(migrationLockPoll):
+		}
+	}
+}
+
 // runMigrations runs the database schema migrations
 func (s *Store) runMigrations(ctx context.Context) error {
 	migrator := migrate.NewMigrator(s.db, migrations.Migrations)
@@ -195,11 +328,15 @@ func (s *Store) runMigrations(ctx context.Context) error {
 
 // Migrate runs all pending migrations (for CLI command)
 func (s *Store) Migrate(ctx context.Context) error {
-	return s.runMigrations(ctx)
+	return s.withMigrationLock(ctx, s.runMigrations)
 }
 
 // Rollback rolls back the last migration group
 func (s *Store) Rollback(ctx context.Context) error {
+	return s.withMigrationLock(ctx, s.rollback)
+}
+
+func (s *Store) rollback(ctx context.Context) error {
 	migrator := migrate.NewMigrator(s.db, migrations.Migrations)
 
 	if err := migrator.Init(ctx); err != nil {
@@ -282,23 +419,34 @@ func (s *Store) DropAllTables(ctx context.Context) error {
 
 // MigrationStatus returns the status of all migrations
 func (s *Store) MigrationStatus(ctx context.Context) ([]MigrationInfo, error) {
-	migrator := migrate.NewMigrator(s.db, migrations.Migrations)
+	var result []MigrationInfo
 
-	if err := migrator.Init(ctx); err != nil {
-		return nil, fmt.Errorf("failed to init migrator: %w", err)
-	}
+	// Reads the migration state, but Init still creates the bookkeeping tables on
+	// a fresh database, so it races a starting replica exactly like Migrate does.
+	err := s.withMigrationLock(ctx, func(ctx context.Context) error {
+		migrator := migrate.NewMigrator(s.db, migrations.Migrations)
 
-	ms, err := migrator.MigrationsWithStatus(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get migration status: %w", err)
-	}
-
-	result := make([]MigrationInfo, len(ms))
-	for i, m := range ms {
-		result[i] = MigrationInfo{
-			Name:       m.Name,
-			MigratedAt: m.MigratedAt,
+		if err := migrator.Init(ctx); err != nil {
+			return fmt.Errorf("failed to init migrator: %w", err)
 		}
+
+		ms, err := migrator.MigrationsWithStatus(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get migration status: %w", err)
+		}
+
+		result = make([]MigrationInfo, len(ms))
+		for i, m := range ms {
+			result[i] = MigrationInfo{
+				Name:       m.Name,
+				MigratedAt: m.MigratedAt,
+			}
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
 	return result, nil
