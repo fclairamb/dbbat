@@ -26,24 +26,14 @@ const slugMaxLength = 64
 var slugPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
 // resolveGrantDefinition looks up a grant definition by either its uid or
-// its slug. A syntactically UUID-shaped identifier is tried as a uid first;
-// if that misses, it is retried as a slug. That fallback matters because
-// the slug format also accepts UUID-shaped strings (`slugPattern` allows
-// them), so without it an operator who deliberately named a definition's
-// slug something that happens to parse as a UUID could get a confusing 404
-// on a path that would otherwise resolve it by slug.
+// its slug. A syntactically UUID-shaped identifier is looked up as a uid
+// only — slugs can never be UUID-shaped (validateDefinitionRequest rejects
+// them), so there is no ambiguity to fall back through: a UUID-shaped
+// param that misses as a uid is simply not found. Anything else is looked
+// up as a slug.
 func (s *Server) resolveGrantDefinition(ctx context.Context, idOrSlug string) (*store.GrantDefinition, error) {
 	if uid, err := uuid.Parse(idOrSlug); err == nil {
-		def, err := s.store.GetGrantDefinition(ctx, uid)
-
-		switch {
-		case err == nil:
-			return def, nil
-		case errors.Is(err, store.ErrGrantDefinitionNotFound):
-			// Fall through to the slug lookup below.
-		default:
-			return nil, err
-		}
+		return s.store.GetGrantDefinition(ctx, uid)
 	}
 
 	return s.store.GetGrantDefinitionBySlug(ctx, idOrSlug)
@@ -138,6 +128,16 @@ func validateDefinitionRequest(req *CreateGrantDefinitionRequest) string {
 
 	if !slugPattern.MatchString(req.Slug) {
 		return "slug must be lowercase alphanumeric segments separated by hyphens (e.g. read-only-1h)"
+	}
+
+	// A UUID is not a valid slug: it defeats the whole point (a
+	// human-typeable handle instead of the uid) and slugPattern's own shape
+	// — lowercase hex segments joined by hyphens — happens to accept both
+	// the canonical hyphenated form and, since hyphens are optional
+	// separators, the bare 32-hex-digit form too. uuid.Parse recognizes
+	// both, so it's the check, not a hand-rolled regex.
+	if _, err := uuid.Parse(req.Slug); err == nil {
+		return "slug must not be a UUID"
 	}
 
 	if req.DurationSeconds <= 0 {
