@@ -124,6 +124,9 @@ func TestOpenUploaderDisabledByDefault(t *testing.T) {
 	_, err = u.Open(t.Context(), "whatever")
 	require.ErrorIs(t, err, os.ErrNotExist)
 
+	_, err = u.Stat(t.Context(), "whatever")
+	require.ErrorIs(t, err, os.ErrNotExist)
+
 	require.NoError(t, u.Delete(t.Context(), "whatever"))
 	require.NoError(t, u.Close())
 }
@@ -343,6 +346,27 @@ func TestDeleteRemovesTheObjectAndToleratesAMissingOne(t *testing.T) {
 	// Deleting again is fine: the caller's intent is already satisfied.
 	require.NoError(t, u.Delete(t.Context(), key))
 	require.NoError(t, u.Delete(t.Context(), ""))
+}
+
+func TestStatReturnsTheUploadedObjectSizeAndToleratesAMissingOne(t *testing.T) {
+	t.Parallel()
+
+	u, spool, rec := newTestUploader(t)
+
+	uid := uuid.New()
+	spoolCapture(t, spool, uid, "twelve-bytes")
+	u.Finish(t.Context(), uid)
+
+	key := waitForKey(t, rec, uid)
+
+	size, err := u.Stat(t.Context(), key)
+	require.NoError(t, err)
+	assert.EqualValues(t, len("twelve-bytes"), size)
+
+	require.NoError(t, u.Delete(t.Context(), key))
+
+	_, err = u.Stat(t.Context(), key)
+	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
 func TestCloseIsIdempotentAndStopsAcceptingWork(t *testing.T) {

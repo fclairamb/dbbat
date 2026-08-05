@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -23,7 +24,7 @@ func newDumpTestRouter(server *Server) *gin.Engine {
 
 	router := gin.New()
 	router.Use(server.authMiddleware())
-	router.GET("/api/v1/connections/:uid/dump", server.requireAdminOrViewer(), server.handleGetConnectionDump)
+	router.GET("/api/v1/connections/:uid/dump", server.requireAdmin(), server.handleGetConnectionDump)
 	router.DELETE("/api/v1/connections/:uid/dump", server.requireAdmin(), server.handleDeleteConnectionDump)
 
 	return router
@@ -224,4 +225,113 @@ func TestConnectionDumpKeyIsNotAPISurface(t *testing.T) { //nolint:paralleltest 
 	require.Equal(t, http.StatusOK, w.Code, "response body: %s", w.Body.String())
 	require.NotContains(t, w.Body.String(), "dump_key")
 	require.NotContains(t, w.Body.String(), "api-test")
+}
+
+// connectionDumpMetadataBody decodes just the "dump" field of a GET
+// /connections/{uid} response.
+type connectionDumpMetadataBody struct {
+	Dump DumpMetadata `json:"dump"`
+}
+
+// TestGetConnection_DumpMetadata_Disabled verifies the detail response
+// reports available:false when captures are disabled server-wide — the
+// default.
+func TestGetConnection_DumpMetadata_Disabled(t *testing.T) { //nolint:paralleltest // shared database state
+	server, dataStore := setupTestServer(t)
+	suffix := "dumpmetaoff"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.1")
+	require.NoError(t, err)
+
+	router := newConnectionsTestRouter(server)
+	w := doGetConnection(router, token, conn.UID.String())
+	require.Equal(t, http.StatusOK, w.Code, "response body: %s", w.Body.String())
+
+	var body connectionDumpMetadataBody
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.False(t, body.Dump.Available)
+	require.Zero(t, body.Dump.SizeBytes)
+}
+
+// TestGetConnection_DumpMetadata_LocalCapture verifies the detail response
+// reports the real size of a capture still sitting in the local spool.
+func TestGetConnection_DumpMetadata_LocalCapture(t *testing.T) { //nolint:paralleltest // shared database state
+	server, dataStore := setupTestServer(t)
+	suffix := "dumpmetalocal"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.1")
+	require.NoError(t, err)
+
+	spool, _ := enableDumpStorage(t, server, dataStore)
+	body := "twelve-bytes"
+	require.NoError(t, os.WriteFile(filepath.Join(spool, conn.UID.String()+dump.FileExt), []byte(body), 0o600))
+
+	router := newConnectionsTestRouter(server)
+	w := doGetConnection(router, token, conn.UID.String())
+	require.Equal(t, http.StatusOK, w.Code, "response body: %s", w.Body.String())
+
+	var got connectionDumpMetadataBody
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	require.True(t, got.Dump.Available)
+	require.EqualValues(t, len(body), got.Dump.SizeBytes)
+}
+
+// TestGetConnection_DumpMetadata_RemoteCapture verifies the detail response
+// reports available:true with the real size for a capture that only exists
+// in blob storage — the case an os.Stat-only check would miss, and exactly
+// what the shared dumpLocator/dumpMetadata helper exists to fix.
+func TestGetConnection_DumpMetadata_RemoteCapture(t *testing.T) { //nolint:paralleltest // shared database state
+	server, dataStore := setupTestServer(t)
+	suffix := "dumpmetaremote"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.1")
+	require.NoError(t, err)
+
+	spool, uploader := enableDumpStorage(t, server, dataStore)
+	body := "twenty-remote-bytes!"
+	uploadCapture(t, dataStore, uploader, spool, conn.UID, body)
+
+	router := newConnectionsTestRouter(server)
+	w := doGetConnection(router, token, conn.UID.String())
+	require.Equal(t, http.StatusOK, w.Code, "response body: %s", w.Body.String())
+
+	var got connectionDumpMetadataBody
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
+	require.True(t, got.Dump.Available)
+	require.EqualValues(t, len(body), got.Dump.SizeBytes)
+}
+
+// TestGetConnectionDump_ViewerTokenForbidden verifies the download endpoint
+// was narrowed from admin-or-viewer to admin-only: a viewer token, which
+// used to succeed, must now be rejected.
+func TestGetConnectionDump_ViewerTokenForbidden(t *testing.T) { //nolint:paralleltest // shared database state
+	server, dataStore := setupTestServer(t)
+	suffix := "dumpviewer403"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	createTestUser(t, dataStore, "viewer-"+suffix, "viewerpass123", []string{store.RoleViewer})
+	viewerToken := loginUser(t, server, "viewer-"+suffix, "viewerpass123")
+
+	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.1")
+	require.NoError(t, err)
+
+	spool, _ := enableDumpStorage(t, server, dataStore)
+	require.NoError(t, os.WriteFile(filepath.Join(spool, conn.UID.String()+dump.FileExt), []byte("bytes"), 0o600))
+
+	router := newDumpTestRouter(server)
+	w := doDumpRequest(router, http.MethodGet, viewerToken, conn.UID.String())
+	require.Equal(t, http.StatusForbidden, w.Code, "response body: %s", w.Body.String())
 }
