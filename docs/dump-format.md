@@ -23,7 +23,8 @@ any future protocol all produce the same file structure.
 
 `.pcapng`
 
-Captures are named `<connection-uid>.pcapng` inside `DBB_DUMP_DIR`.
+Captures are named `<connection-uid>.pcapng` inside `DBB_DUMP_DIR`, and keep
+that name when uploaded to blob storage (see *Where captures are stored*).
 
 ## Why pcapng and not classic pcap
 
@@ -214,6 +215,47 @@ Writers may enforce a maximum file size (`DBB_DUMP_MAX_SIZE`). When the next
 packet's block would push the file past the limit, the writer silently skips it.
 The limit applies to the whole file, headers included. A size-capped capture is
 still a valid pcapng — it simply stops early.
+
+## Where captures are stored
+
+A capture is always **written to local disk first**, at
+`$DBB_DUMP_DIR/<connection-uid>.pcapng`, and flushed after every packet. That is
+what makes a capture readable even when the process dies mid-session: the file
+on disk is a valid, if truncated, pcapng.
+
+With `DBB_DUMP_UPLOAD_URL` set, the local directory becomes a **spool**. When
+the session closes, the finished file is uploaded to the configured bucket and
+the local copy is removed:
+
+```
+DBB_DUMP_UPLOAD_URL=s3://my-bucket/dbbat-captures
+```
+
+The scheme selects the driver (`gocloud.dev/blob`): `s3://` for S3 and
+S3-compatible stores — credentials come from the standard AWS chain — and
+`file://` for a local directory or a mounted volume. Any path after the bucket
+is used as a key prefix.
+
+Object keys are `<prefix>/YYYY/MM/DD/<instance-id>/<connection-uid>.pcapng`. The
+date segments exist for human browsing only: the key is recorded on the
+`connections` row (`dump_key`), and that is what the API resolves a download
+against — a capture is never located by listing the bucket.
+
+Two consequences worth stating plainly:
+
+- **Nothing is streamed to the bucket while a session is live.** S3 objects
+  cannot be appended to, so a live stream would mean multipart uploads and an
+  invisible, incomplete upload on a crash. The trade is that a capture is lost
+  if the pod dies mid-session — an accepted limitation.
+- **`DBB_DUMP_RETENTION` applies to the local spool only.** dbbat never expires
+  an object it uploaded and never LISTs the bucket looking for one. Remote
+  retention is the bucket's own lifecycle policy, and configuring it is part of
+  deploying with an upload URL.
+
+On startup, before any proxy accepts a connection, dbbat sweeps the spool and
+uploads whatever is left there. Every file present at that moment belongs to a
+previous run and is therefore finished, which is what makes the blind sweep
+safe — and what recovers the captures of a run that crashed.
 
 ## Reading
 

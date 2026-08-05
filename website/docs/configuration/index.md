@@ -148,7 +148,8 @@ rollout-window caveat, not a live bug.
 |----------|-------------|---------|
 | `DBB_DUMP_DIR` | Directory for `.pcapng` session captures. Empty = disabled. | _disabled_ |
 | `DBB_DUMP_MAX_SIZE` | Max dump file size per session, in bytes | `10485760` (10 MB) |
-| `DBB_DUMP_RETENTION` | Auto-delete dumps older than this (Go duration) | `24h` |
+| `DBB_DUMP_RETENTION` | Auto-delete dumps older than this (Go duration). Local captures only. | `24h` |
+| `DBB_DUMP_UPLOAD_URL` | Blob bucket finished captures are uploaded to on session close (`s3://bucket/prefix`, `file://…`). Empty = local disk only. Requires `DBB_DUMP_DIR`. | _disabled_ |
 
 See [Session Packet Dumps](/docs/features/session-dumps) for what gets captured.
 

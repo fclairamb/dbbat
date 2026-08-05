@@ -1991,13 +1991,20 @@ paths:
         `dbbat dump anonymise` command).
 
         Captures are only written when the server is started with a dump
-        directory configured (`DBB_DUMP_DIR`), are capped per session
-        (`DBB_DUMP_MAX_SIZE`) and are reaped once older than
-        `DBB_DUMP_RETENTION` (24h by default). `404 Not Found` is therefore
-        returned in two distinct cases: dumps are disabled server-wide
-        (`dumps are not enabled`), or no capture exists — or no longer
-        exists — for this connection (`no dump available for this
-        connection`).
+        directory configured (`DBB_DUMP_DIR`) and are capped per session
+        (`DBB_DUMP_MAX_SIZE`). `404 Not Found` is therefore returned in two
+        distinct cases: dumps are disabled server-wide (`dumps are not
+        enabled`), or no capture exists — or no longer exists — for this
+        connection (`no dump available for this connection`).
+
+        Where a capture lives depends on the deployment. Without
+        `DBB_DUMP_UPLOAD_URL` it stays on the local disk of the replica that
+        recorded it and is reaped once older than `DBB_DUMP_RETENTION` (24h by
+        default). With an upload URL configured, the finished capture is moved
+        to blob storage (S3 or any gocloud.dev-supported bucket) when the
+        session closes, and this endpoint streams it back from there — so any
+        replica can serve it, and how long it survives is the bucket's own
+        lifecycle policy rather than `DBB_DUMP_RETENTION`.
 
         Requires admin or viewer role.
       operationId: getConnectionDump
@@ -2037,10 +2044,13 @@ paths:
       description: |
         Deletes the pcapng capture recorded for a connection.
 
-        Only the capture file is removed — the connection record and its
-        logged queries are left untouched. The deletion is immediate and
-        cannot be undone. Captures are also removed automatically once they
-        are older than `DBB_DUMP_RETENTION`.
+        Only the capture is removed — the connection record and its logged
+        queries are left untouched. The deletion is immediate and cannot be
+        undone, and it covers the capture wherever it currently lives: the
+        local spool, the configured blob store (`DBB_DUMP_UPLOAD_URL`), or
+        both while an upload is in flight. Local captures are also removed
+        automatically once they are older than `DBB_DUMP_RETENTION`; uploaded
+        ones are only expired by the bucket's lifecycle policy.
 
         As with the download, `404 Not Found` covers both dumps being
         disabled server-wide and no capture being available for this
