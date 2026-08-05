@@ -20,6 +20,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/auth/slack"
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/events"
 	"github.com/fclairamb/dbbat/internal/notify"
 	"github.com/fclairamb/dbbat/internal/store"
@@ -61,6 +62,19 @@ type Server struct {
 	approvalNotifier approvalEscalator
 	// listenCancel stops the cross-replica LISTEN loop on shutdown.
 	listenCancel context.CancelFunc
+
+	// dumpStorage reads back session captures that have been uploaded to blob
+	// storage. nil when DBB_DUMP_UPLOAD_URL is unset, in which case captures
+	// only ever exist in the local spool.
+	dumpStorage *dump.Uploader
+}
+
+// SetDumpStorage installs the blob store holding uploaded session captures, so
+// downloads can fall back to it when the capture is no longer (or never was) in
+// this replica's local spool. Called by the process wiring; nil is fine and
+// means local-only captures.
+func (s *Server) SetDumpStorage(uploader *dump.Uploader) {
+	s.dumpStorage = uploader
 }
 
 // SetEventPlumbing installs the shared broker and approval registry. Called by

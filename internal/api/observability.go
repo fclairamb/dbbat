@@ -3,6 +3,8 @@ package api
 import (
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -285,10 +287,45 @@ func (s *Server) handleGetQueryRows(c *gin.Context) {
 
 const (
 	dumpFileExt         = dump.FileExt
-	dumpFileContentType = "application/x-pcapng"
+	dumpFileContentType = dump.ContentType
 )
 
-// handleGetConnectionDump downloads the raw pcapng session capture for a connection.
+// dumpsEnabled reports whether this process captures sessions at all. The
+// spool directory is the switch even when uploads are configured: captures are
+// always written locally first.
+func (s *Server) dumpsEnabled() bool {
+	return s.config != nil && s.config.Dump.Dir != ""
+}
+
+// localDumpPath is where a capture sits while it is still in the spool.
+func (s *Server) localDumpPath(uid uuid.UUID) string {
+	return filepath.Join(s.config.Dump.Dir, uid.String()+dumpFileExt)
+}
+
+// remoteDumpKey returns the blob key of an uploaded capture, or "" when there
+// is none. A missing connection row is reported as no capture: the caller is
+// asking for a capture, not for the row.
+func (s *Server) remoteDumpKey(c *gin.Context, uid uuid.UUID) string {
+	if s.dumpStorage == nil {
+		return ""
+	}
+
+	conn, err := s.store.GetConnectionByUID(c.Request.Context(), uid)
+	if err != nil {
+		return ""
+	}
+
+	return conn.DumpKey
+}
+
+// handleGetConnectionDump downloads the raw pcapng session capture for a
+// connection.
+//
+// Local spool first, uploaded object second. That order matches the lifecycle:
+// a capture lives in the spool until it is uploaded, and the key is only
+// recorded once the object is in place, so at most one of the two is ever
+// authoritative — and the local copy avoids a network round trip for the
+// sessions this replica served itself.
 func (s *Server) handleGetConnectionDump(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
@@ -296,28 +333,54 @@ func (s *Server) handleGetConnectionDump(c *gin.Context) {
 		return
 	}
 
-	dumpDir := ""
-	if s.config != nil {
-		dumpDir = s.config.Dump.Dir
-	}
-
-	if dumpDir == "" {
+	if !s.dumpsEnabled() {
 		writeError(c, http.StatusNotFound, ErrCodeNotFound, "dumps are not enabled")
 		return
 	}
 
-	dumpPath := filepath.Join(dumpDir, uid.String()+dumpFileExt)
-	if _, err := os.Stat(dumpPath); os.IsNotExist(err) {
+	dumpPath := s.localDumpPath(uid)
+	if _, err := os.Stat(dumpPath); err == nil {
+		c.Header("Content-Type", dumpFileContentType)
+		c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, uid, dumpFileExt))
+		c.File(dumpPath)
+
+		return
+	}
+
+	key := s.remoteDumpKey(c, uid)
+	if key == "" {
 		writeError(c, http.StatusNotFound, ErrCodeNotFound, "no dump available for this connection")
 		return
 	}
 
+	body, err := s.dumpStorage.Open(c.Request.Context(), key)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeError(c, http.StatusNotFound, ErrCodeNotFound, "no dump available for this connection")
+			return
+		}
+
+		writeInternalError(c, s.logger, err, "failed to read dump")
+
+		return
+	}
+
+	defer func() { _ = body.Close() }()
+
 	c.Header("Content-Type", dumpFileContentType)
 	c.Header("Content-Disposition", fmt.Sprintf(`attachment; filename="%s%s"`, uid, dumpFileExt))
-	c.File(dumpPath)
+	c.Status(http.StatusOK)
+
+	if _, err := io.Copy(c.Writer, body); err != nil {
+		// Headers are already on the wire; all that is left is to say so.
+		s.logger.ErrorContext(c.Request.Context(), "failed to stream dump",
+			slog.String("connection_uid", uid.String()), slog.Any("error", err))
+	}
 }
 
-// handleDeleteConnectionDump deletes the dump file for a connection.
+// handleDeleteConnectionDump deletes the capture of a connection, wherever it
+// currently lives — the local spool, blob storage, or both while an upload is
+// in flight.
 func (s *Server) handleDeleteConnectionDump(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
@@ -325,25 +388,38 @@ func (s *Server) handleDeleteConnectionDump(c *gin.Context) {
 		return
 	}
 
-	dumpDir := ""
-	if s.config != nil {
-		dumpDir = s.config.Dump.Dir
-	}
-
-	if dumpDir == "" {
+	if !s.dumpsEnabled() {
 		writeError(c, http.StatusNotFound, ErrCodeNotFound, "dumps are not enabled")
 		return
 	}
 
-	dumpPath := filepath.Join(dumpDir, uid.String()+dumpFileExt)
-	if _, err := os.Stat(dumpPath); os.IsNotExist(err) {
+	dumpPath := s.localDumpPath(uid)
+	_, statErr := os.Stat(dumpPath)
+	hadLocal := statErr == nil
+	key := s.remoteDumpKey(c, uid)
+
+	if !hadLocal && key == "" {
 		writeError(c, http.StatusNotFound, ErrCodeNotFound, "no dump available for this connection")
 		return
 	}
 
-	if err := os.Remove(dumpPath); err != nil {
-		writeInternalError(c, s.logger, err, "failed to delete dump")
-		return
+	if hadLocal {
+		if err := os.Remove(dumpPath); err != nil && !os.IsNotExist(err) {
+			writeInternalError(c, s.logger, err, "failed to delete dump")
+			return
+		}
+	}
+
+	if key != "" {
+		if err := s.dumpStorage.Delete(c.Request.Context(), key); err != nil {
+			writeInternalError(c, s.logger, err, "failed to delete dump")
+			return
+		}
+
+		if err := s.store.ClearConnectionDumpKey(c.Request.Context(), uid); err != nil {
+			writeInternalError(c, s.logger, err, "failed to delete dump")
+			return
+		}
 	}
 
 	c.Status(http.StatusNoContent)
