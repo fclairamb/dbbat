@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.22.0](https://github.com/fclairamb/dbbat/compare/v0.21.0...v0.22.0) (2026-08-05)
+
+
+### Features
+
+* **api:** address grant definitions by slug, and de-flake the protocol integration suites ([#291](https://github.com/fclairamb/dbbat/issues/291)) ([1632627](https://github.com/fclairamb/dbbat/commit/16326275fde1f75c1ac3f561f21e6e7c5f6097e7))
+
+
+### Bug Fixes
+
+* **oracle:** stop the legacy TTC Response decoder inventing errors from row data ([#292](https://github.com/fclairamb/dbbat/issues/292)) ([2905143](https://github.com/fclairamb/dbbat/commit/290514319ad6168080af017581dd79cc5e8ef472))
+* **proxy:** never let a connectivity probe panic take down the proxy ([#296](https://github.com/fclairamb/dbbat/issues/296)) ([aee9032](https://github.com/fclairamb/dbbat/commit/aee90326eb440d2c79bca2fd70f8987c5860e18b))
+
 ## [0.21.0](https://github.com/fclairamb/dbbat/compare/v0.20.0...v0.21.0) (2026-08-05)
 
 
