@@ -379,6 +379,38 @@ func (f *fixture) replaceGrant(ctx context.Context, controls []string) {
 
 // ---------- Tests ----------
 
+// TestIntegration_ConnectionStampedWithAuthGrant verifies the connection row
+// a real handshake creates carries the grant that authenticated it
+// (connections.grant_uid) — the auth-time GetActiveGrant pick, not derived or
+// backfilled later. This is the store/proxy wiring at the heart of spec
+// 2026-08-06-03: the store-level unit tests cover WithGrantUID's mechanics,
+// but only a real handshake proves session.authenticate() actually passes
+// s.grant.UID through to CreateConnection.
+func TestIntegration_ConnectionStampedWithAuthGrant(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	dbUID, err := uuid.Parse(f.dbUID)
+	require.NoError(t, err)
+
+	activeGrant, err := f.store.GetActiveGrant(ctx, f.user.UID, dbUID)
+	require.NoError(t, err)
+
+	conn := f.mustConnect(ctx, fixturePass)
+
+	var got int
+	require.NoError(t, conn.QueryRow(ctx, "SELECT 1").Scan(&got))
+	assert.Equal(t, 1, got)
+
+	connections, err := f.store.ListConnections(ctx, store.ConnectionFilter{UserID: &f.user.UID})
+	require.NoError(t, err)
+	require.NotEmpty(t, connections, "the handshake above must have created a connection row")
+
+	row := connections[0]
+	require.NotNil(t, row.GrantUID, "connection row was not stamped with the grant it authenticated under")
+	assert.Equal(t, activeGrant.UID, *row.GrantUID)
+}
+
 // TestIntegration_ProxyAuth_Password connects through the proxy with a dbbat
 // password over proxy-terminated TLS and runs a trivial query.
 func TestIntegration_ProxyAuth_Password(t *testing.T) {
