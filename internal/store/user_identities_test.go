@@ -222,26 +222,40 @@ func TestListAdminSlackUserIDs(t *testing.T) {
 	})
 }
 
-func TestDeleteUserIdentity(t *testing.T) { //nolint:tparallel // re-creation depends on the earlier soft delete
+func TestDeleteUserIdentity(t *testing.T) {
 	t.Parallel()
 
 	store := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
-	suffix := uuid.NewString()[:8]
 
-	user, err := store.CreateUser(ctx, "delete-identity-user-"+suffix, "hash", []string{RoleViewer})
-	require.NoError(t, err)
+	// One user and one identity per subtest: deleting is a write, and the
+	// re-creation case has to soft-delete the very row it then re-creates rather
+	// than inherit a sibling's delete.
+	linkedIdentity := func(t *testing.T, label string) (*User, *UserIdentity, string) {
+		t.Helper()
 
-	providerID := "UDELETE-" + suffix
+		suffix := label + "-" + uuid.NewString()[:8]
 
-	identity, err := store.CreateUserIdentity(ctx, &UserIdentity{
-		UserID:     user.UID,
-		Provider:   IdentityTypeSlack,
-		ProviderID: providerID,
-	})
-	require.NoError(t, err)
+		user, err := store.CreateUser(ctx, "delete-identity-user-"+suffix, "hash", []string{RoleViewer})
+		require.NoError(t, err)
 
-	t.Run("delete existing identity", func(t *testing.T) { //nolint:paralleltest // re-creation depends on the earlier soft delete
+		providerID := "UDELETE-" + suffix
+
+		identity, err := store.CreateUserIdentity(ctx, &UserIdentity{
+			UserID:     user.UID,
+			Provider:   IdentityTypeSlack,
+			ProviderID: providerID,
+		})
+		require.NoError(t, err)
+
+		return user, identity, providerID
+	}
+
+	t.Run("delete existing identity", func(t *testing.T) {
+		t.Parallel()
+
+		_, identity, _ := linkedIdentity(t, "existing")
+
 		err := store.DeleteUserIdentity(ctx, identity.UID)
 		require.NoError(t, err)
 
@@ -250,12 +264,20 @@ func TestDeleteUserIdentity(t *testing.T) { //nolint:tparallel // re-creation de
 		assert.ErrorIs(t, err, ErrIdentityNotFound)
 	})
 
-	t.Run("delete non-existing identity", func(t *testing.T) { //nolint:paralleltest // re-creation depends on the earlier soft delete
+	t.Run("delete non-existing identity", func(t *testing.T) {
+		t.Parallel()
+
 		err := store.DeleteUserIdentity(ctx, uuid.New())
 		assert.ErrorIs(t, err, ErrIdentityNotFound)
 	})
 
-	t.Run("soft delete allows re-creation with same provider_id", func(t *testing.T) { //nolint:paralleltest // re-creation depends on the earlier soft delete
+	t.Run("soft delete allows re-creation with same provider_id", func(t *testing.T) {
+		t.Parallel()
+
+		user, identity, providerID := linkedIdentity(t, "recreate")
+
+		require.NoError(t, store.DeleteUserIdentity(ctx, identity.UID))
+
 		// After soft-deleting, the partial unique index should allow a new row
 		newIdentity, err := store.CreateUserIdentity(ctx, &UserIdentity{
 			UserID:     user.UID,

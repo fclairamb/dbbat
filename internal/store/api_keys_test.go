@@ -317,39 +317,51 @@ func TestVerifyAPIKey(t *testing.T) {
 	})
 }
 
-func TestListAPIKeys(t *testing.T) { //nolint:tparallel // subtests revoke a key the siblings count
-	t.Parallel()
+// setupAPIKeyListFixture hands the caller its own store holding two users: the
+// first with two keys, the second with one.
+//
+// Every list assertion below is a count over the whole api_keys table, or over
+// one user's slice of it, and two of them revoke a key on the way — so each
+// subtest gets a fixture of its own rather than counting rows a sibling is
+// still revoking.
+func setupAPIKeyListFixture(t *testing.T, ctx context.Context) (*Store, *User) {
+	t.Helper()
 
 	store := setupTestStore(t)
-	ctx := context.Background()
 
-	// Create test users
 	user1, err := store.CreateUser(ctx, "listuser1", "hash", []string{RoleConnector})
 	if err != nil {
 		t.Fatalf("CreateUser() error = %v", err)
 	}
+
 	user2, err := store.CreateUser(ctx, "listuser2", "hash", []string{RoleConnector})
 	if err != nil {
 		t.Fatalf("CreateUser() error = %v", err)
 	}
 
-	// Create keys for user1
-	_, _, err = store.CreateAPIKey(ctx, user1.UID, "Key 1", nil)
-	if err != nil {
-		t.Fatalf("CreateAPIKey() error = %v", err)
+	for _, name := range []string{"Key 1", "Key 2"} {
+		if _, _, err := store.CreateAPIKey(ctx, user1.UID, name, nil); err != nil {
+			t.Fatalf("CreateAPIKey() error = %v", err)
+		}
 	}
-	_, _, err = store.CreateAPIKey(ctx, user1.UID, "Key 2", nil)
-	if err != nil {
+
+	if _, _, err := store.CreateAPIKey(ctx, user2.UID, "Key 3", nil); err != nil {
 		t.Fatalf("CreateAPIKey() error = %v", err)
 	}
 
-	// Create key for user2
-	_, _, err = store.CreateAPIKey(ctx, user2.UID, "Key 3", nil)
-	if err != nil {
-		t.Fatalf("CreateAPIKey() error = %v", err)
-	}
+	return store, user1
+}
 
-	t.Run("list all keys", func(t *testing.T) { //nolint:paralleltest // subtests revoke a key the siblings count
+func TestListAPIKeys(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	t.Run("list all keys", func(t *testing.T) {
+		t.Parallel()
+
+		store, _ := setupAPIKeyListFixture(t, ctx)
+
 		keys, err := store.ListAPIKeys(ctx, APIKeyFilter{})
 		if err != nil {
 			t.Fatalf("ListAPIKeys() error = %v", err)
@@ -359,7 +371,11 @@ func TestListAPIKeys(t *testing.T) { //nolint:tparallel // subtests revoke a key
 		}
 	})
 
-	t.Run("list keys by user", func(t *testing.T) { //nolint:paralleltest // subtests revoke a key the siblings count
+	t.Run("list keys by user", func(t *testing.T) {
+		t.Parallel()
+
+		store, user1 := setupAPIKeyListFixture(t, ctx)
+
 		keys, err := store.ListAPIKeys(ctx, APIKeyFilter{UserID: &user1.UID})
 		if err != nil {
 			t.Fatalf("ListAPIKeys() error = %v", err)
@@ -374,7 +390,11 @@ func TestListAPIKeys(t *testing.T) { //nolint:tparallel // subtests revoke a key
 		}
 	})
 
-	t.Run("list excludes revoked keys by default", func(t *testing.T) { //nolint:paralleltest // subtests revoke a key the siblings count
+	t.Run("list excludes revoked keys by default", func(t *testing.T) {
+		t.Parallel()
+
+		store, user1 := setupAPIKeyListFixture(t, ctx)
+
 		// Revoke one of user1's keys
 		keys, err := store.ListAPIKeys(ctx, APIKeyFilter{UserID: &user1.UID})
 		if err != nil {
@@ -396,13 +416,38 @@ func TestListAPIKeys(t *testing.T) { //nolint:tparallel // subtests revoke a key
 		}
 	})
 
-	t.Run("list includes revoked keys when IncludeAll is true", func(t *testing.T) { //nolint:paralleltest // subtests revoke a key the siblings count
-		keys, err := store.ListAPIKeys(ctx, APIKeyFilter{UserID: &user1.UID, IncludeAll: true})
+	t.Run("list includes revoked keys when IncludeAll is true", func(t *testing.T) {
+		t.Parallel()
+
+		store, user1 := setupAPIKeyListFixture(t, ctx)
+
+		// Revoking here rather than leaning on a sibling's revoke is what makes
+		// the count below say something: one revoked key and one active one.
+		keys, err := store.ListAPIKeys(ctx, APIKeyFilter{UserID: &user1.UID})
+		if err != nil {
+			t.Fatalf("ListAPIKeys() error = %v", err)
+		}
+
+		if err := store.RevokeAPIKey(ctx, keys[0].ID, user1.UID); err != nil {
+			t.Fatalf("RevokeAPIKey() error = %v", err)
+		}
+
+		keys, err = store.ListAPIKeys(ctx, APIKeyFilter{UserID: &user1.UID, IncludeAll: true})
 		if err != nil {
 			t.Fatalf("ListAPIKeys() error = %v", err)
 		}
 		if len(keys) != 2 {
 			t.Errorf("ListAPIKeys() len = %d, want 2", len(keys))
+		}
+
+		revoked := 0
+		for _, key := range keys {
+			if key.RevokedAt != nil {
+				revoked++
+			}
+		}
+		if revoked != 1 {
+			t.Errorf("revoked keys in IncludeAll listing = %d, want 1", revoked)
 		}
 	})
 }

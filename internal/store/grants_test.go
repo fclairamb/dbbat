@@ -345,31 +345,47 @@ func TestListGrants(t *testing.T) {
 	})
 }
 
-func TestRevokeGrant(t *testing.T) { //nolint:tparallel // the second revoke depends on the first
+func TestRevokeGrant(t *testing.T) {
 	t.Parallel()
 
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	user, database := createTestUserAndDatabase(t, ctx, store, "revoke")
-	admin, _ := store.CreateUser(ctx, "revokeadmin", "hash", []string{RoleAdmin, RoleConnector})
+	// One grant per subtest, on a user/database pair of its own: revoking is a
+	// write, and "revoke already revoked" needs a grant it revoked itself rather
+	// than one a sibling happened to leave behind.
+	activeGrant := func(t *testing.T, suffix string) (*Grant, *User, *Server, uuid.UUID) {
+		t.Helper()
 
-	now := time.Now()
-	grant := &Grant{
-		UserID:     user.UID,
-		DatabaseID: database.UID,
-		Controls:   []string{ControlReadOnly},
-		GrantedBy:  admin.UID,
-		StartsAt:   now.Add(-time.Hour),
-		ExpiresAt:  now.Add(time.Hour),
-	}
-	created, err := store.CreateGrant(ctx, grant)
-	if err != nil {
-		t.Fatalf("CreateGrant() error = %v", err)
+		user, database := createTestUserAndDatabase(t, ctx, store, "revoke-"+suffix)
+
+		admin, err := store.CreateUser(ctx, "revokeadmin-"+suffix, "hash", []string{RoleAdmin, RoleConnector})
+		if err != nil {
+			t.Fatalf("CreateUser() error = %v", err)
+		}
+
+		now := time.Now()
+		created, err := store.CreateGrant(ctx, &Grant{
+			UserID:     user.UID,
+			DatabaseID: database.UID,
+			Controls:   []string{ControlReadOnly},
+			GrantedBy:  admin.UID,
+			StartsAt:   now.Add(-time.Hour),
+			ExpiresAt:  now.Add(time.Hour),
+		})
+		if err != nil {
+			t.Fatalf("CreateGrant() error = %v", err)
+		}
+
+		return created, user, database, admin.UID
 	}
 
-	t.Run("revoke active grant", func(t *testing.T) { //nolint:paralleltest // the second revoke depends on the first
-		err := store.RevokeGrant(ctx, created.UID, admin.UID)
+	t.Run("revoke active grant", func(t *testing.T) {
+		t.Parallel()
+
+		created, user, database, admin := activeGrant(t, "active")
+
+		err := store.RevokeGrant(ctx, created.UID, admin)
 		if err != nil {
 			t.Fatalf("RevokeGrant() error = %v", err)
 		}
@@ -382,8 +398,8 @@ func TestRevokeGrant(t *testing.T) { //nolint:tparallel // the second revoke dep
 		if found.RevokedAt == nil {
 			t.Error("grant.RevokedAt should not be nil after revoke")
 		}
-		if found.RevokedBy == nil || *found.RevokedBy != admin.UID {
-			t.Errorf("grant.RevokedBy = %v, want %s", found.RevokedBy, admin.UID)
+		if found.RevokedBy == nil || *found.RevokedBy != admin {
+			t.Errorf("grant.RevokedBy = %v, want %s", found.RevokedBy, admin)
 		}
 
 		// Should no longer appear as active
@@ -393,15 +409,27 @@ func TestRevokeGrant(t *testing.T) { //nolint:tparallel // the second revoke dep
 		}
 	})
 
-	t.Run("revoke already revoked grant", func(t *testing.T) { //nolint:paralleltest // the second revoke depends on the first
-		err := store.RevokeGrant(ctx, created.UID, admin.UID)
+	t.Run("revoke already revoked grant", func(t *testing.T) {
+		t.Parallel()
+
+		created, _, _, admin := activeGrant(t, "twice")
+
+		if err := store.RevokeGrant(ctx, created.UID, admin); err != nil {
+			t.Fatalf("RevokeGrant() error = %v", err)
+		}
+
+		err := store.RevokeGrant(ctx, created.UID, admin)
 		if !errors.Is(err, ErrGrantAlreadyRevoked) {
 			t.Errorf("RevokeGrant() error = %v, want %v", err, ErrGrantAlreadyRevoked)
 		}
 	})
 
-	t.Run("revoke non-existing grant", func(t *testing.T) { //nolint:paralleltest // the second revoke depends on the first
-		err := store.RevokeGrant(ctx, uuid.New(), admin.UID)
+	t.Run("revoke non-existing grant", func(t *testing.T) {
+		t.Parallel()
+
+		_, _, _, admin := activeGrant(t, "missing")
+
+		err := store.RevokeGrant(ctx, uuid.New(), admin)
 		if !errors.Is(err, ErrGrantAlreadyRevoked) {
 			t.Errorf("RevokeGrant() error = %v, want %v", err, ErrGrantAlreadyRevoked)
 		}
