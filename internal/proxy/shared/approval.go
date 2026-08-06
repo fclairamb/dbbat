@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -125,6 +126,45 @@ type ApprovalGate struct {
 	userUID       uuid.UUID
 	username      string
 	databaseName  string
+
+	// resolved remembers the outcome of the last hold this session parked, so
+	// the statement's *completion* event can carry it — see ResolutionFor.
+	// Written by the session goroutine, read by the goroutine that persists and
+	// publishes the executed query, hence the atomic.
+	resolved atomic.Pointer[ApprovalResolution]
+}
+
+// ApprovalResolution is the terminal outcome of a hold, kept on the gate for
+// exactly as long as it takes the released statement to finish and publish.
+type ApprovalResolution struct {
+	QueryUID uuid.UUID
+	Status   string
+	ByUID    *uuid.UUID
+	ByName   string
+	Reason   string
+	At       time.Time
+}
+
+// ResolutionFor reports the outcome of a hold this session parked, but only
+// for the statement it last resolved.
+//
+// A session parks at most one statement at a time — the session goroutine is
+// blocked for the whole hold — so remembering just the most recent resolution
+// covers the completion event that immediately follows it, without the gate
+// accumulating per-query state for the lifetime of a long-lived session. A
+// miss simply means the completion event carries no approval fields, which is
+// what it did before.
+func (g *ApprovalGate) ResolutionFor(queryUID uuid.UUID) *ApprovalResolution {
+	if g == nil || queryUID == uuid.Nil {
+		return nil
+	}
+
+	r := g.resolved.Load()
+	if r == nil || r.QueryUID != queryUID {
+		return nil
+	}
+
+	return r
 }
 
 // NewApprovalGate compiles the grant's approval patterns. A gate is returned
@@ -432,6 +472,18 @@ func (g *ApprovalGate) publishPending(ctx context.Context, pending *store.Query,
 // resolved it — every watcher should see who unblocked a query, not merely
 // that it unblocked.
 func (g *ApprovalGate) announceResolved(ctx context.Context, queryUID uuid.UUID, status string, d approval.Decision) {
+	// Remember the outcome before announcing it: an approved statement is
+	// forwarded the moment Hold returns, and its completion event has to be
+	// able to say it was approved and by whom.
+	g.resolved.Store(&ApprovalResolution{
+		QueryUID: queryUID,
+		Status:   status,
+		ByUID:    d.By,
+		ByName:   d.ByName,
+		Reason:   d.Reason,
+		At:       d.At,
+	})
+
 	data := map[string]any{
 		"query_uid":         queryUID.String(),
 		"connection_uid":    g.connectionUID.String(),
@@ -441,12 +493,7 @@ func (g *ApprovalGate) announceResolved(ctx context.Context, queryUID uuid.UUID,
 		"resolved_at":       d.At,
 	}
 
-	if d.By != nil || d.ByName != "" {
-		resolver := map[string]any{"display_name": d.ByName, "username": d.ByName}
-		if d.By != nil {
-			resolver["uid"] = d.By.String()
-		}
-
+	if resolver := resolverData(d.By, d.ByName); resolver != nil {
 		data["resolved_by"] = resolver
 	}
 
@@ -458,6 +505,23 @@ func (g *ApprovalGate) announceResolved(ctx context.Context, queryUID uuid.UUID,
 	}
 
 	g.notifyReplicas(ctx, store.NotifyChannelApprovals, events.EventApprovalResolved, queryUID)
+}
+
+// resolverData renders the human who resolved a hold for the stream payload,
+// or nil when nobody did (an abandoned hold has no approver). Shared by the
+// resolution event and the released statement's completion event so the two
+// cannot describe the same person differently.
+func resolverData(byUID *uuid.UUID, byName string) map[string]any {
+	if byUID == nil && byName == "" {
+		return nil
+	}
+
+	resolver := map[string]any{"display_name": byName, "username": byName}
+	if byUID != nil {
+		resolver["uid"] = byUID.String()
+	}
+
+	return resolver
 }
 
 // notifyReplicas is best-effort: a failed NOTIFY degrades the stream on other

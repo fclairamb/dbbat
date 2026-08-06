@@ -322,7 +322,8 @@ func (s *Session) proxyMessages() error {
 	s.approvalGate = shared.NewApprovalGate(
 		s.approvalDeps, s.grant, s.connectionUID, s.user, s.database.Name,
 	)
-	s.stream = shared.NewStreamPublisher(s.approvalDeps, s.connectionUID, s.user, s.database.Name)
+	s.stream = shared.NewStreamPublisher(s.approvalDeps, s.connectionUID, s.user, s.database.Name).
+		WithApprovals(s.approvalGate)
 	s.stream.Connection(s.ctx, shared.ConnectionOpened)
 
 	watchCtx, cancelWatch := context.WithCancel(s.ctx)
