@@ -21,7 +21,7 @@ A definition describes a *shape* of grant — controls, quotas, duration — wit
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/grant-definitions \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "read-only-1h",
@@ -50,7 +50,7 @@ Any authenticated user can submit a request:
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/grant-requests \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "grant_definition_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -81,7 +81,7 @@ Some access is routine enough that admin review is theatre — read-only access 
 
 ```bash
 curl -X PUT http://localhost:4200/api/v1/grant-definitions/$DEF_UID \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"auto_approve": true}'
 ```

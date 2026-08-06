@@ -58,6 +58,30 @@ curl -H "Authorization: Bearer <token>" http://localhost:4200/api/v1/users
 API keys cannot create or revoke other API keys (security restriction) - these operations require Basic Auth or a web session token.
 :::
 
+## Environment Variables for Clients
+
+Scripts, CI jobs, and SQL clients talking to dbbat should standardize on three env vars instead of inventing their own:
+
+| Variable | Meaning | Needed for |
+|----------|---------|-----------|
+| `DBBAT_API_KEY` | The `dbb_…` API key | REST calls (Bearer token) and SQL connections (as the password) |
+| `DBBAT_USER` | The dbbat username the key belongs to | SQL connections through the proxy (the key is only valid for its owner) |
+| `DBBAT_URL` | API/UI base URL, e.g. `https://dbbat.example.com` | REST calls and deep links |
+
+The API Keys page in the web UI shows a ready-to-copy `export` snippet for all three when you create a new key.
+
+```bash
+export DBBAT_URL=https://dbbat.example.com
+export DBBAT_USER=jane.doe
+export DBBAT_API_KEY=dbb_...
+
+# REST call
+curl -H "Authorization: Bearer $DBBAT_API_KEY" "$DBBAT_URL/api/v1/users"
+
+# SQL connection through the proxy (PostgreSQL example — the API key is the password)
+psql "host=proxy.example.com port=5433 user=$DBBAT_USER password=$DBBAT_API_KEY dbname=mydb"
+```
+
 ## Roles
 
 Users have one or more roles that determine their access:

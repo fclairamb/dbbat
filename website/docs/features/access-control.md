@@ -10,7 +10,7 @@ DBBat provides fine-grained access control through **grants**. A grant gives a u
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/grants \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "user_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -155,7 +155,7 @@ Manually revoke a grant before expiration:
 
 ```bash
 curl -X DELETE http://localhost:4200/api/v1/grants/$GRANT_UID \
-  -H "Authorization: Bearer $TOKEN"
+  -H "Authorization: Bearer $DBBAT_API_KEY"
 ```
 
 The grant record is preserved for audit (with `revoked_at` and `revoked_by` populated).
@@ -167,16 +167,16 @@ Revocation takes effect immediately across all proxied protocols: further querie
 List all grants:
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://localhost:4200/api/v1/grants
+curl -H "Authorization: Bearer $DBBAT_API_KEY" http://localhost:4200/api/v1/grants
 ```
 
 Filter by user, database, or active state:
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" \
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
   "http://localhost:4200/api/v1/grants?user_id=$USER_UID&active_only=true"
 
-curl -H "Authorization: Bearer $TOKEN" \
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
   "http://localhost:4200/api/v1/grants?database_id=$DB_UID"
 ```
 
@@ -191,5 +191,5 @@ All grant operations are logged in the audit log:
 View the audit log:
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://localhost:4200/api/v1/audit
+curl -H "Authorization: Bearer $DBBAT_API_KEY" http://localhost:4200/api/v1/audit
 ```

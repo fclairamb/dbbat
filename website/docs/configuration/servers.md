@@ -16,7 +16,7 @@ The endpoint is `/api/v1/servers` since v0.17.0 — it was `/api/v1/databases` b
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/servers \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "production",
@@ -35,7 +35,7 @@ curl -X POST http://localhost:4200/api/v1/servers \
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/servers \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "orcl",
@@ -57,7 +57,7 @@ curl -X POST http://localhost:4200/api/v1/servers \
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/servers \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "shop",
@@ -78,7 +78,7 @@ For MariaDB, set `"protocol": "mariadb"`. Both share the same listener and proxy
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/servers \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "catalog",
@@ -130,7 +130,7 @@ A server can be reached through an SSH bastion instead of being dialled directly
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/ssh-servers \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "bastion-prod",
@@ -146,7 +146,7 @@ curl -X POST http://localhost:4200/api/v1/ssh-servers \
 Listing bastions returns a `{"servers": [...]}` envelope:
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://localhost:4200/api/v1/ssh-servers
+curl -H "Authorization: Bearer $DBBAT_API_KEY" http://localhost:4200/api/v1/ssh-servers
 ```
 
 ### Pointing a server at a bastion
@@ -155,7 +155,7 @@ Set `via_uid` to the bastion's UID:
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/servers \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "private-pg",
@@ -204,7 +204,7 @@ Client-side TLS for the proxy listeners is configured separately (e.g. `DBB_MYSQ
 ## Listing Servers
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://localhost:4200/api/v1/servers
+curl -H "Authorization: Bearer $DBBAT_API_KEY" http://localhost:4200/api/v1/servers
 ```
 
 Response visibility depends on the caller's role:
@@ -221,7 +221,7 @@ Passwords and SSH private keys are **never** returned in any response. SSH basti
 
 ```bash
 curl -X PUT http://localhost:4200/api/v1/servers/$DB_UID \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "description": "Updated description",
@@ -235,7 +235,7 @@ Provide only the fields you want to update. Changing `password` re-encrypts the 
 
 ```bash
 curl -X DELETE http://localhost:4200/api/v1/servers/$DB_UID \
-  -H "Authorization: Bearer $TOKEN"
+  -H "Authorization: Bearer $DBBAT_API_KEY"
 ```
 
 Deleting a server configuration:

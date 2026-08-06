@@ -28,7 +28,7 @@ Create a new user via the REST API. **Admin role required.**
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/users \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "username": "developer",
@@ -52,7 +52,7 @@ The user's initial password must be **changed before first login** — see "Init
 ## Listing Users
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://localhost:4200/api/v1/users
+curl -H "Authorization: Bearer $DBBAT_API_KEY" http://localhost:4200/api/v1/users
 ```
 
 Admins see all users; non-admins see only themselves.
@@ -76,7 +76,7 @@ Admins see all users; non-admins see only themselves.
 
 ```bash
 curl -X PUT http://localhost:4200/api/v1/users/$USER_UID \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{ "roles": ["admin", "connector"] }'
 ```
@@ -87,7 +87,7 @@ curl -X PUT http://localhost:4200/api/v1/users/$USER_UID \
 
 ## Changing Passwords
 
-Authenticated password change (the user re-supplies their current credentials in the body):
+Authenticated password change (the user re-supplies their current credentials in the body). Requires Basic Auth or a web session — an API key cannot change a password:
 
 ```bash
 curl -X PUT http://localhost:4200/api/v1/users/$USER_UID/password \
@@ -119,6 +119,7 @@ curl -X PUT http://localhost:4200/api/v1/auth/password \
 For programmatic access, create a long-lived API key (`dbb_…`) instead of using a username/password.
 
 ```bash
+# Requires a web session or Basic Auth — an API key cannot create another one.
 curl -X POST http://localhost:4200/api/v1/keys \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
@@ -130,13 +131,13 @@ The full key is **only returned once**. Store it securely.
 ### Listing keys
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://localhost:4200/api/v1/keys
+curl -H "Authorization: Bearer $DBBAT_API_KEY" http://localhost:4200/api/v1/keys
 ```
 
 The list is **scoped to the caller's own keys by default — for everyone, including admins**. An admin who wants to see every user's keys must ask for it explicitly:
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" \
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
   "http://localhost:4200/api/v1/keys?all_users=true"
 ```
 
@@ -166,7 +167,7 @@ When configured, users can sign in with their Slack workspace account. New users
 
 ```bash
 curl -X DELETE http://localhost:4200/api/v1/users/$USER_UID \
-  -H "Authorization: Bearer $TOKEN"
+  -H "Authorization: Bearer $DBBAT_API_KEY"
 ```
 
 Deleting a user:

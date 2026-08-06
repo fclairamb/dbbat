@@ -363,11 +363,11 @@ values are exposed by `GET /api/v1/instance`.
 
 ```bash
 # Read the current parameters
-curl -H "Authorization: Bearer $TOKEN" http://localhost:4200/api/v1/parameters
+curl -H "Authorization: Bearer $DBBAT_API_KEY" http://localhost:4200/api/v1/parameters
 
 # Set the public web UI URL
 curl -X PUT http://localhost:4200/api/v1/parameters \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"public.web_ui_url": "https://dbbat.example.com"}'
 ```

@@ -33,7 +33,7 @@ For each query, DBBat records:
 List recent queries:
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" \
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
   "http://localhost:4200/api/v1/queries"
 ```
 
@@ -43,19 +43,19 @@ The global list resolves and returns **user**, **server** and **connection** col
 
 ```bash
 # By user
-curl -H "Authorization: Bearer $TOKEN" \
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
   "http://localhost:4200/api/v1/queries?user_id=$USER_UID"
 
 # By server
-curl -H "Authorization: Bearer $TOKEN" \
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
   "http://localhost:4200/api/v1/queries?database_id=$SERVER_UID"
 
 # By time range (RFC 3339)
-curl -H "Authorization: Bearer $TOKEN" \
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
   "http://localhost:4200/api/v1/queries?start_time=2024-01-15T00:00:00Z&end_time=2024-01-16T00:00:00Z"
 
 # By connection
-curl -H "Authorization: Bearer $TOKEN" \
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
   "http://localhost:4200/api/v1/queries?connection_id=$CONN_UID"
 ```
 
@@ -64,7 +64,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 Get a single query (without rows):
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" \
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
   http://localhost:4200/api/v1/queries/$QUERY_UID
 ```
 
@@ -94,7 +94,7 @@ Every query names its owning connection through `connection_id`. In the web UI t
 Result rows are stored separately and fetched on demand with cursor-based pagination — capped at 1000 rows or 1 MB per response, whichever comes first.
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" \
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
   "http://localhost:4200/api/v1/queries/$QUERY_UID/rows?limit=100"
 ```
 
@@ -185,14 +185,14 @@ which have their own `DBB_DUMP_RETENTION` (default `24h`).
 Queries are linked to connections. View connection details:
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" \
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
   http://localhost:4200/api/v1/connections
 ```
 
 A single connection can also be fetched directly:
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" \
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
   http://localhost:4200/api/v1/connections/$CONN_UID
 ```
 

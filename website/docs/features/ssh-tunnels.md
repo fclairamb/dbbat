@@ -18,7 +18,7 @@ Bastions are stored as servers with protocol `ssh`, managed through their own en
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/ssh-servers \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "prod-bastion",
@@ -43,7 +43,7 @@ Creating a bastion whose name is already taken returns `409 DUPLICATE_NAME`.
 List registered bastions with:
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://localhost:4200/api/v1/ssh-servers
+curl -H "Authorization: Bearer $DBBAT_API_KEY" http://localhost:4200/api/v1/ssh-servers
 ```
 
 ## Routing a Server Through It
@@ -52,7 +52,7 @@ Set `via_uid` on a database server to the bastion's UID:
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/servers \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "prod-behind-bastion",
@@ -72,7 +72,7 @@ A `via_uid` of `null` means a direct dial. To remove a tunnel from an existing s
 
 ```bash
 curl -X PUT http://localhost:4200/api/v1/servers/$SERVER_UID \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"clear_via_uid": true}'
 ```
