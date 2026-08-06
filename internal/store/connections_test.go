@@ -14,12 +14,16 @@ import (
 )
 
 func TestCreateConnection(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
 	user, database := createTestUserAndDatabase(t, ctx, store, "conn")
 
 	t.Run("create connection", func(t *testing.T) {
+		t.Parallel()
+
 		conn, err := store.CreateConnection(ctx, user.UID, database.UID, "192.168.1.100")
 		if err != nil {
 			t.Fatalf("CreateConnection() error = %v", err)
@@ -50,6 +54,8 @@ func TestCreateConnection(t *testing.T) {
 	// instead of silent, so it has to survive the round trip rather than be a
 	// field the insert quietly drops.
 	t.Run("records the upstream encryption state", func(t *testing.T) {
+		t.Parallel()
+
 		for _, encrypted := range []bool{true, false} {
 			conn, err := store.CreateConnection(ctx, user.UID, database.UID, "192.168.1.101",
 				WithUpstreamTLS(encrypted))
@@ -73,6 +79,8 @@ func TestCreateConnection(t *testing.T) {
 	})
 
 	t.Run("defaults the upstream encryption state to false", func(t *testing.T) {
+		t.Parallel()
+
 		conn, err := store.CreateConnection(ctx, user.UID, database.UID, "192.168.1.102")
 		if err != nil {
 			t.Fatalf("CreateConnection() error = %v", err)
@@ -84,6 +92,8 @@ func TestCreateConnection(t *testing.T) {
 	})
 
 	t.Run("create connection with IPv6", func(t *testing.T) {
+		t.Parallel()
+
 		conn, err := store.CreateConnection(ctx, user.UID, database.UID, "::1")
 		if err != nil {
 			t.Fatalf("CreateConnection() error = %v", err)
@@ -96,7 +106,9 @@ func TestCreateConnection(t *testing.T) {
 	})
 }
 
-func TestCloseConnection(t *testing.T) {
+func TestCloseConnection(t *testing.T) { //nolint:tparallel // the second close depends on the first
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -107,7 +119,7 @@ func TestCloseConnection(t *testing.T) {
 		t.Fatalf("CreateConnection() error = %v", err)
 	}
 
-	t.Run("close open connection", func(t *testing.T) {
+	t.Run("close open connection", func(t *testing.T) { //nolint:paralleltest // the second close depends on the first
 		err := store.CloseConnection(ctx, conn.UID)
 		if err != nil {
 			t.Fatalf("CloseConnection() error = %v", err)
@@ -134,14 +146,14 @@ func TestCloseConnection(t *testing.T) {
 		}
 	})
 
-	t.Run("close already closed connection", func(t *testing.T) {
+	t.Run("close already closed connection", func(t *testing.T) { //nolint:paralleltest // the second close depends on the first
 		err := store.CloseConnection(ctx, conn.UID)
 		if !errors.Is(err, ErrConnectionNotFound) {
 			t.Errorf("CloseConnection() error = %v, want %v", err, ErrConnectionNotFound)
 		}
 	})
 
-	t.Run("close non-existing connection", func(t *testing.T) {
+	t.Run("close non-existing connection", func(t *testing.T) { //nolint:paralleltest // the second close depends on the first
 		err := store.CloseConnection(ctx, uuid.New())
 		if !errors.Is(err, ErrConnectionNotFound) {
 			t.Errorf("CloseConnection() error = %v, want %v", err, ErrConnectionNotFound)
@@ -204,7 +216,9 @@ func asRun(t *testing.T, store *Store, instanceID, runID string, fn func()) {
 // TestCloseOrphanedConnections covers the startup reconcile of connections a
 // previous run left open — including the guarantee that it can never touch a
 // connection belonging to another replica sharing the same store.
-func TestCloseOrphanedConnections(t *testing.T) {
+func TestCloseOrphanedConnections(t *testing.T) { //nolint:tparallel // siblings mutate the store's instance id
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -259,7 +273,7 @@ func TestCloseOrphanedConnections(t *testing.T) {
 		"only the still-open connection of instance-a's previous run should be reconciled")
 	assert.Equal(t, int64(0), closed.Reclaimed, "a heartbeating instance's connections are never reclaimed")
 
-	t.Run("an open connection is closed at its last_activity_at", func(t *testing.T) {
+	t.Run("an open connection is closed at its last_activity_at", func(t *testing.T) { //nolint:paralleltest // siblings mutate the store's instance id
 		got, err := store.GetConnectionByUID(ctx, orphan.UID)
 		require.NoError(t, err)
 		require.NotNil(t, got.DisconnectedAt, "the orphan should no longer look open")
@@ -270,7 +284,7 @@ func TestCloseOrphanedConnections(t *testing.T) {
 			"disconnected_at must not be reset to the restart time")
 	})
 
-	t.Run("an already-closed connection keeps its original timestamp", func(t *testing.T) {
+	t.Run("an already-closed connection keeps its original timestamp", func(t *testing.T) { //nolint:paralleltest // siblings mutate the store's instance id
 		got, err := store.GetConnectionByUID(ctx, alreadyClosed.UID)
 		require.NoError(t, err)
 		require.NotNil(t, got.DisconnectedAt)
@@ -278,7 +292,7 @@ func TestCloseOrphanedConnections(t *testing.T) {
 			"the reconcile must not overwrite a clean teardown's timestamp")
 	})
 
-	t.Run("another instance's live connection is untouched", func(t *testing.T) {
+	t.Run("another instance's live connection is untouched", func(t *testing.T) { //nolint:paralleltest // siblings mutate the store's instance id
 		got, err := store.GetConnectionByUID(ctx, otherReplica.UID)
 		require.NoError(t, err)
 		assert.Nil(t, got.DisconnectedAt,
@@ -286,13 +300,13 @@ func TestCloseOrphanedConnections(t *testing.T) {
 		assert.Equal(t, "instance-b", got.InstanceID)
 	})
 
-	t.Run("running it again is a no-op", func(t *testing.T) {
+	t.Run("running it again is a no-op", func(t *testing.T) { //nolint:paralleltest // siblings mutate the store's instance id
 		again, err := store.CloseOrphanedConnections(ctx)
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), again.Total())
 	})
 
-	t.Run("an unset instance id reconciles nothing", func(t *testing.T) {
+	t.Run("an unset instance id reconciles nothing", func(t *testing.T) { //nolint:paralleltest // siblings mutate the store's instance id
 		// Refusing here is what keeps an unconfigured process from performing
 		// the blanket update the instance scoping exists to prevent.
 		store.SetInstanceID("")
@@ -310,7 +324,9 @@ func TestCloseOrphanedConnections(t *testing.T) {
 // TestCloseOrphanedConnectionsReclaimsDeadInstances covers the liveness half of
 // the reconcile: connections whose owning instance is provably gone are closed
 // too, while a heartbeating instance's are not.
-func TestCloseOrphanedConnectionsReclaimsDeadInstances(t *testing.T) {
+func TestCloseOrphanedConnectionsReclaimsDeadInstances(t *testing.T) { //nolint:tparallel // siblings mutate the store's instance id
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -376,7 +392,7 @@ func TestCloseOrphanedConnectionsReclaimsDeadInstances(t *testing.T) {
 	assert.Equal(t, int64(3), closed.Reclaimed,
 		"the stale, the deregistered and the legacy connection are reclaimed — not the live one")
 
-	t.Run("a live instance's connections are untouched", func(t *testing.T) {
+	t.Run("a live instance's connections are untouched", func(t *testing.T) { //nolint:paralleltest // siblings mutate the store's instance id
 		got, err := store.GetConnectionByUID(ctx, liveConn)
 		require.NoError(t, err)
 		assert.Nil(t, got.DisconnectedAt,
@@ -393,19 +409,19 @@ func TestCloseOrphanedConnectionsReclaimsDeadInstances(t *testing.T) {
 		return *got.DisconnectedAt
 	}
 
-	t.Run("a stale instance's connections are reclaimed", func(t *testing.T) {
+	t.Run("a stale instance's connections are reclaimed", func(t *testing.T) { //nolint:paralleltest // siblings mutate the store's instance id
 		assert.WithinDuration(t, stopped, closedAt(staleConn), time.Millisecond)
 	})
 
-	t.Run("a deregistered instance's connections are reclaimed", func(t *testing.T) {
+	t.Run("a deregistered instance's connections are reclaimed", func(t *testing.T) { //nolint:paralleltest // siblings mutate the store's instance id
 		assert.WithinDuration(t, stopped, closedAt(goneConn), time.Millisecond)
 	})
 
-	t.Run("legacy rows with an empty instance id are reclaimed", func(t *testing.T) {
+	t.Run("legacy rows with an empty instance id are reclaimed", func(t *testing.T) { //nolint:paralleltest // siblings mutate the store's instance id
 		assert.WithinDuration(t, stopped, closedAt(legacyConn), time.Millisecond)
 	})
 
-	t.Run("reclaimed connections keep last_activity_at as the timestamp", func(t *testing.T) {
+	t.Run("reclaimed connections keep last_activity_at as the timestamp", func(t *testing.T) { //nolint:paralleltest // siblings mutate the store's instance id
 		// Not now(): retention has to measure from when the session actually
 		// stopped talking, whoever it belonged to.
 		for _, uid := range []uuid.UUID{staleConn, goneConn, legacyConn, ownConn} {
@@ -416,7 +432,7 @@ func TestCloseOrphanedConnectionsReclaimsDeadInstances(t *testing.T) {
 		}
 	})
 
-	t.Run("running it again reclaims nothing", func(t *testing.T) {
+	t.Run("running it again reclaims nothing", func(t *testing.T) { //nolint:paralleltest // siblings mutate the store's instance id
 		again, err := store.CloseOrphanedConnections(ctx)
 		require.NoError(t, err)
 		assert.Equal(t, int64(0), again.Total())
@@ -433,7 +449,9 @@ func TestCloseOrphanedConnectionsReclaimsDeadInstances(t *testing.T) {
 // this test never calls CloseOrphanedConnections: the reclaim has to stand on
 // its own, without the own-instance update, which mid-life would close this
 // run's own live sessions.
-func TestReclaimDeadInstanceConnectionsWithoutStartup(t *testing.T) {
+func TestReclaimDeadInstanceConnectionsWithoutStartup(t *testing.T) { //nolint:tparallel // siblings mutate the store's instance id
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -490,21 +508,21 @@ func TestReclaimDeadInstanceConnectionsWithoutStartup(t *testing.T) {
 	assert.Equal(t, int64(2), reclaimed,
 		"the crashed peer's and our own dead previous run's connections should be reclaimed")
 
-	t.Run("the crashed instance's connection is closed at its last activity", func(t *testing.T) {
+	t.Run("the crashed instance's connection is closed at its last activity", func(t *testing.T) { //nolint:paralleltest // siblings mutate the store's instance id
 		got, err := store.GetConnectionByUID(ctx, crashedConn)
 		require.NoError(t, err)
 		require.NotNil(t, got.DisconnectedAt)
 		assert.WithinDuration(t, stopped, *got.DisconnectedAt, time.Millisecond)
 	})
 
-	t.Run("a live instance's connection is untouched", func(t *testing.T) {
+	t.Run("a live instance's connection is untouched", func(t *testing.T) { //nolint:paralleltest // siblings mutate the store's instance id
 		got, err := store.GetConnectionByUID(ctx, peerConn)
 		require.NoError(t, err)
 		assert.Nil(t, got.DisconnectedAt,
 			"a heartbeating instance's session must survive every periodic pass")
 	})
 
-	t.Run("a dead previous run of our own instance id is reclaimed", func(t *testing.T) {
+	t.Run("a dead previous run of our own instance id is reclaimed", func(t *testing.T) { //nolint:paralleltest // siblings mutate the store's instance id
 		got, err := store.GetConnectionByUID(ctx, previousRunConn)
 		require.NoError(t, err)
 		require.NotNil(t, got.DisconnectedAt,
@@ -512,7 +530,7 @@ func TestReclaimDeadInstanceConnectionsWithoutStartup(t *testing.T) {
 		assert.WithinDuration(t, stopped, *got.DisconnectedAt, time.Millisecond)
 	})
 
-	t.Run("this run's own live connection is untouched", func(t *testing.T) {
+	t.Run("this run's own live connection is untouched", func(t *testing.T) { //nolint:paralleltest // siblings mutate the store's instance id
 		// The line the reclaim draws is this run, not this instance id: our own
 		// open rows are sessions we are serving right now.
 		got, err := store.GetConnectionByUID(ctx, ownLive.UID)
@@ -521,7 +539,7 @@ func TestReclaimDeadInstanceConnectionsWithoutStartup(t *testing.T) {
 			"the periodic reclaim must never close the calling process's own sessions")
 	})
 
-	t.Run("running it again reclaims nothing", func(t *testing.T) {
+	t.Run("running it again reclaims nothing", func(t *testing.T) { //nolint:paralleltest // siblings mutate the store's instance id
 		// Every replica runs this on its own timer, so overlapping passes are
 		// expected; the second one has to be a no-op rather than double work.
 		again, err := store.ReclaimDeadInstanceConnections(ctx)
@@ -529,7 +547,7 @@ func TestReclaimDeadInstanceConnectionsWithoutStartup(t *testing.T) {
 		assert.Equal(t, int64(0), again)
 	})
 
-	t.Run("an unset instance id reclaims nothing", func(t *testing.T) {
+	t.Run("an unset instance id reclaims nothing", func(t *testing.T) { //nolint:paralleltest // siblings mutate the store's instance id
 		store.SetInstanceID("")
 
 		registerInstanceAs(t, ctx, store, "another-crashed-peer", "another-crashed-run",
@@ -578,7 +596,9 @@ func openBackdatedConnection(
 // for the retention sweep, which then deletes a connection a live session is
 // still writing queries against. Identity is not enough to prevent that,
 // because an instance id is unique per process only by convention.
-func TestCloseOrphanedConnectionsWithSharedInstanceID(t *testing.T) {
+func TestCloseOrphanedConnectionsWithSharedInstanceID(t *testing.T) { //nolint:tparallel // one sibling reclaims the row another asserts on
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -607,14 +627,14 @@ func TestCloseOrphanedConnectionsWithSharedInstanceID(t *testing.T) {
 	assert.Equal(t, int64(0), closed.Total(),
 		"nothing under a shared id may be closed while every run of it still looks alive")
 
-	t.Run("a live peer sharing our instance id keeps its session", func(t *testing.T) {
+	t.Run("a live peer sharing our instance id keeps its session", func(t *testing.T) { //nolint:paralleltest // one sibling reclaims the row another asserts on
 		got, err := store.GetConnectionByUID(ctx, peerConn)
 		require.NoError(t, err)
 		assert.Nil(t, got.DisconnectedAt,
 			"starting a replica must never close a live peer's session, shared id or not")
 	})
 
-	t.Run("our own predecessor is spared while its registry row is fresh", func(t *testing.T) {
+	t.Run("our own predecessor is spared while its registry row is fresh", func(t *testing.T) { //nolint:paralleltest // one sibling reclaims the row another asserts on
 		// The price of not trusting the id: at startup a crashed predecessor
 		// and a live peer look identical, so the predecessor waits out the
 		// grace period like any other dead run instead of being closed now.
@@ -623,7 +643,7 @@ func TestCloseOrphanedConnectionsWithSharedInstanceID(t *testing.T) {
 		assert.Nil(t, got.DisconnectedAt)
 	})
 
-	t.Run("registering does not overwrite a peer's heartbeat", func(t *testing.T) {
+	t.Run("registering does not overwrite a peer's heartbeat", func(t *testing.T) { //nolint:paralleltest // one sibling reclaims the row another asserts on
 		// Keyed by the pair, so all three runs of this id are represented. With
 		// one row per id, our registration would have replaced the peer's — and
 		// a peer with no row of its own has every session it is serving
@@ -638,7 +658,7 @@ func TestCloseOrphanedConnectionsWithSharedInstanceID(t *testing.T) {
 		assert.Equal(t, 3, runs)
 	})
 
-	t.Run("the predecessor is reclaimed once it goes stale", func(t *testing.T) {
+	t.Run("the predecessor is reclaimed once it goes stale", func(t *testing.T) { //nolint:paralleltest // one sibling reclaims the row another asserts on
 		_, err := store.db.ExecContext(ctx,
 			"UPDATE instances SET last_seen_at = now() - make_interval(secs => ?) WHERE run_id = ?",
 			(InstanceStaleAfter + time.Minute).Seconds(), "previous-run")
@@ -674,6 +694,8 @@ func TestCloseOrphanedConnectionsWithSharedInstanceID(t *testing.T) {
 // did not open. Without it, restarting under a stable instance id would shield
 // its own pre-upgrade orphans forever — the leak all of this exists to close.
 func TestCloseOrphanedConnectionsWithoutRunIDs(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -700,6 +722,8 @@ func TestCloseOrphanedConnectionsWithoutRunIDs(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("our own pre-upgrade rows are closed", func(t *testing.T) {
+		t.Parallel()
+
 		assert.Equal(t, int64(1), closed.Own,
 			"our fresh registration must not vouch for rows a previous build left behind")
 
@@ -710,6 +734,8 @@ func TestCloseOrphanedConnectionsWithoutRunIDs(t *testing.T) {
 	})
 
 	t.Run("a live instance's pre-upgrade rows are kept", func(t *testing.T) {
+		t.Parallel()
+
 		assert.Equal(t, int64(1), closed.Reclaimed, "only the dead instance's row is reclaimed")
 
 		got, err := store.GetConnectionByUID(ctx, peerLegacy)
@@ -719,6 +745,8 @@ func TestCloseOrphanedConnectionsWithoutRunIDs(t *testing.T) {
 	})
 
 	t.Run("a dead instance's pre-upgrade rows are reclaimed", func(t *testing.T) {
+		t.Parallel()
+
 		got, err := store.GetConnectionByUID(ctx, deadLegacy)
 		require.NoError(t, err)
 		require.NotNil(t, got.DisconnectedAt)
@@ -730,6 +758,8 @@ func TestCloseOrphanedConnectionsWithoutRunIDs(t *testing.T) {
 // exercise: an orphan is invisible to the retention sweep until the reconcile
 // gives it a disconnected_at, and reapable immediately afterwards.
 func TestCloseOrphanedConnectionsAreReapedByRetention(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -775,6 +805,8 @@ func TestCloseOrphanedConnectionsAreReapedByRetention(t *testing.T) {
 }
 
 func TestGetConnectionByUID(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -786,6 +818,8 @@ func TestGetConnectionByUID(t *testing.T) {
 	}
 
 	t.Run("get existing connection", func(t *testing.T) {
+		t.Parallel()
+
 		found, err := store.GetConnectionByUID(ctx, conn.UID)
 		if err != nil {
 			t.Fatalf("GetConnectionByUID() error = %v", err)
@@ -802,6 +836,8 @@ func TestGetConnectionByUID(t *testing.T) {
 	})
 
 	t.Run("get non-existing connection", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := store.GetConnectionByUID(ctx, uuid.New())
 		if !errors.Is(err, ErrConnectionNotFound) {
 			t.Errorf("GetConnectionByUID() error = %v, want %v", err, ErrConnectionNotFound)
@@ -810,6 +846,8 @@ func TestGetConnectionByUID(t *testing.T) {
 }
 
 func TestListConnections(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -831,6 +869,8 @@ func TestListConnections(t *testing.T) {
 	}
 
 	t.Run("list all", func(t *testing.T) {
+		t.Parallel()
+
 		conns, err := store.ListConnections(ctx, ConnectionFilter{})
 		if err != nil {
 			t.Fatalf("ListConnections() error = %v", err)
@@ -841,6 +881,8 @@ func TestListConnections(t *testing.T) {
 	})
 
 	t.Run("filter by user", func(t *testing.T) {
+		t.Parallel()
+
 		conns, err := store.ListConnections(ctx, ConnectionFilter{UserID: &user1.UID})
 		if err != nil {
 			t.Fatalf("ListConnections() error = %v", err)
@@ -851,6 +893,8 @@ func TestListConnections(t *testing.T) {
 	})
 
 	t.Run("filter by database", func(t *testing.T) {
+		t.Parallel()
+
 		conns, err := store.ListConnections(ctx, ConnectionFilter{DatabaseID: &db1.UID})
 		if err != nil {
 			t.Fatalf("ListConnections() error = %v", err)
@@ -861,6 +905,8 @@ func TestListConnections(t *testing.T) {
 	})
 
 	t.Run("with limit", func(t *testing.T) {
+		t.Parallel()
+
 		conns, err := store.ListConnections(ctx, ConnectionFilter{Limit: 2})
 		if err != nil {
 			t.Fatalf("ListConnections() error = %v", err)
@@ -871,6 +917,8 @@ func TestListConnections(t *testing.T) {
 	})
 
 	t.Run("with offset", func(t *testing.T) {
+		t.Parallel()
+
 		conns, err := store.ListConnections(ctx, ConnectionFilter{Limit: 10, Offset: 2})
 		if err != nil {
 			t.Fatalf("ListConnections() error = %v", err)
@@ -881,6 +929,8 @@ func TestListConnections(t *testing.T) {
 	})
 
 	t.Run("combined filters", func(t *testing.T) {
+		t.Parallel()
+
 		conns, err := store.ListConnections(ctx, ConnectionFilter{UserID: &user1.UID, DatabaseID: &db1.UID})
 		if err != nil {
 			t.Fatalf("ListConnections() error = %v", err)
@@ -891,7 +941,9 @@ func TestListConnections(t *testing.T) {
 	})
 }
 
-func TestIncrementConnectionStats(t *testing.T) {
+func TestIncrementConnectionStats(t *testing.T) { //nolint:tparallel // the counters accumulate across subtests
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -910,7 +962,7 @@ func TestIncrementConnectionStats(t *testing.T) {
 		t.Errorf("Initial conn.BytesTransferred = %d, want 0", conn.BytesTransferred)
 	}
 
-	t.Run("increment stats", func(t *testing.T) {
+	t.Run("increment stats", func(t *testing.T) { //nolint:paralleltest // the counters accumulate across subtests
 		err := store.IncrementConnectionStats(ctx, conn.UID, 1024)
 		if err != nil {
 			t.Fatalf("IncrementConnectionStats() error = %v", err)
@@ -941,7 +993,7 @@ func TestIncrementConnectionStats(t *testing.T) {
 		}
 	})
 
-	t.Run("multiple increments accumulate", func(t *testing.T) {
+	t.Run("multiple increments accumulate", func(t *testing.T) { //nolint:paralleltest // the counters accumulate across subtests
 		err := store.IncrementConnectionStats(ctx, conn.UID, 2048)
 		if err != nil {
 			t.Fatalf("IncrementConnectionStats() error = %v", err)
@@ -978,7 +1030,9 @@ func TestIncrementConnectionStats(t *testing.T) {
 	})
 }
 
-func TestIncrementConnectionBytes(t *testing.T) {
+func TestIncrementConnectionBytes(t *testing.T) { //nolint:tparallel // the counters accumulate across subtests
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -1003,7 +1057,7 @@ func TestIncrementConnectionBytes(t *testing.T) {
 		return nil
 	}
 
-	t.Run("adds bytes without bumping query count", func(t *testing.T) {
+	t.Run("adds bytes without bumping query count", func(t *testing.T) { //nolint:paralleltest // the counters accumulate across subtests
 		if err := store.IncrementConnectionBytes(ctx, conn.UID, 4096); err != nil {
 			t.Fatalf("IncrementConnectionBytes() error = %v", err)
 		}
@@ -1017,7 +1071,7 @@ func TestIncrementConnectionBytes(t *testing.T) {
 		}
 	})
 
-	t.Run("accumulates and coexists with IncrementConnectionStats", func(t *testing.T) {
+	t.Run("accumulates and coexists with IncrementConnectionStats", func(t *testing.T) { //nolint:paralleltest // the counters accumulate across subtests
 		// A completed query bumps both counters...
 		if err := store.IncrementConnectionStats(ctx, conn.UID, 1000); err != nil {
 			t.Fatalf("IncrementConnectionStats() error = %v", err)
@@ -1040,6 +1094,8 @@ func TestIncrementConnectionBytes(t *testing.T) {
 }
 
 func TestExtractSourceIP(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		addr     net.Addr
@@ -1064,6 +1120,8 @@ func TestExtractSourceIP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			result := ExtractSourceIP(tt.addr)
 			if result != tt.expected {
 				t.Errorf("ExtractSourceIP() = %q, want %q", result, tt.expected)
@@ -1079,6 +1137,8 @@ func TestExtractSourceIP(t *testing.T) {
 // paths are asserted together, because forgetting one of the two is exactly
 // the mistake this guards against.
 func TestConnectionDumpKeyIsSelectedEverywhere(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 

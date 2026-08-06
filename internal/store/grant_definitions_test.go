@@ -20,6 +20,8 @@ func createTestAdmin(t *testing.T, ctx context.Context, store *Store, suffix str
 }
 
 func TestCreateGrantDefinition(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -61,6 +63,8 @@ func TestCreateGrantDefinition(t *testing.T) {
 }
 
 func TestCreateGrantDefinition_AutoApprove(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -95,6 +99,8 @@ func TestCreateGrantDefinition_AutoApprove(t *testing.T) {
 }
 
 func TestCreateGrantDefinition_DuplicateActiveName(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -129,6 +135,8 @@ func TestCreateGrantDefinition_DuplicateActiveName(t *testing.T) {
 }
 
 func TestListGrantDefinitions_ActiveOnly(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -192,6 +200,8 @@ func TestListGrantDefinitions_ActiveOnly(t *testing.T) {
 }
 
 func TestUpdateGrantDefinition(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -226,6 +236,8 @@ func TestUpdateGrantDefinition(t *testing.T) {
 }
 
 func TestGetGrantDefinition_NotFound(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -236,6 +248,8 @@ func TestGetGrantDefinition_NotFound(t *testing.T) {
 }
 
 func TestGetGrantDefinitionBySlug(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -262,6 +276,8 @@ func TestGetGrantDefinitionBySlug(t *testing.T) {
 }
 
 func TestGetGrantDefinitionBySlug_NotFound(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -272,6 +288,8 @@ func TestGetGrantDefinitionBySlug_NotFound(t *testing.T) {
 }
 
 func TestCreateGrantDefinition_DuplicateSlug(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -300,6 +318,8 @@ func TestCreateGrantDefinition_DuplicateSlug(t *testing.T) {
 }
 
 func TestUpdateGrantDefinition_DuplicateSlug(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 

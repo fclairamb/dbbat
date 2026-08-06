@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestCreateUserIdentity(t *testing.T) { //nolint:tparallel // subtests share parent data
+func TestCreateUserIdentity(t *testing.T) {
 	t.Parallel()
 
 	store := setupTestStoreNoCleanup(t)
@@ -21,6 +21,8 @@ func TestCreateUserIdentity(t *testing.T) { //nolint:tparallel // subtests share
 	require.NoError(t, err)
 
 	t.Run("create identity", func(t *testing.T) {
+		t.Parallel()
+
 		identity := &UserIdentity{
 			UserID:      user.UID,
 			Provider:    IdentityTypeSlack,
@@ -42,7 +44,7 @@ func TestCreateUserIdentity(t *testing.T) { //nolint:tparallel // subtests share
 	})
 }
 
-func TestGetUserIdentity(t *testing.T) { //nolint:tparallel // subtests share parent data
+func TestGetUserIdentity(t *testing.T) {
 	t.Parallel()
 
 	store := setupTestStoreNoCleanup(t)
@@ -61,6 +63,8 @@ func TestGetUserIdentity(t *testing.T) { //nolint:tparallel // subtests share pa
 	require.NoError(t, err)
 
 	t.Run("existing identity", func(t *testing.T) {
+		t.Parallel()
+
 		found, err := store.GetUserIdentity(ctx, created.UID)
 		require.NoError(t, err)
 		assert.Equal(t, created.UID, found.UID)
@@ -69,12 +73,14 @@ func TestGetUserIdentity(t *testing.T) { //nolint:tparallel // subtests share pa
 	})
 
 	t.Run("non-existing identity", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := store.GetUserIdentity(ctx, uuid.New())
 		assert.ErrorIs(t, err, ErrIdentityNotFound)
 	})
 }
 
-func TestGetUserIdentities(t *testing.T) { //nolint:tparallel // subtests share parent data
+func TestGetUserIdentities(t *testing.T) {
 	t.Parallel()
 
 	store := setupTestStoreNoCleanup(t)
@@ -85,6 +91,8 @@ func TestGetUserIdentities(t *testing.T) { //nolint:tparallel // subtests share 
 	require.NoError(t, err)
 
 	t.Run("empty list", func(t *testing.T) {
+		t.Parallel()
+
 		emptyUser, err := store.CreateUser(ctx, "list-identity-empty-"+uuid.NewString()[:8], "hash", []string{RoleViewer})
 		require.NoError(t, err)
 
@@ -104,13 +112,15 @@ func TestGetUserIdentities(t *testing.T) { //nolint:tparallel // subtests share 
 	}
 
 	t.Run("with identities", func(t *testing.T) {
+		t.Parallel()
+
 		identities, err := store.GetUserIdentities(ctx, user.UID)
 		require.NoError(t, err)
 		assert.Len(t, identities, 2)
 	})
 }
 
-func TestGetUserByIdentity(t *testing.T) { //nolint:tparallel // subtests share parent data
+func TestGetUserByIdentity(t *testing.T) {
 	t.Parallel()
 
 	store := setupTestStoreNoCleanup(t)
@@ -130,6 +140,8 @@ func TestGetUserByIdentity(t *testing.T) { //nolint:tparallel // subtests share 
 	require.NoError(t, err)
 
 	t.Run("existing identity", func(t *testing.T) {
+		t.Parallel()
+
 		found, err := store.GetUserByIdentity(ctx, IdentityTypeSlack, providerID)
 		require.NoError(t, err)
 		assert.Equal(t, user.UID, found.UID)
@@ -137,12 +149,14 @@ func TestGetUserByIdentity(t *testing.T) { //nolint:tparallel // subtests share 
 	})
 
 	t.Run("non-existing identity", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := store.GetUserByIdentity(ctx, IdentityTypeSlack, "NONEXISTENT")
 		assert.ErrorIs(t, err, ErrIdentityNotFound)
 	})
 }
 
-func TestListAdminSlackUserIDs(t *testing.T) { //nolint:tparallel // subtests share parent data
+func TestListAdminSlackUserIDs(t *testing.T) {
 	t.Parallel()
 
 	store := setupTestStoreNoCleanup(t)
@@ -178,6 +192,8 @@ func TestListAdminSlackUserIDs(t *testing.T) { //nolint:tparallel // subtests sh
 	require.NoError(t, err)
 
 	t.Run("lists linked admins, excludes non-admins and unlinked", func(t *testing.T) {
+		t.Parallel()
+
 		ids, err := store.ListAdminSlackUserIDs(ctx)
 		require.NoError(t, err)
 		assert.Contains(t, ids, adminSlackID)
@@ -185,6 +201,8 @@ func TestListAdminSlackUserIDs(t *testing.T) { //nolint:tparallel // subtests sh
 	})
 
 	t.Run("excludes soft-deleted admin identity", func(t *testing.T) {
+		t.Parallel()
+
 		delAdmin, err := store.CreateUser(ctx, "admin-deleted-id-"+suffix, "hash", []string{RoleAdmin})
 		require.NoError(t, err)
 
@@ -204,7 +222,7 @@ func TestListAdminSlackUserIDs(t *testing.T) { //nolint:tparallel // subtests sh
 	})
 }
 
-func TestDeleteUserIdentity(t *testing.T) { //nolint:tparallel // subtests share parent data
+func TestDeleteUserIdentity(t *testing.T) { //nolint:tparallel // re-creation depends on the earlier soft delete
 	t.Parallel()
 
 	store := setupTestStoreNoCleanup(t)
@@ -223,7 +241,7 @@ func TestDeleteUserIdentity(t *testing.T) { //nolint:tparallel // subtests share
 	})
 	require.NoError(t, err)
 
-	t.Run("delete existing identity", func(t *testing.T) {
+	t.Run("delete existing identity", func(t *testing.T) { //nolint:paralleltest // re-creation depends on the earlier soft delete
 		err := store.DeleteUserIdentity(ctx, identity.UID)
 		require.NoError(t, err)
 
@@ -232,12 +250,12 @@ func TestDeleteUserIdentity(t *testing.T) { //nolint:tparallel // subtests share
 		assert.ErrorIs(t, err, ErrIdentityNotFound)
 	})
 
-	t.Run("delete non-existing identity", func(t *testing.T) {
+	t.Run("delete non-existing identity", func(t *testing.T) { //nolint:paralleltest // re-creation depends on the earlier soft delete
 		err := store.DeleteUserIdentity(ctx, uuid.New())
 		assert.ErrorIs(t, err, ErrIdentityNotFound)
 	})
 
-	t.Run("soft delete allows re-creation with same provider_id", func(t *testing.T) {
+	t.Run("soft delete allows re-creation with same provider_id", func(t *testing.T) { //nolint:paralleltest // re-creation depends on the earlier soft delete
 		// After soft-deleting, the partial unique index should allow a new row
 		newIdentity, err := store.CreateUserIdentity(ctx, &UserIdentity{
 			UserID:     user.UID,

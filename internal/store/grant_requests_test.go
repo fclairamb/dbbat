@@ -48,6 +48,8 @@ func setupRequestFixtures(t *testing.T, ctx context.Context, s *Store, suffix st
 }
 
 func TestCreateGrantRequest(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -73,6 +75,8 @@ func TestCreateGrantRequest(t *testing.T) {
 }
 
 func TestApproveGrantRequest_CreatesGrant(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -120,6 +124,8 @@ func TestApproveGrantRequest_CreatesGrant(t *testing.T) {
 }
 
 func TestAutoApproveGrantRequest_CreatesGrantWithNoDecider(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -179,6 +185,8 @@ func TestAutoApproveGrantRequest_CreatesGrantWithNoDecider(t *testing.T) {
 }
 
 func TestApproveGrantRequest_DefinitionInactive(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -203,6 +211,8 @@ func TestApproveGrantRequest_DefinitionInactive(t *testing.T) {
 }
 
 func TestDenyGrantRequest(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -232,6 +242,8 @@ func TestDenyGrantRequest(t *testing.T) {
 }
 
 func TestCancelGrantRequest(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -257,6 +269,8 @@ func TestCancelGrantRequest(t *testing.T) {
 }
 
 func TestHasPendingRequest(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 

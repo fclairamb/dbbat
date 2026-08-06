@@ -37,6 +37,8 @@ func createTestUserAndDatabase(t *testing.T, ctx context.Context, store *Store, 
 }
 
 func TestCreateGrant(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -49,6 +51,8 @@ func TestCreateGrant(t *testing.T) {
 	}
 
 	t.Run("create read grant", func(t *testing.T) {
+		t.Parallel()
+
 		now := time.Now()
 		grant := &Grant{
 			UserID:     user.UID,
@@ -76,6 +80,8 @@ func TestCreateGrant(t *testing.T) {
 	})
 
 	t.Run("create write grant with quotas", func(t *testing.T) {
+		t.Parallel()
+
 		user2, db2 := createTestUserAndDatabase(t, ctx, store, "quotas")
 
 		now := time.Now()
@@ -110,6 +116,8 @@ func TestCreateGrant(t *testing.T) {
 }
 
 func TestGetActiveGrant(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -117,6 +125,8 @@ func TestGetActiveGrant(t *testing.T) {
 	admin, _ := store.CreateUser(ctx, "activeadmin", "hash", []string{RoleAdmin, RoleConnector})
 
 	t.Run("active grant exists", func(t *testing.T) {
+		t.Parallel()
+
 		now := time.Now()
 		grant := &Grant{
 			UserID:     user.UID,
@@ -142,6 +152,8 @@ func TestGetActiveGrant(t *testing.T) {
 	})
 
 	t.Run("no active grant - expired", func(t *testing.T) {
+		t.Parallel()
+
 		user2, db2 := createTestUserAndDatabase(t, ctx, store, "expired")
 
 		now := time.Now()
@@ -165,6 +177,8 @@ func TestGetActiveGrant(t *testing.T) {
 	})
 
 	t.Run("no active grant - not started", func(t *testing.T) {
+		t.Parallel()
+
 		user3, db3 := createTestUserAndDatabase(t, ctx, store, "future")
 
 		now := time.Now()
@@ -188,6 +202,8 @@ func TestGetActiveGrant(t *testing.T) {
 	})
 
 	t.Run("no grant exists", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := store.GetActiveGrant(ctx, uuid.New(), uuid.New())
 		if !errors.Is(err, ErrNoActiveGrant) {
 			t.Errorf("GetActiveGrant() error = %v, want %v", err, ErrNoActiveGrant)
@@ -196,6 +212,8 @@ func TestGetActiveGrant(t *testing.T) {
 }
 
 func TestGetGrantByUID(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -217,6 +235,8 @@ func TestGetGrantByUID(t *testing.T) {
 	}
 
 	t.Run("existing grant", func(t *testing.T) {
+		t.Parallel()
+
 		found, err := store.GetGrantByUID(ctx, created.UID)
 		if err != nil {
 			t.Fatalf("GetGrantByUID() error = %v", err)
@@ -228,6 +248,8 @@ func TestGetGrantByUID(t *testing.T) {
 	})
 
 	t.Run("non-existing grant", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := store.GetGrantByUID(ctx, uuid.New())
 		if !errors.Is(err, ErrGrantNotFound) {
 			t.Errorf("GetGrantByUID() error = %v, want %v", err, ErrGrantNotFound)
@@ -236,6 +258,8 @@ func TestGetGrantByUID(t *testing.T) {
 }
 
 func TestListGrants(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -261,6 +285,8 @@ func TestListGrants(t *testing.T) {
 	}
 
 	t.Run("list all", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListGrants(ctx, GrantFilter{})
 		if err != nil {
 			t.Fatalf("ListGrants() error = %v", err)
@@ -271,6 +297,8 @@ func TestListGrants(t *testing.T) {
 	})
 
 	t.Run("filter by user", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListGrants(ctx, GrantFilter{UserID: &user1.UID})
 		if err != nil {
 			t.Fatalf("ListGrants() error = %v", err)
@@ -281,6 +309,8 @@ func TestListGrants(t *testing.T) {
 	})
 
 	t.Run("filter by database", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListGrants(ctx, GrantFilter{DatabaseID: &db1.UID})
 		if err != nil {
 			t.Fatalf("ListGrants() error = %v", err)
@@ -291,6 +321,8 @@ func TestListGrants(t *testing.T) {
 	})
 
 	t.Run("active only", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListGrants(ctx, GrantFilter{ActiveOnly: true})
 		if err != nil {
 			t.Fatalf("ListGrants() error = %v", err)
@@ -301,6 +333,8 @@ func TestListGrants(t *testing.T) {
 	})
 
 	t.Run("combined filters", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListGrants(ctx, GrantFilter{UserID: &user1.UID, DatabaseID: &db1.UID})
 		if err != nil {
 			t.Fatalf("ListGrants() error = %v", err)
@@ -311,7 +345,9 @@ func TestListGrants(t *testing.T) {
 	})
 }
 
-func TestRevokeGrant(t *testing.T) {
+func TestRevokeGrant(t *testing.T) { //nolint:tparallel // the second revoke depends on the first
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -332,7 +368,7 @@ func TestRevokeGrant(t *testing.T) {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 
-	t.Run("revoke active grant", func(t *testing.T) {
+	t.Run("revoke active grant", func(t *testing.T) { //nolint:paralleltest // the second revoke depends on the first
 		err := store.RevokeGrant(ctx, created.UID, admin.UID)
 		if err != nil {
 			t.Fatalf("RevokeGrant() error = %v", err)
@@ -357,14 +393,14 @@ func TestRevokeGrant(t *testing.T) {
 		}
 	})
 
-	t.Run("revoke already revoked grant", func(t *testing.T) {
+	t.Run("revoke already revoked grant", func(t *testing.T) { //nolint:paralleltest // the second revoke depends on the first
 		err := store.RevokeGrant(ctx, created.UID, admin.UID)
 		if !errors.Is(err, ErrGrantAlreadyRevoked) {
 			t.Errorf("RevokeGrant() error = %v, want %v", err, ErrGrantAlreadyRevoked)
 		}
 	})
 
-	t.Run("revoke non-existing grant", func(t *testing.T) {
+	t.Run("revoke non-existing grant", func(t *testing.T) { //nolint:paralleltest // the second revoke depends on the first
 		err := store.RevokeGrant(ctx, uuid.New(), admin.UID)
 		if !errors.Is(err, ErrGrantAlreadyRevoked) {
 			t.Errorf("RevokeGrant() error = %v, want %v", err, ErrGrantAlreadyRevoked)
@@ -373,6 +409,8 @@ func TestRevokeGrant(t *testing.T) {
 }
 
 func TestGrantCounters_PopulatedFromQueriesAndConnections(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -435,6 +473,8 @@ func TestGrantCounters_PopulatedFromQueriesAndConnections(t *testing.T) {
 }
 
 func TestGrantCounters_TimeWindowExcludesOutOfRange(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -483,6 +523,8 @@ func TestGrantCounters_TimeWindowExcludesOutOfRange(t *testing.T) {
 }
 
 func TestGrantCounters_BoundedByRevokedAt(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -560,6 +602,8 @@ func TestGrantCounters_BoundedByRevokedAt(t *testing.T) {
 // reconnect enforces against — must include them, otherwise the cumulative cap
 // could be bypassed across short-lived reconnects.
 func TestGrantBytesRecompute_IncludesAbortedQueryBytes(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -615,6 +659,8 @@ func TestGrantBytesRecompute_IncludesAbortedQueryBytes(t *testing.T) {
 }
 
 func TestListGrants_PopulatesCountersForEach(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 

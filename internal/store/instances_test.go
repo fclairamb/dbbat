@@ -24,13 +24,15 @@ func looksStale(t *testing.T, ctx context.Context, store *Store, instanceID stri
 	return stale
 }
 
-func TestInstanceRegistry(t *testing.T) {
+func TestInstanceRegistry(t *testing.T) { //nolint:tparallel // subtests share one registry row and mutate the store's instance id
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
 	store.SetInstanceID("registry-a")
 
-	t.Run("register creates a row that is alive", func(t *testing.T) {
+	t.Run("register creates a row that is alive", func(t *testing.T) { //nolint:paralleltest // subtests share one registry row and mutate the store's instance id
 		require.NoError(t, store.RegisterInstance(ctx))
 
 		inst, err := store.GetInstance(ctx, "registry-a")
@@ -41,7 +43,7 @@ func TestInstanceRegistry(t *testing.T) {
 		assert.WithinDuration(t, inst.StartedAt, inst.LastSeenAt, time.Second)
 	})
 
-	t.Run("heartbeat revives a stale row without rewriting started_at", func(t *testing.T) {
+	t.Run("heartbeat revives a stale row without rewriting started_at", func(t *testing.T) { //nolint:paralleltest // subtests share one registry row and mutate the store's instance id
 		// Age the row past the grace period on the database clock, so it is
 		// stale by exactly the predicate the reclaim uses.
 		_, err := store.db.ExecContext(ctx,
@@ -66,7 +68,7 @@ func TestInstanceRegistry(t *testing.T) {
 			"the heartbeat must keep describing the run that started")
 	})
 
-	t.Run("heartbeat re-creates a row that disappeared", func(t *testing.T) {
+	t.Run("heartbeat re-creates a row that disappeared", func(t *testing.T) { //nolint:paralleltest // subtests share one registry row and mutate the store's instance id
 		// A missing row means "dead", so losing ours must not be permanent —
 		// otherwise a live process's connections stay reclaimable forever.
 		require.NoError(t, store.DeregisterInstance(ctx))
@@ -82,7 +84,7 @@ func TestInstanceRegistry(t *testing.T) {
 		assert.NotNil(t, back)
 	})
 
-	t.Run("register resets started_at on a restart", func(t *testing.T) {
+	t.Run("register resets started_at on a restart", func(t *testing.T) { //nolint:paralleltest // subtests share one registry row and mutate the store's instance id
 		_, err := store.db.ExecContext(ctx,
 			"UPDATE instances SET started_at = now() - make_interval(secs => ?) WHERE instance_id = ?",
 			(72 * time.Hour).Seconds(), "registry-a")
@@ -102,7 +104,7 @@ func TestInstanceRegistry(t *testing.T) {
 		assert.WithinDuration(t, after.StartedAt, after.LastSeenAt, time.Second)
 	})
 
-	t.Run("an unset instance id registers nothing", func(t *testing.T) {
+	t.Run("an unset instance id registers nothing", func(t *testing.T) { //nolint:paralleltest // subtests share one registry row and mutate the store's instance id
 		// '' is not an identity: registering it would make the legacy
 		// ownerless connection rows look alive forever.
 		store.SetInstanceID("")
@@ -116,6 +118,8 @@ func TestInstanceRegistry(t *testing.T) {
 }
 
 func TestPruneStaleInstances(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -141,7 +145,9 @@ func TestPruneStaleInstances(t *testing.T) {
 // One row per id was not enough: a second replica starting under a shared id
 // overwrote the first one's row, so a process that was serving traffic lost the
 // only proof it was alive, and its sessions became reclaimable.
-func TestInstanceRegistryTracksRunsSeparately(t *testing.T) {
+func TestInstanceRegistryTracksRunsSeparately(t *testing.T) { //nolint:tparallel // subtests add and remove the runs the siblings count
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -165,18 +171,18 @@ func TestInstanceRegistryTracksRunsSeparately(t *testing.T) {
 	store.SetRunID("run-two")
 	require.NoError(t, store.RegisterInstance(ctx))
 
-	t.Run("registering leaves another run's row alone", func(t *testing.T) {
+	t.Run("registering leaves another run's row alone", func(t *testing.T) { //nolint:paralleltest // subtests add and remove the runs the siblings count
 		assert.Len(t, runsUnder("shared-registry"), 2)
 	})
 
-	t.Run("another live run under our id is reported", func(t *testing.T) {
+	t.Run("another live run under our id is reported", func(t *testing.T) { //nolint:paralleltest // subtests add and remove the runs the siblings count
 		peers, err := store.LiveRunsSharingInstanceID(ctx)
 		require.NoError(t, err)
 		require.Len(t, peers, 1, "our own row must not be reported as a peer")
 		assert.Equal(t, "run-one", peers[0].RunID)
 	})
 
-	t.Run("a run past the grace period is not a live peer", func(t *testing.T) {
+	t.Run("a run past the grace period is not a live peer", func(t *testing.T) { //nolint:paralleltest // subtests add and remove the runs the siblings count
 		_, err := store.db.ExecContext(ctx,
 			"UPDATE instances SET last_seen_at = now() - make_interval(secs => ?) WHERE run_id = ?",
 			(InstanceStaleAfter + time.Minute).Seconds(), "run-one")
@@ -187,7 +193,7 @@ func TestInstanceRegistryTracksRunsSeparately(t *testing.T) {
 		assert.Empty(t, peers)
 	})
 
-	t.Run("deregistering removes only our own run", func(t *testing.T) {
+	t.Run("deregistering removes only our own run", func(t *testing.T) { //nolint:paralleltest // subtests add and remove the runs the siblings count
 		// Deleting every row carrying the id would deregister a live replica
 		// that shares it, and a replica with no row has all of its sessions
 		// reclaimed by the next pass.
@@ -203,6 +209,8 @@ func TestInstanceRegistryTracksRunsSeparately(t *testing.T) {
 // what stands between the reclaim and closing a live replica's connections, so
 // it must stay a large multiple of the heartbeat rather than a couple of ticks.
 func TestInstanceStaleAfterIsGenerous(t *testing.T) {
+	t.Parallel()
+
 	assert.GreaterOrEqual(t, InstanceStaleAfter, 20*InstanceHeartbeatInterval,
 		"the stale-instance grace period must tolerate a long run of missed heartbeats")
 	assert.GreaterOrEqual(t, InstanceStaleAfter, 10*time.Minute,

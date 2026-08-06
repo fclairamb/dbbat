@@ -33,6 +33,19 @@ import (
 // refuses to copy a template another session is attached to.
 const testTemplateDB = "dbbat_api_template"
 
+// testMaxConns is the connection budget one test store gets.
+//
+// store.New sizes its pool for a server, not for a hundred of them: the whole
+// package now runs in parallel, every test opens its own store, and 25
+// connections each blows past PostgreSQL's max_connections long before the
+// tests do anything interesting ("sorry, too many clients already"). A test
+// store issues a handful of statements at a time, so a small pool costs it
+// nothing. testContainerMaxConns raises the server-side ceiling to match.
+const (
+	testMaxConns          = 4
+	testContainerMaxConns = "300"
+)
+
 var (
 	testContainer       *postgres.PostgresContainer
 	testDSN             string
@@ -66,6 +79,7 @@ func prepareTestContainer() {
 		postgres.WithDatabase("dbbat_test"),
 		postgres.WithUsername("test"),
 		postgres.WithPassword("test"),
+		testcontainers.WithCmdArgs("-c", "max_connections="+testContainerMaxConns),
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
@@ -83,6 +97,8 @@ func prepareTestContainer() {
 
 	// Attached to the container's default database, never to the template.
 	testAdminDB = sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(testDSN)))
+	testAdminDB.SetMaxOpenConns(testMaxConns)
+	testAdminDB.SetMaxIdleConns(testMaxConns)
 
 	if _, err := testAdminDB.ExecContext(ctx, "CREATE DATABASE "+testTemplateDB); err != nil {
 		errContainerStartup = fmt.Errorf("failed to create the template database: %w", err)
@@ -172,6 +188,9 @@ func newIsolatedStore(t *testing.T) *store.Store {
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}
+
+	dataStore.DB().DB.SetMaxOpenConns(testMaxConns)
+	dataStore.DB().DB.SetMaxIdleConns(testMaxConns)
 
 	t.Cleanup(func() {
 		dataStore.Close()

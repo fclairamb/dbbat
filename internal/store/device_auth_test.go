@@ -39,13 +39,15 @@ func TestCreateDeviceAuthRequest_UserCodeCollision(t *testing.T) {
 	assert.ErrorIs(t, err, ErrDeviceAuthUserCodeTaken)
 }
 
-func TestGetDeviceAuthByUserCode(t *testing.T) { //nolint:tparallel // subtests share parent data
+func TestGetDeviceAuthByUserCode(t *testing.T) {
 	t.Parallel()
 
 	store := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
 
 	t.Run("found", func(t *testing.T) {
+		t.Parallel()
+
 		userCode := "FOUND" + uuid.NewString()[:3]
 		_, err := store.CreateDeviceAuthRequest(ctx, "found-tool", "device-"+uuid.NewString(), userCode)
 		require.NoError(t, err)
@@ -57,18 +59,22 @@ func TestGetDeviceAuthByUserCode(t *testing.T) { //nolint:tparallel // subtests 
 	})
 
 	t.Run("not found", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := store.GetDeviceAuthByUserCode(ctx, "NOSUCH99")
 		assert.ErrorIs(t, err, ErrDeviceAuthNotFound)
 	})
 }
 
-func TestRespondToDeviceAuthByUserCode(t *testing.T) { //nolint:tparallel // subtests share parent data
+func TestRespondToDeviceAuthByUserCode(t *testing.T) {
 	t.Parallel()
 
 	store := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
 
 	t.Run("approve", func(t *testing.T) {
+		t.Parallel()
+
 		userCode := "APPRV" + uuid.NewString()[:3]
 		_, err := store.CreateDeviceAuthRequest(ctx, "approve-tool", "device-"+uuid.NewString(), userCode)
 		require.NoError(t, err)
@@ -82,6 +88,8 @@ func TestRespondToDeviceAuthByUserCode(t *testing.T) { //nolint:tparallel // sub
 	})
 
 	t.Run("deny", func(t *testing.T) {
+		t.Parallel()
+
 		userCode := "DENY" + uuid.NewString()[:4]
 		_, err := store.CreateDeviceAuthRequest(ctx, "deny-tool", "device-"+uuid.NewString(), userCode)
 		require.NoError(t, err)
@@ -95,6 +103,8 @@ func TestRespondToDeviceAuthByUserCode(t *testing.T) { //nolint:tparallel // sub
 	})
 
 	t.Run("already resolved", func(t *testing.T) {
+		t.Parallel()
+
 		userCode := "DBLE" + uuid.NewString()[:4]
 		_, err := store.CreateDeviceAuthRequest(ctx, "double-tool", "device-"+uuid.NewString(), userCode)
 		require.NoError(t, err)
@@ -106,18 +116,22 @@ func TestRespondToDeviceAuthByUserCode(t *testing.T) { //nolint:tparallel // sub
 	})
 
 	t.Run("not found", func(t *testing.T) {
+		t.Parallel()
+
 		err := store.RespondToDeviceAuthByUserCode(ctx, "GHOST999", uuid.New(), true, []byte("x"), "dbb_pref")
 		assert.ErrorIs(t, err, ErrDeviceAuthNotFound)
 	})
 }
 
-func TestPollDeviceAuthToken(t *testing.T) { //nolint:tparallel // subtests share parent data
+func TestPollDeviceAuthToken(t *testing.T) {
 	t.Parallel()
 
 	store := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
 
 	t.Run("pending stays pending", func(t *testing.T) {
+		t.Parallel()
+
 		deviceCode := "device-" + uuid.NewString()
 		_, err := store.CreateDeviceAuthRequest(ctx, "pending-tool", deviceCode, "PEND"+uuid.NewString()[:4])
 		require.NoError(t, err)
@@ -135,6 +149,8 @@ func TestPollDeviceAuthToken(t *testing.T) { //nolint:tparallel // subtests shar
 	})
 
 	t.Run("approved is delivered exactly once", func(t *testing.T) {
+		t.Parallel()
+
 		deviceCode := "device-" + uuid.NewString()
 		userCode := "ONCE" + uuid.NewString()[:4]
 		_, err := store.CreateDeviceAuthRequest(ctx, "approved-tool", deviceCode, userCode)
@@ -154,6 +170,8 @@ func TestPollDeviceAuthToken(t *testing.T) { //nolint:tparallel // subtests shar
 	})
 
 	t.Run("denied is delivered exactly once", func(t *testing.T) {
+		t.Parallel()
+
 		deviceCode := "device-" + uuid.NewString()
 		userCode := "DEN1" + uuid.NewString()[:4]
 		_, err := store.CreateDeviceAuthRequest(ctx, "denied-tool", deviceCode, userCode)
@@ -171,6 +189,8 @@ func TestPollDeviceAuthToken(t *testing.T) { //nolint:tparallel // subtests shar
 	})
 
 	t.Run("unknown device code", func(t *testing.T) {
+		t.Parallel()
+
 		_, _, err := store.PollDeviceAuthToken(ctx, "nonexistent-device-code")
 		assert.ErrorIs(t, err, ErrDeviceAuthNotFound)
 	})

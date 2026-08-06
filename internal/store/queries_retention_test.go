@@ -52,6 +52,8 @@ func countQueryRows(t *testing.T, ctx context.Context, store *Store, queryUID uu
 }
 
 func TestCleanupOldQueryRows(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -85,6 +87,8 @@ func TestCleanupOldQueryRows(t *testing.T) {
 }
 
 func TestCleanupOldQueryRowsDisabled(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -107,6 +111,8 @@ func TestCleanupOldQueryRowsDisabled(t *testing.T) {
 // their queries and rows with them), while connections still open are kept
 // whatever their age.
 func TestCleanupOldQueryRowsReapsClosedConnections(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -148,6 +154,8 @@ func TestCleanupOldQueryRowsReapsClosedConnections(t *testing.T) {
 // TestCleanupOldQueryRowsBatches proves the batched delete loop terminates and
 // removes everything when there are more matching rows than fit in one batch.
 func TestCleanupOldQueryRowsBatches(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 

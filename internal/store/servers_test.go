@@ -16,6 +16,8 @@ func testEncryptionKey() []byte {
 }
 
 func TestCreateDatabase(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 	key := testEncryptionKey()
@@ -27,6 +29,8 @@ func TestCreateDatabase(t *testing.T) {
 	}
 
 	t.Run("create database", func(t *testing.T) {
+		t.Parallel()
+
 		db := &Server{
 			Name:         "testdb",
 			Description:  "Test database",
@@ -72,6 +76,8 @@ func TestCreateDatabase(t *testing.T) {
 	})
 
 	t.Run("duplicate name", func(t *testing.T) {
+		t.Parallel()
+
 		db := &Server{
 			Name:         "duplicate",
 			Host:         "localhost",
@@ -96,11 +102,15 @@ func TestCreateDatabase(t *testing.T) {
 }
 
 func TestCreateDatabase_Protocols(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 	key := testEncryptionKey()
 
 	t.Run("postgresql default", func(t *testing.T) {
+		t.Parallel()
+
 		db := &Server{
 			Name:         "pg-db",
 			Host:         "localhost",
@@ -128,6 +138,8 @@ func TestCreateDatabase_Protocols(t *testing.T) {
 	})
 
 	t.Run("postgresql explicit", func(t *testing.T) {
+		t.Parallel()
+
 		db := &Server{
 			Name:         "pg-db-explicit",
 			Host:         "localhost",
@@ -148,6 +160,8 @@ func TestCreateDatabase_Protocols(t *testing.T) {
 	})
 
 	t.Run("oracle", func(t *testing.T) {
+		t.Parallel()
+
 		serviceName := "ORCL"
 		db := &Server{
 			Name:              "ora-db",
@@ -182,6 +196,8 @@ func TestCreateDatabase_Protocols(t *testing.T) {
 	})
 
 	t.Run("update protocol", func(t *testing.T) {
+		t.Parallel()
+
 		db := &Server{
 			Name:         "update-proto",
 			Host:         "localhost",
@@ -220,6 +236,8 @@ func TestCreateDatabase_Protocols(t *testing.T) {
 }
 
 func TestGetDatabaseByName(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 	key := testEncryptionKey()
@@ -241,6 +259,8 @@ func TestGetDatabaseByName(t *testing.T) {
 	}
 
 	t.Run("existing database", func(t *testing.T) {
+		t.Parallel()
+
 		found, err := store.GetServerByName(ctx, "findbyname")
 		if err != nil {
 			t.Fatalf("GetServerByName() error = %v", err)
@@ -258,6 +278,8 @@ func TestGetDatabaseByName(t *testing.T) {
 	})
 
 	t.Run("non-existing database", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := store.GetServerByName(ctx, "nonexistent")
 		if !errors.Is(err, ErrServerNotFound) {
 			t.Errorf("GetServerByName() error = %v, want %v", err, ErrServerNotFound)
@@ -266,6 +288,8 @@ func TestGetDatabaseByName(t *testing.T) {
 }
 
 func TestGetDatabaseByUID(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 	key := testEncryptionKey()
@@ -286,6 +310,8 @@ func TestGetDatabaseByUID(t *testing.T) {
 	}
 
 	t.Run("existing database", func(t *testing.T) {
+		t.Parallel()
+
 		found, err := store.GetServerByUID(ctx, created.UID)
 		if err != nil {
 			t.Fatalf("GetServerByUID() error = %v", err)
@@ -297,6 +323,8 @@ func TestGetDatabaseByUID(t *testing.T) {
 	})
 
 	t.Run("non-existing database", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := store.GetServerByUID(ctx, uuid.New())
 		if !errors.Is(err, ErrServerNotFound) {
 			t.Errorf("GetServerByUID() error = %v, want %v", err, ErrServerNotFound)
@@ -304,12 +332,14 @@ func TestGetDatabaseByUID(t *testing.T) {
 	})
 }
 
-func TestListDatabases(t *testing.T) {
+func TestListDatabases(t *testing.T) { //nolint:tparallel // the parent inserts rows between the subtests
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 	key := testEncryptionKey()
 
-	t.Run("empty list", func(t *testing.T) {
+	t.Run("empty list", func(t *testing.T) { //nolint:paralleltest // the parent inserts rows between the subtests
 		dbs, err := store.ListServers(ctx)
 		if err != nil {
 			t.Fatalf("ListServers() error = %v", err)
@@ -336,7 +366,7 @@ func TestListDatabases(t *testing.T) {
 		}
 	}
 
-	t.Run("with databases", func(t *testing.T) {
+	t.Run("with databases", func(t *testing.T) { //nolint:paralleltest // the parent inserts rows between the subtests
 		dbs, err := store.ListServers(ctx)
 		if err != nil {
 			t.Fatalf("ListServers() error = %v", err)
@@ -356,6 +386,8 @@ func TestListDatabases(t *testing.T) {
 }
 
 func TestUpdateDatabase(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 	key := testEncryptionKey()
@@ -377,6 +409,8 @@ func TestUpdateDatabase(t *testing.T) {
 	}
 
 	t.Run("update description", func(t *testing.T) {
+		t.Parallel()
+
 		newDesc := "New description"
 		err := store.UpdateServer(ctx, created.UID, ServerUpdate{Description: &newDesc}, key)
 		if err != nil {
@@ -390,6 +424,8 @@ func TestUpdateDatabase(t *testing.T) {
 	})
 
 	t.Run("update host and port", func(t *testing.T) {
+		t.Parallel()
+
 		newHost := "newhost"
 		newPort := 5433
 		err := store.UpdateServer(ctx, created.UID, ServerUpdate{Host: &newHost, Port: &newPort}, key)
@@ -407,6 +443,8 @@ func TestUpdateDatabase(t *testing.T) {
 	})
 
 	t.Run("update password", func(t *testing.T) {
+		t.Parallel()
+
 		newPass := "newsecretpass"
 		err := store.UpdateServer(ctx, created.UID, ServerUpdate{Password: &newPass}, key)
 		if err != nil {
@@ -424,6 +462,8 @@ func TestUpdateDatabase(t *testing.T) {
 	})
 
 	t.Run("non-existing database", func(t *testing.T) {
+		t.Parallel()
+
 		newHost := "host"
 		err := store.UpdateServer(ctx, uuid.New(), ServerUpdate{Host: &newHost}, key)
 		if !errors.Is(err, ErrServerNotFound) {
@@ -433,6 +473,8 @@ func TestUpdateDatabase(t *testing.T) {
 }
 
 func TestDeleteDatabase(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 	key := testEncryptionKey()
@@ -453,6 +495,8 @@ func TestDeleteDatabase(t *testing.T) {
 	}
 
 	t.Run("delete existing database", func(t *testing.T) {
+		t.Parallel()
+
 		err := store.DeleteServer(ctx, created.UID)
 		if err != nil {
 			t.Fatalf("DeleteServer() error = %v", err)
@@ -465,6 +509,8 @@ func TestDeleteDatabase(t *testing.T) {
 	})
 
 	t.Run("delete non-existing database", func(t *testing.T) {
+		t.Parallel()
+
 		err := store.DeleteServer(ctx, uuid.New())
 		if !errors.Is(err, ErrServerNotFound) {
 			t.Errorf("DeleteServer() error = %v, want %v", err, ErrServerNotFound)
@@ -473,6 +519,8 @@ func TestDeleteDatabase(t *testing.T) {
 }
 
 func TestDecryptPassword(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 	key := testEncryptionKey()
@@ -493,6 +541,8 @@ func TestDecryptPassword(t *testing.T) {
 	}
 
 	t.Run("decrypt password", func(t *testing.T) {
+		t.Parallel()
+
 		// Password should be empty before decryption
 		if created.Password != "" {
 			t.Errorf("db.Password = %q, want empty before DecryptPassword", created.Password)
@@ -509,6 +559,8 @@ func TestDecryptPassword(t *testing.T) {
 	})
 
 	t.Run("decrypt with wrong key", func(t *testing.T) {
+		t.Parallel()
+
 		wrongKey := []byte("wrongkey1234567890123456789012")
 		err := created.DecryptPassword(wrongKey)
 		if err == nil {
@@ -677,6 +729,8 @@ func TestListListableDatabases(t *testing.T) {
 // single-row lookup returned an arbitrary one, so the Oracle proxy could
 // resolve a connection to the wrong logical database.
 func TestListDatabasesByOracleServiceName(t *testing.T) {
+	t.Parallel()
+
 	s := setupTestStore(t)
 	ctx := context.Background()
 	key := testEncryptionKey()
@@ -703,6 +757,8 @@ func TestListDatabasesByOracleServiceName(t *testing.T) {
 	}
 
 	t.Run("returns all databases sharing the service name, ordered", func(t *testing.T) {
+		t.Parallel()
+
 		dbs, err := s.ListServersByOracleServiceName(ctx, svc)
 		if err != nil {
 			t.Fatalf("ListServersByOracleServiceName() error = %v", err)
@@ -721,6 +777,8 @@ func TestListDatabasesByOracleServiceName(t *testing.T) {
 	})
 
 	t.Run("unknown service name returns empty slice", func(t *testing.T) {
+		t.Parallel()
+
 		dbs, err := s.ListServersByOracleServiceName(ctx, "NO_SUCH_SERVICE")
 		if err != nil {
 			t.Fatalf("ListServersByOracleServiceName() error = %v", err)
@@ -736,6 +794,8 @@ func TestListDatabasesByOracleServiceName(t *testing.T) {
 // already-taken name surfaces the typed ErrServerNameConflict (mapped to a 409
 // by the API) rather than an opaque database error.
 func TestCreateServer_DuplicateName(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 	key := testEncryptionKey()

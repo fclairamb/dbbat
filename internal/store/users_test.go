@@ -9,10 +9,14 @@ import (
 )
 
 func TestCreateUser(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
 	t.Run("create connector user", func(t *testing.T) {
+		t.Parallel()
+
 		user, err := store.CreateUser(ctx, "testuser", "hashedpassword", []string{RoleConnector})
 		if err != nil {
 			t.Fatalf("CreateUser() error = %v", err)
@@ -42,6 +46,8 @@ func TestCreateUser(t *testing.T) {
 	})
 
 	t.Run("create admin user", func(t *testing.T) {
+		t.Parallel()
+
 		user, err := store.CreateUser(ctx, "adminuser", "hashedpassword", []string{RoleAdmin, RoleConnector})
 		if err != nil {
 			t.Fatalf("CreateUser() error = %v", err)
@@ -56,6 +62,8 @@ func TestCreateUser(t *testing.T) {
 	})
 
 	t.Run("create viewer user", func(t *testing.T) {
+		t.Parallel()
+
 		user, err := store.CreateUser(ctx, "vieweruser", "hashedpassword", []string{RoleViewer})
 		if err != nil {
 			t.Fatalf("CreateUser() error = %v", err)
@@ -70,6 +78,8 @@ func TestCreateUser(t *testing.T) {
 	})
 
 	t.Run("create user with default role", func(t *testing.T) {
+		t.Parallel()
+
 		user, err := store.CreateUser(ctx, "defaultuser", "hashedpassword", nil)
 		if err != nil {
 			t.Fatalf("CreateUser() error = %v", err)
@@ -81,6 +91,8 @@ func TestCreateUser(t *testing.T) {
 	})
 
 	t.Run("duplicate username", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := store.CreateUser(ctx, "duplicate", "hash1", []string{RoleConnector})
 		if err != nil {
 			t.Fatalf("CreateUser() first call error = %v", err)
@@ -94,6 +106,8 @@ func TestCreateUser(t *testing.T) {
 }
 
 func TestGetUserByUsername(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -104,6 +118,8 @@ func TestGetUserByUsername(t *testing.T) {
 	}
 
 	t.Run("existing user", func(t *testing.T) {
+		t.Parallel()
+
 		user, err := store.GetUserByUsername(ctx, "findme")
 		if err != nil {
 			t.Fatalf("GetUserByUsername() error = %v", err)
@@ -124,6 +140,8 @@ func TestGetUserByUsername(t *testing.T) {
 	})
 
 	t.Run("non-existing user", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := store.GetUserByUsername(ctx, "nonexistent")
 		if !errors.Is(err, ErrUserNotFound) {
 			t.Errorf("GetUserByUsername() error = %v, want %v", err, ErrUserNotFound)
@@ -132,6 +150,8 @@ func TestGetUserByUsername(t *testing.T) {
 }
 
 func TestGetUserByUID(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -142,6 +162,8 @@ func TestGetUserByUID(t *testing.T) {
 	}
 
 	t.Run("existing user", func(t *testing.T) {
+		t.Parallel()
+
 		user, err := store.GetUserByUID(ctx, created.UID)
 		if err != nil {
 			t.Fatalf("GetUserByUID() error = %v", err)
@@ -153,6 +175,8 @@ func TestGetUserByUID(t *testing.T) {
 	})
 
 	t.Run("non-existing user", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := store.GetUserByUID(ctx, uuid.New())
 		if !errors.Is(err, ErrUserNotFound) {
 			t.Errorf("GetUserByUID() error = %v, want %v", err, ErrUserNotFound)
@@ -160,11 +184,13 @@ func TestGetUserByUID(t *testing.T) {
 	})
 }
 
-func TestListUsers(t *testing.T) {
+func TestListUsers(t *testing.T) { //nolint:tparallel // the parent inserts rows between the subtests
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	t.Run("empty list", func(t *testing.T) {
+	t.Run("empty list", func(t *testing.T) { //nolint:paralleltest // the parent inserts rows between the subtests
 		users, err := store.ListUsers(ctx)
 		if err != nil {
 			t.Fatalf("ListUsers() error = %v", err)
@@ -184,7 +210,7 @@ func TestListUsers(t *testing.T) {
 		t.Fatalf("CreateUser() error = %v", err)
 	}
 
-	t.Run("with users", func(t *testing.T) {
+	t.Run("with users", func(t *testing.T) { //nolint:paralleltest // the parent inserts rows between the subtests
 		users, err := store.ListUsers(ctx)
 		if err != nil {
 			t.Fatalf("ListUsers() error = %v", err)
@@ -203,7 +229,9 @@ func TestListUsers(t *testing.T) {
 	})
 }
 
-func TestUpdateUser(t *testing.T) {
+func TestUpdateUser(t *testing.T) { //nolint:tparallel // the subtests update the same row in sequence
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -213,7 +241,7 @@ func TestUpdateUser(t *testing.T) {
 		t.Fatalf("CreateUser() error = %v", err)
 	}
 
-	t.Run("update password", func(t *testing.T) {
+	t.Run("update password", func(t *testing.T) { //nolint:paralleltest // the subtests update the same row in sequence
 		newHash := "newhash"
 		err := store.UpdateUser(ctx, created.UID, UserUpdate{PasswordHash: &newHash})
 		if err != nil {
@@ -229,7 +257,7 @@ func TestUpdateUser(t *testing.T) {
 		}
 	})
 
-	t.Run("update roles", func(t *testing.T) {
+	t.Run("update roles", func(t *testing.T) { //nolint:paralleltest // the subtests update the same row in sequence
 		roles := []string{RoleAdmin, RoleViewer, RoleConnector}
 		err := store.UpdateUser(ctx, created.UID, UserUpdate{Roles: roles})
 		if err != nil {
@@ -251,7 +279,7 @@ func TestUpdateUser(t *testing.T) {
 		}
 	})
 
-	t.Run("update both fields", func(t *testing.T) {
+	t.Run("update both fields", func(t *testing.T) { //nolint:paralleltest // the subtests update the same row in sequence
 		newHash := "finalhash"
 		roles := []string{RoleConnector}
 		err := store.UpdateUser(ctx, created.UID, UserUpdate{PasswordHash: &newHash, Roles: roles})
@@ -271,7 +299,7 @@ func TestUpdateUser(t *testing.T) {
 		}
 	})
 
-	t.Run("non-existing user", func(t *testing.T) {
+	t.Run("non-existing user", func(t *testing.T) { //nolint:paralleltest // the subtests update the same row in sequence
 		newHash := "hash"
 		err := store.UpdateUser(ctx, uuid.New(), UserUpdate{PasswordHash: &newHash})
 		if !errors.Is(err, ErrUserNotFound) {
@@ -281,6 +309,8 @@ func TestUpdateUser(t *testing.T) {
 }
 
 func TestDeleteUser(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -291,6 +321,8 @@ func TestDeleteUser(t *testing.T) {
 	}
 
 	t.Run("delete existing user", func(t *testing.T) {
+		t.Parallel()
+
 		err := store.DeleteUser(ctx, created.UID)
 		if err != nil {
 			t.Fatalf("DeleteUser() error = %v", err)
@@ -304,6 +336,8 @@ func TestDeleteUser(t *testing.T) {
 	})
 
 	t.Run("delete non-existing user", func(t *testing.T) {
+		t.Parallel()
+
 		err := store.DeleteUser(ctx, uuid.New())
 		if !errors.Is(err, ErrUserNotFound) {
 			t.Errorf("DeleteUser() error = %v, want %v", err, ErrUserNotFound)
@@ -352,11 +386,13 @@ func TestDeleteUserCascadesToIdentities(t *testing.T) {
 	}
 }
 
-func TestEnsureDefaultAdmin(t *testing.T) {
+func TestEnsureDefaultAdmin(t *testing.T) { //nolint:tparallel // one subtest empties the users table
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	t.Run("creates admin when no users exist", func(t *testing.T) {
+	t.Run("creates admin when no users exist", func(t *testing.T) { //nolint:paralleltest // one subtest empties the users table
 		err := store.EnsureDefaultAdmin(ctx, "adminhash")
 		if err != nil {
 			t.Fatalf("EnsureDefaultAdmin() error = %v", err)
@@ -377,7 +413,7 @@ func TestEnsureDefaultAdmin(t *testing.T) {
 		}
 	})
 
-	t.Run("does not create when users exist", func(t *testing.T) {
+	t.Run("does not create when users exist", func(t *testing.T) { //nolint:paralleltest // one subtest empties the users table
 		// Clean up and add a non-admin user
 		_, err := store.db.ExecContext(ctx, "DELETE FROM users")
 		if err != nil {
@@ -403,7 +439,11 @@ func TestEnsureDefaultAdmin(t *testing.T) {
 }
 
 func TestUserHasRole(t *testing.T) {
+	t.Parallel()
+
 	t.Run("HasRole returns correct values", func(t *testing.T) {
+		t.Parallel()
+
 		user := &User{
 			Roles: []string{RoleAdmin, RoleConnector},
 		}
@@ -420,6 +460,8 @@ func TestUserHasRole(t *testing.T) {
 	})
 
 	t.Run("helper methods work correctly", func(t *testing.T) {
+		t.Parallel()
+
 		user := &User{
 			Roles: []string{RoleAdmin, RoleViewer},
 		}

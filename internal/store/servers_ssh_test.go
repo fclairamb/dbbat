@@ -28,6 +28,8 @@ func makeSSHServer(t *testing.T, s *Store, key []byte, name, privateKey string) 
 }
 
 func TestSSHServer_SecretRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	s := setupTestStore(t)
 	ctx := context.Background()
 	key := testEncryptionKey()
@@ -60,6 +62,8 @@ func TestSSHServer_SecretRoundTrip(t *testing.T) {
 }
 
 func TestSSHServer_ExcludedFromTargets(t *testing.T) {
+	t.Parallel()
+
 	s := setupTestStore(t)
 	ctx := context.Background()
 	key := testEncryptionKey()
@@ -116,6 +120,8 @@ func TestSSHServer_ExcludedFromTargets(t *testing.T) {
 }
 
 func TestSSHServer_ViaUIDValidation(t *testing.T) {
+	t.Parallel()
+
 	s := setupTestStore(t)
 	ctx := context.Background()
 	key := testEncryptionKey()
@@ -160,6 +166,8 @@ func TestSSHServer_ViaUIDValidation(t *testing.T) {
 }
 
 func TestSSHServer_UpdateSecretsAndClearVia(t *testing.T) {
+	t.Parallel()
+
 	s := setupTestStore(t)
 	ctx := context.Background()
 	key := testEncryptionKey()

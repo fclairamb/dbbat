@@ -15,7 +15,11 @@ import (
 )
 
 func TestGenerateAPIKey(t *testing.T) {
+	t.Parallel()
+
 	t.Run("generates valid key format", func(t *testing.T) {
+		t.Parallel()
+
 		fullKey, prefix, err := generateAPIKey()
 		if err != nil {
 			t.Fatalf("generateAPIKey() error = %v", err)
@@ -43,6 +47,8 @@ func TestGenerateAPIKey(t *testing.T) {
 	})
 
 	t.Run("generates unique keys", func(t *testing.T) {
+		t.Parallel()
+
 		keys := make(map[string]bool)
 		for i := 0; i < 100; i++ {
 			fullKey, _, err := generateAPIKey()
@@ -58,6 +64,8 @@ func TestGenerateAPIKey(t *testing.T) {
 }
 
 func TestCreateAPIKey(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -68,6 +76,8 @@ func TestCreateAPIKey(t *testing.T) {
 	}
 
 	t.Run("create key without expiration", func(t *testing.T) {
+		t.Parallel()
+
 		apiKey, plainKey, err := store.CreateAPIKey(ctx, user.UID, "Test Key", nil)
 		if err != nil {
 			t.Fatalf("CreateAPIKey() error = %v", err)
@@ -107,6 +117,8 @@ func TestCreateAPIKey(t *testing.T) {
 	})
 
 	t.Run("create key with expiration", func(t *testing.T) {
+		t.Parallel()
+
 		expiresAt := time.Now().Add(24 * time.Hour)
 		apiKey, _, err := store.CreateAPIKey(ctx, user.UID, "Expiring Key", &expiresAt)
 		if err != nil {
@@ -122,6 +134,8 @@ func TestCreateAPIKey(t *testing.T) {
 }
 
 func TestAPIKeyProtocolDataRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -204,6 +218,8 @@ func TestAPIKeyProtocolDataRoundTrip(t *testing.T) {
 }
 
 func TestVerifyAPIKey(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -214,6 +230,8 @@ func TestVerifyAPIKey(t *testing.T) {
 	}
 
 	t.Run("verify valid key", func(t *testing.T) {
+		t.Parallel()
+
 		_, plainKey, err := store.CreateAPIKey(ctx, user.UID, "Valid Key", nil)
 		if err != nil {
 			t.Fatalf("CreateAPIKey() error = %v", err)
@@ -230,6 +248,8 @@ func TestVerifyAPIKey(t *testing.T) {
 	})
 
 	t.Run("verify invalid key", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := store.VerifyAPIKey(ctx, "dbb_invalidkey12345678901234567890")
 		if !errors.Is(err, ErrAPIKeyNotFound) {
 			t.Errorf("VerifyAPIKey() error = %v, want %v", err, ErrAPIKeyNotFound)
@@ -237,6 +257,8 @@ func TestVerifyAPIKey(t *testing.T) {
 	})
 
 	t.Run("verify wrong key value", func(t *testing.T) {
+		t.Parallel()
+
 		created, _, err := store.CreateAPIKey(ctx, user.UID, "Wrong Key", nil)
 		if err != nil {
 			t.Fatalf("CreateAPIKey() error = %v", err)
@@ -251,6 +273,8 @@ func TestVerifyAPIKey(t *testing.T) {
 	})
 
 	t.Run("verify expired key", func(t *testing.T) {
+		t.Parallel()
+
 		expiresAt := time.Now().Add(-1 * time.Hour) // Expired 1 hour ago
 		_, plainKey, err := store.CreateAPIKey(ctx, user.UID, "Expired Key", &expiresAt)
 		if err != nil {
@@ -264,6 +288,8 @@ func TestVerifyAPIKey(t *testing.T) {
 	})
 
 	t.Run("verify revoked key", func(t *testing.T) {
+		t.Parallel()
+
 		created, plainKey, err := store.CreateAPIKey(ctx, user.UID, "Revoked Key", nil)
 		if err != nil {
 			t.Fatalf("CreateAPIKey() error = %v", err)
@@ -282,6 +308,8 @@ func TestVerifyAPIKey(t *testing.T) {
 	})
 
 	t.Run("verify key too short", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := store.VerifyAPIKey(ctx, "dbb_sh")
 		if !errors.Is(err, ErrAPIKeyNotFound) {
 			t.Errorf("VerifyAPIKey() error = %v, want %v", err, ErrAPIKeyNotFound)
@@ -289,7 +317,9 @@ func TestVerifyAPIKey(t *testing.T) {
 	})
 }
 
-func TestListAPIKeys(t *testing.T) {
+func TestListAPIKeys(t *testing.T) { //nolint:tparallel // subtests revoke a key the siblings count
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -319,7 +349,7 @@ func TestListAPIKeys(t *testing.T) {
 		t.Fatalf("CreateAPIKey() error = %v", err)
 	}
 
-	t.Run("list all keys", func(t *testing.T) {
+	t.Run("list all keys", func(t *testing.T) { //nolint:paralleltest // subtests revoke a key the siblings count
 		keys, err := store.ListAPIKeys(ctx, APIKeyFilter{})
 		if err != nil {
 			t.Fatalf("ListAPIKeys() error = %v", err)
@@ -329,7 +359,7 @@ func TestListAPIKeys(t *testing.T) {
 		}
 	})
 
-	t.Run("list keys by user", func(t *testing.T) {
+	t.Run("list keys by user", func(t *testing.T) { //nolint:paralleltest // subtests revoke a key the siblings count
 		keys, err := store.ListAPIKeys(ctx, APIKeyFilter{UserID: &user1.UID})
 		if err != nil {
 			t.Fatalf("ListAPIKeys() error = %v", err)
@@ -344,7 +374,7 @@ func TestListAPIKeys(t *testing.T) {
 		}
 	})
 
-	t.Run("list excludes revoked keys by default", func(t *testing.T) {
+	t.Run("list excludes revoked keys by default", func(t *testing.T) { //nolint:paralleltest // subtests revoke a key the siblings count
 		// Revoke one of user1's keys
 		keys, err := store.ListAPIKeys(ctx, APIKeyFilter{UserID: &user1.UID})
 		if err != nil {
@@ -366,7 +396,7 @@ func TestListAPIKeys(t *testing.T) {
 		}
 	})
 
-	t.Run("list includes revoked keys when IncludeAll is true", func(t *testing.T) {
+	t.Run("list includes revoked keys when IncludeAll is true", func(t *testing.T) { //nolint:paralleltest // subtests revoke a key the siblings count
 		keys, err := store.ListAPIKeys(ctx, APIKeyFilter{UserID: &user1.UID, IncludeAll: true})
 		if err != nil {
 			t.Fatalf("ListAPIKeys() error = %v", err)
@@ -378,6 +408,8 @@ func TestListAPIKeys(t *testing.T) {
 }
 
 func TestGetAPIKeyByID(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -392,6 +424,8 @@ func TestGetAPIKeyByID(t *testing.T) {
 	}
 
 	t.Run("existing key", func(t *testing.T) {
+		t.Parallel()
+
 		apiKey, err := store.GetAPIKeyByID(ctx, created.ID)
 		if err != nil {
 			t.Fatalf("GetAPIKeyByID() error = %v", err)
@@ -402,6 +436,8 @@ func TestGetAPIKeyByID(t *testing.T) {
 	})
 
 	t.Run("non-existing key", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := store.GetAPIKeyByID(ctx, uuid.New())
 		if !errors.Is(err, ErrAPIKeyNotFound) {
 			t.Errorf("GetAPIKeyByID() error = %v, want %v", err, ErrAPIKeyNotFound)
@@ -410,6 +446,8 @@ func TestGetAPIKeyByID(t *testing.T) {
 }
 
 func TestRevokeAPIKey(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -419,6 +457,8 @@ func TestRevokeAPIKey(t *testing.T) {
 	}
 
 	t.Run("revoke existing key", func(t *testing.T) {
+		t.Parallel()
+
 		created, _, err := store.CreateAPIKey(ctx, user.UID, "Revoke Key", nil)
 		if err != nil {
 			t.Fatalf("CreateAPIKey() error = %v", err)
@@ -443,6 +483,8 @@ func TestRevokeAPIKey(t *testing.T) {
 	})
 
 	t.Run("revoke already revoked key", func(t *testing.T) {
+		t.Parallel()
+
 		created, _, err := store.CreateAPIKey(ctx, user.UID, "Double Revoke", nil)
 		if err != nil {
 			t.Fatalf("CreateAPIKey() error = %v", err)
@@ -461,6 +503,8 @@ func TestRevokeAPIKey(t *testing.T) {
 	})
 
 	t.Run("revoke non-existing key", func(t *testing.T) {
+		t.Parallel()
+
 		err := store.RevokeAPIKey(ctx, uuid.New(), user.UID)
 		if !errors.Is(err, ErrAPIKeyNotFound) {
 			t.Errorf("RevokeAPIKey() error = %v, want %v", err, ErrAPIKeyNotFound)
@@ -469,6 +513,8 @@ func TestRevokeAPIKey(t *testing.T) {
 }
 
 func TestIncrementAPIKeyUsage(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -483,6 +529,8 @@ func TestIncrementAPIKeyUsage(t *testing.T) {
 	}
 
 	t.Run("increment usage", func(t *testing.T) {
+		t.Parallel()
+
 		// Initial state
 		apiKey, err := store.GetAPIKeyByID(ctx, created.ID)
 		if err != nil {
@@ -530,7 +578,11 @@ func TestIncrementAPIKeyUsage(t *testing.T) {
 }
 
 func TestAPIKeyIsValid(t *testing.T) {
+	t.Parallel()
+
 	t.Run("valid key", func(t *testing.T) {
+		t.Parallel()
+
 		key := &APIKey{
 			ExpiresAt: nil,
 			RevokedAt: nil,
@@ -541,6 +593,8 @@ func TestAPIKeyIsValid(t *testing.T) {
 	})
 
 	t.Run("expired key", func(t *testing.T) {
+		t.Parallel()
+
 		expired := time.Now().Add(-1 * time.Hour)
 		key := &APIKey{
 			ExpiresAt: &expired,
@@ -552,6 +606,8 @@ func TestAPIKeyIsValid(t *testing.T) {
 	})
 
 	t.Run("revoked key", func(t *testing.T) {
+		t.Parallel()
+
 		revoked := time.Now()
 		key := &APIKey{
 			ExpiresAt: nil,
@@ -563,6 +619,8 @@ func TestAPIKeyIsValid(t *testing.T) {
 	})
 
 	t.Run("future expiration", func(t *testing.T) {
+		t.Parallel()
+
 		future := time.Now().Add(1 * time.Hour)
 		key := &APIKey{
 			ExpiresAt: &future,
@@ -580,6 +638,8 @@ func TestAPIKeyIsValid(t *testing.T) {
 // verifier bytes equal a fresh derivation from plainKey + shared salt — so
 // the Oracle proxy can keep all of a user's keys as login candidates.
 func TestCreateAPIKey_UserSharedSalts(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -670,6 +730,8 @@ func TestCreateAPIKey_UserSharedSalts(t *testing.T) {
 // plaintext + those salts. Also asserts the operation is idempotent and that
 // upgrading with no encryption key is a no-op.
 func TestUpgradeAPIKeyO5LogonVerifiers(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -791,6 +853,8 @@ func TestUpgradeAPIKeyO5LogonVerifiers(t *testing.T) {
 // TestEnsureUserOracleSalts_Idempotent verifies lazy generation is stable:
 // repeated calls return the same salts, and salts survive a user re-read.
 func TestEnsureUserOracleSalts_Idempotent(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
