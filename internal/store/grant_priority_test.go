@@ -38,11 +38,13 @@ func TestAutoPriority(t *testing.T) {
 		})
 	}
 
-	// The tiers must stay strictly ordered — the whole point is that a more
+	// The tiers must stay strictly descending — the whole point is that a more
 	// capable grant beats a less capable one.
-	if !(PriorityFullWrite > PriorityRestrictedWrite && PriorityRestrictedWrite > PriorityReadOnly) {
-		t.Fatalf("tiers are not strictly ordered: %d / %d / %d",
-			PriorityFullWrite, PriorityRestrictedWrite, PriorityReadOnly)
+	tiers := []int16{PriorityFullWrite, PriorityRestrictedWrite, PriorityReadOnly}
+	for i := 1; i < len(tiers); i++ {
+		if tiers[i-1] <= tiers[i] {
+			t.Fatalf("tiers are not strictly descending: %v", tiers)
+		}
 	}
 }
 
@@ -260,6 +262,8 @@ func TestCreateGrant_AutoPriority(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			created, err := s.CreateGrant(ctx, &Grant{
 				UserID:     user.UID,
 				DatabaseID: database.UID,

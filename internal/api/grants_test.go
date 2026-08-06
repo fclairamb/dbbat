@@ -24,6 +24,18 @@ func grantsRouter(server *Server) *gin.Engine {
 	return router
 }
 
+// priorityOf pulls the priority out of a decoded JSON body. encoding/json
+// turns every number into a float64; converting back to int keeps the
+// assertions exact rather than approximate.
+func priorityOf(t *testing.T, resp map[string]any) int {
+	t.Helper()
+
+	raw, ok := resp["priority"].(float64)
+	require.True(t, ok, "response carries no numeric priority: %v", resp)
+
+	return int(raw)
+}
+
 // TestCreateGrant_Priority covers the API contract for the priority field:
 // omitted means "derive it from the controls", supplied means "use this", and
 // either way the response echoes the resolved value so a caller never has to
@@ -77,22 +89,22 @@ func TestCreateGrant_Priority(t *testing.T) {
 		cases := []struct {
 			name     string
 			controls []string
-			want     float64
+			want     int
 		}{
-			{"full write", []string{}, float64(store.PriorityFullWrite)},
-			{"restricted write", []string{store.ControlBlockDDL}, float64(store.PriorityRestrictedWrite)},
-			{"read only", []string{store.ControlReadOnly}, float64(store.PriorityReadOnly)},
+			{"full write", []string{}, int(store.PriorityFullWrite)},
+			{"restricted write", []string{store.ControlBlockDDL}, int(store.PriorityRestrictedWrite)},
+			{"read only", []string{store.ControlReadOnly}, int(store.PriorityReadOnly)},
 			{
 				"read only beats a companion control",
 				[]string{store.ControlBlockCopy, store.ControlReadOnly},
-				float64(store.PriorityReadOnly),
+				int(store.PriorityReadOnly),
 			},
 		}
 
 		for _, tc := range cases {
 			w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grants", adminToken, body(tc.controls, nil))
 			require.Equal(t, http.StatusOK, w.Code, "%s: %s", tc.name, w.Body.String())
-			require.Equal(t, tc.want, resp["priority"], "%s", tc.name)
+			require.Equal(t, tc.want, priorityOf(t, resp), "%s", tc.name)
 		}
 	})
 
@@ -103,7 +115,7 @@ func TestCreateGrant_Priority(t *testing.T) {
 		w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grants", adminToken,
 			body([]string{}, &explicit))
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-		require.Equal(t, float64(explicit), resp["priority"])
+		require.Equal(t, explicit, priorityOf(t, resp))
 
 		// And it survives a re-read, so the override was persisted rather than
 		// only reflected in the create response.
@@ -112,7 +124,7 @@ func TestCreateGrant_Priority(t *testing.T) {
 
 		w, fetched := doJSON(t, router, http.MethodGet, "/api/v1/grants/"+uid, adminToken, nil)
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-		require.Equal(t, float64(explicit), fetched["priority"])
+		require.Equal(t, explicit, priorityOf(t, fetched))
 	})
 
 	t.Run("an out-of-range priority is rejected", func(t *testing.T) {
