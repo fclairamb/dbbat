@@ -269,6 +269,14 @@ query parameter: a token in the URL leaks into access logs, proxy logs and
 resolution events additionally carry `resolved_by` (`{uid, username,
 display_name}`), `resolved_at` and `resolution_reason`.
 
+A released statement then produces a *third* event — the `query` event
+published once it has actually run — and that one **repeats the hold's
+outcome**, resolver included. It has to: it is the last word on that query uid,
+and a client folding events by uid would otherwise end up with a row that has
+forgotten the statement was ever gated. The proxy's in-memory record knows
+nothing about approval (the row was written by the gate, not by the session),
+so the gate remembers the hold it just resolved and the publisher stamps it on.
+
 ### Topics and authorization
 
 | Topic | Payload | Who may subscribe | What they then receive |
