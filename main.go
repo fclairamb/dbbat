@@ -917,6 +917,41 @@ func backdate(
 	return nil
 }
 
+// seedDemoUser creates one demo user and dates the row.
+//
+// The password is the username — that is the documented demo convention — and
+// it is written a second time through UpdateUser so the row counts as
+// "password already changed" and the account can log in without the
+// first-login flow.
+func seedDemoUser(
+	ctx context.Context,
+	dataStore *store.Store,
+	username string,
+	roles []string,
+	createdAt time.Time,
+) (*store.User, error) {
+	passwordHash, err := crypto.HashPassword(username)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash %s password: %w", username, err)
+	}
+
+	user, err := dataStore.CreateUser(ctx, username, passwordHash, roles)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create %s user: %w", username, err)
+	}
+
+	if err := dataStore.UpdateUser(ctx, user.UID, store.UserUpdate{PasswordHash: &passwordHash}); err != nil {
+		return nil, fmt.Errorf("failed to mark %s password as changed: %w", username, err)
+	}
+
+	if err := backdate(ctx, dataStore, (*store.User)(nil), user.UID, createdAt,
+		"created_at", "updated_at", "password_changed_at"); err != nil {
+		return nil, err
+	}
+
+	return user, nil
+}
+
 func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.Config, logger *slog.Logger) error {
 	logger.InfoContext(ctx, "Demo mode: provisioning demo data...")
 
@@ -955,53 +990,23 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	// The admin row was inserted by EnsureDefaultAdmin at process start; date it
 	// like the rest of the story — the account that set the proxy up.
 	if err := backdate(ctx, dataStore, (*store.User)(nil), adminUser.UID,
-		epoch.AddDate(0, 0, -30), "created_at", "updated_at"); err != nil {
+		epoch.AddDate(0, 0, -30), "created_at", "updated_at", "password_changed_at"); err != nil {
 		return err
 	}
 	logger.InfoContext(ctx, "Marked admin password as changed (username: admin, password: admin)")
 
 	// 2. Create viewer user (viewer role only)
-	viewerPasswordHash, err := crypto.HashPassword("viewer")
+	viewerUser, err := seedDemoUser(ctx, dataStore,
+		"viewer", []string{store.RoleViewer}, epoch.AddDate(0, 0, -28))
 	if err != nil {
-		return fmt.Errorf("failed to hash viewer password: %w", err)
-	}
-
-	viewerUser, err := dataStore.CreateUser(ctx, "viewer", viewerPasswordHash, []string{store.RoleViewer})
-	if err != nil {
-		return fmt.Errorf("failed to create viewer user: %w", err)
-	}
-	// Mark password as changed so the user can log in immediately
-	err = dataStore.UpdateUser(ctx, viewerUser.UID, store.UserUpdate{
-		PasswordHash: &viewerPasswordHash,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to mark viewer password as changed: %w", err)
-	}
-	if err := backdate(ctx, dataStore, (*store.User)(nil), viewerUser.UID,
-		epoch.AddDate(0, 0, -28), "created_at", "updated_at"); err != nil {
 		return err
 	}
 	logger.InfoContext(ctx, "Created viewer user (username: viewer, password: viewer)")
 
 	// 3. Create connector user (connector role only)
-	connectorPasswordHash, err := crypto.HashPassword("connector")
+	connectorUser, err := seedDemoUser(ctx, dataStore,
+		"connector", []string{store.RoleConnector}, epoch.AddDate(0, 0, -28).Add(3*time.Hour))
 	if err != nil {
-		return fmt.Errorf("failed to hash connector password: %w", err)
-	}
-
-	connectorUser, err := dataStore.CreateUser(ctx, "connector", connectorPasswordHash, []string{store.RoleConnector})
-	if err != nil {
-		return fmt.Errorf("failed to create connector user: %w", err)
-	}
-	// Mark password as changed so the user can log in immediately
-	err = dataStore.UpdateUser(ctx, connectorUser.UID, store.UserUpdate{
-		PasswordHash: &connectorPasswordHash,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to mark connector password as changed: %w", err)
-	}
-	if err := backdate(ctx, dataStore, (*store.User)(nil), connectorUser.UID,
-		epoch.AddDate(0, 0, -28).Add(3*time.Hour), "created_at", "updated_at"); err != nil {
 		return err
 	}
 	logger.InfoContext(ctx, "Created connector user (username: connector, password: connector)")
@@ -1027,40 +1032,29 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	}
 	logger.InfoContext(ctx, "Created demo_db database configuration")
 
-	// 5. Create write grant for connector user (empty controls = full write access)
-	connectorGrantedAt := epoch.AddDate(0, 0, -26)
-	connectorGrant, err := dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:     connectorUser.UID,
-		DatabaseID: demoDB.UID,
-		Controls:   []string{}, // Empty = full write access
-		GrantedBy:  adminUser.UID,
-		StartsAt:   connectorGrantedAt,
-		ExpiresAt:  demoGrantExpiry(epoch),
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create write grant for connector user: %w", err)
-	}
-	if err := backdate(ctx, dataStore, (*store.AccessGrant)(nil), connectorGrant.UID,
-		connectorGrantedAt, "created_at"); err != nil {
+	// 5. Grant the connector full write access and the viewer read-only, both
+	// dated from the epoch.
+	if err := seedDemoGrant(ctx, dataStore, demoGrantSeed{
+		userID:     connectorUser.UID,
+		databaseID: demoDB.UID,
+		grantedBy:  adminUser.UID,
+		controls:   []string{}, // Empty = full write access
+		grantedAt:  epoch.AddDate(0, 0, -26),
+		expiresAt:  demoGrantExpiry(epoch),
+	}); err != nil {
 		return err
 	}
 	logger.InfoContext(ctx, "Created write grant for connector user on demo_db")
 
 	// 6. Create read-only grant for viewer user
-	viewerGrantedAt := epoch.AddDate(0, 0, -25)
-	viewerGrant, err := dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:     viewerUser.UID,
-		DatabaseID: demoDB.UID,
-		Controls:   []string{store.ControlReadOnly}, // Read-only access
-		GrantedBy:  adminUser.UID,
-		StartsAt:   viewerGrantedAt,
-		ExpiresAt:  demoGrantExpiry(epoch),
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create read-only grant for viewer user: %w", err)
-	}
-	if err := backdate(ctx, dataStore, (*store.AccessGrant)(nil), viewerGrant.UID,
-		viewerGrantedAt, "created_at"); err != nil {
+	if err := seedDemoGrant(ctx, dataStore, demoGrantSeed{
+		userID:     viewerUser.UID,
+		databaseID: demoDB.UID,
+		grantedBy:  adminUser.UID,
+		controls:   []string{store.ControlReadOnly},
+		grantedAt:  epoch.AddDate(0, 0, -25),
+		expiresAt:  demoGrantExpiry(epoch),
+	}); err != nil {
 		return err
 	}
 	logger.InfoContext(ctx, "Created read-only grant for viewer user on demo_db")
@@ -1078,6 +1072,35 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 
 	logger.InfoContext(ctx, "Demo data provisioning complete")
 	return nil
+}
+
+// demoGrantSeed describes one seeded demo grant.
+type demoGrantSeed struct {
+	userID     uuid.UUID
+	databaseID uuid.UUID
+	grantedBy  uuid.UUID
+	controls   []string
+	grantedAt  time.Time
+	expiresAt  time.Time
+}
+
+// seedDemoGrant creates a grant whose whole timeline — granted, starts,
+// expires — is absolute. CreateGrant stamps created_at with time.Now(), so it
+// is rewritten right after the insert.
+func seedDemoGrant(ctx context.Context, dataStore *store.Store, seed demoGrantSeed) error {
+	grant, err := dataStore.CreateGrant(ctx, &store.Grant{
+		UserID:     seed.userID,
+		DatabaseID: seed.databaseID,
+		Controls:   seed.controls,
+		GrantedBy:  seed.grantedBy,
+		StartsAt:   seed.grantedAt,
+		ExpiresAt:  seed.expiresAt,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create demo grant: %w", err)
+	}
+
+	return backdate(ctx, dataStore, (*store.AccessGrant)(nil), grant.UID, seed.grantedAt, "created_at")
 }
 
 // demoSession is one seeded connection: who opened it, when (as an offset
@@ -1152,6 +1175,10 @@ var demoSessions = []demoSession{
 	},
 }
 
+// errUnknownDemoUser guards demoSessions against naming a user the seeding
+// never created.
+var errUnknownDemoUser = errors.New("demo history references an unknown user")
+
 // seedDemoHistory records demoSessions as closed connections carrying their
 // statements, all dated from the epoch.
 //
@@ -1168,7 +1195,7 @@ func seedDemoHistory(
 	for _, session := range demoSessions {
 		userID, ok := users[session.user]
 		if !ok {
-			return fmt.Errorf("demo history references unknown user %q", session.user)
+			return fmt.Errorf("%w: %q", errUnknownDemoUser, session.user)
 		}
 
 		conn, err := dataStore.CreateConnection(ctx, userID, databaseID, session.sourceIP)
