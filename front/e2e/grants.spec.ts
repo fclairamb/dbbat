@@ -356,3 +356,102 @@ test.describe("Grant Quota Management", () => {
     });
   });
 });
+
+test.describe("Grant Priority", () => {
+  test("priority field tracks the selected controls until edited", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("grants");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    await authenticatedPage
+      .getByRole("button", { name: /create grant/i })
+      .click();
+    await authenticatedPage.waitForSelector('[role="dialog"]');
+
+    const priorityInput = authenticatedPage.getByTestId("grant-priority-input");
+    const autoHint = authenticatedPage.getByTestId("grant-priority-auto-hint");
+
+    // No controls selected: full write access, the top tier.
+    await expect(priorityInput).toHaveValue("100");
+    await expect(autoHint).toHaveText("auto: 100");
+
+    // A write-blocking control drops it to the middle tier.
+    await authenticatedPage.getByLabel(/block ddl/i).check();
+    await expect(priorityInput).toHaveValue("50");
+    await expect(autoHint).toHaveText("auto: 50");
+
+    // read_only is the most restrictive control and takes the bottom tier
+    // whatever else is selected.
+    await authenticatedPage.getByLabel(/read only/i).check();
+    await expect(priorityInput).toHaveValue("10");
+    await expect(autoHint).toHaveText("auto: 10");
+
+    // Unticking it goes back up — the field is still linked.
+    await authenticatedPage.getByLabel(/read only/i).uncheck();
+    await expect(priorityInput).toHaveValue("50");
+
+    await authenticatedPage.screenshot({
+      path: "test-results/screenshots/grants-priority-auto.png",
+    });
+  });
+
+  test("a manually edited priority stops following the controls", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("grants");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    await authenticatedPage
+      .getByRole("button", { name: /create grant/i })
+      .click();
+    await authenticatedPage.waitForSelector('[role="dialog"]');
+
+    const priorityInput = authenticatedPage.getByTestId("grant-priority-input");
+    await priorityInput.fill("75");
+
+    // Toggling controls must no longer move the field: the admin owns it now.
+    await authenticatedPage.getByLabel(/read only/i).check();
+    await expect(priorityInput).toHaveValue("75");
+
+    // ...but the hint still shows what the controls would have produced, so
+    // the override stays a visible, conscious act.
+    await expect(
+      authenticatedPage.getByTestId("grant-priority-auto-hint")
+    ).toHaveText("auto: 10");
+
+    await authenticatedPage.screenshot({
+      path: "test-results/screenshots/grants-priority-override.png",
+    });
+
+    // Reset re-links the field to the controls.
+    await authenticatedPage.getByTestId("grant-priority-reset").click();
+    await expect(priorityInput).toHaveValue("10");
+
+    await authenticatedPage.getByLabel(/read only/i).uncheck();
+    await expect(priorityInput).toHaveValue("100");
+  });
+
+  test("grant list shows the priority of each grant", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("grants");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    // Test mode seeds grants with different shapes, so the column must be
+    // populated for every row.
+    const priorities = authenticatedPage.locator(
+      '[data-testid^="grant-priority-"]'
+    );
+    expect(await priorities.count()).toBeGreaterThan(0);
+
+    for (const value of await priorities.allTextContents()) {
+      expect(value.trim()).toMatch(/^-?\d+$/);
+    }
+
+    await authenticatedPage.screenshot({
+      path: "test-results/screenshots/grants-list-priority.png",
+      fullPage: true,
+    });
+  });
+});
