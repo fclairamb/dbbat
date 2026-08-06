@@ -51,6 +51,7 @@ func (s *Store) CreateGrantDefinition(ctx context.Context, def *GrantDefinition)
 		Controls:            controls,
 		MaxQueryCounts:      def.MaxQueryCounts,
 		MaxBytesTransferred: def.MaxBytesTransferred,
+		Priority:            def.Priority,
 		AutoApprove:         def.AutoApprove,
 		GroupUIDs:           groupUIDs,
 		DatabaseUIDs:        databaseUIDs,
@@ -168,7 +169,7 @@ func (s *Store) UpdateGrantDefinition(ctx context.Context, def *GrantDefinition)
 	res, err := s.db.NewUpdate().
 		Model(def).
 		Column("name", "slug", "description", "duration_seconds", "controls", "max_query_counts",
-			"max_bytes_transferred", "auto_approve", "group_uids", "database_uids",
+			"max_bytes_transferred", "priority", "auto_approve", "group_uids", "database_uids",
 			"approval_patterns", "approver_group_uids").
 		Where("uid = ?", def.UID).
 		Exec(ctx)

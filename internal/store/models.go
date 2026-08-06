@@ -482,6 +482,14 @@ type AccessGrant struct {
 	MaxBytesTransferred *int64     `bun:"max_bytes_transferred" json:"max_bytes_transferred"`
 	CreatedAt           time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 
+	// Priority ranks this grant against the other active grants the same user
+	// holds on the same database: the highest priority wins at auth time (ties
+	// broken by latest expiry, then newest). Auto-calculated from Controls by
+	// AutoPriority unless an admin set it explicitly, which is why it is a
+	// plain int16 rather than a pointer — by the time a grant row exists the
+	// value is always resolved.
+	Priority int16 `bun:"priority,notnull,default:0" json:"priority"`
+
 	// ApprovalPatterns are RE2 patterns that suspend a matching statement
 	// until an approver resolves it. Mirrored from the grant definition at
 	// materialization time — exactly like Controls / MaxQueryCounts — because
@@ -548,6 +556,11 @@ type GrantDefinition struct {
 	Controls            []string `bun:"controls,array,notnull,default:'{}'" json:"controls"`
 	MaxQueryCounts      *int64   `bun:"max_query_counts" json:"max_query_counts"`
 	MaxBytesTransferred *int64   `bun:"max_bytes_transferred" json:"max_bytes_transferred"`
+	// Priority, when non-nil, is copied verbatim onto every grant
+	// materialized from this definition, pinning it above or below the tier
+	// its controls would otherwise earn. nil — the default — means "compute
+	// it from the controls at materialization time" (see AutoPriority).
+	Priority *int16 `bun:"priority" json:"priority"`
 	// AutoApprove, when set, makes grant requests against this definition
 	// bypass the pending/admin-approval step: the request is approved and
 	// the grant materialized instantly at request time.

@@ -10,6 +10,58 @@ import (
 	"github.com/google/uuid"
 )
 
+// Auto-calculated grant priority tiers. A user holding several active grants
+// on one database gets the highest-priority one at auth time, so the default
+// ranking has to encode "the grant that lets me do the most wins" — otherwise
+// creation order decides, which nobody controls deliberately.
+//
+// The gaps between tiers are the point: an operator can slot a manual override
+// between two tiers (say 75) without renumbering anything.
+const (
+	// PriorityFullWrite ranks a writable grant carrying no controls at all.
+	PriorityFullWrite int16 = 100
+	// PriorityRestrictedWrite ranks a still-writable grant that carries
+	// controls (block_copy / block_ddl).
+	PriorityRestrictedWrite int16 = 50
+	// PriorityReadOnly ranks a read_only grant, whatever else it carries —
+	// read_only is the most restrictive control, so it loses to anything
+	// writable.
+	PriorityReadOnly int16 = 10
+)
+
+// AutoPriority computes the default selection priority for a grant with the
+// given controls. It is the single source of truth for the tiering: the API,
+// the definition-materialization path and the SQL backfill in
+// 20260806000000_grants_priority.up.sql all mirror this exact formula.
+func AutoPriority(controls []string) int16 {
+	for _, c := range controls {
+		if c == ControlReadOnly {
+			return PriorityReadOnly
+		}
+	}
+
+	if len(controls) == 0 {
+		return PriorityFullWrite
+	}
+
+	return PriorityRestrictedWrite
+}
+
+// ResolvePriority returns the priority a grant carrying these controls should
+// be stored with. Zero — the column default, the Go zero value and the value a
+// caller that never heard of priorities leaves behind — reads as "unset" and
+// falls back to AutoPriority. Every creation path funnels through here, so no
+// path can silently insert a grant ranked below every tier. An operator who
+// genuinely wants a grant that always loses sets 1 (or a negative value;
+// smallint goes down to -32768).
+func ResolvePriority(explicit int16, controls []string) int16 {
+	if explicit != 0 {
+		return explicit
+	}
+
+	return AutoPriority(controls)
+}
+
 // BuildGrantFromDefinition assembles an AccessGrant from a GrantDefinition
 // + the requesting user/database, anchoring the time window to `now`. Used
 // by both the grant-request approval path and any future admin shortcut
@@ -18,6 +70,13 @@ func BuildGrantFromDefinition(def *GrantDefinition, userID, databaseID, grantedB
 	controls := append([]string(nil), def.Controls...)
 	if controls == nil {
 		controls = []string{}
+	}
+
+	// A definition's priority is optional: nil means "whatever the controls
+	// earn", which is what every definition predating the column wants.
+	var explicitPriority int16
+	if def.Priority != nil {
+		explicitPriority = *def.Priority
 	}
 
 	return &Grant{
@@ -29,6 +88,7 @@ func BuildGrantFromDefinition(def *GrantDefinition, userID, databaseID, grantedB
 		ExpiresAt:           now.Add(time.Duration(def.DurationSeconds) * time.Second),
 		MaxQueryCounts:      def.MaxQueryCounts,
 		MaxBytesTransferred: def.MaxBytesTransferred,
+		Priority:            ResolvePriority(explicitPriority, controls),
 		// Mirrored, not joined: the proxy session holds only a *Grant, and
 		// resolving patterns off the definition at query time would mean a
 		// join on the hot path plus zero coverage for direct admin grants.
@@ -73,6 +133,7 @@ func (s *Store) CreateGrant(ctx context.Context, grant *Grant) (*Grant, error) {
 		MaxBytesTransferred: grant.MaxBytesTransferred,
 		ApprovalPatterns:    copyStrings(grant.ApprovalPatterns),
 		ApproverGroupUIDs:   copyUUIDs(grant.ApproverGroupUIDs),
+		Priority:            ResolvePriority(grant.Priority, controls),
 		CreatedAt:           time.Now(),
 	}
 
@@ -99,7 +160,12 @@ func (s *Store) GetActiveGrant(ctx context.Context, userID, databaseID uuid.UUID
 		Where("revoked_at IS NULL").
 		Where("starts_at <= NOW()").
 		Where("expires_at > NOW()").
-		Order("created_at DESC").
+		// Highest priority wins. Ties go to the grant that lasts longest (a
+		// session is pinned to the grant it was admitted under for its whole
+		// life, so the longer window is the more useful pick), then to the
+		// newest — which is the pre-priority behavior, preserved as the last
+		// tie-break so nothing changes for users holding a single grant.
+		Order("priority DESC", "expires_at DESC", "created_at DESC").
 		Limit(1).
 		Scan(ctx)
 	if err != nil {
@@ -154,7 +220,10 @@ func (s *Store) ListGrants(ctx context.Context, filter GrantFilter) ([]Grant, er
 			Where("expires_at > NOW()")
 	}
 
-	err := q.Order("created_at DESC").Scan(ctx)
+	// Same ordering as GetActiveGrant, so the UI lists grants in the order the
+	// proxy would pick them: whichever active grant is on top of a given
+	// (user, database) group is the one a new session gets.
+	err := q.Order("priority DESC", "expires_at DESC", "created_at DESC").Scan(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list grants: %w", err)
 	}
