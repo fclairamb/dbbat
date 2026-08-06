@@ -144,6 +144,37 @@ func TestHandshakeConnRejectsNonPreloginPackets(t *testing.T) {
 	require.ErrorIs(t, err, ErrHandshakeWrongPacketType)
 }
 
+// TestHandshakeConnDeactivateReportsUnconsumedBytes pins the invariant that
+// makes the framed -> passthrough switch safe: when the handshake ends there
+// must be nothing left in the inbound PRELOGIN message. Bytes still sitting
+// there belong to the TLS session and pass-through mode would never see them,
+// so losing them silently would corrupt the stream somewhere unrelated.
+func TestHandshakeConnDeactivateReportsUnconsumedBytes(t *testing.T) {
+	t.Parallel()
+
+	inbound := synthPacket(packetTypePrelogin, statusEOM, 1, []byte("flight-plus-leftovers"))
+
+	rw := struct {
+		io.Reader
+		io.Writer
+	}{Reader: bytes.NewReader(inbound), Writer: io.Discard}
+
+	conn := newHandshakeConn(pipeConn{rw}, newPacketRW(rw))
+
+	// Consume only part of the message, as an over-packed peer would leave it.
+	n, err := conn.Read(make([]byte, 6))
+	require.NoError(t, err)
+	require.Equal(t, 6, n)
+
+	err = conn.deactivate()
+	require.ErrorIs(t, err, ErrHandshakeBytesUnconsumed)
+	assert.Contains(t, err.Error(), "15 bytes")
+
+	// The state change still happened: the adapter is no longer framing, so a
+	// caller that chooses to continue is not left half-switched.
+	assert.False(t, conn.isFramed())
+}
+
 func TestHandshakeConnPassesThroughAfterDeactivate(t *testing.T) {
 	t.Parallel()
 

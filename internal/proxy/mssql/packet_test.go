@@ -167,6 +167,90 @@ func TestReadMessage(t *testing.T) {
 	}
 }
 
+// repeatingReader replays one packet forever, so the oversize-message guard can
+// be driven by a peer that never sets EOM without materializing 16 MiB of
+// synthesized stream first.
+type repeatingReader struct {
+	packet []byte
+	pos    int
+}
+
+func (r *repeatingReader) Read(b []byte) (int, error) {
+	n := copy(b, r.packet[r.pos:])
+	r.pos = (r.pos + n) % len(r.packet)
+
+	return n, nil
+}
+
+// TestReadMessageRejectsAnOversizeMessage pins the DoS guard: a peer that keeps
+// sending packets and never sets EOM must be cut off at maxMessageSize rather
+// than allowed to grow the reassembly buffer without bound.
+func TestReadMessageRejectsAnOversizeMessage(t *testing.T) {
+	t.Parallel()
+
+	// Big packets keep the packet count (and so the test's runtime) low while
+	// still crossing the 16 MiB ceiling.
+	payload := bytes.Repeat([]byte{0x7E}, maxPacketSize-packetHeaderSize)
+	endless := &repeatingReader{packet: synthPacket(packetTypeSQLBatch, statusNormal, 1, payload)}
+
+	rw := newPacketRW(struct {
+		io.Reader
+		io.Writer
+	}{Reader: endless, Writer: io.Discard})
+
+	_, body, err := rw.ReadMessage()
+	require.ErrorIs(t, err, ErrMessageTooLarge)
+	assert.Nil(t, body, "the partial reassembly must not be handed back")
+}
+
+// TestWriteMessagePacketIDWrapsAround crosses the 255 -> 0 rollover. A message
+// long enough to need more than 256 packets is unusual but perfectly legal, and
+// an off-by-one in the counter would only ever show up there.
+func TestWriteMessagePacketIDWrapsAround(t *testing.T) {
+	t.Parallel()
+
+	const wantPackets = 260
+
+	var buf bytes.Buffer
+
+	rw := newPacketRW(&buf)
+	rw.SetPacketSize(minPacketSize) // 504 payload bytes per packet
+
+	capacity := minPacketSize - packetHeaderSize
+
+	payload := make([]byte, capacity*wantPackets)
+	for i := range payload {
+		payload[i] = byte(i % 251)
+	}
+
+	require.NoError(t, rw.WriteMessage(packetTypeReply, payload))
+
+	raw := buf.Bytes()
+	offset := 0
+
+	for i := range wantPackets {
+		hdr, err := decodeHeader(raw[offset:])
+		require.NoError(t, err)
+
+		// Ids start at 1 for the first packet of a message and wrap modulo 256,
+		// so packet index 255 carries id 0.
+		assert.Equal(t, byte((i+1)%256), hdr.PacketID, "packet %d", i)
+
+		offset += int(hdr.Length)
+	}
+
+	require.Equal(t, len(raw), offset, "the packets must exactly cover the stream")
+
+	// And the whole thing still reassembles across the boundary.
+	gotType, gotBody, err := newPacketRW(struct {
+		io.Reader
+		io.Writer
+	}{Reader: bytes.NewReader(raw), Writer: io.Discard}).ReadMessage()
+	require.NoError(t, err)
+	assert.Equal(t, packetTypeReply, gotType)
+	assert.Equal(t, payload, gotBody)
+}
+
 func TestWriteMessageSplitsAtPacketSize(t *testing.T) {
 	t.Parallel()
 

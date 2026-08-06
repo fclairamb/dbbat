@@ -2,6 +2,7 @@ package mssql
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -12,6 +13,18 @@ import (
 // something other than a PRELOGIN-typed packet, which means the stream is out
 // of step and nothing good can come of continuing.
 var ErrHandshakeWrongPacketType = errors.New("mssql: non-PRELOGIN packet during the TLS handshake")
+
+// ErrHandshakeBytesUnconsumed — the handshake finished with bytes still sitting
+// in an inbound PRELOGIN message.
+//
+// TDS is strictly alternating, so a conforming client's last framed message
+// holds exactly its final handshake flight and nothing else. Bytes left over
+// mean the peer packed post-handshake TLS records into the same PRELOGIN
+// message — records that belong to the TLS session and that pass-through mode
+// will never see. Dropping them silently would corrupt the stream a few reads
+// later, somewhere unrelated; failing here says what actually happened.
+var ErrHandshakeBytesUnconsumed = errors.New(
+	"mssql: TLS handshake ended with unread bytes in a PRELOGIN message")
 
 // handshakeConn is the net.Conn handed to crypto/tls for TDS's encapsulated TLS
 // handshake.
@@ -87,8 +100,17 @@ func (c *handshakeConn) deactivate() error {
 	}
 
 	c.framed = false
+	unconsumed := len(c.inbound) - c.inboundPos
 
-	return c.pkt.finishPacket()
+	if err := c.pkt.finishPacket(); err != nil {
+		return err
+	}
+
+	if unconsumed > 0 {
+		return fmt.Errorf("%w: %d bytes", ErrHandshakeBytesUnconsumed, unconsumed)
+	}
+
+	return nil
 }
 
 // Read serves bytes from the inbound PRELOGIN message while framed, and
