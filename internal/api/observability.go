@@ -119,13 +119,21 @@ type connectionDetailResponse struct {
 // GrantSummary is the slice of an access grant a connection detail page needs
 // to answer "under which grant did this session run?" without a second
 // round trip: controls, validity window, revocation state and priority.
+//
+// Controls are read from the grant's definition — grants carry no shape of
+// their own — so the summary also names that definition, which is what the
+// page links to for the full policy.
 type GrantSummary struct {
-	UID       uuid.UUID `json:"uid"`
-	Controls  []string  `json:"controls"`
-	StartsAt  time.Time `json:"starts_at"`
-	ExpiresAt time.Time `json:"expires_at"`
-	Revoked   bool      `json:"revoked"`
-	Priority  int16     `json:"priority"`
+	UID                     uuid.UUID `json:"uid"`
+	Controls                []string  `json:"controls"`
+	StartsAt                time.Time `json:"starts_at"`
+	ExpiresAt               time.Time `json:"expires_at"`
+	Revoked                 bool      `json:"revoked"`
+	Priority                int16     `json:"priority"`
+	GrantDefinitionID       uuid.UUID `json:"grant_definition_id"`
+	GrantDefinitionName     string    `json:"grant_definition_name"`
+	GrantDefinitionSlug     string    `json:"grant_definition_slug"`
+	GrantDefinitionIsActive bool      `json:"grant_definition_is_active"`
 }
 
 // grantSummary resolves the grant a connection was stamped with, if any.
@@ -147,14 +155,23 @@ func (s *Server) grantSummary(c *gin.Context, conn *store.Connection) *GrantSumm
 		return nil
 	}
 
-	return &GrantSummary{
-		UID:       grant.UID,
-		Controls:  grant.Controls,
-		StartsAt:  grant.StartsAt,
-		ExpiresAt: grant.ExpiresAt,
-		Revoked:   grant.RevokedAt != nil,
-		Priority:  grant.Priority,
+	summary := &GrantSummary{
+		UID:               grant.UID,
+		Controls:          grant.Controls(),
+		StartsAt:          grant.StartsAt,
+		ExpiresAt:         grant.ExpiresAt,
+		Revoked:           grant.RevokedAt != nil,
+		Priority:          grant.Priority,
+		GrantDefinitionID: grant.GrantDefinitionID,
 	}
+
+	if def := grant.Definition; def != nil {
+		summary.GrantDefinitionName = def.Name
+		summary.GrantDefinitionSlug = def.Slug
+		summary.GrantDefinitionIsActive = def.IsActive
+	}
+
+	return summary
 }
 
 // DumpMetadata reports whether a session capture is available for download

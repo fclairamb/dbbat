@@ -319,7 +319,7 @@ func (s *Server) mayApproveQuery(ctx context.Context, user *store.User, query *s
 	}
 
 	grant, err := s.resolveApprovalGrant(ctx, query)
-	if err != nil || grant == nil || len(grant.ApproverGroupUIDs) == 0 {
+	if err != nil || grant == nil || len(grant.ApproverGroupUIDs()) == 0 {
 		return false
 	}
 

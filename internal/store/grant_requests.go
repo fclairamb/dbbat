@@ -172,8 +172,24 @@ func (s *Store) approveGrantRequestTx(
 			return ErrInvalidTransition
 		}
 
+		// Materialize from the *live* version of the definition's lineage, not
+		// from whatever version the request happened to be filed against. A
+		// definition edited while a request sat pending was edited precisely
+		// so that what gets issued from here on changes; approving would
+		// otherwise hand out the superseded shape — the exact "operator
+		// tightened the policy and it didn't take" surprise this model exists
+		// to remove. The grant then pins the version it was really issued
+		// from, so nothing changes under it afterwards.
 		def := new(GrantDefinition)
-		if err := tx.NewSelect().Model(def).Where("uid = ?", req.GrantDefinitionID).For("UPDATE").Scan(ctx); err != nil {
+		if err := tx.NewSelect().Model(def).
+			Where("archived_at IS NULL").
+			Where("lineage_uid = (SELECT lineage_uid FROM grant_definitions WHERE uid = ?)", req.GrantDefinitionID).
+			For("UPDATE").
+			Scan(ctx); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrGrantDefinitionNotFound
+			}
+
 			return fmt.Errorf("select definition: %w", err)
 		}
 

@@ -383,7 +383,10 @@ func (s *Server) checkRequestInScope(ctx context.Context, uid uuid.UUID) error {
 		return nil //nolint:nilerr // the store transition reports not-found
 	}
 
-	def, err := s.store.GetGrantDefinition(ctx, request.GrantDefinitionID)
+	// The live version of the lineage, since that is the one the approval will
+	// actually materialize — scope has to be judged against the policy being
+	// issued, not against the version the request was filed under.
+	def, err := s.store.GetLiveGrantDefinition(ctx, request.GrantDefinitionID)
 	if err != nil {
 		return nil //nolint:nilerr // the store transition reports not-found
 	}

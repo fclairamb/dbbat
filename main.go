@@ -801,28 +801,44 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	logger.InfoContext(ctx, "Created proxy_target database configuration")
 
 	// 5. Create write grant for connector user (empty controls = full write access)
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:     connectorUser.UID,
-		DatabaseID: targetDB.UID,
-		Controls:   []string{}, // Empty = full write access
-		GrantedBy:  adminUser.UID,
-		StartsAt:   time.Now(),
-		ExpiresAt:  time.Now().AddDate(10, 0, 0), // 10 years from now
+	//
+	// Every grant is an instance of a grant definition, so the seed data
+	// starts by defining the shapes it hands out rather than inventing them
+	// per grant.
+	writeDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:            "Full write (seed)",
+		Slug:            "seed-full-write",
+		Description:     "Unrestricted access, seeded in test mode.",
+		DurationSeconds: int64(10 * 365 * 24 * time.Hour / time.Second),
+		Controls:        []string{},
+		CreatedBy:       adminUser.UID,
 	})
+	if err != nil {
+		return fmt.Errorf("failed to create write grant definition: %w", err)
+	}
+
+	_, err = seedGrantFromDefinition(ctx, dataStore, writeDef,
+		connectorUser.UID, targetDB.UID, adminUser.UID, time.Now(), time.Now().AddDate(10, 0, 0))
 	if err != nil {
 		return fmt.Errorf("failed to create write grant for connector user: %w", err)
 	}
 	logger.InfoContext(ctx, "Created write grant for connector user on proxy_target")
 
 	// 6. Create read-only grant for viewer user
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:     viewerUser.UID,
-		DatabaseID: targetDB.UID,
-		Controls:   []string{store.ControlReadOnly}, // Read-only access
-		GrantedBy:  adminUser.UID,
-		StartsAt:   time.Now(),
-		ExpiresAt:  time.Now().AddDate(10, 0, 0), // 10 years from now
+	readOnlyDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:            "Read only (seed)",
+		Slug:            "seed-read-only",
+		Description:     "Read-only access, seeded in test mode.",
+		DurationSeconds: int64(10 * 365 * 24 * time.Hour / time.Second),
+		Controls:        []string{store.ControlReadOnly},
+		CreatedBy:       adminUser.UID,
 	})
+	if err != nil {
+		return fmt.Errorf("failed to create read-only grant definition: %w", err)
+	}
+
+	_, err = seedGrantFromDefinition(ctx, dataStore, readOnlyDef,
+		viewerUser.UID, targetDB.UID, adminUser.UID, time.Now(), time.Now().AddDate(10, 0, 0))
 	if err != nil {
 		return fmt.Errorf("failed to create read-only grant for viewer user: %w", err)
 	}
@@ -1032,13 +1048,37 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	}
 	logger.InfoContext(ctx, "Created demo_db database configuration")
 
-	// 5. Grant the connector full write access and the viewer read-only, both
-	// dated from the epoch.
+	// 5. Define the two shapes the demo hands out, then grant the connector
+	// full write access and the viewer read-only, both dated from the epoch.
+	demoWriteDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:            "Full write (demo)",
+		Slug:            "demo-full-write",
+		Description:     "Unrestricted access, seeded in demo mode.",
+		DurationSeconds: int64(30 * 24 * time.Hour / time.Second),
+		Controls:        []string{},
+		CreatedBy:       adminUser.UID,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create demo write grant definition: %w", err)
+	}
+
+	demoReadOnlyDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:            "Read only (demo)",
+		Slug:            "demo-read-only",
+		Description:     "Read-only access, seeded in demo mode.",
+		DurationSeconds: int64(30 * 24 * time.Hour / time.Second),
+		Controls:        []string{store.ControlReadOnly},
+		CreatedBy:       adminUser.UID,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create demo read-only grant definition: %w", err)
+	}
+
 	if err := seedDemoGrant(ctx, dataStore, demoGrantSeed{
 		userID:     connectorUser.UID,
 		databaseID: demoDB.UID,
 		grantedBy:  adminUser.UID,
-		controls:   []string{}, // Empty = full write access
+		definition: demoWriteDef,
 		grantedAt:  epoch.AddDate(0, 0, -26),
 		expiresAt:  demoGrantExpiry(epoch),
 	}); err != nil {
@@ -1051,7 +1091,7 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 		userID:     viewerUser.UID,
 		databaseID: demoDB.UID,
 		grantedBy:  adminUser.UID,
-		controls:   []string{store.ControlReadOnly},
+		definition: demoReadOnlyDef,
 		grantedAt:  epoch.AddDate(0, 0, -25),
 		expiresAt:  demoGrantExpiry(epoch),
 	}); err != nil {
@@ -1079,23 +1119,40 @@ type demoGrantSeed struct {
 	userID     uuid.UUID
 	databaseID uuid.UUID
 	grantedBy  uuid.UUID
-	controls   []string
+	definition *store.GrantDefinition
 	grantedAt  time.Time
 	expiresAt  time.Time
+}
+
+// seedGrantFromDefinition materializes a definition into a grant with an
+// explicit window. BuildGrantFromDefinition derives the window from the
+// definition's duration; seeded data wants absolute dates instead, so the
+// expiry is overridden afterwards. The shape still comes from the definition
+// — there is no other way to give a grant one.
+func seedGrantFromDefinition(
+	ctx context.Context,
+	dataStore *store.Store,
+	def *store.GrantDefinition,
+	userID, databaseID, grantedBy uuid.UUID,
+	startsAt, expiresAt time.Time,
+) (*store.Grant, error) {
+	grant := store.BuildGrantFromDefinition(def, userID, databaseID, grantedBy, startsAt)
+	grant.ExpiresAt = expiresAt
+
+	created, err := dataStore.CreateGrant(ctx, grant)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create grant from definition %q: %w", def.Slug, err)
+	}
+
+	return created, nil
 }
 
 // seedDemoGrant creates a grant whose whole timeline — granted, starts,
 // expires — is absolute. CreateGrant stamps created_at with time.Now(), so it
 // is rewritten right after the insert.
 func seedDemoGrant(ctx context.Context, dataStore *store.Store, seed demoGrantSeed) error {
-	grant, err := dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:     seed.userID,
-		DatabaseID: seed.databaseID,
-		Controls:   seed.controls,
-		GrantedBy:  seed.grantedBy,
-		StartsAt:   seed.grantedAt,
-		ExpiresAt:  seed.expiresAt,
-	})
+	grant, err := seedGrantFromDefinition(ctx, dataStore, seed.definition,
+		seed.userID, seed.databaseID, seed.grantedBy, seed.grantedAt, seed.expiresAt)
 	if err != nil {
 		return fmt.Errorf("failed to create demo grant: %w", err)
 	}
@@ -1250,19 +1307,26 @@ func seedDemoHistory(
 func seedQuotaGrant(ctx context.Context, dataStore *store.Store, userID, databaseID uuid.UUID) error {
 	maxQueries := int64(100)
 	maxBytes := int64(1024 * 1024 * 1024) // 1 GB
-	_, err := dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:              userID,
-		DatabaseID:          databaseID,
+
+	def, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:                "Read only with quotas (seed)",
+		Slug:                "seed-read-only-quota",
+		Description:         "Read-only access bounded by query and transfer quotas, seeded in test mode.",
+		DurationSeconds:     int64(10 * 365 * 24 * time.Hour / time.Second),
 		Controls:            []string{store.ControlReadOnly},
-		GrantedBy:           userID,
-		StartsAt:            time.Now(),
-		ExpiresAt:           time.Now().AddDate(10, 0, 0), // 10 years from now
 		MaxQueryCounts:      &maxQueries,
 		MaxBytesTransferred: &maxBytes,
+		CreatedBy:           userID,
 	})
 	if err != nil {
+		return fmt.Errorf("failed to create quota grant definition: %w", err)
+	}
+
+	if _, err := seedGrantFromDefinition(ctx, dataStore, def,
+		userID, databaseID, userID, time.Now(), time.Now().AddDate(10, 0, 0)); err != nil {
 		return fmt.Errorf("failed to create quota grant: %w", err)
 	}
+
 	return nil
 }
 

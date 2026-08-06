@@ -521,26 +521,41 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 		return
 	}
 
-	if err := s.store.UpdateGrantDefinition(c.Request.Context(), def); err != nil {
-		if errors.Is(err, store.ErrGrantDefinitionSlugDuplicate) {
+	previousUID := def.UID
+
+	updated, err := s.store.UpdateGrantDefinition(c.Request.Context(), def)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrGrantDefinitionSlugDuplicate),
+			errors.Is(err, store.ErrGrantDefinitionDuplicate):
 			writeError(c, http.StatusConflict, ErrCodeDuplicateName, err.Error())
-
-			return
+		case errors.Is(err, store.ErrGrantDefinitionArchived):
+			writeError(c, http.StatusConflict, ErrCodeConflict,
+				"this is a superseded version of the definition; edit the current one")
+		case errors.Is(err, store.ErrGrantDefinitionNotFound):
+			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
+		default:
+			writeInternalError(c, s.logger, err, "failed to update grant definition")
 		}
-
-		writeInternalError(c, s.logger, err, "failed to update grant definition")
 
 		return
 	}
 
 	currentUser := getCurrentUser(c)
 
+	// An edit archives the row it started from and inserts a successor, so the
+	// audit trail records both uids: the version that stopped being current
+	// and the one that replaced it. Grants issued from the previous version
+	// keep behaving exactly as they did.
 	details, _ := json.Marshal(map[string]any{
-		"grant_definition_uid": def.UID,
-		"name":                 def.Name,
-		"auto_approve":         def.AutoApprove,
-		"group_uids":           def.GroupUIDs,
-		"database_uids":        def.DatabaseUIDs,
+		"grant_definition_uid":          updated.UID,
+		"previous_grant_definition_uid": previousUID,
+		"lineage_uid":                   updated.LineageUID,
+		"versioned":                     updated.UID != previousUID,
+		"name":                          updated.Name,
+		"auto_approve":                  updated.AutoApprove,
+		"group_uids":                    updated.GroupUIDs,
+		"database_uids":                 updated.DatabaseUIDs,
 	})
 
 	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
@@ -549,13 +564,25 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 		Details:     details,
 	})
 
-	successResponse(c, def)
+	successResponse(c, updated)
 }
 
-// handleDeactivateGrantDefinition — admin-only soft delete. The path param
-// accepts either the definition's uid or its slug.
+// handleDeactivateGrantDefinition — admin-only. The path param accepts either
+// the definition's uid or its slug.
+//
+// Default behaviour is deactivation, which withdraws the definition across its
+// whole version lineage and **fails closed**: every grant issued from any of
+// its versions stops authorising new connections. The response reports how
+// many grants that affected.
+//
+// `?hard=true` asks for a real deletion instead, which is refused with a 409
+// as soon as anything references the definition — a grant's shape lives on its
+// definition, so deleting one out from under a grant is not a thing that can
+// be allowed to happen.
 func (s *Server) handleDeactivateGrantDefinition(c *gin.Context) {
-	def, err := s.resolveGrantDefinition(c.Request.Context(), c.Param("uid"))
+	ctx := c.Request.Context()
+
+	def, err := s.resolveGrantDefinition(ctx, c.Param("uid"))
 	if err != nil {
 		if errors.Is(err, store.ErrGrantDefinitionNotFound) {
 			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
@@ -568,7 +595,22 @@ func (s *Server) handleDeactivateGrantDefinition(c *gin.Context) {
 		return
 	}
 
-	if err := s.store.DeactivateGrantDefinition(c.Request.Context(), def.UID); err != nil {
+	currentUser := getCurrentUser(c)
+
+	if c.Query("hard") == "true" {
+		s.hardDeleteGrantDefinition(c, def, currentUser)
+
+		return
+	}
+
+	_, activeGrants, err := s.store.CountGrantsForLineage(ctx, def.UID)
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to count grants for grant definition")
+
+		return
+	}
+
+	if err := s.store.DeactivateGrantDefinition(ctx, def.UID); err != nil {
 		if errors.Is(err, store.ErrGrantDefinitionNotFound) {
 			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
 
@@ -580,19 +622,62 @@ func (s *Server) handleDeactivateGrantDefinition(c *gin.Context) {
 		return
 	}
 
-	currentUser := getCurrentUser(c)
-
 	details, _ := json.Marshal(map[string]any{
 		"grant_definition_uid": def.UID,
+		"lineage_uid":          def.LineageUID,
+		"affected_grants":      activeGrants,
 	})
 
-	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
+	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{
 		EventType:   "grant_definition.deactivated",
 		PerformedBy: &currentUser.UID,
 		Details:     details,
 	})
 
-	successResponse(c, gin.H{"message": "grant definition deactivated"})
+	successResponse(c, gin.H{
+		"message":         "grant definition deactivated",
+		"affected_grants": activeGrants,
+	})
+}
+
+// hardDeleteGrantDefinition removes a definition and its whole version
+// history, and only ever succeeds for one that was never used.
+func (s *Server) hardDeleteGrantDefinition(c *gin.Context, def *store.GrantDefinition, currentUser *store.User) {
+	ctx := c.Request.Context()
+
+	err := s.store.DeleteGrantDefinition(ctx, def.UID)
+
+	var inUse *store.GrantDefinitionInUseError
+
+	switch {
+	case err == nil:
+	case errors.As(err, &inUse):
+		writeError(c, http.StatusConflict, ErrCodeConflict, inUse.Error()+
+			"; deactivate it instead of deleting it")
+
+		return
+	case errors.Is(err, store.ErrGrantDefinitionNotFound):
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
+
+		return
+	default:
+		writeInternalError(c, s.logger, err, "failed to delete grant definition")
+
+		return
+	}
+
+	details, _ := json.Marshal(map[string]any{
+		"grant_definition_uid": def.UID,
+		"lineage_uid":          def.LineageUID,
+	})
+
+	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{
+		EventType:   "grant_definition.deleted",
+		PerformedBy: &currentUser.UID,
+		Details:     details,
+	})
+
+	successResponse(c, gin.H{"message": "grant definition deleted"})
 }
 
 // normalizeStrings turns a nil slice into an empty one so bun writes '{}'

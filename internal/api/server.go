@@ -336,7 +336,7 @@ func (s *Server) setupRouter() *gin.Engine {
 
 			// Grant endpoints
 			grants := authenticated.Group("/grants")
-			grants.POST("", s.requireAdmin(), s.handleCreateGrant)
+			grants.POST("", s.requireAdmin(), s.handleAssignGrant)
 			grants.GET("", s.handleListGrants)
 			grants.GET("/:uid", s.handleGetGrant)
 			grants.DELETE("/:uid", s.requireAdmin(), s.handleRevokeGrant)
