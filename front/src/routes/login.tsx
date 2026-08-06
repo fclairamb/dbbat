@@ -221,7 +221,9 @@ function LoginPage() {
         <Card className="w-full" data-testid="login-card">
         <CardHeader className="text-center">
           <div className="flex justify-center mb-4">
-            <picture>
+            {/* Sizing repeated on the <picture> so the box is reserved before
+                the image decodes — a bare wrapper is shrink-to-fit. */}
+            <picture className="block h-32 w-32">
               <source
                 srcSet={`${import.meta.env.BASE_URL}logo-text.webp`}
                 type="image/webp"
