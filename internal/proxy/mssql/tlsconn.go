@@ -184,9 +184,17 @@ type revertibleConn struct {
 	raw    net.Conn
 }
 
-// newRevertibleConn starts on active and can later be reverted to raw.
-func newRevertibleConn(active io.ReadWriter, raw net.Conn) *revertibleConn {
-	return &revertibleConn{active: active, raw: raw}
+// newRevertibleConn starts on the raw socket.
+func newRevertibleConn(raw net.Conn) *revertibleConn {
+	return &revertibleConn{active: raw, raw: raw}
+}
+
+// switchTo puts a new stream (in practice a *tls.Conn) in force.
+func (c *revertibleConn) switchTo(rw io.ReadWriter) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.active = rw
 }
 
 // revert drops back to the raw socket. Idempotent.

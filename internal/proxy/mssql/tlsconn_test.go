@@ -261,7 +261,8 @@ func TestRevertibleConnSwapsStreams(t *testing.T) {
 	active := &bytes.Buffer{}
 	active.WriteString("from the tls stream")
 
-	conn := newRevertibleConn(active, rawServer)
+	conn := newRevertibleConn(rawServer)
+	conn.switchTo(active)
 
 	buf := make([]byte, len("from the tls stream"))
 	_, err := io.ReadFull(conn, buf)
