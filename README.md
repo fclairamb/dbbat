@@ -88,7 +88,7 @@ See [docker-compose installation](https://dbbat.com/docs/installation/docker-com
 
 ## Usage Example
 
-All API endpoints are under `/api/v1/`. See the [API Reference](https://dbbat.com/docs/api) for complete documentation.
+All API endpoints are under `/api/v1/`. See the [API Reference](https://dbbat.com/docs/api) for complete documentation. Scripts and CI jobs should standardize on `DBBAT_API_KEY`, `DBBAT_USER`, and `DBBAT_URL` — see [Environment Variables for Clients](https://dbbat.com/docs/api#environment-variables-for-clients).
 
 > **Breaking change in v0.17.0:** `/api/v1/databases` was renamed to `/api/v1/servers`, and `/api/v1/ssh-servers` was added for bastion management. No `/databases` alias is kept — update any scripts that used the old path.
 
