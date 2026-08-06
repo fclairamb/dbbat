@@ -864,8 +864,64 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	return nil
 }
 
+// demoEpoch is the single instant every seeded demo row is dated from: the
+// start of the current UTC day. Every seeded timestamp is expressed as an
+// offset *before* it, so nothing a demo instance renders is ever in the future,
+// whatever time of day the process was started at.
+//
+// Why a truncated-but-rolling epoch rather than a hardcoded constant
+// (2026-01-15T09:00:00Z, as the spec sketched)? demo.dbbat.com is public and
+// long-lived, and demo mode re-seeds from scratch on every start. A hardcoded
+// epoch is byte-stable forever but ages with no forcing function to bump it —
+// within a year the demo would greet visitors with a proxy "set up 18 months
+// ago" whose newest query ran "14 months ago". Truncating to the UTC day keeps
+// every date identical for the whole of a day (so a same-day showcase
+// regeneration diffs cleanly, and a *running* demo instance never shifts a
+// date under a visitor), while the story it tells stays plausible forever.
+func demoEpoch() time.Time {
+	return time.Now().UTC().Truncate(24 * time.Hour)
+}
+
+// demoGrantExpiry is when the seeded grants run out. It is an absolute instant
+// like everything else here — not `time.Now().AddDate(...)` — but derived from
+// the epoch, which keeps it both stable for the day and, at ten years out,
+// comfortably clear of the real clock. A grant seeded with an expiry in the
+// past is not a cosmetic problem: every demo connection would be refused.
+func demoGrantExpiry(epoch time.Time) time.Time {
+	return epoch.AddDate(10, 0, 0)
+}
+
+// backdate rewrites timestamp columns on an already-inserted row.
+//
+// The store's Create* helpers stamp created_at/updated_at with time.Now()
+// themselves and take no creation time, so seeding at absolute dates means
+// fixing them up right after the insert. Verified to round-trip: these are
+// plain columns, not database defaults that would be re-applied.
+func backdate(
+	ctx context.Context,
+	dataStore *store.Store,
+	model any,
+	uid uuid.UUID,
+	at time.Time,
+	columns ...string,
+) error {
+	query := dataStore.DB().NewUpdate().Model(model).Where("uid = ?", uid)
+	for _, column := range columns {
+		query = query.Set(column+" = ?", at)
+	}
+
+	if _, err := query.Exec(ctx); err != nil {
+		return fmt.Errorf("failed to backdate %v: %w", columns, err)
+	}
+
+	return nil
+}
+
 func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.Config, logger *slog.Logger) error {
 	logger.InfoContext(ctx, "Demo mode: provisioning demo data...")
+
+	// Everything below is dated from this one instant — see demoEpoch().
+	epoch := demoEpoch()
 
 	// Get demo target configuration
 	demoTarget := cfg.GetDemoTarget()
@@ -896,6 +952,12 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	if err != nil {
 		return fmt.Errorf("failed to update admin password: %w", err)
 	}
+	// The admin row was inserted by EnsureDefaultAdmin at process start; date it
+	// like the rest of the story — the account that set the proxy up.
+	if err := backdate(ctx, dataStore, (*store.User)(nil), adminUser.UID,
+		epoch.AddDate(0, 0, -30), "created_at", "updated_at"); err != nil {
+		return err
+	}
 	logger.InfoContext(ctx, "Marked admin password as changed (username: admin, password: admin)")
 
 	// 2. Create viewer user (viewer role only)
@@ -914,6 +976,10 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	})
 	if err != nil {
 		return fmt.Errorf("failed to mark viewer password as changed: %w", err)
+	}
+	if err := backdate(ctx, dataStore, (*store.User)(nil), viewerUser.UID,
+		epoch.AddDate(0, 0, -28), "created_at", "updated_at"); err != nil {
+		return err
 	}
 	logger.InfoContext(ctx, "Created viewer user (username: viewer, password: viewer)")
 
@@ -934,6 +1000,10 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	if err != nil {
 		return fmt.Errorf("failed to mark connector password as changed: %w", err)
 	}
+	if err := backdate(ctx, dataStore, (*store.User)(nil), connectorUser.UID,
+		epoch.AddDate(0, 0, -28).Add(3*time.Hour), "created_at", "updated_at"); err != nil {
+		return err
+	}
 	logger.InfoContext(ctx, "Created connector user (username: connector, password: connector)")
 
 	// 4. Create demo_db database configuration using demo target
@@ -951,37 +1021,199 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	if err != nil {
 		return fmt.Errorf("failed to create demo_db database config: %w", err)
 	}
+	if err := backdate(ctx, dataStore, (*store.Server)(nil), demoDB.UID,
+		epoch.AddDate(0, 0, -27), "created_at", "updated_at"); err != nil {
+		return err
+	}
 	logger.InfoContext(ctx, "Created demo_db database configuration")
 
 	// 5. Create write grant for connector user (empty controls = full write access)
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{
+	connectorGrantedAt := epoch.AddDate(0, 0, -26)
+	connectorGrant, err := dataStore.CreateGrant(ctx, &store.Grant{
 		UserID:     connectorUser.UID,
 		DatabaseID: demoDB.UID,
 		Controls:   []string{}, // Empty = full write access
 		GrantedBy:  adminUser.UID,
-		StartsAt:   time.Now(),
-		ExpiresAt:  time.Now().AddDate(10, 0, 0), // 10 years from now
+		StartsAt:   connectorGrantedAt,
+		ExpiresAt:  demoGrantExpiry(epoch),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create write grant for connector user: %w", err)
 	}
+	if err := backdate(ctx, dataStore, (*store.AccessGrant)(nil), connectorGrant.UID,
+		connectorGrantedAt, "created_at"); err != nil {
+		return err
+	}
 	logger.InfoContext(ctx, "Created write grant for connector user on demo_db")
 
 	// 6. Create read-only grant for viewer user
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{
+	viewerGrantedAt := epoch.AddDate(0, 0, -25)
+	viewerGrant, err := dataStore.CreateGrant(ctx, &store.Grant{
 		UserID:     viewerUser.UID,
 		DatabaseID: demoDB.UID,
 		Controls:   []string{store.ControlReadOnly}, // Read-only access
 		GrantedBy:  adminUser.UID,
-		StartsAt:   time.Now(),
-		ExpiresAt:  time.Now().AddDate(10, 0, 0), // 10 years from now
+		StartsAt:   viewerGrantedAt,
+		ExpiresAt:  demoGrantExpiry(epoch),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create read-only grant for viewer user: %w", err)
 	}
+	if err := backdate(ctx, dataStore, (*store.AccessGrant)(nil), viewerGrant.UID,
+		viewerGrantedAt, "created_at"); err != nil {
+		return err
+	}
 	logger.InfoContext(ctx, "Created read-only grant for viewer user on demo_db")
 
+	// 7. Seed a spread of query history so the observability pages open on a
+	// plausible timeline instead of an empty table.
+	if err := seedDemoHistory(ctx, dataStore, epoch, demoDB.UID, map[string]uuid.UUID{
+		"admin":     adminUser.UID,
+		"viewer":    viewerUser.UID,
+		"connector": connectorUser.UID,
+	}); err != nil {
+		return err
+	}
+	logger.InfoContext(ctx, "Seeded demo query history on demo_db")
+
 	logger.InfoContext(ctx, "Demo data provisioning complete")
+	return nil
+}
+
+// demoSession is one seeded connection: who opened it, when (as an offset
+// *before* the epoch), and what they ran on it.
+type demoSession struct {
+	user      string
+	sourceIP  string
+	openedAgo time.Duration
+	// bytes is what the session is recorded as having transferred. Made up, but
+	// in proportion to the rows its statements returned.
+	bytes   int64
+	queries []demoQuery
+}
+
+// demoQuery is one statement inside a demoSession, offset from the moment the
+// session was opened.
+type demoQuery struct {
+	afterOpen  time.Duration
+	sql        string
+	durationMs float64
+	rows       int64
+}
+
+// demoSessions is the history a demo instance starts life with: four sessions
+// spread over the five days before the epoch, so the queries list shows a
+// timeline ("3 days ago", "yesterday", "this morning") rather than a handful of
+// rows from the same second.
+//
+// The SQL deliberately avoids the showcase's marker statement
+// (`FROM customers ORDER BY mrr_eur`, see front/showcase/screenshots.spec.ts)
+// so a seeded row can never be mistaken for the one produced by real traffic.
+var demoSessions = []demoSession{
+	{
+		user:      "connector",
+		sourceIP:  "10.42.7.19",
+		openedAgo: 5 * 24 * time.Hour,
+		bytes:     184_320,
+		queries: []demoQuery{
+			{afterOpen: 2 * time.Second, sql: "SELECT COUNT(*) FROM invoices WHERE issued_on >= DATE '2026-01-01'", durationMs: 4.118, rows: 1},
+			{afterOpen: 47 * time.Second, sql: "UPDATE invoices SET status = 'settled' WHERE payment_reference = 'PR-88213'", durationMs: 12.905, rows: 1},
+			{afterOpen: 3 * time.Minute, sql: "SELECT invoice_id, amount_eur, status FROM invoices WHERE status = 'overdue' ORDER BY amount_eur DESC LIMIT 50", durationMs: 8.442, rows: 50},
+		},
+	},
+	{
+		user:      "viewer",
+		sourceIP:  "10.42.7.83",
+		openedAgo: 3 * 24 * time.Hour,
+		bytes:     51_200,
+		queries: []demoQuery{
+			{afterOpen: time.Second, sql: "SELECT region, SUM(amount_eur) AS total FROM invoices GROUP BY region ORDER BY total DESC", durationMs: 21.674, rows: 6},
+			{afterOpen: 90 * time.Second, sql: "SELECT plan, COUNT(*) FROM subscriptions GROUP BY plan", durationMs: 3.201, rows: 4},
+		},
+	},
+	{
+		user:      "connector",
+		sourceIP:  "10.42.7.19",
+		openedAgo: 27 * time.Hour,
+		bytes:     9_216,
+		queries: []demoQuery{
+			{afterOpen: 2 * time.Second, sql: "INSERT INTO shipments (order_ref, carrier, dispatched_at) VALUES ('OR-40218', 'meridian-freight', now())", durationMs: 6.773, rows: 1},
+			{afterOpen: 11 * time.Second, sql: "SELECT order_ref, carrier, dispatched_at FROM shipments ORDER BY dispatched_at DESC LIMIT 20", durationMs: 2.958, rows: 20},
+		},
+	},
+	{
+		user:      "admin",
+		sourceIP:  "10.42.9.4",
+		openedAgo: 4 * time.Hour,
+		bytes:     2_048,
+		queries: []demoQuery{
+			{afterOpen: 3 * time.Second, sql: "SELECT relname, n_live_tup FROM pg_stat_user_tables ORDER BY n_live_tup DESC LIMIT 10", durationMs: 1.884, rows: 10},
+		},
+	},
+}
+
+// seedDemoHistory records demoSessions as closed connections carrying their
+// statements, all dated from the epoch.
+//
+// It writes the connection's timestamps and counters itself rather than going
+// through CreateConnection/CloseConnection: those stamp time.Now(), which is
+// the whole thing this seeding is trying to avoid.
+func seedDemoHistory(
+	ctx context.Context,
+	dataStore *store.Store,
+	epoch time.Time,
+	databaseID uuid.UUID,
+	users map[string]uuid.UUID,
+) error {
+	for _, session := range demoSessions {
+		userID, ok := users[session.user]
+		if !ok {
+			return fmt.Errorf("demo history references unknown user %q", session.user)
+		}
+
+		conn, err := dataStore.CreateConnection(ctx, userID, databaseID, session.sourceIP)
+		if err != nil {
+			return fmt.Errorf("failed to create demo connection: %w", err)
+		}
+
+		openedAt := epoch.Add(-session.openedAgo)
+		lastActivityAt := openedAt
+
+		for _, query := range session.queries {
+			executedAt := openedAt.Add(query.afterOpen)
+			if executedAt.After(lastActivityAt) {
+				lastActivityAt = executedAt
+			}
+
+			durationMs := query.durationMs
+			rowsAffected := query.rows
+			if _, err := dataStore.CreateQuery(ctx, &store.Query{
+				ConnectionID: conn.UID,
+				SQLText:      query.sql,
+				ExecutedAt:   executedAt,
+				DurationMs:   &durationMs,
+				RowsAffected: &rowsAffected,
+			}); err != nil {
+				return fmt.Errorf("failed to create demo query: %w", err)
+			}
+		}
+
+		// Closed a minute after the last statement: an idle session left open
+		// forever would show up as "active" on a demo nobody is connected to.
+		disconnectedAt := lastActivityAt.Add(time.Minute)
+		if _, err := dataStore.DB().NewUpdate().
+			Model((*store.Connection)(nil)).
+			Where("uid = ?", conn.UID).
+			Set("connected_at = ?", openedAt).
+			Set("last_activity_at = ?", lastActivityAt).
+			Set("disconnected_at = ?", disconnectedAt).
+			Set("queries = ?", len(session.queries)).
+			Set("bytes_transferred = ?", session.bytes).
+			Exec(ctx); err != nil {
+			return fmt.Errorf("failed to date demo connection: %w", err)
+		}
+	}
+
 	return nil
 }
 
