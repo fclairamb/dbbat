@@ -34,6 +34,7 @@ curl -X POST http://localhost:4200/api/v1/grants \
 | `expires_at` | datetime | When the grant expires (must be after `starts_at`) | Yes |
 | `max_query_counts` | integer | Maximum number of queries allowed | No |
 | `max_bytes_transferred` | integer | Maximum bytes transferred (response size) | No |
+| `priority` | integer | Which grant wins when several are active at once. Auto-calculated from `controls` when omitted — see [Overlapping grants](#overlapping-grants). | No (default: auto) |
 
 The grant model is the same across all engines (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB).
 
@@ -79,6 +80,44 @@ This is useful for:
 - Support engineers who need temporary access
 - Contractors with limited engagement periods
 - Scheduled maintenance windows
+
+## Overlapping grants
+
+Nothing stops a user from holding several active grants on the same database at
+once — a read-only one they requested this morning and a read/write one an
+admin created for an incident, say. Exactly one of them applies to a session:
+its controls, quotas and approval patterns are the ones enforced.
+
+The winner is the grant with the **highest `priority`**. Ties break on the
+latest `expires_at`, then the newest `created_at`.
+
+`priority` is auto-calculated from the grant's controls, so the more capable
+grant wins by default:
+
+| Grant shape | Auto priority |
+|---|---|
+| Writable, no controls (full read/write) | 100 |
+| Writable with controls (`block_copy` / `block_ddl`) | 50 |
+| `read_only` (with or without other controls) | 10 |
+
+The gaps between tiers are deliberate: pass an explicit `priority` (on the
+grant, or on a [grant definition](./grant-requests.md) so every grant built
+from it inherits it) to slot a grant between tiers — `75` ranks a
+restricted-write grant above its tier without letting it beat full write
+access. The web UI pre-fills the field from the selected controls and leaves it
+alone once you edit it, showing the computed value as an `auto: N` hint.
+
+### A session lives and dies with its grant
+
+Selection happens **once, at connection time**. The session stays pinned to the
+grant it was admitted under for its whole life — there is no mid-session
+failover to another still-active grant, because that would silently change a
+live session's controls underneath the client.
+
+So when the pinned grant expires or is revoked, the connection is terminated
+even if a lower-priority grant would still allow access. The client reconnects,
+selection runs again, and the next-best still-active grant admits the new
+session — under *its* controls.
 
 ## Quotas
 

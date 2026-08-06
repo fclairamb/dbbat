@@ -35,6 +35,11 @@ curl -X POST http://localhost:4200/api/v1/grant-definitions \
 
 Requires the admin role. A duplicate name returns `409 DUPLICATE_NAME`.
 
+A definition may also carry an optional `priority`, stamped verbatim on every
+grant built from it. Leave it out — the normal case — and each grant computes
+its own from its controls; see [Overlapping
+grants](./access-control.md#overlapping-grants).
+
 Definitions are **soft-deleted**: deactivating one sets `is_active: false` rather than removing the row, so historical requests keep pointing at the definition they were granted under. Non-admins only ever see active definitions.
 
 Direct admin grant creation via `POST /api/v1/grants` bypasses definitions entirely.
