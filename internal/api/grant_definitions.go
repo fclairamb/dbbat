@@ -83,6 +83,10 @@ type CreateGrantDefinitionRequest struct {
 	Controls            []string `json:"controls"`
 	MaxQueryCounts      *int64   `json:"max_query_counts"`
 	MaxBytesTransferred *int64   `json:"max_bytes_transferred"`
+	// Priority, when supplied, is stamped verbatim on every grant
+	// materialized from this definition instead of the tier its controls
+	// would earn. null/omitted — the normal case — leaves it auto.
+	Priority *int16 `json:"priority"`
 	// AutoApprove, when true, makes grant requests against this definition
 	// skip the pending/admin-approval step and materialize the grant
 	// instantly.
@@ -212,6 +216,7 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		Controls:            req.Controls,
 		MaxQueryCounts:      req.MaxQueryCounts,
 		MaxBytesTransferred: req.MaxBytesTransferred,
+		Priority:            req.Priority,
 		AutoApprove:         req.AutoApprove,
 		GroupUIDs:           req.GroupUIDs,
 		DatabaseUIDs:        req.DatabaseUIDs,
@@ -245,6 +250,7 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		"name":                 created.Name,
 		"duration_seconds":     created.DurationSeconds,
 		"controls":             created.Controls,
+		"priority":             created.Priority,
 		"auto_approve":         created.AutoApprove,
 		"group_uids":           created.GroupUIDs,
 		"database_uids":        created.DatabaseUIDs,
@@ -395,6 +401,7 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 	def.Controls = req.Controls
 	def.MaxQueryCounts = req.MaxQueryCounts
 	def.MaxBytesTransferred = req.MaxBytesTransferred
+	def.Priority = req.Priority
 	def.AutoApprove = req.AutoApprove
 	def.GroupUIDs = req.GroupUIDs
 	def.DatabaseUIDs = req.DatabaseUIDs

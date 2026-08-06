@@ -26,6 +26,12 @@ type CreateGrantRequest struct {
 	// without this the control would be unreachable for them.
 	ApprovalPatterns  []string    `json:"approval_patterns"`
 	ApproverGroupUIDs []uuid.UUID `json:"approver_group_uids"`
+	// Priority ranks this grant against the user's other active grants on the
+	// same database — highest wins at auth time. Omitted (or null) means
+	// "auto": store.AutoPriority derives it from Controls, which is what
+	// almost every caller wants. Supply one only to deliberately overrule the
+	// tiering.
+	Priority *int16 `json:"priority"`
 }
 
 // handleCreateGrant creates a new access grant
@@ -77,6 +83,15 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 		return
 	}
 
+	// An omitted priority is resolved from the controls; an explicit one is
+	// taken verbatim. store.ResolvePriority applies the same rule again in the
+	// store, so a caller that bypasses this handler can't insert an unranked
+	// grant either.
+	var explicitPriority int16
+	if req.Priority != nil {
+		explicitPriority = *req.Priority
+	}
+
 	currentUser := getCurrentUser(c)
 	grant := &store.Grant{
 		UserID:              req.UserID,
@@ -89,6 +104,7 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 		MaxBytesTransferred: req.MaxBytesTransferred,
 		ApprovalPatterns:    normalizeStrings(req.ApprovalPatterns),
 		ApproverGroupUIDs:   normalizeUUIDs(req.ApproverGroupUIDs),
+		Priority:            store.ResolvePriority(explicitPriority, req.Controls),
 	}
 
 	result, err := s.store.CreateGrant(c.Request.Context(), grant)
@@ -105,6 +121,7 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 		"controls":    result.Controls,
 		"starts_at":   result.StartsAt,
 		"expires_at":  result.ExpiresAt,
+		"priority":    result.Priority,
 	})
 	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
 		EventType:   "grant.created",
