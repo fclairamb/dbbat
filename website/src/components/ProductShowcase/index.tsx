@@ -7,14 +7,23 @@
  * media is regenerated on demand, not on release, and a visitor deserves to
  * know which version they are looking at.
  */
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import Heading from "@theme/Heading";
 import manifest from "@site/static/img/showcase/manifest.json";
 
 import styles from "./styles.module.css";
 
 type Still = {
+  /** The full-size PNG: the <img> fallback, and what the link opens. */
   src: string;
+  /** The 1280-wide WebP the grid actually shows — ~7% of the PNG's bytes. */
+  webp: string;
   alt: string;
   title: string;
   description: string;
@@ -23,6 +32,7 @@ type Still = {
 const STILLS: Still[] = [
   {
     src: "/img/showcase/query-list.png",
+    webp: "/img/showcase/query-list.webp",
     alt: "The Queries page listing five statements with user, database, connection, duration, row count and status",
     title: "Every query, tracked",
     description:
@@ -30,6 +40,7 @@ const STILLS: Still[] = [
   },
   {
     src: "/img/showcase/query-results.png",
+    webp: "/img/showcase/query-results.webp",
     alt: "A query detail page showing the SQL, its duration, its row count and the ten result rows it returned",
     title: "Down to the rows returned",
     description:
@@ -37,6 +48,7 @@ const STILLS: Still[] = [
   },
   {
     src: "/img/showcase/grant-request.png",
+    webp: "/img/showcase/grant-request.webp",
     alt: "The Request access dialog with a grant definition, a database and a written justification",
     title: "Access on request",
     description:
@@ -44,6 +56,7 @@ const STILLS: Still[] = [
   },
   {
     src: "/img/showcase/add-server.png",
+    webp: "/img/showcase/add-server.webp",
     alt: "The Add Server dialog configuring a PostgreSQL read replica",
     title: "One proxy, four engines",
     description:
@@ -81,16 +94,55 @@ function useMotionPreference(): MotionPreference {
   return preference;
 }
 
+/**
+ * Whether the element has ever been near the viewport.
+ *
+ * The showcase sits well below the fold, and `play()` is what actually pulls
+ * the ~330 KB video rendition down the wire. Gating it on visibility means a
+ * visitor who never scrolls past the hero pays for the poster and nothing
+ * else. Latching (rather than tracking) is deliberate: once it has started,
+ * scrolling away should not stop it.
+ */
+function useHasBeenSeen(ref: RefObject<Element | null>): boolean {
+  const [seen, setSeen] = useState(false);
+
+  useEffect(() => {
+    const element = ref.current;
+    if (!element || seen) {
+      return;
+    }
+    if (typeof IntersectionObserver === "undefined") {
+      setSeen(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setSeen(true);
+          observer.disconnect();
+        }
+      },
+      // A screen's worth of margin: start fetching just before it matters.
+      { rootMargin: "200px" },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [ref, seen]);
+
+  return seen;
+}
+
 function ApprovalVideo(): ReactNode {
   const videoRef = useRef<HTMLVideoElement>(null);
   const preference = useMotionPreference();
   const animate = preference === "ok";
+  const seen = useHasBeenSeen(videoRef);
 
   // No `autoPlay` attribute anywhere — that is the point. The prerendered HTML
   // must not carry one, or a reduced-motion visitor gets a moving picture in
   // the window between paint and hydration (and gets one for good with JS
   // off). Playback is started here instead, only once the media query has
-  // said it is welcome.
+  // said it is welcome *and* the clip is on screen.
   useEffect(() => {
     const video = videoRef.current;
     if (!video) {
@@ -101,13 +153,25 @@ function ApprovalVideo(): ReactNode {
       video.currentTime = 0;
       return;
     }
+    if (!seen) {
+      return;
+    }
     video.muted = true;
     void video.play().catch(() => {
       // Autoplay refused (a battery-saver mode, a strict browser setting).
       // The controls are still there; nothing else to do.
     });
-  }, [animate]);
+  }, [animate, seen]);
 
+  // `preload="none"`: nothing but the poster is fetched until the observer
+  // above lets `play()` through, which is the whole point of gating it. The
+  // intrinsic width/height reserve the frame in the meantime — with no
+  // metadata to infer it from, a video defaults to 300x150.
+  //
+  // The poster is WebP with no markup-level fallback — a `poster=` attribute
+  // cannot come from a <picture>. It is a still frame of the clip below, so
+  // anything that can decode either <source> can decode it too, and the
+  // figure's own background covers the frame for anything that cannot.
   return (
     <figure className={styles.videoFigure}>
       <video
@@ -116,9 +180,11 @@ function ApprovalVideo(): ReactNode {
         loop={animate}
         controls={!animate}
         muted
+        width={1280}
+        height={800}
+        preload="none"
         playsInline
-        preload="metadata"
-        poster="/img/showcase/approval-hold-poster.png"
+        poster="/img/showcase/approval-hold-poster.webp"
         aria-label="An UPDATE statement is held mid-flight until a second person approves it in the DBBat UI"
       >
         <source
@@ -167,15 +233,23 @@ export default function ProductShowcase(): ReactNode {
         <div className={styles.grid}>
           {STILLS.map((still) => (
             <figure key={still.src} className={styles.card}>
+              {/* The link opens the full-size PNG; the page itself loads the
+                  1280-wide WebP, which is what the ~350 CSS px card needs. The
+                  <img> keeps the PNG as the fallback for anything that cannot
+                  decode WebP, and its intrinsic size is only there to reserve
+                  the right aspect ratio. */}
               <a href={still.src} target="_blank" rel="noopener noreferrer">
-                <img
-                  src={still.src}
-                  alt={still.alt}
-                  width={2560}
-                  height={1600}
-                  loading="lazy"
-                  decoding="async"
-                />
+                <picture>
+                  <source srcSet={still.webp} type="image/webp" />
+                  <img
+                    src={still.src}
+                    alt={still.alt}
+                    width={2560}
+                    height={1600}
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </picture>
               </a>
               <figcaption>
                 <strong>{still.title}</strong>
