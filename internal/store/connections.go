@@ -23,6 +23,14 @@ func WithUpstreamTLS(encrypted bool) ConnectionOption {
 	return func(c *Connection) { c.UpstreamTLS = encrypted }
 }
 
+// WithGrantUID stamps the connection with the grant it authenticated under.
+// Every proxy holds the grant returned by its auth-time GetActiveGrant (or
+// equivalent) lookup right where it creates the connection row — this is
+// simply that pick, pinned for the row's whole life. See Connection.GrantUID.
+func WithGrantUID(grantUID uuid.UUID) ConnectionOption {
+	return func(c *Connection) { c.GrantUID = &grantUID }
+}
+
 // CreateConnection creates a new connection record
 func (s *Store) CreateConnection(
 	ctx context.Context,
@@ -435,7 +443,7 @@ func (s *Store) GetConnectionByUID(ctx context.Context, uid uuid.UUID) (*Connect
 	err := s.db.NewSelect().
 		Model(conn).
 		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, "+
-			"disconnected_at, queries, bytes_transferred, instance_id, upstream_tls, dump_key").
+			"disconnected_at, queries, bytes_transferred, instance_id, upstream_tls, dump_key, grant_uid").
 		Where("uid = ?", uid).
 		Scan(ctx)
 	if err != nil {
@@ -453,7 +461,7 @@ func (s *Store) ListConnections(ctx context.Context, filter ConnectionFilter) ([
 	q := s.db.NewSelect().
 		Model(&connections).
 		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, " +
-			"disconnected_at, queries, bytes_transferred, instance_id, upstream_tls, dump_key")
+			"disconnected_at, queries, bytes_transferred, instance_id, upstream_tls, dump_key, grant_uid")
 
 	if filter.UserID != nil {
 		q = q.Where("user_id = ?", *filter.UserID)

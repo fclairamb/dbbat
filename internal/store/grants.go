@@ -242,6 +242,20 @@ func (s *Store) ListGrants(ctx context.Context, filter GrantFilter) ([]Grant, er
 // populateGrantCounters fills the transient QueryCount and BytesTransferred
 // fields of g by aggregating from the queries and connections tables within
 // the grant's effective time window: [StartsAt, min(ExpiresAt, RevokedAt)).
+//
+// A connection stamped with this grant's UID (connections.grant_uid) is
+// attributed to it directly and unconditionally — that is the auth-time pick
+// recorded by CreateConnection, not a guess. A connection with no stamp
+// (grant_uid IS NULL: a legacy row, or the owning grant was deleted) falls
+// back to the pre-stamp heuristic of matching (user_id, database_id) within
+// the time window.
+//
+// The two conditions are deliberately exclusive rather than OR'd together
+// unconditionally: a *stamped* connection only ever matches the grant named
+// by its own grant_uid, never another grant's window, even if both grants
+// cover the same user/database and overlap in time. That is what makes two
+// overlapping grants attribute traffic separately instead of double-counting
+// it — see TestGrantCounters_StampedConnectionExcludedFromOtherGrantsWindow.
 func (s *Store) populateGrantCounters(ctx context.Context, g *AccessGrant) error {
 	upper := g.ExpiresAt
 	if g.RevokedAt != nil && g.RevokedAt.Before(upper) {
@@ -253,8 +267,8 @@ func (s *Store) populateGrantCounters(ctx context.Context, g *AccessGrant) error
 		ColumnExpr("COUNT(*)").
 		TableExpr("queries AS q").
 		Join("JOIN connections AS c ON q.connection_id = c.uid").
-		Where("c.user_id = ?", g.UserID).
-		Where("c.database_id = ?", g.DatabaseID).
+		Where("(c.grant_uid = ? OR (c.grant_uid IS NULL AND c.user_id = ? AND c.database_id = ?))",
+			g.UID, g.UserID, g.DatabaseID).
 		Where("q.executed_at >= ?", g.StartsAt).
 		Where("q.executed_at < ?", upper).
 		Scan(ctx, &queryCount)
@@ -266,8 +280,8 @@ func (s *Store) populateGrantCounters(ctx context.Context, g *AccessGrant) error
 	err = s.db.NewSelect().
 		ColumnExpr("COALESCE(SUM(bytes_transferred), 0)").
 		Model((*Connection)(nil)).
-		Where("user_id = ?", g.UserID).
-		Where("database_id = ?", g.DatabaseID).
+		Where("(grant_uid = ? OR (grant_uid IS NULL AND user_id = ? AND database_id = ?))",
+			g.UID, g.UserID, g.DatabaseID).
 		Where("connected_at >= ?", g.StartsAt).
 		Where("connected_at < ?", upper).
 		Scan(ctx, &bytesTransferred)

@@ -336,6 +336,20 @@ type Connection struct {
 	// Internal bookkeeping, not API surface — hence json:"-": the key exposes
 	// the bucket layout and callers already have the download endpoint.
 	DumpKey string `bun:"dump_key,notnull,default:''" json:"-"`
+
+	// GrantUID is the access grant this session authenticated under — the
+	// auth-time GetActiveGrant (or equivalent per-protocol) pick, stamped at
+	// CreateConnection and never updated afterwards. A connection is bound to
+	// exactly one grant for its whole life: the LimitGuard watchdog already
+	// terminates the session when that grant expires or is revoked
+	// (internal/proxy/shared/limits.go), so there is never a live row that
+	// should be re-pointed at a different grant.
+	//
+	// nil covers two cases that are indistinguishable from here: the row
+	// predates this column, or the owning grant has since been deleted.
+	// Either way, consumers (mayApproveQuery, populateGrantCounters) fall back
+	// to their pre-stamp heuristics.
+	GrantUID *uuid.UUID `bun:"grant_uid,type:uuid" json:"grant_uid"`
 }
 
 // Instance is one *run* of one dbbat process sharing this store. The row is

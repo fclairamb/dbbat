@@ -517,6 +517,10 @@ func (s *Session) recordConnection() error {
 		s.database.UID,
 		store.ExtractSourceIP(s.clientConn.RemoteAddr()),
 		store.WithUpstreamTLS(s.upstreamTLS),
+		// s.grant is always set here: establishSession only clears it (on an
+		// upstream-dial failure) along a path that returns before calling
+		// recordConnection.
+		store.WithGrantUID(s.grant.UID),
 	)
 	if err != nil {
 		return fmt.Errorf("create connection: %w", err)

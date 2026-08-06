@@ -260,8 +260,10 @@ func (s *Session) Run() error {
 	// Create connection record
 	sourceIP := store.ExtractSourceIP(s.clientConn.RemoteAddr())
 
+	// s.grant is always set here: authenticate() returns an error (aborting
+	// Run before this point) whenever GetActiveGrant fails.
 	conn, err := s.store.CreateConnection(s.ctx, s.user.UID, s.database.UID, sourceIP,
-		store.WithUpstreamTLS(s.upstreamTLS))
+		store.WithUpstreamTLS(s.upstreamTLS), store.WithGrantUID(s.grant.UID))
 	if err != nil {
 		s.logger.ErrorContext(s.ctx, "failed to create connection record", slog.Any("error", err))
 	} else {
