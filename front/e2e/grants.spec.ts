@@ -1,5 +1,12 @@
 import { test, expect } from "./fixtures";
 
+/**
+ * A grant is an instance of a grant definition: the admin picks a definition,
+ * a user and a database, and the shape (controls, quotas, approval gating,
+ * duration) comes from the definition. There is deliberately no ad-hoc grant
+ * form any more, so these tests drive the Assign Grant dialog rather than the
+ * old Create Grant one.
+ */
 test.describe("Access Grants Management", () => {
   test("should display grants list page", async ({ authenticatedPage }) => {
     await authenticatedPage.goto("grants");
@@ -18,64 +25,95 @@ test.describe("Access Grants Management", () => {
     expect(content).toBeTruthy();
   });
 
-  test("should show create grant form with controls checkboxes", async ({
+  test("the assign dialog asks for a definition, a user and a database", async ({
     authenticatedPage,
   }) => {
     await authenticatedPage.goto("grants");
     await authenticatedPage.waitForLoadState("networkidle");
 
-    // Look for create/add button
-    const createButton = authenticatedPage.getByRole("button", {
-      name: /create|add|new|grant/i,
+    await authenticatedPage.getByTestId("assign-grant-button").click();
+    await authenticatedPage.waitForSelector('[role="dialog"]');
+
+    await expect(
+      authenticatedPage.getByTestId("assign-grant-definition")
+    ).toBeVisible();
+    await expect(authenticatedPage.getByTestId("assign-grant-user")).toBeVisible();
+    await expect(
+      authenticatedPage.getByTestId("assign-grant-database")
+    ).toBeVisible();
+
+    await authenticatedPage.screenshot({
+      path: "test-results/screenshots/grants-assign-dialog.png",
     });
-
-    if (await createButton.isVisible()) {
-      await createButton.click();
-
-      // Wait for dialog to open
-      await authenticatedPage.waitForSelector('[role="dialog"]');
-
-      // Take screenshot of create grant dialog/form
-      await authenticatedPage.screenshot({
-        path: "test-results/screenshots/grants-create-dialog.png",
-      });
-
-      // Look for controls checkboxes (replaces access_level dropdown)
-      const formContent = await authenticatedPage.textContent("body");
-      expect(formContent?.toLowerCase()).toMatch(
-        /read.only|block.copy|block.ddl|controls|user|database/
-      );
-    }
   });
 
-  test("should create grant with read_only control", async ({
+  test("there is no ad-hoc shape to type: no controls or quota inputs", async ({
     authenticatedPage,
   }) => {
     await authenticatedPage.goto("grants");
     await authenticatedPage.waitForLoadState("networkidle");
 
-    // Click create button
-    const createButton = authenticatedPage.getByRole("button", {
-      name: /create|add|new|grant/i,
+    await authenticatedPage.getByTestId("assign-grant-button").click();
+    await authenticatedPage.waitForSelector('[role="dialog"]');
+
+    // The old form let an admin invent a grant here. That is exactly what this
+    // change removed, so its inputs must be gone — not merely unused.
+    await expect(authenticatedPage.getByLabel(/max queries/i)).toHaveCount(0);
+    await expect(
+      authenticatedPage.getByLabel(/max data transfer/i)
+    ).toHaveCount(0);
+    await expect(authenticatedPage.getByTestId("grant-priority-input")).toHaveCount(
+      0
+    );
+    await expect(
+      authenticatedPage.locator('input[type="datetime-local"]#expiresAt')
+    ).toHaveCount(0);
+  });
+
+  test("picking a definition previews the shape it will grant", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("grants");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    await authenticatedPage.getByTestId("assign-grant-button").click();
+    await authenticatedPage.waitForSelector('[role="dialog"]');
+
+    await authenticatedPage.getByTestId("assign-grant-definition").click();
+    await authenticatedPage.getByRole("option").first().click();
+
+    // The admin has to be able to see what they are handing out before they
+    // hand it out, since they no longer type it themselves.
+    const shape = authenticatedPage.getByTestId("assign-grant-shape");
+    await expect(shape).toBeVisible();
+    await expect(shape).toContainText(/controls/i);
+    await expect(shape).toContainText(/duration/i);
+
+    await authenticatedPage.screenshot({
+      path: "test-results/screenshots/grants-assign-shape-preview.png",
     });
+  });
 
-    if (await createButton.isVisible()) {
-      await createButton.click();
+  test("should default start time to approximately current time", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("grants");
+    await authenticatedPage.waitForLoadState("networkidle");
 
-      // Wait for dialog to open
-      await authenticatedPage.waitForSelector('[role="dialog"]');
+    await authenticatedPage.getByTestId("assign-grant-button").click();
+    await authenticatedPage.waitForSelector('[role="dialog"]');
 
-      // Check if the read_only control checkbox exists
-      const readOnlyCheckbox = authenticatedPage.getByLabel(/read.only/i);
-      if (await readOnlyCheckbox.isVisible()) {
-        await readOnlyCheckbox.check();
-      }
+    const startsAtInput = authenticatedPage.locator(
+      'input[type="datetime-local"]#startsAt'
+    );
+    const startsAtValue = await startsAtInput.inputValue();
 
-      // Take screenshot with control selected
-      await authenticatedPage.screenshot({
-        path: "test-results/screenshots/grants-create-with-controls.png",
-      });
-    }
+    // Verify it's a valid datetime-local format (YYYY-MM-DDTHH:mm)
+    expect(startsAtValue).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
+
+    // Verify the date portion is today
+    const today = new Date().toISOString().split("T")[0];
+    expect(startsAtValue.split("T")[0]).toBe(today);
   });
 
   test("should display controls badges in grant list", async ({
@@ -90,96 +128,31 @@ test.describe("Access Grants Management", () => {
       fullPage: true,
     });
 
-    // Verify controls-related content is displayed (badges like "Read Only", "Full Access", etc.)
-    const content = await authenticatedPage.textContent("body");
-    expect(content).toBeTruthy();
+    // The controls come from each grant's definition, but they are still what
+    // the list has to show.
+    const content = (await authenticatedPage.textContent("body")) ?? "";
+    expect(content.toLowerCase()).toMatch(/read only|full access/);
   });
 
-  test("should display grant details or filters", async ({
+  test("each grant names the definition it was issued from", async ({
     authenticatedPage,
   }) => {
     await authenticatedPage.goto("grants");
     await authenticatedPage.waitForLoadState("networkidle");
 
-    // Take screenshot showing grant management interface
+    const definitions = authenticatedPage.locator(
+      '[data-testid^="grant-definition-"]'
+    );
+    expect(await definitions.count()).toBeGreaterThan(0);
+
+    for (const value of await definitions.allTextContents()) {
+      expect(value.trim().length).toBeGreaterThan(0);
+    }
+
     await authenticatedPage.screenshot({
-      path: "test-results/screenshots/grants-overview.png",
+      path: "test-results/screenshots/grants-list-definition-column.png",
       fullPage: true,
     });
-
-    // Verify grants-related content is present
-    const content = await authenticatedPage.textContent("body");
-    expect(content).toBeTruthy();
-  });
-
-  test("should have datetime-local inputs in create grant dialog", async ({
-    authenticatedPage,
-  }) => {
-    await authenticatedPage.goto("grants");
-    await authenticatedPage.waitForLoadState("networkidle");
-
-    // Click create button
-    const createButton = authenticatedPage.getByRole("button", {
-      name: /create|add|new|grant/i,
-    });
-
-    if (await createButton.isVisible()) {
-      await createButton.click();
-
-      // Wait for dialog to open and all animations to fully complete
-      await authenticatedPage.waitForSelector('[role="dialog"]');
-      await authenticatedPage.waitForTimeout(500);
-
-      // Verify datetime-local inputs are present
-      const startsAtInput = authenticatedPage.locator(
-        'input[type="datetime-local"]#startsAt'
-      );
-      const expiresAtInput = authenticatedPage.locator(
-        'input[type="datetime-local"]#expiresAt'
-      );
-
-      await expect(startsAtInput).toBeVisible();
-      await expect(expiresAtInput).toBeVisible();
-
-      // Take full page screenshot with animations disabled for clean capture
-      await authenticatedPage.screenshot({
-        path: "test-results/screenshots/grants-datetime-inputs.png",
-        fullPage: true,
-        animations: "disabled",
-      });
-    }
-  });
-
-  test("should default start time to approximately current time", async ({
-    authenticatedPage,
-  }) => {
-    await authenticatedPage.goto("grants");
-    await authenticatedPage.waitForLoadState("networkidle");
-
-    // Click create button
-    const createButton = authenticatedPage.getByRole("button", {
-      name: /create|add|new|grant/i,
-    });
-
-    if (await createButton.isVisible()) {
-      await createButton.click();
-
-      // Wait for dialog to open
-      await authenticatedPage.waitForSelector('[role="dialog"]');
-
-      // Get the starts_at input value
-      const startsAtInput = authenticatedPage.locator(
-        'input[type="datetime-local"]#startsAt'
-      );
-      const startsAtValue = await startsAtInput.inputValue();
-
-      // Verify it's a valid datetime-local format (YYYY-MM-DDTHH:mm)
-      expect(startsAtValue).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/);
-
-      // Verify the date portion is today
-      const today = new Date().toISOString().split("T")[0];
-      expect(startsAtValue.split("T")[0]).toBe(today);
-    }
   });
 
   test("should display grants with time information", async ({
@@ -204,63 +177,6 @@ test.describe("Access Grants Management", () => {
 });
 
 test.describe("Grant Quota Management", () => {
-  test("should show quota fields in create grant dialog", async ({
-    authenticatedPage,
-  }) => {
-    await authenticatedPage.goto("grants");
-    await authenticatedPage.waitForLoadState("networkidle");
-
-    // Click create button
-    const createButton = authenticatedPage.getByRole("button", {
-      name: /create|add|new|grant/i,
-    });
-    await createButton.click();
-
-    // Wait for dialog to open
-    await authenticatedPage.waitForSelector('[role="dialog"]');
-
-    // Verify quota fields are present
-    await expect(authenticatedPage.getByLabel(/max queries/i)).toBeVisible();
-    await expect(authenticatedPage.getByLabel(/max data transfer/i)).toBeVisible();
-
-    // Take screenshot
-    await authenticatedPage.screenshot({
-      path: "test-results/screenshots/grants-create-with-quotas.png",
-    });
-  });
-
-  test("should accept quota values when creating grant", async ({
-    authenticatedPage,
-  }) => {
-    await authenticatedPage.goto("grants");
-    await authenticatedPage.waitForLoadState("networkidle");
-
-    // Click create button
-    const createButton = authenticatedPage.getByRole("button", {
-      name: /create|add|new|grant/i,
-    });
-    await createButton.click();
-
-    // Wait for dialog to open
-    await authenticatedPage.waitForSelector('[role="dialog"]');
-
-    // Fill quota fields
-    const maxQueriesInput = authenticatedPage.getByLabel(/max queries/i);
-    await maxQueriesInput.fill("1000");
-
-    const maxBytesInput = authenticatedPage.getByLabel(/max data transfer/i);
-    await maxBytesInput.fill("500");
-
-    // Take screenshot with filled quotas
-    await authenticatedPage.screenshot({
-      path: "test-results/screenshots/grants-create-quotas-filled.png",
-    });
-
-    // Verify input values
-    await expect(maxQueriesInput).toHaveValue("1000");
-    await expect(maxBytesInput).toHaveValue("500");
-  });
-
   test("should display quota usage in grant list", async ({
     authenticatedPage,
   }) => {
@@ -284,8 +200,9 @@ test.describe("Grant Quota Management", () => {
     await authenticatedPage.goto("grants");
     await authenticatedPage.waitForLoadState("networkidle");
 
-    // Test mode seeds a quota-bounded grant (admin, 100 queries / 1 GB) and
-    // unlimited grants (connector write, viewer read-only).
+    // Test mode seeds a quota-bounded definition (admin, 100 queries / 1 GB)
+    // and unlimited ones (connector write, viewer read-only). The limits are
+    // read off each grant's definition now, which is exactly what this asserts.
     const body = (await authenticatedPage.textContent("body")) ?? "";
 
     // A grant with a limit shows "used / limit queries" (e.g. "0 / 100 queries").
@@ -306,140 +223,19 @@ test.describe("Grant Quota Management", () => {
       fullPage: true,
     });
   });
-
-  test("quota fields should have unlimited placeholder", async ({
-    authenticatedPage,
-  }) => {
-    await authenticatedPage.goto("grants");
-    await authenticatedPage.waitForLoadState("networkidle");
-
-    // Click create button
-    const createButton = authenticatedPage.getByRole("button", {
-      name: /create|add|new|grant/i,
-    });
-    await createButton.click();
-
-    // Wait for dialog to open
-    await authenticatedPage.waitForSelector('[role="dialog"]');
-
-    // Verify quota fields have placeholder indicating unlimited
-    const maxQueriesInput = authenticatedPage.getByLabel(/max queries/i);
-    const maxBytesInput = authenticatedPage.getByLabel(/max data transfer/i);
-
-    // Check placeholders indicate unlimited (fields should be empty by default)
-    await expect(maxQueriesInput).toHaveAttribute("placeholder", /unlimited/i);
-    await expect(maxBytesInput).toHaveAttribute("placeholder", /unlimited/i);
-  });
-
-  test("should have unit selector for data transfer", async ({
-    authenticatedPage,
-  }) => {
-    await authenticatedPage.goto("grants");
-    await authenticatedPage.waitForLoadState("networkidle");
-
-    // Click create button
-    const createButton = authenticatedPage.getByRole("button", {
-      name: /create|add|new|grant/i,
-    });
-    await createButton.click();
-
-    // Wait for dialog to open
-    await authenticatedPage.waitForSelector('[role="dialog"]');
-
-    // Verify unit selector is present (MB/GB)
-    const formContent = await authenticatedPage.textContent('[role="dialog"]');
-    expect(formContent).toMatch(/MB|GB/);
-
-    // Take screenshot
-    await authenticatedPage.screenshot({
-      path: "test-results/screenshots/grants-create-unit-selector.png",
-    });
-  });
 });
 
 test.describe("Grant Priority", () => {
-  test("priority field tracks the selected controls until edited", async ({
-    authenticatedPage,
-  }) => {
-    await authenticatedPage.goto("grants");
-    await authenticatedPage.waitForLoadState("networkidle");
-
-    await authenticatedPage
-      .getByRole("button", { name: /create grant/i })
-      .click();
-    await authenticatedPage.waitForSelector('[role="dialog"]');
-
-    const priorityInput = authenticatedPage.getByTestId("grant-priority-input");
-    const autoHint = authenticatedPage.getByTestId("grant-priority-auto-hint");
-
-    // No controls selected: full write access, the top tier.
-    await expect(priorityInput).toHaveValue("100");
-    await expect(autoHint).toHaveText("auto: 100");
-
-    // A write-blocking control drops it to the middle tier.
-    await authenticatedPage.getByLabel(/block ddl/i).check();
-    await expect(priorityInput).toHaveValue("50");
-    await expect(autoHint).toHaveText("auto: 50");
-
-    // read_only is the most restrictive control and takes the bottom tier
-    // whatever else is selected.
-    await authenticatedPage.getByLabel(/read only/i).check();
-    await expect(priorityInput).toHaveValue("10");
-    await expect(autoHint).toHaveText("auto: 10");
-
-    // Unticking it goes back up — the field is still linked.
-    await authenticatedPage.getByLabel(/read only/i).uncheck();
-    await expect(priorityInput).toHaveValue("50");
-
-    await authenticatedPage.screenshot({
-      path: "test-results/screenshots/grants-priority-auto.png",
-    });
-  });
-
-  test("a manually edited priority stops following the controls", async ({
-    authenticatedPage,
-  }) => {
-    await authenticatedPage.goto("grants");
-    await authenticatedPage.waitForLoadState("networkidle");
-
-    await authenticatedPage
-      .getByRole("button", { name: /create grant/i })
-      .click();
-    await authenticatedPage.waitForSelector('[role="dialog"]');
-
-    const priorityInput = authenticatedPage.getByTestId("grant-priority-input");
-    await priorityInput.fill("75");
-
-    // Toggling controls must no longer move the field: the admin owns it now.
-    await authenticatedPage.getByLabel(/read only/i).check();
-    await expect(priorityInput).toHaveValue("75");
-
-    // ...but the hint still shows what the controls would have produced, so
-    // the override stays a visible, conscious act.
-    await expect(
-      authenticatedPage.getByTestId("grant-priority-auto-hint")
-    ).toHaveText("auto: 10");
-
-    await authenticatedPage.screenshot({
-      path: "test-results/screenshots/grants-priority-override.png",
-    });
-
-    // Reset re-links the field to the controls.
-    await authenticatedPage.getByTestId("grant-priority-reset").click();
-    await expect(priorityInput).toHaveValue("10");
-
-    await authenticatedPage.getByLabel(/read only/i).uncheck();
-    await expect(priorityInput).toHaveValue("100");
-  });
-
   test("grant list shows the priority of each grant", async ({
     authenticatedPage,
   }) => {
     await authenticatedPage.goto("grants");
     await authenticatedPage.waitForLoadState("networkidle");
 
-    // Test mode seeds grants with different shapes, so the column must be
-    // populated for every row.
+    // Test mode seeds grants from definitions of different shapes, so the
+    // column must be populated for every row. (The auto-priority *form*
+    // behaviour now lives on the definition editor — see
+    // grant-definitions.spec.ts.)
     const priorities = authenticatedPage.locator(
       '[data-testid^="grant-priority-"]'
     );
