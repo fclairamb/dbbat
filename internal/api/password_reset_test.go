@@ -189,8 +189,8 @@ func newIsolatedStore(t *testing.T) *store.Store {
 		t.Fatalf("failed to create store: %v", err)
 	}
 
-	dataStore.DB().DB.SetMaxOpenConns(testMaxConns)
-	dataStore.DB().DB.SetMaxIdleConns(testMaxConns)
+	dataStore.DB().SetMaxOpenConns(testMaxConns)
+	dataStore.DB().SetMaxIdleConns(testMaxConns)
 
 	t.Cleanup(func() {
 		dataStore.Close()

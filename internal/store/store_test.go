@@ -195,8 +195,8 @@ func setupTestStore(t *testing.T) *Store {
 		t.Fatalf("failed to create store: %v", err)
 	}
 
-	store.db.DB.SetMaxOpenConns(testMaxConns)
-	store.db.DB.SetMaxIdleConns(testMaxConns)
+	store.db.SetMaxOpenConns(testMaxConns)
+	store.db.SetMaxIdleConns(testMaxConns)
 
 	t.Cleanup(func() {
 		store.Close()
