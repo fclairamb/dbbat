@@ -255,8 +255,8 @@ func (m *preloginMessage) serialize() []byte {
 		var entry [optionEntrySize]byte
 
 		entry[0] = opt.Token
-		binary.BigEndian.PutUint16(entry[1:3], uint16(offset))        //nolint:gosec // bounded by payload size
-		binary.BigEndian.PutUint16(entry[3:5], uint16(len(opt.Data))) //nolint:gosec // bounded by payload size
+		binary.BigEndian.PutUint16(entry[1:3], uint16(offset))
+		binary.BigEndian.PutUint16(entry[3:5], uint16(len(opt.Data)))
 
 		table = append(table, entry[:]...)
 		blobs = append(blobs, opt.Data...)
@@ -318,7 +318,7 @@ func buildPreloginResponse(client *preloginMessage, encryption byte) *preloginMe
 	if client.has(preloginFedAuthRequired) {
 		// SQL authentication only in v1 (see docs/mssql.md): federated auth is
 		// declined here so the client falls back rather than sending a
-		// FEDAUTH token the proxy cannot honour.
+		// FEDAUTH token the proxy cannot honor.
 		resp.Options = append(resp.Options, preloginOption{Token: preloginFedAuthRequired, Data: []byte{0x00}})
 	}
 
@@ -369,6 +369,6 @@ func negotiateEncryption(clientValue byte, tlsAvailable bool) (byte, encryptionM
 		return encryptNotSup, encryptionNone, nil
 	default:
 		return encryptNotSup, encryptionNone, fmt.Errorf(
-			"%w: unrecognised ENCRYPTION value %s", ErrEncryptionNotSupported, encryptionName(clientValue))
+			"%w: unrecognized ENCRYPTION value %s", ErrEncryptionNotSupported, encryptionName(clientValue))
 	}
 }

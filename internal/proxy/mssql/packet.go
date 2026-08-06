@@ -344,7 +344,7 @@ func (p *packetRW) writePacket(msgType, status byte, payload []byte) error {
 	hdr := packetHeader{
 		Type:     msgType,
 		Status:   status,
-		Length:   uint16(packetHeaderSize + len(payload)), //nolint:gosec // bounded by payloadCapacity
+		Length:   uint16(packetHeaderSize + len(payload)),
 		SPID:     p.spid,
 		PacketID: p.outPacketID,
 	}

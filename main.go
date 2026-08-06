@@ -335,39 +335,66 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		MaxSize:    cfg.AuthCache.MaxSize,
 	})
 
-	// Start the PostgreSQL proxy server
-	proxyServer := startPostgresProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
-	proxyServer.SetDumpUploader(dumpUploader)
-
-	// Start Oracle proxy server (if configured)
-	oracleServer := startOracleProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
-	if oracleServer != nil {
-		oracleServer.SetDumpUploader(dumpUploader)
-	}
-
-	// Start MySQL proxy server (if configured)
-	mysqlServer := startMySQLProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
-	if mysqlServer != nil {
-		mysqlServer.SetDumpUploader(dumpUploader)
-	}
-
-	// Start MongoDB proxy server (if configured)
-	mongoServer := startMongoProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
-	if mongoServer != nil {
-		mongoServer.SetDumpUploader(dumpUploader)
-	}
-
-	// Start SQL Server proxy (if configured)
-	mssqlServer := startMSSQLProxy(ctx, cfg, logger)
+	proxies := startProxies(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, dumpUploader, logger)
 
 	// One retention sweep for the whole process (nil when disabled, the default).
 	sweeper := startQueryRetentionSweep(ctx, cfg, dataStore, logger)
 
 	// Draining releases parked queries first, then stops the servers.
-	servers := collectServers(approvalDrain{approvals, logger}, apiServer, proxyServer,
-		oracleServer, mysqlServer, mongoServer, mssqlServer, rowWriter, sweeper, heartbeat, dumpUploader)
+	servers := collectServers(approvalDrain{approvals, logger}, apiServer, proxies.postgres,
+		proxies.oracle, proxies.mysql, proxies.mongo, proxies.mssql,
+		rowWriter, sweeper, heartbeat, dumpUploader)
 
 	return awaitShutdown(ctx, logger, servers...)
+}
+
+// proxySet holds the protocol listeners this process started. Every field
+// except postgres is nil when its listen address is empty.
+type proxySet struct {
+	postgres *postgresql.Server
+	oracle   *oracle.Server
+	mysql    *mysql.Server
+	mongo    *mongodb.Server
+	mssql    *mssql.Server
+}
+
+// startProxies brings up every configured protocol listener and hands each one
+// the process-wide capture uploader.
+func startProxies(
+	ctx context.Context,
+	cfg *config.Config,
+	dataStore *store.Store,
+	authCache *cache.AuthCache,
+	approvalDeps shared.ApprovalDeps,
+	rowWriter *shared.RowWriter,
+	dumpUploader *dump.Uploader,
+	logger *slog.Logger,
+) proxySet {
+	set := proxySet{
+		postgres: startPostgresProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
+		oracle:   startOracleProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
+		mysql:    startMySQLProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
+		mongo:    startMongoProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
+		// The SQL Server proxy takes no store or auth cache yet: stage 1 speaks
+		// only the TDS handshake and has nothing to authenticate against.
+		mssql: startMSSQLProxy(ctx, cfg, logger),
+	}
+
+	set.postgres.SetDumpUploader(dumpUploader)
+
+	if set.oracle != nil {
+		set.oracle.SetDumpUploader(dumpUploader)
+	}
+
+	if set.mysql != nil {
+		set.mysql.SetDumpUploader(dumpUploader)
+	}
+
+	if set.mongo != nil {
+		set.mongo.SetDumpUploader(dumpUploader)
+	}
+
+	return set
 }
 
 // registerAndReconcile puts this process in the instance registry and then

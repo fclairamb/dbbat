@@ -98,7 +98,7 @@ func parseLoginFailure(t *testing.T, payload []byte) tdsErrorToken {
 	pos += procChars * 2
 
 	// LineNumber is 4 bytes on TDS 7.2+.
-	require.Equal(t, pos+4, len(body), "the ERROR token body must be fully consumed")
+	require.Len(t, body, pos+4, "the ERROR token body must be fully consumed")
 
 	// A DONE token flagged as an error must follow, or clients wait forever.
 	done := payload[3+length:]
@@ -172,7 +172,7 @@ func (c *testClient) tlsHandshake(t *testing.T) *tls.Conn {
 
 	adapter := newHandshakeConn(c.conn, c.pkt)
 	tlsConn := tls.Client(adapter, &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // the proxy's auto-generated self-signed cert
+		InsecureSkipVerify: true, // the proxy's auto-generated self-signed cert
 		MinVersion:         tls.VersionTLS12,
 		MaxVersion:         tlsMaxVersion,
 	})

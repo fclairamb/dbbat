@@ -3,7 +3,6 @@ package mssql
 import (
 	"bytes"
 	"crypto/tls"
-	"errors"
 	"io"
 	"net"
 	"testing"
@@ -219,7 +218,7 @@ func TestEncapsulatedTLSHandshake(t *testing.T) {
 
 	clientAdapter := newHandshakeConn(clientRaw, newPacketRW(clientRaw))
 	clientTLS := tls.Client(clientAdapter, &tls.Config{
-		InsecureSkipVerify: true, //nolint:gosec // self-signed cert generated in this test
+		InsecureSkipVerify: true, // self-signed cert generated in this test
 		MinVersion:         tls.VersionTLS12,
 		MaxVersion:         tlsMaxVersion,
 	})
@@ -308,5 +307,5 @@ func TestHandshakeConnReadPropagatesEOF(t *testing.T) {
 	conn := newHandshakeConn(pipeConn{rw}, newPacketRW(rw))
 
 	_, err := conn.Read(make([]byte, 8))
-	require.True(t, errors.Is(err, io.EOF))
+	require.ErrorIs(t, err, io.EOF)
 }

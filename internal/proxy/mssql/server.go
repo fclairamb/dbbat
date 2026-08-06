@@ -157,10 +157,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // nextSPID hands out the per-connection session id echoed in packet headers.
 // It wraps at 16 bits and skips 0, which clients read as "no session".
 func (s *Server) nextSPID() uint16 {
-	//nolint:gosec // deliberately truncated to the 16 bits TDS gives the field
 	spid := uint16(s.spidCounter.Add(1))
 	if spid == 0 {
-		//nolint:gosec // same truncation, one step past the wrap
 		spid = uint16(s.spidCounter.Add(1))
 	}
 
