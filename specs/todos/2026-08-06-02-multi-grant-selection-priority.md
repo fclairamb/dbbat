@@ -136,3 +136,56 @@ runs afresh, picking the next-best still-active grant.
   touching the schema.
 
 No GitHub issue filed yet — one should be.
+
+## Implementation Plan
+
+1. **Migration** `internal/migrations/sql/20260806000000_grants_priority.{up,down}.sql`
+   - `ALTER TABLE access_grants ADD COLUMN IF NOT EXISTS priority SMALLINT NOT NULL DEFAULT 0`
+   - Backfill `UPDATE` computing the tier (100 / 50 / 10) from `controls` for every
+     pre-existing row.
+   - `ALTER TABLE grant_definitions ADD COLUMN IF NOT EXISTS priority SMALLINT` —
+     nullable, NULL meaning "auto from controls at materialization time".
+   - Corrective comment about the false "Active grant uniqueness is enforced at
+     application level" note lives here (shipped migrations are immutable).
+   - Down migration drops both columns.
+
+2. **Store** (`internal/store/`)
+   - `models.go`: `AccessGrant.Priority int16` (`bun:"priority,notnull,default:0"`),
+     `GrantDefinition.Priority *int16` (`bun:"priority"`).
+   - `grants.go`: `AutoPriority(controls []string) int16` — the single formula
+     (read_only → 10, any other control → 50, none → 100).
+   - `CreateGrant`: `Priority` = supplied value when non-zero-by-caller… actually
+     the caller passes an already-resolved value; the API/definition paths resolve
+     nil → `AutoPriority`. `CreateGrant` itself falls back to `AutoPriority` when
+     the field is left at 0 so no path can insert an unintentional 0.
+   - `BuildGrantFromDefinition`: `def.Priority` when non-nil, else `AutoPriority`.
+   - `GetActiveGrant` + `ListGrants`: `ORDER BY priority DESC, expires_at DESC,
+     created_at DESC`.
+   - `UpdateGrantDefinition`: add `priority` to the updated column list.
+
+3. **API** (`internal/api/`)
+   - `CreateGrantRequest.Priority *int16` — absent → auto.
+   - `CreateGrantDefinitionRequest.Priority *int16` — absent → auto at
+     materialization.
+   - Validate the range fits a smallint.
+   - Audit event records the resulting priority.
+
+4. **OpenAPI** (`internal/api/openapi.yml`): `priority` on `AccessGrant`,
+   `CreateGrantRequest`, `GrantDefinition`, `CreateGrantDefinitionRequest`.
+   Regenerate `front/src/api/schema.ts`.
+
+5. **Frontend**
+   - `grants/index.tsx`: Priority column in the list; Priority input in the create
+     dialog, live-synced from the selected controls until manually edited
+     ("auto: N" hint + a reset affordance).
+   - `grant-definitions/index.tsx`: Priority column + the same optional
+     auto-synced field in the definition dialog (blank = auto).
+
+6. **Tests**
+   - `internal/store/grants_test.go`: both creation orders, explicit override,
+     tie-breaking on expiry then creation.
+   - `internal/store/grants_test.go` (lifecycle): a `LimitGuard` built from the
+     admitted grant still fires `ErrGrantExpired` while a second grant is active.
+   - `internal/api/grants_test.go`: create with and without an explicit priority.
+   - `front/e2e/grants.spec.ts`: auto-update on control toggle + manual override
+     sticks.
