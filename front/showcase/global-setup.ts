@@ -98,19 +98,23 @@ async function connectorUid(api: ShowcaseApi): Promise<string> {
   return match.uid;
 }
 
+/**
+ * Issues the grant by instantiating the definition above. A grant carries no
+ * shape of its own — the controls, the approval patterns and the window's
+ * length all come from the definition.
+ */
 async function ensureGrant(
   api: ShowcaseApi,
+  definitionUid: string,
   userUid: string,
   serverUid: string,
 ): Promise<string> {
   const now = new Date();
   const created = await api.post<Identified>("/grants", {
+    grant_definition_id: definitionUid,
     user_id: userUid,
     database_id: serverUid,
-    controls: [],
     starts_at: new Date(now.getTime() - 60_000).toISOString(),
-    expires_at: new Date(now.getTime() + 8 * 3600_000).toISOString(),
-    approval_patterns: [APPROVAL_PATTERN],
   });
   return created.uid;
 }
@@ -132,7 +136,7 @@ export default async function globalSetup(): Promise<void> {
   const serverUid = await ensureServer(api);
   const definitionUid = await ensureDefinition(api);
   const userUid = await connectorUid(api);
-  const grantUid = await ensureGrant(api, userUid, serverUid);
+  const grantUid = await ensureGrant(api, definitionUid, userUid, serverUid);
 
   console.log("[showcase] generating proxy traffic");
   await generateTraffic();
