@@ -24,18 +24,21 @@ func looksStale(t *testing.T, ctx context.Context, store *Store, instanceID stri
 	return stale
 }
 
-// registeredStore hands the caller its own store, identified as instanceID and
-// registered under it.
+// testRegistryInstanceID is the identity the registry subtests register under.
+const testRegistryInstanceID = "registry-a"
+
+// registeredStore hands the caller its own store, identified as
+// testRegistryInstanceID and already registered under it.
 //
 // The identity a process registers under lives in a plain *Store field that
 // RegisterInstance and the reclaim both read, so subtests that each need their
-// own identity — or their own registry row to age, revive and delete — need
-// their own store rather than a shared one they take turns re-pointing.
-func registeredStore(t *testing.T, ctx context.Context, instanceID string) *Store {
+// own registry row to age, revive and delete need their own store rather than a
+// shared one they take turns re-pointing.
+func registeredStore(t *testing.T, ctx context.Context) *Store {
 	t.Helper()
 
 	store := setupTestStore(t)
-	store.SetInstanceID(instanceID)
+	store.SetInstanceID(testRegistryInstanceID)
 
 	require.NoError(t, store.RegisterInstance(ctx))
 
@@ -50,7 +53,7 @@ func TestInstanceRegistry(t *testing.T) {
 	t.Run("register creates a row that is alive", func(t *testing.T) {
 		t.Parallel()
 
-		store := registeredStore(t, ctx, "registry-a")
+		store := registeredStore(t, ctx)
 
 		inst, err := store.GetInstance(ctx, "registry-a")
 		require.NoError(t, err)
@@ -63,7 +66,7 @@ func TestInstanceRegistry(t *testing.T) {
 	t.Run("heartbeat revives a stale row without rewriting started_at", func(t *testing.T) {
 		t.Parallel()
 
-		store := registeredStore(t, ctx, "registry-a")
+		store := registeredStore(t, ctx)
 
 		// Age the row past the grace period on the database clock, so it is
 		// stale by exactly the predicate the reclaim uses.
@@ -92,7 +95,7 @@ func TestInstanceRegistry(t *testing.T) {
 	t.Run("heartbeat re-creates a row that disappeared", func(t *testing.T) {
 		t.Parallel()
 
-		store := registeredStore(t, ctx, "registry-a")
+		store := registeredStore(t, ctx)
 
 		// A missing row means "dead", so losing ours must not be permanent —
 		// otherwise a live process's connections stay reclaimable forever.
@@ -112,7 +115,7 @@ func TestInstanceRegistry(t *testing.T) {
 	t.Run("register resets started_at on a restart", func(t *testing.T) {
 		t.Parallel()
 
-		store := registeredStore(t, ctx, "registry-a")
+		store := registeredStore(t, ctx)
 
 		_, err := store.db.ExecContext(ctx,
 			"UPDATE instances SET started_at = now() - make_interval(secs => ?) WHERE instance_id = ?",

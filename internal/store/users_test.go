@@ -420,7 +420,7 @@ func TestEnsureDefaultAdmin(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Each subtest owns its store: the behaviour under test is decided by whether
+	// Each subtest owns its store: the behavior under test is decided by whether
 	// the users table is empty, which is the one thing a sibling cannot share.
 	t.Run("creates admin when no users exist", func(t *testing.T) {
 		t.Parallel()
