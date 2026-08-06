@@ -26,6 +26,7 @@ export type CreateGrantRequestPayload =
   components["schemas"]["CreateGrantRequestPayload"];
 export type Connection = components["schemas"]["Connection"];
 export type ConnectionDetail = components["schemas"]["ConnectionDetail"];
+export type GrantSummary = components["schemas"]["GrantSummary"];
 export type Query = components["schemas"]["Query"];
 export type QueryWithRows = components["schemas"]["QueryWithRows"];
 export type AuditEvent = components["schemas"]["AuditEvent"];
