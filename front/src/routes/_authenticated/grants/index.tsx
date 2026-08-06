@@ -51,11 +51,17 @@ import {
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { Plus, Ban } from "lucide-react";
 import { toast } from "sonner";
 import { formatDateTimeLocal, formatDateTime } from "@/lib/date-utils";
 import { UsageMeter } from "@/components/shared/UsageMeter";
 import { formatBytes } from "@/lib/utils";
+import { autoPriority } from "@/lib/grant-priority";
 
 // Control options with descriptions
 const CONTROLS = [
@@ -178,6 +184,26 @@ function GrantsPage() {
           </div>
         );
       },
+    },
+    {
+      key: "priority",
+      header: "Priority",
+      cell: (g) => (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span
+              className="font-mono text-sm tabular-nums"
+              data-testid={`grant-priority-${g.uid}`}
+            >
+              {g.priority}
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>
+            Among this user's overlapping active grants on this database, the
+            highest priority is the one a new session is admitted under.
+          </TooltipContent>
+        </Tooltip>
+      ),
     },
     {
       key: "time_window",
@@ -331,6 +357,16 @@ function CreateGrantDialog({
   const [maxQueries, setMaxQueries] = useState<string>("");
   const [maxBytesValue, setMaxBytesValue] = useState<string>("");
   const [bytesUnit, setBytesUnit] = useState<"KB" | "MB" | "GB">("MB");
+  // "Linked until touched": the priority tracks the selected controls as the
+  // admin toggles them, right up until they type in the field themselves — at
+  // which point it's theirs. Same behavior as the slug field on grant
+  // definitions.
+  const [priority, setPriority] = useState<string>(() =>
+    String(autoPriority([]))
+  );
+  const [priorityTouched, setPriorityTouched] = useState(false);
+
+  const computedPriority = autoPriority(controls);
 
   // Compute duration and validation
   const startsAtDate = new Date(startsAt);
@@ -372,15 +408,25 @@ function CreateGrantDialog({
       expires_at: new Date(expiresAt).toISOString(),
       max_query_counts: maxQueries ? parseInt(maxQueries) : undefined,
       max_bytes_transferred: maxBytesTransferred,
+      // An untouched field is exactly what the server would compute anyway;
+      // sending it keeps the request an honest record of what the admin saw.
+      // A cleared field falls back to the server-side auto value.
+      priority: priority === "" ? undefined : parseInt(priority),
     });
   };
 
   const toggleControl = (controlValue: string) => {
-    setControls((prev) =>
-      prev.includes(controlValue)
+    setControls((prev) => {
+      const next = prev.includes(controlValue)
         ? prev.filter((c) => c !== controlValue)
-        : [...prev, controlValue]
-    );
+        : [...prev, controlValue];
+
+      if (!priorityTouched) {
+        setPriority(String(autoPriority(next)));
+      }
+
+      return next;
+    });
   };
 
   return (
@@ -450,6 +496,49 @@ function CreateGrantDialog({
                 </div>
               ))}
             </div>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="priority">Priority</Label>
+            <p className="text-sm text-muted-foreground">
+              When this user holds several active grants on the same database,
+              a new session is admitted under the highest priority one. Derived
+              from the controls above until you edit it.
+            </p>
+            <div className="flex items-center gap-2">
+              <Input
+                id="priority"
+                type="number"
+                min="-32768"
+                max="32767"
+                value={priority}
+                onChange={(e) => {
+                  setPriority(e.target.value);
+                  setPriorityTouched(true);
+                }}
+                className="flex-1"
+                data-testid="grant-priority-input"
+              />
+              {priorityTouched && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setPriority(String(computedPriority));
+                    setPriorityTouched(false);
+                  }}
+                  data-testid="grant-priority-reset"
+                >
+                  Reset
+                </Button>
+              )}
+            </div>
+            <p
+              className="text-xs text-muted-foreground"
+              data-testid="grant-priority-auto-hint"
+            >
+              auto: {computedPriority}
+            </p>
           </div>
           <div className="space-y-3">
             <Label>Quotas (Optional)</Label>

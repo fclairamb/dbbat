@@ -57,6 +57,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { canManageGrantDefinitions } from "@/lib/permissions";
 import { UsageLimit } from "@/components/shared/UsageMeter";
 import { formatBytes } from "@/lib/utils";
+import { autoPriority } from "@/lib/grant-priority";
 
 export const Route = createFileRoute("/_authenticated/grant-definitions/")({
   component: GrantDefinitionsPage,
@@ -141,6 +142,7 @@ function GrantDefinitionsPage() {
       controls: d.controls,
       max_query_counts: d.max_query_counts,
       max_bytes_transferred: d.max_bytes_transferred,
+      priority: d.priority,
       auto_approve: next,
       // Preserve scope: this is a targeted toggle, not a full edit.
       group_uids: d.group_uids,
@@ -199,6 +201,22 @@ function GrantDefinitionsPage() {
             ))}
           </div>
         ),
+    },
+    {
+      key: "priority",
+      header: "Priority",
+      cell: (d: GrantDefinition) => (
+        <span
+          className="font-mono text-sm tabular-nums"
+          data-testid={`grant-definition-priority-${d.uid}`}
+        >
+          {d.priority ?? (
+            <span className="text-muted-foreground italic font-sans">
+              auto ({autoPriority(d.controls)})
+            </span>
+          )}
+        </span>
+      ),
     },
     {
       key: "max_query_counts",
@@ -451,6 +469,17 @@ function DefinitionDialog({
     return "m";
   });
   const [controls, setControls] = useState<string[]>(editing?.controls ?? []);
+  // Optional on a definition: empty means "let each materialized grant take
+  // the tier its controls earn". Prefilled from the controls until the
+  // operator edits it, same "linked until touched" rule as the slug.
+  const [priority, setPriority] = useState<string>(() =>
+    editing?.priority != null
+      ? String(editing.priority)
+      : String(autoPriority(editing?.controls ?? []))
+  );
+  const [priorityTouched, setPriorityTouched] = useState(
+    editing?.priority != null
+  );
   const [groupUids, setGroupUids] = useState<string[]>(
     editing?.group_uids ?? []
   );
@@ -503,9 +532,19 @@ function DefinitionDialog({
   });
 
   const toggleControl = (v: string) =>
-    setControls((prev) =>
-      prev.includes(v) ? prev.filter((c) => c !== v) : [...prev, v]
-    );
+    setControls((prev) => {
+      const next = prev.includes(v)
+        ? prev.filter((c) => c !== v)
+        : [...prev, v];
+
+      if (!priorityTouched) {
+        setPriority(String(autoPriority(next)));
+      }
+
+      return next;
+    });
+
+  const computedPriority = autoPriority(controls);
 
   const handleNameChange = (value: string) => {
     setName(value);
@@ -543,6 +582,10 @@ function DefinitionDialog({
       max_bytes_transferred: maxBytesValue
         ? parseInt(maxBytesValue) * unitMult
         : null,
+      // Only an explicitly-edited value is pinned on the definition; an
+      // untouched field stays null so each materialized grant re-derives the
+      // tier from its own controls.
+      priority: priorityTouched && priority !== "" ? parseInt(priority) : null,
       auto_approve: autoApprove,
       group_uids: groupUids,
       database_uids: databaseUids,
@@ -660,6 +703,51 @@ function DefinitionDialog({
                 </div>
               ))}
             </div>
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="def-priority">Priority</Label>
+            <p className="text-xs text-muted-foreground">
+              When a user holds several active grants on the same database, a
+              new session is admitted under the highest priority one. Derived
+              from the controls above until you edit it — leave it linked and
+              every grant from this definition computes its own.
+            </p>
+            <div className="flex items-center gap-2">
+              <Input
+                id="def-priority"
+                type="number"
+                min="-32768"
+                max="32767"
+                value={priority}
+                onChange={(e) => {
+                  setPriority(e.target.value);
+                  setPriorityTouched(true);
+                }}
+                className="flex-1"
+                data-testid="grant-definition-priority"
+              />
+              {priorityTouched && (
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setPriority(String(computedPriority));
+                    setPriorityTouched(false);
+                  }}
+                  data-testid="grant-definition-priority-reset"
+                >
+                  Reset
+                </Button>
+              )}
+            </div>
+            <p
+              className="text-xs text-muted-foreground"
+              data-testid="grant-definition-priority-auto-hint"
+            >
+              auto: {computedPriority}
+              {priorityTouched ? " (overridden)" : ""}
+            </p>
           </div>
           <div className="space-y-2">
             <Label>Restrict to groups</Label>
