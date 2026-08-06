@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/uptrace/bun"
 )
 
 // Auto-calculated grant priority tiers. A user holding several active grants
@@ -63,15 +64,16 @@ func ResolvePriority(explicit int16, controls []string) int16 {
 }
 
 // BuildGrantFromDefinition assembles an AccessGrant from a GrantDefinition
-// + the requesting user/database, anchoring the time window to `now`. Used
-// by both the grant-request approval path and any future admin shortcut
-// that wants to materialize a definition into a concrete grant.
+// + the target user/database, anchoring the time window to `now`. It is the
+// only way a grant comes into existence: the grant-request approval path and
+// the admin direct-assign path both go through here.
+//
+// Nothing about the definition's shape is copied onto the grant — the grant
+// pins the definition's uid and reads its shape back through the accessors on
+// AccessGrant. The only value derived from the shape is Priority, which is a
+// selection rank rather than policy and has to be stored so the ordering can
+// happen in SQL.
 func BuildGrantFromDefinition(def *GrantDefinition, userID, databaseID, grantedBy uuid.UUID, now time.Time) *Grant {
-	controls := append([]string(nil), def.Controls...)
-	if controls == nil {
-		controls = []string{}
-	}
-
 	// A definition's priority is optional: nil means "whatever the controls
 	// earn", which is what every definition predating the column wants.
 	var explicitPriority int16
@@ -80,20 +82,14 @@ func BuildGrantFromDefinition(def *GrantDefinition, userID, databaseID, grantedB
 	}
 
 	return &Grant{
-		UserID:              userID,
-		DatabaseID:          databaseID,
-		Controls:            controls,
-		GrantedBy:           grantedBy,
-		StartsAt:            now,
-		ExpiresAt:           now.Add(time.Duration(def.DurationSeconds) * time.Second),
-		MaxQueryCounts:      def.MaxQueryCounts,
-		MaxBytesTransferred: def.MaxBytesTransferred,
-		Priority:            ResolvePriority(explicitPriority, controls),
-		// Mirrored, not joined: the proxy session holds only a *Grant, and
-		// resolving patterns off the definition at query time would mean a
-		// join on the hot path plus zero coverage for direct admin grants.
-		ApprovalPatterns:  copyStrings(def.ApprovalPatterns),
-		ApproverGroupUIDs: copyUUIDs(def.ApproverGroupUIDs),
+		UserID:            userID,
+		DatabaseID:        databaseID,
+		GrantDefinitionID: def.UID,
+		Definition:        def,
+		GrantedBy:         grantedBy,
+		StartsAt:          now,
+		ExpiresAt:         now.Add(time.Duration(def.DurationSeconds) * time.Second),
+		Priority:          ResolvePriority(explicitPriority, def.Controls),
 	}
 }
 
@@ -114,27 +110,33 @@ func copyUUIDs(in []uuid.UUID) []uuid.UUID {
 	return out
 }
 
-// CreateGrant creates a new access grant
+// CreateGrant creates a new access grant. The grant must name the definition
+// it is an instance of: a grant with no definition would carry no shape at
+// all, and there is deliberately no code path that produces one.
 func (s *Store) CreateGrant(ctx context.Context, grant *Grant) (*Grant, error) {
-	// Ensure Controls is not nil
-	controls := grant.Controls
-	if controls == nil {
-		controls = []string{}
+	if grant.GrantDefinitionID == uuid.Nil {
+		return nil, ErrGrantDefinitionRequired
+	}
+
+	def := grant.Definition
+	if def == nil || def.UID != grant.GrantDefinitionID {
+		loaded, err := s.GetGrantDefinition(ctx, grant.GrantDefinitionID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve grant definition: %w", err)
+		}
+
+		def = loaded
 	}
 
 	result := &AccessGrant{
-		UserID:              grant.UserID,
-		DatabaseID:          grant.DatabaseID,
-		Controls:            controls,
-		GrantedBy:           grant.GrantedBy,
-		StartsAt:            grant.StartsAt,
-		ExpiresAt:           grant.ExpiresAt,
-		MaxQueryCounts:      grant.MaxQueryCounts,
-		MaxBytesTransferred: grant.MaxBytesTransferred,
-		ApprovalPatterns:    copyStrings(grant.ApprovalPatterns),
-		ApproverGroupUIDs:   copyUUIDs(grant.ApproverGroupUIDs),
-		Priority:            ResolvePriority(grant.Priority, controls),
-		CreatedAt:           time.Now(),
+		UserID:            grant.UserID,
+		DatabaseID:        grant.DatabaseID,
+		GrantDefinitionID: def.UID,
+		GrantedBy:         grant.GrantedBy,
+		StartsAt:          grant.StartsAt,
+		ExpiresAt:         grant.ExpiresAt,
+		Priority:          ResolvePriority(grant.Priority, def.Controls),
+		CreatedAt:         time.Now(),
 	}
 
 	_, err := s.db.NewInsert().
@@ -145,12 +147,21 @@ func (s *Store) CreateGrant(ctx context.Context, grant *Grant) (*Grant, error) {
 		return nil, fmt.Errorf("failed to create grant: %w", err)
 	}
 
+	result.Definition = def
 	result.QueryCount = 0
 	result.BytesTransferred = 0
 	return result, nil
 }
 
-// GetActiveGrant retrieves an active grant for a user and database
+// GetActiveGrant retrieves an active grant for a user and database.
+//
+// "Active" now includes the definition's own state: a grant whose definition
+// was **deactivated** is not returned, so deactivation fails closed for every
+// grant issued from that definition — including grants pinned to an older
+// version, since deactivation applies to the whole lineage. Being
+// **archived** (superseded by an edit) is explicitly not deactivation and is
+// never consulted here: a grant keeps authorising under the exact version it
+// was issued from.
 func (s *Store) GetActiveGrant(ctx context.Context, userID, databaseID uuid.UUID) (*Grant, error) {
 	grant := new(AccessGrant)
 	err := s.db.NewSelect().
@@ -160,6 +171,7 @@ func (s *Store) GetActiveGrant(ctx context.Context, userID, databaseID uuid.UUID
 		Where("revoked_at IS NULL").
 		Where("starts_at <= NOW()").
 		Where("expires_at > NOW()").
+		Where("grant_definition_id IN (SELECT uid FROM grant_definitions WHERE is_active)").
 		// Highest priority wins. Ties go to the grant that lasts longest (a
 		// session is pinned to the grant it was admitted under for its whole
 		// life, so the longer window is the more useful pick), then to the
@@ -175,10 +187,74 @@ func (s *Store) GetActiveGrant(ctx context.Context, userID, databaseID uuid.UUID
 		return nil, fmt.Errorf("failed to get active grant: %w", err)
 	}
 
+	// A grant whose shape cannot be attached is unusable by definition, and
+	// the caller is the proxy admitting a session — so report it as "no active
+	// grant" rather than handing back something whose behaviour is unknown.
+	if err := s.attachDefinitions(ctx, []*AccessGrant{grant}); err != nil {
+		return nil, err
+	}
+
+	if grant.Definition == nil {
+		return nil, ErrNoActiveGrant
+	}
+
 	if err := s.populateGrantCounters(ctx, grant); err != nil {
 		return nil, err
 	}
 	return grant, nil
+}
+
+// attachDefinitions loads the grant definitions the given grants point at and
+// hangs them off each grant, in one batched query regardless of how many
+// grants are involved.
+//
+// Deliberately not a bun relation: the auth path is the wrong place to depend
+// on ORM join-alias behaviour, and archived definitions must stay attachable
+// (a grant issued from version 1 still has to render its shape after version 2
+// exists), which a filtered join would make easy to get wrong.
+func (s *Store) attachDefinitions(ctx context.Context, grants []*AccessGrant) error {
+	if len(grants) == 0 {
+		return nil
+	}
+
+	seen := make(map[uuid.UUID]struct{}, len(grants))
+	uids := make([]uuid.UUID, 0, len(grants))
+
+	for _, g := range grants {
+		if g.GrantDefinitionID == uuid.Nil {
+			continue
+		}
+
+		if _, dup := seen[g.GrantDefinitionID]; dup {
+			continue
+		}
+
+		seen[g.GrantDefinitionID] = struct{}{}
+		uids = append(uids, g.GrantDefinitionID)
+	}
+
+	if len(uids) == 0 {
+		return nil
+	}
+
+	var defs []GrantDefinition
+	if err := s.db.NewSelect().
+		Model(&defs).
+		Where("uid IN (?)", bun.In(uids)).
+		Scan(ctx); err != nil {
+		return fmt.Errorf("failed to load grant definitions: %w", err)
+	}
+
+	byUID := make(map[uuid.UUID]*GrantDefinition, len(defs))
+	for i := range defs {
+		byUID[defs[i].UID] = &defs[i]
+	}
+
+	for _, g := range grants {
+		g.Definition = byUID[g.GrantDefinitionID]
+	}
+
+	return nil
 }
 
 // GetGrantByUID retrieves a grant by UID
@@ -193,6 +269,13 @@ func (s *Store) GetGrantByUID(ctx context.Context, uid uuid.UUID) (*Grant, error
 			return nil, ErrGrantNotFound
 		}
 		return nil, fmt.Errorf("failed to get grant: %w", err)
+	}
+
+	// Unfiltered on purpose: a lookup by uid is a history/detail read, so it
+	// must still resolve a grant whose definition has since been deactivated
+	// or superseded.
+	if err := s.attachDefinitions(ctx, []*AccessGrant{grant}); err != nil {
+		return nil, err
 	}
 
 	if err := s.populateGrantCounters(ctx, grant); err != nil {
@@ -231,6 +314,16 @@ func (s *Store) ListGrants(ctx context.Context, filter GrantFilter) ([]Grant, er
 	if grants == nil {
 		grants = []AccessGrant{}
 	}
+
+	refs := make([]*AccessGrant, len(grants))
+	for i := range grants {
+		refs[i] = &grants[i]
+	}
+
+	if err := s.attachDefinitions(ctx, refs); err != nil {
+		return nil, err
+	}
+
 	for i := range grants {
 		if err := s.populateGrantCounters(ctx, &grants[i]); err != nil {
 			return nil, err

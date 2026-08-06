@@ -310,11 +310,11 @@ func checkQuotas(grant *store.Grant) error {
 		return shared.ErrGrantExpired
 	}
 
-	if grant.MaxQueryCounts != nil && grant.QueryCount >= *grant.MaxQueryCounts {
+	if maxQueries := grant.MaxQueryCounts(); maxQueries != nil && grant.QueryCount >= *maxQueries {
 		return ErrQueryLimitExceeded
 	}
 
-	if grant.MaxBytesTransferred != nil && grant.BytesTransferred >= *grant.MaxBytesTransferred {
+	if maxBytes := grant.MaxBytesTransferred(); maxBytes != nil && grant.BytesTransferred >= *maxBytes {
 		return ErrDataLimitExceeded
 	}
 

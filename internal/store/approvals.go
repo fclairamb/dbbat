@@ -86,7 +86,7 @@ func ValidateApprovalPatterns(patterns []string) error {
 // all. Cheap pre-check so the common case (no patterns) never compiles or
 // matches anything.
 func (g *AccessGrant) RequiresApproval() bool {
-	return g != nil && len(g.ApprovalPatterns) > 0
+	return g != nil && len(g.ApprovalPatterns()) > 0
 }
 
 // MayApprove reports whether a user in the given groups may resolve holds on
@@ -97,7 +97,7 @@ func (g *AccessGrant) MayApprove(userGroupUIDs []uuid.UUID) bool {
 		return false
 	}
 
-	for _, scoped := range g.ApproverGroupUIDs {
+	for _, scoped := range g.ApproverGroupUIDs() {
 		for _, owned := range userGroupUIDs {
 			if scoped == owned {
 				return true

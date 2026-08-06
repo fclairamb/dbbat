@@ -479,54 +479,129 @@ type QueryFilter struct {
 	Offset       int
 }
 
-// AccessGrant represents an access grant
+// AccessGrant is one *instance* of a GrantDefinition: a named user's
+// time-boxed access to one database, issued from a definition that describes
+// what that access may do.
+//
+// It deliberately carries no behavioral shape of its own. Controls, quotas,
+// approval patterns and approver groups all live on GrantDefinitionID's row
+// and are read through the accessors below. The grant row holds only
+// instance-lifecycle data — who, where, the window, revocation, usage — plus
+// Priority, which ranks this instance against the user's other instances and
+// is not policy.
 type AccessGrant struct {
 	bun.BaseModel `bun:"table:access_grants,alias:ag"`
 
-	UID                 uuid.UUID  `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
-	UserID              uuid.UUID  `bun:"user_id,notnull,type:uuid" json:"user_id"`
-	DatabaseID          uuid.UUID  `bun:"database_id,notnull,type:uuid" json:"database_id"`
-	Controls            []string   `bun:"controls,array" json:"controls"` // Array of controls: read_only, block_copy, block_ddl
-	GrantedBy           uuid.UUID  `bun:"granted_by,notnull,type:uuid" json:"granted_by"`
-	StartsAt            time.Time  `bun:"starts_at,notnull" json:"starts_at"`
-	ExpiresAt           time.Time  `bun:"expires_at,notnull" json:"expires_at"`
-	RevokedAt           *time.Time `bun:"revoked_at" json:"revoked_at"`
-	RevokedBy           *uuid.UUID `bun:"revoked_by,type:uuid" json:"revoked_by"`
-	MaxQueryCounts      *int64     `bun:"max_query_counts" json:"max_query_counts"`
-	MaxBytesTransferred *int64     `bun:"max_bytes_transferred" json:"max_bytes_transferred"`
-	CreatedAt           time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	UID        uuid.UUID `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	UserID     uuid.UUID `bun:"user_id,notnull,type:uuid" json:"user_id"`
+	DatabaseID uuid.UUID `bun:"database_id,notnull,type:uuid" json:"database_id"`
+	// GrantDefinitionID pins the exact definition *version* this grant was
+	// issued from. Definitions are immutably versioned (an edit archives the
+	// row and inserts a successor), so this reference can never make a live
+	// grant's behaviour change underneath it.
+	GrantDefinitionID uuid.UUID  `bun:"grant_definition_id,notnull,type:uuid" json:"grant_definition_id"`
+	GrantedBy         uuid.UUID  `bun:"granted_by,notnull,type:uuid" json:"granted_by"`
+	StartsAt          time.Time  `bun:"starts_at,notnull" json:"starts_at"`
+	ExpiresAt         time.Time  `bun:"expires_at,notnull" json:"expires_at"`
+	RevokedAt         *time.Time `bun:"revoked_at" json:"revoked_at"`
+	RevokedBy         *uuid.UUID `bun:"revoked_by,type:uuid" json:"revoked_by"`
+	CreatedAt         time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 
 	// Priority ranks this grant against the other active grants the same user
 	// holds on the same database: the highest priority wins at auth time (ties
-	// broken by latest expiry, then newest). Auto-calculated from Controls by
-	// AutoPriority unless an admin set it explicitly, which is why it is a
-	// plain int16 rather than a pointer — by the time a grant row exists the
-	// value is always resolved.
+	// broken by latest expiry, then newest). Auto-calculated from the
+	// definition's controls by AutoPriority unless an admin set it explicitly,
+	// which is why it is a plain int16 rather than a pointer — by the time a
+	// grant row exists the value is always resolved.
 	Priority int16 `bun:"priority,notnull,default:0" json:"priority"`
 
-	// ApprovalPatterns are RE2 patterns that suspend a matching statement
-	// until an approver resolves it. Mirrored from the grant definition at
-	// materialization time — exactly like Controls / MaxQueryCounts — because
-	// the proxy session holds nothing but a *Grant, and admin-created grants
-	// bypass definitions entirely.
-	ApprovalPatterns []string `bun:"approval_patterns,array,notnull,default:'{}'" json:"approval_patterns"`
-	// ApproverGroupUIDs lists groups whose members may resolve holds on this
-	// grant, in addition to admins. Empty = admins only.
-	ApproverGroupUIDs []uuid.UUID `bun:"approver_group_uids,array,notnull,default:'{}'" json:"approver_group_uids"`
+	// Definition is the grant's shape, attached by the store on every read
+	// path (see Store.attachDefinitions). It is not a bun relation: the
+	// attachment is one batched query, which keeps the auth path free of ORM
+	// join semantics.
+	Definition *GrantDefinition `bun:"-" json:"definition,omitempty"`
 
 	// Computed fields (not stored in DB)
 	QueryCount       int64 `bun:"-" json:"query_count"`
 	BytesTransferred int64 `bun:"-" json:"bytes_transferred"`
 }
 
+// Controls returns the controls this grant enforces, read from its definition.
+//
+// A grant with no definition attached is treated as carrying *every* control:
+// the shape is unknown, so the answer that cannot widen access is "everything
+// is restricted". Combined with MaxQueryCounts/MaxBytesTransferred returning a
+// zero quota in the same situation, a shapeless grant authorises nothing at
+// all. That is a backstop, not a mode: GetActiveGrant refuses to hand out a
+// grant whose definition it could not attach.
+func (g *AccessGrant) Controls() []string {
+	if g == nil || g.Definition == nil {
+		return append([]string(nil), ValidControls...)
+	}
+
+	return g.Definition.Controls
+}
+
 // HasControl checks if the grant has a specific control enabled
 func (g *AccessGrant) HasControl(control string) bool {
-	for _, c := range g.Controls {
+	for _, c := range g.Controls() {
 		if c == control {
 			return true
 		}
 	}
 	return false
+}
+
+// MaxQueryCounts is the grant's query quota, read from its definition. nil
+// means unlimited; a shapeless grant reports a zero quota (nothing allowed)
+// rather than nil, so it fails closed. See Controls.
+func (g *AccessGrant) MaxQueryCounts() *int64 {
+	if g == nil || g.Definition == nil {
+		return newZeroQuota()
+	}
+
+	return g.Definition.MaxQueryCounts
+}
+
+// MaxBytesTransferred is the grant's transfer quota, read from its definition.
+// Same nil/zero semantics as MaxQueryCounts.
+func (g *AccessGrant) MaxBytesTransferred() *int64 {
+	if g == nil || g.Definition == nil {
+		return newZeroQuota()
+	}
+
+	return g.Definition.MaxBytesTransferred
+}
+
+// ApprovalPatterns are the RE2 patterns that suspend a matching statement
+// until an approver resolves it, read from the grant's definition.
+func (g *AccessGrant) ApprovalPatterns() []string {
+	if g == nil || g.Definition == nil {
+		return nil
+	}
+
+	return g.Definition.ApprovalPatterns
+}
+
+// ApproverGroupUIDs lists the groups whose members may resolve holds on this
+// grant, in addition to admins, read from the grant's definition. Empty =
+// admins only, which is also what a shapeless grant reports: the narrowest
+// possible approver set.
+func (g *AccessGrant) ApproverGroupUIDs() []uuid.UUID {
+	if g == nil || g.Definition == nil {
+		return nil
+	}
+
+	return g.Definition.ApproverGroupUIDs
+}
+
+// newZeroQuota backs the fail-closed quota accessors: an exhausted quota,
+// freshly allocated so no caller can write through the pointer and poison a
+// shared value.
+func newZeroQuota() *int64 {
+	q := int64(0)
+
+	return &q
 }
 
 // IsReadOnly returns true if the grant has read_only control
@@ -547,18 +622,38 @@ func (g *AccessGrant) ShouldBlockDDL() bool {
 // Grant is an alias for backward compatibility
 type Grant = AccessGrant
 
-// GrantDefinition is an admin-managed template describing the *shape* of a
-// grant: name, duration, controls, optional quotas. Grant requests
-// (separately implemented) reference a definition; on approval, a real
-// AccessGrant is built from the definition + the request's user/database.
+// GrantDefinition is the *shape* of a grant: name, duration, controls,
+// optional quotas, approval gating. It is the single source of truth for what
+// a grant may do — every AccessGrant is an instance of one, whether it came
+// from a user's grant request or from an admin assigning it directly. Nothing
+// creates a grant without a definition.
 //
-// Direct admin grant creation bypasses definitions — they exist to bound
-// what users can self-request, not to constrain admins.
+// Definitions are immutably versioned. Editing one archives the current row
+// (ArchivedAt) and inserts a successor sharing its LineageUID, so grants keep
+// pointing at the exact row they were issued from and an edit never
+// retroactively changes live access. Two lifecycle states must not be
+// confused:
+//
+//   - **Archived** (ArchivedAt != nil): superseded by a newer version. Still
+//     authorises the grants pinned to it — it was replaced, not withdrawn.
+//   - **Deactivated** (IsActive == false): explicitly withdrawn by an
+//     operator, across the whole lineage. Fails closed at auth time: grants
+//     pinned to any version of it stop authorising new connections.
 type GrantDefinition struct {
 	bun.BaseModel `bun:"table:grant_definitions,alias:gd"`
 
-	UID  uuid.UUID `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
-	Name string    `bun:"name,notnull" json:"name"`
+	UID uuid.UUID `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	// LineageUID is stable across every version of a definition (the root
+	// version's own uid). It is what deactivation, hard deletion and
+	// "which versions are this definition?" act on. The slug cannot serve
+	// that purpose: it is unique only among live rows, so a new definition
+	// may legally reuse a slug whose archived rows belong to another lineage.
+	LineageUID uuid.UUID `bun:"lineage_uid,notnull,type:uuid" json:"lineage_uid"`
+	// ArchivedAt marks a superseded version. NULL = this is the live version
+	// of its lineage — exactly one row per lineage has it NULL, enforced by a
+	// partial unique index on the slug.
+	ArchivedAt *time.Time `bun:"archived_at" json:"archived_at,omitempty"`
+	Name       string     `bun:"name,notnull" json:"name"`
 	// Slug is a stable, human-typeable, machine-friendly identifier — the
 	// thing a CLI invocation, an agent prompt, or a runbook references
 	// instead of copying a UUID out of the UI. Mandatory and unique at the
@@ -603,6 +698,18 @@ type GrantDefinition struct {
 	IsActive          bool        `bun:"is_active,notnull,default:true" json:"is_active"`
 	CreatedBy         uuid.UUID   `bun:"created_by,notnull,type:uuid" json:"created_by"`
 	CreatedAt         time.Time   `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+
+	// ActiveGrantCount is how many non-revoked, non-expired grants this
+	// definition's *lineage* is currently authorising. Computed on listing
+	// (one grouped query, never per row) so the UI can tell an operator what
+	// deactivating it would cut off before they confirm.
+	ActiveGrantCount int64 `bun:"-" json:"active_grant_count"`
+}
+
+// IsLive reports whether this is the current version of its lineage, as
+// opposed to a version archived by a later edit.
+func (d *GrantDefinition) IsLive() bool {
+	return d != nil && d.ArchivedAt == nil
 }
 
 // AppliesToGroups reports whether a user belonging to the given groups is

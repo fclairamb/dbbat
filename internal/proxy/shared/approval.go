@@ -191,7 +191,7 @@ func NewApprovalGate(deps ApprovalDeps, grant *store.Grant, connectionUID uuid.U
 		return g
 	}
 
-	for _, src := range grant.ApprovalPatterns {
+	for _, src := range grant.ApprovalPatterns() {
 		re, err := regexp.Compile(src)
 		if err != nil {
 			if deps.Logger != nil {

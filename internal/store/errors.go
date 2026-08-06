@@ -32,6 +32,11 @@ var (
 	// already taken by an active (non-soft-deleted) user (violates the
 	// users_username_active_uq unique index).
 	ErrUserNameConflict = errors.New("a user with this username already exists")
+	// ErrGrantDefinitionRequired is returned when a grant is created without
+	// naming the definition it instantiates. A grant carries no shape of its
+	// own, so one without a definition would authorise nothing meaningful —
+	// it is rejected rather than stored.
+	ErrGrantDefinitionRequired = errors.New("a grant must reference a grant definition")
 )
 
 // isUniqueViolation reports whether err is a PostgreSQL unique-constraint
