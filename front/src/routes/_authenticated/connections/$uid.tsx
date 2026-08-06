@@ -345,7 +345,10 @@ function ConnectionDetailPage() {
                 <dt className="text-sm font-medium text-muted-foreground mb-1">
                   Priority
                 </dt>
-                <dd className="font-mono text-sm tabular-nums">
+                <dd
+                  className="font-mono text-sm tabular-nums"
+                  data-testid="connection-grant-priority"
+                >
                   {connection.grant.priority}
                 </dd>
               </div>

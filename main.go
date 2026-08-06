@@ -1269,8 +1269,19 @@ func seedQuotaGrant(ctx context.Context, dataStore *store.Store, userID, databas
 // seedSampleQuery records one historical query on a closed connection so the
 // test-mode queries list has a clickable row and the query-detail breadcrumb
 // has real SQL text (long enough to exercise the preview truncation) to render.
+//
+// The connection is stamped with whatever active grant seedQuotaGrant already
+// created for this (user, database) pair — mirroring what CreateConnection's
+// real call sites do at auth time — so the connection detail page's Grant
+// section has real grant context to render in test mode, not just the "no
+// grant on record" fallback.
 func seedSampleQuery(ctx context.Context, dataStore *store.Store, userID, databaseID uuid.UUID) error {
-	conn, err := dataStore.CreateConnection(ctx, userID, databaseID, "127.0.0.1")
+	var opts []store.ConnectionOption
+	if grant, err := dataStore.GetActiveGrant(ctx, userID, databaseID); err == nil {
+		opts = append(opts, store.WithGrantUID(grant.UID))
+	}
+
+	conn, err := dataStore.CreateConnection(ctx, userID, databaseID, "127.0.0.1", opts...)
 	if err != nil {
 		return fmt.Errorf("failed to create sample connection: %w", err)
 	}

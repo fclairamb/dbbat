@@ -595,6 +595,95 @@ func TestGrantCounters_BoundedByRevokedAt(t *testing.T) {
 	}
 }
 
+// TestGrantCounters_StampedConnectionExcludedFromOtherGrantsWindow is the
+// quota-attribution half of spec 2026-08-06-03: two grants active on the same
+// (user, database) at overlapping times, but the traffic ran through a
+// connection stamped with only one of them. Only that grant's counters must
+// move — the other grant's window-based fallback must not also pick it up
+// just because the user/database/time window all match.
+func TestGrantCounters_StampedConnectionExcludedFromOtherGrantsWindow(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "stampedquota")
+	admin, _ := store.CreateUser(ctx, "stampedquotaadmin", "hash", []string{RoleAdmin, RoleConnector})
+
+	now := time.Now()
+
+	// Grant A: lower priority (read_only), created first.
+	grantA, err := store.CreateGrant(ctx, &Grant{
+		UserID:     user.UID,
+		DatabaseID: database.UID,
+		Controls:   []string{ControlReadOnly},
+		GrantedBy:  admin.UID,
+		StartsAt:   now.Add(-time.Hour),
+		ExpiresAt:  now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateGrant() grantA error = %v", err)
+	}
+
+	// Grant B: fully overlapping window, same user/database, higher priority
+	// (full write) — the kind of grant GetActiveGrant would now pick, and
+	// exactly what the pre-stamp window heuristic could not tell apart from A.
+	grantB, err := store.CreateGrant(ctx, &Grant{
+		UserID:     user.UID,
+		DatabaseID: database.UID,
+		Controls:   []string{},
+		GrantedBy:  admin.UID,
+		StartsAt:   now.Add(-time.Hour),
+		ExpiresAt:  now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateGrant() grantB error = %v", err)
+	}
+
+	// All traffic runs through a connection stamped with grant A.
+	conn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.42", WithGrantUID(grantA.UID))
+	if err != nil {
+		t.Fatalf("CreateConnection() error = %v", err)
+	}
+
+	const queries = 3
+	const bytesPerQuery = int64(200)
+	for i := 0; i < queries; i++ {
+		if _, err := store.CreateQuery(ctx, &Query{
+			ConnectionID: conn.UID,
+			SQLText:      "SELECT 1",
+			ExecutedAt:   now,
+		}); err != nil {
+			t.Fatalf("CreateQuery() error = %v", err)
+		}
+		if err := store.IncrementConnectionStats(ctx, conn.UID, bytesPerQuery); err != nil {
+			t.Fatalf("IncrementConnectionStats() error = %v", err)
+		}
+	}
+
+	gotA, err := store.GetGrantByUID(ctx, grantA.UID)
+	if err != nil {
+		t.Fatalf("GetGrantByUID(grantA) error = %v", err)
+	}
+	if gotA.QueryCount != queries {
+		t.Errorf("grantA QueryCount = %d, want %d", gotA.QueryCount, queries)
+	}
+	if gotA.BytesTransferred != queries*bytesPerQuery {
+		t.Errorf("grantA BytesTransferred = %d, want %d", gotA.BytesTransferred, queries*bytesPerQuery)
+	}
+
+	gotB, err := store.GetGrantByUID(ctx, grantB.UID)
+	if err != nil {
+		t.Fatalf("GetGrantByUID(grantB) error = %v", err)
+	}
+	if gotB.QueryCount != 0 {
+		t.Errorf("grantB QueryCount = %d, want 0 (traffic was stamped to grantA, not grantB)", gotB.QueryCount)
+	}
+	if gotB.BytesTransferred != 0 {
+		t.Errorf("grantB BytesTransferred = %d, want 0 (traffic was stamped to grantA, not grantB)", gotB.BytesTransferred)
+	}
+}
+
 // TestGrantBytesRecompute_IncludesAbortedQueryBytes covers the core scenario of
 // spec 2026-07-14-09: bytes from a query aborted mid-stream by a grant limit are
 // flushed to the connection via IncrementConnectionBytes (no query log row / no

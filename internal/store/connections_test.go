@@ -91,6 +91,91 @@ func TestCreateConnection(t *testing.T) {
 		}
 	})
 
+	// grant_uid is the auth-time grant pick, stamped once and never updated —
+	// it has to survive the round trip through both single-row and list reads,
+	// since mayApproveQuery and populateGrantCounters both depend on it being
+	// there afterwards.
+	t.Run("records the grant it authenticated under", func(t *testing.T) {
+		t.Parallel()
+
+		admin, err := store.CreateUser(ctx, "connstampadmin", "hash", []string{RoleAdmin})
+		if err != nil {
+			t.Fatalf("CreateUser() error = %v", err)
+		}
+
+		now := time.Now()
+		grant, err := store.CreateGrant(ctx, &Grant{
+			UserID:     user.UID,
+			DatabaseID: database.UID,
+			Controls:   []string{},
+			GrantedBy:  admin.UID,
+			StartsAt:   now.Add(-time.Hour),
+			ExpiresAt:  now.Add(time.Hour),
+		})
+		if err != nil {
+			t.Fatalf("CreateGrant() error = %v", err)
+		}
+
+		conn, err := store.CreateConnection(ctx, user.UID, database.UID, "192.168.1.103",
+			WithGrantUID(grant.UID))
+		if err != nil {
+			t.Fatalf("CreateConnection() error = %v", err)
+		}
+
+		if conn.GrantUID == nil || *conn.GrantUID != grant.UID {
+			t.Fatalf("returned conn.GrantUID = %v, want %s", conn.GrantUID, grant.UID)
+		}
+
+		reread, err := store.GetConnectionByUID(ctx, conn.UID)
+		if err != nil {
+			t.Fatalf("GetConnectionByUID() error = %v", err)
+		}
+		if reread.GrantUID == nil || *reread.GrantUID != grant.UID {
+			t.Fatalf("GetConnectionByUID() conn.GrantUID = %v, want %s", reread.GrantUID, grant.UID)
+		}
+
+		listed, err := store.ListConnections(ctx, ConnectionFilter{UserID: &user.UID})
+		if err != nil {
+			t.Fatalf("ListConnections() error = %v", err)
+		}
+		found := false
+		for _, c := range listed {
+			if c.UID == conn.UID {
+				found = true
+				if c.GrantUID == nil || *c.GrantUID != grant.UID {
+					t.Fatalf("ListConnections() conn.GrantUID = %v, want %s", c.GrantUID, grant.UID)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("stamped connection missing from ListConnections()")
+		}
+	})
+
+	// A connection created the old way (no WithGrantUID option) must not
+	// silently default to a zero-value UUID that could later collide with a
+	// real grant — it must stay a genuine NULL.
+	t.Run("defaults grant_uid to nil", func(t *testing.T) {
+		t.Parallel()
+
+		conn, err := store.CreateConnection(ctx, user.UID, database.UID, "192.168.1.104")
+		if err != nil {
+			t.Fatalf("CreateConnection() error = %v", err)
+		}
+
+		if conn.GrantUID != nil {
+			t.Errorf("conn.GrantUID = %v, want nil", conn.GrantUID)
+		}
+
+		reread, err := store.GetConnectionByUID(ctx, conn.UID)
+		if err != nil {
+			t.Fatalf("GetConnectionByUID() error = %v", err)
+		}
+		if reread.GrantUID != nil {
+			t.Errorf("persisted conn.GrantUID = %v, want nil", reread.GrantUID)
+		}
+	})
+
 	t.Run("create connection with IPv6", func(t *testing.T) {
 		t.Parallel()
 

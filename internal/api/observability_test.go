@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
@@ -142,4 +143,79 @@ func TestGetConnection_InvalidUID(t *testing.T) {
 	w := doGetConnection(router, token, "not-a-uuid")
 
 	require.Equal(t, http.StatusBadRequest, w.Code, "response body: %s", w.Body.String())
+}
+
+// connectionGrantBody decodes just the "grant_uid"/"grant" fields of a GET
+// /connections/{uid} response.
+type connectionGrantBody struct {
+	GrantUID *string       `json:"grant_uid"`
+	Grant    *GrantSummary `json:"grant"`
+}
+
+// TestGetConnection_EmbedsGrantSummary verifies the detail response resolves
+// a stamped grant_uid into a GrantSummary, so the UI never needs a second
+// round trip to show "under which grant did this session run?".
+func TestGetConnection_EmbedsGrantSummary(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	suffix := "connectiongrant"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+
+	now := time.Now()
+	grant, err := dataStore.CreateGrant(t.Context(), &store.Grant{
+		UserID:     admin.UID,
+		DatabaseID: db.UID,
+		Controls:   []string{store.ControlReadOnly},
+		GrantedBy:  admin.UID,
+		StartsAt:   now.Add(-time.Hour),
+		ExpiresAt:  now.Add(time.Hour),
+	})
+	require.NoError(t, err)
+
+	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.9", store.WithGrantUID(grant.UID))
+	require.NoError(t, err)
+
+	router := newConnectionsTestRouter(server)
+	w := doGetConnection(router, token, conn.UID.String())
+	require.Equal(t, http.StatusOK, w.Code, "response body: %s", w.Body.String())
+
+	var body connectionGrantBody
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.NotNil(t, body.GrantUID)
+	require.Equal(t, grant.UID.String(), *body.GrantUID)
+	require.NotNil(t, body.Grant)
+	require.Equal(t, grant.UID, body.Grant.UID)
+	require.Equal(t, []string{store.ControlReadOnly}, body.Grant.Controls)
+	require.False(t, body.Grant.Revoked)
+}
+
+// TestGetConnection_GrantSummaryNilWhenUnstamped verifies a connection with
+// no grant_uid (the common case: predates this column, or a future grantless
+// path) reports grant: null rather than an error.
+func TestGetConnection_GrantSummaryNilWhenUnstamped(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	suffix := "connectionnograt"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.10")
+	require.NoError(t, err)
+
+	router := newConnectionsTestRouter(server)
+	w := doGetConnection(router, token, conn.UID.String())
+	require.Equal(t, http.StatusOK, w.Code, "response body: %s", w.Body.String())
+
+	var body connectionGrantBody
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.Nil(t, body.GrantUID)
+	require.Nil(t, body.Grant)
 }
