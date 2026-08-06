@@ -25,7 +25,7 @@ import {
   shouldFreezeClock,
 } from "./config";
 import { readState } from "./state";
-import { freezeClock } from "./fixtures";
+import { asset, freezeClock } from "./fixtures";
 import { ShowcaseApi, type ConnectionRow } from "./lib/api";
 import { cursorClick, installFakeCursor } from "./lib/cursor";
 import {
@@ -130,6 +130,14 @@ test("video: an UPDATE is held for approval and released from the UI", async ({
     await expect(pending).toBeVisible({ timeout: 30_000 });
     await expect(pending).toContainText("UPDATE customers");
     await page.waitForTimeout(1400);
+
+    // The still the website shows instead of autoplaying, for visitors who
+    // asked for reduced motion. Captured here on purpose: this frame carries
+    // the whole point of the clip — a live statement parked on a human, with
+    // the pattern that caught it and the Approve button that will release it.
+    // Extracting it from the encoded video afterwards would re-derive it from
+    // a lossy rendition and pin it to a timestamp that moves between runs.
+    await page.screenshot({ path: asset("approval-hold-poster.png") });
 
     // 3. The second pair of eyes releases it.
     const approve = pending.locator('[data-testid^="approve-query-"]').first();

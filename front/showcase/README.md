@@ -9,6 +9,7 @@ Regenerates the website's marketing media into `website/static/img/showcase/`:
 | `query-list.png` | The query list, populated by real proxy traffic |
 | `query-results.png` | A query's captured result rows |
 | `approval-hold-av1.mp4`, `approval-hold-h264.mp4` | An `UPDATE` held for approval and released from the UI |
+| `approval-hold-poster.png` | The hold itself — the video's poster, and what the site shows under `prefers-reduced-motion` |
 | `manifest.json` | `{ version, commit, generatedAt }` for the run |
 
 Run it with `make showcase` from the repo root. Never with a bare
