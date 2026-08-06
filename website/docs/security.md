@@ -109,19 +109,23 @@ Grants control which users can connect to which servers through the proxy.
 
 ### Grant Constraints
 
-| Constraint | Description |
-|------------|-------------|
-| `starts_at` | Grant is not valid before this time |
-| `expires_at` | Grant automatically expires after this time |
-| `max_query_counts` | Maximum queries allowed (quota) |
-| `max_bytes_transferred` | Maximum data transfer allowed (quota) |
-| `controls` | Combination of `read_only`, `block_copy`, `block_ddl`. Empty = full write access. |
+A grant is an *instance* of a grant definition: the time window and revocation state live on the grant, everything below lives on the definition it was issued from and is read back from there.
+
+| Constraint | Lives on | Description |
+|------------|----------|-------------|
+| `starts_at` | grant | Grant is not valid before this time |
+| `expires_at` | grant | Grant automatically expires after this time |
+| `max_query_counts` | definition | Maximum queries allowed (quota) |
+| `max_bytes_transferred` | definition | Maximum data transfer allowed (quota) |
+| `controls` | definition | Combination of `read_only`, `block_copy`, `block_ddl`. Empty = full write access. |
 
 **Recommendation**: Always set all constraints. Time-limited grants with quotas minimize blast radius if credentials are compromised.
 
+Because the rules live on the definition and definitions are immutably versioned, a grant's behaviour is fixed at issue time and the set of definitions is an auditable list of every access shape in use — no grant can be an unreviewable one-off.
+
 ### Grant Lifecycle
 
-1. Admin creates grant with constraints
+1. Admin assigns a grant definition to a user and database (or approves a request for one)
 2. Grant becomes active at `starts_at`
 3. User can connect and execute queries
 4. Quotas and the time window are enforced **mid-stream**, not only between commands

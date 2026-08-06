@@ -109,7 +109,7 @@ Everything described here can be done via the REST API or the web UI.
 1. **Admin creates a user**
 2. **Admin configures a target server** (protocol, host, port, credentials, optional `oracle_service_name`)
 3. *(Optional)* **Admin adds an SSH bastion server** (`protocol: ssh`) and sets the target's `via_uid` to it, so the upstream connection is dialled through the tunnel
-4. **Admin grants the user access** to the server with a time window, controls, and optional quotas — or the user requests it themselves against a grant definition
+4. **Admin defines a grant definition** (controls, quotas, duration) and assigns it to the user on that server — or the user requests it themselves against the same definition. A grant is always an instance of a definition; it carries no access rules of its own
 5. **User connects** with `psql` / `sqlplus` / `mysql` / `mongosh` / any client, using their DBBat credentials (or an API key)
 6. **DBBat authenticates** the user, checks for a valid grant, and connects to the upstream using the stored encrypted credentials
 7. **DBBat proxies** all queries to the target database, logging everything

@@ -4,37 +4,60 @@ sidebar_position: 1
 
 # Access Control
 
-DBBat provides fine-grained access control through **grants**. A grant gives a user permission to access a specific database for a limited time, optionally with one or more controls and quotas.
+DBBat provides fine-grained access control through **grants**. A grant gives a user permission to access a specific database for a limited time, under the rules of the **grant definition** it was issued from.
 
-## Creating a Grant
+A grant carries no access rules of its own. Controls, quotas and approval gating live on the definition; the grant holds only who, where, when, and its revocation state. That split is what makes definitions trustworthy: the list of definitions *is* the list of access shapes in use, with no unauditable one-offs hiding among the grants.
+
+## Assigning a Grant
+
+Define the shape once:
+
+```bash
+curl -X POST http://localhost:4200/api/v1/grant-definitions \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Read-only 9h",
+    "slug": "read-only-9h",
+    "duration_seconds": 32400,
+    "controls": ["read_only"],
+    "max_query_counts": 1000,
+    "max_bytes_transferred": 104857600
+  }'
+```
+
+Then assign it — by slug or uid:
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/grants \
   -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
+    "grant_definition_id": "read-only-9h",
     "user_id": "550e8400-e29b-41d4-a716-446655440000",
     "database_id": "660e8400-e29b-41d4-a716-446655440000",
-    "controls": ["read_only"],
-    "starts_at": "2024-01-15T09:00:00Z",
-    "expires_at": "2024-01-15T18:00:00Z",
-    "max_query_counts": 1000,
-    "max_bytes_transferred": 104857600
+    "starts_at": "2024-01-15T09:00:00Z"
   }'
 ```
 
+Users can also request the same definition themselves — see [Grant requests](./grant-requests.md). Both paths produce the same thing.
+
 ## Grant Fields
 
-| Field | Type | Description | Required |
-|-------|------|-------------|----------|
-| `user_id` | UUID | UID of the user | Yes |
-| `database_id` | UUID | UID of the database configuration | Yes |
-| `controls` | array | Combination of `read_only`, `block_copy`, `block_ddl`. Empty = full write access. | No (default: `[]`) |
-| `starts_at` | datetime | When the grant becomes active | Yes |
-| `expires_at` | datetime | When the grant expires (must be after `starts_at`) | Yes |
-| `max_query_counts` | integer | Maximum number of queries allowed | No |
-| `max_bytes_transferred` | integer | Maximum bytes transferred (response size) | No |
-| `priority` | integer | Which grant wins when several are active at once. Auto-calculated from `controls` when omitted — see [Overlapping grants](#overlapping-grants). | No (default: auto) |
+| Field | Lives on | Description |
+|-------|----------|-------------|
+| `user_id` | grant | UID of the user |
+| `database_id` | grant | UID of the database configuration |
+| `grant_definition_id` | grant | The definition *version* this grant was issued from |
+| `starts_at` | grant | When the grant becomes active |
+| `expires_at` | grant | When it expires — `starts_at` plus the definition's `duration_seconds` |
+| `priority` | grant | Which grant wins when several are active at once. Derived from the definition's controls unless it pins one — see [Overlapping grants](#overlapping-grants). |
+| `controls` | definition | Combination of `read_only`, `block_copy`, `block_ddl`. Empty = full write access. |
+| `max_query_counts` | definition | Maximum number of queries allowed |
+| `max_bytes_transferred` | definition | Maximum bytes transferred (response size) |
+| `duration_seconds` | definition | How long a grant issued from it lasts |
+
+Definitions are immutably versioned, so editing one never changes a grant that is already live — the grant stays pinned to the version it was issued from. Deactivating a definition, on the other hand, **fails closed**: every grant issued from any of its versions stops authorising new connections.
 
 The grant model is the same across all engines (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB).
 
@@ -85,13 +108,13 @@ This is useful for:
 
 Nothing stops a user from holding several active grants on the same database at
 once — a read-only one they requested this morning and a read/write one an
-admin created for an incident, say. Exactly one of them applies to a session:
+admin assigned for an incident, say. Exactly one of them applies to a session:
 its controls, quotas and approval patterns are the ones enforced.
 
 The winner is the grant with the **highest `priority`**. Ties break on the
 latest `expires_at`, then the newest `created_at`.
 
-`priority` is auto-calculated from the grant's controls, so the more capable
+`priority` is auto-calculated from the definition's controls, so the more capable
 grant wins by default:
 
 | Grant shape | Auto priority |
@@ -100,12 +123,13 @@ grant wins by default:
 | Writable with controls (`block_copy` / `block_ddl`) | 50 |
 | `read_only` (with or without other controls) | 10 |
 
-The gaps between tiers are deliberate: pass an explicit `priority` (on the
-grant, or on a [grant definition](./grant-requests.md) so every grant built
-from it inherits it) to slot a grant between tiers — `75` ranks a
+The gaps between tiers are deliberate: set an explicit `priority` on the
+[grant definition](./grant-requests.md) — every grant issued from it is stamped
+with that value — to slot those grants between tiers. `75` ranks a
 restricted-write grant above its tier without letting it beat full write
-access. The web UI pre-fills the field from the selected controls and leaves it
-alone once you edit it, showing the computed value as an `auto: N` hint.
+access. The definition form pre-fills the field from the selected controls and
+leaves it alone once you edit it, showing the computed value as an `auto: N`
+hint.
 
 ### A session lives and dies with its grant
 

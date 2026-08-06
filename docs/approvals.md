@@ -20,8 +20,9 @@ then, approval patterns on grants are inert and nothing is ever held.
 1. A statement arrives and passes every static control (`read_only`,
    `block_copy`, `block_ddl`, the protocol blocklists). Cheap deterministic
    denies stay cheap — the gate runs after them.
-2. The statement is matched against the grant's `approval_patterns` (Go RE2,
-   compiled once per session). No match ⇒ nothing changes.
+2. The statement is matched against the `approval_patterns` of the definition
+   the grant was issued from (Go RE2, compiled once per session). No match ⇒
+   nothing changes.
 3. On a match, dbbat **persists the query row immediately** with
    `approval_status = 'pending'`, so the held statement is visible in
    `/queries` and addressable by UID *while it hangs*.
@@ -121,7 +122,8 @@ silently letting the statements through.
 ## Who may approve
 
 - Any user with the **`admin`** role, plus
-- any member of a group listed in the grant's **`approver_group_uids`**.
+- any member of a group listed in **`approver_group_uids`** on the definition
+  the grant was issued from.
 
 **Self-approval is always rejected**, including for admins. Four eyes means
 four eyes; an admin who could wave their own statements through would make the
@@ -143,14 +145,19 @@ unblocked.
 ## Configuring patterns
 
 Patterns live on the **grant definition** only (no server-level patterns; that
-is a possible follow-up, deliberately out of scope). They are mirrored onto
-`AccessGrant` at materialization time, exactly as `controls` and quotas are —
-the proxy session holds only a `*store.Grant`, and admin-created grants bypass
-definitions entirely, so reading patterns off the definition at query time
-would mean a join on the hot path *and* zero coverage for direct admin grants.
+is a possible follow-up, deliberately out of scope). A grant carries no shape
+of its own: it pins the definition *version* it was issued from, and
+`store.AccessGrant`'s accessors read the patterns and approver groups back off
+that row. The proxy session still holds only a `*store.Grant` — the definition
+is attached once, at authentication, so nothing joins on the query hot path.
 
-Direct admin grants accept `approval_patterns` / `approver_group_uids` on
-`POST /api/v1/grants` for the same reason.
+Every grant comes from a definition, including one an admin assigns directly
+with `POST /api/v1/grants`, so there is no longer any grant that approval
+gating cannot reach.
+
+Because definitions are immutably versioned — an edit archives the current row
+and inserts a successor — editing a definition's patterns never changes what a
+live session is gated on. The new patterns apply to grants issued from then on.
 
 Patterns are Go `regexp` (RE2 — no catastrophic backtracking, which matters
 when the input is attacker-influenced SQL). They are compiled at
@@ -385,8 +392,9 @@ On `queries`: `approval_status` (`null|pending|approved|denied|abandoned`),
 `approval_pattern`, `resolved_by`, `resolved_at`, `resolution_reason`, plus a
 partial index on `approval_status = 'pending'`.
 
-On `grant_definitions` and `access_grants`: `approval_patterns text[]`,
-`approver_group_uids uuid[]`.
+On `grant_definitions`: `approval_patterns text[]`, `approver_group_uids
+uuid[]`. **Not** on `access_grants` — a grant references its definition through
+`grant_definition_id` and reads both from there.
 
 ## Environment variables
 

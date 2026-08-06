@@ -40,9 +40,11 @@ grant built from it. Leave it out — the normal case — and each grant compute
 its own from its controls; see [Overlapping
 grants](./access-control.md#overlapping-grants).
 
-Definitions are **soft-deleted**: deactivating one sets `is_active: false` rather than removing the row, so historical requests keep pointing at the definition they were granted under. Non-admins only ever see active definitions.
+Definitions are **immutably versioned**. Editing one archives the current row and inserts a successor carrying the change; grants keep pointing at the exact version they were issued from, so tightening — or loosening — a definition never retroactively changes access that is already live. It changes what gets issued from then on. A slug always resolves to the current version; older versions stay readable by uid so a grant issued from one can still show its shape.
 
-Direct admin grant creation via `POST /api/v1/grants` bypasses definitions entirely.
+**Deactivating** a definition (`DELETE /api/v1/grant-definitions/{uid}`) is different from that archival, and much stronger: it withdraws every version at once and **fails closed** — grants issued from any of them stop authorising new connections. The API reports how many grants that affected, and the UI shows the number before you confirm. Hard deletion (`?hard=true`) is refused with a `409` as soon as anything references the definition; deactivation is the way to retire one that has been used.
+
+**Every grant is an instance of a definition.** An admin assigning access directly (`POST /api/v1/grants`) picks a definition too — there is no way to create a grant with an ad-hoc shape, which is what makes the set of definitions an exhaustive list of the access shapes your organisation permits.
 
 ## Requesting Access
 

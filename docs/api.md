@@ -126,7 +126,7 @@ All entities use **UUIDs** as their primary identifier:
 ### Grants
 | Method | Endpoint | Description | Auth | Role |
 |--------|----------|-------------|------|------|
-| POST | `/grants` | Create grant | Yes | Admin |
+| POST | `/grants` | Assign a grant definition to a user + database | Yes | Admin |
 | GET | `/grants` | List grants | Yes | Any |
 | GET | `/grants/{uid}` | Get grant | Yes | Any |
 | DELETE | `/grants/{uid}` | Revoke grant | Yes | Admin |
@@ -204,17 +204,27 @@ DB_UID=$(curl -s -X POST http://localhost:8080/api/v1/databases \
     "ssl_mode": "require"
   }' | jq -r '.uid')
 
-# Grant read access for 24 hours
+# Define the shape of the access once (controls, quotas, how long it lasts).
+# Grants are instances of a definition — there is no ad-hoc grant creation.
+curl -X POST http://localhost:8080/api/v1/grant-definitions \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Read-only 24h",
+    "slug": "read-only-24h",
+    "duration_seconds": 86400,
+    "controls": ["read_only"],
+    "max_query_counts": 1000
+  }'
+
+# Assign it to a user on a database (the slug works anywhere the uid does)
 curl -X POST http://localhost:8080/api/v1/grants \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d "{
+    \"grant_definition_id\": \"read-only-24h\",
     \"user_id\": \"$USER_UID\",
-    \"database_id\": \"$DB_UID\",
-    \"controls\": [\"read_only\"],
-    \"starts_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
-    \"expires_at\": \"$(date -u -d '+24 hours' +%Y-%m-%dT%H:%M:%SZ)\",
-    \"max_query_counts\": 1000
+    \"database_id\": \"$DB_UID\"
   }"
 ```
 

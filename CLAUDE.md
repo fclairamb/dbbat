@@ -281,13 +281,25 @@ Client → DBBat (SCRAM-SHA-256 or PLAIN-over-TLS, authSource lookup) → Target
 The same auth + grant + query-logging pipeline runs across all four protocols (`internal/proxy/shared`).
 
 ### Access Control
-- Time-windowed grants (`starts_at`, `expires_at`)
+- **Every grant is an instance of a grant definition** and carries no shape of
+  its own: `POST /api/v1/grants` assigns a definition to a user + database, and
+  a grant request approval materializes the same thing. The grant row holds
+  who/where/when, revocation and `priority`; everything below lives on the
+  definition and is read through accessors on `store.AccessGrant`.
+- Time-windowed grants (`starts_at`, `expires_at`; the length is the
+  definition's `duration_seconds`)
 - Controls: `read_only`, `block_copy`, `block_ddl` (combinable; empty = full write)
 - Optional quotas: `max_query_counts`, `max_bytes_transferred`
-- Optional **approval holds**: RE2 patterns on the grant that suspend a matching
-  statement mid-flight until a second human approves it. Self-approval is always
-  rejected; a hold has no timeout. Off by default (`DBB_APPROVAL_ENABLED`) —
-  see `docs/approvals.md`
+- Optional **approval holds**: RE2 patterns on the definition that suspend a
+  matching statement mid-flight until a second human approves it. Self-approval
+  is always rejected; a hold has no timeout. Off by default
+  (`DBB_APPROVAL_ENABLED`) — see `docs/approvals.md`
+- **Definitions are immutably versioned**: an edit archives the current row
+  (`archived_at`) and inserts a successor sharing its `lineage_uid`, so a live
+  grant's behaviour never changes under it. A slug resolves to the live row.
+  **Deactivating** a definition is different from that archival — it withdraws
+  the whole lineage and fails closed at auth time; hard deletion is refused
+  (409) while anything references it.
 
 ### Security
 - User passwords: Argon2id hashed

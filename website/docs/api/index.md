@@ -647,37 +647,35 @@ Tunnelled connections are pooled and shared across sessions, so many proxied cli
 
 ## Grants
 
-### Create Grant
+### Assign Grant
 
 ```
 POST /api/v1/grants
 ```
 
-Creates a new access grant for a user to a database. **Requires admin role.**
+Issues a grant to a user by instantiating a grant definition — the admin-initiated equivalent of an approved grant request. **Requires admin role.**
+
+A grant carries no access rules of its own: controls, quotas and approval gating all come from the definition, and the window's length is the definition's `duration_seconds`. There is deliberately no way to describe an ad-hoc shape here, which is what makes the set of definitions an exhaustive, auditable list of the access shapes in use.
 
 **Request:**
 
 ```json
 {
+  "grant_definition_id": "read-only-24h",
   "user_id": "550e8400-e29b-41d4-a716-446655440000",
   "database_id": "660e8400-e29b-41d4-a716-446655440000",
-  "controls": ["read_only"],
-  "starts_at": "2024-01-01T00:00:00Z",
-  "expires_at": "2024-12-31T23:59:59Z",
-  "max_query_counts": 10000,
-  "max_bytes_transferred": 1073741824
+  "starts_at": "2024-01-01T00:00:00Z"
 }
 ```
 
-`controls` is an array. Each element is one of:
+| Field | Description |
+|-------|-------------|
+| `grant_definition_id` | The definition to instantiate — its uid **or** its slug. A slug always resolves to the current version. |
+| `user_id` | Who receives the access. |
+| `database_id` | Which server. Must be within the definition's `database_uids` scope when it has one. |
+| `starts_at` | Optional; defaults to now. The window's *length* comes from the definition. |
 
-| Value | Effect |
-|-------|--------|
-| `read_only` | SQL inspection blocks writes; PostgreSQL also sets `default_transaction_read_only = on`. |
-| `block_copy` | Blocks `COPY` (PostgreSQL) and `LOAD DATA` / `SELECT … INTO OUTFILE` (MySQL). |
-| `block_ddl` | Blocks `CREATE`, `ALTER`, `DROP`, `TRUNCATE`. |
-
-An empty `controls` array (or omitting the field) grants full write access within the time window.
+The definition must be active. A deactivated one cannot be assigned — and grants already issued from it have stopped authorising connections anyway.
 
 **Response:**
 
@@ -686,19 +684,37 @@ An empty `controls` array (or omitting the field) grants full write access withi
   "uid": "770e8400-e29b-41d4-a716-446655440000",
   "user_id": "550e8400-e29b-41d4-a716-446655440000",
   "database_id": "660e8400-e29b-41d4-a716-446655440000",
-  "controls": ["read_only"],
+  "grant_definition_id": "990e8400-e29b-41d4-a716-446655440000",
+  "definition": {
+    "uid": "990e8400-e29b-41d4-a716-446655440000",
+    "name": "Read-only 24h",
+    "slug": "read-only-24h",
+    "duration_seconds": 86400,
+    "controls": ["read_only"],
+    "max_query_counts": 10000,
+    "max_bytes_transferred": 1073741824
+  },
   "granted_by": "880e8400-e29b-41d4-a716-446655440000",
   "starts_at": "2024-01-01T00:00:00Z",
-  "expires_at": "2024-12-31T23:59:59Z",
+  "expires_at": "2024-01-02T00:00:00Z",
   "revoked_at": null,
   "revoked_by": null,
-  "max_query_counts": 10000,
-  "max_bytes_transferred": 1073741824,
+  "priority": 10,
   "query_count": 0,
   "bytes_transferred": 0,
   "created_at": "2024-01-01T00:00:00Z"
 }
 ```
+
+The embedded `definition` is the exact version this grant was issued from, and it is where the shape is read from. `controls` there is an array; each element is one of:
+
+| Value | Effect |
+|-------|--------|
+| `read_only` | SQL inspection blocks writes; PostgreSQL also sets `default_transaction_read_only = on`. |
+| `block_copy` | Blocks `COPY` (PostgreSQL) and `LOAD DATA` / `SELECT … INTO OUTFILE` (MySQL). |
+| `block_ddl` | Blocks `CREATE`, `ALTER`, `DROP`, `TRUNCATE`. |
+
+An empty `controls` array means full write access within the time window.
 
 ### List Grants
 
@@ -738,7 +754,9 @@ Revocation takes effect immediately: further queries are blocked and any session
 
 ## Grant Definitions
 
-Definitions are admin-managed templates describing a *shape* of grant (controls, duration, quotas). Users can only request access by picking an active definition. Direct admin grant creation via `POST /api/v1/grants` bypasses definitions entirely.
+Definitions are the *shape* of a grant (controls, duration, quotas, approval gating) and the only source of one: users request access by picking an active definition, and admins assign one directly with `POST /api/v1/grants`.
+
+Definitions are **immutably versioned** — a `PATCH` archives the current row and inserts a successor with a new `uid` and the same `lineage_uid`, and grants keep pointing at the version they were issued from, so an edit never changes access that is already live. `DELETE` deactivates the whole lineage and **fails closed**: grants issued from any version stop authorising new connections, and the response reports how many. `DELETE ...?hard=true` really deletes, and is refused with a `409` if anything references the definition.
 
 ### Create Grant Definition
 
