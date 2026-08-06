@@ -252,6 +252,12 @@ what makes staleness visible. `.github/workflows/showcase.yml` exposes the same
 pipeline as a `workflow_dispatch` job, plus a non-blocking rot guard that runs
 the suite on `front/` pull requests with the output discarded.
 
+The homepage consumes all of it (`website/src/components/ProductShowcase/`),
+manifest caption included. It is the site's **only** screenshot set — the old
+hand-captured `website/static/img/screenshots/` is gone. The clip never carries
+an `autoplay` attribute: playback starts from an effect, and only when the
+visitor has not asked for reduced motion.
+
 ## Creating Migrations
 
 Add files to `internal/migrations/sql/`:
