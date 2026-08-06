@@ -949,3 +949,197 @@ func TestListGrants_PopulatesCountersForEach(t *testing.T) {
 		t.Errorf("g2 QueryCount=%d BytesTransferred=%d, want 2 / 500", got2.QueryCount, got2.BytesTransferred)
 	}
 }
+
+// TestGetActiveGrant_DefinitionLifecycle pins down the two lifecycle states a
+// definition can be in and the deliberately different answers auth gives them.
+// Getting this backwards is a policy hole in one direction and a broken
+// deployment in the other, so both halves are asserted together.
+func TestGetActiveGrant_DefinitionLifecycle(t *testing.T) {
+	t.Parallel()
+
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	t.Run("deactivating a definition fails its grants closed", func(t *testing.T) {
+		t.Parallel()
+
+		user, database := createTestUserAndDatabase(t, ctx, s, "lifecycle_deactivate")
+
+		admin, err := s.CreateUser(ctx, "lifecycleadmin1", "hash", []string{RoleAdmin})
+		if err != nil {
+			t.Fatalf("CreateUser() error = %v", err)
+		}
+
+		def := newTestGrantDefinition(t, ctx, s, admin.UID, GrantDefinition{})
+		newTestGrant(t, ctx, s, def, user.UID, database.UID, admin.UID,
+			now.Add(-time.Hour), now.Add(time.Hour))
+
+		if _, err := s.GetActiveGrant(ctx, user.UID, database.UID); err != nil {
+			t.Fatalf("fixture: GetActiveGrant() error = %v", err)
+		}
+
+		if err := s.DeactivateGrantDefinition(ctx, def.UID); err != nil {
+			t.Fatalf("DeactivateGrantDefinition() error = %v", err)
+		}
+
+		if _, err := s.GetActiveGrant(ctx, user.UID, database.UID); !errors.Is(err, ErrNoActiveGrant) {
+			t.Fatalf("GetActiveGrant() after deactivation = %v, want ErrNoActiveGrant", err)
+		}
+	})
+
+	t.Run("deactivation reaches grants pinned to an older version", func(t *testing.T) {
+		t.Parallel()
+
+		user, database := createTestUserAndDatabase(t, ctx, s, "lifecycle_lineage")
+
+		admin, err := s.CreateUser(ctx, "lifecycleadmin2", "hash", []string{RoleAdmin})
+		if err != nil {
+			t.Fatalf("CreateUser() error = %v", err)
+		}
+
+		def := newTestGrantDefinition(t, ctx, s, admin.UID, GrantDefinition{})
+		newTestGrant(t, ctx, s, def, user.UID, database.UID, admin.UID,
+			now.Add(-time.Hour), now.Add(time.Hour))
+
+		// Edit it, so the grant is now pinned to an *archived* version...
+		def.Description = "edited"
+		updated, err := s.UpdateGrantDefinition(ctx, def)
+		if err != nil {
+			t.Fatalf("UpdateGrantDefinition() error = %v", err)
+		}
+
+		// ...which must still authorise: archival is supersession, not
+		// withdrawal.
+		got, err := s.GetActiveGrant(ctx, user.UID, database.UID)
+		if err != nil {
+			t.Fatalf("GetActiveGrant() after an edit = %v, want the grant to keep working", err)
+		}
+
+		if got.GrantDefinitionID != def.UID {
+			t.Errorf("grant now points at %s, want the version it was issued from %s",
+				got.GrantDefinitionID, def.UID)
+		}
+
+		// Deactivating the *live* version withdraws the whole lineage, so the
+		// grant pinned to the archived one stops authorising too. Anything
+		// else would make deactivation a kill switch that doesn't kill.
+		if err := s.DeactivateGrantDefinition(ctx, updated.UID); err != nil {
+			t.Fatalf("DeactivateGrantDefinition() error = %v", err)
+		}
+
+		if _, err := s.GetActiveGrant(ctx, user.UID, database.UID); !errors.Is(err, ErrNoActiveGrant) {
+			t.Fatalf("GetActiveGrant() after lineage deactivation = %v, want ErrNoActiveGrant", err)
+		}
+	})
+
+	t.Run("an edit never changes a live grant's shape", func(t *testing.T) {
+		t.Parallel()
+
+		user, database := createTestUserAndDatabase(t, ctx, s, "lifecycle_snapshot")
+
+		admin, err := s.CreateUser(ctx, "lifecycleadmin3", "hash", []string{RoleAdmin})
+		if err != nil {
+			t.Fatalf("CreateUser() error = %v", err)
+		}
+
+		def := newTestGrantDefinition(t, ctx, s, admin.UID, GrantDefinition{Controls: []string{}})
+		newTestGrant(t, ctx, s, def, user.UID, database.UID, admin.UID,
+			now.Add(-time.Hour), now.Add(time.Hour))
+
+		// Loosening *or* tightening the definition must not reach the grant:
+		// snapshot safety comes from the version pin.
+		def.Controls = []string{ControlReadOnly}
+		if _, err := s.UpdateGrantDefinition(ctx, def); err != nil {
+			t.Fatalf("UpdateGrantDefinition() error = %v", err)
+		}
+
+		got, err := s.GetActiveGrant(ctx, user.UID, database.UID)
+		if err != nil {
+			t.Fatalf("GetActiveGrant() error = %v", err)
+		}
+
+		if got.IsReadOnly() {
+			t.Error("editing the definition retroactively tightened a live grant")
+		}
+	})
+}
+
+// TestCreateGrant_RequiresADefinition proves the model's core invariant: there
+// is no way to store a grant that carries no shape.
+func TestCreateGrant_RequiresADefinition(t *testing.T) {
+	t.Parallel()
+
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, s, "nodefinition")
+
+	admin, err := s.CreateUser(ctx, "nodefadmin", "hash", []string{RoleAdmin})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	now := time.Now()
+
+	_, err = s.CreateGrant(ctx, &Grant{
+		UserID:     user.UID,
+		DatabaseID: database.UID,
+		GrantedBy:  admin.UID,
+		StartsAt:   now,
+		ExpiresAt:  now.Add(time.Hour),
+	})
+	if !errors.Is(err, ErrGrantDefinitionRequired) {
+		t.Fatalf("CreateGrant() without a definition = %v, want ErrGrantDefinitionRequired", err)
+	}
+}
+
+// TestDeleteGrantDefinition covers the "hard deletion is forbidden while
+// anything references it" rule, and its inverse.
+func TestDeleteGrantDefinition(t *testing.T) {
+	t.Parallel()
+
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	user, database := createTestUserAndDatabase(t, ctx, s, "defdelete")
+
+	admin, err := s.CreateUser(ctx, "defdeleteadmin", "hash", []string{RoleAdmin})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	unused := newTestGrantDefinition(t, ctx, s, admin.UID, GrantDefinition{})
+	if err := s.DeleteGrantDefinition(ctx, unused.UID); err != nil {
+		t.Fatalf("DeleteGrantDefinition() on an unused definition error = %v", err)
+	}
+
+	if _, err := s.GetGrantDefinition(ctx, unused.UID); !errors.Is(err, ErrGrantDefinitionNotFound) {
+		t.Errorf("the deleted definition is still readable: %v", err)
+	}
+
+	used := newTestGrantDefinition(t, ctx, s, admin.UID, GrantDefinition{})
+	newTestGrant(t, ctx, s, used, user.UID, database.UID, admin.UID, now, now.Add(time.Hour))
+
+	var inUse *GrantDefinitionInUseError
+	if err := s.DeleteGrantDefinition(ctx, used.UID); !errors.As(err, &inUse) {
+		t.Fatalf("DeleteGrantDefinition() on a referenced definition = %v, want GrantDefinitionInUseError", err)
+	}
+
+	if inUse.Grants != 1 {
+		t.Errorf("blocking grant count = %d, want 1", inUse.Grants)
+	}
+
+	// An archived version cannot be deleted out from under the grants pinned
+	// to it either — deletion acts on the lineage, so the whole history is
+	// protected by the one live reference.
+	used.Description = "edited"
+	if _, err := s.UpdateGrantDefinition(ctx, used); err != nil {
+		t.Fatalf("UpdateGrantDefinition() error = %v", err)
+	}
+
+	if err := s.DeleteGrantDefinition(ctx, used.UID); !errors.As(err, &inUse) {
+		t.Fatalf("DeleteGrantDefinition() on an archived version = %v, want GrantDefinitionInUseError", err)
+	}
+}
