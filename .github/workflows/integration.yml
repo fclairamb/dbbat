@@ -31,6 +31,7 @@ jobs:
           - ./internal/proxy/postgresql/
           - ./internal/proxy/mysql/
           - ./internal/proxy/mongodb/
+          - ./internal/proxy/mssql/
     steps:
       - uses: actions/checkout@v7.0.1
 

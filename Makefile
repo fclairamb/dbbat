@@ -89,6 +89,13 @@ test-integration-mysql:
 test-integration-postgresql:
 	go test -tags integration -v -timeout 40m -count=1 ./internal/proxy/postgresql/...
 
+# mcr.microsoft.com/mssql/server is published for linux/amd64 only and takes a
+# couple of minutes to finish recovery, so on an arm64 laptop this suite runs
+# under emulation if it runs at all. CI (ubuntu-24.04) is where it is expected
+# to pass.
+test-integration-mssql:
+	go test -tags integration -v -timeout 40m -count=1 ./internal/proxy/mssql/...
+
 # Run linter
 lint:
 	golangci-lint run
