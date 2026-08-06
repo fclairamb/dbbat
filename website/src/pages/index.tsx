@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import clsx from "clsx";
+import Head from "@docusaurus/Head";
 import Link from "@docusaurus/Link";
 import useDocusaurusContext from "@docusaurus/useDocusaurusContext";
 import Layout from "@theme/Layout";
@@ -13,12 +14,36 @@ function HomepageHeader() {
   const { siteConfig } = useDocusaurusContext();
   return (
     <header className={clsx("hero hero--primary", styles.heroBanner)}>
-      <div className="container">
-        <img
-          src="/img/logo-text.png"
-          alt={siteConfig.title}
-          className={styles.heroLogo}
+      {/* React only auto-preloads a bare <img>; wrapping the hero logo in a
+          <picture> makes it (rightly) give up, since it cannot know which
+          <source> will win. So we preload the WebP by hand — `type` gates the
+          hint on decoder support, so a browser that would fall back to the PNG
+          simply ignores it rather than fetching both. */}
+      <Head>
+        <link
+          rel="preload"
+          as="image"
+          href="/img/logo-text.webp"
+          type="image/webp"
         />
+      </Head>
+      <div className="container">
+        {/* Above the fold on every cold visit, so it is served at the size it
+            actually renders (600px for a 300 CSS px box at DPR 2) rather than
+            at its 761px source resolution. WebP for anything that can decode
+            it, the PNG as the fallback — see `website/img-src/README.md` for
+            the originals and the encoder invocations. */}
+        <picture>
+          <source srcSet="/img/logo-text.webp" type="image/webp" />
+          <img
+            src="/img/logo-text.png"
+            alt={siteConfig.title}
+            className={styles.heroLogo}
+            width={600}
+            height={600}
+            fetchPriority="high"
+          />
+        </picture>
         <p className="hero__subtitle">{siteConfig.tagline}</p>
         <div className={styles.buttons}>
           <Link
