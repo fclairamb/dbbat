@@ -332,14 +332,19 @@ func TestGetDatabaseByUID(t *testing.T) {
 	})
 }
 
-func TestListDatabases(t *testing.T) { //nolint:tparallel // the parent inserts rows between the subtests
+func TestListDatabases(t *testing.T) {
 	t.Parallel()
 
-	store := setupTestStore(t)
 	ctx := context.Background()
 	key := testEncryptionKey()
 
-	t.Run("empty list", func(t *testing.T) { //nolint:paralleltest // the parent inserts rows between the subtests
+	// Each subtest owns its store: "empty list" asserts on a table-wide count, so
+	// a sibling inserting a server is enough to break it.
+	t.Run("empty list", func(t *testing.T) {
+		t.Parallel()
+
+		store := setupTestStore(t)
+
 		dbs, err := store.ListServers(ctx)
 		if err != nil {
 			t.Fatalf("ListServers() error = %v", err)
@@ -349,24 +354,27 @@ func TestListDatabases(t *testing.T) { //nolint:tparallel // the parent inserts 
 		}
 	})
 
-	// Create some databases
-	for _, name := range []string{"db_alpha", "db_beta"} {
-		db := &Server{
-			Name:         name,
-			Host:         "localhost",
-			Port:         5432,
-			DatabaseName: name,
-			Username:     "user",
-			Password:     "pass",
-			SSLMode:      "disable",
-		}
-		_, err := store.CreateServer(ctx, db, key)
-		if err != nil {
-			t.Fatalf("CreateServer() error = %v", err)
-		}
-	}
+	t.Run("with databases", func(t *testing.T) {
+		t.Parallel()
 
-	t.Run("with databases", func(t *testing.T) { //nolint:paralleltest // the parent inserts rows between the subtests
+		store := setupTestStore(t)
+
+		for _, name := range []string{"db_alpha", "db_beta"} {
+			db := &Server{
+				Name:         name,
+				Host:         "localhost",
+				Port:         5432,
+				DatabaseName: name,
+				Username:     "user",
+				Password:     "pass",
+				SSLMode:      "disable",
+			}
+			_, err := store.CreateServer(ctx, db, key)
+			if err != nil {
+				t.Fatalf("CreateServer() error = %v", err)
+			}
+		}
+
 		dbs, err := store.ListServers(ctx)
 		if err != nil {
 			t.Fatalf("ListServers() error = %v", err)

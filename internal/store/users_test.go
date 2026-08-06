@@ -184,13 +184,18 @@ func TestGetUserByUID(t *testing.T) {
 	})
 }
 
-func TestListUsers(t *testing.T) { //nolint:tparallel // the parent inserts rows between the subtests
+func TestListUsers(t *testing.T) {
 	t.Parallel()
 
-	store := setupTestStore(t)
 	ctx := context.Background()
 
-	t.Run("empty list", func(t *testing.T) { //nolint:paralleltest // the parent inserts rows between the subtests
+	// Each subtest owns its store: "empty list" asserts on a table-wide count, so
+	// a sibling inserting a user is enough to break it.
+	t.Run("empty list", func(t *testing.T) {
+		t.Parallel()
+
+		store := setupTestStore(t)
+
 		users, err := store.ListUsers(ctx)
 		if err != nil {
 			t.Fatalf("ListUsers() error = %v", err)
@@ -200,17 +205,20 @@ func TestListUsers(t *testing.T) { //nolint:tparallel // the parent inserts rows
 		}
 	})
 
-	// Create some users
-	_, err := store.CreateUser(ctx, "alice", "hash1", []string{RoleConnector})
-	if err != nil {
-		t.Fatalf("CreateUser() error = %v", err)
-	}
-	_, err = store.CreateUser(ctx, "bob", "hash2", []string{RoleAdmin, RoleConnector})
-	if err != nil {
-		t.Fatalf("CreateUser() error = %v", err)
-	}
+	t.Run("with users", func(t *testing.T) {
+		t.Parallel()
 
-	t.Run("with users", func(t *testing.T) { //nolint:paralleltest // the parent inserts rows between the subtests
+		store := setupTestStore(t)
+
+		_, err := store.CreateUser(ctx, "alice", "hash1", []string{RoleConnector})
+		if err != nil {
+			t.Fatalf("CreateUser() error = %v", err)
+		}
+		_, err = store.CreateUser(ctx, "bob", "hash2", []string{RoleAdmin, RoleConnector})
+		if err != nil {
+			t.Fatalf("CreateUser() error = %v", err)
+		}
+
 		users, err := store.ListUsers(ctx)
 		if err != nil {
 			t.Fatalf("ListUsers() error = %v", err)
@@ -229,19 +237,30 @@ func TestListUsers(t *testing.T) { //nolint:tparallel // the parent inserts rows
 	})
 }
 
-func TestUpdateUser(t *testing.T) { //nolint:tparallel // the subtests update the same row in sequence
+func TestUpdateUser(t *testing.T) {
 	t.Parallel()
 
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	// Create a test user
-	created, err := store.CreateUser(ctx, "toupdate", "oldhash", []string{RoleConnector})
-	if err != nil {
-		t.Fatalf("CreateUser() error = %v", err)
+	// One row per subtest: they all write to the user they read back, so sharing
+	// a single row would make each assertion depend on the sibling that ran last.
+	createUser := func(t *testing.T, username string) *User {
+		t.Helper()
+
+		created, err := store.CreateUser(ctx, username, "oldhash", []string{RoleConnector})
+		if err != nil {
+			t.Fatalf("CreateUser() error = %v", err)
+		}
+
+		return created
 	}
 
-	t.Run("update password", func(t *testing.T) { //nolint:paralleltest // the subtests update the same row in sequence
+	t.Run("update password", func(t *testing.T) {
+		t.Parallel()
+
+		created := createUser(t, "toupdate-password")
+
 		newHash := "newhash"
 		err := store.UpdateUser(ctx, created.UID, UserUpdate{PasswordHash: &newHash})
 		if err != nil {
@@ -257,7 +276,11 @@ func TestUpdateUser(t *testing.T) { //nolint:tparallel // the subtests update th
 		}
 	})
 
-	t.Run("update roles", func(t *testing.T) { //nolint:paralleltest // the subtests update the same row in sequence
+	t.Run("update roles", func(t *testing.T) {
+		t.Parallel()
+
+		created := createUser(t, "toupdate-roles")
+
 		roles := []string{RoleAdmin, RoleViewer, RoleConnector}
 		err := store.UpdateUser(ctx, created.UID, UserUpdate{Roles: roles})
 		if err != nil {
@@ -279,7 +302,11 @@ func TestUpdateUser(t *testing.T) { //nolint:tparallel // the subtests update th
 		}
 	})
 
-	t.Run("update both fields", func(t *testing.T) { //nolint:paralleltest // the subtests update the same row in sequence
+	t.Run("update both fields", func(t *testing.T) {
+		t.Parallel()
+
+		created := createUser(t, "toupdate-both")
+
 		newHash := "finalhash"
 		roles := []string{RoleConnector}
 		err := store.UpdateUser(ctx, created.UID, UserUpdate{PasswordHash: &newHash, Roles: roles})
@@ -299,7 +326,9 @@ func TestUpdateUser(t *testing.T) { //nolint:tparallel // the subtests update th
 		}
 	})
 
-	t.Run("non-existing user", func(t *testing.T) { //nolint:paralleltest // the subtests update the same row in sequence
+	t.Run("non-existing user", func(t *testing.T) {
+		t.Parallel()
+
 		newHash := "hash"
 		err := store.UpdateUser(ctx, uuid.New(), UserUpdate{PasswordHash: &newHash})
 		if !errors.Is(err, ErrUserNotFound) {
@@ -386,13 +415,18 @@ func TestDeleteUserCascadesToIdentities(t *testing.T) {
 	}
 }
 
-func TestEnsureDefaultAdmin(t *testing.T) { //nolint:tparallel // one subtest empties the users table
+func TestEnsureDefaultAdmin(t *testing.T) {
 	t.Parallel()
 
-	store := setupTestStore(t)
 	ctx := context.Background()
 
-	t.Run("creates admin when no users exist", func(t *testing.T) { //nolint:paralleltest // one subtest empties the users table
+	// Each subtest owns its store: the behaviour under test is decided by whether
+	// the users table is empty, which is the one thing a sibling cannot share.
+	t.Run("creates admin when no users exist", func(t *testing.T) {
+		t.Parallel()
+
+		store := setupTestStore(t)
+
 		err := store.EnsureDefaultAdmin(ctx, "adminhash")
 		if err != nil {
 			t.Fatalf("EnsureDefaultAdmin() error = %v", err)
@@ -413,14 +447,12 @@ func TestEnsureDefaultAdmin(t *testing.T) { //nolint:tparallel // one subtest em
 		}
 	})
 
-	t.Run("does not create when users exist", func(t *testing.T) { //nolint:paralleltest // one subtest empties the users table
-		// Clean up and add a non-admin user
-		_, err := store.db.ExecContext(ctx, "DELETE FROM users")
-		if err != nil {
-			t.Fatalf("cleanup error = %v", err)
-		}
+	t.Run("does not create when users exist", func(t *testing.T) {
+		t.Parallel()
 
-		_, err = store.CreateUser(ctx, "existing", "hash", []string{RoleConnector})
+		store := setupTestStore(t)
+
+		_, err := store.CreateUser(ctx, "existing", "hash", []string{RoleConnector})
 		if err != nil {
 			t.Fatalf("CreateUser() error = %v", err)
 		}
