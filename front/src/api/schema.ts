@@ -1957,6 +1957,13 @@ export interface components {
             /** Format: int64 */
             max_bytes_transferred?: number | null;
             /**
+             * Format: int32
+             * @description Selection priority stamped verbatim on every grant materialized
+             *     from this definition. `null` — the normal case — means the grant
+             *     gets the tier its controls earn (see `AccessGrant.priority`).
+             */
+            priority?: number | null;
+            /**
              * @description When true, grant requests against this definition skip the pending/admin-approval
              *     step and are approved (and the grant materialized) instantly at request time.
              * @default false
@@ -2020,6 +2027,13 @@ export interface components {
             max_query_counts?: number | null;
             /** Format: int64 */
             max_bytes_transferred?: number | null;
+            /**
+             * Format: int32
+             * @description Optional selection priority for grants materialized from this
+             *     definition. Omit (or send `null`) to let each grant take the tier
+             *     its controls earn — see `AccessGrant.priority`.
+             */
+            priority?: number | null;
             /**
              * @description When true, grant requests against this definition skip the pending/admin-approval
              *     step and are approved (and the grant materialized) instantly at request time.
@@ -2120,6 +2134,28 @@ export interface components {
              */
             max_bytes_transferred?: number | null;
             /**
+             * Format: int32
+             * @description Ranks this grant against the other active grants the same user
+             *     holds on the same database. A new session is admitted under the
+             *     highest-priority active grant; ties break on the latest
+             *     `expires_at`, then the newest `created_at`.
+             *
+             *     Auto-calculated from `controls` unless an admin overrode it:
+             *
+             *     | grant shape | priority |
+             *     |---|---|
+             *     | writable, no controls | 100 |
+             *     | writable with `block_copy` / `block_ddl` | 50 |
+             *     | `read_only` (whatever else it carries) | 10 |
+             *
+             *     The gaps let an override slot between tiers. Selection happens
+             *     once, at authentication: the session stays pinned to the grant it
+             *     was admitted under and is terminated when that grant expires or is
+             *     revoked, even if a lower-priority grant would still allow access —
+             *     the client reconnects and selection runs afresh.
+             */
+            priority: number;
+            /**
              * Format: int64
              * @description Current query count
              */
@@ -2182,6 +2218,17 @@ export interface components {
              *     to admins. Empty means admins only.
              */
             approver_group_uids?: string[];
+            /**
+             * Format: int32
+             * @description Optional override for the grant's selection priority among the
+             *     user's other active grants on the same database. Omit (or send
+             *     `null`) to let it be derived from `controls` — 100 for a
+             *     control-free writable grant, 50 for a writable one with controls,
+             *     10 for `read_only`. Supply a value only to deliberately overrule
+             *     that tiering, e.g. `75` to rank a restricted-write grant above
+             *     its tier without beating full write access.
+             */
+            priority?: number | null;
         };
         APIKey: {
             /**
