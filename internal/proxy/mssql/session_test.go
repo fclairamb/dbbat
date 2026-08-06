@@ -331,6 +331,23 @@ func TestSessionRejectsIntegratedSecurityLogin(t *testing.T) {
 	assert.Contains(t, tok.Message, "SQL login")
 }
 
+func TestSessionRejectsATDSVersionBelowTheFloor(t *testing.T) {
+	t.Parallel()
+
+	addr := startTestServer(t, config.MSSQLConfig{})
+
+	client := dialTestClient(t, addr)
+	client.prelogin(t, encryptNotSup, false)
+
+	login := sampleLogin7()
+	login.TDSVersion = tdsVersion72
+	client.sendLogin7(t, login)
+
+	tok := parseLoginFailure(t, client.readReply(t))
+	assert.Equal(t, errNumberLoginFailed, tok.Number)
+	assert.Contains(t, tok.Message, "7.4")
+}
+
 func TestSessionRejectsAPreTDS7Login(t *testing.T) {
 	t.Parallel()
 

@@ -178,9 +178,24 @@ the login.
 - **Changing a password through the proxy.**
 - **Pre-TDS7 logins** (packet type `0x02`).
 - **TLS 1.3** on the client leg — see above.
+- **TDS below 7.4.** The floor is **7.4 (SQL Server 2012+)**, enforced in
+  `Login7.Validate()`. It is not arbitrary: the tokens the proxy emits use the
+  TDS 7.2+ wide forms (a 4-byte ERROR line number, an 8-byte DONE row count),
+  which an older client would misparse rather than cleanly reject. A LOGIN7
+  with `TDSVersion = 0` means "server picks", which is 7.4 here.
 
-The minimum TDS version targeted is **7.4 (SQL Server 2012+)**; that is what
-the proxy advertises in PRELOGIN.
+## Ahead of this stage
+
+Recorded so the three stages stay consistent rather than because anything here
+is implemented yet:
+
+- **Stage 2** — authenticating the client against the dbbat user store,
+  resolving the target database, connecting upstream and replaying LOGIN7 with
+  the rewritten credentials. `Login7.serialize()` exists for exactly that.
+- **Stage 3** — intercepting SQLBatch (`0x01`) and RPC (`0x03`), logging
+  queries, and accounting for result rows. **RPC is enforced, not log-only**:
+  `read_only` and `block_ddl` are security controls, and a log-only RPC path
+  would let any client bypass them by wrapping a write in `sp_executesql`.
 
 ## Session Packet Dumps
 

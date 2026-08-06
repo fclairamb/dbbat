@@ -135,10 +135,22 @@ func (l *Login7) ChangePasswordRequested() bool {
 }
 
 // Validate rejects the logins dbbat cannot serve, with an error a human can act
-// on. It deliberately does not enforce a minimum TDS version: 7.4 is what the
-// proxy targets and advertises, and how an older client fares upstream is stage
-// 2's business, not the framing's.
+// on.
 func (l *Login7) Validate() error {
+	// TDS 7.4 (SQL Server 2012+) is the floor this proxy targets. It is not
+	// arbitrary: the token stream the proxy emits uses the 7.2+ wide forms —
+	// a 4-byte ERROR line number and an 8-byte DONE row count — which an older
+	// client would misparse rather than fail on. Zero means "server picks",
+	// which is 7.4 here.
+	//
+	// The version constants are monotonically increasing as uint32
+	// (0x71.. < 0x72.. < 0x73.. < 0x74..), so a plain comparison also accepts
+	// anything newer.
+	if l.TDSVersion != 0 && l.TDSVersion < tdsVersion74 {
+		return fmt.Errorf("%w: TDS %s is below the minimum this proxy supports (7.4, SQL Server 2012+)",
+			ErrLogin7Unsupported, tdsVersionName(l.TDSVersion))
+	}
+
 	if l.IntegratedSecurity() {
 		return fmt.Errorf("%w: integrated (NTLM/Kerberos) authentication is not supported; "+
 			"connect with a SQL login (User ID / Password)", ErrLogin7Unsupported)

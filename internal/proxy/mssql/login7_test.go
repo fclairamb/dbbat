@@ -234,6 +234,43 @@ func TestParseLogin7Errors(t *testing.T) {
 	})
 }
 
+func TestLogin7ValidateEnforcesTheTDS74Floor(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		version uint32
+		wantErr bool
+	}{
+		{"7.1", tdsVersion71, true},
+		{"7.2", tdsVersion72, true},
+		{"7.3A", tdsVersion73A, true},
+		{"7.3B", tdsVersion73B, true},
+		{"7.4", tdsVersion74, false},
+		{"newer than 7.4", 0x75000000, false},
+		{"zero means the server picks", 0, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			login := sampleLogin7()
+			login.TDSVersion = tc.version
+
+			err := login.Validate()
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrLogin7Unsupported)
+				assert.Contains(t, err.Error(), "7.4")
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
+
 func TestLogin7ValidateRejectsUnsupportedAuth(t *testing.T) {
 	t.Parallel()
 
