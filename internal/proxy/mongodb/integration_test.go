@@ -321,14 +321,7 @@ func setupFixtureWith(ctx context.Context, t *testing.T, dumpDir, sslMode string
 	}, encKey)
 	require.NoError(t, err)
 
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:     user.UID,
-		DatabaseID: db.UID,
-		GrantedBy:  user.UID,
-		Controls:   []string{},
-		StartsAt:   time.Now().Add(-time.Hour),
-		ExpiresAt:  time.Now().Add(24 * time.Hour),
-	})
+	_, err = dataStore.CreateGrant(ctx, &store.Grant{UserID: user.UID, DatabaseID: db.UID, GrantedBy: user.UID, StartsAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(24 * time.Hour), Definition: &store.GrantDefinition{Controls: []string{}}})
 	require.NoError(t, err)
 
 	queryStorage := config.QueryStorageConfig{StoreResults: true, MaxResultRows: 1000, MaxResultBytes: 1 * 1024 * 1024}
@@ -424,14 +417,7 @@ func (f *fixture) replaceGrant(ctx context.Context, controls []string) {
 	dbUID, err := uuid.Parse(f.dbUID)
 	require.NoError(f.t, err)
 
-	_, err = f.store.CreateGrant(ctx, &store.Grant{
-		UserID:     f.user.UID,
-		DatabaseID: dbUID,
-		GrantedBy:  f.user.UID,
-		Controls:   controls,
-		StartsAt:   time.Now().Add(-time.Hour),
-		ExpiresAt:  time.Now().Add(24 * time.Hour),
-	})
+	_, err = f.store.CreateGrant(ctx, &store.Grant{UserID: f.user.UID, DatabaseID: dbUID, GrantedBy: f.user.UID, StartsAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(24 * time.Hour), Definition: &store.GrantDefinition{Controls: controls}})
 	require.NoError(f.t, err)
 }
 

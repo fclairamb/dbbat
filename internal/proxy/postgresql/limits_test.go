@@ -46,7 +46,9 @@ func TestSession_CheckQuotas_Revoked(t *testing.T) {
 	t.Parallel()
 
 	reg := cache.NewRevocationRegistry()
-	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour)}
+	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
+	}
 	h := reg.Register(grant.UID)
 
 	s := &Session{grant: grant, revocation: h}
@@ -69,7 +71,9 @@ func TestSession_Revocation_DisconnectsLiveSession(t *testing.T) {
 	t.Parallel()
 
 	reg := cache.NewRevocationRegistry()
-	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour)}
+	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
+	}
 	h := reg.Register(grant.UID)
 
 	clientProxyEnd, clientTestEnd := net.Pipe()
@@ -102,12 +106,16 @@ func TestSession_Revocation_DisconnectsLiveSession(t *testing.T) {
 func TestSession_CheckQuotas_Expiry(t *testing.T) {
 	t.Parallel()
 
-	expired := &Session{grant: &store.Grant{ExpiresAt: time.Now().Add(-time.Minute)}}
+	expired := &Session{grant: &store.Grant{ExpiresAt: time.Now().Add(-time.Minute),
+		Definition: &store.GrantDefinition{},
+	}}
 	if err := expired.checkQuotas(); !errors.Is(err, shared.ErrGrantExpired) {
 		t.Fatalf("checkQuotas() with expired grant = %v, want ErrGrantExpired", err)
 	}
 
-	live := &Session{grant: &store.Grant{ExpiresAt: time.Now().Add(time.Hour)}}
+	live := &Session{grant: &store.Grant{ExpiresAt: time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
+	}}
 	if err := live.checkQuotas(); err != nil {
 		t.Fatalf("checkQuotas() with live grant = %v, want nil", err)
 	}
@@ -128,10 +136,7 @@ func TestSession_ProxyUpstreamToClient_ByteLimitAbort(t *testing.T) {
 	countedClient := shared.NewCountingConn(clientProxyEnd, &fromClient, &toClient)
 
 	maxBytes := int64(150)
-	grant := &store.Grant{
-		MaxBytesTransferred: &maxBytes,
-		ExpiresAt:           time.Now().Add(time.Hour),
-	}
+	grant := &store.Grant{ExpiresAt: time.Now().Add(time.Hour), Definition: &store.GrantDefinition{MaxBytesTransferred: &maxBytes}}
 
 	s := &Session{
 		clientConn:       countedClient,

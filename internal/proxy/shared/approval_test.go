@@ -103,7 +103,7 @@ func testGate(t *testing.T, patterns []string) (*ApprovalGate, *fakeApprovalStor
 	reg := approval.NewRegistry()
 	broker := events.New()
 
-	grant := &store.Grant{ApprovalPatterns: patterns}
+	grant := &store.Grant{Definition: &store.GrantDefinition{ApprovalPatterns: patterns}}
 	user := &store.User{UID: uuid.New(), Username: "alice"}
 
 	gate := NewApprovalGate(ApprovalDeps{
@@ -120,7 +120,7 @@ func testGate(t *testing.T, patterns []string) (*ApprovalGate, *fakeApprovalStor
 func TestGateInactiveWithoutPatternsOrFlag(t *testing.T) {
 	t.Parallel()
 
-	grant := &store.Grant{ApprovalPatterns: []string{"(?i)DELETE"}}
+	grant := &store.Grant{Definition: &store.GrantDefinition{ApprovalPatterns: []string{"(?i)DELETE"}}}
 
 	off := NewApprovalGate(ApprovalDeps{Enabled: false}, grant, uuid.New(), nil, "")
 	if off.Active() {
@@ -131,7 +131,7 @@ func TestGateInactiveWithoutPatternsOrFlag(t *testing.T) {
 		t.Fatal("disabled gate matched")
 	}
 
-	empty := NewApprovalGate(ApprovalDeps{Enabled: true}, &store.Grant{}, uuid.New(), nil, "")
+	empty := NewApprovalGate(ApprovalDeps{Enabled: true}, &store.Grant{Definition: &store.GrantDefinition{}}, uuid.New(), nil, "")
 	if empty.Active() {
 		t.Fatal("gate with no patterns must be inert")
 	}
@@ -183,9 +183,7 @@ func TestGateMatchingIsCaseSensitiveWithoutTheInlineFlag(t *testing.T) {
 func TestGateSkipsUncompilablePattern(t *testing.T) {
 	t.Parallel()
 
-	gate := NewApprovalGate(ApprovalDeps{Enabled: true}, &store.Grant{
-		ApprovalPatterns: []string{"(unclosed", `(?i)DROP`},
-	}, uuid.New(), nil, "")
+	gate := NewApprovalGate(ApprovalDeps{Enabled: true}, &store.Grant{Definition: &store.GrantDefinition{ApprovalPatterns: []string{"(unclosed", `(?i)DROP`}}}, uuid.New(), nil, "")
 
 	if !gate.Active() {
 		t.Fatal("one bad pattern must not disable the gate")
@@ -403,7 +401,9 @@ func TestHoldTripsOnGrantExpiryWhileParked(t *testing.T) {
 
 	gate, st, _ := testGate(t, []string{`(?i)DELETE`})
 
-	expired := &store.Grant{ExpiresAt: time.Now().Add(80 * time.Millisecond)}
+	expired := &store.Grant{ExpiresAt: time.Now().Add(80 * time.Millisecond),
+		Definition: &store.GrantDefinition{},
+	}
 	guard := NewLimitGuard(expired, nil, nil)
 
 	errc := make(chan error, 1)
@@ -462,7 +462,7 @@ func TestHoldFailsClosedWhenPersistFails(t *testing.T) {
 
 	gate := NewApprovalGate(ApprovalDeps{
 		Enabled: true, Store: st, Registry: approval.NewRegistry(), Broker: events.New(),
-	}, &store.Grant{ApprovalPatterns: []string{"x"}}, uuid.New(), nil, "")
+	}, &store.Grant{Definition: &store.GrantDefinition{ApprovalPatterns: []string{"x"}}}, uuid.New(), nil, "")
 
 	_, err := gate.Hold(context.Background(), HoldRequest{SQL: "x", Pattern: "x", Guard: NewLimitGuard(nil, nil, nil)})
 	if !errors.Is(err, ErrApprovalUnavailable) {
@@ -480,7 +480,7 @@ func TestHoldPublishesOnBothTopics(t *testing.T) {
 
 	gate := NewApprovalGate(ApprovalDeps{
 		Enabled: true, Store: st, Registry: reg, Broker: broker, PollInterval: 10 * time.Millisecond,
-	}, &store.Grant{ApprovalPatterns: []string{"(?i)DELETE"}}, connUID, &store.User{UID: uuid.New(), Username: "alice"}, "prod")
+	}, &store.Grant{Definition: &store.GrantDefinition{ApprovalPatterns: []string{"(?i)DELETE"}}}, connUID, &store.User{UID: uuid.New(), Username: "alice"}, "prod")
 
 	sub := broker.Subscribe(func(string, *events.Event) bool { return true }, 64)
 	defer sub.Close()

@@ -33,9 +33,9 @@ func TestLimitGuard_Check_ByteQuota(t *testing.T) {
 	var from, to atomic.Int64
 
 	grant := &store.Grant{
-		BytesTransferred:    100, // already consumed before this session
-		MaxBytesTransferred: int64Ptr(1000),
-		ExpiresAt:           time.Now().Add(time.Hour),
+		BytesTransferred: 100, // already consumed before this session
+		ExpiresAt:        time.Now().Add(time.Hour),
+		Definition:       &store.GrantDefinition{MaxBytesTransferred: int64Ptr(1000)},
 	}
 
 	g := NewLimitGuard(grant, &from, &to)
@@ -60,7 +60,8 @@ func TestLimitGuard_Check_Expiry(t *testing.T) {
 	t.Parallel()
 
 	grant := &store.Grant{
-		ExpiresAt: time.Now().Add(time.Hour),
+		ExpiresAt:  time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
 	}
 
 	g := NewLimitGuard(grant, &atomic.Int64{}, &atomic.Int64{})
@@ -83,7 +84,8 @@ func TestLimitGuard_Check_NoLimitsNeverTrips(t *testing.T) {
 
 	// Grant with no byte cap; expiry far in the future.
 	grant := &store.Grant{
-		ExpiresAt: time.Now().Add(24 * time.Hour),
+		ExpiresAt:  time.Now().Add(24 * time.Hour),
+		Definition: &store.GrantDefinition{},
 	}
 
 	var from, to atomic.Int64
@@ -102,10 +104,7 @@ func TestLimitGuard_Watch_FiresOnByteQuota(t *testing.T) {
 
 	var from, to atomic.Int64
 
-	grant := &store.Grant{
-		MaxBytesTransferred: int64Ptr(1000),
-		ExpiresAt:           time.Now().Add(time.Hour),
-	}
+	grant := &store.Grant{ExpiresAt: time.Now().Add(time.Hour), Definition: &store.GrantDefinition{MaxBytesTransferred: int64Ptr(1000)}}
 
 	g := NewLimitGuard(grant, &from, &to)
 
@@ -133,7 +132,8 @@ func TestLimitGuard_Watch_FiresOnExpiry(t *testing.T) {
 	t.Parallel()
 
 	grant := &store.Grant{
-		ExpiresAt: time.Now().Add(time.Hour),
+		ExpiresAt:  time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
 	}
 
 	g := NewLimitGuard(grant, &atomic.Int64{}, &atomic.Int64{})
@@ -159,10 +159,7 @@ func TestLimitGuard_Watch_FiresOnExpiry(t *testing.T) {
 func TestLimitGuard_Watch_StopsOnContextCancel(t *testing.T) {
 	t.Parallel()
 
-	grant := &store.Grant{
-		MaxBytesTransferred: int64Ptr(1000),
-		ExpiresAt:           time.Now().Add(time.Hour),
-	}
+	grant := &store.Grant{ExpiresAt: time.Now().Add(time.Hour), Definition: &store.GrantDefinition{MaxBytesTransferred: int64Ptr(1000)}}
 
 	g := NewLimitGuard(grant, &atomic.Int64{}, &atomic.Int64{})
 
@@ -198,7 +195,8 @@ func TestLimitGuard_Check_Revocation(t *testing.T) {
 	var revoked atomic.Bool
 
 	grant := &store.Grant{
-		ExpiresAt: time.Now().Add(time.Hour),
+		ExpiresAt:  time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
 	}
 
 	g := NewLimitGuard(grant, &atomic.Int64{}, &atomic.Int64{}).WithRevocation(&revoked)
@@ -225,7 +223,8 @@ func TestLimitGuard_Check_RevocationTakesPrecedence(t *testing.T) {
 	// Grant is also already expired; revocation must win as it is the most
 	// authoritative reason.
 	grant := &store.Grant{
-		ExpiresAt: time.Now().Add(-time.Hour),
+		ExpiresAt:  time.Now().Add(-time.Hour),
+		Definition: &store.GrantDefinition{},
 	}
 
 	g := NewLimitGuard(grant, &atomic.Int64{}, &atomic.Int64{}).WithRevocation(&revoked)
@@ -241,7 +240,8 @@ func TestLimitGuard_Watch_FiresOnRevocation(t *testing.T) {
 	var revoked atomic.Bool
 
 	grant := &store.Grant{
-		ExpiresAt: time.Now().Add(time.Hour),
+		ExpiresAt:  time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
 	}
 
 	g := NewLimitGuard(grant, &atomic.Int64{}, &atomic.Int64{}).WithRevocation(&revoked)

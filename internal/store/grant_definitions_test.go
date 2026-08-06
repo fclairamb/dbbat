@@ -217,21 +217,95 @@ func TestUpdateGrantDefinition(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	originalUID := def.UID
+
 	def.Name = "renamed"
 	def.Slug = "renamed"
 	def.DurationSeconds = 120
 
-	if err := store.UpdateGrantDefinition(ctx, def); err != nil {
+	updated, err := store.UpdateGrantDefinition(ctx, def)
+	if err != nil {
 		t.Fatalf("UpdateGrantDefinition() error = %v", err)
 	}
 
-	got, err := store.GetGrantDefinition(ctx, def.UID)
+	// An edit versions the definition: a new row carrying the change, sharing
+	// the lineage of the one it superseded.
+	if updated.UID == originalUID {
+		t.Fatal("UpdateGrantDefinition() mutated the row in place instead of versioning it")
+	}
+
+	if updated.LineageUID != def.LineageUID {
+		t.Errorf("new version lineage = %s, want %s", updated.LineageUID, def.LineageUID)
+	}
+
+	if updated.Name != "renamed" || updated.Slug != "renamed" || updated.DurationSeconds != 120 {
+		t.Errorf("got = %+v, want renamed/renamed/120", updated)
+	}
+
+	// The superseded row is still readable — grants issued from it have to be
+	// able to render their shape — but it is archived and no longer live.
+	previous, err := store.GetGrantDefinition(ctx, originalUID)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if got.Name != "renamed" || got.Slug != "renamed" || got.DurationSeconds != 120 {
-		t.Errorf("got = %+v, want renamed/renamed/120", got)
+	if previous.ArchivedAt == nil {
+		t.Error("the superseded version was not archived")
+	}
+
+	if previous.Name != "original" {
+		t.Errorf("the superseded version changed: name = %q, want %q", previous.Name, "original")
+	}
+
+	// The slug now resolves to the live version only.
+	live, err := store.GetGrantDefinitionBySlug(ctx, "renamed")
+	if err != nil {
+		t.Fatalf("GetGrantDefinitionBySlug() error = %v", err)
+	}
+
+	if live.UID != updated.UID {
+		t.Errorf("slug resolved to %s, want the live version %s", live.UID, updated.UID)
+	}
+
+	// Editing a superseded version is refused rather than forking history.
+	previous.Description = "late edit"
+
+	if _, err := store.UpdateGrantDefinition(ctx, previous); !errors.Is(err, ErrGrantDefinitionArchived) {
+		t.Fatalf("editing an archived version: err = %v, want ErrGrantDefinitionArchived", err)
+	}
+}
+
+// A PATCH that changes nothing must not litter the version history.
+func TestUpdateGrantDefinition_NoOpEditIsNotVersioned(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "noop_update")
+
+	def, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
+		Name:            "stable",
+		Slug:            "stable",
+		DurationSeconds: 60,
+		Controls:        []string{ControlReadOnly},
+		CreatedBy:       admin.UID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := store.UpdateGrantDefinition(ctx, def)
+	if err != nil {
+		t.Fatalf("UpdateGrantDefinition() error = %v", err)
+	}
+
+	if updated.UID != def.UID {
+		t.Errorf("a no-op edit created version %s, want the existing %s", updated.UID, def.UID)
+	}
+
+	if updated.ArchivedAt != nil {
+		t.Error("a no-op edit archived the live version")
 	}
 }
 
@@ -346,7 +420,7 @@ func TestUpdateGrantDefinition_DuplicateSlug(t *testing.T) {
 
 	other.Slug = "taken-slug"
 
-	if err := store.UpdateGrantDefinition(ctx, other); !errors.Is(err, ErrGrantDefinitionSlugDuplicate) {
+	if _, err := store.UpdateGrantDefinition(ctx, other); !errors.Is(err, ErrGrantDefinitionSlugDuplicate) {
 		t.Fatalf("expected ErrGrantDefinitionSlugDuplicate, got %v", err)
 	}
 }

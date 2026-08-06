@@ -30,17 +30,14 @@ func TestLimitGuard_SessionDiesWithItsGrant(t *testing.T) {
 
 	admitted := &store.Grant{
 		// Full write, so it is the one priority selection hands to the proxy.
-		Priority:  store.PriorityFullWrite,
-		ExpiresAt: now.Add(30 * time.Second),
+		Priority:   store.PriorityFullWrite,
+		ExpiresAt:  now.Add(30 * time.Second),
+		Definition: &store.GrantDefinition{},
 	}
 
 	// Still active, still selectable — and completely irrelevant to a session
 	// already admitted under `admitted`.
-	other := &store.Grant{
-		Controls:  []string{store.ControlReadOnly},
-		Priority:  store.PriorityReadOnly,
-		ExpiresAt: now.Add(2 * time.Hour),
-	}
+	other := &store.Grant{Priority: store.PriorityReadOnly, ExpiresAt: now.Add(2 * time.Hour), Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
 
 	guard := NewLimitGuard(admitted, &atomic.Int64{}, &atomic.Int64{})
 

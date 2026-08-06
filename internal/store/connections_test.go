@@ -104,17 +104,9 @@ func TestCreateConnection(t *testing.T) {
 		}
 
 		now := time.Now()
-		grant, err := store.CreateGrant(ctx, &Grant{
-			UserID:     user.UID,
-			DatabaseID: database.UID,
-			Controls:   []string{},
-			GrantedBy:  admin.UID,
-			StartsAt:   now.Add(-time.Hour),
-			ExpiresAt:  now.Add(time.Hour),
-		})
-		if err != nil {
-			t.Fatalf("CreateGrant() error = %v", err)
-		}
+		def := newTestGrantDefinition(t, ctx, store, admin.UID, GrantDefinition{})
+		grant := newTestGrant(t, ctx, store, def,
+			user.UID, database.UID, admin.UID, now.Add(-time.Hour), now.Add(time.Hour))
 
 		conn, err := store.CreateConnection(ctx, user.UID, database.UID, "192.168.1.103",
 			WithGrantUID(grant.UID))

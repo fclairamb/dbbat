@@ -178,7 +178,7 @@ func TestHandleResponse_MidFetchRowStream(t *testing.T) {
 func TestHandleResponse_MidFetchOERStillCompletes(t *testing.T) {
 	t.Parallel()
 
-	s := newTestSessionWithStorage(&store.Grant{}, true, 100, 1<<20)
+	s := newTestSessionWithStorage(&store.Grant{Definition: &store.GrantDefinition{}}, true, 100, 1<<20)
 	require.NoError(t, s.handleOALL8(buildOALL8("SELECT id FROM emp", nil, 1)))
 
 	s.tracker.pendingQuery.cursor.columns = []columnDef{{Name: "ID"}}

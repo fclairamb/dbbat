@@ -92,18 +92,18 @@ func TestGetActiveGrant_PrioritySelection(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
+	// Controls live on the definition now, so each shape under test becomes a
+	// definition the grant is materialized from.
 	newGrant := func(user, database, admin uuid.UUID, controls []string, priority int16, expiresIn time.Duration) *Grant {
 		t.Helper()
 
-		created, err := s.CreateGrant(ctx, &Grant{
-			UserID:     user,
-			DatabaseID: database,
-			Controls:   controls,
-			GrantedBy:  admin,
-			StartsAt:   now.Add(-time.Hour),
-			ExpiresAt:  now.Add(expiresIn),
-			Priority:   priority,
-		})
+		def := newTestGrantDefinition(t, ctx, s, admin, GrantDefinition{Controls: controls})
+
+		grant := BuildGrantFromDefinition(def, user, database, admin, now.Add(-time.Hour))
+		grant.ExpiresAt = now.Add(expiresIn)
+		grant.Priority = priority
+
+		created, err := s.CreateGrant(ctx, grant)
 		if err != nil {
 			t.Fatalf("CreateGrant() error = %v", err)
 		}
@@ -201,29 +201,10 @@ func TestGetActiveGrant_PrioritySelection(t *testing.T) {
 
 		expiry := now.Add(3 * time.Hour)
 
-		first, err := s.CreateGrant(ctx, &Grant{
-			UserID:     user.UID,
-			DatabaseID: database.UID,
-			Controls:   []string{ControlReadOnly},
-			GrantedBy:  admin.UID,
-			StartsAt:   now.Add(-time.Hour),
-			ExpiresAt:  expiry,
-		})
-		if err != nil {
-			t.Fatalf("CreateGrant() error = %v", err)
-		}
+		def := newTestGrantDefinition(t, ctx, s, admin.UID, GrantDefinition{Controls: []string{ControlReadOnly}})
 
-		second, err := s.CreateGrant(ctx, &Grant{
-			UserID:     user.UID,
-			DatabaseID: database.UID,
-			Controls:   []string{ControlReadOnly},
-			GrantedBy:  admin.UID,
-			StartsAt:   now.Add(-time.Hour),
-			ExpiresAt:  expiry,
-		})
-		if err != nil {
-			t.Fatalf("CreateGrant() error = %v", err)
-		}
+		first := newTestGrant(t, ctx, s, def, user.UID, database.UID, admin.UID, now.Add(-time.Hour), expiry)
+		second := newTestGrant(t, ctx, s, def, user.UID, database.UID, admin.UID, now.Add(-time.Hour), expiry)
 
 		got, err := s.GetActiveGrant(ctx, user.UID, database.UID)
 		if err != nil {
@@ -264,15 +245,13 @@ func TestCreateGrant_AutoPriority(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			created, err := s.CreateGrant(ctx, &Grant{
-				UserID:     user.UID,
-				DatabaseID: database.UID,
-				Controls:   tt.controls,
-				GrantedBy:  admin.UID,
-				StartsAt:   now,
-				ExpiresAt:  now.Add(time.Hour),
-				Priority:   tt.explicit,
-			})
+			def := newTestGrantDefinition(t, ctx, s, admin.UID, GrantDefinition{Controls: tt.controls})
+
+			grant := BuildGrantFromDefinition(def, user.UID, database.UID, admin.UID, now)
+			grant.ExpiresAt = now.Add(time.Hour)
+			grant.Priority = tt.explicit
+
+			created, err := s.CreateGrant(ctx, grant)
 			if err != nil {
 				t.Fatalf("CreateGrant() error = %v", err)
 			}
@@ -354,24 +333,16 @@ func TestGetActiveGrant_ReselectsAfterTheWinnerExpires(t *testing.T) {
 	user, database, admin := grantPriorityFixture(t, ctx, s, "prio_reselect")
 	now := time.Now()
 
+	writeDef := newTestGrantDefinition(t, ctx, s, admin.UID, GrantDefinition{})
+	readOnlyDef := newTestGrantDefinition(t, ctx, s, admin.UID, GrantDefinition{Controls: []string{ControlReadOnly}})
+
 	// A: full write, so it wins the initial selection, but short-lived.
-	shortLived, err := s.CreateGrant(ctx, &Grant{
-		UserID: user.UID, DatabaseID: database.UID,
-		GrantedBy: admin.UID, StartsAt: now.Add(-time.Minute),
-		ExpiresAt: now.Add(700 * time.Millisecond),
-	})
-	if err != nil {
-		t.Fatalf("CreateGrant() error = %v", err)
-	}
+	shortLived := newTestGrant(t, ctx, s, writeDef, user.UID, database.UID, admin.UID,
+		now.Add(-time.Minute), now.Add(700*time.Millisecond))
 
 	// B: read-only, lower priority, but outlives A.
-	longLived, err := s.CreateGrant(ctx, &Grant{
-		UserID: user.UID, DatabaseID: database.UID, Controls: []string{ControlReadOnly},
-		GrantedBy: admin.UID, StartsAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Hour),
-	})
-	if err != nil {
-		t.Fatalf("CreateGrant() error = %v", err)
-	}
+	longLived := newTestGrant(t, ctx, s, readOnlyDef, user.UID, database.UID, admin.UID,
+		now.Add(-time.Minute), now.Add(time.Hour))
 
 	admitted, err := s.GetActiveGrant(ctx, user.UID, database.UID)
 	if err != nil {
@@ -415,31 +386,17 @@ func TestListGrants_OrdersLikeSelection(t *testing.T) {
 	user, database, admin := grantPriorityFixture(t, ctx, s, "prio_list")
 	now := time.Now()
 
+	writeDef := newTestGrantDefinition(t, ctx, s, admin.UID, GrantDefinition{})
+	readOnlyDef := newTestGrantDefinition(t, ctx, s, admin.UID, GrantDefinition{Controls: []string{ControlReadOnly}})
+
 	// Created read-only first, then read/write, then a longer-lived read-only:
 	// no single column reproduces the expected order by accident.
-	readOnlyShort, err := s.CreateGrant(ctx, &Grant{
-		UserID: user.UID, DatabaseID: database.UID, Controls: []string{ControlReadOnly},
-		GrantedBy: admin.UID, StartsAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour),
-	})
-	if err != nil {
-		t.Fatalf("CreateGrant() error = %v", err)
-	}
-
-	readWrite, err := s.CreateGrant(ctx, &Grant{
-		UserID: user.UID, DatabaseID: database.UID,
-		GrantedBy: admin.UID, StartsAt: now.Add(-time.Hour), ExpiresAt: now.Add(time.Hour),
-	})
-	if err != nil {
-		t.Fatalf("CreateGrant() error = %v", err)
-	}
-
-	readOnlyLong, err := s.CreateGrant(ctx, &Grant{
-		UserID: user.UID, DatabaseID: database.UID, Controls: []string{ControlReadOnly},
-		GrantedBy: admin.UID, StartsAt: now.Add(-time.Hour), ExpiresAt: now.Add(5 * time.Hour),
-	})
-	if err != nil {
-		t.Fatalf("CreateGrant() error = %v", err)
-	}
+	readOnlyShort := newTestGrant(t, ctx, s, readOnlyDef, user.UID, database.UID, admin.UID,
+		now.Add(-time.Hour), now.Add(time.Hour))
+	readWrite := newTestGrant(t, ctx, s, writeDef, user.UID, database.UID, admin.UID,
+		now.Add(-time.Hour), now.Add(time.Hour))
+	readOnlyLong := newTestGrant(t, ctx, s, readOnlyDef, user.UID, database.UID, admin.UID,
+		now.Add(-time.Hour), now.Add(5*time.Hour))
 
 	listed, err := s.ListGrants(ctx, GrantFilter{UserID: &user.UID, DatabaseID: &database.UID})
 	if err != nil {

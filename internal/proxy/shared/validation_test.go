@@ -13,7 +13,7 @@ import (
 func TestValidateQuery_ReadOnly_BlocksWrites(t *testing.T) {
 	t.Parallel()
 
-	grant := &store.Grant{Controls: []string{store.ControlReadOnly}}
+	grant := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
 	blocked := []string{
 		"INSERT INTO t VALUES (1)", "UPDATE t SET x = 1", "DELETE FROM t WHERE id = 1",
 		"MERGE INTO t USING s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.x = s.x",
@@ -28,7 +28,7 @@ func TestValidateQuery_ReadOnly_BlocksWrites(t *testing.T) {
 func TestValidateQuery_ReadOnly_AllowsReads(t *testing.T) {
 	t.Parallel()
 
-	grant := &store.Grant{Controls: []string{store.ControlReadOnly}}
+	grant := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
 	allowed := []string{
 		"SELECT * FROM t", "SELECT 1 FROM DUAL",
 		"WITH cte AS (SELECT 1 FROM DUAL) SELECT * FROM cte",
@@ -42,7 +42,7 @@ func TestValidateQuery_ReadOnly_AllowsReads(t *testing.T) {
 func TestValidateQuery_BlockDDL(t *testing.T) {
 	t.Parallel()
 
-	grant := &store.Grant{Controls: []string{store.ControlBlockDDL}}
+	grant := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlBlockDDL}}}
 	blocked := []string{
 		"CREATE TABLE t (id NUMBER)", "ALTER TABLE t ADD (col NUMBER)", "DROP TABLE t",
 		"CREATE INDEX idx ON t(col)", "CREATE OR REPLACE VIEW v AS SELECT 1 FROM DUAL",
@@ -61,7 +61,7 @@ func TestValidateQuery_BlockDDL(t *testing.T) {
 func TestValidateQuery_CaseInsensitive(t *testing.T) {
 	t.Parallel()
 
-	grant := &store.Grant{Controls: []string{store.ControlReadOnly}}
+	grant := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
 	require.Error(t, ValidateQuery("insert INTO t VALUES (1)", grant))
 	require.Error(t, ValidateQuery("  INSERT INTO t VALUES (1)  ", grant))
 }
@@ -69,14 +69,14 @@ func TestValidateQuery_CaseInsensitive(t *testing.T) {
 func TestValidateQuery_CommentBypass(t *testing.T) {
 	t.Parallel()
 
-	grant := &store.Grant{Controls: []string{store.ControlReadOnly}}
+	grant := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
 	assert.NoError(t, ValidateQuery("/* harmless */ INSERT INTO t VALUES (1)", grant))
 }
 
 func TestValidateQuery_PasswordChange(t *testing.T) {
 	t.Parallel()
 
-	grant := &store.Grant{} // No restrictions
+	grant := &store.Grant{Definition: &store.GrantDefinition{}} // No restrictions
 	require.ErrorIs(t, ValidateQuery("ALTER USER bob PASSWORD 'secret'", grant), ErrPasswordChangeBlocked)
 	require.ErrorIs(t, ValidateQuery("ALTER ROLE admin PASSWORD 'secret'", grant), ErrPasswordChangeBlocked)
 	assert.NoError(t, ValidateQuery("ALTER TABLE t ADD (col NUMBER)", grant))
@@ -85,7 +85,7 @@ func TestValidateQuery_PasswordChange(t *testing.T) {
 func TestValidateOracleQuery_BlocksDangerousPatterns(t *testing.T) {
 	t.Parallel()
 
-	grant := &store.Grant{} // No restrictions — patterns always blocked
+	grant := &store.Grant{Definition: &store.GrantDefinition{}} // No restrictions — patterns always blocked
 	blocked := []struct{ sql, reason string }{
 		{"ALTER SYSTEM SET open_cursors=1000", "system config"},
 		{"ALTER SYSTEM KILL SESSION '123,456'", "kill session"},
@@ -108,7 +108,7 @@ func TestValidateOracleQuery_BlocksDangerousPatterns(t *testing.T) {
 func TestValidateOracleQuery_AllowsSafePLSQL(t *testing.T) {
 	t.Parallel()
 
-	grant := &store.Grant{} // No restrictions
+	grant := &store.Grant{Definition: &store.GrantDefinition{}} // No restrictions
 	allowed := []string{
 		"BEGIN my_pkg.read_data(:1, :2); END;",
 		"DECLARE v NUMBER; BEGIN SELECT COUNT(*) INTO v FROM t; END;",
@@ -123,7 +123,7 @@ func TestValidateOracleQuery_AllowsSafePLSQL(t *testing.T) {
 func TestValidateOracleQuery_CombinesSharedAndOracleChecks(t *testing.T) {
 	t.Parallel()
 
-	grant := &store.Grant{Controls: []string{store.ControlReadOnly}}
+	grant := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
 	require.ErrorIs(t, ValidateOracleQuery("INSERT INTO t VALUES (1)", grant), ErrReadOnlyViolation)
 	require.ErrorIs(t, ValidateOracleQuery("SELECT UTL_HTTP.REQUEST('x') FROM DUAL", grant), ErrOraclePatternBlocked)
 }
@@ -131,7 +131,7 @@ func TestValidateOracleQuery_CombinesSharedAndOracleChecks(t *testing.T) {
 func TestValidateMySQLQuery_BlocksDangerousPatterns(t *testing.T) {
 	t.Parallel()
 
-	grant := &store.Grant{} // no grant restrictions — patterns always blocked
+	grant := &store.Grant{Definition: &store.GrantDefinition{}} // no grant restrictions — patterns always blocked
 	blocked := []struct{ sql, reason string }{
 		{"LOAD DATA INFILE '/tmp/x.csv' INTO TABLE t", "server-side file read"},
 		{"LOAD DATA LOCAL INFILE '/etc/passwd' INTO TABLE t", "client-side exfiltration"},
@@ -151,7 +151,7 @@ func TestValidateMySQLQuery_BlocksDangerousPatterns(t *testing.T) {
 func TestValidateMySQLQuery_AllowsSafeQueries(t *testing.T) {
 	t.Parallel()
 
-	grant := &store.Grant{} // no restrictions
+	grant := &store.Grant{Definition: &store.GrantDefinition{}} // no restrictions
 	allowed := []string{
 		"SELECT * FROM users",
 		"SELECT REPLACE(name, 'old', 'new') FROM t", // REPLACE() function, not REPLACE INTO
@@ -167,7 +167,7 @@ func TestValidateMySQLQuery_AllowsSafeQueries(t *testing.T) {
 func TestValidateMySQLQuery_CombinesSharedAndMySQLChecks(t *testing.T) {
 	t.Parallel()
 
-	grant := &store.Grant{Controls: []string{store.ControlReadOnly}}
+	grant := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
 	require.ErrorIs(t, ValidateMySQLQuery("INSERT INTO t VALUES (1)", grant), ErrReadOnlyViolation)
 	require.ErrorIs(t, ValidateMySQLQuery("REPLACE INTO t VALUES (1)", grant), ErrReadOnlyViolation)
 	require.ErrorIs(t, ValidateMySQLQuery("LOAD DATA INFILE '/x' INTO TABLE t", grant), ErrMySQLPatternBlocked)
@@ -186,9 +186,9 @@ func TestValidateMongoCommand_Classification(t *testing.T) {
 	t.Parallel()
 
 	db := &store.Server{Name: "app", DatabaseName: "app"}
-	full := &store.Grant{Controls: []string{}}
-	readOnly := &store.Grant{Controls: []string{store.ControlReadOnly}}
-	noDDL := &store.Grant{Controls: []string{store.ControlBlockDDL}}
+	full := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{}}}
+	readOnly := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
+	noDDL := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlBlockDDL}}}
 
 	// Reads and writes on the configured db under a full grant.
 	require.NoError(t, ValidateMongoCommand("find", "app", mongoBody(t, bson.D{{Key: "find", Value: "c"}, {Key: "$db", Value: "app"}}), db, full))
@@ -229,7 +229,7 @@ func TestValidateMongoCommand_DBEnforcement(t *testing.T) {
 	t.Parallel()
 
 	db := &store.Server{Name: "app", DatabaseName: "app"}
-	full := &store.Grant{Controls: []string{}}
+	full := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{}}}
 
 	// admin allowed for diagnostics only.
 	require.NoError(t, ValidateMongoCommand("ping", "admin", mongoBody(t, bson.D{{Key: "ping", Value: 1}}), db, full))

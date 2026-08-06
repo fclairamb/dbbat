@@ -155,11 +155,7 @@ func heldSession(t *testing.T, patterns []string) (*Session, net.Conn, *fakeHold
 
 	watched := shared.NewWatchedConn(a.conn)
 
-	grant := &store.Grant{
-		UID:              uuid.New(),
-		ApprovalPatterns: patterns,
-		ExpiresAt:        time.Now().Add(time.Hour),
-	}
+	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour), Definition: &store.GrantDefinition{ApprovalPatterns: patterns}}
 
 	sess := &Session{
 		clientConn: watched,

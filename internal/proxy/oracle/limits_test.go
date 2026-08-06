@@ -23,7 +23,9 @@ func TestCheckQuotas_Revoked(t *testing.T) {
 	t.Parallel()
 
 	reg := cache.NewRevocationRegistry()
-	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour)}
+	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
+	}
 	h := reg.Register(grant.UID)
 
 	s := newTestSession(grant)
@@ -43,7 +45,9 @@ func TestRevocation_DisconnectsLiveSession(t *testing.T) {
 	t.Parallel()
 
 	reg := cache.NewRevocationRegistry()
-	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour)}
+	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
+	}
 	h := reg.Register(grant.UID)
 
 	clientProxyEnd, clientTestEnd := net.Pipe()
@@ -96,10 +100,14 @@ func assertOraclePeerClosed(t *testing.T, c net.Conn, name string) {
 func TestCheckQuotas_Expiry(t *testing.T) {
 	t.Parallel()
 
-	expired := newTestSession(&store.Grant{ExpiresAt: time.Now().Add(-time.Minute)})
+	expired := newTestSession(&store.Grant{ExpiresAt: time.Now().Add(-time.Minute),
+		Definition: &store.GrantDefinition{},
+	})
 	require.ErrorIs(t, expired.checkQuotas(), shared.ErrGrantExpired)
 
-	live := newTestSession(&store.Grant{ExpiresAt: time.Now().Add(time.Hour)})
+	live := newTestSession(&store.Grant{ExpiresAt: time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
+	})
 	require.NoError(t, live.checkQuotas())
 }
 
@@ -118,10 +126,7 @@ func TestUpstreamToClient_ByteLimitAbort(t *testing.T) {
 	counted := shared.NewCountingConn(clientProxyEnd, &from, &to)
 
 	maxBytes := int64(200)
-	grant := &store.Grant{
-		MaxBytesTransferred: &maxBytes,
-		ExpiresAt:           time.Now().Add(time.Hour),
-	}
+	grant := &store.Grant{ExpiresAt: time.Now().Add(time.Hour), Definition: &store.GrantDefinition{MaxBytesTransferred: &maxBytes}}
 
 	s := &session{
 		clientConn:      counted,

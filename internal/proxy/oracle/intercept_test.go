@@ -37,7 +37,7 @@ func newTestSession(grant *store.Grant) *session {
 
 func TestHandleOALL8_DecodesAndTracksQuery(t *testing.T) {
 	t.Parallel()
-	s := newTestSession(&store.Grant{})
+	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
 	payload := buildOALL8("SELECT 1 FROM DUAL", nil, 1)
 
 	err := s.handleOALL8(payload)
@@ -55,7 +55,7 @@ func TestHandleOALL8_DecodesAndTracksQuery(t *testing.T) {
 
 func TestHandleOALL8_WithBindValues(t *testing.T) {
 	t.Parallel()
-	s := newTestSession(&store.Grant{})
+	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
 	payload := buildOALL8("SELECT * FROM emp WHERE dept_id = :1", []string{"10"}, 2)
 
 	err := s.handleOALL8(payload)
@@ -68,7 +68,7 @@ func TestHandleOALL8_WithBindValues(t *testing.T) {
 
 func TestHandleOALL8_ReadOnlyBlocks(t *testing.T) {
 	t.Parallel()
-	grant := &store.Grant{Controls: []string{store.ControlReadOnly}}
+	grant := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
 	s := newTestSession(grant)
 
 	tests := []struct {
@@ -97,7 +97,7 @@ func TestHandleOALL8_ReadOnlyBlocks(t *testing.T) {
 
 func TestHandleOALL8_BlockDDL(t *testing.T) {
 	t.Parallel()
-	grant := &store.Grant{Controls: []string{store.ControlBlockDDL}}
+	grant := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlBlockDDL}}}
 	s := newTestSession(grant)
 
 	blocked := []string{
@@ -123,7 +123,7 @@ func TestHandleOALL8_BlockDDL(t *testing.T) {
 
 func TestHandleOALL8_OracleSpecificPatterns(t *testing.T) {
 	t.Parallel()
-	grant := &store.Grant{} // No restrictions — Oracle patterns always blocked
+	grant := &store.Grant{Definition: &store.GrantDefinition{}} // No restrictions — Oracle patterns always blocked
 	s := newTestSession(grant)
 
 	blocked := []string{
@@ -146,7 +146,7 @@ func TestHandleOALL8_OracleSpecificPatterns(t *testing.T) {
 
 func TestHandleOALL8_AllowsSafePLSQL(t *testing.T) {
 	t.Parallel()
-	grant := &store.Grant{}
+	grant := &store.Grant{Definition: &store.GrantDefinition{}}
 	s := newTestSession(grant)
 
 	allowed := []string{
@@ -163,7 +163,7 @@ func TestHandleOALL8_AllowsSafePLSQL(t *testing.T) {
 
 func TestHandleOALL8_PasswordChangeBlocked(t *testing.T) {
 	t.Parallel()
-	grant := &store.Grant{}
+	grant := &store.Grant{Definition: &store.GrantDefinition{}}
 	s := newTestSession(grant)
 
 	err := s.handleOALL8(buildOALL8("ALTER USER bob PASSWORD 'secret'", nil, 1))
@@ -172,7 +172,7 @@ func TestHandleOALL8_PasswordChangeBlocked(t *testing.T) {
 
 func TestHandleOFETCH_LinksToCursor(t *testing.T) {
 	t.Parallel()
-	s := newTestSession(&store.Grant{})
+	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
 
 	// First, register a cursor via OALL8
 	_ = s.handleOALL8(buildOALL8("SELECT * FROM emp", nil, 7))
@@ -188,7 +188,7 @@ func TestHandleOFETCH_LinksToCursor(t *testing.T) {
 
 func TestHandleOFETCH_UnknownCursor(t *testing.T) {
 	t.Parallel()
-	s := newTestSession(&store.Grant{})
+	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
 
 	// OFETCH for cursor that doesn't exist
 	s.handleOFETCH(buildOFETCH(99, 100))
@@ -197,7 +197,7 @@ func TestHandleOFETCH_UnknownCursor(t *testing.T) {
 
 func TestHandleOCLOSE_CleansCursor(t *testing.T) {
 	t.Parallel()
-	s := newTestSession(&store.Grant{})
+	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
 
 	// Register cursor
 	_ = s.handleOALL8(buildOALL8("SELECT 1", nil, 5))
@@ -210,7 +210,7 @@ func TestHandleOCLOSE_CleansCursor(t *testing.T) {
 
 func TestCursorReuse(t *testing.T) {
 	t.Parallel()
-	s := newTestSession(&store.Grant{})
+	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
 
 	// Register cursor 5 with first query
 	_ = s.handleOALL8(buildOALL8("SELECT 1 FROM DUAL", nil, 5))
@@ -226,7 +226,7 @@ func TestCursorReuse(t *testing.T) {
 
 func TestCompleteQuery_SetsDuration(t *testing.T) {
 	t.Parallel()
-	s := newTestSession(&store.Grant{})
+	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
 
 	s.tracker.pendingQuery = &pendingOracleQuery{
 		cursor: &trackedCursor{
@@ -322,27 +322,21 @@ func TestDecodeCursorIDFromOCLOSE_TooShort(t *testing.T) {
 
 func TestCheckQuotas_NoLimits(t *testing.T) {
 	t.Parallel()
-	s := newTestSession(&store.Grant{})
+	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
 	assert.NoError(t, s.checkQuotas())
 }
 
 func TestCheckQuotas_QueryLimitExceeded(t *testing.T) {
 	t.Parallel()
 	maxQueries := int64(10)
-	s := newTestSession(&store.Grant{
-		MaxQueryCounts: &maxQueries,
-		QueryCount:     10,
-	})
+	s := newTestSession(&store.Grant{QueryCount: 10, Definition: &store.GrantDefinition{MaxQueryCounts: &maxQueries}})
 	assert.ErrorIs(t, s.checkQuotas(), ErrQueryLimitExceed)
 }
 
 func TestCheckQuotas_DataLimitExceeded(t *testing.T) {
 	t.Parallel()
 	maxBytes := int64(1024)
-	s := newTestSession(&store.Grant{
-		MaxBytesTransferred: &maxBytes,
-		BytesTransferred:    1024,
-	})
+	s := newTestSession(&store.Grant{BytesTransferred: 1024, Definition: &store.GrantDefinition{MaxBytesTransferred: &maxBytes}})
 	assert.ErrorIs(t, s.checkQuotas(), ErrDataLimitExceed)
 }
 
@@ -350,12 +344,7 @@ func TestCheckQuotas_UnderLimit(t *testing.T) {
 	t.Parallel()
 	maxQueries := int64(10)
 	maxBytes := int64(1024)
-	s := newTestSession(&store.Grant{
-		MaxQueryCounts:      &maxQueries,
-		MaxBytesTransferred: &maxBytes,
-		QueryCount:          5,
-		BytesTransferred:    500,
-	})
+	s := newTestSession(&store.Grant{QueryCount: 5, BytesTransferred: 500, Definition: &store.GrantDefinition{MaxQueryCounts: &maxQueries, MaxBytesTransferred: &maxBytes}})
 	assert.NoError(t, s.checkQuotas())
 }
 
@@ -393,7 +382,7 @@ func newTestSessionWithStorage(grant *store.Grant, storeResults bool, maxRows in
 
 func TestCaptureRow_Basic(t *testing.T) {
 	t.Parallel()
-	s := newTestSessionWithStorage(&store.Grant{}, true, 100, 1048576)
+	s := newTestSessionWithStorage(&store.Grant{Definition: &store.GrantDefinition{}}, true, 100, 1048576)
 
 	// Start a pending query
 	_ = s.handleOALL8(buildOALL8("SELECT id, name FROM emp", nil, 1))
@@ -412,7 +401,7 @@ func TestCaptureRow_Basic(t *testing.T) {
 
 func TestCaptureRow_Limits_RowCount(t *testing.T) {
 	t.Parallel()
-	s := newTestSessionWithStorage(&store.Grant{}, true, 3, 1048576)
+	s := newTestSessionWithStorage(&store.Grant{Definition: &store.GrantDefinition{}}, true, 3, 1048576)
 	_ = s.handleOALL8(buildOALL8("SELECT * FROM big_table", nil, 1))
 
 	cols := []columnDef{{Name: "ID", TypeCode: OracleTypeNUMBER}}
@@ -429,7 +418,7 @@ func TestCaptureRow_Limits_RowCount(t *testing.T) {
 
 func TestCaptureRow_Limits_ByteCount(t *testing.T) {
 	t.Parallel()
-	s := newTestSessionWithStorage(&store.Grant{}, true, 1000, 50) // 50 bytes max
+	s := newTestSessionWithStorage(&store.Grant{Definition: &store.GrantDefinition{}}, true, 1000, 50) // 50 bytes max
 	_ = s.handleOALL8(buildOALL8("SELECT * FROM t", nil, 1))
 
 	cols := []columnDef{{Name: "DATA", TypeCode: OracleTypeVARCHAR2}}
@@ -447,7 +436,7 @@ func TestCaptureRow_Limits_ByteCount(t *testing.T) {
 
 func TestCaptureRow_StoreResultsDisabled(t *testing.T) {
 	t.Parallel()
-	s := newTestSessionWithStorage(&store.Grant{}, false, 100, 1048576)
+	s := newTestSessionWithStorage(&store.Grant{Definition: &store.GrantDefinition{}}, false, 100, 1048576)
 	_ = s.handleOALL8(buildOALL8("SELECT * FROM t", nil, 1))
 
 	cols := []columnDef{{Name: "ID", TypeCode: OracleTypeNUMBER}}
@@ -459,7 +448,7 @@ func TestCaptureRow_StoreResultsDisabled(t *testing.T) {
 
 func TestCaptureRow_NoPendingQuery(t *testing.T) {
 	t.Parallel()
-	s := newTestSessionWithStorage(&store.Grant{}, true, 100, 1048576)
+	s := newTestSessionWithStorage(&store.Grant{Definition: &store.GrantDefinition{}}, true, 100, 1048576)
 	// No pending query — should not panic
 	cols := []columnDef{{Name: "ID", TypeCode: OracleTypeNUMBER}}
 	s.captureRow(cols, []interface{}{1})
@@ -467,7 +456,7 @@ func TestCaptureRow_NoPendingQuery(t *testing.T) {
 
 func TestCaptureRow_NilValue(t *testing.T) {
 	t.Parallel()
-	s := newTestSessionWithStorage(&store.Grant{}, true, 100, 1048576)
+	s := newTestSessionWithStorage(&store.Grant{Definition: &store.GrantDefinition{}}, true, 100, 1048576)
 	_ = s.handleOALL8(buildOALL8("SELECT id, name FROM t", nil, 1))
 
 	cols := []columnDef{
@@ -482,7 +471,7 @@ func TestCaptureRow_NilValue(t *testing.T) {
 
 func TestCompleteQuery_WithRows_AssignsRowNumbers(t *testing.T) {
 	t.Parallel()
-	s := newTestSessionWithStorage(&store.Grant{}, true, 100, 1048576)
+	s := newTestSessionWithStorage(&store.Grant{Definition: &store.GrantDefinition{}}, true, 100, 1048576)
 	_ = s.handleOALL8(buildOALL8("SELECT id FROM t", nil, 1))
 
 	cols := []columnDef{{Name: "ID", TypeCode: OracleTypeNUMBER}}
@@ -502,7 +491,7 @@ func TestCompleteQuery_WithRows_AssignsRowNumbers(t *testing.T) {
 
 func TestHandleResponse_ErrorResponse(t *testing.T) {
 	t.Parallel()
-	s := newTestSessionWithStorage(&store.Grant{}, true, 100, 1048576)
+	s := newTestSessionWithStorage(&store.Grant{Definition: &store.GrantDefinition{}}, true, 100, 1048576)
 	_ = s.handleOALL8(buildOALL8("SELECT * FROM nonexistent", nil, 1))
 
 	payload := buildTTCErrorResponse(942, "ORA-00942: table or view does not exist")
@@ -514,7 +503,7 @@ func TestHandleResponse_ErrorResponse(t *testing.T) {
 
 func TestHandleResponse_WithColumnDefsAndRows(t *testing.T) {
 	t.Parallel()
-	s := newTestSessionWithStorage(&store.Grant{}, true, 100, 1048576)
+	s := newTestSessionWithStorage(&store.Grant{Definition: &store.GrantDefinition{}}, true, 100, 1048576)
 	_ = s.handleOALL8(buildOALL8("SELECT id, name FROM emp", nil, 1))
 
 	payload := buildTTCResponse(
@@ -534,7 +523,7 @@ func TestHandleResponse_WithColumnDefsAndRows(t *testing.T) {
 
 func TestHandleResponse_MoreData_DoesNotComplete(t *testing.T) {
 	t.Parallel()
-	s := newTestSessionWithStorage(&store.Grant{}, true, 100, 1048576)
+	s := newTestSessionWithStorage(&store.Grant{Definition: &store.GrantDefinition{}}, true, 100, 1048576)
 	_ = s.handleOALL8(buildOALL8("SELECT id FROM big_table", nil, 1))
 
 	payload := buildTTCResponseWithMoreData(true)

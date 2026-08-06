@@ -25,7 +25,9 @@ func TestRunIntercepted_Revoked(t *testing.T) {
 	t.Parallel()
 
 	reg := cache.NewRevocationRegistry()
-	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour)}
+	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
+	}
 	h := reg.Register(grant.UID)
 	reg.Revoke(grant.UID)
 
@@ -63,7 +65,9 @@ func TestWatchdog_TearsDownOnRevocation(t *testing.T) {
 	s := &Session{logger: discardLogger(), ctx: context.Background()}
 
 	reg := cache.NewRevocationRegistry()
-	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour)}
+	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
+	}
 	h := reg.Register(grant.UID)
 
 	guard := shared.NewLimitGuard(grant, &atomic.Int64{}, &atomic.Int64{}).WithRevocation(h.Flag())
@@ -90,11 +94,15 @@ func TestWatchdog_TearsDownOnRevocation(t *testing.T) {
 func TestCheckQuotas_Expiry(t *testing.T) {
 	t.Parallel()
 
-	if err := checkQuotas(&store.Grant{ExpiresAt: time.Now().Add(-time.Minute)}); !errors.Is(err, shared.ErrGrantExpired) {
+	if err := checkQuotas(&store.Grant{ExpiresAt: time.Now().Add(-time.Minute),
+		Definition: &store.GrantDefinition{},
+	}); !errors.Is(err, shared.ErrGrantExpired) {
 		t.Fatalf("checkQuotas() expired grant = %v, want ErrGrantExpired", err)
 	}
 
-	if err := checkQuotas(&store.Grant{ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+	if err := checkQuotas(&store.Grant{ExpiresAt: time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
+	}); err != nil {
 		t.Fatalf("checkQuotas() live grant = %v, want nil", err)
 	}
 }
@@ -157,7 +165,7 @@ func TestWatchdog_TearsDownOnByteQuota(t *testing.T) {
 	s := &Session{logger: discardLogger(), ctx: context.Background()}
 
 	maxBytes := int64(50)
-	grant := &store.Grant{BytesTransferred: 100, MaxBytesTransferred: &maxBytes}
+	grant := &store.Grant{BytesTransferred: 100, Definition: &store.GrantDefinition{MaxBytesTransferred: &maxBytes}}
 	guard := shared.NewLimitGuard(grant, &atomic.Int64{}, &atomic.Int64{})
 
 	clientConn := pipePair(t)
@@ -182,7 +190,9 @@ func TestWatchdog_TearsDownOnExpiry(t *testing.T) {
 
 	s := &Session{logger: discardLogger(), ctx: context.Background()}
 
-	grant := &store.Grant{ExpiresAt: time.Now().Add(-time.Minute)}
+	grant := &store.Grant{ExpiresAt: time.Now().Add(-time.Minute),
+		Definition: &store.GrantDefinition{},
+	}
 	guard := shared.NewLimitGuard(grant, &atomic.Int64{}, &atomic.Int64{})
 
 	clientConn := pipePair(t)
