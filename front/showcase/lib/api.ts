@@ -89,6 +89,34 @@ export class ShowcaseApi {
 }
 
 /**
+ * Poll for the proxy session a `pg` client has just opened.
+ *
+ * Scoped to the showcase's own server row and user, and to a session that has
+ * not disconnected — global-setup's traffic run left closed connections behind,
+ * and picking one of those up would produce a capture of a dead page.
+ */
+export async function waitForLiveConnection(
+  api: ShowcaseApi,
+  serverUid: string,
+  userUid: string,
+): Promise<string> {
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    const body = await api.get<{ connections?: ConnectionRow[] }>(
+      `/connections?database_id=${serverUid}&user_id=${userUid}`,
+    );
+    const live = (body.connections ?? []).find(
+      (c) => c.disconnected_at === null || c.disconnected_at === undefined,
+    );
+    if (live) {
+      return live.uid;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
+  throw new Error("showcase: the proxy session never showed up in /connections");
+}
+
+/**
  * Wait until the showcase dbbat answers. The orchestrating shell script waits
  * too, but the suite must be runnable on its own against an instance someone
  * started by hand.

@@ -8,6 +8,12 @@
  *   one, so the two can never fight over a database.
  * - It runs single-worker and serial: captures share one scenario and a shared
  *   live connection, and parallelism would make the output non-deterministic.
+ * - Its projects run in declaration order, and that order is load-bearing:
+ *   `screenshots` first (its query list must show the traffic global-setup
+ *   generated and nothing else), then `poster` and `video`, each of which
+ *   opens a further live session. Playwright is not told this with
+ *   `dependencies` on purpose — that would drag the whole suite along whenever
+ *   SHOWCASE_PROJECT asks for one project.
  * - It never runs as part of `make test-e2e`, and it must never gate CI. On
  *   pull requests it runs only as a non-blocking rot guard with its output
  *   thrown away (see .github/workflows/showcase.yml).
@@ -53,6 +59,21 @@ export default defineConfig({
         ...devices["Desktop Chrome"],
         viewport: VIEWPORT,
         deviceScaleFactor: 2,
+      },
+    },
+    {
+      // The clip's poster, captured as a still rather than grabbed out of the
+      // recording — see the header of approval-poster.spec.ts.
+      //
+      // 1x, unlike the stills above: this one is a <video poster>, and that
+      // element is 1280x800. A 2x rendition would only be downscaled back to
+      // the same pixels by the WebP step in scripts/showcase.sh.
+      name: "poster",
+      testMatch: /approval-poster\.spec\.ts/,
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: VIEWPORT,
+        deviceScaleFactor: 1,
       },
     },
     {

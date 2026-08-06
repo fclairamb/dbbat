@@ -8,8 +8,8 @@ Regenerates the website's marketing media into `website/static/img/showcase/`:
 | `grant-request.png` | The Request access dialog, filled |
 | `query-list.png` | The query list, populated by real proxy traffic |
 | `query-results.png` | A query's captured result rows |
-| `approval-hold-av1.mp4`, `approval-hold-h264.mp4` | An `UPDATE` held for approval and released from the UI |
 | `approval-hold-poster.png` | The hold itself — the video's poster, and what the site shows under `prefers-reduced-motion` |
+| `approval-hold-av1.mp4`, `approval-hold-h264.mp4` | An `UPDATE` held for approval and released from the UI |
 | `manifest.json` | `{ version, commit, generatedAt }` for the run |
 
 Run it with `make showcase` from the repo root. Never with a bare
@@ -58,9 +58,11 @@ cursor never appears in the frame. Neither fakes a *result*: every line the
 pane prints came back from the real connection.
 
 Restated afterwards: *when* it all happened, and how long the statements took
-(`lib/normalise.ts`). The measured durations against a container on the same
-host come back as `0.0ms` — true, and not worth a screenshot. Those two are the
-only invented values anywhere in the captures.
+(`lib/normalise.ts`), plus the grant's validity window and the "held for"
+counter for the one frame of the poster (`approval-poster.spec.ts`). The
+measured durations against a container on the same host come back as `0.0ms` —
+true, and not worth a screenshot. Those are the only invented values anywhere
+in the captures.
 
 ## Determinism
 
@@ -79,9 +81,9 @@ That is the bar, and everything below exists to hold it.
   fixed offsets from `SHOWCASE_EPOCH`, the demo history is shifted wholesale
   onto the same epoch (preserving its "4 hours ago" / "3 days ago" spread), and
   every connection uid is reissued as a UUIDv7 derived from its now-fixed
-  connect time. `access_grants` is left alone: the video opens a live session
-  through the grant after the stills are done, and it has to stay valid at the
-  real clock.
+  connect time. `access_grants` is left alone here: every session after this
+  point authenticates through the grant, so it has to stay valid at the real
+  clock. The poster borrows it for one frame instead — see *The hold* below.
 - **Clock.** `page.clock.setFixedTime()` — pins `Date.now()` without stopping
   timers, so React Query and the watch panel's reconnect backoff still work. It
   is a constant (`SHOWCASE_EPOCH` + 30s), which it can be because every row it
@@ -93,13 +95,26 @@ That is the bar, and everything below exists to hold it.
   localStorage key). The countdown badge ticks on a real one-second interval
   that the clock pin deliberately does not stop, so "Next: 9s" was however long
   the page took to load. The video leaves it on.
-- **Geometry.** 1280×800 everywhere; `deviceScaleFactor: 2` for stills (so the
-  PNGs are 2560×1600), `1` for video.
-- **Ordering.** One worker, serial, no retries.
+- **The hold.** `approval-hold-poster.png` is a still, not a frame lifted out of
+  the recording (`approval-poster.spec.ts`, its own project). Two things in it
+  move with the wall clock and neither can be restated afterwards, because the
+  frame is what renders them: the grant's validity window is dated from
+  `SHOWCASE_EPOCH` before the page loads it and put back verbatim the moment
+  the shutter closes — the grant has to be valid at the real clock again for
+  the video's session — and the clock is pinned to the held statement's own
+  `executed_at` plus a fixed offset, so "held 12s" is a constant.
+- **Geometry.** 1280×800 everywhere; `deviceScaleFactor: 2` for the four
+  stills (so the PNGs are 2560×1600), `1` for the video and for its poster,
+  which is displayed at the `<video>` element's own size.
+- **Ordering.** One worker, serial, no retries. Projects run in the order
+  `playwright.config.ts` declares them — `screenshots`, then `poster`, then
+  `video` — and that matters: the last two each open a further live session,
+  which would otherwise show up in the query list the first one captures.
 
-Two things still move, both on purpose: the version string in the sidebar
-(`git describe`, so every commit changes it) and the approval video with its
-poster, which records a live hold and a wall-clock "held for Ns" counter.
+One thing still moves, on purpose: the version string in the sidebar
+(`git describe`, so every commit changes it). The clips do too, but a recording
+of a live session re-encoded by ffmpeg was never going to be byte-stable, and
+nobody reviews it as a diff.
 
 ## Environment variables
 
@@ -107,7 +122,7 @@ poster, which records a live hold and a wall-clock "held for Ns" counter.
 |---|---|---|
 | `SHOWCASE_OUT` | `website/static/img/showcase` | Where finished assets land |
 | `SHOWCASE_WORK` | `front/showcase/.artifacts` | Raw WebM, traces, scenario state |
-| `SHOWCASE_PROJECT` | *(all)* | `screenshots` or `video` |
+| `SHOWCASE_PROJECT` | *(all)* | `screenshots`, `poster` or `video` |
 | `SHOWCASE_SKIP_BUILD` | `0` | Reuse the existing `./dbbat` |
 | `SHOWCASE_SKIP_TRANSCODE` | `0` | Copy the raw WebM instead of encoding |
 | `SHOWCASE_KEEP` | `0` | Leave the stack running afterwards |

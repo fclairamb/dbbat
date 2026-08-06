@@ -23,10 +23,12 @@
  *   fixed, `connected_at`, because the query list renders its first eight hex
  *   characters and those are a millisecond timestamp.
  *
- * What is *not* touched: `access_grants`. The grant has to stay valid at the
- * real clock — the video project opens a fresh proxy session through it after
- * the stills are done, and a grant backdated into the past would refuse it.
- * No still renders a grant date.
+ * `access_grants` is a special case. The grant has to stay valid at the real
+ * clock — every proxy session after this point authenticates through it, and a
+ * grant backdated into the past would be refused. So normaliseTimeline() does
+ * not touch it; the poster capture, which is the one frame that renders a
+ * grant date, borrows it for a moment instead — see pinGrantWindow() and
+ * restoreGrantWindow() at the bottom of this file.
  *
  * Reaching behind a running dbbat is not something to imitate elsewhere. It is
  * acceptable here for the same reason the whole suite is: the instance is a
@@ -234,6 +236,80 @@ export async function normaliseTimeline(serverUid: string): Promise<void> {
       await client.query("ROLLBACK");
       throw err;
     }
+  } finally {
+    await client.end();
+  }
+}
+
+/** A grant's validity window, as the two ISO strings the column holds. */
+export interface GrantWindow {
+  startsAt: string;
+  expiresAt: string;
+}
+
+/** How long the grant's rendered window lasts — the definition's own 4h, doubled
+ * so the poster shows a window that plainly still has room in it. */
+const GRANT_WINDOW_HOURS = 8;
+
+/**
+ * Date the grant's validity window from the showcase epoch, and hand back what
+ * was there so the caller can put it straight back.
+ *
+ * The poster is the only capture that renders a grant date ("Valid Aug 6, 2026
+ * at 09:12 to Aug 6, 2026 at 17:12"), and left alone that line is the real
+ * clock — a fresh pair of timestamps on every regeneration, which is most of
+ * why the poster used to churn.
+ *
+ * Borrowing the row rather than pinning it for good is the whole trick: the
+ * grant is what every proxy session authenticates through, so it has to be
+ * valid at the real clock again the moment the frame is taken. That is safe
+ * *while* a session is live because the proxy pins the grant at session open
+ * (LimitGuard snapshots ExpiresAt; see internal/proxy/shared/limits.go), so a
+ * backdated row cannot cut the poster's own hold loose underneath it.
+ */
+export async function pinGrantWindow(grantUid: string): Promise<GrantWindow> {
+  const client = storageClient();
+  await client.connect();
+  try {
+    const { rows } = await client.query<GrantWindow>(
+      `SELECT starts_at::text  AS "startsAt",
+              expires_at::text AS "expiresAt"
+         FROM access_grants
+        WHERE uid = $1`,
+      [grantUid],
+    );
+    if (rows.length === 0) {
+      throw new Error(`showcase: no access_grants row for ${grantUid}`);
+    }
+
+    await client.query(
+      `UPDATE access_grants
+          SET starts_at  = $2::timestamptz,
+              expires_at = $2::timestamptz + make_interval(hours => $3)
+        WHERE uid = $1`,
+      [grantUid, SHOWCASE_EPOCH.toISOString(), GRANT_WINDOW_HOURS],
+    );
+
+    return rows[0];
+  } finally {
+    await client.end();
+  }
+}
+
+/** Put a window taken by pinGrantWindow() back, verbatim. */
+export async function restoreGrantWindow(
+  grantUid: string,
+  window: GrantWindow,
+): Promise<void> {
+  const client = storageClient();
+  await client.connect();
+  try {
+    await client.query(
+      `UPDATE access_grants
+          SET starts_at = $2::timestamptz, expires_at = $3::timestamptz
+        WHERE uid = $1`,
+      [grantUid, window.startsAt, window.expiresAt],
+    );
   } finally {
     await client.end();
   }
