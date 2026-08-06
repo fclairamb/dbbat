@@ -33,6 +33,9 @@ SHOWCASE_CONTAINER="${SHOWCASE_CONTAINER:-dbbat-showcase-postgres}"
 SHOWCASE_PROJECT="${SHOWCASE_PROJECT:-}"        # "screenshots" | "video" | ""
 SHOWCASE_SKIP_BUILD="${SHOWCASE_SKIP_BUILD:-0}"
 SHOWCASE_SKIP_TRANSCODE="${SHOWCASE_SKIP_TRANSCODE:-0}"
+SHOWCASE_SKIP_WEBP="${SHOWCASE_SKIP_WEBP:-0}"   # leave the PNGs unaccompanied
+SHOWCASE_WEBP_QUALITY="${SHOWCASE_WEBP_QUALITY:-80}"
+SHOWCASE_WEBP_MAX_WIDTH="${SHOWCASE_WEBP_MAX_WIDTH:-1280}"
 SHOWCASE_KEEP="${SHOWCASE_KEEP:-0}"             # leave the stack up afterwards
 SHOWCASE_BINARY="${SHOWCASE_BINARY:-${REPO_ROOT}/dbbat}"
 
@@ -226,6 +229,89 @@ else
   for src in "${videos[@]}"; do
     base="$(basename "${src}" .webm)"
     transcode "${src}" "${base}"
+  done
+fi
+
+# --- still renditions -------------------------------------------------------
+#
+# Every PNG in the output directory gets a WebP sibling. The homepage serves
+# those (a <picture> for the grid, poster= for the clip); the PNGs stay exactly
+# where they are, because the docs and any external embed link to them and a
+# reader who clicks a screenshot wants the full-size original.
+#
+# Anything wider than SHOWCASE_WEBP_MAX_WIDTH is downscaled to it. The stills
+# are captured at 2560x1600 (deviceScaleFactor 2) and render at ~350 CSS px in
+# the homepage grid, so 1280 is still generously retina there. Never upscales:
+# the 1280x800 video poster is re-encoded at its native size.
+
+webp_encoder() {
+  if [ "${SHOWCASE_SKIP_WEBP}" = "1" ]; then
+    return
+  fi
+  # Ubuntu's ffmpeg is built with libwebp, Homebrew's is not; cwebp is the same
+  # library's own CLI and is what the `webp` package installs everywhere.
+  if command -v ffmpeg >/dev/null 2>&1 \
+    && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q ' libwebp'; then
+    echo ffmpeg
+  elif command -v cwebp >/dev/null 2>&1; then
+    echo cwebp
+  fi
+}
+
+# Width of an image, or 0 when we cannot tell (ffprobe ships with ffmpeg).
+image_width() {
+  local width
+  width="$(ffprobe -v error -select_streams v:0 -show_entries stream=width \
+    -of csv=p=0 "$1" 2>/dev/null || true)"
+  case "${width}" in
+    '' | *[!0-9]*) echo 0 ;;
+    *) echo "${width}" ;;
+  esac
+}
+
+webp_rendition() {
+  local encoder="$1" src="$2"
+  local dst="${src%.png}.webp"
+  local width target
+  width="$(image_width "${src}")"
+  target=0
+  if [ "${width}" -gt "${SHOWCASE_WEBP_MAX_WIDTH}" ]; then
+    target="${SHOWCASE_WEBP_MAX_WIDTH}"
+  fi
+
+  if [ "${encoder}" = "ffmpeg" ]; then
+    local scale=()
+    if [ "${target}" -gt 0 ]; then
+      scale=(-vf "scale=${target}:-2:flags=lanczos")
+    fi
+    ffmpeg -y -loglevel error -i "${src}" "${scale[@]}" \
+      -c:v libwebp -quality "${SHOWCASE_WEBP_QUALITY}" -preset picture \
+      -compression_level 6 "${dst}"
+  else
+    local resize=()
+    if [ "${target}" -gt 0 ]; then
+      resize=(-resize "${target}" 0)
+    fi
+    cwebp -quiet -q "${SHOWCASE_WEBP_QUALITY}" -m 6 -sharp_yuv \
+      "${resize[@]}" "${src}" -o "${dst}"
+  fi
+}
+
+WEBP_ENCODER="$(webp_encoder)"
+shopt -s nullglob
+stills=("${SHOWCASE_OUT}"/*.png)
+shopt -u nullglob
+
+if [ "${SHOWCASE_SKIP_WEBP}" = "1" ]; then
+  log "SHOWCASE_SKIP_WEBP=1 — not writing the WebP renditions"
+elif [ "${#stills[@]}" -eq 0 ]; then
+  log "no PNG to re-encode"
+elif [ -z "${WEBP_ENCODER}" ]; then
+  warn "no WebP encoder found (ffmpeg without libwebp, and no cwebp) — the website will fall back to the PNGs"
+else
+  log "writing WebP renditions with ${WEBP_ENCODER} (q${SHOWCASE_WEBP_QUALITY}, max ${SHOWCASE_WEBP_MAX_WIDTH}px wide)"
+  for src in "${stills[@]}"; do
+    webp_rendition "${WEBP_ENCODER}" "${src}"
   done
 fi
 
