@@ -3318,7 +3318,7 @@ components:
           description: SSL mode (disable, prefer, require, etc.)
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql, mariadb, mongodb, ssh]
+          enum: [postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh]
           description: Server protocol (ssh = an SSH bastion, not a database target)
         oracle_service_name:
           type: string
@@ -3462,7 +3462,7 @@ components:
           description: SSL mode
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql, mariadb, mongodb, ssh]
+          enum: [postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh]
           default: postgresql
           description: Server protocol (ssh = an SSH bastion, not a database target)
         oracle_service_name:
@@ -3523,7 +3523,7 @@ components:
           description: SSL mode
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql, mariadb, mongodb, ssh]
+          enum: [postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh]
           description: Server protocol
         oracle_service_name:
           type: string
@@ -4972,6 +4972,9 @@ components:
             mongo:
               type: string
               description: MongoDB proxy TCP listen address
+            mssql:
+              type: string
+              description: SQL Server (TDS) proxy TCP listen address
             api:
               type: string
               description: REST API / Web UI HTTP listen address

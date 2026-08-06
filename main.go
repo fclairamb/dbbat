@@ -24,6 +24,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/events"
 	"github.com/fclairamb/dbbat/internal/notify"
 	"github.com/fclairamb/dbbat/internal/proxy/mongodb"
+	"github.com/fclairamb/dbbat/internal/proxy/mssql"
 	"github.com/fclairamb/dbbat/internal/proxy/mysql"
 	"github.com/fclairamb/dbbat/internal/proxy/oracle"
 	"github.com/fclairamb/dbbat/internal/proxy/postgresql"
@@ -356,12 +357,15 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		mongoServer.SetDumpUploader(dumpUploader)
 	}
 
+	// Start SQL Server proxy (if configured)
+	mssqlServer := startMSSQLProxy(ctx, cfg, logger)
+
 	// One retention sweep for the whole process (nil when disabled, the default).
 	sweeper := startQueryRetentionSweep(ctx, cfg, dataStore, logger)
 
 	// Draining releases parked queries first, then stops the servers.
 	servers := collectServers(approvalDrain{approvals, logger}, apiServer, proxyServer,
-		oracleServer, mysqlServer, mongoServer, rowWriter, sweeper, heartbeat, dumpUploader)
+		oracleServer, mysqlServer, mongoServer, mssqlServer, rowWriter, sweeper, heartbeat, dumpUploader)
 
 	return awaitShutdown(ctx, logger, servers...)
 }
@@ -625,6 +629,39 @@ func startMongoProxy(
 	logger.InfoContext(ctx, "MongoDB proxy server started",
 		slog.String("addr", cfg.ListenMongo),
 		slog.Bool("tls", !cfg.Mongo.TLS.Disable))
+
+	return srv
+}
+
+// startMSSQLProxy starts the SQL Server (TDS) proxy when a listen address is
+// configured.
+//
+// It takes fewer dependencies than its siblings on purpose: stage 1 of the
+// proxy only speaks the TDS handshake and closes every session with a
+// "not wired through" error, so there is nothing yet to authenticate against,
+// log, or capture. Stage 2 brings the store, auth cache, approvals and row
+// writer in alongside the upstream connection.
+func startMSSQLProxy(ctx context.Context, cfg *config.Config, logger *slog.Logger) *mssql.Server {
+	if cfg.ListenMSSQL == "" {
+		return nil
+	}
+
+	srv, err := mssql.NewServer(cfg.MSSQL, logger)
+	if err != nil {
+		logger.ErrorContext(ctx, "SQL Server proxy init failed", slog.Any("error", err))
+		os.Exit(1)
+	}
+
+	go func() {
+		if err := srv.Start(cfg.ListenMSSQL); err != nil {
+			logger.ErrorContext(context.Background(), "SQL Server proxy error", slog.Any("error", err))
+			os.Exit(1)
+		}
+	}()
+
+	logger.InfoContext(ctx, "SQL Server proxy started",
+		slog.String("addr", cfg.ListenMSSQL),
+		slog.Bool("tls", !cfg.MSSQL.TLS.Disable))
 
 	return srv
 }
@@ -1580,6 +1617,7 @@ func collectServers(
 	oracleServer *oracle.Server,
 	mysqlServer *mysql.Server,
 	mongoServer *mongodb.Server,
+	mssqlServer *mssql.Server,
 	rowWriter *shared.RowWriter,
 	sweeper *queryRetentionSweeper,
 	heartbeat *instanceHeartbeat,
@@ -1597,6 +1635,10 @@ func collectServers(
 
 	if mongoServer != nil {
 		servers = append(servers, mongoServer)
+	}
+
+	if mssqlServer != nil {
+		servers = append(servers, mssqlServer)
 	}
 
 	// After every proxy: the batched capture has to drain once no session can

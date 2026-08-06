@@ -163,6 +163,10 @@ const (
 	ProtocolMySQL      = "mysql"
 	ProtocolMariaDB    = "mariadb"
 	ProtocolMongoDB    = "mongodb"
+	// ProtocolMSSQL is Microsoft SQL Server (TDS). The protocol column is a
+	// plain TEXT column with no CHECK constraint, so adding a value needs no
+	// migration.
+	ProtocolMSSQL = "mssql"
 	// ProtocolSSH marks a row that is an SSH bastion (a dial path), not a
 	// grantable/connectable database target.
 	ProtocolSSH = "ssh"
@@ -178,7 +182,7 @@ func IsMySQLFamily(protocol string) bool {
 }
 
 // Server represents a target dbbat knows how to reach: a database target
-// (protocol postgresql|oracle|mysql|mariadb|mongodb) or an SSH bastion
+// (protocol postgresql|oracle|mysql|mariadb|mongodb|mssql) or an SSH bastion
 // (protocol ssh). Both share the same storage shape — host, port, username,
 // encrypted secret — with the protocol column as discriminator. ViaUID, when
 // set, points at an SSH server row: "dial this server through that bastion".

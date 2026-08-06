@@ -1736,7 +1736,7 @@ export interface components {
              * @description Server protocol (ssh = an SSH bastion, not a database target)
              * @enum {string}
              */
-            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "ssh";
+            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "mssql" | "ssh";
             /** @description Oracle SERVICE_NAME (Oracle only) */
             oracle_service_name?: string;
             /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
@@ -1837,7 +1837,7 @@ export interface components {
              * @default postgresql
              * @enum {string}
              */
-            protocol: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "ssh";
+            protocol: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "mssql" | "ssh";
             /** @description Oracle SERVICE_NAME (required for Oracle) */
             oracle_service_name?: string;
             /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
@@ -1882,7 +1882,7 @@ export interface components {
              * @description Server protocol
              * @enum {string}
              */
-            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "ssh";
+            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "mssql" | "ssh";
             /** @description Oracle SERVICE_NAME */
             oracle_service_name?: string;
             /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
@@ -2804,6 +2804,8 @@ export interface components {
                 mysql: string;
                 /** @description MongoDB proxy TCP listen address */
                 mongo?: string;
+                /** @description SQL Server (TDS) proxy TCP listen address */
+                mssql?: string;
                 /** @description REST API / Web UI HTTP listen address */
                 api: string;
             };
