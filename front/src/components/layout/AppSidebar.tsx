@@ -122,7 +122,13 @@ export function AppSidebar() {
     <Sidebar>
       <SidebarHeader>
         <div className="flex items-center gap-2 px-2 py-1">
-          <img src={`${import.meta.env.BASE_URL}logo-notext.png`} alt="DBBat" className="h-10 w-10" />
+          <img
+            src={`${import.meta.env.BASE_URL}logo-notext.png`}
+            alt="DBBat"
+            className="h-10 w-10"
+            width={40}
+            height={40}
+          />
           <div className="flex flex-col">
             <span className="font-semibold text-lg text-primary">DBBat</span>
             <span className="text-xs text-muted-foreground">

@@ -221,12 +221,20 @@ function LoginPage() {
         <Card className="w-full" data-testid="login-card">
         <CardHeader className="text-center">
           <div className="flex justify-center mb-4">
-            <img
-              src={`${import.meta.env.BASE_URL}logo-text.png`}
-              alt="DBBat"
-              className="h-32 w-32"
-              data-testid="login-logo"
-            />
+            <picture>
+              <source
+                srcSet={`${import.meta.env.BASE_URL}logo-text.webp`}
+                type="image/webp"
+              />
+              <img
+                src={`${import.meta.env.BASE_URL}logo-text.png`}
+                alt="DBBat"
+                className="h-32 w-32"
+                width={128}
+                height={128}
+                data-testid="login-logo"
+              />
+            </picture>
           </div>
           {viewState === "login" && (
             <>
