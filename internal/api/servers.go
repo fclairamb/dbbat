@@ -116,7 +116,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 
 	if !isSupportedProtocol(req.Protocol) {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
-			"protocol must be one of: postgresql, oracle, mysql, mariadb, mongodb, ssh")
+			"protocol must be one of: postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh")
 		return
 	}
 
@@ -657,7 +657,8 @@ func redactUpdateForAudit(req UpdateDatabaseRequest) map[string]any {
 // of truth for the enum.
 func isSupportedProtocol(protocol string) bool {
 	switch protocol {
-	case store.ProtocolPostgreSQL, store.ProtocolOracle, store.ProtocolMySQL, store.ProtocolMariaDB, store.ProtocolMongoDB, store.ProtocolSSH:
+	case store.ProtocolPostgreSQL, store.ProtocolOracle, store.ProtocolMySQL, store.ProtocolMariaDB,
+		store.ProtocolMongoDB, store.ProtocolMSSQL, store.ProtocolSSH:
 		return true
 	default:
 		return false
@@ -680,6 +681,11 @@ func defaultPortFor(protocol string) int {
 		// to avoid clashing with a local mongod, but Server.Port is the
 		// upstream target's port, which conventionally is 27017.
 		return 27017
+	case store.ProtocolMSSQL:
+		// SQL Server's standard target port. The proxy listener defaults to
+		// 1434 to avoid clashing with a local instance; Server.Port is the
+		// upstream target's.
+		return 1433
 	case store.ProtocolSSH:
 		return 22
 	default:
