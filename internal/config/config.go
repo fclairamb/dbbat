@@ -321,6 +321,17 @@ type MongoConfig struct {
 	TLS TLSConfig `koanf:"tls"`
 }
 
+// MSSQLConfig holds configuration specific to the SQL Server (TDS) proxy.
+type MSSQLConfig struct {
+	// TLS holds TLS server-termination settings for the proxy. TDS is the odd
+	// one out: the handshake is encapsulated inside PRELOGIN-typed TDS packets
+	// rather than starting on a clean byte boundary, and a client connecting
+	// with Encrypt=no still runs one — TLS then covers the LOGIN7 packet only.
+	// When Disable is true the proxy answers ENCRYPT_NOT_SUP and the listener
+	// stays plaintext, which also refuses clients that require encryption.
+	TLS TLSConfig `koanf:"tls"`
+}
+
 // PGConfig holds configuration specific to the PostgreSQL proxy.
 type PGConfig struct {
 	// TLS holds TLS server-termination settings for the proxy. When enabled,
@@ -361,6 +372,9 @@ type Config struct {
 
 	// MongoDB proxy listen address (empty = disabled).
 	ListenMongo string `koanf:"listen_mongo"`
+
+	// SQL Server (TDS) proxy listen address (empty = disabled).
+	ListenMSSQL string `koanf:"listen_mssql"`
 
 	// REST API listen address.
 	ListenAPI string `koanf:"listen_api"`
@@ -441,6 +455,9 @@ type Config struct {
 	// Mongo holds MongoDB proxy specific configuration.
 	Mongo MongoConfig `koanf:"mongo"`
 
+	// MSSQL holds SQL Server proxy specific configuration.
+	MSSQL MSSQLConfig `koanf:"mssql"`
+
 	// PG holds PostgreSQL proxy specific configuration.
 	PG PGConfig `koanf:"pg"`
 
@@ -500,8 +517,11 @@ func defaultConfig() Config {
 		ListenOracle: ":1522",
 		ListenMySQL:  ":3307",
 		ListenMongo:  ":27018",
-		BaseURL:      DefaultBaseURL,
-		LogLevel:     DefaultLogLevel,
+		// 1434/tcp is free: the SQL Server Browser service that owns 1434 is
+		// UDP-only, so the +1 convention the other listeners use still works.
+		ListenMSSQL: ":1434",
+		BaseURL:     DefaultBaseURL,
+		LogLevel:    DefaultLogLevel,
 		QueryStorage: QueryStorageConfig{
 			MaxResultRows:  DefaultMaxResultRows,
 			MaxResultBytes: DefaultMaxResultBytes,
@@ -605,6 +625,10 @@ func envTransform(k, v string) (string, any) {
 	// mongo_tls_* -> mongo.tls.*
 	if strings.HasPrefix(key, "mongo_tls_") {
 		return "mongo.tls." + strings.TrimPrefix(key, "mongo_tls_"), v
+	}
+	// mssql_tls_* -> mssql.tls.*
+	if strings.HasPrefix(key, "mssql_tls_") {
+		return "mssql.tls." + strings.TrimPrefix(key, "mssql_tls_"), v
 	}
 	// pg_tls_* -> pg.tls.*
 	if strings.HasPrefix(key, "pg_tls_") {
