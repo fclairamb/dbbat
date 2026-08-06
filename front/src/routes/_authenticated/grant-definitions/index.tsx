@@ -12,6 +12,7 @@ import {
   useDeactivateGrantDefinition,
   type GrantDefinition,
   type CreateGrantDefinitionRequest,
+  type UpdateGrantDefinitionRequest,
 } from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { DataTable, type Column } from "@/components/shared/DataTable";
@@ -134,20 +135,10 @@ function GrantDefinitionsPage() {
   });
 
   const toggleAutoApprove = (d: GrantDefinition, next: boolean) => {
-    const body: CreateGrantDefinitionRequest = {
-      name: d.name,
-      slug: d.slug,
-      description: d.description,
-      duration_seconds: d.duration_seconds,
-      controls: d.controls,
-      max_query_counts: d.max_query_counts,
-      max_bytes_transferred: d.max_bytes_transferred,
-      priority: d.priority,
-      auto_approve: next,
-      // Preserve scope: this is a targeted toggle, not a full edit.
-      group_uids: d.group_uids,
-      database_uids: d.database_uids,
-    };
+    // PATCH is a genuine partial update: only auto_approve changes here,
+    // every other field (scope, approval patterns, approver groups, ...)
+    // is left untouched on the server.
+    const body: UpdateGrantDefinitionRequest = { auto_approve: next };
     updateAutoApprove.mutate({ uid: d.uid, body });
   };
 
@@ -572,33 +563,61 @@ function DefinitionDialog({
           ? 1024 * 1024
           : 1024;
 
-    const body: CreateGrantDefinitionRequest = {
-      name,
-      slug,
-      description,
-      duration_seconds: durationSeconds,
-      controls: controls as ("read_only" | "block_copy" | "block_ddl")[],
-      max_query_counts: maxQueries ? parseInt(maxQueries) : null,
-      max_bytes_transferred: maxBytesValue
-        ? parseInt(maxBytesValue) * unitMult
-        : null,
-      // Only an explicitly-edited value is pinned on the definition; an
-      // untouched field stays null so each materialized grant re-derives the
-      // tier from its own controls.
-      priority: priorityTouched && priority !== "" ? parseInt(priority) : null,
-      auto_approve: autoApprove,
-      group_uids: groupUids,
-      database_uids: databaseUids,
-      approval_patterns: approvalPatterns
-        .split("\n")
-        .map((p) => p.trim())
-        .filter((p) => p.length > 0),
-      approver_group_uids: approverGroupUids,
-    };
+    const controlsValue = controls as ("read_only" | "block_copy" | "block_ddl")[];
+    const maxQueryCounts = maxQueries ? parseInt(maxQueries) : null;
+    const maxBytesTransferred = maxBytesValue
+      ? parseInt(maxBytesValue) * unitMult
+      : null;
+    // Only an explicitly-edited value is pinned on the definition; an
+    // untouched field stays null so each materialized grant re-derives the
+    // tier from its own controls.
+    const priorityValue =
+      priorityTouched && priority !== "" ? parseInt(priority) : null;
+    const approvalPatternsValue = approvalPatterns
+      .split("\n")
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
 
     if (editing) {
+      // PATCH is a partial update: max_query_counts/max_bytes_transferred/
+      // priority are themselves nullable, so a bare `null` can't be told
+      // apart from an omitted field — the matching clear_* flag is what
+      // actually resets them.
+      const body: UpdateGrantDefinitionRequest = {
+        name,
+        slug,
+        description,
+        duration_seconds: durationSeconds,
+        controls: controlsValue,
+        max_query_counts: maxQueryCounts ?? undefined,
+        clear_max_query_counts: maxQueryCounts === null,
+        max_bytes_transferred: maxBytesTransferred ?? undefined,
+        clear_max_bytes_transferred: maxBytesTransferred === null,
+        priority: priorityValue ?? undefined,
+        clear_priority: priorityValue === null,
+        auto_approve: autoApprove,
+        group_uids: groupUids,
+        database_uids: databaseUids,
+        approval_patterns: approvalPatternsValue,
+        approver_group_uids: approverGroupUids,
+      };
       update.mutate({ uid: editing.uid, body });
     } else {
+      const body: CreateGrantDefinitionRequest = {
+        name,
+        slug,
+        description,
+        duration_seconds: durationSeconds,
+        controls: controlsValue,
+        max_query_counts: maxQueryCounts,
+        max_bytes_transferred: maxBytesTransferred,
+        priority: priorityValue,
+        auto_approve: autoApprove,
+        group_uids: groupUids,
+        database_uids: databaseUids,
+        approval_patterns: approvalPatternsValue,
+        approver_group_uids: approverGroupUids,
+      };
       create.mutate(body);
     }
   };

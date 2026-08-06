@@ -1454,14 +1454,20 @@ paths:
       tags:
         - Grant Definitions
       summary: Update grant definition (admin)
-      description: Replaces the editable fields (uid / created_by / created_at / is_active stay put).
+      description: |
+        Partial update: only fields present in the body are changed (uid /
+        created_by / created_at / is_active always stay put). A field
+        omitted from the body is left untouched on the existing definition —
+        so a caller that only means to flip `auto_approve`, say, can send
+        just that field without risk of wiping the rest, notably
+        `approval_patterns` and `approver_group_uids`.
       operationId: updateGrantDefinition
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateGrantDefinitionRequest'
+              $ref: '#/components/schemas/UpdateGrantDefinitionRequest'
       responses:
         '200':
           description: Definition updated
@@ -3819,6 +3825,90 @@ components:
         - name
         - slug
         - duration_seconds
+
+    UpdateGrantDefinitionRequest:
+      type: object
+      description: |
+        PATCH body for `/grant-definitions/{uid}`. Every field is optional —
+        a field omitted from the body is left untouched on the existing
+        definition rather than reset. An explicit empty array (`[]`) still
+        clears a list field; only a missing key (or explicit `null`) leaves
+        it alone.
+
+        `max_query_counts`, `max_bytes_transferred` and `priority` are
+        themselves nullable in the domain (null = "no limit" / "auto"), so a
+        bare `null` can't be told apart from an omitted key. Use the
+        matching `clear_*` flag to explicitly reset one of them.
+      properties:
+        name:
+          type: string
+          maxLength: 64
+        slug:
+          type: string
+          maxLength: 64
+          pattern: '^[a-z0-9]+(-[a-z0-9]+)*$'
+          description: Same rules as `CreateGrantDefinitionRequest.slug`.
+        description:
+          type: string
+        duration_seconds:
+          type: integer
+          format: int64
+          minimum: 1
+        controls:
+          type: array
+          items:
+            $ref: '#/components/schemas/GrantControl'
+        max_query_counts:
+          type: integer
+          format: int64
+          nullable: true
+        clear_max_query_counts:
+          type: boolean
+          description: When true, resets max_query_counts to unlimited.
+        max_bytes_transferred:
+          type: integer
+          format: int64
+          nullable: true
+        clear_max_bytes_transferred:
+          type: boolean
+          description: When true, resets max_bytes_transferred to unlimited.
+        priority:
+          type: integer
+          format: int32
+          minimum: -32768
+          maximum: 32767
+          nullable: true
+        clear_priority:
+          type: boolean
+          description: When true, resets priority to auto (tier derived from controls).
+        auto_approve:
+          type: boolean
+          description: |
+            When true, grant requests against this definition skip the pending/admin-approval
+            step and are approved (and the grant materialized) instantly at request time.
+        group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Same semantics as `CreateGrantDefinitionRequest.group_uids`.
+        database_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Same semantics as `CreateGrantDefinitionRequest.database_uids`.
+        approval_patterns:
+          type: array
+          items:
+            type: string
+          description: Same semantics as `CreateGrantDefinitionRequest.approval_patterns`.
+        approver_group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Same semantics as `CreateGrantDefinitionRequest.approver_group_uids`.
 
     AccessGrant:
       type: object

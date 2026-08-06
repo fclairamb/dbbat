@@ -109,9 +109,110 @@ type CreateGrantDefinitionRequest struct {
 }
 
 // UpdateGrantDefinitionRequest is the JSON body for PATCH
-// /grant-definitions/:uid. The shape mirrors the create request — partial
-// updates aren't worth the extra complexity for this small surface.
-type UpdateGrantDefinitionRequest = CreateGrantDefinitionRequest
+// /grant-definitions/:uid. Unlike CreateGrantDefinitionRequest, every field
+// is optional and a field absent from the body is left untouched on the
+// existing definition rather than reset to its zero value. This is what
+// makes a targeted PATCH — like the auto-approve toggle, which only means
+// to flip one field — safe: it used to reuse CreateGrantDefinitionRequest
+// as a full-replace body, so any field the caller didn't round-trip (most
+// notably approval_patterns and approver_group_uids) got silently wiped.
+//
+// Slice fields (controls, group_uids, database_uids, approval_patterns,
+// approver_group_uids) distinguish "absent" from "explicitly cleared":
+// encoding/json leaves a slice field nil when its key is missing (or its
+// value is JSON null), but allocates a non-nil empty slice for a present
+// `[]`. Only a non-nil slice is applied, so an admin can still empty one of
+// these lists via PATCH without sending anything else.
+//
+// max_query_counts, max_bytes_transferred and priority are themselves
+// nullable in the domain (null means "no limit" / "auto"), so a plain
+// pointer can't tell "absent" from "explicit null" — both decode to a nil
+// pointer. Each gets a companion Clear* flag instead, mirroring
+// UpdateDatabaseRequest.ClearViaUID.
+type UpdateGrantDefinitionRequest struct {
+	Name                     *string     `json:"name"`
+	Slug                     *string     `json:"slug"`
+	Description              *string     `json:"description"`
+	DurationSeconds          *int64      `json:"duration_seconds"`
+	Controls                 []string    `json:"controls"`
+	MaxQueryCounts           *int64      `json:"max_query_counts"`
+	ClearMaxQueryCounts      bool        `json:"clear_max_query_counts"`
+	MaxBytesTransferred      *int64      `json:"max_bytes_transferred"`
+	ClearMaxBytesTransferred bool        `json:"clear_max_bytes_transferred"`
+	Priority                 *int16      `json:"priority"`
+	ClearPriority            bool        `json:"clear_priority"`
+	AutoApprove              *bool       `json:"auto_approve"`
+	GroupUIDs                []uuid.UUID `json:"group_uids"`
+	DatabaseUIDs             []uuid.UUID `json:"database_uids"`
+	ApprovalPatterns         []string    `json:"approval_patterns"`
+	ApproverGroupUIDs        []uuid.UUID `json:"approver_group_uids"`
+}
+
+// applyGrantDefinitionUpdate copies every field present in req onto def,
+// leaving fields absent from the request body untouched. See
+// UpdateGrantDefinitionRequest for how presence is detected per field kind.
+func applyGrantDefinitionUpdate(def *store.GrantDefinition, req *UpdateGrantDefinitionRequest) {
+	if req.Name != nil {
+		def.Name = *req.Name
+	}
+
+	if req.Slug != nil {
+		def.Slug = *req.Slug
+	}
+
+	if req.Description != nil {
+		def.Description = *req.Description
+	}
+
+	if req.DurationSeconds != nil {
+		def.DurationSeconds = *req.DurationSeconds
+	}
+
+	if req.Controls != nil {
+		def.Controls = req.Controls
+	}
+
+	switch {
+	case req.ClearMaxQueryCounts:
+		def.MaxQueryCounts = nil
+	case req.MaxQueryCounts != nil:
+		def.MaxQueryCounts = req.MaxQueryCounts
+	}
+
+	switch {
+	case req.ClearMaxBytesTransferred:
+		def.MaxBytesTransferred = nil
+	case req.MaxBytesTransferred != nil:
+		def.MaxBytesTransferred = req.MaxBytesTransferred
+	}
+
+	switch {
+	case req.ClearPriority:
+		def.Priority = nil
+	case req.Priority != nil:
+		def.Priority = req.Priority
+	}
+
+	if req.AutoApprove != nil {
+		def.AutoApprove = *req.AutoApprove
+	}
+
+	if req.GroupUIDs != nil {
+		def.GroupUIDs = req.GroupUIDs
+	}
+
+	if req.DatabaseUIDs != nil {
+		def.DatabaseUIDs = req.DatabaseUIDs
+	}
+
+	if req.ApprovalPatterns != nil {
+		def.ApprovalPatterns = normalizeStrings(req.ApprovalPatterns)
+	}
+
+	if req.ApproverGroupUIDs != nil {
+		def.ApproverGroupUIDs = normalizeUUIDs(req.ApproverGroupUIDs)
+	}
+}
 
 func validateDefinitionRequest(req *CreateGrantDefinitionRequest) string {
 	if req.Name == "" {
@@ -359,24 +460,15 @@ func (s *Server) handleGetGrantDefinition(c *gin.Context) {
 }
 
 // handleUpdateGrantDefinition — admin-only. The path param accepts either
-// the definition's uid or its slug.
+// the definition's uid or its slug. PATCH is a genuine partial update: only
+// fields present in the body are changed (see UpdateGrantDefinitionRequest),
+// so a caller like the auto-approve toggle can flip one field without
+// round-tripping — and without risk of wiping — the rest of the definition.
 func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 	var req UpdateGrantDefinitionRequest
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid request: "+err.Error())
-
-		return
-	}
-
-	if msg := validateDefinitionRequest(&req); msg != "" {
-		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
-
-		return
-	}
-
-	if msg := s.validateDefinitionScope(c.Request.Context(), &req); msg != "" {
-		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
 
 		return
 	}
@@ -394,19 +486,40 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 		return
 	}
 
-	def.Name = req.Name
-	def.Slug = req.Slug
-	def.Description = req.Description
-	def.DurationSeconds = req.DurationSeconds
-	def.Controls = req.Controls
-	def.MaxQueryCounts = req.MaxQueryCounts
-	def.MaxBytesTransferred = req.MaxBytesTransferred
-	def.Priority = req.Priority
-	def.AutoApprove = req.AutoApprove
-	def.GroupUIDs = req.GroupUIDs
-	def.DatabaseUIDs = req.DatabaseUIDs
-	def.ApprovalPatterns = normalizeStrings(req.ApprovalPatterns)
-	def.ApproverGroupUIDs = normalizeUUIDs(req.ApproverGroupUIDs)
+	applyGrantDefinitionUpdate(def, &req)
+
+	// Validate the merged, post-update state — same rules a full create/
+	// replace enforces — by reusing validateDefinitionRequest/
+	// validateDefinitionScope against a request built from the merged
+	// definition. This keeps validation logic in one place regardless of
+	// which fields the PATCH actually touched.
+	merged := &CreateGrantDefinitionRequest{
+		Name:                def.Name,
+		Slug:                def.Slug,
+		Description:         def.Description,
+		DurationSeconds:     def.DurationSeconds,
+		Controls:            def.Controls,
+		MaxQueryCounts:      def.MaxQueryCounts,
+		MaxBytesTransferred: def.MaxBytesTransferred,
+		Priority:            def.Priority,
+		AutoApprove:         def.AutoApprove,
+		GroupUIDs:           def.GroupUIDs,
+		DatabaseUIDs:        def.DatabaseUIDs,
+		ApprovalPatterns:    def.ApprovalPatterns,
+		ApproverGroupUIDs:   def.ApproverGroupUIDs,
+	}
+
+	if msg := validateDefinitionRequest(merged); msg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
+
+		return
+	}
+
+	if msg := s.validateDefinitionScope(c.Request.Context(), merged); msg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
+
+		return
+	}
 
 	if err := s.store.UpdateGrantDefinition(c.Request.Context(), def); err != nil {
 		if errors.Is(err, store.ErrGrantDefinitionSlugDuplicate) {

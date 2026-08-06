@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strings"
 	"testing"
@@ -188,4 +189,141 @@ func TestCreateGrantRequest_BySlug(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	require.Equal(t, "pending", resp["status"])
 	require.Equal(t, def.UID.String(), resp["grant_definition_id"], "stored request should hold the resolved uid, not the slug")
+}
+
+// TestUpdateGrantDefinition_PartialToggleDoesNotWipeApprovalConfig is the
+// direct regression test for the bug: PATCHing only auto_approve (the
+// shape the list-view toggle sends) must leave approval_patterns,
+// approver_group_uids and priority exactly as they were, because PATCH is
+// now a genuine partial update rather than a full replace.
+func TestUpdateGrantDefinition_PartialToggleDoesNotWipeApprovalConfig(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	suffix := "ugdpt"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	approverGroup, err := dataStore.CreateUserGroup(context.Background(), &store.UserGroup{
+		Name:      "approvers-" + suffix,
+		CreatedBy: &admin.UID,
+	})
+	require.NoError(t, err)
+
+	priority := int16(5)
+	def, err := dataStore.CreateGrantDefinition(context.Background(), &store.GrantDefinition{
+		Name:              "partial-toggle-" + suffix,
+		Slug:              "partial-toggle-" + suffix,
+		DurationSeconds:   3600,
+		Controls:          []string{store.ControlReadOnly},
+		Priority:          &priority,
+		ApprovalPatterns:  []string{"^DELETE", "^DROP"},
+		ApproverGroupUIDs: []uuid.UUID{approverGroup.UID},
+		CreatedBy:         admin.UID,
+	})
+	require.NoError(t, err)
+	require.False(t, def.AutoApprove)
+
+	router := grantDefinitionsRouter(server)
+
+	w, resp := doJSON(t, router, http.MethodPatch, "/api/v1/grant-definitions/"+def.UID.String(), adminToken,
+		map[string]any{"auto_approve": true})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Equal(t, true, resp["auto_approve"])
+	require.ElementsMatch(t, []string{"^DELETE", "^DROP"}, resp["approval_patterns"],
+		"toggling auto_approve alone must not wipe approval_patterns")
+	require.ElementsMatch(t, []string{approverGroup.UID.String()}, resp["approver_group_uids"],
+		"toggling auto_approve alone must not wipe approver_group_uids")
+	require.EqualValues(t, priority, resp["priority"], "toggling auto_approve alone must not wipe priority")
+
+	// Re-read to confirm the persisted row, not just the response body.
+	w, resp = doJSON(t, router, http.MethodGet, "/api/v1/grant-definitions/"+def.UID.String(), adminToken, nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Equal(t, true, resp["auto_approve"])
+	require.ElementsMatch(t, []string{"^DELETE", "^DROP"}, resp["approval_patterns"])
+	require.ElementsMatch(t, []string{approverGroup.UID.String()}, resp["approver_group_uids"])
+	require.EqualValues(t, priority, resp["priority"])
+}
+
+// TestUpdateGrantDefinition_FullBodyStillSetsPatterns pins down that a full
+// PATCH body — the shape the edit dialog sends — still applies every field,
+// including explicitly replacing approval_patterns, exactly as a full
+// replace did before PATCH became partial.
+func TestUpdateGrantDefinition_FullBodyStillSetsPatterns(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	suffix := "ugdfb"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	def, err := dataStore.CreateGrantDefinition(context.Background(), &store.GrantDefinition{
+		Name:             "full-body-" + suffix,
+		Slug:             "full-body-" + suffix,
+		DurationSeconds:  3600,
+		Controls:         []string{store.ControlReadOnly},
+		ApprovalPatterns: []string{"^DELETE"},
+		CreatedBy:        admin.UID,
+	})
+	require.NoError(t, err)
+
+	router := grantDefinitionsRouter(server)
+
+	w, resp := doJSON(t, router, http.MethodPatch, "/api/v1/grant-definitions/"+def.UID.String(), adminToken,
+		map[string]any{
+			"name":                  "full-body-updated-" + suffix,
+			"slug":                  def.Slug,
+			"description":           "updated via full body",
+			"duration_seconds":      7200,
+			"controls":              []string{store.ControlReadOnly, store.ControlBlockDDL},
+			"max_query_counts":      nil,
+			"max_bytes_transferred": nil,
+			"priority":              nil,
+			"auto_approve":          false,
+			"group_uids":            []string{},
+			"database_uids":         []string{},
+			"approval_patterns":     []string{"^TRUNCATE", "^DROP"},
+			"approver_group_uids":   []string{},
+		})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Equal(t, "full-body-updated-"+suffix, resp["name"])
+	require.EqualValues(t, 7200, resp["duration_seconds"])
+	require.ElementsMatch(t, []string{"^TRUNCATE", "^DROP"}, resp["approval_patterns"])
+}
+
+// TestUpdateGrantDefinition_ExplicitEmptyArrayClears pins down that presence
+// still wins over absence for slice fields: a PATCH that explicitly sends
+// approval_patterns: [] clears the list, which is different from omitting
+// the field entirely (covered by the partial-toggle test above). Untouched
+// fields (here, priority) must still survive.
+func TestUpdateGrantDefinition_ExplicitEmptyArrayClears(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	suffix := "ugdec"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	priority := int16(3)
+	def, err := dataStore.CreateGrantDefinition(context.Background(), &store.GrantDefinition{
+		Name:             "empty-clears-" + suffix,
+		Slug:             "empty-clears-" + suffix,
+		DurationSeconds:  3600,
+		Controls:         []string{store.ControlReadOnly},
+		Priority:         &priority,
+		ApprovalPatterns: []string{"^DELETE", "^DROP"},
+		CreatedBy:        admin.UID,
+	})
+	require.NoError(t, err)
+
+	router := grantDefinitionsRouter(server)
+
+	w, resp := doJSON(t, router, http.MethodPatch, "/api/v1/grant-definitions/"+def.UID.String(), adminToken,
+		map[string]any{"approval_patterns": []string{}})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Empty(t, resp["approval_patterns"], "an explicit empty array must clear approval_patterns")
+	require.EqualValues(t, priority, resp["priority"], "a field absent from the PATCH body must survive untouched")
 }

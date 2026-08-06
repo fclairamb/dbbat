@@ -733,7 +733,12 @@ export interface paths {
         head?: never;
         /**
          * Update grant definition (admin)
-         * @description Replaces the editable fields (uid / created_by / created_at / is_active stay put).
+         * @description Partial update: only fields present in the body are changed (uid /
+         *     created_by / created_at / is_active always stay put). A field
+         *     omitted from the body is left untouched on the existing definition —
+         *     so a caller that only means to flip `auto_approve`, say, can send
+         *     just that field without risk of wiping the rest, notably
+         *     `approval_patterns` and `approver_group_uids`.
          */
         patch: operations["updateGrantDefinition"];
         trace?: never;
@@ -2067,6 +2072,52 @@ export interface components {
              */
             approver_group_uids?: string[];
         };
+        /**
+         * @description PATCH body for `/grant-definitions/{uid}`. Every field is optional —
+         *     a field omitted from the body is left untouched on the existing
+         *     definition rather than reset. An explicit empty array (`[]`) still
+         *     clears a list field; only a missing key (or explicit `null`) leaves
+         *     it alone.
+         *
+         *     `max_query_counts`, `max_bytes_transferred` and `priority` are
+         *     themselves nullable in the domain (null = "no limit" / "auto"), so a
+         *     bare `null` can't be told apart from an omitted key. Use the
+         *     matching `clear_*` flag to explicitly reset one of them.
+         */
+        UpdateGrantDefinitionRequest: {
+            name?: string;
+            /** @description Same rules as `CreateGrantDefinitionRequest.slug`. */
+            slug?: string;
+            description?: string;
+            /** Format: int64 */
+            duration_seconds?: number;
+            controls?: components["schemas"]["GrantControl"][];
+            /** Format: int64 */
+            max_query_counts?: number | null;
+            /** @description When true, resets max_query_counts to unlimited. */
+            clear_max_query_counts?: boolean;
+            /** Format: int64 */
+            max_bytes_transferred?: number | null;
+            /** @description When true, resets max_bytes_transferred to unlimited. */
+            clear_max_bytes_transferred?: boolean;
+            /** Format: int32 */
+            priority?: number | null;
+            /** @description When true, resets priority to auto (tier derived from controls). */
+            clear_priority?: boolean;
+            /**
+             * @description When true, grant requests against this definition skip the pending/admin-approval
+             *     step and are approved (and the grant materialized) instantly at request time.
+             */
+            auto_approve?: boolean;
+            /** @description Same semantics as `CreateGrantDefinitionRequest.group_uids`. */
+            group_uids?: string[];
+            /** @description Same semantics as `CreateGrantDefinitionRequest.database_uids`. */
+            database_uids?: string[];
+            /** @description Same semantics as `CreateGrantDefinitionRequest.approval_patterns`. */
+            approval_patterns?: string[];
+            /** @description Same semantics as `CreateGrantDefinitionRequest.approver_group_uids`. */
+            approver_group_uids?: string[];
+        };
         AccessGrant: {
             /**
              * Format: uuid
@@ -2858,6 +2909,7 @@ export type GrantRequest = components['schemas']['GrantRequest'];
 export type CreateGrantRequestPayload = components['schemas']['CreateGrantRequestPayload'];
 export type GrantDefinition = components['schemas']['GrantDefinition'];
 export type CreateGrantDefinitionRequest = components['schemas']['CreateGrantDefinitionRequest'];
+export type UpdateGrantDefinitionRequest = components['schemas']['UpdateGrantDefinitionRequest'];
 export type AccessGrant = components['schemas']['AccessGrant'];
 export type CreateGrantRequest = components['schemas']['CreateGrantRequest'];
 export type ApiKey = components['schemas']['APIKey'];
@@ -4200,7 +4252,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateGrantDefinitionRequest"];
+                "application/json": components["schemas"]["UpdateGrantDefinitionRequest"];
             };
         };
         responses: {

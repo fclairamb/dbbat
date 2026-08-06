@@ -21,6 +21,8 @@ export type CreateGrantRequest = components["schemas"]["CreateGrantRequest"];
 export type GrantDefinition = components["schemas"]["GrantDefinition"];
 export type CreateGrantDefinitionRequest =
   components["schemas"]["CreateGrantDefinitionRequest"];
+export type UpdateGrantDefinitionRequest =
+  components["schemas"]["UpdateGrantDefinitionRequest"];
 export type GrantRequest = components["schemas"]["GrantRequest"];
 export type CreateGrantRequestPayload =
   components["schemas"]["CreateGrantRequestPayload"];
@@ -584,7 +586,7 @@ export function useUpdateGrantDefinition(options?: {
   return useMutation({
     mutationFn: async (args: {
       uid: string;
-      body: CreateGrantDefinitionRequest;
+      body: UpdateGrantDefinitionRequest;
     }): Promise<GrantDefinition> => {
       const response = await apiClient.PATCH("/grant-definitions/{uid}", {
         params: { path: { uid: args.uid } },
