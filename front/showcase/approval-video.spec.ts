@@ -139,11 +139,12 @@ test("video: an UPDATE is held for approval and released from the UI", async ({
     const result = await held;
     await writeLine(page, `UPDATE ${result.rowCount ?? 0}`, "ok");
 
-    // The hold is gone and the statement has landed in the session's query
-    // history. (The live-feed row carries no "Approved" badge — the resolve
-    // event does not repeat approval_status — so the disappearance of the
-    // held card is the signal to assert on.)
+    // The hold is gone, the live feed remembers who released it, and the
+    // statement has landed in the session's query history.
     await expect(pending).toBeHidden({ timeout: 20_000 });
+    await expect(
+      page.getByTestId("watch-feed").getByTestId("approval-status-approved"),
+    ).toBeVisible({ timeout: 20_000 });
     await expect(
       page.locator("tbody tr", { hasText: "UPDATE customers" }).first(),
     ).toBeVisible();

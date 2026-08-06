@@ -96,6 +96,50 @@ export function ApprovalStatusBadge({ status }: { status?: string }) {
   }
 }
 
+/**
+ * Keep what the incoming event actually says, fall back to what we already
+ * knew.
+ *
+ * An absent field is "this event has nothing to say about that", never "reset
+ * it". The server sends several events per query — held, resolved, completed —
+ * and each carries only the fields it knows: the completion event of a
+ * released statement has no approver on it, and must not erase the one the
+ * resolution event delivered a moment earlier.
+ */
+function keep<T>(incoming: T | undefined, previous: T | undefined): T | undefined {
+  return incoming === undefined || incoming === "" ? previous : incoming;
+}
+
+/**
+ * Fold an incoming event onto the row already showing the same query.
+ *
+ * The feed is keyed by query uid, so the second (and third) event for one
+ * statement updates its row instead of adding another — and "last non-empty
+ * wins" makes that independent of the order they arrive in.
+ */
+function mergeFeedItem(
+  previous: FeedItem | undefined,
+  incoming: FeedItem,
+): FeedItem {
+  if (!previous) return incoming;
+
+  return {
+    key: incoming.key,
+    queryUid: keep(incoming.queryUid, previous.queryUid),
+    sqlText: keep(incoming.sqlText, previous.sqlText) ?? "",
+    at: keep(incoming.at, previous.at) ?? incoming.at,
+    approvalStatus: keep(incoming.approvalStatus, previous.approvalStatus),
+    approvalPattern: keep(incoming.approvalPattern, previous.approvalPattern),
+    resolvedBy: keep(incoming.resolvedBy, previous.resolvedBy),
+    resolutionReason: keep(
+      incoming.resolutionReason,
+      previous.resolutionReason,
+    ),
+    durationMs: keep(incoming.durationMs, previous.durationMs),
+    error: keep(incoming.error, previous.error),
+  };
+}
+
 function toFeedItem(ev: StreamEvent): FeedItem {
   const d: StreamEventData = ev.data;
 
@@ -147,13 +191,10 @@ export function ConnectionWatchPanel({
     setFeed((prev) => {
       const item = toFeedItem(ev);
       const without = prev.filter((p) => p.key !== item.key);
-      const merged = prev.find((p) => p.key === item.key);
-
-      // Resolution events carry only the decision, so fold them onto the
-      // pending row rather than replacing its SQL text with an empty string.
-      const next = merged
-        ? { ...merged, ...item, sqlText: item.sqlText || merged.sqlText }
-        : item;
+      const next = mergeFeedItem(
+        prev.find((p) => p.key === item.key),
+        item,
+      );
 
       return [next, ...without].slice(0, LIVE_FEED_LIMIT);
     });
@@ -305,6 +346,7 @@ export function ConnectionWatchPanel({
                 {feed.map((item) => (
                   <li
                     key={item.key}
+                    data-testid="watch-feed-item"
                     className="rounded border px-2 py-1 text-xs font-mono break-all flex items-start justify-between gap-2"
                   >
                     <span className="flex-1">{item.sqlText}</span>
