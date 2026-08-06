@@ -40,9 +40,10 @@ SHOWCASE_BINARY="${SHOWCASE_BINARY:-${REPO_ROOT}/dbbat}"
 SHOWCASE_KEY="${SHOWCASE_KEY:-MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=}"
 
 # SHOWCASE_FIXED_TIME is intentionally NOT defaulted here. The browser clock
-# has to be pinned *after* the scenario is seeded, otherwise every timestamp
-# renders in the future ("in less than a minute"); global-setup therefore picks
-# the pin itself. Set it only to force a specific instant.
+# has to be pinned *after* this run's own rows exist (the server, the grant and
+# every query in the query list are created live by global-setup), otherwise
+# they render in the future ("in less than a minute"); global-setup therefore
+# reads the pin itself. Set it only to force a specific instant.
 export SHOWCASE_API_PORT SHOWCASE_PROXY_PORT SHOWCASE_PG_PORT \
        SHOWCASE_OUT SHOWCASE_WORK
 

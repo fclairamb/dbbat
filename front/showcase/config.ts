@@ -86,7 +86,7 @@ export const VIEWPORT = { width: 1280, height: 800 };
  * The wall clock the browser is pinned to, when the operator names one.
  *
  * Returns null when SHOWCASE_FIXED_TIME is unset, in which case global-setup
- * picks the pin itself — see resolveFixedTime().
+ * pins to the moment the scenario became ready — see fixedTime().
  */
 export function configuredFixedTime(): Date | null {
   const explicit = process.env.SHOWCASE_FIXED_TIME;
@@ -94,20 +94,28 @@ export function configuredFixedTime(): Date | null {
 }
 
 /**
- * Choose the clock the browser will see, called once by global-setup *after*
- * the scenario has been seeded.
+ * The clock the browser will see, read once by global-setup once the scenario
+ * is ready.
  *
  * Pinning matters because a capture run spans a minute or two: without it, one
  * screenshot says "less than a minute ago" and the next says "2 minutes ago"
  * for the same row, and the diff churns on every regeneration.
  *
- * The pin must land *after* the seeded data, not before it — demo data is
- * created at process start, so a pin at the run's start renders every
- * timestamp in the future ("in less than a minute"). A few seconds past the
- * end of seeding is both stable and truthful.
+ * The old "now + 5s" nudge is gone: it existed because demo mode seeded its
+ * users, servers and grants at process start, so a pin taken any earlier
+ * rendered them in the future. Demo data is now seeded at absolute dates
+ * (demoEpoch() in main.go), all of them days before the run.
+ *
+ * What is *not* gone is the pin's dependence on the run, and it cannot be — a
+ * hardcoded instant would be wrong for the rows this suite creates itself. The
+ * server, the grant and every query in the query list are produced live by
+ * global-setup, at the real clock; pinned to a constant in the past they would
+ * render "in 7 months" (date-fns formatDistanceToNow) and query-list.png would
+ * be nonsense. Their timestamps are what still keeps a regenerated capture
+ * from being byte-identical — see specs/todos/ for the follow-up.
  */
-export function resolveFixedTime(): Date {
-  return configuredFixedTime() ?? new Date(Date.now() + 5_000);
+export function fixedTime(): Date {
+  return configuredFixedTime() ?? new Date();
 }
 
 /**

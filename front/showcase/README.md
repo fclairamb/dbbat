@@ -58,18 +58,25 @@ pane prints came back from the real connection.
 
 ## Determinism
 
+- **Demo data.** Seeded at absolute dates: `demoEpoch()` in `main.go` dates
+  every demo user, server, grant and history row from the start of the current
+  UTC day, so a demo instance renders the same dates on every start and those
+  rows never move under a capture.
 - **Clock.** `page.clock.setFixedTime()` — pins `Date.now()` without stopping
   timers, so React Query and the watch panel's reconnect backoff still work.
-  The pin is chosen by `global-setup.ts` *after* seeding: pinned earlier, every
-  seeded row renders in the future ("in less than a minute"). Override with
+  The pin is read by `global-setup.ts` once the scenario is ready; it is the
+  run's own clock, not a constant, because the server, the grant and every
+  query in the query list are created live by this suite — a constant pin in
+  the past would render them "in 7 months". Override with
   `SHOWCASE_FIXED_TIME`.
 - **Geometry.** 1280×800 everywhere; `deviceScaleFactor: 2` for stills (so the
   PNGs are 2560×1600), `1` for video.
 - **Ordering.** One worker, serial, no retries.
 
-Demo data is still seeded at process start rather than at absolute dates, so
-the *absolute* timestamps rendered on detail pages differ between runs. See
-`specs/todos/` for the follow-up.
+What is still not reproducible is what this suite creates itself: the absolute
+`Executed …` timestamp and the measured duration on `query-results.png` come
+from a query that really ran during the capture. See `specs/todos/` for the
+follow-up.
 
 ## Environment variables
 
