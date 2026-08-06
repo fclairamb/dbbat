@@ -6,6 +6,7 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   storeToken,
   clearToken,
@@ -42,6 +43,7 @@ interface AuthContextType extends AuthState {
 const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const queryClient = useQueryClient();
   const [state, setState] = useState<AuthState>({
     user: null,
     session: null,
@@ -102,11 +104,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           isLoading: false,
           isAdmin: false,
         });
+        // Stale token: make sure nothing from a previous identity lingers
+        // in the query cache before the login screen renders.
+        queryClient.clear();
       }
     };
 
     checkStoredAuth();
-  }, [validateSession]);
+  }, [validateSession, queryClient]);
 
   const login = useCallback(async (username: string, password: string) => {
     setState((prev) => ({ ...prev, isLoading: true }));
@@ -129,6 +134,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       // Store the token
       storeToken(data.token);
+
+      // Drop anything cached under the previous identity (or from an
+      // anonymous session) before any query mounts under the new one.
+      queryClient.clear();
 
       // Update state with user info from login response
       setState({
@@ -156,7 +165,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
       throw error;
     }
-  }, []);
+  }, [queryClient]);
 
   const logout = useCallback(async () => {
     try {
@@ -166,6 +175,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Ignore errors - we're logging out anyway
     } finally {
       clearToken();
+      // Reset auth state first so the router unmounts authenticated routes
+      // before the cache is emptied below — otherwise still-mounted queries
+      // could refetch without a token and bounce through the 401 redirect.
       setState({
         user: null,
         session: null,
@@ -173,8 +185,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isLoading: false,
         isAdmin: false,
       });
+      queryClient.clear();
     }
-  }, []);
+  }, [queryClient]);
 
   const refreshUser = useCallback(async () => {
     await validateSession();
