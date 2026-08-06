@@ -100,17 +100,10 @@ func newCrossGrantFixture(t *testing.T) *crossGrantFixture {
 	mkGrant := func(owner *store.User, target *store.Server, group *store.UserGroup) {
 		t.Helper()
 
-		if _, err := data.CreateGrant(ctx, &store.Grant{
-			UserID:            owner.UID,
-			DatabaseID:        target.UID,
-			GrantedBy:         admin.UID,
-			StartsAt:          time.Now().Add(-time.Hour),
-			ExpiresAt:         time.Now().Add(time.Hour),
+		persistGrantWithShape(t, data, store.GrantDefinition{
 			ApprovalPatterns:  []string{`(?i)^DELETE\s+FROM`},
 			ApproverGroupUIDs: []uuid.UUID{group.UID},
-		}); err != nil {
-			t.Fatalf("create grant: %v", err)
-		}
+		}, owner.UID, target.UID, admin.UID, time.Now().Add(-time.Hour), time.Now().Add(time.Hour), 0)
 	}
 
 	mkGrant(ownerA, dbA, groupA)

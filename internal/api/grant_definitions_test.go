@@ -237,8 +237,9 @@ func TestUpdateGrantDefinition_PartialToggleDoesNotWipeApprovalConfig(t *testing
 		"toggling auto_approve alone must not wipe approver_group_uids")
 	require.EqualValues(t, priority, resp["priority"], "toggling auto_approve alone must not wipe priority")
 
-	// Re-read to confirm the persisted row, not just the response body.
-	w, resp = doJSON(t, router, http.MethodGet, "/api/v1/grant-definitions/"+def.UID.String(), adminToken, nil)
+	// The edit versioned the definition, so the persisted row to re-read is the
+	// new live version — which the unchanged slug resolves to.
+	w, resp = doJSON(t, router, http.MethodGet, "/api/v1/grant-definitions/partial-toggle-"+suffix, adminToken, nil)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	require.Equal(t, true, resp["auto_approve"])
 	require.ElementsMatch(t, []string{"^DELETE", "^DROP"}, resp["approval_patterns"])

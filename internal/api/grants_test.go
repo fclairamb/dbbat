@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
 	"github.com/fclairamb/dbbat/internal/store"
@@ -14,11 +15,72 @@ import (
 
 var grantsTestKey = []byte("grantstest-key-01234567890123456")
 
-// grantsRouter wires just the grant endpoints the priority tests exercise.
+// newTestDefinition persists a grant definition carrying the given shape.
+// Grants have no shape of their own, so every grant these tests issue starts
+// from one of these; name and slug are generated when the caller doesn't care.
+func newTestDefinition(
+	t *testing.T,
+	dataStore *store.Store,
+	createdBy uuid.UUID,
+	shape store.GrantDefinition,
+) *store.GrantDefinition {
+	t.Helper()
+
+	suffix := uuid.NewString()[:8]
+
+	if shape.Name == "" {
+		shape.Name = "api-def-" + suffix
+	}
+
+	if shape.Slug == "" {
+		shape.Slug = "api-def-" + suffix
+	}
+
+	if shape.DurationSeconds == 0 {
+		shape.DurationSeconds = 3600
+	}
+
+	shape.CreatedBy = createdBy
+
+	def, err := dataStore.CreateGrantDefinition(context.Background(), &shape)
+	require.NoError(t, err, "newTestDefinition")
+
+	return def
+}
+
+// persistGrantWithShape persists a definition carrying `shape` and a grant
+// instantiating it over the given window — the API-package equivalent of what
+// tests used to express as a grant literal with inline controls.
+func persistGrantWithShape(
+	t *testing.T,
+	dataStore *store.Store,
+	shape store.GrantDefinition,
+	userID, databaseID, grantedBy uuid.UUID,
+	startsAt, expiresAt time.Time,
+	priority int16,
+) *store.Grant {
+	t.Helper()
+
+	def := newTestDefinition(t, dataStore, grantedBy, shape)
+
+	grant := store.BuildGrantFromDefinition(def, userID, databaseID, grantedBy, startsAt)
+	grant.ExpiresAt = expiresAt
+
+	if priority != 0 {
+		grant.Priority = priority
+	}
+
+	created, err := dataStore.CreateGrant(context.Background(), grant)
+	require.NoError(t, err, "persistGrantWithShape")
+
+	return created
+}
+
+// grantsRouter wires just the grant endpoints these tests exercise.
 func grantsRouter(server *Server) *gin.Engine {
 	router := gin.New()
 	router.Use(server.authMiddleware())
-	router.POST("/api/v1/grants", server.requireAdmin(), server.handleCreateGrant)
+	router.POST("/api/v1/grants", server.requireAdmin(), server.handleAssignGrant)
 	router.GET("/api/v1/grants/:uid", server.handleGetGrant)
 
 	return router
@@ -36,18 +98,18 @@ func priorityOf(t *testing.T, resp map[string]any) int {
 	return int(raw)
 }
 
-// TestCreateGrant_Priority covers the API contract for the priority field:
-// omitted means "derive it from the controls", supplied means "use this", and
-// either way the response echoes the resolved value so a caller never has to
-// guess what was stored.
-func TestCreateGrant_Priority(t *testing.T) {
+// TestAssignGrant_Priority covers the API contract for the priority field.
+// Priority is no longer something a caller can type at a grant: it comes from
+// the definition being instantiated — derived from its controls, or pinned by
+// its own explicit priority.
+func TestAssignGrant_Priority(t *testing.T) {
 	t.Parallel()
 
 	server, dataStore := setupTestServer(t)
 	ctx := context.Background()
 	suffix := "grantprio"
 
-	createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
 	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
 
 	target := createTestUser(t, dataStore, "target-"+suffix, "targetpass123", []string{store.RoleConnector})
@@ -66,24 +128,15 @@ func TestCreateGrant_Priority(t *testing.T) {
 
 	router := grantsRouter(server)
 
-	now := time.Now()
-	body := func(controls []string, priority *int) map[string]any {
-		payload := map[string]any{
-			"user_id":     target.UID.String(),
-			"database_id": database.UID.String(),
-			"controls":    controls,
-			"starts_at":   now.Format(time.RFC3339),
-			"expires_at":  now.Add(time.Hour).Format(time.RFC3339),
+	assign := func(defRef string) map[string]any {
+		return map[string]any{
+			"grant_definition_id": defRef,
+			"user_id":             target.UID.String(),
+			"database_id":         database.UID.String(),
 		}
-
-		if priority != nil {
-			payload["priority"] = *priority
-		}
-
-		return payload
 	}
 
-	t.Run("omitted priority is derived from the controls", func(t *testing.T) {
+	t.Run("priority is derived from the definition's controls", func(t *testing.T) {
 		t.Parallel()
 
 		cases := []struct {
@@ -102,40 +155,194 @@ func TestCreateGrant_Priority(t *testing.T) {
 		}
 
 		for _, tc := range cases {
-			w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grants", adminToken, body(tc.controls, nil))
+			def := newTestDefinition(t, dataStore, admin.UID, store.GrantDefinition{Controls: tc.controls})
+
+			w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grants", adminToken, assign(def.UID.String()))
 			require.Equal(t, http.StatusOK, w.Code, "%s: %s", tc.name, w.Body.String())
 			require.Equal(t, tc.want, priorityOf(t, resp), "%s", tc.name)
 		}
 	})
 
-	t.Run("explicit priority is echoed back", func(t *testing.T) {
+	t.Run("a definition's explicit priority is stamped on the grant", func(t *testing.T) {
 		t.Parallel()
 
-		explicit := 7
-		w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grants", adminToken,
-			body([]string{}, &explicit))
-		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-		require.Equal(t, explicit, priorityOf(t, resp))
+		explicit := int16(7)
+		def := newTestDefinition(t, dataStore, admin.UID, store.GrantDefinition{Priority: &explicit})
 
-		// And it survives a re-read, so the override was persisted rather than
+		w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grants", adminToken, assign(def.UID.String()))
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		require.Equal(t, int(explicit), priorityOf(t, resp))
+
+		// And it survives a re-read, so the value was persisted rather than
 		// only reflected in the create response.
 		uid, ok := resp["uid"].(string)
-		require.True(t, ok, "create response has no uid: %s", w.Body.String())
+		require.True(t, ok, "assign response has no uid: %s", w.Body.String())
 
 		w, fetched := doJSON(t, router, http.MethodGet, "/api/v1/grants/"+uid, adminToken, nil)
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-		require.Equal(t, explicit, priorityOf(t, fetched))
+		require.Equal(t, int(explicit), priorityOf(t, fetched))
 	})
+}
 
-	t.Run("an out-of-range priority is rejected", func(t *testing.T) {
+// TestAssignGrant is the contract of the endpoint that replaced ad-hoc grant
+// creation: a grant is an instance of a definition, it carries the
+// definition's shape and none of its own, and the definition's own state
+// decides whether it may be issued at all.
+func TestAssignGrant(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	ctx := context.Background()
+	suffix := "grantassign"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	target := createTestUser(t, dataStore, "target-"+suffix, "targetpass123", []string{store.RoleConnector})
+
+	database, err := dataStore.CreateServer(ctx, &store.Server{
+		Name:         "assign-db-" + suffix,
+		Host:         "127.0.0.1",
+		Port:         5432,
+		DatabaseName: "prod",
+		Username:     "pg",
+		Password:     "secret",
+		Protocol:     store.ProtocolPostgreSQL,
+		SSLMode:      "disable",
+	}, grantsTestKey)
+	require.NoError(t, err)
+
+	other, err := dataStore.CreateServer(ctx, &store.Server{
+		Name:         "assign-other-db-" + suffix,
+		Host:         "127.0.0.1",
+		Port:         5432,
+		DatabaseName: "other",
+		Username:     "pg",
+		Password:     "secret",
+		Protocol:     store.ProtocolPostgreSQL,
+		SSLMode:      "disable",
+	}, grantsTestKey)
+	require.NoError(t, err)
+
+	router := grantsRouter(server)
+
+	t.Run("the grant instantiates the definition", func(t *testing.T) {
 		t.Parallel()
 
-		// priority is a smallint; anything wider must fail validation rather
-		// than wrapping silently.
-		tooBig := 40000
-		w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grants", adminToken,
-			body([]string{}, &tooBig))
+		maxQueries := int64(42)
+		def := newTestDefinition(t, dataStore, admin.UID, store.GrantDefinition{
+			Controls:        []string{store.ControlReadOnly},
+			MaxQueryCounts:  &maxQueries,
+			DurationSeconds: 7200,
+		})
+
+		w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grants", adminToken, map[string]any{
+			"grant_definition_id": def.UID.String(),
+			"user_id":             target.UID.String(),
+			"database_id":         database.UID.String(),
+		})
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+		require.Equal(t, def.UID.String(), resp["grant_definition_id"])
+
+		// The shape is on the embedded definition, never on the grant itself.
+		require.NotContains(t, resp, "controls")
+		require.NotContains(t, resp, "max_query_counts")
+		require.NotContains(t, resp, "approval_patterns")
+
+		embedded, ok := resp["definition"].(map[string]any)
+		require.True(t, ok, "assign response carries no definition: %s", w.Body.String())
+		require.Equal(t, []any{store.ControlReadOnly}, embedded["controls"])
+
+		// The window's length comes from the definition's duration.
+		startsAt, err := time.Parse(time.RFC3339, resp["starts_at"].(string))
+		require.NoError(t, err)
+		expiresAt, err := time.Parse(time.RFC3339, resp["expires_at"].(string))
+		require.NoError(t, err)
+		require.InDelta(t, 7200.0, expiresAt.Sub(startsAt).Seconds(), 1.0)
+	})
+
+	t.Run("a slug resolves to the live definition", func(t *testing.T) {
+		t.Parallel()
+
+		def := newTestDefinition(t, dataStore, admin.UID, store.GrantDefinition{
+			Slug:     "assign-by-slug",
+			Name:     "assign by slug",
+			Controls: []string{store.ControlReadOnly},
+		})
+
+		// Edit it: the slug now belongs to the new version, and assigning by
+		// slug must issue that one rather than the archived original.
+		def.Controls = []string{store.ControlBlockDDL}
+		updated, err := dataStore.UpdateGrantDefinition(ctx, def)
+		require.NoError(t, err)
+		require.NotEqual(t, def.UID, updated.UID)
+
+		w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grants", adminToken, map[string]any{
+			"grant_definition_id": "assign-by-slug",
+			"user_id":             target.UID.String(),
+			"database_id":         database.UID.String(),
+		})
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		require.Equal(t, updated.UID.String(), resp["grant_definition_id"])
+	})
+
+	t.Run("an unknown definition is rejected", func(t *testing.T) {
+		t.Parallel()
+
+		w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grants", adminToken, map[string]any{
+			"grant_definition_id": "no-such-definition",
+			"user_id":             target.UID.String(),
+			"database_id":         database.UID.String(),
+		})
 		require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 		require.Equal(t, "VALIDATION_ERROR", resp["code"])
+	})
+
+	t.Run("a deactivated definition cannot be assigned", func(t *testing.T) {
+		t.Parallel()
+
+		def := newTestDefinition(t, dataStore, admin.UID, store.GrantDefinition{})
+		require.NoError(t, dataStore.DeactivateGrantDefinition(ctx, def.UID))
+
+		w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grants", adminToken, map[string]any{
+			"grant_definition_id": def.UID.String(),
+			"user_id":             target.UID.String(),
+			"database_id":         database.UID.String(),
+		})
+		require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		require.Equal(t, "VALIDATION_ERROR", resp["code"])
+	})
+
+	t.Run("the definition's database scope is enforced", func(t *testing.T) {
+		t.Parallel()
+
+		def := newTestDefinition(t, dataStore, admin.UID, store.GrantDefinition{
+			DatabaseUIDs: []uuid.UUID{database.UID},
+		})
+
+		w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grants", adminToken, map[string]any{
+			"grant_definition_id": def.UID.String(),
+			"user_id":             target.UID.String(),
+			"database_id":         other.UID.String(),
+		})
+		require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+		require.Equal(t, "VALIDATION_ERROR", resp["code"])
+	})
+
+	t.Run("a non-admin cannot assign a grant", func(t *testing.T) {
+		t.Parallel()
+
+		createTestUser(t, dataStore, "plain-"+suffix, "plainpass123", []string{store.RoleConnector})
+		plainToken := loginUser(t, server, "plain-"+suffix, "plainpass123")
+
+		def := newTestDefinition(t, dataStore, admin.UID, store.GrantDefinition{})
+
+		w, _ := doJSON(t, router, http.MethodPost, "/api/v1/grants", plainToken, map[string]any{
+			"grant_definition_id": def.UID.String(),
+			"user_id":             target.UID.String(),
+			"database_id":         database.UID.String(),
+		})
+		require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
 	})
 }

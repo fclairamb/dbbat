@@ -167,15 +167,9 @@ func TestGetConnection_EmbedsGrantSummary(t *testing.T) {
 	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
 
 	now := time.Now()
-	grant, err := dataStore.CreateGrant(t.Context(), &store.Grant{
-		UserID:     admin.UID,
-		DatabaseID: db.UID,
-		Controls:   []string{store.ControlReadOnly},
-		GrantedBy:  admin.UID,
-		StartsAt:   now.Add(-time.Hour),
-		ExpiresAt:  now.Add(time.Hour),
-	})
-	require.NoError(t, err)
+	grant := persistGrantWithShape(t, dataStore, store.GrantDefinition{
+		Controls: []string{store.ControlReadOnly},
+	}, admin.UID, db.UID, admin.UID, now.Add(-time.Hour), now.Add(time.Hour), 0)
 
 	conn, err := dataStore.CreateConnection(t.Context(), admin.UID, db.UID, "10.1.1.9", store.WithGrantUID(grant.UID))
 	require.NoError(t, err)

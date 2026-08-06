@@ -302,8 +302,12 @@ func TestApproveGrantRequest_ConflictsWhenScopeTightened(t *testing.T) {
 	group, err := dataStore.CreateUserGroup(ctx, &store.UserGroup{Name: "late-" + suffix})
 	require.NoError(t, err)
 
+	// The edit versions the definition; the approval below has to be judged
+	// against the new live version, which is the whole point of re-checking
+	// scope at approval time.
 	def.GroupUIDs = []uuid.UUID{group.UID}
-	require.NoError(t, dataStore.UpdateGrantDefinition(ctx, def))
+	_, err = dataStore.UpdateGrantDefinition(ctx, def)
+	require.NoError(t, err)
 
 	w, resp = doJSON(t, router, http.MethodPost, "/api/v1/grant-requests/"+requestUID+"/approve", adminToken, nil)
 	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())

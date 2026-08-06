@@ -238,11 +238,16 @@ func (s *Store) HasApproverGroups(ctx context.Context, groupUIDs []uuid.UUID) (b
 		return false, nil
 	}
 
+	// The approver groups live on the grant's definition, so this joins rather
+	// than reading a column off the grant. The definition is the exact version
+	// the grant was issued from, which is the one whose approver groups govern
+	// its holds.
 	exists, err := s.db.NewSelect().
-		Model((*AccessGrant)(nil)).
-		Where("revoked_at IS NULL").
-		Where("expires_at > NOW()").
-		Where("approver_group_uids && ?", pgdialect.Array(groupUIDs)).
+		TableExpr("access_grants AS ag").
+		Join("JOIN grant_definitions AS gd ON gd.uid = ag.grant_definition_id").
+		Where("ag.revoked_at IS NULL").
+		Where("ag.expires_at > NOW()").
+		Where("gd.approver_group_uids && ?", pgdialect.Array(groupUIDs)).
 		Exists(ctx)
 	if err != nil {
 		return false, fmt.Errorf("failed to check approver groups: %w", err)
