@@ -213,6 +213,8 @@ func (f *crossGrantFixture) subscribeAs(t *testing.T, broker *events.Broker, use
 }
 
 func TestApprovalsStreamDoesNotLeakOtherGrants(t *testing.T) {
+	t.Parallel()
+
 	f := newCrossGrantFixture(t)
 	ctx := context.Background()
 
@@ -264,6 +266,8 @@ func TestApprovalsStreamDoesNotLeakOtherGrants(t *testing.T) {
 // out as "verify, do not assume": a hold parked on another replica arrives via
 // LISTEN/NOTIFY and is republished locally, so it must meet the same filter.
 func TestApprovalsStreamFiltersCrossReplicaEvents(t *testing.T) {
+	t.Parallel()
+
 	f := newCrossGrantFixture(t)
 	ctx := context.Background()
 
@@ -298,6 +302,8 @@ func TestApprovalsStreamFiltersCrossReplicaEvents(t *testing.T) {
 // visibility to mayViewQuery's, row by row. If the REST rule ever changes, this
 // fails rather than letting the two drift apart silently.
 func TestApprovalEventAuthorizationMatchesREST(t *testing.T) {
+	t.Parallel()
+
 	f := newCrossGrantFixture(t)
 	ctx := context.Background()
 
@@ -328,6 +334,8 @@ func TestApprovalEventAuthorizationMatchesREST(t *testing.T) {
 // keyed on the event's scope rather than the topic: a decision taken for one
 // connection must not answer for another.
 func TestApprovalEventAuthorizationIsMemoizedPerConnection(t *testing.T) {
+	t.Parallel()
+
 	f := newCrossGrantFixture(t)
 	ctx := context.Background()
 
@@ -359,6 +367,8 @@ func TestApprovalEventAuthorizationIsMemoizedPerConnection(t *testing.T) {
 // pending event that preceded it — including after the hold has left the
 // pending state.
 func TestApprovalsStreamFiltersResolutionEvents(t *testing.T) {
+	t.Parallel()
+
 	f := newCrossGrantFixture(t)
 	ctx := context.Background()
 

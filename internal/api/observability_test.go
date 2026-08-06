@@ -17,7 +17,6 @@ import (
 // "/connections/:uid" with no extra role gate — ownership is checked
 // inside the handler itself, same as the list endpoint).
 func newConnectionsTestRouter(server *Server) *gin.Engine {
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(server.authMiddleware())
 	router.GET("/api/v1/connections/:uid", server.handleGetConnection)
@@ -35,7 +34,9 @@ func doGetConnection(router *gin.Engine, token, uid string) *httptest.ResponseRe
 
 // TestGetConnection_OwnerSeesOwnConnection verifies a connector fetching
 // their own connection gets it back in full.
-func TestGetConnection_OwnerSeesOwnConnection(t *testing.T) { //nolint:paralleltest // shared database state
+func TestGetConnection_OwnerSeesOwnConnection(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "gcown"
 
@@ -62,7 +63,9 @@ func TestGetConnection_OwnerSeesOwnConnection(t *testing.T) { //nolint:parallelt
 // non-admin/non-viewer user fetching another user's connection is reported
 // as 404, not 403 — connectors must not be able to distinguish "doesn't
 // exist" from "exists but isn't mine".
-func TestGetConnection_NonOwnerConnectorGets404NotForbidden(t *testing.T) { //nolint:paralleltest // shared database state
+func TestGetConnection_NonOwnerConnectorGets404NotForbidden(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "gcother"
 
@@ -82,7 +85,9 @@ func TestGetConnection_NonOwnerConnectorGets404NotForbidden(t *testing.T) { //no
 
 // TestGetConnection_AdminAndViewerSeeAnyConnection verifies both admin and
 // viewer roles can fetch a connection they don't own.
-func TestGetConnection_AdminAndViewerSeeAnyConnection(t *testing.T) { //nolint:paralleltest // shared database state
+func TestGetConnection_AdminAndViewerSeeAnyConnection(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "gcprivileged"
 
@@ -107,7 +112,9 @@ func TestGetConnection_AdminAndViewerSeeAnyConnection(t *testing.T) { //nolint:p
 
 // TestGetConnection_NotFound verifies a UID with no matching connection is
 // reported as 404, regardless of role.
-func TestGetConnection_NotFound(t *testing.T) { //nolint:paralleltest // shared database state
+func TestGetConnection_NotFound(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "gcnf"
 
@@ -122,7 +129,9 @@ func TestGetConnection_NotFound(t *testing.T) { //nolint:paralleltest // shared 
 
 // TestGetConnection_InvalidUID verifies a malformed UID is rejected as a
 // 400, not a 404 or 500.
-func TestGetConnection_InvalidUID(t *testing.T) { //nolint:paralleltest // shared database state
+func TestGetConnection_InvalidUID(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "gcbaduid"
 

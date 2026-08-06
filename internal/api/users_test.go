@@ -17,7 +17,6 @@ import (
 // newUsersTestRouter mounts the user update/delete routes with the same
 // middleware chain as production (see server.go).
 func newUsersTestRouter(server *Server) *gin.Engine {
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(server.authMiddleware())
 	router.PUT("/api/v1/users/:uid", server.handleUpdateUser)
@@ -36,7 +35,9 @@ func doUpdateUserRoles(router *gin.Engine, token, uid string, roles []string) *h
 	return w
 }
 
-func TestUpdateUser_LastAdminDemotionRejected(t *testing.T) { //nolint:paralleltest // shared database state
+func TestUpdateUser_LastAdminDemotionRejected(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 
 	adminUser := createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
@@ -67,7 +68,9 @@ func TestUpdateUser_LastAdminDemotionRejected(t *testing.T) { //nolint:parallelt
 	}
 }
 
-func TestUpdateUser_LastAdminEmptyRolesRejected(t *testing.T) { //nolint:paralleltest // shared database state
+func TestUpdateUser_LastAdminEmptyRolesRejected(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 
 	adminUser := createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
@@ -81,7 +84,9 @@ func TestUpdateUser_LastAdminEmptyRolesRejected(t *testing.T) { //nolint:paralle
 	}
 }
 
-func TestUpdateUser_DemotionAllowedWithAnotherAdmin(t *testing.T) { //nolint:paralleltest // shared database state
+func TestUpdateUser_DemotionAllowedWithAnotherAdmin(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 
 	createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
@@ -107,7 +112,9 @@ func TestUpdateUser_DemotionAllowedWithAnotherAdmin(t *testing.T) { //nolint:par
 	}
 }
 
-func TestUpdateUser_PromoteAddsAdminRole(t *testing.T) { //nolint:paralleltest // shared database state
+func TestUpdateUser_PromoteAddsAdminRole(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 
 	createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
@@ -133,7 +140,9 @@ func TestUpdateUser_PromoteAddsAdminRole(t *testing.T) { //nolint:paralleltest /
 	}
 }
 
-func TestUpdateUser_NonAdminCannotClearOwnRoles(t *testing.T) { //nolint:paralleltest // shared database state
+func TestUpdateUser_NonAdminCannotClearOwnRoles(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 
 	viewerUser := createTestUser(t, dataStore, "viewer", "viewerpassword123", []string{"viewer"})
@@ -156,7 +165,9 @@ func TestUpdateUser_NonAdminCannotClearOwnRoles(t *testing.T) { //nolint:paralle
 	}
 }
 
-func TestDeleteUser_LastAdminRejected(t *testing.T) { //nolint:paralleltest // shared database state
+func TestDeleteUser_LastAdminRejected(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 
 	adminUser := createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
@@ -166,7 +177,6 @@ func TestDeleteUser_LastAdminRejected(t *testing.T) { //nolint:paralleltest // s
 	// Mount the handler without requireAdmin to exercise its own last-admin
 	// guard directly: through the production chain the scenario is unreachable
 	// (the actor is always a second admin), the guard is defense in depth.
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(server.authMiddleware())
 	router.DELETE("/api/v1/users/:uid", server.handleDeleteUser)
@@ -185,7 +195,9 @@ func TestDeleteUser_LastAdminRejected(t *testing.T) { //nolint:paralleltest // s
 	}
 }
 
-func TestDeleteUser_AdminCanDeleteOtherAdmin(t *testing.T) { //nolint:paralleltest // shared database state
+func TestDeleteUser_AdminCanDeleteOtherAdmin(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 
 	createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
@@ -207,7 +219,9 @@ func TestDeleteUser_AdminCanDeleteOtherAdmin(t *testing.T) { //nolint:parallelte
 	}
 }
 
-func TestDeleteUser_NotFound(t *testing.T) { //nolint:paralleltest // shared database state
+func TestDeleteUser_NotFound(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 
 	createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
@@ -235,7 +249,9 @@ func doUpdateUserPassword(router *gin.Engine, token, uid, newPassword string) *h
 	return w
 }
 
-func TestUpdateUser_DemoModeAdminPasswordChangeRejected(t *testing.T) { //nolint:paralleltest // shared database state
+func TestUpdateUser_DemoModeAdminPasswordChangeRejected(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	server.config.RunMode = config.RunModeDemo
 
@@ -271,7 +287,9 @@ func TestUpdateUser_DemoModeAdminPasswordChangeRejected(t *testing.T) { //nolint
 	}
 }
 
-func TestUpdateUser_DemoModeNonAdminPasswordChangeAllowed(t *testing.T) { //nolint:paralleltest // shared database state
+func TestUpdateUser_DemoModeNonAdminPasswordChangeAllowed(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	server.config.RunMode = config.RunModeDemo
 

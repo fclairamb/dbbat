@@ -87,7 +87,6 @@ func TestBuildConnectionsForUser_Truncation(t *testing.T) {
 // chain as production (see server.go: authenticated.Use(authMiddleware())
 // then keys.GET("", handleListAPIKeys) with no admin gate).
 func newKeysTestRouter(server *Server) *gin.Engine {
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(server.authMiddleware())
 	router.GET("/api/v1/keys", server.handleListAPIKeys)
@@ -127,7 +126,9 @@ func listedKeyUserIDs(t *testing.T, w *httptest.ResponseRecorder) []uuid.UUID {
 // TestListAPIKeys_DefaultsToOwnKeys verifies that an admin with no query
 // params sees only their own keys, not the fleet — the behavior this spec
 // changes (previously admins saw every user's keys by default).
-func TestListAPIKeys_DefaultsToOwnKeys(t *testing.T) { //nolint:paralleltest // shared database state
+func TestListAPIKeys_DefaultsToOwnKeys(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	ctx := context.Background()
 
@@ -149,7 +150,9 @@ func TestListAPIKeys_DefaultsToOwnKeys(t *testing.T) { //nolint:paralleltest // 
 
 // TestListAPIKeys_AdminAllUsers verifies all_users=true returns every user's
 // keys, admin only.
-func TestListAPIKeys_AdminAllUsers(t *testing.T) { //nolint:paralleltest // shared database state
+func TestListAPIKeys_AdminAllUsers(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	ctx := context.Background()
 
@@ -171,7 +174,9 @@ func TestListAPIKeys_AdminAllUsers(t *testing.T) { //nolint:paralleltest // shar
 
 // TestListAPIKeys_AdminUserIDFilter verifies user_id=<uuid> scopes to that
 // one user's keys, overriding the own-keys default.
-func TestListAPIKeys_AdminUserIDFilter(t *testing.T) { //nolint:paralleltest // shared database state
+func TestListAPIKeys_AdminUserIDFilter(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	ctx := context.Background()
 
@@ -193,7 +198,9 @@ func TestListAPIKeys_AdminUserIDFilter(t *testing.T) { //nolint:paralleltest // 
 
 // TestListAPIKeys_AdminUserIDWinsOverAllUsers verifies that when an admin
 // sends both params, the more specific user_id wins.
-func TestListAPIKeys_AdminUserIDWinsOverAllUsers(t *testing.T) { //nolint:paralleltest // shared database state
+func TestListAPIKeys_AdminUserIDWinsOverAllUsers(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	ctx := context.Background()
 
@@ -215,7 +222,9 @@ func TestListAPIKeys_AdminUserIDWinsOverAllUsers(t *testing.T) { //nolint:parall
 
 // TestListAPIKeys_NonAdminIgnoresAllUsers verifies a non-admin passing
 // all_users=true still only ever sees their own keys.
-func TestListAPIKeys_NonAdminIgnoresAllUsers(t *testing.T) { //nolint:paralleltest // shared database state
+func TestListAPIKeys_NonAdminIgnoresAllUsers(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	ctx := context.Background()
 
@@ -238,7 +247,9 @@ func TestListAPIKeys_NonAdminIgnoresAllUsers(t *testing.T) { //nolint:parallelte
 // TestListAPIKeys_NonAdminIgnoresUserID verifies a non-admin passing
 // user_id=<other> still only ever sees their own keys (not forbidden — the
 // param is simply not honored).
-func TestListAPIKeys_NonAdminIgnoresUserID(t *testing.T) { //nolint:paralleltest // shared database state
+func TestListAPIKeys_NonAdminIgnoresUserID(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	ctx := context.Background()
 

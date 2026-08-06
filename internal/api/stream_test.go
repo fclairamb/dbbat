@@ -21,8 +21,6 @@ import (
 func TestStreamAuthMiddlewarePromotesSubprotocol(t *testing.T) {
 	t.Parallel()
 
-	gin.SetMode(gin.TestMode)
-
 	s := &Server{}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/stream", nil)
@@ -46,8 +44,6 @@ func TestStreamAuthMiddlewarePromotesSubprotocol(t *testing.T) {
 
 func TestStreamAuthMiddlewareLeavesExistingHeader(t *testing.T) {
 	t.Parallel()
-
-	gin.SetMode(gin.TestMode)
 
 	s := &Server{}
 

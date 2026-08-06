@@ -33,7 +33,9 @@ func validCreateDefinitionBody(name, slug string) map[string]any {
 	}
 }
 
-func TestCreateGrantDefinition_Slug(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestCreateGrantDefinition_Slug(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "cgds"
 
@@ -42,21 +44,27 @@ func TestCreateGrantDefinition_Slug(t *testing.T) { //nolint:paralleltest // sha
 
 	router := grantDefinitionsRouter(server)
 
-	t.Run("valid slug creates the definition", func(t *testing.T) { //nolint:paralleltest // shared router/store state
+	t.Run("valid slug creates the definition", func(t *testing.T) {
+		t.Parallel()
+
 		w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grant-definitions", adminToken,
 			validCreateDefinitionBody("Read-only 1h "+suffix, "read-only-1h-"+suffix))
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		require.Equal(t, "read-only-1h-"+suffix, resp["slug"])
 	})
 
-	t.Run("missing slug is rejected", func(t *testing.T) { //nolint:paralleltest // shared router/store state
+	t.Run("missing slug is rejected", func(t *testing.T) {
+		t.Parallel()
+
 		body := validCreateDefinitionBody("No slug "+suffix, "")
 		w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grant-definitions", adminToken, body)
 		require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 		require.Equal(t, "VALIDATION_ERROR", resp["code"])
 	})
 
-	t.Run("invalid slug format is rejected", func(t *testing.T) { //nolint:paralleltest // shared router/store state
+	t.Run("invalid slug format is rejected", func(t *testing.T) {
+		t.Parallel()
+
 		for _, bad := range []string{"Has Uppercase", "has_underscore", "-leading-hyphen", "trailing-hyphen-", "double--hyphen", "has space"} {
 			body := validCreateDefinitionBody("Bad slug "+suffix, bad)
 			w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grant-definitions", adminToken, body)
@@ -65,7 +73,9 @@ func TestCreateGrantDefinition_Slug(t *testing.T) { //nolint:paralleltest // sha
 		}
 	})
 
-	t.Run("duplicate slug is rejected with 409", func(t *testing.T) { //nolint:paralleltest // shared router/store state
+	t.Run("duplicate slug is rejected with 409", func(t *testing.T) {
+		t.Parallel()
+
 		slug := "dup-slug-" + suffix
 
 		w, _ := doJSON(t, router, http.MethodPost, "/api/v1/grant-definitions", adminToken,
@@ -79,7 +89,9 @@ func TestCreateGrantDefinition_Slug(t *testing.T) { //nolint:paralleltest // sha
 	})
 }
 
-func TestGetGrantDefinition_BySlug(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestGetGrantDefinition_BySlug(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "ggds"
 
@@ -90,19 +102,25 @@ func TestGetGrantDefinition_BySlug(t *testing.T) { //nolint:paralleltest // shar
 
 	router := grantDefinitionsRouter(server)
 
-	t.Run("fetch by uid still works", func(t *testing.T) { //nolint:paralleltest // shared router/store state
+	t.Run("fetch by uid still works", func(t *testing.T) {
+		t.Parallel()
+
 		w, resp := doJSON(t, router, http.MethodGet, "/api/v1/grant-definitions/"+def.UID.String(), adminToken, nil)
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		require.Equal(t, def.UID.String(), resp["uid"])
 	})
 
-	t.Run("fetch by slug resolves the same definition", func(t *testing.T) { //nolint:paralleltest // shared router/store state
+	t.Run("fetch by slug resolves the same definition", func(t *testing.T) {
+		t.Parallel()
+
 		w, resp := doJSON(t, router, http.MethodGet, "/api/v1/grant-definitions/"+def.Slug, adminToken, nil)
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		require.Equal(t, def.UID.String(), resp["uid"])
 	})
 
-	t.Run("unknown slug is a 404", func(t *testing.T) { //nolint:paralleltest // shared router/store state
+	t.Run("unknown slug is a 404", func(t *testing.T) {
+		t.Parallel()
+
 		w, _ := doJSON(t, router, http.MethodGet, "/api/v1/grant-definitions/does-not-exist", adminToken, nil)
 		require.Equal(t, http.StatusNotFound, w.Code)
 	})
@@ -113,7 +131,9 @@ func TestGetGrantDefinition_BySlug(t *testing.T) { //nolint:paralleltest // shar
 // slug lookup" behavior: a UUID is no longer a valid slug at all, in either
 // form uuid.Parse accepts — the canonical 36-char hyphenated layout and the
 // bare 32-hex-digit layout, both of which otherwise satisfy slugPattern.
-func TestCreateGrantDefinition_RejectsUUIDShapedSlug(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestCreateGrantDefinition_RejectsUUIDShapedSlug(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "ggdsu"
 
@@ -125,14 +145,18 @@ func TestCreateGrantDefinition_RejectsUUIDShapedSlug(t *testing.T) { //nolint:pa
 	canonical := uuid.New().String()
 	bareHex := strings.ReplaceAll(canonical, "-", "")
 
-	t.Run("canonical hyphenated form is rejected", func(t *testing.T) { //nolint:paralleltest // shared router/store state
+	t.Run("canonical hyphenated form is rejected", func(t *testing.T) {
+		t.Parallel()
+
 		w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grant-definitions", adminToken,
 			validCreateDefinitionBody("UUID slug canonical "+suffix, canonical))
 		require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 		require.Equal(t, "VALIDATION_ERROR", resp["code"])
 	})
 
-	t.Run("bare 32-hex-digit form is rejected", func(t *testing.T) { //nolint:paralleltest // shared router/store state
+	t.Run("bare 32-hex-digit form is rejected", func(t *testing.T) {
+		t.Parallel()
+
 		w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grant-definitions", adminToken,
 			validCreateDefinitionBody("UUID slug bare hex "+suffix, bareHex))
 		require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
@@ -140,7 +164,9 @@ func TestCreateGrantDefinition_RejectsUUIDShapedSlug(t *testing.T) { //nolint:pa
 	})
 }
 
-func TestCreateGrantRequest_BySlug(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestCreateGrantRequest_BySlug(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "cgrs"
 

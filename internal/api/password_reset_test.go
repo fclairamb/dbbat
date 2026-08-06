@@ -235,7 +235,6 @@ func createTestUser(t *testing.T, dataStore *store.Store, username, password str
 func loginUser(t *testing.T, server *Server, username, password string) string {
 	t.Helper()
 
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.POST("/api/v1/auth/login", server.handleLogin)
 
@@ -268,6 +267,8 @@ func loginUser(t *testing.T, server *Server, username, password string) string {
 }
 
 func TestResetPassword_SelfResetForbidden(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 
 	// Create an admin user
@@ -277,7 +278,6 @@ func TestResetPassword_SelfResetForbidden(t *testing.T) {
 	token := loginUser(t, server, "admin", "adminpassword123")
 
 	// Setup router with auth middleware
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 
 	// Add auth middleware that verifies the token
@@ -313,6 +313,8 @@ func TestResetPassword_SelfResetForbidden(t *testing.T) {
 }
 
 func TestResetPassword_AdminCanResetOtherUser(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 
 	// Create an admin user
@@ -325,7 +327,6 @@ func TestResetPassword_AdminCanResetOtherUser(t *testing.T) {
 	token := loginUser(t, server, "admin", "adminpassword123")
 
 	// Setup router with auth middleware
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(server.authMiddleware())
 	router.POST("/api/v1/users/:uid/reset-password", server.requireAdmin(), server.handleResetPassword)
@@ -371,6 +372,8 @@ func TestResetPassword_AdminCanResetOtherUser(t *testing.T) {
 }
 
 func TestResetPassword_NonAdminForbidden(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 
 	// Create a regular user (non-admin)
@@ -383,7 +386,6 @@ func TestResetPassword_NonAdminForbidden(t *testing.T) {
 	token := loginUser(t, server, "viewer", "viewerpassword123")
 
 	// Setup router with auth middleware
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(server.authMiddleware())
 	router.POST("/api/v1/users/:uid/reset-password", server.requireAdmin(), server.handleResetPassword)
@@ -407,6 +409,8 @@ func TestResetPassword_NonAdminForbidden(t *testing.T) {
 }
 
 func TestResetPassword_WeakPasswordRejected(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 
 	// Create an admin user
@@ -419,7 +423,6 @@ func TestResetPassword_WeakPasswordRejected(t *testing.T) {
 	token := loginUser(t, server, "admin", "adminpassword123")
 
 	// Setup router with auth middleware
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(server.authMiddleware())
 	router.POST("/api/v1/users/:uid/reset-password", server.requireAdmin(), server.handleResetPassword)
@@ -452,6 +455,8 @@ func TestResetPassword_WeakPasswordRejected(t *testing.T) {
 }
 
 func TestResetPassword_UserNotFound(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 
 	// Create an admin user
@@ -461,7 +466,6 @@ func TestResetPassword_UserNotFound(t *testing.T) {
 	token := loginUser(t, server, "admin", "adminpassword123")
 
 	// Setup router with auth middleware
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(server.authMiddleware())
 	router.POST("/api/v1/users/:uid/reset-password", server.requireAdmin(), server.handleResetPassword)

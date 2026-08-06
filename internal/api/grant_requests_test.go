@@ -69,7 +69,9 @@ func postGrantRequest(t *testing.T, router *gin.Engine, token string, body map[s
 	return w, resp
 }
 
-func TestCreateGrantRequest_AutoApproveYieldsActiveGrantInstantly(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestCreateGrantRequest_AutoApproveYieldsActiveGrantInstantly(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "cgra"
 
@@ -124,7 +126,9 @@ func TestCreateGrantRequest_AutoApproveYieldsActiveGrantInstantly(t *testing.T) 
 	require.True(t, sawApprovedAuto, "expected a grant_request.approved audit event marked via=auto_approve")
 }
 
-func TestCreateGrantRequest_NonAutoApproveStaysPending(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestCreateGrantRequest_NonAutoApproveStaysPending(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "cgrp"
 
@@ -147,7 +151,9 @@ func TestCreateGrantRequest_NonAutoApproveStaysPending(t *testing.T) { //nolint:
 	require.Nil(t, resp["resulting_grant_id"])
 }
 
-func TestCreateGrantRequest_AutoApproveRequiresJustification(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestCreateGrantRequest_AutoApproveRequiresJustification(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "cgrj"
 

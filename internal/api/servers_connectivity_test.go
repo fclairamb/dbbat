@@ -40,7 +40,9 @@ func closedTCPPort(t *testing.T) (string, int) {
 	return addr.IP.String(), addr.Port
 }
 
-func TestTestServerConnection_UnreachableTarget(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestTestServerConnection_UnreachableTarget(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	server.encryptionKey = dbTestEncryptionKey
 
@@ -74,7 +76,9 @@ func TestTestServerConnection_UnreachableTarget(t *testing.T) { //nolint:paralle
 	assert.NotContains(t, w.Body.String(), "s3cr3t-pg-password")
 }
 
-func TestTestServerConnection_UnreachableBastion(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestTestServerConnection_UnreachableBastion(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	server.encryptionKey = dbTestEncryptionKey
 
@@ -111,7 +115,9 @@ func TestTestServerConnection_UnreachableBastion(t *testing.T) { //nolint:parall
 	assert.NotContains(t, w.Body.String(), "PRIVATE KEY")
 }
 
-func TestTestServerConnection_NotFoundAndBadUID(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestTestServerConnection_NotFoundAndBadUID(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	server.encryptionKey = dbTestEncryptionKey
 
@@ -136,7 +142,9 @@ func TestTestServerConnection_NotFoundAndBadUID(t *testing.T) { //nolint:paralle
 	}
 }
 
-func TestTestServerConnection_NonAdminForbidden(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestTestServerConnection_NonAdminForbidden(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	server.encryptionKey = dbTestEncryptionKey
 

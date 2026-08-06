@@ -37,7 +37,9 @@ func createTestDBEntry(t *testing.T, dataStore *store.Store, name string, listab
 	return created
 }
 
-func TestListDatabases_AdminSeesAll(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestListDatabases_AdminSeesAll(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "lda"
 
@@ -85,7 +87,9 @@ func TestListDatabases_AdminSeesAll(t *testing.T) { //nolint:paralleltest // sha
 // (handleCreateDatabase), not store.CreateServer directly, to prove the
 // create path accepts protocol "mongodb". This case previously returned HTTP
 // 400 because isSupportedProtocol omitted store.ProtocolMongoDB.
-func TestCreateDatabase_MongoDBProtocol(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestCreateDatabase_MongoDBProtocol(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "mongo"
 
@@ -137,7 +141,9 @@ func TestCreateDatabase_MongoDBProtocol(t *testing.T) { //nolint:paralleltest //
 	assert.Equal(t, store.ProtocolMongoDB, found.Protocol)
 }
 
-func TestListDatabases_ConnectorSeesOnlyListable(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestListDatabases_ConnectorSeesOnlyListable(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "ldc"
 

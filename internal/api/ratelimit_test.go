@@ -116,7 +116,6 @@ func TestRateLimiter_Disabled(t *testing.T) {
 		Burst:                 2,
 	})
 
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(rl.Middleware())
 	router.GET("/test", func(c *gin.Context) {
@@ -145,7 +144,6 @@ func TestRateLimiter_PreAuthMiddleware(t *testing.T) {
 		Burst:                 0,
 	})
 
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(rl.PreAuthMiddleware())
 	router.GET("/test", func(c *gin.Context) {
@@ -195,7 +193,6 @@ func TestRateLimiter_PostAuthMiddleware_ExemptUser(t *testing.T) {
 		Burst:                 0,
 	})
 
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 
 	// Middleware to set up exempt user
@@ -234,7 +231,6 @@ func TestRateLimiter_ResponseFormat(t *testing.T) {
 		Burst:                 0,
 	})
 
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(rl.PreAuthMiddleware())
 	router.GET("/test", func(c *gin.Context) {
@@ -291,7 +287,6 @@ func TestRateLimiter_DifferentIPs(t *testing.T) {
 		Burst:                 0,
 	})
 
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(rl.PreAuthMiddleware())
 	router.GET("/test", func(c *gin.Context) {

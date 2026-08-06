@@ -141,7 +141,9 @@ func newParityTestServer(t *testing.T) *Server {
 
 // TestOpenAPIRouteParity fails when a registered route is missing from
 // openapi.yml, or when the spec documents a path that no route serves.
-func TestOpenAPIRouteParity(t *testing.T) { //nolint:paralleltest // shared database state
+func TestOpenAPIRouteParity(t *testing.T) {
+	t.Parallel()
+
 	doc := parseOpenAPISpec(t)
 	documented := specOperations(t, doc)
 

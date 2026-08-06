@@ -89,8 +89,6 @@ func newApprovalFixture(t *testing.T) *approvalFixture {
 func (f *approvalFixture) call(t *testing.T, user *store.User, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 
-	gin.SetMode(gin.TestMode)
-
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 
@@ -117,6 +115,8 @@ func (f *approvalFixture) call(t *testing.T, user *store.User, path, body string
 }
 
 func TestSelfApprovalIsRejectedEvenForAdmins(t *testing.T) {
+	t.Parallel()
+
 	f := newApprovalFixture(t)
 	ctx := context.Background()
 
@@ -154,6 +154,8 @@ func TestSelfApprovalIsRejectedEvenForAdmins(t *testing.T) {
 }
 
 func TestAdminApprovesSomebodyElsesQuery(t *testing.T) {
+	t.Parallel()
+
 	f := newApprovalFixture(t)
 	ctx := context.Background()
 
@@ -206,6 +208,8 @@ func TestAdminApprovesSomebodyElsesQuery(t *testing.T) {
 }
 
 func TestDenyRecordsTheReason(t *testing.T) {
+	t.Parallel()
+
 	f := newApprovalFixture(t)
 	ctx := context.Background()
 
@@ -229,6 +233,8 @@ func TestDenyRecordsTheReason(t *testing.T) {
 }
 
 func TestSecondDecisionConflicts(t *testing.T) {
+	t.Parallel()
+
 	f := newApprovalFixture(t)
 
 	if w := f.call(t, f.admin, "/api/v1/queries/x/approve", ""); w.Code != http.StatusOK {
@@ -242,6 +248,8 @@ func TestSecondDecisionConflicts(t *testing.T) {
 }
 
 func TestNonApproverIsRefused(t *testing.T) {
+	t.Parallel()
+
 	f := newApprovalFixture(t)
 	ctx := context.Background()
 
@@ -258,6 +266,8 @@ func TestNonApproverIsRefused(t *testing.T) {
 }
 
 func TestPendingListIsBackedByThePartialIndex(t *testing.T) {
+	t.Parallel()
+
 	f := newApprovalFixture(t)
 	ctx := context.Background()
 
@@ -291,6 +301,8 @@ func TestPendingListIsBackedByThePartialIndex(t *testing.T) {
 }
 
 func TestResolveQueryApprovalAsRejectsSelfApproval(t *testing.T) {
+	t.Parallel()
+
 	f := newApprovalFixture(t)
 	ctx := context.Background()
 
@@ -307,6 +319,8 @@ func TestResolveQueryApprovalAsRejectsSelfApproval(t *testing.T) {
 }
 
 func TestResolveUnknownQueryFails(t *testing.T) {
+	t.Parallel()
+
 	f := newApprovalFixture(t)
 
 	err := f.server.ResolveQueryApprovalAs(context.Background(), f.admin, uuid.New(), store.ApprovalApproved, "")
