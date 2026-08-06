@@ -33,6 +33,7 @@ import {
   type ServerRow,
   type UserRow,
 } from "./lib/api";
+import { normaliseTimeline } from "./lib/normalise";
 import { generateTraffic, seedUpstream } from "./lib/traffic";
 import { writeState } from "./state";
 
@@ -136,14 +137,18 @@ export default async function globalSetup(): Promise<void> {
   console.log("[showcase] generating proxy traffic");
   await generateTraffic();
 
+  // The traffic just ran at the real clock, and the demo history is dated from
+  // whatever UTC day this process started on. Restate both onto the fixed
+  // showcase epoch, so the pin below — a constant — is read against rows that
+  // are constants too, and a regenerated capture diffs cleanly.
+  console.log("[showcase] normalising the observability timeline");
+  await normaliseTimeline(serverUid);
+
   writeState({
     serverUid,
     definitionUid,
     connectorUid: userUid,
     grantUid,
-    // Pinned only now that every row this run created exists, so nothing
-    // renders in the future. The demo-seeded rows are absolute (main.go) and
-    // days old either way.
     fixedTime: fixedTime().toISOString(),
   });
 

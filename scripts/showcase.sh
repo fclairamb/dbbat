@@ -42,11 +42,10 @@ SHOWCASE_BINARY="${SHOWCASE_BINARY:-${REPO_ROOT}/dbbat}"
 # A throwaway key: this instance holds nothing but demo data.
 SHOWCASE_KEY="${SHOWCASE_KEY:-MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=}"
 
-# SHOWCASE_FIXED_TIME is intentionally NOT defaulted here. The browser clock
-# has to be pinned *after* this run's own rows exist (the server, the grant and
-# every query in the query list are created live by global-setup), otherwise
-# they render in the future ("in less than a minute"); global-setup therefore
-# reads the pin itself. Set it only to force a specific instant.
+# SHOWCASE_FIXED_TIME is not defaulted here: the pin is a constant derived from
+# SHOWCASE_EPOCH in front/showcase/config.ts, and global-setup reads it once the
+# scenario's own rows have been dated onto that same epoch. Set it only to force
+# a specific instant.
 export SHOWCASE_API_PORT SHOWCASE_PROXY_PORT SHOWCASE_PG_PORT \
        SHOWCASE_OUT SHOWCASE_WORK
 

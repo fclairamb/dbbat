@@ -57,27 +57,49 @@ Playwright's recorder captures the page rather than the compositor, so a real
 cursor never appears in the frame. Neither fakes a *result*: every line the
 pane prints came back from the real connection.
 
+Restated afterwards: *when* it all happened, and how long the statements took
+(`lib/normalise.ts`). The measured durations against a container on the same
+host come back as `0.0ms` — true, and not worth a screenshot. Those two are the
+only invented values anywhere in the captures.
+
 ## Determinism
+
+Regenerating the stills against an unchanged UI produces byte-identical PNGs.
+That is the bar, and everything below exists to hold it.
 
 - **Demo data.** Seeded at absolute dates: `demoEpoch()` in `main.go` dates
   every demo user, server, grant and history row from the start of the current
-  UTC day, so a demo instance renders the same dates on every start and those
-  rows never move under a capture.
+  UTC day, so those rows never move under a capture.
+- **Timeline.** `lib/normalise.ts`, run by `global-setup.ts` once the traffic
+  has been generated. The scenario is still produced for real — real API calls,
+  real statements through the proxy — and it is exactly that which used to
+  churn: a fresh `executed_at`, a freshly measured `duration_ms` and a fresh
+  UUIDv7 connection id every run, the last eight hex digits of which the query
+  list prints. So afterwards the run's own session and statements are pinned to
+  fixed offsets from `SHOWCASE_EPOCH`, the demo history is shifted wholesale
+  onto the same epoch (preserving its "4 hours ago" / "3 days ago" spread), and
+  every connection uid is reissued as a UUIDv7 derived from its now-fixed
+  connect time. `access_grants` is left alone: the video opens a live session
+  through the grant after the stills are done, and it has to stay valid at the
+  real clock.
 - **Clock.** `page.clock.setFixedTime()` — pins `Date.now()` without stopping
-  timers, so React Query and the watch panel's reconnect backoff still work.
-  The pin is read by `global-setup.ts` once the scenario is ready; it is the
-  run's own clock, not a constant, because the server, the grant and every
-  query in the query list are created live by this suite — a constant pin in
-  the past would render them "in 7 months". Override with
-  `SHOWCASE_FIXED_TIME`.
+  timers, so React Query and the watch panel's reconnect backoff still work. It
+  is a constant (`SHOWCASE_EPOCH` + 30s), which it can be because every row it
+  is read against is one too. Override with `SHOWCASE_FIXED_TIME`.
+- **Locale and zone.** `en-US`/`UTC`, pinned in `playwright.config.ts` rather
+  than inherited: the query-detail page prints an absolute `Executed …` line,
+  so a laptop in CEST and a CI runner in UTC would otherwise disagree.
+- **Auto-refresh.** Off for the stills (`fixtures.ts` seeds the toggle's
+  localStorage key). The countdown badge ticks on a real one-second interval
+  that the clock pin deliberately does not stop, so "Next: 9s" was however long
+  the page took to load. The video leaves it on.
 - **Geometry.** 1280×800 everywhere; `deviceScaleFactor: 2` for stills (so the
   PNGs are 2560×1600), `1` for video.
 - **Ordering.** One worker, serial, no retries.
 
-What is still not reproducible is what this suite creates itself: the absolute
-`Executed …` timestamp and the measured duration on `query-results.png` come
-from a query that really ran during the capture. See `specs/todos/` for the
-follow-up.
+Two things still move, both on purpose: the version string in the sidebar
+(`git describe`, so every commit changes it) and the approval video with its
+poster, which records a live hold and a wall-clock "held for Ns" counter.
 
 ## Environment variables
 
@@ -89,6 +111,8 @@ follow-up.
 | `SHOWCASE_SKIP_BUILD` | `0` | Reuse the existing `./dbbat` |
 | `SHOWCASE_SKIP_TRANSCODE` | `0` | Copy the raw WebM instead of encoding |
 | `SHOWCASE_KEEP` | `0` | Leave the stack running afterwards |
-| `SHOWCASE_FIXED_TIME` | *(auto)* | Force the pinned clock |
+| `SHOWCASE_EPOCH` | `2026-08-06T09:12:00Z` | Instant every rendered row is dated from |
+| `SHOWCASE_FIXED_TIME` | `SHOWCASE_EPOCH` + 30s | Force the pinned clock |
+| `SHOWCASE_STORAGE_DSN` | the instance's own `dbbat` DB | Where `lib/normalise.ts` restates the timeline |
 | `SHOWCASE_FREEZE_CLOCK` | *(auto)* | Force the pin on or off for both projects |
 | `SHOWCASE_FPS` | `22` | Transcode frame rate |

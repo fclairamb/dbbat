@@ -31,6 +31,12 @@ export default defineConfig({
   use: {
     baseURL: BASE_URL,
     viewport: VIEWPORT,
+    // Pinned, not inherited from the host: the query-detail page prints an
+    // absolute "Executed …" line, which Intl renders in the browser's locale
+    // and zone. Left to the machine, the same run would emit a different PNG
+    // on a laptop in CEST and on a CI runner in UTC.
+    timezoneId: "UTC",
+    locale: "en-US",
     trace: "retain-on-failure",
     // Screenshot/video capture is the *product* here, so the failure-capture
     // machinery stays off: it would litter the output directory.

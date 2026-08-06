@@ -23,10 +23,34 @@ export async function freezeClock(page: Page): Promise<void> {
   await page.clock.setFixedTime(new Date(readState().fixedTime));
 }
 
+/**
+ * Park the adaptive-refresh badge on a value that cannot tick.
+ *
+ * The observability pages count down to their next auto-refresh ("Next: 9s")
+ * on a real one-second setInterval. `clock.setFixedTime` pins Date.now() but
+ * deliberately leaves timers running, so the digit is however many seconds the
+ * page happened to take to load and settle — the last thing in a still that
+ * still moved between two runs. Freezing timers instead would take React's
+ * scheduler and every Radix transition down with it.
+ *
+ * So the stills capture the toggle in its off position, which is a real state
+ * of a real control rather than a frozen counter, and is stable by
+ * construction. The video never calls this: watching the UI keep up with a
+ * live session is the whole point of that one.
+ */
+async function disableAutoRefresh(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    for (const key of ["dbbat.autoRefresh.queries", "dbbat.autoRefresh.connections"]) {
+      localStorage.setItem(key, JSON.stringify({ enabled: false }));
+    }
+  });
+}
+
 export const test = base.extend<{ showcasePage: Page }>({
   showcasePage: async ({ page }, use) => {
     if (shouldFreezeClock("screenshot")) {
       await freezeClock(page);
+      await disableAutoRefresh(page);
     }
     // No fake cursor here: it is a video affordance. In a still it just leaves
     // an unexplained dot floating over the UI.
