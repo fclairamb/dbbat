@@ -534,10 +534,22 @@ export interface paths {
         get: operations["listGrants"];
         put?: never;
         /**
-         * Create access grant
-         * @description Creates a new access grant for a user to a database. Requires admin role.
+         * Assign an access grant
+         * @description Issues a grant to a user by instantiating a grant definition — the
+         *     admin-initiated equivalent of an approved grant request. Requires admin
+         *     role.
+         *
+         *     A grant carries no shape of its own: controls, quotas, approval
+         *     patterns and approver groups all come from the definition, and the
+         *     window's length is the definition's `duration_seconds`. There is
+         *     deliberately no way to describe an ad-hoc shape here.
+         *
+         *     The definition must be active, and its `database_uids` scope (when set)
+         *     must cover the target database. Its `group_uids` scope is *not*
+         *     enforced: that scope governs who may self-request the definition, and
+         *     an admin assigning access is the authority on who receives it.
          */
-        post: operations["createGrant"];
+        post: operations["assignGrant"];
         delete?: never;
         options?: never;
         head?: never;
@@ -692,10 +704,10 @@ export interface paths {
         put?: never;
         /**
          * Create grant definition (admin)
-         * @description Creates a new admin-managed grant definition. Definitions are templates
-         *     for the grant request workflow — users can request grants only by
-         *     picking an active definition. Direct admin grant creation
-         *     (`POST /grants`) bypasses definitions.
+         * @description Creates a new admin-managed grant definition. A definition is the shape
+         *     of a grant and the only source of one: users request access by picking
+         *     an active definition, and admins assign it directly with
+         *     `POST /grants`. There is no way to create a grant without a definition.
          */
         post: operations["createGrantDefinition"];
         delete?: never;
@@ -723,22 +735,40 @@ export interface paths {
         put?: never;
         post?: never;
         /**
-         * Deactivate grant definition (admin)
-         * @description Soft-deletes by flipping `is_active` to false. Definitions are not
-         *     hard-deleted because grant requests reference them and the audit
-         *     trail needs to stay intact.
+         * Deactivate (or delete) grant definition (admin)
+         * @description Deactivates the definition by flipping `is_active` to false across its
+         *     **whole version lineage**. This is a withdrawal and it **fails closed**:
+         *     every grant issued from any version stops authorising new connections
+         *     on its next authentication. The response reports how many active grants
+         *     that affected.
+         *
+         *     Pass `hard=true` to delete the definition and its version history
+         *     outright. That only ever succeeds for a definition nothing references:
+         *     a grant's shape lives on its definition, so deleting one out from under
+         *     a grant is refused with a 409 naming the blocking counts. Deactivation
+         *     is the operation for retiring a definition that has been used.
          */
         delete: operations["deactivateGrantDefinition"];
         options?: never;
         head?: never;
         /**
          * Update grant definition (admin)
-         * @description Partial update: only fields present in the body are changed (uid /
-         *     created_by / created_at / is_active always stay put). A field
-         *     omitted from the body is left untouched on the existing definition —
-         *     so a caller that only means to flip `auto_approve`, say, can send
-         *     just that field without risk of wiping the rest, notably
-         *     `approval_patterns` and `approver_group_uids`.
+         * @description Partial update: only fields present in the body are changed (created_by
+         *     / created_at / is_active always stay put). A field omitted from the
+         *     body is left untouched on the existing definition — so a caller that
+         *     only means to flip `auto_approve`, say, can send just that field
+         *     without risk of wiping the rest, notably `approval_patterns` and
+         *     `approver_group_uids`.
+         *
+         *     **An edit creates a new version.** The current row is archived
+         *     (`archived_at` set) and a successor carrying the change is inserted
+         *     with a new `uid` and the same `lineage_uid`; the response is that new
+         *     version. Grants already issued keep pointing at the version they were
+         *     issued from, so their behaviour never changes. An edit that changes
+         *     nothing is not versioned.
+         *
+         *     Editing an already-archived version is refused with a 409 — history is
+         *     immutable, and the caller means the live version.
          */
         patch: operations["updateGrantDefinition"];
         trace?: never;
@@ -1925,14 +1955,51 @@ export interface components {
             justification?: string;
         };
         /**
-         * @description Admin-managed template describing a *shape* of grant. Grant requests
-         *     (separate workflow) reference a definition; on approval a real
-         *     AccessGrant is built from the definition + the request's
-         *     user/database. Direct admin grant creation bypasses definitions.
+         * @description The *shape* of a grant, and the single source of truth for what an
+         *     access grant may do. Every grant is an instance of one — whether it
+         *     came from a user's grant request or from an admin assigning it
+         *     directly (`POST /grants`). Nothing creates a grant without one.
+         *
+         *     Definitions are **immutably versioned**: a `PATCH` archives the current
+         *     row and inserts a successor sharing its `lineage_uid`, and grants keep
+         *     pointing at the exact row they were issued from. Editing a definition
+         *     therefore never changes access that is already live; it changes what
+         *     gets issued from then on.
+         *
+         *     Two lifecycle states are deliberately distinct:
+         *
+         *     - **archived** (`archived_at` set): superseded by a later edit. Still
+         *       authorises the grants pinned to it — it was replaced, not withdrawn.
+         *       Never appears in listings; still readable by uid.
+         *     - **deactivated** (`is_active: false`): explicitly withdrawn, across
+         *       every version of the lineage. Fails closed at authentication time:
+         *       grants issued from any of its versions stop authorising new
+         *       connections.
          */
         GrantDefinition: {
             /** Format: uuid */
             uid: string;
+            /**
+             * Format: uuid
+             * @description Stable across every version of this definition (the first
+             *     version's own uid). Deactivation, reactivation and deletion act on
+             *     a lineage rather than a single version.
+             */
+            readonly lineage_uid?: string;
+            /**
+             * Format: date-time
+             * @description When a later edit superseded this version. `null` means this is the
+             *     live version — exactly one per lineage, enforced by a partial
+             *     unique index on the slug.
+             */
+            readonly archived_at?: string | null;
+            /**
+             * Format: int64
+             * @description How many grants across this definition's lineage are currently
+             *     authorising access. Populated on listings so the UI can tell an
+             *     operator what deactivating it would cut off before they confirm.
+             */
+            readonly active_grant_count?: number;
             name: string;
             /**
              * @description Stable, human-typeable, machine-friendly identifier — what a CLI
@@ -1942,7 +2009,11 @@ export interface components {
              *     from the name until the operator edits it manually). Accepted
              *     anywhere a definition uid is accepted: `GET/PATCH/DELETE
              *     /grant-definitions/{uid}` and `grant_definition_id` on
-             *     `POST /grant-requests`.
+             *     `POST /grant-requests` and `POST /grants`.
+             *
+             *     Unique among **live** versions only: archived versions keep the
+             *     slug they were created with, and resolving a slug always returns
+             *     the live version. Address a specific historical version by uid.
              *
              *     Must not be a UUID (in either the canonical hyphenated form or
              *     the bare 32-hex-digit form — both parse as one) — that would
@@ -1991,7 +2062,8 @@ export interface components {
              *     admin or an approver-group member approves it. An empty array means
              *     no approval gating. Validated (compiled) at save time, so a bad
              *     pattern is a 400 rather than a runtime surprise on the proxy hot
-             *     path. Mirrored onto every grant materialized from this definition.
+             *     path. Read from here by every grant issued from this definition —
+             *     grants do not copy them.
              */
             approval_patterns?: string[];
             /**
@@ -2000,7 +2072,13 @@ export interface components {
              *     admins only. Self-approval is always rejected.
              */
             approver_group_uids?: string[];
-            /** @description Soft-deleted definitions have is_active=false; they remain referenced by historical grant requests. */
+            /**
+             * @description `false` once an operator has deactivated the definition. This is a
+             *     withdrawal, not an archival: it applies to every version of the
+             *     lineage and makes grants issued from it stop authorising new
+             *     connections (fail closed). The rows themselves stay, since
+             *     historical grants and grant requests still reference them.
+             */
             readonly is_active: boolean;
             /** Format: uuid */
             readonly created_by: string;
@@ -2014,8 +2092,8 @@ export interface components {
              *     hyphens (e.g. `read-only-1h`). Never auto-generated by the
              *     server — the web UI derives it from the name until the operator
              *     edits it manually, but CLI/agent/scripted callers must supply
-             *     one explicitly. Must be unique across every definition, active
-             *     or not.
+             *     one explicitly. Must be unique among live definitions; archived
+             *     versions keep their slug and never conflict.
              *
              *     Must not be a UUID (canonical hyphenated or bare 32-hex-digit
              *     form) — rejected with 400 even though both forms are shaped like
@@ -2134,8 +2212,20 @@ export interface components {
              * @description Database UID
              */
             database_id: string;
-            /** @description List of controls applied. Empty array means full write access. */
-            controls: components["schemas"]["GrantControl"][];
+            /**
+             * Format: uuid
+             * @description The exact grant definition *version* this grant was issued from.
+             *     Definitions are immutably versioned — an edit archives the current
+             *     row and inserts a successor — so this pins the behaviour the grant
+             *     was issued with and no later edit can change it.
+             */
+            grant_definition_id: string;
+            /**
+             * @description The pinned definition, embedded on every grant read. This is where
+             *     the grant's controls, quotas, approval patterns and approver groups
+             *     live; the grant row itself has none of them.
+             */
+            definition?: components["schemas"]["GrantDefinition"];
             /**
              * Format: uuid
              * @description Admin who granted access
@@ -2162,36 +2252,14 @@ export interface components {
              */
             revoked_by?: string | null;
             /**
-             * @description RE2 patterns that suspend a matching statement until a second human
-             *     approves it. Mirrored from the grant definition at materialization
-             *     time (like controls and quotas) so the proxy never joins back to
-             *     the definition on the hot path — and so direct admin grants, which
-             *     bypass definitions entirely, can carry patterns too.
-             */
-            approval_patterns?: string[];
-            /**
-             * @description Groups whose members may resolve holds on this grant, in addition
-             *     to admins. Empty means admins only.
-             */
-            approver_group_uids?: string[];
-            /**
-             * Format: int64
-             * @description Maximum queries allowed (quota)
-             */
-            max_query_counts?: number | null;
-            /**
-             * Format: int64
-             * @description Maximum bytes transferred (quota)
-             */
-            max_bytes_transferred?: number | null;
-            /**
              * Format: int32
              * @description Ranks this grant against the other active grants the same user
              *     holds on the same database. A new session is admitted under the
              *     highest-priority active grant; ties break on the latest
              *     `expires_at`, then the newest `created_at`.
              *
-             *     Auto-calculated from `controls` unless an admin overrode it:
+             *     Auto-calculated from the definition's `controls` unless the
+             *     definition pins a `priority` of its own:
              *
              *     | grant shape | priority |
              *     |---|---|
@@ -2222,7 +2290,20 @@ export interface components {
              */
             created_at: string;
         };
-        CreateGrantRequest: {
+        /**
+         * @description Body for `POST /grants`. A grant is an instance of a grant definition
+         *     and nothing else — there is deliberately no way to describe controls,
+         *     quotas or approval gating here. Those live on the definition, which is
+         *     what makes definitions trustworthy as the policy source of truth.
+         */
+        AssignGrantRequest: {
+            /**
+             * @description The definition to instantiate — its uid or its slug. A slug always
+             *     resolves to the live version; naming an archived version by uid
+             *     still issues the live one, since an edit exists precisely to change
+             *     what gets issued from then on.
+             */
+            grant_definition_id: string;
             /**
              * Format: uuid
              * @description User UID
@@ -2234,52 +2315,20 @@ export interface components {
              */
             database_id: string;
             /**
-             * @description List of controls to apply. Empty array means full write access.
-             * @default []
-             */
-            controls: components["schemas"]["GrantControl"][];
-            /**
              * Format: date-time
-             * @description When access starts
+             * @description When access starts. Defaults to now. The window's *length* is the
+             *     definition's `duration_seconds` and cannot be overridden here.
              */
-            starts_at: string;
-            /**
-             * Format: date-time
-             * @description When access expires (must be after starts_at)
-             */
-            expires_at: string;
+            starts_at?: string;
+        };
+        DeactivateGrantDefinitionResponse: {
+            message: string;
             /**
              * Format: int64
-             * @description Maximum queries allowed (quota)
+             * @description How many currently-active grants the deactivation failed closed.
+             *     Absent on a hard delete, which by definition affected none.
              */
-            max_query_counts?: number;
-            /**
-             * Format: int64
-             * @description Maximum bytes transferred (quota)
-             */
-            max_bytes_transferred?: number;
-            /**
-             * @description RE2 patterns that suspend a matching statement until a second human
-             *     approves it. Admin grants bypass definitions entirely, so this is
-             *     the only way to put four-eyes gating on one.
-             */
-            approval_patterns?: string[];
-            /**
-             * @description Groups whose members may resolve holds on this grant, in addition
-             *     to admins. Empty means admins only.
-             */
-            approver_group_uids?: string[];
-            /**
-             * Format: int32
-             * @description Optional override for the grant's selection priority among the
-             *     user's other active grants on the same database. Omit (or send
-             *     `null`) to let it be derived from `controls` — 100 for a
-             *     control-free writable grant, 50 for a writable one with controls,
-             *     10 for `read_only`. Supply a value only to deliberately overrule
-             *     that tiering, e.g. `75` to rank a restricted-write grant above
-             *     its tier without beating full write access.
-             */
-            priority?: number | null;
+            affected_grants?: number;
         };
         APIKey: {
             /**
@@ -2478,7 +2527,7 @@ export interface components {
              * @description Grant identifier — links to the Grants page.
              */
             uid: string;
-            /** @description List of controls applied. Empty array means full write access. */
+            /** @description The controls this session ran under, read from the grant's pinned definition. Empty array means full write access. */
             controls: components["schemas"]["GrantControl"][];
             /**
              * Format: date-time
@@ -2497,6 +2546,15 @@ export interface components {
              * @description This grant's selection rank — see AccessGrant.priority for the full explanation.
              */
             priority: number;
+            /**
+             * Format: uuid
+             * @description The definition version the grant was issued from — links to the policy.
+             */
+            grant_definition_id: string;
+            grant_definition_name?: string;
+            grant_definition_slug?: string;
+            /** @description False once the definition was deactivated, which is why a grant that still looks in-window may no longer authorise a connection. */
+            grant_definition_is_active?: boolean;
         };
         /** @description Whether a raw pcapng session capture is available for download via `GET /connections/{uid}/dump`, and its size. `available: false` covers both "captures are disabled server-wide" (no `DBB_DUMP_DIR`) and "no capture exists — or no longer exists — for this connection". */
         DumpMetadata: {
@@ -2911,7 +2969,8 @@ export type GrantDefinition = components['schemas']['GrantDefinition'];
 export type CreateGrantDefinitionRequest = components['schemas']['CreateGrantDefinitionRequest'];
 export type UpdateGrantDefinitionRequest = components['schemas']['UpdateGrantDefinitionRequest'];
 export type AccessGrant = components['schemas']['AccessGrant'];
-export type CreateGrantRequest = components['schemas']['CreateGrantRequest'];
+export type AssignGrantRequest = components['schemas']['AssignGrantRequest'];
+export type DeactivateGrantDefinitionResponse = components['schemas']['DeactivateGrantDefinitionResponse'];
 export type ApiKey = components['schemas']['APIKey'];
 export type CreateApiKeyRequest = components['schemas']['CreateAPIKeyRequest'];
 export type CreateApiKeyResponse = components['schemas']['CreateAPIKeyResponse'];
@@ -3822,7 +3881,7 @@ export interface operations {
             500: components["responses"]["InternalError"];
         };
     };
-    createGrant: {
+    assignGrant: {
         parameters: {
             query?: never;
             header?: never;
@@ -3831,11 +3890,11 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateGrantRequest"];
+                "application/json": components["schemas"]["AssignGrantRequest"];
             };
         };
         responses: {
-            /** @description Grant created successfully */
+            /** @description Grant assigned successfully */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -4208,7 +4267,10 @@ export interface operations {
     };
     deactivateGrantDefinition: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Delete the definition instead of deactivating it. Refused with 409 if anything references it. */
+                hard?: boolean;
+            };
             header?: never;
             path: {
                 /**
@@ -4222,18 +4284,19 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Definition deactivated */
+            /** @description Definition deactivated (or deleted) */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["MessageResponse"];
+                    "application/json": components["schemas"]["DeactivateGrantDefinitionResponse"];
                 };
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
         };
     };
     updateGrantDefinition: {

@@ -115,8 +115,12 @@ function GrantDefinitionsPage() {
     useState<GrantDefinition | null>(null);
 
   const deactivate = useDeactivateGrantDefinition({
-    onSuccess: () => {
-      toast.success("Definition deactivated");
+    onSuccess: (affectedGrants) => {
+      toast.success(
+        affectedGrants > 0
+          ? `Definition deactivated — ${affectedGrants} grant${affectedGrants === 1 ? "" : "s"} no longer authorise access`
+          : "Definition deactivated"
+      );
       setDeactivating(null);
     },
     onError: (e) => toast.error(e.message),
@@ -381,9 +385,25 @@ function GrantDefinitionsPage() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Deactivate definition?</AlertDialogTitle>
-            <AlertDialogDescription>
-              "{deactivating?.name}" will no longer appear in the request UI.
-              Existing grants and pending requests are unaffected.
+            <AlertDialogDescription data-testid="deactivate-definition-warning">
+              "{deactivating?.name}" will no longer appear in the request UI,
+              and it can no longer be assigned.
+              {(deactivating?.active_grant_count ?? 0) > 0 ? (
+                <>
+                  {" "}
+                  <strong>
+                    {deactivating?.active_grant_count} active grant
+                    {deactivating?.active_grant_count === 1 ? "" : "s"} will
+                    stop working:
+                  </strong>{" "}
+                  a grant reads its controls, quotas and approval rules from
+                  this definition, so deactivating it fails those grants closed
+                  on their next connection. Existing sessions keep running until
+                  they reconnect.
+                </>
+              ) : (
+                " No grant is currently issued from it."
+              )}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -629,9 +649,18 @@ function DefinitionDialog({
           <DialogTitle>
             {editing ? "Edit definition" : "New definition"}
           </DialogTitle>
-          <DialogDescription>
-            Definitions are templates for the grant request workflow. Users will
-            request grants by picking one.
+          <DialogDescription data-testid="definition-dialog-description">
+            A definition is the shape of a grant, and the only source of one:
+            users request access by picking a definition, and admins assign it
+            directly.
+            {editing && (
+              <>
+                {" "}
+                Saving creates a <strong>new version</strong> — grants already
+                issued keep the version they were issued from, so their access
+                does not change.
+              </>
+            )}
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-4 max-h-[60vh] overflow-y-auto">

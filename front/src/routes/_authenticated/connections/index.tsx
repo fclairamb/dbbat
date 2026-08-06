@@ -77,8 +77,12 @@ function ConnectionsPage() {
     return db && "host" in db ? db.protocol : undefined;
   };
 
+  // Controls live on the definition the grant was issued from, not on the
+  // grant row.
   const getGrantControls = (grantUid: string | null | undefined) =>
-    grantUid ? grants?.find((g) => g.uid === grantUid)?.controls : undefined;
+    grantUid
+      ? grants?.find((g) => g.uid === grantUid)?.definition?.controls
+      : undefined;
 
   const filteredConnections = active
     ? connections?.filter((c) => !c.disconnected_at)

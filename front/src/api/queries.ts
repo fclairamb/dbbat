@@ -17,7 +17,7 @@ export type CreateDatabaseRequest =
 export type UpdateDatabaseRequest =
   components["schemas"]["UpdateDatabaseRequest"];
 export type AccessGrant = components["schemas"]["AccessGrant"];
-export type CreateGrantRequest = components["schemas"]["CreateGrantRequest"];
+export type AssignGrantRequest = components["schemas"]["AssignGrantRequest"];
 export type GrantDefinition = components["schemas"]["GrantDefinition"];
 export type CreateGrantDefinitionRequest =
   components["schemas"]["CreateGrantDefinitionRequest"];
@@ -381,19 +381,24 @@ export function useGrant(uid: string) {
   });
 }
 
-export function useCreateGrant(options?: {
+/**
+ * Issues a grant by instantiating a grant definition. There is no ad-hoc grant
+ * creation any more: the shape (controls, quotas, approval gating) and the
+ * window's length all come from the definition.
+ */
+export function useAssignGrant(options?: {
   onSuccess?: (grant: AccessGrant) => void;
   onError?: (error: Error) => void;
 }) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (data: CreateGrantRequest): Promise<AccessGrant> => {
+    mutationFn: async (data: AssignGrantRequest): Promise<AccessGrant> => {
       const response = await apiClient.POST("/grants", {
         body: data,
       });
       if (response.error || !response.data) {
-        throw new Error(response.error?.message || "Failed to create grant");
+        throw new Error(response.error?.message || "Failed to assign grant");
       }
       return response.data;
     },
@@ -607,14 +612,19 @@ export function useUpdateGrantDefinition(options?: {
   });
 }
 
+/**
+ * Deactivates a grant definition across its whole version lineage. This fails
+ * closed: every grant issued from it stops authorising new connections, and
+ * the response says how many that was.
+ */
 export function useDeactivateGrantDefinition(options?: {
-  onSuccess?: () => void;
+  onSuccess?: (affectedGrants: number) => void;
   onError?: (error: Error) => void;
 }) {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async (uid: string): Promise<void> => {
+    mutationFn: async (uid: string): Promise<number> => {
       const response = await apiClient.DELETE("/grant-definitions/{uid}", {
         params: { path: { uid } },
       });
@@ -623,10 +633,14 @@ export function useDeactivateGrantDefinition(options?: {
           response.error.message || "Failed to deactivate grant definition"
         );
       }
+      return response.data?.affected_grants ?? 0;
     },
-    onSuccess: () => {
+    onSuccess: (affectedGrants) => {
       queryClient.invalidateQueries({ queryKey: ["grant-definitions"] });
-      options?.onSuccess?.();
+      // A definition edit versions the row, and deactivation reaches every
+      // grant issued from it, so the grants list is stale either way.
+      queryClient.invalidateQueries({ queryKey: ["grants"] });
+      options?.onSuccess?.(affectedGrants);
     },
     onError: options?.onError,
   });

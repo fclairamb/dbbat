@@ -1,12 +1,14 @@
-import { useCallback, useRef, useState } from "react";
-import { createFileRoute } from "@tanstack/react-router";
+import { useCallback, useMemo, useRef, useState } from "react";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import {
   useGrants,
   useUsers,
   useDatabases,
-  useCreateGrant,
+  useGrantDefinitions,
+  useAssignGrant,
   useRevokeGrant,
   type AccessGrant,
+  type GrantDefinition,
 } from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -50,7 +52,6 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   Tooltip,
   TooltipContent,
@@ -61,14 +62,6 @@ import { toast } from "sonner";
 import { formatDateTimeLocal, formatDateTime } from "@/lib/date-utils";
 import { UsageMeter } from "@/components/shared/UsageMeter";
 import { formatBytes } from "@/lib/utils";
-import { autoPriority } from "@/lib/grant-priority";
-
-// Control options with descriptions
-const CONTROLS = [
-  { value: "read_only", label: "Read Only", description: "Enable PostgreSQL read-only mode" },
-  { value: "block_copy", label: "Block COPY", description: "Prevent COPY commands (data export/import)" },
-  { value: "block_ddl", label: "Block DDL", description: "Prevent schema modifications (CREATE, ALTER, DROP)" },
-] as const;
 
 // Helper to format control names for display
 function formatControlName(control: string): string {
@@ -111,7 +104,7 @@ function GrantsPage() {
   const { data: grants, isLoading, refetch } = useGrants({ active_only: activeOnly });
   const { data: users } = useUsers();
   const { data: databases } = useDatabases();
-  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [isAssignOpen, setIsAssignOpen] = useState(false);
   const [revokeGrant, setRevokeGrant] = useState<AccessGrant | null>(null);
 
   const previousSignatureRef = useRef<string | null>(null);
@@ -167,10 +160,30 @@ function GrantsPage() {
       ),
     },
     {
+      key: "definition",
+      header: "Definition",
+      cell: (g) => (
+        <div className="space-y-1" data-testid={`grant-definition-${g.uid}`}>
+          <Link
+            to="/grant-definitions"
+            className="font-medium hover:underline"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {g.definition?.name ?? "—"}
+          </Link>
+          {g.definition && !g.definition.is_active && (
+            <Badge variant="destructive">Deactivated</Badge>
+          )}
+        </div>
+      ),
+    },
+    {
       key: "controls",
       header: "Controls",
       cell: (g) => {
-        const controls = g.controls || [];
+        // The shape lives on the definition the grant was issued from; the
+        // grant row itself carries none of it.
+        const controls = g.definition?.controls ?? [];
         if (controls.length === 0) {
           return <Badge variant="default">Full Access</Badge>;
         }
@@ -238,12 +251,12 @@ function GrantsPage() {
         <div className="space-y-2" data-testid={`grant-usage-${g.uid}`}>
           <UsageMeter
             used={g.query_count ?? 0}
-            limit={g.max_query_counts}
+            limit={g.definition?.max_query_counts}
             unit="queries"
           />
           <UsageMeter
             used={g.bytes_transferred ?? 0}
-            limit={g.max_bytes_transferred}
+            limit={g.definition?.max_bytes_transferred}
             format={formatBytes}
           />
         </div>
@@ -276,7 +289,7 @@ function GrantsPage() {
     <div className="space-y-6">
       <PageHeader
         title="Grants"
-        description="Manage database access grants"
+        description="Database access, issued from grant definitions"
         actions={
           <div className="flex items-center gap-4">
             <AdaptiveRefresh
@@ -291,22 +304,23 @@ function GrantsPage() {
               />
               <Label htmlFor="activeOnly">Active only</Label>
             </div>
-            <Dialog open={isCreateOpen} onOpenChange={setIsCreateOpen}>
+            <Dialog open={isAssignOpen} onOpenChange={setIsAssignOpen}>
               <DialogTrigger asChild>
                 <PermissionButton
                   disabled={!canCreate}
                   disabledReason={getDisabledReason("create-grant", user?.roles)}
                   enabledTooltip={getActionTooltip("create-grant")}
+                  data-testid="assign-grant-button"
                 >
                   <Plus className="mr-2 h-4 w-4" />
-                  Create Grant
+                  Assign Grant
                 </PermissionButton>
               </DialogTrigger>
-              {isCreateOpen && (
-                <CreateGrantDialog
+              {isAssignOpen && (
+                <AssignGrantDialog
                   users={users ?? []}
                   databases={databases ?? []}
-                  onClose={() => setIsCreateOpen(false)}
+                  onClose={() => setIsAssignOpen(false)}
                 />
               )}
             </Dialog>
@@ -332,7 +346,14 @@ function GrantsPage() {
   );
 }
 
-function CreateGrantDialog({
+/**
+ * AssignGrantDialog replaced the old "Create Grant" form. An admin no longer
+ * invents a grant's shape here: they pick a definition, and the controls,
+ * quotas, approval gating and duration all come from it. That is what makes a
+ * definition trustworthy as the policy source of truth — no grant can be an
+ * unauditable one-off.
+ */
+function AssignGrantDialog({
   users,
   databases,
   onClose,
@@ -341,44 +362,34 @@ function CreateGrantDialog({
   databases: { uid: string; name: string }[];
   onClose: () => void;
 }) {
+  const { data: definitions } = useGrantDefinitions({ active_only: true });
+  const [definitionUid, setDefinitionUid] = useState("");
   const [userId, setUserId] = useState("");
   const [databaseId, setDatabaseId] = useState("");
-  const [controls, setControls] = useState<string[]>([]);
   const [startsAt, setStartsAt] = useState(() => {
     const now = new Date();
     now.setSeconds(0, 0);
     return formatDateTimeLocal(now);
   });
-  const [expiresAt, setExpiresAt] = useState(() => {
-    const future = new Date(Date.now() + 2 * 60 * 60 * 1000); // 2 hours default
-    future.setSeconds(0, 0);
-    return formatDateTimeLocal(future);
-  });
-  const [maxQueries, setMaxQueries] = useState<string>("");
-  const [maxBytesValue, setMaxBytesValue] = useState<string>("");
-  const [bytesUnit, setBytesUnit] = useState<"KB" | "MB" | "GB">("MB");
-  // "Linked until touched": the priority tracks the selected controls as the
-  // admin toggles them, right up until they type in the field themselves — at
-  // which point it's theirs. Same behavior as the slug field on grant
-  // definitions.
-  const [priority, setPriority] = useState<string>(() =>
-    String(autoPriority([]))
+
+  const definition: GrantDefinition | undefined = useMemo(
+    () => definitions?.find((d) => d.uid === definitionUid),
+    [definitions, definitionUid],
   );
-  const [priorityTouched, setPriorityTouched] = useState(false);
 
-  const computedPriority = autoPriority(controls);
+  // A definition scoped to specific databases can only be assigned against
+  // those — the server enforces it, so the picker shouldn't offer the rest.
+  const selectableDatabases = useMemo(() => {
+    const scope = definition?.database_uids ?? [];
+    if (scope.length === 0) return databases;
+    return databases.filter((d) => scope.includes(d.uid));
+  }, [databases, definition]);
 
-  // Compute duration and validation
-  const startsAtDate = new Date(startsAt);
-  const expiresAtDate = new Date(expiresAt);
-  const now = new Date();
-  const effectiveStart = startsAtDate > now ? startsAtDate : now;
-  const durationMs = expiresAtDate.getTime() - effectiveStart.getTime();
-  const isValidTimeRange = expiresAtDate > startsAtDate;
+  const durationMs = (definition?.duration_seconds ?? 0) * 1000;
 
-  const createGrant = useCreateGrant({
+  const assignGrant = useAssignGrant({
     onSuccess: () => {
-      toast.success("Grant created successfully");
+      toast.success("Grant assigned successfully");
       onClose();
     },
     onError: (error) => {
@@ -389,60 +400,97 @@ function CreateGrantDialog({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
-    // Convert bytes unit to actual bytes
-    const unitMultiplier =
-      bytesUnit === "GB"
-        ? 1024 * 1024 * 1024
-        : bytesUnit === "MB"
-          ? 1024 * 1024
-          : 1024; // KB
-    const maxBytesTransferred = maxBytesValue
-      ? parseInt(maxBytesValue) * unitMultiplier
-      : undefined;
-
-    createGrant.mutate({
+    assignGrant.mutate({
+      grant_definition_id: definitionUid,
       user_id: userId,
       database_id: databaseId,
-      controls: controls as ("read_only" | "block_copy" | "block_ddl")[],
       starts_at: new Date(startsAt).toISOString(),
-      expires_at: new Date(expiresAt).toISOString(),
-      max_query_counts: maxQueries ? parseInt(maxQueries) : undefined,
-      max_bytes_transferred: maxBytesTransferred,
-      // An untouched field is exactly what the server would compute anyway;
-      // sending it keeps the request an honest record of what the admin saw.
-      // A cleared field falls back to the server-side auto value.
-      priority: priority === "" ? undefined : parseInt(priority),
-    });
-  };
-
-  const toggleControl = (controlValue: string) => {
-    setControls((prev) => {
-      const next = prev.includes(controlValue)
-        ? prev.filter((c) => c !== controlValue)
-        : [...prev, controlValue];
-
-      if (!priorityTouched) {
-        setPriority(String(autoPriority(next)));
-      }
-
-      return next;
     });
   };
 
   return (
-    <DialogContent>
+    <DialogContent data-testid="assign-grant-dialog">
       <form onSubmit={handleSubmit}>
         <DialogHeader>
-          <DialogTitle>Create Grant</DialogTitle>
+          <DialogTitle>Assign Grant</DialogTitle>
           <DialogDescription>
-            Grant a user access to a database.
+            Give a user access to a database by issuing a grant definition. The
+            definition decides what the access can do and how long it lasts.
           </DialogDescription>
         </DialogHeader>
         <div className="space-y-4 py-4">
           <div className="space-y-2">
+            <Label htmlFor="definition">Grant definition</Label>
+            <Select
+              value={definitionUid}
+              onValueChange={(value) => {
+                setDefinitionUid(value);
+                setDatabaseId("");
+              }}
+              required
+            >
+              <SelectTrigger data-testid="assign-grant-definition">
+                <SelectValue placeholder="Select a grant definition" />
+              </SelectTrigger>
+              <SelectContent>
+                {(definitions ?? []).map((d) => (
+                  <SelectItem key={d.uid} value={d.uid}>
+                    {d.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {definitions?.length === 0 && (
+              <p className="text-sm text-muted-foreground">
+                No active grant definitions yet — create one first; grants can
+                only be issued from a definition.
+              </p>
+            )}
+          </div>
+
+          {definition && (
+            <div
+              className="rounded-md border p-3 space-y-2 text-sm"
+              data-testid="assign-grant-shape"
+            >
+              <div className="flex flex-wrap items-center gap-1">
+                <span className="text-muted-foreground">Controls:</span>
+                {(definition.controls ?? []).length === 0 ? (
+                  <Badge variant="default">Full Access</Badge>
+                ) : (
+                  definition.controls.map((control) => (
+                    <Badge key={control} variant="secondary">
+                      {formatControlName(control)}
+                    </Badge>
+                  ))
+                )}
+              </div>
+              <div className="text-muted-foreground">
+                Duration: {formatDuration(durationMs)}
+              </div>
+              <div className="text-muted-foreground">
+                Quotas:{" "}
+                {definition.max_query_counts
+                  ? `${definition.max_query_counts} queries`
+                  : "unlimited queries"}
+                {", "}
+                {definition.max_bytes_transferred
+                  ? formatBytes(definition.max_bytes_transferred)
+                  : "unlimited transfer"}
+              </div>
+              {(definition.approval_patterns?.length ?? 0) > 0 && (
+                <div className="text-muted-foreground">
+                  Approval holds: {definition.approval_patterns?.length} pattern
+                  {definition.approval_patterns?.length !== 1 ? "s" : ""}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="space-y-2">
             <Label htmlFor="user">User</Label>
             <Select value={userId} onValueChange={setUserId} required>
-              <SelectTrigger>
+              <SelectTrigger data-testid="assign-grant-user">
                 <SelectValue placeholder="Select user" />
               </SelectTrigger>
               <SelectContent>
@@ -457,166 +505,36 @@ function CreateGrantDialog({
           <div className="space-y-2">
             <Label htmlFor="database">Database</Label>
             <Select value={databaseId} onValueChange={setDatabaseId} required>
-              <SelectTrigger>
+              <SelectTrigger data-testid="assign-grant-database">
                 <SelectValue placeholder="Select database" />
               </SelectTrigger>
               <SelectContent>
-                {databases.map((d) => (
+                {selectableDatabases.map((d) => (
                   <SelectItem key={d.uid} value={d.uid}>
                     {d.name}
                   </SelectItem>
                 ))}
               </SelectContent>
             </Select>
-          </div>
-          <div className="space-y-3">
-            <Label>Access Controls</Label>
-            <p className="text-sm text-muted-foreground">
-              Select restrictions to apply. No selections = full write access.
-            </p>
-            <div className="space-y-2">
-              {CONTROLS.map((control) => (
-                <div key={control.value} className="flex items-start space-x-3">
-                  <Checkbox
-                    id={control.value}
-                    checked={controls.includes(control.value)}
-                    onCheckedChange={() => toggleControl(control.value)}
-                  />
-                  <div className="grid gap-0.5 leading-none">
-                    <Label
-                      htmlFor={control.value}
-                      className="text-sm font-medium cursor-pointer"
-                    >
-                      {control.label}
-                    </Label>
-                    <p className="text-xs text-muted-foreground">
-                      {control.description}
-                    </p>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-          <div className="space-y-2">
-            <Label htmlFor="priority">Priority</Label>
-            <p className="text-sm text-muted-foreground">
-              When this user holds several active grants on the same database,
-              a new session is admitted under the highest priority one. Derived
-              from the controls above until you edit it.
-            </p>
-            <div className="flex items-center gap-2">
-              <Input
-                id="priority"
-                type="number"
-                min="-32768"
-                max="32767"
-                value={priority}
-                onChange={(e) => {
-                  setPriority(e.target.value);
-                  setPriorityTouched(true);
-                }}
-                className="flex-1"
-                data-testid="grant-priority-input"
-              />
-              {priorityTouched && (
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    setPriority(String(computedPriority));
-                    setPriorityTouched(false);
-                  }}
-                  data-testid="grant-priority-reset"
-                >
-                  Reset
-                </Button>
-              )}
-            </div>
-            <p
-              className="text-xs text-muted-foreground"
-              data-testid="grant-priority-auto-hint"
-            >
-              auto: {computedPriority}
-            </p>
-          </div>
-          <div className="space-y-3">
-            <Label>Quotas (Optional)</Label>
-            <p className="text-sm text-muted-foreground">
-              Set limits on usage. Leave empty for unlimited.
-            </p>
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="maxQueries">Max Queries</Label>
-                <Input
-                  id="maxQueries"
-                  type="number"
-                  min="1"
-                  placeholder="Unlimited"
-                  value={maxQueries}
-                  onChange={(e) => setMaxQueries(e.target.value)}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="maxBytes">Max Data Transfer</Label>
-                <div className="flex gap-2">
-                  <Input
-                    id="maxBytes"
-                    type="number"
-                    min="1"
-                    placeholder="Unlimited"
-                    value={maxBytesValue}
-                    onChange={(e) => setMaxBytesValue(e.target.value)}
-                    className="flex-1"
-                  />
-                  <Select value={bytesUnit} onValueChange={(v) => setBytesUnit(v as "KB" | "MB" | "GB")}>
-                    <SelectTrigger className="w-20" data-testid="grant-bytes-unit">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="KB">KB</SelectItem>
-                      <SelectItem value="MB">MB</SelectItem>
-                      <SelectItem value="GB">GB</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-            </div>
-          </div>
-          <div className="space-y-3">
-            <div className="grid grid-cols-2 gap-4">
-              <div className="space-y-2">
-                <Label htmlFor="startsAt">Start Date & Time</Label>
-                <Input
-                  id="startsAt"
-                  type="datetime-local"
-                  value={startsAt}
-                  onChange={(e) => setStartsAt(e.target.value)}
-                  required
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="expiresAt">Expiration Date & Time</Label>
-                <Input
-                  id="expiresAt"
-                  type="datetime-local"
-                  value={expiresAt}
-                  min={startsAt}
-                  onChange={(e) => setExpiresAt(e.target.value)}
-                  required
-                  className={!isValidTimeRange ? "border-destructive" : ""}
-                />
-              </div>
-            </div>
-            {!isValidTimeRange ? (
-              <p className="text-sm text-destructive">
-                Expiration must be after start time
-              </p>
-            ) : (
-              <p className="text-sm text-muted-foreground">
-                Duration: {formatDuration(durationMs)}
+            {definition && (definition.database_uids ?? []).length > 0 && (
+              <p className="text-xs text-muted-foreground">
+                This definition is scoped to specific databases.
               </p>
             )}
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="startsAt">Start Date &amp; Time</Label>
+            <Input
+              id="startsAt"
+              type="datetime-local"
+              value={startsAt}
+              onChange={(e) => setStartsAt(e.target.value)}
+              required
+            />
+            <p className="text-xs text-muted-foreground">
+              The grant expires {formatDuration(durationMs)} after it starts —
+              that length comes from the definition.
+            </p>
           </div>
         </div>
         <DialogFooter>
@@ -625,9 +543,12 @@ function CreateGrantDialog({
           </Button>
           <Button
             type="submit"
-            disabled={createGrant.isPending || !userId || !databaseId || !isValidTimeRange}
+            disabled={
+              assignGrant.isPending || !definitionUid || !userId || !databaseId
+            }
+            data-testid="assign-grant-submit"
           >
-            Create
+            Assign
           </Button>
         </DialogFooter>
       </form>

@@ -67,7 +67,7 @@ export const getDisabledReason = (action: string, _roles?: string[]): string => 
   const roleMessages: Record<string, string> = {
     'create-user': 'Only administrators can create users',
     'create-database': 'Only administrators can create databases',
-    'create-grant': 'Only administrators can create grants',
+    'create-grant': 'Only administrators can assign grants',
     'create-api-key': 'Viewers cannot create API keys',
     'revoke-grant': 'Only administrators can revoke grants',
     'revoke-api-key': 'Viewers cannot revoke API keys',
@@ -88,7 +88,7 @@ export const getActionTooltip = (action: string): string => {
   const actionMessages: Record<string, string> = {
     'create-user': 'Create a new user',
     'create-database': 'Add a new database configuration',
-    'create-grant': 'Grant database access to a user',
+    'create-grant': 'Assign a grant definition to a user and database',
     'create-api-key': 'Create a new API key',
     'revoke-grant': 'Revoke this grant',
     'revoke-api-key': 'Revoke this API key',
