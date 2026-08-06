@@ -157,7 +157,8 @@ func (c *testClient) prelogin(t *testing.T, encryption byte, mars bool) *prelogi
 
 	msgType, payload, err := c.pkt.ReadMessage()
 	require.NoError(t, err)
-	require.Equal(t, packetTypePrelogin, msgType)
+	require.Equal(t, packetTypeReply, msgType,
+		"the PRELOGIN response is a Tabular Result packet, not a PRELOGIN one")
 
 	resp, err := parsePrelogin(payload)
 	require.NoError(t, err)

@@ -143,7 +143,11 @@ func (s *session) handlePrelogin(ctx context.Context, client *preloginMessage) e
 	response, mode, negotiateErr := negotiateEncryption(client.Encryption(), s.server.tlsConfig != nil)
 	s.encryption = mode
 
-	if err := s.pkt.WriteMessage(packetTypePrelogin, buildPreloginResponse(client, response).serialize()); err != nil {
+	// The PRELOGIN *response* is a Tabular Result (0x04) packet, not a PRELOGIN
+	// (0x12) one — an asymmetry in MS-TDS that clients enforce strictly
+	// (go-mssqldb refuses anything else outright). The TLS handshake packets
+	// that follow go back to 0x12 in both directions.
+	if err := s.pkt.WriteMessage(packetTypeReply, buildPreloginResponse(client, response).serialize()); err != nil {
 		return err
 	}
 

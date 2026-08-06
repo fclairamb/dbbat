@@ -63,6 +63,14 @@ VERSION, ENCRYPTION, INSTOPT (`0x00` = instance accepted), an empty THREADID
 and MARS (`0x00` = refused). FEDAUTHREQUIRED and TRACEID are echoed only when
 the client offered them — an unsolicited option upsets some drivers.
 
+**The PRELOGIN response goes out as a Tabular Result (`0x04`) packet, not a
+PRELOGIN (`0x12`) one.** The option-list *payload* is the same shape, but the
+packet type is not symmetric, and clients enforce it: `go-mssqldb` rejects
+anything else with `invalid respones, expected packet type 4`. The TLS
+handshake packets that follow revert to `0x12` in both directions. This was
+found by pointing a real driver at the proxy, which is exactly why the
+integration suite drives one.
+
 ### The part that makes TDS different
 
 **The TLS handshake rides inside PRELOGIN-typed TDS packets, and the stream
