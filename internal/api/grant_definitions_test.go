@@ -20,6 +20,8 @@ func grantDefinitionsRouter(server *Server) *gin.Engine {
 	router.POST("/api/v1/grant-definitions", server.requireAdmin(), server.handleCreateGrantDefinition)
 	router.GET("/api/v1/grant-definitions/:uid", server.handleGetGrantDefinition)
 	router.PATCH("/api/v1/grant-definitions/:uid", server.requireAdmin(), server.handleUpdateGrantDefinition)
+	router.DELETE("/api/v1/grant-definitions/:uid", server.requireAdmin(), server.handleDeactivateGrantDefinition)
+	router.POST("/api/v1/grants", server.requireAdmin(), server.handleAssignGrant)
 	router.POST("/api/v1/grant-requests", server.handleCreateGrantRequest)
 
 	return router
@@ -327,4 +329,73 @@ func TestUpdateGrantDefinition_ExplicitEmptyArrayClears(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	require.Empty(t, resp["approval_patterns"], "an explicit empty array must clear approval_patterns")
 	require.EqualValues(t, priority, resp["priority"], "a field absent from the PATCH body must survive untouched")
+}
+
+// TestDeactivateGrantDefinition_ReportsAndForbidsDeletion covers the two
+// answers the endpoint gives for a definition that has been used: deactivation
+// says how much access it just failed closed, and hard deletion is refused
+// outright, because a grant's shape lives on the definition it points at.
+func TestDeactivateGrantDefinition_ReportsAndForbidsDeletion(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	ctx := context.Background()
+	suffix := "defdelete"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
+	target := createTestUser(t, dataStore, "target-"+suffix, "targetpass123", []string{store.RoleConnector})
+
+	database, err := dataStore.CreateServer(ctx, &store.Server{
+		Name:         "defdelete-db-" + suffix,
+		Host:         "127.0.0.1",
+		Port:         5432,
+		DatabaseName: "prod",
+		Username:     "pg",
+		Password:     "secret",
+		Protocol:     store.ProtocolPostgreSQL,
+		SSLMode:      "disable",
+	}, grantsTestKey)
+	require.NoError(t, err)
+
+	router := grantDefinitionsRouter(server)
+
+	t.Run("an unused definition can be deleted outright", func(t *testing.T) {
+		t.Parallel()
+
+		def := newTestDefinition(t, dataStore, admin.UID, store.GrantDefinition{})
+
+		w, _ := doJSON(t, router, http.MethodDelete,
+			"/api/v1/grant-definitions/"+def.UID.String()+"?hard=true", adminToken, nil)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+		_, err := dataStore.GetGrantDefinition(ctx, def.UID)
+		require.Error(t, err)
+	})
+
+	t.Run("deletion is refused once a grant references it", func(t *testing.T) {
+		t.Parallel()
+
+		def := newTestDefinition(t, dataStore, admin.UID, store.GrantDefinition{})
+
+		w, _ := doJSON(t, router, http.MethodPost, "/api/v1/grants", adminToken, map[string]any{
+			"grant_definition_id": def.UID.String(),
+			"user_id":             target.UID.String(),
+			"database_id":         database.UID.String(),
+		})
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+		w, resp := doJSON(t, router, http.MethodDelete,
+			"/api/v1/grant-definitions/"+def.UID.String()+"?hard=true", adminToken, nil)
+		require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
+		require.Equal(t, "CONFLICT", resp["code"])
+		require.Contains(t, resp["message"], "1 grant(s)")
+
+		// Deactivation, on the other hand, goes through — and says how many
+		// grants it just stopped from authorizing anything.
+		w, resp = doJSON(t, router, http.MethodDelete,
+			"/api/v1/grant-definitions/"+def.UID.String(), adminToken, nil)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		require.EqualValues(t, 1, resp["affected_grants"])
+	})
 }
