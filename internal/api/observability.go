@@ -99,18 +99,62 @@ func (s *Server) handleGetConnection(c *gin.Context) {
 	successResponse(c, connectionDetailResponse{
 		Connection: conn,
 		Dump:       s.dumpMetadata(c, uid),
+		Grant:      s.grantSummary(c, conn),
 	})
 }
 
-// connectionDetailResponse decorates a connection with capture metadata, for
-// GET /connections/{uid} only. The list endpoint (handleListConnections)
-// keeps returning bare store.Connection rows: statting a capture — local or
-// remote — for every row of a paginated list is a needless fan-out that a
-// single detail fetch doesn't pay.
+// connectionDetailResponse decorates a connection with capture metadata and a
+// grant summary, for GET /connections/{uid} only. The list endpoint
+// (handleListConnections) keeps returning bare store.Connection rows:
+// statting a capture — local or remote — or resolving the linked grant for
+// every row of a paginated list is a needless fan-out that a single detail
+// fetch doesn't pay.
 type connectionDetailResponse struct {
 	*store.Connection
 
-	Dump DumpMetadata `json:"dump"`
+	Dump  DumpMetadata  `json:"dump"`
+	Grant *GrantSummary `json:"grant"`
+}
+
+// GrantSummary is the slice of an access grant a connection detail page needs
+// to answer "under which grant did this session run?" without a second
+// round trip: controls, validity window, revocation state and priority.
+type GrantSummary struct {
+	UID       uuid.UUID `json:"uid"`
+	Controls  []string  `json:"controls"`
+	StartsAt  time.Time `json:"starts_at"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Revoked   bool      `json:"revoked"`
+	Priority  int16     `json:"priority"`
+}
+
+// grantSummary resolves the grant a connection was stamped with, if any.
+// A nil GrantUID (a connection predating the stamp) and a lookup failure (the
+// stamped grant has since been deleted — grants are normally only revoked,
+// never deleted, but the FK does not forbid it) are both reported the same
+// way: no grant summary, rather than failing the whole request over a detail
+// the UI can live without.
+func (s *Server) grantSummary(c *gin.Context, conn *store.Connection) *GrantSummary {
+	if conn.GrantUID == nil {
+		return nil
+	}
+
+	grant, err := s.store.GetGrantByUID(c.Request.Context(), *conn.GrantUID)
+	if err != nil {
+		s.logger.WarnContext(c.Request.Context(), "connection references a grant that could not be resolved",
+			slog.Any("connection_uid", conn.UID), slog.Any("grant_uid", *conn.GrantUID), slog.Any("error", err))
+
+		return nil
+	}
+
+	return &GrantSummary{
+		UID:       grant.UID,
+		Controls:  grant.Controls,
+		StartsAt:  grant.StartsAt,
+		ExpiresAt: grant.ExpiresAt,
+		Revoked:   grant.RevokedAt != nil,
+		Priority:  grant.Priority,
+	}
 }
 
 // DumpMetadata reports whether a session capture is available for download

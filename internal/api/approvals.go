@@ -304,9 +304,11 @@ func resolverPayload(u *store.User) map[string]any {
 // mayApproveQuery reports whether the user may resolve holds on this query:
 // any admin, plus members of the grant's approver groups.
 //
-// The grant is looked up from the connection's user/database pair; if it is
-// gone (revoked or expired since), only admins can still resolve — which is
-// the fail-closed direction.
+// The grant is the one resolveApprovalGrant names — the connection's stamped
+// grant_uid when there is one, otherwise the (legacy) active grant for the
+// connection's user/database pair. Either way, if it is gone (deleted, or
+// — on the legacy path — revoked or expired since), only admins can still
+// resolve: that is the fail-closed direction.
 func (s *Server) mayApproveQuery(ctx context.Context, user *store.User, query *store.Query) bool {
 	if user == nil {
 		return false
@@ -316,11 +318,7 @@ func (s *Server) mayApproveQuery(ctx context.Context, user *store.User, query *s
 		return true
 	}
 
-	if query.UserID == nil || query.DatabaseID == nil {
-		return false
-	}
-
-	grant, err := s.store.GetActiveGrant(ctx, *query.UserID, *query.DatabaseID)
+	grant, err := s.resolveApprovalGrant(ctx, query)
 	if err != nil || grant == nil || len(grant.ApproverGroupUIDs) == 0 {
 		return false
 	}
@@ -331,6 +329,37 @@ func (s *Server) mayApproveQuery(ctx context.Context, user *store.User, query *s
 	}
 
 	return grant.MayApprove(groups)
+}
+
+// resolveApprovalGrant finds the grant whose approver_group_uids govern this
+// query's hold.
+//
+// Preferred: the grant the query's connection was stamped with at auth time
+// (connections.grant_uid). That is the grant whose approval_patterns actually
+// triggered the hold, so it is also the grant whose approver groups get to
+// resolve it. Getting this wrong is a real bug this replaces: without the
+// stamp, the check re-resolves "the active grant" at approval time via
+// GetActiveGrant, which — if a newer, higher-priority grant was created for
+// the same user/database while the query sat on hold — returns that *newer*
+// grant, whose approver_group_uids have nothing to do with why the hold
+// exists.
+//
+// A stamped grant that fails to resolve (deleted) is reported as an error,
+// not silently swapped for the legacy lookup: that would reintroduce the same
+// wrong-grant risk the stamp exists to close. The legacy
+// GetActiveGrant(user, database) path is used only when there is no stamp to
+// trust in the first place — a NULL grant_uid (a connection predating this
+// column) or a connection lookup failure.
+func (s *Server) resolveApprovalGrant(ctx context.Context, query *store.Query) (*store.Grant, error) {
+	if conn, err := s.store.GetConnectionByUID(ctx, query.ConnectionID); err == nil && conn.GrantUID != nil {
+		return s.store.GetGrantByUID(ctx, *conn.GrantUID)
+	}
+
+	if query.UserID == nil || query.DatabaseID == nil {
+		return nil, store.ErrNoActiveGrant
+	}
+
+	return s.store.GetActiveGrant(ctx, *query.UserID, *query.DatabaseID)
 }
 
 // mayViewQuery reports whether the user may *see* a pending query. Reading is

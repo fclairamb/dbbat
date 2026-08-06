@@ -2410,9 +2410,42 @@ export interface components {
             bytes_transferred: number;
             /** @description Whether the proxy→upstream leg of this session was actually encrypted. The server's ssl_mode states a policy, not an outcome: the opportunistic modes (`prefer`, and the empty default) offer TLS and fall back to plaintext when the target refuses, so only the session knows which way it went. Always false for Oracle, whose proxy relays the client's own TNS Connect descriptor over a plain socket. */
             upstream_tls?: boolean;
+            /**
+             * Format: uuid
+             * @description The access grant this session authenticated under — the auth-time selection, pinned for the life of the connection and never updated afterwards. Null on connections that predate this column, or whose grant has since been deleted (revocation does not clear it — only deletion, which does not otherwise happen, does).
+             */
+            grant_uid?: string | null;
         };
         ConnectionDetail: components["schemas"]["Connection"] & {
             dump: components["schemas"]["DumpMetadata"];
+            /** @description The grant named by `grant_uid`, or null when `grant_uid` is null or the grant it names could not be resolved. */
+            grant: components["schemas"]["GrantSummary"] | null;
+        };
+        GrantSummary: {
+            /**
+             * Format: uuid
+             * @description Grant identifier — links to the Grants page.
+             */
+            uid: string;
+            /** @description List of controls applied. Empty array means full write access. */
+            controls: components["schemas"]["GrantControl"][];
+            /**
+             * Format: date-time
+             * @description When access starts
+             */
+            starts_at: string;
+            /**
+             * Format: date-time
+             * @description When access expires
+             */
+            expires_at: string;
+            /** @description Whether the grant has been revoked. */
+            revoked: boolean;
+            /**
+             * Format: int32
+             * @description This grant's selection rank — see AccessGrant.priority for the full explanation.
+             */
+            priority: number;
         };
         /** @description Whether a raw pcapng session capture is available for download via `GET /connections/{uid}/dump`, and its size. `available: false` covers both "captures are disabled server-wide" (no `DBB_DUMP_DIR`) and "no capture exists — or no longer exists — for this connection". */
         DumpMetadata: {
@@ -2839,6 +2872,7 @@ export type DeviceConsentInfo = components['schemas']['DeviceConsentInfo'];
 export type DeviceConsentRequest = components['schemas']['DeviceConsentRequest'];
 export type Connection = components['schemas']['Connection'];
 export type ConnectionDetail = components['schemas']['ConnectionDetail'];
+export type GrantSummary = components['schemas']['GrantSummary'];
 export type DumpMetadata = components['schemas']['DumpMetadata'];
 export type Query = components['schemas']['Query'];
 export type ApprovalResolution = components['schemas']['ApprovalResolution'];

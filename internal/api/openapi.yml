@@ -4275,6 +4275,16 @@ components:
             session knows which way it went. Always false for Oracle, whose
             proxy relays the client's own TNS Connect descriptor over a plain
             socket.
+        grant_uid:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The access grant this session authenticated under — the auth-time
+            selection, pinned for the life of the connection and never
+            updated afterwards. Null on connections that predate this column,
+            or whose grant has since been deleted (revocation does not clear
+            it — only deletion, which does not otherwise happen, does).
       required:
         - uid
         - user_id
@@ -4286,10 +4296,11 @@ components:
         - bytes_transferred
 
     # ConnectionDetail is what GET /connections/{uid} returns: a Connection
-    # plus capture metadata. The list endpoint (GET /connections) returns
-    # plain Connection objects — computing dump availability (an os.Stat, or
-    # a blob HEAD for a remotely-stored capture) for every row of a paginated
-    # list would be a needless fan-out that a single detail fetch doesn't pay.
+    # plus capture metadata and a grant summary. The list endpoint
+    # (GET /connections) returns plain Connection objects — computing dump
+    # availability (an os.Stat, or a blob HEAD for a remotely-stored capture)
+    # or resolving the linked grant for every row of a paginated list would be
+    # a needless fan-out that a single detail fetch doesn't pay.
     ConnectionDetail:
       allOf:
         - $ref: '#/components/schemas/Connection'
@@ -4297,8 +4308,60 @@ components:
           properties:
             dump:
               $ref: '#/components/schemas/DumpMetadata'
+            grant:
+              allOf:
+                - $ref: '#/components/schemas/GrantSummary'
+              nullable: true
+              description: >-
+                The grant named by `grant_uid`, or null when `grant_uid` is
+                null or the grant it names could not be resolved.
           required:
             - dump
+            - grant
+
+    # GrantSummary is the small slice of AccessGrant the UI needs to show
+    # "under which grant did this session run?" on a connection detail page
+    # without a second round trip. Deliberately not the full AccessGrant:
+    # usage counters and approval configuration belong to the grants page, not
+    # here.
+    GrantSummary:
+      type: object
+      properties:
+        uid:
+          type: string
+          format: uuid
+          description: Grant identifier — links to the Grants page.
+        controls:
+          type: array
+          items:
+            $ref: '#/components/schemas/GrantControl'
+          description: List of controls applied. Empty array means full write access.
+        starts_at:
+          type: string
+          format: date-time
+          description: When access starts
+        expires_at:
+          type: string
+          format: date-time
+          description: When access expires
+        revoked:
+          type: boolean
+          description: Whether the grant has been revoked.
+        priority:
+          type: integer
+          format: int32
+          minimum: -32768
+          maximum: 32767
+          description: >-
+            This grant's selection rank — see AccessGrant.priority for the
+            full explanation.
+      required:
+        - uid
+        - controls
+        - starts_at
+        - expires_at
+        - revoked
+        - priority
 
     DumpMetadata:
       type: object
