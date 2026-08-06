@@ -4,6 +4,7 @@ import Link from "@docusaurus/Link";
 import useDocusaurusContext from "@docusaurus/useDocusaurusContext";
 import Layout from "@theme/Layout";
 import HomepageFeatures from "@site/src/components/HomepageFeatures";
+import ProductShowcase from "@site/src/components/ProductShowcase";
 import Heading from "@theme/Heading";
 
 import styles from "./index.module.css";
@@ -44,48 +45,6 @@ function HomepageHeader() {
         </p>
       </div>
     </header>
-  );
-}
-
-const screenshots = [
-  {
-    src: "/img/screenshots/screenshot-dashboard.png",
-    alt: "Dashboard showing recent connections and activity",
-    caption: "Dashboard",
-  },
-  {
-    src: "/img/screenshots/screenshot-queries.png",
-    alt: "Query log with SQL details and execution times",
-    caption: "Query Logging",
-  },
-  {
-    src: "/img/screenshots/screenshot-grants.png",
-    alt: "Grant management with time-based access controls",
-    caption: "Access Control",
-  },
-];
-
-function Screenshots() {
-  return (
-    <section className={styles.screenshots}>
-      <div className="container">
-        <Heading as="h2">See it in Action</Heading>
-        <p>
-          Explore the DBBat interface for managing database access and monitoring
-          queries.
-        </p>
-        <div className={styles.screenshotsGrid}>
-          {screenshots.map((screenshot) => (
-            <figure key={screenshot.src} className={styles.screenshotCard}>
-              <a href={screenshot.src} target="_blank" rel="noopener noreferrer">
-                <img src={screenshot.src} alt={screenshot.alt} loading="lazy" />
-              </a>
-              <figcaption>{screenshot.caption}</figcaption>
-            </figure>
-          ))}
-        </div>
-      </div>
-    </section>
   );
 }
 
@@ -138,7 +97,7 @@ export default function Home(): ReactNode {
       <HomepageHeader />
       <main>
         <HomepageFeatures />
-        <Screenshots />
+        <ProductShowcase />
         <QuickStart />
       </main>
     </Layout>

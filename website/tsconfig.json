@@ -7,6 +7,9 @@
     // a tsconfig that no longer relies on it.
     // TODO: drop both once @docusaurus/tsconfig stops setting `baseUrl`.
     "baseUrl": ".",
-    "ignoreDeprecations": "6.0"
+    "ignoreDeprecations": "6.0",
+    // The homepage imports static/img/showcase/manifest.json so the "captured
+    // on vX" caption is baked in at build time rather than fetched.
+    "resolveJsonModule": true
   }
 }
