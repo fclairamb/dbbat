@@ -800,49 +800,12 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	}
 	logger.InfoContext(ctx, "Created proxy_target database configuration")
 
-	// 5. Create write grant for connector user (empty controls = full write access)
-	//
-	// Every grant is an instance of a grant definition, so the seed data
-	// starts by defining the shapes it hands out rather than inventing them
-	// per grant.
-	writeDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
-		Name:            "Full write (seed)",
-		Slug:            "seed-full-write",
-		Description:     "Unrestricted access, seeded in test mode.",
-		DurationSeconds: int64(10 * 365 * 24 * time.Hour / time.Second),
-		Controls:        []string{},
-		CreatedBy:       adminUser.UID,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create write grant definition: %w", err)
+	// 5. Create the write and read-only grants (each an instance of a seeded
+	// grant definition — a grant has no shape of its own).
+	if err := seedTestGrants(ctx, dataStore, adminUser.UID, connectorUser.UID, viewerUser.UID, targetDB.UID); err != nil {
+		return err
 	}
-
-	_, err = seedGrantFromDefinition(ctx, dataStore, writeDef,
-		connectorUser.UID, targetDB.UID, adminUser.UID, time.Now(), time.Now().AddDate(10, 0, 0))
-	if err != nil {
-		return fmt.Errorf("failed to create write grant for connector user: %w", err)
-	}
-	logger.InfoContext(ctx, "Created write grant for connector user on proxy_target")
-
-	// 6. Create read-only grant for viewer user
-	readOnlyDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
-		Name:            "Read only (seed)",
-		Slug:            "seed-read-only",
-		Description:     "Read-only access, seeded in test mode.",
-		DurationSeconds: int64(10 * 365 * 24 * time.Hour / time.Second),
-		Controls:        []string{store.ControlReadOnly},
-		CreatedBy:       adminUser.UID,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create read-only grant definition: %w", err)
-	}
-
-	_, err = seedGrantFromDefinition(ctx, dataStore, readOnlyDef,
-		viewerUser.UID, targetDB.UID, adminUser.UID, time.Now(), time.Now().AddDate(10, 0, 0))
-	if err != nil {
-		return fmt.Errorf("failed to create read-only grant for viewer user: %w", err)
-	}
-	logger.InfoContext(ctx, "Created read-only grant for viewer user on proxy_target")
+	logger.InfoContext(ctx, "Created write and read-only grants on proxy_target")
 
 	// 6b. Create a quota-bounded grant for the admin user so the grants list
 	// has a grant with applied limits (alongside the unlimited grants above).
@@ -1050,28 +1013,9 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 
 	// 5. Define the two shapes the demo hands out, then grant the connector
 	// full write access and the viewer read-only, both dated from the epoch.
-	demoWriteDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
-		Name:            "Full write (demo)",
-		Slug:            "demo-full-write",
-		Description:     "Unrestricted access, seeded in demo mode.",
-		DurationSeconds: int64(30 * 24 * time.Hour / time.Second),
-		Controls:        []string{},
-		CreatedBy:       adminUser.UID,
-	})
+	demoWriteDef, demoReadOnlyDef, err := seedDemoGrantDefinitions(ctx, dataStore, adminUser.UID)
 	if err != nil {
-		return fmt.Errorf("failed to create demo write grant definition: %w", err)
-	}
-
-	demoReadOnlyDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
-		Name:            "Read only (demo)",
-		Slug:            "demo-read-only",
-		Description:     "Read-only access, seeded in demo mode.",
-		DurationSeconds: int64(30 * 24 * time.Hour / time.Second),
-		Controls:        []string{store.ControlReadOnly},
-		CreatedBy:       adminUser.UID,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create demo read-only grant definition: %w", err)
+		return err
 	}
 
 	if err := seedDemoGrant(ctx, dataStore, demoGrantSeed{
@@ -1112,6 +1056,42 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 
 	logger.InfoContext(ctx, "Demo data provisioning complete")
 	return nil
+}
+
+// seedDemoGrantDefinitions creates the full-write and read-only shapes the
+// demo data hands out.
+func seedDemoGrantDefinitions(
+	ctx context.Context,
+	dataStore *store.Store,
+	adminUID uuid.UUID,
+) (*store.GrantDefinition, *store.GrantDefinition, error) {
+	const thirtyDays = int64(30 * 24 * 3600)
+
+	writeDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:            "Full write (demo)",
+		Slug:            "demo-full-write",
+		Description:     "Unrestricted access, seeded in demo mode.",
+		DurationSeconds: thirtyDays,
+		Controls:        []string{},
+		CreatedBy:       adminUID,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create demo write grant definition: %w", err)
+	}
+
+	readOnlyDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:            "Read only (demo)",
+		Slug:            "demo-read-only",
+		Description:     "Read-only access, seeded in demo mode.",
+		DurationSeconds: thirtyDays,
+		Controls:        []string{store.ControlReadOnly},
+		CreatedBy:       adminUID,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create demo read-only grant definition: %w", err)
+	}
+
+	return writeDef, readOnlyDef, nil
 }
 
 // demoGrantSeed describes one seeded demo grant.
@@ -1296,6 +1276,53 @@ func seedDemoHistory(
 			Exec(ctx); err != nil {
 			return fmt.Errorf("failed to date demo connection: %w", err)
 		}
+	}
+
+	return nil
+}
+
+// seedTestGrants creates the two unlimited seed shapes — full write and
+// read-only — and hands each to its user. Definitions come first because a
+// grant is an instance of one; there is no way to seed a grant otherwise.
+func seedTestGrants(
+	ctx context.Context,
+	dataStore *store.Store,
+	adminUID, connectorUID, viewerUID, databaseUID uuid.UUID,
+) error {
+	const tenYears = int64(10 * 365 * 24 * 3600)
+
+	writeDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:            "Full write (seed)",
+		Slug:            "seed-full-write",
+		Description:     "Unrestricted access, seeded in test mode.",
+		DurationSeconds: tenYears,
+		Controls:        []string{},
+		CreatedBy:       adminUID,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create write grant definition: %w", err)
+	}
+
+	if _, err := seedGrantFromDefinition(ctx, dataStore, writeDef,
+		connectorUID, databaseUID, adminUID, time.Now(), time.Now().AddDate(10, 0, 0)); err != nil {
+		return fmt.Errorf("failed to create write grant for connector user: %w", err)
+	}
+
+	readOnlyDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:            "Read only (seed)",
+		Slug:            "seed-read-only",
+		Description:     "Read-only access, seeded in test mode.",
+		DurationSeconds: tenYears,
+		Controls:        []string{store.ControlReadOnly},
+		CreatedBy:       adminUID,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create read-only grant definition: %w", err)
+	}
+
+	if _, err := seedGrantFromDefinition(ctx, dataStore, readOnlyDef,
+		viewerUID, databaseUID, adminUID, time.Now(), time.Now().AddDate(10, 0, 0)); err != nil {
+		return fmt.Errorf("failed to create read-only grant for viewer user: %w", err)
 	}
 
 	return nil

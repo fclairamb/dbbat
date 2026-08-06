@@ -34,7 +34,7 @@ var (
 	ErrUserNameConflict = errors.New("a user with this username already exists")
 	// ErrGrantDefinitionRequired is returned when a grant is created without
 	// naming the definition it instantiates. A grant carries no shape of its
-	// own, so one without a definition would authorise nothing meaningful —
+	// own, so one without a definition would authorize nothing meaningful —
 	// it is rejected rather than stored.
 	ErrGrantDefinitionRequired = errors.New("a grant must reference a grant definition")
 )

@@ -221,7 +221,7 @@ func (s *Store) ListGrantDefinitions(ctx context.Context, filter GrantDefinition
 }
 
 // attachActiveGrantCounts fills ActiveGrantCount on each definition with the
-// number of currently-authorising grants across its lineage.
+// number of currently-authorizing grants across its lineage.
 func (s *Store) attachActiveGrantCounts(ctx context.Context, defs []GrantDefinition) error {
 	if len(defs) == 0 {
 		return nil
@@ -249,7 +249,7 @@ func (s *Store) attachActiveGrantCounts(ctx context.Context, defs []GrantDefinit
 		Join("JOIN grant_definitions AS gd ON gd.uid = ag.grant_definition_id").
 		ColumnExpr("gd.lineage_uid AS lineage_uid").
 		ColumnExpr("count(*) AS count").
-		Where("gd.lineage_uid IN (?)", bun.In(lineages)).
+		Where("gd.lineage_uid IN (?)", bun.List(lineages)).
 		Where("ag.revoked_at IS NULL").
 		Where("ag.expires_at > NOW()").
 		GroupExpr("gd.lineage_uid").
@@ -272,16 +272,16 @@ func (s *Store) attachActiveGrantCounts(ctx context.Context, defs []GrantDefinit
 
 // CountGrantsForLineage reports how many grants the lineage of the given
 // definition uid is responsible for: every grant ever issued from any of its
-// versions, and the subset still authorising access. Both numbers matter — the
+// versions, and the subset still authorizing access. Both numbers matter — the
 // first is what blocks a hard delete, the second is what an operator needs to
 // see before deactivating.
-func (s *Store) CountGrantsForLineage(ctx context.Context, uid uuid.UUID) (total, active int64, err error) {
+func (s *Store) CountGrantsForLineage(ctx context.Context, uid uuid.UUID) (int64, int64, error) {
 	var row struct {
 		Total  int64 `bun:"total"`
 		Active int64 `bun:"active"`
 	}
 
-	err = s.db.NewSelect().
+	err := s.db.NewSelect().
 		TableExpr("access_grants AS ag").
 		Join("JOIN grant_definitions AS gd ON gd.uid = ag.grant_definition_id").
 		ColumnExpr("count(*) AS total").
@@ -435,7 +435,7 @@ func equalInt16Ptr(a, b *int16) bool {
 // lineage** — every version, archived ones included.
 //
 // That reach is the point. An operator deactivates a policy, not one row of
-// its version history; leaving older versions active would keep authorising
+// its version history; leaving older versions active would keep authorizing
 // the grants pinned to them and make deactivation a kill switch that doesn't
 // kill. Auth checks is_active, so this fails those grants closed on their next
 // connection.
@@ -474,7 +474,7 @@ func (s *Store) setGrantDefinitionActive(ctx context.Context, uid uuid.UUID, act
 // soon as anything references any version. Grants carry no shape of their own
 // and their grant_definition_id is NOT NULL, so deleting a referenced
 // definition would either be impossible (the FK says so) or would strand a
-// grant whose behaviour nothing can describe. Deactivation is the operation
+// grant whose behavior nothing can describe. Deactivation is the operation
 // for retiring a definition that has been used; deletion is only for one that
 // never was.
 func (s *Store) DeleteGrantDefinition(ctx context.Context, uid uuid.UUID) error {

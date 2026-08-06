@@ -99,7 +99,7 @@ func (s *Server) handleAssignGrant(c *gin.Context) {
 	}
 
 	// The definition's database scope is enforced: a shape declared to apply
-	// only to certain databases must not authorise another one, whoever is
+	// only to certain databases must not authorize another one, whoever is
 	// issuing it. Its *group* scope is not — that scope governs who may
 	// self-request the definition, and an admin assigning access is the
 	// authority on who gets it.

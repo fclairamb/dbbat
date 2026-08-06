@@ -46,7 +46,8 @@ func TestSession_CheckQuotas_Revoked(t *testing.T) {
 	t.Parallel()
 
 	reg := cache.NewRevocationRegistry()
-	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+	grant := &store.Grant{
+		UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
 		Definition: &store.GrantDefinition{},
 	}
 	h := reg.Register(grant.UID)
@@ -71,7 +72,8 @@ func TestSession_Revocation_DisconnectsLiveSession(t *testing.T) {
 	t.Parallel()
 
 	reg := cache.NewRevocationRegistry()
-	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+	grant := &store.Grant{
+		UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
 		Definition: &store.GrantDefinition{},
 	}
 	h := reg.Register(grant.UID)
@@ -106,14 +108,16 @@ func TestSession_Revocation_DisconnectsLiveSession(t *testing.T) {
 func TestSession_CheckQuotas_Expiry(t *testing.T) {
 	t.Parallel()
 
-	expired := &Session{grant: &store.Grant{ExpiresAt: time.Now().Add(-time.Minute),
+	expired := &Session{grant: &store.Grant{
+		ExpiresAt:  time.Now().Add(-time.Minute),
 		Definition: &store.GrantDefinition{},
 	}}
 	if err := expired.checkQuotas(); !errors.Is(err, shared.ErrGrantExpired) {
 		t.Fatalf("checkQuotas() with expired grant = %v, want ErrGrantExpired", err)
 	}
 
-	live := &Session{grant: &store.Grant{ExpiresAt: time.Now().Add(time.Hour),
+	live := &Session{grant: &store.Grant{
+		ExpiresAt:  time.Now().Add(time.Hour),
 		Definition: &store.GrantDefinition{},
 	}}
 	if err := live.checkQuotas(); err != nil {

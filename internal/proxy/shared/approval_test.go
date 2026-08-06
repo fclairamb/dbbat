@@ -401,7 +401,8 @@ func TestHoldTripsOnGrantExpiryWhileParked(t *testing.T) {
 
 	gate, st, _ := testGate(t, []string{`(?i)DELETE`})
 
-	expired := &store.Grant{ExpiresAt: time.Now().Add(80 * time.Millisecond),
+	expired := &store.Grant{
+		ExpiresAt:  time.Now().Add(80 * time.Millisecond),
 		Definition: &store.GrantDefinition{},
 	}
 	guard := NewLimitGuard(expired, nil, nil)

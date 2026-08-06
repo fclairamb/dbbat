@@ -160,7 +160,7 @@ func (s *Store) CreateGrant(ctx context.Context, grant *Grant) (*Grant, error) {
 // grant issued from that definition — including grants pinned to an older
 // version, since deactivation applies to the whole lineage. Being
 // **archived** (superseded by an edit) is explicitly not deactivation and is
-// never consulted here: a grant keeps authorising under the exact version it
+// never consulted here: a grant keeps authorizing under the exact version it
 // was issued from.
 func (s *Store) GetActiveGrant(ctx context.Context, userID, databaseID uuid.UUID) (*Grant, error) {
 	grant := new(AccessGrant)
@@ -189,7 +189,7 @@ func (s *Store) GetActiveGrant(ctx context.Context, userID, databaseID uuid.UUID
 
 	// A grant whose shape cannot be attached is unusable by definition, and
 	// the caller is the proxy admitting a session — so report it as "no active
-	// grant" rather than handing back something whose behaviour is unknown.
+	// grant" rather than handing back something whose behavior is unknown.
 	if err := s.attachDefinitions(ctx, []*AccessGrant{grant}); err != nil {
 		return nil, err
 	}
@@ -209,7 +209,7 @@ func (s *Store) GetActiveGrant(ctx context.Context, userID, databaseID uuid.UUID
 // grants are involved.
 //
 // Deliberately not a bun relation: the auth path is the wrong place to depend
-// on ORM join-alias behaviour, and archived definitions must stay attachable
+// on ORM join-alias behavior, and archived definitions must stay attachable
 // (a grant issued from version 1 still has to render its shape after version 2
 // exists), which a filtered join would make easy to get wrong.
 func (s *Store) attachDefinitions(ctx context.Context, grants []*AccessGrant) error {
@@ -240,7 +240,7 @@ func (s *Store) attachDefinitions(ctx context.Context, grants []*AccessGrant) er
 	var defs []GrantDefinition
 	if err := s.db.NewSelect().
 		Model(&defs).
-		Where("uid IN (?)", bun.In(uids)).
+		Where("uid IN (?)", bun.List(uids)).
 		Scan(ctx); err != nil {
 		return fmt.Errorf("failed to load grant definitions: %w", err)
 	}

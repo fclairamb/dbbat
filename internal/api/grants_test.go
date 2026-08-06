@@ -255,9 +255,15 @@ func TestAssignGrant(t *testing.T) {
 		require.Equal(t, []any{store.ControlReadOnly}, embedded["controls"])
 
 		// The window's length comes from the definition's duration.
-		startsAt, err := time.Parse(time.RFC3339, resp["starts_at"].(string))
+		rawStartsAt, ok := resp["starts_at"].(string)
+		require.True(t, ok, "assign response has no starts_at: %s", w.Body.String())
+
+		rawExpiresAt, ok := resp["expires_at"].(string)
+		require.True(t, ok, "assign response has no expires_at: %s", w.Body.String())
+
+		startsAt, err := time.Parse(time.RFC3339, rawStartsAt)
 		require.NoError(t, err)
-		expiresAt, err := time.Parse(time.RFC3339, resp["expires_at"].(string))
+		expiresAt, err := time.Parse(time.RFC3339, rawExpiresAt)
 		require.NoError(t, err)
 		require.InDelta(t, 7200.0, expiresAt.Sub(startsAt).Seconds(), 1.0)
 	})

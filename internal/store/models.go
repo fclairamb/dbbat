@@ -498,7 +498,7 @@ type AccessGrant struct {
 	// GrantDefinitionID pins the exact definition *version* this grant was
 	// issued from. Definitions are immutably versioned (an edit archives the
 	// row and inserts a successor), so this reference can never make a live
-	// grant's behaviour change underneath it.
+	// grant's behavior change underneath it.
 	GrantDefinitionID uuid.UUID  `bun:"grant_definition_id,notnull,type:uuid" json:"grant_definition_id"`
 	GrantedBy         uuid.UUID  `bun:"granted_by,notnull,type:uuid" json:"granted_by"`
 	StartsAt          time.Time  `bun:"starts_at,notnull" json:"starts_at"`
@@ -531,7 +531,7 @@ type AccessGrant struct {
 // A grant with no definition attached is treated as carrying *every* control:
 // the shape is unknown, so the answer that cannot widen access is "everything
 // is restricted". Combined with MaxQueryCounts/MaxBytesTransferred returning a
-// zero quota in the same situation, a shapeless grant authorises nothing at
+// zero quota in the same situation, a shapeless grant authorizes nothing at
 // all. That is a backstop, not a mode: GetActiveGrant refuses to hand out a
 // grant whose definition it could not attach.
 func (g *AccessGrant) Controls() []string {
@@ -635,10 +635,10 @@ type Grant = AccessGrant
 // confused:
 //
 //   - **Archived** (ArchivedAt != nil): superseded by a newer version. Still
-//     authorises the grants pinned to it — it was replaced, not withdrawn.
+//     authorizes the grants pinned to it — it was replaced, not withdrawn.
 //   - **Deactivated** (IsActive == false): explicitly withdrawn by an
 //     operator, across the whole lineage. Fails closed at auth time: grants
-//     pinned to any version of it stop authorising new connections.
+//     pinned to any version of it stop authorizing new connections.
 type GrantDefinition struct {
 	bun.BaseModel `bun:"table:grant_definitions,alias:gd"`
 
@@ -700,7 +700,7 @@ type GrantDefinition struct {
 	CreatedAt         time.Time   `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 
 	// ActiveGrantCount is how many non-revoked, non-expired grants this
-	// definition's *lineage* is currently authorising. Computed on listing
+	// definition's *lineage* is currently authorizing. Computed on listing
 	// (one grouped query, never per row) so the UI can tell an operator what
 	// deactivating it would cut off before they confirm.
 	ActiveGrantCount int64 `bun:"-" json:"active_grant_count"`

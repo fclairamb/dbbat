@@ -1009,7 +1009,7 @@ func TestGetActiveGrant_DefinitionLifecycle(t *testing.T) {
 			t.Fatalf("UpdateGrantDefinition() error = %v", err)
 		}
 
-		// ...which must still authorise: archival is supersession, not
+		// ...which must still authorize: archival is supersession, not
 		// withdrawal.
 		got, err := s.GetActiveGrant(ctx, user.UID, database.UID)
 		if err != nil {
@@ -1022,7 +1022,7 @@ func TestGetActiveGrant_DefinitionLifecycle(t *testing.T) {
 		}
 
 		// Deactivating the *live* version withdraws the whole lineage, so the
-		// grant pinned to the archived one stops authorising too. Anything
+		// grant pinned to the archived one stops authorizing too. Anything
 		// else would make deactivation a kill switch that doesn't kill.
 		if err := s.DeactivateGrantDefinition(ctx, updated.UID); err != nil {
 			t.Fatalf("DeactivateGrantDefinition() error = %v", err)

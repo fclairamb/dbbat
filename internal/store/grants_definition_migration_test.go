@@ -119,7 +119,7 @@ func TestGrantsReferenceDefinitionsMigration(t *testing.T) {
 	assertRollback(t, ctx, db, fixture)
 }
 
-// legacyGrantFixture records the uids the assertions need to recognise each
+// legacyGrantFixture records the uids the assertions need to recognize each
 // seeded row after the migration has rewritten the table.
 type legacyGrantFixture struct {
 	adminUID uuid.UUID
@@ -288,7 +288,7 @@ func assertBackfill(t *testing.T, ctx context.Context, db *bun.DB, f legacyGrant
 	}
 
 	// The synthesized definitions describe the shape they replaced, are
-	// inactive, and are recognisable as synthesized.
+	// inactive, and are recognizable as synthesized.
 	var (
 		slug     string
 		isActive bool
@@ -305,7 +305,7 @@ func assertBackfill(t *testing.T, ctx context.Context, db *bun.DB, f legacyGrant
 	}
 
 	// Only the prefix is fixed; the rest is uid-derived. The prefix is what
-	// makes these recognisable as machine-generated stand-ins rather than a
+	// makes these recognizable as machine-generated stand-ins rather than a
 	// deliberate policy, and it is what the down-migration deletes by.
 	if !strings.HasPrefix(slug, "legacy-grant-shape-") {
 		t.Errorf("synthesized slug %q does not carry the legacy prefix", slug)

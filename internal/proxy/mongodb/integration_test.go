@@ -931,7 +931,7 @@ func (f *fixture) assertUpstreamEncryption(ctx context.Context, wantTLS bool) {
 	f.assertRecordedUpstreamTLS(ctx, wantTLS)
 }
 
-// TestIntegration_UpstreamTLS_Prefer is the behaviour this proxy did not have
+// TestIntegration_UpstreamTLS_Prefer is the behavior this proxy did not have
 // before the upstream-connect paths were unified: MongoDB cannot negotiate
 // encryption in band, so prefer means "try the TLS handshake first". Against a
 // preferTLS mongod it must actually encrypt, and record that it did.

@@ -23,7 +23,8 @@ func TestCheckQuotas_Revoked(t *testing.T) {
 	t.Parallel()
 
 	reg := cache.NewRevocationRegistry()
-	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+	grant := &store.Grant{
+		UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
 		Definition: &store.GrantDefinition{},
 	}
 	h := reg.Register(grant.UID)
@@ -45,7 +46,8 @@ func TestRevocation_DisconnectsLiveSession(t *testing.T) {
 	t.Parallel()
 
 	reg := cache.NewRevocationRegistry()
-	grant := &store.Grant{UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+	grant := &store.Grant{
+		UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
 		Definition: &store.GrantDefinition{},
 	}
 	h := reg.Register(grant.UID)
@@ -100,12 +102,14 @@ func assertOraclePeerClosed(t *testing.T, c net.Conn, name string) {
 func TestCheckQuotas_Expiry(t *testing.T) {
 	t.Parallel()
 
-	expired := newTestSession(&store.Grant{ExpiresAt: time.Now().Add(-time.Minute),
+	expired := newTestSession(&store.Grant{
+		ExpiresAt:  time.Now().Add(-time.Minute),
 		Definition: &store.GrantDefinition{},
 	})
 	require.ErrorIs(t, expired.checkQuotas(), shared.ErrGrantExpired)
 
-	live := newTestSession(&store.Grant{ExpiresAt: time.Now().Add(time.Hour),
+	live := newTestSession(&store.Grant{
+		ExpiresAt:  time.Now().Add(time.Hour),
 		Definition: &store.GrantDefinition{},
 	})
 	require.NoError(t, live.checkQuotas())

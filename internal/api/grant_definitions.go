@@ -570,9 +570,9 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 // handleDeactivateGrantDefinition — admin-only. The path param accepts either
 // the definition's uid or its slug.
 //
-// Default behaviour is deactivation, which withdraws the definition across its
+// Default behavior is deactivation, which withdraws the definition across its
 // whole version lineage and **fails closed**: every grant issued from any of
-// its versions stops authorising new connections. The response reports how
+// its versions stops authorizing new connections. The response reports how
 // many grants that affected.
 //
 // `?hard=true` asks for a real deletion instead, which is refused with a 409
