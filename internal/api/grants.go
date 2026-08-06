@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
 	"time"
@@ -45,31 +44,11 @@ func (s *Server) handleAssignGrant(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	def, err := s.resolveGrantDefinition(ctx, req.GrantDefinitionID)
-	if err != nil {
-		if errors.Is(err, store.ErrGrantDefinitionNotFound) {
-			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "grant_definition_id does not exist")
-
-			return
-		}
-
-		writeInternalError(c, s.logger, err, "failed to load grant definition")
-
+	// Issuing always happens from the live version of the lineage: an edit
+	// exists precisely to change what gets issued from here on.
+	def, ok := s.resolveLiveGrantDefinition(c, req.GrantDefinitionID)
+	if !ok {
 		return
-	}
-
-	// Issuing always happens from the live version of the lineage, even when
-	// the caller named an archived one by uid: an edit exists precisely to
-	// change what gets issued from here on.
-	if !def.IsLive() {
-		live, err := s.store.GetLiveGrantDefinition(ctx, def.UID)
-		if err != nil {
-			writeInternalError(c, s.logger, err, "failed to resolve the live grant definition")
-
-			return
-		}
-
-		def = live
 	}
 
 	if !def.IsActive {
