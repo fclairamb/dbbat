@@ -22,6 +22,20 @@ All API endpoints are versioned under `/api/v1/`.
 | Web Session | `web_` | 1 hour | Frontend login |
 | API Key | `dbb_` | Configurable | Programmatic access |
 
+### Environment Variables for Clients
+
+Scripts, CI jobs, and SQL clients talking to dbbat should standardize on
+three env vars instead of inventing their own:
+
+| Variable | Meaning | Needed for |
+|----------|---------|-----------|
+| `DBBAT_API_KEY` | The `dbb_…` API key | REST calls (Bearer token) and SQL connections (as the password) |
+| `DBBAT_USER` | The dbbat username the key belongs to | SQL connections through the proxy (the key is only valid for its owner) |
+| `DBBAT_URL` | API/UI base URL, e.g. `https://dbbat.example.com` | REST calls and deep links |
+
+The API Keys page shows a ready-to-copy `export` snippet for all three when
+a new key is created.
+
 ### Getting Started
 
 1. **Initial Setup**: Login with default admin credentials (`admin`/`admin`)
