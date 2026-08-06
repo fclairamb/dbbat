@@ -105,3 +105,93 @@ Answered by the repository owner, 2026-08-06. Binding.
   v1; reject them with a clear error rather than failing obscurely.
 
 No GitHub issue exists yet — one should be filed.
+
+## Implementation Plan
+
+Written before the code, revised as it landed.
+
+### 1. `internal/proxy/mssql/packet.go` — TDS framing
+
+`packetHeader` (type, status, length, SPID, packet id, window) with `encode`/
+`decodeHeader`, and a `packetRW` bound to a `net.Conn` (actually an
+`io.ReadWriter`, so tests drive it over `bytes.Buffer` / `net.Pipe`):
+
+- `ReadMessage()` — reassemble packets until the `EOM` status bit, returning
+  `(packetType, payload)`. Enforces a max reassembled size so a peer cannot
+  make the proxy allocate without bound.
+- `WriteMessage(typ, payload)` — split at the negotiated packet size, `EOM`
+  only on the last packet, packet id incrementing mod 256.
+- Streaming variants (`beginPacket` / `Write` / `finishPacket`) for the TLS
+  adapter, which cannot know a flight's length up front.
+- `SetPacketSize` for the size LOGIN7 asks for.
+
+Table-driven tests over synthesized bytes: single packet, message split across
+packets, truncated header, truncated payload (trailer), bad length field,
+oversize message, packet-id wraparound, round-trip at several packet sizes.
+
+### 2. `internal/proxy/mssql/prelogin.go` — PRELOGIN
+
+Option-list codec: 5-byte entries (token, offset BE16, length BE16) terminated
+by `0xFF`, then the blobs at those offsets. Tokens VERSION(0), ENCRYPTION(1),
+INSTOPT(2), THREADID(3), MARS(4), TRACEID(5), FEDAUTHREQUIRED(6), NONCEOPT(7).
+`buildResponse` answers VERSION + ENCRYPTION + INSTOPT + THREADID + MARS(off,
+i.e. refused) and echoes FEDAUTHREQUIRED(0) only when the client offered it.
+`negotiateEncryption` implements the full OFF/ON/REQ/NOT_SUP matrix and returns
+`(serverResponse, mode)` where mode ∈ {none, loginOnly, full} or an error.
+
+### 3. `internal/proxy/mssql/tlsconn.go` — the encapsulated handshake
+
+`handshakeConn` is a `net.Conn` over `packetRW`:
+
+- `Write` lazily begins a PRELOGIN-typed packet and buffers into it.
+- `Read` first *finishes* any pending packet (with `EOM`) — a TLS flight is
+  complete exactly when the stack next wants to read — then serves bytes from
+  the current inbound message, pulling the next message when exhausted.
+- `deactivate()` flushes anything pending and flips to raw pass-through, so the
+  same `tls.Conn` keeps working once `Handshake()` has returned.
+- `revertToPlaintext()` for `ENCRYPT_OFF`, where only the login packet is
+  encrypted and the stream goes back to cleartext TDS afterwards.
+
+Unit-tested directly: framing of writes, unframing of reads, the finish-on-read
+rule, pass-through after deactivate — plus a real `crypto/tls` handshake driven
+through two `handshakeConn`s over a `net.Pipe`.
+
+### 4. `internal/proxy/mssql/login7.go` — LOGIN7
+
+Parse the 94-byte fixed header + the 9 offset/length pairs + SSPI/AtchDBFile/
+ChangePassword, decode the UCS-2LE blobs, and descramble the password
+(`swap-nibbles ^ 0xA5` on encode, `^ 0xA5` then swap on decode — not an
+involution, so both directions are implemented and tested). `serialize()`
+rebuilds a wire-identical packet from the struct so stage 2 can rewrite the
+credentials and replay it. `String()`/logging never touches the password.
+
+### 5. `internal/proxy/mssql/errors.go` — TDS error tokens
+
+ERROR (0xAA) + DONE (0xFD) token builders in a type-0x04 response, so the stub
+"not wired through yet" failure is a well-formed login rejection any client
+surfaces as a normal error rather than a hang or a parse failure.
+
+### 6. `internal/proxy/mssql/{tls,server,session}.go`
+
+`tls.go` mirrors `mongodb/tls.go` (`DBB_MSSQL_TLS_*`, auto self-signed).
+`server.go` mirrors the other proxies' listen/accept/shutdown. `session.go`
+runs PRELOGIN → negotiate → optional encapsulated TLS → LOGIN7 → stub error.
+Stage 1 deliberately takes no store/authCache dependency: there is nothing to
+authenticate against yet, and the `unused` linter would flag dead fields.
+
+### 7. Integration points
+
+`internal/config/config.go` (`MSSQLConfig`, `ListenMSSQL` default `:1434`,
+`mssql_tls_*` env prefix), `main.go` (`startMSSQLProxy` + `collectServers`),
+`internal/api/parameters.go` + `openapi.yml` (`listen.mssql`, protocol enum),
+`front/` (protocol option, label, port hint 1433, listener row),
+`internal/store/models.go` (`ProtocolMSSQL`; the `protocol` column is plain
+TEXT with no CHECK, so no migration), `docs/mssql.md`, root `CLAUDE.md`.
+
+### 8. Tests
+
+Unit: everything above, plus a session-level test that drives a synthetic
+client through PRELOGIN/TLS/LOGIN7 over a real TCP listener and asserts the
+stub error token comes back. Integration (`//go:build integration`):
+`mcr.microsoft.com/mssql/server` via testcontainers + `make
+test-integration-mssql` + a matrix entry in `.github/workflows/integration.yml`.
