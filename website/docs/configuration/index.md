@@ -31,7 +31,12 @@ Configuration is loaded in this priority order (highest wins):
 | `DBB_LISTEN_ORA` | Oracle proxy listen address. Empty value disables the Oracle proxy. | `:1522` |
 | `DBB_LISTEN_MYSQL` | MySQL/MariaDB proxy listen address. Empty value disables it. | `:3307` |
 | `DBB_LISTEN_MONGO` | MongoDB proxy listen address. Empty value disables it. | `:27018` |
+| `DBB_LISTEN_MSSQL` | Microsoft SQL Server (TDS) proxy listen address. Empty value disables it. | `:1434` |
 | `DBB_LISTEN_API` | REST API + web UI listen address | `:4200` |
+
+`:1434` looks like it should collide with SQL Server, but it does not: the SQL
+Server Browser service that owns port 1434 is **UDP-only**, so 1434/tcp is free
+even on a host already running SQL Server.
 
 ### Encryption Key
 
@@ -369,6 +374,7 @@ listen_pg: ":5433"
 listen_ora: ":1522"
 listen_mysql: ":3307"
 listen_mongo: ":27018"
+listen_mssql: ":1434"
 listen_api: ":4200"
 dsn: "postgres://user:pass@localhost:5432/dbbat?sslmode=require"
 
