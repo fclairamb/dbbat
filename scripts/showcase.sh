@@ -30,6 +30,7 @@ SHOWCASE_OUT="${SHOWCASE_OUT:-${REPO_ROOT}/website/static/img/showcase}"
 SHOWCASE_WORK="${SHOWCASE_WORK:-${REPO_ROOT}/front/showcase/.artifacts}"
 SHOWCASE_PG_IMAGE="${SHOWCASE_PG_IMAGE:-postgres:15}"
 SHOWCASE_CONTAINER="${SHOWCASE_CONTAINER:-dbbat-showcase-postgres}"
+SHOWCASE_PG_TIMEOUT="${SHOWCASE_PG_TIMEOUT:-60}"  # seconds to wait for the upstream (pg_isready + demo db)
 SHOWCASE_PROJECT="${SHOWCASE_PROJECT:-}"        # "screenshots" | "poster" | "video" | ""
 SHOWCASE_SKIP_BUILD="${SHOWCASE_SKIP_BUILD:-0}"
 SHOWCASE_SKIP_TRANSCODE="${SHOWCASE_SKIP_TRANSCODE:-0}"
@@ -78,6 +79,20 @@ trap cleanup EXIT INT TERM
 
 require() { command -v "$1" >/dev/null 2>&1 || die "$1 is required but not on PATH"; }
 
+# Docker's state string ("running", "exited", "created", ...), or "gone" when
+# the container cannot be inspected at all (removed, never created, etc).
+container_state() {
+  docker inspect -f '{{.State.Status}}' "${SHOWCASE_CONTAINER}" 2>/dev/null || echo "gone"
+}
+
+dump_container_diagnostics() {
+  local exit_code
+  exit_code="$(docker inspect -f '{{.State.ExitCode}}' "${SHOWCASE_CONTAINER}" 2>/dev/null || echo 'unknown')"
+  warn "container ${SHOWCASE_CONTAINER} state: $(container_state), exit code: ${exit_code}"
+  warn "container ${SHOWCASE_CONTAINER} logs (last 50 lines):"
+  docker logs --tail 50 "${SHOWCASE_CONTAINER}" 2>&1 || true
+}
+
 port_busy() {
   # `nc -z` is not everywhere; lsof is on macOS and the GitHub runners.
   if command -v lsof >/dev/null 2>&1; then
@@ -122,7 +137,9 @@ if docker ps -a --format '{{.Names}}' | grep -qx "${SHOWCASE_CONTAINER}"; then
   docker start "${SHOWCASE_CONTAINER}" >/dev/null
 else
   log "starting the throwaway upstream (${SHOWCASE_PG_IMAGE}) on :${SHOWCASE_PG_PORT}"
-  docker run -d --rm \
+  # No --rm: a crashed container must survive long enough for the diagnostics
+  # below to inspect it. The named cleanup trap still removes it on exit.
+  docker run -d \
     --name "${SHOWCASE_CONTAINER}" \
     -e POSTGRES_USER=postgres \
     -e POSTGRES_PASSWORD=postgres \
@@ -132,23 +149,57 @@ else
   STARTED_CONTAINER=1
 fi
 
-log "waiting for the upstream to accept connections"
-for _ in $(seq 1 60); do
+log "waiting for the upstream to accept connections (timeout ${SHOWCASE_PG_TIMEOUT}s)"
+pg_ready=0
+container_died=0
+for _ in $(seq 1 "${SHOWCASE_PG_TIMEOUT}"); do
   if docker exec "${SHOWCASE_CONTAINER}" pg_isready -U postgres >/dev/null 2>&1; then
+    pg_ready=1
+    break
+  fi
+  state="$(container_state)"
+  if [ "${state}" != "running" ]; then
+    container_died=1
     break
   fi
   sleep 1
 done
-docker exec "${SHOWCASE_CONTAINER}" pg_isready -U postgres >/dev/null 2>&1 \
-  || die "the upstream container never became ready"
+if [ "${pg_ready}" != "1" ]; then
+  dump_container_diagnostics
+  if [ "${container_died}" = "1" ]; then
+    die "the upstream container died before becoming ready (state: $(container_state))"
+  else
+    die "the upstream container never became ready (timed out after ${SHOWCASE_PG_TIMEOUT}s, still running)"
+  fi
+fi
+
 # pg_isready goes green before init.sql has finished; the demo database is the
 # thing we actually need.
-for _ in $(seq 1 60); do
+log "waiting for the demo database to be created (timeout ${SHOWCASE_PG_TIMEOUT}s)"
+demo_ready=0
+container_died=0
+for _ in $(seq 1 "${SHOWCASE_PG_TIMEOUT}"); do
   if docker exec "${SHOWCASE_CONTAINER}" psql -U postgres -lqt 2>/dev/null | cut -d'|' -f1 | grep -qw demo; then
+    demo_ready=1
+    break
+  fi
+  state="$(container_state)"
+  if [ "${state}" != "running" ]; then
+    container_died=1
     break
   fi
   sleep 1
 done
+if [ "${demo_ready}" != "1" ]; then
+  dump_container_diagnostics
+  warn "databases currently on the upstream:"
+  docker exec "${SHOWCASE_CONTAINER}" psql -U postgres -lqt 2>&1 || true
+  if [ "${container_died}" = "1" ]; then
+    die "the upstream container died before the demo database was created (state: $(container_state))"
+  else
+    die "the demo database was never created (timed out after ${SHOWCASE_PG_TIMEOUT}s — check docker/postgres/init.sql)"
+  fi
+fi
 
 # --- demo-mode dbbat --------------------------------------------------------
 log "starting dbbat in demo mode (api :${SHOWCASE_API_PORT}, pg proxy :${SHOWCASE_PROXY_PORT})"

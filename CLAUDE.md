@@ -239,6 +239,7 @@ make showcase                       # everything
 SHOWCASE_PROJECT=video make showcase  # just the clip
 SHOWCASE_SKIP_BUILD=1 make showcase   # reuse the existing ./dbbat
 SHOWCASE_KEEP=1 make showcase         # leave the stack up to poke at
+SHOWCASE_PG_TIMEOUT=120 make showcase # give the upstream more time on a cold pull
 ```
 
 `scripts/showcase.sh` owns the lifecycle: it starts its **own** throwaway
