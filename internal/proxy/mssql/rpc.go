@@ -349,20 +349,70 @@ func (r rpcRequest) isWellKnown() bool {
 	return r.procID != procIDByNameMarker
 }
 
-// statementText returns the SQL this request carries inline, if any.
-func (r rpcRequest) statementText() (string, bool) {
+// statementParamNames are the names SQL Server accepts for the statement
+// parameter of the SQL-carrying system procedures. The empty name is included
+// because that is what every driver sends: these are positional calls.
+var statementParamNames = map[string]bool{
+	"": true, "@stmt": true, "@statement": true, "@tsql": true, "@rpccall": true,
+}
+
+// isStatementParamName reports whether a parameter name could be the statement.
+func isStatementParamName(name string) bool {
+	return statementParamNames[strings.ToLower(name)]
+}
+
+// statementTexts returns *every* parameter of this request that could be the
+// statement SQL Server ends up running.
+//
+// Usually that is exactly one: the documented positional slot, sent unnamed.
+// The set exists because SQL Server accepts these system procedures both
+// positionally and by name, and dbbat must not be able to disagree with the
+// server about which parameter is the statement — a client that could engineer
+// such a disagreement would have dbbat validate one string while the server ran
+// another, which is a read_only bypass. So when a request is anything other
+// than the plain positional form, every candidate is enforced.
+func (r rpcRequest) statementTexts() []string {
 	if !r.isWellKnown() {
-		return "", false
+		return nil
 	}
 
 	idx, ok := statementParamIndex[r.procID]
 	if !ok {
+		return nil
+	}
+
+	var candidates []string
+
+	// Anything explicitly named as a statement parameter.
+	for i, p := range r.params {
+		if p.name == "" || !isStatementParamName(p.name) {
+			continue
+		}
+
+		if text := r.stringParam(i); text != "" {
+			candidates = append(candidates, text)
+		}
+	}
+
+	// And the positional slot, which is what the server reads for a call sent
+	// the way every driver sends one.
+	if text := r.stringParam(idx); text != "" {
+		candidates = append(candidates, text)
+	}
+
+	return candidates
+}
+
+// statementText returns the statement this request is logged as: the positional
+// one when it is there, otherwise the first named candidate. Enforcement uses
+// statementTexts, not this.
+func (r rpcRequest) statementText() (string, bool) {
+	candidates := r.statementTexts()
+	if len(candidates) == 0 {
 		return "", false
 	}
 
-	stmt := r.stringParam(idx)
-
-	return stmt, stmt != ""
+	return candidates[len(candidates)-1], true
 }
 
 // handle returns the prepared-statement handle this request executes, if any.

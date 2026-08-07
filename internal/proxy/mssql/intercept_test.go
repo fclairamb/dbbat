@@ -520,3 +520,96 @@ func TestSessionParksAStatementOnAnApprovalHold(t *testing.T) {
 	require.Eventually(t, func() bool { return len(fixture.fake.receivedRequests()) == 1 },
 		10*time.Second, 20*time.Millisecond)
 }
+
+// TestRPCEnforcesEveryStatementCandidate is the hardening for a disagreement
+// dbbat must not be able to have with the server.
+//
+// SQL Server accepts these system procedures both positionally and by name. A
+// client that could get dbbat to validate the *named* @stmt while the server
+// ran the *positional* one (or the reverse) would have a read_only bypass, so
+// every candidate is enforced when a request is anything but the plain
+// positional form.
+func TestRPCEnforcesEveryStatementCandidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		payload []byte
+	}{
+		{
+			name: "a write in the positional slot, a read named @stmt",
+			payload: rpcByID(spExecuteSQL,
+				nvarcharMaxParam("", "DELETE FROM t"),
+				nvarcharMaxParam("@stmt", "SELECT 1")),
+		},
+		{
+			name: "a read in the positional slot, a write named @stmt",
+			payload: rpcByID(spExecuteSQL,
+				nvarcharMaxParam("", "SELECT 1"),
+				nvarcharMaxParam("@stmt", "DELETE FROM t")),
+		},
+		{
+			name: "a write named @tsql",
+			payload: rpcByID(spExecuteSQL,
+				nvarcharMaxParam("@tsql", "DROP TABLE t"),
+				nvarcharMaxParam("", "SELECT 1")),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			session := sessionWithGrant(t, grantWithControls(store.ControlReadOnly, store.ControlBlockDDL))
+
+			requests, err := parseRPC(tc.payload)
+			require.NoError(t, err)
+
+			st := session.describeRPC(requests)
+
+			got := st.refusal
+			if got == nil {
+				got = session.validate(st)
+			}
+
+			require.Error(t, got, "whichever candidate the server would run, dbbat must have checked it")
+		})
+	}
+}
+
+// TestBulkLoadIsRefusedUnderRestrictiveGrants covers the message that carries
+// bulk-copy rows. The INSERT BULK statement is the primary gate; this is the
+// belt to those braces, so no ordering trick delivers rows to the upstream.
+func TestBulkLoadIsRefusedUnderRestrictiveGrants(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		controls []string
+		wantErr  error
+	}{
+		{name: "read_only", controls: []string{store.ControlReadOnly}, wantErr: shared.ErrReadOnlyViolation},
+		{name: "block_copy", controls: []string{store.ControlBlockCopy}, wantErr: ErrBulkCopyBlocked},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			fixture := newAuthFixtureWith(t, fixtureOptions{
+				upstreamEncryption: encryptNotSup,
+				sslMode:            "disable",
+				controls:           tc.controls,
+			})
+
+			client, outcome := fixture.login(t, fixtureUser, fixturePassword, fixtureDBEntry)
+			require.True(t, outcome.Acked)
+
+			reply := fixture.sendAndRead(t, client, packetTypeBulkLoad, []byte{0x01, 0x02, 0x03})
+			assert.Contains(t, firstErrorToken(t, reply).Message, tc.wantErr.Error())
+
+			assert.Empty(t, fixture.fake.receivedRequests(),
+				"bulk-copy rows must never reach the upstream under this grant")
+		})
+	}
+}

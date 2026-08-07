@@ -122,10 +122,12 @@ func (s *session) describeRPC(requests []rpcRequest) statement {
 
 		switch {
 		case describedInline(req):
-			stmt, _ := req.statementText()
-			st.enforce = append(st.enforce, stmt)
+			// Every candidate, not just the logged one: dbbat must not be able
+			// to validate one parameter while the upstream runs another.
+			st.enforce = append(st.enforce, req.statementTexts()...)
 
 			if preparingProcs[req.procID] {
+				stmt, _ := req.statementText()
 				st.prepareFor = stmt
 			}
 
@@ -219,17 +221,18 @@ func (s *session) rememberPrepared(handle int64, sql string) {
 // writing or bulk copying refuses the data too, so no ordering trick reaches
 // the upstream with rows.
 func (s *session) interceptBulkLoad(ctx context.Context, payload []byte) ([]byte, error) {
-	if s.grant.IsReadOnly() {
-		return s.runStatement(ctx, payload,
-			statement{text: "BULK LOAD DATA", refusal: shared.ErrReadOnlyViolation})
+	st := statement{text: "BULK LOAD DATA"}
+
+	switch {
+	case s.grant.IsReadOnly():
+		st.refusal = shared.ErrReadOnlyViolation
+	case s.grant.ShouldBlockCopy():
+		st.refusal = ErrBulkCopyBlocked
 	}
 
-	if s.grant.ShouldBlockCopy() {
-		return s.runStatement(ctx, payload,
-			statement{text: "BULK LOAD DATA", refusal: ErrBulkCopyBlocked})
-	}
-
-	return forwarded(payload), nil
+	// Allowed or not, it goes through the pipeline: the rows carry no statement
+	// to check, but they do consume the grant's quota and belong in the audit.
+	return s.runStatement(ctx, payload, st)
 }
 
 // runStatement is the enforcement pipeline, in the same order every other

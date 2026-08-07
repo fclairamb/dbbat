@@ -360,6 +360,14 @@ Enforcement runs on the **statement template**. Parameter values are decoded and
 captured for the query row, but they are not what the controls match, which is
 the right granularity: `read_only` is about what the statement *does*.
 
+SQL Server accepts these system procedures both positionally and by name, so
+dbbat enforces on **every candidate**: the documented positional slot, plus any
+parameter explicitly named `@stmt` / `@statement` / `@tsql` / `@rpccall`. A
+client that could get dbbat to validate one parameter while the server ran
+another would have a `read_only` bypass; a normal driver call sends the
+statement unnamed and positional, so there is exactly one candidate and nothing
+changes.
+
 dbbat parses both RPC forms — a procedure name, and the well-known
 procedure-id shorthand every driver actually uses — plus multi-call batches
 separated by a batch flag. The forms that carry SQL, and where:
@@ -407,7 +415,10 @@ statement it acts on was checked when it was prepared or opened.
 copy, so it matches `BULK INSERT`, `INSERT BULK` and `OPENROWSET(BULK …)`. The
 `INSERT BULK` statement is the primary gate — a bulk-copy client announces it as
 an ordinary SQLBatch — and the `BulkLoadBCP` (`0x07`) message that streams the
-rows is refused as well, so no ordering trick delivers rows to the upstream.
+rows is refused as well, so no ordering trick delivers rows to the upstream. An
+allowed bulk-load message still goes through the pipeline: the rows carry no
+statement to check, but they do consume the grant's quota and belong in the
+audit trail.
 
 ### Approval holds
 
