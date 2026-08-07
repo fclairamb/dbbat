@@ -1997,8 +1997,22 @@ export interface components {
             uid: string;
             /** Format: uuid */
             user_id: string;
-            /** Format: uuid */
+            /**
+             * Format: uuid
+             * @description The exact definition *version* the request was filed against. An
+             *     edit to that definition archives this row and inserts a successor,
+             *     so this uid may name a version no listing returns anymore — read
+             *     `definition` instead of resolving it.
+             */
             grant_definition_id: string;
+            /**
+             * @description The **live** version of that definition's lineage, embedded on
+             *     every read. Live rather than pinned because approving the request
+             *     materializes today's policy, so today's version is the one to show
+             *     (name, auto_approve, controls). A grant is the opposite case: it
+             *     embeds the exact version it was issued from.
+             */
+            definition?: components["schemas"]["GrantDefinition"];
             /** Format: uuid */
             database_id: string;
             justification?: string;

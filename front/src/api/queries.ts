@@ -614,6 +614,10 @@ export function useUpdateGrantDefinition(options?: {
     },
     onSuccess: (def) => {
       queryClient.invalidateQueries({ queryKey: ["grant-definitions"] });
+      // Grant requests embed the live version of their definition, so an edit
+      // (which archives the current version and inserts a successor) changes
+      // what every request against that lineage renders.
+      queryClient.invalidateQueries({ queryKey: ["grant-requests"] });
       options?.onSuccess?.(def);
     },
     onError: options?.onError,
