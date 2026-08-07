@@ -184,6 +184,76 @@ func TestProxyHandshakeWithARealClient(t *testing.T) {
 	}
 }
 
+// TestProxyHandshakeAtTLS13 is the regression guard for the opt-in ceiling.
+//
+// TLS 1.3 is the version the encapsulation makes awkward: the client's
+// handshake ends on a *write*, so the framed→raw switch no longer lands on the
+// same byte for both peers, and the classic failure is a hang rather than an
+// error. Everything here is therefore bounded — a short context and a short
+// driver-side connection timeout — so a regression fails in seconds instead of
+// parking the suite.
+//
+// go-mssqldb is the only driver this can drive; the Microsoft ODBC and JDBC
+// drivers are not available to this suite, and docs/mssql.md says so.
+func TestProxyHandshakeAtTLS13(t *testing.T) {
+	tests := []struct {
+		name     string
+		encrypt  string
+		proxyMax string
+		wantLogn bool
+	}{
+		// The whole session inside TLS 1.3.
+		{
+			name: "encryption on", encrypt: "true",
+			proxyMax: config.MSSQLTLSMaxVersion13, wantLogn: true,
+		},
+		// ENCRYPT_OFF still runs a full handshake, then reverts to cleartext —
+		// the revert is the step most likely to break on a version change.
+		{
+			name: "login-packet-only encryption", encrypt: "false",
+			proxyMax: config.MSSQLTLSMaxVersion13, wantLogn: true,
+		},
+		// And the default really is a ceiling: a client that will not go below
+		// 1.3 must be refused, not quietly downgraded.
+		{
+			name: "default ceiling refuses a 1.3-only client", encrypt: "true",
+			proxyMax: "", wantLogn: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Deliberately tight: the failure mode under test is a hang.
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+
+			addr := startProxy(t, config.MSSQLConfig{TLSMaxVersion: tc.proxyMax})
+
+			// tlsmin=1.3 puts the *client's* floor at 1.3, so the handshake can
+			// only succeed if the proxy actually served 1.3. Without it Go
+			// would pick a version and the assertion would prove nothing.
+			db, err := sql.Open("sqlserver", dsn(addr, tc.encrypt)+"&tlsmin=1.3")
+			require.NoError(t, err)
+
+			t.Cleanup(func() { _ = db.Close() })
+
+			err = db.PingContext(ctx)
+			require.Error(t, err, "a proxy without a store authenticates nobody")
+
+			if !tc.wantLogn {
+				assert.NotContains(t, err.Error(), "Login failed for user",
+					"a 1.2 ceiling must refuse the handshake, well before any login")
+
+				return
+			}
+
+			assert.Contains(t, err.Error(), "Login failed for user",
+				"reaching the login refusal means the TLS 1.3 handshake completed and "+
+					"both ends switched from PRELOGIN framing to raw records on the same byte")
+		})
+	}
+}
+
 // TestProxyRefusesMARS documents the v1 limitation: a client configured with
 // MultipleActiveResultSets cannot connect, and the failure is diagnosable.
 func TestProxyRefusesMARS(t *testing.T) {
