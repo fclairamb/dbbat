@@ -5,6 +5,8 @@ import (
 )
 
 func TestStringArrayValueQuotesEveryElement(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		name string
 		in   StringArray
@@ -24,6 +26,8 @@ func TestStringArrayValueQuotesEveryElement(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			got, err := tc.in.Value()
 			if err != nil {
 				t.Fatalf("Value() error: %v", err)
@@ -37,6 +41,8 @@ func TestStringArrayValueQuotesEveryElement(t *testing.T) {
 }
 
 func TestStringArrayScanParsesPostgresOutput(t *testing.T) {
+	t.Parallel()
+
 	cases := []struct {
 		name string
 		in   string
@@ -64,6 +70,8 @@ func TestStringArrayScanParsesPostgresOutput(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			for _, src := range []any{tc.in, []byte(tc.in)} {
 				var got StringArray
 				if err := got.Scan(src); err != nil {
@@ -85,6 +93,8 @@ func TestStringArrayScanParsesPostgresOutput(t *testing.T) {
 }
 
 func TestStringArrayRoundTripsThroughItsOwnEncoding(t *testing.T) {
+	t.Parallel()
+
 	in := StringArray{
 		`(?i)^DELETE`, `[abc]`, `(a|b)`, `a,b`, `he said "hi"`, `a\b`, ``, `NULL`,
 		`{nested}`, `(?i)^DROP\s+TABLE`,
@@ -112,6 +122,8 @@ func TestStringArrayRoundTripsThroughItsOwnEncoding(t *testing.T) {
 }
 
 func TestStringArrayScanNullAndGarbage(t *testing.T) {
+	t.Parallel()
+
 	var got StringArray
 	if err := got.Scan(nil); err != nil {
 		t.Fatalf("Scan(nil) error: %v", err)

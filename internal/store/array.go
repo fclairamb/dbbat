@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql/driver"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -33,6 +34,14 @@ import (
 // PostgreSQL renders as a bare `NULL`) decodes to the empty string, because
 // []string cannot represent it. No dbbat column stores NULL elements.
 type StringArray []string
+
+var (
+	errArrayLiteral     = errors.New("store: cannot parse PostgreSQL array literal")
+	errArraySeparator   = errors.New("expected a ',' separator")
+	errArrayEscape      = errors.New("unterminated escape")
+	errArrayQuotedElem  = errors.New("unterminated quoted element")
+	errArrayUnsupported = errors.New("store: cannot scan into StringArray")
+)
 
 var (
 	_ driver.Valuer = StringArray(nil)
@@ -84,13 +93,13 @@ func (a *StringArray) Scan(src any) error {
 	case []byte:
 		return a.parse(string(v))
 	default:
-		return fmt.Errorf("store: cannot scan %T into StringArray", src)
+		return fmt.Errorf("%w: unsupported source type %T", errArrayUnsupported, src)
 	}
 }
 
 func (a *StringArray) parse(s string) error {
 	if len(s) < 2 || s[0] != '{' || s[len(s)-1] != '}' {
-		return fmt.Errorf("store: cannot parse PostgreSQL array %q", s)
+		return fmt.Errorf("%w: %q", errArrayLiteral, s)
 	}
 
 	body := s[1 : len(s)-1]
@@ -110,7 +119,7 @@ func (a *StringArray) parse(s string) error {
 
 		if body[i] == '"' {
 			if elem, i, err = parseQuotedArrayElem(body, i); err != nil {
-				return fmt.Errorf("store: cannot parse PostgreSQL array %q: %w", s, err)
+				return fmt.Errorf("%w %q: %w", errArrayLiteral, s, err)
 			}
 		} else {
 			elem, i = parseBareArrayElem(body, i)
@@ -121,7 +130,7 @@ func (a *StringArray) parse(s string) error {
 		// Every element but the last is followed by the separator.
 		if i < len(body) {
 			if body[i] != ',' {
-				return fmt.Errorf("store: cannot parse PostgreSQL array %q: expected ',' at offset %d", s, i+1)
+				return fmt.Errorf("%w %q: %w at offset %d", errArrayLiteral, s, errArraySeparator, i+1)
 			}
 
 			i++
@@ -144,7 +153,7 @@ func parseQuotedArrayElem(body string, i int) (string, int, error) {
 		case '\\':
 			i++
 			if i >= len(body) {
-				return "", 0, fmt.Errorf("unterminated escape")
+				return "", 0, errArrayEscape
 			}
 
 			b.WriteByte(body[i])
@@ -155,7 +164,7 @@ func parseQuotedArrayElem(body string, i int) (string, int, error) {
 		}
 	}
 
-	return "", 0, fmt.Errorf("unterminated quoted element")
+	return "", 0, errArrayQuotedElem
 }
 
 // parseBareArrayElem reads an unquoted element starting at body[i] and returns
