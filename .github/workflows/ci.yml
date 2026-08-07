@@ -96,6 +96,17 @@ jobs:
       - name: Run tests
         run: go test -race -coverprofile=coverage.out ./...
 
+      # The proxies' accept loop races their Shutdown only probabilistically —
+      # the WaitGroup bug fixed in ea85c3f showed up about once in a few hundred
+      # runs, so the single -race pass above would almost always have missed it.
+      # Repeat just the Start+Shutdown tests enough times to make a regression
+      # actually redden CI. ~90s for all five protocols.
+      - name: Race-stress the proxy start/shutdown path
+        run: >-
+          go test -race -count=200
+          -run 'TestServerStartAndShutdown|TestOracleServer_GracefulShutdown'
+          ./internal/proxy/...
+
       # Integration-tagged tests need live databases and so never run here, but
       # they must at least keep compiling — otherwise they rot silently until
       # someone tries to run them.
