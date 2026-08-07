@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -117,49 +118,79 @@ func (s *session) describeRPC(requests []rpcRequest) statement {
 	texts := make([]string, 0, len(requests))
 
 	for _, req := range requests {
-		texts = append(texts, req.logText())
 		st.params = appendParams(st.params, req.parameterValues())
-
-		switch {
-		case describedInline(req):
-			// Every candidate, not just the logged one: dbbat must not be able
-			// to validate one parameter while the upstream runs another.
-			st.enforce = append(st.enforce, req.statementTexts()...)
-
-			if preparingProcs[req.procID] {
-				stmt, _ := req.statementText()
-				st.prepareFor = stmt
-			}
-
-		case handleOnly(req):
-			sql, known := s.preparedStatement(req)
-
-			switch {
-			case known:
-				st.enforce = append(st.enforce, sql)
-			case harmlessProcs[req.procID]:
-				// Releasing or repositioning something already checked.
-			case grantRestricts(s.grant) && st.refusal == nil:
-				st.refusal = ErrUnknownPreparedStatement
-			}
-
-		case req.isWellKnown() && harmlessProcs[req.procID]:
-			// Cursor bookkeeping: no statement, nothing a control is about.
-
-		default:
-			// A stored procedure by name (or a well-known form with no
-			// statement and no handle). dbbat cannot see the body, so under a
-			// grant that restricts anything it fails closed rather than
-			// forwarding something it cannot vouch for.
-			if grantRestricts(s.grant) && st.refusal == nil {
-				st.refusal = ErrOpaqueProcedureBlocked
-			}
-		}
+		texts = append(texts, s.describeRPCRequest(req, &st))
 	}
 
 	st.text = truncateSQL(strings.Join(texts, "; "))
 
 	return st
+}
+
+// describeRPCRequest classifies one request, folds its enforcement into st, and
+// returns the text the statement is logged and pattern-matched as.
+func (s *session) describeRPCRequest(req rpcRequest, st *statement) string {
+	switch {
+	case describedInline(req):
+		// Every candidate, not just the logged one: dbbat must not be able to
+		// validate one parameter while the upstream runs another.
+		st.enforce = append(st.enforce, req.statementTexts()...)
+
+		stmt, _ := req.statementText()
+		if preparingProcs[req.procID] {
+			st.prepareFor = stmt
+		}
+
+		return stmt
+
+	case handleOnly(req):
+		return s.describeHandleRequest(req, st)
+
+	case req.isWellKnown() && harmlessProcs[req.procID]:
+		// Cursor bookkeeping: no statement, nothing a control is about.
+		return req.logText()
+
+	default:
+		// A stored procedure by name (or a well-known form with no statement
+		// and no handle). dbbat cannot see the body, so under a grant that
+		// restricts anything it fails closed rather than forwarding something
+		// it cannot vouch for.
+		if grantRestricts(s.grant) && st.refusal == nil {
+			st.refusal = ErrOpaqueProcedureBlocked
+		}
+
+		return req.logText()
+	}
+}
+
+// describeHandleRequest classifies a form that executes something prepared
+// earlier.
+//
+// A resolved handle is logged *as the statement it runs*, not as
+// "EXEC sp_execute 41". That is what the MySQL proxy does for COM_STMT_EXECUTE,
+// and it is load-bearing rather than cosmetic: approval patterns are matched
+// against this text, so logging the handle instead would make the four-eyes rule
+// silently stop applying the moment a client used prepared statements.
+func (s *session) describeHandleRequest(req rpcRequest, st *statement) string {
+	// sp_unprepare and friends release a handle; the statement behind it was
+	// checked when it was prepared, and logging its SQL here would read as if it
+	// ran again.
+	if harmlessProcs[req.procID] {
+		return req.logText()
+	}
+
+	sql, known := s.preparedStatement(req)
+	if known {
+		st.enforce = append(st.enforce, sql)
+
+		return sql
+	}
+
+	if grantRestricts(s.grant) && st.refusal == nil {
+		st.refusal = ErrUnknownPreparedStatement
+	}
+
+	return req.logText()
 }
 
 // describedInline reports whether the request carries its statement inline.
@@ -417,13 +448,23 @@ func appendParams(params *store.QueryParameters, values []string) *store.QueryPa
 	return params
 }
 
-// truncateSQL bounds the stored statement text.
+// truncateSQL bounds the stored statement text, cutting on a rune boundary.
+//
+// The limit is in bytes, but the text is UTF-8 decoded from UCS-2: a blind cut
+// can land inside a multi-byte rune, and the invalid string that results fails
+// the query insert outright. Losing the audit row for an oversize statement is
+// exactly the wrong failure.
 func truncateSQL(sql string) string {
 	if len(sql) <= maxSQLTextLen {
 		return sql
 	}
 
-	return sql[:maxSQLTextLen]
+	cut := maxSQLTextLen
+	for cut > 0 && !utf8.RuneStart(sql[cut]) {
+		cut--
+	}
+
+	return sql[:cut]
 }
 
 // usernameOf renders a user for logs without dereferencing a nil.

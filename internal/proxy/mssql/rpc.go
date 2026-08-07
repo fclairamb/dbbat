@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // ALL_HEADERS (MS-TDS 2.2.5.2) prefixes every SQLBatch, RPC and Transaction
@@ -88,43 +89,57 @@ type rpcRequest struct {
 	params []rpcParam
 }
 
-// parseAllHeaders returns the offset just past the ALL_HEADERS block.
+// parseAllHeaders returns the offset just past the ALL_HEADERS block, and
+// refuses a payload that should carry one but does not.
 //
-// It is defensive on purpose. Every TDS 7.2+ client sends the block, but the
-// consequence of misreading it is that the SQL text starts two bytes off and a
-// pattern-based control silently stops matching — so the block is only skipped
-// when it really looks like one.
-func parseAllHeaders(payload []byte) int {
+// **Failing closed here is a security property, not tidiness.** If a block that
+// does not validate were simply skipped, its bytes would be decoded as part of
+// the statement — and every grant control dbbat applies to a statement is
+// prefix-based (`shared.IsWriteQuery` and friends do `strings.HasPrefix`). A
+// garbage prefix therefore turns `DELETE FROM t` into something `read_only` no
+// longer matches, while the upstream may still recognize the statement. So a
+// malformed block is refused rather than skipped.
+//
+// It costs nothing in compatibility: ALL_HEADERS is mandatory from TDS 7.2, and
+// Login7.Validate already refuses anything below 7.4. A client that omits or
+// mangles the block is a red flag, not an old client.
+func parseAllHeaders(payload []byte) (int, error) {
+	// An empty message carries no statement and no headers; there is nothing to
+	// refuse.
+	if len(payload) == 0 {
+		return 0, nil
+	}
+
 	if len(payload) < allHeadersLenSize {
-		return 0
+		return 0, fmt.Errorf("%w: too short to carry an ALL_HEADERS block", ErrMalformedRequest)
 	}
 
 	total := int(binary.LittleEndian.Uint32(payload[:allHeadersLenSize]))
 	if total < allHeadersLenSize || total > len(payload) {
-		return 0
+		return 0, fmt.Errorf("%w: ALL_HEADERS length %d does not fit the message", ErrMalformedRequest, total)
 	}
 
 	// An empty block (just the length) is legal.
 	if total == allHeadersLenSize {
-		return total
+		return total, nil
 	}
 
 	if total < allHeadersLenSize+minHeaderLen {
-		return 0
+		return 0, fmt.Errorf("%w: ALL_HEADERS block is too small to hold a header", ErrMalformedRequest)
 	}
 
 	headerLen := int(binary.LittleEndian.Uint32(payload[4:8]))
 	headerType := binary.LittleEndian.Uint16(payload[8:10])
 
 	if headerLen < minHeaderLen || headerLen > total-allHeadersLenSize {
-		return 0
+		return 0, fmt.Errorf("%w: ALL_HEADERS header length %d is out of range", ErrMalformedRequest, headerLen)
 	}
 
 	switch headerType {
 	case headerQueryNotification, headerTransDescriptor, headerTraceActivity:
-		return total
+		return total, nil
 	default:
-		return 0
+		return 0, fmt.Errorf("%w: unknown ALL_HEADERS header type %d", ErrMalformedRequest, headerType)
 	}
 }
 
@@ -134,7 +149,10 @@ func parseAllHeaders(payload []byte) int {
 // non-ASCII identifier and — the part that matters — could let a statement
 // slip past a pattern-based control that is a security control.
 func parseSQLBatch(payload []byte) (string, error) {
-	offset := parseAllHeaders(payload)
+	offset, err := parseAllHeaders(payload)
+	if err != nil {
+		return "", err
+	}
 
 	body := payload[offset:]
 	if len(body)%2 != 0 {
@@ -146,14 +164,17 @@ func parseSQLBatch(payload []byte) (string, error) {
 
 // parseRPC decodes an RPC (0x03) message into its requests.
 func parseRPC(payload []byte) ([]rpcRequest, error) {
-	pos := parseAllHeaders(payload)
+	pos, err := parseAllHeaders(payload)
+	if err != nil {
+		return nil, err
+	}
 
 	var requests []rpcRequest
 
 	for pos < len(payload) {
-		req, next, err := parseRPCRequest(payload, pos)
-		if err != nil {
-			return nil, err
+		req, next, reqErr := parseRPCRequest(payload, pos)
+		if reqErr != nil {
+			return nil, reqErr
 		}
 
 		requests = append(requests, req)
@@ -283,7 +304,13 @@ func (r rpcRequest) stringParam(i int) string {
 	case isUCS2Type(p.info.id):
 		return ucs2ToString(p.raw)
 	case isASCIIType(p.info.id):
-		return string(p.raw)
+		// Single-byte text that is not valid UTF-8 goes through Latin-1 rather
+		// than into the store as invalid bytes: sql_text has to stay insertable.
+		if utf8.Valid(p.raw) {
+			return string(p.raw)
+		}
+
+		return latin1ToString(p.raw)
 	default:
 		return ""
 	}
@@ -317,7 +344,7 @@ var statementParamIndex = map[uint16]int{
 	spPrepExec:       2, // @handle OUT, @params, @stmt, values…
 	spCursorPrepare:  2, // @handle OUT, @params, @stmt, @options, …
 	spCursorOpen:     1, // @cursor OUT, @stmt, @scrollopt, …
-	spCursorPrepExec: 3, // @cursor OUT, @handle OUT, @params, @stmt, …
+	spCursorPrepExec: 3, // @handle OUT, @cursor OUT, @params, @stmt, …
 	spPrepExecRPC:    1, // @handle OUT, @rpccall
 }
 
@@ -325,8 +352,8 @@ var statementParamIndex = map[uint16]int{
 // put the handle they execute.
 var handleParamIndex = map[uint16]int{
 	spExecute:       0, // @handle, values…
-	spCursorExecute: 1, // @cursor OUT, @handle, …
-	spUnprepare:     0,
+	spCursorExecute: 0, // @handle, @cursor OUT, @scrollopt, …
+	spUnprepare:     0, // @handle
 }
 
 // preparingProcs are the forms whose first RETURNVALUE is a prepared-statement

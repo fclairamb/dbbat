@@ -151,15 +151,66 @@ func TestParseSQLBatchDecodesUCS2(t *testing.T) {
 	}
 }
 
-// TestParseSQLBatchWithoutAllHeaders covers a payload whose leading DWORD is
-// not a header block: the SQL must be read from offset zero rather than two
-// characters in, or every pattern-based control would silently shift.
-func TestParseSQLBatchWithoutAllHeaders(t *testing.T) {
+// TestParseSQLBatchRefusesAMalformedHeaderBlock is the fail-closed rule.
+//
+// Skipping a header block that does not validate would decode its bytes as part
+// of the statement, and every grant control dbbat applies is prefix-based —
+// so a garbage prefix turns `DELETE FROM t` into something `read_only` no longer
+// matches while the upstream may still run it. ALL_HEADERS is mandatory from
+// TDS 7.2 and the proxy's floor is 7.4, so refusing costs nothing.
+func TestParseSQLBatchRefusesAMalformedHeaderBlock(t *testing.T) {
 	t.Parallel()
 
-	decoded, err := parseSQLBatch(stringToUCS2("SELECT 1"))
+	// The exact evasion: an unknown header type in front of a real write.
+	evasion := append(
+		[]byte{0x16, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x63, 0x00},
+		make([]byte, 12)...)
+	evasion = append(evasion, stringToUCS2("DELETE FROM t")...)
+
+	tests := []struct {
+		name    string
+		payload []byte
+	}{
+		{"no header block at all", stringToUCS2("SELECT 1")},
+		{"an unknown header type in front of a write", evasion},
+		{"a length that overruns the message", append([]byte{0xFF, 0xFF, 0x00, 0x00}, stringToUCS2("SELECT 1")...)},
+		{"a length smaller than itself", append([]byte{0x02, 0x00, 0x00, 0x00}, stringToUCS2("SELECT 1")...)},
+		{"a header length out of range", []byte{0x0C, 0x00, 0x00, 0x00, 0xFF, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00}},
+		{"too short to hold a block", []byte{0x41, 0x00}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := parseSQLBatch(tc.payload)
+			require.ErrorIs(t, err, ErrMalformedRequest)
+		})
+	}
+}
+
+// TestParseAllHeadersAcceptsTheLegalForms: an empty block, and each of the
+// three header types MS-TDS defines.
+func TestParseAllHeadersAcceptsTheLegalForms(t *testing.T) {
+	t.Parallel()
+
+	offset, err := parseAllHeaders([]byte{0x04, 0x00, 0x00, 0x00})
 	require.NoError(t, err)
-	assert.Equal(t, "SELECT 1", decoded)
+	assert.Equal(t, 4, offset)
+
+	for _, headerType := range []byte{0x01, 0x02, 0x03} {
+		block := append([]byte{}, testAllHeaders()...)
+		block[8] = headerType
+
+		offset, err := parseAllHeaders(block)
+		require.NoError(t, err)
+		assert.Equal(t, len(testAllHeaders()), offset)
+	}
+
+	// An empty message carries no statement and no headers.
+	offset, err = parseAllHeaders(nil)
+	require.NoError(t, err)
+	assert.Zero(t, offset)
 }
 
 // TestParseSQLBatchRejectsAnOddLength: UCS-2 text always occupies an even
@@ -287,8 +338,12 @@ func TestParseRPCHandleForms(t *testing.T) {
 		payload []byte
 	}{
 		{"sp_execute", rpcByID(spExecute, intNParam("@handle", 41, 0), intNParam("@id", 2, 0))},
+		// sp_cursorexecute prepared_handle, cursor OUTPUT, …: the handle comes
+		// first. Reading the cursor slot instead would refuse every cursor
+		// re-execution under a restrictive grant, and — on a cursor-id/handle-id
+		// collision — resolve against the wrong statement.
 		{"sp_cursorexecute", rpcByID(spCursorExecute,
-			intNParam("@cursor", 0, 0x01), intNParam("@handle", 41, 0))},
+			intNParam("@handle", 41, 0), intNParam("@cursor", 0, 0x01))},
 	}
 
 	for _, tc := range tests {

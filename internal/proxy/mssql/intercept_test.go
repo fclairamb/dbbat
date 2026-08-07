@@ -2,8 +2,10 @@ package mssql
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -612,4 +614,249 @@ func TestBulkLoadIsRefusedUnderRestrictiveGrants(t *testing.T) {
 				"bulk-copy rows must never reach the upstream under this grant")
 		})
 	}
+}
+
+// TestSQLBatchRefusesAPrefixEvasion is the same fail-closed rule from the
+// enforcement side: a malformed ALL_HEADERS block must refuse the statement
+// rather than let its bytes become a prefix that a prefix-based control no
+// longer matches.
+func TestSQLBatchRefusesAPrefixEvasion(t *testing.T) {
+	t.Parallel()
+
+	// A well-formed-looking block with a header type MS-TDS does not define,
+	// followed by a real write.
+	payload := append(
+		[]byte{0x16, 0x00, 0x00, 0x00, 0x12, 0x00, 0x00, 0x00, 0x63, 0x00},
+		make([]byte, 12)...)
+	payload = append(payload, stringToUCS2("DELETE FROM t")...)
+
+	_, err := parseSQLBatch(payload)
+	require.ErrorIs(t, err, ErrMalformedRequest)
+
+	// And, had it been skipped rather than refused, the prefix really would
+	// have defeated the control — which is why this is fail-closed.
+	assert.False(t, shared.IsWriteQuery(ucs2ToString(payload)),
+		"the garbage prefix is exactly what stops read_only from matching")
+}
+
+// TestCursorExecuteResolvesItsHandle covers the parameter order of
+// sp_cursorexecute: the handle is the first parameter, the cursor OUT the
+// second.
+func TestCursorExecuteResolvesItsHandle(t *testing.T) {
+	t.Parallel()
+
+	session := sessionWithGrant(t, grantWithControls(store.ControlReadOnly))
+	session.rememberPrepared(41, "SELECT * FROM t")
+
+	requests, err := parseRPC(rpcByID(spCursorExecute,
+		intNParam("@handle", 41, 0), intNParam("@cursor", 0, 0x01)))
+	require.NoError(t, err)
+
+	st := session.describeRPC(requests)
+	require.NoError(t, st.refusal, "a cursor re-execution of a known handle must not fail closed")
+	require.NoError(t, session.validate(st))
+	assert.Equal(t, "SELECT * FROM t", st.text)
+}
+
+// TestPreparedExecuteIsLoggedAsItsStatement is the observability half of the
+// prepared-statement path, and the reason it matters is the approval gate:
+// holds are matched against this text, so logging "EXEC sp_execute 41" would
+// make the four-eyes rule silently stop applying to any client that uses
+// prepared statements.
+func TestPreparedExecuteIsLoggedAsItsStatement(t *testing.T) {
+	t.Parallel()
+
+	session := sessionWithGrant(t, grantWithControls())
+	session.rememberPrepared(41, "DELETE FROM employés WHERE id = @id")
+
+	requests, err := parseRPC(rpcByID(spExecute, intNParam("@handle", 41, 0), intNParam("@id", 2, 0)))
+	require.NoError(t, err)
+
+	st := session.describeRPC(requests)
+
+	assert.Equal(t, "DELETE FROM employés WHERE id = @id", st.text)
+	assert.Equal(t, []string{"DELETE FROM employés WHERE id = @id"}, st.enforce)
+	require.NotNil(t, st.params)
+	assert.Equal(t, []string{"@handle=41", "@id=2"}, st.params.Values)
+}
+
+// TestUnprepareIsNotLoggedAsItsStatement: releasing a handle is not running the
+// statement again, so it must not read like it.
+func TestUnprepareIsNotLoggedAsItsStatement(t *testing.T) {
+	t.Parallel()
+
+	session := sessionWithGrant(t, grantWithControls(store.ControlReadOnly))
+	session.rememberPrepared(41, "SELECT 1")
+
+	requests, err := parseRPC(rpcByID(spUnprepare, intNParam("@handle", 41, 0)))
+	require.NoError(t, err)
+
+	st := session.describeRPC(requests)
+	require.NoError(t, st.refusal)
+	assert.Equal(t, "EXEC sp_unprepare @handle = 41", st.text)
+	assert.Empty(t, st.enforce)
+}
+
+// TestApprovalHoldMatchesAPreparedStatement is the end-to-end version of the
+// same property: a pattern that fires on the statement must still fire when the
+// client runs it through a prepared handle.
+func TestApprovalHoldMatchesAPreparedStatement(t *testing.T) {
+	t.Parallel()
+
+	registry := approval.NewRegistry()
+
+	fixture := newAuthFixtureWith(t, fixtureOptions{
+		upstreamEncryption: encryptNotSup,
+		sslMode:            "disable",
+		approvalPatterns:   []string{`(?i)^DELETE`},
+		approvalDepsFor: func(dataStore *store.Store) shared.ApprovalDeps {
+			return shared.ApprovalDeps{
+				Enabled:      true,
+				Store:        dataStore,
+				Registry:     registry,
+				Logger:       testLogger(),
+				PollInterval: 100 * time.Millisecond,
+			}
+		},
+	})
+
+	// The upstream answers a prepare with the handle it allocated.
+	handleReturn := appendUint16([]byte{tokenReturnValue}, 1)
+	handleReturn = writeBVarchar(handleReturn, "@handle")
+	handleReturn = append(handleReturn, 0x01)
+	handleReturn = appendUint32(handleReturn, 0)
+	handleReturn = appendUint16(handleReturn, 0)
+	handleReturn = append(handleReturn, typeIntN, 4, 4)
+	handleReturn = appendUint32(handleReturn, 41)
+	handleReturn = append(handleReturn, buildDoneToken(doneCount, 0)...)
+
+	fixture.fake.mu.Lock()
+	fixture.fake.batchResponse = handleReturn
+	fixture.fake.mu.Unlock()
+
+	client, outcome := fixture.login(t, fixtureUser, fixturePassword, fixtureDBEntry)
+	require.True(t, outcome.Acked)
+
+	const sql = "DELETE FROM employés WHERE id = @id"
+
+	// Preparing it holds too, so release that one first.
+	preparing := make(chan []byte, 1)
+
+	require.NoError(t, client.pkt.WriteMessage(packetTypeRPC, rpcByID(spPrepare,
+		intNParam("@handle", 0, 0x01),
+		nvarcharMaxParam("", "@id int"),
+		nvarcharMaxParam("", sql),
+		intNParam("", 1, 0))))
+
+	go func() {
+		_, payload, err := client.pkt.ReadMessage()
+		if err != nil {
+			close(preparing)
+
+			return
+		}
+
+		preparing <- payload
+	}()
+
+	approver := fixture.user.UID
+	prepared := releaseHold(t, fixture, registry, approver, uuid.Nil)
+	assert.Equal(t, sql, prepared.SQLText)
+
+	select {
+	case _, ok := <-preparing:
+		require.True(t, ok, "the prepare was never answered")
+	case <-time.After(15 * time.Second):
+		t.Fatal("the released prepare never reached the client")
+	}
+
+	// Now execute the handle. Nothing in *this* message says DELETE — only the
+	// statement it resolves to does.
+	executing := make(chan []byte, 1)
+
+	require.NoError(t, client.pkt.WriteMessage(packetTypeRPC,
+		rpcByID(spExecute, intNParam("@handle", 41, 0), intNParam("@id", 2, 0))))
+
+	go func() {
+		_, payload, err := client.pkt.ReadMessage()
+		if err != nil {
+			close(executing)
+
+			return
+		}
+
+		executing <- payload
+	}()
+
+	held := releaseHold(t, fixture, registry, approver, prepared.UID)
+	assert.Equal(t, sql, held.SQLText,
+		"the hold must be recorded against the statement, not against EXEC sp_execute")
+
+	select {
+	case _, ok := <-executing:
+		require.True(t, ok, "the execute was never answered")
+	case <-time.After(15 * time.Second):
+		t.Fatal("the released execute never reached the client")
+	}
+}
+
+// releaseHold waits for a statement other than skip to be parked, approves it,
+// and returns the row it was parked as. skip is the previously released hold,
+// whose row can still read as pending for a moment after it resolves.
+func releaseHold(
+	t *testing.T, fixture *authFixture, registry *approval.Registry, approver, skip uuid.UUID,
+) store.Query {
+	t.Helper()
+
+	var pending store.Query
+
+	require.Eventually(t, func() bool {
+		queries, err := fixture.store.ListQueries(context.Background(), store.QueryFilter{Limit: 50})
+		if err != nil {
+			return false
+		}
+
+		for _, query := range queries {
+			if query.UID == skip || query.ApprovalStatus == nil {
+				continue
+			}
+
+			if *query.ApprovalStatus == store.ApprovalPending {
+				pending = query
+
+				return true
+			}
+		}
+
+		return false
+	}, 15*time.Second, 50*time.Millisecond)
+
+	require.True(t, registry.Resolve(approval.Decision{
+		QueryUID: pending.UID,
+		Status:   store.ApprovalApproved,
+		By:       &approver,
+		ByName:   "an approver",
+		At:       time.Now(),
+	}))
+
+	return pending
+}
+
+// TestTruncateSQLCutsOnARuneBoundary: the limit is in bytes but the text is
+// UTF-8 decoded from UCS-2, so a blind cut can land inside a rune — and the
+// invalid string that results fails the query insert outright, losing the audit
+// row for exactly the statement somebody would want to see.
+func TestTruncateSQLCutsOnARuneBoundary(t *testing.T) {
+	t.Parallel()
+
+	for pad := range 8 {
+		sql := strings.Repeat("a", maxSQLTextLen-pad) + strings.Repeat("é", 16)
+
+		truncated := truncateSQL(sql)
+
+		assert.True(t, utf8.ValidString(truncated), "padding %d produced invalid UTF-8", pad)
+		assert.LessOrEqual(t, len(truncated), maxSQLTextLen)
+	}
+
+	assert.Equal(t, "SELECT 1", truncateSQL("SELECT 1"))
 }

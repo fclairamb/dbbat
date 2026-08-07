@@ -342,11 +342,15 @@ part that matters — could let a crafted statement slip past a pattern-based
 control, which is a security control and not a display concern. The decode is
 round-tripped in tests over accented, Cyrillic, Greek and surrogate-pair SQL.
 
-`ALL_HEADERS` is skipped defensively: the leading DWORD is only treated as a
-header block when its length is plausible *and* the first header's type is one
-of the three MS-TDS defines. Getting that wrong would shift the statement by two
-characters, which is exactly the kind of silent mismatch a pattern control
-cannot survive.
+`ALL_HEADERS` is validated, and a block that does not validate **refuses the
+message** rather than being skipped. That is a security property, not tidiness:
+skipping it would decode the header bytes as part of the statement, and every
+grant control dbbat applies is prefix-based (`strings.HasPrefix(upper,
+"DELETE")` and friends). A garbage prefix therefore turns `DELETE FROM t` into
+something `read_only` no longer matches, while the upstream may still recognize
+the statement. `ALL_HEADERS` is mandatory from TDS 7.2 and the proxy's floor is
+7.4, so a client that omits or mangles it is a red flag, not a compatibility
+case — refusing costs nothing.
 
 ### RPC is enforced, not log-only
 
@@ -370,7 +374,14 @@ changes.
 
 dbbat parses both RPC forms — a procedure name, and the well-known
 procedure-id shorthand every driver actually uses — plus multi-call batches
-separated by a batch flag. The forms that carry SQL, and where:
+separated by a batch flag.
+
+**Only the procedure-id shorthand is read for a statement.** A call that names
+its procedure — including one that spells out `sp_executesql` — is treated as an
+opaque stored procedure and fails closed under a restrictive grant, because the
+name resolution and parameter conventions of an arbitrary procedure are not
+something dbbat can assume. Drivers always send these by id. The forms that
+carry SQL, and where:
 
 | Form | id | Statement parameter |
 |------|----|---------------------|
@@ -384,11 +395,19 @@ separated by a batch flag. The forms that carry SQL, and where:
 
 ### Prepared statements, and where dbbat fails closed
 
-`sp_execute` and `sp_cursorexecute` carry a **handle**, not SQL. dbbat resolves
-them: the response accountant reads the `RETURNVALUE` token a prepare answers
-with and remembers that handle against the statement text that was already
-validated, so an execute is checked against the SQL it actually runs. The map is
-per session and bounded.
+`sp_execute` (handle at parameter 0) and `sp_cursorexecute` (handle at parameter
+0, the cursor OUT at 1) carry a **handle**, not SQL. dbbat resolves them: the
+response accountant reads the `RETURNVALUE` token a prepare answers with and
+remembers that handle against the statement text that was already validated, so
+an execute is checked against the SQL it actually runs. The map is per session
+and bounded — no handle enters it that dbbat did not watch being prepared.
+
+A resolved execute is also **logged and pattern-matched as the statement it
+runs**, not as `EXEC sp_execute 41`. That is what the MySQL proxy does for
+`COM_STMT_EXECUTE`, and it is load-bearing: approval patterns match the logged
+text, so recording the handle would make the four-eyes rule silently stop
+applying the moment a client used prepared statements. Releasing a handle
+(`sp_unprepare`) is *not* logged as its statement — it is not running it again.
 
 Three cases cannot be resolved, and all three **fail closed whenever the grant
 restricts anything** (`read_only`, `block_ddl` or `block_copy`) — and are
@@ -400,9 +419,11 @@ closed about:
 - **A stored procedure called by name.** `EXEC dbo.Something` is opaque: dbbat
   cannot see the body, so it cannot prove the procedure respects the
   restriction. (`ErrOpaqueProcedureBlocked`)
-- **A request that will not parse.** An unparseable SQLBatch or RPC is refused
-  rather than relayed, because it is one dbbat cannot enforce a grant on.
-  (`ErrMalformedRequest`)
+- **A request that will not parse.** An unparseable SQLBatch or RPC — including
+  one whose `ALL_HEADERS` block does not validate — is refused rather than
+  relayed, because it is one dbbat cannot enforce a grant on.
+  (`ErrMalformedRequest`) Unlike the two above, this one fails closed under
+  *every* grant, restrictive or not.
 
 Cursor bookkeeping that carries neither a statement nor a decision —
 `sp_cursor`, `sp_cursorfetch`, `sp_cursoroption`, `sp_cursorclose`,
@@ -484,7 +505,8 @@ proxies do.
 Plainly, so nobody assumes more coverage than there is:
 
 - **A stored procedure's body.** dbbat sees `EXEC dbo.Something`, not what it
-  does — hence failing closed under a restrictive grant.
+  does — hence failing closed under a restrictive grant. The same applies to a
+  system procedure invoked by name rather than by its well-known id.
 - **Rows inside a `BulkLoadBCP` stream.** The `INSERT BULK` statement that
   announces it is logged and checked; the rows themselves are relayed (or
   refused wholesale), not parsed.
@@ -559,10 +581,12 @@ as a hang rather than a diff:
   one; the by-name form; the handle forms; multi-call batches; and a truncated
   request never yielding a statement.
 - `intercept_test.go` — the enforcement decisions as a table (including the
-  fail-closed cases), then end-to-end through the proxy: the same write refused
-  as a SQLBatch *and* through `sp_executesql`, the session surviving a refusal,
-  a statement logged with its row count and captured rows, an upstream ERROR
-  landing on the query row, and an approval hold parked and released mid-session.
+  fail-closed cases and the malformed-`ALL_HEADERS` prefix evasion), then
+  end-to-end through the proxy: the same write refused as a SQLBatch *and*
+  through `sp_executesql`, the session surviving a refusal, a statement logged
+  with its row count and captured rows, an upstream ERROR landing on the query
+  row, an approval hold parked and released mid-session, and a hold firing on a
+  statement run through a prepared handle.
 - `result_test.go` — the accountant against synthesized responses: rows and
   counts, NBCROW, every packet split point, an ERROR token, DONEPROC not being
   double-counted, the tail-DONE backstop, the RETURNVALUE handle, and the
