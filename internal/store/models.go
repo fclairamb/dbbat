@@ -832,6 +832,23 @@ type GrantRequest struct {
 	// because the API has no need to expose Slack message coordinates.
 	SlackChannel   *string `bun:"slack_channel" json:"-"`
 	SlackMessageTS *string `bun:"slack_message_ts" json:"-"`
+
+	// Definition is the **live** version of the lineage GrantDefinitionID
+	// points into, attached by the store on every read path (see
+	// Store.attachRequestDefinitions).
+	//
+	// Live, not pinned, and deliberately so: a request is a claim on a policy,
+	// not a grant of one. Approving it materializes today's version of that
+	// policy (see approveGrantRequestTx), so the version a reader must be
+	// shown — name, auto-approve, controls — is today's too. Resolving
+	// GrantDefinitionID directly would render the version the request was
+	// filed under, which an edit has since superseded and which no listing
+	// returns anymore: that is how an edited definition used to leave its
+	// requests displaying a bare uid.
+	//
+	// A grant is the opposite case and keeps the opposite rule: it pins the
+	// exact version it was issued from (see AccessGrant.Definition).
+	Definition *GrantDefinition `bun:"-" json:"definition,omitempty"`
 }
 
 // GrantRequestFilter narrows ListGrantRequests queries.

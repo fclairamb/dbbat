@@ -43,7 +43,14 @@ func (s *Server) notifyAsync(ev notify.GrantRequestEvent) {
 func (s *Server) loadEventContext(ctx context.Context, req *store.GrantRequest, decider *store.User) notify.GrantRequestEvent {
 	ev := notify.GrantRequestEvent{Request: req, Decider: decider}
 
-	if def, err := s.store.GetGrantDefinition(ctx, req.GrantDefinitionID); err == nil {
+	// The store attaches the live version of the request's definition on every
+	// read path; use it so a Slack message names the same version the web UI
+	// shows. The by-uid lookup stays as a fallback for the few callers that
+	// hand-build a request (tests, and the Slack interaction path, which
+	// re-reads by uid anyway).
+	if req.Definition != nil {
+		ev.Definition = req.Definition
+	} else if def, err := s.store.GetGrantDefinition(ctx, req.GrantDefinitionID); err == nil {
 		ev.Definition = def
 	}
 

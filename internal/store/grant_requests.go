@@ -41,7 +41,103 @@ func (s *Store) CreateGrantRequest(ctx context.Context, req *GrantRequest) (*Gra
 		return nil, fmt.Errorf("create grant request: %w", err)
 	}
 
+	if err := s.attachRequestDefinitions(ctx, []*GrantRequest{result}); err != nil {
+		return nil, err
+	}
+
 	return result, nil
+}
+
+// attachRequestDefinitions hangs the **live** version of each request's
+// definition lineage off the request, in two batched queries regardless of how
+// many requests are involved.
+//
+// It resolves through the lineage rather than by uid: grant_definition_id
+// pins the version the request was filed under, an edit archives that version
+// and inserts a successor, and a request has to be read against the policy
+// that would actually be issued if it were approved today. Looking the uid up
+// directly would return an archived row — or, for a caller reading from the
+// definitions listing (which only returns live rows), nothing at all.
+func (s *Store) attachRequestDefinitions(ctx context.Context, requests []*GrantRequest) error {
+	if len(requests) == 0 {
+		return nil
+	}
+
+	seen := make(map[uuid.UUID]struct{}, len(requests))
+	uids := make([]uuid.UUID, 0, len(requests))
+
+	for _, r := range requests {
+		if r.GrantDefinitionID == uuid.Nil {
+			continue
+		}
+
+		if _, dup := seen[r.GrantDefinitionID]; dup {
+			continue
+		}
+
+		seen[r.GrantDefinitionID] = struct{}{}
+		uids = append(uids, r.GrantDefinitionID)
+	}
+
+	if len(uids) == 0 {
+		return nil
+	}
+
+	// Referenced version -> its lineage. A definition row is never deleted
+	// while a request references it (DeleteGrantDefinition refuses), so every
+	// uid resolves; a miss just leaves that request's definition nil, which
+	// every caller already tolerates.
+	var refs []struct {
+		UID        uuid.UUID `bun:"uid"`
+		LineageUID uuid.UUID `bun:"lineage_uid"`
+	}
+
+	if err := s.db.NewSelect().
+		Model((*GrantDefinition)(nil)).
+		Column("uid", "lineage_uid").
+		Where("uid IN (?)", bun.List(uids)).
+		Scan(ctx, &refs); err != nil {
+		return fmt.Errorf("load grant definition lineages: %w", err)
+	}
+
+	lineageOf := make(map[uuid.UUID]uuid.UUID, len(refs))
+	lineages := make([]uuid.UUID, 0, len(refs))
+	seenLineage := make(map[uuid.UUID]struct{}, len(refs))
+
+	for _, ref := range refs {
+		lineageOf[ref.UID] = ref.LineageUID
+
+		if _, dup := seenLineage[ref.LineageUID]; dup {
+			continue
+		}
+
+		seenLineage[ref.LineageUID] = struct{}{}
+		lineages = append(lineages, ref.LineageUID)
+	}
+
+	if len(lineages) == 0 {
+		return nil
+	}
+
+	var defs []GrantDefinition
+	if err := s.db.NewSelect().
+		Model(&defs).
+		Where("archived_at IS NULL").
+		Where("lineage_uid IN (?)", bun.List(lineages)).
+		Scan(ctx); err != nil {
+		return fmt.Errorf("load live grant definitions: %w", err)
+	}
+
+	byLineage := make(map[uuid.UUID]*GrantDefinition, len(defs))
+	for i := range defs {
+		byLineage[defs[i].LineageUID] = &defs[i]
+	}
+
+	for _, r := range requests {
+		r.Definition = byLineage[lineageOf[r.GrantDefinitionID]]
+	}
+
+	return nil
 }
 
 // GetGrantRequest fetches a request by UID.
@@ -58,6 +154,10 @@ func (s *Store) GetGrantRequest(ctx context.Context, uid uuid.UUID) (*GrantReque
 		}
 
 		return nil, fmt.Errorf("get grant request: %w", err)
+	}
+
+	if err := s.attachRequestDefinitions(ctx, []*GrantRequest{req}); err != nil {
+		return nil, err
 	}
 
 	return req, nil
@@ -93,6 +193,15 @@ func (s *Store) ListGrantRequests(ctx context.Context, filter GrantRequestFilter
 
 	if err := q.Scan(ctx); err != nil {
 		return nil, fmt.Errorf("list grant requests: %w", err)
+	}
+
+	refs := make([]*GrantRequest, len(requests))
+	for i := range requests {
+		refs[i] = &requests[i]
+	}
+
+	if err := s.attachRequestDefinitions(ctx, refs); err != nil {
+		return nil, err
 	}
 
 	return requests, nil
@@ -208,6 +317,10 @@ func (s *Store) approveGrantRequestTx(
 		req.DecidedAt = &now
 		req.DecidedBy = decidedBy
 		req.ResultingGrantID = &newGrant.UID
+		// The live definition is already in hand here — it is the one the
+		// grant was just materialized from — so the response carries it
+		// without a second round trip.
+		req.Definition = def
 
 		if _, err := tx.NewUpdate().Model(req).
 			Column("status", "decided_at", "decided_by", "resulting_grant_id").
@@ -307,6 +420,10 @@ func (s *Store) transition(
 		return nil
 	})
 	if err != nil {
+		return nil, err
+	}
+
+	if err := s.attachRequestDefinitions(ctx, []*GrantRequest{updated}); err != nil {
 		return nil, err
 	}
 
