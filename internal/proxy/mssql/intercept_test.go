@@ -805,6 +805,161 @@ func TestAttentionAfterTheHoldEndsTravelsUpstream(t *testing.T) {
 	assert.False(t, sess.takeAttentionAck())
 }
 
+// TestAttentionLosingToAnApproverInsideTheArmWindow is the deterministic half of
+// the regression: the cancel is consumed in the arm window — before any uid
+// exists to arbitrate it — and *then* loses to a human approver.
+//
+// The arm window used to mark the client as owed a DONE_ATTN the moment it
+// swallowed the ATTENTION, before the catch-up Resolve had said who won. When
+// that Resolve lost, the statement ran and the session kept a spurious owed
+// acknowledgement, which the next refused statement would take — answering it
+// as "cancelled" instead of with its real error.
+func TestAttentionLosingToAnApproverInsideTheArmWindow(t *testing.T) {
+	t.Parallel()
+
+	registry := approval.NewRegistry()
+	sess := &session{server: &Server{approvalDeps: shared.ApprovalDeps{Registry: registry}}}
+
+	uid := uuid.New()
+	_, release := registry.Register(uid)
+
+	defer release()
+
+	// The gate has registered the hold but has not published its uid yet, and
+	// the client's cancel lands in exactly that sliver.
+	sess.armHoldCancel()
+	require.True(t, sess.cancelHeldStatement(),
+		"a cancel arriving while the hold is being registered must be consumed, not forwarded")
+
+	// A human approves inside the window: the statement is going to run.
+	require.True(t, registry.Resolve(approval.Decision{QueryUID: uid, Status: store.ApprovalApproved}))
+
+	// The gate publishes the uid and the deferred cancel catches up — too late.
+	sess.setHeldQuery(uid)
+
+	assert.False(t, sess.takeAttentionAck(),
+		"a cancel that lost must not leave the client owed an acknowledgement the next refusal would take")
+	assert.True(t, sess.takeAttentionUpstream(),
+		"the consumed ATTENTION must be put back on the upstream leg, behind the statement it lost to")
+	assert.False(t, sess.takeAttentionUpstream(), "and only once")
+}
+
+// TestArmWindowCancelWithNoUidIsAcknowledged covers the path where the gate
+// never publishes a uid at all — a failed pending insert, which fails closed.
+// Nothing arbitrated the cancel and nothing ran, so the ATTENTION the reader
+// consumed still owes the client its acknowledgement.
+func TestArmWindowCancelWithNoUidIsAcknowledged(t *testing.T) {
+	t.Parallel()
+
+	sess := &session{server: &Server{approvalDeps: shared.ApprovalDeps{Registry: approval.NewRegistry()}}}
+
+	sess.armHoldCancel()
+	require.True(t, sess.cancelHeldStatement())
+
+	sess.disarmHoldCancel()
+
+	assert.True(t, sess.takeAttentionAck(), "the swallowed cancel must still be acknowledged")
+	assert.False(t, sess.takeAttentionUpstream(), "nothing ran, so nothing goes upstream")
+}
+
+// TestArmWindowCancelLosingLeavesTheNextRefusalIntact is the same race end to
+// end, over a real client socket, and asserts the consequence the internal
+// flags only stand for: the *next* statement the grant refuses must be answered
+// with its real error, not with the bare DONE_ATTN a stale acknowledgement
+// would turn it into.
+//
+// The window is a handful of instructions wide, so the gate's HoldRegistered
+// seam holds it open while the client's cancel arrives and a human approves.
+func TestArmWindowCancelLosingLeavesTheNextRefusalIntact(t *testing.T) {
+	t.Parallel()
+
+	registry := approval.NewRegistry()
+	armed := make(chan uuid.UUID, 1)
+	proceed := make(chan struct{})
+
+	fixture := newAuthFixtureWith(t, fixtureOptions{
+		upstreamEncryption: encryptNotSup,
+		sslMode:            "disable",
+		// block_ddl is what makes the trailing DROP refusable; it must not be
+		// read_only, or the DELETE would never reach the approval gate.
+		controls:         []string{store.ControlBlockDDL},
+		approvalPatterns: []string{`(?i)^DELETE`},
+		approvalDepsFor: func(dataStore *store.Store) shared.ApprovalDeps {
+			return shared.ApprovalDeps{
+				Enabled:      true,
+				Store:        dataStore,
+				Registry:     registry,
+				Logger:       testLogger(),
+				PollInterval: 100 * time.Millisecond,
+				HoldRegistered: func(uid uuid.UUID) {
+					armed <- uid
+					<-proceed
+				},
+			}
+		},
+	})
+
+	client, outcome := fixture.login(t, fixtureUser, fixturePassword, fixtureDBEntry)
+	require.True(t, outcome.Acked)
+
+	require.NoError(t, client.conn.SetDeadline(time.Now().Add(60*time.Second)))
+
+	require.NoError(t, client.pkt.WriteMessage(packetTypeSQLBatch,
+		sqlBatchPayload("DELETE FROM employés WHERE id = 1")))
+
+	// The hold is registered and the session goroutine is parked inside the arm
+	// window: the uid exists in the registry but has not been published to the
+	// cancel path yet.
+	var pendingUID uuid.UUID
+
+	select {
+	case pendingUID = <-armed:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the hold was never registered")
+	}
+
+	// The client's query timeout fires inside that window. The reader goroutine
+	// is the only part of the session still running, and it is blocked on this
+	// very socket, so it picks the cancel up while the pump stays parked; the
+	// settle below is slack for the scheduler, not for the protocol.
+	require.NoError(t, client.pkt.WriteMessage(packetTypeAttention, nil))
+	time.Sleep(500 * time.Millisecond)
+
+	// And a human approves in the same sliver, which is what the cancel loses to.
+	approver := fixture.user.UID
+	require.True(t, registry.Resolve(approval.Decision{
+		QueryUID: pendingUID,
+		Status:   store.ApprovalApproved,
+		By:       &approver,
+		ByName:   "an approver",
+		At:       time.Now(),
+	}))
+
+	close(proceed)
+
+	// The approved statement runs, and the cancel that lost is put back on the
+	// upstream leg behind it — the fake answers both.
+	assert.Equal(t, buildDoneToken(0, 1), client.readReply(t), "the released statement's answer must reach the client")
+	assert.Equal(t, buildDoneToken(0, 1), client.readReply(t), "the re-emitted cancel is answered too")
+
+	require.Eventually(t, func() bool { return len(fixture.fake.receivedRequests()) == 2 },
+		15*time.Second, 20*time.Millisecond)
+
+	upstreamSaw := fixture.fake.receivedRequests()
+	assert.Equal(t, packetTypeSQLBatch, upstreamSaw[0].msgType, "the approved statement must reach the upstream")
+	assert.Equal(t, packetTypeAttention, upstreamSaw[1].msgType,
+		"a cancel that lost its race must still reach the upstream, behind the statement it lost to")
+
+	// The point of the whole fix: nothing owes the client a DONE_ATTN anymore,
+	// so the next refusal is answered as a refusal. firstErrorToken fails hard
+	// on a bare DONE_ATTN.
+	refusal := fixture.sendAndRead(t, client, packetTypeSQLBatch, sqlBatchPayload("DROP TABLE t"))
+	assert.Contains(t, firstErrorToken(t, refusal).Message, "DDL",
+		"a stale cancel acknowledgement must not answer the next refused statement")
+
+	assert.Len(t, fixture.fake.receivedRequests(), 2, "the refused DDL must never reach the upstream")
+}
+
 // waitForPendingHold waits until a statement other than skip is parked, and
 // returns its uid.
 func waitForPendingHold(t *testing.T, fixture *authFixture, skip uuid.UUID) uuid.UUID {
