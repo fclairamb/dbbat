@@ -4,7 +4,7 @@ sidebar_position: 2
 
 # Server Configuration
 
-Target servers are configured through the REST API. Each entry maps a DBBat server name to a target (PostgreSQL, Oracle, MySQL, MariaDB, or MongoDB), optionally reached through an SSH bastion.
+Target servers are configured through the REST API. Each entry maps a DBBat server name to a target (PostgreSQL, Oracle, MySQL, MariaDB, MongoDB, or Microsoft SQL Server), optionally reached through an SSH bastion.
 
 :::note Endpoint rename
 The endpoint is `/api/v1/servers` since v0.17.0 — it was `/api/v1/databases` before, and no alias is kept. The JSON response envelope is still `{"databases": [...]}`.
@@ -96,14 +96,35 @@ curl -X POST http://localhost:4200/api/v1/servers \
 
 `mongo_auth_source` is the upstream auth database DBBat authenticates against (defaults to `admin`, where root/service users are typically defined). Clients reach this entry by putting the DBBat database name in their connection's `authSource` (or using a `dbbatuser#catalog` username).
 
+### Microsoft SQL Server
+
+```bash
+curl -X POST http://localhost:4200/api/v1/servers \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "billing",
+    "description": "Production SQL Server",
+    "protocol": "mssql",
+    "host": "mssql.example.com",
+    "port": 1433,
+    "database_name": "billing",
+    "username": "app_user",
+    "password": "secret",
+    "ssl_mode": "prefer"
+  }'
+```
+
+Clients name this entry in the LOGIN7 *Database* field — that is, the `database=` / `Initial Catalog=` part of the connection string carries the **DBBat entry name**, not a database on the target. Only SQL authentication is accepted; integrated (NTLM/Kerberos) and Entra ID logins are refused.
+
 ## Fields
 
 | Field | Type | Description | Required |
 |-------|------|-------------|----------|
 | `name` | string | DBBat server name (used by clients in their connection string) | Yes |
-| `protocol` | enum | `postgresql`, `oracle`, `mysql`, `mariadb`, `mongodb`, `ssh` | No (default: `postgresql`) |
+| `protocol` | enum | `postgresql`, `oracle`, `mysql`, `mariadb`, `mongodb`, `mssql`, `ssh` | No (default: `postgresql`) |
 | `host` | string | Target database host | Yes |
-| `port` | integer | Target database port. Suggested defaults: 5432 / 1521 / 3306 / 27017. | Yes |
+| `port` | integer | Target database port. Suggested defaults: 5432 / 1521 / 3306 / 27017 / 1433. | Yes |
 | `database_name` | string | Target database name (or PDB name for Oracle) | Yes (PG/MySQL); recommended (Oracle) |
 | `username` | string | Target database username | Yes |
 | `password` | string | Target database password (encrypted at rest) | Yes |
@@ -248,7 +269,7 @@ Deleting a server configuration:
 
 When a user connects with `database=production`:
 
-1. **PostgreSQL / MySQL**: DBBat looks up the entry by `name` (the database name in the client's connection string).
+1. **PostgreSQL / MySQL / SQL Server**: DBBat looks up the entry by `name` (the database name in the client's connection string).
 2. **Oracle**: DBBat matches the TNS connect descriptor's `SERVICE_NAME` against `oracle_service_name` (falls back to `name`).
 3. **MongoDB**: DBBat resolves the entry from the SASL `authSource` (the DBBat database name), a `dbbatuser#name` username, or the user's single active MongoDB grant.
 4. DBBat decrypts the stored credentials.

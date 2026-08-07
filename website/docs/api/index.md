@@ -515,7 +515,7 @@ Creates a new server configuration. **Requires admin role.**
 }
 ```
 
-`protocol` accepts `postgresql` (default), `oracle`, `mysql`, `mariadb`, or `mongodb`. For Oracle, also provide `oracle_service_name` so TNS clients can route by service name. For MongoDB, optionally set `mongo_auth_source` (defaults to `admin`).
+`protocol` accepts `postgresql` (default), `oracle`, `mysql`, `mariadb`, `mongodb`, or `mssql`. For Oracle, also provide `oracle_service_name` so TNS clients can route by service name. For MongoDB, optionally set `mongo_auth_source` (defaults to `admin`).
 
 Set `via_uid` to the UID of an SSH bastion to tunnel the upstream connection through it — see [SSH servers](#ssh-servers) below.
 

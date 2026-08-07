@@ -4,7 +4,7 @@ sidebar_position: 3
 
 # Query Logging
 
-DBBat logs every query or command executed through the proxy — across all supported engines (PostgreSQL, Oracle, MySQL, MariaDB, MongoDB) — providing complete visibility into database activity.
+DBBat logs every query or command executed through the proxy — across all supported engines (PostgreSQL, Oracle, MySQL, MariaDB, MongoDB, SQL Server) — providing complete visibility into database activity.
 
 ## What's Logged
 

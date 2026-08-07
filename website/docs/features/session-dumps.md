@@ -6,9 +6,9 @@ sidebar_position: 5
 
 DBBat can write **per-session packet captures** of every proxied connection. The capture records the post-auth byte stream between client and upstream, which is invaluable for protocol-level debugging, replay testing, and forensic analysis.
 
-Captures are plain **pcapng** files — the same format `tcpdump` and Wireshark write — so you can open one in Wireshark and get full PostgreSQL / Oracle TNS / MySQL / MongoDB dissection with no dbbat tooling involved.
+Captures are plain **pcapng** files — the same format `tcpdump` and Wireshark write — so you can open one in Wireshark and get full PostgreSQL / Oracle TNS / MySQL / MongoDB / TDS dissection with no dbbat tooling involved.
 
-The format is **protocol-agnostic**: PostgreSQL, Oracle, MySQL/MariaDB, and MongoDB sessions all use the same `.pcapng` structure. See the [full format spec](https://github.com/fclairamb/dbbat/blob/main/docs/dump-format.md) for the block layout and header-synthesis rules.
+The format is **protocol-agnostic**: PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, and SQL Server sessions all use the same `.pcapng` structure. See the [full format spec](https://github.com/fclairamb/dbbat/blob/main/docs/dump-format.md) for the block layout and header-synthesis rules.
 
 ## Enabling Captures
 

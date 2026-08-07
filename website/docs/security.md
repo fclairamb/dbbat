@@ -150,8 +150,9 @@ DBBat encodes the acting DBBat username into the upstream connection metadata, s
 | PostgreSQL | `application_name` |
 | MySQL / MariaDB | `program_name` |
 | Oracle | `AUTH_PROGRAM_NM` |
+| SQL Server | LOGIN7 `AppName` (visible as `sys.dm_exec_sessions.program_name`) |
 
-This means `pg_stat_activity`, `performance_schema.session_connect_attrs`, `v$session`, and engine-level audit logs all name the individual user. Auditability therefore does not depend solely on DBBat's own records — the upstream database keeps a correlatable trace of its own.
+This means `pg_stat_activity`, `performance_schema.session_connect_attrs`, `v$session`, `sys.dm_exec_sessions`, and engine-level audit logs all name the individual user. Auditability therefore does not depend solely on DBBat's own records — the upstream database keeps a correlatable trace of its own.
 
 ## Read-Only Mode
 
@@ -308,7 +309,7 @@ SSH private keys and their passphrases are **write-only**. They can be set or re
 
 ### For Target Databases
 
-- [ ] Use a dedicated upstream user for each target (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB)
+- [ ] Use a dedicated upstream user for each target (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, SQL Server)
 - [ ] Grant minimum required privileges to that user
 - [ ] For read-only grants, also restrict the upstream user to read-only privileges
   - PostgreSQL: `GRANT SELECT` only

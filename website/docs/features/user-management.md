@@ -7,7 +7,7 @@ sidebar_position: 4
 DBBat maintains its own user database, separate from target database users. This separation provides:
 
 - Independent credentials for proxy access (one DBBat login, many target servers)
-- Central user management across PostgreSQL, Oracle, MySQL/MariaDB, and MongoDB targets
+- Central user management across PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, and SQL Server targets
 - Audit trail of user actions
 
 ## Roles

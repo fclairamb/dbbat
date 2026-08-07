@@ -29,7 +29,7 @@ DBBat captures and stores all query results for audit purposes:
 
 ### Connection Handling
 
-DBBat maintains a 1:1 mapping between client connections and upstream **database** connections, for every engine (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB):
+DBBat maintains a 1:1 mapping between client connections and upstream **database** connections, for every engine (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, SQL Server):
 
 - Each client connection opens a dedicated upstream connection
 - No database connection reuse or pooling between different client sessions

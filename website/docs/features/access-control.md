@@ -59,7 +59,7 @@ Users can also request the same definition themselves — see [Grant requests](.
 
 Definitions are immutably versioned, so editing one never changes a grant that is already live — the grant stays pinned to the version it was issued from. Deactivating a definition, on the other hand, **fails closed**: every grant issued from any of its versions stops authorising new connections.
 
-The grant model is the same across all engines (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB).
+The grant model is the same across all engines (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, SQL Server).
 
 ## Controls
 
