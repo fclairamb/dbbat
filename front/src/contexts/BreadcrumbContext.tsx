@@ -134,13 +134,14 @@ function useBreadcrumbPatch(pathname: string, patch: BreadcrumbPatch): void {
   // effect on a value-based snapshot (rather than `patch` itself) stops it
   // from re-running — and unconditionally clearing-then-resetting the
   // published crumb — on every render that doesn't actually change the
-  // content.
-  const patchRef = useRef(patch);
-  patchRef.current = patch;
+  // content. The effect closes over `patch` directly: it only re-runs when
+  // `patchKey` changes, and every render sharing a `patchKey` has a
+  // value-equal `patch`, so the captured object is always current in the
+  // only sense that matters here.
   const patchKey = JSON.stringify(patch);
 
   useEffect(() => {
-    const currentPatch = patchRef.current;
+    const currentPatch = patch;
     if (
       lastPublished.current === null ||
       !patchAppliesNoChange(
@@ -161,7 +162,7 @@ function useBreadcrumbPatch(pathname: string, patch: BreadcrumbPatch): void {
       lastPublished.current = null;
       setBreadcrumb(pathname, clear);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- patchKey is a value-based snapshot of patch, read via patchRef
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- patchKey is a value-based snapshot of patch, which the closure captures
   }, [pathname, patchKey, setBreadcrumb]);
 }
 

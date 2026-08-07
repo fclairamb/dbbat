@@ -78,16 +78,32 @@ function LoginPage() {
   const { data: versionInfo } = useVersion();
   const { data: providers } = useAuthProviders();
   const slackProvider = providers?.find((p) => p.type === "slack" && p.enabled);
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [error, setError] = useState<string | null>(null);
+  // Any `?error=` the OAuth callback bounced us back with is turned into a
+  // message once, at mount, in this lazy initializer — the effect below
+  // scrubs the param from the URL, so a later render could no longer read it.
+  const [error, setError] = useState<string | null>(() => {
+    const oauthError = new URLSearchParams(window.location.search).get("error");
+    return oauthError ? oauthErrorMessage(oauthError) : null;
+  });
   const [success, setSuccess] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [viewState, setViewState] = useState<ViewState>("login");
 
   const isDemo = versionInfo?.run_mode === "demo";
+
+  // Credential fields are uncontrolled-until-typed: `null` means "the visitor
+  // has not touched this field", which is what lets demo mode pre-fill the
+  // form from render instead of from an effect. `versionInfo` arrives
+  // asynchronously, so the demo default cannot be baked into a useState
+  // initializer — deriving it keeps the prefill appearing the moment the run
+  // mode is known, without a setState-in-effect round trip.
+  const demoDefault = isDemo ? "admin" : "";
+  const [typedUsername, setTypedUsername] = useState<string | null>(null);
+  const [typedPassword, setTypedPassword] = useState<string | null>(null);
+  const username = typedUsername ?? demoDefault;
+  const password = typedPassword ?? demoDefault;
 
   // Redirect authenticated users away from the login page (handles both OAuth
   // callback and direct navigation by already-authenticated users).
@@ -133,23 +149,14 @@ function LoginPage() {
     })();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Handle OAuth error from callback
+  // Scrub the OAuth `?error=` param from the URL so a reload doesn't resurrect
+  // the banner. The message itself was already captured by the `error` state's
+  // lazy initializer above, which runs before this effect.
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const oauthError = params.get("error");
-    if (oauthError) {
+    if (new URLSearchParams(window.location.search).has("error")) {
       window.history.replaceState({}, "", window.location.pathname);
-      setError(oauthErrorMessage(oauthError));
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Pre-fill credentials in demo mode
-  useEffect(() => {
-    if (isDemo && !username && !password) {
-      setUsername("admin");
-      setPassword("admin");
-    }
-  }, [isDemo, username, password]);
+  }, []);
 
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -310,7 +317,7 @@ function LoginPage() {
                   id="username"
                   type="text"
                   value={username}
-                  onChange={(e) => setUsername(e.target.value)}
+                  onChange={(e) => setTypedUsername(e.target.value)}
                   placeholder="admin"
                   required
                   autoComplete="username"
@@ -325,7 +332,7 @@ function LoginPage() {
                   id="password"
                   type="password"
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onChange={(e) => setTypedPassword(e.target.value)}
                   placeholder="Enter your password"
                   required
                   autoComplete="current-password"
@@ -370,7 +377,7 @@ function LoginPage() {
                   id="current-password"
                   type="password"
                   value={password}
-                  onChange={(e) => setPassword(e.target.value)}
+                  onChange={(e) => setTypedPassword(e.target.value)}
                   placeholder="Enter your current password"
                   required
                   autoComplete="current-password"
