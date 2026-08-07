@@ -145,6 +145,10 @@ type fixtureOptions struct {
 	// callback because the deps need the store the fixture creates, and they
 	// must be installed before the listener serves anything.
 	approvalDepsFor func(*store.Store) shared.ApprovalDeps
+	// clientTLS leaves TLS termination on, so a client can put the whole
+	// session inside the encapsulated TLS handshake. Off by default: most cases
+	// have nothing to say about encryption and are cheaper without it.
+	clientTLS bool
 }
 
 // newAuthFixture builds the whole chain: store, user, API key, a server row
@@ -221,7 +225,7 @@ func newAuthFixtureWith(t *testing.T, opts fixtureOptions) *authFixture {
 	authCache := cache.NewAuthCache(cache.AuthCacheConfig{Enabled: true, TTLSeconds: 60, MaxSize: 16})
 
 	proxy, err := NewServer(dataStore, encryptionKey, opts.queryStorage, dumpConfig, authCache,
-		config.MSSQLConfig{TLS: config.TLSConfig{Disable: true}}, testLogger())
+		config.MSSQLConfig{TLS: config.TLSConfig{Disable: !opts.clientTLS}}, testLogger())
 	require.NoError(t, err)
 
 	if opts.approvalDepsFor != nil {
@@ -264,6 +268,30 @@ func (f *authFixture) login(t *testing.T, username, password, database string) (
 
 	client := dialTestClient(t, f.proxyAddr)
 	client.prelogin(t, encryptNotSup, false)
+
+	login := sampleLogin7()
+	login.UserName = username
+	login.Password = password
+	login.Database = database
+
+	client.sendLogin7(t, login)
+
+	return client, scanLoginResponse(client.readReply(t))
+}
+
+// loginEncrypted is login with the whole session inside TLS (ENCRYPT_ON), which
+// needs the fixture built with clientTLS. Everything after the handshake — the
+// statements, and the ATTENTION that cancels one — then travels as TLS records
+// on the wire.
+func (f *authFixture) loginEncrypted(t *testing.T, username, password, database string) (*testClient, loginOutcome) {
+	t.Helper()
+
+	client := dialTestClient(t, f.proxyAddr)
+
+	resp := client.prelogin(t, encryptOn, false)
+	require.Equal(t, encryptOn, resp.Encryption(), "the fixture must be built with clientTLS")
+
+	client.tlsHandshake(t)
 
 	login := sampleLogin7()
 	login.UserName = username

@@ -634,6 +634,78 @@ func TestAttentionCancelsAStatementParkedOnAnApprovalHold(t *testing.T) {
 	assert.Equal(t, packetTypeSQLBatch, fixture.fake.receivedRequests()[0].msgType)
 }
 
+// TestAttentionCancelsAHoldOnAnEncryptedClientLeg is the case that decided the
+// design. A byte-level watcher parked below TLS — what the other four proxies
+// use — sees TLS records and could never recognize the cancel inside them, so
+// the SQL Server proxy reads its client leg above TLS instead. This asserts the
+// cancel really does work when the whole session is inside the encapsulated TLS
+// handshake, not just on a plaintext link.
+func TestAttentionCancelsAHoldOnAnEncryptedClientLeg(t *testing.T) {
+	t.Parallel()
+
+	registry := approval.NewRegistry()
+
+	fixture := newAuthFixtureWith(t, fixtureOptions{
+		upstreamEncryption: encryptNotSup,
+		sslMode:            "disable",
+		clientTLS:          true,
+		approvalPatterns:   []string{`^DELETE`},
+		approvalDepsFor: func(dataStore *store.Store) shared.ApprovalDeps {
+			return shared.ApprovalDeps{
+				Enabled:      true,
+				Store:        dataStore,
+				Registry:     registry,
+				Logger:       testLogger(),
+				PollInterval: 100 * time.Millisecond,
+			}
+		},
+	})
+
+	client, outcome := fixture.loginEncrypted(t, fixtureUser, fixturePassword, fixtureDBEntry)
+	require.True(t, outcome.Acked)
+
+	// The hold has no timeout, so the client must be allowed to sit on it for
+	// longer than dialTestClient's default deadline.
+	require.NoError(t, client.conn.SetDeadline(time.Now().Add(60*time.Second)))
+
+	require.NoError(t, client.pkt.WriteMessage(packetTypeSQLBatch,
+		sqlBatchPayload("DELETE FROM employés WHERE id = 1")))
+
+	replies := make(chan []byte, 1)
+
+	go func() {
+		_, payload, err := client.pkt.ReadMessage()
+		if err != nil {
+			close(replies)
+
+			return
+		}
+
+		replies <- payload
+	}()
+
+	pendingUID := waitForPendingHold(t, fixture, uuid.Nil)
+
+	require.NoError(t, client.pkt.WriteMessage(packetTypeAttention, nil))
+
+	select {
+	case reply, ok := <-replies:
+		require.True(t, ok, "the connection was torn down instead of acknowledging the cancel")
+		assert.Equal(t, buildAttentionAck(), reply)
+	case <-time.After(15 * time.Second):
+		t.Fatal("the cancel was never acknowledged through TLS")
+	}
+
+	require.Eventually(t, func() bool {
+		query, err := fixture.store.GetQuery(context.Background(), pendingUID)
+
+		return err == nil && query.ApprovalStatus != nil && *query.ApprovalStatus == store.ApprovalAbandoned
+	}, 15*time.Second, 50*time.Millisecond)
+
+	assert.Empty(t, fixture.fake.receivedRequests(),
+		"a canceled statement must never reach the upstream")
+}
+
 // TestAttentionLosingToAnApproverTravelsUpstream pins the other side of the
 // race. The registry arbitrates; the cancel that loses must not pretend it won,
 // or the statement would be answered as canceled while it runs upstream anyway.

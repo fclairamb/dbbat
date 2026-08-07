@@ -656,9 +656,10 @@ as a hang rather than a diff:
   row, an approval hold parked and released mid-session, a hold firing on a
   statement run through a prepared handle, and the cancel path: an ATTENTION
   releasing a parked statement (hold abandoned, nothing forwarded upstream,
-  DONE_ATTN to the client, connection still usable), a cancel that loses the
-  race to an approver traveling upstream instead, and a cancel landing before
-  the hold has published its uid.
+  DONE_ATTN to the client, connection still usable), the same thing with the
+  whole session inside TLS — the case that decided the design — a cancel that
+  loses the race to an approver traveling upstream instead, and a cancel
+  landing either side of the window where the hold's uid exists.
 - `result_test.go` — the accountant against synthesized responses: rows and
   counts, NBCROW, every packet split point, an ERROR token, DONEPROC not being
   double-counted, the tail-DONE backstop, the RETURNVALUE handle, and the
