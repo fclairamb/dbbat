@@ -44,7 +44,7 @@ func TestMSSQLTLSMaxVersionOptsIn13(t *testing.T) {
 	assert.False(t, cfg.MSSQL.TLS.Disable)
 }
 
-// A ceiling nobody can honour must stop the process. Silently falling back
+// A ceiling nobody can honor must stop the process. Silently falling back
 // would leave a deployment that asked for a TLS policy quietly running another
 // one, which is the kind of thing nobody discovers until an audit.
 func TestMSSQLTLSMaxVersionRejectsGarbage(t *testing.T) {

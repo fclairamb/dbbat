@@ -44,7 +44,7 @@ func TestLoadTLSConfigVersionCeiling(t *testing.T) {
 	}
 }
 
-// A ceiling the proxy cannot honour must fail the listener rather than quietly
+// A ceiling the proxy cannot honor must fail the listener rather than quietly
 // serving a different policy. config.Load checks this too; this covers a Server
 // built straight from a struct literal, as the tests and any embedder do.
 func TestLoadTLSConfigRejectsAnUnknownCeiling(t *testing.T) {

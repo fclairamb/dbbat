@@ -357,7 +357,7 @@ const (
 	// client ends on a *write* and drivers differ on whether that last flight
 	// is still encapsulated. dbbat handles both (see internal/proxy/mssql),
 	// but only go-mssqldb has been verified end to end, so an existing
-	// deployment must not change behaviour merely by upgrading.
+	// deployment must not change behavior merely by upgrading.
 	MSSQLDefaultTLSMaxVersion = MSSQLTLSMaxVersion12
 )
 

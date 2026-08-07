@@ -458,7 +458,7 @@ func TestSessionTicketsWouldStrandBytesAtTLS13(t *testing.T) {
 	}
 }
 
-// earlyUnframingConn models the driver behaviour the spec worries about: a
+// earlyUnframingConn models the driver behavior the spec worries about: a
 // client that considers the encapsulation over as soon as it has read the
 // server's handshake flight, and therefore writes its final TLS 1.3
 // CCS+Finished as raw records instead of inside a PRELOGIN packet.
