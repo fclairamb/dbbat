@@ -32,6 +32,9 @@ var ErrTokenTruncated = errors.New("mssql: truncated TDS token stream")
 
 // tdsMessage is a decoded ERROR (0xAA) or INFO (0xAB) token. The two share a
 // body layout; only the token type says whether it is fatal.
+//
+// It carries String() rather than Error(): it is a decoded token, and the
+// caller decides whether an ERROR token becomes a Go error.
 type tdsMessage struct {
 	Number     int32
 	State      byte
@@ -42,9 +45,9 @@ type tdsMessage struct {
 	LineNumber uint32
 }
 
-// Error renders the message the way a client would show it, so it can be
+// String renders the message the way a client would show it, so it can be
 // wrapped straight into a Go error.
-func (m tdsMessage) Error() string {
+func (m tdsMessage) String() string {
 	return fmt.Sprintf("%s (error %d, state %d, class %d)", m.Message, m.Number, m.State, m.Class)
 }
 
@@ -137,7 +140,7 @@ type loginOutcome struct {
 // It is deliberately a partial decoder. dbbat forwards the login response to
 // the client byte for byte, so the walk exists only to answer one question —
 // did the upstream let us in — and every token it does not need is skipped by
-// its length. An unrecognised token stops the walk rather than guessing at a
+// its length. An unrecognized token stops the walk rather than guessing at a
 // length and mis-reading the rest: whatever has been learned so far is still
 // true, and the bytes are relayed untouched either way.
 //

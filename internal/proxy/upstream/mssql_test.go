@@ -6,6 +6,10 @@ import (
 	"testing"
 )
 
+// errRefused stands in for a transport failure that is nobody's encryption
+// policy to fix.
+var errRefused = errors.New("connection refused")
+
 func TestMSSQLEncryptionOption(t *testing.T) {
 	t.Parallel()
 
@@ -34,7 +38,7 @@ func TestMSSQLEncryptionOption(t *testing.T) {
 				got = append(got, MSSQLEncryptionOption(attempt))
 			}
 
-			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+			if string(got) != string(tc.want) {
 				t.Errorf("ssl_mode %q offers %v, want %v", tc.mode, got, tc.want)
 			}
 		})
@@ -100,7 +104,7 @@ func TestMSSQLRetryable(t *testing.T) {
 		{"encryption mismatch", fmt.Errorf("wrapped: %w", ErrMSSQLEncryptionMismatch), true},
 		{"tls handshake", fmt.Errorf("wrapped: %w", ErrMSSQLTLSHandshake), true},
 		{"rejected login ends the chain", fmt.Errorf("wrapped: %w", ErrMSSQLLoginRejected), false},
-		{"anything else ends the chain", errors.New("connection refused"), false},
+		{"anything else ends the chain", errRefused, false},
 	}
 
 	for _, tc := range cases {

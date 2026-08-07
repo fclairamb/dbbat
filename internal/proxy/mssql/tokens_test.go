@@ -102,7 +102,7 @@ func TestScanLoginResponseDetectsARejectedLogin(t *testing.T) {
 	assert.Equal(t, int32(18456), outcome.Failure.Number)
 	assert.Equal(t, "Login failed for user 'sa'.", outcome.Failure.Message)
 	assert.Equal(t, serverNameToken, outcome.Failure.ServerName)
-	assert.Contains(t, outcome.Failure.Error(), "error 18456")
+	assert.Contains(t, outcome.Failure.String(), "error 18456")
 }
 
 func TestScanLoginResponseKeepsTheFirstError(t *testing.T) {

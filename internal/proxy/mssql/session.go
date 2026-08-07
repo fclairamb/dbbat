@@ -192,7 +192,7 @@ func (s *session) serve(ctx context.Context) error {
 
 	// The client gets the upstream's own login response — LOGINACK, the
 	// ENVCHANGEs for database/collation/packet size, any INFO messages — rather
-	// than something dbbat synthesised, so it sees the real server it is
+	// than something dbbat synthesized, so it sees the real server it is
 	// talking to.
 	if err := s.pkt.WriteMessage(packetTypeReply, s.upstream.LoginResponse); err != nil {
 		return err

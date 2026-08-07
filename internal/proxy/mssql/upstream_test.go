@@ -13,6 +13,10 @@ import (
 	"github.com/fclairamb/dbbat/internal/proxy/upstream"
 )
 
+// errBastionDown stands in for whatever the SSH bastion chain hands back when
+// the transport cannot be opened at all.
+var errBastionDown = errors.New("bastion is down")
+
 // upstreamConfigFor builds a connector config pointing at a fake server.
 func upstreamConfigFor(fake *fakeUpstream, sslMode string) upstream.MSSQLConfig {
 	host, port := fake.addr()
@@ -162,15 +166,13 @@ func TestConnectUpstreamSurfacesALoginRejection(t *testing.T) {
 func TestConnectUpstreamReportsADialFailure(t *testing.T) {
 	t.Parallel()
 
-	wanted := errors.New("bastion is down")
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err := ConnectUpstream(ctx, func(context.Context) (net.Conn, error) { return nil, wanted },
+	_, err := ConnectUpstream(ctx, func(context.Context) (net.Conn, error) { return nil, errBastionDown },
 		upstream.MSSQLConfig{Host: "nowhere", Port: 1433, SSLMode: "disable"}, nil)
 
-	require.ErrorIs(t, err, wanted)
+	require.ErrorIs(t, err, errBastionDown)
 }
 
 // TestBuildUpstreamLoginReplaysTheClientShape is the reason the client's own

@@ -29,7 +29,12 @@ func sqlBatchPayload(sql string) []byte {
 		0x01, 0x00, 0x00, 0x00,
 	}
 
-	return append(headers, stringToUCS2(sql)...)
+	statement := stringToUCS2(sql)
+
+	payload := make([]byte, 0, len(headers)+len(statement))
+	payload = append(payload, headers...)
+
+	return append(payload, statement...)
 }
 
 func TestRelayForwardsRequestsAndResponses(t *testing.T) {

@@ -315,6 +315,8 @@ func TestSessionAuthFailuresAreIndistinguishable(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
 			_, outcome := fixture.login(t, tc.username, tc.password, fixtureDBEntry)
 
 			failure := requireLoginFailure(t, outcome)
@@ -322,10 +324,9 @@ func TestSessionAuthFailuresAreIndistinguishable(t *testing.T) {
 			assert.Equal(t, errSeverityUserError, failure.Class)
 			assert.Equal(t, fmt.Sprintf(authFailedMessage, tc.username), failure.Message,
 				"the message must depend on nothing but the username the client supplied")
+			assert.Zero(t, fixture.fake.loginCount(), "a refused login never reaches the upstream")
 		})
 	}
-
-	assert.Zero(t, fixture.fake.loginCount(), "a refused login never reaches the upstream")
 }
 
 func TestSessionRejectsAnUnsupportedAuthType(t *testing.T) {

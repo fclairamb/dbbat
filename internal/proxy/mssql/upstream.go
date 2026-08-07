@@ -40,7 +40,7 @@ const maxUpstreamAppNameLen = 128
 // It is what both entry points get back: the proxy, which then MITMs it, and
 // the connectivity check, which closes it immediately.
 type UpstreamConn struct {
-	// conn is the raw transport (a direct dial or an SSH-tunnelled one).
+	// conn is the raw transport (a direct dial or an SSH-tunneled one).
 	conn net.Conn
 
 	// stream is what TDS is read from and written to: the socket, or the TLS
@@ -272,7 +272,7 @@ func readLoginResponse(pkt *packetRW) ([]byte, error) {
 	outcome := scanLoginResponse(payload)
 
 	if outcome.Failure != nil {
-		return nil, fmt.Errorf("%w: %s", upstream.ErrMSSQLLoginRejected, outcome.Failure.Error())
+		return nil, fmt.Errorf("%w: %s", upstream.ErrMSSQLLoginRejected, outcome.Failure.String())
 	}
 
 	if !outcome.Acked {

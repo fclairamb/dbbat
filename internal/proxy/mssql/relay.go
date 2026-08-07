@@ -30,7 +30,7 @@ type serverPacketHook func(ctx context.Context, msgType byte, payload []byte, eo
 // relay pumps TDS both ways until either side closes.
 //
 // The two directions run independently rather than as a request/response loop,
-// which is what makes ATTENTION (0x06) work: a client cancelling a query sends
+// which is what makes ATTENTION (0x06) work: a client canceling a query sends
 // it while the response is still streaming, and a lock-step relay would not
 // read it until the response it is meant to interrupt had finished.
 //

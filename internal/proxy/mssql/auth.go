@@ -8,7 +8,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
-// authenticate turns a parsed LOGIN7 into an authorised session: the dbbat user
+// authenticate turns a parsed LOGIN7 into an authorized session: the dbbat user
 // behind the credentials, the target database, and the grant that links them.
 //
 // It is the SQL Server side of the same three steps every other proxy takes —
@@ -22,7 +22,7 @@ import (
 func (s *session) authenticate(ctx context.Context, login *Login7) error {
 	// A proxy built without a store can authenticate nobody. It only happens in
 	// tests that exercise the handshake on its own, but failing closed is the
-	// only defensible behaviour for an auth path.
+	// only defensible behavior for an auth path.
 	if s.server.store == nil {
 		return ErrAuthFailed
 	}
@@ -100,7 +100,7 @@ func (s *session) authenticateAPIKey(ctx context.Context, username, key string) 
 	}
 
 	// Usage accounting must not sit in the login's latency path, and it must
-	// outlive the request context, which is cancelled the moment the session
+	// outlive the request context, which is canceled the moment the session
 	// ends.
 	go func() { _ = s.server.store.IncrementAPIKeyUsage(context.WithoutCancel(ctx), verified.ID) }()
 

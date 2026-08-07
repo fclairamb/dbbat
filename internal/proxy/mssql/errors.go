@@ -50,7 +50,7 @@ var (
 	// One error for every cause on purpose: see clientMessageFor.
 	ErrAuthFailed = errors.New("mssql: authentication failed")
 	// ErrNoDatabaseRequested — the LOGIN7 carried no database name, so there is
-	// nothing to resolve against the dbbat catalogue.
+	// nothing to resolve against the dbbat catalog.
 	ErrNoDatabaseRequested = errors.New("mssql: the login named no database")
 	// ErrServerNotFound — no SQL Server target is registered in dbbat under the
 	// requested name.
@@ -152,12 +152,6 @@ func buildLoginFailure(number int32, message string) []byte {
 	stream := buildErrorToken(number, 1, errSeverityUserError, message, "", 1)
 
 	return append(stream, buildDoneToken(doneError, 0)...)
-}
-
-// buildLoginRejected wraps a handshake-time refusal (unsupported auth mode,
-// MARS, a malformed login) in the login-failure shape.
-func buildLoginRejected(message string) []byte {
-	return buildLoginFailure(errNumberLoginFailed, message)
 }
 
 // clientMessageFor renders a refusal for the client: the SQL Server error

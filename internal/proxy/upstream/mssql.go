@@ -80,7 +80,7 @@ func MSSQLEncryptionOption(a Attempt) byte {
 	return MSSQLEncryptNotSup
 }
 
-// MSSQLAnswerAcceptable reports whether a server's ENCRYPTION answer honours
+// MSSQLAnswerAcceptable reports whether a server's ENCRYPTION answer honors
 // what the attempt asked for.
 //
 // It is strict on purpose. A plaintext attempt that gets anything but
