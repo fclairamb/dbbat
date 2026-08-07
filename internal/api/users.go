@@ -106,11 +106,27 @@ func (s *Server) handleListUsers(c *gin.Context) {
 	successResponse(c, gin.H{"users": []any{currentUser}})
 }
 
-// handleGetUser retrieves a specific user
+// handleGetUser retrieves a specific user.
+//
+// Visibility matches handleListUsers: admins and viewers see everyone, anyone
+// else sees only themselves. A foreign UID is answered with the same 404 as a
+// UID that does not exist, so a connector cannot use this endpoint to
+// enumerate who has an account — a 403 would confirm the user is real.
 func (s *Server) handleGetUser(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid user UID")
+		return
+	}
+
+	currentUser := getCurrentUser(c)
+	if currentUser == nil {
+		writeError(c, http.StatusUnauthorized, ErrCodeUnauthorized, "authentication required")
+		return
+	}
+
+	if !currentUser.IsAdmin() && !currentUser.IsViewer() && currentUser.UID != uid {
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "user not found")
 		return
 	}
 

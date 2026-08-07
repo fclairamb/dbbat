@@ -6,19 +6,23 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
 )
 
-// newUsersTestRouter mounts the user update/delete routes with the same
+// newUsersTestRouter mounts the user read/update/delete routes with the same
 // middleware chain as production (see server.go).
 func newUsersTestRouter(server *Server) *gin.Engine {
 	router := gin.New()
 	router.Use(server.authMiddleware())
+	router.GET("/api/v1/users", server.handleListUsers)
+	router.GET("/api/v1/users/:uid", server.handleGetUser)
 	router.PUT("/api/v1/users/:uid", server.handleUpdateUser)
 	router.DELETE("/api/v1/users/:uid", server.requireAdmin(), server.handleDeleteUser)
 	return router
@@ -314,5 +318,108 @@ func TestUpdateUser_DemoModeNonAdminPasswordChangeAllowed(t *testing.T) {
 	}
 	if !ok {
 		t.Error("viewer password should have been changed")
+	}
+}
+
+// doGetUser performs a GET /users/:uid as the holder of token.
+func doGetUser(router *gin.Engine, token, uid string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users/"+uid, nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	return w
+}
+
+// TestGetUser_Authorization pins the detail endpoint's visibility to the same
+// policy the list endpoint implements: admins and viewers see everyone, anyone
+// else sees only themselves. Before this, any authenticated caller — a
+// connector, or anything holding a dbb_ key — could read another user's row
+// and group membership by UID.
+func TestGetUser_Authorization(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+
+	adminUser := createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
+	viewerUser := createTestUser(t, dataStore, "viewer", "viewerpassword123", []string{"viewer"})
+	connectorUser := createTestUser(t, dataStore, "connector", "connectorpassword123", []string{"connector"})
+	otherConnector := createTestUser(t, dataStore, "connector2", "connectorpassword456", []string{"connector"})
+
+	adminToken := loginUser(t, server, "admin", "adminpassword123")
+	viewerToken := loginUser(t, server, "viewer", "viewerpassword123")
+	connectorToken := loginUser(t, server, "connector", "connectorpassword123")
+
+	router := newUsersTestRouter(server)
+
+	tests := []struct {
+		name     string
+		token    string
+		targetID string
+		want     int
+	}{
+		{"admin reads another user", adminToken, connectorUser.UID.String(), http.StatusOK},
+		{"admin reads themselves", adminToken, adminUser.UID.String(), http.StatusOK},
+		// The list endpoint lets viewers see every user, so the detail
+		// endpoint must too — a viewer is a read-only operator role.
+		{"viewer reads another user", viewerToken, connectorUser.UID.String(), http.StatusOK},
+		{"viewer reads themselves", viewerToken, viewerUser.UID.String(), http.StatusOK},
+		{"connector reads themselves", connectorToken, connectorUser.UID.String(), http.StatusOK},
+		// 404, not 403: a 403 would confirm the account exists.
+		{"connector reads another user", connectorToken, otherConnector.UID.String(), http.StatusNotFound},
+		{"connector reads an admin", connectorToken, adminUser.UID.String(), http.StatusNotFound},
+		{"connector reads an unknown uid", connectorToken, uuid.NewString(), http.StatusNotFound},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			w := doGetUser(router, tt.token, tt.targetID)
+			if w.Code != tt.want {
+				t.Fatalf("expected status %d, got %d: %s", tt.want, w.Code, w.Body.String())
+			}
+		})
+	}
+}
+
+// TestGetUser_ForeignUIDLeaksNothing checks the refusal body as well as its
+// status: a connector denied another user's row must not learn the username,
+// the roles, or the group membership that would have been returned.
+func TestGetUser_ForeignUIDLeaksNothing(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+
+	createTestUser(t, dataStore, "admin", "adminpassword123", []string{"admin"})
+	target := createTestUser(t, dataStore, "secret-target", "targetpassword123", []string{"viewer"})
+	createTestUser(t, dataStore, "connector", "connectorpassword123", []string{"connector"})
+
+	connectorToken := loginUser(t, server, "connector", "connectorpassword123")
+	router := newUsersTestRouter(server)
+
+	w := doGetUser(router, connectorToken, target.UID.String())
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected status 404, got %d: %s", w.Code, w.Body.String())
+	}
+	if body := w.Body.String(); strings.Contains(body, "secret-target") || strings.Contains(body, "groups") {
+		t.Errorf("the refusal must not describe the user, got %s", body)
+	}
+
+	// And the list endpoint agrees: a connector only ever sees themselves.
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/users", nil)
+	req.Header.Set("Authorization", "Bearer "+connectorToken)
+	listRec := httptest.NewRecorder()
+	router.ServeHTTP(listRec, req)
+
+	var listResp struct {
+		Users []struct {
+			Username string `json:"username"`
+		} `json:"users"`
+	}
+	if err := json.Unmarshal(listRec.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("failed to decode list response: %v", err)
+	}
+	if len(listResp.Users) != 1 || listResp.Users[0].Username != "connector" {
+		t.Errorf("a connector must only list themselves, got %+v", listResp.Users)
 	}
 }

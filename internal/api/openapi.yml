@@ -643,7 +643,13 @@ paths:
       tags:
         - Users
       summary: Get user by UID
-      description: Retrieves a specific user by their UID.
+      description: |
+        Retrieves a specific user by their UID, with the groups they belong to.
+
+        Visibility matches `GET /users`: admins and viewers may read any user,
+        everyone else only themselves. Asking for another user's UID returns
+        404, the same as an unknown UID — the endpoint never confirms that an
+        account exists.
       operationId: getUser
       responses:
         '200':
