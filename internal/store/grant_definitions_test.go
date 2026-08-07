@@ -517,6 +517,99 @@ func TestGrantDefinition_SampleQueriesSurviveVersioning(t *testing.T) {
 	}
 }
 
+// TestGrantDefinition_PatternsStartingWithABracketSurviveStorage is the
+// regression test for the text[] read-back bug: bun's pgdialect array parser
+// treats an element starting with `(` or `[` as a range literal and splits it
+// at the matching bracket, so `(?i)^DELETE` came back as two patterns — and
+// `(?i)` on its own matches every statement, turning a targeted approval hold
+// into a hold on everything the grant runs. See internal/store/array.go.
+func TestGrantDefinition_PatternsStartingWithABracketSurviveStorage(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "bracket_patterns")
+
+	patterns := []string{`(?i)^DELETE`, `[abc]`, `(a|b)`}
+	samples := []string{`(SELECT 1)`, `[bracketed]`}
+
+	def, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
+		Name:             "bracket-patterns",
+		Slug:             "bracket-patterns",
+		DurationSeconds:  60,
+		Controls:         []string{ControlReadOnly},
+		ApprovalPatterns: patterns,
+		SampleQueries:    samples,
+		CreatedBy:        admin.UID,
+	})
+	if err != nil {
+		t.Fatalf("CreateGrantDefinition() error = %v", err)
+	}
+
+	if !equalStringSlices(def.ApprovalPatterns, patterns) {
+		t.Fatalf("ApprovalPatterns returned by the insert = %#v, want %#v", def.ApprovalPatterns, patterns)
+	}
+
+	fetched, err := store.GetGrantDefinition(ctx, def.UID)
+	if err != nil {
+		t.Fatalf("GetGrantDefinition() error = %v", err)
+	}
+
+	if len(fetched.ApprovalPatterns) != len(patterns) {
+		t.Fatalf(
+			"ApprovalPatterns read back with %d elements (%#v), want %d (%#v) — an element was split",
+			len(fetched.ApprovalPatterns), fetched.ApprovalPatterns, len(patterns), patterns,
+		)
+	}
+
+	if !equalStringSlices(fetched.ApprovalPatterns, patterns) {
+		t.Fatalf("ApprovalPatterns read back as %#v, want %#v", fetched.ApprovalPatterns, patterns)
+	}
+
+	if !equalStringSlices(fetched.SampleQueries, samples) {
+		t.Fatalf("SampleQueries read back as %#v, want %#v", fetched.SampleQueries, samples)
+	}
+
+	// A listing goes through a different query path than a by-uid fetch.
+	defs, err := store.ListGrantDefinitions(ctx, GrantDefinitionFilter{})
+	if err != nil {
+		t.Fatalf("ListGrantDefinitions() error = %v", err)
+	}
+
+	var listed *GrantDefinition
+
+	for i := range defs {
+		if defs[i].UID == def.UID {
+			listed = &defs[i]
+
+			break
+		}
+	}
+
+	if listed == nil {
+		t.Fatal("the definition is missing from ListGrantDefinitions()")
+	}
+
+	if !equalStringSlices(listed.ApprovalPatterns, patterns) {
+		t.Fatalf("ApprovalPatterns from the listing = %#v, want %#v", listed.ApprovalPatterns, patterns)
+	}
+
+	// An edit archives the row and reinserts a successor: the patterns must
+	// survive that re-encode too, which is where a read-back bug turns a
+	// display glitch into corrupted stored data.
+	listed.Description = "edited"
+
+	updated, err := store.UpdateGrantDefinition(ctx, listed)
+	if err != nil {
+		t.Fatalf("UpdateGrantDefinition() error = %v", err)
+	}
+
+	if !equalStringSlices(updated.ApprovalPatterns, patterns) {
+		t.Fatalf("ApprovalPatterns after versioning = %#v, want %#v", updated.ApprovalPatterns, patterns)
+	}
+}
+
 func equalStringSlices(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
