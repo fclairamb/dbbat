@@ -83,3 +83,84 @@ on this stage:
 - **Minimum TDS version → 7.4 (SQL Server 2012+).**
 
 No GitHub issue exists yet — one should be filed.
+
+## Implementation Plan
+
+Added by the implementing agent on 2026-08-07, before writing code.
+
+### Library decision (read first, then decided)
+
+`microsoft/go-mssqldb` v1.9.3 was read before choosing. Everything wire-level in
+it is **unexported**: `tdsSession`, `tdsBuffer`, `writePrelogin`, `readPrelogin`,
+`sendLogin`, `connect`, `getTLSConn` — the only exported surface is the
+`database/sql` driver and `Connector`, which hands back a `driver.Conn` with no
+access to the underlying socket or token stream. A proxy needs a raw
+authenticated TDS connection it can relay packets over, which that API cannot
+give. **Decision: hand-roll the client side on stage 1's codec** (the Oracle
+proxy precedent). `go-mssqldb` stays a *test-only* dependency driving the
+integration suite as a third-party client.
+
+### Where the connector lives
+
+`internal/proxy/upstream` must not import a protocol package (its own package doc
+states the invariant), and the TDS client needs stage 1's packet codec,
+PRELOGIN builder, LOGIN7 serializer and `handshakeConn`. So the split mirrors
+the **MongoDB** carve-out already documented in `upstream/upstream.go`:
+
+- `internal/proxy/upstream/mssql.go` — `MSSQLConfig`, the TDS PRELOGIN
+  `ENCRYPTION` byte each `Attempt` maps to, and the retry predicate. The
+  `ssl_mode` policy itself stays `PlanFor`; nothing is reimplemented.
+- `internal/proxy/mssql/upstream.go` — `ConnectUpstream`, the actual dial +
+  PRELOGIN + TLS + LOGIN7 + login-response classification.
+- `conncheck` calls `mssql.ConnectUpstream` exactly as `probeMongo` calls
+  `mongodb.ConnectUpstream`.
+
+### Steps
+
+1. `upstream/mssql.go` + the package-doc carve-out update.
+2. `mssql/tokens.go` — a minimal TDS token-stream walker, enough to tell a
+   successful login response from an `ERROR` one and to extract the message.
+   Stage 3 grows it into the result accountant.
+3. `mssql/upstream.go` — `UpstreamConn` (conn, revertible stream, packetRW,
+   `TLS bool`, raw `LoginResponse`), the attempt loop over `PlanFor`, the client
+   half of PRELOGIN, the encapsulated TLS handshake as `tls.Client` over stage
+   1's `handshakeConn`, the LOGIN7 replay with the stored credentials, and the
+   login-response read. The upstream's own login response is what gets forwarded
+   to the client, so the client sees the real `LOGINACK`/`ENVCHANGE`.
+4. `mssql/auth.go` — username/password (or `dbb_` API key) from the parsed
+   LOGIN7 verified through `internal/cache`, database resolved from the LOGIN7
+   database field by `GetServerByName` + protocol check (the convention all four
+   proxies use), then `GetActiveGrant`. One indistinguishable failure message for
+   unknown-user and bad-password.
+5. `mssql/relay.go` — two pumps, like `mongodb/session.go`. Client→upstream reads
+   whole logical messages (`ReadMessage`) so stage 3 has one hook point per
+   request; upstream→client forwards **packet by packet** (a result set is one
+   logical message and would blow the 16 MB reassembly cap), with the message
+   boundary surfaced so stage 3 can accumulate.
+6. `mssql/session.go` — replace the stub with: auth → grant → upstream connect →
+   connection row (`WithUpstreamTLS`, `WithGrantUID`) → dump writer → relay, and
+   nil-safe `dumpUploader.Finish` on close.
+7. `mssql/server.go` + `main.go` — the store/auth-cache/dump/encryption-key
+   dependencies and `SetDumpUploader`.
+8. `conncheck/probes.go` — `probeMSSQL`.
+9. `docs/mssql.md` — status, the upstream leg, the relay, the library decision.
+
+### Out of scope (stage 3)
+
+Query interception, `read_only`/`block_ddl`/quota enforcement per statement,
+approval holds, the limit watchdog, result-row accounting and the row writer. The
+relay is structured so the hook drops in; none of it is wired here.
+
+### Tests
+
+- `mssql/upstream_test.go` — a fake TDS upstream (pure Go, stage 1's codec) for
+  every `ssl_mode` path, plus login rejection.
+- `mssql/auth_test.go` — valid user, bad password, unknown user, API key, and an
+  unsupported auth type, against the fake upstream and a throwaway PostgreSQL
+  store (the `postgresql/copy_persist_test.go` precedent: testcontainers under
+  `make test`).
+- `mssql/tokens_test.go` — the token walker over synthesized streams.
+- `mssql/integration_test.go` — `//go:build integration`: connect through the
+  proxy, `SELECT`, assert rows and the connection row's `upstream_tls`. Authored
+  but **not runnable on this arm64 host** (the SQL Server image is amd64-only);
+  CI runs it.
