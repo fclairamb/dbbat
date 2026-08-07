@@ -15,14 +15,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	_ "github.com/microsoft/go-mssqldb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -241,8 +244,27 @@ func startProxyWithStore(
 ) string {
 	t.Helper()
 
-	srv, err := NewServer(dataStore, encryptionKey, config.QueryStorageConfig{}, config.DumpConfig{}, nil, cfg, slog.New(slog.DiscardHandler))
+	return startProxyWithOptions(t, cfg, dataStore, encryptionKey, config.QueryStorageConfig{}, nil)
+}
+
+// startProxyWithOptions is startProxyWithStore plus stage 3's dependencies:
+// result-row storage and the approval-hold collaborators.
+func startProxyWithOptions(
+	t *testing.T,
+	cfg config.MSSQLConfig,
+	dataStore *store.Store,
+	encryptionKey []byte,
+	queryStorage config.QueryStorageConfig,
+	approvalDeps *shared.ApprovalDeps,
+) string {
+	t.Helper()
+
+	srv, err := NewServer(dataStore, encryptionKey, queryStorage, config.DumpConfig{}, nil, cfg, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
+
+	if approvalDeps != nil {
+		srv.SetApprovalDeps(*approvalDeps)
+	}
 
 	go func() {
 		_ = srv.Start("127.0.0.1:0")
@@ -263,6 +285,19 @@ func startProxyWithStore(
 // seedE2E creates the dbbat user, the SQL Server entry pointing at upstreamAddr
 // and a live grant linking them, and returns the store plus its encryption key.
 func seedE2E(ctx context.Context, t *testing.T, upstreamAddr, sslMode string) (*store.Store, []byte) {
+	t.Helper()
+
+	return seedE2EWith(ctx, t, upstreamAddr, sslMode, nil, nil)
+}
+
+// seedE2EWith is seedE2E with the grant definition's controls and approval
+// patterns spelled out, which is what the enforcement tests below need.
+func seedE2EWith(
+	ctx context.Context,
+	t *testing.T,
+	upstreamAddr, sslMode string,
+	controls, approvalPatterns []string,
+) (*store.Store, []byte) {
 	t.Helper()
 
 	dataStore := newTestStore(t)
@@ -296,7 +331,7 @@ func seedE2E(ctx context.Context, t *testing.T, upstreamAddr, sslMode string) (*
 	}, encryptionKey)
 	require.NoError(t, err)
 
-	grantFullAccess(t, dataStore, user.UID, database.UID)
+	grantAccess(t, dataStore, user.UID, database.UID, controls, approvalPatterns)
 
 	return dataStore, encryptionKey
 }
@@ -408,4 +443,295 @@ func TestProxyRefusesBadCredentialsAgainstARealServer(t *testing.T) {
 	connections, err := dataStore.ListConnections(ctx, store.ConnectionFilter{Limit: 10})
 	require.NoError(t, err)
 	assert.Empty(t, connections, "a refused login opens no session and records nothing")
+}
+
+// e2eTable is the throwaway table the enforcement tests below write to.
+const e2eTable = "dbbat_stage3"
+
+// createE2ETable builds the fixture table through a *direct* connection to the
+// container, so the proxy's own controls never get in the way of setting up.
+func createE2ETable(ctx context.Context, t *testing.T, upstreamAddr string) {
+	t.Helper()
+
+	db, err := sql.Open("sqlserver", dsn(upstreamAddr, "disable"))
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _ = db.Close() })
+
+	_, err = db.ExecContext(ctx, fmt.Sprintf(
+		"IF OBJECT_ID('%s') IS NOT NULL DROP TABLE %s;"+
+			"CREATE TABLE %s (id int NOT NULL, label nvarchar(100) NULL)", e2eTable, e2eTable, e2eTable))
+	require.NoError(t, err)
+
+	for i := 1; i <= 5; i++ {
+		_, err = db.ExecContext(ctx,
+			fmt.Sprintf("INSERT INTO %s (id, label) VALUES (@p1, @p2)", e2eTable),
+			i, fmt.Sprintf("étiquette %d", i))
+		require.NoError(t, err)
+	}
+}
+
+// TestProxyEnforcesReadOnlyOnBothStatementPaths is the regression test for the
+// owner's binding decision on RPC.
+//
+// go-mssqldb sends a parameterless statement as a plain SQLBatch and a
+// parameterised one as sp_executesql, so the two halves of this test really do
+// exercise the two code paths against a real server. If RPC were log-only, the
+// second half would succeed and read_only would be bypassable by anyone.
+func TestProxyEnforcesReadOnlyOnBothStatementPaths(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	upstreamAddr := startUpstreamSQLServer(ctx, t)
+	createE2ETable(ctx, t, upstreamAddr)
+
+	dataStore, encryptionKey := seedE2EWith(ctx, t, upstreamAddr, "disable",
+		[]string{store.ControlReadOnly}, nil)
+
+	proxyAddr := startProxyWithStore(t, config.MSSQLConfig{}, dataStore, encryptionKey)
+
+	db, err := sql.Open("sqlserver", proxyDSN(proxyAddr, "disable"))
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _ = db.Close() })
+
+	// A read still works, so the refusals below are about the write and not
+	// about the session being broken.
+	var before int
+	require.NoError(t, db.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", e2eTable)).Scan(&before))
+	assert.Equal(t, 5, before)
+
+	// Path 1: a plain SQLBatch.
+	_, err = db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s", e2eTable))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read-only")
+
+	// Path 2: the same write wrapped in sp_executesql by the driver's
+	// parameter handling.
+	_, err = db.ExecContext(ctx,
+		fmt.Sprintf("DELETE FROM %s WHERE id = @p1", e2eTable), 1)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "read-only",
+		"sp_executesql must be enforced, not merely logged")
+
+	// Nothing was deleted by either path.
+	var after int
+	require.NoError(t, db.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", e2eTable)).Scan(&after))
+	assert.Equal(t, 5, after, "a blocked write must never reach the upstream")
+
+	// And both refusals are in the query history.
+	queries, err := dataStore.ListQueries(ctx, store.QueryFilter{Limit: 50})
+	require.NoError(t, err)
+
+	blocked := 0
+
+	for _, query := range queries {
+		if query.Error != nil && strings.Contains(*query.Error, "read-only") {
+			blocked++
+		}
+	}
+
+	assert.Equal(t, 2, blocked, "both refusals must be logged")
+}
+
+// TestProxyAccountsForResults covers the response side against a real server:
+// the row count the upstream reported lands on the query row, and the rows
+// themselves are captured.
+func TestProxyAccountsForResults(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	upstreamAddr := startUpstreamSQLServer(ctx, t)
+	createE2ETable(ctx, t, upstreamAddr)
+
+	dataStore, encryptionKey := seedE2E(ctx, t, upstreamAddr, "disable")
+
+	proxyAddr := startProxyWithOptions(t, config.MSSQLConfig{}, dataStore, encryptionKey,
+		config.QueryStorageConfig{StoreResults: true, MaxResultRows: 100}, nil)
+
+	db, err := sql.Open("sqlserver", proxyDSN(proxyAddr, "disable"))
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _ = db.Close() })
+
+	const selectSQL = "SELECT id, label FROM " + e2eTable + " ORDER BY id"
+
+	rows, err := db.QueryContext(ctx, selectSQL)
+	require.NoError(t, err)
+
+	seen := 0
+
+	for rows.Next() {
+		var (
+			id    int
+			label string
+		)
+
+		require.NoError(t, rows.Scan(&id, &label))
+		assert.Equal(t, fmt.Sprintf("étiquette %d", id), label)
+
+		seen++
+	}
+
+	require.NoError(t, rows.Err())
+	require.NoError(t, rows.Close())
+	require.Equal(t, 5, seen)
+
+	var logged store.Query
+
+	require.Eventually(t, func() bool {
+		queries, err := dataStore.ListQueries(ctx, store.QueryFilter{Limit: 50})
+		if err != nil {
+			return false
+		}
+
+		for _, query := range queries {
+			if query.SQLText == selectSQL && query.RowsAffected != nil {
+				logged = query
+
+				return true
+			}
+		}
+
+		return false
+	}, 30*time.Second, 100*time.Millisecond)
+
+	require.NotNil(t, logged.RowsAffected)
+	assert.Equal(t, int64(5), *logged.RowsAffected,
+		"the DONE token's row count must land on the query row")
+	assert.Nil(t, logged.Error)
+
+	captured, err := dataStore.GetQueryRows(ctx, logged.UID, "", 20)
+	require.NoError(t, err)
+	require.Len(t, captured.Rows, 5, "the captured result rows must be stored")
+	assert.JSONEq(t, `[1,"étiquette 1"]`, string(captured.Rows[0].RowData))
+
+	// A write reports its affected rows through the same DONE token.
+	result, err := db.ExecContext(ctx,
+		fmt.Sprintf("UPDATE %s SET label = N'modifié' WHERE id <= 2", e2eTable))
+	require.NoError(t, err)
+
+	affected, err := result.RowsAffected()
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), affected)
+}
+
+// TestProxyHoldsAStatementForApproval drives a real driver into an approval
+// hold. The behavior that matters is what the client does *while* parked: it
+// must simply wait, with no timeout and no torn-down connection, and then get
+// its real answer once a human approves.
+func TestProxyHoldsAStatementForApproval(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	upstreamAddr := startUpstreamSQLServer(ctx, t)
+	createE2ETable(ctx, t, upstreamAddr)
+
+	dataStore, encryptionKey := seedE2EWith(ctx, t, upstreamAddr, "disable",
+		nil, []string{`(?i)^DELETE`})
+
+	registry := approval.NewRegistry()
+
+	proxyAddr := startProxyWithOptions(t, config.MSSQLConfig{}, dataStore, encryptionKey,
+		config.QueryStorageConfig{}, &shared.ApprovalDeps{
+			Enabled:      true,
+			Store:        dataStore,
+			Registry:     registry,
+			Logger:       slog.New(slog.DiscardHandler),
+			PollInterval: 200 * time.Millisecond,
+		})
+
+	db, err := sql.Open("sqlserver", proxyDSN(proxyAddr, "disable"))
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _ = db.Close() })
+
+	// A statement that does not match the pattern runs normally, which also
+	// warms the connection pool so the hold below is not racing a handshake.
+	var count int
+	require.NoError(t, db.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", e2eTable)).Scan(&count))
+	require.Equal(t, 5, count)
+
+	type execOutcome struct {
+		affected int64
+		err      error
+	}
+
+	outcomes := make(chan execOutcome, 1)
+
+	go func() {
+		result, err := db.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = 3", e2eTable))
+		if err != nil {
+			outcomes <- execOutcome{err: err}
+
+			return
+		}
+
+		affected, err := result.RowsAffected()
+		outcomes <- execOutcome{affected: affected, err: err}
+	}()
+
+	// The statement is persisted as pending while it hangs.
+	var pendingUID uuid.UUID
+
+	require.Eventually(t, func() bool {
+		queries, err := dataStore.ListQueries(ctx, store.QueryFilter{Limit: 50})
+		if err != nil {
+			return false
+		}
+
+		for _, query := range queries {
+			if query.ApprovalStatus != nil && *query.ApprovalStatus == store.ApprovalPending {
+				pendingUID = query.UID
+
+				return true
+			}
+		}
+
+		return false
+	}, 60*time.Second, 200*time.Millisecond)
+
+	// Still parked a good while later: a hold has no timeout, and the client
+	// has neither timed out nor been disconnected.
+	select {
+	case outcome := <-outcomes:
+		t.Fatalf("the client was answered while parked: %+v", outcome)
+	case <-time.After(5 * time.Second):
+	}
+
+	stillThere := 0
+	require.NoError(t, db.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = 3", e2eTable)).Scan(&stillThere))
+	assert.Equal(t, 1, stillThere, "a parked statement must not reach the upstream")
+
+	// A human approves, and the statement runs for real.
+	users, err := dataStore.ListUsers(ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, users)
+
+	approver := users[0].UID
+	require.True(t, registry.Resolve(approval.Decision{
+		QueryUID: pendingUID,
+		Status:   store.ApprovalApproved,
+		By:       &approver,
+		ByName:   "an approver",
+		At:       time.Now(),
+	}))
+
+	select {
+	case outcome := <-outcomes:
+		require.NoError(t, outcome.err)
+		assert.Equal(t, int64(1), outcome.affected,
+			"the released statement must run and report its own row count")
+	case <-time.After(60 * time.Second):
+		t.Fatal("the released statement never completed")
+	}
+
+	gone := 1
+	require.NoError(t, db.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = 3", e2eTable)).Scan(&gone))
+	assert.Equal(t, 0, gone)
 }
