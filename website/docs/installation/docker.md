@@ -15,13 +15,14 @@ docker run -d \
   -p 1522:1522 \
   -p 3307:3307 \
   -p 27018:27018 \
+  -p 1434:1434 \
   -p 4200:4200 \
   -e DBB_DSN="postgres://user:pass@host:5432/dbbat" \
   -e DBB_KEY="your-base64-encoded-key" \
   ghcr.io/fclairamb/dbbat
 ```
 
-The same container exposes all five listeners — PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, and the REST API + web UI. Drop the `-p` mapping for any proxy you don't need, and disable that listener with the matching `DBB_LISTEN_*=""` env var.
+The same container exposes all six listeners — PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, SQL Server, and the REST API + web UI. Drop the `-p` mapping for any proxy you don't need, and disable that listener with the matching `DBB_LISTEN_*=""` env var.
 
 ## Environment Variables
 
@@ -41,6 +42,7 @@ The same container exposes all five listeners — PostgreSQL, Oracle, MySQL/Mari
 | `DBB_LISTEN_ORA` | Oracle proxy listen address (empty = disabled) | `:1522` |
 | `DBB_LISTEN_MYSQL` | MySQL/MariaDB proxy listen address (empty = disabled) | `:3307` |
 | `DBB_LISTEN_MONGO` | MongoDB proxy listen address (empty = disabled) | `:27018` |
+| `DBB_LISTEN_MSSQL` | Microsoft SQL Server (TDS) proxy listen address (empty = disabled) | `:1434` |
 | `DBB_LISTEN_API` | REST API + web UI listen address | `:4200` |
 
 For the full list (rate limiting, dump capture, MySQL TLS, hashing, Slack OAuth), see [Configuration](/docs/configuration).
@@ -63,6 +65,7 @@ If you don't provide one via `DBB_KEY` or `DBB_KEYFILE`, DBBat creates one at `~
 | `1522` | Oracle proxy |
 | `3307` | MySQL / MariaDB proxy |
 | `27018` | MongoDB proxy |
+| `1434` | Microsoft SQL Server proxy (1434/tcp is free — the SQL Server Browser that owns 1434 is UDP-only) |
 | `4200` | REST API + web UI |
 
 ## Volumes
@@ -72,7 +75,7 @@ For persistent key storage, mount a volume:
 ```bash
 docker run -d \
   --name dbbat \
-  -p 5433:5433 -p 1522:1522 -p 3307:3307 -p 27018:27018 -p 4200:4200 \
+  -p 5433:5433 -p 1522:1522 -p 3307:3307 -p 27018:27018 -p 1434:1434 -p 4200:4200 \
   -e DBB_DSN="postgres://user:pass@host:5432/dbbat" \
   -e DBB_KEYFILE="/keys/dbbat.key" \
   -v /path/to/keys:/keys:ro \
@@ -84,7 +87,7 @@ To enable session packet dumps:
 ```bash
 docker run -d \
   --name dbbat \
-  -p 5433:5433 -p 1522:1522 -p 3307:3307 -p 27018:27018 -p 4200:4200 \
+  -p 5433:5433 -p 1522:1522 -p 3307:3307 -p 27018:27018 -p 1434:1434 -p 4200:4200 \
   -e DBB_DSN="postgres://user:pass@host:5432/dbbat" \
   -e DBB_DUMP_DIR="/var/dbbat/dumps" \
   -e DBB_DUMP_RETENTION="72h" \

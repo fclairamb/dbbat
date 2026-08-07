@@ -17,7 +17,7 @@ A Helm chart is also maintained in-tree under [`charts/`](https://github.com/fcl
 
 ## Listeners
 
-DBBat exposes five listeners by default. Each can be disabled by setting the matching environment variable to an empty string.
+DBBat exposes six listeners by default. Each can be disabled by setting the matching environment variable to an empty string.
 
 | Listener | Default port | Env var |
 |----------|-------------|---------|
@@ -25,9 +25,10 @@ DBBat exposes five listeners by default. Each can be disabled by setting the mat
 | Oracle proxy | `1522` | `DBB_LISTEN_ORA` |
 | MySQL/MariaDB proxy | `3307` | `DBB_LISTEN_MYSQL` |
 | MongoDB proxy | `27018` | `DBB_LISTEN_MONGO` |
+| Microsoft SQL Server proxy | `1434` | `DBB_LISTEN_MSSQL` |
 | REST API + web UI | `4200` | `DBB_LISTEN_API` |
 
-The wire protocols (PostgreSQL, Oracle TNS, MySQL, MongoDB) generally cannot share an HTTP Ingress — see "Exposing the proxy listeners" below for the options.
+The wire protocols (PostgreSQL, Oracle TNS, MySQL, MongoDB, SQL Server TDS) generally cannot share an HTTP Ingress — see "Exposing the proxy listeners" below for the options.
 
 :::note SSH-tunnelled upstreams
 These are *inbound* listeners. If any target server is configured with a `via_uid`
@@ -172,6 +173,9 @@ spec:
         - name: mongo
           containerPort: 27018
           protocol: TCP
+        - name: mssql
+          containerPort: 1434
+          protocol: TCP
         - name: api
           containerPort: 4200
           protocol: TCP
@@ -194,6 +198,8 @@ spec:
           value: ":3307"
         - name: DBB_LISTEN_MONGO
           value: ":27018"
+        - name: DBB_LISTEN_MSSQL
+          value: ":1434"
         - name: DBB_LISTEN_API
           value: ":4200"
         resources:
@@ -260,6 +266,10 @@ spec:
   - name: mongo
     port: 27018
     targetPort: mongo
+    protocol: TCP
+  - name: mssql
+    port: 1434
+    targetPort: mssql
     protocol: TCP
   - name: api
     port: 4200
@@ -397,7 +407,7 @@ and no gateway change is needed.
 
 ## Exposing the Proxy Listeners
 
-The proxy listeners (PostgreSQL `5433`, Oracle `1522`, MySQL/MariaDB `3307`, MongoDB `27018`) cannot be exposed via a standard HTTP Ingress — they speak TCP/wire protocols, not HTTP. Options:
+The proxy listeners (PostgreSQL `5433`, Oracle `1522`, MySQL/MariaDB `3307`, MongoDB `27018`, SQL Server `1434`) cannot be exposed via a standard HTTP Ingress — they speak TCP/wire protocols, not HTTP. Options:
 
 :::note Egress for SSH tunnels
 Exposing the listeners only covers traffic *into* the pod. Upstreams configured
@@ -435,6 +445,9 @@ spec:
   - name: mongo
     port: 27018
     targetPort: mongo
+  - name: mssql
+    port: 1434
+    targetPort: mssql
   type: LoadBalancer
 ```
 
@@ -467,6 +480,10 @@ spec:
     port: 27018
     targetPort: mongo
     nodePort: 32018
+  - name: mssql
+    port: 1434
+    targetPort: mssql
+    nodePort: 31434
   type: NodePort
 ```
 
@@ -486,6 +503,7 @@ data:
   "1522": "dbbat/dbbat:1522"
   "3307": "dbbat/dbbat:3307"
   "27018": "dbbat/dbbat:27018"
+  "1434": "dbbat/dbbat:1434"
 ```
 
 ## Complete Deployment
