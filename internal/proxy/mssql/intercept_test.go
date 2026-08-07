@@ -521,6 +521,24 @@ func TestSessionParksAStatementOnAnApprovalHold(t *testing.T) {
 
 	require.Eventually(t, func() bool { return len(fixture.fake.receivedRequests()) == 1 },
 		10*time.Second, 20*time.Millisecond)
+
+	// And a statement the pattern does *not* match sails straight through,
+	// unheld. This is what proves the hold above was the pattern matching and
+	// not a pattern that matches everything — which is what `(?i)^DELETE`
+	// decayed into for as long as the store split it in two on read-back
+	// (see internal/store/array.go).
+	// The reader goroutine above is done (it reads exactly one message), so
+	// this reads the reply inline — with a deadline, since being held would
+	// otherwise hang the test rather than fail it.
+	require.NoError(t, client.conn.SetDeadline(time.Now().Add(15*time.Second)))
+	require.NoError(t, client.pkt.WriteMessage(packetTypeSQLBatch, sqlBatchPayload("SELECT 1")))
+
+	_, unheld, err := client.pkt.ReadMessage()
+	require.NoError(t, err, "a statement missing the approval pattern was held anyway")
+	assert.Equal(t, buildDoneToken(0, 1), unheld)
+
+	require.Eventually(t, func() bool { return len(fixture.fake.receivedRequests()) == 2 },
+		10*time.Second, 20*time.Millisecond)
 }
 
 // TestAttentionCancelsAStatementParkedOnAnApprovalHold is the whole point of
@@ -538,12 +556,12 @@ func TestAttentionCancelsAStatementParkedOnAnApprovalHold(t *testing.T) {
 	fixture := newAuthFixtureWith(t, fixtureOptions{
 		upstreamEncryption: encryptNotSup,
 		sslMode:            "disable",
-		// Not `(?i)^DELETE`, unlike the tests around this one: a pattern that
-		// starts with `(` does not survive the store round-trip today (see
-		// specs/todos/2026-08-07-approval-patterns-starting-with-a-paren.md),
-		// and it comes back as `(?i)` — which matches *everything*. This test
-		// needs the SELECT below to genuinely miss the pattern.
-		approvalPatterns: []string{`^DELETE`},
+		// `(?i)^DELETE`, like the tests around this one — step (d) below needs
+		// the trailing SELECT to genuinely *miss* the pattern, which it only
+		// does because the leading `(?i)` now survives the store round-trip
+		// (it used to come back split as `(?i)` + `^DELETE`, and `(?i)` alone
+		// matches everything). See internal/store/array.go.
+		approvalPatterns: []string{`(?i)^DELETE`},
 		approvalDepsFor: func(dataStore *store.Store) shared.ApprovalDeps {
 			return shared.ApprovalDeps{
 				Enabled:      true,
@@ -649,7 +667,7 @@ func TestAttentionCancelsAHoldOnAnEncryptedClientLeg(t *testing.T) {
 		upstreamEncryption: encryptNotSup,
 		sslMode:            "disable",
 		clientTLS:          true,
-		approvalPatterns:   []string{`^DELETE`},
+		approvalPatterns:   []string{`(?i)^DELETE`},
 		approvalDepsFor: func(dataStore *store.Store) shared.ApprovalDeps {
 			return shared.ApprovalDeps{
 				Enabled:      true,
@@ -1093,6 +1111,17 @@ func TestApprovalHoldMatchesAPreparedStatement(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("the released execute never reached the client")
 	}
+
+	// A statement the pattern does *not* match is answered without a hold.
+	// That is what separates "the pattern matched" from "the pattern matches
+	// everything" — which is what `(?i)^DELETE` decayed into for as long as
+	// the store split it on read-back (see internal/store/array.go).
+	require.NoError(t, client.conn.SetDeadline(time.Now().Add(15*time.Second)))
+	require.NoError(t, client.pkt.WriteMessage(packetTypeRPC,
+		rpcByID(spExecuteSQL, nvarcharMaxParam("", "SELECT 1"))))
+
+	_, _, err := client.pkt.ReadMessage()
+	require.NoError(t, err, "a statement missing the approval pattern was held anyway")
 }
 
 // releaseHold waits for a statement other than skip to be parked, approves it,
