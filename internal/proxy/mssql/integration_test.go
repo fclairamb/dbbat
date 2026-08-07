@@ -629,8 +629,12 @@ func TestProxyHoldsAStatementForApproval(t *testing.T) {
 	upstreamAddr := startUpstreamSQLServer(ctx, t)
 	createE2ETable(ctx, t, upstreamAddr)
 
+	// `^DELETE` rather than `(?i)^DELETE`: a pattern starting with `(` does not
+	// survive the store round-trip today and comes back as a bare `(?i)`, which
+	// matches every statement — including the warm-up SELECT below. See
+	// specs/todos/2026-08-07-approval-patterns-starting-with-a-paren.md.
 	dataStore, encryptionKey := seedE2EWith(ctx, t, upstreamAddr, "disable",
-		nil, []string{`(?i)^DELETE`})
+		nil, []string{`^DELETE`})
 
 	registry := approval.NewRegistry()
 
@@ -734,4 +738,112 @@ func TestProxyHoldsAStatementForApproval(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(ctx,
 		fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = 3", e2eTable)).Scan(&gone))
 	assert.Equal(t, 0, gone)
+}
+
+// TestProxyReleasesAHoldWhenTheClientCancels drives a real driver into an
+// approval hold and then cancels it, which is what a query timeout or a Ctrl-C
+// does. The cancel arrives as a TDS ATTENTION on the held session's own socket
+// — unlike every other protocol, where it comes in on a second connection —
+// and it must end the hold there and then rather than after the client gives up
+// and drops the socket.
+func TestProxyReleasesAHoldWhenTheClientCancels(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	upstreamAddr := startUpstreamSQLServer(ctx, t)
+	createE2ETable(ctx, t, upstreamAddr)
+
+	// See the note on the pattern in TestProxyHoldsAStatementForApproval.
+	dataStore, encryptionKey := seedE2EWith(ctx, t, upstreamAddr, "disable",
+		nil, []string{`^DELETE`})
+
+	proxyAddr := startProxyWithOptions(t, config.MSSQLConfig{}, dataStore, encryptionKey,
+		config.QueryStorageConfig{}, &shared.ApprovalDeps{
+			Enabled:      true,
+			Store:        dataStore,
+			Registry:     approval.NewRegistry(),
+			Logger:       slog.New(slog.DiscardHandler),
+			PollInterval: 200 * time.Millisecond,
+		})
+
+	db, err := sql.Open("sqlserver", proxyDSN(proxyAddr, "disable"))
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Warms the pool, and proves the pattern does not match everything.
+	var count int
+	require.NoError(t, db.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", e2eTable)).Scan(&count))
+	require.Equal(t, 5, count)
+
+	stmtCtx, cancelStatement := context.WithCancel(ctx)
+	defer cancelStatement()
+
+	errs := make(chan error, 1)
+
+	go func() {
+		_, execErr := db.ExecContext(stmtCtx, fmt.Sprintf("DELETE FROM %s WHERE id = 3", e2eTable))
+		errs <- execErr
+	}()
+
+	var pendingUID uuid.UUID
+
+	require.Eventually(t, func() bool {
+		queries, err := dataStore.ListQueries(ctx, store.QueryFilter{Limit: 50})
+		if err != nil {
+			return false
+		}
+
+		for _, query := range queries {
+			if query.ApprovalStatus != nil && *query.ApprovalStatus == store.ApprovalPending {
+				pendingUID = query.UID
+
+				return true
+			}
+		}
+
+		return false
+	}, 60*time.Second, 200*time.Millisecond)
+
+	// The client gives up: go-mssqldb sends an ATTENTION and waits for the
+	// cancel acknowledgement before it hands the error back.
+	cancelStatement()
+
+	select {
+	case execErr := <-errs:
+		require.ErrorIs(t, execErr, context.Canceled,
+			"the cancel must come back as a canceled context, not a broken connection")
+	case <-time.After(30 * time.Second):
+		t.Fatal("the client was still parked 30s after it canceled")
+	}
+
+	// The hold is settled rather than left pending forever, and it says who
+	// ended it.
+	require.Eventually(t, func() bool {
+		query, err := dataStore.GetQuery(ctx, pendingUID)
+		if err != nil || query.ApprovalStatus == nil {
+			return false
+		}
+
+		return *query.ApprovalStatus == store.ApprovalAbandoned
+	}, 30*time.Second, 200*time.Millisecond)
+
+	query, err := dataStore.GetQuery(ctx, pendingUID)
+	require.NoError(t, err)
+	require.NotNil(t, query.ResolutionReason)
+	assert.Equal(t, attentionCancelReason, *query.ResolutionReason)
+
+	// The security property: a cancel cancels, it does not release. The row is
+	// still there, so the DELETE never reached the upstream.
+	stillThere := 0
+	require.NoError(t, db.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = 3", e2eTable)).Scan(&stillThere))
+	assert.Equal(t, 1, stillThere, "a canceled statement must never reach the upstream")
+
+	// And the connection survived it, which is the difference between an
+	// acknowledged cancel and a dropped socket.
+	require.NoError(t, db.QueryRowContext(ctx,
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", e2eTable)).Scan(&count))
+	assert.Equal(t, 5, count)
 }

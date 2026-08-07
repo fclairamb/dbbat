@@ -15,8 +15,16 @@ const (
 )
 
 // DONE token status bits (MS-TDS 2.2.7.6). DONE_FINAL is the zero value and
-// needs no name; DONE_ERROR is the one stage 1 ever sets.
-const doneError uint16 = 0x0002
+// needs no name.
+const (
+	// doneError (DONE_ERROR) says the statement ended badly.
+	doneError uint16 = 0x0002
+	// doneAttention (DONE_ATTN) marks the DONE that acknowledges an ATTENTION.
+	// It is not decoration: a driver that sent a cancel reads the response
+	// stream until it sees this bit, and treats a stream that ends without one
+	// as an unusable connection.
+	doneAttention uint16 = 0x0020
+)
 
 // Error numbers dbbat reports. SQL Server's own numbering is dense and
 // well-known to clients, so the proxy reuses the numbers whose meaning matches:
@@ -197,6 +205,18 @@ func buildStatementRefusal(reason error) []byte {
 		statementMessageFor(reason), "", 1)
 
 	return append(stream, buildDoneToken(doneError, 0)...)
+}
+
+// buildAttentionAck renders the answer a canceled statement gets: a DONE token
+// carrying DONE_ATTN and no rows, which is exactly what SQL Server sends when
+// an ATTENTION interrupts a request.
+//
+// Deliberately *not* an ERROR token in front of it. The client asked for the
+// cancel, so there is nothing to report as a failure, and a driver reading for
+// its cancel confirmation would only discard it. What matters is that the
+// stream contains the DONE_ATTN and that the connection stays open.
+func buildAttentionAck() []byte {
+	return buildDoneToken(doneAttention, 0)
 }
 
 // statementMessageFor renders a statement refusal for the client.

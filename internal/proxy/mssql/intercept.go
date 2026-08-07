@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -349,13 +350,19 @@ func grantRestricts(grant *store.Grant) bool {
 	return grant != nil && (grant.IsReadOnly() || grant.ShouldBlockDDL() || grant.ShouldBlockCopy())
 }
 
+// attentionCancelReason is what a hold released by a client cancel is recorded
+// and announced as. It reads as an outcome in the approvals UI, next to
+// "client disconnected while awaiting approval".
+const attentionCancelReason = "canceled by the client (ATTENTION)"
+
 // holdIfNeeded runs the approval gate for one statement.
 //
-// The session goroutine blocks here for as long as the hold lasts. Parking the
-// client conn is what keeps that safe: the watcher goes on reading the socket,
-// so a client that gives up and disconnects ends the hold instead of leaving it
-// parked forever, and anything the client sent meanwhile is replayed in order
-// once the session resumes.
+// The session goroutine blocks here for as long as the hold lasts. The client
+// leg keeps being read by readClientMessages throughout, which is what keeps
+// that safe: a client that gives up and disconnects ends the hold instead of
+// leaving it parked forever, one that cancels ends it through
+// cancelHeldStatement, and anything else it sent meanwhile is forwarded in
+// order once the session resumes.
 func (s *session) holdIfNeeded(ctx context.Context, st statement) (uuid.UUID, error) {
 	if !s.approvalGate.Active() {
 		return uuid.Nil, nil
@@ -366,27 +373,119 @@ func (s *session) holdIfNeeded(ctx context.Context, st statement) (uuid.UUID, er
 		return uuid.Nil, nil
 	}
 
-	var gone <-chan struct{}
-
-	if s.watched != nil {
-		gone = s.watched.Park()
-		defer s.watched.Unpark()
-	}
+	s.armHoldCancel()
+	defer s.disarmHoldCancel()
 
 	return s.approvalGate.Hold(ctx, shared.HoldRequest{
 		SQL:        truncateSQL(st.text),
 		Params:     st.params,
 		Pattern:    pattern,
 		StartedAt:  time.Now(),
-		ClientGone: gone,
+		ClientGone: s.clientGone,
 		Guard:      s.guard,
 		OnPending:  s.setHeldQuery,
 	})
 }
 
+// armHoldCancel opens the window in which an ATTENTION cancels the statement
+// about to be parked, rather than traveling upstream. It has to open *before*
+// the gate is asked for a hold: the uid only exists once the gate has persisted
+// the pending row, and a driver whose timeout has already fired can send its
+// cancel inside that gap.
+func (s *session) armHoldCancel() {
+	s.heldMu.Lock()
+	s.holdArmed = true
+	s.heldMu.Unlock()
+}
+
+// disarmHoldCancel closes that window once the hold is over.
+func (s *session) disarmHoldCancel() {
+	s.heldMu.Lock()
+	s.holdArmed = false
+	s.heldMu.Unlock()
+}
+
+// cancelHeldStatement releases a statement parked on a human because the client
+// sent an ATTENTION, the TDS cancel. It reports whether the ATTENTION was
+// consumed here — false means nothing was parked, or a human resolved the hold
+// in the same instant, and the cancel must travel upstream as it always has.
+//
+// Called from the reader goroutine, never from the session goroutine.
+func (s *session) cancelHeldStatement() bool {
+	s.heldMu.Lock()
+
+	uid, armed, pending := s.heldQueryUID, s.holdArmed, s.attentionAckDue
+
+	// The gate is registering the hold right now, so there is no uid to cancel
+	// yet. Record the cancel; the OnPending callback applies it the instant the
+	// uid exists.
+	if uid == uuid.Nil && armed && !pending {
+		s.attentionAckDue = true
+	}
+
+	s.heldMu.Unlock()
+
+	// A cancel already being answered for the statement in flight swallows any
+	// repeat, so a second ATTENTION cannot slip upstream and cancel whatever
+	// runs next.
+	if pending {
+		return true
+	}
+
+	if uid == uuid.Nil {
+		return armed
+	}
+
+	return s.resolveHoldCanceled(uid)
+}
+
+// resolveHoldCanceled hands the parked session an abandoned decision and marks
+// the acknowledgement the client is owed. It reports whether the hold was still
+// there to be canceled: the registry's Resolve is what arbitrates a cancel
+// racing an approver, and the loser must not pretend it won.
+func (s *session) resolveHoldCanceled(uid uuid.UUID) bool {
+	if uid == uuid.Nil || s.server == nil || s.server.approvalDeps.Registry == nil {
+		return false
+	}
+
+	if !s.server.approvalDeps.Registry.Resolve(approval.Decision{
+		QueryUID: uid,
+		Status:   store.ApprovalAbandoned,
+		Reason:   attentionCancelReason,
+		At:       time.Now(),
+	}) {
+		return false
+	}
+
+	s.heldMu.Lock()
+	s.attentionAckDue = true
+	s.heldMu.Unlock()
+
+	return true
+}
+
+// takeAttentionAck reports whether the statement being answered owes the client
+// a cancel acknowledgement, consuming the mark.
+func (s *session) takeAttentionAck() bool {
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+
+	due := s.attentionAckDue
+	s.attentionAckDue = false
+
+	return due
+}
+
 // refuse answers a blocked statement on the client leg and logs it, without
 // anything reaching the upstream.
 func (s *session) refuse(ctx context.Context, st statement, start time.Time, cause error) ([]byte, error) {
+	// A statement the client canceled is answered as a cancel, whatever else
+	// went on to decide against it: the driver is reading for its cancel
+	// acknowledgement and nothing but a DONE_ATTN ends that wait.
+	if s.takeAttentionAck() {
+		return s.acknowledgeAttention(ctx, st, start)
+	}
+
 	s.logger.InfoContext(ctx, "MSSQL statement blocked",
 		slog.String("user", usernameOf(s.user)),
 		slog.String("sql", truncateSQL(st.text)),
@@ -402,6 +501,37 @@ func (s *session) refuse(ctx context.Context, st statement, start time.Time, cau
 	return nil, s.writeRefusal(cause)
 }
 
+// acknowledgeAttention answers a statement the client canceled with the TDS
+// cancel acknowledgement — a DONE carrying DONE_ATTN — rather than an error or
+// a dropped socket, and logs the query row as canceled.
+//
+// It answers for a statement that never reached the upstream, which is the
+// whole point: an ATTENTION during an approval hold cancels the statement, it
+// does not release it for execution.
+func (s *session) acknowledgeAttention(ctx context.Context, st statement, start time.Time) ([]byte, error) {
+	s.logger.InfoContext(ctx, "MSSQL statement canceled by the client while awaiting approval",
+		slog.String("user", usernameOf(s.user)),
+		slog.String("sql", truncateSQL(st.text)))
+
+	errText := attentionCancelReason
+	s.recordQuery(ctx, &pendingQuery{
+		sqlText: truncateSQL(st.text),
+		params:  st.params,
+		start:   start,
+	}, queryOutcome{queryError: &errText})
+
+	return nil, s.writeAttentionAck()
+}
+
+// writeAttentionAck sends the cancel acknowledgement on the client leg, under
+// the lock both relay pumps write through.
+func (s *session) writeAttentionAck() error {
+	s.clientWriteMu.Lock()
+	defer s.clientWriteMu.Unlock()
+
+	return s.pkt.WriteMessage(packetTypeReply, buildAttentionAck())
+}
+
 // refuseHeld reports the outcome of an approval hold. The gate already
 // persisted the statement, so the completion is written onto that row rather
 // than inserting a duplicate.
@@ -410,6 +540,19 @@ func (s *session) refuseHeld(
 ) ([]byte, error) {
 	if approvalUID == uuid.Nil {
 		return s.refuse(ctx, st, start, cause)
+	}
+
+	// The client canceled it while it hung. The hold is already recorded as
+	// abandoned by the gate; what is left is to answer the cancel and complete
+	// the row the gate created.
+	if s.takeAttentionAck() {
+		s.logger.InfoContext(ctx, "MSSQL approval hold canceled by the client",
+			slog.String("user", usernameOf(s.user)),
+			slog.String("sql", truncateSQL(st.text)))
+
+		s.completeHeldQuery(ctx, approvalUID, attentionCancelReason)
+
+		return nil, s.writeAttentionAck()
 	}
 
 	s.logger.InfoContext(ctx, "MSSQL statement blocked by an approval hold",

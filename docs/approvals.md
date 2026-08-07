@@ -88,22 +88,32 @@ polish. Two mechanisms, both in `internal/proxy/shared/watch.go`:
   resumes — never dropped, never interpreted mid-hold.
   `WatchedConn` sits *below* any TLS layer, so it parks on raw records it never
   has to decrypt.
+  The SQL Server proxy is the exception: it has no `WatchedConn` at all, and
+  keeps its client leg read by a goroutine sitting on the TDS codec *above*
+  TLS. It has to, because a TDS cancel arrives in-band on the held session's
+  own socket and a byte-level watcher below TLS would only ever see records.
+  See `docs/mssql.md`.
 - **TCP keepalive on client connections** (30 s idle / 10 s interval / 3
   probes). A hard-killed client or a dead network path never produces a FIN;
   without keepalive, "until the client disconnects" silently means *forever*.
 
 ## Cancellation while held
 
-A held query stays cancellable through each protocol's normal out-of-band path.
-The held session's own socket is blocked by definition, so these all arrive
-elsewhere:
+A held query stays cancellable through each protocol's normal cancel path. In
+every protocol but one the held session's own socket is not being interpreted,
+so the cancel has to arrive elsewhere:
 
 | Protocol | Path | Result |
 |---|---|---|
 | PostgreSQL | `CancelRequest` on a **separate TCP connection**, routed by the BackendKeyData dbbat forwarded | hold → `abandoned`; the cancel is also relayed upstream |
 | MySQL / MariaDB | `KILL [QUERY] <id>` from another connection, routed by the connection id dbbat assigned | hold → `abandoned`; the `KILL` still runs upstream |
 | MongoDB | `killOperations` | hold → `abandoned` |
+| SQL Server | `ATTENTION` **on the held connection itself** — what a driver sends on a cancelled context or a query timeout | hold → `abandoned`; the ATTENTION is *not* forwarded upstream, and the client gets the `DONE_ATTN` acknowledgement |
 | Oracle | client disconnect / session kill | hold → `abandoned` |
+
+SQL Server is in-band because TDS has no side channel: the cancel travels on the
+same socket as the statement it cancels. That is why its proxy reads the client
+leg from a goroutine of its own — see `docs/mssql.md`.
 
 ## Quotas, expiry and revocation keep running
 
@@ -384,6 +394,7 @@ stays correct, only the live feed goes away.
 | PostgreSQL | simple `Query`, and `Execute` (**not** `Parse`) | At Parse time the bind parameters aren't known and the SQL that ultimately runs is the portal's. Validated first — start here. |
 | MySQL / MariaDB | `COM_QUERY` / `COM_STMT_EXECUTE`, inside `runIntercepted` | go-mysql owns the wire; the hold happens before `exec()`. |
 | MongoDB | `OP_MSG` command dispatch | Matching runs against the rendered `<command> <extJSON>` text, which is what `/queries` shows. |
+| SQL Server | `SQLBatch` / `RPC`, in the client→upstream pump's hook | The one protocol whose cancel is in-band, so the client leg is read by a separate goroutine for the whole session. |
 | Oracle | `OALL8` and the v315+ piggyback exec | Oracle clients are the least forgiving about a silent connection — expect `abandoned` more often here. |
 
 ## Schema

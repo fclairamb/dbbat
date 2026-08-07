@@ -523,6 +523,208 @@ func TestSessionParksAStatementOnAnApprovalHold(t *testing.T) {
 		10*time.Second, 20*time.Millisecond)
 }
 
+// TestAttentionCancelsAStatementParkedOnAnApprovalHold is the whole point of
+// the split reader: a client that gives up on a statement waiting for a human
+// gets its cancel honored immediately, instead of hanging until it drops the
+// socket.
+//
+// Four things have to hold at once, and the third is a security property: the
+// cancel must not be a way to get the statement past the gate.
+func TestAttentionCancelsAStatementParkedOnAnApprovalHold(t *testing.T) {
+	t.Parallel()
+
+	registry := approval.NewRegistry()
+
+	fixture := newAuthFixtureWith(t, fixtureOptions{
+		upstreamEncryption: encryptNotSup,
+		sslMode:            "disable",
+		// Not `(?i)^DELETE`, unlike the tests around this one: a pattern that
+		// starts with `(` does not survive the store round-trip today (see
+		// specs/todos/2026-08-07-approval-patterns-starting-with-a-paren.md),
+		// and it comes back as `(?i)` — which matches *everything*. This test
+		// needs the SELECT below to genuinely miss the pattern.
+		approvalPatterns: []string{`^DELETE`},
+		approvalDepsFor: func(dataStore *store.Store) shared.ApprovalDeps {
+			return shared.ApprovalDeps{
+				Enabled:      true,
+				Store:        dataStore,
+				Registry:     registry,
+				Logger:       testLogger(),
+				PollInterval: 100 * time.Millisecond,
+			}
+		},
+	})
+
+	client, outcome := fixture.login(t, fixtureUser, fixturePassword, fixtureDBEntry)
+	require.True(t, outcome.Acked)
+
+	require.NoError(t, client.pkt.WriteMessage(packetTypeSQLBatch,
+		sqlBatchPayload("DELETE FROM employés WHERE id = 1")))
+
+	replies := make(chan []byte, 2)
+
+	go func() {
+		for {
+			_, payload, err := client.pkt.ReadMessage()
+			if err != nil {
+				close(replies)
+
+				return
+			}
+
+			replies <- payload
+		}
+	}()
+
+	pendingUID := waitForPendingHold(t, fixture, uuid.Nil)
+
+	// The client's query timeout fires: a TDS cancel, on the session's own
+	// socket, while the session goroutine is parked on a human.
+	require.NoError(t, client.pkt.WriteMessage(packetTypeAttention, nil))
+
+	// (a) The client is answered promptly, with the acknowledgement TDS says a
+	// cancel gets — a DONE carrying DONE_ATTN. A driver reads for exactly this
+	// before handing context.Canceled back to its caller.
+	select {
+	case reply, ok := <-replies:
+		require.True(t, ok, "the connection was torn down instead of acknowledging the cancel")
+		assert.Equal(t, buildAttentionAck(), reply)
+	case <-time.After(15 * time.Second):
+		t.Fatal("the cancel was never acknowledged")
+	}
+
+	// (b) The hold is settled, not left haunting /queries/pending, and it is
+	// recorded as abandoned with the client cancel as its reason.
+	require.Eventually(t, func() bool {
+		queries, err := fixture.store.ListQueries(context.Background(), store.QueryFilter{Limit: 10})
+		if err != nil || len(queries) != 1 || queries[0].ApprovalStatus == nil {
+			return false
+		}
+
+		return *queries[0].ApprovalStatus == store.ApprovalAbandoned
+	}, 15*time.Second, 50*time.Millisecond)
+
+	queries, err := fixture.store.ListQueries(context.Background(), store.QueryFilter{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, queries, 1)
+	assert.Equal(t, pendingUID, queries[0].UID, "the cancel must settle the row the hold created")
+	require.NotNil(t, queries[0].ResolutionReason)
+	assert.Equal(t, attentionCancelReason, *queries[0].ResolutionReason)
+
+	// (c) The security property: a canceled statement is canceled, never
+	// released. Neither it nor the ATTENTION itself reached the upstream — the
+	// latter matters because a stray cancel would abort whatever ran next.
+	assert.Empty(t, fixture.fake.receivedRequests(),
+		"a canceled statement must never reach the upstream")
+
+	// (d) The connection survives it, which is what separates a cancel from a
+	// refusal in TDS.
+	require.NoError(t, client.pkt.WriteMessage(packetTypeSQLBatch, sqlBatchPayload("SELECT 1")))
+
+	select {
+	case reply, ok := <-replies:
+		require.True(t, ok, "the connection did not survive the cancel")
+		assert.Equal(t, buildDoneToken(0, 1), reply)
+	case <-time.After(15 * time.Second):
+		t.Fatal("the session stopped serving after the cancel")
+	}
+
+	require.Eventually(t, func() bool { return len(fixture.fake.receivedRequests()) == 1 },
+		10*time.Second, 20*time.Millisecond)
+	assert.Equal(t, packetTypeSQLBatch, fixture.fake.receivedRequests()[0].msgType)
+}
+
+// TestAttentionLosingToAnApproverTravelsUpstream pins the other side of the
+// race. The registry arbitrates; the cancel that loses must not pretend it won,
+// or the statement would be answered as canceled while it runs upstream anyway.
+func TestAttentionLosingToAnApproverTravelsUpstream(t *testing.T) {
+	t.Parallel()
+
+	registry := approval.NewRegistry()
+	sess := &session{server: &Server{approvalDeps: shared.ApprovalDeps{Registry: registry}}}
+
+	uid := uuid.New()
+	_, release := registry.Register(uid)
+
+	defer release()
+
+	sess.setHeldQuery(uid)
+
+	// An approver gets there first.
+	require.True(t, registry.Resolve(approval.Decision{QueryUID: uid, Status: store.ApprovalApproved}))
+
+	assert.False(t, sess.cancelHeldStatement(),
+		"a cancel that lost the race must let the ATTENTION travel upstream")
+	assert.False(t, sess.takeAttentionAck(),
+		"and must not leave the client owed a cancel acknowledgement")
+}
+
+// TestAttentionRacingTheHoldRegistration covers the window the reader goroutine
+// cannot see into on its own: the gate has decided to park the statement but
+// has not published its uid yet. A cancel landing there must still be applied,
+// not forwarded upstream against a statement that never ran.
+func TestAttentionRacingTheHoldRegistration(t *testing.T) {
+	t.Parallel()
+
+	registry := approval.NewRegistry()
+	sess := &session{server: &Server{approvalDeps: shared.ApprovalDeps{Registry: registry}}}
+
+	sess.armHoldCancel()
+
+	require.True(t, sess.cancelHeldStatement(),
+		"a cancel arriving while the hold is being registered must be consumed, not forwarded")
+
+	// The gate now publishes the uid, and the cancel catches up with it.
+	uid := uuid.New()
+	decisions, release := registry.Register(uid)
+
+	defer release()
+
+	sess.setHeldQuery(uid)
+
+	select {
+	case d := <-decisions:
+		assert.Equal(t, store.ApprovalAbandoned, d.Status)
+		assert.Equal(t, attentionCancelReason, d.Reason)
+	default:
+		t.Fatal("the hold was never canceled")
+	}
+
+	assert.True(t, sess.takeAttentionAck(), "the client is owed a cancel acknowledgement")
+	assert.False(t, sess.takeAttentionAck(), "and only one")
+}
+
+// waitForPendingHold waits until a statement other than skip is parked, and
+// returns its uid.
+func waitForPendingHold(t *testing.T, fixture *authFixture, skip uuid.UUID) uuid.UUID {
+	t.Helper()
+
+	pendingUID := uuid.Nil
+
+	require.Eventually(t, func() bool {
+		queries, err := fixture.store.ListQueries(context.Background(), store.QueryFilter{Limit: 10})
+		if err != nil {
+			return false
+		}
+
+		for _, query := range queries {
+			if query.UID == skip || query.ApprovalStatus == nil {
+				continue
+			}
+
+			if *query.ApprovalStatus == store.ApprovalPending {
+				pendingUID = query.UID
+
+				return true
+			}
+		}
+
+		return false
+	}, 15*time.Second, 50*time.Millisecond)
+
+	return pendingUID
+}
+
 // TestRPCEnforcesEveryStatementCandidate is the hardening for a disagreement
 // dbbat must not be able to have with the server.
 //

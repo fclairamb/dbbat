@@ -292,6 +292,24 @@ The two directions are deliberately asymmetric:
   that cap and make the proxy buffer a whole result before the client sees its
   first row.
 
+The client leg is split once more: **reading it is a goroutine of its own**,
+separate from the pump that intercepts and forwards. `readClientMessages` lifts
+complete messages off the codec and hands them over a small bounded channel
+(`clientReadAhead`).
+
+That split is not decoration — it is what makes a cancel work during an approval
+hold. The forward pump is blocked on a human for the whole duration of a hold;
+the reader is not, so it sees the `ATTENTION` the driver sends when its context
+is cancelled and ends the hold there and then. It reads *decrypted* TDS, since
+it sits on the session codec rather than on the socket, so the cancel is honored
+on an encrypted client leg too. The channel is bounded because a parked session
+must not let a pipelining client make the proxy allocate without limit; a client
+that fills it simply stops being read.
+
+The same goroutine is why this proxy has no `shared.WatchedConn` underneath its
+client socket, unlike the other four: the socket is being read at all times, so
+a FIN is noticed the moment it lands.
+
 Each codec ends up with one reader and one writer in different goroutines, which
 is safe because its read and write paths share no mutable state.
 
@@ -326,7 +344,7 @@ statement split across a packet boundary cannot slip past.
 | `SQLBatch` (`0x01`) | statement decoded from UCS-2LE, logged, **enforced** |
 | `RPC` (`0x03`) | every request in the batch parsed; statement text extracted, logged, **enforced** |
 | `BulkLoadBCP` (`0x07`) | refused under `read_only` or `block_copy` |
-| `Attention` (`0x06`) | relayed untouched |
+| `Attention` (`0x06`) | relayed untouched — **unless** a statement is parked on an approval hold, which it then cancels |
 | `TransactionManager` (`0x0E`) | relayed untouched |
 | anything else | relayed untouched |
 
@@ -450,16 +468,37 @@ audit trail.
 ### Approval holds
 
 Holds go through the shared gate (`docs/approvals.md`). While a statement is
-parked the session goroutine is blocked, so the client conn is **parked**: a
-watcher keeps reading the socket, which is what makes "the client went away" an
-event rather than a silence. Bytes the client sends meanwhile are queued and
-replayed in order once the session resumes.
+parked the session goroutine is blocked, but the client leg keeps being read by
+`readClientMessages` (see "The relay"), which is what makes "the client went
+away" an event rather than a silence. Anything else the client sends meanwhile
+is forwarded in order once the session resumes.
 
-One consequence is worth stating: an `ATTENTION` (the TDS cancel) sent *during*
-a hold is queued like anything else, so it does not release the hold — it is
-delivered to the upstream immediately after the released statement, cancelling
-it there. A client that gives up and disconnects does end the hold, through the
-watcher. See `specs/todos/2026-08-07-mssql-attention-during-approval-hold.md`.
+**A cancel releases the hold.** An `ATTENTION` (`0x06`) arriving while a
+statement is parked is *not* forwarded upstream — the statement it cancels never
+got there, and a stray cancel would abort whatever ran next. Instead:
+
+- the hold is resolved through the approval registry as `abandoned`, with the
+  reason `canceled by the client (ATTENTION)`, exactly as a MySQL `KILL QUERY`
+  or a Mongo `killOperations` does. The pending row is settled, not left
+  haunting `/queries/pending`;
+- the client is answered with the acknowledgement TDS requires — a `DONE` token
+  carrying `DONE_ATTN`, no ERROR token in front of it. A driver that sent a
+  cancel reads the response stream until it sees that bit and treats a stream
+  that ends without one as an unusable connection, so this is what turns the
+  cancel into a clean `context.Canceled` rather than a dropped socket;
+- **the statement is cancelled, never released.** Nothing about this path can
+  put the held statement on the wire.
+
+SQL Server is the only protocol where the cancel arrives on the held session's
+*own* socket rather than on a second connection, which is why the reader had to
+move above TLS.
+
+One race is closed explicitly: a cancel can land in the window between the gate
+registering the hold and publishing its uid. `holdIfNeeded` arms the cancel path
+before asking for the hold, and the gate's `OnPending` callback applies a cancel
+recorded in that window the instant the uid exists. A cancel that loses to a
+human approver — the registry arbitrates — is forwarded upstream as it always
+was, so it still cancels the statement that is now genuinely running.
 
 ## Result accounting
 
@@ -522,7 +561,12 @@ Plainly, so nobody assumes more coverage than there is:
 - **Transaction Manager requests** (`0x0E`): `BEGIN` / `COMMIT` / `ROLLBACK`
   issued through the protocol rather than as SQL are relayed untouched and do
   not appear in the query history.
-- **An ATTENTION during an approval hold**, as described above.
+- **An ATTENTION the client sends faster than the read-ahead queue drains.**
+  The cancel path above needs the reader to actually reach the ATTENTION; a
+  client that has already filled `clientReadAhead` with pipelined messages
+  stops being read, and its cancel is only seen once the hold ends some other
+  way. TDS without MARS is strictly alternating, so this takes a client going
+  out of its way.
 
 ## What is deliberately unsupported in v1
 
@@ -609,8 +653,12 @@ as a hang rather than a diff:
   end-to-end through the proxy: the same write refused as a SQLBatch *and*
   through `sp_executesql`, the session surviving a refusal, a statement logged
   with its row count and captured rows, an upstream ERROR landing on the query
-  row, an approval hold parked and released mid-session, and a hold firing on a
-  statement run through a prepared handle.
+  row, an approval hold parked and released mid-session, a hold firing on a
+  statement run through a prepared handle, and the cancel path: an ATTENTION
+  releasing a parked statement (hold abandoned, nothing forwarded upstream,
+  DONE_ATTN to the client, connection still usable), a cancel that loses the
+  race to an approver traveling upstream instead, and a cancel landing before
+  the hold has published its uid.
 - `result_test.go` — the accountant against synthesized responses: rows and
   counts, NBCROW, every packet split point, an ERROR token, DONEPROC not being
   double-counted, the tail-DONE backstop, the RETURNVALUE handle, and the
@@ -640,7 +688,10 @@ more: a `read_only` grant refusing the same write on both statement paths (the
 driver sends a parameterless statement as a SQLBatch and a parameterised one as
 `sp_executesql`, so this really does exercise both), row counts and captured
 rows against a real result set, and an approval hold parked and then released
-mid-session. `make test` neither compiles nor runs it:
+mid-session. A fourth case cancels the driver's `context.Context` while the
+statement is parked and asserts the hold ends as `abandoned`, the row is still
+there (so the statement never ran) and the pooled connection survives.
+`make test` neither compiles nor runs it:
 
 ```bash
 make test-integration-mssql

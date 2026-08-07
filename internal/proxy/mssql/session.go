@@ -78,10 +78,22 @@ type session struct {
 	// safe for concurrent use, and its outbound packet id is shared state.
 	clientWriteMu sync.Mutex
 
-	// watched sits below TLS and below the byte counters so an approval hold
-	// can keep reading the client socket while the session is parked on a
-	// human, without ever having to decrypt what it reads.
-	watched *shared.WatchedConn
+	// clientMsgs carries complete client messages from the reader goroutine to
+	// the forward pump. clientGone is closed when the reader stops for any
+	// reason, which is what an approval hold waits on to notice a client that
+	// walked away; clientErr is why it stopped, reported by the pump once the
+	// queue is drained. done is closed by the relay's teardown so the reader
+	// never blocks forever handing a message to a pump that has died.
+	//
+	// This is the SQL Server proxy's substitute for shared.WatchedConn, which
+	// the other protocols park below TLS: here the reader sits *above* TLS, on
+	// the TDS codec, because a hold has to be released by an in-band ATTENTION
+	// and a byte-level watcher below TLS would only ever see records.
+	clientMsgs  chan clientMessage
+	clientGone  chan struct{}
+	done        chan struct{}
+	clientErrMu sync.Mutex
+	clientErr   error
 
 	// Wire-level byte counters for the client-facing socket. lastBytesSnapshot
 	// is what makes each query's bytes_transferred a delta rather than a total.
@@ -108,9 +120,15 @@ type session struct {
 	publisher    *shared.StreamPublisher
 
 	// heldQueryUID is the statement currently parked on a human, uuid.Nil
-	// otherwise.
-	heldMu       sync.Mutex
-	heldQueryUID uuid.UUID
+	// otherwise. holdArmed says a hold is being taken but its uid is not known
+	// yet — the window between the gate registering the hold and announcing its
+	// uid, which an ATTENTION can land in. attentionAckDue says a client
+	// ATTENTION was answered by the proxy rather than forwarded, so the
+	// statement it canceled owes the client a DONE_ATTN.
+	heldMu          sync.Mutex
+	heldQueryUID    uuid.UUID
+	holdArmed       bool
+	attentionAckDue bool
 
 	// pending is the statement whose response is currently being accounted
 	// for. TDS without MARS is strictly alternating, so one slot is enough;
@@ -137,10 +155,22 @@ type session struct {
 }
 
 // setHeldQuery records (or clears) the statement currently parked on a human.
+// It is the approval gate's OnPending callback, so it runs on the session
+// goroutine just before the gate blocks.
+//
+// It also closes a race the reader goroutine cannot close on its own: an
+// ATTENTION that arrives between the gate registering the hold and announcing
+// its uid finds no uid to cancel. The reader records that it saw one, and the
+// cancel is applied here, the instant the uid exists.
 func (s *session) setHeldQuery(uid uuid.UUID) {
 	s.heldMu.Lock()
 	s.heldQueryUID = uid
+	catchUp := uid != uuid.Nil && s.attentionAckDue
 	s.heldMu.Unlock()
+
+	if catchUp {
+		s.resolveHoldCanceled(uid)
+	}
 }
 
 // cumulativeClientBytes returns the running total of client-side bytes.
@@ -195,20 +225,21 @@ func (s *session) checkGrantQuotas() error {
 
 // newSession prepares a session over an accepted connection.
 //
-// The client socket is wrapped twice before anything else touches it, and the
-// order is load-bearing: WatchedConn sits at the bottom so an approval hold
-// parks on raw bytes it never has to decrypt, and CountingConn sits above it so
-// every byte of the client leg — TLS records included — is counted exactly once.
-// Both are below the TLS layer, which is installed later by switching the
-// revertible stream.
+// The client socket is wrapped in a CountingConn before anything else touches
+// it, and below the TLS layer that is installed later by switching the
+// revertible stream, so every byte of the client leg — TLS records included —
+// is counted exactly once.
+//
+// Unlike the other proxies there is no shared.WatchedConn underneath: this
+// protocol keeps the client leg read at all times by a goroutine of its own,
+// sitting on the TDS codec rather than on the socket. See readClientMessages.
 func newSession(conn net.Conn, server *Server) *session {
 	_ = shared.EnableClientKeepAlive(conn)
 
 	bytesFromClient := &atomic.Int64{}
 	bytesToClient := &atomic.Int64{}
 
-	watched := shared.NewWatchedConn(conn)
-	counted := shared.NewCountingConn(watched, bytesFromClient, bytesToClient)
+	counted := shared.NewCountingConn(conn, bytesFromClient, bytesToClient)
 
 	stream := newRevertibleConn(counted)
 	pkt := newPacketRW(stream)
@@ -220,7 +251,9 @@ func newSession(conn net.Conn, server *Server) *session {
 		logger:          server.logger,
 		stream:          stream,
 		pkt:             pkt,
-		watched:         watched,
+		clientMsgs:      make(chan clientMessage, clientReadAhead),
+		clientGone:      make(chan struct{}),
+		done:            make(chan struct{}),
 		bytesFromClient: bytesFromClient,
 		bytesToClient:   bytesToClient,
 		prepared:        make(map[int64]string),
