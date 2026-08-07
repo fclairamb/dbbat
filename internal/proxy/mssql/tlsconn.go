@@ -67,6 +67,35 @@ type handshakeConn struct {
 	// served to crypto/tls, and how much of it has been consumed.
 	inbound    []byte
 	inboundPos int
+
+	// rawPending holds the byte peeked off the socket when the peer turned out
+	// to have stopped encapsulating (see unframeOnRawRecord). It is the first
+	// byte of a raw TLS record and must be served before anything read from the
+	// socket afterwards.
+	rawPending []byte
+}
+
+// tlsRecordType reports whether b can only be the first byte of a raw TLS
+// record, and therefore cannot be a TDS packet header.
+//
+// This is what lets the adapter cope with a client that stops encapsulating
+// before dbbat does. TDS types and TLS content types do not overlap: during the
+// handshake the only legal packet type is PRELOGIN (0x12), while a TLS record
+// starts with change_cipher_spec (0x14), alert (0x15), handshake (0x16) or
+// application_data (0x17). One byte decides it, with no ambiguity to trade off.
+//
+// It matters for TLS 1.3. There the client's handshake ends on a *write*, so a
+// driver has to decide for itself whether that last CCS+Finished flight is
+// still inside a PRELOGIN packet — and drivers differ. go-mssqldb flushes its
+// pending packet after Handshake returns, so it stays framed; a driver that
+// switches to raw records first would otherwise desynchronise the stream here.
+func tlsRecordType(b byte) bool {
+	const (
+		recordChangeCipherSpec byte = 0x14
+		recordApplicationData  byte = 0x17
+	)
+
+	return b >= recordChangeCipherSpec && b <= recordApplicationData
 }
 
 // newHandshakeConn wraps a socket for the encapsulated handshake. The packetRW
@@ -117,7 +146,7 @@ func (c *handshakeConn) deactivate() error {
 // straight from the socket once not.
 func (c *handshakeConn) Read(b []byte) (int, error) {
 	if !c.isFramed() {
-		return c.raw.Read(b)
+		return c.readRaw(b)
 	}
 
 	// A flight ends where the next read begins.
@@ -128,6 +157,20 @@ func (c *handshakeConn) Read(b []byte) (int, error) {
 	}
 
 	for c.inboundPos >= len(c.inbound) {
+		first, err := c.pkt.peekType()
+		if err != nil {
+			return 0, err
+		}
+
+		if tlsRecordType(first) {
+			// The peer has already stopped encapsulating. Follow it rather
+			// than trying to parse a TLS record as a TDS header — the
+			// alternative is a desynchronised stream, and historically a hang.
+			c.unframeOnRawRecord()
+
+			return c.readRaw(b)
+		}
+
 		msgType, payload, err := c.pkt.ReadMessage()
 		if err != nil {
 			return 0, err
@@ -148,6 +191,42 @@ func (c *handshakeConn) Read(b []byte) (int, error) {
 	c.inboundPos += n
 
 	return n, nil
+}
+
+// unframeOnRawRecord switches to pass-through mid-handshake because the peer's
+// next flight arrived as a raw TLS record. The peeked byte is kept: it is the
+// record's content type and the next Read has to serve it first.
+//
+// The outbound side is already clean — Read finished any open packet before
+// peeking — so nothing is left half-written. deactivate() afterwards is a
+// no-op, which is exactly right.
+func (c *handshakeConn) unframeOnRawRecord() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if b, ok := c.pkt.takePeeked(); ok {
+		c.rawPending = append(c.rawPending, b)
+	}
+
+	c.framed = false
+}
+
+// readRaw reads straight from the socket, serving any bytes stashed by
+// unframeOnRawRecord first.
+func (c *handshakeConn) readRaw(b []byte) (int, error) {
+	c.mu.Lock()
+
+	if len(c.rawPending) > 0 {
+		n := copy(b, c.rawPending)
+		c.rawPending = c.rawPending[n:]
+		c.mu.Unlock()
+
+		return n, nil
+	}
+
+	c.mu.Unlock()
+
+	return c.raw.Read(b)
 }
 
 // Write buffers into a PRELOGIN-typed packet while framed, and writes straight

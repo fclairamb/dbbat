@@ -190,7 +190,7 @@ func (c *testClient) tlsHandshake(t *testing.T) *tls.Conn {
 	tlsConn := tls.Client(adapter, &tls.Config{
 		InsecureSkipVerify: true, // the proxy's auto-generated self-signed cert
 		MinVersion:         tls.VersionTLS12,
-		MaxVersion:         tlsMaxVersion,
+		MaxVersion:         defaultTLSMaxVersion,
 	})
 
 	require.NoError(t, tlsConn.Handshake())

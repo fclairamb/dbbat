@@ -248,11 +248,15 @@ func negotiateUpstreamEncryption(
 // policy: TDS un-wraps the handshake the moment it completes, and under TLS 1.3
 // the *client* finishes on a write, so the two peers can disagree about whether
 // that last flight is still encapsulated. That disagreement presents as a hang.
-// Every SQL Server speaks TLS 1.2 for this handshake, so both legs pin it — see
-// tlsMaxVersion and docs/mssql.md.
+//
+// The *upstream* leg stays pinned even when DBB_MSSQL_TLS_MAX_VERSION raises
+// the client leg to 1.3: here dbbat is the TLS client, so it is dbbat that
+// would have to guess what the far end expects of its final flight, against a
+// server it does not control. Every SQL Server speaks TLS 1.2 for this
+// handshake — see defaultTLSMaxVersion and docs/mssql.md.
 func upstreamTLSConfig(attempt upstream.Attempt) *tls.Config {
 	cfg := attempt.TLS.Clone()
-	cfg.MaxVersion = tlsMaxVersion
+	cfg.MaxVersion = defaultTLSMaxVersion
 
 	return cfg
 }

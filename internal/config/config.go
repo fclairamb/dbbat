@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -330,6 +331,54 @@ type MSSQLConfig struct {
 	// When Disable is true the proxy answers ENCRYPT_NOT_SUP and the listener
 	// stays plaintext, which also refuses clients that require encryption.
 	TLS TLSConfig `koanf:"tls"`
+
+	// TLSMaxVersion caps the client-leg handshake. Empty (the default) means
+	// TLS 1.2 — see MSSQLDefaultTLSMaxVersion for why that is not simply "the
+	// newest thing crypto/tls supports". "1.3" opts in.
+	//
+	// It lives here rather than on the shared TLSConfig because it is a TDS
+	// encapsulation concern: the other four proxies upgrade on a clean byte
+	// boundary and have nothing to decide.
+	TLSMaxVersion string `koanf:"tls_max_version"`
+}
+
+// SQL Server client-leg TLS version ceilings, as accepted in
+// DBB_MSSQL_TLS_MAX_VERSION.
+const (
+	// MSSQLTLSMaxVersion12 pins the encapsulated handshake to TLS 1.2.
+	MSSQLTLSMaxVersion12 = "1.2"
+	// MSSQLTLSMaxVersion13 allows TLS 1.3 on the client leg.
+	MSSQLTLSMaxVersion13 = "1.3"
+	// MSSQLDefaultTLSMaxVersion is what an unset variable means.
+	//
+	// It is 1.2 on purpose, and not for lack of ambition: under TLS 1.2 both
+	// peers end their handshake on a *read*, so the framed→raw switch that TDS
+	// encapsulation forces lands on the same byte for both. Under 1.3 the
+	// client ends on a *write* and drivers differ on whether that last flight
+	// is still encapsulated. dbbat handles both (see internal/proxy/mssql),
+	// but only go-mssqldb has been verified end to end, so an existing
+	// deployment must not change behaviour merely by upgrading.
+	MSSQLDefaultTLSMaxVersion = MSSQLTLSMaxVersion12
+)
+
+// ErrMSSQLTLSMaxVersionInvalid is returned when DBB_MSSQL_TLS_MAX_VERSION holds
+// something other than "1.2" or "1.3". It fails the process at startup rather
+// than silently falling back, because a deployment that asked for a TLS floor
+// and quietly got a different one is exactly the sort of thing nobody notices.
+var ErrMSSQLTLSMaxVersionInvalid = errors.New(
+	`invalid DBB_MSSQL_TLS_MAX_VERSION: want "1.2" or "1.3"`)
+
+// ResolveTLSMaxVersion validates TLSMaxVersion and returns the crypto/tls
+// constant it names. An empty value resolves to MSSQLDefaultTLSMaxVersion.
+func (c MSSQLConfig) ResolveTLSMaxVersion() (uint16, error) {
+	switch strings.TrimSpace(c.TLSMaxVersion) {
+	case "", MSSQLDefaultTLSMaxVersion:
+		return tls.VersionTLS12, nil
+	case MSSQLTLSMaxVersion13:
+		return tls.VersionTLS13, nil
+	default:
+		return 0, fmt.Errorf("%w: got %q", ErrMSSQLTLSMaxVersionInvalid, c.TLSMaxVersion)
+	}
 }
 
 // PGConfig holds configuration specific to the PostgreSQL proxy.
@@ -520,8 +569,11 @@ func defaultConfig() Config {
 		// 1434/tcp is free: the SQL Server Browser service that owns 1434 is
 		// UDP-only, so the +1 convention the other listeners use still works.
 		ListenMSSQL: ":1434",
-		BaseURL:     DefaultBaseURL,
-		LogLevel:    DefaultLogLevel,
+		MSSQL: MSSQLConfig{
+			TLSMaxVersion: MSSQLDefaultTLSMaxVersion,
+		},
+		BaseURL:  DefaultBaseURL,
+		LogLevel: DefaultLogLevel,
 		QueryStorage: QueryStorageConfig{
 			MaxResultRows:  DefaultMaxResultRows,
 			MaxResultBytes: DefaultMaxResultBytes,
@@ -626,6 +678,15 @@ func envTransform(k, v string) (string, any) {
 	if strings.HasPrefix(key, "mongo_tls_") {
 		return "mongo.tls." + strings.TrimPrefix(key, "mongo_tls_"), v
 	}
+	// mssql_tls_max_version -> mssql.tls_max_version
+	//
+	// This one is deliberately *not* under mssql.tls.*: the ceiling is a TDS
+	// encapsulation setting on MSSQLConfig, not one of the cert/key/disable
+	// knobs the five proxies share. It has to be tested before the mssql_tls_
+	// prefix rule below, which would otherwise swallow it.
+	if key == "mssql_tls_max_version" {
+		return "mssql.tls_max_version", v
+	}
 	// mssql_tls_* -> mssql.tls.*
 	if strings.HasPrefix(key, "mssql_tls_") {
 		return "mssql.tls." + strings.TrimPrefix(key, "mssql_tls_"), v
@@ -701,6 +762,12 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 
 	if cfg.Dump.UploadURL != "" && cfg.Dump.Dir == "" {
 		return nil, ErrDumpUploadNeedsDir
+	}
+
+	// Fail here rather than in the proxy: a typo'd TLS ceiling must stop the
+	// process, not silently leave the listener on the default.
+	if _, err := cfg.MSSQL.ResolveTLSMaxVersion(); err != nil {
+		return nil, err
 	}
 
 	// Load encryption key from Key or KeyFile

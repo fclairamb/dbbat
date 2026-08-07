@@ -212,6 +212,13 @@ type packetRW struct {
 	// one per packet.
 	hdrBuf [packetHeaderSize]byte
 
+	// peeked / peekedOK hold one byte read ahead of the next packet header by
+	// peekType and not yet consumed. It exists for exactly one caller — the
+	// encapsulated TLS handshake, which has to tell a TDS header from a raw TLS
+	// record before committing to parsing either.
+	peeked   byte
+	peekedOK bool
+
 	// lastReadStatus is the status byte of the first packet of the most
 	// recently read message. The relay reads it to carry RESETCONNECTION
 	// through; EOM and IGNORE are already handled by the framing.
@@ -270,14 +277,72 @@ func (p *packetRW) payloadCapacity() int {
 	return p.packetSize - packetHeaderSize
 }
 
-// readPacket reads exactly one packet: header, then its payload.
-func (p *packetRW) readPacket() (packetHeader, []byte, error) {
-	if _, err := io.ReadFull(p.rw, p.hdrBuf[:]); err != nil {
-		if errors.Is(err, io.EOF) {
-			return packetHeader{}, nil, io.EOF
+// readHeader fills hdrBuf with the next 8-byte header, consuming the peeked
+// byte first when there is one.
+func (p *packetRW) readHeader() error {
+	rest := p.hdrBuf[:]
+
+	if b, ok := p.takePeeked(); ok {
+		p.hdrBuf[0] = b
+		rest = p.hdrBuf[1:]
+	}
+
+	if _, err := io.ReadFull(p.rw, rest); err != nil {
+		// A clean EOF on the *first* byte means the peer closed between
+		// messages, which callers report as such. Once any byte of the header
+		// has landed, the same EOF is a truncation.
+		if errors.Is(err, io.EOF) && len(rest) == packetHeaderSize {
+			return io.EOF
 		}
 
-		return packetHeader{}, nil, fmt.Errorf("%w: %w", ErrShortHeader, err)
+		return fmt.Errorf("%w: %w", ErrShortHeader, err)
+	}
+
+	return nil
+}
+
+// peekType returns the first byte of the next packet without consuming it: the
+// byte stays buffered and readPacket picks it up as the head of the header.
+//
+// A peeked byte must be either consumed by readPacket or handed to takePeeked;
+// dropping it desynchronises the stream.
+func (p *packetRW) peekType() (byte, error) {
+	if p.peekedOK {
+		return p.peeked, nil
+	}
+
+	var one [1]byte
+	if _, err := io.ReadFull(p.rw, one[:]); err != nil {
+		if errors.Is(err, io.EOF) {
+			return 0, io.EOF
+		}
+
+		return 0, fmt.Errorf("%w: %w", ErrShortHeader, err)
+	}
+
+	p.peeked = one[0]
+	p.peekedOK = true
+
+	return p.peeked, nil
+}
+
+// takePeeked hands the peeked byte back to the caller and forgets it, for a
+// caller that has decided the stream is no longer TDS-framed and will read the
+// rest of it itself.
+func (p *packetRW) takePeeked() (byte, bool) {
+	if !p.peekedOK {
+		return 0, false
+	}
+
+	p.peekedOK = false
+
+	return p.peeked, true
+}
+
+// readPacket reads exactly one packet: header, then its payload.
+func (p *packetRW) readPacket() (packetHeader, []byte, error) {
+	if err := p.readHeader(); err != nil {
+		return packetHeader{}, nil, err
 	}
 
 	hdr, err := decodeHeader(p.hdrBuf[:])
