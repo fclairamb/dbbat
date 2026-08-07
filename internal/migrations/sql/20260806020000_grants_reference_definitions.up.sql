@@ -100,6 +100,26 @@ WHERE gr.resulting_grant_id = ag.uid
 --     silently stop the grant authorising anything.
 --   * ORDER BY created_at, uid makes the pick deterministic when several
 --     definitions share a shape.
+--
+-- Deliberately NOT part of the match: gd.database_uids. A legacy grant could
+-- therefore be pinned to a definition whose database scope excludes the
+-- grant's own database. This is behaviourally inert — auth never consults a
+-- definition's database scope (only the assign endpoint does, at issuance
+-- time), and the shape is identical by construction — but such a grant could
+-- not be re-issued through the assign endpoint today. Documented rather than
+-- fixed here (see specs/todos/2026-08-07-grant-definition-consistency-loose-ends.md
+-- item 4): a corrective migration is only worth it if a real deployment is
+-- affected, and as of writing this migration has not shipped in any tagged
+-- release (latest at the time is v0.22.0, this migration landed after it) and
+-- the query below returns zero rows against every database this was checked
+-- against:
+--   SELECT ag.uid FROM access_grants ag
+--   JOIN grant_definitions gd ON gd.uid = ag.grant_definition_id
+--   WHERE gd.database_uids IS NOT NULL AND array_length(gd.database_uids, 1) > 0
+--     AND NOT (ag.database_id = ANY(gd.database_uids));
+-- Re-run that query against any environment before/at the point this
+-- migration is actually deployed there; a non-empty result is the "real
+-- deployment is affected" trigger the loose-ends spec asks for.
 UPDATE access_grants AS ag
 SET grant_definition_id = (
     SELECT gd.uid
