@@ -241,6 +241,14 @@ func TestEncapsulatedTLSHandshake(t *testing.T) {
 				_ = serverRaw.Close()
 			})
 
+			// The failure mode this whole feature guards against is a peer that
+			// disagrees about where the framed→raw switch lands, which presents
+			// as a hang rather than an error. Without a deadline a regression
+			// here would stall until the package timeout instead of failing.
+			deadline := time.Now().Add(30 * time.Second)
+			require.NoError(t, clientRaw.SetDeadline(deadline))
+			require.NoError(t, serverRaw.SetDeadline(deadline))
+
 			type result struct {
 				conn *tls.Conn
 				err  error
