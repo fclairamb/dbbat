@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // TDS token types the proxy emits (MS-TDS 2.2.5.x). Stage 1 only ever needs to
@@ -62,6 +63,35 @@ var (
 	ErrAPIKeyOwnerMismatch = errors.New("mssql: API key does not belong to this user")
 	// ErrUpstreamConnect — dbbat could not open the upstream session.
 	ErrUpstreamConnect = errors.New("mssql: upstream connection failed")
+	// ErrQueryLimitExceeded — the grant's max_query_count quota is spent.
+	ErrQueryLimitExceeded = errors.New("dbbat: query count limit exceeded for this grant")
+	// ErrDataLimitExceeded — the grant's max_bytes_transferred quota is spent.
+	ErrDataLimitExceeded = errors.New("dbbat: data transfer limit exceeded for this grant")
+)
+
+// Statement-level refusals. Unlike the login-leg errors above these are
+// answered mid-session, as an ERROR + DONE token stream on the client leg.
+var (
+	// ErrBulkCopyBlocked — the grant blocks bulk copy, so a BULK INSERT (and
+	// the BulkLoadBCP message that carries its rows) is refused.
+	ErrBulkCopyBlocked = errors.New("dbbat: bulk copy is not permitted: your access grant blocks it")
+	// ErrOpaqueProcedureBlocked — an RPC names a stored procedure whose body
+	// dbbat cannot see, under a grant that restricts what a statement may do.
+	// dbbat cannot prove the procedure respects the restriction, so it fails
+	// closed. See docs/mssql.md.
+	ErrOpaqueProcedureBlocked = errors.New(
+		"dbbat: this grant restricts what statements may do, and dbbat cannot see " +
+			"what a stored procedure does: call it with an explicit statement instead")
+	// ErrUnknownPreparedStatement — an sp_execute named a prepared-statement
+	// handle dbbat never saw prepared on this session, so the statement it
+	// would run is unknown. Fails closed under a restrictive grant.
+	ErrUnknownPreparedStatement = errors.New(
+		"dbbat: this prepared statement was not prepared through this session, " +
+			"so dbbat cannot check it against your grant")
+	// ErrMalformedRequest — a SQLBatch or RPC message could not be parsed.
+	// Refused rather than relayed: an unparseable request is one dbbat cannot
+	// enforce a grant on.
+	ErrMalformedRequest = errors.New("dbbat: this request could not be parsed by the proxy")
 )
 
 // authFailedMessage is what a client is told when authentication fails, no
@@ -152,6 +182,36 @@ func buildLoginFailure(number int32, message string) []byte {
 	stream := buildErrorToken(number, 1, errSeverityUserError, message, "", 1)
 
 	return append(stream, buildDoneToken(doneError, 0)...)
+}
+
+// errSeverityStatementError is the class SQL Server puts on an error that
+// aborts the statement but leaves the connection usable — which is exactly what
+// a blocked query is.
+const errSeverityStatementError byte = 16
+
+// buildStatementRefusal renders a refused statement as the token stream a real
+// SQL Server error takes. The client raises it as an ordinary SQL error and
+// carries on with the next statement, rather than seeing its socket drop.
+func buildStatementRefusal(reason error) []byte {
+	stream := buildErrorToken(errNumberProxyMessage, 1, errSeverityStatementError,
+		statementMessageFor(reason), "", 1)
+
+	return append(stream, buildDoneToken(doneError, 0)...)
+}
+
+// statementMessageFor renders a statement refusal for the client.
+//
+// Unlike the login-leg messages, these are shown verbatim: every one of them is
+// dbbat's own text about dbbat's own decision — a grant control, a quota, an
+// approval outcome — and the whole point is that the person running the query
+// learns why it was refused. Nothing here comes from the upstream or the store.
+func statementMessageFor(reason error) string {
+	message := reason.Error()
+	if !strings.HasPrefix(message, "dbbat: ") {
+		message = "dbbat: " + message
+	}
+
+	return message
 }
 
 // clientMessageFor renders a refusal for the client: the SQL Server error

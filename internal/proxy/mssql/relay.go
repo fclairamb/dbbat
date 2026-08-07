@@ -15,8 +15,9 @@ import (
 // hook answered the client itself and nothing must reach the upstream (a
 // blocked statement); returning an error ends the session.
 //
-// Stage 2 never installs one. The signature is fixed now so the interception
-// work is a new file plus one assignment, not a rewrite of the pumps.
+// The nil-means-answered rule has one sharp edge: ATTENTION is a message with
+// no payload at all, so a hook must hand back a non-nil empty slice for it
+// rather than its own argument. See forwarded() in intercept.go.
 type clientMessageHook func(ctx context.Context, msgType byte, payload []byte) ([]byte, error)
 
 // serverPacketHook is the response-side seam. It sees each response packet as
@@ -126,7 +127,14 @@ func (s *session) pumpUpstreamToClient(ctx context.Context) error {
 			s.onServerPacket(ctx, hdr.Type, payload, eom)
 		}
 
-		if err := s.pkt.ForwardPacket(hdr.Type, hdr.Status, payload, start); err != nil {
+		// The client codec has two writers now: this pump, and the request pump
+		// when it answers a blocked statement itself. packetRW is not safe for
+		// concurrent use — its outbound packet id is shared state.
+		s.clientWriteMu.Lock()
+		err = s.pkt.ForwardPacket(hdr.Type, hdr.Status, payload, start)
+		s.clientWriteMu.Unlock()
+
+		if err != nil {
 			return err
 		}
 

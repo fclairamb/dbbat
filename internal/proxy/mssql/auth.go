@@ -3,8 +3,10 @@ package mssql
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -47,6 +49,29 @@ func (s *session) authenticate(ctx context.Context, login *Login7) error {
 	}
 
 	s.grant = grant
+
+	// A grant that is already over quota (or expired) must not open a session
+	// at all — the same check the per-statement path re-runs on every message.
+	return checkQuotas(grant)
+}
+
+// checkQuotas verifies the grant's expiry and its count / byte quotas.
+func checkQuotas(grant *store.Grant) error {
+	if grant == nil {
+		return nil
+	}
+
+	if !grant.ExpiresAt.IsZero() && !time.Now().Before(grant.ExpiresAt) {
+		return shared.ErrGrantExpired
+	}
+
+	if maxQueries := grant.MaxQueryCounts(); maxQueries != nil && grant.QueryCount >= *maxQueries {
+		return ErrQueryLimitExceeded
+	}
+
+	if maxBytes := grant.MaxBytesTransferred(); maxBytes != nil && grant.BytesTransferred >= *maxBytes {
+		return ErrDataLimitExceeded
+	}
 
 	return nil
 }

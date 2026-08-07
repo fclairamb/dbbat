@@ -375,9 +375,7 @@ func startProxies(
 		oracle:   startOracleProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
 		mysql:    startMySQLProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
 		mongo:    startMongoProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
-		// The SQL Server proxy takes no approval deps or row writer yet: those
-		// belong to stage 3, alongside query interception.
-		mssql: startMSSQLProxy(ctx, cfg, dataStore, authCache, logger),
+		mssql:    startMSSQLProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
 	}
 
 	set.postgres.SetDumpUploader(dumpUploader)
@@ -666,27 +664,27 @@ func startMongoProxy(
 
 // startMSSQLProxy starts the SQL Server (TDS) proxy when a listen address is
 // configured.
-//
-// It still takes fewer dependencies than its siblings: query interception,
-// per-statement grant enforcement, approval holds and result accounting are
-// stage 3 of the proxy, so there is no approval-deps or row-writer wiring here
-// yet.
 func startMSSQLProxy(
 	ctx context.Context,
 	cfg *config.Config,
 	dataStore *store.Store,
 	authCache *cache.AuthCache,
+	approvalDeps shared.ApprovalDeps,
+	rowWriter *shared.RowWriter,
 	logger *slog.Logger,
 ) *mssql.Server {
 	if cfg.ListenMSSQL == "" {
 		return nil
 	}
 
-	srv, err := mssql.NewServer(dataStore, cfg.EncryptionKey, cfg.Dump, authCache, cfg.MSSQL, logger)
+	srv, err := mssql.NewServer(dataStore, cfg.EncryptionKey, cfg.QueryStorage, cfg.Dump, authCache, cfg.MSSQL, logger)
 	if err != nil {
 		logger.ErrorContext(ctx, "SQL Server proxy init failed", slog.Any("error", err))
 		os.Exit(1)
 	}
+
+	srv.SetApprovalDeps(approvalDeps)
+	srv.SetRowWriter(rowWriter)
 
 	go func() {
 		if err := srv.Start(cfg.ListenMSSQL); err != nil {

@@ -26,7 +26,7 @@ func testLogger() *slog.Logger {
 func newTestServer(t *testing.T, cfg config.MSSQLConfig) *Server {
 	t.Helper()
 
-	srv, err := NewServer(nil, nil, config.DumpConfig{}, nil, cfg, testLogger())
+	srv, err := NewServer(nil, nil, config.QueryStorageConfig{}, config.DumpConfig{}, nil, cfg, testLogger())
 	require.NoError(t, err)
 
 	return srv
@@ -441,7 +441,7 @@ func TestServerStartAndShutdown(t *testing.T) {
 func TestNewServerRejectsAHalfConfiguredCertPair(t *testing.T) {
 	t.Parallel()
 
-	_, err := NewServer(nil, nil, config.DumpConfig{}, nil,
+	_, err := NewServer(nil, nil, config.QueryStorageConfig{}, config.DumpConfig{}, nil,
 		config.MSSQLConfig{TLS: config.TLSConfig{CertFile: "/nope/cert.pem"}}, testLogger())
 	require.ErrorIs(t, err, ErrTLSConfigInvalid)
 }

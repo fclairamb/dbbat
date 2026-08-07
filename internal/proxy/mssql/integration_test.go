@@ -89,7 +89,7 @@ func startUpstreamSQLServer(ctx context.Context, t *testing.T) string {
 func startProxy(t *testing.T, cfg config.MSSQLConfig) string {
 	t.Helper()
 
-	srv, err := NewServer(nil, nil, config.DumpConfig{}, nil, cfg, slog.New(slog.DiscardHandler))
+	srv, err := NewServer(nil, nil, config.QueryStorageConfig{}, config.DumpConfig{}, nil, cfg, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 
 	go func() {
@@ -241,7 +241,7 @@ func startProxyWithStore(
 ) string {
 	t.Helper()
 
-	srv, err := NewServer(dataStore, encryptionKey, config.DumpConfig{}, nil, cfg, slog.New(slog.DiscardHandler))
+	srv, err := NewServer(dataStore, encryptionKey, config.QueryStorageConfig{}, config.DumpConfig{}, nil, cfg, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 
 	go func() {

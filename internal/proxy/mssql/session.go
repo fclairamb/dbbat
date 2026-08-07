@@ -10,8 +10,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
+
+	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/proxy/upstream"
@@ -68,26 +72,116 @@ type session struct {
 	dumpWriter *dump.Writer
 	dumpMu     sync.Mutex
 
-	// onClientMessage / onServerPacket are the interception seams stage 3
-	// fills. Both nil here — see relay.go.
+	// clientWriteMu serializes writes on the client codec. Both relay pumps
+	// write there now: the upstream→client pump forwards responses, and the
+	// client→upstream pump answers a blocked statement itself. packetRW is not
+	// safe for concurrent use, and its outbound packet id is shared state.
+	clientWriteMu sync.Mutex
+
+	// watched sits below TLS and below the byte counters so an approval hold
+	// can keep reading the client socket while the session is parked on a
+	// human, without ever having to decrypt what it reads.
+	watched *shared.WatchedConn
+
+	// Wire-level byte counters for the client-facing socket. lastBytesSnapshot
+	// is what makes each query's bytes_transferred a delta rather than a total.
+	bytesFromClient   *atomic.Int64
+	bytesToClient     *atomic.Int64
+	lastBytesSnapshot int64
+
+	// guard enforces the grant's expiry / bandwidth / revocation mid-stream;
+	// revocation is signaled when the grant is revoked under a live session.
+	guard      *shared.LimitGuard
+	revocation *cache.RevocationHandle
+
+	// approvalGate implements pattern-triggered approval holds; publisher
+	// pushes this session's activity onto the live event stream. (The plain
+	// `stream` name is already taken by the TDS byte stream above.)
+	approvalGate *shared.ApprovalGate
+	publisher    *shared.StreamPublisher
+
+	// heldQueryUID is the statement currently parked on a human, uuid.Nil
+	// otherwise.
+	heldMu       sync.Mutex
+	heldQueryUID uuid.UUID
+
+	// pending is the statement whose response is currently being accounted
+	// for. TDS without MARS is strictly alternating, so one slot is enough;
+	// MARS is refused in PRELOGIN precisely because it would not be. The two
+	// relay pumps hand it over, hence the mutex.
+	pendingMu sync.Mutex
+	pending   *pendingQuery
+
+	// accountant walks the response token stream of the message currently
+	// arriving. Only the upstream→client pump ever touches it.
+	accountant *resultAccountant
+
+	// prepared maps a prepared-statement handle the upstream handed back onto
+	// the statement text that was validated when it was prepared, so an
+	// sp_execute is enforced on the SQL it actually runs. Written by the
+	// response accountant and read by the request hook, hence the mutex.
+	preparedMu sync.Mutex
+	prepared   map[int64]string
+
+	// onClientMessage / onServerPacket are the interception seams the relay
+	// pumps call — see relay.go, intercept.go and result.go.
 	onClientMessage clientMessageHook
 	onServerPacket  serverPacketHook
 }
 
+// setHeldQuery records (or clears) the statement currently parked on a human.
+func (s *session) setHeldQuery(uid uuid.UUID) {
+	s.heldMu.Lock()
+	s.heldQueryUID = uid
+	s.heldMu.Unlock()
+}
+
+// cumulativeClientBytes returns the running total of client-side bytes.
+func (s *session) cumulativeClientBytes() int64 {
+	var total int64
+
+	if s.bytesFromClient != nil {
+		total += s.bytesFromClient.Load()
+	}
+
+	if s.bytesToClient != nil {
+		total += s.bytesToClient.Load()
+	}
+
+	return total
+}
+
 // newSession prepares a session over an accepted connection.
+//
+// The client socket is wrapped twice before anything else touches it, and the
+// order is load-bearing: WatchedConn sits at the bottom so an approval hold
+// parks on raw bytes it never has to decrypt, and CountingConn sits above it so
+// every byte of the client leg — TLS records included — is counted exactly once.
+// Both are below the TLS layer, which is installed later by switching the
+// revertible stream.
 func newSession(conn net.Conn, server *Server) *session {
 	_ = shared.EnableClientKeepAlive(conn)
 
-	stream := newRevertibleConn(conn)
+	bytesFromClient := &atomic.Int64{}
+	bytesToClient := &atomic.Int64{}
+
+	watched := shared.NewWatchedConn(conn)
+	counted := shared.NewCountingConn(watched, bytesFromClient, bytesToClient)
+
+	stream := newRevertibleConn(counted)
 	pkt := newPacketRW(stream)
 	pkt.setSPID(server.nextSPID())
 
 	return &session{
-		server: server,
-		conn:   conn,
-		logger: server.logger,
-		stream: stream,
-		pkt:    pkt,
+		server:          server,
+		conn:            counted,
+		logger:          server.logger,
+		stream:          stream,
+		pkt:             pkt,
+		watched:         watched,
+		bytesFromClient: bytesFromClient,
+		bytesToClient:   bytesToClient,
+		prepared:        make(map[int64]string),
 	}
 }
 
@@ -153,6 +247,14 @@ func (s *session) Run(ctx context.Context) error {
 		return s.reject(ctx, login.UserName, err)
 	}
 
+	// Register the live session so an admin revoke can signal it, and arm the
+	// guard that enforces expiry / bandwidth / revocation mid-stream.
+	s.revocation = s.server.store.Revocations().Register(s.grant.UID)
+	s.guard = shared.NewLimitGuard(s.grant, s.bytesFromClient, s.bytesToClient).
+		WithRevocation(s.revocation.Flag())
+
+	defer s.deregisterRevocation()
+
 	if err := s.connectUpstream(ctx, login); err != nil {
 		// The upstream's own message is for the operator, not the client: it
 		// can name hosts and stored credentials. The client gets the class of
@@ -198,6 +300,23 @@ func (s *session) serve(ctx context.Context) error {
 		return err
 	}
 
+	// Watchdog: tears the session down the moment a time / bandwidth /
+	// revocation limit is crossed, without waiting for the next statement.
+	watchCtx, cancelWatch := context.WithCancel(ctx)
+	defer cancelWatch()
+
+	up := s.upstream
+	clientConn := s.conn
+
+	go s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
+		s.onLimitViolation(ctx, up, clientConn, err)
+	})
+
+	// Install the interception seams the relay pumps already call. Nothing
+	// about the pumps changes; this is where stage 3 plugs in.
+	s.onClientMessage = s.interceptClientMessage
+	s.onServerPacket = s.accountServerPacket
+
 	s.logger.InfoContext(ctx, "MSSQL session ready",
 		slog.String("user", s.user.Username),
 		slog.String("database", s.database.Name),
@@ -205,6 +324,29 @@ func (s *session) serve(ctx context.Context) error {
 		slog.Any("remote_addr", s.conn.RemoteAddr()))
 
 	return s.relay(ctx)
+}
+
+// onLimitViolation force-closes both legs when the watchdog trips.
+func (s *session) onLimitViolation(ctx context.Context, up *UpstreamConn, clientConn net.Conn, err error) {
+	s.logger.WarnContext(ctx, "terminating MSSQL session: grant no longer valid mid-stream",
+		slog.Any("error", err))
+
+	if up != nil {
+		_ = up.Close()
+	}
+
+	if clientConn != nil {
+		_ = clientConn.Close()
+	}
+}
+
+// deregisterRevocation drops this session's revocation handle.
+func (s *session) deregisterRevocation() {
+	if s.grant == nil || s.revocation == nil {
+		return
+	}
+
+	s.server.store.Revocations().Deregister(s.grant.UID, s.revocation)
 }
 
 // connectUpstream opens the upstream session with the stored credentials,
@@ -264,13 +406,34 @@ func (s *session) recordConnection(ctx context.Context) error {
 
 	s.connection = conn
 
+	//nolint:contextcheck // the gate holds no context of its own; each Hold gets the caller's
+	s.approvalGate = shared.NewApprovalGate(s.server.approvalDeps, s.grant, conn.UID, s.user, s.database.Name)
+	s.publisher = shared.NewStreamPublisher(s.server.approvalDeps, conn.UID, s.user, s.database.Name).
+		WithApprovals(s.approvalGate)
+	s.publisher.Connection(ctx, shared.ConnectionOpened)
+
 	return nil
 }
 
 // recordDisconnect closes the audit row.
 func (s *session) recordDisconnect(ctx context.Context) {
+	s.publisher.Connection(ctx, shared.ConnectionClosed)
+
 	if s.connection == nil {
 		return
+	}
+
+	// Flush any client-side bytes not yet attributed to a statement, so a
+	// session's connection total is honest even when it ends mid-response.
+	total := s.cumulativeClientBytes()
+	if delta := total - s.lastBytesSnapshot; delta > 0 {
+		s.lastBytesSnapshot = total
+
+		if err := s.server.store.IncrementConnectionBytes(ctx, s.connection.UID, delta); err != nil {
+			s.logger.DebugContext(ctx, "MSSQL trailing byte flush failed",
+				slog.Any("connection_id", s.connection.UID),
+				slog.Any("error", err))
+		}
 	}
 
 	if err := s.server.store.CloseConnection(ctx, s.connection.UID); err != nil {

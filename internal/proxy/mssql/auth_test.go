@@ -17,6 +17,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -74,14 +75,36 @@ func newTestStore(t *testing.T) *store.Store {
 func grantFullAccess(t *testing.T, dataStore *store.Store, userUID, databaseUID uuid.UUID) {
 	t.Helper()
 
+	grantAccess(t, dataStore, userUID, databaseUID, nil, nil)
+}
+
+// grantAccess is grantFullAccess with the definition's controls and approval
+// patterns spelled out, which is what stage 3's enforcement tests need.
+func grantAccess(
+	t *testing.T,
+	dataStore *store.Store,
+	userUID, databaseUID uuid.UUID,
+	controls, approvalPatterns []string,
+) {
+	t.Helper()
+
 	ctx := context.Background()
 
+	if controls == nil {
+		controls = []string{}
+	}
+
+	if approvalPatterns == nil {
+		approvalPatterns = []string{}
+	}
+
 	def, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
-		Name:            "mssql-test-" + databaseUID.String(),
-		Slug:            "mssql-test-" + databaseUID.String(),
-		DurationSeconds: int64((24 * time.Hour).Seconds()),
-		Controls:        []string{},
-		CreatedBy:       userUID,
+		Name:             "mssql-test-" + databaseUID.String(),
+		Slug:             "mssql-test-" + databaseUID.String(),
+		DurationSeconds:  int64((24 * time.Hour).Seconds()),
+		Controls:         controls,
+		ApprovalPatterns: approvalPatterns,
+		CreatedBy:        userUID,
 	})
 	require.NoError(t, err)
 
@@ -102,9 +125,24 @@ type authFixture struct {
 	store     *store.Store
 	fake      *fakeUpstream
 	authCache *cache.AuthCache
+	proxy     *Server
 	proxyAddr string
 	user      *store.User
 	database  *store.Server
+}
+
+// fixtureOptions varies what newAuthFixtureWith builds around the common chain.
+type fixtureOptions struct {
+	upstreamEncryption byte
+	sslMode            string
+	dumpDir            string
+	// controls / approvalPatterns shape the grant definition the user gets.
+	controls         []string
+	approvalPatterns []string
+	// queryStorage turns captured result rows on.
+	queryStorage config.QueryStorageConfig
+	// approvalDeps, when set, enables approval holds on the proxy.
+	approvalDeps *shared.ApprovalDeps
 }
 
 // newAuthFixture builds the whole chain: store, user, API key, a server row
@@ -112,12 +150,25 @@ type authFixture struct {
 func newAuthFixture(t *testing.T, upstreamEncryption byte, sslMode string) *authFixture {
 	t.Helper()
 
-	return newAuthFixtureWithDump(t, upstreamEncryption, sslMode, "")
+	return newAuthFixtureWith(t, fixtureOptions{upstreamEncryption: upstreamEncryption, sslMode: sslMode})
 }
 
 // newAuthFixtureWithDump is newAuthFixture with session captures enabled.
 func newAuthFixtureWithDump(t *testing.T, upstreamEncryption byte, sslMode, dumpDir string) *authFixture {
 	t.Helper()
+
+	return newAuthFixtureWith(t, fixtureOptions{
+		upstreamEncryption: upstreamEncryption,
+		sslMode:            sslMode,
+		dumpDir:            dumpDir,
+	})
+}
+
+// newAuthFixtureWith is the general form.
+func newAuthFixtureWith(t *testing.T, opts fixtureOptions) *authFixture {
+	t.Helper()
+
+	upstreamEncryption, sslMode, dumpDir := opts.upstreamEncryption, opts.sslMode, opts.dumpDir
 
 	ctx := context.Background()
 
@@ -152,7 +203,7 @@ func newAuthFixtureWithDump(t *testing.T, upstreamEncryption byte, sslMode, dump
 	}, encryptionKey)
 	require.NoError(t, err)
 
-	grantFullAccess(t, dataStore, user.UID, database.UID)
+	grantAccess(t, dataStore, user.UID, database.UID, opts.controls, opts.approvalPatterns)
 
 	dumpConfig := config.DumpConfig{}
 	if dumpDir != "" {
@@ -167,9 +218,13 @@ func newAuthFixtureWithDump(t *testing.T, upstreamEncryption byte, sslMode, dump
 	// verification path a real deployment takes is the cached one.
 	authCache := cache.NewAuthCache(cache.AuthCacheConfig{Enabled: true, TTLSeconds: 60, MaxSize: 16})
 
-	proxy, err := NewServer(dataStore, encryptionKey, dumpConfig, authCache,
+	proxy, err := NewServer(dataStore, encryptionKey, opts.queryStorage, dumpConfig, authCache,
 		config.MSSQLConfig{TLS: config.TLSConfig{Disable: true}}, testLogger())
 	require.NoError(t, err)
+
+	if opts.approvalDeps != nil {
+		proxy.SetApprovalDeps(*opts.approvalDeps)
+	}
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -193,6 +248,7 @@ func newAuthFixtureWithDump(t *testing.T, upstreamEncryption byte, sslMode, dump
 		store:     dataStore,
 		fake:      fake,
 		authCache: authCache,
+		proxy:     proxy,
 		proxyAddr: listener.Addr().String(),
 		user:      user,
 		database:  database,

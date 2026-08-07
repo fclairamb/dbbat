@@ -9,11 +9,24 @@ import (
 // TDS token types the proxy *reads* (MS-TDS 2.2.5.x). The two it writes —
 // ERROR and DONE — are declared in errors.go next to their builders.
 const (
+	tokenOffset        byte = 0x78
+	tokenReturnStatus  byte = 0x79
+	tokenColMetadata   byte = 0x81
+	tokenAltMetadata   byte = 0x88
+	tokenTabName       byte = 0xA4
+	tokenColInfo       byte = 0xA5
+	tokenOrder         byte = 0xA9
 	tokenInfo          byte = 0xAB
+	tokenReturnValue   byte = 0xAC
 	tokenLoginAck      byte = 0xAD
+	tokenFeatureExtAck byte = 0xAE
+	tokenRow           byte = 0xD1
+	tokenNBCRow        byte = 0xD2
+	tokenAltRow        byte = 0xD3
 	tokenEnvChange     byte = 0xE3
 	tokenSessionState  byte = 0xE4
-	tokenFeatureExtAck byte = 0xEE
+	tokenSSPI          byte = 0xED
+	tokenFedAuthInfo   byte = 0xEE
 	tokenDoneProc      byte = 0xFE
 	tokenDoneInProc    byte = 0xFF
 )
@@ -21,9 +34,48 @@ const (
 // featureExtAckTerminator ends the FEATUREEXTACK token's feature list.
 const featureExtAckTerminator byte = 0xFF
 
+// DONE token status bits (MS-TDS 2.2.7.5-7). DONE_COUNT is the one that says
+// the row count field means anything at all: without it the field is zero-filled
+// padding, and reading it as a count is how a proxy invents rows that never
+// existed.
+const (
+	doneMore  uint16 = 0x0001
+	doneCount uint16 = 0x0010
+	doneAttn  uint16 = 0x0020
+)
+
 // doneTokenBodyLen is the fixed body of a DONE/DONEPROC/DONEINPROC token on TDS
 // 7.2+: status (2), current command (2) and a 64-bit row count (8).
 const doneTokenBodyLen = 12
+
+// doneTokenLen is a whole DONE-family token, type byte included. The last token
+// of any TDS response message is one of these, which is what makes the tail
+// backstop in the result accountant work.
+const doneTokenLen = 1 + doneTokenBodyLen
+
+// doneToken is a decoded DONE / DONEPROC / DONEINPROC.
+type doneToken struct {
+	Status   uint16
+	RowCount int64
+	// HasCount reports whether DONE_COUNT was set, i.e. whether RowCount is a
+	// count at all.
+	HasCount bool
+}
+
+// parseDoneBody decodes a DONE-family token body.
+func parseDoneBody(body []byte) (doneToken, error) {
+	if len(body) < doneTokenBodyLen {
+		return doneToken{}, ErrTokenTruncated
+	}
+
+	status := binary.LittleEndian.Uint16(body[0:2])
+
+	return doneToken{
+		Status:   status,
+		RowCount: int64(binary.LittleEndian.Uint64(body[4:12])),
+		HasCount: status&doneCount != 0,
+	}, nil
+}
 
 // ErrTokenTruncated — a token's declared length runs past the end of the
 // stream. It means the message was mis-framed, not that the server said
@@ -211,6 +263,24 @@ func scanToken(token byte, payload []byte, pos int, outcome *loginOutcome) (int,
 
 	case tokenFeatureExtAck:
 		return scanFeatureExtAck(payload, pos)
+
+	case tokenFedAuthInfo:
+		// FEDAUTHINFO (0xEE) is the other DWORD-length token. dbbat declines
+		// federated authentication in PRELOGIN, so it should never arrive —
+		// but skipping it correctly costs nothing and stopping the walk on it
+		// would report a good login as refused.
+		if pos+4 > len(payload) {
+			return pos, true
+		}
+
+		length := int(binary.LittleEndian.Uint32(payload[pos : pos+4]))
+		pos += 4
+
+		if length < 0 || pos+length > len(payload) {
+			return pos, true
+		}
+
+		return pos + length, false
 
 	default:
 		// Not a token this walk models. Stop rather than guess.

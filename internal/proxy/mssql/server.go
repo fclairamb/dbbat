@@ -15,6 +15,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -25,10 +26,8 @@ import (
 // against dbbat's own users and API keys, opens the upstream with the stored
 // credentials, and relays the session.
 //
-// It still takes fewer dependencies than its siblings: query interception,
-// grant enforcement per statement, approval holds and result accounting are
-// stage 3, so there is no approval-gate, row-writer or query-storage
-// configuration here yet.
+// Every statement it relays goes through the same intercept / grant / approval
+// pipeline as the other four protocols, and every response is accounted for.
 type Server struct {
 	// tlsConfig supports client-facing TLS termination. Nil when TLS is
 	// explicitly disabled in config, in which case the proxy answers
@@ -38,7 +37,17 @@ type Server struct {
 	store         *store.Store
 	encryptionKey []byte
 	authCache     *cache.AuthCache
+	queryStorage  config.QueryStorageConfig
 	dumpConfig    config.DumpConfig
+
+	// approvalDeps carries the approval-hold collaborators. Zero value =
+	// holds disabled, which is the default.
+	approvalDeps shared.ApprovalDeps
+
+	// rowWriter batches captured result rows off the capture path. Defaults
+	// to a private one; SetRowWriter swaps in the process-wide writer so
+	// batching spans every protocol.
+	rowWriter *shared.RowWriter
 	// dumpUploader ships finished captures from the local spool to blob
 	// storage. nil — the default — keeps them on local disk only.
 	dumpUploader *dump.Uploader
@@ -65,6 +74,7 @@ type Server struct {
 func NewServer(
 	dataStore *store.Store,
 	encryptionKey []byte,
+	queryStorage config.QueryStorageConfig,
 	dumpConfig config.DumpConfig,
 	authCache *cache.AuthCache,
 	mssqlConfig config.MSSQLConfig,
@@ -77,17 +87,44 @@ func NewServer(
 
 	ctx, cancel := context.WithCancel(context.Background())
 
+	var rowWriter *shared.RowWriter
+	if dataStore != nil {
+		rowWriter = shared.NewRowWriter(dataStore, logger)
+	}
+
 	return &Server{
 		tlsConfig:     tlsConfig,
 		store:         dataStore,
 		encryptionKey: encryptionKey,
 		authCache:     authCache,
+		queryStorage:  queryStorage,
 		dumpConfig:    dumpConfig,
+		rowWriter:     rowWriter,
 		logger:        logger,
 		shutdown:      make(chan struct{}),
 		ctx:           ctx,
 		cancel:        cancel,
 	}, nil
+}
+
+// SetApprovalDeps installs the approval-hold collaborators. A server without
+// them never holds anything.
+func (s *Server) SetApprovalDeps(deps shared.ApprovalDeps) {
+	s.approvalDeps = deps
+}
+
+// SetRowWriter installs the process-wide result-row writer, replacing (and
+// shutting down) the private one NewServer created, so row batching spans every
+// protocol rather than one writer per proxy.
+func (s *Server) SetRowWriter(writer *shared.RowWriter) {
+	if writer == nil || writer == s.rowWriter {
+		return
+	}
+
+	previous := s.rowWriter
+	s.rowWriter = writer
+
+	previous.Close(s.ctx)
 }
 
 // SetDumpUploader installs the process-wide capture uploader, so this proxy's
