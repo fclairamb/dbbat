@@ -62,6 +62,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # GITLEAKS_LICENSE is only required for organization accounts.
+          # The action defaults to gitleaks 8.24.3, which does NOT apply a
+          # top-level [[allowlists]] block to rules inherited from
+          # `[extend] useDefault = true` — so every allowlist in
+          # .gitleaks.toml was silently ignored and the job failed on its own
+          # test fixtures. Fixed in a later gitleaks; 8.30.1 is verified
+          # against this repo's config. Pin it rather than collapsing the
+          # config into the single legacy [allowlist] table, which would cost
+          # us the per-entry rationale the config requires.
+          GITLEAKS_VERSION: 8.30.1
 
   # ===========================================================================
   # Frontend Job - Build React app with Bun
