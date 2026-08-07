@@ -65,3 +65,29 @@ note above — the owner has explicitly authorised it for this run. Procedure:
 **Should a GitHub issue be filed for this spec?**
 
 Decision: **no.** Do not run `gh issue create`. The spec file is the record.
+
+## Outcome (2026-08-07)
+
+Run against the production dbbat storage database (`aws/master`, namespace
+`tooling`, DSN read from the `dbbat` secret into a throwaway `postgres:16-alpine`
+pod so the credential was never handled directly).
+
+Inspection:
+
+- 12 350 rows in `queries` total; **38** matched the binary-error predicate
+  (~1 in 325, in line with the estimate above).
+- The 20 most recent were all unambiguous noise: control bytes (`01 02 03 07`,
+  `15`), `efbfbd` (U+FFFD) throughout, and one row decoding to
+  `2353L-Al-BOULOGNE BILL…` — literal column-compressed row data. The example
+  named above, `019fcf4e-6774-7293-9f3f-ac023d2a6f4f`, was present at 768 bytes.
+  No `ORA-` prefix on any of them.
+
+Applied: `UPDATE queries SET error = NULL WHERE error ~ '[^[:print:][:space:]]'`
+→ **`UPDATE 38`**, and a re-count returned **0** remaining.
+
+Note on the predicate: the equivalent form `error ~ '[^[:print:][:space:]]'`
+("contains at least one non-printable byte") was used instead of the
+`!~ '^[[:print:][:space:]]*$'` written above — the two were confirmed to select
+the same 38 rows, and the negated-anchor form kept getting mangled by shell
+escaping of `$` on the way into the pod. `rows_affected` was left untouched, as
+instructed.
