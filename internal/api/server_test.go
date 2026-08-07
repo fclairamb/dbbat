@@ -187,3 +187,68 @@ func TestGetCurrentUser(t *testing.T) {
 		}
 	})
 }
+
+// TestRedactQuery pins the access log's secret filter: a credential riding in
+// a query string (the OAuth exchange code, a device code, a bearer token
+// pasted as ?token=) must never reach the logs, while ordinary filtering
+// params stay readable.
+func TestRedactQuery(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "empty", raw: "", want: ""},
+		{
+			name: "ordinary params survive",
+			raw:  "limit=50&offset=100&status=active",
+			want: "limit=50&offset=100&status=active",
+		},
+		{
+			name: "oauth exchange code is redacted",
+			raw:  "code=1f3a9c&redirect=%2Fgrants",
+			want: "code=REDACTED&redirect=%2Fgrants",
+		},
+		{
+			name: "legacy token handoff is redacted",
+			raw:  "token=web_abcdef",
+			want: "token=REDACTED",
+		},
+		{
+			name: "csrf state and device code are redacted",
+			raw:  "state=abc&device_code=def&user_code=WDJP4KXR",
+			want: "state=REDACTED&device_code=REDACTED&user_code=REDACTED",
+		},
+		{
+			name: "matching is case-insensitive",
+			raw:  "Token=abc&ACCESS_TOKEN=def",
+			want: "Token=REDACTED&ACCESS_TOKEN=REDACTED",
+		},
+		{
+			name: "valueless flags are left alone",
+			raw:  "verbose&token=abc",
+			want: "verbose&token=REDACTED",
+		},
+		{
+			name: "percent-encoded sensitive name is still caught",
+			raw:  "%74oken=abc",
+			want: "%74oken=REDACTED",
+		},
+		{
+			name: "undecodable name is redacted rather than trusted",
+			raw:  "%zz=abc",
+			want: "%zz=REDACTED",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := redactQuery(tt.raw); got != tt.want {
+				t.Errorf("redactQuery(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}

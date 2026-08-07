@@ -47,6 +47,9 @@ const (
 	ErrCodeOAuthProviderError ErrorCode = "OAUTH_PROVIDER_ERROR"
 	// ErrCodeOAuthUserNotLinked indicates no account is linked to the OAuth identity.
 	ErrCodeOAuthUserNotLinked ErrorCode = "OAUTH_USER_NOT_LINKED"
+	// ErrCodeOAuthExchangeInvalid indicates the one-time login exchange code is
+	// unknown, already redeemed or expired.
+	ErrCodeOAuthExchangeInvalid ErrorCode = "OAUTH_EXCHANGE_INVALID"
 	// ErrCodeOAuthWrongWorkspace indicates the wrong OAuth workspace was used.
 	ErrCodeOAuthWrongWorkspace ErrorCode = "OAUTH_WRONG_WORKSPACE"
 	// ErrCodeDuplicateName indicates a resource with that name already exists.

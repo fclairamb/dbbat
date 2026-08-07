@@ -268,6 +268,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/oauth/exchange": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Redeem a one-time OAuth login code for a web session token
+         * @description The OAuth callback never puts a session token in a URL: it redirects
+         *     the browser to the login page with a short-lived, single-use `code`
+         *     instead. The SPA posts that code here and gets the actual `web_`
+         *     session token back in the response body.
+         *
+         *     Unauthenticated — the code itself is the capability — but the code is
+         *     consumed on first use, expires within minutes, and the endpoint is IP
+         *     rate limited.
+         */
+        post: operations["oauthExchange"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/device/consent": {
         parameters: {
             query?: never;
@@ -2549,6 +2576,16 @@ export interface components {
             /** @enum {string} */
             token_type: "Bearer";
         };
+        LoginExchangeRequest: {
+            /** @description The one-time code handed to the browser by the OAuth callback */
+            code: string;
+        };
+        LoginExchangeResponse: {
+            /** @description The web session token (web_...), delivered exactly once */
+            access_token: string;
+            /** @enum {string} */
+            token_type: "Bearer";
+        };
         OAuthError: {
             /** @description OAuth error code */
             error: string;
@@ -3085,6 +3122,8 @@ export type DeviceAuthorizationRequest = components['schemas']['DeviceAuthorizat
 export type DeviceAuthorizationResponse = components['schemas']['DeviceAuthorizationResponse'];
 export type DeviceTokenRequest = components['schemas']['DeviceTokenRequest'];
 export type DeviceTokenResponse = components['schemas']['DeviceTokenResponse'];
+export type LoginExchangeRequest = components['schemas']['LoginExchangeRequest'];
+export type LoginExchangeResponse = components['schemas']['LoginExchangeResponse'];
 export type OAuthError = components['schemas']['OAuthError'];
 export type DeviceConsentInfo = components['schemas']['DeviceConsentInfo'];
 export type DeviceConsentRequest = components['schemas']['DeviceConsentRequest'];
@@ -3440,6 +3479,42 @@ export interface operations {
                     "application/json": components["schemas"]["OAuthError"];
                 };
             };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    oauthExchange: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LoginExchangeRequest"];
+            };
+        };
+        responses: {
+            /** @description Code redeemed; web session token issued */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LoginExchangeResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            /** @description The code is unknown, already redeemed or expired */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
         };
     };

@@ -241,6 +241,19 @@ func (s *Server) setupRouter() *gin.Engine {
 			auth.GET("/"+name+"/callback", s.handleOAuthCallback(name))
 		}
 
+		// One-time code -> web session token exchange. The OAuth callback
+		// hands the browser a short-lived single-use code instead of the
+		// session token, so no session credential ever appears in a URL; the
+		// SPA redeems it here. Unauthenticated (the code is the credential),
+		// IP rate limited like the other pre-auth endpoints. Registered
+		// unconditionally so the route surface does not depend on which
+		// providers are configured.
+		if s.rateLimiter != nil {
+			auth.POST("/oauth/exchange", s.rateLimiter.PreAuthMiddleware(), s.handleOAuthExchange)
+		} else {
+			auth.POST("/oauth/exchange", s.handleOAuthExchange)
+		}
+
 		// OAuth 2.0 Device Authorization Grant (RFC 8628): lets external
 		// tools (CLI, desktop apps) obtain an API key through a browser
 		// approval instead of manual copy/paste. The authorization request
@@ -534,7 +547,7 @@ func (s *Server) loggingMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		path := c.Request.URL.Path
-		query := c.Request.URL.RawQuery
+		query := redactQuery(c.Request.URL.RawQuery)
 
 		c.Next()
 
@@ -550,6 +563,63 @@ func (s *Server) loggingMiddleware() gin.HandlerFunc {
 			slog.String("client_ip", c.ClientIP()),
 		)
 	}
+}
+
+// redactedValue replaces the value of a sensitive query parameter in the
+// access log. The parameter name is kept so the log still shows the shape of
+// the request.
+const redactedValue = "REDACTED"
+
+// sensitiveQueryParams are query parameter names whose values are credentials
+// or single-use capabilities, and so must never reach the access log. Matched
+// case-insensitively. Kept deliberately broad: a parameter wrongly listed here
+// only costs log detail, while a missing one costs a replayable secret.
+var sensitiveQueryParams = map[string]bool{
+	"access_token":  true,
+	"api_key":       true,
+	"apikey":        true,
+	"code":          true,
+	"device_code":   true,
+	"id_token":      true,
+	"key":           true,
+	"password":      true,
+	"refresh_token": true,
+	"secret":        true,
+	"session":       true,
+	"state":         true,
+	"token":         true,
+	"user_code":     true,
+}
+
+// redactQuery rewrites a raw query string with the values of every sensitive
+// parameter replaced. It works on the raw string rather than url.Values so an
+// unparseable query (which url.ParseQuery would partially drop) is redacted
+// wholesale rather than logged verbatim, and so parameter order is preserved.
+func redactQuery(raw string) string {
+	if raw == "" {
+		return ""
+	}
+
+	pairs := strings.Split(raw, "&")
+	for i, pair := range pairs {
+		name, _, hasValue := strings.Cut(pair, "=")
+		if !hasValue {
+			continue
+		}
+
+		decoded, err := url.QueryUnescape(name)
+		if err != nil {
+			// Undecodable parameter name: assume the worst.
+			pairs[i] = name + "=" + redactedValue
+			continue
+		}
+
+		if sensitiveQueryParams[strings.ToLower(decoded)] {
+			pairs[i] = name + "=" + redactedValue
+		}
+	}
+
+	return strings.Join(pairs, "&")
 }
 
 // successResponse sends a success response.

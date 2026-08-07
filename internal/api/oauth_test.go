@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -124,6 +125,9 @@ func TestOAuthLoginRedirectRoundTrip(t *testing.T) {
 	server, _ := setupTestServer(t)
 	suffix := uuid.NewString()[:8]
 
+	// The callback encrypts the web session token into the login exchange row.
+	server.encryptionKey = dbTestEncryptionKey
+
 	server.config = &config.Config{
 		SlackAuth: config.SlackAuthConfig{
 			AutoCreateUsers: true,
@@ -244,12 +248,20 @@ func TestOAuthLoginRedirectRoundTrip(t *testing.T) {
 			assert.NotContains(t, location, "evil.example",
 				"a hostile redirect target must never be echoed back")
 
+			// The callback hands back a one-time exchange code, never a
+			// session token: nothing in the Location may look like a `web_`
+			// credential.
+			assert.NotContains(t, location, store.WebKeyPrefix,
+				"the session token must never appear in the redirect URL")
+			assert.Empty(t, loc.Query().Get("token"),
+				"the legacy ?token= handoff must be gone")
+
 			if tt.wantError == "" {
-				assert.NotEmpty(t, loc.Query().Get("token"))
+				assert.NotEmpty(t, loc.Query().Get("code"))
 				assert.Empty(t, loc.Query().Get("error"))
 			} else {
 				assert.Equal(t, tt.wantError, loc.Query().Get("error"))
-				assert.Empty(t, loc.Query().Get("token"))
+				assert.Empty(t, loc.Query().Get("code"))
 			}
 			assert.Equal(t, tt.wantRedirect, loc.Query().Get("redirect"))
 		})
@@ -321,6 +333,104 @@ func TestOAuthCallbackErrorRedirects(t *testing.T) {
 	loc = get("/api/v1/auth/" + providerName + "/callback?error=access_denied")
 	assert.Equal(t, string(ErrCodeOAuthProviderError), loc.Query().Get("error"), "stateless provider error")
 	assert.Empty(t, loc.Query().Get("redirect"), "stateless provider error has nothing to forward")
+}
+
+// TestOAuthLoginExchange drives the full handoff the way a browser does: the
+// callback puts a one-time code in the URL, the SPA trades it for the session
+// token, and the token is a real, usable web session. It also pins the
+// single-use property — the replay that a leaked access log would enable must
+// fail.
+func TestOAuthLoginExchange(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	server.encryptionKey = dbTestEncryptionKey
+	suffix := uuid.NewString()[:8]
+
+	server.config = &config.Config{
+		SlackAuth: config.SlackAuthConfig{
+			AutoCreateUsers: true,
+			DefaultRole:     store.RoleConnector,
+		},
+	}
+
+	providerName := "slack-exchange-" + suffix
+	provider := &recordingProvider{
+		name: providerName,
+		user: &auth.OAuthUser{
+			ProviderID:  "UEXCHANGE-" + suffix,
+			Email:       "exchange-" + suffix + "@example.com",
+			DisplayName: "Exchange User " + suffix,
+		},
+	}
+	server.oauthProviders[providerName] = provider
+
+	router := gin.New()
+	router.GET("/api/v1/auth/"+providerName, server.handleOAuthAuthorize(providerName))
+	router.GET("/api/v1/auth/"+providerName+"/callback", server.handleOAuthCallback(providerName))
+	router.POST("/api/v1/auth/oauth/exchange", server.handleOAuthExchange)
+
+	exchange := func(code string) *httptest.ResponseRecorder {
+		body, err := json.Marshal(map[string]string{"code": code})
+		require.NoError(t, err)
+		req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/oauth/exchange", strings.NewReader(string(body)))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		router.ServeHTTP(w, req)
+		return w
+	}
+
+	// Walk the flow: authorize, then callback.
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/auth/"+providerName, nil))
+	require.Equal(t, http.StatusFound, w.Code)
+	require.NotEmpty(t, provider.lastState)
+
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet,
+		"/api/v1/auth/"+providerName+"/callback?code=x&state="+provider.lastState, nil))
+	require.Equal(t, http.StatusFound, w.Code)
+
+	loc, err := url.Parse(w.Header().Get("Location"))
+	require.NoError(t, err)
+	exchangeCode := loc.Query().Get("code")
+	require.NotEmpty(t, exchangeCode, "the callback must hand back an exchange code")
+	require.NotContains(t, exchangeCode, store.WebKeyPrefix,
+		"the exchange code must not be the session token in disguise")
+
+	// Redeeming it yields a real web session token.
+	w = exchange(exchangeCode)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var resp LoginExchangeResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "Bearer", resp.TokenType)
+	require.True(t, strings.HasPrefix(resp.AccessToken, store.WebKeyPrefix),
+		"the exchange must return a web session token, got %q", resp.AccessToken)
+
+	apiKey, err := dataStore.VerifyAPIKey(context.Background(), resp.AccessToken)
+	require.NoError(t, err, "the exchanged token must authenticate")
+	assert.True(t, apiKey.IsWebSession())
+
+	linked, err := dataStore.GetUserByIdentity(context.Background(), providerName, provider.user.ProviderID)
+	require.NoError(t, err)
+	assert.Equal(t, linked.UID, apiKey.UserID,
+		"the session must belong to the user who just signed in")
+
+	// Replay: the code is burned.
+	w = exchange(exchangeCode)
+	assert.Equal(t, http.StatusUnauthorized, w.Code, "an exchange code must be single-use")
+
+	// Unknown code: same answer, no existence leak.
+	w = exchange("deadbeef" + suffix)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+
+	// Missing code: a validation error, not a 500.
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/oauth/exchange", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 // TestBuildLoginRedirectSanitizes pins the chokepoint: even a hostile value

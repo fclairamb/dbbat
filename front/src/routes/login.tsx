@@ -58,6 +58,8 @@ function oauthErrorMessage(code: string): string {
       return "Failed to create your account. Contact an administrator.";
     case "slack_not_linked":
       return "No account is linked to your Slack identity. Contact an administrator.";
+    case "exchange_failed":
+      return "Your login link has expired or was already used. Please sign in again.";
     default:
       return "An error occurred during login. Please try again.";
   }
@@ -95,17 +97,44 @@ function LoginPage() {
     }
   }, [isAuthenticated, isLoading, navigate, redirectTarget]);
 
-  // Handle OAuth callback token — just store it and trigger a session refresh.
-  // The reactive effect above handles the navigation once isAuthenticated is committed.
+  // Handle the OAuth callback: it hands us a short-lived, single-use `code`,
+  // never the session token itself (a token in a URL leaks into access logs,
+  // proxy logs, browser history and Referer headers, and stays replayable).
+  // Trade the code for the real token, store it, and trigger a session
+  // refresh. The reactive effect above handles the navigation once
+  // isAuthenticated is committed.
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    const token = params.get("token");
-    if (token) {
-      // Remove token from URL immediately (security: don't leave in browser history)
-      window.history.replaceState({}, "", window.location.pathname);
-      storeToken(token);
-      refreshUser();
+    const code = params.get("code");
+    if (!code) {
+      return;
     }
+
+    // Drop the code from the URL immediately: it must not survive into
+    // browser history, and a reload must not attempt a second (doomed)
+    // redemption.
+    window.history.replaceState({}, "", window.location.pathname);
+
+    let cancelled = false;
+    void (async () => {
+      const { data, error: exchangeError } = await apiClient.POST(
+        "/auth/oauth/exchange",
+        { body: { code } },
+      );
+      if (cancelled) {
+        return;
+      }
+      if (exchangeError || !data?.access_token) {
+        setError(oauthErrorMessage("exchange_failed"));
+        return;
+      }
+      storeToken(data.access_token);
+      refreshUser();
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Handle OAuth error from callback
