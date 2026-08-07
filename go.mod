@@ -1,6 +1,6 @@
 module github.com/fclairamb/dbbat
 
-go 1.25.5
+go 1.25.7
 
 // Floor the toolchain at the Go release that fixes the standard-library
 // vulnerabilities govulncheck flags in 1.26.1 and earlier, so a local build
@@ -24,7 +24,7 @@ require (
 	github.com/knadh/koanf/providers/file v1.2.1
 	github.com/knadh/koanf/providers/structs v1.0.1
 	github.com/knadh/koanf/v2 v2.3.6
-	github.com/microsoft/go-mssqldb v1.9.3
+	github.com/microsoft/go-mssqldb v1.10.0
 	github.com/sijms/go-ora/v3 v3.0.1
 	github.com/slack-go/slack v0.27.0
 	github.com/stretchr/testify v1.11.1
