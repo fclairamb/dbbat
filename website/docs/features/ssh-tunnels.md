@@ -6,7 +6,7 @@ sidebar_position: 6
 
 Not every database is reachable from wherever DBBat runs. Production databases commonly sit in a private subnet with no route from outside the VPC, fronted by a bastion host.
 
-DBBat can dial any upstream **through an SSH bastion**, so those databases become proxyable without opening them to the network. Tunnelling is available for all four proxied protocols — PostgreSQL, Oracle, MySQL/MariaDB, and MongoDB.
+DBBat can dial any upstream **through an SSH bastion**, so those databases become proxyable without opening them to the network. Tunnelling is available for all five proxied protocols — PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, and Microsoft SQL Server.
 
 ```
 client ──► DBBat ──► SSH bastion ──► database in private subnet

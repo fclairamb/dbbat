@@ -261,7 +261,7 @@ TLS termination is built into the PostgreSQL, MySQL, MongoDB and SQL Server list
 
 ### SSH Bastions
 
-A server can set `via_uid` pointing at another server whose `protocol` is `ssh`. Its upstream connection is then dialled through that SSH bastion. This works for all four proxied protocols (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB).
+A server can set `via_uid` pointing at another server whose `protocol` is `ssh`. Its upstream connection is then dialled through that SSH bastion. This works for all five proxied protocols (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, SQL Server).
 
 #### Host-key trust model (TOFU)
 

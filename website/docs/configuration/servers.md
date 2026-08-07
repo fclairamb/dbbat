@@ -171,7 +171,7 @@ curl -X POST http://localhost:4200/api/v1/servers \
 
 `host` and `port` are then resolved *from the bastion*, not from DBBat's own network. To remove the tunnel later, `PUT` with `"clear_via_uid": true`.
 
-Tunnelling works for all four proxied protocols (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB).
+Tunnelling works for all five proxied protocols (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, SQL Server).
 
 ### Host-key pinning (TOFU)
 

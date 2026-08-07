@@ -58,9 +58,9 @@ const STILLS: Still[] = [
     src: "/img/showcase/add-server.png",
     webp: "/img/showcase/add-server.webp",
     alt: "The Add Server dialog configuring a PostgreSQL read replica",
-    title: "One proxy, four engines",
+    title: "One proxy, five engines",
     description:
-      "Point DBBat at PostgreSQL, Oracle, MySQL/MariaDB or MongoDB. Credentials are encrypted at rest; clients never see them.",
+      "Point DBBat at PostgreSQL, Oracle, MySQL/MariaDB, MongoDB or SQL Server. Credentials are encrypted at rest; clients never see them.",
   },
 ];
 

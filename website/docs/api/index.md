@@ -641,7 +641,7 @@ POST /api/v1/ssh-servers
 
 `ssh_private_key` and `ssh_passphrase` are write-only and never returned. The bastion's host key is pinned on first successful connection (trust on first use) and reported back as the read-only `ssh_known_host_key`.
 
-Tunnelled connections are pooled and shared across sessions, so many proxied clients reuse a single SSH connection per bastion. Tunnelling is supported for all four proxied protocols.
+Tunnelled connections are pooled and shared across sessions, so many proxied clients reuse a single SSH connection per bastion. Tunnelling is supported for all five proxied protocols.
 
 ---
 
