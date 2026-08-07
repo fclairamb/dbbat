@@ -398,7 +398,9 @@ func (s *session) armHoldCancel() {
 	s.heldMu.Unlock()
 }
 
-// disarmHoldCancel closes that window once the hold is over.
+// disarmHoldCancel closes that window once the hold is over. In the ordinary
+// case setHeldQuery has already closed it; this is the backstop for the paths
+// where the gate never published a uid at all, such as a failed pending insert.
 func (s *session) disarmHoldCancel() {
 	s.heldMu.Lock()
 	s.holdArmed = false

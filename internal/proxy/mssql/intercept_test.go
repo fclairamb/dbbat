@@ -694,6 +694,27 @@ func TestAttentionRacingTheHoldRegistration(t *testing.T) {
 	assert.False(t, sess.takeAttentionAck(), "and only one")
 }
 
+// TestAttentionAfterTheHoldEndsTravelsUpstream closes the sliver between the
+// gate clearing the held uid and holdIfNeeded disarming: a cancel landing there
+// must not be swallowed against a statement that was approved and is about to
+// run, or the client would wait forever for an acknowledgement nothing owes it.
+func TestAttentionAfterTheHoldEndsTravelsUpstream(t *testing.T) {
+	t.Parallel()
+
+	sess := &session{server: &Server{approvalDeps: shared.ApprovalDeps{Registry: approval.NewRegistry()}}}
+
+	sess.armHoldCancel()
+	sess.setHeldQuery(uuid.New())
+
+	// The gate resolves the hold and clears the uid, which is what ends the
+	// window — holdIfNeeded's own defer has not run yet.
+	sess.setHeldQuery(uuid.Nil)
+
+	assert.False(t, sess.cancelHeldStatement(),
+		"a cancel arriving after the hold ended must travel upstream")
+	assert.False(t, sess.takeAttentionAck())
+}
+
 // waitForPendingHold waits until a statement other than skip is parked, and
 // returns its uid.
 func waitForPendingHold(t *testing.T, fixture *authFixture, skip uuid.UUID) uuid.UUID {

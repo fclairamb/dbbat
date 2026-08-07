@@ -165,6 +165,17 @@ type session struct {
 func (s *session) setHeldQuery(uid uuid.UUID) {
 	s.heldMu.Lock()
 	s.heldQueryUID = uid
+
+	// Clearing the uid is the gate saying the hold is over, so the cancel
+	// window closes with it rather than a few instructions later when
+	// holdIfNeeded's own defer runs. Otherwise a cancel landing in that sliver
+	// — after an *approved* hold, with no uid left to check — would be swallowed
+	// against a statement that is about to run for real, and the client would
+	// wait forever for an acknowledgement nothing owes it.
+	if uid == uuid.Nil {
+		s.holdArmed = false
+	}
+
 	catchUp := uid != uuid.Nil && s.attentionAckDue
 	s.heldMu.Unlock()
 
