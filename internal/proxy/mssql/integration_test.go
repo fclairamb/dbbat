@@ -592,18 +592,46 @@ func TestProxyEnforcesReadOnlyOnBothStatementPaths(t *testing.T) {
 	assert.Equal(t, 5, after, "a blocked write must never reach the upstream")
 
 	// And both refusals are in the query history.
-	queries, err := dataStore.ListQueries(ctx, store.QueryFilter{Limit: 50})
-	require.NoError(t, err)
+	//
+	// The query row is inserted asynchronously (recordQuery hands off to a
+	// goroutine), so the refusal reaches the client before the audit row reaches
+	// the store. Reading the history the instant ExecContext returns therefore
+	// races the second insert and reliably sees only the first — which is a
+	// property of the test, not of the audit trail. Every other query-history
+	// assertion in this suite waits the same way.
+	var blocked []string
 
-	blocked := 0
+	require.Eventually(t, func() bool {
+		found, err := blockedStatements(ctx, dataStore)
+
+		return err == nil && len(found) == 2
+	}, 30*time.Second, 100*time.Millisecond, "both refusals must be logged")
+
+	blocked, err = blockedStatements(ctx, dataStore)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{
+		fmt.Sprintf("DELETE FROM %s", e2eTable),
+		fmt.Sprintf("DELETE FROM %s WHERE id = @p1", e2eTable),
+	}, blocked, "both refusals must be logged, each as the statement it refused")
+}
+
+// blockedStatements returns the statement text of every query the grant
+// refused, which is what the read-only enforcement test counts.
+func blockedStatements(ctx context.Context, dataStore *store.Store) ([]string, error) {
+	queries, err := dataStore.ListQueries(ctx, store.QueryFilter{Limit: 50})
+	if err != nil {
+		return nil, err
+	}
+
+	var blocked []string
 
 	for _, query := range queries {
 		if query.Error != nil && strings.Contains(*query.Error, "read-only") {
-			blocked++
+			blocked = append(blocked, query.SQLText)
 		}
 	}
 
-	assert.Equal(t, 2, blocked, "both refusals must be logged")
+	return blocked, nil
 }
 
 // TestProxyAccountsForResults covers the response side against a real server:
