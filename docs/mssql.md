@@ -542,8 +542,19 @@ One race is closed explicitly: a cancel can land in the window between the gate
 registering the hold and publishing its uid. `holdIfNeeded` arms the cancel path
 before asking for the hold, and the gate's `OnPending` callback applies a cancel
 recorded in that window the instant the uid exists. A cancel that loses to a
-human approver — the registry arbitrates — is forwarded upstream as it always
-was, so it still cancels the statement that is now genuinely running.
+human approver — the registry arbitrates, wherever the cancel came from — still
+reaches the upstream, so it cancels the statement that is now genuinely running.
+
+The arm window decides nothing on its own, which is the subtle part. A cancel
+consumed there is recorded as *undecided*: what the client is owed depends on
+the catch-up `Resolve`, exactly as it does on the ordinary path. Winning owes
+the client a `DONE_ATTN`; losing owes the **upstream** an ATTENTION, and since
+the reader already took that packet off the wire the forward pump re-emits it —
+behind the statement it lost to, never in front of it, or it would cancel
+nothing and let the statement run on unbothered. Marking the acknowledgement
+optimistically instead used to leave a session that kept running with a
+`DONE_ATTN` owed to nobody, which the next refused statement would take: the
+client saw "cancelled" where it should have seen the real error.
 
 ## Result accounting
 
