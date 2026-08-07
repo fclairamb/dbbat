@@ -30,28 +30,31 @@ DBBat addresses all these needs without requiring changes to your application co
 | MySQL | MySQL wire (`go-mysql-org/go-mysql`) | `:3307` | `caching_sha2_password` (default), `mysql_clear_password`. TLS terminated at the proxy. `mysql_native_password` not supported |
 | MariaDB | MySQL wire (same listener) | `:3307` | Same as MySQL — `STMT_BULK_EXECUTE` refused (clients need batch-rewriting off) |
 | MongoDB | MongoDB wire (`OP_MSG`, hand-rolled) | `:27018` | Clients authenticate with `SCRAM-SHA-256` or `PLAIN`-over-TLS; upstream via `SCRAM-SHA-256`. `authSource` carries the DBBat database name |
+| Microsoft SQL Server | TDS (hand-rolled) | `:1434` | SQL authentication only (LOGIN7), TLS terminated at the proxy. `SQLBatch` and `RPC` are both enforced. MARS and integrated/Entra ID auth are refused |
 
-Each engine has its own listener and is enabled independently via `DBB_LISTEN_PG` / `DBB_LISTEN_ORA` / `DBB_LISTEN_MYSQL` / `DBB_LISTEN_MONGO`. Setting the variable to an empty string disables that proxy.
+Each engine has its own listener and is enabled independently via `DBB_LISTEN_PG` / `DBB_LISTEN_ORA` / `DBB_LISTEN_MYSQL` / `DBB_LISTEN_MONGO` / `DBB_LISTEN_MSSQL`. Setting the variable to an empty string disables that proxy.
 
-**Any of the four can be reached through an SSH tunnel.** Register an SSH bastion as a server with `protocol: ssh`, then set the target server's `via_uid` to it — DBBat dials the upstream through the bastion. Bastion host keys are pinned trust-on-first-use.
+**Any of the five can be reached through an SSH tunnel.** Register an SSH bastion as a server with `protocol: ssh`, then set the target server's `via_uid` to it — DBBat dials the upstream through the bastion. Bastion host keys are pinned trust-on-first-use.
 
 For protocol-level details, see:
 - [Oracle proxy notes (TNS/TTC)](https://github.com/fclairamb/dbbat/blob/main/docs/oracle.md)
 - [MySQL proxy notes](https://github.com/fclairamb/dbbat/blob/main/docs/mysql.md)
 - [MongoDB proxy notes](https://github.com/fclairamb/dbbat/blob/main/docs/mongodb.md)
+- [SQL Server proxy notes (TDS)](https://github.com/fclairamb/dbbat/blob/main/docs/mssql.md)
 - [Session capture format](https://github.com/fclairamb/dbbat/blob/main/docs/dump-format.md)
 
 ## Core Features
 
 ### Transparent Multi-Protocol Proxy
 
-DBBat speaks each engine's native wire protocol. The same auth + grant + query-logging pipeline runs across all four.
+DBBat speaks each engine's native wire protocol. The same auth + grant + query-logging pipeline runs across all five.
 
 ```
 psql / pg client     ─►  DBBat (auth + grant check + log) ─► PostgreSQL upstream
 sqlplus / go-ora     ─►  DBBat (TNS service-name routing)  ─► Oracle upstream
 mysql / mariadb cli  ─►  DBBat (caching_sha2_password)     ─► MySQL / MariaDB upstream
 mongosh / driver     ─►  DBBat (SCRAM-SHA-256 / PLAIN-TLS) ─► MongoDB upstream
+sqlcmd / driver      ─►  DBBat (TDS PRELOGIN + LOGIN7)     ─► SQL Server upstream
 ```
 
 ### User Management
