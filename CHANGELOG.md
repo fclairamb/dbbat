@@ -5,71 +5,67 @@
 
 ### ⚠ BREAKING CHANGES
 
-* SQL Server as a fifth proxied protocol, and grants become instances of definitions ([#301](https://github.com/fclairamb/dbbat/issues/301))
-* `GET /api/v1/connections/{uid}/dump` now requires the admin role; viewer tokens receive 403.
+* **grants:** a grant no longer carries a shape of its own. Every grant is now an *instance* of a versioned grant definition, and `POST /api/v1/grants` assigns a definition to a user + database instead of accepting inline controls. Clients that built grants from `read_only` / `block_ddl` / `block_copy` / quota fields must now reference a definition. In the UI, "Create Grant" is replaced by "Assign Grant". ([#301](https://github.com/fclairamb/dbbat/issues/301))
+* **api:** `GET /api/v1/connections/{uid}/dump` now requires the admin role; viewer tokens receive 403. ([#300](https://github.com/fclairamb/dbbat/issues/300))
 
 ### Features
 
-* durable session captures, capture download in the UI, and an approvals stream security fix ([#300](https://github.com/fclairamb/dbbat/issues/300)) ([f83e511](https://github.com/fclairamb/dbbat/commit/f83e5117efbdd488443ee6aceac53a286a16f57e))
-* SQL Server as a fifth proxied protocol, and grants become instances of definitions ([#301](https://github.com/fclairamb/dbbat/issues/301)) ([85209da](https://github.com/fclairamb/dbbat/commit/85209da031e83b5cb0b4b5ef095236e12d279294))
-
+* **mssql:** Microsoft SQL Server is now a fully proxied protocol, the fifth after PostgreSQL, Oracle, MySQL/MariaDB and MongoDB. Hand-rolled TDS: packet framing, PRELOGIN negotiation, the TLS handshake encapsulated in TDS packets, LOGIN7 parsing and password descramble, client auth against dbbat, and relay to a real upstream. Statements are intercepted and logged, grants enforced (including inside RPC batches), result rows accounted against quotas, and approval holds honoured — including releasing a hold when the client sends an ATTENTION. Listens on `:1434` by default (`DBB_LISTEN_MSSQL`). ([#301](https://github.com/fclairamb/dbbat/issues/301)) ([85209da](https://github.com/fclairamb/dbbat/commit/85209da031e83b5cb0b4b5ef095236e12d279294))
+* **mssql:** the client leg can be raised to TLS 1.3 with `DBB_MSSQL_TLS_MAX_VERSION=1.3`. Off by default and verified against `go-mssqldb` only, because TDS un-wraps the handshake the moment it completes and drivers disagree on whether the client's last flight is still framed. ([#301](https://github.com/fclairamb/dbbat/issues/301))
+* **grants:** grants are instances of an immutably versioned grant definition. Editing a definition archives the current row and inserts a successor sharing its lineage, so a live grant's behaviour never changes under it. Deactivating a definition withdraws the whole lineage and fails closed at auth time. ([#301](https://github.com/fclairamb/dbbat/issues/301))
+* **grants:** an explicit `priority` column decides which grant wins when several are active for the same user and database. It is auto-derived from the selected controls (a stricter grant outranks a looser one) and can be pinned by hand from the API or the UI. ([#301](https://github.com/fclairamb/dbbat/issues/301))
+* **connections:** every connection is now stamped with the grant it authenticated under, surfaced through the API and shown in the UI, so quota attribution and approval resolution are traceable back to a specific grant. ([#301](https://github.com/fclairamb/dbbat/issues/301))
+* **dump:** session captures can live in blob storage. They still spool to local disk and upload on session close via `gocloud.dev/blob` (`s3://`, `gs://`, `azblob://`, `file://`), never streamed mid-session, with the object key recorded on the connection row so reads never need a bucket LIST. New `DBB_DUMP_UPLOAD_URL`; empty keeps the local-only behaviour exactly. A startup sweep uploads captures left finished-but-not-uploaded by a crash. ([#300](https://github.com/fclairamb/dbbat/issues/300)) ([f83e511](https://github.com/fclairamb/dbbat/commit/f83e5117efbdd488443ee6aceac53a286a16f57e))
+* **ui:** the raw session capture can be downloaded from the connection detail page. `GET /connections/{uid}` carries `dump: { available, size_bytes }`, resolved through a single locator that checks the local spool then blob storage. ([#300](https://github.com/fclairamb/dbbat/issues/300))
+* **ui:** upstream TLS is visible on the connections screen — quiet when encrypted, an amber badge when the leg fell back to plaintext, paired with the server's `ssl_mode` policy for admins. Oracle sessions, always plaintext because the proxy never upgrades that leg, are labelled not-applicable rather than flagged. ([#300](https://github.com/fclairamb/dbbat/issues/300))
+* **grant-definitions:** definitions carry sample queries, so a control pattern can be authored against realistic SQL. ([#301](https://github.com/fclairamb/dbbat/issues/301))
+* **auth:** the OAuth callback hands back a single-use code that the frontend exchanges for a session token, instead of putting the session token itself in the redirect. ([#301](https://github.com/fclairamb/dbbat/issues/301))
+* **ui:** the API-key creation dialog shows a ready-to-paste export snippet for the canonical client environment variables (`DBBAT_API_KEY`, `DBBAT_USER`, `DBBAT_URL`), now used consistently across the docs and website examples. ([#301](https://github.com/fclairamb/dbbat/issues/301))
+* **docs:** the website's marketing media is regenerated on demand from a live demo-mode instance (`make showcase`, plus a `workflow_dispatch` Action), stamped with a manifest recording the version and commit captured. The approval clip is a real held `UPDATE` released by a click in the UI, not a mockup. ([#300](https://github.com/fclairamb/dbbat/issues/300))
 
 ### Bug Fixes
 
-* **api:** keep the login redirect target through the Slack OAuth flow ([#298](https://github.com/fclairamb/dbbat/issues/298)) ([6dcc27c](https://github.com/fclairamb/dbbat/commit/6dcc27c36d8fc802dd93a3a500db584134bfdc7c))
+* **api:** the approvals stream leaked other grants' SQL. `approvals/pending` was authorized per *topic*, so anyone who could approve on a single grant received the SQL text, database and requesting user of **every** held query on the instance. Authorization is now per *event*, delegating to the same `mayViewQuery` the REST endpoint uses so the two cannot drift, with every uncertain branch failing closed. Reported by a security audit. ([#300](https://github.com/fclairamb/dbbat/issues/300))
+* **store:** `text[]` elements beginning with `(` were split on read, silently corrupting approval patterns — the most common way to write one. Existing corrupted patterns are detectable and repairable; see `docs/approvals.md`. ([#301](https://github.com/fclairamb/dbbat/issues/301))
+* **api:** access-log query redaction was a denylist, so any query shape nobody had thought of was logged verbatim. It is now an allowlist that defaults to redacting. ([#301](https://github.com/fclairamb/dbbat/issues/301))
+* **api:** `GET /users/:uid` returned more than the caller was entitled to see; it is now scoped to the caller's visibility. ([#301](https://github.com/fclairamb/dbbat/issues/301))
+* **api:** the login redirect target is kept through the Slack OAuth flow, so a device registration and an account registration in the same process no longer collide. Sanitized on both ends to same-app absolute paths, so it cannot become an open redirect. ([#298](https://github.com/fclairamb/dbbat/issues/298)) ([6dcc27c](https://github.com/fclairamb/dbbat/commit/6dcc27c36d8fc802dd93a3a500db584134bfdc7c))
+* **api:** every failure branch of the OAuth flow now forwards that same sanitized redirect target, so a retry from the login page still lands where the user started. ([#300](https://github.com/fclairamb/dbbat/issues/300))
+* **proxy:** the accept loop could deregister itself while `Shutdown` was waiting on it, racing `wg.Add` against `wg.Wait`. Covered by a race-stress job in CI. ([#301](https://github.com/fclairamb/dbbat/issues/301))
+* **proxy:** a statement released from an approval hold now carries the hold's outcome on its completion event, so the live watch feed no longer forgets an approval once the statement runs. ([#301](https://github.com/fclairamb/dbbat/issues/301))
+* **store:** `ListGrants(ActiveOnly)` and `GetActiveGrant` disagreed about what counts as an active definition state. ([#301](https://github.com/fclairamb/dbbat/issues/301))
+* **migrations:** the grants-to-definitions backfill could attach a grant to a definition that does not cover its database; the scope condition is fixed and a follow-up migration repairs rows already backfilled that way. ([#301](https://github.com/fclairamb/dbbat/issues/301))
+* **ui:** the TanStack Query cache survived login, logout and stale-token invalidation, so one identity could briefly see the previous session's rows. ([#301](https://github.com/fclairamb/dbbat/issues/301))
+* **ui:** a grant whose definition is missing now renders an explicit unknown state instead of blank. ([#301](https://github.com/fclairamb/dbbat/issues/301))
 * **deps:** update module github.com/microsoft/go-mssqldb to v1.10.0 ([#303](https://github.com/fclairamb/dbbat/issues/303)) ([f3ecbce](https://github.com/fclairamb/dbbat/commit/f3ecbcece963eca2ced261a42da752892b51b83e))
 * **deps:** update testcontainers-go monorepo to v0.44.0 ([#302](https://github.com/fclairamb/dbbat/issues/302)) ([a7145ef](https://github.com/fclairamb/dbbat/commit/a7145efb59a5e62d8400d665d664f680abb35e84))
 
-## [Unreleased]
-
-### ⚠ BREAKING CHANGES
-
-* **grants:** a grant no longer carries a shape of its own. Every grant is now an *instance* of a versioned grant definition, and `POST /api/v1/grants` assigns a definition to a user + database instead of accepting inline controls. Clients that built grants from `read_only` / `block_ddl` / `block_copy` / quota fields must now reference a definition. In the UI, "Create Grant" is replaced by "Assign Grant".
-
-### Features
-
-* **mssql:** Microsoft SQL Server is now a fully proxied protocol, the fifth after PostgreSQL, Oracle, MySQL/MariaDB and MongoDB. Hand-rolled TDS: packet framing, PRELOGIN negotiation, the TLS handshake encapsulated in TDS packets, LOGIN7 parsing and password descramble, client auth against dbbat, and relay to a real upstream. Statements are intercepted and logged, grants enforced (including inside RPC batches), result rows accounted against quotas, and approval holds honoured — including releasing a hold when the client sends an ATTENTION. Listens on `:1434` by default (`DBB_LISTEN_MSSQL`).
-* **mssql:** the client leg can be raised to TLS 1.3 with `DBB_MSSQL_TLS_MAX_VERSION=1.3`. Off by default and verified against `go-mssqldb` only, because TDS un-wraps the handshake the moment it completes and drivers disagree on whether the client's last flight is still framed.
-* **grants:** grants are instances of an immutably versioned grant definition. Editing a definition archives the current row and inserts a successor sharing its lineage, so a live grant's behaviour never changes under it. Deactivating a definition withdraws the whole lineage and fails closed at auth time.
-* **grants:** an explicit `priority` column decides which grant wins when several are active for the same user and database. It is auto-derived from the selected controls (a stricter grant outranks a looser one) and can be pinned by hand from the API or the UI.
-* **connections:** every connection is now stamped with the grant it authenticated under, surfaced through the API and shown in the UI, so quota attribution and approval resolution are traceable back to a specific grant.
-* **grant-definitions:** definitions carry sample queries, so a control pattern can be authored against realistic SQL.
-* **auth:** the OAuth callback hands back a single-use code that the frontend exchanges for a session token, instead of putting the session token itself in the redirect.
-* **ui:** the API-key creation dialog shows a ready-to-paste export snippet for the canonical client environment variables (`DBBAT_API_KEY`, `DBBAT_USER`, `DBBAT_URL`), now used consistently across the docs and website examples.
-
-### Bug Fixes
-
-* **store:** `text[]` elements beginning with `(` were split on read, silently corrupting approval patterns — the most common way to write one. Existing corrupted patterns are detectable and repairable; see `docs/approvals.md`.
-* **api:** access-log query redaction was a denylist, so any query shape nobody had thought of was logged verbatim. It is now an allowlist that defaults to redacting.
-* **api:** `GET /users/:uid` returned more than the caller was entitled to see; it is now scoped to the caller's visibility.
-* **proxy:** the accept loop could deregister itself while `Shutdown` was waiting on it, racing `wg.Add` against `wg.Wait`. Covered by a race-stress job in CI.
-* **proxy:** a statement released from an approval hold now carries the hold's outcome on its completion event, so the live watch feed no longer forgets an approval once the statement runs.
-* **store:** `ListGrants(ActiveOnly)` and `GetActiveGrant` disagreed about what counts as an active definition state.
-* **migrations:** the grants-to-definitions backfill could attach a grant to a definition that does not cover its database; the scope condition is fixed and a follow-up migration repairs rows already backfilled that way.
-* **ui:** the TanStack Query cache survived login, logout and stale-token invalidation, so one identity could briefly see the previous session's rows.
-* **ui:** a grant whose definition is missing now renders an explicit unknown state instead of blank.
-
 ### Performance Improvements
 
-* **website:** the homepage showcase ships as WebP with the clip held until it is scrolled into view, and the logos ship as renditions rather than 761px originals — removing ~1.4 MB of PNG from above the fold.
+* **website:** the homepage showcase ships as WebP with the clip held until it is scrolled into view, and the logos ship as renditions rather than 761px originals — removing ~1.4 MB of PNG from above the fold. ([#301](https://github.com/fclairamb/dbbat/issues/301))
 
 ### Upgrade notes
 
-**Five migrations**, all forward-only and reversible:
+**Six migrations**, all forward-only and reversible:
 
 | Migration | What it does |
 |---|---|
+| `20260805120000_connections_dump_key` | adds `connections.dump_key` for blob-stored captures |
 | `20260806000000_grants_priority` | adds `priority` to grants and grant definitions |
 | `20260806010000_connections_grant_uid` | adds `connections.grant_uid` |
 | `20260806020000_grants_reference_definitions` | links every grant to a grant definition, backfilling one per distinct existing grant shape |
 | `20260807000000_grant_definitions_sample_queries` | adds sample queries to definitions |
 | `20260807010000_grants_rescope_mismatched_definitions` | repairs grants the first backfill attached to an out-of-scope definition |
 
-**The grants API is the compatibility break in this release.** `POST /api/v1/grants` no longer accepts a grant's shape inline — it assigns an existing definition to a user and a database. Every control (`read_only`, `block_copy`, `block_ddl`), the duration, the quotas and the approval patterns now live on the definition and are read through it. The backfill means existing grants keep working unchanged: each distinct shape in your database becomes a generated definition. Any client or script that *creates* grants must be updated to reference a definition.
+**The grants API is the main compatibility break in this release.** `POST /api/v1/grants` no longer accepts a grant's shape inline — it assigns an existing definition to a user and a database. Every control (`read_only`, `block_copy`, `block_ddl`), the duration, the quotas and the approval patterns now live on the definition and are read through it. The backfill means existing grants keep working unchanged: each distinct shape in your database becomes a generated definition. Any client or script that *creates* grants must be updated to reference a definition.
+
+**Capture download is admin-only.** `GET /api/v1/connections/{uid}/dump` now requires the admin role and returns 403 to viewer tokens. A session capture is raw wire traffic, so it is not viewer-grade data.
 
 **The backfill's scope was verified against real data and did need the follow-up repair.** `20260806020000` could pair a grant with a definition that does not cover the grant's database; `20260807010000` re-scopes those rows. If you already ran the former in an earlier build, the latter is what fixes it — no manual intervention is required.
 
 **Approval patterns starting with `(` may already be corrupt.** The `text[]` read path split them on the leading paren, so a pattern like `(?i)DELETE` was stored intact but read back broken. Upgrading fixes the codec; it does not repair rows written before. `docs/approvals.md` explains how to detect and repair them.
+
+**If you approve queries, update promptly.** Before this release the pending-approvals stream was authorized per topic, so any user who could approve on one grant received the SQL text, database and requesting user of every held query on the instance. There is no configuration workaround — the fix is the upgrade.
 
 **SQL Server is new and its listener is on by default** at `:1434` (`DBB_LISTEN_MSSQL`, empty disables). 1434/tcp is free — the SQL Server Browser that owns 1434 is UDP-only. TLS is terminated with an auto-generated self-signed certificate unless you point `DBB_MSSQL_TLS_CERT_FILE` / `DBB_MSSQL_TLS_KEY_FILE` at your own.
 
