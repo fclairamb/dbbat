@@ -284,6 +284,26 @@ func (s *Store) GetGrantByUID(ctx context.Context, uid uuid.UUID) (*Grant, error
 	return grant, nil
 }
 
+// UserHasGrantForDefinition reports whether userID holds any grant (active,
+// expired, or revoked) issued from definitionID. Used to let a non-admin read
+// a grant definition by uid even when it is archived or otherwise out of
+// their normal scope: GET /grants already embeds that same definition
+// unfiltered (see attachDefinitions), so a direct GET of the definition a
+// caller's own grant points at must not be more restrictive than what the
+// grant response already shows them.
+func (s *Store) UserHasGrantForDefinition(ctx context.Context, userID, definitionID uuid.UUID) (bool, error) {
+	exists, err := s.db.NewSelect().
+		Model((*AccessGrant)(nil)).
+		Where("user_id = ?", userID).
+		Where("grant_definition_id = ?", definitionID).
+		Exists(ctx)
+	if err != nil {
+		return false, fmt.Errorf("failed to check grant ownership of definition: %w", err)
+	}
+
+	return exists, nil
+}
+
 // ListGrants retrieves grants with optional filters
 func (s *Store) ListGrants(ctx context.Context, filter GrantFilter) ([]Grant, error) {
 	var grants []AccessGrant

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -329,6 +330,82 @@ func TestUpdateGrantDefinition_ExplicitEmptyArrayClears(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	require.Empty(t, resp["approval_patterns"], "an explicit empty array must clear approval_patterns")
 	require.EqualValues(t, priority, resp["priority"], "a field absent from the PATCH body must survive untouched")
+}
+
+// TestGetGrantDefinition_ArchivedVersion pins down item 3 of
+// specs/todos/2026-08-07-grant-definition-consistency-loose-ends.md:
+// handleGetGrantDefinition must hide an archived version from a non-admin —
+// matching the archived_at IS NULL filter every listing already applies —
+// except when that non-admin holds a grant issued from that exact version,
+// since GET /grants already renders the same definition to them unfiltered.
+func TestGetGrantDefinition_ArchivedVersion(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	ctx := context.Background()
+	suffix := "archget"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
+	owner := createTestUser(t, dataStore, "owner-"+suffix, "ownerpass123", []string{store.RoleConnector})
+	ownerToken := loginUser(t, server, "owner-"+suffix, "ownerpass123")
+	createTestUser(t, dataStore, "stranger-"+suffix, "strangerpass123", []string{store.RoleConnector})
+	strangerToken := loginUser(t, server, "stranger-"+suffix, "strangerpass123")
+
+	database, err := dataStore.CreateServer(ctx, &store.Server{
+		Name:         "archget-db-" + suffix,
+		Host:         "127.0.0.1",
+		Port:         5432,
+		DatabaseName: "prod",
+		Username:     "pg",
+		Password:     "secret",
+		Protocol:     store.ProtocolPostgreSQL,
+		SSLMode:      "disable",
+	}, grantsTestKey)
+	require.NoError(t, err)
+
+	def := newTestDefinition(t, dataStore, admin.UID, store.GrantDefinition{})
+
+	// Materialize a grant pinned to this exact version before archiving it.
+	grant := store.BuildGrantFromDefinition(def, owner.UID, database.UID, admin.UID, time.Now())
+	_, err = dataStore.CreateGrant(ctx, grant)
+	require.NoError(t, err)
+
+	// Edit the definition: archives def's row (uid unchanged), inserts a live
+	// successor.
+	def.Description = "edited for " + suffix
+	_, err = dataStore.UpdateGrantDefinition(ctx, def)
+	require.NoError(t, err)
+
+	archived, err := dataStore.GetGrantDefinition(ctx, def.UID)
+	require.NoError(t, err)
+	require.NotNil(t, archived.ArchivedAt, "fixture: definition must be archived")
+
+	router := grantDefinitionsRouter(server)
+	path := "/api/v1/grant-definitions/" + def.UID.String()
+
+	t.Run("admin reads the archived version", func(t *testing.T) {
+		t.Parallel()
+
+		w, resp := doJSON(t, router, http.MethodGet, path, adminToken, nil)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		require.Equal(t, def.UID.String(), resp["uid"])
+	})
+
+	t.Run("a non-admin holding a grant pinned to it can still read it", func(t *testing.T) {
+		t.Parallel()
+
+		w, resp := doJSON(t, router, http.MethodGet, path, ownerToken, nil)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		require.Equal(t, def.UID.String(), resp["uid"])
+	})
+
+	t.Run("a non-admin with no grant on it gets 404", func(t *testing.T) {
+		t.Parallel()
+
+		w, _ := doJSON(t, router, http.MethodGet, path, strangerToken, nil)
+		require.Equal(t, http.StatusNotFound, w.Code)
+	})
 }
 
 // TestDeactivateGrantDefinition_ReportsAndForbidsDeletion covers the two

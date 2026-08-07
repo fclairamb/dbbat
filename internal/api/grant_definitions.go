@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 
@@ -429,7 +430,9 @@ func (s *Server) handleListGrantDefinitions(c *gin.Context) {
 // handleGetGrantDefinition — any authenticated user. The path param accepts
 // either the definition's uid or its slug.
 func (s *Server) handleGetGrantDefinition(c *gin.Context) {
-	def, err := s.resolveGrantDefinition(c.Request.Context(), c.Param("uid"))
+	ctx := c.Request.Context()
+
+	def, err := s.resolveGrantDefinition(ctx, c.Param("uid"))
 	if err != nil {
 		if errors.Is(err, store.ErrGrantDefinitionNotFound) {
 			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
@@ -445,25 +448,14 @@ func (s *Server) handleGetGrantDefinition(c *gin.Context) {
 	currentUser := getCurrentUser(c)
 
 	if !currentUser.IsAdmin() {
-		if !def.IsActive {
-			// Hide deactivated definitions from non-admins entirely; the
-			// listing endpoint already filters them, so a direct GET should
-			// match.
-			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
-
-			return
-		}
-
-		groupUIDs, err := s.store.ListUserGroupUIDs(c.Request.Context(), currentUser.UID)
+		visible, err := s.nonAdminMayViewGrantDefinition(ctx, currentUser, def)
 		if err != nil {
-			writeInternalError(c, s.logger, err, "failed to list user groups")
+			writeInternalError(c, s.logger, err, "failed to check grant definition visibility")
 
 			return
 		}
 
-		// Out-of-scope definitions are invisible in the listing; a direct GET
-		// must not be a way around that.
-		if !def.AppliesToGroups(groupUIDs) {
+		if !visible {
 			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
 
 			return
@@ -471,6 +463,44 @@ func (s *Server) handleGetGrantDefinition(c *gin.Context) {
 	}
 
 	successResponse(c, def)
+}
+
+// nonAdminMayViewGrantDefinition decides whether a non-admin caller may read
+// def directly by uid.
+//
+// A caller who holds a grant issued from this exact version always may:
+// GET /grants already embeds the same definition unfiltered
+// (store.attachDefinitions), whatever def's is_active or archived_at state,
+// so a direct GET by uid must not be more restrictive than what that grant
+// response already shows. This is what keeps an archived version's shape
+// renderable for the grant pinned to it.
+//
+// Otherwise def must be the live, active, in-scope row for its lineage —
+// exactly what the listing endpoint shows — since a direct GET by uid must
+// not be a way to browse past that: not to an archived version, not to a
+// deactivated one, not to one outside the caller's group scope.
+func (s *Server) nonAdminMayViewGrantDefinition(
+	ctx context.Context, currentUser *store.User, def *store.GrantDefinition,
+) (bool, error) {
+	owns, err := s.store.UserHasGrantForDefinition(ctx, currentUser.UID, def.UID)
+	if err != nil {
+		return false, fmt.Errorf("check grant ownership: %w", err)
+	}
+
+	if owns {
+		return true, nil
+	}
+
+	if def.ArchivedAt != nil || !def.IsActive {
+		return false, nil
+	}
+
+	groupUIDs, err := s.store.ListUserGroupUIDs(ctx, currentUser.UID)
+	if err != nil {
+		return false, fmt.Errorf("list user groups: %w", err)
+	}
+
+	return def.AppliesToGroups(groupUIDs), nil
 }
 
 // handleUpdateGrantDefinition — admin-only. The path param accepts either
