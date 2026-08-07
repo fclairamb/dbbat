@@ -173,3 +173,72 @@ func TestCreateGrantRequest_AutoApproveRequiresJustification(t *testing.T) {
 
 	require.Equal(t, http.StatusBadRequest, w.Code, "response body: %s", w.Body.String())
 }
+
+// TestListGrantRequests_EmbedsLiveDefinition pins the wire contract the
+// grant-requests UI depends on: a request carries the **live** version of its
+// definition, not the archived version its grant_definition_id points at once
+// the definition has been edited.
+//
+// Without it, the UI is left resolving that uid against the definitions
+// listing — which only ever returns live rows — and comes up empty, losing the
+// definition's name and auto-approve state from the row.
+func TestListGrantRequests_EmbedsLiveDefinition(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	ctx := context.Background()
+	suffix := "lgrld"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	db := createTestDBEntry(t, dataStore, "live-db-"+suffix, true)
+	def := createTestGrantDefinition(t, dataStore, *admin, "live-def-"+suffix, false)
+
+	_, err := dataStore.CreateGrantRequest(ctx, &store.GrantRequest{
+		UserID:            admin.UID,
+		GrantDefinitionID: def.UID,
+		DatabaseID:        db.UID,
+	})
+	require.NoError(t, err)
+
+	// Enable auto-approve: archives def, inserts a successor.
+	edited := *def
+	edited.AutoApprove = true
+
+	next, err := dataStore.UpdateGrantDefinition(ctx, &edited)
+	require.NoError(t, err)
+	require.NotEqual(t, def.UID, next.UID, "the edit should have been versioned")
+
+	router := gin.New()
+	router.Use(server.authMiddleware())
+	router.GET("/api/v1/grant-requests", server.handleListGrantRequests)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/grant-requests", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken)
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "response body: %s", w.Body.String())
+
+	var resp struct {
+		GrantRequests []struct {
+			GrantDefinitionID string `json:"grant_definition_id"`
+			Definition        *struct {
+				UID         string `json:"uid"`
+				Name        string `json:"name"`
+				AutoApprove bool   `json:"auto_approve"`
+			} `json:"definition"`
+		} `json:"grant_requests"`
+	}
+
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.GrantRequests, 1)
+
+	got := resp.GrantRequests[0]
+	require.Equal(t, def.UID.String(), got.GrantDefinitionID, "the pinned version should be unchanged")
+	require.NotNil(t, got.Definition, "the request should embed its definition")
+	require.Equal(t, next.UID.String(), got.Definition.UID, "should embed the live version")
+	require.Equal(t, next.Name, got.Definition.Name)
+	require.True(t, got.Definition.AutoApprove, "the live version's auto_approve should be visible")
+}
