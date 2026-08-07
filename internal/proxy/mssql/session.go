@@ -85,6 +85,13 @@ type session struct {
 
 	// Wire-level byte counters for the client-facing socket. lastBytesSnapshot
 	// is what makes each query's bytes_transferred a delta rather than a total.
+	//
+	// statsMu guards lastBytesSnapshot and the in-session grant counters. TDS
+	// without MARS is strictly alternating, so the request pump (which records a
+	// blocked statement) and the response pump (which records a completed one)
+	// never really overlap — but nothing in the code *establishes* that, and an
+	// unsynchronized counter is a race whether or not it is ever observed.
+	statsMu           sync.Mutex
 	bytesFromClient   *atomic.Int64
 	bytesToClient     *atomic.Int64
 	lastBytesSnapshot int64
@@ -149,6 +156,41 @@ func (s *session) cumulativeClientBytes() int64 {
 	}
 
 	return total
+}
+
+// takeByteDelta returns the client-side bytes seen since the last call, and
+// resets the mark.
+func (s *session) takeByteDelta() int64 {
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+
+	total := s.cumulativeClientBytes()
+	delta := total - s.lastBytesSnapshot
+	s.lastBytesSnapshot = total
+
+	return delta
+}
+
+// chargeGrant advances the in-session quota counters, so the next quota check
+// reflects the statement just accounted for rather than what the grant looked
+// like at login.
+func (s *session) chargeGrant(bytesTransferred int64) {
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+
+	if s.grant != nil {
+		s.grant.QueryCount++
+		s.grant.BytesTransferred += bytesTransferred
+	}
+}
+
+// checkGrantQuotas re-evaluates the grant's expiry and quotas under the lock
+// that guards the counters chargeGrant advances.
+func (s *session) checkGrantQuotas() error {
+	s.statsMu.Lock()
+	defer s.statsMu.Unlock()
+
+	return checkQuotas(s.grant)
 }
 
 // newSession prepares a session over an accepted connection.
@@ -425,10 +467,7 @@ func (s *session) recordDisconnect(ctx context.Context) {
 
 	// Flush any client-side bytes not yet attributed to a statement, so a
 	// session's connection total is honest even when it ends mid-response.
-	total := s.cumulativeClientBytes()
-	if delta := total - s.lastBytesSnapshot; delta > 0 {
-		s.lastBytesSnapshot = total
-
+	if delta := s.takeByteDelta(); delta > 0 {
 		if err := s.server.store.IncrementConnectionBytes(ctx, s.connection.UID, delta); err != nil {
 			s.logger.DebugContext(ctx, "MSSQL trailing byte flush failed",
 				slog.Any("connection_id", s.connection.UID),

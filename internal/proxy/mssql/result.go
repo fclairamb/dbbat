@@ -634,9 +634,7 @@ func (s *session) recordQuery(ctx context.Context, pending *pendingQuery, outcom
 	// what guarantees no decoder mistake ever reaches queries.error as bytes.
 	queryError := shared.SanitizeQueryError(ctx, s.logger, outcome.queryError)
 
-	total := s.cumulativeClientBytes()
-	bytesTransferred := total - s.lastBytesSnapshot
-	s.lastBytesSnapshot = total
+	bytesTransferred := s.takeByteDelta()
 
 	durationMs := float64(time.Since(pending.start).Microseconds()) / 1000.0
 
@@ -655,12 +653,7 @@ func (s *session) recordQuery(ctx context.Context, pending *pendingQuery, outcom
 
 	go s.persistQuery(ctx, pending.approvalUID, record, outcome, hasRows, bytesTransferred)
 
-	// In-session quota counters, so the next checkQuotas reflects this
-	// statement rather than what the grant looked like at login.
-	if s.grant != nil {
-		s.grant.QueryCount++
-		s.grant.BytesTransferred += bytesTransferred
-	}
+	s.chargeGrant(bytesTransferred)
 }
 
 // persistQuery is the asynchronous half of recordQuery.

@@ -250,7 +250,7 @@ func (s *session) runStatement(ctx context.Context, payload []byte, st statement
 		return s.refuse(ctx, st, start, shared.ErrGrantRevoked)
 	}
 
-	if err := checkQuotas(s.grant); err != nil {
+	if err := s.checkGrantQuotas(); err != nil {
 		return s.refuse(ctx, st, start, err)
 	}
 
