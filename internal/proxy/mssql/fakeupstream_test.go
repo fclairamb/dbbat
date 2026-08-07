@@ -46,7 +46,22 @@ type fakeUpstream struct {
 // fakeRequest is one post-login message the fake was sent.
 type fakeRequest struct {
 	msgType byte
+	status  byte
 	payload []byte
+}
+
+// receivedStatuses returns the first-packet status byte of every post-login
+// message, which is where RESETCONNECTION lives.
+func (f *fakeUpstream) receivedStatuses() []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := make([]byte, 0, len(f.requests))
+	for _, req := range f.requests {
+		out = append(out, req.status)
+	}
+
+	return out
 }
 
 // receivedRequests returns a copy of everything the fake was sent after login.
@@ -181,7 +196,11 @@ func (f *fakeUpstream) serve(conn net.Conn) {
 		}
 
 		f.mu.Lock()
-		f.requests = append(f.requests, fakeRequest{msgType: msgType, payload: payload})
+		f.requests = append(f.requests, fakeRequest{
+			msgType: msgType,
+			status:  pkt.lastReadStatus,
+			payload: payload,
+		})
 		response := f.batchResponse
 		f.mu.Unlock()
 

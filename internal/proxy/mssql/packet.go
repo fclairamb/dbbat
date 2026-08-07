@@ -55,14 +55,26 @@ func packetTypeName(t byte) string {
 	}
 }
 
-// TDS packet status bits (MS-TDS 2.2.3.1.2). Only the three the proxy acts on
-// are named; RESETCONNECTION (0x08) and RESETCONNECTIONSKIPTRAN (0x10) matter
-// only once sessions carry state, which is stage 2's problem.
+// TDS packet status bits (MS-TDS 2.2.3.1.2).
 const (
 	statusNormal byte = 0x00
 	statusEOM    byte = 0x01
 	statusIgnore byte = 0x02
+	// statusResetConnection / statusResetConnectionSkipTran are set by a
+	// connection pool reusing a physical connection for a new logical session:
+	// they ask the server to drop temp tables, SET options and cursors first.
+	// The proxy must carry them upstream, or a pooled client would inherit the
+	// previous session's state through dbbat while getting a clean one when
+	// connecting directly.
+	statusResetConnection         byte = 0x08
+	statusResetConnectionSkipTran byte = 0x10
 )
+
+// relayedStatusBits are the status bits the relay carries from a client message
+// onto the message it forwards upstream. EOM and the packet id are the
+// framing's own business and are recomputed; IGNORE never reaches the forward
+// path (ReadMessage reports it as an error).
+const relayedStatusBits = statusResetConnection | statusResetConnectionSkipTran
 
 // Packet sizing. The header is fixed at 8 bytes; the length field covers the
 // header *and* the payload, so it is bounded by what fits in a uint16.
@@ -200,6 +212,11 @@ type packetRW struct {
 	// one per packet.
 	hdrBuf [packetHeaderSize]byte
 
+	// lastReadStatus is the status byte of the first packet of the most
+	// recently read message. The relay reads it to carry RESETCONNECTION
+	// through; EOM and IGNORE are already handled by the framing.
+	lastReadStatus byte
+
 	// tapRead / tapWrite, when set, receive every raw packet (header included)
 	// this codec reads and writes. The session capture uses them, which is why
 	// they sit here rather than around the socket: on an encrypted client leg a
@@ -318,6 +335,7 @@ func (p *packetRW) ReadMessage() (byte, []byte, error) {
 
 		if first {
 			msgType = hdr.Type
+			p.lastReadStatus = hdr.Status
 			first = false
 		} else if hdr.Type != msgType {
 			return 0, nil, fmt.Errorf("%w: %s then %s",
@@ -349,6 +367,12 @@ func (p *packetRW) ReadMessage() (byte, []byte, error) {
 // An empty payload still produces one header-only packet with EOM, which is a
 // legal (and occasionally required) TDS message.
 func (p *packetRW) WriteMessage(msgType byte, payload []byte) error {
+	return p.WriteMessageWithStatus(msgType, payload, statusNormal)
+}
+
+// WriteMessageWithStatus is WriteMessage with extra status bits ORed into the
+// *first* packet of the message, which is where MS-TDS puts RESETCONNECTION.
+func (p *packetRW) WriteMessageWithStatus(msgType byte, payload []byte, extra byte) error {
 	if p.pendingOpen {
 		return ErrPacketPending
 	}
@@ -367,6 +391,10 @@ func (p *packetRW) WriteMessage(msgType byte, payload []byte) error {
 		status := statusNormal
 		if len(payload) == 0 {
 			status = statusEOM
+		}
+
+		if first {
+			status |= extra
 		}
 
 		if err := p.writePacket(msgType, status, chunk); err != nil {

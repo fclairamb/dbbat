@@ -160,3 +160,27 @@ func TestSessionWritesACapture(t *testing.T) {
 
 	assert.Len(t, captures, 1)
 }
+
+// TestRelayCarriesResetConnection covers the status bit a connection pool sets
+// on the first packet of a reused connection. Dropping it would leave the
+// upstream session carrying the previous logical session's temp tables and SET
+// options — state a client connecting directly would not see.
+func TestRelayCarriesResetConnection(t *testing.T) {
+	t.Parallel()
+
+	fixture := newAuthFixture(t, encryptNotSup, "disable")
+
+	client, outcome := fixture.login(t, fixtureUser, fixturePassword, fixtureDBEntry)
+	require.True(t, outcome.Acked)
+
+	require.NoError(t, client.pkt.WriteMessageWithStatus(
+		packetTypeSQLBatch, sqlBatchPayload("SELECT 1"), statusResetConnection))
+
+	client.readReply(t)
+
+	require.Eventually(t, func() bool { return len(fixture.fake.receivedStatuses()) == 1 },
+		10*time.Second, 20*time.Millisecond)
+
+	got := fixture.fake.receivedStatuses()[0]
+	assert.NotZero(t, got&statusResetConnection, "RESETCONNECTION must reach the upstream")
+}

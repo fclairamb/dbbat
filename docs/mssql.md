@@ -289,6 +289,12 @@ The two directions are deliberately asymmetric:
 Each codec ends up with one reader and one writer in different goroutines, which
 is safe because its read and write paths share no mutable state.
 
+`RESETCONNECTION` (status bit `0x08`, and its `SKIPTRAN` variant) is carried
+through onto the forwarded message. A connection pool sets it on the first
+packet of a reused connection to ask for a clean session; dropping it would
+leave the upstream carrying the previous logical session's temp tables and SET
+options — state the same client would not see connecting directly.
+
 Stage 3 fills the two hooks (`clientMessageHook`, `serverPacketHook`) that the
 pumps already call; nothing about the loops has to change.
 

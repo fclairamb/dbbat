@@ -93,7 +93,13 @@ func (s *session) pumpClientToUpstream(ctx context.Context) error {
 			}
 		}
 
-		if err := s.upstream.pkt.WriteMessage(msgType, forward); err != nil {
+		// Carry RESETCONNECTION through. A pooled client sets it on the first
+		// packet of a reused connection to ask for a clean session; dropping it
+		// would leave the upstream carrying the previous logical session's temp
+		// tables and SET options.
+		status := s.pkt.lastReadStatus & relayedStatusBits
+
+		if err := s.upstream.pkt.WriteMessageWithStatus(msgType, forward, status); err != nil {
 			return err
 		}
 	}
