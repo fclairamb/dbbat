@@ -9,14 +9,14 @@ The listener defaults to `:1434` (`DBB_LISTEN_MSSQL`; empty disables it). The
 because the service that owns 1434 upstream, the SQL Server Browser, is
 **UDP-only**; 1434/tcp is free.
 
-> **Status: stage 2 of 3.** A client authenticates against dbbat's own users
-> and API keys, dbbat opens its own session on the target with the stored
-> credentials, and the session is relayed end to end — a `sqlcmd` or
-> `go-mssqldb` client runs queries and gets real results. What is **not** here
-> yet is stage 3: no statement is logged, no `read_only` / `block_ddl` /quota
-> control is enforced per query, no approval hold can fire, and no result rows
-> or byte counts are accounted for. Connection-level access control **is**
-> enforced: a login without a live grant on the requested database is refused.
+> **Status: complete (stages 1–3).** SQL Server is a first-class protocol: a
+> client authenticates against dbbat's own users and API keys, dbbat opens its
+> own session on the target with the stored credentials, every statement is
+> logged and checked against the grant, approval holds fire, and result rows
+> and byte counts are accounted for — the same pipeline the PostgreSQL, Oracle,
+> MySQL and MongoDB proxies run. The known gaps are listed under
+> [What dbbat does not see](#what-dbbat-does-not-see) and
+> [What is deliberately unsupported in v1](#what-is-deliberately-unsupported-in-v1).
 
 ## Library Choice
 
@@ -295,8 +295,195 @@ packet of a reused connection to ask for a clean session; dropping it would
 leave the upstream carrying the previous logical session's temp tables and SET
 options — state the same client would not see connecting directly.
 
-Stage 3 fills the two hooks (`clientMessageHook`, `serverPacketHook`) that the
-pumps already call; nothing about the loops has to change.
+The two pumps call one hook each — `clientMessageHook` for interception,
+`serverPacketHook` for result accounting. The request hook returns the payload
+to forward; **a nil return means the hook answered the client itself**, which is
+how a blocked statement never reaches the upstream. ATTENTION is a message with
+*no payload at all*, so a hook must hand back a non-nil empty slice for it —
+returning its own argument would silently swallow every client cancellation.
+
+Because a refusal is written on the *client* codec from the request pump, while
+the response pump is also writing there, the session serializes client writes
+behind one mutex. `packetRW` is explicitly not safe for concurrent use: its
+outbound packet id is shared state.
+
+## Query interception
+
+`internal/proxy/mssql/intercept.go`, `internal/proxy/mssql/rpc.go`.
+
+Every complete client message is classified before anything is forwarded. The
+request pump hands the hook **whole logical messages**, not packets, so a
+statement split across a packet boundary cannot slip past.
+
+| TDS message | Treatment |
+|-------------|-----------|
+| `SQLBatch` (`0x01`) | statement decoded from UCS-2LE, logged, **enforced** |
+| `RPC` (`0x03`) | every request in the batch parsed; statement text extracted, logged, **enforced** |
+| `BulkLoadBCP` (`0x07`) | refused under `read_only` or `block_copy` |
+| `Attention` (`0x06`) | relayed untouched |
+| `TransactionManager` (`0x0E`) | relayed untouched |
+| anything else | relayed untouched |
+
+The enforcement order is the one every other proxy uses: revocation → quotas →
+the grant's static controls (`read_only`, `block_ddl`, `block_copy`,
+password-change) → the approval gate. Only a statement that clears all four
+reaches the upstream.
+
+A refusal is answered as an `ERROR` (number 50000, class 16) followed by a
+`DONE` with `DONE_ERROR` — the shape a real SQL Server statement error takes, so
+the driver raises an ordinary SQL error and the connection stays usable for the
+next statement.
+
+### SQLBatch is UCS-2, not UTF-8
+
+The statement text in a SQLBatch is UCS-2LE, behind an `ALL_HEADERS` block.
+Reading those bytes as text would mangle every non-ASCII identifier, and — the
+part that matters — could let a crafted statement slip past a pattern-based
+control, which is a security control and not a display concern. The decode is
+round-tripped in tests over accented, Cyrillic, Greek and surrogate-pair SQL.
+
+`ALL_HEADERS` is skipped defensively: the leading DWORD is only treated as a
+header block when its length is plausible *and* the first header's type is one
+of the three MS-TDS defines. Getting that wrong would shift the statement by two
+characters, which is exactly the kind of silent mismatch a pattern control
+cannot survive.
+
+### RPC is enforced, not log-only
+
+**This is the owner's binding decision, and it is a security property.**
+`read_only` and `block_ddl` are access controls; a log-only RPC path would let
+any client bypass them by wrapping a write in `sp_executesql`. There is an
+integration test that issues the identical `DELETE` twice — once as a plain
+`SQLBatch`, once through `sp_executesql` — and asserts both are refused.
+
+Enforcement runs on the **statement template**. Parameter values are decoded and
+captured for the query row, but they are not what the controls match, which is
+the right granularity: `read_only` is about what the statement *does*.
+
+dbbat parses both RPC forms — a procedure name, and the well-known
+procedure-id shorthand every driver actually uses — plus multi-call batches
+separated by a batch flag. The forms that carry SQL, and where:
+
+| Form | id | Statement parameter |
+|------|----|---------------------|
+| `sp_executesql` | 10 | 0 (`@stmt`) |
+| `sp_prepare` | 11 | 2 |
+| `sp_prepexec` | 13 | 2 |
+| `sp_cursorprepare` | 3 | 2 |
+| `sp_cursoropen` | 2 | 1 |
+| `sp_cursorprepexec` | 5 | 3 |
+| `sp_prepexecrpc` | 14 | 1 |
+
+### Prepared statements, and where dbbat fails closed
+
+`sp_execute` and `sp_cursorexecute` carry a **handle**, not SQL. dbbat resolves
+them: the response accountant reads the `RETURNVALUE` token a prepare answers
+with and remembers that handle against the statement text that was already
+validated, so an execute is checked against the SQL it actually runs. The map is
+per session and bounded.
+
+Three cases cannot be resolved, and all three **fail closed whenever the grant
+restricts anything** (`read_only`, `block_ddl` or `block_copy`) — and are
+forwarded when it restricts nothing, because then there is nothing to fail
+closed about:
+
+- **An unknown handle.** A handle dbbat never saw prepared on this session names
+  a statement it cannot see. (`ErrUnknownPreparedStatement`)
+- **A stored procedure called by name.** `EXEC dbo.Something` is opaque: dbbat
+  cannot see the body, so it cannot prove the procedure respects the
+  restriction. (`ErrOpaqueProcedureBlocked`)
+- **A request that will not parse.** An unparseable SQLBatch or RPC is refused
+  rather than relayed, because it is one dbbat cannot enforce a grant on.
+  (`ErrMalformedRequest`)
+
+Cursor bookkeeping that carries neither a statement nor a decision —
+`sp_cursor`, `sp_cursorfetch`, `sp_cursoroption`, `sp_cursorclose`,
+`sp_cursorunprepare`, `sp_unprepare` — is allowed under a restrictive grant: the
+statement it acts on was checked when it was prepared or opened.
+
+### `block_copy` on SQL Server
+
+`block_copy` is PostgreSQL's `COPY` control. Its SQL Server analogue is bulk
+copy, so it matches `BULK INSERT`, `INSERT BULK` and `OPENROWSET(BULK …)`. The
+`INSERT BULK` statement is the primary gate — a bulk-copy client announces it as
+an ordinary SQLBatch — and the `BulkLoadBCP` (`0x07`) message that streams the
+rows is refused as well, so no ordering trick delivers rows to the upstream.
+
+### Approval holds
+
+Holds go through the shared gate (`docs/approvals.md`). While a statement is
+parked the session goroutine is blocked, so the client conn is **parked**: a
+watcher keeps reading the socket, which is what makes "the client went away" an
+event rather than a silence. Bytes the client sends meanwhile are queued and
+replayed in order once the session resumes.
+
+One consequence is worth stating: an `ATTENTION` (the TDS cancel) sent *during*
+a hold is queued like anything else, so it does not release the hold — it is
+delivered to the upstream immediately after the released statement, cancelling
+it there. A client that gives up and disconnects does end the hold, through the
+watcher. See `specs/todos/2026-08-07-mssql-attention-during-approval-hold.md`.
+
+## Result accounting
+
+`internal/proxy/mssql/result.go`, `internal/proxy/mssql/tokens.go`,
+`internal/proxy/mssql/typeinfo.go`.
+
+The response hook walks the token stream: `COLMETADATA` (full `TYPE_INFO`,
+including the BYTELEN / USHORTLEN / LONGLEN / PLP families), `ROW`, `NBCROW`,
+`DONE` / `DONEPROC` / `DONEINPROC`, `ERROR`, `INFO` and `RETURNVALUE`. Every
+other token is skipped by its length.
+
+Three things about it are not obvious:
+
+- **It has to be incremental.** Responses are forwarded a packet at a time, so
+  tokens routinely straddle packet boundaries. The walker keeps a carry buffer
+  with a hard cap; past the cap it gives up rather than growing without bound.
+- **It is strictly observational.** Nothing it does can alter the bytes the
+  client receives, so a stream it cannot follow is a lost *measurement*, never a
+  broken session. An unmodelled token (`ALTMETADATA` / `ALTROW` from
+  `COMPUTE BY`, or the Always Encrypted CEK table) desynchronises the walk for
+  that message only.
+- **There is a backstop.** The last token of any TDS response is a DONE-family
+  token, so a 13-byte rolling tail recovers the row count even from a walk that
+  gave up.
+
+`DONE_COUNT` is what says the row-count field means anything; without it the
+field is padding, and reading it anyway is how a proxy invents rows that never
+existed. `DONEPROC` is deliberately not counted — it repeats the count of the
+`DONEINPROC` inside the same procedure, so counting both would report every
+`sp_executesql`'s rows twice.
+
+An `ERROR` token becomes the query row's `error`, as a decoded diagnostic
+("*message* (error N, state S, class C)"), and goes through
+`shared.SanitizeQueryError` on the way — the repo has been burned before by a
+decoder writing raw bytes into `queries.error`.
+
+Captured rows are serialized as JSON arrays through the shared `RowWriter`, with
+the same storage limits as the other protocols. Value decoding is best-effort by
+design — the *framing* is what has to be exact — so a type the decoder does not
+interpret is captured as a tagged base64 object (`{"$bytes": …, "$type": …}`),
+the same shape the MySQL proxy uses for a binary blob.
+
+`bytes_transferred` comes from a counting conn wrapped around the client socket,
+below TLS, so it measures the whole client leg exactly as the MySQL and MongoDB
+proxies do.
+
+## What dbbat does not see
+
+Plainly, so nobody assumes more coverage than there is:
+
+- **A stored procedure's body.** dbbat sees `EXEC dbo.Something`, not what it
+  does — hence failing closed under a restrictive grant.
+- **Rows inside a `BulkLoadBCP` stream.** The `INSERT BULK` statement that
+  announces it is logged and checked; the rows themselves are relayed (or
+  refused wholesale), not parsed.
+- **Result sets behind an unmodelled token.** `COMPUTE BY` (`ALTMETADATA` /
+  `ALTROW`) and Always Encrypted column metadata desynchronise the accountant,
+  so those queries get a row count from the tail DONE and no captured rows.
+- **Transaction Manager requests** (`0x0E`): `BEGIN` / `COMMIT` / `ROLLBACK`
+  issued through the protocol rather than as SQL are relayed untouched and do
+  not appear in the query history.
+- **An ATTENTION during an approval hold**, as described above.
 
 ## What is deliberately unsupported in v1
 
@@ -315,20 +502,6 @@ pumps already call; nothing about the loops has to change.
   TDS 7.2+ wide forms (a 4-byte ERROR line number, an 8-byte DONE row count),
   which an older client would misparse rather than cleanly reject. A LOGIN7
   with `TDSVersion = 0` means "server picks", which is 7.4 here.
-
-## Ahead of this stage
-
-- **Stage 3** — intercepting SQLBatch (`0x01`) and RPC (`0x03`), logging
-  queries, enforcing `read_only` / `block_ddl` / quotas per statement, honouring
-  approval holds, and accounting for result rows and bytes. **RPC is enforced,
-  not log-only**: `read_only` and `block_ddl` are security controls, and a
-  log-only RPC path would let any client bypass them by wrapping a write in
-  `sp_executesql`.
-
-Two consequences of stage 2 shipping without stage 3 are worth stating plainly:
-a SQL Server session is **relayed but not observed** (nothing appears in the
-query history), and a grant's per-statement controls and quotas have **no effect
-on it**. Connection-level access control does apply — no grant, no session.
 
 ## Session Packet Dumps
 
@@ -363,6 +536,26 @@ as a hang rather than a diff:
 - `tokens_test.go` — the login-response token walker: a good login behind
   ENVCHANGE/INFO/FEATUREEXTACK/SESSIONSTATE tokens, a rejected one, an
   unmodelled token stopping the walk, and every truncation of a real stream.
+  It also pins the token *numbers*: stage 2 had FEATUREEXTACK at `0xEE`, which
+  is FEDAUTHINFO — and since FEATUREEXTACK precedes LOGINACK, a client asking
+  for any feature extension would have had a perfectly good login read as a
+  refusal.
+- `typeinfo_test.go` — the TYPE_INFO and value framing, type by type, plus the
+  value rendering. The framing assertions are the load-bearing ones: a wrong
+  length loses the token stream, a wrong interpretation only makes a cell ugly.
+- `rpc_test.go` — the UCS-2 SQLBatch round trip over accented, Cyrillic, Greek
+  and surrogate-pair SQL; statement extraction for every RPC form that carries
+  one; the by-name form; the handle forms; multi-call batches; and a truncated
+  request never yielding a statement.
+- `intercept_test.go` — the enforcement decisions as a table (including the
+  fail-closed cases), then end-to-end through the proxy: the same write refused
+  as a SQLBatch *and* through `sp_executesql`, the session surviving a refusal,
+  a statement logged with its row count and captured rows, an upstream ERROR
+  landing on the query row, and an approval hold parked and released mid-session.
+- `result_test.go` — the accountant against synthesized responses: rows and
+  counts, NBCROW, every packet split point, an ERROR token, DONEPROC not being
+  double-counted, the tail-DONE backstop, the RETURNVALUE handle, and the
+  capture limits.
 - `fakeupstream_test.go` — a fake TDS **server** on the same codec. It is what
   lets the whole upstream leg run under `make test` on any architecture, which
   matters because the real SQL Server image is linux/amd64 only.
@@ -383,8 +576,12 @@ as a hang rather than a diff:
 `github.com/microsoft/go-mssqldb`: a real driver completes the handshake in each
 encryption mode, then authenticates against a seeded dbbat user and runs real
 `SELECT`s through to the container, with the connection row's `upstream_tls`
-asserted for both a plaintext and an encrypted upstream leg. `make test` neither
-compiles nor runs it:
+asserted for both a plaintext and an encrypted upstream leg. Stage 3 adds three
+more: a `read_only` grant refusing the same write on both statement paths (the
+driver sends a parameterless statement as a SQLBatch and a parameterised one as
+`sp_executesql`, so this really does exercise both), row counts and captured
+rows against a real result set, and an approval hold parked and then released
+mid-session. `make test` neither compiles nor runs it:
 
 ```bash
 make test-integration-mssql

@@ -1,6 +1,6 @@
 # DBBat - Database Observability Proxy
 
-A transparent database proxy for query observability, access control, and safety. Supports **PostgreSQL**, **Oracle**, **MySQL/MariaDB**, and **MongoDB**, with **Microsoft SQL Server** in progress. Every query logged. Every connection tracked.
+A transparent database proxy for query observability, access control, and safety. Supports **PostgreSQL**, **Oracle**, **MySQL/MariaDB**, **MongoDB** and **Microsoft SQL Server**. Every query logged. Every connection tracked.
 
 ## Semantic Versioning
 
@@ -47,7 +47,7 @@ PR titles MUST follow the conventional commit format:
   - Oracle TNS/TTC (hand-rolled) — see `docs/oracle.md`
   - MySQL/MariaDB via `go-mysql-org/go-mysql` (server + client) — see `docs/mysql.md`
   - MongoDB wire protocol (hand-rolled `OP_MSG`; BSON via `go.mongodb.org/mongo-driver/v2`) — see `docs/mongodb.md`
-  - Microsoft SQL Server TDS (hand-rolled) — **stage 2 of 3: auth + upstream relay; no query interception yet** — see `docs/mssql.md`
+  - Microsoft SQL Server TDS (hand-rolled) — see `docs/mssql.md`
 - **API**: `gin-gonic/gin` with OpenAPI 3.0 docs
 - **CLI**: `urfave/cli/v3`
 - **Config**: `knadh/koanf`
@@ -283,10 +283,10 @@ Client → DBBat (auth + grant check) → Target PostgreSQL
 Client → DBBat (service-name lookup, O5LOGON proxy auth) → Target Oracle
 Client → DBBat (caching_sha2_password / TLS termination) → Target MySQL/MariaDB
 Client → DBBat (SCRAM-SHA-256 or PLAIN-over-TLS, authSource lookup) → Target MongoDB
-Client → DBBat (TDS PRELOGIN + encapsulated TLS + LOGIN7, SQL auth) → Target SQL Server [stage 2: no query interception]
+Client → DBBat (TDS PRELOGIN + encapsulated TLS + LOGIN7, SQL auth) → Target SQL Server
 ```
 
-The same auth + grant + query-logging pipeline runs across all four shipped protocols (`internal/proxy/shared`). The SQL Server proxy authenticates and relays today, and joins the query-interception half of that pipeline in stage 3.
+The same auth + grant + query-logging pipeline runs across all five protocols (`internal/proxy/shared`).
 
 ### Access Control
 - **Every grant is an instance of a grant definition** and carries no shape of
