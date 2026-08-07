@@ -47,3 +47,21 @@ Notes:
   than a low-volume, opt-in clean-up needs.
 - `rows_affected` on the affected rows is also wrong (truncated at the misparse
   point) and cannot be recovered — leave it as is.
+
+## Resolved open questions
+
+**Should this stay a human-only runbook, or may automation run it against the
+real production dbbat database?**
+
+Decision (2026-08-07, repository owner): **run it against production.** This
+overrides the "no automation should mutate production query history unattended"
+note above — the owner has explicitly authorised it for this run. Procedure:
+
+1. Run the two inspection queries first and show the operator the counts and the
+   20-row sample before mutating anything.
+2. Only then run the `UPDATE`.
+3. Report the number of rows affected.
+
+**Should a GitHub issue be filed for this spec?**
+
+Decision: **no.** Do not run `gh issue create`. The spec file is the record.

@@ -44,3 +44,19 @@ every SQL Server client speaks TLS 1.2 today.
    suite so a regression shows up as a failed test rather than a hung client.
 
 No GitHub issue exists yet — one should be filed.
+
+## Resolved open questions
+
+**Should a GitHub issue be filed for this spec?**
+
+Decision (2026-08-07, repository owner): **no.** Do not run `gh issue create`.
+The spec file is the record.
+
+**Step 1 asks for byte captures from the Microsoft ODBC and JDBC drivers, which
+are not available to this automation.**
+
+Proceed on the evidence that *is* obtainable: `go-mssqldb` (already in the
+integration suite) plus the encapsulation logic itself. Where a driver cannot be
+tested, take the spec's own step 3 as the answer — keep TLS 1.2 as the default
+and put 1.3 behind an opt-in `DBB_MSSQL_TLS_MAX_VERSION` rather than guessing
+per connection. Record the untested drivers as a caveat in `docs/mssql.md`.

@@ -49,3 +49,17 @@ WHERE gd.database_uids IS NOT NULL
 
 No GitHub issue yet — one should be filed if this ships to production before being
 resolved.
+
+## Resolved open questions
+
+**May automation run this verification query against the real production dbbat
+deployment, rather than waiting for a human to do it?**
+
+Decision (2026-08-07, repository owner): **yes — run it against production.**
+The query is read-only. Act on the result exactly as the two bullets above say:
+zero rows → close this spec out with a note recording the result; non-zero rows →
+write the corrective migration described above.
+
+**Should a GitHub issue be filed for this spec?**
+
+Decision: **no.** Do not run `gh issue create`. The spec file is the record.

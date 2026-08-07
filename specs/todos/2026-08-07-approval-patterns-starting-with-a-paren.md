@@ -83,3 +83,12 @@ Files: `internal/store/models.go` (`GrantDefinition.ApprovalPatterns`),
 `docs/approvals.md`.
 
 No GitHub issue exists yet — one should be filed.
+
+## Resolved open questions
+
+**Should a GitHub issue be filed for this spec?**
+
+Decision (2026-08-07, repository owner): **no.** Do not run `gh issue create`.
+The spec file is the record. (Filing the bug upstream against `uptrace/bun` is a
+separate matter and is also out of scope for this run — note it in the report
+instead.)

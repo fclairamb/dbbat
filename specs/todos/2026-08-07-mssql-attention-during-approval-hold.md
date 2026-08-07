@@ -69,3 +69,10 @@ Files: `internal/proxy/mssql/intercept.go` (`holdIfNeeded`),
 `internal/proxy/shared/watch.go`, `internal/proxy/mssql/integration_test.go`.
 
 No GitHub issue exists yet — one should be filed.
+
+## Resolved open questions
+
+**Should a GitHub issue be filed for this spec?**
+
+Decision (2026-08-07, repository owner): **no.** Do not run `gh issue create`.
+The spec file is the record.

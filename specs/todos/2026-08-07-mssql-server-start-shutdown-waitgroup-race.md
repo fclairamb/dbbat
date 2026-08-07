@@ -58,3 +58,10 @@ Files: `internal/proxy/mssql/server.go`, `internal/proxy/mssql/session_test.go`
 (`TestServerStartAndShutdown`), `.github/workflows/`.
 
 No GitHub issue exists yet — one should be filed.
+
+## Resolved open questions
+
+**Should a GitHub issue be filed for this spec?**
+
+Decision (2026-08-07, repository owner): **no.** Do not run `gh issue create`.
+The spec file is the record.
