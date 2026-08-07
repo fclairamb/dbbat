@@ -11,13 +11,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestCreateOAuthState(t *testing.T) { //nolint:tparallel // subtests share parent data
+func TestCreateOAuthState(t *testing.T) {
 	t.Parallel()
 
 	store := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
 
 	t.Run("create state", func(t *testing.T) {
+		t.Parallel()
+
 		stateToken := "random-state-token-" + uuid.NewString()[:8]
 
 		state := &OAuthState{
@@ -37,13 +39,15 @@ func TestCreateOAuthState(t *testing.T) { //nolint:tparallel // subtests share p
 	})
 }
 
-func TestConsumeOAuthState(t *testing.T) { //nolint:tparallel // subtests share parent data
+func TestConsumeOAuthState(t *testing.T) {
 	t.Parallel()
 
 	store := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
 
 	t.Run("consume valid state", func(t *testing.T) {
+		t.Parallel()
+
 		state := &OAuthState{
 			State:       "consume-valid-" + uuid.NewString(),
 			Provider:    IdentityTypeSlack,
@@ -64,6 +68,8 @@ func TestConsumeOAuthState(t *testing.T) { //nolint:tparallel // subtests share 
 	})
 
 	t.Run("consume expired state", func(t *testing.T) {
+		t.Parallel()
+
 		state := &OAuthState{
 			State:     "consume-expired-" + uuid.NewString(),
 			Provider:  IdentityTypeSlack,
@@ -77,6 +83,8 @@ func TestConsumeOAuthState(t *testing.T) { //nolint:tparallel // subtests share 
 	})
 
 	t.Run("consume non-existing state", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := store.ConsumeOAuthState(ctx, "nonexistent-state")
 		assert.ErrorIs(t, err, ErrOAuthStateNotFound)
 	})

@@ -46,32 +46,32 @@ func TestCheckQuotas(t *testing.T) {
 	}{
 		{
 			name:    "no quotas configured",
-			grant:   &store.Grant{},
+			grant:   &store.Grant{Definition: &store.GrantDefinition{}},
 			wantErr: nil,
 		},
 		{
 			name:    "under query quota",
-			grant:   &store.Grant{MaxQueryCounts: &maxQ, QueryCount: 5},
+			grant:   &store.Grant{QueryCount: 5, Definition: &store.GrantDefinition{MaxQueryCounts: &maxQ}},
 			wantErr: nil,
 		},
 		{
 			name:    "at query quota",
-			grant:   &store.Grant{MaxQueryCounts: &maxQ, QueryCount: 10},
+			grant:   &store.Grant{QueryCount: 10, Definition: &store.GrantDefinition{MaxQueryCounts: &maxQ}},
 			wantErr: ErrQueryLimitExceeded,
 		},
 		{
 			name:    "over query quota",
-			grant:   &store.Grant{MaxQueryCounts: &maxQ, QueryCount: 11},
+			grant:   &store.Grant{QueryCount: 11, Definition: &store.GrantDefinition{MaxQueryCounts: &maxQ}},
 			wantErr: ErrQueryLimitExceeded,
 		},
 		{
 			name:    "at byte quota",
-			grant:   &store.Grant{MaxBytesTransferred: &maxB, BytesTransferred: 1000},
+			grant:   &store.Grant{BytesTransferred: 1000, Definition: &store.GrantDefinition{MaxBytesTransferred: &maxB}},
 			wantErr: ErrDataLimitExceeded,
 		},
 		{
 			name:    "query quota wins over byte quota",
-			grant:   &store.Grant{MaxQueryCounts: &maxQ, QueryCount: 10, MaxBytesTransferred: &maxB, BytesTransferred: 1000},
+			grant:   &store.Grant{QueryCount: 10, BytesTransferred: 1000, Definition: &store.GrantDefinition{MaxQueryCounts: &maxQ, MaxBytesTransferred: &maxB}},
 			wantErr: ErrQueryLimitExceeded,
 		},
 	}

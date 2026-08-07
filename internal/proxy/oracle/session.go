@@ -370,8 +370,12 @@ func (s *session) run() error {
 	// Oracle is the one protocol dbbat never upgrades: the proxy relays the
 	// client's own TNS Connect descriptor over a plain socket, so the
 	// upstream leg is unencrypted regardless of the row's ssl_mode.
+	//
+	// s.grant is always set here: authenticateClient (step 5, above) returns
+	// an error — aborting run() before this point — whenever the grant lookup
+	// fails.
 	conn, err := s.store.CreateConnection(s.ctx, s.user.UID, s.database.UID, sourceIP,
-		store.WithUpstreamTLS(false))
+		store.WithUpstreamTLS(false), store.WithGrantUID(s.grant.UID))
 	if err == nil {
 		s.connectionUID = conn.UID
 	}
@@ -1149,7 +1153,8 @@ func (s *session) proxyMessages() error {
 	}
 
 	s.approvalGate = shared.NewApprovalGate(s.approvalDeps, s.grant, s.connectionUID, s.user, databaseName)
-	s.stream = shared.NewStreamPublisher(s.approvalDeps, s.connectionUID, s.user, databaseName)
+	s.stream = shared.NewStreamPublisher(s.approvalDeps, s.connectionUID, s.user, databaseName).
+		WithApprovals(s.approvalGate)
 	s.stream.Connection(s.ctx, shared.ConnectionOpened)
 
 	watchCtx, cancelWatch := context.WithCancel(s.ctx)

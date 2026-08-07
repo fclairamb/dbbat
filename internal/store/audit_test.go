@@ -10,6 +10,8 @@ import (
 )
 
 func TestLogAuditEvent(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -24,6 +26,8 @@ func TestLogAuditEvent(t *testing.T) {
 	}
 
 	t.Run("log event with all fields", func(t *testing.T) {
+		t.Parallel()
+
 		details := json.RawMessage(`{"action": "grant_created", "database_id": 1}`)
 		event := &AuditEvent{
 			EventType:   "grant_created",
@@ -39,6 +43,8 @@ func TestLogAuditEvent(t *testing.T) {
 	})
 
 	t.Run("log event without user", func(t *testing.T) {
+		t.Parallel()
+
 		details := json.RawMessage(`{"message": "system startup"}`)
 		event := &AuditEvent{
 			EventType: "system_event",
@@ -52,6 +58,8 @@ func TestLogAuditEvent(t *testing.T) {
 	})
 
 	t.Run("log event without details", func(t *testing.T) {
+		t.Parallel()
+
 		event := &AuditEvent{
 			EventType:   "user_login",
 			UserID:      &user.UID,
@@ -66,6 +74,8 @@ func TestLogAuditEvent(t *testing.T) {
 }
 
 func TestListAuditEvents(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -91,6 +101,8 @@ func TestListAuditEvents(t *testing.T) {
 	}
 
 	t.Run("list all", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListAuditEvents(ctx, AuditFilter{})
 		if err != nil {
 			t.Fatalf("ListAuditEvents() error = %v", err)
@@ -101,6 +113,8 @@ func TestListAuditEvents(t *testing.T) {
 	})
 
 	t.Run("filter by event type", func(t *testing.T) {
+		t.Parallel()
+
 		eventType := "grant_created"
 		result, err := store.ListAuditEvents(ctx, AuditFilter{EventType: &eventType})
 		if err != nil {
@@ -115,6 +129,8 @@ func TestListAuditEvents(t *testing.T) {
 	})
 
 	t.Run("filter by user", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListAuditEvents(ctx, AuditFilter{UserID: &user1.UID})
 		if err != nil {
 			t.Fatalf("ListAuditEvents() error = %v", err)
@@ -125,6 +141,8 @@ func TestListAuditEvents(t *testing.T) {
 	})
 
 	t.Run("filter by performed_by", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListAuditEvents(ctx, AuditFilter{PerformedBy: &admin.UID})
 		if err != nil {
 			t.Fatalf("ListAuditEvents() error = %v", err)
@@ -135,6 +153,8 @@ func TestListAuditEvents(t *testing.T) {
 	})
 
 	t.Run("filter by time range", func(t *testing.T) {
+		t.Parallel()
+
 		startTime := time.Now().Add(-1 * time.Hour)
 		endTime := time.Now().Add(1 * time.Hour)
 		result, err := store.ListAuditEvents(ctx, AuditFilter{StartTime: &startTime, EndTime: &endTime})
@@ -147,6 +167,8 @@ func TestListAuditEvents(t *testing.T) {
 	})
 
 	t.Run("with limit", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListAuditEvents(ctx, AuditFilter{Limit: 2})
 		if err != nil {
 			t.Fatalf("ListAuditEvents() error = %v", err)
@@ -157,6 +179,8 @@ func TestListAuditEvents(t *testing.T) {
 	})
 
 	t.Run("with offset", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListAuditEvents(ctx, AuditFilter{Limit: 10, Offset: 2})
 		if err != nil {
 			t.Fatalf("ListAuditEvents() error = %v", err)
@@ -167,6 +191,8 @@ func TestListAuditEvents(t *testing.T) {
 	})
 
 	t.Run("combined filters", func(t *testing.T) {
+		t.Parallel()
+
 		eventType := "grant_created"
 		result, err := store.ListAuditEvents(ctx, AuditFilter{
 			EventType:   &eventType,
@@ -182,6 +208,8 @@ func TestListAuditEvents(t *testing.T) {
 }
 
 func TestAuditEventFields(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 

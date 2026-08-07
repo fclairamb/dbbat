@@ -241,6 +241,19 @@ func (s *Server) setupRouter() *gin.Engine {
 			auth.GET("/"+name+"/callback", s.handleOAuthCallback(name))
 		}
 
+		// One-time code -> web session token exchange. The OAuth callback
+		// hands the browser a short-lived single-use code instead of the
+		// session token, so no session credential ever appears in a URL; the
+		// SPA redeems it here. Unauthenticated (the code is the credential),
+		// IP rate limited like the other pre-auth endpoints. Registered
+		// unconditionally so the route surface does not depend on which
+		// providers are configured.
+		if s.rateLimiter != nil {
+			auth.POST("/oauth/exchange", s.rateLimiter.PreAuthMiddleware(), s.handleOAuthExchange)
+		} else {
+			auth.POST("/oauth/exchange", s.handleOAuthExchange)
+		}
+
 		// OAuth 2.0 Device Authorization Grant (RFC 8628): lets external
 		// tools (CLI, desktop apps) obtain an API key through a browser
 		// approval instead of manual copy/paste. The authorization request
@@ -336,7 +349,7 @@ func (s *Server) setupRouter() *gin.Engine {
 
 			// Grant endpoints
 			grants := authenticated.Group("/grants")
-			grants.POST("", s.requireAdmin(), s.handleCreateGrant)
+			grants.POST("", s.requireAdmin(), s.handleAssignGrant)
 			grants.GET("", s.handleListGrants)
 			grants.GET("/:uid", s.handleGetGrant)
 			grants.DELETE("/:uid", s.requireAdmin(), s.handleRevokeGrant)
@@ -348,6 +361,12 @@ func (s *Server) setupRouter() *gin.Engine {
 			grantDefs := authenticated.Group("/grant-definitions")
 			grantDefs.POST("", s.requireAdmin(), s.handleCreateGrantDefinition)
 			grantDefs.GET("", s.handleListGrantDefinitions)
+			// validate-patterns is a pure compute endpoint (no store access,
+			// no :uid to resolve) for previewing approval patterns against
+			// sample queries before a definition is saved. Registered ahead
+			// of GET/PATCH/DELETE /:uid on a different HTTP method (POST),
+			// so it never competes with the :uid param route.
+			grantDefs.POST("/validate-patterns", s.requireAdmin(), s.handleValidateGrantDefinitionPatterns)
 			grantDefs.GET("/:uid", s.handleGetGrantDefinition)
 			grantDefs.PATCH("/:uid", s.requireAdmin(), s.handleUpdateGrantDefinition)
 			grantDefs.DELETE("/:uid", s.requireAdmin(), s.handleDeactivateGrantDefinition)
@@ -528,7 +547,7 @@ func (s *Server) loggingMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		path := c.Request.URL.Path
-		query := c.Request.URL.RawQuery
+		query := redactQuery(c.Request.URL.RawQuery)
 
 		c.Next()
 
@@ -544,6 +563,114 @@ func (s *Server) loggingMiddleware() gin.HandlerFunc {
 			slog.String("client_ip", c.ClientIP()),
 		)
 	}
+}
+
+// redactedValue replaces the value of a query parameter that is not on the
+// access log's allowlist. The parameter name is kept so the log still shows
+// the shape of the request — the names are not the secret, the values are.
+const redactedValue = "REDACTED"
+
+// loggableQueryParams is an ALLOWLIST: the only query parameter names whose
+// *values* may reach the access log. Everything else is redacted by default.
+//
+// This is deliberately an allowlist and not a denylist. A denylist enumerating
+// known-sensitive names (`token`, `code`, `state`, …) fails silently and late:
+// whoever later adds a `?reset_token=`, `?otp=`, `?invite=` or `?signature=`
+// gets it written to the access log verbatim, and neither review nor CI points
+// at the omission. Inverted, a new parameter is redacted until someone with the
+// context consciously declares it safe. **Do not turn this back into a
+// denylist** — TestRedactQueryDefaultsToRedacted pins the direction.
+//
+// Adding an entry here is a one-line change; the bar is that the value is a
+// bounded, non-secret, non-caller-controlled-free-text token: an enum, a
+// boolean, a number, a timestamp, or an opaque entity UID. It is NOT enough
+// that a value "looks harmless today" — `redirect` is excluded precisely
+// because it carries an arbitrary caller-supplied path that the device flow
+// populates with `/device?user_code=...`, i.e. a secret nested inside an
+// otherwise innocuous parameter.
+//
+// Matched case-insensitively, after percent-decoding the name.
+var loggableQueryParams = map[string]bool{
+	// Pagination and cursoring.
+	"before":   true,
+	"cursor":   true,
+	"limit":    true,
+	"offset":   true,
+	"order":    true,
+	"page":     true,
+	"per_page": true,
+	"sort":     true,
+
+	// Boolean and enum filters.
+	"active_only": true,
+	"all_users":   true,
+	"event_type":  true,
+	"hard":        true,
+	"include_all": true,
+	"protocol":    true,
+	"status":      true,
+
+	// Opaque entity identifiers (UUIDs / config group keys), not credentials.
+	"connection_id": true,
+	"database_id":   true,
+	"group_key":     true,
+	"performed_by":  true,
+	"user_id":       true,
+
+	// Time-range filters.
+	"end_time":   true,
+	"start_time": true,
+
+	// OAuth failure code — a short enumerated value ("access_denied") that is
+	// the whole reason to look at these logs. Its free-text sibling
+	// `error_description` is intentionally absent.
+	"error": true,
+}
+
+// redactQuery rewrites a raw query string, keeping the value of allowlisted
+// parameters and replacing every other value with redactedValue. Parameter
+// names are always preserved so a request stays diagnosable.
+//
+// It works on the raw string rather than url.Values so an unparseable query
+// (which url.ParseQuery would partially drop) is still redacted rather than
+// logged verbatim, and so parameter order is preserved.
+func redactQuery(raw string) string {
+	if raw == "" {
+		return ""
+	}
+
+	pairs := strings.Split(raw, "&")
+	for i, pair := range pairs {
+		name, _, hasValue := strings.Cut(pair, "=")
+
+		if loggableQueryName(name) {
+			continue
+		}
+
+		if !hasValue {
+			// A bare segment with no "=" is all name and no value, so there is
+			// no key worth preserving; it could itself be a pasted secret.
+			pairs[i] = redactedValue
+			continue
+		}
+
+		pairs[i] = name + "=" + redactedValue
+	}
+
+	return strings.Join(pairs, "&")
+}
+
+// loggableQueryName reports whether a raw (still percent-encoded) parameter
+// name is on the allowlist. A name that will not decode is never allowlisted:
+// an attacker must not be able to smuggle a value past the filter by encoding
+// the name it rides on.
+func loggableQueryName(rawName string) bool {
+	decoded, err := url.QueryUnescape(rawName)
+	if err != nil {
+		return false
+	}
+
+	return loggableQueryParams[strings.ToLower(decoded)]
 }
 
 // successResponse sends a success response.

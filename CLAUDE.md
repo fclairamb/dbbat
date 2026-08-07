@@ -1,6 +1,6 @@
 # DBBat - Database Observability Proxy
 
-A transparent database proxy for query observability, access control, and safety. Supports **PostgreSQL**, **Oracle**, **MySQL/MariaDB**, and **MongoDB**. Every query logged. Every connection tracked.
+A transparent database proxy for query observability, access control, and safety. Supports **PostgreSQL**, **Oracle**, **MySQL/MariaDB**, **MongoDB** and **Microsoft SQL Server**. Every query logged. Every connection tracked.
 
 ## Semantic Versioning
 
@@ -27,7 +27,7 @@ PR titles MUST follow the conventional commit format:
 | `ci` | CI configuration | None |
 | `chore` | Other changes (deps, tooling) | None |
 
-**Scopes** (optional): `api`, `auth`, `config`, `crypto`, `db`, `deps`, `docs`, `dump`, `grants`, `migrations`, `mongodb`, `mysql`, `oracle`, `postgresql`, `proxy`, `store`, `ui`, `release`, `ci`
+**Scopes** (optional): `api`, `auth`, `config`, `crypto`, `db`, `deps`, `docs`, `dump`, `grants`, `migrations`, `mongodb`, `mssql`, `mysql`, `oracle`, `postgresql`, `proxy`, `store`, `ui`, `release`, `ci`
 
 **Breaking Changes:** Add `!` after type/scope or include `BREAKING CHANGE:` in body for major version bumps.
 
@@ -47,6 +47,7 @@ PR titles MUST follow the conventional commit format:
   - Oracle TNS/TTC (hand-rolled) — see `docs/oracle.md`
   - MySQL/MariaDB via `go-mysql-org/go-mysql` (server + client) — see `docs/mysql.md`
   - MongoDB wire protocol (hand-rolled `OP_MSG`; BSON via `go.mongodb.org/mongo-driver/v2`) — see `docs/mongodb.md`
+  - Microsoft SQL Server TDS (hand-rolled) — see `docs/mssql.md`
 - **API**: `gin-gonic/gin` with OpenAPI 3.0 docs
 - **CLI**: `urfave/cli/v3`
 - **Config**: `knadh/koanf`
@@ -78,11 +79,12 @@ dbbat/
 │   │   ├── postgresql/      # PostgreSQL wire protocol proxy
 │   │   ├── oracle/          # Oracle TNS/TTC proxy (see docs/oracle.md)
 │   │   ├── mysql/           # MySQL/MariaDB proxy (see docs/mysql.md)
-│   │   └── mongodb/         # MongoDB wire protocol proxy (see docs/mongodb.md)
+│   │   ├── mongodb/         # MongoDB wire protocol proxy (see docs/mongodb.md)
+│   │   └── mssql/           # SQL Server TDS proxy (see docs/mssql.md)
 │   └── auth/                # OAuth provider abstraction (Slack, etc.)
 ├── front/                   # React frontend (see front/CLAUDE.md)
 ├── website/                 # Docusaurus site for dbbat.com
-├── docs/                    # Protocol-level technical notes (oracle, mysql, mongodb, dump format)
+├── docs/                    # Protocol-level technical notes (oracle, mysql, mongodb, mssql, dump format)
 ├── docker-compose.yml
 └── go.mod
 ```
@@ -112,6 +114,7 @@ make showcase         # Regenerate website/static/img/showcase/ from a live demo
 
 # Integration suites (real containers via testcontainers; `make test` skips them)
 make test-integration-mongodb      # ./internal/proxy/mongodb/...
+make test-integration-mssql        # ./internal/proxy/mssql/...  (amd64 image)
 make test-integration-mysql        # ./internal/proxy/mysql/...
 make test-integration-postgresql   # ./internal/proxy/postgresql/...
 make test-e2e-oracle               # ./internal/proxy/oracle/...
@@ -157,6 +160,7 @@ This applies even when the current task is otherwise complete — capture the fo
 | `DBB_LISTEN_ORA` | Oracle proxy listen address (default: `:1522`; empty disables) | No |
 | `DBB_LISTEN_MYSQL` | MySQL/MariaDB proxy listen address (default: `:3307`; empty disables) | No |
 | `DBB_LISTEN_MONGO` | MongoDB proxy listen address (default: `:27018`; empty disables) | No |
+| `DBB_LISTEN_MSSQL` | SQL Server (TDS) proxy listen address (default: `:1434`; empty disables). 1434/tcp is free — the SQL Server Browser that owns 1434 is UDP-only | No |
 | `DBB_LISTEN_API` | REST API listen address (default: `:4200`) | No |
 | `DBB_KEY` | Base64-encoded AES-256 encryption key | No |
 | `DBB_KEYFILE` | Path to file containing encryption key | No |
@@ -177,6 +181,10 @@ This applies even when the current task is otherwise complete — capture the fo
 | `DBB_MONGO_TLS_DISABLE` | Keep the MongoDB listener plaintext — refuse TLS termination (default: `false`) | No |
 | `DBB_MONGO_TLS_CERT_FILE` | PEM cert for MongoDB TLS termination (auto self-signed if empty) | No |
 | `DBB_MONGO_TLS_KEY_FILE` | PEM key for MongoDB TLS termination (auto-generated if empty) | No |
+| `DBB_MSSQL_TLS_DISABLE` | Keep the SQL Server listener plaintext — answer `ENCRYPT_NOT_SUP` (default: `false`) | No |
+| `DBB_MSSQL_TLS_CERT_FILE` | PEM cert for SQL Server TLS termination (auto self-signed if empty) | No |
+| `DBB_MSSQL_TLS_KEY_FILE` | PEM key for SQL Server TLS termination (auto-generated if empty) | No |
+| `DBB_MSSQL_TLS_MAX_VERSION` | Client-leg TLS ceiling: `1.2` (default) or `1.3`; anything else fails at startup. TDS encapsulates the handshake and un-wraps it the moment it completes, and at 1.3 the client finishes on a *write*, so drivers differ on whether that last flight is still framed — the proxy sniffs the first byte and follows either choice, but 1.3 is **verified against `go-mssqldb` only** (ODBC/JDBC untested), hence opt-in. The upstream leg stays at 1.2. See `docs/mssql.md` | No |
 | `DBB_SLACK_NOTIFY_BOT_TOKEN` | Slack bot user OAuth token (`xoxb-...`); empty disables notifications | No |
 | `DBB_SLACK_NOTIFY_CHANNEL` | Slack channel id or name for grant-request notifications (default: `#dbbat`) | No |
 | `DBB_SLACK_SIGNING_SECRET` | Slack app signing secret; enables Approve/Deny buttons + inbound interactions endpoint. Empty = link-through-UI (no buttons). Requires the bot token. Legacy alias `DBB_SLACK_NOTIFY_SIGNING_SECRET` is also accepted; the canonical name wins if both are set. | No |
@@ -200,7 +208,7 @@ make test  # Uses testcontainers-go for PostgreSQL
 Behind `//go:build integration`, so `make test` neither compiles nor runs them.
 
 ```bash
-make test-integration-mongodb   # and -mysql, -postgresql, plus test-e2e-oracle
+make test-integration-mongodb   # and -mysql, -postgresql, -mssql, plus test-e2e-oracle
 ```
 
 **Use the Make target, not a bare `go test -tags integration ./internal/proxy/...`.**
@@ -231,6 +239,7 @@ make showcase                       # everything
 SHOWCASE_PROJECT=video make showcase  # just the clip
 SHOWCASE_SKIP_BUILD=1 make showcase   # reuse the existing ./dbbat
 SHOWCASE_KEEP=1 make showcase         # leave the stack up to poke at
+SHOWCASE_PG_TIMEOUT=120 make showcase # give the upstream more time on a cold pull
 ```
 
 `scripts/showcase.sh` owns the lifecycle: it starts its **own** throwaway
@@ -252,6 +261,12 @@ what makes staleness visible. `.github/workflows/showcase.yml` exposes the same
 pipeline as a `workflow_dispatch` job, plus a non-blocking rot guard that runs
 the suite on `front/` pull requests with the output discarded.
 
+The homepage consumes all of it (`website/src/components/ProductShowcase/`),
+manifest caption included. It is the site's **only** screenshot set — the old
+hand-captured `website/static/img/screenshots/` is gone. The clip never carries
+an `autoplay` attribute: playback starts from an effect, and only when the
+visitor has not asked for reduced motion.
+
 ## Creating Migrations
 
 Add files to `internal/migrations/sql/`:
@@ -270,18 +285,31 @@ Client → DBBat (auth + grant check) → Target PostgreSQL
 Client → DBBat (service-name lookup, O5LOGON proxy auth) → Target Oracle
 Client → DBBat (caching_sha2_password / TLS termination) → Target MySQL/MariaDB
 Client → DBBat (SCRAM-SHA-256 or PLAIN-over-TLS, authSource lookup) → Target MongoDB
+Client → DBBat (TDS PRELOGIN + encapsulated TLS + LOGIN7, SQL auth) → Target SQL Server
 ```
 
-The same auth + grant + query-logging pipeline runs across all four protocols (`internal/proxy/shared`).
+The same auth + grant + query-logging pipeline runs across all five protocols (`internal/proxy/shared`).
 
 ### Access Control
-- Time-windowed grants (`starts_at`, `expires_at`)
+- **Every grant is an instance of a grant definition** and carries no shape of
+  its own: `POST /api/v1/grants` assigns a definition to a user + database, and
+  a grant request approval materializes the same thing. The grant row holds
+  who/where/when, revocation and `priority`; everything below lives on the
+  definition and is read through accessors on `store.AccessGrant`.
+- Time-windowed grants (`starts_at`, `expires_at`; the length is the
+  definition's `duration_seconds`)
 - Controls: `read_only`, `block_copy`, `block_ddl` (combinable; empty = full write)
 - Optional quotas: `max_query_counts`, `max_bytes_transferred`
-- Optional **approval holds**: RE2 patterns on the grant that suspend a matching
-  statement mid-flight until a second human approves it. Self-approval is always
-  rejected; a hold has no timeout. Off by default (`DBB_APPROVAL_ENABLED`) —
-  see `docs/approvals.md`
+- Optional **approval holds**: RE2 patterns on the definition that suspend a
+  matching statement mid-flight until a second human approves it. Self-approval
+  is always rejected; a hold has no timeout. Off by default
+  (`DBB_APPROVAL_ENABLED`) — see `docs/approvals.md`
+- **Definitions are immutably versioned**: an edit archives the current row
+  (`archived_at`) and inserts a successor sharing its `lineage_uid`, so a live
+  grant's behaviour never changes under it. A slug resolves to the live row.
+  **Deactivating** a definition is different from that archival — it withdraws
+  the whole lineage and fails closed at auth time; hard deletion is refused
+  (409) while anything references it.
 
 ### Security
 - User passwords: Argon2id hashed

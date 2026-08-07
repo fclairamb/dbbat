@@ -11,7 +11,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
-	"github.com/uptrace/bun/dialect/pgdialect"
 
 	"github.com/fclairamb/dbbat/internal/crypto"
 )
@@ -118,7 +117,7 @@ func (s *Store) UpdateUser(ctx context.Context, uid uuid.UUID, updates UserUpdat
 	}
 
 	if updates.Roles != nil {
-		q = q.Set("roles = ?", pgdialect.Array(updates.Roles))
+		q = q.Set("roles = ?", updates.Roles)
 	}
 
 	result, err := q.Exec(ctx)

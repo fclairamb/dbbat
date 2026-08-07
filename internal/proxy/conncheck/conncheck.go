@@ -623,6 +623,11 @@ func isDBAuthRejection(err error) bool {
 	for _, needle := range []string{
 		"password authentication failed",
 		"authentication failed",
+		// SQL Server 18456 ("Login failed for user") and 4060 ("Cannot open
+		// database requested by the login"), both of which mean the stored
+		// credentials are the problem rather than the network.
+		"login failed",
+		"cannot open database",
 		"auth failed",
 		"access denied",
 		"role \"", // 28000: role does not exist

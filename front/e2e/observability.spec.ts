@@ -290,6 +290,49 @@ test.describe("Observability Features", () => {
     ).toContainText("disable");
   });
 
+  // Test mode's seeded sample connection (seedSampleQuery in main.go) is
+  // stamped with the read-only, quota-bounded grant seedQuotaGrant creates
+  // for the admin user just before it — the same grant_uid a real proxy
+  // session would carry after authenticating under it.
+  test("connection detail shows the grant it ran under", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("connections");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const rows = authenticatedPage.locator("tbody tr");
+    if ((await rows.count()) === 0) {
+      test.skip(true, "No connection rows available in this environment");
+      return;
+    }
+
+    // The list itself carries a compact access chip derived from the same
+    // stamp, before navigating into the detail page.
+    await expect(
+      rows.first().getByTestId("grant-access-chip"),
+    ).toHaveText("R/O");
+
+    await rows.first().locator("a").first().click();
+    await expect(authenticatedPage).toHaveURL(/\/connections\/[0-9a-f-]{36}$/);
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    await expect(authenticatedPage.getByText("Grant", { exact: true })).toBeVisible();
+
+    const summary = authenticatedPage.getByTestId("connection-grant-summary");
+    await expect(summary).toBeVisible();
+    await expect(summary.getByText("Read Only")).toBeVisible();
+
+    // seedQuotaGrant sets no explicit priority, so it auto-computes to the
+    // read_only tier (store.PriorityReadOnly = 10).
+    await expect(
+      authenticatedPage.getByTestId("connection-grant-priority"),
+    ).toHaveText("10");
+
+    await expect(
+      authenticatedPage.getByTestId("connection-grant-link"),
+    ).toHaveAttribute("href", "/app/grants");
+  });
+
   test("viewer sees the plaintext leg without an unattributable warning", async ({
     authenticatedPage,
     browser,

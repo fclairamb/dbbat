@@ -40,6 +40,15 @@ const (
 	MaxApprovalPatternLength = 512
 )
 
+// MaxSampleQueries and MaxSampleQueryLength bound the pattern-authoring test
+// bench (sample_queries) an admin may save on a definition. Purely a sanity
+// cap — samples never touch the proxy hot path — but an unbounded list is
+// still an unbounded column and an unbounded validate-patterns request body.
+const (
+	MaxSampleQueries     = 32
+	MaxSampleQueryLength = 4096
+)
+
 // Approval validation errors, surfaced as 400s by the API layer.
 var (
 	// ErrTooManyApprovalPatterns is returned when a definition carries more
@@ -51,6 +60,12 @@ var (
 	// ErrApprovalPatternEmpty is returned for a blank pattern, which would
 	// match every statement — almost certainly a mistake, never a policy.
 	ErrApprovalPatternEmpty = errors.New("approval pattern must not be empty")
+	// ErrTooManySampleQueries is returned when a definition carries more than
+	// MaxSampleQueries sample queries.
+	ErrTooManySampleQueries = errors.New("too many sample queries")
+	// ErrSampleQueryTooLong is returned for a sample query over
+	// MaxSampleQueryLength characters.
+	ErrSampleQueryTooLong = errors.New("sample query too long")
 	// ErrQueryNotPending is returned when resolving a query that is not (or
 	// is no longer) in the pending state.
 	ErrQueryNotPending = errors.New("query is not pending approval")
@@ -82,11 +97,31 @@ func ValidateApprovalPatterns(patterns []string) error {
 	return nil
 }
 
+// ValidateSampleQueries bounds the count and length of a definition's sample
+// queries. Unlike approval patterns, samples are plain strings — nothing to
+// compile — so this is a sanity cap, not a correctness check. A sample that
+// fails to match a pattern is not an error at all: see
+// POST /grant-definitions/validate-patterns, which reports match/no-match
+// without failing the save.
+func ValidateSampleQueries(queries []string) error {
+	if len(queries) > MaxSampleQueries {
+		return fmt.Errorf("%w: %d > %d", ErrTooManySampleQueries, len(queries), MaxSampleQueries)
+	}
+
+	for _, q := range queries {
+		if len(q) > MaxSampleQueryLength {
+			return fmt.Errorf("%w: %d > %d", ErrSampleQueryTooLong, len(q), MaxSampleQueryLength)
+		}
+	}
+
+	return nil
+}
+
 // RequiresApproval reports whether the grant carries any approval pattern at
 // all. Cheap pre-check so the common case (no patterns) never compiles or
 // matches anything.
 func (g *AccessGrant) RequiresApproval() bool {
-	return g != nil && len(g.ApprovalPatterns) > 0
+	return g != nil && len(g.ApprovalPatterns()) > 0
 }
 
 // MayApprove reports whether a user in the given groups may resolve holds on
@@ -97,7 +132,7 @@ func (g *AccessGrant) MayApprove(userGroupUIDs []uuid.UUID) bool {
 		return false
 	}
 
-	for _, scoped := range g.ApproverGroupUIDs {
+	for _, scoped := range g.ApproverGroupUIDs() {
 		for _, owned := range userGroupUIDs {
 			if scoped == owned {
 				return true
@@ -238,11 +273,16 @@ func (s *Store) HasApproverGroups(ctx context.Context, groupUIDs []uuid.UUID) (b
 		return false, nil
 	}
 
+	// The approver groups live on the grant's definition, so this joins rather
+	// than reading a column off the grant. The definition is the exact version
+	// the grant was issued from, which is the one whose approver groups govern
+	// its holds.
 	exists, err := s.db.NewSelect().
-		Model((*AccessGrant)(nil)).
-		Where("revoked_at IS NULL").
-		Where("expires_at > NOW()").
-		Where("approver_group_uids && ?", pgdialect.Array(groupUIDs)).
+		TableExpr("access_grants AS ag").
+		Join("JOIN grant_definitions AS gd ON gd.uid = ag.grant_definition_id").
+		Where("ag.revoked_at IS NULL").
+		Where("ag.expires_at > NOW()").
+		Where("gd.approver_group_uids && ?", pgdialect.Array(groupUIDs)).
 		Exists(ctx)
 	if err != nil {
 		return false, fmt.Errorf("failed to check approver groups: %w", err)

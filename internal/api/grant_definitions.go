@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 
@@ -83,6 +84,10 @@ type CreateGrantDefinitionRequest struct {
 	Controls            []string `json:"controls"`
 	MaxQueryCounts      *int64   `json:"max_query_counts"`
 	MaxBytesTransferred *int64   `json:"max_bytes_transferred"`
+	// Priority, when supplied, is stamped verbatim on every grant
+	// materialized from this definition instead of the tier its controls
+	// would earn. null/omitted — the normal case — leaves it auto.
+	Priority *int16 `json:"priority"`
 	// AutoApprove, when true, makes grant requests against this definition
 	// skip the pending/admin-approval step and materialize the grant
 	// instantly.
@@ -99,15 +104,125 @@ type CreateGrantDefinitionRequest struct {
 	// Compiled here so a bad pattern is a 400 rather than a runtime surprise
 	// on the proxy hot path.
 	ApprovalPatterns []string `json:"approval_patterns"`
+	// SampleQueries are representative SQL statements saved alongside the
+	// patterns to validate them against — a test bench for pattern
+	// authoring. See POST /grant-definitions/validate-patterns.
+	SampleQueries []string `json:"sample_queries"`
 	// ApproverGroupUIDs lists groups whose members may resolve those holds,
 	// in addition to admins. Empty/omitted = admins only.
 	ApproverGroupUIDs []uuid.UUID `json:"approver_group_uids"`
 }
 
 // UpdateGrantDefinitionRequest is the JSON body for PATCH
-// /grant-definitions/:uid. The shape mirrors the create request — partial
-// updates aren't worth the extra complexity for this small surface.
-type UpdateGrantDefinitionRequest = CreateGrantDefinitionRequest
+// /grant-definitions/:uid. Unlike CreateGrantDefinitionRequest, every field
+// is optional and a field absent from the body is left untouched on the
+// existing definition rather than reset to its zero value. This is what
+// makes a targeted PATCH — like the auto-approve toggle, which only means
+// to flip one field — safe: it used to reuse CreateGrantDefinitionRequest
+// as a full-replace body, so any field the caller didn't round-trip (most
+// notably approval_patterns and approver_group_uids) got silently wiped.
+//
+// Slice fields (controls, group_uids, database_uids, approval_patterns,
+// approver_group_uids) distinguish "absent" from "explicitly cleared":
+// encoding/json leaves a slice field nil when its key is missing (or its
+// value is JSON null), but allocates a non-nil empty slice for a present
+// `[]`. Only a non-nil slice is applied, so an admin can still empty one of
+// these lists via PATCH without sending anything else.
+//
+// max_query_counts, max_bytes_transferred and priority are themselves
+// nullable in the domain (null means "no limit" / "auto"), so a plain
+// pointer can't tell "absent" from "explicit null" — both decode to a nil
+// pointer. Each gets a companion Clear* flag instead, mirroring
+// UpdateDatabaseRequest.ClearViaUID.
+type UpdateGrantDefinitionRequest struct {
+	Name                     *string     `json:"name"`
+	Slug                     *string     `json:"slug"`
+	Description              *string     `json:"description"`
+	DurationSeconds          *int64      `json:"duration_seconds"`
+	Controls                 []string    `json:"controls"`
+	MaxQueryCounts           *int64      `json:"max_query_counts"`
+	ClearMaxQueryCounts      bool        `json:"clear_max_query_counts"`
+	MaxBytesTransferred      *int64      `json:"max_bytes_transferred"`
+	ClearMaxBytesTransferred bool        `json:"clear_max_bytes_transferred"`
+	Priority                 *int16      `json:"priority"`
+	ClearPriority            bool        `json:"clear_priority"`
+	AutoApprove              *bool       `json:"auto_approve"`
+	GroupUIDs                []uuid.UUID `json:"group_uids"`
+	DatabaseUIDs             []uuid.UUID `json:"database_uids"`
+	ApprovalPatterns         []string    `json:"approval_patterns"`
+	SampleQueries            []string    `json:"sample_queries"`
+	ApproverGroupUIDs        []uuid.UUID `json:"approver_group_uids"`
+}
+
+// applyGrantDefinitionUpdate copies every field present in req onto def,
+// leaving fields absent from the request body untouched. See
+// UpdateGrantDefinitionRequest for how presence is detected per field kind.
+func applyGrantDefinitionUpdate(def *store.GrantDefinition, req *UpdateGrantDefinitionRequest) {
+	if req.Name != nil {
+		def.Name = *req.Name
+	}
+
+	if req.Slug != nil {
+		def.Slug = *req.Slug
+	}
+
+	if req.Description != nil {
+		def.Description = *req.Description
+	}
+
+	if req.DurationSeconds != nil {
+		def.DurationSeconds = *req.DurationSeconds
+	}
+
+	if req.Controls != nil {
+		def.Controls = req.Controls
+	}
+
+	switch {
+	case req.ClearMaxQueryCounts:
+		def.MaxQueryCounts = nil
+	case req.MaxQueryCounts != nil:
+		def.MaxQueryCounts = req.MaxQueryCounts
+	}
+
+	switch {
+	case req.ClearMaxBytesTransferred:
+		def.MaxBytesTransferred = nil
+	case req.MaxBytesTransferred != nil:
+		def.MaxBytesTransferred = req.MaxBytesTransferred
+	}
+
+	switch {
+	case req.ClearPriority:
+		def.Priority = nil
+	case req.Priority != nil:
+		def.Priority = req.Priority
+	}
+
+	if req.AutoApprove != nil {
+		def.AutoApprove = *req.AutoApprove
+	}
+
+	if req.GroupUIDs != nil {
+		def.GroupUIDs = req.GroupUIDs
+	}
+
+	if req.DatabaseUIDs != nil {
+		def.DatabaseUIDs = req.DatabaseUIDs
+	}
+
+	if req.ApprovalPatterns != nil {
+		def.ApprovalPatterns = normalizeStrings(req.ApprovalPatterns)
+	}
+
+	if req.SampleQueries != nil {
+		def.SampleQueries = normalizeStrings(req.SampleQueries)
+	}
+
+	if req.ApproverGroupUIDs != nil {
+		def.ApproverGroupUIDs = normalizeUUIDs(req.ApproverGroupUIDs)
+	}
+}
 
 func validateDefinitionRequest(req *CreateGrantDefinitionRequest) string {
 	if req.Name == "" {
@@ -177,6 +292,10 @@ func validateDefinitionRequest(req *CreateGrantDefinitionRequest) string {
 		return err.Error()
 	}
 
+	if err := store.ValidateSampleQueries(req.SampleQueries); err != nil {
+		return err.Error()
+	}
+
 	return ""
 }
 
@@ -212,10 +331,12 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		Controls:            req.Controls,
 		MaxQueryCounts:      req.MaxQueryCounts,
 		MaxBytesTransferred: req.MaxBytesTransferred,
+		Priority:            req.Priority,
 		AutoApprove:         req.AutoApprove,
 		GroupUIDs:           req.GroupUIDs,
 		DatabaseUIDs:        req.DatabaseUIDs,
 		ApprovalPatterns:    normalizeStrings(req.ApprovalPatterns),
+		SampleQueries:       normalizeStrings(req.SampleQueries),
 		ApproverGroupUIDs:   normalizeUUIDs(req.ApproverGroupUIDs),
 		CreatedBy:           currentUser.UID,
 	}
@@ -245,6 +366,7 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		"name":                 created.Name,
 		"duration_seconds":     created.DurationSeconds,
 		"controls":             created.Controls,
+		"priority":             created.Priority,
 		"auto_approve":         created.AutoApprove,
 		"group_uids":           created.GroupUIDs,
 		"database_uids":        created.DatabaseUIDs,
@@ -308,7 +430,9 @@ func (s *Server) handleListGrantDefinitions(c *gin.Context) {
 // handleGetGrantDefinition — any authenticated user. The path param accepts
 // either the definition's uid or its slug.
 func (s *Server) handleGetGrantDefinition(c *gin.Context) {
-	def, err := s.resolveGrantDefinition(c.Request.Context(), c.Param("uid"))
+	ctx := c.Request.Context()
+
+	def, err := s.resolveGrantDefinition(ctx, c.Param("uid"))
 	if err != nil {
 		if errors.Is(err, store.ErrGrantDefinitionNotFound) {
 			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
@@ -324,25 +448,14 @@ func (s *Server) handleGetGrantDefinition(c *gin.Context) {
 	currentUser := getCurrentUser(c)
 
 	if !currentUser.IsAdmin() {
-		if !def.IsActive {
-			// Hide deactivated definitions from non-admins entirely; the
-			// listing endpoint already filters them, so a direct GET should
-			// match.
-			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
-
-			return
-		}
-
-		groupUIDs, err := s.store.ListUserGroupUIDs(c.Request.Context(), currentUser.UID)
+		visible, err := s.nonAdminMayViewGrantDefinition(ctx, currentUser, def)
 		if err != nil {
-			writeInternalError(c, s.logger, err, "failed to list user groups")
+			writeInternalError(c, s.logger, err, "failed to check grant definition visibility")
 
 			return
 		}
 
-		// Out-of-scope definitions are invisible in the listing; a direct GET
-		// must not be a way around that.
-		if !def.AppliesToGroups(groupUIDs) {
+		if !visible {
 			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
 
 			return
@@ -352,8 +465,49 @@ func (s *Server) handleGetGrantDefinition(c *gin.Context) {
 	successResponse(c, def)
 }
 
+// nonAdminMayViewGrantDefinition decides whether a non-admin caller may read
+// def directly by uid.
+//
+// A caller who holds a grant issued from this exact version always may:
+// GET /grants already embeds the same definition unfiltered
+// (store.attachDefinitions), whatever def's is_active or archived_at state,
+// so a direct GET by uid must not be more restrictive than what that grant
+// response already shows. This is what keeps an archived version's shape
+// renderable for the grant pinned to it.
+//
+// Otherwise def must be the live, active, in-scope row for its lineage —
+// exactly what the listing endpoint shows — since a direct GET by uid must
+// not be a way to browse past that: not to an archived version, not to a
+// deactivated one, not to one outside the caller's group scope.
+func (s *Server) nonAdminMayViewGrantDefinition(
+	ctx context.Context, currentUser *store.User, def *store.GrantDefinition,
+) (bool, error) {
+	owns, err := s.store.UserHasGrantForDefinition(ctx, currentUser.UID, def.UID)
+	if err != nil {
+		return false, fmt.Errorf("check grant ownership: %w", err)
+	}
+
+	if owns {
+		return true, nil
+	}
+
+	if def.ArchivedAt != nil || !def.IsActive {
+		return false, nil
+	}
+
+	groupUIDs, err := s.store.ListUserGroupUIDs(ctx, currentUser.UID)
+	if err != nil {
+		return false, fmt.Errorf("list user groups: %w", err)
+	}
+
+	return def.AppliesToGroups(groupUIDs), nil
+}
+
 // handleUpdateGrantDefinition — admin-only. The path param accepts either
-// the definition's uid or its slug.
+// the definition's uid or its slug. PATCH is a genuine partial update: only
+// fields present in the body are changed (see UpdateGrantDefinitionRequest),
+// so a caller like the auto-approve toggle can flip one field without
+// round-tripping — and without risk of wiping — the rest of the definition.
 func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 	var req UpdateGrantDefinitionRequest
 
@@ -363,18 +517,6 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 		return
 	}
 
-	if msg := validateDefinitionRequest(&req); msg != "" {
-		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
-
-		return
-	}
-
-	if msg := s.validateDefinitionScope(c.Request.Context(), &req); msg != "" {
-		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
-
-		return
-	}
-
 	def, err := s.resolveGrantDefinition(c.Request.Context(), c.Param("uid"))
 	if err != nil {
 		if errors.Is(err, store.ErrGrantDefinitionNotFound) {
@@ -388,39 +530,77 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 		return
 	}
 
-	def.Name = req.Name
-	def.Slug = req.Slug
-	def.Description = req.Description
-	def.DurationSeconds = req.DurationSeconds
-	def.Controls = req.Controls
-	def.MaxQueryCounts = req.MaxQueryCounts
-	def.MaxBytesTransferred = req.MaxBytesTransferred
-	def.AutoApprove = req.AutoApprove
-	def.GroupUIDs = req.GroupUIDs
-	def.DatabaseUIDs = req.DatabaseUIDs
-	def.ApprovalPatterns = normalizeStrings(req.ApprovalPatterns)
-	def.ApproverGroupUIDs = normalizeUUIDs(req.ApproverGroupUIDs)
+	applyGrantDefinitionUpdate(def, &req)
 
-	if err := s.store.UpdateGrantDefinition(c.Request.Context(), def); err != nil {
-		if errors.Is(err, store.ErrGrantDefinitionSlugDuplicate) {
+	// Validate the merged, post-update state — same rules a full create/
+	// replace enforces — by reusing validateDefinitionRequest/
+	// validateDefinitionScope against a request built from the merged
+	// definition. This keeps validation logic in one place regardless of
+	// which fields the PATCH actually touched.
+	merged := &CreateGrantDefinitionRequest{
+		Name:                def.Name,
+		Slug:                def.Slug,
+		Description:         def.Description,
+		DurationSeconds:     def.DurationSeconds,
+		Controls:            def.Controls,
+		MaxQueryCounts:      def.MaxQueryCounts,
+		MaxBytesTransferred: def.MaxBytesTransferred,
+		Priority:            def.Priority,
+		AutoApprove:         def.AutoApprove,
+		GroupUIDs:           def.GroupUIDs,
+		DatabaseUIDs:        def.DatabaseUIDs,
+		ApprovalPatterns:    def.ApprovalPatterns,
+		SampleQueries:       def.SampleQueries,
+		ApproverGroupUIDs:   def.ApproverGroupUIDs,
+	}
+
+	if msg := validateDefinitionRequest(merged); msg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
+
+		return
+	}
+
+	if msg := s.validateDefinitionScope(c.Request.Context(), merged); msg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
+
+		return
+	}
+
+	previousUID := def.UID
+
+	updated, err := s.store.UpdateGrantDefinition(c.Request.Context(), def)
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrGrantDefinitionSlugDuplicate),
+			errors.Is(err, store.ErrGrantDefinitionDuplicate):
 			writeError(c, http.StatusConflict, ErrCodeDuplicateName, err.Error())
-
-			return
+		case errors.Is(err, store.ErrGrantDefinitionArchived):
+			writeError(c, http.StatusConflict, ErrCodeConflict,
+				"this is a superseded version of the definition; edit the current one")
+		case errors.Is(err, store.ErrGrantDefinitionNotFound):
+			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
+		default:
+			writeInternalError(c, s.logger, err, "failed to update grant definition")
 		}
-
-		writeInternalError(c, s.logger, err, "failed to update grant definition")
 
 		return
 	}
 
 	currentUser := getCurrentUser(c)
 
+	// An edit archives the row it started from and inserts a successor, so the
+	// audit trail records both uids: the version that stopped being current
+	// and the one that replaced it. Grants issued from the previous version
+	// keep behaving exactly as they did.
 	details, _ := json.Marshal(map[string]any{
-		"grant_definition_uid": def.UID,
-		"name":                 def.Name,
-		"auto_approve":         def.AutoApprove,
-		"group_uids":           def.GroupUIDs,
-		"database_uids":        def.DatabaseUIDs,
+		"grant_definition_uid":          updated.UID,
+		"previous_grant_definition_uid": previousUID,
+		"lineage_uid":                   updated.LineageUID,
+		"versioned":                     updated.UID != previousUID,
+		"name":                          updated.Name,
+		"auto_approve":                  updated.AutoApprove,
+		"group_uids":                    updated.GroupUIDs,
+		"database_uids":                 updated.DatabaseUIDs,
 	})
 
 	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
@@ -429,13 +609,25 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 		Details:     details,
 	})
 
-	successResponse(c, def)
+	successResponse(c, updated)
 }
 
-// handleDeactivateGrantDefinition — admin-only soft delete. The path param
-// accepts either the definition's uid or its slug.
+// handleDeactivateGrantDefinition — admin-only. The path param accepts either
+// the definition's uid or its slug.
+//
+// Default behavior is deactivation, which withdraws the definition across its
+// whole version lineage and **fails closed**: every grant issued from any of
+// its versions stops authorizing new connections. The response reports how
+// many grants that affected.
+//
+// `?hard=true` asks for a real deletion instead, which is refused with a 409
+// as soon as anything references the definition — a grant's shape lives on its
+// definition, so deleting one out from under a grant is not a thing that can
+// be allowed to happen.
 func (s *Server) handleDeactivateGrantDefinition(c *gin.Context) {
-	def, err := s.resolveGrantDefinition(c.Request.Context(), c.Param("uid"))
+	ctx := c.Request.Context()
+
+	def, err := s.resolveGrantDefinition(ctx, c.Param("uid"))
 	if err != nil {
 		if errors.Is(err, store.ErrGrantDefinitionNotFound) {
 			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
@@ -448,7 +640,22 @@ func (s *Server) handleDeactivateGrantDefinition(c *gin.Context) {
 		return
 	}
 
-	if err := s.store.DeactivateGrantDefinition(c.Request.Context(), def.UID); err != nil {
+	currentUser := getCurrentUser(c)
+
+	if c.Query("hard") == "true" {
+		s.hardDeleteGrantDefinition(c, def, currentUser)
+
+		return
+	}
+
+	_, activeGrants, err := s.store.CountGrantsForLineage(ctx, def.UID)
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to count grants for grant definition")
+
+		return
+	}
+
+	if err := s.store.DeactivateGrantDefinition(ctx, def.UID); err != nil {
 		if errors.Is(err, store.ErrGrantDefinitionNotFound) {
 			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
 
@@ -460,19 +667,62 @@ func (s *Server) handleDeactivateGrantDefinition(c *gin.Context) {
 		return
 	}
 
-	currentUser := getCurrentUser(c)
-
 	details, _ := json.Marshal(map[string]any{
 		"grant_definition_uid": def.UID,
+		"lineage_uid":          def.LineageUID,
+		"affected_grants":      activeGrants,
 	})
 
-	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
+	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{
 		EventType:   "grant_definition.deactivated",
 		PerformedBy: &currentUser.UID,
 		Details:     details,
 	})
 
-	successResponse(c, gin.H{"message": "grant definition deactivated"})
+	successResponse(c, gin.H{
+		"message":         "grant definition deactivated",
+		"affected_grants": activeGrants,
+	})
+}
+
+// hardDeleteGrantDefinition removes a definition and its whole version
+// history, and only ever succeeds for one that was never used.
+func (s *Server) hardDeleteGrantDefinition(c *gin.Context, def *store.GrantDefinition, currentUser *store.User) {
+	ctx := c.Request.Context()
+
+	err := s.store.DeleteGrantDefinition(ctx, def.UID)
+
+	var inUse *store.GrantDefinitionInUseError
+
+	switch {
+	case err == nil:
+	case errors.As(err, &inUse):
+		writeError(c, http.StatusConflict, ErrCodeConflict, inUse.Error()+
+			"; deactivate it instead of deleting it")
+
+		return
+	case errors.Is(err, store.ErrGrantDefinitionNotFound):
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant definition not found")
+
+		return
+	default:
+		writeInternalError(c, s.logger, err, "failed to delete grant definition")
+
+		return
+	}
+
+	details, _ := json.Marshal(map[string]any{
+		"grant_definition_uid": def.UID,
+		"lineage_uid":          def.LineageUID,
+	})
+
+	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{
+		EventType:   "grant_definition.deleted",
+		PerformedBy: &currentUser.UID,
+		Details:     details,
+	})
+
+	successResponse(c, gin.H{"message": "grant definition deleted"})
 }
 
 // normalizeStrings turns a nil slice into an empty one so bun writes '{}'

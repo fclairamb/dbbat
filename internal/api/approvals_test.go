@@ -89,8 +89,6 @@ func newApprovalFixture(t *testing.T) *approvalFixture {
 func (f *approvalFixture) call(t *testing.T, user *store.User, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 
-	gin.SetMode(gin.TestMode)
-
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 
@@ -117,6 +115,8 @@ func (f *approvalFixture) call(t *testing.T, user *store.User, path, body string
 }
 
 func TestSelfApprovalIsRejectedEvenForAdmins(t *testing.T) {
+	t.Parallel()
+
 	f := newApprovalFixture(t)
 	ctx := context.Background()
 
@@ -154,6 +154,8 @@ func TestSelfApprovalIsRejectedEvenForAdmins(t *testing.T) {
 }
 
 func TestAdminApprovesSomebodyElsesQuery(t *testing.T) {
+	t.Parallel()
+
 	f := newApprovalFixture(t)
 	ctx := context.Background()
 
@@ -206,6 +208,8 @@ func TestAdminApprovesSomebodyElsesQuery(t *testing.T) {
 }
 
 func TestDenyRecordsTheReason(t *testing.T) {
+	t.Parallel()
+
 	f := newApprovalFixture(t)
 	ctx := context.Background()
 
@@ -229,6 +233,8 @@ func TestDenyRecordsTheReason(t *testing.T) {
 }
 
 func TestSecondDecisionConflicts(t *testing.T) {
+	t.Parallel()
+
 	f := newApprovalFixture(t)
 
 	if w := f.call(t, f.admin, "/api/v1/queries/x/approve", ""); w.Code != http.StatusOK {
@@ -242,6 +248,8 @@ func TestSecondDecisionConflicts(t *testing.T) {
 }
 
 func TestNonApproverIsRefused(t *testing.T) {
+	t.Parallel()
+
 	f := newApprovalFixture(t)
 	ctx := context.Background()
 
@@ -257,7 +265,130 @@ func TestNonApproverIsRefused(t *testing.T) {
 	}
 }
 
+// TestApprovalUsesStampedGrantNotNewerOverlappingGrant covers the approval
+// half of spec 2026-08-06-03: a query held under grant A's approval_patterns
+// must stay resolvable by grant A's approver group even after a newer,
+// higher-priority grant B is created for the same user/database — the exact
+// situation where the pre-stamp code (re-resolving GetActiveGrant at approval
+// time) picked B's approver_group_uids instead of A's.
+func TestApprovalUsesStampedGrantNotNewerOverlappingGrant(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	ctx := context.Background()
+
+	requester, err := dataStore.CreateUser(ctx, "stamprequester", "x", []string{store.RoleConnector})
+	if err != nil {
+		t.Fatalf("create requester: %v", err)
+	}
+
+	admin, err := dataStore.CreateUser(ctx, "stampadmin", "x", []string{store.RoleAdmin})
+	if err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+
+	groupA, err := dataStore.CreateUserGroup(ctx, &store.UserGroup{Name: "approvers-a"})
+	if err != nil {
+		t.Fatalf("create group A: %v", err)
+	}
+	groupB, err := dataStore.CreateUserGroup(ctx, &store.UserGroup{Name: "approvers-b"})
+	if err != nil {
+		t.Fatalf("create group B: %v", err)
+	}
+
+	memberA, err := dataStore.CreateUser(ctx, "member-a", "x", []string{store.RoleConnector})
+	if err != nil {
+		t.Fatalf("create member A: %v", err)
+	}
+	if err := dataStore.AddUserToGroup(ctx, groupA.UID, memberA.UID); err != nil {
+		t.Fatalf("add member A: %v", err)
+	}
+
+	memberB, err := dataStore.CreateUser(ctx, "member-b", "x", []string{store.RoleConnector})
+	if err != nil {
+		t.Fatalf("create member B: %v", err)
+	}
+	if err := dataStore.AddUserToGroup(ctx, groupB.UID, memberB.UID); err != nil {
+		t.Fatalf("add member B: %v", err)
+	}
+
+	target, err := dataStore.CreateServer(ctx, &store.Server{
+		Name:         "stampprod",
+		Host:         "127.0.0.1",
+		Port:         5432,
+		DatabaseName: "prod",
+		Username:     "pg",
+		Password:     "secret",
+		Protocol:     store.ProtocolPostgreSQL,
+		SSLMode:      "disable",
+	}, approvalTestKey)
+	if err != nil {
+		t.Fatalf("create server: %v", err)
+	}
+
+	now := time.Now()
+
+	// Grant A: what the connection is actually stamped with, approver group A.
+	grantA := persistGrantWithShape(t, dataStore, store.GrantDefinition{
+		Controls:          []string{},
+		ApprovalPatterns:  []string{`(?i)^DELETE\s+FROM`},
+		ApproverGroupUIDs: []uuid.UUID{groupA.UID},
+	}, requester.UID, target.UID, admin.UID, now.Add(-time.Hour), now.Add(time.Hour), 0)
+
+	// Grant B: created afterwards, higher priority, overlapping window,
+	// approver group B — exactly the grant GetActiveGrant now picks.
+	persistGrantWithShape(t, dataStore, store.GrantDefinition{
+		Controls:          []string{},
+		ApprovalPatterns:  []string{`(?i)^DELETE\s+FROM`},
+		ApproverGroupUIDs: []uuid.UUID{groupB.UID},
+	}, requester.UID, target.UID, admin.UID, now.Add(-time.Hour), now.Add(2*time.Hour), store.PriorityFullWrite+10)
+
+	active, err := dataStore.GetActiveGrant(ctx, requester.UID, target.UID)
+	if err != nil {
+		t.Fatalf("GetActiveGrant() error = %v", err)
+	}
+	if active.UID == grantA.UID {
+		t.Fatal("fixture setup: GetActiveGrant must pick grant B (the higher-priority one), not A")
+	}
+
+	// The connection is stamped with grant A — the grant it actually
+	// authenticated under — not grant B.
+	conn, err := dataStore.CreateConnection(ctx, requester.UID, target.UID, "127.0.0.1", store.WithGrantUID(grantA.UID))
+	if err != nil {
+		t.Fatalf("create connection: %v", err)
+	}
+
+	query, err := dataStore.CreatePendingQuery(ctx, &store.Query{
+		ConnectionID: conn.UID,
+		SQLText:      "DELETE FROM users",
+		ExecutedAt:   time.Now(),
+	}, `(?i)^DELETE\s+FROM`)
+	if err != nil {
+		t.Fatalf("create pending query: %v", err)
+	}
+
+	f := &approvalFixture{server: server, dataStore: dataStore, requester: requester, admin: admin, query: query}
+
+	if w := f.call(t, memberB, "/api/v1/queries/x/approve", ""); w.Code != http.StatusForbidden {
+		t.Fatalf("group B member approve returned %d, want 403 (their group has nothing to do with this hold)", w.Code)
+	}
+
+	if w := f.call(t, memberA, "/api/v1/queries/x/approve", ""); w.Code != http.StatusOK {
+		t.Fatalf("group A member approve returned %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	reloaded, err := dataStore.GetQuery(ctx, query.UID)
+	if err != nil {
+		t.Fatalf("reload query: %v", err)
+	}
+	if reloaded.ApprovalStatus == nil || *reloaded.ApprovalStatus != store.ApprovalApproved {
+		t.Fatalf("status = %v, want approved", reloaded.ApprovalStatus)
+	}
+}
+
 func TestPendingListIsBackedByThePartialIndex(t *testing.T) {
+	t.Parallel()
+
 	f := newApprovalFixture(t)
 	ctx := context.Background()
 
@@ -291,6 +422,8 @@ func TestPendingListIsBackedByThePartialIndex(t *testing.T) {
 }
 
 func TestResolveQueryApprovalAsRejectsSelfApproval(t *testing.T) {
+	t.Parallel()
+
 	f := newApprovalFixture(t)
 	ctx := context.Background()
 
@@ -307,6 +440,8 @@ func TestResolveQueryApprovalAsRejectsSelfApproval(t *testing.T) {
 }
 
 func TestResolveUnknownQueryFails(t *testing.T) {
+	t.Parallel()
+
 	f := newApprovalFixture(t)
 
 	err := f.server.ResolveQueryApprovalAs(context.Background(), f.admin, uuid.New(), store.ApprovalApproved, "")

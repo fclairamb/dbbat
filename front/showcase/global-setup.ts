@@ -24,7 +24,7 @@ import {
   SERVER_NAME,
   UPSTREAM_PORT,
   WORK_DIR,
-  resolveFixedTime,
+  fixedTime,
 } from "./config";
 import {
   ShowcaseApi,
@@ -33,6 +33,7 @@ import {
   type ServerRow,
   type UserRow,
 } from "./lib/api";
+import { normaliseTimeline } from "./lib/normalise";
 import { generateTraffic, seedUpstream } from "./lib/traffic";
 import { writeState } from "./state";
 
@@ -97,19 +98,23 @@ async function connectorUid(api: ShowcaseApi): Promise<string> {
   return match.uid;
 }
 
+/**
+ * Issues the grant by instantiating the definition above. A grant carries no
+ * shape of its own — the controls, the approval patterns and the window's
+ * length all come from the definition.
+ */
 async function ensureGrant(
   api: ShowcaseApi,
+  definitionUid: string,
   userUid: string,
   serverUid: string,
 ): Promise<string> {
   const now = new Date();
   const created = await api.post<Identified>("/grants", {
+    grant_definition_id: definitionUid,
     user_id: userUid,
     database_id: serverUid,
-    controls: [],
     starts_at: new Date(now.getTime() - 60_000).toISOString(),
-    expires_at: new Date(now.getTime() + 8 * 3600_000).toISOString(),
-    approval_patterns: [APPROVAL_PATTERN],
   });
   return created.uid;
 }
@@ -131,18 +136,24 @@ export default async function globalSetup(): Promise<void> {
   const serverUid = await ensureServer(api);
   const definitionUid = await ensureDefinition(api);
   const userUid = await connectorUid(api);
-  const grantUid = await ensureGrant(api, userUid, serverUid);
+  const grantUid = await ensureGrant(api, definitionUid, userUid, serverUid);
 
   console.log("[showcase] generating proxy traffic");
   await generateTraffic();
+
+  // The traffic just ran at the real clock, and the demo history is dated from
+  // whatever UTC day this process started on. Restate both onto the fixed
+  // showcase epoch, so the pin below — a constant — is read against rows that
+  // are constants too, and a regenerated capture diffs cleanly.
+  console.log("[showcase] normalising the observability timeline");
+  await normaliseTimeline(serverUid);
 
   writeState({
     serverUid,
     definitionUid,
     connectorUid: userUid,
     grantUid,
-    // Pinned only now that every row exists, so nothing renders in the future.
-    fixedTime: resolveFixedTime().toISOString(),
+    fixedTime: fixedTime().toISOString(),
   });
 
   console.log("[showcase] scenario ready");

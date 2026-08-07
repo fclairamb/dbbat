@@ -188,8 +188,6 @@ func TestAuditDetailsFormat(t *testing.T) {
 func TestClientIP(t *testing.T) {
 	t.Parallel()
 
-	gin.SetMode(gin.TestMode)
-
 	t.Run("extracts client IP", func(t *testing.T) {
 		t.Parallel()
 		w := httptest.NewRecorder()

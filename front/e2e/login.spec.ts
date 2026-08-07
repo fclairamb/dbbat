@@ -114,4 +114,68 @@ test.describe("Login Flow", () => {
 
     expect(isOnLoginPage || showsEmptyState).toBe(true);
   });
+  // The OAuth callback hands the browser a single-use exchange code, never a
+  // session token (a token in a URL leaks into logs and history). This drives
+  // the SPA half of that handoff: an unknown code must be posted to the
+  // exchange endpoint, rejected, scrubbed from the URL, and reported.
+  test("should redeem an OAuth exchange code and refuse a stale one", async ({
+    page,
+  }) => {
+    const exchangeCalls: number[] = [];
+    page.on("response", (response) => {
+      if (response.url().includes("/api/v1/auth/oauth/exchange")) {
+        exchangeCalls.push(response.status());
+      }
+    });
+
+    await page.goto("login?code=deadbeefdeadbeefdeadbeefdeadbeef");
+    await page.waitForLoadState("networkidle");
+
+    // The code must never survive in the URL, used or not.
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("code"))
+      .toBeNull();
+
+    // The SPA asked the exchange endpoint, and was refused.
+    await expect.poll(() => exchangeCalls.length).toBeGreaterThan(0);
+    expect(exchangeCalls[0]).toBe(401);
+
+    // A refused exchange leaves the user on the login page with an
+    // explanation, not silently signed out.
+    await expect(page.getByTestId("login-error")).toBeVisible({ timeout: 5000 });
+    expect(page.url()).toContain("/app/login");
+
+    await page.screenshot({
+      path: "test-results/screenshots/login-oauth-exchange-refused.png",
+    });
+  });
+
+  // Regression guard for the session token that used to ride in the OAuth
+  // callback's redirect: no navigation of a successful login may carry a
+  // credential in its URL.
+  test("should never put a session token in the URL", async ({ page }) => {
+    const urls: string[] = [];
+    page.on("framenavigated", (frame) => {
+      if (frame === page.mainFrame()) {
+        urls.push(frame.url());
+      }
+    });
+
+    await page.goto("login");
+    await page.waitForLoadState("networkidle");
+    await page.getByTestId("login-username").fill("admin");
+    await page.getByTestId("login-password").fill("admintest");
+    await page.getByTestId("login-submit").click();
+
+    await page.waitForURL((url) => !url.pathname.includes("/login"), {
+      timeout: 10000,
+    });
+    await page.waitForLoadState("networkidle");
+
+    urls.push(page.url());
+    for (const url of urls) {
+      expect(url).not.toContain("web_");
+      expect(url).not.toContain("token=");
+    }
+  });
 });

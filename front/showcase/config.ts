@@ -26,6 +26,19 @@ export const PROXY_PORT = Number(env("SHOWCASE_PROXY_PORT", "5499"));
 /** Host port of the throwaway upstream PostgreSQL container. */
 export const UPSTREAM_PORT = Number(env("SHOWCASE_PG_PORT", "5099"));
 
+/**
+ * The showcase dbbat instance's *storage* database.
+ *
+ * The same throwaway container as the upstream (scripts/showcase.sh points
+ * DBB_DSN at it), on the `dbbat` database rather than `demo`. lib/normalise.ts
+ * is the only thing that opens it, and only to rewrite the timestamps of rows
+ * this run just produced — see normaliseTimeline().
+ */
+export const STORAGE_DSN = env(
+  "SHOWCASE_STORAGE_DSN",
+  `postgres://postgres:postgres@localhost:${UPSTREAM_PORT}/dbbat`,
+);
+
 export const BASE_URL = env(
   "SHOWCASE_BASE_URL",
   `http://localhost:${API_PORT}/app/`,
@@ -83,31 +96,52 @@ export const APPROVAL_PATTERN = "(?i)^\\s*UPDATE\\b";
 export const VIEWPORT = { width: 1280, height: 800 };
 
 /**
- * The wall clock the browser is pinned to, when the operator names one.
+ * The instant every row a capture renders is dated from.
  *
- * Returns null when SHOWCASE_FIXED_TIME is unset, in which case global-setup
- * picks the pin itself — see resolveFixedTime().
+ * A constant, not "the start of today" like demoEpoch() in main.go: that one
+ * rolls so a long-lived public demo never ages into telling an implausible
+ * story, whereas these stills are committed files whose whole point is to diff
+ * cleanly. A rolling epoch would rewrite `query-results.png`'s absolute
+ * "Executed …" line every midnight for no reason.
+ *
+ * Nothing in the run happens at this instant — the scenario is created at the
+ * real clock. lib/normalise.ts rewrites it there afterwards: the run's own
+ * rows are pinned to fixed offsets from this epoch, and the demo-seeded rows
+ * (dated from demoEpoch(), which moves) are shifted onto it wholesale so their
+ * relative spacing — "4 hours ago", "3 days ago" — survives untouched.
+ *
+ * Bumping it is a deliberate one-line change that regenerates both query
+ * stills. Nothing forces it; the dates simply age.
  */
-export function configuredFixedTime(): Date | null {
-  const explicit = process.env.SHOWCASE_FIXED_TIME;
-  return explicit ? new Date(explicit) : null;
-}
+export const SHOWCASE_EPOCH = new Date(
+  env("SHOWCASE_EPOCH", "2026-08-06T09:12:00.000Z"),
+);
 
 /**
- * Choose the clock the browser will see, called once by global-setup *after*
- * the scenario has been seeded.
+ * How far after the epoch the browser clock is pinned.
+ *
+ * Under a minute, so the run's own statements render "less than a minute ago"
+ * in the query list (date-fns formatDistanceToNow) — a session someone is
+ * still looking at, which is the story query-list.png tells.
+ */
+const FIXED_TIME_OFFSET_MS = 30_000;
+
+/**
+ * The clock the browser will see, read once by global-setup.
  *
  * Pinning matters because a capture run spans a minute or two: without it, one
  * screenshot says "less than a minute ago" and the next says "2 minutes ago"
  * for the same row, and the diff churns on every regeneration.
  *
- * The pin must land *after* the seeded data, not before it — demo data is
- * created at process start, so a pin at the run's start renders every
- * timestamp in the future ("in less than a minute"). A few seconds past the
- * end of seeding is both stable and truthful.
+ * It is a constant because every row it is read against is one too — see
+ * SHOWCASE_EPOCH and lib/normalise.ts. Override with SHOWCASE_FIXED_TIME.
  */
-export function resolveFixedTime(): Date {
-  return configuredFixedTime() ?? new Date(Date.now() + 5_000);
+export function fixedTime(): Date {
+  const explicit = process.env.SHOWCASE_FIXED_TIME;
+  if (explicit) {
+    return new Date(explicit);
+  }
+  return new Date(SHOWCASE_EPOCH.getTime() + FIXED_TIME_OFFSET_MS);
 }
 
 /**

@@ -27,6 +27,11 @@ type StreamPublisher struct {
 	userUID       uuid.UUID
 	username      string
 	databaseName  string
+
+	// approvals, when set, lets a completion event carry the outcome of the
+	// hold the statement came out of. Optional: a publisher without one simply
+	// reports no approval state, as it always did.
+	approvals *ApprovalGate
 }
 
 // NewStreamPublisher builds a publisher for one session. A nil broker yields a
@@ -49,6 +54,19 @@ func NewStreamPublisher(
 		p.userUID = user.UID
 		p.username = user.Username
 	}
+
+	return p
+}
+
+// WithApprovals links the session's approval gate so a released statement's
+// completion event carries the decision that released it. Returns the receiver
+// for chaining at construction.
+func (p *StreamPublisher) WithApprovals(gate *ApprovalGate) *StreamPublisher {
+	if p == nil {
+		return p
+	}
+
+	p.approvals = gate
 
 	return p
 }
@@ -88,7 +106,45 @@ func (p *StreamPublisher) Query(queryUID uuid.UUID, q *store.Query) {
 		data["error"] = *q.Error
 	}
 
+	p.stampApproval(data, queryUID, q)
+
 	p.broker.Publish(events.ConnectionQueriesTopic(p.connectionUID.String()), events.EventQuery, data)
+}
+
+// stampApproval carries a hold's outcome onto the released statement's
+// completion event.
+//
+// The proxy's in-memory *store.Query never learns its approval state: the row
+// was inserted as pending — and later resolved — by the approval gate, while
+// this record only tracks execution. Without this, the completion event of an
+// approved statement publishes approval_status:"" moments after the resolution
+// event published "approved", and any client folding events by query uid loses
+// the outcome it had just been told. That is exactly what made the watch
+// panel's live feed forget a statement was ever gated.
+func (p *StreamPublisher) stampApproval(data map[string]any, queryUID uuid.UUID, q *store.Query) {
+	if q.ApprovalStatus != nil {
+		return
+	}
+
+	r := p.approvals.ResolutionFor(queryUID)
+	if r == nil {
+		return
+	}
+
+	data["approval_required"] = true
+	data["approval_status"] = r.Status
+
+	if !r.At.IsZero() {
+		data["resolved_at"] = r.At
+	}
+
+	if r.Reason != "" {
+		data["resolution_reason"] = r.Reason
+	}
+
+	if resolver := resolverData(r.ByUID, r.ByName); resolver != nil {
+		data["resolved_by"] = resolver
+	}
 }
 
 // Connection announces a connection lifecycle change on the admin-only

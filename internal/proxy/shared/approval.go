@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -108,6 +109,16 @@ type ApprovalDeps struct {
 	// while a statement is parked. With no approval timeout, the LimitGuard
 	// is the one remaining server-side bound, so it must keep running.
 	PollInterval time.Duration
+	// HoldRegistered, when set, is called with the pending row's uid *after*
+	// the registry accepted the hold and *before* OnPending publishes that uid
+	// to the protocol's cancellation path.
+	//
+	// It is a test seam and nothing else: that gap — the "arm window" — is a
+	// handful of instructions wide, and the races that live in it (a cancel
+	// landing there and then losing to a human approver) cannot be reached by
+	// timing. Blocking here lets a test occupy the window deliberately. Nil in
+	// production, where it costs one nil check per hold.
+	HoldRegistered func(queryUID uuid.UUID)
 }
 
 // ApprovalGate decides whether a statement needs a human, and parks the
@@ -118,13 +129,51 @@ type ApprovalDeps struct {
 // (no-pattern) case is a nil check.
 type ApprovalGate struct {
 	deps     ApprovalDeps
-	patterns []*regexp.Regexp
-	sources  []string
+	compiled *CompiledApprovalPatterns
 
 	connectionUID uuid.UUID
 	userUID       uuid.UUID
 	username      string
 	databaseName  string
+
+	// resolved remembers the outcome of the last hold this session parked, so
+	// the statement's *completion* event can carry it — see ResolutionFor.
+	// Written by the session goroutine, read by the goroutine that persists and
+	// publishes the executed query, hence the atomic.
+	resolved atomic.Pointer[ApprovalResolution]
+}
+
+// ApprovalResolution is the terminal outcome of a hold, kept on the gate for
+// exactly as long as it takes the released statement to finish and publish.
+type ApprovalResolution struct {
+	QueryUID uuid.UUID
+	Status   string
+	ByUID    *uuid.UUID
+	ByName   string
+	Reason   string
+	At       time.Time
+}
+
+// ResolutionFor reports the outcome of a hold this session parked, but only
+// for the statement it last resolved.
+//
+// A session parks at most one statement at a time — the session goroutine is
+// blocked for the whole hold — so remembering just the most recent resolution
+// covers the completion event that immediately follows it, without the gate
+// accumulating per-query state for the lifetime of a long-lived session. A
+// miss simply means the completion event carries no approval fields, which is
+// what it did before.
+func (g *ApprovalGate) ResolutionFor(queryUID uuid.UUID) *ApprovalResolution {
+	if g == nil || queryUID == uuid.Nil {
+		return nil
+	}
+
+	r := g.resolved.Load()
+	if r == nil || r.QueryUID != queryUID {
+		return nil
+	}
+
+	return r
 }
 
 // NewApprovalGate compiles the grant's approval patterns. A gate is returned
@@ -151,19 +200,13 @@ func NewApprovalGate(deps ApprovalDeps, grant *store.Grant, connectionUID uuid.U
 		return g
 	}
 
-	for _, src := range grant.ApprovalPatterns {
-		re, err := regexp.Compile(src)
-		if err != nil {
-			if deps.Logger != nil {
-				deps.Logger.WarnContext(context.Background(), "skipping invalid approval pattern",
-					slog.String("pattern", src), slog.Any("error", err))
-			}
+	g.compiled = CompileApprovalPatterns(grant.ApprovalPatterns())
 
-			continue
+	for _, ce := range g.compiled.CompileErrors() {
+		if deps.Logger != nil {
+			deps.Logger.WarnContext(context.Background(), "skipping invalid approval pattern",
+				slog.String("pattern", ce.Pattern), slog.Any("error", ce.Err))
 		}
-
-		g.patterns = append(g.patterns, re)
-		g.sources = append(g.sources, src)
 	}
 
 	return g
@@ -171,26 +214,23 @@ func NewApprovalGate(deps ApprovalDeps, grant *store.Grant, connectionUID uuid.U
 
 // Active reports whether this gate can hold anything at all.
 func (g *ApprovalGate) Active() bool {
-	return g != nil && g.deps.Enabled && len(g.patterns) > 0
+	return g != nil && g.deps.Enabled && g.compiled.Len() > 0
 }
 
 // Match reports the first pattern the statement matches. Matching runs on the
 // same normalized SQL text the static validators use, so an operator writing a
 // pattern does not have to reason about a second normalization.
+//
+// Delegates to CompiledApprovalPatterns.Match, the same code the
+// validate-patterns API endpoint calls — so a "test patterns" panel built on
+// that endpoint reports exactly what the live gate will do, not a
+// reimplementation that can drift from it.
 func (g *ApprovalGate) Match(sql string) (string, bool) {
 	if !g.Active() {
 		return "", false
 	}
 
-	normalized := NormalizeSQL(sql)
-
-	for i, re := range g.patterns {
-		if re.MatchString(normalized) {
-			return g.sources[i], true
-		}
-	}
-
-	return "", false
+	return g.compiled.Match(sql)
 }
 
 // NormalizeSQL is the canonical normalization applied before pattern matching:
@@ -208,6 +248,120 @@ func (g *ApprovalGate) Match(sql string) (string, bool) {
 // both teach — because a pattern that misses is a hold that never happens.
 func NormalizeSQL(sql string) string {
 	return strings.TrimSpace(sql)
+}
+
+// PatternCompileEntry is the compile outcome for one approval pattern
+// source, in the order the source was given to CompileApprovalPatterns.
+// Exactly one of Regexp/Err is set: Err nil means the pattern compiled.
+type PatternCompileEntry struct {
+	Pattern string
+	Regexp  *regexp.Regexp
+	Err     error
+}
+
+// PatternCompileError names one approval pattern source that failed to
+// compile, and why. A narrower view of PatternCompileEntry for callers that
+// only care about the failures.
+type PatternCompileError struct {
+	Pattern string
+	Err     error
+}
+
+// CompiledApprovalPatterns is a set of RE2 approval-pattern sources compiled
+// once, ready to match SQL with exactly ApprovalGate.Match's semantics:
+// normalize with NormalizeSQL, then report the first pattern (in the order
+// given) that matches — patterns that failed to compile never match anything.
+//
+// This type is the single place that logic lives. NewApprovalGate uses it to
+// build the live per-session gate, and the grant-definition
+// validate-patterns API endpoint uses it to preview what that gate will do —
+// so the "test patterns" panel in the UI can never drift from proxy
+// behavior by reimplementing the match loop separately.
+type CompiledApprovalPatterns struct {
+	// entries holds one item per source, in the exact order given to
+	// CompileApprovalPatterns — index-aligned with the caller's input, which
+	// is what lets the validate-patterns API report per-pattern results
+	// without having to re-associate them by source text (sources can
+	// repeat).
+	entries []PatternCompileEntry
+}
+
+// CompileApprovalPatterns compiles every pattern source. A pattern that fails
+// to compile is recorded on its PatternCompileEntry rather than aborting the
+// batch, so one typo does not hide the compile errors — or the matches — of
+// every other pattern.
+func CompileApprovalPatterns(sources []string) *CompiledApprovalPatterns {
+	c := &CompiledApprovalPatterns{entries: make([]PatternCompileEntry, len(sources))}
+
+	for i, src := range sources {
+		re, err := regexp.Compile(src)
+		c.entries[i] = PatternCompileEntry{Pattern: src, Regexp: re, Err: err}
+	}
+
+	return c
+}
+
+// Len reports how many patterns compiled successfully.
+func (c *CompiledApprovalPatterns) Len() int {
+	if c == nil {
+		return 0
+	}
+
+	n := 0
+
+	for _, e := range c.entries {
+		if e.Err == nil {
+			n++
+		}
+	}
+
+	return n
+}
+
+// Entries reports the compile outcome of every source, in the order given to
+// CompileApprovalPatterns — one entry per source, success or failure.
+func (c *CompiledApprovalPatterns) Entries() []PatternCompileEntry {
+	if c == nil {
+		return nil
+	}
+
+	return c.entries
+}
+
+// CompileErrors reports every pattern that failed to compile, in source
+// order. Empty when every pattern compiled.
+func (c *CompiledApprovalPatterns) CompileErrors() []PatternCompileError {
+	if c == nil {
+		return nil
+	}
+
+	var errs []PatternCompileError
+
+	for _, e := range c.entries {
+		if e.Err != nil {
+			errs = append(errs, PatternCompileError{Pattern: e.Pattern, Err: e.Err})
+		}
+	}
+
+	return errs
+}
+
+// Match reports the first successfully-compiled pattern that matches sql
+// after NormalizeSQL, or false if none does.
+func (c *CompiledApprovalPatterns) Match(sql string) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+
+	normalized := NormalizeSQL(sql)
+
+	for _, e := range c.entries {
+		if e.Regexp != nil && e.Regexp.MatchString(normalized) {
+			return e.Pattern, true
+		}
+	}
+
+	return "", false
 }
 
 // HoldRequest is one parked statement.
@@ -271,6 +425,12 @@ func (g *ApprovalGate) Hold(ctx context.Context, req HoldRequest) (uuid.UUID, er
 
 	decisions, release := g.deps.Registry.Register(pending.UID)
 	defer release()
+
+	// The arm window is open from here until OnPending returns. Tests hold it
+	// open on purpose; production leaves this nil.
+	if g.deps.HoldRegistered != nil {
+		g.deps.HoldRegistered(pending.UID)
+	}
 
 	// Announce the uid to the protocol's cancellation path before blocking.
 	if req.OnPending != nil {
@@ -432,6 +592,18 @@ func (g *ApprovalGate) publishPending(ctx context.Context, pending *store.Query,
 // resolved it — every watcher should see who unblocked a query, not merely
 // that it unblocked.
 func (g *ApprovalGate) announceResolved(ctx context.Context, queryUID uuid.UUID, status string, d approval.Decision) {
+	// Remember the outcome before announcing it: an approved statement is
+	// forwarded the moment Hold returns, and its completion event has to be
+	// able to say it was approved and by whom.
+	g.resolved.Store(&ApprovalResolution{
+		QueryUID: queryUID,
+		Status:   status,
+		ByUID:    d.By,
+		ByName:   d.ByName,
+		Reason:   d.Reason,
+		At:       d.At,
+	})
+
 	data := map[string]any{
 		"query_uid":         queryUID.String(),
 		"connection_uid":    g.connectionUID.String(),
@@ -441,12 +613,7 @@ func (g *ApprovalGate) announceResolved(ctx context.Context, queryUID uuid.UUID,
 		"resolved_at":       d.At,
 	}
 
-	if d.By != nil || d.ByName != "" {
-		resolver := map[string]any{"display_name": d.ByName, "username": d.ByName}
-		if d.By != nil {
-			resolver["uid"] = d.By.String()
-		}
-
+	if resolver := resolverData(d.By, d.ByName); resolver != nil {
 		data["resolved_by"] = resolver
 	}
 
@@ -458,6 +625,23 @@ func (g *ApprovalGate) announceResolved(ctx context.Context, queryUID uuid.UUID,
 	}
 
 	g.notifyReplicas(ctx, store.NotifyChannelApprovals, events.EventApprovalResolved, queryUID)
+}
+
+// resolverData renders the human who resolved a hold for the stream payload,
+// or nil when nobody did (an abandoned hold has no approver). Shared by the
+// resolution event and the released statement's completion event so the two
+// cannot describe the same person differently.
+func resolverData(byUID *uuid.UUID, byName string) map[string]any {
+	if byUID == nil && byName == "" {
+		return nil
+	}
+
+	resolver := map[string]any{"display_name": byName, "username": byName}
+	if byUID != nil {
+		resolver["uid"] = byUID.String()
+	}
+
+	return resolver
 }
 
 // notifyReplicas is best-effort: a failed NOTIFY degrades the stream on other

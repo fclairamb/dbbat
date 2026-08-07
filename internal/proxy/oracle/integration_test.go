@@ -263,14 +263,7 @@ func TestIntegration_ProxyPassthrough(t *testing.T) {
 	}, encryptionKey)
 	require.NoError(t, err)
 
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:     user.UID,
-		DatabaseID: db.UID,
-		GrantedBy:  user.UID,
-		Controls:   []string{},
-		StartsAt:   time.Now().Add(-time.Hour),
-		ExpiresAt:  time.Now().Add(24 * time.Hour),
-	})
+	_, err = dataStore.CreateGrant(ctx, &store.Grant{UserID: user.UID, DatabaseID: db.UID, GrantedBy: user.UID, StartsAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(24 * time.Hour), Definition: &store.GrantDefinition{Controls: []string{}}})
 	require.NoError(t, err)
 
 	queryStorage := config.QueryStorageConfig{

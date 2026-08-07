@@ -81,6 +81,7 @@ type Protocol =
   | "mysql"
   | "mariadb"
   | "mongodb"
+  | "mssql"
   | "ssh";
 
 const PROTOCOL_LABEL: Record<Protocol, string> = {
@@ -89,6 +90,7 @@ const PROTOCOL_LABEL: Record<Protocol, string> = {
   mysql: "MySQL",
   mariadb: "MariaDB",
   mongodb: "MongoDB",
+  mssql: "SQL Server",
   ssh: "SSH Bastion",
 };
 
@@ -98,6 +100,7 @@ const PROTOCOL_DEFAULT_PORT: Record<Protocol, string> = {
   mysql: "3306",
   mariadb: "3306",
   mongodb: "27017",
+  mssql: "1433",
   ssh: "22",
 };
 
@@ -110,6 +113,8 @@ const PROTOCOL_BADGE_CLASS: Record<Protocol, string> = {
     "bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-400",
   mongodb:
     "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+  mssql:
+    "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400",
   ssh: "bg-slate-100 text-slate-700 dark:bg-slate-800/50 dark:text-slate-300",
 };
 
@@ -119,6 +124,7 @@ const PROTOCOL_USERNAME_PLACEHOLDER: Record<Protocol, string> = {
   mysql: "root",
   mariadb: "root",
   mongodb: "admin",
+  mssql: "sa",
   ssh: "www-data",
 };
 
@@ -541,6 +547,7 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
                 <SelectItem value="mysql">MySQL</SelectItem>
                 <SelectItem value="mariadb">MariaDB</SelectItem>
                 <SelectItem value="mongodb">MongoDB</SelectItem>
+                <SelectItem value="mssql">SQL Server</SelectItem>
                 <SelectItem value="ssh" data-testid="protocol-option-ssh">SSH Bastion</SelectItem>
               </SelectContent>
             </Select>

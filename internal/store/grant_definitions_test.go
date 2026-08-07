@@ -20,6 +20,8 @@ func createTestAdmin(t *testing.T, ctx context.Context, store *Store, suffix str
 }
 
 func TestCreateGrantDefinition(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -61,6 +63,8 @@ func TestCreateGrantDefinition(t *testing.T) {
 }
 
 func TestCreateGrantDefinition_AutoApprove(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -95,6 +99,8 @@ func TestCreateGrantDefinition_AutoApprove(t *testing.T) {
 }
 
 func TestCreateGrantDefinition_DuplicateActiveName(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -129,6 +135,8 @@ func TestCreateGrantDefinition_DuplicateActiveName(t *testing.T) {
 }
 
 func TestListGrantDefinitions_ActiveOnly(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -192,6 +200,8 @@ func TestListGrantDefinitions_ActiveOnly(t *testing.T) {
 }
 
 func TestUpdateGrantDefinition(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -207,25 +217,101 @@ func TestUpdateGrantDefinition(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	originalUID := def.UID
+
 	def.Name = "renamed"
 	def.Slug = "renamed"
 	def.DurationSeconds = 120
 
-	if err := store.UpdateGrantDefinition(ctx, def); err != nil {
+	updated, err := store.UpdateGrantDefinition(ctx, def)
+	if err != nil {
 		t.Fatalf("UpdateGrantDefinition() error = %v", err)
 	}
 
-	got, err := store.GetGrantDefinition(ctx, def.UID)
+	// An edit versions the definition: a new row carrying the change, sharing
+	// the lineage of the one it superseded.
+	if updated.UID == originalUID {
+		t.Fatal("UpdateGrantDefinition() mutated the row in place instead of versioning it")
+	}
+
+	if updated.LineageUID != def.LineageUID {
+		t.Errorf("new version lineage = %s, want %s", updated.LineageUID, def.LineageUID)
+	}
+
+	if updated.Name != "renamed" || updated.Slug != "renamed" || updated.DurationSeconds != 120 {
+		t.Errorf("got = %+v, want renamed/renamed/120", updated)
+	}
+
+	// The superseded row is still readable — grants issued from it have to be
+	// able to render their shape — but it is archived and no longer live.
+	previous, err := store.GetGrantDefinition(ctx, originalUID)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if got.Name != "renamed" || got.Slug != "renamed" || got.DurationSeconds != 120 {
-		t.Errorf("got = %+v, want renamed/renamed/120", got)
+	if previous.ArchivedAt == nil {
+		t.Error("the superseded version was not archived")
+	}
+
+	if previous.Name != "original" {
+		t.Errorf("the superseded version changed: name = %q, want %q", previous.Name, "original")
+	}
+
+	// The slug now resolves to the live version only.
+	live, err := store.GetGrantDefinitionBySlug(ctx, "renamed")
+	if err != nil {
+		t.Fatalf("GetGrantDefinitionBySlug() error = %v", err)
+	}
+
+	if live.UID != updated.UID {
+		t.Errorf("slug resolved to %s, want the live version %s", live.UID, updated.UID)
+	}
+
+	// Editing a superseded version is refused rather than forking history.
+	previous.Description = "late edit"
+
+	if _, err := store.UpdateGrantDefinition(ctx, previous); !errors.Is(err, ErrGrantDefinitionArchived) {
+		t.Fatalf("editing an archived version: err = %v, want ErrGrantDefinitionArchived", err)
+	}
+}
+
+// A PATCH that changes nothing must not litter the version history.
+func TestUpdateGrantDefinition_NoOpEditIsNotVersioned(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "noop_update")
+
+	def, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
+		Name:            "stable",
+		Slug:            "stable",
+		DurationSeconds: 60,
+		Controls:        []string{ControlReadOnly},
+		CreatedBy:       admin.UID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updated, err := store.UpdateGrantDefinition(ctx, def)
+	if err != nil {
+		t.Fatalf("UpdateGrantDefinition() error = %v", err)
+	}
+
+	if updated.UID != def.UID {
+		t.Errorf("a no-op edit created version %s, want the existing %s", updated.UID, def.UID)
+	}
+
+	if updated.ArchivedAt != nil {
+		t.Error("a no-op edit archived the live version")
 	}
 }
 
 func TestGetGrantDefinition_NotFound(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -236,6 +322,8 @@ func TestGetGrantDefinition_NotFound(t *testing.T) {
 }
 
 func TestGetGrantDefinitionBySlug(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -262,6 +350,8 @@ func TestGetGrantDefinitionBySlug(t *testing.T) {
 }
 
 func TestGetGrantDefinitionBySlug_NotFound(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -272,6 +362,8 @@ func TestGetGrantDefinitionBySlug_NotFound(t *testing.T) {
 }
 
 func TestCreateGrantDefinition_DuplicateSlug(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -300,6 +392,8 @@ func TestCreateGrantDefinition_DuplicateSlug(t *testing.T) {
 }
 
 func TestUpdateGrantDefinition_DuplicateSlug(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -326,7 +420,206 @@ func TestUpdateGrantDefinition_DuplicateSlug(t *testing.T) {
 
 	other.Slug = "taken-slug"
 
-	if err := store.UpdateGrantDefinition(ctx, other); !errors.Is(err, ErrGrantDefinitionSlugDuplicate) {
+	if _, err := store.UpdateGrantDefinition(ctx, other); !errors.Is(err, ErrGrantDefinitionSlugDuplicate) {
 		t.Fatalf("expected ErrGrantDefinitionSlugDuplicate, got %v", err)
 	}
+}
+
+// TestGrantDefinition_SampleQueriesSurviveVersioning pins the resolved-open-
+// question behavior from
+// specs/todos/2026-08-06-06-sql-control-pattern-query-templates.md:
+// sample_queries is just another column on grant_definitions, so it must
+// round-trip through both CreateGrantDefinition and, critically, through the
+// archive-and-reinsert versioning UpdateGrantDefinition performs on every
+// edit — carried forward on a no-op-shape edit is not enough, since that path
+// never versions at all.
+func TestGrantDefinition_SampleQueriesSurviveVersioning(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "sample_queries")
+
+	samples := []string{
+		"DELETE FROM users WHERE id = 1",
+		"SELECT * FROM accounts",
+	}
+
+	def, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
+		Name:             "with-samples",
+		Slug:             "with-samples",
+		DurationSeconds:  60,
+		Controls:         []string{ControlReadOnly},
+		ApprovalPatterns: []string{`(?i)^DELETE`},
+		SampleQueries:    samples,
+		CreatedBy:        admin.UID,
+	})
+	if err != nil {
+		t.Fatalf("CreateGrantDefinition() error = %v", err)
+	}
+
+	if !equalStringSlices(def.SampleQueries, samples) {
+		t.Fatalf("SampleQueries on create = %v, want %v", def.SampleQueries, samples)
+	}
+
+	fetched, err := store.GetGrantDefinition(ctx, def.UID)
+	if err != nil {
+		t.Fatalf("GetGrantDefinition() error = %v", err)
+	}
+
+	if !equalStringSlices(fetched.SampleQueries, samples) {
+		t.Fatalf("SampleQueries round-tripped through storage as %v, want %v", fetched.SampleQueries, samples)
+	}
+
+	// Editing an unrelated field forces a version bump — the archive +
+	// reinsert path — and the samples must be carried onto the successor,
+	// not dropped, since sample_queries versions along with the rest of the
+	// definition's matching config.
+	fetched.Description = "now with a description"
+
+	updated, err := store.UpdateGrantDefinition(ctx, fetched)
+	if err != nil {
+		t.Fatalf("UpdateGrantDefinition() error = %v", err)
+	}
+
+	if updated.UID == def.UID {
+		t.Fatal("expected the edit to version the definition (new uid), got the same row")
+	}
+
+	if !equalStringSlices(updated.SampleQueries, samples) {
+		t.Fatalf("SampleQueries on the new version = %v, want %v (must survive versioning)", updated.SampleQueries, samples)
+	}
+
+	// The archived predecessor must keep describing exactly the samples it
+	// was saved with — versioning must not retroactively rewrite history.
+	archived, err := store.GetGrantDefinition(ctx, def.UID)
+	if err != nil {
+		t.Fatalf("GetGrantDefinition(archived) error = %v", err)
+	}
+
+	if !equalStringSlices(archived.SampleQueries, samples) {
+		t.Fatalf("archived version SampleQueries = %v, want %v", archived.SampleQueries, samples)
+	}
+
+	// Clearing the samples on a further edit must itself version and stick —
+	// an explicit empty slice is not "leave alone".
+	updated.SampleQueries = []string{}
+	updated.Description = "samples cleared"
+
+	cleared, err := store.UpdateGrantDefinition(ctx, updated)
+	if err != nil {
+		t.Fatalf("UpdateGrantDefinition() (clearing) error = %v", err)
+	}
+
+	if len(cleared.SampleQueries) != 0 {
+		t.Fatalf("SampleQueries after clearing = %v, want empty", cleared.SampleQueries)
+	}
+}
+
+// TestGrantDefinition_PatternsStartingWithABracketSurviveStorage is the
+// regression test for the text[] read-back bug: bun's pgdialect array parser
+// treats an element starting with `(` or `[` as a range literal and splits it
+// at the matching bracket, so `(?i)^DELETE` came back as two patterns — and
+// `(?i)` on its own matches every statement, turning a targeted approval hold
+// into a hold on everything the grant runs. See internal/store/array.go.
+func TestGrantDefinition_PatternsStartingWithABracketSurviveStorage(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "bracket_patterns")
+
+	patterns := []string{`(?i)^DELETE`, `[abc]`, `(a|b)`}
+	samples := []string{`(SELECT 1)`, `[bracketed]`}
+
+	def, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
+		Name:             "bracket-patterns",
+		Slug:             "bracket-patterns",
+		DurationSeconds:  60,
+		Controls:         []string{ControlReadOnly},
+		ApprovalPatterns: patterns,
+		SampleQueries:    samples,
+		CreatedBy:        admin.UID,
+	})
+	if err != nil {
+		t.Fatalf("CreateGrantDefinition() error = %v", err)
+	}
+
+	if !equalStringSlices(def.ApprovalPatterns, patterns) {
+		t.Fatalf("ApprovalPatterns returned by the insert = %#v, want %#v", def.ApprovalPatterns, patterns)
+	}
+
+	fetched, err := store.GetGrantDefinition(ctx, def.UID)
+	if err != nil {
+		t.Fatalf("GetGrantDefinition() error = %v", err)
+	}
+
+	if len(fetched.ApprovalPatterns) != len(patterns) {
+		t.Fatalf(
+			"ApprovalPatterns read back with %d elements (%#v), want %d (%#v) — an element was split",
+			len(fetched.ApprovalPatterns), fetched.ApprovalPatterns, len(patterns), patterns,
+		)
+	}
+
+	if !equalStringSlices(fetched.ApprovalPatterns, patterns) {
+		t.Fatalf("ApprovalPatterns read back as %#v, want %#v", fetched.ApprovalPatterns, patterns)
+	}
+
+	if !equalStringSlices(fetched.SampleQueries, samples) {
+		t.Fatalf("SampleQueries read back as %#v, want %#v", fetched.SampleQueries, samples)
+	}
+
+	// A listing goes through a different query path than a by-uid fetch.
+	defs, err := store.ListGrantDefinitions(ctx, GrantDefinitionFilter{})
+	if err != nil {
+		t.Fatalf("ListGrantDefinitions() error = %v", err)
+	}
+
+	var listed *GrantDefinition
+
+	for i := range defs {
+		if defs[i].UID == def.UID {
+			listed = &defs[i]
+
+			break
+		}
+	}
+
+	if listed == nil {
+		t.Fatal("the definition is missing from ListGrantDefinitions()")
+	}
+
+	if !equalStringSlices(listed.ApprovalPatterns, patterns) {
+		t.Fatalf("ApprovalPatterns from the listing = %#v, want %#v", listed.ApprovalPatterns, patterns)
+	}
+
+	// An edit archives the row and reinserts a successor: the patterns must
+	// survive that re-encode too, which is where a read-back bug turns a
+	// display glitch into corrupted stored data.
+	listed.Description = "edited"
+
+	updated, err := store.UpdateGrantDefinition(ctx, listed)
+	if err != nil {
+		t.Fatalf("UpdateGrantDefinition() error = %v", err)
+	}
+
+	if !equalStringSlices(updated.ApprovalPatterns, patterns) {
+		t.Fatalf("ApprovalPatterns after versioning = %#v, want %#v", updated.ApprovalPatterns, patterns)
+	}
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+
+	return true
 }

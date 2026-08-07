@@ -24,6 +24,7 @@ const (
 	ProtocolPostgreSQL = "postgresql"
 	ProtocolMySQL      = "mysql"
 	ProtocolMongo      = "mongodb"
+	ProtocolMSSQL      = "mssql"
 )
 
 // ErrMissingMetadata is returned when a capture carries no dbbat session

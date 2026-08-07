@@ -25,11 +25,43 @@ jobs:
 
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
 
       - uses: golangci/golangci-lint-action@v9.3.0
         with:
           version: v2.12.2
+
+  # ===========================================================================
+  # Secrets Job - keep credentials out of the repository
+  # ===========================================================================
+  # A HAR export of an authenticated session was committed once (it carried a
+  # live web_ session token). Two guards, cheapest first: a hard refusal of
+  # capture-file extensions, then a full gitleaks scan of the pushed commits.
+  secrets:
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please-')
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0 # gitleaks scans commit history, not just the tree
+
+      # A HAR records whole requests — Authorization headers, cookies, tokens
+      # in URLs — so it is a credential file even when it looks like a
+      # debugging artifact. Same for a saved browser session or a raw cookie
+      # jar. .gitignore stops the accident locally; this stops it in CI.
+      - name: Refuse committed network captures
+        run: |
+          matches=$(git ls-files -- '*.har' '*.harfile' 'cookies.txt' 'cookies.json' || true)
+          if [ -n "$matches" ]; then
+            echo "::error::network capture / cookie files must never be committed:"
+            echo "$matches"
+            exit 1
+          fi
+
+      - uses: gitleaks/gitleaks-action@v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITLEAKS_LICENSE is only required for organization accounts.
 
   # ===========================================================================
   # Frontend Job - Build React app with Bun
@@ -91,10 +123,21 @@ jobs:
 
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
 
       - name: Run tests
         run: go test -race -coverprofile=coverage.out ./...
+
+      # The proxies' accept loop races their Shutdown only probabilistically —
+      # the WaitGroup bug fixed in ea85c3f showed up about once in a few hundred
+      # runs, so the single -race pass above would almost always have missed it.
+      # Repeat just the Start+Shutdown tests enough times to make a regression
+      # actually redden CI. ~90s for all five protocols.
+      - name: Race-stress the proxy start/shutdown path
+        run: >-
+          go test -race -count=200
+          -run 'TestServerStartAndShutdown|TestOracleServer_GracefulShutdown'
+          ./internal/proxy/...
 
       # Integration-tagged tests need live databases and so never run here, but
       # they must at least keep compiling — otherwise they rot silently until
@@ -122,7 +165,7 @@ jobs:
 
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
 
       - name: Download frontend artifacts
         uses: actions/download-artifact@v8.0.1

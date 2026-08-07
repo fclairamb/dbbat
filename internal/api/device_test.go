@@ -22,7 +22,6 @@ import (
 // consent POST additionally requires Web Session or Basic Auth (never a plain
 // API key).
 func newDeviceTestRouter(server *Server) *gin.Engine {
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 
 	router.POST("/api/v1/auth/device", server.handleDeviceAuthorization)
@@ -76,7 +75,9 @@ func pollDeviceToken(router *gin.Engine, deviceCode string) *httptest.ResponseRe
 // TestDeviceFlow_Approve exercises the full happy path: authorization request,
 // consent-page fetch by user_code, approve, token poll (delivered exactly
 // once), and confirms the minted token actually authenticates.
-func TestDeviceFlow_Approve(t *testing.T) { //nolint:paralleltest // shared database state
+func TestDeviceFlow_Approve(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	server.encryptionKey = dbTestEncryptionKey
 	router := newDeviceTestRouter(server)
@@ -126,7 +127,9 @@ func TestDeviceFlow_Approve(t *testing.T) { //nolint:paralleltest // shared data
 }
 
 // TestDeviceFlow_Deny verifies a denied request yields access_denied and no key.
-func TestDeviceFlow_Deny(t *testing.T) { //nolint:paralleltest // shared database state
+func TestDeviceFlow_Deny(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	server.encryptionKey = dbTestEncryptionKey
 	router := newDeviceTestRouter(server)
@@ -149,7 +152,9 @@ func TestDeviceFlow_Deny(t *testing.T) { //nolint:paralleltest // shared databas
 
 // TestDeviceToken_Pending verifies polling a still-pending request returns
 // authorization_pending.
-func TestDeviceToken_Pending(t *testing.T) { //nolint:paralleltest // shared database state
+func TestDeviceToken_Pending(t *testing.T) {
+	t.Parallel()
+
 	server, _ := setupTestServer(t)
 	server.encryptionKey = dbTestEncryptionKey
 	router := newDeviceTestRouter(server)
@@ -165,7 +170,9 @@ func TestDeviceToken_Pending(t *testing.T) { //nolint:paralleltest // shared dat
 
 // TestDeviceConsent_NormalizesUserCode verifies a user code typed in a
 // different case / without the dash still resolves.
-func TestDeviceConsent_NormalizesUserCode(t *testing.T) { //nolint:paralleltest // shared database state
+func TestDeviceConsent_NormalizesUserCode(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	server.encryptionKey = dbTestEncryptionKey
 	router := newDeviceTestRouter(server)
@@ -188,7 +195,9 @@ func TestDeviceConsent_NormalizesUserCode(t *testing.T) { //nolint:paralleltest 
 // TestDeviceConsent_RequiresWebSessionOrBasicAuth verifies a plain API key
 // cannot approve — only a web session or Basic Auth can, like direct API key
 // creation.
-func TestDeviceConsent_RequiresWebSessionOrBasicAuth(t *testing.T) { //nolint:paralleltest // shared database state
+func TestDeviceConsent_RequiresWebSessionOrBasicAuth(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	server.encryptionKey = dbTestEncryptionKey
 	router := newDeviceTestRouter(server)
@@ -214,7 +223,9 @@ func TestDeviceConsent_RequiresWebSessionOrBasicAuth(t *testing.T) { //nolint:pa
 
 // TestDeviceConsent_DoubleRespond verifies responding twice is rejected with a
 // conflict, not a second key.
-func TestDeviceConsent_DoubleRespond(t *testing.T) { //nolint:paralleltest // shared database state
+func TestDeviceConsent_DoubleRespond(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	server.encryptionKey = dbTestEncryptionKey
 	router := newDeviceTestRouter(server)
@@ -235,7 +246,9 @@ func TestDeviceConsent_DoubleRespond(t *testing.T) { //nolint:paralleltest // sh
 
 // TestDeviceToken_UnknownDeviceCode verifies an unknown device_code reports
 // expired_token rather than leaking whether it ever existed.
-func TestDeviceToken_UnknownDeviceCode(t *testing.T) { //nolint:paralleltest // shared database state
+func TestDeviceToken_UnknownDeviceCode(t *testing.T) {
+	t.Parallel()
+
 	server, _ := setupTestServer(t)
 	server.encryptionKey = dbTestEncryptionKey
 	router := newDeviceTestRouter(server)
@@ -248,7 +261,9 @@ func TestDeviceToken_UnknownDeviceCode(t *testing.T) { //nolint:paralleltest // 
 }
 
 // TestDeviceToken_BadGrantType verifies a wrong grant_type is rejected.
-func TestDeviceToken_BadGrantType(t *testing.T) { //nolint:paralleltest // shared database state
+func TestDeviceToken_BadGrantType(t *testing.T) {
+	t.Parallel()
+
 	server, _ := setupTestServer(t)
 	server.encryptionKey = dbTestEncryptionKey
 	router := newDeviceTestRouter(server)
@@ -267,12 +282,16 @@ func TestDeviceToken_BadGrantType(t *testing.T) { //nolint:paralleltest // share
 
 // TestDeviceAuthorization_Validation verifies the client_name bound and the
 // empty-body default.
-func TestDeviceAuthorization_Validation(t *testing.T) { //nolint:paralleltest // shared database state
+func TestDeviceAuthorization_Validation(t *testing.T) {
+	t.Parallel()
+
 	server, _ := setupTestServer(t)
 	server.encryptionKey = dbTestEncryptionKey
 	router := newDeviceTestRouter(server)
 
-	t.Run("empty body defaults client name", func(t *testing.T) { //nolint:paralleltest // shared server/router state
+	t.Run("empty body defaults client name", func(t *testing.T) {
+		t.Parallel()
+
 		w := doDeviceJSON(router, http.MethodPost, "/api/v1/auth/device", "", nil)
 		require.Equal(t, http.StatusOK, w.Code)
 		var resp DeviceAuthorizationResponse
@@ -280,7 +299,9 @@ func TestDeviceAuthorization_Validation(t *testing.T) { //nolint:paralleltest //
 		assert.NotEmpty(t, resp.DeviceCode)
 	})
 
-	t.Run("client_name too long", func(t *testing.T) { //nolint:paralleltest // shared server/router state
+	t.Run("client_name too long", func(t *testing.T) {
+		t.Parallel()
+
 		long := strings.Repeat("a", deviceClientNameMaxLength+1)
 		w := doDeviceJSON(router, http.MethodPost, "/api/v1/auth/device", "", map[string]string{"client_name": long})
 		assert.Equal(t, http.StatusBadRequest, w.Code)

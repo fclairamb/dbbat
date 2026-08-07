@@ -1,0 +1,109 @@
+.showcase {
+  padding: 4rem 0;
+  text-align: center;
+}
+
+.lead {
+  max-width: 46rem;
+  margin: 0 auto;
+  color: var(--ifm-font-color-secondary);
+}
+
+.videoFigure {
+  margin: 2rem auto 0;
+  max-width: 1280px;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+}
+
+/* The clip is 1280x800; never let it push the page sideways. */
+.video {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  background: var(--ifm-background-surface-color);
+}
+
+.video img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.videoCaption {
+  padding: 1rem;
+  background: var(--ifm-background-surface-color);
+  font-size: 0.95rem;
+  text-align: left;
+}
+
+.motionNote {
+  color: var(--ifm-font-color-secondary);
+  font-style: italic;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 2rem;
+  margin-top: 2rem;
+}
+
+.card {
+  margin: 0;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  transition:
+    transform 0.2s,
+    box-shadow 0.2s;
+}
+
+.card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+}
+
+/* The stills are 2560x1600 @2x — served at 1x CSS width. */
+.card img {
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+.card figcaption {
+  padding: 0.75rem 1rem 1rem;
+  background: var(--ifm-background-surface-color);
+  font-size: 0.9rem;
+  text-align: left;
+}
+
+.card figcaption strong {
+  display: block;
+  margin-bottom: 0.25rem;
+  color: var(--ifm-color-primary);
+}
+
+.card figcaption span {
+  color: var(--ifm-font-color-secondary);
+}
+
+.provenance {
+  margin-top: 2rem;
+  font-size: 0.85rem;
+  color: var(--ifm-font-color-secondary);
+}
+
+/* A hover lift is motion too — and the transition is decoration, not content. */
+@media (prefers-reduced-motion: reduce) {
+  .card {
+    transition: none;
+  }
+
+  .card:hover {
+    transform: none;
+  }
+}

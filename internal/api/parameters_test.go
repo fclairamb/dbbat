@@ -19,7 +19,6 @@ import (
 // routes behind the real auth + admin-gating middleware, matching the
 // production mounting in server.go.
 func setupInstanceRouter(server *Server) *gin.Engine {
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(server.authMiddleware())
 	router.GET("/api/v1/instance", server.handleGetInstance)
@@ -51,7 +50,9 @@ func getInstance(t *testing.T, router *gin.Engine, token string) map[string]any 
 // covers spec item: GET /instance must return web_ui_url in "resolved" for
 // every authenticated caller, but only expose the raw "public" block
 // (including its web_ui_url) to admins.
-func TestHandleGetInstance_WebUIURL_ResolvedForAllCallers_PublicAdminOnly(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestHandleGetInstance_WebUIURL_ResolvedForAllCallers_PublicAdminOnly(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	ctx := context.Background()
 
@@ -69,7 +70,9 @@ func TestHandleGetInstance_WebUIURL_ResolvedForAllCallers_PublicAdminOnly(t *tes
 
 	router := setupInstanceRouter(server)
 
-	t.Run("admin sees resolved and raw public web_ui_url", func(t *testing.T) { //nolint:paralleltest // shared server/router state
+	t.Run("admin sees resolved and raw public web_ui_url", func(t *testing.T) {
+		t.Parallel()
+
 		resp := getInstance(t, router, adminToken)
 
 		resolved, ok := resp["resolved"].(map[string]any)
@@ -81,7 +84,9 @@ func TestHandleGetInstance_WebUIURL_ResolvedForAllCallers_PublicAdminOnly(t *tes
 		assert.Equal(t, wantWebUIURL, public["web_ui_url"])
 	})
 
-	t.Run("non-admin sees resolved web_ui_url but no public block", func(t *testing.T) { //nolint:paralleltest // shared server/router state
+	t.Run("non-admin sees resolved web_ui_url but no public block", func(t *testing.T) {
+		t.Parallel()
+
 		resp := getInstance(t, router, connToken)
 
 		resolved, ok := resp["resolved"].(map[string]any)
@@ -96,7 +101,9 @@ func TestHandleGetInstance_WebUIURL_ResolvedForAllCallers_PublicAdminOnly(t *tes
 // TestHandleUpdateInstancePublic_WebUIURLRoundTrip covers spec item: PUT
 // /instance/public sets web_ui_url and a subsequent GET /instance reflects
 // it in both the raw public block and the resolved value.
-func TestHandleUpdateInstancePublic_WebUIURLRoundTrip(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestHandleUpdateInstancePublic_WebUIURLRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	ctx := context.Background()
 
@@ -137,7 +144,9 @@ func TestHandleUpdateInstancePublic_WebUIURLRoundTrip(t *testing.T) { //nolint:p
 // the server has a store and public.web_ui_url is set, that value wins over
 // the config.PublicURL env-var fallback. Existing tests only exercise the
 // nil-store fallback via testServer(), which never sets s.store.
-func TestPublicURLForMessage_LiveStoreOverridesConfig(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestPublicURLForMessage_LiveStoreOverridesConfig(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	ctx := context.Background()
 

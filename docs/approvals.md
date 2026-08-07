@@ -20,8 +20,9 @@ then, approval patterns on grants are inert and nothing is ever held.
 1. A statement arrives and passes every static control (`read_only`,
    `block_copy`, `block_ddl`, the protocol blocklists). Cheap deterministic
    denies stay cheap — the gate runs after them.
-2. The statement is matched against the grant's `approval_patterns` (Go RE2,
-   compiled once per session). No match ⇒ nothing changes.
+2. The statement is matched against the `approval_patterns` of the definition
+   the grant was issued from (Go RE2, compiled once per session). No match ⇒
+   nothing changes.
 3. On a match, dbbat **persists the query row immediately** with
    `approval_status = 'pending'`, so the held statement is visible in
    `/queries` and addressable by UID *while it hangs*.
@@ -87,22 +88,32 @@ polish. Two mechanisms, both in `internal/proxy/shared/watch.go`:
   resumes — never dropped, never interpreted mid-hold.
   `WatchedConn` sits *below* any TLS layer, so it parks on raw records it never
   has to decrypt.
+  The SQL Server proxy is the exception: it has no `WatchedConn` at all, and
+  keeps its client leg read by a goroutine sitting on the TDS codec *above*
+  TLS. It has to, because a TDS cancel arrives in-band on the held session's
+  own socket and a byte-level watcher below TLS would only ever see records.
+  See `docs/mssql.md`.
 - **TCP keepalive on client connections** (30 s idle / 10 s interval / 3
   probes). A hard-killed client or a dead network path never produces a FIN;
   without keepalive, "until the client disconnects" silently means *forever*.
 
 ## Cancellation while held
 
-A held query stays cancellable through each protocol's normal out-of-band path.
-The held session's own socket is blocked by definition, so these all arrive
-elsewhere:
+A held query stays cancellable through each protocol's normal cancel path. In
+every protocol but one the held session's own socket is not being interpreted,
+so the cancel has to arrive elsewhere:
 
 | Protocol | Path | Result |
 |---|---|---|
 | PostgreSQL | `CancelRequest` on a **separate TCP connection**, routed by the BackendKeyData dbbat forwarded | hold → `abandoned`; the cancel is also relayed upstream |
 | MySQL / MariaDB | `KILL [QUERY] <id>` from another connection, routed by the connection id dbbat assigned | hold → `abandoned`; the `KILL` still runs upstream |
 | MongoDB | `killOperations` | hold → `abandoned` |
+| SQL Server | `ATTENTION` **on the held connection itself** — what a driver sends on a cancelled context or a query timeout | hold → `abandoned`; the ATTENTION is *not* forwarded upstream, and the client gets the `DONE_ATTN` acknowledgement |
 | Oracle | client disconnect / session kill | hold → `abandoned` |
+
+SQL Server is in-band because TDS has no side channel: the cancel travels on the
+same socket as the statement it cancels. That is why its proxy reads the client
+leg from a goroutine of its own — see `docs/mssql.md`.
 
 ## Quotas, expiry and revocation keep running
 
@@ -121,7 +132,8 @@ silently letting the statements through.
 ## Who may approve
 
 - Any user with the **`admin`** role, plus
-- any member of a group listed in the grant's **`approver_group_uids`**.
+- any member of a group listed in **`approver_group_uids`** on the definition
+  the grant was issued from.
 
 **Self-approval is always rejected**, including for admins. Four eyes means
 four eyes; an admin who could wave their own statements through would make the
@@ -143,14 +155,19 @@ unblocked.
 ## Configuring patterns
 
 Patterns live on the **grant definition** only (no server-level patterns; that
-is a possible follow-up, deliberately out of scope). They are mirrored onto
-`AccessGrant` at materialization time, exactly as `controls` and quotas are —
-the proxy session holds only a `*store.Grant`, and admin-created grants bypass
-definitions entirely, so reading patterns off the definition at query time
-would mean a join on the hot path *and* zero coverage for direct admin grants.
+is a possible follow-up, deliberately out of scope). A grant carries no shape
+of its own: it pins the definition *version* it was issued from, and
+`store.AccessGrant`'s accessors read the patterns and approver groups back off
+that row. The proxy session still holds only a `*store.Grant` — the definition
+is attached once, at authentication, so nothing joins on the query hot path.
 
-Direct admin grants accept `approval_patterns` / `approver_group_uids` on
-`POST /api/v1/grants` for the same reason.
+Every grant comes from a definition, including one an admin assigns directly
+with `POST /api/v1/grants`, so there is no longer any grant that approval
+gating cannot reach.
+
+Because definitions are immutably versioned — an edit archives the current row
+and inserts a successor — editing a definition's patterns never changes what a
+live session is gated on. The new patterns apply to grants issued from then on.
 
 Patterns are Go `regexp` (RE2 — no catastrophic backtracking, which matters
 when the input is attacker-influenced SQL). They are compiled at
@@ -200,6 +217,52 @@ to your intent, so this is worth getting right.
   "approver_group_uids": ["…sre group uid…"]
 }
 ```
+
+### Repairing patterns split by the pre-fix storage bug
+
+Every dbbat before the fix in `internal/store/array.go` read `text[]` columns
+back through `uptrace/bun`'s PostgreSQL array parser, which treats an element
+whose first byte is `(` or `[` as a range literal and terminates it at the
+matching bracket. A pattern stored correctly as `(?i)^DELETE` therefore came
+back as **two** patterns, `(?i)` and `^DELETE` — and `(?i)` on its own is a
+regexp that matches every statement, so such a definition put a hold on *every
+query the grant ran*. It fails closed, not open, but it makes the documented
+`(?i)…` form unusable.
+
+The stored rows were only damaged if somebody **edited** the definition while
+running an affected build: the UI read the split list and wrote it straight
+back, and because definitions are immutably versioned, that saved a genuinely
+split successor row. Definitions that were never re-saved are intact and need
+nothing — upgrading is enough.
+
+Find the suspects. A leading element that is nothing but an inline-flag group
+(`(?i)`, `(?s)`, `(?im)`, …) is never something an operator would author on
+purpose, so it is a reliable fingerprint:
+
+```sql
+SELECT uid, lineage_uid, slug, archived_at, approval_patterns
+FROM grant_definitions
+WHERE EXISTS (
+  SELECT 1 FROM unnest(approval_patterns) AS p
+  WHERE p ~ '^\(\?[a-zA-Z-]+\)$'
+)
+ORDER BY slug, archived_at NULLS FIRST;
+```
+
+Repair is deliberately **manual**, and dbbat ships no migration for it. The
+split is deterministic, so re-joining `['(?i)', '^DELETE']` into
+`'(?i)^DELETE'` is unambiguous *for that row* — but a definition legitimately
+authored with two patterns, the first of which happens to be a bracketed group
+(`['(a|b)', '^DROP']`), is byte-for-byte indistinguishable from a split one. An
+automatic fix would silently rewrite correct definitions. Approval patterns are
+a security control, so re-read each row the query above returns and edit it in
+the UI (or with `PUT /api/v1/grant-definitions/{uid}`) to the patterns you
+meant. Editing versions the definition as usual, so live grants keep running
+against the version they were issued from until they are re-issued.
+
+Archived rows (`archived_at IS NOT NULL`) are history: leave them. They are
+never used to authorize anything, and rewriting them would falsify the record
+of what a past grant was actually gated on.
 
 ## Slack escalation
 
@@ -268,6 +331,14 @@ query parameter: a token in the URL leaks into access logs, proxy logs and
 `sql_text`, `executed_at`, `approval_required` and `approval_status`;
 resolution events additionally carry `resolved_by` (`{uid, username,
 display_name}`), `resolved_at` and `resolution_reason`.
+
+A released statement then produces a *third* event — the `query` event
+published once it has actually run — and that one **repeats the hold's
+outcome**, resolver included. It has to: it is the last word on that query uid,
+and a client folding events by uid would otherwise end up with a row that has
+forgotten the statement was ever gated. The proxy's in-memory record knows
+nothing about approval (the row was written by the gate, not by the session),
+so the gate remembers the hold it just resolved and the publisher stamps it on.
 
 ### Topics and authorization
 
@@ -369,6 +440,7 @@ stays correct, only the live feed goes away.
 | PostgreSQL | simple `Query`, and `Execute` (**not** `Parse`) | At Parse time the bind parameters aren't known and the SQL that ultimately runs is the portal's. Validated first — start here. |
 | MySQL / MariaDB | `COM_QUERY` / `COM_STMT_EXECUTE`, inside `runIntercepted` | go-mysql owns the wire; the hold happens before `exec()`. |
 | MongoDB | `OP_MSG` command dispatch | Matching runs against the rendered `<command> <extJSON>` text, which is what `/queries` shows. |
+| SQL Server | `SQLBatch` / `RPC`, in the client→upstream pump's hook | The one protocol whose cancel is in-band, so the client leg is read by a separate goroutine for the whole session. |
 | Oracle | `OALL8` and the v315+ piggyback exec | Oracle clients are the least forgiving about a silent connection — expect `abandoned` more often here. |
 
 ## Schema
@@ -377,8 +449,9 @@ On `queries`: `approval_status` (`null|pending|approved|denied|abandoned`),
 `approval_pattern`, `resolved_by`, `resolved_at`, `resolution_reason`, plus a
 partial index on `approval_status = 'pending'`.
 
-On `grant_definitions` and `access_grants`: `approval_patterns text[]`,
-`approver_group_uids uuid[]`.
+On `grant_definitions`: `approval_patterns text[]`, `approver_group_uids
+uuid[]`. **Not** on `access_grants` — a grant references its definition through
+`grant_definition_id` and reads both from there.
 
 ## Environment variables
 

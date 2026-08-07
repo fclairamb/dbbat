@@ -644,9 +644,7 @@ func newTestSession(accessLevel string) *Session {
 	}
 
 	return &Session{
-		grant: &store.Grant{
-			Controls: controls,
-		},
+		grant: &store.Grant{Definition: &store.GrantDefinition{Controls: controls}},
 		extendedState: &extendedQueryState{
 			preparedStatements: make(map[string]*preparedStatement),
 			portals:            make(map[string]*portalState),
@@ -658,9 +656,7 @@ func newTestSession(accessLevel string) *Session {
 // newTestSessionWithControls creates a session with the specified controls for testing.
 func newTestSessionWithControls(controls []string) *Session {
 	return &Session{
-		grant: &store.Grant{
-			Controls: controls,
-		},
+		grant: &store.Grant{Definition: &store.GrantDefinition{Controls: controls}},
 		extendedState: &extendedQueryState{
 			preparedStatements: make(map[string]*preparedStatement),
 			portals:            make(map[string]*portalState),
@@ -1126,9 +1122,11 @@ func TestHandleExecute_QuotaCheck(t *testing.T) {
 	maxQueries := int64(0) // Quota exhausted
 	s := &Session{
 		grant: &store.Grant{
-			Controls:       []string{}, // Full write access
-			MaxQueryCounts: &maxQueries,
-			QueryCount:     0,
+			QueryCount: 0,
+			Definition: &store.GrantDefinition{
+				Controls:       []string{}, // Full write access
+				MaxQueryCounts: &maxQueries,
+			},
 		},
 		extendedState: &extendedQueryState{
 			preparedStatements: map[string]*preparedStatement{"": {sql: "SELECT 1"}},

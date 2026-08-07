@@ -52,7 +52,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Plus, Ban, Key, AlertTriangle, AlertCircle } from "lucide-react";
+import { Plus, Ban, Key, AlertTriangle, AlertCircle, Copy } from "lucide-react";
 import { toast } from "sonner";
 import { formatDistanceToNow, format } from "date-fns";
 
@@ -334,6 +334,41 @@ function CreateKeyDialog({
   );
 }
 
+// EnvSnippet shows the three canonical client-side env vars (DBBAT_URL,
+// DBBAT_USER, DBBAT_API_KEY) as a single copyable block, pre-filled from the
+// current session, so a freshly created key can be dropped straight into a
+// shell without guessing variable names.
+function EnvSnippet({ snippet }: { snippet: string }) {
+  const handleCopy = () => {
+    navigator.clipboard.writeText(snippet).then(() => {
+      toast.success("Environment variables copied to clipboard");
+    });
+  };
+
+  return (
+    <div className="space-y-1">
+      <label className="text-sm font-medium">Environment variables</label>
+      <div className="relative">
+        <pre
+          data-testid="api-key-env-snippet"
+          className="rounded-md border bg-muted px-3 py-2 pr-10 font-mono text-xs whitespace-pre-wrap break-all"
+        >
+          {snippet}
+        </pre>
+        <Button
+          variant="outline"
+          size="icon"
+          className="absolute right-1.5 top-1.5 h-7 w-7"
+          onClick={handleCopy}
+          title="Copy to clipboard"
+        >
+          <Copy className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function ShowKeyDialog({
   newKey,
   onClose,
@@ -341,8 +376,14 @@ function ShowKeyDialog({
   newKey: CreateAPIKeyResponse | null;
   onClose: () => void;
 }) {
+  const { user } = useAuth();
   const connections = newKey?.connections ?? [];
   const truncated = newKey?.connections_truncated ?? false;
+  const envSnippet = [
+    `export DBBAT_URL=${window.location.origin}`,
+    `export DBBAT_USER=${user?.username ?? ""}`,
+    `export DBBAT_API_KEY=${newKey?.key ?? ""}`,
+  ].join("\n");
 
   return (
     <Dialog open={!!newKey} onOpenChange={() => onClose()}>
@@ -368,6 +409,8 @@ function ShowKeyDialog({
             value={newKey?.key ?? ""}
             toastMessage="API key copied to clipboard"
           />
+
+          <EnvSnippet snippet={envSnippet} />
 
           <div data-testid="connections-section" className="space-y-2">
             <h3 className="font-medium text-sm">Connection URLs</h3>

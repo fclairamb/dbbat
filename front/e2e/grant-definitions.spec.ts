@@ -384,3 +384,39 @@ test.describe("Grant Definition inline auto-approve toggle", () => {
     await expect(toggleAfter).toHaveAttribute("data-state", "unchecked");
   });
 });
+
+test.describe("Grant definition priority", () => {
+  test("priority is prefilled from the controls and pinned once edited", async ({
+    authenticatedPage: page,
+  }) => {
+    await page.goto(DEFS_URL);
+    await page.waitForLoadState("networkidle");
+
+    await openCreateDialog(page);
+
+    const priority = page.getByTestId("grant-definition-priority");
+    const hint = page.getByTestId("grant-definition-priority-auto-hint");
+
+    // A fresh definition has no controls: top tier.
+    await expect(priority).toHaveValue("100");
+    await expect(hint).toHaveText("auto: 100");
+
+    await page.locator("#def-block_copy").check();
+    await expect(priority).toHaveValue("50");
+
+    await page.locator("#def-read_only").check();
+    await expect(priority).toHaveValue("10");
+
+    // Editing the field pins it: further control changes leave it alone, and
+    // the hint marks it as an override.
+    await priority.fill("80");
+    await page.locator("#def-read_only").uncheck();
+    await expect(priority).toHaveValue("80");
+    await expect(hint).toHaveText("auto: 50 (overridden)");
+
+    // Reset re-links it.
+    await page.getByTestId("grant-definition-priority-reset").click();
+    await expect(priority).toHaveValue("50");
+    await expect(hint).toHaveText("auto: 50");
+  });
+});

@@ -24,6 +24,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/events"
 	"github.com/fclairamb/dbbat/internal/notify"
 	"github.com/fclairamb/dbbat/internal/proxy/mongodb"
+	"github.com/fclairamb/dbbat/internal/proxy/mssql"
 	"github.com/fclairamb/dbbat/internal/proxy/mysql"
 	"github.com/fclairamb/dbbat/internal/proxy/oracle"
 	"github.com/fclairamb/dbbat/internal/proxy/postgresql"
@@ -334,36 +335,68 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		MaxSize:    cfg.AuthCache.MaxSize,
 	})
 
-	// Start the PostgreSQL proxy server
-	proxyServer := startPostgresProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
-	proxyServer.SetDumpUploader(dumpUploader)
-
-	// Start Oracle proxy server (if configured)
-	oracleServer := startOracleProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
-	if oracleServer != nil {
-		oracleServer.SetDumpUploader(dumpUploader)
-	}
-
-	// Start MySQL proxy server (if configured)
-	mysqlServer := startMySQLProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
-	if mysqlServer != nil {
-		mysqlServer.SetDumpUploader(dumpUploader)
-	}
-
-	// Start MongoDB proxy server (if configured)
-	mongoServer := startMongoProxy(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, logger)
-	if mongoServer != nil {
-		mongoServer.SetDumpUploader(dumpUploader)
-	}
+	proxies := startProxies(ctx, cfg, dataStore, proxyAuthCache, approvalDeps, rowWriter, dumpUploader, logger)
 
 	// One retention sweep for the whole process (nil when disabled, the default).
 	sweeper := startQueryRetentionSweep(ctx, cfg, dataStore, logger)
 
 	// Draining releases parked queries first, then stops the servers.
-	servers := collectServers(approvalDrain{approvals, logger}, apiServer, proxyServer,
-		oracleServer, mysqlServer, mongoServer, rowWriter, sweeper, heartbeat, dumpUploader)
+	servers := collectServers(approvalDrain{approvals, logger}, apiServer, proxies.postgres,
+		proxies.oracle, proxies.mysql, proxies.mongo, proxies.mssql,
+		rowWriter, sweeper, heartbeat, dumpUploader)
 
 	return awaitShutdown(ctx, logger, servers...)
+}
+
+// proxySet holds the protocol listeners this process started. Every field
+// except postgres is nil when its listen address is empty.
+type proxySet struct {
+	postgres *postgresql.Server
+	oracle   *oracle.Server
+	mysql    *mysql.Server
+	mongo    *mongodb.Server
+	mssql    *mssql.Server
+}
+
+// startProxies brings up every configured protocol listener and hands each one
+// the process-wide capture uploader.
+func startProxies(
+	ctx context.Context,
+	cfg *config.Config,
+	dataStore *store.Store,
+	authCache *cache.AuthCache,
+	approvalDeps shared.ApprovalDeps,
+	rowWriter *shared.RowWriter,
+	dumpUploader *dump.Uploader,
+	logger *slog.Logger,
+) proxySet {
+	set := proxySet{
+		postgres: startPostgresProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
+		oracle:   startOracleProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
+		mysql:    startMySQLProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
+		mongo:    startMongoProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
+		mssql:    startMSSQLProxy(ctx, cfg, dataStore, authCache, approvalDeps, rowWriter, logger),
+	}
+
+	set.postgres.SetDumpUploader(dumpUploader)
+
+	if set.oracle != nil {
+		set.oracle.SetDumpUploader(dumpUploader)
+	}
+
+	if set.mysql != nil {
+		set.mysql.SetDumpUploader(dumpUploader)
+	}
+
+	if set.mongo != nil {
+		set.mongo.SetDumpUploader(dumpUploader)
+	}
+
+	if set.mssql != nil {
+		set.mssql.SetDumpUploader(dumpUploader)
+	}
+
+	return set
 }
 
 // registerAndReconcile puts this process in the instance registry and then
@@ -629,6 +662,44 @@ func startMongoProxy(
 	return srv
 }
 
+// startMSSQLProxy starts the SQL Server (TDS) proxy when a listen address is
+// configured.
+func startMSSQLProxy(
+	ctx context.Context,
+	cfg *config.Config,
+	dataStore *store.Store,
+	authCache *cache.AuthCache,
+	approvalDeps shared.ApprovalDeps,
+	rowWriter *shared.RowWriter,
+	logger *slog.Logger,
+) *mssql.Server {
+	if cfg.ListenMSSQL == "" {
+		return nil
+	}
+
+	srv, err := mssql.NewServer(dataStore, cfg.EncryptionKey, cfg.QueryStorage, cfg.Dump, authCache, cfg.MSSQL, logger)
+	if err != nil {
+		logger.ErrorContext(ctx, "SQL Server proxy init failed", slog.Any("error", err))
+		os.Exit(1)
+	}
+
+	srv.SetApprovalDeps(approvalDeps)
+	srv.SetRowWriter(rowWriter)
+
+	go func() {
+		if err := srv.Start(cfg.ListenMSSQL); err != nil {
+			logger.ErrorContext(context.Background(), "SQL Server proxy error", slog.Any("error", err))
+			os.Exit(1)
+		}
+	}()
+
+	logger.InfoContext(ctx, "SQL Server proxy started",
+		slog.String("addr", cfg.ListenMSSQL),
+		slog.Bool("tls", !cfg.MSSQL.TLS.Disable))
+
+	return srv
+}
+
 func runMigrate(ctx context.Context, flags *cliFlags) error {
 	cfg, err := loadConfigWithCLI(flags)
 	if err != nil {
@@ -800,33 +871,12 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	}
 	logger.InfoContext(ctx, "Created proxy_target database configuration")
 
-	// 5. Create write grant for connector user (empty controls = full write access)
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:     connectorUser.UID,
-		DatabaseID: targetDB.UID,
-		Controls:   []string{}, // Empty = full write access
-		GrantedBy:  adminUser.UID,
-		StartsAt:   time.Now(),
-		ExpiresAt:  time.Now().AddDate(10, 0, 0), // 10 years from now
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create write grant for connector user: %w", err)
+	// 5. Create the write and read-only grants (each an instance of a seeded
+	// grant definition — a grant has no shape of its own).
+	if err := seedTestGrants(ctx, dataStore, adminUser.UID, connectorUser.UID, viewerUser.UID, targetDB.UID); err != nil {
+		return err
 	}
-	logger.InfoContext(ctx, "Created write grant for connector user on proxy_target")
-
-	// 6. Create read-only grant for viewer user
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:     viewerUser.UID,
-		DatabaseID: targetDB.UID,
-		Controls:   []string{store.ControlReadOnly}, // Read-only access
-		GrantedBy:  adminUser.UID,
-		StartsAt:   time.Now(),
-		ExpiresAt:  time.Now().AddDate(10, 0, 0), // 10 years from now
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create read-only grant for viewer user: %w", err)
-	}
-	logger.InfoContext(ctx, "Created read-only grant for viewer user on proxy_target")
+	logger.InfoContext(ctx, "Created write and read-only grants on proxy_target")
 
 	// 6b. Create a quota-bounded grant for the admin user so the grants list
 	// has a grant with applied limits (alongside the unlimited grants above).
@@ -864,8 +914,99 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 	return nil
 }
 
+// demoEpoch is the single instant every seeded demo row is dated from: the
+// start of the current UTC day. Every seeded timestamp is expressed as an
+// offset *before* it, so nothing a demo instance renders is ever in the future,
+// whatever time of day the process was started at.
+//
+// Why a truncated-but-rolling epoch rather than a hardcoded constant
+// (2026-01-15T09:00:00Z, as the spec sketched)? demo.dbbat.com is public and
+// long-lived, and demo mode re-seeds from scratch on every start. A hardcoded
+// epoch is byte-stable forever but ages with no forcing function to bump it —
+// within a year the demo would greet visitors with a proxy "set up 18 months
+// ago" whose newest query ran "14 months ago". Truncating to the UTC day keeps
+// every date identical for the whole of a day (so a same-day showcase
+// regeneration diffs cleanly, and a *running* demo instance never shifts a
+// date under a visitor), while the story it tells stays plausible forever.
+func demoEpoch() time.Time {
+	return time.Now().UTC().Truncate(24 * time.Hour)
+}
+
+// demoGrantExpiry is when the seeded grants run out. It is an absolute instant
+// like everything else here — not `time.Now().AddDate(...)` — but derived from
+// the epoch, which keeps it both stable for the day and, at ten years out,
+// comfortably clear of the real clock. A grant seeded with an expiry in the
+// past is not a cosmetic problem: every demo connection would be refused.
+func demoGrantExpiry(epoch time.Time) time.Time {
+	return epoch.AddDate(10, 0, 0)
+}
+
+// backdate rewrites timestamp columns on an already-inserted row.
+//
+// The store's Create* helpers stamp created_at/updated_at with time.Now()
+// themselves and take no creation time, so seeding at absolute dates means
+// fixing them up right after the insert. Verified to round-trip: these are
+// plain columns, not database defaults that would be re-applied.
+func backdate(
+	ctx context.Context,
+	dataStore *store.Store,
+	model any,
+	uid uuid.UUID,
+	at time.Time,
+	columns ...string,
+) error {
+	query := dataStore.DB().NewUpdate().Model(model).Where("uid = ?", uid)
+	for _, column := range columns {
+		query = query.Set(column+" = ?", at)
+	}
+
+	if _, err := query.Exec(ctx); err != nil {
+		return fmt.Errorf("failed to backdate %v: %w", columns, err)
+	}
+
+	return nil
+}
+
+// seedDemoUser creates one demo user and dates the row.
+//
+// The password is the username — that is the documented demo convention — and
+// it is written a second time through UpdateUser so the row counts as
+// "password already changed" and the account can log in without the
+// first-login flow.
+func seedDemoUser(
+	ctx context.Context,
+	dataStore *store.Store,
+	username string,
+	roles []string,
+	createdAt time.Time,
+) (*store.User, error) {
+	passwordHash, err := crypto.HashPassword(username)
+	if err != nil {
+		return nil, fmt.Errorf("failed to hash %s password: %w", username, err)
+	}
+
+	user, err := dataStore.CreateUser(ctx, username, passwordHash, roles)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create %s user: %w", username, err)
+	}
+
+	if err := dataStore.UpdateUser(ctx, user.UID, store.UserUpdate{PasswordHash: &passwordHash}); err != nil {
+		return nil, fmt.Errorf("failed to mark %s password as changed: %w", username, err)
+	}
+
+	if err := backdate(ctx, dataStore, (*store.User)(nil), user.UID, createdAt,
+		"created_at", "updated_at", "password_changed_at"); err != nil {
+		return nil, err
+	}
+
+	return user, nil
+}
+
 func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.Config, logger *slog.Logger) error {
 	logger.InfoContext(ctx, "Demo mode: provisioning demo data...")
+
+	// Everything below is dated from this one instant — see demoEpoch().
+	epoch := demoEpoch()
 
 	// Get demo target configuration
 	demoTarget := cfg.GetDemoTarget()
@@ -896,43 +1037,27 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	if err != nil {
 		return fmt.Errorf("failed to update admin password: %w", err)
 	}
+	// The admin row was inserted by EnsureDefaultAdmin at process start; date it
+	// like the rest of the story — the account that set the proxy up.
+	if err := backdate(ctx, dataStore, (*store.User)(nil), adminUser.UID,
+		epoch.AddDate(0, 0, -30), "created_at", "updated_at", "password_changed_at"); err != nil {
+		return err
+	}
 	logger.InfoContext(ctx, "Marked admin password as changed (username: admin, password: admin)")
 
 	// 2. Create viewer user (viewer role only)
-	viewerPasswordHash, err := crypto.HashPassword("viewer")
+	viewerUser, err := seedDemoUser(ctx, dataStore,
+		"viewer", []string{store.RoleViewer}, epoch.AddDate(0, 0, -28))
 	if err != nil {
-		return fmt.Errorf("failed to hash viewer password: %w", err)
-	}
-
-	viewerUser, err := dataStore.CreateUser(ctx, "viewer", viewerPasswordHash, []string{store.RoleViewer})
-	if err != nil {
-		return fmt.Errorf("failed to create viewer user: %w", err)
-	}
-	// Mark password as changed so the user can log in immediately
-	err = dataStore.UpdateUser(ctx, viewerUser.UID, store.UserUpdate{
-		PasswordHash: &viewerPasswordHash,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to mark viewer password as changed: %w", err)
+		return err
 	}
 	logger.InfoContext(ctx, "Created viewer user (username: viewer, password: viewer)")
 
 	// 3. Create connector user (connector role only)
-	connectorPasswordHash, err := crypto.HashPassword("connector")
+	connectorUser, err := seedDemoUser(ctx, dataStore,
+		"connector", []string{store.RoleConnector}, epoch.AddDate(0, 0, -28).Add(3*time.Hour))
 	if err != nil {
-		return fmt.Errorf("failed to hash connector password: %w", err)
-	}
-
-	connectorUser, err := dataStore.CreateUser(ctx, "connector", connectorPasswordHash, []string{store.RoleConnector})
-	if err != nil {
-		return fmt.Errorf("failed to create connector user: %w", err)
-	}
-	// Mark password as changed so the user can log in immediately
-	err = dataStore.UpdateUser(ctx, connectorUser.UID, store.UserUpdate{
-		PasswordHash: &connectorPasswordHash,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to mark connector password as changed: %w", err)
+		return err
 	}
 	logger.InfoContext(ctx, "Created connector user (username: connector, password: connector)")
 
@@ -951,37 +1076,326 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 	if err != nil {
 		return fmt.Errorf("failed to create demo_db database config: %w", err)
 	}
+	if err := backdate(ctx, dataStore, (*store.Server)(nil), demoDB.UID,
+		epoch.AddDate(0, 0, -27), "created_at", "updated_at"); err != nil {
+		return err
+	}
 	logger.InfoContext(ctx, "Created demo_db database configuration")
 
-	// 5. Create write grant for connector user (empty controls = full write access)
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:     connectorUser.UID,
-		DatabaseID: demoDB.UID,
-		Controls:   []string{}, // Empty = full write access
-		GrantedBy:  adminUser.UID,
-		StartsAt:   time.Now(),
-		ExpiresAt:  time.Now().AddDate(10, 0, 0), // 10 years from now
-	})
+	// 5. Define the two shapes the demo hands out, then grant the connector
+	// full write access and the viewer read-only, both dated from the epoch.
+	demoWriteDef, demoReadOnlyDef, err := seedDemoGrantDefinitions(ctx, dataStore, adminUser.UID)
 	if err != nil {
-		return fmt.Errorf("failed to create write grant for connector user: %w", err)
+		return err
+	}
+
+	if err := seedDemoGrant(ctx, dataStore, demoGrantSeed{
+		userID:     connectorUser.UID,
+		databaseID: demoDB.UID,
+		grantedBy:  adminUser.UID,
+		definition: demoWriteDef,
+		grantedAt:  epoch.AddDate(0, 0, -26),
+		expiresAt:  demoGrantExpiry(epoch),
+	}); err != nil {
+		return err
 	}
 	logger.InfoContext(ctx, "Created write grant for connector user on demo_db")
 
 	// 6. Create read-only grant for viewer user
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:     viewerUser.UID,
-		DatabaseID: demoDB.UID,
-		Controls:   []string{store.ControlReadOnly}, // Read-only access
-		GrantedBy:  adminUser.UID,
-		StartsAt:   time.Now(),
-		ExpiresAt:  time.Now().AddDate(10, 0, 0), // 10 years from now
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create read-only grant for viewer user: %w", err)
+	if err := seedDemoGrant(ctx, dataStore, demoGrantSeed{
+		userID:     viewerUser.UID,
+		databaseID: demoDB.UID,
+		grantedBy:  adminUser.UID,
+		definition: demoReadOnlyDef,
+		grantedAt:  epoch.AddDate(0, 0, -25),
+		expiresAt:  demoGrantExpiry(epoch),
+	}); err != nil {
+		return err
 	}
 	logger.InfoContext(ctx, "Created read-only grant for viewer user on demo_db")
 
+	// 7. Seed a spread of query history so the observability pages open on a
+	// plausible timeline instead of an empty table.
+	if err := seedDemoHistory(ctx, dataStore, epoch, demoDB.UID, map[string]uuid.UUID{
+		"admin":     adminUser.UID,
+		"viewer":    viewerUser.UID,
+		"connector": connectorUser.UID,
+	}); err != nil {
+		return err
+	}
+	logger.InfoContext(ctx, "Seeded demo query history on demo_db")
+
 	logger.InfoContext(ctx, "Demo data provisioning complete")
+	return nil
+}
+
+// seedDemoGrantDefinitions creates the full-write and read-only shapes the
+// demo data hands out.
+func seedDemoGrantDefinitions(
+	ctx context.Context,
+	dataStore *store.Store,
+	adminUID uuid.UUID,
+) (*store.GrantDefinition, *store.GrantDefinition, error) {
+	const thirtyDays = int64(30 * 24 * 3600)
+
+	writeDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:            "Full write (demo)",
+		Slug:            "demo-full-write",
+		Description:     "Unrestricted access, seeded in demo mode.",
+		DurationSeconds: thirtyDays,
+		Controls:        []string{},
+		CreatedBy:       adminUID,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create demo write grant definition: %w", err)
+	}
+
+	readOnlyDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:            "Read only (demo)",
+		Slug:            "demo-read-only",
+		Description:     "Read-only access, seeded in demo mode.",
+		DurationSeconds: thirtyDays,
+		Controls:        []string{store.ControlReadOnly},
+		CreatedBy:       adminUID,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create demo read-only grant definition: %w", err)
+	}
+
+	return writeDef, readOnlyDef, nil
+}
+
+// demoGrantSeed describes one seeded demo grant.
+type demoGrantSeed struct {
+	userID     uuid.UUID
+	databaseID uuid.UUID
+	grantedBy  uuid.UUID
+	definition *store.GrantDefinition
+	grantedAt  time.Time
+	expiresAt  time.Time
+}
+
+// seedGrantFromDefinition materializes a definition into a grant with an
+// explicit window. BuildGrantFromDefinition derives the window from the
+// definition's duration; seeded data wants absolute dates instead, so the
+// expiry is overridden afterwards. The shape still comes from the definition
+// — there is no other way to give a grant one.
+func seedGrantFromDefinition(
+	ctx context.Context,
+	dataStore *store.Store,
+	def *store.GrantDefinition,
+	userID, databaseID, grantedBy uuid.UUID,
+	startsAt, expiresAt time.Time,
+) (*store.Grant, error) {
+	grant := store.BuildGrantFromDefinition(def, userID, databaseID, grantedBy, startsAt)
+	grant.ExpiresAt = expiresAt
+
+	created, err := dataStore.CreateGrant(ctx, grant)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create grant from definition %q: %w", def.Slug, err)
+	}
+
+	return created, nil
+}
+
+// seedDemoGrant creates a grant whose whole timeline — granted, starts,
+// expires — is absolute. CreateGrant stamps created_at with time.Now(), so it
+// is rewritten right after the insert.
+func seedDemoGrant(ctx context.Context, dataStore *store.Store, seed demoGrantSeed) error {
+	grant, err := seedGrantFromDefinition(ctx, dataStore, seed.definition,
+		seed.userID, seed.databaseID, seed.grantedBy, seed.grantedAt, seed.expiresAt)
+	if err != nil {
+		return fmt.Errorf("failed to create demo grant: %w", err)
+	}
+
+	return backdate(ctx, dataStore, (*store.AccessGrant)(nil), grant.UID, seed.grantedAt, "created_at")
+}
+
+// demoSession is one seeded connection: who opened it, when (as an offset
+// *before* the epoch), and what they ran on it.
+type demoSession struct {
+	user      string
+	sourceIP  string
+	openedAgo time.Duration
+	// bytes is what the session is recorded as having transferred. Made up, but
+	// in proportion to the rows its statements returned.
+	bytes   int64
+	queries []demoQuery
+}
+
+// demoQuery is one statement inside a demoSession, offset from the moment the
+// session was opened.
+type demoQuery struct {
+	afterOpen  time.Duration
+	sql        string
+	durationMs float64
+	rows       int64
+}
+
+// demoSessions is the history a demo instance starts life with: four sessions
+// spread over the five days before the epoch, so the queries list shows a
+// timeline ("3 days ago", "yesterday", "this morning") rather than a handful of
+// rows from the same second.
+//
+// The SQL deliberately avoids the showcase's marker statement
+// (`FROM customers ORDER BY mrr_eur`, see front/showcase/screenshots.spec.ts)
+// so a seeded row can never be mistaken for the one produced by real traffic.
+var demoSessions = []demoSession{
+	{
+		user:      "connector",
+		sourceIP:  "10.42.7.19",
+		openedAgo: 5 * 24 * time.Hour,
+		bytes:     184_320,
+		queries: []demoQuery{
+			{afterOpen: 2 * time.Second, sql: "SELECT COUNT(*) FROM invoices WHERE issued_on >= DATE '2026-01-01'", durationMs: 4.118, rows: 1},
+			{afterOpen: 47 * time.Second, sql: "UPDATE invoices SET status = 'settled' WHERE payment_reference = 'PR-88213'", durationMs: 12.905, rows: 1},
+			{afterOpen: 3 * time.Minute, sql: "SELECT invoice_id, amount_eur, status FROM invoices WHERE status = 'overdue' ORDER BY amount_eur DESC LIMIT 50", durationMs: 8.442, rows: 50},
+		},
+	},
+	{
+		user:      "viewer",
+		sourceIP:  "10.42.7.83",
+		openedAgo: 3 * 24 * time.Hour,
+		bytes:     51_200,
+		queries: []demoQuery{
+			{afterOpen: time.Second, sql: "SELECT region, SUM(amount_eur) AS total FROM invoices GROUP BY region ORDER BY total DESC", durationMs: 21.674, rows: 6},
+			{afterOpen: 90 * time.Second, sql: "SELECT plan, COUNT(*) FROM subscriptions GROUP BY plan", durationMs: 3.201, rows: 4},
+		},
+	},
+	{
+		user:      "connector",
+		sourceIP:  "10.42.7.19",
+		openedAgo: 27 * time.Hour,
+		bytes:     9_216,
+		queries: []demoQuery{
+			{afterOpen: 2 * time.Second, sql: "INSERT INTO shipments (order_ref, carrier, dispatched_at) VALUES ('OR-40218', 'meridian-freight', now())", durationMs: 6.773, rows: 1},
+			{afterOpen: 11 * time.Second, sql: "SELECT order_ref, carrier, dispatched_at FROM shipments ORDER BY dispatched_at DESC LIMIT 20", durationMs: 2.958, rows: 20},
+		},
+	},
+	{
+		user:      "admin",
+		sourceIP:  "10.42.9.4",
+		openedAgo: 4 * time.Hour,
+		bytes:     2_048,
+		queries: []demoQuery{
+			{afterOpen: 3 * time.Second, sql: "SELECT relname, n_live_tup FROM pg_stat_user_tables ORDER BY n_live_tup DESC LIMIT 10", durationMs: 1.884, rows: 10},
+		},
+	},
+}
+
+// errUnknownDemoUser guards demoSessions against naming a user the seeding
+// never created.
+var errUnknownDemoUser = errors.New("demo history references an unknown user")
+
+// seedDemoHistory records demoSessions as closed connections carrying their
+// statements, all dated from the epoch.
+//
+// It writes the connection's timestamps and counters itself rather than going
+// through CreateConnection/CloseConnection: those stamp time.Now(), which is
+// the whole thing this seeding is trying to avoid.
+func seedDemoHistory(
+	ctx context.Context,
+	dataStore *store.Store,
+	epoch time.Time,
+	databaseID uuid.UUID,
+	users map[string]uuid.UUID,
+) error {
+	for _, session := range demoSessions {
+		userID, ok := users[session.user]
+		if !ok {
+			return fmt.Errorf("%w: %q", errUnknownDemoUser, session.user)
+		}
+
+		conn, err := dataStore.CreateConnection(ctx, userID, databaseID, session.sourceIP)
+		if err != nil {
+			return fmt.Errorf("failed to create demo connection: %w", err)
+		}
+
+		openedAt := epoch.Add(-session.openedAgo)
+		lastActivityAt := openedAt
+
+		for _, query := range session.queries {
+			executedAt := openedAt.Add(query.afterOpen)
+			if executedAt.After(lastActivityAt) {
+				lastActivityAt = executedAt
+			}
+
+			durationMs := query.durationMs
+			rowsAffected := query.rows
+			if _, err := dataStore.CreateQuery(ctx, &store.Query{
+				ConnectionID: conn.UID,
+				SQLText:      query.sql,
+				ExecutedAt:   executedAt,
+				DurationMs:   &durationMs,
+				RowsAffected: &rowsAffected,
+			}); err != nil {
+				return fmt.Errorf("failed to create demo query: %w", err)
+			}
+		}
+
+		// Closed a minute after the last statement: an idle session left open
+		// forever would show up as "active" on a demo nobody is connected to.
+		disconnectedAt := lastActivityAt.Add(time.Minute)
+		if _, err := dataStore.DB().NewUpdate().
+			Model((*store.Connection)(nil)).
+			Where("uid = ?", conn.UID).
+			Set("connected_at = ?", openedAt).
+			Set("last_activity_at = ?", lastActivityAt).
+			Set("disconnected_at = ?", disconnectedAt).
+			Set("queries = ?", len(session.queries)).
+			Set("bytes_transferred = ?", session.bytes).
+			Exec(ctx); err != nil {
+			return fmt.Errorf("failed to date demo connection: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// seedTestGrants creates the two unlimited seed shapes — full write and
+// read-only — and hands each to its user. Definitions come first because a
+// grant is an instance of one; there is no way to seed a grant otherwise.
+func seedTestGrants(
+	ctx context.Context,
+	dataStore *store.Store,
+	adminUID, connectorUID, viewerUID, databaseUID uuid.UUID,
+) error {
+	const tenYears = int64(10 * 365 * 24 * 3600)
+
+	writeDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:            "Full write (seed)",
+		Slug:            "seed-full-write",
+		Description:     "Unrestricted access, seeded in test mode.",
+		DurationSeconds: tenYears,
+		Controls:        []string{},
+		CreatedBy:       adminUID,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create write grant definition: %w", err)
+	}
+
+	if _, err := seedGrantFromDefinition(ctx, dataStore, writeDef,
+		connectorUID, databaseUID, adminUID, time.Now(), time.Now().AddDate(10, 0, 0)); err != nil {
+		return fmt.Errorf("failed to create write grant for connector user: %w", err)
+	}
+
+	readOnlyDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:            "Read only (seed)",
+		Slug:            "seed-read-only",
+		Description:     "Read-only access, seeded in test mode.",
+		DurationSeconds: tenYears,
+		Controls:        []string{store.ControlReadOnly},
+		CreatedBy:       adminUID,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create read-only grant definition: %w", err)
+	}
+
+	if _, err := seedGrantFromDefinition(ctx, dataStore, readOnlyDef,
+		viewerUID, databaseUID, adminUID, time.Now(), time.Now().AddDate(10, 0, 0)); err != nil {
+		return fmt.Errorf("failed to create read-only grant for viewer user: %w", err)
+	}
+
 	return nil
 }
 
@@ -991,27 +1405,45 @@ func provisionDemoData(ctx context.Context, dataStore *store.Store, cfg *config.
 func seedQuotaGrant(ctx context.Context, dataStore *store.Store, userID, databaseID uuid.UUID) error {
 	maxQueries := int64(100)
 	maxBytes := int64(1024 * 1024 * 1024) // 1 GB
-	_, err := dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:              userID,
-		DatabaseID:          databaseID,
+
+	def, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:                "Read only with quotas (seed)",
+		Slug:                "seed-read-only-quota",
+		Description:         "Read-only access bounded by query and transfer quotas, seeded in test mode.",
+		DurationSeconds:     int64(10 * 365 * 24 * time.Hour / time.Second),
 		Controls:            []string{store.ControlReadOnly},
-		GrantedBy:           userID,
-		StartsAt:            time.Now(),
-		ExpiresAt:           time.Now().AddDate(10, 0, 0), // 10 years from now
 		MaxQueryCounts:      &maxQueries,
 		MaxBytesTransferred: &maxBytes,
+		CreatedBy:           userID,
 	})
 	if err != nil {
+		return fmt.Errorf("failed to create quota grant definition: %w", err)
+	}
+
+	if _, err := seedGrantFromDefinition(ctx, dataStore, def,
+		userID, databaseID, userID, time.Now(), time.Now().AddDate(10, 0, 0)); err != nil {
 		return fmt.Errorf("failed to create quota grant: %w", err)
 	}
+
 	return nil
 }
 
 // seedSampleQuery records one historical query on a closed connection so the
 // test-mode queries list has a clickable row and the query-detail breadcrumb
 // has real SQL text (long enough to exercise the preview truncation) to render.
+//
+// The connection is stamped with whatever active grant seedQuotaGrant already
+// created for this (user, database) pair — mirroring what CreateConnection's
+// real call sites do at auth time — so the connection detail page's Grant
+// section has real grant context to render in test mode, not just the "no
+// grant on record" fallback.
 func seedSampleQuery(ctx context.Context, dataStore *store.Store, userID, databaseID uuid.UUID) error {
-	conn, err := dataStore.CreateConnection(ctx, userID, databaseID, "127.0.0.1")
+	var opts []store.ConnectionOption
+	if grant, err := dataStore.GetActiveGrant(ctx, userID, databaseID); err == nil {
+		opts = append(opts, store.WithGrantUID(grant.UID))
+	}
+
+	conn, err := dataStore.CreateConnection(ctx, userID, databaseID, "127.0.0.1", opts...)
 	if err != nil {
 		return fmt.Errorf("failed to create sample connection: %w", err)
 	}
@@ -1219,6 +1651,7 @@ func collectServers(
 	oracleServer *oracle.Server,
 	mysqlServer *mysql.Server,
 	mongoServer *mongodb.Server,
+	mssqlServer *mssql.Server,
 	rowWriter *shared.RowWriter,
 	sweeper *queryRetentionSweeper,
 	heartbeat *instanceHeartbeat,
@@ -1236,6 +1669,10 @@ func collectServers(
 
 	if mongoServer != nil {
 		servers = append(servers, mongoServer)
+	}
+
+	if mssqlServer != nil {
+		servers = append(servers, mssqlServer)
 	}
 
 	// After every proxy: the batched capture has to drain once no session can

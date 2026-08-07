@@ -30,6 +30,14 @@ import {
   upstreamTlsState,
 } from "@/lib/upstream-tls";
 import { formatBytes } from "@/lib/utils";
+import { formatDateTime } from "@/lib/date-utils";
+
+// Mirrors the Grants page's control-name formatting: "block_ddl" -> "Block Ddl".
+function formatControlName(control: string): string {
+  return control
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
+}
 
 const RECENT_QUERIES_LIMIT = 50;
 
@@ -292,6 +300,83 @@ function ConnectionDetailPage() {
               )}
             </div>
           </dl>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Grant</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {connection.grant ? (
+            <dl
+              className="grid gap-4 sm:grid-cols-2 md:grid-cols-4"
+              data-testid="connection-grant-summary"
+            >
+              <div>
+                <dt className="text-sm font-medium text-muted-foreground mb-1">
+                  Access
+                </dt>
+                <dd className="flex flex-wrap gap-1">
+                  {connection.grant.controls.length === 0 ? (
+                    <Badge variant="default">Full Access</Badge>
+                  ) : (
+                    connection.grant.controls.map((control) => (
+                      <Badge key={control} variant="secondary">
+                        {formatControlName(control)}
+                      </Badge>
+                    ))
+                  )}
+                  {connection.grant.revoked && (
+                    <Badge variant="destructive">Revoked</Badge>
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm font-medium text-muted-foreground mb-1">
+                  Valid
+                </dt>
+                <dd className="text-sm">
+                  {formatDateTime(connection.grant.starts_at)} to{" "}
+                  {formatDateTime(connection.grant.expires_at)}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm font-medium text-muted-foreground mb-1">
+                  Priority
+                </dt>
+                <dd
+                  className="font-mono text-sm tabular-nums"
+                  data-testid="connection-grant-priority"
+                >
+                  {connection.grant.priority}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-sm font-medium text-muted-foreground mb-1">
+                  &nbsp;
+                </dt>
+                <dd>
+                  <Link
+                    to="/grants"
+                    className="text-sm underline hover:text-foreground"
+                    data-testid="connection-grant-link"
+                  >
+                    View grants
+                  </Link>
+                </dd>
+              </div>
+            </dl>
+          ) : (
+            <p
+              className="text-sm text-muted-foreground"
+              data-testid="connection-grant-unavailable"
+            >
+              {connection.grant_uid
+                ? "The grant this session ran under is no longer available."
+                : "No grant on record — this connection predates grant tracking."}
+            </p>
+          )}
         </CardContent>
       </Card>
 

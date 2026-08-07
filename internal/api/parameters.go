@@ -88,6 +88,7 @@ type instanceListenInfo struct {
 	Ora   string `json:"ora"`
 	MySQL string `json:"mysql"`
 	Mongo string `json:"mongo"`
+	MSSQL string `json:"mssql"`
 	API   string `json:"api"`
 }
 
@@ -147,12 +148,14 @@ func (s *Server) handleGetInstance(c *gin.Context) {
 	listenOra := ""
 	listenMySQL := ""
 	listenMongo := ""
+	listenMSSQL := ""
 	listenAPI := ""
 	if s.config != nil {
 		listenPG = s.config.ListenPG
 		listenOra = s.config.ListenOracle
 		listenMySQL = s.config.ListenMySQL
 		listenMongo = s.config.ListenMongo
+		listenMSSQL = s.config.ListenMSSQL
 		listenAPI = s.config.ListenAPI
 	}
 
@@ -162,6 +165,7 @@ func (s *Server) handleGetInstance(c *gin.Context) {
 			Ora:   listenOra,
 			MySQL: listenMySQL,
 			Mongo: listenMongo,
+			MSSQL: listenMSSQL,
 			API:   listenAPI,
 		},
 		Resolved: instanceResolvedInfo{

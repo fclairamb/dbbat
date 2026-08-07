@@ -1,0 +1,54 @@
+# gitleaks configuration for dbbat.
+#
+# The CI `secrets` job (.github/workflows/ci.yml) runs gitleaks over pushed
+# commits so a credential can never land in the repository the way the
+# priv/*.har session capture once did.
+#
+# Everything below is an allowlist of *known non-secrets*. Keep it that way:
+# every entry must name why the thing it matches cannot authenticate anywhere.
+# Never allowlist a path just to make CI green.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = """
+The fixed AES key used by local dev scripts, docker-compose, the e2e harness
+and CI. It is a published constant (literally "0123456789..." base64-encoded),
+guards only throwaway test databases, and is documented as such in
+front/CLAUDE.md.
+"""
+regexTarget = "match"
+regexes = [
+  '''MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=''',
+]
+
+[[allowlists]]
+description = """
+Prose and test fixtures. Specs, docs and CLAUDE.md files are full of example
+curl invocations with admin/admin; Go test files and the Playwright harness use
+hard-coded fixture keys against containers that live for the length of a test
+run. None of them authenticate against anything real.
+"""
+paths = [
+  '''specs/.*\.md''',
+  '''website/docs/.*''',
+  '''.*CLAUDE\.md''',
+  '''.*_test\.go''',
+  '''front/e2e/.*''',
+]
+
+[[allowlists]]
+description = "The SSH key form field's placeholder is a bare PEM header, not a key."
+paths = ['''front/src/routes/_authenticated/servers/index\.tsx''']
+regexes = ['''-----BEGIN OPENSSH PRIVATE KEY-----''']
+matchCondition = "AND"
+
+[[allowlists]]
+description = """
+Assignment of the Oracle O5LOGON combined key derived at runtime — an
+identifier, not a literal.
+"""
+paths = ['''internal/proxy/oracle/session\.go''']
+regexes = ['''clientCombinedKey''']
+matchCondition = "AND"

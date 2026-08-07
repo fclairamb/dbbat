@@ -4,7 +4,7 @@ sidebar_position: 2
 
 # Server Configuration
 
-Target servers are configured through the REST API. Each entry maps a DBBat server name to a target (PostgreSQL, Oracle, MySQL, MariaDB, or MongoDB), optionally reached through an SSH bastion.
+Target servers are configured through the REST API. Each entry maps a DBBat server name to a target (PostgreSQL, Oracle, MySQL, MariaDB, MongoDB, or Microsoft SQL Server), optionally reached through an SSH bastion.
 
 :::note Endpoint rename
 The endpoint is `/api/v1/servers` since v0.17.0 — it was `/api/v1/databases` before, and no alias is kept. The JSON response envelope is still `{"databases": [...]}`.
@@ -16,7 +16,7 @@ The endpoint is `/api/v1/servers` since v0.17.0 — it was `/api/v1/databases` b
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/servers \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "production",
@@ -35,7 +35,7 @@ curl -X POST http://localhost:4200/api/v1/servers \
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/servers \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "orcl",
@@ -57,7 +57,7 @@ curl -X POST http://localhost:4200/api/v1/servers \
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/servers \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "shop",
@@ -78,7 +78,7 @@ For MariaDB, set `"protocol": "mariadb"`. Both share the same listener and proxy
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/servers \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "catalog",
@@ -96,14 +96,35 @@ curl -X POST http://localhost:4200/api/v1/servers \
 
 `mongo_auth_source` is the upstream auth database DBBat authenticates against (defaults to `admin`, where root/service users are typically defined). Clients reach this entry by putting the DBBat database name in their connection's `authSource` (or using a `dbbatuser#catalog` username).
 
+### Microsoft SQL Server
+
+```bash
+curl -X POST http://localhost:4200/api/v1/servers \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "billing",
+    "description": "Production SQL Server",
+    "protocol": "mssql",
+    "host": "mssql.example.com",
+    "port": 1433,
+    "database_name": "billing",
+    "username": "app_user",
+    "password": "secret",
+    "ssl_mode": "prefer"
+  }'
+```
+
+Clients name this entry in the LOGIN7 *Database* field — that is, the `database=` / `Initial Catalog=` part of the connection string carries the **DBBat entry name**, not a database on the target. Only SQL authentication is accepted; integrated (NTLM/Kerberos) and Entra ID logins are refused.
+
 ## Fields
 
 | Field | Type | Description | Required |
 |-------|------|-------------|----------|
 | `name` | string | DBBat server name (used by clients in their connection string) | Yes |
-| `protocol` | enum | `postgresql`, `oracle`, `mysql`, `mariadb`, `mongodb`, `ssh` | No (default: `postgresql`) |
+| `protocol` | enum | `postgresql`, `oracle`, `mysql`, `mariadb`, `mongodb`, `mssql`, `ssh` | No (default: `postgresql`) |
 | `host` | string | Target database host | Yes |
-| `port` | integer | Target database port. Suggested defaults: 5432 / 1521 / 3306 / 27017. | Yes |
+| `port` | integer | Target database port. Suggested defaults: 5432 / 1521 / 3306 / 27017 / 1433. | Yes |
 | `database_name` | string | Target database name (or PDB name for Oracle) | Yes (PG/MySQL); recommended (Oracle) |
 | `username` | string | Target database username | Yes |
 | `password` | string | Target database password (encrypted at rest) | Yes |
@@ -130,7 +151,7 @@ A server can be reached through an SSH bastion instead of being dialled directly
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/ssh-servers \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "bastion-prod",
@@ -146,7 +167,7 @@ curl -X POST http://localhost:4200/api/v1/ssh-servers \
 Listing bastions returns a `{"servers": [...]}` envelope:
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://localhost:4200/api/v1/ssh-servers
+curl -H "Authorization: Bearer $DBBAT_API_KEY" http://localhost:4200/api/v1/ssh-servers
 ```
 
 ### Pointing a server at a bastion
@@ -155,7 +176,7 @@ Set `via_uid` to the bastion's UID:
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/servers \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "private-pg",
@@ -171,7 +192,7 @@ curl -X POST http://localhost:4200/api/v1/servers \
 
 `host` and `port` are then resolved *from the bastion*, not from DBBat's own network. To remove the tunnel later, `PUT` with `"clear_via_uid": true`.
 
-Tunnelling works for all four proxied protocols (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB).
+Tunnelling works for all five proxied protocols (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, SQL Server).
 
 ### Host-key pinning (TOFU)
 
@@ -204,7 +225,7 @@ Client-side TLS for the proxy listeners is configured separately (e.g. `DBB_MYSQ
 ## Listing Servers
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" http://localhost:4200/api/v1/servers
+curl -H "Authorization: Bearer $DBBAT_API_KEY" http://localhost:4200/api/v1/servers
 ```
 
 Response visibility depends on the caller's role:
@@ -221,7 +242,7 @@ Passwords and SSH private keys are **never** returned in any response. SSH basti
 
 ```bash
 curl -X PUT http://localhost:4200/api/v1/servers/$DB_UID \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "description": "Updated description",
@@ -235,7 +256,7 @@ Provide only the fields you want to update. Changing `password` re-encrypts the 
 
 ```bash
 curl -X DELETE http://localhost:4200/api/v1/servers/$DB_UID \
-  -H "Authorization: Bearer $TOKEN"
+  -H "Authorization: Bearer $DBBAT_API_KEY"
 ```
 
 Deleting a server configuration:
@@ -248,7 +269,7 @@ Deleting a server configuration:
 
 When a user connects with `database=production`:
 
-1. **PostgreSQL / MySQL**: DBBat looks up the entry by `name` (the database name in the client's connection string).
+1. **PostgreSQL / MySQL / SQL Server**: DBBat looks up the entry by `name` (the database name in the client's connection string).
 2. **Oracle**: DBBat matches the TNS connect descriptor's `SERVICE_NAME` against `oracle_service_name` (falls back to `name`).
 3. **MongoDB**: DBBat resolves the entry from the SASL `authSource` (the DBBat database name), a `dbbatuser#name` username, or the user's single active MongoDB grant.
 4. DBBat decrypts the stored credentials.

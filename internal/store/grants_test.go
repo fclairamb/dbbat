@@ -36,7 +36,109 @@ func createTestUserAndDatabase(t *testing.T, ctx context.Context, store *Store, 
 	return user, database
 }
 
+// newTestGrantDefinition persists a grant definition carrying the given shape.
+// Grants have no shape of their own any more, so every test that used to write
+// controls or quotas onto a grant literal now goes through a definition — this
+// keeps that one line long.
+//
+// Only the shape fields of `shape` are read; name and slug are generated so
+// callers never have to invent unique ones, and a missing duration defaults to
+// an hour.
+func newTestGrantDefinition(t *testing.T, ctx context.Context, s *Store, createdBy uuid.UUID, shape GrantDefinition) *GrantDefinition {
+	t.Helper()
+
+	suffix := uuid.NewString()[:8]
+
+	if shape.Name == "" {
+		shape.Name = "test-def-" + suffix
+	}
+
+	if shape.Slug == "" {
+		shape.Slug = "test-def-" + suffix
+	}
+
+	if shape.DurationSeconds == 0 {
+		shape.DurationSeconds = 3600
+	}
+
+	shape.CreatedBy = createdBy
+
+	def, err := s.CreateGrantDefinition(ctx, &shape)
+	if err != nil {
+		t.Fatalf("CreateGrantDefinition() error = %v", err)
+	}
+
+	return def
+}
+
+// newTestGrant materializes a definition into a grant with an explicit window,
+// which is what most tests need (BuildGrantFromDefinition derives the window
+// from the definition's duration).
+func newTestGrant(
+	t *testing.T,
+	ctx context.Context,
+	s *Store,
+	def *GrantDefinition,
+	userID, databaseID, grantedBy uuid.UUID,
+	startsAt, expiresAt time.Time,
+) *Grant {
+	t.Helper()
+
+	grant := BuildGrantFromDefinition(def, userID, databaseID, grantedBy, startsAt)
+	grant.ExpiresAt = expiresAt
+
+	created, err := s.CreateGrant(ctx, grant)
+	if err != nil {
+		t.Fatalf("CreateGrant() error = %v", err)
+	}
+
+	return created
+}
+
+// testGrantSpec is the shape-plus-window description a test used to write
+// straight onto a Grant literal. Since a grant no longer holds any shape, the
+// spec is split by createGrantWithShape into a definition (the shape) and a
+// grant (the instance).
+type testGrantSpec struct {
+	UserID              uuid.UUID
+	DatabaseID          uuid.UUID
+	GrantedBy           uuid.UUID
+	Controls            []string
+	MaxQueryCounts      *int64
+	MaxBytesTransferred *int64
+	ApprovalPatterns    []string
+	ApproverGroupUIDs   []uuid.UUID
+	StartsAt            time.Time
+	ExpiresAt           time.Time
+	Priority            int16
+}
+
+// createGrantWithShape persists a definition carrying spec's shape and a grant
+// instantiating it over spec's window.
+func createGrantWithShape(t *testing.T, ctx context.Context, s *Store, spec testGrantSpec) (*Grant, error) {
+	t.Helper()
+
+	def := newTestGrantDefinition(t, ctx, s, spec.GrantedBy, GrantDefinition{
+		Controls:            spec.Controls,
+		MaxQueryCounts:      spec.MaxQueryCounts,
+		MaxBytesTransferred: spec.MaxBytesTransferred,
+		ApprovalPatterns:    spec.ApprovalPatterns,
+		ApproverGroupUIDs:   spec.ApproverGroupUIDs,
+	})
+
+	grant := BuildGrantFromDefinition(def, spec.UserID, spec.DatabaseID, spec.GrantedBy, spec.StartsAt)
+	grant.ExpiresAt = spec.ExpiresAt
+
+	if spec.Priority != 0 {
+		grant.Priority = spec.Priority
+	}
+
+	return s.CreateGrant(ctx, grant)
+}
+
 func TestCreateGrant(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -49,8 +151,10 @@ func TestCreateGrant(t *testing.T) {
 	}
 
 	t.Run("create read grant", func(t *testing.T) {
+		t.Parallel()
+
 		now := time.Now()
-		grant := &Grant{
+		grant := testGrantSpec{
 			UserID:     user.UID,
 			DatabaseID: database.UID,
 			Controls:   []string{ControlReadOnly},
@@ -59,7 +163,7 @@ func TestCreateGrant(t *testing.T) {
 			ExpiresAt:  now.Add(24 * time.Hour),
 		}
 
-		created, err := store.CreateGrant(ctx, grant)
+		created, err := createGrantWithShape(t, ctx, store, grant)
 		if err != nil {
 			t.Fatalf("CreateGrant() error = %v", err)
 		}
@@ -76,12 +180,14 @@ func TestCreateGrant(t *testing.T) {
 	})
 
 	t.Run("create write grant with quotas", func(t *testing.T) {
+		t.Parallel()
+
 		user2, db2 := createTestUserAndDatabase(t, ctx, store, "quotas")
 
 		now := time.Now()
 		maxQueryCounts := int64(100)
 		maxBytesTransferred := int64(1024 * 1024)
-		grant := &Grant{
+		grant := testGrantSpec{
 			UserID:              user2.UID,
 			DatabaseID:          db2.UID,
 			Controls:            []string{}, // Empty = full write access
@@ -92,24 +198,26 @@ func TestCreateGrant(t *testing.T) {
 			MaxBytesTransferred: &maxBytesTransferred,
 		}
 
-		created, err := store.CreateGrant(ctx, grant)
+		created, err := createGrantWithShape(t, ctx, store, grant)
 		if err != nil {
 			t.Fatalf("CreateGrant() error = %v", err)
 		}
 
-		if len(created.Controls) != 0 {
-			t.Errorf("CreateGrant() grant.Controls should be empty for full write access, got %v", created.Controls)
+		if len(created.Controls()) != 0 {
+			t.Errorf("CreateGrant() grant.Controls should be empty for full write access, got %v", created.Controls())
 		}
-		if created.MaxQueryCounts == nil || *created.MaxQueryCounts != 100 {
-			t.Errorf("CreateGrant() grant.MaxQueryCounts = %v, want %d", created.MaxQueryCounts, 100)
+		if created.MaxQueryCounts() == nil || *created.MaxQueryCounts() != 100 {
+			t.Errorf("CreateGrant() grant.MaxQueryCounts = %v, want %d", created.MaxQueryCounts(), 100)
 		}
-		if created.MaxBytesTransferred == nil || *created.MaxBytesTransferred != 1024*1024 {
-			t.Errorf("CreateGrant() grant.MaxBytesTransferred = %v, want %d", created.MaxBytesTransferred, 1024*1024)
+		if created.MaxBytesTransferred() == nil || *created.MaxBytesTransferred() != 1024*1024 {
+			t.Errorf("CreateGrant() grant.MaxBytesTransferred = %v, want %d", created.MaxBytesTransferred(), 1024*1024)
 		}
 	})
 }
 
 func TestGetActiveGrant(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -117,8 +225,10 @@ func TestGetActiveGrant(t *testing.T) {
 	admin, _ := store.CreateUser(ctx, "activeadmin", "hash", []string{RoleAdmin, RoleConnector})
 
 	t.Run("active grant exists", func(t *testing.T) {
+		t.Parallel()
+
 		now := time.Now()
-		grant := &Grant{
+		grant := testGrantSpec{
 			UserID:     user.UID,
 			DatabaseID: database.UID,
 			Controls:   []string{ControlReadOnly},
@@ -126,7 +236,7 @@ func TestGetActiveGrant(t *testing.T) {
 			StartsAt:   now.Add(-1 * time.Hour), // Started 1 hour ago
 			ExpiresAt:  now.Add(1 * time.Hour),  // Expires in 1 hour
 		}
-		created, err := store.CreateGrant(ctx, grant)
+		created, err := createGrantWithShape(t, ctx, store, grant)
 		if err != nil {
 			t.Fatalf("CreateGrant() error = %v", err)
 		}
@@ -142,10 +252,12 @@ func TestGetActiveGrant(t *testing.T) {
 	})
 
 	t.Run("no active grant - expired", func(t *testing.T) {
+		t.Parallel()
+
 		user2, db2 := createTestUserAndDatabase(t, ctx, store, "expired")
 
 		now := time.Now()
-		grant := &Grant{
+		grant := testGrantSpec{
 			UserID:     user2.UID,
 			DatabaseID: db2.UID,
 			Controls:   []string{ControlReadOnly},
@@ -153,7 +265,7 @@ func TestGetActiveGrant(t *testing.T) {
 			StartsAt:   now.Add(-2 * time.Hour), // Started 2 hours ago
 			ExpiresAt:  now.Add(-1 * time.Hour), // Expired 1 hour ago
 		}
-		_, err := store.CreateGrant(ctx, grant)
+		_, err := createGrantWithShape(t, ctx, store, grant)
 		if err != nil {
 			t.Fatalf("CreateGrant() error = %v", err)
 		}
@@ -165,10 +277,12 @@ func TestGetActiveGrant(t *testing.T) {
 	})
 
 	t.Run("no active grant - not started", func(t *testing.T) {
+		t.Parallel()
+
 		user3, db3 := createTestUserAndDatabase(t, ctx, store, "future")
 
 		now := time.Now()
-		grant := &Grant{
+		grant := testGrantSpec{
 			UserID:     user3.UID,
 			DatabaseID: db3.UID,
 			Controls:   []string{ControlReadOnly},
@@ -176,7 +290,7 @@ func TestGetActiveGrant(t *testing.T) {
 			StartsAt:   now.Add(1 * time.Hour), // Starts in 1 hour
 			ExpiresAt:  now.Add(2 * time.Hour), // Expires in 2 hours
 		}
-		_, err := store.CreateGrant(ctx, grant)
+		_, err := createGrantWithShape(t, ctx, store, grant)
 		if err != nil {
 			t.Fatalf("CreateGrant() error = %v", err)
 		}
@@ -188,6 +302,8 @@ func TestGetActiveGrant(t *testing.T) {
 	})
 
 	t.Run("no grant exists", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := store.GetActiveGrant(ctx, uuid.New(), uuid.New())
 		if !errors.Is(err, ErrNoActiveGrant) {
 			t.Errorf("GetActiveGrant() error = %v, want %v", err, ErrNoActiveGrant)
@@ -196,6 +312,8 @@ func TestGetActiveGrant(t *testing.T) {
 }
 
 func TestGetGrantByUID(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -203,7 +321,7 @@ func TestGetGrantByUID(t *testing.T) {
 	admin, _ := store.CreateUser(ctx, "byidadmin", "hash", []string{RoleAdmin, RoleConnector})
 
 	now := time.Now()
-	grant := &Grant{
+	grant := testGrantSpec{
 		UserID:     user.UID,
 		DatabaseID: database.UID,
 		Controls:   []string{},
@@ -211,23 +329,27 @@ func TestGetGrantByUID(t *testing.T) {
 		StartsAt:   now,
 		ExpiresAt:  now.Add(time.Hour),
 	}
-	created, err := store.CreateGrant(ctx, grant)
+	created, err := createGrantWithShape(t, ctx, store, grant)
 	if err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
 
 	t.Run("existing grant", func(t *testing.T) {
+		t.Parallel()
+
 		found, err := store.GetGrantByUID(ctx, created.UID)
 		if err != nil {
 			t.Fatalf("GetGrantByUID() error = %v", err)
 		}
 
-		if len(found.Controls) != 0 {
-			t.Errorf("GetGrantByUID() grant.Controls should be empty for full write access, got %v", found.Controls)
+		if len(found.Controls()) != 0 {
+			t.Errorf("GetGrantByUID() grant.Controls should be empty for full write access, got %v", found.Controls())
 		}
 	})
 
 	t.Run("non-existing grant", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := store.GetGrantByUID(ctx, uuid.New())
 		if !errors.Is(err, ErrGrantNotFound) {
 			t.Errorf("GetGrantByUID() error = %v, want %v", err, ErrGrantNotFound)
@@ -236,6 +358,8 @@ func TestGetGrantByUID(t *testing.T) {
 }
 
 func TestListGrants(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -247,20 +371,22 @@ func TestListGrants(t *testing.T) {
 
 	// Create grants
 	// Use a time in the past for StartsAt to avoid race conditions with database NOW()
-	grants := []*Grant{
+	grants := []testGrantSpec{
 		{UserID: user1.UID, DatabaseID: db1.UID, Controls: []string{ControlReadOnly}, GrantedBy: admin.UID, StartsAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Hour)},
 		{UserID: user1.UID, DatabaseID: db2.UID, Controls: []string{}, GrantedBy: admin.UID, StartsAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Hour)},
 		{UserID: user2.UID, DatabaseID: db1.UID, Controls: []string{ControlReadOnly}, GrantedBy: admin.UID, StartsAt: now.Add(-2 * time.Hour), ExpiresAt: now.Add(-time.Hour)}, // Expired
 	}
 
 	for _, g := range grants {
-		_, err := store.CreateGrant(ctx, g)
+		_, err := createGrantWithShape(t, ctx, store, g)
 		if err != nil {
 			t.Fatalf("CreateGrant() error = %v", err)
 		}
 	}
 
 	t.Run("list all", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListGrants(ctx, GrantFilter{})
 		if err != nil {
 			t.Fatalf("ListGrants() error = %v", err)
@@ -271,6 +397,8 @@ func TestListGrants(t *testing.T) {
 	})
 
 	t.Run("filter by user", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListGrants(ctx, GrantFilter{UserID: &user1.UID})
 		if err != nil {
 			t.Fatalf("ListGrants() error = %v", err)
@@ -281,6 +409,8 @@ func TestListGrants(t *testing.T) {
 	})
 
 	t.Run("filter by database", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListGrants(ctx, GrantFilter{DatabaseID: &db1.UID})
 		if err != nil {
 			t.Fatalf("ListGrants() error = %v", err)
@@ -291,6 +421,8 @@ func TestListGrants(t *testing.T) {
 	})
 
 	t.Run("active only", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListGrants(ctx, GrantFilter{ActiveOnly: true})
 		if err != nil {
 			t.Fatalf("ListGrants() error = %v", err)
@@ -301,6 +433,8 @@ func TestListGrants(t *testing.T) {
 	})
 
 	t.Run("combined filters", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListGrants(ctx, GrantFilter{UserID: &user1.UID, DatabaseID: &db1.UID})
 		if err != nil {
 			t.Fatalf("ListGrants() error = %v", err)
@@ -312,28 +446,46 @@ func TestListGrants(t *testing.T) {
 }
 
 func TestRevokeGrant(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
-	user, database := createTestUserAndDatabase(t, ctx, store, "revoke")
-	admin, _ := store.CreateUser(ctx, "revokeadmin", "hash", []string{RoleAdmin, RoleConnector})
+	// One grant per subtest, on a user/database pair of its own: revoking is a
+	// write, and "revoke already revoked" needs a grant it revoked itself rather
+	// than one a sibling happened to leave behind.
+	activeGrant := func(t *testing.T, suffix string) (*Grant, *User, *Server, uuid.UUID) {
+		t.Helper()
 
-	now := time.Now()
-	grant := &Grant{
-		UserID:     user.UID,
-		DatabaseID: database.UID,
-		Controls:   []string{ControlReadOnly},
-		GrantedBy:  admin.UID,
-		StartsAt:   now.Add(-time.Hour),
-		ExpiresAt:  now.Add(time.Hour),
-	}
-	created, err := store.CreateGrant(ctx, grant)
-	if err != nil {
-		t.Fatalf("CreateGrant() error = %v", err)
+		user, database := createTestUserAndDatabase(t, ctx, store, "revoke-"+suffix)
+
+		admin, err := store.CreateUser(ctx, "revokeadmin-"+suffix, "hash", []string{RoleAdmin, RoleConnector})
+		if err != nil {
+			t.Fatalf("CreateUser() error = %v", err)
+		}
+
+		now := time.Now()
+		created, err := createGrantWithShape(t, ctx, store, testGrantSpec{
+			UserID:     user.UID,
+			DatabaseID: database.UID,
+			Controls:   []string{ControlReadOnly},
+			GrantedBy:  admin.UID,
+			StartsAt:   now.Add(-time.Hour),
+			ExpiresAt:  now.Add(time.Hour),
+		})
+		if err != nil {
+			t.Fatalf("CreateGrant() error = %v", err)
+		}
+
+		return created, user, database, admin.UID
 	}
 
 	t.Run("revoke active grant", func(t *testing.T) {
-		err := store.RevokeGrant(ctx, created.UID, admin.UID)
+		t.Parallel()
+
+		created, user, database, admin := activeGrant(t, "active")
+
+		err := store.RevokeGrant(ctx, created.UID, admin)
 		if err != nil {
 			t.Fatalf("RevokeGrant() error = %v", err)
 		}
@@ -346,8 +498,8 @@ func TestRevokeGrant(t *testing.T) {
 		if found.RevokedAt == nil {
 			t.Error("grant.RevokedAt should not be nil after revoke")
 		}
-		if found.RevokedBy == nil || *found.RevokedBy != admin.UID {
-			t.Errorf("grant.RevokedBy = %v, want %s", found.RevokedBy, admin.UID)
+		if found.RevokedBy == nil || *found.RevokedBy != admin {
+			t.Errorf("grant.RevokedBy = %v, want %s", found.RevokedBy, admin)
 		}
 
 		// Should no longer appear as active
@@ -358,14 +510,26 @@ func TestRevokeGrant(t *testing.T) {
 	})
 
 	t.Run("revoke already revoked grant", func(t *testing.T) {
-		err := store.RevokeGrant(ctx, created.UID, admin.UID)
+		t.Parallel()
+
+		created, _, _, admin := activeGrant(t, "twice")
+
+		if err := store.RevokeGrant(ctx, created.UID, admin); err != nil {
+			t.Fatalf("RevokeGrant() error = %v", err)
+		}
+
+		err := store.RevokeGrant(ctx, created.UID, admin)
 		if !errors.Is(err, ErrGrantAlreadyRevoked) {
 			t.Errorf("RevokeGrant() error = %v, want %v", err, ErrGrantAlreadyRevoked)
 		}
 	})
 
 	t.Run("revoke non-existing grant", func(t *testing.T) {
-		err := store.RevokeGrant(ctx, uuid.New(), admin.UID)
+		t.Parallel()
+
+		_, _, _, admin := activeGrant(t, "missing")
+
+		err := store.RevokeGrant(ctx, uuid.New(), admin)
 		if !errors.Is(err, ErrGrantAlreadyRevoked) {
 			t.Errorf("RevokeGrant() error = %v, want %v", err, ErrGrantAlreadyRevoked)
 		}
@@ -373,6 +537,8 @@ func TestRevokeGrant(t *testing.T) {
 }
 
 func TestGrantCounters_PopulatedFromQueriesAndConnections(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -380,7 +546,7 @@ func TestGrantCounters_PopulatedFromQueriesAndConnections(t *testing.T) {
 	admin, _ := store.CreateUser(ctx, "countersadmin", "hash", []string{RoleAdmin, RoleConnector})
 
 	now := time.Now()
-	grant, err := store.CreateGrant(ctx, &Grant{
+	grant, err := createGrantWithShape(t, ctx, store, testGrantSpec{
 		UserID:     user.UID,
 		DatabaseID: database.UID,
 		Controls:   []string{},
@@ -435,6 +601,8 @@ func TestGrantCounters_PopulatedFromQueriesAndConnections(t *testing.T) {
 }
 
 func TestGrantCounters_TimeWindowExcludesOutOfRange(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -443,7 +611,7 @@ func TestGrantCounters_TimeWindowExcludesOutOfRange(t *testing.T) {
 
 	now := time.Now()
 	// Grant window is entirely in the future relative to the activity below.
-	grant, err := store.CreateGrant(ctx, &Grant{
+	grant, err := createGrantWithShape(t, ctx, store, testGrantSpec{
 		UserID:     user.UID,
 		DatabaseID: database.UID,
 		Controls:   []string{},
@@ -483,6 +651,8 @@ func TestGrantCounters_TimeWindowExcludesOutOfRange(t *testing.T) {
 }
 
 func TestGrantCounters_BoundedByRevokedAt(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -490,7 +660,7 @@ func TestGrantCounters_BoundedByRevokedAt(t *testing.T) {
 	admin, _ := store.CreateUser(ctx, "revokeboundadmin", "hash", []string{RoleAdmin, RoleConnector})
 
 	now := time.Now()
-	grant, err := store.CreateGrant(ctx, &Grant{
+	grant, err := createGrantWithShape(t, ctx, store, testGrantSpec{
 		UserID:     user.UID,
 		DatabaseID: database.UID,
 		Controls:   []string{},
@@ -553,6 +723,95 @@ func TestGrantCounters_BoundedByRevokedAt(t *testing.T) {
 	}
 }
 
+// TestGrantCounters_StampedConnectionExcludedFromOtherGrantsWindow is the
+// quota-attribution half of spec 2026-08-06-03: two grants active on the same
+// (user, database) at overlapping times, but the traffic ran through a
+// connection stamped with only one of them. Only that grant's counters must
+// move — the other grant's window-based fallback must not also pick it up
+// just because the user/database/time window all match.
+func TestGrantCounters_StampedConnectionExcludedFromOtherGrantsWindow(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "stampedquota")
+	admin, _ := store.CreateUser(ctx, "stampedquotaadmin", "hash", []string{RoleAdmin, RoleConnector})
+
+	now := time.Now()
+
+	// Grant A: lower priority (read_only), created first.
+	grantA, err := createGrantWithShape(t, ctx, store, testGrantSpec{
+		UserID:     user.UID,
+		DatabaseID: database.UID,
+		Controls:   []string{ControlReadOnly},
+		GrantedBy:  admin.UID,
+		StartsAt:   now.Add(-time.Hour),
+		ExpiresAt:  now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateGrant() grantA error = %v", err)
+	}
+
+	// Grant B: fully overlapping window, same user/database, higher priority
+	// (full write) — the kind of grant GetActiveGrant would now pick, and
+	// exactly what the pre-stamp window heuristic could not tell apart from A.
+	grantB, err := createGrantWithShape(t, ctx, store, testGrantSpec{
+		UserID:     user.UID,
+		DatabaseID: database.UID,
+		Controls:   []string{},
+		GrantedBy:  admin.UID,
+		StartsAt:   now.Add(-time.Hour),
+		ExpiresAt:  now.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateGrant() grantB error = %v", err)
+	}
+
+	// All traffic runs through a connection stamped with grant A.
+	conn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.42", WithGrantUID(grantA.UID))
+	if err != nil {
+		t.Fatalf("CreateConnection() error = %v", err)
+	}
+
+	const queries = 3
+	const bytesPerQuery = int64(200)
+	for i := 0; i < queries; i++ {
+		if _, err := store.CreateQuery(ctx, &Query{
+			ConnectionID: conn.UID,
+			SQLText:      "SELECT 1",
+			ExecutedAt:   now,
+		}); err != nil {
+			t.Fatalf("CreateQuery() error = %v", err)
+		}
+		if err := store.IncrementConnectionStats(ctx, conn.UID, bytesPerQuery); err != nil {
+			t.Fatalf("IncrementConnectionStats() error = %v", err)
+		}
+	}
+
+	gotA, err := store.GetGrantByUID(ctx, grantA.UID)
+	if err != nil {
+		t.Fatalf("GetGrantByUID(grantA) error = %v", err)
+	}
+	if gotA.QueryCount != queries {
+		t.Errorf("grantA QueryCount = %d, want %d", gotA.QueryCount, queries)
+	}
+	if gotA.BytesTransferred != queries*bytesPerQuery {
+		t.Errorf("grantA BytesTransferred = %d, want %d", gotA.BytesTransferred, queries*bytesPerQuery)
+	}
+
+	gotB, err := store.GetGrantByUID(ctx, grantB.UID)
+	if err != nil {
+		t.Fatalf("GetGrantByUID(grantB) error = %v", err)
+	}
+	if gotB.QueryCount != 0 {
+		t.Errorf("grantB QueryCount = %d, want 0 (traffic was stamped to grantA, not grantB)", gotB.QueryCount)
+	}
+	if gotB.BytesTransferred != 0 {
+		t.Errorf("grantB BytesTransferred = %d, want 0 (traffic was stamped to grantA, not grantB)", gotB.BytesTransferred)
+	}
+}
+
 // TestGrantBytesRecompute_IncludesAbortedQueryBytes covers the core scenario of
 // spec 2026-07-14-09: bytes from a query aborted mid-stream by a grant limit are
 // flushed to the connection via IncrementConnectionBytes (no query log row / no
@@ -560,6 +819,8 @@ func TestGrantCounters_BoundedByRevokedAt(t *testing.T) {
 // reconnect enforces against — must include them, otherwise the cumulative cap
 // could be bypassed across short-lived reconnects.
 func TestGrantBytesRecompute_IncludesAbortedQueryBytes(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -567,7 +828,7 @@ func TestGrantBytesRecompute_IncludesAbortedQueryBytes(t *testing.T) {
 	admin, _ := store.CreateUser(ctx, "abortedbytesadmin", "hash", []string{RoleAdmin, RoleConnector})
 
 	now := time.Now()
-	grant, err := store.CreateGrant(ctx, &Grant{
+	grant, err := createGrantWithShape(t, ctx, store, testGrantSpec{
 		UserID:     user.UID,
 		DatabaseID: database.UID,
 		Controls:   []string{},
@@ -615,6 +876,8 @@ func TestGrantBytesRecompute_IncludesAbortedQueryBytes(t *testing.T) {
 }
 
 func TestListGrants_PopulatesCountersForEach(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -623,7 +886,7 @@ func TestListGrants_PopulatesCountersForEach(t *testing.T) {
 	admin, _ := store.CreateUser(ctx, "listcountersadmin", "hash", []string{RoleAdmin, RoleConnector})
 
 	now := time.Now()
-	g1, err := store.CreateGrant(ctx, &Grant{
+	g1, err := createGrantWithShape(t, ctx, store, testGrantSpec{
 		UserID:     user.UID,
 		DatabaseID: db1.UID,
 		Controls:   []string{},
@@ -634,7 +897,7 @@ func TestListGrants_PopulatesCountersForEach(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateGrant() error = %v", err)
 	}
-	g2, err := store.CreateGrant(ctx, &Grant{
+	g2, err := createGrantWithShape(t, ctx, store, testGrantSpec{
 		UserID:     user.UID,
 		DatabaseID: db2.UID,
 		Controls:   []string{},
@@ -684,5 +947,261 @@ func TestListGrants_PopulatesCountersForEach(t *testing.T) {
 	}
 	if got2.QueryCount != 2 || got2.BytesTransferred != 500 {
 		t.Errorf("g2 QueryCount=%d BytesTransferred=%d, want 2 / 500", got2.QueryCount, got2.BytesTransferred)
+	}
+}
+
+// TestGetActiveGrant_DefinitionLifecycle pins down the two lifecycle states a
+// definition can be in and the deliberately different answers auth gives them.
+// Getting this backwards is a policy hole in one direction and a broken
+// deployment in the other, so both halves are asserted together.
+func TestGetActiveGrant_DefinitionLifecycle(t *testing.T) {
+	t.Parallel()
+
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	t.Run("deactivating a definition fails its grants closed", func(t *testing.T) {
+		t.Parallel()
+
+		user, database := createTestUserAndDatabase(t, ctx, s, "lifecycle_deactivate")
+
+		admin, err := s.CreateUser(ctx, "lifecycleadmin1", "hash", []string{RoleAdmin})
+		if err != nil {
+			t.Fatalf("CreateUser() error = %v", err)
+		}
+
+		def := newTestGrantDefinition(t, ctx, s, admin.UID, GrantDefinition{})
+		newTestGrant(t, ctx, s, def, user.UID, database.UID, admin.UID,
+			now.Add(-time.Hour), now.Add(time.Hour))
+
+		if _, err := s.GetActiveGrant(ctx, user.UID, database.UID); err != nil {
+			t.Fatalf("fixture: GetActiveGrant() error = %v", err)
+		}
+
+		if err := s.DeactivateGrantDefinition(ctx, def.UID); err != nil {
+			t.Fatalf("DeactivateGrantDefinition() error = %v", err)
+		}
+
+		if _, err := s.GetActiveGrant(ctx, user.UID, database.UID); !errors.Is(err, ErrNoActiveGrant) {
+			t.Fatalf("GetActiveGrant() after deactivation = %v, want ErrNoActiveGrant", err)
+		}
+	})
+
+	t.Run("deactivation reaches grants pinned to an older version", func(t *testing.T) {
+		t.Parallel()
+
+		user, database := createTestUserAndDatabase(t, ctx, s, "lifecycle_lineage")
+
+		admin, err := s.CreateUser(ctx, "lifecycleadmin2", "hash", []string{RoleAdmin})
+		if err != nil {
+			t.Fatalf("CreateUser() error = %v", err)
+		}
+
+		def := newTestGrantDefinition(t, ctx, s, admin.UID, GrantDefinition{})
+		newTestGrant(t, ctx, s, def, user.UID, database.UID, admin.UID,
+			now.Add(-time.Hour), now.Add(time.Hour))
+
+		// Edit it, so the grant is now pinned to an *archived* version...
+		def.Description = "edited"
+		updated, err := s.UpdateGrantDefinition(ctx, def)
+		if err != nil {
+			t.Fatalf("UpdateGrantDefinition() error = %v", err)
+		}
+
+		// ...which must still authorize: archival is supersession, not
+		// withdrawal.
+		got, err := s.GetActiveGrant(ctx, user.UID, database.UID)
+		if err != nil {
+			t.Fatalf("GetActiveGrant() after an edit = %v, want the grant to keep working", err)
+		}
+
+		if got.GrantDefinitionID != def.UID {
+			t.Errorf("grant now points at %s, want the version it was issued from %s",
+				got.GrantDefinitionID, def.UID)
+		}
+
+		// Deactivating the *live* version withdraws the whole lineage, so the
+		// grant pinned to the archived one stops authorizing too. Anything
+		// else would make deactivation a kill switch that doesn't kill.
+		if err := s.DeactivateGrantDefinition(ctx, updated.UID); err != nil {
+			t.Fatalf("DeactivateGrantDefinition() error = %v", err)
+		}
+
+		if _, err := s.GetActiveGrant(ctx, user.UID, database.UID); !errors.Is(err, ErrNoActiveGrant) {
+			t.Fatalf("GetActiveGrant() after lineage deactivation = %v, want ErrNoActiveGrant", err)
+		}
+	})
+
+	t.Run("an edit never changes a live grant's shape", func(t *testing.T) {
+		t.Parallel()
+
+		user, database := createTestUserAndDatabase(t, ctx, s, "lifecycle_snapshot")
+
+		admin, err := s.CreateUser(ctx, "lifecycleadmin3", "hash", []string{RoleAdmin})
+		if err != nil {
+			t.Fatalf("CreateUser() error = %v", err)
+		}
+
+		def := newTestGrantDefinition(t, ctx, s, admin.UID, GrantDefinition{Controls: []string{}})
+		newTestGrant(t, ctx, s, def, user.UID, database.UID, admin.UID,
+			now.Add(-time.Hour), now.Add(time.Hour))
+
+		// Loosening *or* tightening the definition must not reach the grant:
+		// snapshot safety comes from the version pin.
+		def.Controls = []string{ControlReadOnly}
+		if _, err := s.UpdateGrantDefinition(ctx, def); err != nil {
+			t.Fatalf("UpdateGrantDefinition() error = %v", err)
+		}
+
+		got, err := s.GetActiveGrant(ctx, user.UID, database.UID)
+		if err != nil {
+			t.Fatalf("GetActiveGrant() error = %v", err)
+		}
+
+		if got.IsReadOnly() {
+			t.Error("editing the definition retroactively tightened a live grant")
+		}
+	})
+}
+
+// TestListGrants_ActiveOnlyFiltersDeactivatedDefinition proves ListGrants
+// agrees with GetActiveGrant about what "active" means. Before this test,
+// ListGrants(ActiveOnly: true) only checked the grant's own window and
+// revocation, so a database.uid the proxy had already stopped authorizing
+// (via GetActiveGrant's definition-active filter) still showed up as
+// accessible everywhere ListGrants(ActiveOnly) is used: the grants UI and
+// the non-admin database-visibility checks in servers.go/keys.go.
+func TestListGrants_ActiveOnlyFiltersDeactivatedDefinition(t *testing.T) {
+	t.Parallel()
+
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	user, database := createTestUserAndDatabase(t, ctx, s, "listgrants_deactivate")
+
+	admin, err := s.CreateUser(ctx, "listgrantsadmin", "hash", []string{RoleAdmin})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	def := newTestGrantDefinition(t, ctx, s, admin.UID, GrantDefinition{})
+	grant := newTestGrant(t, ctx, s, def, user.UID, database.UID, admin.UID,
+		now.Add(-time.Hour), now.Add(time.Hour))
+
+	assertListed := func(t *testing.T, want bool) {
+		t.Helper()
+
+		grants, err := s.ListGrants(ctx, GrantFilter{UserID: &user.UID, ActiveOnly: true})
+		if err != nil {
+			t.Fatalf("ListGrants() error = %v", err)
+		}
+
+		found := false
+		for i := range grants {
+			if grants[i].UID == grant.UID {
+				found = true
+			}
+		}
+
+		if found != want {
+			t.Fatalf("ListGrants(ActiveOnly: true) contains grant = %v, want %v", found, want)
+		}
+	}
+
+	assertListed(t, true)
+
+	if _, err := s.GetActiveGrant(ctx, user.UID, database.UID); err != nil {
+		t.Fatalf("fixture: GetActiveGrant() error = %v", err)
+	}
+
+	if err := s.DeactivateGrantDefinition(ctx, def.UID); err != nil {
+		t.Fatalf("DeactivateGrantDefinition() error = %v", err)
+	}
+
+	// Both paths must agree the grant is no longer active.
+	if _, err := s.GetActiveGrant(ctx, user.UID, database.UID); !errors.Is(err, ErrNoActiveGrant) {
+		t.Fatalf("GetActiveGrant() after deactivation = %v, want ErrNoActiveGrant", err)
+	}
+	assertListed(t, false)
+}
+
+// TestCreateGrant_RequiresADefinition proves the model's core invariant: there
+// is no way to store a grant that carries no shape.
+func TestCreateGrant_RequiresADefinition(t *testing.T) {
+	t.Parallel()
+
+	s := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, s, "nodefinition")
+
+	admin, err := s.CreateUser(ctx, "nodefadmin", "hash", []string{RoleAdmin})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	now := time.Now()
+
+	_, err = s.CreateGrant(ctx, &Grant{
+		UserID:     user.UID,
+		DatabaseID: database.UID,
+		GrantedBy:  admin.UID,
+		StartsAt:   now,
+		ExpiresAt:  now.Add(time.Hour),
+	})
+	if !errors.Is(err, ErrGrantDefinitionRequired) {
+		t.Fatalf("CreateGrant() without a definition = %v, want ErrGrantDefinitionRequired", err)
+	}
+}
+
+// TestDeleteGrantDefinition covers the "hard deletion is forbidden while
+// anything references it" rule, and its inverse.
+func TestDeleteGrantDefinition(t *testing.T) {
+	t.Parallel()
+
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	user, database := createTestUserAndDatabase(t, ctx, s, "defdelete")
+
+	admin, err := s.CreateUser(ctx, "defdeleteadmin", "hash", []string{RoleAdmin})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	unused := newTestGrantDefinition(t, ctx, s, admin.UID, GrantDefinition{})
+	if err := s.DeleteGrantDefinition(ctx, unused.UID); err != nil {
+		t.Fatalf("DeleteGrantDefinition() on an unused definition error = %v", err)
+	}
+
+	if _, err := s.GetGrantDefinition(ctx, unused.UID); !errors.Is(err, ErrGrantDefinitionNotFound) {
+		t.Errorf("the deleted definition is still readable: %v", err)
+	}
+
+	used := newTestGrantDefinition(t, ctx, s, admin.UID, GrantDefinition{})
+	newTestGrant(t, ctx, s, used, user.UID, database.UID, admin.UID, now, now.Add(time.Hour))
+
+	var inUse *GrantDefinitionInUseError
+	if err := s.DeleteGrantDefinition(ctx, used.UID); !errors.As(err, &inUse) {
+		t.Fatalf("DeleteGrantDefinition() on a referenced definition = %v, want GrantDefinitionInUseError", err)
+	}
+
+	if inUse.Grants != 1 {
+		t.Errorf("blocking grant count = %d, want 1", inUse.Grants)
+	}
+
+	// An archived version cannot be deleted out from under the grants pinned
+	// to it either — deletion acts on the lineage, so the whole history is
+	// protected by the one live reference.
+	used.Description = "edited"
+	if _, err := s.UpdateGrantDefinition(ctx, used); err != nil {
+		t.Fatalf("UpdateGrantDefinition() error = %v", err)
+	}
+
+	if err := s.DeleteGrantDefinition(ctx, used.UID); !errors.As(err, &inUse) {
+		t.Fatalf("DeleteGrantDefinition() on an archived version = %v, want GrantDefinitionInUseError", err)
 	}
 }

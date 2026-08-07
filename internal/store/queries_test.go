@@ -25,12 +25,16 @@ func createTestConnection(t *testing.T, ctx context.Context, store *Store, suffi
 }
 
 func TestCreateQuery(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
 	conn := createTestConnection(t, ctx, store, "query")
 
 	t.Run("create query without results", func(t *testing.T) {
+		t.Parallel()
+
 		duration := 15.5
 		rowsAffected := int64(10)
 		query := &Query{
@@ -64,6 +68,8 @@ func TestCreateQuery(t *testing.T) {
 	})
 
 	t.Run("create query with error", func(t *testing.T) {
+		t.Parallel()
+
 		errorMsg := "relation does not exist"
 		query := &Query{
 			ConnectionID: conn.UID,
@@ -86,6 +92,8 @@ func TestCreateQuery(t *testing.T) {
 	// model field existed, the insert just never carried them. It has to
 	// survive both the insert and the projection ListQueries applies.
 	t.Run("create query with COPY metadata", func(t *testing.T) {
+		t.Parallel()
+
 		direction := "out"
 		format := "text"
 		query := &Query{
@@ -142,6 +150,8 @@ func TestCreateQuery(t *testing.T) {
 	// string: the UI keys "was this a bulk transfer?" off the column's
 	// presence.
 	t.Run("non-COPY query leaves the COPY columns null", func(t *testing.T) {
+		t.Parallel()
+
 		created, err := store.CreateQuery(ctx, &Query{
 			ConnectionID: conn.UID,
 			SQLText:      "SELECT 1",
@@ -183,6 +193,8 @@ func pendingRows(queryUID uuid.UUID, rows []QueryRow) []PendingQueryRow {
 }
 
 func TestStoreQueryRows(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -199,6 +211,8 @@ func TestStoreQueryRows(t *testing.T) {
 	}
 
 	t.Run("store multiple rows", func(t *testing.T) {
+		t.Parallel()
+
 		rows := []QueryRow{
 			{RowNumber: 1, RowData: json.RawMessage(`{"id": 1, "name": "item1"}`), RowSizeBytes: 30},
 			{RowNumber: 2, RowData: json.RawMessage(`{"id": 2, "name": "item2"}`), RowSizeBytes: 30},
@@ -222,6 +236,8 @@ func TestStoreQueryRows(t *testing.T) {
 	})
 
 	t.Run("store empty rows", func(t *testing.T) {
+		t.Parallel()
+
 		query2 := &Query{
 			ConnectionID: conn.UID,
 			SQLText:      "SELECT * FROM empty_table",
@@ -243,6 +259,8 @@ func TestStoreQueryRows(t *testing.T) {
 // process-wide row writer possible: rows carry their own query id, so a single
 // INSERT can cover several concurrent queries.
 func TestStoreQueryRows_BatchSpansQueries(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -299,6 +317,8 @@ func TestStoreQueryRows_BatchSpansQueries(t *testing.T) {
 // truncation (a configured limit) and dropping (dbbat losing rows) are two
 // independent columns, never one overloaded flag.
 func TestQueryPartialCaptureFlags(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -374,6 +394,8 @@ func TestQueryPartialCaptureFlags(t *testing.T) {
 }
 
 func TestListQueries(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -396,6 +418,8 @@ func TestListQueries(t *testing.T) {
 	}
 
 	t.Run("list all", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListQueries(ctx, QueryFilter{})
 		if err != nil {
 			t.Fatalf("ListQueries() error = %v", err)
@@ -406,6 +430,8 @@ func TestListQueries(t *testing.T) {
 	})
 
 	t.Run("filter by connection", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListQueries(ctx, QueryFilter{ConnectionID: &conn1.UID})
 		if err != nil {
 			t.Fatalf("ListQueries() error = %v", err)
@@ -416,6 +442,8 @@ func TestListQueries(t *testing.T) {
 	})
 
 	t.Run("filter by time range", func(t *testing.T) {
+		t.Parallel()
+
 		startTime := now.Add(-90 * time.Minute)
 		endTime := now.Add(-30 * time.Minute)
 		result, err := store.ListQueries(ctx, QueryFilter{StartTime: &startTime, EndTime: &endTime})
@@ -428,6 +456,8 @@ func TestListQueries(t *testing.T) {
 	})
 
 	t.Run("with limit", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListQueries(ctx, QueryFilter{Limit: 2})
 		if err != nil {
 			t.Fatalf("ListQueries() error = %v", err)
@@ -438,6 +468,8 @@ func TestListQueries(t *testing.T) {
 	})
 
 	t.Run("with offset", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListQueries(ctx, QueryFilter{Limit: 10, Offset: 2})
 		if err != nil {
 			t.Fatalf("ListQueries() error = %v", err)
@@ -448,6 +480,8 @@ func TestListQueries(t *testing.T) {
 	})
 
 	t.Run("resolves user and database via the connection join", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.ListQueries(ctx, QueryFilter{ConnectionID: &conn1.UID})
 		if err != nil {
 			t.Fatalf("ListQueries() error = %v", err)
@@ -467,6 +501,8 @@ func TestListQueries(t *testing.T) {
 }
 
 func TestGetQueryWithRows(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -497,6 +533,8 @@ func TestGetQueryWithRows(t *testing.T) {
 	}
 
 	t.Run("get query with rows", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.GetQueryWithRows(ctx, created.UID)
 		if err != nil {
 			t.Fatalf("GetQueryWithRows() error = %v", err)
@@ -528,6 +566,8 @@ func TestGetQueryWithRows(t *testing.T) {
 	})
 
 	t.Run("get query without rows", func(t *testing.T) {
+		t.Parallel()
+
 		query2 := &Query{
 			ConnectionID: conn.UID,
 			SQLText:      "DELETE FROM old_data",
@@ -550,6 +590,8 @@ func TestGetQueryWithRows(t *testing.T) {
 }
 
 func TestGetQueryRows(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -581,6 +623,8 @@ func TestGetQueryRows(t *testing.T) {
 	}
 
 	t.Run("get first page", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.GetQueryRows(ctx, created.UID, "", 5)
 		if err != nil {
 			t.Fatalf("GetQueryRows() error = %v", err)
@@ -606,6 +650,8 @@ func TestGetQueryRows(t *testing.T) {
 	})
 
 	t.Run("get second page with cursor", func(t *testing.T) {
+		t.Parallel()
+
 		// Get first page to get cursor
 		firstPage, err := store.GetQueryRows(ctx, created.UID, "", 5)
 		if err != nil {
@@ -632,6 +678,8 @@ func TestGetQueryRows(t *testing.T) {
 	})
 
 	t.Run("get last page", func(t *testing.T) {
+		t.Parallel()
+
 		// Get first two pages
 		page1, _ := store.GetQueryRows(ctx, created.UID, "", 5)
 		page2, _ := store.GetQueryRows(ctx, created.UID, page1.NextCursor, 5)
@@ -659,6 +707,8 @@ func TestGetQueryRows(t *testing.T) {
 	})
 
 	t.Run("default limit", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.GetQueryRows(ctx, created.UID, "", 0)
 		if err != nil {
 			t.Fatalf("GetQueryRows() error = %v", err)
@@ -670,6 +720,8 @@ func TestGetQueryRows(t *testing.T) {
 	})
 
 	t.Run("limit capped at max", func(t *testing.T) {
+		t.Parallel()
+
 		result, err := store.GetQueryRows(ctx, created.UID, "", 2000)
 		if err != nil {
 			t.Fatalf("GetQueryRows() error = %v", err)
@@ -682,6 +734,8 @@ func TestGetQueryRows(t *testing.T) {
 	})
 
 	t.Run("query not found", func(t *testing.T) {
+		t.Parallel()
+
 		nonExistentUID := uuid.New()
 		_, err := store.GetQueryRows(ctx, nonExistentUID, "", 10)
 		if !errors.Is(err, ErrQueryNotFound) {
@@ -690,6 +744,8 @@ func TestGetQueryRows(t *testing.T) {
 	})
 
 	t.Run("invalid cursor", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := store.GetQueryRows(ctx, created.UID, "invalid-cursor", 10)
 		if !errors.Is(err, ErrInvalidCursor) {
 			t.Errorf("GetQueryRows() error = %v, want ErrInvalidCursor", err)
@@ -697,6 +753,8 @@ func TestGetQueryRows(t *testing.T) {
 	})
 
 	t.Run("invalid cursor json", func(t *testing.T) {
+		t.Parallel()
+
 		// Valid base64 but invalid JSON
 		_, err := store.GetQueryRows(ctx, created.UID, "bm90LWpzb24=", 10)
 		if !errors.Is(err, ErrInvalidCursor) {
@@ -705,6 +763,8 @@ func TestGetQueryRows(t *testing.T) {
 	})
 
 	t.Run("empty result", func(t *testing.T) {
+		t.Parallel()
+
 		// Create a query without rows
 		query2 := &Query{
 			ConnectionID: conn.UID,
@@ -734,6 +794,8 @@ func TestGetQueryRows(t *testing.T) {
 }
 
 func TestGetQueryRowsDataSizeLimit(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -770,6 +832,8 @@ func TestGetQueryRowsDataSizeLimit(t *testing.T) {
 	}
 
 	t.Run("data size limit stops iteration", func(t *testing.T) {
+		t.Parallel()
+
 		// Request 20 rows, but 1MB limit should stop us earlier
 		// 100KB per row * 10 rows = 1MB
 		result, err := store.GetQueryRows(ctx, created.UID, "", 20)
@@ -788,6 +852,8 @@ func TestGetQueryRowsDataSizeLimit(t *testing.T) {
 	})
 
 	t.Run("at least one row returned even if over limit", func(t *testing.T) {
+		t.Parallel()
+
 		// Create a query with a single huge row
 		query2 := &Query{
 			ConnectionID: conn.UID,

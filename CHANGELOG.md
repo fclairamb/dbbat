@@ -1,5 +1,58 @@
 # Changelog
 
+## [Unreleased]
+
+### ⚠ BREAKING CHANGES
+
+* **grants:** a grant no longer carries a shape of its own. Every grant is now an *instance* of a versioned grant definition, and `POST /api/v1/grants` assigns a definition to a user + database instead of accepting inline controls. Clients that built grants from `read_only` / `block_ddl` / `block_copy` / quota fields must now reference a definition. In the UI, "Create Grant" is replaced by "Assign Grant".
+
+### Features
+
+* **mssql:** Microsoft SQL Server is now a fully proxied protocol, the fifth after PostgreSQL, Oracle, MySQL/MariaDB and MongoDB. Hand-rolled TDS: packet framing, PRELOGIN negotiation, the TLS handshake encapsulated in TDS packets, LOGIN7 parsing and password descramble, client auth against dbbat, and relay to a real upstream. Statements are intercepted and logged, grants enforced (including inside RPC batches), result rows accounted against quotas, and approval holds honoured — including releasing a hold when the client sends an ATTENTION. Listens on `:1434` by default (`DBB_LISTEN_MSSQL`).
+* **mssql:** the client leg can be raised to TLS 1.3 with `DBB_MSSQL_TLS_MAX_VERSION=1.3`. Off by default and verified against `go-mssqldb` only, because TDS un-wraps the handshake the moment it completes and drivers disagree on whether the client's last flight is still framed.
+* **grants:** grants are instances of an immutably versioned grant definition. Editing a definition archives the current row and inserts a successor sharing its lineage, so a live grant's behaviour never changes under it. Deactivating a definition withdraws the whole lineage and fails closed at auth time.
+* **grants:** an explicit `priority` column decides which grant wins when several are active for the same user and database. It is auto-derived from the selected controls (a stricter grant outranks a looser one) and can be pinned by hand from the API or the UI.
+* **connections:** every connection is now stamped with the grant it authenticated under, surfaced through the API and shown in the UI, so quota attribution and approval resolution are traceable back to a specific grant.
+* **grant-definitions:** definitions carry sample queries, so a control pattern can be authored against realistic SQL.
+* **auth:** the OAuth callback hands back a single-use code that the frontend exchanges for a session token, instead of putting the session token itself in the redirect.
+* **ui:** the API-key creation dialog shows a ready-to-paste export snippet for the canonical client environment variables (`DBBAT_API_KEY`, `DBBAT_USER`, `DBBAT_URL`), now used consistently across the docs and website examples.
+
+### Bug Fixes
+
+* **store:** `text[]` elements beginning with `(` were split on read, silently corrupting approval patterns — the most common way to write one. Existing corrupted patterns are detectable and repairable; see `docs/approvals.md`.
+* **api:** access-log query redaction was a denylist, so any query shape nobody had thought of was logged verbatim. It is now an allowlist that defaults to redacting.
+* **api:** `GET /users/:uid` returned more than the caller was entitled to see; it is now scoped to the caller's visibility.
+* **proxy:** the accept loop could deregister itself while `Shutdown` was waiting on it, racing `wg.Add` against `wg.Wait`. Covered by a race-stress job in CI.
+* **proxy:** a statement released from an approval hold now carries the hold's outcome on its completion event, so the live watch feed no longer forgets an approval once the statement runs.
+* **store:** `ListGrants(ActiveOnly)` and `GetActiveGrant` disagreed about what counts as an active definition state.
+* **migrations:** the grants-to-definitions backfill could attach a grant to a definition that does not cover its database; the scope condition is fixed and a follow-up migration repairs rows already backfilled that way.
+* **ui:** the TanStack Query cache survived login, logout and stale-token invalidation, so one identity could briefly see the previous session's rows.
+* **ui:** a grant whose definition is missing now renders an explicit unknown state instead of blank.
+
+### Performance Improvements
+
+* **website:** the homepage showcase ships as WebP with the clip held until it is scrolled into view, and the logos ship as renditions rather than 761px originals — removing ~1.4 MB of PNG from above the fold.
+
+### Upgrade notes
+
+**Five migrations**, all forward-only and reversible:
+
+| Migration | What it does |
+|---|---|
+| `20260806000000_grants_priority` | adds `priority` to grants and grant definitions |
+| `20260806010000_connections_grant_uid` | adds `connections.grant_uid` |
+| `20260806020000_grants_reference_definitions` | links every grant to a grant definition, backfilling one per distinct existing grant shape |
+| `20260807000000_grant_definitions_sample_queries` | adds sample queries to definitions |
+| `20260807010000_grants_rescope_mismatched_definitions` | repairs grants the first backfill attached to an out-of-scope definition |
+
+**The grants API is the compatibility break in this release.** `POST /api/v1/grants` no longer accepts a grant's shape inline — it assigns an existing definition to a user and a database. Every control (`read_only`, `block_copy`, `block_ddl`), the duration, the quotas and the approval patterns now live on the definition and are read through it. The backfill means existing grants keep working unchanged: each distinct shape in your database becomes a generated definition. Any client or script that *creates* grants must be updated to reference a definition.
+
+**The backfill's scope was verified against real data and did need the follow-up repair.** `20260806020000` could pair a grant with a definition that does not cover the grant's database; `20260807010000` re-scopes those rows. If you already ran the former in an earlier build, the latter is what fixes it — no manual intervention is required.
+
+**Approval patterns starting with `(` may already be corrupt.** The `text[]` read path split them on the leading paren, so a pattern like `(?i)DELETE` was stored intact but read back broken. Upgrading fixes the codec; it does not repair rows written before. `docs/approvals.md` explains how to detect and repair them.
+
+**SQL Server is new and its listener is on by default** at `:1434` (`DBB_LISTEN_MSSQL`, empty disables). 1434/tcp is free — the SQL Server Browser that owns 1434 is UDP-only. TLS is terminated with an auto-generated self-signed certificate unless you point `DBB_MSSQL_TLS_CERT_FILE` / `DBB_MSSQL_TLS_KEY_FILE` at your own.
+
 ## [0.22.0](https://github.com/fclairamb/dbbat/compare/v0.21.0...v0.22.0) (2026-08-05)
 
 

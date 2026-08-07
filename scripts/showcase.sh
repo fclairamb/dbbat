@@ -30,19 +30,23 @@ SHOWCASE_OUT="${SHOWCASE_OUT:-${REPO_ROOT}/website/static/img/showcase}"
 SHOWCASE_WORK="${SHOWCASE_WORK:-${REPO_ROOT}/front/showcase/.artifacts}"
 SHOWCASE_PG_IMAGE="${SHOWCASE_PG_IMAGE:-postgres:15}"
 SHOWCASE_CONTAINER="${SHOWCASE_CONTAINER:-dbbat-showcase-postgres}"
-SHOWCASE_PROJECT="${SHOWCASE_PROJECT:-}"        # "screenshots" | "video" | ""
+SHOWCASE_PG_TIMEOUT="${SHOWCASE_PG_TIMEOUT:-60}"  # seconds to wait for the upstream (pg_isready + demo db)
+SHOWCASE_PROJECT="${SHOWCASE_PROJECT:-}"        # "screenshots" | "poster" | "video" | ""
 SHOWCASE_SKIP_BUILD="${SHOWCASE_SKIP_BUILD:-0}"
 SHOWCASE_SKIP_TRANSCODE="${SHOWCASE_SKIP_TRANSCODE:-0}"
+SHOWCASE_SKIP_WEBP="${SHOWCASE_SKIP_WEBP:-0}"   # leave the PNGs unaccompanied
+SHOWCASE_WEBP_QUALITY="${SHOWCASE_WEBP_QUALITY:-80}"
+SHOWCASE_WEBP_MAX_WIDTH="${SHOWCASE_WEBP_MAX_WIDTH:-1280}"
 SHOWCASE_KEEP="${SHOWCASE_KEEP:-0}"             # leave the stack up afterwards
 SHOWCASE_BINARY="${SHOWCASE_BINARY:-${REPO_ROOT}/dbbat}"
 
 # A throwaway key: this instance holds nothing but demo data.
 SHOWCASE_KEY="${SHOWCASE_KEY:-MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=}"
 
-# SHOWCASE_FIXED_TIME is intentionally NOT defaulted here. The browser clock
-# has to be pinned *after* the scenario is seeded, otherwise every timestamp
-# renders in the future ("in less than a minute"); global-setup therefore picks
-# the pin itself. Set it only to force a specific instant.
+# SHOWCASE_FIXED_TIME is not defaulted here: the pin is a constant derived from
+# SHOWCASE_EPOCH in front/showcase/config.ts, and global-setup reads it once the
+# scenario's own rows have been dated onto that same epoch. Set it only to force
+# a specific instant.
 export SHOWCASE_API_PORT SHOWCASE_PROXY_PORT SHOWCASE_PG_PORT \
        SHOWCASE_OUT SHOWCASE_WORK
 
@@ -74,6 +78,20 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 require() { command -v "$1" >/dev/null 2>&1 || die "$1 is required but not on PATH"; }
+
+# Docker's state string ("running", "exited", "created", ...), or "gone" when
+# the container cannot be inspected at all (removed, never created, etc).
+container_state() {
+  docker inspect -f '{{.State.Status}}' "${SHOWCASE_CONTAINER}" 2>/dev/null || echo "gone"
+}
+
+dump_container_diagnostics() {
+  local exit_code
+  exit_code="$(docker inspect -f '{{.State.ExitCode}}' "${SHOWCASE_CONTAINER}" 2>/dev/null || echo 'unknown')"
+  warn "container ${SHOWCASE_CONTAINER} state: $(container_state), exit code: ${exit_code}"
+  warn "container ${SHOWCASE_CONTAINER} logs (last 50 lines):"
+  docker logs --tail 50 "${SHOWCASE_CONTAINER}" 2>&1 || true
+}
 
 port_busy() {
   # `nc -z` is not everywhere; lsof is on macOS and the GitHub runners.
@@ -119,7 +137,9 @@ if docker ps -a --format '{{.Names}}' | grep -qx "${SHOWCASE_CONTAINER}"; then
   docker start "${SHOWCASE_CONTAINER}" >/dev/null
 else
   log "starting the throwaway upstream (${SHOWCASE_PG_IMAGE}) on :${SHOWCASE_PG_PORT}"
-  docker run -d --rm \
+  # No --rm: a crashed container must survive long enough for the diagnostics
+  # below to inspect it. The named cleanup trap still removes it on exit.
+  docker run -d \
     --name "${SHOWCASE_CONTAINER}" \
     -e POSTGRES_USER=postgres \
     -e POSTGRES_PASSWORD=postgres \
@@ -129,23 +149,57 @@ else
   STARTED_CONTAINER=1
 fi
 
-log "waiting for the upstream to accept connections"
-for _ in $(seq 1 60); do
+log "waiting for the upstream to accept connections (timeout ${SHOWCASE_PG_TIMEOUT}s)"
+pg_ready=0
+container_died=0
+for _ in $(seq 1 "${SHOWCASE_PG_TIMEOUT}"); do
   if docker exec "${SHOWCASE_CONTAINER}" pg_isready -U postgres >/dev/null 2>&1; then
+    pg_ready=1
+    break
+  fi
+  state="$(container_state)"
+  if [ "${state}" != "running" ]; then
+    container_died=1
     break
   fi
   sleep 1
 done
-docker exec "${SHOWCASE_CONTAINER}" pg_isready -U postgres >/dev/null 2>&1 \
-  || die "the upstream container never became ready"
+if [ "${pg_ready}" != "1" ]; then
+  dump_container_diagnostics
+  if [ "${container_died}" = "1" ]; then
+    die "the upstream container died before becoming ready (state: $(container_state))"
+  else
+    die "the upstream container never became ready (timed out after ${SHOWCASE_PG_TIMEOUT}s, still running)"
+  fi
+fi
+
 # pg_isready goes green before init.sql has finished; the demo database is the
 # thing we actually need.
-for _ in $(seq 1 60); do
+log "waiting for the demo database to be created (timeout ${SHOWCASE_PG_TIMEOUT}s)"
+demo_ready=0
+container_died=0
+for _ in $(seq 1 "${SHOWCASE_PG_TIMEOUT}"); do
   if docker exec "${SHOWCASE_CONTAINER}" psql -U postgres -lqt 2>/dev/null | cut -d'|' -f1 | grep -qw demo; then
+    demo_ready=1
+    break
+  fi
+  state="$(container_state)"
+  if [ "${state}" != "running" ]; then
+    container_died=1
     break
   fi
   sleep 1
 done
+if [ "${demo_ready}" != "1" ]; then
+  dump_container_diagnostics
+  warn "databases currently on the upstream:"
+  docker exec "${SHOWCASE_CONTAINER}" psql -U postgres -lqt 2>&1 || true
+  if [ "${container_died}" = "1" ]; then
+    die "the upstream container died before the demo database was created (state: $(container_state))"
+  else
+    die "the demo database was never created (timed out after ${SHOWCASE_PG_TIMEOUT}s — check docker/postgres/init.sql)"
+  fi
+fi
 
 # --- demo-mode dbbat --------------------------------------------------------
 log "starting dbbat in demo mode (api :${SHOWCASE_API_PORT}, pg proxy :${SHOWCASE_PROXY_PORT})"
@@ -225,6 +279,89 @@ else
   for src in "${videos[@]}"; do
     base="$(basename "${src}" .webm)"
     transcode "${src}" "${base}"
+  done
+fi
+
+# --- still renditions -------------------------------------------------------
+#
+# Every PNG in the output directory gets a WebP sibling. The homepage serves
+# those (a <picture> for the grid, poster= for the clip); the PNGs stay exactly
+# where they are, because the docs and any external embed link to them and a
+# reader who clicks a screenshot wants the full-size original.
+#
+# Anything wider than SHOWCASE_WEBP_MAX_WIDTH is downscaled to it. The stills
+# are captured at 2560x1600 (deviceScaleFactor 2) and render at ~350 CSS px in
+# the homepage grid, so 1280 is still generously retina there. Never upscales:
+# the 1280x800 video poster is re-encoded at its native size.
+
+webp_encoder() {
+  if [ "${SHOWCASE_SKIP_WEBP}" = "1" ]; then
+    return
+  fi
+  # Ubuntu's ffmpeg is built with libwebp, Homebrew's is not; cwebp is the same
+  # library's own CLI and is what the `webp` package installs everywhere.
+  if command -v ffmpeg >/dev/null 2>&1 \
+    && ffmpeg -hide_banner -encoders 2>/dev/null | grep -q ' libwebp'; then
+    echo ffmpeg
+  elif command -v cwebp >/dev/null 2>&1; then
+    echo cwebp
+  fi
+}
+
+# Width of an image, or 0 when we cannot tell (ffprobe ships with ffmpeg).
+image_width() {
+  local width
+  width="$(ffprobe -v error -select_streams v:0 -show_entries stream=width \
+    -of csv=p=0 "$1" 2>/dev/null || true)"
+  case "${width}" in
+    '' | *[!0-9]*) echo 0 ;;
+    *) echo "${width}" ;;
+  esac
+}
+
+webp_rendition() {
+  local encoder="$1" src="$2"
+  local dst="${src%.png}.webp"
+  local width target
+  width="$(image_width "${src}")"
+  target=0
+  if [ "${width}" -gt "${SHOWCASE_WEBP_MAX_WIDTH}" ]; then
+    target="${SHOWCASE_WEBP_MAX_WIDTH}"
+  fi
+
+  if [ "${encoder}" = "ffmpeg" ]; then
+    local scale=()
+    if [ "${target}" -gt 0 ]; then
+      scale=(-vf "scale=${target}:-2:flags=lanczos")
+    fi
+    ffmpeg -y -loglevel error -i "${src}" "${scale[@]}" \
+      -c:v libwebp -quality "${SHOWCASE_WEBP_QUALITY}" -preset picture \
+      -compression_level 6 "${dst}"
+  else
+    local resize=()
+    if [ "${target}" -gt 0 ]; then
+      resize=(-resize "${target}" 0)
+    fi
+    cwebp -quiet -q "${SHOWCASE_WEBP_QUALITY}" -m 6 -sharp_yuv \
+      "${resize[@]}" "${src}" -o "${dst}"
+  fi
+}
+
+WEBP_ENCODER="$(webp_encoder)"
+shopt -s nullglob
+stills=("${SHOWCASE_OUT}"/*.png)
+shopt -u nullglob
+
+if [ "${SHOWCASE_SKIP_WEBP}" = "1" ]; then
+  log "SHOWCASE_SKIP_WEBP=1 — not writing the WebP renditions"
+elif [ "${#stills[@]}" -eq 0 ]; then
+  log "no PNG to re-encode"
+elif [ -z "${WEBP_ENCODER}" ]; then
+  warn "no WebP encoder found (ffmpeg without libwebp, and no cwebp) — the website will fall back to the PNGs"
+else
+  log "writing WebP renditions with ${WEBP_ENCODER} (q${SHOWCASE_WEBP_QUALITY}, max ${SHOWCASE_WEBP_MAX_WIDTH}px wide)"
+  for src in "${stills[@]}"; do
+    webp_rendition "${WEBP_ENCODER}" "${src}"
   done
 fi
 

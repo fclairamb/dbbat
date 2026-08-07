@@ -122,7 +122,13 @@ export function AppSidebar() {
     <Sidebar>
       <SidebarHeader>
         <div className="flex items-center gap-2 px-2 py-1">
-          <img src={`${import.meta.env.BASE_URL}logo-notext.png`} alt="DBBat" className="h-10 w-10" />
+          <img
+            src={`${import.meta.env.BASE_URL}logo-notext.png`}
+            alt="DBBat"
+            className="h-10 w-10"
+            width={40}
+            height={40}
+          />
           <div className="flex flex-col">
             <span className="font-semibold text-lg text-primary">DBBat</span>
             <span className="text-xs text-muted-foreground">
@@ -238,7 +244,7 @@ export function AppSidebar() {
           <SidebarMenuItem>
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <SidebarMenuButton className="w-full">
+                <SidebarMenuButton className="w-full" data-testid="user-menu-trigger">
                   <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-primary-foreground text-sm font-medium">
                     {user?.username?.charAt(0).toUpperCase() || "U"}
                   </div>
@@ -269,7 +275,7 @@ export function AppSidebar() {
                   <LockKeyhole className="mr-2 h-4 w-4" />
                   <span>Change password</span>
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={logout}>
+                <DropdownMenuItem onClick={logout} data-testid="logout-menu-item">
                   <LogOut className="mr-2 h-4 w-4" />
                   <span>Log out</span>
                 </DropdownMenuItem>

@@ -65,6 +65,8 @@ func freshDatabaseDSN(t *testing.T, name string) string {
 // `duplicate key value violates unique constraint "pg_class_relname_nsp_index"`
 // rather than one of them quietly no-opping.
 func TestNewMigratesConcurrentlyOnFreshDatabase(t *testing.T) {
+	t.Parallel()
+
 	dsn := freshDatabaseDSN(t, fmt.Sprintf("dbbat_race_%d", time.Now().UnixNano()))
 
 	const racers = 8
@@ -134,6 +136,8 @@ func TestNewMigratesConcurrentlyOnFreshDatabase(t *testing.T) {
 // only one holder at a time, and the lock is handed back on every exit path,
 // including the one where the guarded work fails.
 func TestWithMigrationLockSerializesAndReleases(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStoreNoCleanup(t)
 	ctx := context.Background()
 

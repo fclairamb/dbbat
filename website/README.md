@@ -64,8 +64,27 @@ drift behind the product. `static/img/showcase/manifest.json` is how you tell:
 `version` comes from `.release-please-manifest.json` — the same source the
 binary's `internal/version` is stamped from. Pages that embed the media should
 read the manifest and caption it ("captured on v0.22.0") rather than implying
-the visuals are current.
+the visuals are current. `src/components/ProductShowcase/` does exactly that:
+it `import`s the manifest, so the caption is baked in at build time.
 
 The video ships in two renditions: `approval-hold-av1.mp4` (small, modern) and
 `approval-hold-h264.mp4`. A `<video>` element needs **both** `<source>`s —
-Safari only hardware-decodes AV1 on recent silicon.
+Safari only hardware-decodes AV1 on recent silicon. `approval-hold-poster.png`
+is the still that goes with them.
+
+### Autoplay and `prefers-reduced-motion`
+
+A CSS media query cannot stop a video from autoplaying, so `ProductShowcase`
+never renders an `autoplay` attribute at all. The prerendered HTML is the
+still, paused, with player controls; an effect calls `play()` after hydration
+only when `matchMedia("(prefers-reduced-motion: reduce)")` does *not* match.
+That is also why the check lives in an effect rather than at render time —
+Docusaurus prerenders these pages in Node, where `window` does not exist.
+
+### This is the only screenshot set
+
+`static/img/screenshots/` used to hold a second, hand-captured set. It was
+deleted in favour of this one: it could not be regenerated, it carried no
+provenance, and five of its eight files were referenced by nothing. Put new
+product visuals in the showcase suite (`front/showcase/`) so they stay
+reproducible — do not start a third directory.

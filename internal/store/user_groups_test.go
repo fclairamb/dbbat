@@ -97,6 +97,8 @@ func TestGrantDefinitionAppliesTo(t *testing.T) {
 }
 
 func TestUserGroupCRUD(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -157,6 +159,8 @@ func TestUserGroupCRUD(t *testing.T) {
 }
 
 func TestUserGroupMembership(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -221,6 +225,8 @@ func TestUserGroupMembership(t *testing.T) {
 }
 
 func TestSetGroupMembersAndSetUserGroups(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -299,6 +305,8 @@ func TestSetGroupMembersAndSetUserGroups(t *testing.T) {
 }
 
 func TestUserGroupDeletionCascadesMembershipButNotScope(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -361,6 +369,8 @@ func TestUserGroupDeletionCascadesMembershipButNotScope(t *testing.T) {
 }
 
 func TestGrantDefinitionScopePersistence(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -388,11 +398,13 @@ func TestGrantDefinitionScopePersistence(t *testing.T) {
 	def.GroupUIDs = []uuid.UUID{groupUID}
 	def.DatabaseUIDs = []uuid.UUID{dbUID}
 
-	if err := store.UpdateGrantDefinition(ctx, def); err != nil {
+	updated, err := store.UpdateGrantDefinition(ctx, def)
+	if err != nil {
 		t.Fatalf("UpdateGrantDefinition() error = %v", err)
 	}
 
-	reloaded, err := store.GetGrantDefinition(ctx, def.UID)
+	// The edit produced a new version; the scope has to be read off that one.
+	reloaded, err := store.GetGrantDefinition(ctx, updated.UID)
 	if err != nil {
 		t.Fatalf("GetGrantDefinition() error = %v", err)
 	}

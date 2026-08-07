@@ -185,16 +185,100 @@ func (s *Server) handleOAuthCallback(providerName string) gin.HandlerFunc {
 			return
 		}
 
+		// 6. Park the session behind a one-time exchange code. The session
+		// token itself must never travel in a URL: a redirect Location lands
+		// in access logs, proxy logs, browser history and Referer headers,
+		// and it stays replayable for the session's whole lifetime. The code
+		// is short-lived, single-use and worthless once redeemed.
+		exchangeCode, err := s.createLoginExchange(ctx, user.UID, plainKey)
+		if err != nil {
+			writeInternalError(c, s.logger, err, "failed to create OAuth login exchange")
+			return
+		}
+
 		s.logger.InfoContext(ctx, "OAuth login successful",
 			slog.String("provider", providerName),
 			slog.String("username", user.Username),
 			slog.Any("uid", user.UID))
 
-		// 6. Redirect to frontend with token, forwarding the redirect target
-		// captured when the flow started. The login page picks `redirect` up
-		// the same way it does after a password login.
-		c.Redirect(http.StatusFound, s.buildLoginRedirect("token="+plainKey, redirectTarget))
+		// 7. Redirect to frontend with the exchange code, forwarding the
+		// redirect target captured when the flow started. The login page picks
+		// `redirect` up the same way it does after a password login.
+		c.Redirect(http.StatusFound, s.buildLoginRedirect("code="+url.QueryEscape(exchangeCode), redirectTarget))
 	}
+}
+
+// createLoginExchange mints the one-time code the browser trades for the web
+// session token created by the OAuth callback. The token is AES-GCM encrypted
+// and AAD-bound to the exchange row before it is stored, so a database dump on
+// its own never yields a usable session.
+func (s *Server) createLoginExchange(ctx context.Context, userID uuid.UUID, plainKey string) (string, error) {
+	code, err := generateRandomState()
+	if err != nil {
+		return "", err
+	}
+
+	exchangeUID := uuid.New()
+
+	encrypted, err := crypto.Encrypt([]byte(plainKey), s.encryptionKey, crypto.LoginExchangeAAD(exchangeUID.String()))
+	if err != nil {
+		return "", fmt.Errorf("encrypt login exchange token: %w", err)
+	}
+
+	if err := s.store.CreateLoginExchange(ctx, exchangeUID, code, userID, encrypted); err != nil {
+		return "", err
+	}
+
+	return code, nil
+}
+
+// LoginExchangeRequest is the request body for POST /auth/oauth/exchange.
+type LoginExchangeRequest struct {
+	Code string `json:"code" binding:"required"`
+}
+
+// LoginExchangeResponse hands the web session token back to the SPA. Shaped
+// like the device-grant token response so both login paths look the same to a
+// client.
+type LoginExchangeResponse struct {
+	AccessToken string `json:"access_token"`
+	TokenType   string `json:"token_type"`
+}
+
+// handleOAuthExchange redeems the one-time code the OAuth callback put in the
+// login page's URL for the actual web session token. Unauthenticated by
+// design — the code *is* the credential — but single-use, short-lived and IP
+// rate limited like the other pre-auth endpoints.
+// POST /api/v1/auth/oauth/exchange
+func (s *Server) handleOAuthExchange(c *gin.Context) {
+	var req LoginExchangeRequest
+	if err := c.ShouldBindJSON(&req); err != nil || req.Code == "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "code is required")
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	exchangeUID, userID, encrypted, err := s.store.ConsumeLoginExchange(ctx, req.Code)
+	if err != nil {
+		if errors.Is(err, store.ErrLoginExchangeNotFound) {
+			writeError(c, http.StatusUnauthorized, ErrCodeOAuthExchangeInvalid,
+				"login code is invalid, already used or expired")
+			return
+		}
+		writeInternalError(c, s.logger, err, "failed to consume OAuth login exchange")
+		return
+	}
+
+	plainKey, err := crypto.Decrypt(encrypted, s.encryptionKey, crypto.LoginExchangeAAD(exchangeUID.String()))
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to decrypt OAuth login exchange token")
+		return
+	}
+
+	s.logger.InfoContext(ctx, "OAuth login exchange redeemed", slog.Any("uid", userID))
+
+	c.JSON(http.StatusOK, LoginExchangeResponse{AccessToken: string(plainKey), TokenType: "Bearer"})
 }
 
 // errOAuthUserNotLinked is returned when no local user could be found or created.

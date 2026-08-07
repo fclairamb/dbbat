@@ -74,7 +74,7 @@ func NewLimitGuard(grant *store.Grant, from, to *atomic.Int64) *LimitGuard {
 
 	if grant != nil {
 		g.baseBytes = grant.BytesTransferred
-		g.maxBytes = grant.MaxBytesTransferred
+		g.maxBytes = grant.MaxBytesTransferred()
 		g.expiresAt = grant.ExpiresAt
 	}
 

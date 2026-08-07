@@ -33,6 +33,19 @@ import (
 // refuses to copy a template another session is attached to.
 const testTemplateDB = "dbbat_api_template"
 
+// testMaxConns is the connection budget one test store gets.
+//
+// store.New sizes its pool for a server, not for a hundred of them: the whole
+// package now runs in parallel, every test opens its own store, and 25
+// connections each blows past PostgreSQL's max_connections long before the
+// tests do anything interesting ("sorry, too many clients already"). A test
+// store issues a handful of statements at a time, so a small pool costs it
+// nothing. testContainerMaxConns raises the server-side ceiling to match.
+const (
+	testMaxConns          = 4
+	testContainerMaxConns = "300"
+)
+
 var (
 	testContainer       *postgres.PostgresContainer
 	testDSN             string
@@ -66,6 +79,7 @@ func prepareTestContainer() {
 		postgres.WithDatabase("dbbat_test"),
 		postgres.WithUsername("test"),
 		postgres.WithPassword("test"),
+		testcontainers.WithCmdArgs("-c", "max_connections="+testContainerMaxConns),
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
@@ -83,6 +97,8 @@ func prepareTestContainer() {
 
 	// Attached to the container's default database, never to the template.
 	testAdminDB = sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(testDSN)))
+	testAdminDB.SetMaxOpenConns(testMaxConns)
+	testAdminDB.SetMaxIdleConns(testMaxConns)
 
 	if _, err := testAdminDB.ExecContext(ctx, "CREATE DATABASE "+testTemplateDB); err != nil {
 		errContainerStartup = fmt.Errorf("failed to create the template database: %w", err)
@@ -173,6 +189,9 @@ func newIsolatedStore(t *testing.T) *store.Store {
 		t.Fatalf("failed to create store: %v", err)
 	}
 
+	dataStore.DB().SetMaxOpenConns(testMaxConns)
+	dataStore.DB().SetMaxIdleConns(testMaxConns)
+
 	t.Cleanup(func() {
 		dataStore.Close()
 
@@ -235,7 +254,6 @@ func createTestUser(t *testing.T, dataStore *store.Store, username, password str
 func loginUser(t *testing.T, server *Server, username, password string) string {
 	t.Helper()
 
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.POST("/api/v1/auth/login", server.handleLogin)
 
@@ -268,6 +286,8 @@ func loginUser(t *testing.T, server *Server, username, password string) string {
 }
 
 func TestResetPassword_SelfResetForbidden(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 
 	// Create an admin user
@@ -277,7 +297,6 @@ func TestResetPassword_SelfResetForbidden(t *testing.T) {
 	token := loginUser(t, server, "admin", "adminpassword123")
 
 	// Setup router with auth middleware
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 
 	// Add auth middleware that verifies the token
@@ -313,6 +332,8 @@ func TestResetPassword_SelfResetForbidden(t *testing.T) {
 }
 
 func TestResetPassword_AdminCanResetOtherUser(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 
 	// Create an admin user
@@ -325,7 +346,6 @@ func TestResetPassword_AdminCanResetOtherUser(t *testing.T) {
 	token := loginUser(t, server, "admin", "adminpassword123")
 
 	// Setup router with auth middleware
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(server.authMiddleware())
 	router.POST("/api/v1/users/:uid/reset-password", server.requireAdmin(), server.handleResetPassword)
@@ -371,6 +391,8 @@ func TestResetPassword_AdminCanResetOtherUser(t *testing.T) {
 }
 
 func TestResetPassword_NonAdminForbidden(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 
 	// Create a regular user (non-admin)
@@ -383,7 +405,6 @@ func TestResetPassword_NonAdminForbidden(t *testing.T) {
 	token := loginUser(t, server, "viewer", "viewerpassword123")
 
 	// Setup router with auth middleware
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(server.authMiddleware())
 	router.POST("/api/v1/users/:uid/reset-password", server.requireAdmin(), server.handleResetPassword)
@@ -407,6 +428,8 @@ func TestResetPassword_NonAdminForbidden(t *testing.T) {
 }
 
 func TestResetPassword_WeakPasswordRejected(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 
 	// Create an admin user
@@ -419,7 +442,6 @@ func TestResetPassword_WeakPasswordRejected(t *testing.T) {
 	token := loginUser(t, server, "admin", "adminpassword123")
 
 	// Setup router with auth middleware
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(server.authMiddleware())
 	router.POST("/api/v1/users/:uid/reset-password", server.requireAdmin(), server.handleResetPassword)
@@ -452,6 +474,8 @@ func TestResetPassword_WeakPasswordRejected(t *testing.T) {
 }
 
 func TestResetPassword_UserNotFound(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 
 	// Create an admin user
@@ -461,7 +485,6 @@ func TestResetPassword_UserNotFound(t *testing.T) {
 	token := loginUser(t, server, "admin", "adminpassword123")
 
 	// Setup router with auth middleware
-	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	router.Use(server.authMiddleware())
 	router.POST("/api/v1/users/:uid/reset-password", server.requireAdmin(), server.handleResetPassword)

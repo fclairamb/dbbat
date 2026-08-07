@@ -43,7 +43,14 @@ func (s *Server) notifyAsync(ev notify.GrantRequestEvent) {
 func (s *Server) loadEventContext(ctx context.Context, req *store.GrantRequest, decider *store.User) notify.GrantRequestEvent {
 	ev := notify.GrantRequestEvent{Request: req, Decider: decider}
 
-	if def, err := s.store.GetGrantDefinition(ctx, req.GrantDefinitionID); err == nil {
+	// The store attaches the live version of the request's definition on every
+	// read path; use it so a Slack message names the same version the web UI
+	// shows. The by-uid lookup stays as a fallback for the few callers that
+	// hand-build a request (tests, and the Slack interaction path, which
+	// re-reads by uid anyway).
+	if req.Definition != nil {
+		ev.Definition = req.Definition
+	} else if def, err := s.store.GetGrantDefinition(ctx, req.GrantDefinitionID); err == nil {
 		ev.Definition = def
 	}
 
@@ -152,6 +159,44 @@ func (s *Server) enforceRequestScope(
 	return true
 }
 
+// resolveLiveGrantDefinition resolves a uid-or-slug reference to the **live**
+// version of that definition's lineage, writing the error response itself and
+// returning ok=false when it cannot.
+//
+// Naming an archived version by uid still yields the live one: issuing (or
+// requesting) a superseded policy is exactly what versioning exists to
+// prevent, and pinning the live row keeps uid- and slug-based callers
+// comparing like with like.
+func (s *Server) resolveLiveGrantDefinition(c *gin.Context, idOrSlug string) (*store.GrantDefinition, bool) {
+	ctx := c.Request.Context()
+
+	def, err := s.resolveGrantDefinition(ctx, idOrSlug)
+	if err != nil {
+		if errors.Is(err, store.ErrGrantDefinitionNotFound) {
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "grant_definition_id does not exist")
+
+			return nil, false
+		}
+
+		writeInternalError(c, s.logger, err, "failed to load grant definition")
+
+		return nil, false
+	}
+
+	if def.IsLive() {
+		return def, true
+	}
+
+	live, err := s.store.GetLiveGrantDefinition(ctx, def.UID)
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to resolve the live grant definition")
+
+		return nil, false
+	}
+
+	return live, true
+}
+
 // handleCreateGrantRequest — any authenticated user can request access.
 func (s *Server) handleCreateGrantRequest(c *gin.Context) {
 	var req CreateGrantRequestRequest
@@ -171,16 +216,8 @@ func (s *Server) handleCreateGrantRequest(c *gin.Context) {
 	currentUser := getCurrentUser(c)
 	ctx := c.Request.Context()
 
-	def, err := s.resolveGrantDefinition(ctx, req.GrantDefinitionID)
-	if err != nil {
-		if errors.Is(err, store.ErrGrantDefinitionNotFound) {
-			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "grant_definition_id does not exist")
-
-			return
-		}
-
-		writeInternalError(c, s.logger, err, "failed to load grant definition")
-
+	def, ok := s.resolveLiveGrantDefinition(c, req.GrantDefinitionID)
+	if !ok {
 		return
 	}
 
@@ -383,7 +420,10 @@ func (s *Server) checkRequestInScope(ctx context.Context, uid uuid.UUID) error {
 		return nil //nolint:nilerr // the store transition reports not-found
 	}
 
-	def, err := s.store.GetGrantDefinition(ctx, request.GrantDefinitionID)
+	// The live version of the lineage, since that is the one the approval will
+	// actually materialize — scope has to be judged against the policy being
+	// issued, not against the version the request was filed under.
+	def, err := s.store.GetLiveGrantDefinition(ctx, request.GrantDefinitionID)
 	if err != nil {
 		return nil //nolint:nilerr // the store transition reports not-found
 	}

@@ -137,6 +137,7 @@ function LocalListenersSection() {
     { protocol: "Oracle", address: instance?.listen.ora ?? "" },
     { protocol: "MySQL", address: instance?.listen.mysql ?? "" },
     { protocol: "MongoDB", address: instance?.listen.mongo ?? "" },
+    { protocol: "SQL Server", address: instance?.listen.mssql ?? "" },
   ];
 
   return (

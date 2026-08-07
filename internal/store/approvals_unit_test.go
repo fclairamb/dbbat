@@ -57,7 +57,8 @@ func TestGrantRequiresApproval(t *testing.T) {
 		t.Fatal("a grant with no patterns must not require approval")
 	}
 
-	if !(&AccessGrant{ApprovalPatterns: []string{"x"}}).RequiresApproval() {
+	withPatterns := &AccessGrant{Definition: &GrantDefinition{ApprovalPatterns: []string{"x"}}}
+	if !withPatterns.RequiresApproval() {
 		t.Fatal("a grant with a pattern must require approval")
 	}
 }
@@ -69,7 +70,7 @@ func TestGrantMayApprove(t *testing.T) {
 	dba := uuid.New()
 	other := uuid.New()
 
-	grant := &AccessGrant{ApproverGroupUIDs: []uuid.UUID{sre, dba}}
+	grant := &AccessGrant{Definition: &GrantDefinition{ApproverGroupUIDs: []uuid.UUID{sre, dba}}}
 
 	if !grant.MayApprove([]uuid.UUID{other, dba}) {
 		t.Fatal("a member of an approver group was refused")
@@ -80,8 +81,14 @@ func TestGrantMayApprove(t *testing.T) {
 	}
 
 	// Empty approver groups means admins only — never "everyone".
-	if (&AccessGrant{}).MayApprove([]uuid.UUID{sre}) {
+	if (&AccessGrant{Definition: &GrantDefinition{}}).MayApprove([]uuid.UUID{sre}) {
 		t.Fatal("an empty approver-group list must not fail open")
+	}
+
+	// A grant whose definition never got attached is the fail-closed case: it
+	// must not hand approval rights to anybody.
+	if (&AccessGrant{}).MayApprove([]uuid.UUID{sre}) {
+		t.Fatal("a grant with no definition attached must not fail open")
 	}
 
 	var nilGrant *AccessGrant
@@ -90,11 +97,13 @@ func TestGrantMayApprove(t *testing.T) {
 	}
 }
 
-func TestBuildGrantFromDefinitionMirrorsApprovalFields(t *testing.T) {
+func TestBuildGrantFromDefinitionReadsApprovalFieldsFromTheDefinition(t *testing.T) {
 	t.Parallel()
 
 	group := uuid.New()
+	defUID := uuid.New()
 	def := &GrantDefinition{
+		UID:               defUID,
 		DurationSeconds:   3600,
 		ApprovalPatterns:  []string{`(?i)^DELETE`},
 		ApproverGroupUIDs: []uuid.UUID{group},
@@ -102,19 +111,40 @@ func TestBuildGrantFromDefinitionMirrorsApprovalFields(t *testing.T) {
 
 	grant := BuildGrantFromDefinition(def, uuid.New(), uuid.New(), uuid.New(), time.Now())
 
-	if len(grant.ApprovalPatterns) != 1 || grant.ApprovalPatterns[0] != `(?i)^DELETE` {
-		t.Fatalf("patterns not mirrored onto the grant: %v", grant.ApprovalPatterns)
+	if grant.GrantDefinitionID != defUID {
+		t.Fatalf("grant pins %s, want the definition %s", grant.GrantDefinitionID, defUID)
 	}
 
-	if len(grant.ApproverGroupUIDs) != 1 || grant.ApproverGroupUIDs[0] != group {
-		t.Fatalf("approver groups not mirrored: %v", grant.ApproverGroupUIDs)
+	if len(grant.ApprovalPatterns()) != 1 || grant.ApprovalPatterns()[0] != `(?i)^DELETE` {
+		t.Fatalf("patterns not read from the definition: %v", grant.ApprovalPatterns())
 	}
 
-	// The copy must be independent: mutating the definition afterwards must
-	// not reach a grant that was already materialized.
-	def.ApprovalPatterns[0] = "changed"
+	if len(grant.ApproverGroupUIDs()) != 1 || grant.ApproverGroupUIDs()[0] != group {
+		t.Fatalf("approver groups not read from the definition: %v", grant.ApproverGroupUIDs())
+	}
+}
 
-	if grant.ApprovalPatterns[0] == "changed" {
-		t.Fatal("the grant shares the definition's slice")
+// A grant whose definition could not be attached must behave as the most
+// restrictive grant imaginable rather than as an unrestricted one — the whole
+// reason the accessors exist rather than plain field reads.
+func TestGrantWithoutDefinitionFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	grant := &AccessGrant{}
+
+	for _, control := range ValidControls {
+		if !grant.HasControl(control) {
+			t.Errorf("a shapeless grant must report %s as enforced", control)
+		}
+	}
+
+	maxQueries := grant.MaxQueryCounts()
+	if maxQueries == nil || *maxQueries != 0 {
+		t.Errorf("MaxQueryCounts() = %v, want an exhausted quota", maxQueries)
+	}
+
+	maxBytes := grant.MaxBytesTransferred()
+	if maxBytes == nil || *maxBytes != 0 {
+		t.Errorf("MaxBytesTransferred() = %v, want an exhausted quota", maxBytes)
 	}
 }

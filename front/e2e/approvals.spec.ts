@@ -150,6 +150,107 @@ test.describe("Approval holds", () => {
     expect([404, 409]).toContain(result);
   });
 
+  test("the live feed keeps the approval outcome after the statement completes", async ({
+    authenticatedPage,
+  }) => {
+    // A held statement produces three events for one query uid: the hold, the
+    // decision, then the completion once it actually ran. The regression this
+    // guards is the third one wiping the second: the feed row must still say
+    // "Approved", by whom, and must still be a single row.
+    //
+    // Both halves are synthetic on purpose — a real hold needs a live proxy
+    // session (see the note at the top of this file), and what is under test
+    // here is purely how the panel folds the events it is handed.
+    const connectionUid = "3f1b0c9e-0000-4000-8000-000000000001";
+    const queryUid = "3f1b0c9e-0000-4000-8000-000000000002";
+    const executedAt = new Date().toISOString();
+    const sql = "DELETE FROM shipments WHERE id = 42";
+
+    await authenticatedPage.route(
+      `**/api/v1/connections/${connectionUid}`,
+      (route) =>
+        route.fulfill({
+          json: {
+            uid: connectionUid,
+            user_id: "3f1b0c9e-0000-4000-8000-000000000003",
+            database_id: "3f1b0c9e-0000-4000-8000-000000000004",
+            source_ip: "127.0.0.1",
+            connected_at: executedAt,
+            last_activity_at: executedAt,
+            disconnected_at: null,
+            queries: 1,
+            bytes_transferred: 0,
+          },
+        }),
+    );
+
+    await authenticatedPage.routeWebSocket("**/api/v1/stream", (ws) => {
+      const send = (event: string, seq: number, data: Record<string, unknown>) =>
+        ws.send(
+          JSON.stringify({
+            type: "event",
+            topic: `connection/${connectionUid}/queries`,
+            seq,
+            event,
+            at: executedAt,
+            data,
+          }),
+        );
+
+      ws.onMessage((raw) => {
+        const msg = JSON.parse(String(raw)) as { type?: string; topic?: string };
+        if (msg.type !== "subscribe") return;
+
+        ws.send(JSON.stringify({ type: "subscribed", topic: msg.topic, error: null }));
+
+        send("approval_pending", 1, {
+          query_uid: queryUid,
+          connection_uid: connectionUid,
+          sql_text: sql,
+          executed_at: executedAt,
+          approval_required: true,
+          approval_status: "pending",
+          approval_pattern: "(?i)^\\s*DELETE",
+        });
+
+        send("approval_resolved", 2, {
+          query_uid: queryUid,
+          connection_uid: connectionUid,
+          approval_required: true,
+          approval_status: "approved",
+          resolved_at: executedAt,
+          resolved_by: { username: "bob", display_name: "bob" },
+        });
+
+        // The completion event as the proxy published it before the fix: it
+        // knows nothing about the hold. Folding it in must not un-approve the
+        // row, whatever the server chooses to send.
+        send("query", 3, {
+          query_uid: queryUid,
+          connection_uid: connectionUid,
+          sql_text: sql,
+          executed_at: executedAt,
+          duration_ms: 12.5,
+          rows_affected: 1,
+          approval_required: false,
+          approval_status: "",
+        });
+      });
+    });
+
+    await authenticatedPage.goto(`connections/${connectionUid}?watch=1`);
+    await authenticatedPage.waitForLoadState("domcontentloaded");
+
+    const feed = authenticatedPage.getByTestId("watch-feed");
+    await expect(feed).toBeVisible();
+    await expect(feed.getByTestId("approval-status-approved")).toBeVisible();
+    await expect(feed).toContainText("by bob");
+    await expect(feed).toContainText("DELETE FROM shipments");
+
+    // One statement, one row: the feed is keyed by query uid, not by event.
+    await expect(authenticatedPage.getByTestId("watch-feed-item")).toHaveCount(1);
+  });
+
   test("a non-admin cannot deny every pending approval", async ({ page }) => {
     // The bulk safety valve is admin-only; a viewer must be refused.
     await page.goto("/");

@@ -31,12 +31,13 @@ jobs:
           - ./internal/proxy/postgresql/
           - ./internal/proxy/mysql/
           - ./internal/proxy/mongodb/
+          - ./internal/proxy/mssql/
     steps:
       - uses: actions/checkout@v7.0.1
 
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
 
       - name: Run integration suite
         run: go test -tags integration -timeout 40m -count=1 -v ${{ github.event.inputs.package || matrix.package }}
@@ -50,7 +51,7 @@ jobs:
 
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
 
       - name: Run Oracle integration suite
         run: go test -tags integration -timeout 60m -count=1 -v ./internal/proxy/oracle/

@@ -14,7 +14,6 @@ import {
   useCancelGrantRequest,
   useUpdateGrantDefinition,
   type GrantRequest,
-  type CreateGrantDefinitionRequest,
 } from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { DataTable, type Column } from "@/components/shared/DataTable";
@@ -75,9 +74,6 @@ function GrantRequestsPage() {
 
   const { data: users = [] } = useUsers();
   const { data: databases = [] } = useDatabases();
-  const { data: definitions = [] } = useGrantDefinitions({
-    active_only: true,
-  });
 
   const userMap = useMemo(
     () => Object.fromEntries((users ?? []).map((u) => [u.uid, u.username])),
@@ -86,10 +82,6 @@ function GrantRequestsPage() {
   const dbMap = useMemo(
     () => Object.fromEntries((databases ?? []).map((d) => [d.uid, d.name])),
     [databases]
-  );
-  const defMap = useMemo(
-    () => Object.fromEntries((definitions ?? []).map((d) => [d.uid, d])),
-    [definitions]
   );
 
   const approve = useApproveGrantRequest({
@@ -106,21 +98,18 @@ function GrantRequestsPage() {
 
   // Approve a pending request and, in the same action, flip its definition to
   // auto-approve so future requests against it skip review entirely.
+  //
+  // The PATCH is a genuine partial update, so it carries only the field being
+  // changed: re-sending the whole shape would risk an edit racing this one
+  // getting silently rolled back, and every edit is versioned, so a definition
+  // is never mutated in place — this archives the current version and inserts
+  // a successor. The request row is re-read afterwards (the approve mutation
+  // invalidates it) and comes back carrying that successor.
   const approveAndEnableAutoApprove = (r: GrantRequest) => {
-    const def = defMap[r.grant_definition_id];
+    const def = r.definition;
     if (!def) return;
-    const body: CreateGrantDefinitionRequest = {
-      name: def.name,
-      slug: def.slug,
-      description: def.description,
-      duration_seconds: def.duration_seconds,
-      controls: def.controls,
-      max_query_counts: def.max_query_counts,
-      max_bytes_transferred: def.max_bytes_transferred,
-      auto_approve: true,
-    };
     updateDefinition.mutate(
-      { uid: def.uid, body },
+      { uid: def.uid, body: { auto_approve: true } },
       {
         onSuccess: () => {
           toast.success("Auto-approve enabled for this definition");
@@ -145,7 +134,11 @@ function GrantRequestsPage() {
       key: "definition",
       header: "Definition",
       cell: (r: GrantRequest) => {
-        const def = defMap[r.grant_definition_id];
+        // The live version of the request's definition, embedded by the API.
+        // Resolving grant_definition_id against the definitions listing would
+        // miss every request whose definition has been edited since — that uid
+        // names the archived version, which no listing returns.
+        const def = r.definition;
         return (
           <div className="flex items-center gap-1.5">
             <span>{def?.name ?? r.grant_definition_id.slice(0, 8)}</span>
@@ -205,7 +198,7 @@ function GrantRequestsPage() {
                 >
                   <Check className="h-4 w-4 text-green-600" />
                 </Button>
-                {!defMap[r.grant_definition_id]?.auto_approve && (
+                {r.definition && !r.definition.auto_approve && (
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button
@@ -223,7 +216,7 @@ function GrantRequestsPage() {
                     </TooltipTrigger>
                     <TooltipContent>
                       Approve this request and enable auto-approve on "
-                      {defMap[r.grant_definition_id]?.name ?? "this definition"}
+                      {r.definition?.name ?? "this definition"}
                       " so future requests skip review.
                     </TooltipContent>
                   </Tooltip>

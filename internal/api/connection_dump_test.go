@@ -20,8 +20,6 @@ import (
 // newDumpTestRouter mounts the capture routes with the production middleware
 // chain and role gates (see server.go).
 func newDumpTestRouter(server *Server) *gin.Engine {
-	gin.SetMode(gin.TestMode)
-
 	router := gin.New()
 	router.Use(server.authMiddleware())
 	router.GET("/api/v1/connections/:uid/dump", server.requireAdmin(), server.handleGetConnectionDump)
@@ -114,7 +112,9 @@ func captureFileExists(t *testing.T, path string) bool {
 // TestGetConnectionDump_FallsBackToBlobStorage is the case local-only storage
 // cannot serve at all: the capture was uploaded and the local copy is gone, so
 // the only way to find it is the key recorded on the connection row.
-func TestGetConnectionDump_FallsBackToBlobStorage(t *testing.T) { //nolint:paralleltest // shared database state
+func TestGetConnectionDump_FallsBackToBlobStorage(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "dumpremote"
 
@@ -139,7 +139,9 @@ func TestGetConnectionDump_FallsBackToBlobStorage(t *testing.T) { //nolint:paral
 
 // TestGetConnectionDump_PrefersTheLocalSpool keeps the pre-existing behavior
 // honest: a capture still in the spool is served without touching the bucket.
-func TestGetConnectionDump_PrefersTheLocalSpool(t *testing.T) { //nolint:paralleltest // shared database state
+func TestGetConnectionDump_PrefersTheLocalSpool(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "dumplocal"
 
@@ -163,7 +165,9 @@ func TestGetConnectionDump_PrefersTheLocalSpool(t *testing.T) { //nolint:paralle
 
 // TestGetConnectionDump_NotFoundWithoutACapture covers both 404 cases: captures
 // disabled server-wide, and no capture for this connection.
-func TestGetConnectionDump_NotFoundWithoutACapture(t *testing.T) { //nolint:paralleltest // shared database state
+func TestGetConnectionDump_NotFoundWithoutACapture(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "dumpmissing"
 
@@ -189,7 +193,9 @@ func TestGetConnectionDump_NotFoundWithoutACapture(t *testing.T) { //nolint:para
 
 // TestDeleteConnectionDump_RemovesTheUploadedObject checks the delete path ends
 // with the capture unreachable *and* the row no longer pointing at it.
-func TestDeleteConnectionDump_RemovesTheUploadedObject(t *testing.T) { //nolint:paralleltest // shared database state
+func TestDeleteConnectionDump_RemovesTheUploadedObject(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "dumpdelete"
 
@@ -221,7 +227,9 @@ func TestDeleteConnectionDump_RemovesTheUploadedObject(t *testing.T) { //nolint:
 
 // TestConnectionDumpKeyIsNotAPISurface: the key names a bucket and a layout,
 // which callers have no use for — they have the download endpoint.
-func TestConnectionDumpKeyIsNotAPISurface(t *testing.T) { //nolint:paralleltest // shared database state
+func TestConnectionDumpKeyIsNotAPISurface(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "dumpkeyhidden"
 
@@ -251,7 +259,9 @@ type connectionDumpMetadataBody struct {
 // TestGetConnection_DumpMetadata_Disabled verifies the detail response
 // reports available:false when captures are disabled server-wide — the
 // default.
-func TestGetConnection_DumpMetadata_Disabled(t *testing.T) { //nolint:paralleltest // shared database state
+func TestGetConnection_DumpMetadata_Disabled(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "dumpmetaoff"
 
@@ -274,7 +284,9 @@ func TestGetConnection_DumpMetadata_Disabled(t *testing.T) { //nolint:parallelte
 
 // TestGetConnection_DumpMetadata_LocalCapture verifies the detail response
 // reports the real size of a capture still sitting in the local spool.
-func TestGetConnection_DumpMetadata_LocalCapture(t *testing.T) { //nolint:paralleltest // shared database state
+func TestGetConnection_DumpMetadata_LocalCapture(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "dumpmetalocal"
 
@@ -303,7 +315,9 @@ func TestGetConnection_DumpMetadata_LocalCapture(t *testing.T) { //nolint:parall
 // reports available:true with the real size for a capture that only exists
 // in blob storage — the case an os.Stat-only check would miss, and exactly
 // what the shared dumpLocator/dumpMetadata helper exists to fix.
-func TestGetConnection_DumpMetadata_RemoteCapture(t *testing.T) { //nolint:paralleltest // shared database state
+func TestGetConnection_DumpMetadata_RemoteCapture(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "dumpmetaremote"
 
@@ -331,7 +345,9 @@ func TestGetConnection_DumpMetadata_RemoteCapture(t *testing.T) { //nolint:paral
 // TestGetConnectionDump_ViewerTokenForbidden verifies the download endpoint
 // was narrowed from admin-or-viewer to admin-only: a viewer token, which
 // used to succeed, must now be rejected.
-func TestGetConnectionDump_ViewerTokenForbidden(t *testing.T) { //nolint:paralleltest // shared database state
+func TestGetConnectionDump_ViewerTokenForbidden(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "dumpviewer403"
 

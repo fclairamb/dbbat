@@ -22,6 +22,19 @@ import (
 // PostgreSQL refuses to copy a template another session is attached to.
 const testTemplateDB = "dbbat_store_template"
 
+// testMaxConns is the connection budget one test store gets.
+//
+// store.New sizes its pool for a server, not for a hundred of them: the whole
+// package now runs in parallel, every test opens its own store, and 25
+// connections each blows past PostgreSQL's max_connections long before the
+// tests do anything interesting ("sorry, too many clients already"). A test
+// store issues a handful of statements at a time, so a small pool costs it
+// nothing. testContainerMaxConns raises the server-side ceiling to match.
+const (
+	testMaxConns          = 4
+	testContainerMaxConns = "300"
+)
+
 var (
 	testContainer       *postgres.PostgresContainer
 	testDSN             string
@@ -61,6 +74,7 @@ func prepareTestContainer() {
 		postgres.WithDatabase("dbbat_test"),
 		postgres.WithUsername("test"),
 		postgres.WithPassword("test"),
+		testcontainers.WithCmdArgs("-c", "max_connections="+testContainerMaxConns),
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
@@ -78,6 +92,8 @@ func prepareTestContainer() {
 
 	// Attached to the container's default database, never to the template.
 	testAdminDB = sql.OpenDB(pgdriver.NewConnector(pgdriver.WithDSN(testDSN)))
+	testAdminDB.SetMaxOpenConns(testMaxConns)
+	testAdminDB.SetMaxIdleConns(testMaxConns)
 
 	if _, err := testAdminDB.ExecContext(containerCtx, "CREATE DATABASE "+testTemplateDB); err != nil {
 		errContainerStartup = fmt.Errorf("failed to create the template database: %w", err)
@@ -179,6 +195,9 @@ func setupTestStore(t *testing.T) *Store {
 		t.Fatalf("failed to create store: %v", err)
 	}
 
+	store.db.SetMaxOpenConns(testMaxConns)
+	store.db.SetMaxIdleConns(testMaxConns)
+
 	t.Cleanup(func() {
 		store.Close()
 
@@ -194,10 +213,14 @@ func setupTestStore(t *testing.T) *Store {
 }
 
 func TestNew(t *testing.T) {
+	t.Parallel()
+
 	dsn := setupPostgresContainer(t)
 	ctx := context.Background()
 
 	t.Run("valid DSN", func(t *testing.T) {
+		t.Parallel()
+
 		store, err := New(ctx, dsn)
 		if err != nil {
 			t.Fatalf("New() error = %v", err)
@@ -210,6 +233,8 @@ func TestNew(t *testing.T) {
 	})
 
 	t.Run("invalid DSN", func(t *testing.T) {
+		t.Parallel()
+
 		_, err := New(ctx, "postgres://invalid:invalid@localhost:9999/nonexistent?connect_timeout=1")
 		if err == nil {
 			t.Error("New() expected error for invalid DSN")
@@ -218,6 +243,8 @@ func TestNew(t *testing.T) {
 }
 
 func TestHealth(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 	ctx := context.Background()
 
@@ -228,6 +255,8 @@ func TestHealth(t *testing.T) {
 }
 
 func TestDB(t *testing.T) {
+	t.Parallel()
+
 	store := setupTestStore(t)
 
 	db := store.DB()
@@ -237,6 +266,8 @@ func TestDB(t *testing.T) {
 }
 
 func TestParsePostgresDSN(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name     string
 		dsn      string
@@ -333,6 +364,8 @@ func TestParsePostgresDSN(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			got, err := parsePostgresDSN(tt.dsn)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("parsePostgresDSN() error = %v, wantErr %v", err, tt.wantErr)
@@ -355,6 +388,8 @@ func TestParsePostgresDSN(t *testing.T) {
 }
 
 func TestNormalizeHost(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		input string
 		want  string
@@ -369,6 +404,8 @@ func TestNormalizeHost(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
+			t.Parallel()
+
 			if got := normalizeHost(tt.input); got != tt.want {
 				t.Errorf("normalizeHost(%q) = %q, want %q", tt.input, got, tt.want)
 			}
@@ -377,6 +414,8 @@ func TestNormalizeHost(t *testing.T) {
 }
 
 func TestMatchesStorageDSN(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
 		name       string
 		storageDSN string
@@ -461,6 +500,8 @@ func TestMatchesStorageDSN(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			s := &Store{storageDSN: tt.storageDSN}
 			if got := s.MatchesStorageDSN(tt.host, tt.port, tt.dbName); got != tt.want {
 				t.Errorf("MatchesStorageDSN() = %v, want %v", got, tt.want)

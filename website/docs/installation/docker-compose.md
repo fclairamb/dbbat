@@ -33,12 +33,14 @@ services:
       DBB_LISTEN_ORA: ":1522"
       DBB_LISTEN_MYSQL: ":3307"
       DBB_LISTEN_MONGO: ":27018"
+      DBB_LISTEN_MSSQL: ":1434"
       DBB_LISTEN_API: ":4200"
     ports:
       - "5001:5433"   # PostgreSQL proxy
       - "1522:1522"   # Oracle proxy
       - "3307:3307"   # MySQL / MariaDB proxy
       - "27018:27018" # MongoDB proxy
+      - "1434:1434"   # SQL Server proxy
       - "4200:4200"   # REST API + web UI
 
 volumes:
@@ -116,7 +118,7 @@ curl -X POST http://localhost:4200/api/v1/servers \
   }'
 ```
 
-For Oracle add `"protocol": "oracle"` plus `"oracle_service_name": "ORCL"`. For MySQL/MariaDB use `"protocol": "mysql"` (or `"mariadb"`) and port `3306`. For MongoDB use `"protocol": "mongodb"` and port `27017`. Targets that are only reachable through a jump host can be pointed at an `ssh` bastion — see [Server Configuration](/docs/configuration/servers#ssh-tunnels).
+For Oracle add `"protocol": "oracle"` plus `"oracle_service_name": "ORCL"`. For MySQL/MariaDB use `"protocol": "mysql"` (or `"mariadb"`) and port `3306`. For MongoDB use `"protocol": "mongodb"` and port `27017`. For Microsoft SQL Server use `"protocol": "mssql"` and port `1433`. Targets that are only reachable through a jump host can be pointed at an `ssh` bastion — see [Server Configuration](/docs/configuration/servers#ssh-tunnels).
 
 ### Create a Test User and Grant Access
 

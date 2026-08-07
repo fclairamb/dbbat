@@ -22,6 +22,20 @@ All API endpoints are versioned under `/api/v1/`.
 | Web Session | `web_` | 1 hour | Frontend login |
 | API Key | `dbb_` | Configurable | Programmatic access |
 
+### Environment Variables for Clients
+
+Scripts, CI jobs, and SQL clients talking to dbbat should standardize on
+three env vars instead of inventing their own:
+
+| Variable | Meaning | Needed for |
+|----------|---------|-----------|
+| `DBBAT_API_KEY` | The `dbb_…` API key | REST calls (Bearer token) and SQL connections (as the password) |
+| `DBBAT_USER` | The dbbat username the key belongs to | SQL connections through the proxy (the key is only valid for its owner) |
+| `DBBAT_URL` | API/UI base URL, e.g. `https://dbbat.example.com` | REST calls and deep links |
+
+The API Keys page shows a ready-to-copy `export` snippet for all three when
+a new key is created.
+
 ### Getting Started
 
 1. **Initial Setup**: Login with default admin credentials (`admin`/`admin`)
@@ -112,7 +126,7 @@ All entities use **UUIDs** as their primary identifier:
 ### Grants
 | Method | Endpoint | Description | Auth | Role |
 |--------|----------|-------------|------|------|
-| POST | `/grants` | Create grant | Yes | Admin |
+| POST | `/grants` | Assign a grant definition to a user + database | Yes | Admin |
 | GET | `/grants` | List grants | Yes | Any |
 | GET | `/grants/{uid}` | Get grant | Yes | Any |
 | DELETE | `/grants/{uid}` | Revoke grant | Yes | Admin |
@@ -190,17 +204,27 @@ DB_UID=$(curl -s -X POST http://localhost:8080/api/v1/databases \
     "ssl_mode": "require"
   }' | jq -r '.uid')
 
-# Grant read access for 24 hours
+# Define the shape of the access once (controls, quotas, how long it lasts).
+# Grants are instances of a definition — there is no ad-hoc grant creation.
+curl -X POST http://localhost:8080/api/v1/grant-definitions \
+  -H "Authorization: Bearer $API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Read-only 24h",
+    "slug": "read-only-24h",
+    "duration_seconds": 86400,
+    "controls": ["read_only"],
+    "max_query_counts": 1000
+  }'
+
+# Assign it to a user on a database (the slug works anywhere the uid does)
 curl -X POST http://localhost:8080/api/v1/grants \
   -H "Authorization: Bearer $API_KEY" \
   -H "Content-Type: application/json" \
   -d "{
+    \"grant_definition_id\": \"read-only-24h\",
     \"user_id\": \"$USER_UID\",
-    \"database_id\": \"$DB_UID\",
-    \"controls\": [\"read_only\"],
-    \"starts_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",
-    \"expires_at\": \"$(date -u -d '+24 hours' +%Y-%m-%dT%H:%M:%SZ)\",
-    \"max_query_counts\": 1000
+    \"database_id\": \"$DB_UID\"
   }"
 ```
 

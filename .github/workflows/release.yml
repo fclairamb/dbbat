@@ -59,7 +59,7 @@ jobs:
 
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: "1.26"
+          go-version: "1.26.5"
 
       - uses: oven-sh/setup-bun@v2.2.0
         with:

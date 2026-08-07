@@ -420,6 +420,48 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /auth/oauth/exchange:
+    post:
+      tags:
+        - Auth
+      summary: Redeem a one-time OAuth login code for a web session token
+      description: |
+        The OAuth callback never puts a session token in a URL: it redirects
+        the browser to the login page with a short-lived, single-use `code`
+        instead. The SPA posts that code here and gets the actual `web_`
+        session token back in the response body.
+
+        Unauthenticated — the code itself is the capability — but the code is
+        consumed on first use, expires within minutes, and the endpoint is IP
+        rate limited.
+      operationId: oauthExchange
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginExchangeRequest'
+      responses:
+        '200':
+          description: Code redeemed; web session token issued
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginExchangeResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: The code is unknown, already redeemed or expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /auth/device/consent:
     get:
       tags:
@@ -601,7 +643,13 @@ paths:
       tags:
         - Users
       summary: Get user by UID
-      description: Retrieves a specific user by their UID.
+      description: |
+        Retrieves a specific user by their UID, with the groups they belong to.
+
+        Visibility matches `GET /users`: admins and viewers may read any user,
+        everyone else only themselves. Asking for another user's UID returns
+        404, the same as an unknown UID — the endpoint never confirms that an
+        account exists.
       operationId: getUser
       responses:
         '200':
@@ -992,18 +1040,31 @@ paths:
     post:
       tags:
         - Grants
-      summary: Create access grant
-      description: Creates a new access grant for a user to a database. Requires admin role.
-      operationId: createGrant
+      summary: Assign an access grant
+      description: |
+        Issues a grant to a user by instantiating a grant definition — the
+        admin-initiated equivalent of an approved grant request. Requires admin
+        role.
+
+        A grant carries no shape of its own: controls, quotas, approval
+        patterns and approver groups all come from the definition, and the
+        window's length is the definition's `duration_seconds`. There is
+        deliberately no way to describe an ad-hoc shape here.
+
+        The definition must be active, and its `database_uids` scope (when set)
+        must cover the target database. Its `group_uids` scope is *not*
+        enforced: that scope governs who may self-request the definition, and
+        an admin assigning access is the authority on who receives it.
+      operationId: assignGrant
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateGrantRequest'
+              $ref: '#/components/schemas/AssignGrantRequest'
       responses:
         '200':
-          description: Grant created successfully
+          description: Grant assigned successfully
           content:
             application/json:
               schema:
@@ -1356,10 +1417,10 @@ paths:
         - Grant Definitions
       summary: Create grant definition (admin)
       description: |
-        Creates a new admin-managed grant definition. Definitions are templates
-        for the grant request workflow — users can request grants only by
-        picking an active definition. Direct admin grant creation
-        (`POST /grants`) bypasses definitions.
+        Creates a new admin-managed grant definition. A definition is the shape
+        of a grant and the only source of one: users request access by picking
+        an active definition, and admins assign it directly with
+        `POST /grants`. There is no way to create a grant without a definition.
       operationId: createGrantDefinition
       requestBody:
         required: true
@@ -1454,14 +1515,30 @@ paths:
       tags:
         - Grant Definitions
       summary: Update grant definition (admin)
-      description: Replaces the editable fields (uid / created_by / created_at / is_active stay put).
+      description: |
+        Partial update: only fields present in the body are changed (created_by
+        / created_at / is_active always stay put). A field omitted from the
+        body is left untouched on the existing definition — so a caller that
+        only means to flip `auto_approve`, say, can send just that field
+        without risk of wiping the rest, notably `approval_patterns` and
+        `approver_group_uids`.
+
+        **An edit creates a new version.** The current row is archived
+        (`archived_at` set) and a successor carrying the change is inserted
+        with a new `uid` and the same `lineage_uid`; the response is that new
+        version. Grants already issued keep pointing at the version they were
+        issued from, so their behaviour never changes. An edit that changes
+        nothing is not versioned.
+
+        Editing an already-archived version is refused with a 409 — history is
+        immutable, and the caller means the live version.
       operationId: updateGrantDefinition
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/CreateGrantDefinitionRequest'
+              $ref: '#/components/schemas/UpdateGrantDefinitionRequest'
       responses:
         '200':
           description: Definition updated
@@ -1483,25 +1560,91 @@ paths:
     delete:
       tags:
         - Grant Definitions
-      summary: Deactivate grant definition (admin)
+      summary: Deactivate (or delete) grant definition (admin)
       description: |
-        Soft-deletes by flipping `is_active` to false. Definitions are not
-        hard-deleted because grant requests reference them and the audit
-        trail needs to stay intact.
+        Deactivates the definition by flipping `is_active` to false across its
+        **whole version lineage**. This is a withdrawal and it **fails closed**:
+        every grant issued from any version stops authorising new connections
+        on its next authentication. The response reports how many active grants
+        that affected.
+
+        Pass `hard=true` to delete the definition and its version history
+        outright. That only ever succeeds for a definition nothing references:
+        a grant's shape lives on its definition, so deleting one out from under
+        a grant is refused with a 409 naming the blocking counts. Deactivation
+        is the operation for retiring a definition that has been used.
       operationId: deactivateGrantDefinition
+      parameters:
+        - name: hard
+          in: query
+          description: Delete the definition instead of deactivating it. Refused with 409 if anything references it.
+          schema:
+            type: boolean
+            default: false
       responses:
         '200':
-          description: Definition deactivated
+          description: Definition deactivated (or deleted)
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/MessageResponse'
+                $ref: '#/components/schemas/DeactivateGrantDefinitionResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /grant-definitions/validate-patterns:
+    post:
+      tags:
+        - Grant Definitions
+      summary: Preview approval patterns against sample queries (admin)
+      description: |
+        Pure compute endpoint — no store access, nothing persisted, no
+        definition needs to exist yet. Lets an admin authoring
+        `approval_patterns` see, before saving anything:
+
+        - which patterns fail to **compile** — the exact error
+          [`NewApprovalGate`](../../internal/proxy/shared/approval.go)
+          otherwise swallows with only a server-side warning log, silently
+          degrading a bad pattern to "no hold";
+        - for each sample query: its `NormalizeSQL` form (what the patterns
+          actually run against — not the raw text) and which pattern, if any,
+          matches it first, using **exactly**
+          [`ApprovalGate.Match`](../../internal/proxy/shared/approval.go)'s
+          semantics, so this preview can never disagree with what the proxy
+          will actually do.
+
+        A pattern that fails to compile is the only thing that should block a
+        save (enforced by `POST`/`PATCH /grant-definitions`, not by this
+        endpoint). A sample that simply does not match a pattern is not an
+        error — an author may legitimately save a bench that is currently red
+        while iterating.
+      operationId: validateGrantDefinitionPatterns
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ValidatePatternsRequest'
+      responses:
+        '200':
+          description: Compile and match results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidatePatternsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
 
   /grant-requests:
     post:
@@ -3272,7 +3415,7 @@ components:
           description: SSL mode (disable, prefer, require, etc.)
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql, mariadb, mongodb, ssh]
+          enum: [postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh]
           description: Server protocol (ssh = an SSH bastion, not a database target)
         oracle_service_name:
           type: string
@@ -3416,7 +3559,7 @@ components:
           description: SSL mode
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql, mariadb, mongodb, ssh]
+          enum: [postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh]
           default: postgresql
           description: Server protocol (ssh = an SSH bastion, not a database target)
         oracle_service_name:
@@ -3477,7 +3620,7 @@ components:
           description: SSL mode
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql, mariadb, mongodb, ssh]
+          enum: [postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh]
           description: Server protocol
         oracle_service_name:
           type: string
@@ -3539,6 +3682,20 @@ components:
         grant_definition_id:
           type: string
           format: uuid
+          description: |
+            The exact definition *version* the request was filed against. An
+            edit to that definition archives this row and inserts a successor,
+            so this uid may name a version no listing returns anymore — read
+            `definition` instead of resolving it.
+        definition:
+          allOf:
+            - $ref: '#/components/schemas/GrantDefinition'
+          description: |
+            The **live** version of that definition's lineage, embedded on
+            every read. Live rather than pinned because approving the request
+            materializes today's policy, so today's version is the one to show
+            (name, auto_approve, controls). A grant is the opposite case: it
+            embeds the exact version it was issued from.
         database_id:
           type: string
           format: uuid
@@ -3596,14 +3753,55 @@ components:
     GrantDefinition:
       type: object
       description: |
-        Admin-managed template describing a *shape* of grant. Grant requests
-        (separate workflow) reference a definition; on approval a real
-        AccessGrant is built from the definition + the request's
-        user/database. Direct admin grant creation bypasses definitions.
+        The *shape* of a grant, and the single source of truth for what an
+        access grant may do. Every grant is an instance of one — whether it
+        came from a user's grant request or from an admin assigning it
+        directly (`POST /grants`). Nothing creates a grant without one.
+
+        Definitions are **immutably versioned**: a `PATCH` archives the current
+        row and inserts a successor sharing its `lineage_uid`, and grants keep
+        pointing at the exact row they were issued from. Editing a definition
+        therefore never changes access that is already live; it changes what
+        gets issued from then on.
+
+        Two lifecycle states are deliberately distinct:
+
+        - **archived** (`archived_at` set): superseded by a later edit. Still
+          authorises the grants pinned to it — it was replaced, not withdrawn.
+          Never appears in listings; still readable by uid.
+        - **deactivated** (`is_active: false`): explicitly withdrawn, across
+          every version of the lineage. Fails closed at authentication time:
+          grants issued from any of its versions stop authorising new
+          connections.
       properties:
         uid:
           type: string
           format: uuid
+        lineage_uid:
+          type: string
+          format: uuid
+          readOnly: true
+          description: |
+            Stable across every version of this definition (the first
+            version's own uid). Deactivation, reactivation and deletion act on
+            a lineage rather than a single version.
+        archived_at:
+          type: string
+          format: date-time
+          nullable: true
+          readOnly: true
+          description: |
+            When a later edit superseded this version. `null` means this is the
+            live version — exactly one per lineage, enforced by a partial
+            unique index on the slug.
+        active_grant_count:
+          type: integer
+          format: int64
+          readOnly: true
+          description: |
+            How many grants across this definition's lineage are currently
+            authorising access. Populated on listings so the UI can tell an
+            operator what deactivating it would cut off before they confirm.
         name:
           type: string
           maxLength: 64
@@ -3619,7 +3817,11 @@ components:
             from the name until the operator edits it manually). Accepted
             anywhere a definition uid is accepted: `GET/PATCH/DELETE
             /grant-definitions/{uid}` and `grant_definition_id` on
-            `POST /grant-requests`.
+            `POST /grant-requests` and `POST /grants`.
+
+            Unique among **live** versions only: archived versions keep the
+            slug they were created with, and resolving a slug always returns
+            the live version. Address a specific historical version by uid.
 
             Must not be a UUID (in either the canonical hyphenated form or
             the bare 32-hex-digit form — both parse as one) — that would
@@ -3644,6 +3846,16 @@ components:
           type: integer
           format: int64
           nullable: true
+        priority:
+          type: integer
+          format: int32
+          minimum: -32768
+          maximum: 32767
+          nullable: true
+          description: |
+            Selection priority stamped verbatim on every grant materialized
+            from this definition. `null` — the normal case — means the grant
+            gets the tier its controls earn (see `AccessGrant.priority`).
         auto_approve:
           type: boolean
           default: false
@@ -3677,7 +3889,22 @@ components:
             admin or an approver-group member approves it. An empty array means
             no approval gating. Validated (compiled) at save time, so a bad
             pattern is a 400 rather than a runtime surprise on the proxy hot
-            path. Mirrored onto every grant materialized from this definition.
+            path. Read from here by every grant issued from this definition —
+            grants do not copy them.
+        sample_queries:
+          type: array
+          items:
+            type: string
+          description: |
+            Representative SQL statements saved alongside `approval_patterns`
+            as a test bench for pattern authoring — test fixtures, not
+            first-class matchers; the RE2 patterns above remain what the
+            proxy actually evaluates. Because this is just another column on
+            the definition row, it versions for free with every edit like
+            `approval_patterns` does. Use
+            `POST /grant-definitions/validate-patterns` to preview
+            match/no-match against these before saving; a sample that
+            doesn't match does not block the save.
         approver_group_uids:
           type: array
           items:
@@ -3690,7 +3917,12 @@ components:
         is_active:
           type: boolean
           readOnly: true
-          description: Soft-deleted definitions have is_active=false; they remain referenced by historical grant requests.
+          description: |
+            `false` once an operator has deactivated the definition. This is a
+            withdrawal, not an archival: it applies to every version of the
+            lineage and makes grants issued from it stop authorising new
+            connections (fail closed). The rows themselves stay, since
+            historical grants and grant requests still reference them.
         created_by:
           type: string
           format: uuid
@@ -3726,8 +3958,8 @@ components:
             hyphens (e.g. `read-only-1h`). Never auto-generated by the
             server — the web UI derives it from the name until the operator
             edits it manually, but CLI/agent/scripted callers must supply
-            one explicitly. Must be unique across every definition, active
-            or not.
+            one explicitly. Must be unique among live definitions; archived
+            versions keep their slug and never conflict.
 
             Must not be a UUID (canonical hyphenated or bare 32-hex-digit
             form) — rejected with 400 even though both forms are shaped like
@@ -3752,6 +3984,16 @@ components:
           type: integer
           format: int64
           nullable: true
+        priority:
+          type: integer
+          format: int32
+          minimum: -32768
+          maximum: 32767
+          nullable: true
+          description: |
+            Optional selection priority for grants materialized from this
+            definition. Omit (or send `null`) to let each grant take the tier
+            its controls earn — see `AccessGrant.priority`.
         auto_approve:
           type: boolean
           default: false
@@ -3786,6 +4028,14 @@ components:
             no approval gating. Validated (compiled) at save time, so a bad
             pattern is a 400 rather than a runtime surprise on the proxy hot
             path. Mirrored onto every grant materialized from this definition.
+        sample_queries:
+          type: array
+          items:
+            type: string
+          description: |
+            Representative SQL statements saved alongside `approval_patterns`
+            to validate them against — see
+            `GrantDefinition.sample_queries`.
         approver_group_uids:
           type: array
           items:
@@ -3799,6 +4049,95 @@ components:
         - name
         - slug
         - duration_seconds
+
+    UpdateGrantDefinitionRequest:
+      type: object
+      description: |
+        PATCH body for `/grant-definitions/{uid}`. Every field is optional —
+        a field omitted from the body is left untouched on the existing
+        definition rather than reset. An explicit empty array (`[]`) still
+        clears a list field; only a missing key (or explicit `null`) leaves
+        it alone.
+
+        `max_query_counts`, `max_bytes_transferred` and `priority` are
+        themselves nullable in the domain (null = "no limit" / "auto"), so a
+        bare `null` can't be told apart from an omitted key. Use the
+        matching `clear_*` flag to explicitly reset one of them.
+      properties:
+        name:
+          type: string
+          maxLength: 64
+        slug:
+          type: string
+          maxLength: 64
+          pattern: '^[a-z0-9]+(-[a-z0-9]+)*$'
+          description: Same rules as `CreateGrantDefinitionRequest.slug`.
+        description:
+          type: string
+        duration_seconds:
+          type: integer
+          format: int64
+          minimum: 1
+        controls:
+          type: array
+          items:
+            $ref: '#/components/schemas/GrantControl'
+        max_query_counts:
+          type: integer
+          format: int64
+          nullable: true
+        clear_max_query_counts:
+          type: boolean
+          description: When true, resets max_query_counts to unlimited.
+        max_bytes_transferred:
+          type: integer
+          format: int64
+          nullable: true
+        clear_max_bytes_transferred:
+          type: boolean
+          description: When true, resets max_bytes_transferred to unlimited.
+        priority:
+          type: integer
+          format: int32
+          minimum: -32768
+          maximum: 32767
+          nullable: true
+        clear_priority:
+          type: boolean
+          description: When true, resets priority to auto (tier derived from controls).
+        auto_approve:
+          type: boolean
+          description: |
+            When true, grant requests against this definition skip the pending/admin-approval
+            step and are approved (and the grant materialized) instantly at request time.
+        group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Same semantics as `CreateGrantDefinitionRequest.group_uids`.
+        database_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Same semantics as `CreateGrantDefinitionRequest.database_uids`.
+        approval_patterns:
+          type: array
+          items:
+            type: string
+          description: Same semantics as `CreateGrantDefinitionRequest.approval_patterns`.
+        sample_queries:
+          type: array
+          items:
+            type: string
+          description: Same semantics as `CreateGrantDefinitionRequest.sample_queries`.
+        approver_group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Same semantics as `CreateGrantDefinitionRequest.approver_group_uids`.
 
     AccessGrant:
       type: object
@@ -3815,11 +4154,21 @@ components:
           type: string
           format: uuid
           description: Database UID
-        controls:
-          type: array
-          items:
-            $ref: '#/components/schemas/GrantControl'
-          description: List of controls applied. Empty array means full write access.
+        grant_definition_id:
+          type: string
+          format: uuid
+          description: |
+            The exact grant definition *version* this grant was issued from.
+            Definitions are immutably versioned — an edit archives the current
+            row and inserts a successor — so this pins the behaviour the grant
+            was issued with and no later edit can change it.
+        definition:
+          allOf:
+            - $ref: '#/components/schemas/GrantDefinition'
+          description: |
+            The pinned definition, embedded on every grant read. This is where
+            the grant's controls, quotas, approval patterns and approver groups
+            live; the grant row itself has none of them.
         granted_by:
           type: string
           format: uuid
@@ -3842,34 +4191,31 @@ components:
           format: uuid
           nullable: true
           description: Admin who revoked access
-        approval_patterns:
-          type: array
-          items:
-            type: string
-          description: |
-            RE2 patterns that suspend a matching statement until a second human
-            approves it. Mirrored from the grant definition at materialization
-            time (like controls and quotas) so the proxy never joins back to
-            the definition on the hot path — and so direct admin grants, which
-            bypass definitions entirely, can carry patterns too.
-        approver_group_uids:
-          type: array
-          items:
-            type: string
-            format: uuid
-          description: |
-            Groups whose members may resolve holds on this grant, in addition
-            to admins. Empty means admins only.
-        max_query_counts:
+        priority:
           type: integer
-          format: int64
-          nullable: true
-          description: Maximum queries allowed (quota)
-        max_bytes_transferred:
-          type: integer
-          format: int64
-          nullable: true
-          description: Maximum bytes transferred (quota)
+          format: int32
+          minimum: -32768
+          maximum: 32767
+          description: |
+            Ranks this grant against the other active grants the same user
+            holds on the same database. A new session is admitted under the
+            highest-priority active grant; ties break on the latest
+            `expires_at`, then the newest `created_at`.
+
+            Auto-calculated from the definition's `controls` unless the
+            definition pins a `priority` of its own:
+
+            | grant shape | priority |
+            |---|---|
+            | writable, no controls | 100 |
+            | writable with `block_copy` / `block_ddl` | 50 |
+            | `read_only` (whatever else it carries) | 10 |
+
+            The gaps let an override slot between tiers. Selection happens
+            once, at authentication: the session stays pinned to the grant it
+            was admitted under and is terminated when that grant expires or is
+            revoked, even if a lower-priority grant would still allow access —
+            the client reconnects and selection runs afresh.
         query_count:
           type: integer
           format: int64
@@ -3886,15 +4232,28 @@ components:
         - uid
         - user_id
         - database_id
-        - controls
+        - grant_definition_id
         - granted_by
         - starts_at
         - expires_at
+        - priority
         - created_at
 
-    CreateGrantRequest:
+    AssignGrantRequest:
       type: object
+      description: |
+        Body for `POST /grants`. A grant is an instance of a grant definition
+        and nothing else — there is deliberately no way to describe controls,
+        quotas or approval gating here. Those live on the definition, which is
+        what makes definitions trustworthy as the policy source of truth.
       properties:
+        grant_definition_id:
+          type: string
+          description: |
+            The definition to instantiate — its uid or its slug. A slug always
+            resolves to the live version; naming an archived version by uid
+            still issues the live one, since an edit exists precisely to change
+            what gets issued from then on.
         user_id:
           type: string
           format: uuid
@@ -3903,49 +4262,102 @@ components:
           type: string
           format: uuid
           description: Database UID
-        controls:
-          type: array
-          items:
-            $ref: '#/components/schemas/GrantControl'
-          default: []
-          description: List of controls to apply. Empty array means full write access.
         starts_at:
           type: string
           format: date-time
-          description: When access starts
-        expires_at:
-          type: string
-          format: date-time
-          description: When access expires (must be after starts_at)
-        max_query_counts:
-          type: integer
-          format: int64
-          description: Maximum queries allowed (quota)
-        max_bytes_transferred:
-          type: integer
-          format: int64
-          description: Maximum bytes transferred (quota)
-        approval_patterns:
-          type: array
-          items:
-            type: string
           description: |
-            RE2 patterns that suspend a matching statement until a second human
-            approves it. Admin grants bypass definitions entirely, so this is
-            the only way to put four-eyes gating on one.
-        approver_group_uids:
-          type: array
-          items:
-            type: string
-            format: uuid
-          description: |
-            Groups whose members may resolve holds on this grant, in addition
-            to admins. Empty means admins only.
+            When access starts. Defaults to now. The window's *length* is the
+            definition's `duration_seconds` and cannot be overridden here.
       required:
+        - grant_definition_id
         - user_id
         - database_id
-        - starts_at
-        - expires_at
+
+    DeactivateGrantDefinitionResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        affected_grants:
+          type: integer
+          format: int64
+          description: |
+            How many currently-active grants the deactivation failed closed.
+            Absent on a hard delete, which by definition affected none.
+      required:
+        - message
+
+    ValidatePatternsRequest:
+      type: object
+      description: Body for `POST /grant-definitions/validate-patterns`.
+      properties:
+        patterns:
+          type: array
+          items:
+            type: string
+          description: RE2 approval-pattern sources to test.
+        queries:
+          type: array
+          items:
+            type: string
+          description: Sample SQL statements to test the patterns against.
+
+    ValidatePatternsResponse:
+      type: object
+      properties:
+        patterns:
+          type: array
+          description: |
+            One entry per pattern in the request, same order, reporting
+            whether it compiled.
+          items:
+            $ref: '#/components/schemas/PatternValidationResult'
+        queries:
+          type: array
+          description: |
+            One entry per query in the request, same order, reporting its
+            normalized form and first match.
+          items:
+            $ref: '#/components/schemas/QueryValidationResult'
+      required:
+        - patterns
+        - queries
+
+    PatternValidationResult:
+      type: object
+      properties:
+        pattern:
+          type: string
+        error:
+          type: string
+          description: |
+            The compile error message. Present only when the pattern failed
+            to compile — this is the error `NewApprovalGate` otherwise
+            swallows with only a warning log.
+      required:
+        - pattern
+
+    QueryValidationResult:
+      type: object
+      properties:
+        query:
+          type: string
+        normalized:
+          type: string
+          description: |
+            The `NormalizeSQL` form of the query — what the approval patterns
+            actually run against, not the raw text.
+        matched:
+          type: boolean
+        matched_pattern:
+          type: string
+          description: |
+            The source text of the first pattern that matched, in request
+            order. Present only when `matched` is true.
+      required:
+        - query
+        - normalized
+        - matched
 
     # API Key schemas
     APIKey:
@@ -4125,6 +4537,28 @@ components:
         - access_token
         - token_type
 
+    LoginExchangeRequest:
+      type: object
+      properties:
+        code:
+          type: string
+          description: The one-time code handed to the browser by the OAuth callback
+      required:
+        - code
+
+    LoginExchangeResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: The web session token (web_...), delivered exactly once
+        token_type:
+          type: string
+          enum: [Bearer]
+      required:
+        - access_token
+        - token_type
+
     OAuthError:
       type: object
       properties:
@@ -4216,6 +4650,16 @@ components:
             session knows which way it went. Always false for Oracle, whose
             proxy relays the client's own TNS Connect descriptor over a plain
             socket.
+        grant_uid:
+          type: string
+          format: uuid
+          nullable: true
+          description: >-
+            The access grant this session authenticated under — the auth-time
+            selection, pinned for the life of the connection and never
+            updated afterwards. Null on connections that predate this column,
+            or whose grant has since been deleted (revocation does not clear
+            it — only deletion, which does not otherwise happen, does).
       required:
         - uid
         - user_id
@@ -4227,10 +4671,11 @@ components:
         - bytes_transferred
 
     # ConnectionDetail is what GET /connections/{uid} returns: a Connection
-    # plus capture metadata. The list endpoint (GET /connections) returns
-    # plain Connection objects — computing dump availability (an os.Stat, or
-    # a blob HEAD for a remotely-stored capture) for every row of a paginated
-    # list would be a needless fan-out that a single detail fetch doesn't pay.
+    # plus capture metadata and a grant summary. The list endpoint
+    # (GET /connections) returns plain Connection objects — computing dump
+    # availability (an os.Stat, or a blob HEAD for a remotely-stored capture)
+    # or resolving the linked grant for every row of a paginated list would be
+    # a needless fan-out that a single detail fetch doesn't pay.
     ConnectionDetail:
       allOf:
         - $ref: '#/components/schemas/Connection'
@@ -4238,8 +4683,76 @@ components:
           properties:
             dump:
               $ref: '#/components/schemas/DumpMetadata'
+            grant:
+              allOf:
+                - $ref: '#/components/schemas/GrantSummary'
+              nullable: true
+              description: >-
+                The grant named by `grant_uid`, or null when `grant_uid` is
+                null or the grant it names could not be resolved.
           required:
             - dump
+            - grant
+
+    # GrantSummary is the small slice of AccessGrant the UI needs to show
+    # "under which grant did this session run?" on a connection detail page
+    # without a second round trip. Deliberately not the full AccessGrant:
+    # usage counters and approval configuration belong to the grants page, not
+    # here.
+    GrantSummary:
+      type: object
+      properties:
+        uid:
+          type: string
+          format: uuid
+          description: Grant identifier — links to the Grants page.
+        controls:
+          type: array
+          items:
+            $ref: '#/components/schemas/GrantControl'
+          description: >-
+            The controls this session ran under, read from the grant's pinned
+            definition. Empty array means full write access.
+        starts_at:
+          type: string
+          format: date-time
+          description: When access starts
+        expires_at:
+          type: string
+          format: date-time
+          description: When access expires
+        revoked:
+          type: boolean
+          description: Whether the grant has been revoked.
+        priority:
+          type: integer
+          format: int32
+          minimum: -32768
+          maximum: 32767
+          description: >-
+            This grant's selection rank — see AccessGrant.priority for the
+            full explanation.
+        grant_definition_id:
+          type: string
+          format: uuid
+          description: The definition version the grant was issued from — links to the policy.
+        grant_definition_name:
+          type: string
+        grant_definition_slug:
+          type: string
+        grant_definition_is_active:
+          type: boolean
+          description: >-
+            False once the definition was deactivated, which is why a grant
+            that still looks in-window may no longer authorise a connection.
+      required:
+        - uid
+        - controls
+        - starts_at
+        - expires_at
+        - revoked
+        - priority
+        - grant_definition_id
 
     DumpMetadata:
       type: object
@@ -4691,6 +5204,9 @@ components:
             mongo:
               type: string
               description: MongoDB proxy TCP listen address
+            mssql:
+              type: string
+              description: SQL Server (TDS) proxy TCP listen address
             api:
               type: string
               description: REST API / Web UI HTTP listen address

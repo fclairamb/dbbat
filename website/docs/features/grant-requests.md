@@ -21,7 +21,7 @@ A definition describes a *shape* of grant — controls, quotas, duration — wit
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/grant-definitions \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "read-only-1h",
@@ -35,9 +35,16 @@ curl -X POST http://localhost:4200/api/v1/grant-definitions \
 
 Requires the admin role. A duplicate name returns `409 DUPLICATE_NAME`.
 
-Definitions are **soft-deleted**: deactivating one sets `is_active: false` rather than removing the row, so historical requests keep pointing at the definition they were granted under. Non-admins only ever see active definitions.
+A definition may also carry an optional `priority`, stamped verbatim on every
+grant built from it. Leave it out — the normal case — and each grant computes
+its own from its controls; see [Overlapping
+grants](./access-control.md#overlapping-grants).
 
-Direct admin grant creation via `POST /api/v1/grants` bypasses definitions entirely.
+Definitions are **immutably versioned**. Editing one archives the current row and inserts a successor carrying the change; grants keep pointing at the exact version they were issued from, so tightening — or loosening — a definition never retroactively changes access that is already live. It changes what gets issued from then on. A slug always resolves to the current version; older versions stay readable by uid so a grant issued from one can still show its shape.
+
+**Deactivating** a definition (`DELETE /api/v1/grant-definitions/{uid}`) is different from that archival, and much stronger: it withdraws every version at once and **fails closed** — grants issued from any of them stop authorising new connections. The API reports how many grants that affected, and the UI shows the number before you confirm. Hard deletion (`?hard=true`) is refused with a `409` as soon as anything references the definition; deactivation is the way to retire one that has been used.
+
+**Every grant is an instance of a definition.** An admin assigning access directly (`POST /api/v1/grants`) picks a definition too — there is no way to create a grant with an ad-hoc shape, which is what makes the set of definitions an exhaustive list of the access shapes your organisation permits.
 
 ## Requesting Access
 
@@ -45,7 +52,7 @@ Any authenticated user can submit a request:
 
 ```bash
 curl -X POST http://localhost:4200/api/v1/grant-requests \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "grant_definition_id": "550e8400-e29b-41d4-a716-446655440000",
@@ -76,7 +83,7 @@ Some access is routine enough that admin review is theatre — read-only access 
 
 ```bash
 curl -X PUT http://localhost:4200/api/v1/grant-definitions/$DEF_UID \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"auto_approve": true}'
 ```

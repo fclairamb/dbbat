@@ -1,16 +1,24 @@
 import { useRef, useCallback } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useConnections, useUsers, useDatabases, type Connection } from "@/api";
+import {
+  useConnections,
+  useUsers,
+  useDatabases,
+  useGrants,
+  type Connection,
+} from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { AdaptiveRefresh } from "@/components/shared/AdaptiveRefresh";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { UpstreamTlsIndicator } from "@/components/shared/UpstreamTlsIndicator";
+import { GrantAccessChip } from "@/components/shared/GrantAccessChip";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
+import { formatBytes } from "@/lib/utils";
 
 const DEFAULT_PAGE_SIZE = 50;
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
@@ -32,6 +40,10 @@ function ConnectionsPage() {
   });
   const { data: users } = useUsers();
   const { data: databases } = useDatabases();
+  // Unfiltered: a connector's ListGrants call is already scoped server-side
+  // to their own grants, matching the connection-list scoping, so there is no
+  // extra data exposed by fetching without a user_id/database_id filter here.
+  const { data: grants } = useGrants();
 
   const isFirstPage = !before;
 
@@ -65,6 +77,13 @@ function ConnectionsPage() {
     return db && "host" in db ? db.protocol : undefined;
   };
 
+  // Controls live on the definition the grant was issued from, not on the
+  // grant row.
+  const getGrantControls = (grantUid: string | null | undefined) =>
+    grantUid
+      ? grants?.find((g) => g.uid === grantUid)?.definition?.controls
+      : undefined;
+
   const filteredConnections = active
     ? connections?.filter((c) => !c.disconnected_at)
     : connections;
@@ -83,6 +102,22 @@ function ConnectionsPage() {
       cell: (c) => (
         <span className="font-mono text-sm">{getDbName(c.database_id)}</span>
       ),
+    },
+    {
+      key: "grant",
+      header: "Grant",
+      cell: (c) => {
+        const controls = getGrantControls(c.grant_uid);
+        if (!c.grant_uid) {
+          return <span className="text-sm text-muted-foreground">-</span>;
+        }
+        if (!controls) {
+          return (
+            <span className="text-sm text-muted-foreground">unavailable</span>
+          );
+        }
+        return <GrantAccessChip controls={controls} />;
+      },
     },
     {
       key: "source_ip",
@@ -245,12 +280,4 @@ function ConnectionsPage() {
       </div>
     </div>
   );
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 B";
-  const k = 1024;
-  const sizes = ["B", "KB", "MB", "GB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
 }

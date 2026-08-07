@@ -68,7 +68,7 @@ func newCapturingSession(t *testing.T, maxRows int) (*session, *captureRowStore,
 
 	t.Cleanup(func() { writer.Close(context.Background()) })
 
-	s := newTestSessionWithStorage(&store.Grant{}, true, maxRows, captureTestMaxBytes)
+	s := newTestSessionWithStorage(&store.Grant{Definition: &store.GrantDefinition{}}, true, maxRows, captureTestMaxBytes)
 	s.rowWriter = writer
 
 	_ = s.handleOALL8(buildOALL8("SELECT id FROM emp", nil, 1))

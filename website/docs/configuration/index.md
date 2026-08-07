@@ -31,7 +31,12 @@ Configuration is loaded in this priority order (highest wins):
 | `DBB_LISTEN_ORA` | Oracle proxy listen address. Empty value disables the Oracle proxy. | `:1522` |
 | `DBB_LISTEN_MYSQL` | MySQL/MariaDB proxy listen address. Empty value disables it. | `:3307` |
 | `DBB_LISTEN_MONGO` | MongoDB proxy listen address. Empty value disables it. | `:27018` |
+| `DBB_LISTEN_MSSQL` | Microsoft SQL Server (TDS) proxy listen address. Empty value disables it. | `:1434` |
 | `DBB_LISTEN_API` | REST API + web UI listen address | `:4200` |
+
+`:1434` looks like it should collide with SQL Server, but it does not: the SQL
+Server Browser service that owns port 1434 is **UDP-only**, so 1434/tcp is free
+even on a host already running SQL Server.
 
 ### Encryption Key
 
@@ -153,13 +158,78 @@ rollout-window caveat, not a live bug.
 
 See [Session Packet Dumps](/docs/features/session-dumps) for what gets captured.
 
-### MySQL Proxy TLS
+### Proxy TLS termination
+
+Four of the five proxies terminate client TLS at the listener, and each has the
+same three knobs: `*_TLS_DISABLE`, `*_TLS_CERT_FILE`, `*_TLS_KEY_FILE`. (The
+Oracle listener is the exception — it has no TLS termination.)
+
+The rule is the same everywhere: **set both the cert and the key, or neither.**
+Leaving both empty makes the proxy generate a self-signed RSA-2048 certificate
+in memory at startup — convenient for development, not something to run in
+production. Setting exactly one of the two is a configuration error and the
+proxy refuses to start.
+
+#### PostgreSQL Proxy TLS
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DBB_PG_TLS_DISABLE` | Answer `SSLRequest` with `N` and stay plaintext-only | `false` |
+| `DBB_PG_TLS_CERT_FILE` | PEM-encoded server certificate | _auto self-signed_ |
+| `DBB_PG_TLS_KEY_FILE` | PEM-encoded private key | _auto-generated RSA-2048_ |
+
+Disabling TLS here is rarely what you want: a client with `sslmode=prefer` (the
+libpq default) silently falls back to plaintext rather than failing, so the
+credentials travel in the clear and nothing tells anyone.
+
+#### MySQL Proxy TLS
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `DBB_MYSQL_TLS_DISABLE` | Refuse `SSLRequest` packets and stay plaintext-only | `false` |
 | `DBB_MYSQL_TLS_CERT_FILE` | PEM-encoded server certificate | _auto self-signed_ |
 | `DBB_MYSQL_TLS_KEY_FILE` | PEM-encoded RSA private key (RSA required for the non-TLS `caching_sha2` public-key path) | _auto-generated RSA-2048_ |
+
+#### MongoDB Proxy TLS
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DBB_MONGO_TLS_DISABLE` | Keep the listener plaintext — no TLS termination | `false` |
+| `DBB_MONGO_TLS_CERT_FILE` | PEM-encoded server certificate | _auto self-signed_ |
+| `DBB_MONGO_TLS_KEY_FILE` | PEM-encoded private key | _auto-generated RSA-2048_ |
+
+MongoDB TLS is implicit from the first byte — there is no `STARTTLS`-style
+upgrade to negotiate — so the client decides by connecting with `tls=true` or
+without it. The listener peeks that first byte and serves both on the same port.
+SASL `PLAIN` authentication is only accepted over TLS, so
+`DBB_MONGO_TLS_DISABLE=true` also rules that mechanism out.
+
+#### SQL Server Proxy TLS
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `DBB_MSSQL_TLS_DISABLE` | Answer `ENCRYPT_NOT_SUP` and stay plaintext — this also **refuses** clients that require encryption | `false` |
+| `DBB_MSSQL_TLS_CERT_FILE` | PEM-encoded server certificate | _auto self-signed_ |
+| `DBB_MSSQL_TLS_KEY_FILE` | PEM-encoded private key | _auto-generated RSA-2048_ |
+| `DBB_MSSQL_TLS_MAX_VERSION` | Ceiling for the client-leg handshake: `1.2` or `1.3`. The floor is 1.2 either way. | `1.2` |
+
+:::caution `DBB_MSSQL_TLS_MAX_VERSION=1.3` is opt-in
+TDS carries the TLS handshake *inside* PRELOGIN packets, and under TLS 1.3 the
+client's handshake ends on a write — so a driver has to decide for itself
+whether that last flight is still encapsulated. dbbat handles both, but **only
+`go-mssqldb` has been verified end to end**; the Microsoft ODBC and JDBC drivers
+are untested at 1.3. The classic symptom of a driver guessing wrong is a client
+that **connects and then hangs**, not an error, so test your own driver before
+enabling this. Any value other than `1.2` or `1.3` fails the process at startup
+rather than falling back silently.
+
+The full explanation is in the
+[SQL Server protocol notes](https://github.com/fclairamb/dbbat/blob/main/docs/mssql.md#tls-version).
+:::
+
+Note that a SQL Server client connecting with `Encrypt=no` still performs a
+complete TLS handshake — TLS then covers the LOGIN7 packet and nothing else,
+and both ends revert to cleartext TDS once login is through.
 
 ### Query Result Storage
 
@@ -304,6 +374,7 @@ listen_pg: ":5433"
 listen_ora: ":1522"
 listen_mysql: ":3307"
 listen_mongo: ":27018"
+listen_mssql: ":1434"
 listen_api: ":4200"
 dsn: "postgres://user:pass@localhost:5432/dbbat?sslmode=require"
 
@@ -323,11 +394,30 @@ dump:
   max_size: 33554432
   retention: "72h"
 
+pg:
+  tls:
+    disable: false
+    cert_file: "/etc/dbbat/pg.crt"
+    key_file: "/etc/dbbat/pg.key"
+
 mysql:
   tls:
     disable: false
     cert_file: "/etc/dbbat/mysql.crt"
     key_file: "/etc/dbbat/mysql.key"
+
+mongo:
+  tls:
+    disable: false
+    cert_file: "/etc/dbbat/mongo.crt"
+    key_file: "/etc/dbbat/mongo.key"
+
+mssql:
+  tls:
+    disable: false
+    cert_file: "/etc/dbbat/mssql.crt"
+    key_file: "/etc/dbbat/mssql.key"
+  tls_max_version: "1.2" # "1.3" is opt-in; see above
 
 slack_auth:
   client_id: "..."
@@ -363,11 +453,11 @@ values are exposed by `GET /api/v1/instance`.
 
 ```bash
 # Read the current parameters
-curl -H "Authorization: Bearer $TOKEN" http://localhost:4200/api/v1/parameters
+curl -H "Authorization: Bearer $DBBAT_API_KEY" http://localhost:4200/api/v1/parameters
 
 # Set the public web UI URL
 curl -X PUT http://localhost:4200/api/v1/parameters \
-  -H "Authorization: Bearer $TOKEN" \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"public.web_ui_url": "https://dbbat.example.com"}'
 ```

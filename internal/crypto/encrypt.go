@@ -114,3 +114,11 @@ func UserAAD(userUID string) []byte {
 func DeviceAuthAAD(requestUID string) []byte {
 	return []byte(fmt.Sprintf("deviceauth:%s", requestUID))
 }
+
+// LoginExchangeAAD returns the AAD for encrypting a web session token while it
+// waits behind a one-time OAuth login exchange code. This binds the ciphertext
+// to the specific exchange row UID, so a token cannot be transplanted onto
+// another (attacker-known) code.
+func LoginExchangeAAD(exchangeUID string) []byte {
+	return []byte(fmt.Sprintf("loginexchange:%s", exchangeUID))
+}

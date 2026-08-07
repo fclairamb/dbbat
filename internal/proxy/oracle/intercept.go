@@ -617,11 +617,11 @@ func (s *session) checkQuotas() error {
 		return shared.ErrGrantExpired
 	}
 
-	if s.grant.MaxQueryCounts != nil && s.grant.QueryCount >= *s.grant.MaxQueryCounts {
+	if maxQueries := s.grant.MaxQueryCounts(); maxQueries != nil && s.grant.QueryCount >= *maxQueries {
 		return ErrQueryLimitExceed
 	}
 
-	if s.grant.MaxBytesTransferred != nil && s.grant.BytesTransferred >= *s.grant.MaxBytesTransferred {
+	if maxBytes := s.grant.MaxBytesTransferred(); maxBytes != nil && s.grant.BytesTransferred >= *maxBytes {
 		return ErrDataLimitExceed
 	}
 

@@ -12,86 +12,92 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
-// CreateGrantRequest represents the request to create a grant
-type CreateGrantRequest struct {
-	UserID              uuid.UUID `json:"user_id" binding:"required"`
-	DatabaseID          uuid.UUID `json:"database_id" binding:"required"`
-	Controls            []string  `json:"controls"` // Array of controls: read_only, block_copy, block_ddl
-	StartsAt            time.Time `json:"starts_at" binding:"required"`
-	ExpiresAt           time.Time `json:"expires_at" binding:"required"`
-	MaxQueryCounts      *int64    `json:"max_query_counts"`
-	MaxBytesTransferred *int64    `json:"max_bytes_transferred"`
-	// ApprovalPatterns / ApproverGroupUIDs let a direct admin grant carry
-	// four-eyes gating too. Admin grants bypass definitions entirely, so
-	// without this the control would be unreachable for them.
-	ApprovalPatterns  []string    `json:"approval_patterns"`
-	ApproverGroupUIDs []uuid.UUID `json:"approver_group_uids"`
+// AssignGrantRequest is the body for POST /grants: an admin issuing a grant
+// directly, without the user having to file a request.
+//
+// There is deliberately no way to describe the grant's *shape* here. A grant
+// is an instance of a grant definition and nothing else; ad-hoc grants — an
+// admin typing controls and quotas into a form — are what made definitions
+// untrustworthy as the policy source of truth, so the shape comes from the
+// definition or the grant does not exist.
+type AssignGrantRequest struct {
+	// GrantDefinitionID identifies the definition to instantiate — either its
+	// uid or its slug, resolved the same way every other definition reference
+	// is. A slug always resolves to the live version.
+	GrantDefinitionID string    `json:"grant_definition_id" binding:"required"`
+	UserID            uuid.UUID `json:"user_id" binding:"required"`
+	DatabaseID        uuid.UUID `json:"database_id" binding:"required"`
+	// StartsAt defaults to now. The window's *length* is the definition's
+	// duration_seconds and is not negotiable here — that is part of the shape.
+	StartsAt *time.Time `json:"starts_at"`
 }
 
-// handleCreateGrant creates a new access grant
-func (s *Server) handleCreateGrant(c *gin.Context) {
-	var req CreateGrantRequest
+// handleAssignGrant issues a grant to a user by instantiating a grant
+// definition — the admin-initiated equivalent of an approved grant request,
+// and the only way a grant is created outside that flow.
+func (s *Server) handleAssignGrant(c *gin.Context) {
+	var req AssignGrantRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid request: "+err.Error())
 		return
 	}
 
-	// Validate controls
-	for _, control := range req.Controls {
-		valid := false
-		for _, validControl := range store.ValidControls {
-			if control == validControl {
-				valid = true
-				break
-			}
-		}
-		if !valid {
-			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid control: "+control)
-			return
-		}
+	ctx := c.Request.Context()
+
+	// Issuing always happens from the live version of the lineage: an edit
+	// exists precisely to change what gets issued from here on.
+	def, ok := s.resolveLiveGrantDefinition(c, req.GrantDefinitionID)
+	if !ok {
+		return
 	}
 
-	if err := store.ValidateApprovalPatterns(req.ApprovalPatterns); err != nil {
-		writeError(c, http.StatusBadRequest, ErrCodeValidationError, err.Error())
+	if !def.IsActive {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "grant definition is not active")
 
 		return
 	}
 
-	for _, groupUID := range req.ApproverGroupUIDs {
-		if _, err := s.store.GetUserGroup(c.Request.Context(), groupUID); err != nil {
-			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "approver group does not exist: "+groupUID.String())
+	if _, err := s.store.GetUserByUID(ctx, req.UserID); err != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "user does not exist")
 
-			return
-		}
-	}
-
-	// Validate time window
-	if !req.StartsAt.Before(req.ExpiresAt) {
-		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "starts_at must be before expires_at")
 		return
 	}
 
 	// The target must be a database, never an SSH bastion (a dial path).
-	if target, err := s.store.GetServerByUID(c.Request.Context(), req.DatabaseID); err == nil && target.IsSSH() {
-		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "cannot grant access to an ssh server")
+	target, err := s.store.GetServerByUID(ctx, req.DatabaseID)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "database does not exist")
+
 		return
 	}
 
-	currentUser := getCurrentUser(c)
-	grant := &store.Grant{
-		UserID:              req.UserID,
-		DatabaseID:          req.DatabaseID,
-		Controls:            req.Controls,
-		GrantedBy:           currentUser.UID,
-		StartsAt:            req.StartsAt,
-		ExpiresAt:           req.ExpiresAt,
-		MaxQueryCounts:      req.MaxQueryCounts,
-		MaxBytesTransferred: req.MaxBytesTransferred,
-		ApprovalPatterns:    normalizeStrings(req.ApprovalPatterns),
-		ApproverGroupUIDs:   normalizeUUIDs(req.ApproverGroupUIDs),
+	if target.IsSSH() {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "cannot grant access to an ssh server")
+
+		return
 	}
 
-	result, err := s.store.CreateGrant(c.Request.Context(), grant)
+	// The definition's database scope is enforced: a shape declared to apply
+	// only to certain databases must not authorize another one, whoever is
+	// issuing it. Its *group* scope is not — that scope governs who may
+	// self-request the definition, and an admin assigning access is the
+	// authority on who gets it.
+	if !def.AppliesToDatabase(req.DatabaseID) {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
+			"this grant definition cannot be used for this database")
+
+		return
+	}
+
+	startsAt := time.Now()
+	if req.StartsAt != nil {
+		startsAt = *req.StartsAt
+	}
+
+	currentUser := getCurrentUser(c)
+
+	result, err := s.store.CreateGrant(ctx,
+		store.BuildGrantFromDefinition(def, req.UserID, req.DatabaseID, currentUser.UID, startsAt))
 	if err != nil {
 		writeInternalError(c, s.logger, err, "failed to create grant")
 		return
@@ -99,14 +105,16 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 
 	// Log audit event
 	details, _ := json.Marshal(map[string]interface{}{
-		"grant_uid":   result.UID,
-		"user_id":     result.UserID,
-		"database_id": result.DatabaseID,
-		"controls":    result.Controls,
-		"starts_at":   result.StartsAt,
-		"expires_at":  result.ExpiresAt,
+		"grant_uid":           result.UID,
+		"user_id":             result.UserID,
+		"database_id":         result.DatabaseID,
+		"grant_definition_id": result.GrantDefinitionID,
+		"controls":            result.Controls(),
+		"starts_at":           result.StartsAt,
+		"expires_at":          result.ExpiresAt,
+		"priority":            result.Priority,
 	})
-	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
+	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{
 		EventType:   "grant.created",
 		UserID:      &result.UserID,
 		PerformedBy: &currentUser.UID,

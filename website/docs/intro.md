@@ -30,28 +30,31 @@ DBBat addresses all these needs without requiring changes to your application co
 | MySQL | MySQL wire (`go-mysql-org/go-mysql`) | `:3307` | `caching_sha2_password` (default), `mysql_clear_password`. TLS terminated at the proxy. `mysql_native_password` not supported |
 | MariaDB | MySQL wire (same listener) | `:3307` | Same as MySQL — `STMT_BULK_EXECUTE` refused (clients need batch-rewriting off) |
 | MongoDB | MongoDB wire (`OP_MSG`, hand-rolled) | `:27018` | Clients authenticate with `SCRAM-SHA-256` or `PLAIN`-over-TLS; upstream via `SCRAM-SHA-256`. `authSource` carries the DBBat database name |
+| Microsoft SQL Server | TDS (hand-rolled) | `:1434` | SQL authentication only (LOGIN7), TLS terminated at the proxy. `SQLBatch` and `RPC` are both enforced. MARS and integrated/Entra ID auth are refused |
 
-Each engine has its own listener and is enabled independently via `DBB_LISTEN_PG` / `DBB_LISTEN_ORA` / `DBB_LISTEN_MYSQL` / `DBB_LISTEN_MONGO`. Setting the variable to an empty string disables that proxy.
+Each engine has its own listener and is enabled independently via `DBB_LISTEN_PG` / `DBB_LISTEN_ORA` / `DBB_LISTEN_MYSQL` / `DBB_LISTEN_MONGO` / `DBB_LISTEN_MSSQL`. Setting the variable to an empty string disables that proxy.
 
-**Any of the four can be reached through an SSH tunnel.** Register an SSH bastion as a server with `protocol: ssh`, then set the target server's `via_uid` to it — DBBat dials the upstream through the bastion. Bastion host keys are pinned trust-on-first-use.
+**Any of the five can be reached through an SSH tunnel.** Register an SSH bastion as a server with `protocol: ssh`, then set the target server's `via_uid` to it — DBBat dials the upstream through the bastion. Bastion host keys are pinned trust-on-first-use.
 
 For protocol-level details, see:
 - [Oracle proxy notes (TNS/TTC)](https://github.com/fclairamb/dbbat/blob/main/docs/oracle.md)
 - [MySQL proxy notes](https://github.com/fclairamb/dbbat/blob/main/docs/mysql.md)
 - [MongoDB proxy notes](https://github.com/fclairamb/dbbat/blob/main/docs/mongodb.md)
+- [SQL Server proxy notes (TDS)](https://github.com/fclairamb/dbbat/blob/main/docs/mssql.md)
 - [Session capture format](https://github.com/fclairamb/dbbat/blob/main/docs/dump-format.md)
 
 ## Core Features
 
 ### Transparent Multi-Protocol Proxy
 
-DBBat speaks each engine's native wire protocol. The same auth + grant + query-logging pipeline runs across all four.
+DBBat speaks each engine's native wire protocol. The same auth + grant + query-logging pipeline runs across all five.
 
 ```
 psql / pg client     ─►  DBBat (auth + grant check + log) ─► PostgreSQL upstream
 sqlplus / go-ora     ─►  DBBat (TNS service-name routing)  ─► Oracle upstream
 mysql / mariadb cli  ─►  DBBat (caching_sha2_password)     ─► MySQL / MariaDB upstream
 mongosh / driver     ─►  DBBat (SCRAM-SHA-256 / PLAIN-TLS) ─► MongoDB upstream
+sqlcmd / driver      ─►  DBBat (TDS PRELOGIN + LOGIN7)     ─► SQL Server upstream
 ```
 
 ### User Management
@@ -109,7 +112,7 @@ Everything described here can be done via the REST API or the web UI.
 1. **Admin creates a user**
 2. **Admin configures a target server** (protocol, host, port, credentials, optional `oracle_service_name`)
 3. *(Optional)* **Admin adds an SSH bastion server** (`protocol: ssh`) and sets the target's `via_uid` to it, so the upstream connection is dialled through the tunnel
-4. **Admin grants the user access** to the server with a time window, controls, and optional quotas — or the user requests it themselves against a grant definition
+4. **Admin defines a grant definition** (controls, quotas, duration) and assigns it to the user on that server — or the user requests it themselves against the same definition. A grant is always an instance of a definition; it carries no access rules of its own
 5. **User connects** with `psql` / `sqlplus` / `mysql` / `mongosh` / any client, using their DBBat credentials (or an API key)
 6. **DBBat authenticates** the user, checks for a valid grant, and connects to the upstream using the stored encrypted credentials
 7. **DBBat proxies** all queries to the target database, logging everything

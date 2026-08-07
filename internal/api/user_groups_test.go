@@ -60,7 +60,9 @@ func doJSON(t *testing.T, router *gin.Engine, method, path, token string, body a
 	return w, resp
 }
 
-func TestUserGroupsCRUDEndpoints(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestUserGroupsCRUDEndpoints(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	suffix := "ugcrud"
 
@@ -136,7 +138,9 @@ func TestUserGroupsCRUDEndpoints(t *testing.T) { //nolint:paralleltest // shared
 	require.Equal(t, http.StatusNotFound, w.Code)
 }
 
-func TestListGrantDefinitions_FiltersByGroupScope(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestListGrantDefinitions_FiltersByGroupScope(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	ctx := context.Background()
 	suffix := "gdscope"
@@ -201,7 +205,9 @@ func TestListGrantDefinitions_FiltersByGroupScope(t *testing.T) { //nolint:paral
 	require.Equal(t, http.StatusOK, w.Code)
 }
 
-func TestCreateGrantRequest_RejectsOutOfScope(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestCreateGrantRequest_RejectsOutOfScope(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	ctx := context.Background()
 	suffix := "grscope"
@@ -265,7 +271,9 @@ func TestCreateGrantRequest_RejectsOutOfScope(t *testing.T) { //nolint:parallelt
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 }
 
-func TestApproveGrantRequest_ConflictsWhenScopeTightened(t *testing.T) { //nolint:paralleltest // shared migration lock
+func TestApproveGrantRequest_ConflictsWhenScopeTightened(t *testing.T) {
+	t.Parallel()
+
 	server, dataStore := setupTestServer(t)
 	ctx := context.Background()
 	suffix := "aprscope"
@@ -294,8 +302,12 @@ func TestApproveGrantRequest_ConflictsWhenScopeTightened(t *testing.T) { //nolin
 	group, err := dataStore.CreateUserGroup(ctx, &store.UserGroup{Name: "late-" + suffix})
 	require.NoError(t, err)
 
+	// The edit versions the definition; the approval below has to be judged
+	// against the new live version, which is the whole point of re-checking
+	// scope at approval time.
 	def.GroupUIDs = []uuid.UUID{group.UID}
-	require.NoError(t, dataStore.UpdateGrantDefinition(ctx, def))
+	_, err = dataStore.UpdateGrantDefinition(ctx, def)
+	require.NoError(t, err)
 
 	w, resp = doJSON(t, router, http.MethodPost, "/api/v1/grant-requests/"+requestUID+"/approve", adminToken, nil)
 	require.Equal(t, http.StatusConflict, w.Code, w.Body.String())
