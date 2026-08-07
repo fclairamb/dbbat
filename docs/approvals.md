@@ -218,6 +218,52 @@ to your intent, so this is worth getting right.
 }
 ```
 
+### Repairing patterns split by the pre-fix storage bug
+
+Every dbbat before the fix in `internal/store/array.go` read `text[]` columns
+back through `uptrace/bun`'s PostgreSQL array parser, which treats an element
+whose first byte is `(` or `[` as a range literal and terminates it at the
+matching bracket. A pattern stored correctly as `(?i)^DELETE` therefore came
+back as **two** patterns, `(?i)` and `^DELETE` — and `(?i)` on its own is a
+regexp that matches every statement, so such a definition put a hold on *every
+query the grant ran*. It fails closed, not open, but it makes the documented
+`(?i)…` form unusable.
+
+The stored rows were only damaged if somebody **edited** the definition while
+running an affected build: the UI read the split list and wrote it straight
+back, and because definitions are immutably versioned, that saved a genuinely
+split successor row. Definitions that were never re-saved are intact and need
+nothing — upgrading is enough.
+
+Find the suspects. A leading element that is nothing but an inline-flag group
+(`(?i)`, `(?s)`, `(?im)`, …) is never something an operator would author on
+purpose, so it is a reliable fingerprint:
+
+```sql
+SELECT uid, lineage_uid, slug, archived_at, approval_patterns
+FROM grant_definitions
+WHERE EXISTS (
+  SELECT 1 FROM unnest(approval_patterns) AS p
+  WHERE p ~ '^\(\?[a-zA-Z-]+\)$'
+)
+ORDER BY slug, archived_at NULLS FIRST;
+```
+
+Repair is deliberately **manual**, and dbbat ships no migration for it. The
+split is deterministic, so re-joining `['(?i)', '^DELETE']` into
+`'(?i)^DELETE'` is unambiguous *for that row* — but a definition legitimately
+authored with two patterns, the first of which happens to be a bracketed group
+(`['(a|b)', '^DROP']`), is byte-for-byte indistinguishable from a split one. An
+automatic fix would silently rewrite correct definitions. Approval patterns are
+a security control, so re-read each row the query above returns and edit it in
+the UI (or with `PUT /api/v1/grant-definitions/{uid}`) to the patterns you
+meant. Editing versions the definition as usual, so live grants keep running
+against the version they were issued from until they are re-issued.
+
+Archived rows (`archived_at IS NOT NULL`) are history: leave them. They are
+never used to authorize anything, and rewriting them would falsify the record
+of what a past grant was actually gated on.
+
 ## Slack escalation
 
 A hold still pending after `DBB_APPROVAL_SLACK_DELAY` (default `30s`, `0`
