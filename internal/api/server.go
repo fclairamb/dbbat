@@ -565,36 +565,75 @@ func (s *Server) loggingMiddleware() gin.HandlerFunc {
 	}
 }
 
-// redactedValue replaces the value of a sensitive query parameter in the
-// access log. The parameter name is kept so the log still shows the shape of
-// the request.
+// redactedValue replaces the value of a query parameter that is not on the
+// access log's allowlist. The parameter name is kept so the log still shows
+// the shape of the request — the names are not the secret, the values are.
 const redactedValue = "REDACTED"
 
-// sensitiveQueryParams are query parameter names whose values are credentials
-// or single-use capabilities, and so must never reach the access log. Matched
-// case-insensitively. Kept deliberately broad: a parameter wrongly listed here
-// only costs log detail, while a missing one costs a replayable secret.
-var sensitiveQueryParams = map[string]bool{
-	"access_token":  true,
-	"api_key":       true,
-	"apikey":        true,
-	"code":          true,
-	"device_code":   true,
-	"id_token":      true,
-	"key":           true,
-	"password":      true,
-	"refresh_token": true,
-	"secret":        true,
-	"session":       true,
-	"state":         true,
-	"token":         true,
-	"user_code":     true,
+// loggableQueryParams is an ALLOWLIST: the only query parameter names whose
+// *values* may reach the access log. Everything else is redacted by default.
+//
+// This is deliberately an allowlist and not a denylist. A denylist enumerating
+// known-sensitive names (`token`, `code`, `state`, …) fails silently and late:
+// whoever later adds a `?reset_token=`, `?otp=`, `?invite=` or `?signature=`
+// gets it written to the access log verbatim, and neither review nor CI points
+// at the omission. Inverted, a new parameter is redacted until someone with the
+// context consciously declares it safe. **Do not turn this back into a
+// denylist** — TestRedactQueryDefaultsToRedacted pins the direction.
+//
+// Adding an entry here is a one-line change; the bar is that the value is a
+// bounded, non-secret, non-caller-controlled-free-text token: an enum, a
+// boolean, a number, a timestamp, or an opaque entity UID. It is NOT enough
+// that a value "looks harmless today" — `redirect` is excluded precisely
+// because it carries an arbitrary caller-supplied path that the device flow
+// populates with `/device?user_code=...`, i.e. a secret nested inside an
+// otherwise innocuous parameter.
+//
+// Matched case-insensitively, after percent-decoding the name.
+var loggableQueryParams = map[string]bool{
+	// Pagination and cursoring.
+	"before":   true,
+	"cursor":   true,
+	"limit":    true,
+	"offset":   true,
+	"order":    true,
+	"page":     true,
+	"per_page": true,
+	"sort":     true,
+
+	// Boolean and enum filters.
+	"active_only": true,
+	"all_users":   true,
+	"event_type":  true,
+	"hard":        true,
+	"include_all": true,
+	"protocol":    true,
+	"status":      true,
+
+	// Opaque entity identifiers (UUIDs / config group keys), not credentials.
+	"connection_id": true,
+	"database_id":   true,
+	"group_key":     true,
+	"performed_by":  true,
+	"user_id":       true,
+
+	// Time-range filters.
+	"end_time":   true,
+	"start_time": true,
+
+	// OAuth failure code — a short enumerated value ("access_denied") that is
+	// the whole reason to look at these logs. Its free-text sibling
+	// `error_description` is intentionally absent.
+	"error": true,
 }
 
-// redactQuery rewrites a raw query string with the values of every sensitive
-// parameter replaced. It works on the raw string rather than url.Values so an
-// unparseable query (which url.ParseQuery would partially drop) is redacted
-// wholesale rather than logged verbatim, and so parameter order is preserved.
+// redactQuery rewrites a raw query string, keeping the value of allowlisted
+// parameters and replacing every other value with redactedValue. Parameter
+// names are always preserved so a request stays diagnosable.
+//
+// It works on the raw string rather than url.Values so an unparseable query
+// (which url.ParseQuery would partially drop) is still redacted rather than
+// logged verbatim, and so parameter order is preserved.
 func redactQuery(raw string) string {
 	if raw == "" {
 		return ""
@@ -603,23 +642,35 @@ func redactQuery(raw string) string {
 	pairs := strings.Split(raw, "&")
 	for i, pair := range pairs {
 		name, _, hasValue := strings.Cut(pair, "=")
+
+		if loggableQueryName(name) {
+			continue
+		}
+
 		if !hasValue {
+			// A bare segment with no "=" is all name and no value, so there is
+			// no key worth preserving; it could itself be a pasted secret.
+			pairs[i] = redactedValue
 			continue
 		}
 
-		decoded, err := url.QueryUnescape(name)
-		if err != nil {
-			// Undecodable parameter name: assume the worst.
-			pairs[i] = name + "=" + redactedValue
-			continue
-		}
-
-		if sensitiveQueryParams[strings.ToLower(decoded)] {
-			pairs[i] = name + "=" + redactedValue
-		}
+		pairs[i] = name + "=" + redactedValue
 	}
 
 	return strings.Join(pairs, "&")
+}
+
+// loggableQueryName reports whether a raw (still percent-encoded) parameter
+// name is on the allowlist. A name that will not decode is never allowlisted:
+// an attacker must not be able to smuggle a value past the filter by encoding
+// the name it rides on.
+func loggableQueryName(rawName string) bool {
+	decoded, err := url.QueryUnescape(rawName)
+	if err != nil {
+		return false
+	}
+
+	return loggableQueryParams[strings.ToLower(decoded)]
 }
 
 // successResponse sends a success response.
