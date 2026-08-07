@@ -31,8 +31,10 @@ const (
 	tokenDoneInProc    byte = 0xFF
 )
 
-// featureExtAckTerminator ends the FEATUREEXTACK token's feature list.
-const featureExtAckTerminator byte = 0xFF
+// featureExtTerminator closes a feature list — the one a client sends in the
+// LOGIN7 FEATUREEXT block as much as the one a server answers with in
+// FEATUREEXTACK. The two blocks share the entry shape, so they share this too.
+const featureExtTerminator byte = 0xFF
 
 // DONE token status bits (MS-TDS 2.2.7.5-7). DONE_COUNT is the one that says
 // the row count field means anything at all: without it the field is zero-filled
@@ -315,7 +317,7 @@ func scanFeatureExtAck(payload []byte, pos int) (int, bool) {
 		id := payload[pos]
 		pos++
 
-		if id == featureExtAckTerminator {
+		if id == featureExtTerminator {
 			return pos, false
 		}
 

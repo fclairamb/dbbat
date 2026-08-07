@@ -312,6 +312,167 @@ func TestLogin7ValidateRejectsUnsupportedAuth(t *testing.T) {
 	})
 }
 
+// featureExtEntry renders one {feature id, DWORD length, data} FEATUREEXT entry.
+func featureExtEntry(id byte, data ...byte) []byte {
+	entry := make([]byte, 5, 5+len(data))
+	entry[0] = id
+	binary.LittleEndian.PutUint32(entry[1:5], uint32(len(data)))
+
+	return append(entry, data...)
+}
+
+// featureExtBlock renders a whole FEATUREEXT block: the entries, then the
+// terminator.
+func featureExtBlock(entries ...[]byte) []byte {
+	block := []byte{}
+	for _, entry := range entries {
+		block = append(block, entry...)
+	}
+
+	return append(block, featureExtTerminator)
+}
+
+// loginWithFeatureExt is a sample login carrying the given FEATUREEXT block.
+func loginWithFeatureExt(block []byte) *Login7 {
+	login := sampleLogin7()
+	login.OptionFlags3 |= optionFlags3Extension
+	login.FeatureExt = block
+
+	return login
+}
+
+// TestLogin7ValidateRejectsFederatedAuthInFeatureExt is the guard for dbbat's v1
+// position: SQL authentication only. The proxy declines FEDAUTH in PRELOGIN, but
+// a client can still ask for it in the LOGIN7 feature extension block, and that
+// request must not reach the upstream.
+func TestLogin7ValidateRejectsFederatedAuthInFeatureExt(t *testing.T) {
+	t.Parallel()
+
+	t.Run("fedauth alone", func(t *testing.T) {
+		t.Parallel()
+
+		// FEDAUTH's data is the library byte plus a token; its content does not
+		// matter here, only that the feature was asked for.
+		login := loginWithFeatureExt(featureExtBlock(featureExtEntry(featureExtFedAuth, 0x02, 0x01)))
+
+		assert.True(t, login.FederatedAuthRequested())
+
+		err := login.Validate()
+		require.ErrorIs(t, err, ErrLogin7Unsupported)
+		assert.Contains(t, err.Error(), "SQL login")
+	})
+
+	t.Run("fedauth hidden behind an allowed feature", func(t *testing.T) {
+		t.Parallel()
+
+		login := loginWithFeatureExt(featureExtBlock(
+			featureExtEntry(0x0A, 0x01),                         // UTF-8 support
+			featureExtEntry(0x01, 0xFF, 0xFF, 0xFF, 0xFF),       // session recovery, 0xFF bytes inside
+			featureExtEntry(featureExtFedAuth, 0x02, 0x00),      // FEDAUTH
+			featureExtEntry(0x04, 0x01, 0x00, 0x00, 0x00, 0x01), // column encryption
+		))
+
+		assert.True(t, login.FederatedAuthRequested())
+		require.ErrorIs(t, login.Validate(), ErrLogin7Unsupported)
+	})
+
+	t.Run("the refusal survives a parse of the real bytes", func(t *testing.T) {
+		t.Parallel()
+
+		login := loginWithFeatureExt(featureExtBlock(featureExtEntry(featureExtFedAuth, 0x02, 0x01)))
+
+		parsed, err := parseLogin7(login.serialize())
+		require.NoError(t, err)
+
+		assert.True(t, parsed.FederatedAuthRequested())
+		require.ErrorIs(t, parsed.Validate(), ErrLogin7Unsupported)
+	})
+}
+
+// TestLogin7ValidateFailsClosedOnAnUndecodableFeatureExt pins the other half of
+// the rule: a block the proxy cannot walk is refused, because a walker that gave
+// up quietly is exactly how a FEDAUTH request would slip through.
+func TestLogin7ValidateFailsClosedOnAnUndecodableFeatureExt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		block []byte
+	}{
+		{"no terminator", []byte{0x0A, 0x01, 0x00, 0x00, 0x00, 0x01}},
+		{"truncated length field", []byte{0x0A, 0x01, 0x00}},
+		{"data shorter than the declared length", []byte{0x0A, 0xFF, 0x00, 0x00, 0x00, 0x01, 0x02}},
+		{"absurd declared length", []byte{0x0A, 0xFF, 0xFF, 0xFF, 0x7F, 0x01, 0xFF}},
+		{"terminator eaten by the previous entry", []byte{0x0A, 0x02, 0x00, 0x00, 0x00, 0x01, 0xFF}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			login := loginWithFeatureExt(tc.block)
+
+			_, err := featureExtRequests(tc.block)
+			require.ErrorIs(t, err, ErrLogin7BadFeatureExt)
+
+			// It is refused, and refused as an unsupported login so the client
+			// gets the same well-formed TDS error as any other refusal.
+			validateErr := login.Validate()
+			require.ErrorIs(t, validateErr, ErrLogin7Unsupported)
+			require.ErrorIs(t, validateErr, ErrLogin7BadFeatureExt)
+
+			// The undecodable block never reads as "no federated auth here".
+			assert.False(t, login.FederatedAuthRequested(),
+				"detection alone must not be trusted on a block that does not decode")
+		})
+	}
+}
+
+// TestLogin7ValidateAcceptsAllowedFeatureExtensions is the regression guard for
+// the pass-through stage 2 depends on: everything that is not FEDAUTH is still
+// accepted and still replayed byte for byte.
+func TestLogin7ValidateAcceptsAllowedFeatureExtensions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		block []byte
+	}{
+		{"utf-8 support", featureExtBlock(featureExtEntry(0x0A, 0x01))},
+		{"session recovery", featureExtBlock(featureExtEntry(0x01, 0x00, 0x00, 0x00, 0x00))},
+		{"column encryption", featureExtBlock(featureExtEntry(0x04, 0x01))},
+		{"several at once", featureExtBlock(
+			featureExtEntry(0x01, 0x00),
+			featureExtEntry(0x04, 0x01),
+			featureExtEntry(0x08),
+			featureExtEntry(0x0A, 0x01),
+		)},
+		{"terminator only", featureExtBlock()},
+		{"padding past the terminator", append(featureExtBlock(featureExtEntry(0x0A, 0x01)), 0x00, 0x00)},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			login := loginWithFeatureExt(tc.block)
+
+			assert.False(t, login.FederatedAuthRequested())
+			require.NoError(t, login.Validate())
+
+			// And the block still round-trips byte for byte, which is what the
+			// upstream replay depends on.
+			payload := login.serialize()
+
+			parsed, err := parseLogin7(payload)
+			require.NoError(t, err)
+			assert.Equal(t, tc.block, parsed.FeatureExt)
+			assert.Equal(t, payload, parsed.serialize())
+			require.NoError(t, parsed.Validate())
+		})
+	}
+}
+
 // TestLogin7StringNeverLeaksThePassword is the guard for the one rule in this
 // file that is a security property rather than a correctness one.
 func TestLogin7StringNeverLeaksThePassword(t *testing.T) {

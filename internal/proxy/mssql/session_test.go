@@ -345,6 +345,48 @@ func TestSessionRejectsIntegratedSecurityLogin(t *testing.T) {
 	assert.Contains(t, tok.Message, "SQL login")
 }
 
+// TestSessionRejectsFederatedAuthInFeatureExt proves the refusal reaches the
+// client as a proper TDS login failure — not a dropped socket, and not a login
+// half-accepted on its way upstream.
+func TestSessionRejectsFederatedAuthInFeatureExt(t *testing.T) {
+	t.Parallel()
+
+	addr := startTestServer(t, config.MSSQLConfig{})
+
+	client := dialTestClient(t, addr)
+	client.prelogin(t, encryptNotSup, false)
+
+	login := loginWithFeatureExt(featureExtBlock(
+		featureExtEntry(0x0A, 0x01),
+		featureExtEntry(featureExtFedAuth, 0x02, 0x01),
+	))
+	client.sendLogin7(t, login)
+
+	tok := parseLoginFailure(t, client.readReply(t))
+	assert.Equal(t, errNumberLoginFailed, tok.Number)
+	assert.Contains(t, tok.Message, "federated")
+	assert.Contains(t, tok.Message, "SQL login")
+}
+
+// TestSessionRejectsAnUndecodableFeatureExt is the fail-closed half: a feature
+// block the proxy cannot walk is refused rather than relayed.
+func TestSessionRejectsAnUndecodableFeatureExt(t *testing.T) {
+	t.Parallel()
+
+	addr := startTestServer(t, config.MSSQLConfig{})
+
+	client := dialTestClient(t, addr)
+	client.prelogin(t, encryptNotSup, false)
+
+	// A first entry whose declared length swallows the terminator: nothing after
+	// it can be read, so what it hides is unknowable.
+	client.sendLogin7(t, loginWithFeatureExt([]byte{0x0A, 0x02, 0x00, 0x00, 0x00, 0x01, 0xFF}))
+
+	tok := parseLoginFailure(t, client.readReply(t))
+	assert.Equal(t, errNumberLoginFailed, tok.Number)
+	assert.Contains(t, tok.Message, "feature extension")
+}
+
 func TestSessionRejectsATDSVersionBelowTheFloor(t *testing.T) {
 	t.Parallel()
 

@@ -289,7 +289,7 @@ func consumeFeatureExtAck(buf []byte) (int, error) {
 		id := buf[pos]
 		pos++
 
-		if id == featureExtAckTerminator {
+		if id == featureExtTerminator {
 			return pos, nil
 		}
 

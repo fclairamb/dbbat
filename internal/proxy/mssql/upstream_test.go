@@ -224,6 +224,39 @@ func TestBuildUpstreamLoginReplaysTheClientShape(t *testing.T) {
 	assert.Equal(t, "florent", client.UserName)
 }
 
+// TestBuildUpstreamLoginDropsAFederatedFeatureExt is belt and braces on the
+// rule Login7.Validate already enforces: no federated-auth request, and no
+// block dbbat could not read, is ever what the upstream negotiates on.
+func TestBuildUpstreamLoginDropsAFederatedFeatureExt(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		block []byte
+	}{
+		{"fedauth requested", featureExtBlock(featureExtEntry(featureExtFedAuth, 0x02, 0x01))},
+		{"block does not decode", []byte{0x0A, 0x02, 0x00, 0x00, 0x00, 0x01, 0xFF}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			client := loginWithFeatureExt(tc.block)
+
+			login := buildUpstreamLogin(client, upstream.MSSQLConfig{Username: "sa", Password: "x"})
+
+			assert.Nil(t, login.FeatureExt)
+			assert.Zero(t, login.OptionFlags3&optionFlags3Extension)
+			assert.False(t, login.FederatedAuthRequested())
+			require.NoError(t, login.Validate())
+
+			// The client's own struct is untouched.
+			assert.Equal(t, tc.block, client.FeatureExt)
+		})
+	}
+}
+
 func TestBuildUpstreamLoginClampsThePacketSize(t *testing.T) {
 	t.Parallel()
 

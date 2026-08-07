@@ -1,6 +1,7 @@
 package mssql
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -58,6 +59,11 @@ var (
 	// ErrLogin7Unsupported — the login asks for something dbbat does not do in
 	// v1 (integrated auth, federated auth, a password change).
 	ErrLogin7Unsupported = errors.New("mssql: unsupported LOGIN7 request")
+	// ErrLogin7BadFeatureExt — the FEATUREEXT block does not decode. It is a
+	// refusal rather than something to shrug off: that block is where a client
+	// asks for federated authentication, so a block dbbat cannot read is a block
+	// whose auth intent it cannot rule out.
+	ErrLogin7BadFeatureExt = errors.New("mssql: LOGIN7 feature extension block does not decode")
 )
 
 // OptionFlags bits the proxy acts on (MS-TDS 2.2.6.4).
@@ -69,6 +75,15 @@ const (
 	// is itself the offset of a FEATUREEXT block at the end of the payload.
 	optionFlags3Extension byte = 0x10
 )
+
+// featureExtFedAuth is the FEATUREEXT feature id a client uses to ask for
+// federated authentication — the Azure AD / Entra ID path (MS-TDS 2.2.6.4).
+//
+// It is the only feature in the block that carries an authentication mechanism:
+// the others (session recovery, column encryption, UTF-8 support, Azure SQL
+// support, data classification…) describe what the session can do once the
+// login has succeeded, and dbbat relays them upstream untouched on purpose.
+const featureExtFedAuth byte = 0x02
 
 // Login7 is a parsed LOGIN7 message.
 //
@@ -106,11 +121,12 @@ type Login7 struct {
 	ClientID       [6]byte
 	SSPI           []byte
 
-	// FeatureExt is the opaque FEATUREEXT block that sits past every blob when
+	// FeatureExt is the FEATUREEXT block that sits past every blob when
 	// optionFlags3Extension is set (UTF-8 support, column encryption, session
-	// recovery…). dbbat does not interpret it, but it has to survive a
-	// re-serialize or the replayed login would lose features the client asked
-	// for.
+	// recovery…). dbbat relays it verbatim — it has to survive a re-serialize or
+	// the replayed login would lose features the client asked for — and only
+	// reads it far enough to refuse the one feature that is an authentication
+	// mechanism, FEDAUTH. See validateFeatureExt.
 	FeatureExt []byte
 }
 
@@ -126,6 +142,23 @@ func (l *Login7) String() string {
 // authentication. dbbat v1 does SQL authentication only.
 func (l *Login7) IntegratedSecurity() bool {
 	return l.OptionFlags2&optionFlags2IntSecurity != 0 || len(l.SSPI) > 0
+}
+
+// FederatedAuthRequested reports whether the login's FEATUREEXT block asks for
+// federated (Azure AD / Entra ID) authentication.
+//
+// A block that does not decode answers false here — the undecodable case is not
+// silently allowed, it is refused separately by validateFeatureExt, which walks
+// the block before this question is ever reached. Callers outside Validate
+// should therefore treat a decode failure as its own refusal rather than trust
+// this answer on a login that has not been validated.
+func (l *Login7) FederatedAuthRequested() bool {
+	ids, err := featureExtRequests(l.FeatureExt)
+	if err != nil {
+		return false
+	}
+
+	return bytes.IndexByte(ids, featureExtFedAuth) >= 0
 }
 
 // ChangePasswordRequested reports whether the login carries a password change,
@@ -161,7 +194,87 @@ func (l *Login7) Validate() error {
 			ErrLogin7Unsupported)
 	}
 
+	return l.validateFeatureExt()
+}
+
+// validateFeatureExt refuses a FEATUREEXT block that asks for an authentication
+// mechanism dbbat does not implement, and refuses one it cannot decode at all.
+//
+// The rest of the block is deliberately left alone: dbbat replays it upstream
+// verbatim so the features negotiated there are the ones the client asked for.
+// FEDAUTH is the exception, because dbbat can neither mint nor validate a
+// federated token — relaying it would start an exchange the proxy has no part
+// in, between two ends that both think it is in the middle of it.
+func (l *Login7) validateFeatureExt() error {
+	if len(l.FeatureExt) == 0 {
+		return nil
+	}
+
+	ids, err := featureExtRequests(l.FeatureExt)
+	if err != nil {
+		// Fail closed. An unreadable block is exactly how a federated login
+		// would slip past a walker that gave up quietly.
+		return fmt.Errorf("%w: %w", ErrLogin7Unsupported, err)
+	}
+
+	if bytes.IndexByte(ids, featureExtFedAuth) >= 0 {
+		return fmt.Errorf("%w: federated (Azure AD / Entra ID) authentication is not supported; "+
+			"connect with a SQL login (User ID / Password)", ErrLogin7Unsupported)
+	}
+
 	return nil
+}
+
+// featureExtRelayable reports whether the FEATUREEXT block may be replayed
+// upstream: it decodes, and it asks for no authentication mechanism dbbat would
+// have no part in.
+func (l *Login7) featureExtRelayable() bool {
+	return l.validateFeatureExt() == nil
+}
+
+// featureExtRequests returns the feature ids a LOGIN7 FEATUREEXT block asks for.
+//
+// The block is a run of {feature id (1 byte), length (DWORD), data} entries
+// closed by the 0xFF terminator — the same shape scanFeatureExtAck walks on the
+// response side. Unlike that walk it returns an error instead of stopping
+// quietly: a server response the proxy relays byte for byte can afford an
+// unread tail, a login the proxy has to authorize cannot.
+//
+// Anything past the terminator is not an error. The block runs to the end of the
+// payload, so a client that pads it is well within the protocol; what matters is
+// that every entry up to the terminator was read.
+func featureExtRequests(block []byte) ([]byte, error) {
+	ids := make([]byte, 0, 4)
+	pos := 0
+
+	for {
+		if pos >= len(block) {
+			return nil, fmt.Errorf("%w: no terminator after %d feature(s) in %d bytes",
+				ErrLogin7BadFeatureExt, len(ids), len(block))
+		}
+
+		id := block[pos]
+		pos++
+
+		if id == featureExtTerminator {
+			return ids, nil
+		}
+
+		if pos+4 > len(block) {
+			return nil, fmt.Errorf("%w: feature %#02x has no length field", ErrLogin7BadFeatureExt, id)
+		}
+
+		length := int(binary.LittleEndian.Uint32(block[pos : pos+4]))
+		pos += 4
+
+		if length < 0 || pos+length > len(block) {
+			return nil, fmt.Errorf("%w: feature %#02x declares %d bytes, %d left",
+				ErrLogin7BadFeatureExt, id, length, len(block)-pos)
+		}
+
+		ids = append(ids, id)
+		pos += length
+	}
 }
 
 // ucs2ToString decodes a UCS-2LE blob.

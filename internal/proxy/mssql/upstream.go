@@ -312,7 +312,8 @@ func buildUpstreamPrelogin(encryption byte) *preloginMessage {
 //
 // What is dropped: anything that would make the upstream negotiate an
 // authentication scheme dbbat does not speak (integrated security, an SSPI
-// blob), a password change, or an attached database file.
+// blob, a FEDAUTH feature request), a password change, or an attached database
+// file.
 func buildUpstreamLogin(template *Login7, cfg upstream.MSSQLConfig) *Login7 {
 	login := defaultUpstreamLogin()
 
@@ -333,6 +334,17 @@ func buildUpstreamLogin(template *Login7, cfg upstream.MSSQLConfig) *Login7 {
 	login.SSPI = nil
 	login.ChangePassword = ""
 	login.AtchDBFile = ""
+
+	if !login.featureExtRelayable() {
+		// Unreachable through a session: Login7.Validate refuses a FEDAUTH
+		// request — and a block it cannot decode — on the client leg, before
+		// anything upstream is dialed. Dropped here anyway, the same way the
+		// SSPI blob above is dropped after being refused: an authentication
+		// mechanism dbbat has no part in must not be what the upstream
+		// negotiates on, whatever path built this login.
+		login.FeatureExt = nil
+		login.OptionFlags3 &^= optionFlags3Extension
+	}
 
 	if login.TDSVersion == 0 {
 		login.TDSVersion = tdsVersion74

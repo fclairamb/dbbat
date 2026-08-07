@@ -68,7 +68,7 @@ func buildFeatureExtAckToken(featureID byte, data []byte) []byte {
 	token = append(token, length[:]...)
 	token = append(token, data...)
 
-	return append(token, featureExtAckTerminator)
+	return append(token, featureExtTerminator)
 }
 
 // buildAcceptedLoginResponse is the token stream a real server answers a good

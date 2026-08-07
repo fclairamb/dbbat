@@ -160,9 +160,13 @@ for the extension and SSPI blobs. Mixing the two up is the classic LOGIN7 bug.
 
 `FEATUREEXT` is not a blob in the table: when `OptionFlags3 & 0x10` is set, the
 extension pair points at a DWORD which itself holds the offset of a block at
-the end of the payload. dbbat carries that block through opaquely so a
+the end of the payload. The block is a run of `{feature id, length(DWORD),
+data}` entries closed by `0xFF` — the same shape as the `FEATUREEXTACK` the
+server answers with. dbbat carries the block through byte for byte so a
 re-serialized login does not silently lose features (UTF-8 support, column
-encryption, session recovery) the client asked for.
+encryption, session recovery) the client asked for, and reads it only far
+enough to refuse `FEDAUTH` (see [what is deliberately
+unsupported](#what-is-deliberately-unsupported-in-v1)).
 
 ### Password obfuscation
 
@@ -224,8 +228,10 @@ flags, collation, the `FEATUREEXT` block — is kept, because dbbat forwards tha
 response to the client untouched; negotiating anything different upstream would
 hand the client a stream it did not ask for. The host name and client id are
 kept too, so `sys.dm_exec_sessions` shows the real originating machine. What is
-dropped: integrated security and any SSPI blob, a password change, and an
-attached database file. `AppName` becomes `dbbat/<version> @<user> for <the
+dropped: integrated security and any SSPI blob, a `FEATUREEXT` block that asks
+for federated auth or that does not decode (already refused on the client leg —
+dropped here as belt and braces), a password change, and an attached database
+file. `AppName` becomes `dbbat/<version> @<user> for <the
 client's own app name>`.
 
 The client's login response is the upstream's own `LOGINACK` / `ENVCHANGE` /
@@ -525,8 +531,25 @@ Plainly, so nobody assumes more coverage than there is:
   interception pipeline is not built for. Clients configured with it will fail
   to connect until they drop it.
 - **Integrated authentication** — NTLM, Kerberos, SSPI. Refused with a message
-  telling the user to connect with a SQL login. Azure AD / federated
-  authentication is declined in PRELOGIN (`FEDAUTHREQUIRED = 0`).
+  telling the user to connect with a SQL login.
+- **Azure AD / Entra ID (federated) authentication**, refused in two places.
+  dbbat declines it in PRELOGIN (`FEDAUTHREQUIRED = 0`), which is what makes
+  every mainstream driver fall back to a SQL login; and `Login7.Validate()`
+  refuses a LOGIN7 whose **FEATUREEXT** block still carries a `FEDAUTH` feature
+  request (id `0x02`), with the same "connect with a SQL login" message as the
+  integrated-security refusal. The second check is the one that matters: dbbat
+  can neither mint nor validate a federated token, so relaying that request
+  would start an exchange between client and server that the proxy has no part
+  in — while sitting in the middle of it.
+  A FEATUREEXT block that **does not decode** is refused too, rather than
+  relayed: the block is where an authentication request lives, so one dbbat
+  cannot read is one whose intent it cannot rule out. Every other feature in
+  the block (session recovery, column encryption, UTF-8 support, Azure SQL
+  support…) is relayed upstream byte for byte, because the upstream's
+  FEATUREEXTACK is forwarded to the client untouched.
+  `buildUpstreamLogin` drops the whole block in both refused cases as well —
+  unreachable through a session, kept for the same reason the SSPI blob is
+  stripped there.
 - **Changing a password through the proxy.**
 - **Pre-TDS7 logins** (packet type `0x02`).
 - **TLS 1.3** on the client leg — see above.
@@ -562,8 +585,9 @@ as a hang rather than a diff:
 - `prelogin_test.go` — option round-trip, the response shape, the whole
   encryption matrix.
 - `login7_test.go` — parse/re-serialize round-trip, credential rewrite,
-  FEATUREEXT survival, the scramble in both directions with a pinned known
-  vector, and the no-password-in-`String()` guard.
+  FEATUREEXT survival, the FEDAUTH-in-FEATUREEXT refusal and its fail-closed
+  twin (an undecodable block), the scramble in both directions with a pinned
+  known vector, and the no-password-in-`String()` guard.
 - `session_test.go` — a synthetic client over a real TCP listener through every
   encryption mode, decoding the ERROR/DONE tokens the way a driver would.
 - `tokens_test.go` — the login-response token walker: a good login behind
