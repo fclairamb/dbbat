@@ -112,18 +112,18 @@ function LoginPage() {
 
     // Drop the code from the URL immediately: it must not survive into
     // browser history, and a reload must not attempt a second (doomed)
-    // redemption.
+    // redemption. This also makes StrictMode's development-only double
+    // invoke harmless — the second pass finds no code and returns. Note the
+    // effect deliberately has no cleanup: the request in flight holds the
+    // only copy of a single-use code, so its result must be committed even
+    // if the effect is torn down under it.
     window.history.replaceState({}, "", window.location.pathname);
 
-    let cancelled = false;
     void (async () => {
       const { data, error: exchangeError } = await apiClient.POST(
         "/auth/oauth/exchange",
         { body: { code } },
       );
-      if (cancelled) {
-        return;
-      }
       if (exchangeError || !data?.access_token) {
         setError(oauthErrorMessage("exchange_failed"));
         return;
@@ -131,10 +131,6 @@ function LoginPage() {
       storeToken(data.access_token);
       refreshUser();
     })();
-
-    return () => {
-      cancelled = true;
-    };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Handle OAuth error from callback
