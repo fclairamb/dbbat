@@ -47,7 +47,7 @@ PR titles MUST follow the conventional commit format:
   - Oracle TNS/TTC (hand-rolled) — see `docs/oracle.md`
   - MySQL/MariaDB via `go-mysql-org/go-mysql` (server + client) — see `docs/mysql.md`
   - MongoDB wire protocol (hand-rolled `OP_MSG`; BSON via `go.mongodb.org/mongo-driver/v2`) — see `docs/mongodb.md`
-  - Microsoft SQL Server TDS (hand-rolled) — **stage 1 of 3: handshake only, no upstream yet** — see `docs/mssql.md`
+  - Microsoft SQL Server TDS (hand-rolled) — **stage 2 of 3: auth + upstream relay; no query interception yet** — see `docs/mssql.md`
 - **API**: `gin-gonic/gin` with OpenAPI 3.0 docs
 - **CLI**: `urfave/cli/v3`
 - **Config**: `knadh/koanf`
@@ -283,10 +283,10 @@ Client → DBBat (auth + grant check) → Target PostgreSQL
 Client → DBBat (service-name lookup, O5LOGON proxy auth) → Target Oracle
 Client → DBBat (caching_sha2_password / TLS termination) → Target MySQL/MariaDB
 Client → DBBat (SCRAM-SHA-256 or PLAIN-over-TLS, authSource lookup) → Target MongoDB
-Client → DBBat (TDS PRELOGIN + encapsulated TLS + LOGIN7) → Target SQL Server [stage 1: handshake only]
+Client → DBBat (TDS PRELOGIN + encapsulated TLS + LOGIN7, SQL auth) → Target SQL Server [stage 2: no query interception]
 ```
 
-The same auth + grant + query-logging pipeline runs across all four shipped protocols (`internal/proxy/shared`). The SQL Server proxy speaks only the TDS handshake today and joins that pipeline in stage 2.
+The same auth + grant + query-logging pipeline runs across all four shipped protocols (`internal/proxy/shared`). The SQL Server proxy authenticates and relays today, and joins the query-interception half of that pipeline in stage 3.
 
 ### Access Control
 - **Every grant is an instance of a grant definition** and carries no shape of
