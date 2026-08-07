@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -20,6 +22,8 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/store"
 )
 
 // defaultMSSQLImage is the upstream image this suite runs against. Set
@@ -43,11 +47,6 @@ func mssqlImage() string {
 }
 
 // startUpstreamSQLServer boots a real SQL Server and returns its host:port.
-//
-// Stage 1 of the proxy never talks to it — there is no upstream leg yet. It is
-// started anyway because this is the fixture stage 2 builds on, and because a
-// handshake suite that has never seen a real server is a handshake suite that
-// will surprise you later.
 func startUpstreamSQLServer(ctx context.Context, t *testing.T) string {
 	t.Helper()
 
@@ -84,11 +83,13 @@ func startUpstreamSQLServer(ctx context.Context, t *testing.T) string {
 	return net.JoinHostPort(host, port.Port())
 }
 
-// startProxy runs the stage-1 proxy on an ephemeral port.
+// startProxy runs a proxy with no store on an ephemeral port. Every login that
+// gets past the handshake is refused as an authentication failure, which is
+// what the handshake-only cases below assert on.
 func startProxy(t *testing.T, cfg config.MSSQLConfig) string {
 	t.Helper()
 
-	srv, err := NewServer(cfg, slog.New(slog.DiscardHandler))
+	srv, err := NewServer(nil, nil, config.DumpConfig{}, nil, cfg, slog.New(slog.DiscardHandler))
 	require.NoError(t, err)
 
 	go func() {
@@ -137,10 +138,10 @@ func TestUpstreamSQLServerIsReachable(t *testing.T) {
 	assert.Contains(t, version, "Microsoft SQL Server")
 }
 
-// TestProxyHandshakeWithARealClient is the point of this stage: a genuine
-// third-party driver must get all the way through PRELOGIN, the encapsulated
-// TLS handshake and LOGIN7, and must then read back the stub error as a normal
-// SQL error rather than hanging or failing to parse the stream.
+// TestProxyHandshakeWithARealClient proves a genuine third-party driver gets
+// all the way through PRELOGIN, the encapsulated TLS handshake and LOGIN7 in
+// every encryption mode, and then reads back dbbat's refusal as a normal SQL
+// error rather than hanging or failing to parse the stream.
 func TestProxyHandshakeWithARealClient(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -172,11 +173,10 @@ func TestProxyHandshakeWithARealClient(t *testing.T) {
 			t.Cleanup(func() { _ = db.Close() })
 
 			err = db.PingContext(ctx)
-			require.Error(t, err, "stage 1 always refuses the login")
-			assert.Contains(t, err.Error(), "not wired through",
+			require.Error(t, err, "a proxy without a store authenticates nobody")
+			assert.Contains(t, err.Error(), "Login failed for user",
 				"the driver must surface the proxy's own message, which means it parsed "+
 					"the ERROR/DONE token stream")
-			assert.Contains(t, err.Error(), "stage 1 of 3")
 		})
 	}
 }
@@ -195,7 +195,7 @@ func TestProxyRefusesMARS(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 
 	// The proxy answers MARS=0x00 in PRELOGIN; the driver either gives up or
-	// continues without MARS and then hits the stage-1 stub. Either way it
+	// continues without MARS and then hits the login refusal. Either way it
 	// fails, and never hangs.
 	err = db.PingContext(ctx)
 	require.Error(t, err)
@@ -217,6 +217,195 @@ func TestProxyRefusesEncryptionWhenTLSIsDisabled(t *testing.T) {
 
 	err = db.PingContext(ctx)
 	require.Error(t, err)
-	assert.False(t, strings.Contains(err.Error(), "not wired through"),
+	assert.False(t, strings.Contains(err.Error(), "Login failed for user"),
 		"the connection must be refused during negotiation, before any login")
+}
+
+// Fixture names for the end-to-end tests below. The dbbat login is deliberately
+// different from the SQL Server one: the whole point of the proxy is that the
+// client never learns the upstream credentials.
+const (
+	e2eDBBatUser     = "e2e-user"
+	e2eDBBatPassword = "e2e-p@ssw0rd"
+	e2eEntryName     = "e2e-sqlserver"
+	e2eRealDatabase  = "master"
+)
+
+// startProxyWithStore runs a fully wired proxy — store, encryption key, auth —
+// on an ephemeral port.
+func startProxyWithStore(
+	t *testing.T,
+	cfg config.MSSQLConfig,
+	dataStore *store.Store,
+	encryptionKey []byte,
+) string {
+	t.Helper()
+
+	srv, err := NewServer(dataStore, encryptionKey, config.DumpConfig{}, nil, cfg, slog.New(slog.DiscardHandler))
+	require.NoError(t, err)
+
+	go func() {
+		_ = srv.Start("127.0.0.1:0")
+	}()
+
+	require.Eventually(t, func() bool { return srv.Addr() != nil }, 10*time.Second, 10*time.Millisecond)
+
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_ = srv.Shutdown(ctx)
+	})
+
+	return srv.Addr().String()
+}
+
+// seedE2E creates the dbbat user, the SQL Server entry pointing at upstreamAddr
+// and a live grant linking them, and returns the store plus its encryption key.
+func seedE2E(ctx context.Context, t *testing.T, upstreamAddr, sslMode string) (*store.Store, []byte) {
+	t.Helper()
+
+	dataStore := newTestStore(t)
+
+	hash, err := crypto.HashPassword(e2eDBBatPassword)
+	require.NoError(t, err)
+
+	user, err := dataStore.CreateUser(ctx, e2eDBBatUser, hash, []string{store.RoleConnector})
+	require.NoError(t, err)
+
+	encryptionKey := make([]byte, 32)
+	for i := range encryptionKey {
+		encryptionKey[i] = byte(i + 1)
+	}
+
+	host, portText, err := net.SplitHostPort(upstreamAddr)
+	require.NoError(t, err)
+
+	port, err := strconv.Atoi(portText)
+	require.NoError(t, err)
+
+	database, err := dataStore.CreateServer(ctx, &store.Server{
+		Name:         e2eEntryName,
+		Host:         host,
+		Port:         port,
+		DatabaseName: e2eRealDatabase,
+		Username:     "sa",
+		Password:     saPassword,
+		Protocol:     store.ProtocolMSSQL,
+		SSLMode:      sslMode,
+	}, encryptionKey)
+	require.NoError(t, err)
+
+	grantFullAccess(t, dataStore, user.UID, database.UID)
+
+	return dataStore, encryptionKey
+}
+
+// proxyDSN builds a go-mssqldb connection string aimed at the proxy, using the
+// dbbat credentials and naming the dbbat entry as the database.
+func proxyDSN(addr, encrypt string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		panic(err)
+	}
+
+	return fmt.Sprintf(
+		"sqlserver://%s:%s@%s:%s?database=%s&encrypt=%s&TrustServerCertificate=true&connection+timeout=30",
+		url.QueryEscape(e2eDBBatUser), url.QueryEscape(e2eDBBatPassword),
+		host, port, url.QueryEscape(e2eEntryName), encrypt)
+}
+
+// TestProxyRelaysQueriesEndToEnd is what stage 2 is for: a real driver
+// authenticates against dbbat, dbbat opens its own session on a real SQL
+// Server with the stored credentials, and a query's rows come back.
+//
+// The two rows of the table are the two upstream encryption outcomes, asserted
+// on the connection row's upstream_tls so the connections UI is proved to
+// report SQL Server sessions like the others. The client leg is varied
+// independently of the upstream leg, because they negotiate independently.
+func TestProxyRelaysQueriesEndToEnd(t *testing.T) {
+	tests := []struct {
+		name          string
+		upstreamMode  string
+		clientEncrypt string
+		wantTLS       bool
+	}{
+		{name: "plaintext upstream", upstreamMode: "disable", clientEncrypt: "disable", wantTLS: false},
+		{name: "encrypted upstream", upstreamMode: "require", clientEncrypt: "true", wantTLS: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+			defer cancel()
+
+			upstreamAddr := startUpstreamSQLServer(ctx, t)
+			dataStore, encryptionKey := seedE2E(ctx, t, upstreamAddr, tc.upstreamMode)
+
+			proxyAddr := startProxyWithStore(t, config.MSSQLConfig{}, dataStore, encryptionKey)
+
+			db, err := sql.Open("sqlserver", proxyDSN(proxyAddr, tc.clientEncrypt))
+			require.NoError(t, err)
+
+			t.Cleanup(func() { _ = db.Close() })
+
+			var answer int
+			require.NoError(t, db.QueryRowContext(ctx, "SELECT 42").Scan(&answer))
+			assert.Equal(t, 42, answer)
+
+			// A multi-row result exercises the packet-at-a-time response relay
+			// rather than a single small message.
+			rows, err := db.QueryContext(ctx,
+				"SELECT TOP 50 name FROM sys.objects ORDER BY name")
+			require.NoError(t, err)
+
+			names := 0
+
+			for rows.Next() {
+				var name string
+				require.NoError(t, rows.Scan(&name))
+
+				names++
+			}
+
+			require.NoError(t, rows.Err())
+			require.NoError(t, rows.Close())
+			assert.Positive(t, names, "rows must actually arrive through the relay")
+
+			// The session must be on the connection list, with the upstream
+			// leg's encryption recorded honestly.
+			connections, err := dataStore.ListConnections(ctx, store.ConnectionFilter{Limit: 10})
+			require.NoError(t, err)
+			require.NotEmpty(t, connections)
+			assert.Equal(t, tc.wantTLS, connections[0].UpstreamTLS)
+		})
+	}
+}
+
+// TestProxyRefusesBadCredentialsAgainstARealServer proves the refusal path is
+// the same one a real driver reads, and that nothing reaches the upstream.
+func TestProxyRefusesBadCredentialsAgainstARealServer(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	upstreamAddr := startUpstreamSQLServer(ctx, t)
+	dataStore, encryptionKey := seedE2E(ctx, t, upstreamAddr, "disable")
+
+	proxyAddr := startProxyWithStore(t, config.MSSQLConfig{}, dataStore, encryptionKey)
+
+	dsnText := strings.Replace(proxyDSN(proxyAddr, "disable"),
+		url.QueryEscape(e2eDBBatPassword), "wrong-password", 1)
+
+	db, err := sql.Open("sqlserver", dsnText)
+	require.NoError(t, err)
+
+	t.Cleanup(func() { _ = db.Close() })
+
+	err = db.PingContext(ctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Login failed for user '"+e2eDBBatUser+"'")
+
+	connections, err := dataStore.ListConnections(ctx, store.ConnectionFilter{Limit: 10})
+	require.NoError(t, err)
+	assert.Empty(t, connections, "a refused login opens no session and records nothing")
 }
