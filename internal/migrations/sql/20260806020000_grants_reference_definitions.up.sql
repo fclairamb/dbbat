@@ -101,30 +101,39 @@ WHERE gr.resulting_grant_id = ag.uid
 --   * ORDER BY created_at, uid makes the pick deterministic when several
 --     definitions share a shape.
 --
--- Deliberately NOT part of the match: gd.database_uids. A legacy grant could
--- therefore be pinned to a definition whose database scope excludes the
--- grant's own database. This is behaviourally inert — auth never consults a
--- definition's database scope (only the assign endpoint does, at issuance
--- time), and the shape is identical by construction — but such a grant could
--- not be re-issued through the assign endpoint today. Documented rather than
--- fixed here (see specs/todos/2026-08-07-grant-definition-consistency-loose-ends.md
--- item 4): a corrective migration is only worth it if a real deployment is
--- affected, and as of writing this migration has not shipped in any tagged
--- release (latest at the time is v0.22.0, this migration landed after it) and
--- the query below returns zero rows against every database this was checked
--- against:
---   SELECT ag.uid FROM access_grants ag
---   JOIN grant_definitions gd ON gd.uid = ag.grant_definition_id
---   WHERE gd.database_uids IS NOT NULL AND array_length(gd.database_uids, 1) > 0
---     AND NOT (ag.database_id = ANY(gd.database_uids));
--- Re-run that query against any environment before/at the point this
--- migration is actually deployed there; a non-empty result is the "real
--- deployment is affected" trigger the loose-ends spec asks for.
+-- Database scope IS part of the match: a definition is a candidate only when
+-- it is unscoped (empty database_uids — it covers every database) or its
+-- database_uids lists the grant's own database_id. Grants left matching
+-- nothing fall through to pass 3's synthesis, which is already their correct
+-- destination.
+--
+-- Without that condition a grant could be pinned to a definition whose scope
+-- excludes the grant's own database. That is behaviourally inert — auth never
+-- consults a definition's database scope, only the assign endpoint does, at
+-- issuance time — but such a grant could not be re-issued through the assign
+-- endpoint, a real if narrow inconsistency. It is not hypothetical: on
+-- 2026-08-07, before this migration had shipped in any tagged release or
+-- reached production, this pass was replayed read-only against the production
+-- dbbat database and predicted 10 grants across 4 distinct databases being
+-- pinned to a definition that excludes them. So it is fixed here rather than
+-- documented (see
+-- specs/todos/2026-08-07-verify-grant-backfill-scope-before-real-deploy.md).
+-- Environments that already ran the earlier version of this file are repaired
+-- by 20260807010000_grants_rescope_mismatched_definitions, which is a no-op
+-- everywhere else.
+--
+-- cardinality() and not array_length(): array_length(x, 1) yields NULL for an
+-- empty array, which would make the "unscoped" test NULL rather than true and
+-- send every unscoped definition — the common case — out of the candidate set.
+-- The column is NOT NULL DEFAULT '{}'; the IS NULL arm is belt and braces.
 UPDATE access_grants AS ag
 SET grant_definition_id = (
     SELECT gd.uid
     FROM grant_definitions AS gd
     WHERE gd.is_active
+      AND (gd.database_uids IS NULL
+        OR cardinality(gd.database_uids) = 0
+        OR ag.database_id = ANY (gd.database_uids))
       AND ARRAY(SELECT unnest(gd.controls) ORDER BY 1)
         = ARRAY(SELECT unnest(ag.controls) ORDER BY 1)
       AND gd.max_query_counts IS NOT DISTINCT FROM ag.max_query_counts
