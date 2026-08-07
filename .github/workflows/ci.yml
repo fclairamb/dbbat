@@ -32,6 +32,38 @@ jobs:
           version: v2.12.2
 
   # ===========================================================================
+  # Secrets Job - keep credentials out of the repository
+  # ===========================================================================
+  # A HAR export of an authenticated session was committed once (it carried a
+  # live web_ session token). Two guards, cheapest first: a hard refusal of
+  # capture-file extensions, then a full gitleaks scan of the pushed commits.
+  secrets:
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please-')
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0 # gitleaks scans commit history, not just the tree
+
+      # A HAR records whole requests — Authorization headers, cookies, tokens
+      # in URLs — so it is a credential file even when it looks like a
+      # debugging artifact. Same for a saved browser session or a raw cookie
+      # jar. .gitignore stops the accident locally; this stops it in CI.
+      - name: Refuse committed network captures
+        run: |
+          matches=$(git ls-files -- '*.har' '*.harfile' 'cookies.txt' 'cookies.json' || true)
+          if [ -n "$matches" ]; then
+            echo "::error::network capture / cookie files must never be committed:"
+            echo "$matches"
+            exit 1
+          fi
+
+      - uses: gitleaks/gitleaks-action@v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # GITLEAKS_LICENSE is only required for organization accounts.
+
+  # ===========================================================================
   # Frontend Job - Build React app with Bun
   # ===========================================================================
   frontend:

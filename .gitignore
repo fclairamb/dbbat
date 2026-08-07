@@ -32,6 +32,14 @@ Thumbs.db
 .env
 *.key
 
+# Browser network captures. A HAR records whole requests — Authorization
+# headers, session cookies, tokens in URLs — so it is a credential file even
+# when it looks like a debugging artifact. Never commit one.
+*.har
+
+# Scratch space for local captures and other private debugging material.
+/priv/
+
 # Docker
 docker-compose.override.yml
 
