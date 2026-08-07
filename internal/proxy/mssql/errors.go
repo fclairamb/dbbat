@@ -3,6 +3,7 @@ package mssql
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 )
 
 // TDS token types the proxy emits (MS-TDS 2.2.5.x). Stage 1 only ever needs to
@@ -21,11 +22,15 @@ const doneError uint16 = 0x0002
 //
 //   - 18456 "Login failed for user" is what every client already handles as an
 //     authentication failure, including the ones that key retry logic off it.
+//   - 4060 "Cannot open database requested by the login" is the number for
+//     "your credentials are fine, that database is not available to you", which
+//     is exactly what an unknown dbbat database name or a missing grant means.
 //   - 50000 is the first user-defined number, which is what a message from
 //     something that is not SQL Server should use.
 const (
-	errNumberLoginFailed  int32 = 18456
-	errNumberProxyMessage int32 = 50000
+	errNumberLoginFailed      int32 = 18456
+	errNumberCannotOpenDBName int32 = 4060
+	errNumberProxyMessage     int32 = 50000
 )
 
 // Severity classes (MS-TDS: 0-10 informational, 11-16 user-correctable errors,
@@ -37,16 +42,34 @@ const errSeverityUserError byte = 14
 // serverNameToken is the server name dbbat reports in its error tokens.
 const serverNameToken = "dbbat"
 
-// ErrNotWiredThrough is the stage-1 stub: the handshake completed, and there is
-// deliberately nothing behind it yet.
-var ErrNotWiredThrough = errors.New("mssql: the SQL Server proxy is not wired through to an upstream yet")
+// Client-leg refusals. Every one of them is reported to the client as a proper
+// TDS login failure, so a driver surfaces the reason instead of a dropped
+// socket.
+var (
+	// ErrAuthFailed — the username/password (or API key) did not check out.
+	// One error for every cause on purpose: see clientMessageFor.
+	ErrAuthFailed = errors.New("mssql: authentication failed")
+	// ErrNoDatabaseRequested — the LOGIN7 carried no database name, so there is
+	// nothing to resolve against the dbbat catalogue.
+	ErrNoDatabaseRequested = errors.New("mssql: the login named no database")
+	// ErrServerNotFound — no SQL Server target is registered in dbbat under the
+	// requested name.
+	ErrServerNotFound = errors.New("mssql: no SQL Server database registered under that name")
+	// ErrNoActiveGrant — the user has no live grant on that database.
+	ErrNoActiveGrant = errors.New("mssql: no active grant for this database")
+	// ErrAPIKeyOwnerMismatch — the API key is valid but belongs to another
+	// user than the one named in the login.
+	ErrAPIKeyOwnerMismatch = errors.New("mssql: API key does not belong to this user")
+	// ErrUpstreamConnect — dbbat could not open the upstream session.
+	ErrUpstreamConnect = errors.New("mssql: upstream connection failed")
+)
 
-// stubMessage is the text the stub error puts in front of a human. It names the
-// stage explicitly so nobody spends an afternoon looking for a misconfiguration
-// that is really just an unfinished feature.
-const stubMessage = "dbbat: the SQL Server proxy accepted the handshake but is not wired " +
-	"through to an upstream database yet (stage 1 of 3). Use the PostgreSQL, Oracle, " +
-	"MySQL or MongoDB proxy in the meantime."
+// authFailedMessage is what a client is told when authentication fails, no
+// matter which half of the credential was wrong. Wording it once — and never
+// interpolating the reason — is what makes "no such user" and "wrong password"
+// indistinguishable, as everywhere else in dbbat.
+const authFailedMessage = "Login failed for user '%s'. dbbat could not authenticate " +
+	"this login: check the username and the password (or dbb_ API key)."
 
 // writeUSVarchar appends a US_VARCHAR: a little-endian USHORT character count
 // followed by the UCS-2LE text.
@@ -131,13 +154,43 @@ func buildLoginFailure(number int32, message string) []byte {
 	return append(stream, buildDoneToken(doneError, 0)...)
 }
 
-// buildStubResponse is the stage-1 reply to a completed handshake.
-func buildStubResponse() []byte {
-	return buildLoginFailure(errNumberProxyMessage, stubMessage)
-}
-
 // buildLoginRejected wraps a handshake-time refusal (unsupported auth mode,
 // MARS, a malformed login) in the login-failure shape.
 func buildLoginRejected(message string) []byte {
 	return buildLoginFailure(errNumberLoginFailed, message)
+}
+
+// clientMessageFor renders a refusal for the client: the SQL Server error
+// number to report, and the text to put in front of a human.
+//
+// Everything the client is told is derived from the *class* of failure, never
+// from the underlying error's own text. That keeps store errors, upstream
+// hostnames and driver internals off the client leg, and it is what makes the
+// authentication failures indistinguishable from one another.
+func clientMessageFor(username string, reason error) (int32, string) {
+	switch {
+	case errors.Is(reason, ErrAuthFailed), errors.Is(reason, ErrAPIKeyOwnerMismatch):
+		return errNumberLoginFailed, fmt.Sprintf(authFailedMessage, username)
+
+	case errors.Is(reason, ErrNoDatabaseRequested):
+		return errNumberCannotOpenDBName, "dbbat: this login named no database. Connect with the " +
+			"name of the dbbat database entry you have a grant on (for example Database=my-target)."
+
+	case errors.Is(reason, ErrServerNotFound):
+		return errNumberCannotOpenDBName, "dbbat: no SQL Server database is registered under that " +
+			"name. The Database in your connection string must be the name of the dbbat entry, " +
+			"not the name of a database on the server."
+
+	case errors.Is(reason, ErrNoActiveGrant):
+		return errNumberCannotOpenDBName, "dbbat: you have no active grant on that database. " +
+			"Request access in the dbbat UI and connect again once it is approved."
+
+	case errors.Is(reason, ErrUpstreamConnect):
+		return errNumberProxyMessage, "dbbat: could not open a session on the upstream SQL Server. " +
+			"The proxy authenticated you, so this is a problem with the target or its stored " +
+			"credentials — ask an administrator to run the connectivity check on it."
+
+	default:
+		return errNumberLoginFailed, "dbbat: " + reason.Error()
+	}
 }

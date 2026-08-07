@@ -199,6 +199,24 @@ type packetRW struct {
 	// hdrBuf is scratch for reading headers, so a read loop does not allocate
 	// one per packet.
 	hdrBuf [packetHeaderSize]byte
+
+	// tapRead / tapWrite, when set, receive every raw packet (header included)
+	// this codec reads and writes. The session capture uses them, which is why
+	// they sit here rather than around the socket: on an encrypted client leg a
+	// tap below TLS would only ever record ciphertext.
+	//
+	// They are installed once, before the relay's goroutines start. Read and
+	// write are then driven from different goroutines — safe because the two
+	// paths share no mutable state — so a tap that writes to a shared sink must
+	// do its own locking.
+	tapRead  func([]byte)
+	tapWrite func([]byte)
+}
+
+// setTaps installs the capture callbacks. Either may be nil.
+func (p *packetRW) setTaps(onRead, onWrite func([]byte)) {
+	p.tapRead = onRead
+	p.tapWrite = onWrite
 }
 
 // newPacketRW wraps a stream in the TDS framing codec.
@@ -252,6 +270,8 @@ func (p *packetRW) readPacket() (packetHeader, []byte, error) {
 
 	size := int(hdr.Length) - packetHeaderSize
 	if size == 0 {
+		p.tapReadPacket(nil)
+
 		return hdr, nil, nil
 	}
 
@@ -260,7 +280,25 @@ func (p *packetRW) readPacket() (packetHeader, []byte, error) {
 		return packetHeader{}, nil, fmt.Errorf("%w: %w", ErrShortPayload, err)
 	}
 
+	p.tapReadPacket(payload)
+
 	return hdr, payload, nil
+}
+
+// tapReadPacket hands one inbound packet to the capture callback, putting the
+// header back in front of the payload so the capture holds exactly what crossed
+// the wire. hdrBuf still holds this packet's header — the next read is what
+// overwrites it — so the frame is assembled here rather than at the call site.
+func (p *packetRW) tapReadPacket(payload []byte) {
+	if p.tapRead == nil {
+		return
+	}
+
+	frame := make([]byte, 0, packetHeaderSize+len(payload))
+	frame = append(frame, p.hdrBuf[:]...)
+	frame = append(frame, payload...)
+
+	p.tapRead(frame)
 }
 
 // ReadMessage reassembles a full logical message: packets of the same type are
@@ -360,7 +398,32 @@ func (p *packetRW) writePacket(msgType, status byte, payload []byte) error {
 		return fmt.Errorf("mssql: write TDS packet: %w", err)
 	}
 
+	if p.tapWrite != nil {
+		p.tapWrite(buf)
+	}
+
 	return nil
+}
+
+// ForwardPacket relays one packet of a message received from the other side,
+// keeping the peer's type and status bits (EOM, IGNORE, RESETCONNECTION) but
+// re-stamping the SPID and the packet id, which are per-connection.
+//
+// It exists because a response is one logical TDS message that can be
+// arbitrarily large — a result set is not something a proxy may reassemble in
+// memory before passing it on — so the relay forwards a response packet at a
+// time. Pass start=true for the first packet of a message so the packet id
+// counter restarts, as MS-TDS 2.2.3.1.4 requires.
+func (p *packetRW) ForwardPacket(msgType, status byte, payload []byte, start bool) error {
+	if p.pendingOpen {
+		return ErrPacketPending
+	}
+
+	if start {
+		p.outPacketID = 1
+	}
+
+	return p.writePacket(msgType, status, payload)
 }
 
 // beginPacket opens a streaming message of the given type. Writes accumulate

@@ -21,13 +21,28 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }
 
+// newTestServer builds a proxy with no store, auth cache or capture: the
+// handshake suite exercises the wire, not the pipeline behind it.
+func newTestServer(t *testing.T, cfg config.MSSQLConfig) *Server {
+	t.Helper()
+
+	srv, err := NewServer(nil, nil, config.DumpConfig{}, nil, cfg, testLogger())
+	require.NoError(t, err)
+
+	return srv
+}
+
 // startTestServer brings up the proxy on an ephemeral port and returns its
 // address.
+//
+// It is built without a store, so every login that gets past the handshake is
+// refused as an authentication failure. That is exactly what these tests want
+// to assert on: reaching the refusal proves the whole handshake worked. The
+// store-backed path has its own suite in auth_test.go.
 func startTestServer(t *testing.T, cfg config.MSSQLConfig) string {
 	t.Helper()
 
-	srv, err := NewServer(cfg, testLogger())
-	require.NoError(t, err)
+	srv := newTestServer(t, cfg)
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
@@ -220,10 +235,9 @@ func TestSessionHandshakeWithFullEncryption(t *testing.T) {
 	client.sendLogin7(t, sampleLogin7())
 
 	tok := parseLoginFailure(t, client.readReply(t))
-	assert.Equal(t, errNumberProxyMessage, tok.Number)
+	assert.Equal(t, errNumberLoginFailed, tok.Number)
 	assert.Equal(t, "dbbat", tok.Server)
-	assert.Contains(t, tok.Message, "not wired through")
-	assert.Contains(t, tok.Message, "stage 1 of 3")
+	assert.Contains(t, tok.Message, "Login failed for user 'florent'")
 }
 
 // TestSessionHandshakeWithLoginOnlyEncryption covers the row of the matrix that
@@ -246,7 +260,7 @@ func TestSessionHandshakeWithLoginOnlyEncryption(t *testing.T) {
 	client.stream.revert()
 
 	tok := parseLoginFailure(t, client.readReply(t))
-	assert.Equal(t, errNumberProxyMessage, tok.Number)
+	assert.Equal(t, errNumberLoginFailed, tok.Number)
 }
 
 func TestSessionHandshakeWithoutEncryption(t *testing.T) {
@@ -262,7 +276,7 @@ func TestSessionHandshakeWithoutEncryption(t *testing.T) {
 	client.sendLogin7(t, sampleLogin7())
 
 	tok := parseLoginFailure(t, client.readReply(t))
-	assert.Equal(t, errNumberProxyMessage, tok.Number)
+	assert.Equal(t, errNumberLoginFailed, tok.Number)
 }
 
 func TestSessionWithTLSDisabledAnswersNotSupported(t *testing.T) {
@@ -279,7 +293,7 @@ func TestSessionWithTLSDisabledAnswersNotSupported(t *testing.T) {
 	client.sendLogin7(t, sampleLogin7())
 
 	tok := parseLoginFailure(t, client.readReply(t))
-	assert.Equal(t, errNumberProxyMessage, tok.Number)
+	assert.Equal(t, errNumberLoginFailed, tok.Number)
 }
 
 func TestSessionRefusesEncryptionRequiredWhenTLSDisabled(t *testing.T) {
@@ -376,7 +390,7 @@ func TestSessionSurvivesAnImmediateDisconnect(t *testing.T) {
 	client.sendLogin7(t, sampleLogin7())
 
 	tok := parseLoginFailure(t, client.readReply(t))
-	assert.Equal(t, errNumberProxyMessage, tok.Number)
+	assert.Equal(t, errNumberLoginFailed, tok.Number)
 }
 
 func TestSessionHonoursTheNegotiatedPacketSize(t *testing.T) {
@@ -396,14 +410,13 @@ func TestSessionHonoursTheNegotiatedPacketSize(t *testing.T) {
 	client.pkt.SetPacketSize(minPacketSize)
 
 	tok := parseLoginFailure(t, client.readReply(t))
-	assert.Equal(t, errNumberProxyMessage, tok.Number)
+	assert.Equal(t, errNumberLoginFailed, tok.Number)
 }
 
 func TestServerStartAndShutdown(t *testing.T) {
 	t.Parallel()
 
-	srv, err := NewServer(config.MSSQLConfig{}, testLogger())
-	require.NoError(t, err)
+	srv := newTestServer(t, config.MSSQLConfig{})
 	assert.Nil(t, srv.Addr(), "no listener before Start")
 
 	errCh := make(chan error, 1)
@@ -428,23 +441,22 @@ func TestServerStartAndShutdown(t *testing.T) {
 func TestNewServerRejectsAHalfConfiguredCertPair(t *testing.T) {
 	t.Parallel()
 
-	_, err := NewServer(config.MSSQLConfig{TLS: config.TLSConfig{CertFile: "/nope/cert.pem"}}, testLogger())
+	_, err := NewServer(nil, nil, config.DumpConfig{}, nil,
+		config.MSSQLConfig{TLS: config.TLSConfig{CertFile: "/nope/cert.pem"}}, testLogger())
 	require.ErrorIs(t, err, ErrTLSConfigInvalid)
 }
 
 func TestNewServerWithTLSDisabledHasNoTLSConfig(t *testing.T) {
 	t.Parallel()
 
-	srv, err := NewServer(config.MSSQLConfig{TLS: config.TLSConfig{Disable: true}}, testLogger())
-	require.NoError(t, err)
+	srv := newTestServer(t, config.MSSQLConfig{TLS: config.TLSConfig{Disable: true}})
 	assert.Nil(t, srv.tlsConfig)
 }
 
 func TestNextSPIDNeverReturnsZero(t *testing.T) {
 	t.Parallel()
 
-	srv, err := NewServer(config.MSSQLConfig{TLS: config.TLSConfig{Disable: true}}, testLogger())
-	require.NoError(t, err)
+	srv := newTestServer(t, config.MSSQLConfig{TLS: config.TLSConfig{Disable: true}})
 
 	srv.spidCounter.Store(0xFFFF)
 	assert.NotZero(t, srv.nextSPID())

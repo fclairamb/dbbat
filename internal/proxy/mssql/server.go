@@ -10,25 +10,38 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/dump"
+	"github.com/fclairamb/dbbat/internal/store"
 )
 
 // Server is the SQL Server (TDS) proxy.
 //
-// Stage 1 of the proxy speaks the handshake and nothing else: it accepts a
-// client, negotiates PRELOGIN (including the TLS handshake encapsulated inside
-// PRELOGIN packets), parses LOGIN7, and closes the session with a TDS error
-// explaining that nothing is wired through yet.
+// It accepts a client, negotiates PRELOGIN (including the TLS handshake
+// encapsulated inside PRELOGIN packets), parses LOGIN7, authenticates the login
+// against dbbat's own users and API keys, opens the upstream with the stored
+// credentials, and relays the session.
 //
-// It therefore takes none of the store / auth-cache / dump / approval
-// dependencies its siblings do: there is nothing yet to authenticate against,
-// log, or capture. Stage 2 widens the constructor when the upstream leg lands.
+// It still takes fewer dependencies than its siblings: query interception,
+// grant enforcement per statement, approval holds and result accounting are
+// stage 3, so there is no approval-gate, row-writer or query-storage
+// configuration here yet.
 type Server struct {
 	// tlsConfig supports client-facing TLS termination. Nil when TLS is
 	// explicitly disabled in config, in which case the proxy answers
 	// ENCRYPT_NOT_SUP.
 	tlsConfig *tls.Config
+
+	store         *store.Store
+	encryptionKey []byte
+	authCache     *cache.AuthCache
+	dumpConfig    config.DumpConfig
+	// dumpUploader ships finished captures from the local spool to blob
+	// storage. nil — the default — keeps them on local disk only.
+	dumpUploader *dump.Uploader
 
 	logger *slog.Logger
 
@@ -49,7 +62,14 @@ type Server struct {
 }
 
 // NewServer creates a new SQL Server proxy.
-func NewServer(mssqlConfig config.MSSQLConfig, logger *slog.Logger) (*Server, error) {
+func NewServer(
+	dataStore *store.Store,
+	encryptionKey []byte,
+	dumpConfig config.DumpConfig,
+	authCache *cache.AuthCache,
+	mssqlConfig config.MSSQLConfig,
+	logger *slog.Logger,
+) (*Server, error) {
 	tlsConfig, err := loadTLSConfig(mssqlConfig)
 	if err != nil {
 		return nil, fmt.Errorf("SQL Server proxy TLS setup: %w", err)
@@ -58,12 +78,23 @@ func NewServer(mssqlConfig config.MSSQLConfig, logger *slog.Logger) (*Server, er
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Server{
-		tlsConfig: tlsConfig,
-		logger:    logger,
-		shutdown:  make(chan struct{}),
-		ctx:       ctx,
-		cancel:    cancel,
+		tlsConfig:     tlsConfig,
+		store:         dataStore,
+		encryptionKey: encryptionKey,
+		authCache:     authCache,
+		dumpConfig:    dumpConfig,
+		logger:        logger,
+		shutdown:      make(chan struct{}),
+		ctx:           ctx,
+		cancel:        cancel,
 	}, nil
+}
+
+// SetDumpUploader installs the process-wide capture uploader, so this proxy's
+// finished captures are shipped to blob storage alongside every other one.
+// nil (the default) keeps them on local disk.
+func (s *Server) SetDumpUploader(uploader *dump.Uploader) {
+	s.dumpUploader = uploader
 }
 
 // Start starts the proxy server on addr.
@@ -75,6 +106,10 @@ func (s *Server) Start(addr string) error {
 
 	s.setListener(listener)
 	s.logger.InfoContext(s.ctx, "SQL Server proxy listening", slog.String("addr", addr))
+
+	if s.dumpConfig.Dir != "" {
+		go s.runDumpCleanup()
+	}
 
 	for {
 		conn, err := listener.Accept()
@@ -151,6 +186,36 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		s.logger.WarnContext(ctx, "SQL Server proxy shutdown timeout")
 
 		return ctx.Err()
+	}
+}
+
+// dumpCleanupInterval is how often the local capture spool is swept.
+const dumpCleanupInterval = 1 * time.Hour
+
+// runDumpCleanup deletes captures older than the configured retention. It
+// applies to the local spool only — captures dbbat uploaded are the bucket's
+// lifecycle policy to expire.
+func (s *Server) runDumpCleanup() {
+	retention, err := time.ParseDuration(s.dumpConfig.Retention)
+	if err != nil {
+		retention = 24 * time.Hour
+	}
+
+	ticker := time.NewTicker(dumpCleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
+			if err != nil {
+				s.logger.ErrorContext(s.ctx, "MSSQL dump cleanup failed", slog.Any("error", err))
+			} else if deleted > 0 {
+				s.logger.InfoContext(s.ctx, "MSSQL dump cleanup", slog.Int("deleted", deleted))
+			}
+		case <-s.shutdown:
+			return
+		}
 	}
 }
 

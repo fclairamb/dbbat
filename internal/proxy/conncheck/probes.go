@@ -7,6 +7,7 @@ import (
 	"net"
 
 	"github.com/fclairamb/dbbat/internal/proxy/mongodb"
+	"github.com/fclairamb/dbbat/internal/proxy/mssql"
 	"github.com/fclairamb/dbbat/internal/proxy/upstream"
 	"github.com/fclairamb/dbbat/internal/store"
 	"github.com/fclairamb/dbbat/internal/version"
@@ -39,6 +40,8 @@ func probeFor(protocol string) probe {
 		return probeMongo
 	case store.ProtocolOracle:
 		return probeOracle
+	case store.ProtocolMSSQL:
+		return probeMSSQL
 	default:
 		return nil
 	}
@@ -113,6 +116,30 @@ func probeMongo(ctx context.Context, srv *store.Server, dial dialFunc) error {
 		AppName:    probeAppName(),
 		SSLMode:    srv.SSLMode,
 	})
+	if err != nil {
+		return err
+	}
+
+	return conn.Close()
+}
+
+// probeMSSQL runs the SQL Server proxy's own upstream connect — dial, the
+// ssl_mode policy expressed as a PRELOGIN ENCRYPTION offer, the encapsulated
+// TLS handshake, LOGIN7 — and hangs up.
+//
+// It passes a nil LOGIN7 template because there is no client session to copy
+// one from; the connector then sends a plain TDS 7.4 login, which is what the
+// proxy would send for a client that asked for nothing special.
+func probeMSSQL(ctx context.Context, srv *store.Server, dial dialFunc) error {
+	conn, err := mssql.ConnectUpstream(ctx, upstream.DialFunc(dial), upstream.MSSQLConfig{
+		Host:     srv.Host,
+		Port:     srv.Port,
+		Username: srv.Username,
+		Password: srv.Password,
+		Database: srv.DatabaseName,
+		AppName:  probeAppName(),
+		SSLMode:  srv.SSLMode,
+	}, nil)
 	if err != nil {
 		return err
 	}
