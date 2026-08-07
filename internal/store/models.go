@@ -34,15 +34,15 @@ var ValidControls = []string{
 type User struct {
 	bun.BaseModel `bun:"table:users,alias:u"`
 
-	UID               uuid.UUID  `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
-	Username          string     `bun:"username,notnull,unique" json:"username"`
-	PasswordHash      string     `bun:"password_hash,notnull" json:"-"`
-	Roles             []string   `bun:"roles,array" json:"roles"`
-	RateLimitExempt   bool       `bun:"rate_limit_exempt,notnull,default:false" json:"rate_limit_exempt"`
-	PasswordChangedAt *time.Time `bun:"password_changed_at" json:"-"`
-	CreatedAt         time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
-	UpdatedAt         time.Time  `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
-	DeletedAt         *time.Time `bun:"deleted_at,soft_delete" json:"-"`
+	UID               uuid.UUID   `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	Username          string      `bun:"username,notnull,unique" json:"username"`
+	PasswordHash      string      `bun:"password_hash,notnull" json:"-"`
+	Roles             StringArray `bun:"roles" json:"roles"`
+	RateLimitExempt   bool        `bun:"rate_limit_exempt,notnull,default:false" json:"rate_limit_exempt"`
+	PasswordChangedAt *time.Time  `bun:"password_changed_at" json:"-"`
+	CreatedAt         time.Time   `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	UpdatedAt         time.Time   `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
+	DeletedAt         *time.Time  `bun:"deleted_at,soft_delete" json:"-"`
 	// ProtocolData holds protocol-specific per-user material (Oracle O5LOGON
 	// user salts, etc.) in a single generic jsonb column — mirroring
 	// APIKey.ProtocolData — rather than protocol-specific user columns.
@@ -153,7 +153,7 @@ func (u *User) IsConnector() bool {
 // UserUpdate represents fields that can be updated
 type UserUpdate struct {
 	PasswordHash *string
-	Roles        []string
+	Roles        StringArray
 }
 
 // Protocol constants for database connections
@@ -663,12 +663,12 @@ type GrantDefinition struct {
 	// instead of copying a UUID out of the UI. Mandatory and unique at the
 	// database level; the API never auto-generates it (the frontend does,
 	// from the name, until the operator edits it manually).
-	Slug                string   `bun:"slug,notnull" json:"slug"`
-	Description         string   `bun:"description,notnull,default:''" json:"description"`
-	DurationSeconds     int64    `bun:"duration_seconds,notnull" json:"duration_seconds"`
-	Controls            []string `bun:"controls,array,notnull,default:'{}'" json:"controls"`
-	MaxQueryCounts      *int64   `bun:"max_query_counts" json:"max_query_counts"`
-	MaxBytesTransferred *int64   `bun:"max_bytes_transferred" json:"max_bytes_transferred"`
+	Slug                string      `bun:"slug,notnull" json:"slug"`
+	Description         string      `bun:"description,notnull,default:''" json:"description"`
+	DurationSeconds     int64       `bun:"duration_seconds,notnull" json:"duration_seconds"`
+	Controls            StringArray `bun:"controls,notnull,default:'{}'" json:"controls"`
+	MaxQueryCounts      *int64      `bun:"max_query_counts" json:"max_query_counts"`
+	MaxBytesTransferred *int64      `bun:"max_bytes_transferred" json:"max_bytes_transferred"`
 	// Priority, when non-nil, is copied verbatim onto every grant
 	// materialized from this definition, pinning it above or below the tier
 	// its controls would otherwise earn. nil — the default — means "compute
@@ -694,7 +694,7 @@ type GrantDefinition struct {
 	// statement until an admin or an approver-group member approves it.
 	// Empty = no approval gating. Validated at save time so a bad pattern is
 	// a 400 rather than a runtime surprise on the proxy hot path.
-	ApprovalPatterns []string `bun:"approval_patterns,array,notnull,default:'{}'" json:"approval_patterns"`
+	ApprovalPatterns StringArray `bun:"approval_patterns,notnull,default:'{}'" json:"approval_patterns"`
 	// SampleQueries are representative SQL statements an author saves
 	// alongside the patterns to validate them against — a test bench for
 	// pattern authoring, not a first-class matcher: the RE2 patterns above
@@ -704,7 +704,7 @@ type GrantDefinition struct {
 	// of that exact version. A sample that stops matching after an edit does
 	// not block the save — see POST /grant-definitions/validate-patterns,
 	// which reports match/no-match without failing the request.
-	SampleQueries []string `bun:"sample_queries,array,notnull,default:'{}'" json:"sample_queries"`
+	SampleQueries StringArray `bun:"sample_queries,notnull,default:'{}'" json:"sample_queries"`
 	// ApproverGroupUIDs lists groups whose members may resolve holds on
 	// grants built from this definition, *in addition to* admins.
 	// Empty = admins only.
