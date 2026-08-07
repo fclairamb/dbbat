@@ -50,8 +50,13 @@ build-front:
 	@./scripts/build-frontend.sh
 
 # Run Go unit tests
+#
+# `-race` matches what CI runs (.github/workflows/ci.yml). The proxies are
+# concurrency-heavy — accept loop, per-connection goroutines, shutdown
+# WaitGroup — and races there are probabilistic, so a local gate without the
+# detector lets them through to CI (or to production).
 test:
-	go test ./...
+	go test -race ./...
 
 # Run E2E tests (builds production server, starts it in test mode, runs Playwright tests)
 test-e2e:
