@@ -251,9 +251,13 @@ DBBat supports PostgreSQL SSL modes for upstream connections:
 
 ### Client Connections
 
-- **PostgreSQL listener**: plain protocol only. Deploy behind a TLS-terminating load balancer, a VPN, or a private network.
-- **Oracle listener**: plain TNS only. Same recommendation.
-- **MySQL listener**: TLS termination is built in. Configure `DBB_MYSQL_TLS_CERT_FILE` / `DBB_MYSQL_TLS_KEY_FILE` (PEM-encoded) for production. If unset, the proxy auto-generates a self-signed cert and an RSA-2048 keypair at startup — fine for development, not for production. `DBB_MYSQL_TLS_DISABLE=true` refuses TLS and stays plaintext-only.
+TLS termination is built into the PostgreSQL, MySQL, MongoDB and SQL Server listeners, and each is configured the same way: `DBB_<PROXY>_TLS_CERT_FILE` / `DBB_<PROXY>_TLS_KEY_FILE` (both PEM-encoded, both or neither), with `DBB_<PROXY>_TLS_DISABLE=true` to keep the listener plaintext-only. **If no cert and key are configured, the proxy auto-generates a self-signed certificate and an RSA-2048 key at startup** — fine for development, not something to serve production traffic with. See [Proxy TLS termination](/docs/configuration#proxy-tls-termination) for every variable and its default.
+
+- **PostgreSQL listener**: `DBB_PG_TLS_*`. Do not disable it lightly — a client using the libpq default `sslmode=prefer` falls back to plaintext silently rather than failing.
+- **MySQL listener**: `DBB_MYSQL_TLS_*`. The key must be RSA — the non-TLS `caching_sha2_password` public-key path needs it.
+- **MongoDB listener**: `DBB_MONGO_TLS_*`. TLS is implicit from the first byte (no `STARTTLS`), and SASL `PLAIN` is only accepted over TLS.
+- **SQL Server listener**: `DBB_MSSQL_TLS_*`. Disabling TLS answers `ENCRYPT_NOT_SUP`, which also refuses clients that require encryption. `DBB_MSSQL_TLS_MAX_VERSION` caps the client-leg handshake at `1.2` (the default) or `1.3`; 1.3 is opt-in and verified against `go-mssqldb` only.
+- **Oracle listener**: plain TNS only — no TLS termination. Deploy it behind a TLS-terminating load balancer, a VPN, or a private network.
 
 ### SSH Bastions
 
