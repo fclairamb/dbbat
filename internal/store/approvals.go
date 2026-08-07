@@ -40,6 +40,15 @@ const (
 	MaxApprovalPatternLength = 512
 )
 
+// MaxSampleQueries and MaxSampleQueryLength bound the pattern-authoring test
+// bench (sample_queries) an admin may save on a definition. Purely a sanity
+// cap — samples never touch the proxy hot path — but an unbounded list is
+// still an unbounded column and an unbounded validate-patterns request body.
+const (
+	MaxSampleQueries     = 32
+	MaxSampleQueryLength = 4096
+)
+
 // Approval validation errors, surfaced as 400s by the API layer.
 var (
 	// ErrTooManyApprovalPatterns is returned when a definition carries more
@@ -51,6 +60,12 @@ var (
 	// ErrApprovalPatternEmpty is returned for a blank pattern, which would
 	// match every statement — almost certainly a mistake, never a policy.
 	ErrApprovalPatternEmpty = errors.New("approval pattern must not be empty")
+	// ErrTooManySampleQueries is returned when a definition carries more than
+	// MaxSampleQueries sample queries.
+	ErrTooManySampleQueries = errors.New("too many sample queries")
+	// ErrSampleQueryTooLong is returned for a sample query over
+	// MaxSampleQueryLength characters.
+	ErrSampleQueryTooLong = errors.New("sample query too long")
 	// ErrQueryNotPending is returned when resolving a query that is not (or
 	// is no longer) in the pending state.
 	ErrQueryNotPending = errors.New("query is not pending approval")
@@ -76,6 +91,26 @@ func ValidateApprovalPatterns(patterns []string) error {
 
 		if _, err := regexp.Compile(p); err != nil {
 			return fmt.Errorf("invalid approval pattern %q: %w", p, err)
+		}
+	}
+
+	return nil
+}
+
+// ValidateSampleQueries bounds the count and length of a definition's sample
+// queries. Unlike approval patterns, samples are plain strings — nothing to
+// compile — so this is a sanity cap, not a correctness check. A sample that
+// fails to match a pattern is not an error at all: see
+// POST /grant-definitions/validate-patterns, which reports match/no-match
+// without failing the save.
+func ValidateSampleQueries(queries []string) error {
+	if len(queries) > MaxSampleQueries {
+		return fmt.Errorf("%w: %d > %d", ErrTooManySampleQueries, len(queries), MaxSampleQueries)
+	}
+
+	for _, q := range queries {
+		if len(q) > MaxSampleQueryLength {
+			return fmt.Errorf("%w: %d > %d", ErrSampleQueryTooLong, len(q), MaxSampleQueryLength)
 		}
 	}
 

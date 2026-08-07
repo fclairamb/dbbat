@@ -23,6 +23,14 @@ export type CreateGrantDefinitionRequest =
   components["schemas"]["CreateGrantDefinitionRequest"];
 export type UpdateGrantDefinitionRequest =
   components["schemas"]["UpdateGrantDefinitionRequest"];
+export type ValidatePatternsRequest =
+  components["schemas"]["ValidatePatternsRequest"];
+export type ValidatePatternsResponse =
+  components["schemas"]["ValidatePatternsResponse"];
+export type PatternValidationResult =
+  components["schemas"]["PatternValidationResult"];
+export type QueryValidationResult =
+  components["schemas"]["QueryValidationResult"];
 export type GrantRequest = components["schemas"]["GrantRequest"];
 export type CreateGrantRequestPayload =
   components["schemas"]["CreateGrantRequestPayload"];
@@ -607,6 +615,36 @@ export function useUpdateGrantDefinition(options?: {
     onSuccess: (def) => {
       queryClient.invalidateQueries({ queryKey: ["grant-definitions"] });
       options?.onSuccess?.(def);
+    },
+    onError: options?.onError,
+  });
+}
+
+/**
+ * Previews a set of approval patterns against a bench of sample queries —
+ * which patterns fail to compile, and which sample each successfully
+ * compiled pattern would hold, with exactly ApprovalGate.Match's semantics.
+ * Pure compute on the server: no store access, nothing persisted, and no
+ * definition needs to exist yet — so this can run against whatever is
+ * currently typed into the dialog, not just what's saved.
+ */
+export function useValidateGrantDefinitionPatterns(options?: {
+  onError?: (error: Error) => void;
+}) {
+  return useMutation({
+    mutationFn: async (
+      data: ValidatePatternsRequest
+    ): Promise<ValidatePatternsResponse> => {
+      const response = await apiClient.POST(
+        "/grant-definitions/validate-patterns",
+        { body: data }
+      );
+      if (response.error || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to validate patterns"
+        );
+      }
+      return response.data;
     },
     onError: options?.onError,
   });

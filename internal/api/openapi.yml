@@ -1549,6 +1549,55 @@ paths:
         '409':
           $ref: '#/components/responses/Conflict'
 
+  /grant-definitions/validate-patterns:
+    post:
+      tags:
+        - Grant Definitions
+      summary: Preview approval patterns against sample queries (admin)
+      description: |
+        Pure compute endpoint — no store access, nothing persisted, no
+        definition needs to exist yet. Lets an admin authoring
+        `approval_patterns` see, before saving anything:
+
+        - which patterns fail to **compile** — the exact error
+          [`NewApprovalGate`](../../internal/proxy/shared/approval.go)
+          otherwise swallows with only a server-side warning log, silently
+          degrading a bad pattern to "no hold";
+        - for each sample query: its `NormalizeSQL` form (what the patterns
+          actually run against — not the raw text) and which pattern, if any,
+          matches it first, using **exactly**
+          [`ApprovalGate.Match`](../../internal/proxy/shared/approval.go)'s
+          semantics, so this preview can never disagree with what the proxy
+          will actually do.
+
+        A pattern that fails to compile is the only thing that should block a
+        save (enforced by `POST`/`PATCH /grant-definitions`, not by this
+        endpoint). A sample that simply does not match a pattern is not an
+        error — an author may legitimately save a bench that is currently red
+        while iterating.
+      operationId: validateGrantDefinitionPatterns
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ValidatePatternsRequest'
+      responses:
+        '200':
+          description: Compile and match results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidatePatternsResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /grant-requests:
     post:
       tags:
@@ -3780,6 +3829,20 @@ components:
             pattern is a 400 rather than a runtime surprise on the proxy hot
             path. Read from here by every grant issued from this definition —
             grants do not copy them.
+        sample_queries:
+          type: array
+          items:
+            type: string
+          description: |
+            Representative SQL statements saved alongside `approval_patterns`
+            as a test bench for pattern authoring — test fixtures, not
+            first-class matchers; the RE2 patterns above remain what the
+            proxy actually evaluates. Because this is just another column on
+            the definition row, it versions for free with every edit like
+            `approval_patterns` does. Use
+            `POST /grant-definitions/validate-patterns` to preview
+            match/no-match against these before saving; a sample that
+            doesn't match does not block the save.
         approver_group_uids:
           type: array
           items:
@@ -3903,6 +3966,14 @@ components:
             no approval gating. Validated (compiled) at save time, so a bad
             pattern is a 400 rather than a runtime surprise on the proxy hot
             path. Mirrored onto every grant materialized from this definition.
+        sample_queries:
+          type: array
+          items:
+            type: string
+          description: |
+            Representative SQL statements saved alongside `approval_patterns`
+            to validate them against — see
+            `GrantDefinition.sample_queries`.
         approver_group_uids:
           type: array
           items:
@@ -3994,6 +4065,11 @@ components:
           items:
             type: string
           description: Same semantics as `CreateGrantDefinitionRequest.approval_patterns`.
+        sample_queries:
+          type: array
+          items:
+            type: string
+          description: Same semantics as `CreateGrantDefinitionRequest.sample_queries`.
         approver_group_uids:
           type: array
           items:
@@ -4148,6 +4224,78 @@ components:
             Absent on a hard delete, which by definition affected none.
       required:
         - message
+
+    ValidatePatternsRequest:
+      type: object
+      description: Body for `POST /grant-definitions/validate-patterns`.
+      properties:
+        patterns:
+          type: array
+          items:
+            type: string
+          description: RE2 approval-pattern sources to test.
+        queries:
+          type: array
+          items:
+            type: string
+          description: Sample SQL statements to test the patterns against.
+
+    ValidatePatternsResponse:
+      type: object
+      properties:
+        patterns:
+          type: array
+          description: |
+            One entry per pattern in the request, same order, reporting
+            whether it compiled.
+          items:
+            $ref: '#/components/schemas/PatternValidationResult'
+        queries:
+          type: array
+          description: |
+            One entry per query in the request, same order, reporting its
+            normalized form and first match.
+          items:
+            $ref: '#/components/schemas/QueryValidationResult'
+      required:
+        - patterns
+        - queries
+
+    PatternValidationResult:
+      type: object
+      properties:
+        pattern:
+          type: string
+        error:
+          type: string
+          description: |
+            The compile error message. Present only when the pattern failed
+            to compile — this is the error `NewApprovalGate` otherwise
+            swallows with only a warning log.
+      required:
+        - pattern
+
+    QueryValidationResult:
+      type: object
+      properties:
+        query:
+          type: string
+        normalized:
+          type: string
+          description: |
+            The `NormalizeSQL` form of the query — what the approval patterns
+            actually run against, not the raw text.
+        matched:
+          type: boolean
+        matched_pattern:
+          type: string
+          description: |
+            The source text of the first pattern that matched, in request
+            order. Present only when `matched` is true.
+      required:
+        - query
+        - normalized
+        - matched
 
     # API Key schemas
     APIKey:

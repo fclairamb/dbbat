@@ -348,6 +348,12 @@ func (s *Server) setupRouter() *gin.Engine {
 			grantDefs := authenticated.Group("/grant-definitions")
 			grantDefs.POST("", s.requireAdmin(), s.handleCreateGrantDefinition)
 			grantDefs.GET("", s.handleListGrantDefinitions)
+			// validate-patterns is a pure compute endpoint (no store access,
+			// no :uid to resolve) for previewing approval patterns against
+			// sample queries before a definition is saved. Registered ahead
+			// of GET/PATCH/DELETE /:uid on a different HTTP method (POST),
+			// so it never competes with the :uid param route.
+			grantDefs.POST("/validate-patterns", s.requireAdmin(), s.handleValidateGrantDefinitionPatterns)
 			grantDefs.GET("/:uid", s.handleGetGrantDefinition)
 			grantDefs.PATCH("/:uid", s.requireAdmin(), s.handleUpdateGrantDefinition)
 			grantDefs.DELETE("/:uid", s.requireAdmin(), s.handleDeactivateGrantDefinition)

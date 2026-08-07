@@ -773,6 +773,45 @@ export interface paths {
         patch: operations["updateGrantDefinition"];
         trace?: never;
     };
+    "/grant-definitions/validate-patterns": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview approval patterns against sample queries (admin)
+         * @description Pure compute endpoint — no store access, nothing persisted, no
+         *     definition needs to exist yet. Lets an admin authoring
+         *     `approval_patterns` see, before saving anything:
+         *
+         *     - which patterns fail to **compile** — the exact error
+         *       [`NewApprovalGate`](../../internal/proxy/shared/approval.go)
+         *       otherwise swallows with only a server-side warning log, silently
+         *       degrading a bad pattern to "no hold";
+         *     - for each sample query: its `NormalizeSQL` form (what the patterns
+         *       actually run against — not the raw text) and which pattern, if any,
+         *       matches it first, using **exactly**
+         *       [`ApprovalGate.Match`](../../internal/proxy/shared/approval.go)'s
+         *       semantics, so this preview can never disagree with what the proxy
+         *       will actually do.
+         *
+         *     A pattern that fails to compile is the only thing that should block a
+         *     save (enforced by `POST`/`PATCH /grant-definitions`, not by this
+         *     endpoint). A sample that simply does not match a pattern is not an
+         *     error — an author may legitimately save a bench that is currently red
+         *     while iterating.
+         */
+        post: operations["validateGrantDefinitionPatterns"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/grant-requests": {
         parameters: {
             query?: never;
@@ -2067,6 +2106,18 @@ export interface components {
              */
             approval_patterns?: string[];
             /**
+             * @description Representative SQL statements saved alongside `approval_patterns`
+             *     as a test bench for pattern authoring — test fixtures, not
+             *     first-class matchers; the RE2 patterns above remain what the
+             *     proxy actually evaluates. Because this is just another column on
+             *     the definition row, it versions for free with every edit like
+             *     `approval_patterns` does. Use
+             *     `POST /grant-definitions/validate-patterns` to preview
+             *     match/no-match against these before saving; a sample that
+             *     doesn't match does not block the save.
+             */
+            sample_queries?: string[];
+            /**
              * @description Groups whose members may resolve approval holds on grants built
              *     from this definition, *in addition to* admins. An empty array means
              *     admins only. Self-approval is always rejected.
@@ -2144,6 +2195,12 @@ export interface components {
              */
             approval_patterns?: string[];
             /**
+             * @description Representative SQL statements saved alongside `approval_patterns`
+             *     to validate them against — see
+             *     `GrantDefinition.sample_queries`.
+             */
+            sample_queries?: string[];
+            /**
              * @description Groups whose members may resolve approval holds on grants built
              *     from this definition, *in addition to* admins. An empty array means
              *     admins only. Self-approval is always rejected.
@@ -2193,6 +2250,8 @@ export interface components {
             database_uids?: string[];
             /** @description Same semantics as `CreateGrantDefinitionRequest.approval_patterns`. */
             approval_patterns?: string[];
+            /** @description Same semantics as `CreateGrantDefinitionRequest.sample_queries`. */
+            sample_queries?: string[];
             /** @description Same semantics as `CreateGrantDefinitionRequest.approver_group_uids`. */
             approver_group_uids?: string[];
         };
@@ -2329,6 +2388,48 @@ export interface components {
              *     Absent on a hard delete, which by definition affected none.
              */
             affected_grants?: number;
+        };
+        /** @description Body for `POST /grant-definitions/validate-patterns`. */
+        ValidatePatternsRequest: {
+            /** @description RE2 approval-pattern sources to test. */
+            patterns?: string[];
+            /** @description Sample SQL statements to test the patterns against. */
+            queries?: string[];
+        };
+        ValidatePatternsResponse: {
+            /**
+             * @description One entry per pattern in the request, same order, reporting
+             *     whether it compiled.
+             */
+            patterns: components["schemas"]["PatternValidationResult"][];
+            /**
+             * @description One entry per query in the request, same order, reporting its
+             *     normalized form and first match.
+             */
+            queries: components["schemas"]["QueryValidationResult"][];
+        };
+        PatternValidationResult: {
+            pattern: string;
+            /**
+             * @description The compile error message. Present only when the pattern failed
+             *     to compile — this is the error `NewApprovalGate` otherwise
+             *     swallows with only a warning log.
+             */
+            error?: string;
+        };
+        QueryValidationResult: {
+            query: string;
+            /**
+             * @description The `NormalizeSQL` form of the query — what the approval patterns
+             *     actually run against, not the raw text.
+             */
+            normalized: string;
+            matched: boolean;
+            /**
+             * @description The source text of the first pattern that matched, in request
+             *     order. Present only when `matched` is true.
+             */
+            matched_pattern?: string;
         };
         APIKey: {
             /**
@@ -2973,6 +3074,10 @@ export type UpdateGrantDefinitionRequest = components['schemas']['UpdateGrantDef
 export type AccessGrant = components['schemas']['AccessGrant'];
 export type AssignGrantRequest = components['schemas']['AssignGrantRequest'];
 export type DeactivateGrantDefinitionResponse = components['schemas']['DeactivateGrantDefinitionResponse'];
+export type ValidatePatternsRequest = components['schemas']['ValidatePatternsRequest'];
+export type ValidatePatternsResponse = components['schemas']['ValidatePatternsResponse'];
+export type PatternValidationResult = components['schemas']['PatternValidationResult'];
+export type QueryValidationResult = components['schemas']['QueryValidationResult'];
 export type ApiKey = components['schemas']['APIKey'];
 export type CreateApiKeyRequest = components['schemas']['CreateAPIKeyRequest'];
 export type CreateApiKeyResponse = components['schemas']['CreateAPIKeyResponse'];
@@ -4335,6 +4440,34 @@ export interface operations {
             403: components["responses"]["Forbidden"];
             404: components["responses"]["NotFound"];
             409: components["responses"]["Conflict"];
+        };
+    };
+    validateGrantDefinitionPatterns: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ValidatePatternsRequest"];
+            };
+        };
+        responses: {
+            /** @description Compile and match results */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ValidatePatternsResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
         };
     };
     listGrantRequests: {

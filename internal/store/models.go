@@ -695,6 +695,16 @@ type GrantDefinition struct {
 	// Empty = no approval gating. Validated at save time so a bad pattern is
 	// a 400 rather than a runtime surprise on the proxy hot path.
 	ApprovalPatterns []string `bun:"approval_patterns,array,notnull,default:'{}'" json:"approval_patterns"`
+	// SampleQueries are representative SQL statements an author saves
+	// alongside the patterns to validate them against — a test bench for
+	// pattern authoring, not a first-class matcher: the RE2 patterns above
+	// remain what the proxy actually evaluates. Because it is just another
+	// column on this row, it versions for free with every edit (see the
+	// type doc): a definition's saved samples always describe the patterns
+	// of that exact version. A sample that stops matching after an edit does
+	// not block the save — see POST /grant-definitions/validate-patterns,
+	// which reports match/no-match without failing the request.
+	SampleQueries []string `bun:"sample_queries,array,notnull,default:'{}'" json:"sample_queries"`
 	// ApproverGroupUIDs lists groups whose members may resolve holds on
 	// grants built from this definition, *in addition to* admins.
 	// Empty = admins only.

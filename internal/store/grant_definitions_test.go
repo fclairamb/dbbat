@@ -424,3 +424,109 @@ func TestUpdateGrantDefinition_DuplicateSlug(t *testing.T) {
 		t.Fatalf("expected ErrGrantDefinitionSlugDuplicate, got %v", err)
 	}
 }
+
+// TestGrantDefinition_SampleQueriesSurviveVersioning pins the resolved-open-
+// question behavior from
+// specs/todos/2026-08-06-06-sql-control-pattern-query-templates.md:
+// sample_queries is just another column on grant_definitions, so it must
+// round-trip through both CreateGrantDefinition and, critically, through the
+// archive-and-reinsert versioning UpdateGrantDefinition performs on every
+// edit — carried forward on a no-op-shape edit is not enough, since that path
+// never versions at all.
+func TestGrantDefinition_SampleQueriesSurviveVersioning(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "sample_queries")
+
+	samples := []string{
+		"DELETE FROM users WHERE id = 1",
+		"SELECT * FROM accounts",
+	}
+
+	def, err := store.CreateGrantDefinition(ctx, &GrantDefinition{
+		Name:             "with-samples",
+		Slug:             "with-samples",
+		DurationSeconds:  60,
+		Controls:         []string{ControlReadOnly},
+		ApprovalPatterns: []string{`(?i)^DELETE`},
+		SampleQueries:    samples,
+		CreatedBy:        admin.UID,
+	})
+	if err != nil {
+		t.Fatalf("CreateGrantDefinition() error = %v", err)
+	}
+
+	if !equalStringSlices(def.SampleQueries, samples) {
+		t.Fatalf("SampleQueries on create = %v, want %v", def.SampleQueries, samples)
+	}
+
+	fetched, err := store.GetGrantDefinition(ctx, def.UID)
+	if err != nil {
+		t.Fatalf("GetGrantDefinition() error = %v", err)
+	}
+
+	if !equalStringSlices(fetched.SampleQueries, samples) {
+		t.Fatalf("SampleQueries round-tripped through storage as %v, want %v", fetched.SampleQueries, samples)
+	}
+
+	// Editing an unrelated field forces a version bump — the archive +
+	// reinsert path — and the samples must be carried onto the successor,
+	// not dropped, since sample_queries versions along with the rest of the
+	// definition's matching config.
+	fetched.Description = "now with a description"
+
+	updated, err := store.UpdateGrantDefinition(ctx, fetched)
+	if err != nil {
+		t.Fatalf("UpdateGrantDefinition() error = %v", err)
+	}
+
+	if updated.UID == def.UID {
+		t.Fatal("expected the edit to version the definition (new uid), got the same row")
+	}
+
+	if !equalStringSlices(updated.SampleQueries, samples) {
+		t.Fatalf("SampleQueries on the new version = %v, want %v (must survive versioning)", updated.SampleQueries, samples)
+	}
+
+	// The archived predecessor must keep describing exactly the samples it
+	// was saved with — versioning must not retroactively rewrite history.
+	archived, err := store.GetGrantDefinition(ctx, def.UID)
+	if err != nil {
+		t.Fatalf("GetGrantDefinition(archived) error = %v", err)
+	}
+
+	if !equalStringSlices(archived.SampleQueries, samples) {
+		t.Fatalf("archived version SampleQueries = %v, want %v", archived.SampleQueries, samples)
+	}
+
+	// Clearing the samples on a further edit must itself version and stick —
+	// an explicit empty slice is not "leave alone".
+	updated.SampleQueries = []string{}
+	updated.Description = "samples cleared"
+
+	cleared, err := store.UpdateGrantDefinition(ctx, updated)
+	if err != nil {
+		t.Fatalf("UpdateGrantDefinition() (clearing) error = %v", err)
+	}
+
+	if len(cleared.SampleQueries) != 0 {
+		t.Fatalf("SampleQueries after clearing = %v, want empty", cleared.SampleQueries)
+	}
+}
+
+func equalStringSlices(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+
+	return true
+}

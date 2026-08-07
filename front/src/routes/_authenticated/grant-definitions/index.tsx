@@ -10,9 +10,12 @@ import {
   useCreateGrantDefinition,
   useUpdateGrantDefinition,
   useDeactivateGrantDefinition,
+  useValidateGrantDefinitionPatterns,
   type GrantDefinition,
   type CreateGrantDefinitionRequest,
   type UpdateGrantDefinitionRequest,
+  type PatternValidationResult,
+  type QueryValidationResult,
 } from "@/api";
 import { PageHeader } from "@/components/shared/PageHeader";
 import { DataTable, type Column } from "@/components/shared/DataTable";
@@ -501,9 +504,25 @@ function DefinitionDialog({
   const [approvalPatterns, setApprovalPatterns] = useState<string>(
     (editing?.approval_patterns ?? []).join("\n")
   );
+  // Sample queries — the pattern-authoring test bench, one statement per
+  // line, saved alongside approval_patterns and versioned with it (see
+  // GrantDefinition.sample_queries). Not a first-class matcher: these are
+  // fixtures to validate the RE2 patterns above against, nothing more.
+  const [sampleQueries, setSampleQueries] = useState<string>(
+    (editing?.sample_queries ?? []).join("\n")
+  );
   const [approverGroupUids, setApproverGroupUids] = useState<string[]>(
     editing?.approver_group_uids ?? []
   );
+  // Results of the last "Test patterns" run (manual, or the implicit one on
+  // submit). null = never run yet, so the panel stays hidden until the
+  // operator asks for it or tries to save.
+  const [patternResults, setPatternResults] = useState<
+    PatternValidationResult[] | null
+  >(null);
+  const [queryResults, setQueryResults] = useState<
+    QueryValidationResult[] | null
+  >(null);
   const { data: groups = [] } = useUserGroups();
   const { data: databases = [] } = useDatabases();
   const [autoApprove, setAutoApprove] = useState(
@@ -541,6 +560,53 @@ function DefinitionDialog({
     },
     onError: (e) => toast.error(e.message),
   });
+  const validatePatterns = useValidateGrantDefinitionPatterns({
+    onError: (e) => toast.error(e.message),
+  });
+
+  // One pattern/query per non-blank line — the shape the two textareas
+  // present to the operator. Shared by the manual "Test patterns" button and
+  // the implicit check onSubmit runs, so both send the API the exact same
+  // arrays.
+  const parsedPatterns = () =>
+    approvalPatterns
+      .split("\n")
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+  const parsedSampleQueries = () =>
+    sampleQueries
+      .split("\n")
+      .map((q) => q.trim())
+      .filter((q) => q.length > 0);
+
+  // Runs the validate-patterns preview against whatever is currently typed
+  // into the two textareas — not necessarily anything saved yet — and stores
+  // the result for the "Test patterns" panel. Returns the pattern results so
+  // callers (onSubmit) can decide whether a compile error should block the
+  // save without waiting on a second render.
+  const runPatternValidation = async (): Promise<
+    PatternValidationResult[]
+  > => {
+    const patterns = parsedPatterns();
+    const queries = parsedSampleQueries();
+
+    try {
+      const result = await validatePatterns.mutateAsync({
+        patterns,
+        queries,
+      });
+      setPatternResults(result.patterns ?? []);
+      setQueryResults(result.queries ?? []);
+
+      return result.patterns ?? [];
+    } catch {
+      // The hook's onError already toasted. Treat as "nothing to report"
+      // rather than blocking the save on an infra hiccup unrelated to the
+      // patterns themselves — the server still re-validates compile errors
+      // at save time regardless.
+      return [];
+    }
+  };
 
   const toggleControl = (v: string) =>
     setControls((prev) => {
@@ -569,8 +635,27 @@ function DefinitionDialog({
     setSlugTouched(true);
   };
 
-  const onSubmit = (e: React.FormEvent) => {
+  const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    // Validate patterns against the saved sample bench before saving. A
+    // pattern that fails to *compile* blocks the save (the inline error
+    // appears in the panel below); a sample that simply doesn't match one
+    // does not — see the resolved open questions in
+    // specs/todos/2026-08-06-06-sql-control-pattern-query-templates.md. This
+    // is also what the API would reject with a generic 400 regardless, but
+    // running it here surfaces exactly which pattern is broken instead of a
+    // single opaque error banner.
+    if (parsedPatterns().length > 0) {
+      const results = await runPatternValidation();
+      if (results.some((p) => p.error)) {
+        toast.error(
+          "Fix the invalid approval pattern(s) below before saving."
+        );
+
+        return;
+      }
+    }
 
     const durationSeconds =
       parseInt(durationValue || "0") *
@@ -593,10 +678,8 @@ function DefinitionDialog({
     // tier from its own controls.
     const priorityValue =
       priorityTouched && priority !== "" ? parseInt(priority) : null;
-    const approvalPatternsValue = approvalPatterns
-      .split("\n")
-      .map((p) => p.trim())
-      .filter((p) => p.length > 0);
+    const approvalPatternsValue = parsedPatterns();
+    const sampleQueriesValue = parsedSampleQueries();
 
     if (editing) {
       // PATCH is a partial update: max_query_counts/max_bytes_transferred/
@@ -619,6 +702,7 @@ function DefinitionDialog({
         group_uids: groupUids,
         database_uids: databaseUids,
         approval_patterns: approvalPatternsValue,
+        sample_queries: sampleQueriesValue,
         approver_group_uids: approverGroupUids,
       };
       update.mutate({ uid: editing.uid, body });
@@ -636,6 +720,7 @@ function DefinitionDialog({
         group_uids: groupUids,
         database_uids: databaseUids,
         approval_patterns: approvalPatternsValue,
+        sample_queries: sampleQueriesValue,
         approver_group_uids: approverGroupUids,
       };
       create.mutate(body);
@@ -843,8 +928,108 @@ function DefinitionDialog({
               className="font-mono text-xs"
               placeholder={"(?i)^\\s*DELETE\\s+FROM\n(?i)^\\s*(GRANT|REVOKE)\\b"}
               value={approvalPatterns}
-              onChange={(e) => setApprovalPatterns(e.target.value)}
+              onChange={(e) => {
+                setApprovalPatterns(e.target.value);
+                // Stale results would misreport patterns that no longer
+                // exist (or exist differently) once the operator keeps
+                // typing — hide the panel until "Test patterns" runs again.
+                setPatternResults(null);
+                setQueryResults(null);
+              }}
             />
+            {patternResults?.some((p) => p.error) && (
+              <ul
+                data-testid="grant-definition-pattern-errors"
+                className="space-y-1 text-xs text-destructive"
+              >
+                {patternResults
+                  .filter((p) => p.error)
+                  .map((p, i) => (
+                    <li key={i}>
+                      <code className="break-all">{p.pattern}</code>:{" "}
+                      {p.error}
+                    </li>
+                  ))}
+              </ul>
+            )}
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="def-sample-queries">
+              Sample queries — test bench (one per line)
+            </Label>
+            <p className="text-xs text-muted-foreground">
+              Representative statements saved alongside the patterns above so
+              a typo'd pattern is caught here at authoring time instead of
+              degrading silently to "no hold" on the proxy. Saved as part of
+              this definition and versioned with it. A sample that doesn't
+              match doesn't block saving — it's fine to save a bench that's
+              currently red while you iterate.
+            </p>
+            <Textarea
+              id="def-sample-queries"
+              data-testid="grant-definition-sample-queries"
+              rows={3}
+              spellCheck={false}
+              className="font-mono text-xs"
+              placeholder={
+                "DELETE FROM users WHERE id = 1\nSELECT * FROM accounts"
+              }
+              value={sampleQueries}
+              onChange={(e) => {
+                setSampleQueries(e.target.value);
+                setPatternResults(null);
+                setQueryResults(null);
+              }}
+            />
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={() => void runPatternValidation()}
+              disabled={validatePatterns.isPending}
+              data-testid="grant-definition-test-patterns"
+            >
+              Test patterns
+            </Button>
+            {queryResults !== null && (
+              <div
+                data-testid="grant-definition-test-results"
+                className="space-y-2 rounded-md border p-2"
+              >
+                {queryResults.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">
+                    No sample queries to test — add one per line above.
+                  </p>
+                ) : (
+                  queryResults.map((r, i) => (
+                    <div
+                      key={i}
+                      data-testid={`grant-definition-test-result-${i}`}
+                      className="text-xs"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={
+                            r.matched
+                              ? "font-medium text-amber-600 dark:text-amber-400"
+                              : "font-medium text-muted-foreground"
+                          }
+                          data-testid={`grant-definition-test-result-status-${i}`}
+                        >
+                          {r.matched ? "HOLD" : "pass-through"}
+                        </span>
+                        <code className="break-all">{r.normalized}</code>
+                      </div>
+                      {r.matched && (
+                        <p className="pl-14 text-muted-foreground">
+                          matched: <code>{r.matched_pattern}</code>
+                        </p>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
           </div>
           <div className="space-y-2">
             <Label>Approver groups</Label>

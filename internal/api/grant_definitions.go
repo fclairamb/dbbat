@@ -103,6 +103,10 @@ type CreateGrantDefinitionRequest struct {
 	// Compiled here so a bad pattern is a 400 rather than a runtime surprise
 	// on the proxy hot path.
 	ApprovalPatterns []string `json:"approval_patterns"`
+	// SampleQueries are representative SQL statements saved alongside the
+	// patterns to validate them against — a test bench for pattern
+	// authoring. See POST /grant-definitions/validate-patterns.
+	SampleQueries []string `json:"sample_queries"`
 	// ApproverGroupUIDs lists groups whose members may resolve those holds,
 	// in addition to admins. Empty/omitted = admins only.
 	ApproverGroupUIDs []uuid.UUID `json:"approver_group_uids"`
@@ -145,6 +149,7 @@ type UpdateGrantDefinitionRequest struct {
 	GroupUIDs                []uuid.UUID `json:"group_uids"`
 	DatabaseUIDs             []uuid.UUID `json:"database_uids"`
 	ApprovalPatterns         []string    `json:"approval_patterns"`
+	SampleQueries            []string    `json:"sample_queries"`
 	ApproverGroupUIDs        []uuid.UUID `json:"approver_group_uids"`
 }
 
@@ -207,6 +212,10 @@ func applyGrantDefinitionUpdate(def *store.GrantDefinition, req *UpdateGrantDefi
 
 	if req.ApprovalPatterns != nil {
 		def.ApprovalPatterns = normalizeStrings(req.ApprovalPatterns)
+	}
+
+	if req.SampleQueries != nil {
+		def.SampleQueries = normalizeStrings(req.SampleQueries)
 	}
 
 	if req.ApproverGroupUIDs != nil {
@@ -282,6 +291,10 @@ func validateDefinitionRequest(req *CreateGrantDefinitionRequest) string {
 		return err.Error()
 	}
 
+	if err := store.ValidateSampleQueries(req.SampleQueries); err != nil {
+		return err.Error()
+	}
+
 	return ""
 }
 
@@ -322,6 +335,7 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		GroupUIDs:           req.GroupUIDs,
 		DatabaseUIDs:        req.DatabaseUIDs,
 		ApprovalPatterns:    normalizeStrings(req.ApprovalPatterns),
+		SampleQueries:       normalizeStrings(req.SampleQueries),
 		ApproverGroupUIDs:   normalizeUUIDs(req.ApproverGroupUIDs),
 		CreatedBy:           currentUser.UID,
 	}
@@ -506,6 +520,7 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 		GroupUIDs:           def.GroupUIDs,
 		DatabaseUIDs:        def.DatabaseUIDs,
 		ApprovalPatterns:    def.ApprovalPatterns,
+		SampleQueries:       def.SampleQueries,
 		ApproverGroupUIDs:   def.ApproverGroupUIDs,
 	}
 

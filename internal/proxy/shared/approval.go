@@ -119,8 +119,7 @@ type ApprovalDeps struct {
 // (no-pattern) case is a nil check.
 type ApprovalGate struct {
 	deps     ApprovalDeps
-	patterns []*regexp.Regexp
-	sources  []string
+	compiled *CompiledApprovalPatterns
 
 	connectionUID uuid.UUID
 	userUID       uuid.UUID
@@ -191,19 +190,13 @@ func NewApprovalGate(deps ApprovalDeps, grant *store.Grant, connectionUID uuid.U
 		return g
 	}
 
-	for _, src := range grant.ApprovalPatterns() {
-		re, err := regexp.Compile(src)
-		if err != nil {
-			if deps.Logger != nil {
-				deps.Logger.WarnContext(context.Background(), "skipping invalid approval pattern",
-					slog.String("pattern", src), slog.Any("error", err))
-			}
+	g.compiled = CompileApprovalPatterns(grant.ApprovalPatterns())
 
-			continue
+	for _, ce := range g.compiled.CompileErrors() {
+		if deps.Logger != nil {
+			deps.Logger.WarnContext(context.Background(), "skipping invalid approval pattern",
+				slog.String("pattern", ce.Pattern), slog.Any("error", ce.Err))
 		}
-
-		g.patterns = append(g.patterns, re)
-		g.sources = append(g.sources, src)
 	}
 
 	return g
@@ -211,26 +204,23 @@ func NewApprovalGate(deps ApprovalDeps, grant *store.Grant, connectionUID uuid.U
 
 // Active reports whether this gate can hold anything at all.
 func (g *ApprovalGate) Active() bool {
-	return g != nil && g.deps.Enabled && len(g.patterns) > 0
+	return g != nil && g.deps.Enabled && g.compiled.Len() > 0
 }
 
 // Match reports the first pattern the statement matches. Matching runs on the
 // same normalized SQL text the static validators use, so an operator writing a
 // pattern does not have to reason about a second normalization.
+//
+// Delegates to CompiledApprovalPatterns.Match, the same code the
+// validate-patterns API endpoint calls — so a "test patterns" panel built on
+// that endpoint reports exactly what the live gate will do, not a
+// reimplementation that can drift from it.
 func (g *ApprovalGate) Match(sql string) (string, bool) {
 	if !g.Active() {
 		return "", false
 	}
 
-	normalized := NormalizeSQL(sql)
-
-	for i, re := range g.patterns {
-		if re.MatchString(normalized) {
-			return g.sources[i], true
-		}
-	}
-
-	return "", false
+	return g.compiled.Match(sql)
 }
 
 // NormalizeSQL is the canonical normalization applied before pattern matching:
@@ -248,6 +238,120 @@ func (g *ApprovalGate) Match(sql string) (string, bool) {
 // both teach — because a pattern that misses is a hold that never happens.
 func NormalizeSQL(sql string) string {
 	return strings.TrimSpace(sql)
+}
+
+// PatternCompileEntry is the compile outcome for one approval pattern
+// source, in the order the source was given to CompileApprovalPatterns.
+// Exactly one of Regexp/Err is set: Err nil means the pattern compiled.
+type PatternCompileEntry struct {
+	Pattern string
+	Regexp  *regexp.Regexp
+	Err     error
+}
+
+// PatternCompileError names one approval pattern source that failed to
+// compile, and why. A narrower view of PatternCompileEntry for callers that
+// only care about the failures.
+type PatternCompileError struct {
+	Pattern string
+	Err     error
+}
+
+// CompiledApprovalPatterns is a set of RE2 approval-pattern sources compiled
+// once, ready to match SQL with exactly ApprovalGate.Match's semantics:
+// normalize with NormalizeSQL, then report the first pattern (in the order
+// given) that matches — patterns that failed to compile never match anything.
+//
+// This type is the single place that logic lives. NewApprovalGate uses it to
+// build the live per-session gate, and the grant-definition
+// validate-patterns API endpoint uses it to preview what that gate will do —
+// so the "test patterns" panel in the UI can never drift from proxy
+// behavior by reimplementing the match loop separately.
+type CompiledApprovalPatterns struct {
+	// entries holds one item per source, in the exact order given to
+	// CompileApprovalPatterns — index-aligned with the caller's input, which
+	// is what lets the validate-patterns API report per-pattern results
+	// without having to re-associate them by source text (sources can
+	// repeat).
+	entries []PatternCompileEntry
+}
+
+// CompileApprovalPatterns compiles every pattern source. A pattern that fails
+// to compile is recorded on its PatternCompileEntry rather than aborting the
+// batch, so one typo does not hide the compile errors — or the matches — of
+// every other pattern.
+func CompileApprovalPatterns(sources []string) *CompiledApprovalPatterns {
+	c := &CompiledApprovalPatterns{entries: make([]PatternCompileEntry, len(sources))}
+
+	for i, src := range sources {
+		re, err := regexp.Compile(src)
+		c.entries[i] = PatternCompileEntry{Pattern: src, Regexp: re, Err: err}
+	}
+
+	return c
+}
+
+// Len reports how many patterns compiled successfully.
+func (c *CompiledApprovalPatterns) Len() int {
+	if c == nil {
+		return 0
+	}
+
+	n := 0
+
+	for _, e := range c.entries {
+		if e.Err == nil {
+			n++
+		}
+	}
+
+	return n
+}
+
+// Entries reports the compile outcome of every source, in the order given to
+// CompileApprovalPatterns — one entry per source, success or failure.
+func (c *CompiledApprovalPatterns) Entries() []PatternCompileEntry {
+	if c == nil {
+		return nil
+	}
+
+	return c.entries
+}
+
+// CompileErrors reports every pattern that failed to compile, in source
+// order. Empty when every pattern compiled.
+func (c *CompiledApprovalPatterns) CompileErrors() []PatternCompileError {
+	if c == nil {
+		return nil
+	}
+
+	var errs []PatternCompileError
+
+	for _, e := range c.entries {
+		if e.Err != nil {
+			errs = append(errs, PatternCompileError{Pattern: e.Pattern, Err: e.Err})
+		}
+	}
+
+	return errs
+}
+
+// Match reports the first successfully-compiled pattern that matches sql
+// after NormalizeSQL, or false if none does.
+func (c *CompiledApprovalPatterns) Match(sql string) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+
+	normalized := NormalizeSQL(sql)
+
+	for _, e := range c.entries {
+		if e.Regexp != nil && e.Regexp.MatchString(normalized) {
+			return e.Pattern, true
+		}
+	}
+
+	return "", false
 }
 
 // HoldRequest is one parked statement.

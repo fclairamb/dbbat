@@ -82,6 +82,7 @@ func (s *Store) CreateGrantDefinition(ctx context.Context, def *GrantDefinition)
 		GroupUIDs:           groupUIDs,
 		DatabaseUIDs:        databaseUIDs,
 		ApprovalPatterns:    copyStrings(def.ApprovalPatterns),
+		SampleQueries:       copyStrings(def.SampleQueries),
 		ApproverGroupUIDs:   copyUUIDs(def.ApproverGroupUIDs),
 		IsActive:            true,
 		CreatedBy:           def.CreatedBy,
@@ -325,6 +326,7 @@ func (s *Store) UpdateGrantDefinition(ctx context.Context, def *GrantDefinition)
 	}
 
 	def.ApprovalPatterns = copyStrings(def.ApprovalPatterns)
+	def.SampleQueries = copyStrings(def.SampleQueries)
 	def.ApproverGroupUIDs = copyUUIDs(def.ApproverGroupUIDs)
 
 	var result *GrantDefinition
@@ -376,6 +378,7 @@ func (s *Store) UpdateGrantDefinition(ctx context.Context, def *GrantDefinition)
 			GroupUIDs:           def.GroupUIDs,
 			DatabaseUIDs:        def.DatabaseUIDs,
 			ApprovalPatterns:    def.ApprovalPatterns,
+			SampleQueries:       def.SampleQueries,
 			ApproverGroupUIDs:   def.ApproverGroupUIDs,
 			IsActive:            current.IsActive,
 			CreatedBy:           current.CreatedBy,
@@ -412,6 +415,7 @@ func sameGrantDefinitionShape(a, b *GrantDefinition) bool {
 		slices.Equal(a.GroupUIDs, b.GroupUIDs) &&
 		slices.Equal(a.DatabaseUIDs, b.DatabaseUIDs) &&
 		slices.Equal(a.ApprovalPatterns, b.ApprovalPatterns) &&
+		slices.Equal(a.SampleQueries, b.SampleQueries) &&
 		slices.Equal(a.ApproverGroupUIDs, b.ApproverGroupUIDs)
 }
 
