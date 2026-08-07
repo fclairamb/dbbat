@@ -75,3 +75,11 @@ cd front && CI=true bunx playwright test e2e/grant-requests.spec.ts
 
 `CI=true` makes `e2e/global-setup.ts` skip the build/start/`docker compose`
 steps and only wait for readiness, and makes the teardown a no-op.
+
+## Resolved open questions
+
+**Should a GitHub issue be filed for this spec?**
+
+Decision (2026-08-07, repository owner): **no.** Do not run `gh issue create`.
+The spec file is the record. This carries forward the same decision the owner
+made for the two preceding batches.

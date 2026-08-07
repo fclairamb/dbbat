@@ -46,3 +46,11 @@ row — an odd state to leave behind.
   `docs/mssql.md`.
 
 No GitHub issue exists yet — one should be filed.
+
+## Resolved open questions
+
+**Should a GitHub issue be filed for this spec?**
+
+Decision (2026-08-07, repository owner): **no.** Do not run `gh issue create`.
+The spec file is the record. This carries forward the same decision the owner
+made for the two preceding batches.
