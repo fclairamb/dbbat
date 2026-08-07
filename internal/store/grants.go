@@ -300,7 +300,13 @@ func (s *Store) ListGrants(ctx context.Context, filter GrantFilter) ([]Grant, er
 	if filter.ActiveOnly {
 		q = q.Where("revoked_at IS NULL").
 			Where("starts_at <= NOW()").
-			Where("expires_at > NOW()")
+			Where("expires_at > NOW()").
+			// Same fail-closed rule as GetActiveGrant: a grant whose definition
+			// was deactivated must not read as active here either, or the UI
+			// and the non-admin database-visibility checks (servers.go,
+			// keys.go) would keep showing a database the proxy has already
+			// stopped authorizing.
+			Where("grant_definition_id IN (SELECT uid FROM grant_definitions WHERE is_active)")
 	}
 
 	// Same ordering as GetActiveGrant, so the UI lists grants in the order the

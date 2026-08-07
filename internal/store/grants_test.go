@@ -1065,6 +1065,68 @@ func TestGetActiveGrant_DefinitionLifecycle(t *testing.T) {
 	})
 }
 
+// TestListGrants_ActiveOnlyFiltersDeactivatedDefinition proves ListGrants
+// agrees with GetActiveGrant about what "active" means. Before this test,
+// ListGrants(ActiveOnly: true) only checked the grant's own window and
+// revocation, so a database.uid the proxy had already stopped authorizing
+// (via GetActiveGrant's definition-active filter) still showed up as
+// accessible everywhere ListGrants(ActiveOnly) is used: the grants UI and
+// the non-admin database-visibility checks in servers.go/keys.go.
+func TestListGrants_ActiveOnlyFiltersDeactivatedDefinition(t *testing.T) {
+	t.Parallel()
+
+	s := setupTestStore(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	user, database := createTestUserAndDatabase(t, ctx, s, "listgrants_deactivate")
+
+	admin, err := s.CreateUser(ctx, "listgrantsadmin", "hash", []string{RoleAdmin})
+	if err != nil {
+		t.Fatalf("CreateUser() error = %v", err)
+	}
+
+	def := newTestGrantDefinition(t, ctx, s, admin.UID, GrantDefinition{})
+	grant := newTestGrant(t, ctx, s, def, user.UID, database.UID, admin.UID,
+		now.Add(-time.Hour), now.Add(time.Hour))
+
+	assertListed := func(t *testing.T, want bool) {
+		t.Helper()
+
+		grants, err := s.ListGrants(ctx, GrantFilter{UserID: &user.UID, ActiveOnly: true})
+		if err != nil {
+			t.Fatalf("ListGrants() error = %v", err)
+		}
+
+		found := false
+		for i := range grants {
+			if grants[i].UID == grant.UID {
+				found = true
+			}
+		}
+
+		if found != want {
+			t.Fatalf("ListGrants(ActiveOnly: true) contains grant = %v, want %v", found, want)
+		}
+	}
+
+	assertListed(t, true)
+
+	if _, err := s.GetActiveGrant(ctx, user.UID, database.UID); err != nil {
+		t.Fatalf("fixture: GetActiveGrant() error = %v", err)
+	}
+
+	if err := s.DeactivateGrantDefinition(ctx, def.UID); err != nil {
+		t.Fatalf("DeactivateGrantDefinition() error = %v", err)
+	}
+
+	// Both paths must agree the grant is no longer active.
+	if _, err := s.GetActiveGrant(ctx, user.UID, database.UID); !errors.Is(err, ErrNoActiveGrant) {
+		t.Fatalf("GetActiveGrant() after deactivation = %v, want ErrNoActiveGrant", err)
+	}
+	assertListed(t, false)
+}
+
 // TestCreateGrant_RequiresADefinition proves the model's core invariant: there
 // is no way to store a grant that carries no shape.
 func TestCreateGrant_RequiresADefinition(t *testing.T) {
