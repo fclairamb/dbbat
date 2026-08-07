@@ -51,3 +51,11 @@ before the SA password is usable. Those pass on a retry and are environmental â€
 do not confuse them with this one, which does not.
 
 No GitHub issue exists yet â€” one should be filed.
+
+## Resolved open questions
+
+**Should a GitHub issue be filed for this spec?**
+
+Decision (2026-08-07, repository owner): **no.** Do not run `gh issue create`.
+The spec file is the record. This carries forward the same decision the owner
+made for the preceding batch.

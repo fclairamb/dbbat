@@ -34,3 +34,11 @@ of work.
      the run mode instead, once `versionInfo` is known.
 3. Behaviour must not change: `make test-e2e` covers the login page, and the
    demo prefill is asserted by the `demo-credentials-hint` path.
+
+## Resolved open questions
+
+**Should a GitHub issue be filed for this spec?**
+
+Decision (2026-08-07, repository owner): **no.** Do not run `gh issue create`.
+The spec file is the record. This carries forward the same decision the owner
+made for the preceding batch.

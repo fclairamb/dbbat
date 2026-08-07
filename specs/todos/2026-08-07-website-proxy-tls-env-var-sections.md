@@ -36,3 +36,11 @@ against `go-mssqldb` only, ODBC/JDBC untested) exists nowhere a user will see.
   `internal/config/config.go`.
 
 No GitHub issue exists yet — one should be filed.
+
+## Resolved open questions
+
+**Should a GitHub issue be filed for this spec?**
+
+Decision (2026-08-07, repository owner): **no.** Do not run `gh issue create`.
+The spec file is the record. This carries forward the same decision the owner
+made for the preceding batch.
