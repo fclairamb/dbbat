@@ -39,6 +39,13 @@ const grantsDefinitionMigrationName = "20260806020000"
 //     collapse onto a single synthesized definition (pass 3);
 //   - a third ad-hoc grant with a different shape, which must get its own.
 //
+// On top of that it pins down pass 2's database-scope condition, the part that
+// was wrong until 2026-08-07: a grant whose shape matches a definition scoped
+// to *another* database must not be pinned to it, a definition scoped to the
+// grant's own database is a normal match, and an unscoped definition still
+// matches anything (the regression the scope predicate could most easily
+// introduce, since almost every definition is unscoped).
+//
 // It then rolls the migration back and checks the shape data came home.
 //
 // Like the slug-migration test, this drives bun's migrator through an explicit
@@ -106,14 +113,36 @@ func TestGrantsReferenceDefinitionsMigration(t *testing.T) {
 
 	fixture := seedPreMigrationGrants(t, ctx, db)
 
+	// This migration runs on its own — RunMigration gives it its own group —
+	// so the backfill assertions below see exactly what *it* produced. Running
+	// the rest of the stack first would let 20260807010000, which repairs
+	// out-of-scope links, mask a pass-2 regression.
+	if err := migrator.RunMigration(ctx, all[index].Name); err != nil {
+		t.Fatalf("RunMigration(%s): %v", all[index].Name, err)
+	}
+
+	assertBackfill(t, ctx, db, fixture)
+	scopedDefinition := assertDatabaseScopeRespected(t, ctx, db, fixture)
+
+	// Now the migrations layered on top, including the corrective one. It has
+	// nothing to repair here, so nothing may move.
 	if _, err := migrator.Migrate(ctx); err != nil {
 		t.Fatalf("Migrate: %v", err)
 	}
 
-	assertBackfill(t, ctx, db, fixture)
+	if got := assertDatabaseScopeRespected(t, ctx, db, fixture); got != scopedDefinition {
+		t.Errorf(
+			"the corrective migration re-pointed a grant pass 2 had already placed correctly: %s -> %s",
+			scopedDefinition, got,
+		)
+	}
 
-	if _, err := migrator.Rollback(ctx); err != nil {
-		t.Fatalf("Rollback: %v", err)
+	// Two rollbacks: one for the group Migrate just created, one for this
+	// migration's own group.
+	for range 2 {
+		if _, err := migrator.Rollback(ctx); err != nil {
+			t.Fatalf("Rollback: %v", err)
+		}
 	}
 
 	assertRollback(t, ctx, db, fixture)
@@ -125,12 +154,36 @@ type legacyGrantFixture struct {
 	adminUID uuid.UUID
 	dbUID    uuid.UUID
 
-	// definitionUID is a real, pre-existing definition. requestGrant was
-	// materialized from it (and is linked through a grant request);
-	// matchingGrant merely happens to share its shape.
+	// otherDBUID is a second database no grant is ever issued on. It exists to
+	// give the scope-restricted definitions below something to be scoped to
+	// that is *not* dbUID.
+	otherDBUID uuid.UUID
+
+	// definitionUID is a real, pre-existing definition, unscoped (empty
+	// database_uids). requestGrant was materialized from it (and is linked
+	// through a grant request); matchingGrant merely happens to share its
+	// shape.
 	definitionUID uuid.UUID
 	requestGrant  uuid.UUID
 	matchingGrant uuid.UUID
+
+	// elsewhereDefinition is scoped to otherDBUID, so it must never claim
+	// excludedGrant even though their shapes are identical.
+	elsewhereDefinition uuid.UUID
+	excludedGrant       uuid.UUID
+
+	// hereDefinition is scoped to dbUID and must claim includedGrant: an
+	// explicit scope that *covers* the grant is a normal match.
+	hereDefinition uuid.UUID
+	includedGrant  uuid.UUID
+
+	// Two definitions share one shape: the older one is scoped elsewhere, the
+	// newer one is unscoped. Pass 2 picks the oldest candidate, so twinGrant
+	// landing on the newer one proves the scope filter runs before that
+	// ordering rather than after it.
+	twinElsewhereDefinition uuid.UUID
+	twinUnscopedDefinition  uuid.UUID
+	twinGrant               uuid.UUID
 
 	// adHocA and adHocB share one shape that matches no definition; adHocC has
 	// a different unmatched shape.
@@ -153,22 +206,71 @@ func seedPreMigrationGrants(t *testing.T, ctx context.Context, db *bun.DB) legac
 		t.Fatalf("seed admin: %v", err)
 	}
 
-	if err := db.NewRaw(
-		"INSERT INTO servers (name, host, port, database_name, username, password_encrypted, ssl_mode) "+
-			"VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING uid",
-		"legacy-db", "localhost", 5432, "db", "user", []byte("enc"), "disable",
-	).Scan(ctx, &f.dbUID); err != nil {
-		t.Fatalf("seed database: %v", err)
+	insertDatabase := func(name string) uuid.UUID {
+		t.Helper()
+
+		var uid uuid.UUID
+
+		if err := db.NewRaw(
+			"INSERT INTO servers (name, host, port, database_name, username, password_encrypted, ssl_mode) "+
+				"VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING uid",
+			name, "localhost", 5432, "db", "user", []byte("enc"), "disable",
+		).Scan(ctx, &uid); err != nil {
+			t.Fatalf("seed database %s: %v", name, err)
+		}
+
+		return uid
 	}
 
-	// A real definition: read_only with a query quota.
-	if err := db.NewRaw(
-		"INSERT INTO grant_definitions (name, slug, duration_seconds, controls, max_query_counts, created_by) "+
-			"VALUES (?, ?, ?, ?, ?, ?) RETURNING uid",
-		"read-only-1h", "read-only-1h", 3600, pgdialect.Array([]string{ControlReadOnly}), 100, f.adminUID,
-	).Scan(ctx, &f.definitionUID); err != nil {
-		t.Fatalf("seed definition: %v", err)
+	f.dbUID = insertDatabase("legacy-db")
+	f.otherDBUID = insertDatabase("legacy-db-elsewhere")
+
+	// databaseUIDs is the definition's scope. A nil slice becomes the empty
+	// array the column defaults to, i.e. "unscoped — covers every database".
+	insertDefinition := func(slug string, maxQueries int64, controls []string, databaseUIDs []uuid.UUID) uuid.UUID {
+		t.Helper()
+
+		if databaseUIDs == nil {
+			databaseUIDs = []uuid.UUID{}
+		}
+
+		var uid uuid.UUID
+
+		if err := db.NewRaw(
+			"INSERT INTO grant_definitions "+
+				"(name, slug, duration_seconds, controls, max_query_counts, database_uids, created_by) "+
+				"VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING uid",
+			slug, slug, 3600, pgdialect.Array(controls), maxQueries,
+			pgdialect.Array(databaseUIDs), f.adminUID,
+		).Scan(ctx, &uid); err != nil {
+			t.Fatalf("seed definition %s: %v", slug, err)
+		}
+
+		return uid
 	}
+
+	// A real definition: read_only with a query quota, unscoped.
+	f.definitionUID = insertDefinition("read-only-1h", 100, []string{ControlReadOnly}, nil)
+
+	// Scoped to the *other* database: a shape match that must be rejected.
+	f.elsewhereDefinition = insertDefinition(
+		"ddl-elsewhere", 500, []string{ControlBlockDDL}, []uuid.UUID{f.otherDBUID},
+	)
+
+	// Scoped to the grant's own database: a shape match that must be accepted.
+	f.hereDefinition = insertDefinition(
+		"copy-here", 250, []string{ControlBlockCopy}, []uuid.UUID{f.dbUID},
+	)
+
+	// Same shape, two definitions. The out-of-scope one is created first, so
+	// pass 2's "oldest candidate wins" tiebreak would pick it if the scope
+	// filter did not run.
+	f.twinElsewhereDefinition = insertDefinition(
+		"twin-elsewhere", 777, []string{ControlReadOnly}, []uuid.UUID{f.otherDBUID},
+	)
+	f.twinUnscopedDefinition = insertDefinition(
+		"twin-unscoped", 777, []string{ControlReadOnly}, nil,
+	)
 
 	now := time.Now()
 
@@ -211,8 +313,17 @@ func seedPreMigrationGrants(t *testing.T, ctx context.Context, db *bun.DB) legac
 		t.Fatalf("seed grant request: %v", err)
 	}
 
-	// Pass 2: the same shape, but no request behind it.
+	// Pass 2: the same shape, but no request behind it. The definition is
+	// unscoped, which is the overwhelmingly common case and the one the scope
+	// predicate must keep matching.
 	f.matchingGrant = insertGrant([]string{ControlReadOnly}, &hundred, nil)
+
+	// Pass 2, database scope. All three grants are on f.dbUID.
+	fiveHundred, twoFifty, sevenSevenSeven := int64(500), int64(250), int64(777)
+
+	f.excludedGrant = insertGrant([]string{ControlBlockDDL}, &fiveHundred, nil)
+	f.includedGrant = insertGrant([]string{ControlBlockCopy}, &twoFifty, nil)
+	f.twinGrant = insertGrant([]string{ControlReadOnly}, &sevenSevenSeven, nil)
 
 	// Pass 3: two ad-hoc grants sharing one unmatched shape (note the reversed
 	// control order — sorted comparison has to see through that), and a third
@@ -236,6 +347,81 @@ func definitionOf(t *testing.T, ctx context.Context, db *bun.DB, grantUID uuid.U
 	}
 
 	return defUID
+}
+
+// assertDatabaseScopeRespected covers backfill pass 2's database-scope
+// condition, which was missing until 2026-08-07: shape equality alone used to
+// be enough to pin a grant to a definition whose database_uids excluded the
+// grant's own database. Replaying that logic against the production dbbat
+// database predicted 10 such grants across 4 databases, which is what got it
+// fixed rather than merely documented.
+//
+// It returns the definition the out-of-scope grant landed on, so the caller can
+// check the corrective migration 20260807010000 leaves it where it is.
+func assertDatabaseScopeRespected(
+	t *testing.T, ctx context.Context, db *bun.DB, f legacyGrantFixture,
+) uuid.UUID {
+	t.Helper()
+
+	// A definition scoped to another database must not claim the grant, even
+	// though the shape matches exactly. It falls through to pass 3 instead.
+	excludedDef := definitionOf(t, ctx, db, f.excludedGrant)
+	if excludedDef == f.elsewhereDefinition {
+		t.Errorf(
+			"grant on database %s was pinned to definition %s, whose scope is limited to %s",
+			f.dbUID, f.elsewhereDefinition, f.otherDBUID,
+		)
+	}
+
+	var (
+		excludedSlug     string
+		excludedIsActive bool
+	)
+
+	if err := db.NewRaw("SELECT slug, is_active FROM grant_definitions WHERE uid = ?", excludedDef).
+		Scan(ctx, &excludedSlug, &excludedIsActive); err != nil {
+		t.Fatalf("read the definition the out-of-scope grant landed on: %v", err)
+	}
+
+	if !strings.HasPrefix(excludedSlug, "legacy-grant-shape-") {
+		t.Errorf("out-of-scope grant landed on %q, want a synthesized pass-3 definition", excludedSlug)
+	}
+
+	if excludedIsActive {
+		t.Error("the definition synthesized for the out-of-scope grant must be inactive")
+	}
+
+	// A definition whose scope *lists* the grant's database is a normal match.
+	if got := definitionOf(t, ctx, db, f.includedGrant); got != f.hereDefinition {
+		t.Errorf("in-scope grant points at %s, want the definition scoped to its database %s", got, f.hereDefinition)
+	}
+
+	// Scope is filtered before the oldest-candidate tiebreak, not after: the
+	// older twin is out of scope, so the newer unscoped one has to win.
+	if got := definitionOf(t, ctx, db, f.twinGrant); got != f.twinUnscopedDefinition {
+		t.Errorf(
+			"grant with two same-shape candidates points at %s, want the unscoped %s (the out-of-scope twin is %s)",
+			got, f.twinUnscopedDefinition, f.twinElsewhereDefinition,
+		)
+	}
+
+	// The end-state invariant the corrective migration also enforces: nothing
+	// anywhere in the table is pinned to a definition that excludes it.
+	var mismatched int
+
+	if err := db.NewRaw(
+		"SELECT count(*) FROM access_grants ag "+
+			"JOIN grant_definitions gd ON gd.uid = ag.grant_definition_id "+
+			"WHERE cardinality(gd.database_uids) > 0 AND NOT (ag.database_id = ANY (gd.database_uids))",
+	).Scan(ctx, &mismatched); err != nil {
+		t.Fatalf("count scope-mismatched grants: %v", err)
+	}
+
+	if mismatched != 0 {
+		t.Errorf("%d grants are pinned to a definition whose database scope excludes them", mismatched)
+	}
+
+	return excludedDef
 }
 
 func assertBackfill(t *testing.T, ctx context.Context, db *bun.DB, f legacyGrantFixture) {
@@ -264,9 +450,12 @@ func assertBackfill(t *testing.T, ctx context.Context, db *bun.DB, f legacyGrant
 	}
 
 	// Pass 2: an identical shape reuses the real definition rather than
-	// synthesizing a duplicate.
+	// synthesizing a duplicate. That definition is unscoped, so this is also
+	// the regression guard for the scope predicate: an empty database_uids has
+	// to keep matching every database, or nearly every grant in a real
+	// deployment would be dumped on pass 3 and deactivated.
 	if got := definitionOf(t, ctx, db, f.matchingGrant); got != f.definitionUID {
-		t.Errorf("shape-matched grant points at %s, want the matching definition %s", got, f.definitionUID)
+		t.Errorf("shape-matched grant points at %s, want the matching unscoped definition %s", got, f.definitionUID)
 	}
 
 	// Pass 3: duplicates collapse onto one synthesized definition...
