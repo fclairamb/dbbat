@@ -141,8 +141,10 @@ type fixtureOptions struct {
 	approvalPatterns []string
 	// queryStorage turns captured result rows on.
 	queryStorage config.QueryStorageConfig
-	// approvalDeps, when set, enables approval holds on the proxy.
-	approvalDeps *shared.ApprovalDeps
+	// approvalDepsFor, when set, enables approval holds on the proxy. It is a
+	// callback because the deps need the store the fixture creates, and they
+	// must be installed before the listener serves anything.
+	approvalDepsFor func(*store.Store) shared.ApprovalDeps
 }
 
 // newAuthFixture builds the whole chain: store, user, API key, a server row
@@ -222,8 +224,8 @@ func newAuthFixtureWith(t *testing.T, opts fixtureOptions) *authFixture {
 		config.MSSQLConfig{TLS: config.TLSConfig{Disable: true}}, testLogger())
 	require.NoError(t, err)
 
-	if opts.approvalDeps != nil {
-		proxy.SetApprovalDeps(*opts.approvalDeps)
+	if opts.approvalDepsFor != nil {
+		proxy.SetApprovalDeps(opts.approvalDepsFor(dataStore))
 	}
 
 	listener, err := net.Listen("tcp", "127.0.0.1:0")

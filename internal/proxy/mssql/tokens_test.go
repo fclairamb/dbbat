@@ -183,3 +183,45 @@ func TestParseInfoBodyRoundTripsNonASCII(t *testing.T) {
 	assert.Equal(t, uint32(42), decoded.LineNumber)
 	assert.Equal(t, byte(3), decoded.State)
 }
+
+// TestFeatureExtAckTokenNumber pins the token id itself.
+//
+// Stage 2 had FEATUREEXTACK at 0xEE, which is FEDAUTHINFO. The consequence was
+// not academic: FEATUREEXTACK precedes LOGINACK, so a client that asked for a
+// feature extension (UTF-8 support, column encryption, session recovery) — and
+// dbbat replays the client's FEATUREEXT block upstream verbatim — would have had
+// its perfectly good login read as a refusal.
+func TestFeatureExtAckTokenNumber(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, tokenFeatureExtAck, byte(0xAE))
+	assert.Equal(t, tokenFedAuthInfo, byte(0xEE))
+}
+
+// TestScanLoginResponseWalksPastAFeatureExtAck is the same bug from the outside:
+// a LOGINACK sitting behind a FEATUREEXTACK must still be found.
+func TestScanLoginResponseWalksPastAFeatureExtAck(t *testing.T) {
+	t.Parallel()
+
+	// The order a real server uses: FEATUREEXTACK, then LOGINACK, then DONE.
+	stream := buildFeatureExtAckToken(0x0A, []byte{0x01, 0x00, 0x00, 0x00})
+	stream = append(stream, buildLoginAckToken("Microsoft SQL Azure")...)
+	stream = append(stream, buildDoneToken(0, 0)...)
+
+	outcome := scanLoginResponse(stream)
+
+	assert.True(t, outcome.Acked)
+	assert.Nil(t, outcome.Failure)
+}
+
+// TestScanLoginResponseSkipsFedAuthInfo covers the other DWORD-length token.
+func TestScanLoginResponseSkipsFedAuthInfo(t *testing.T) {
+	t.Parallel()
+
+	stream := make([]byte, 0, 64)
+	stream = append(stream, tokenFedAuthInfo, 0x03, 0x00, 0x00, 0x00, 1, 2, 3)
+	stream = append(stream, buildLoginAckToken("Microsoft SQL Server")...)
+	stream = append(stream, buildDoneToken(0, 0)...)
+
+	assert.True(t, scanLoginResponse(stream).Acked)
+}
