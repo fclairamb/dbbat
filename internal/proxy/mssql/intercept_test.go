@@ -813,7 +813,7 @@ func TestAttentionAfterTheHoldEndsTravelsUpstream(t *testing.T) {
 // swallowed the ATTENTION, before the catch-up Resolve had said who won. When
 // that Resolve lost, the statement ran and the session kept a spurious owed
 // acknowledgement, which the next refused statement would take — answering it
-// as "cancelled" instead of with its real error.
+// as canceled instead of with its real error.
 func TestAttentionLosingToAnApproverInsideTheArmWindow(t *testing.T) {
 	t.Parallel()
 
