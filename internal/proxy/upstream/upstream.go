@@ -18,13 +18,16 @@
 // Two things this package does NOT deliver, both worth knowing before trusting
 // the headline claim ("a green connectivity check proves the proxy can get in"):
 //
-//   - MongoDB's upstream login is implemented in internal/proxy/mongodb, not
-//     here, because it is written on top of that package's OP_MSG codec, which
-//     the whole MongoDB proxy is built from and which would have to be hoisted
-//     wholesale to move the connector. It uses the same Plan from this package,
-//     so the ssl_mode policy is still defined exactly once and the probe and the
-//     proxy still run the same code; only the code's postal address differs.
-//     conncheck calls it directly.
+//   - MongoDB's and SQL Server's upstream logins are implemented in
+//     internal/proxy/mongodb and internal/proxy/mssql, not here, because each is
+//     written on top of that package's own codec (OP_MSG; TDS packet framing +
+//     PRELOGIN + LOGIN7), which the whole proxy is built from and which would
+//     have to be hoisted wholesale to move the connector. Both use the same Plan
+//     from this package — see mssql.go for the SQL Server side of the policy, in
+//     particular which PRELOGIN ENCRYPTION byte each attempt maps to — so the
+//     ssl_mode policy is still defined exactly once and the probe and the proxy
+//     still run the same code; only the code's postal address differs. conncheck
+//     calls them directly.
 //
 //   - Oracle is the one protocol where probe and proxy are genuinely NOT the
 //     same code, and where they do not even agree on encryption. The proxy
