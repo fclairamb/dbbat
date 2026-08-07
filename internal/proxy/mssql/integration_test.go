@@ -83,7 +83,56 @@ func startUpstreamSQLServer(ctx context.Context, t *testing.T) string {
 	port, err := container.MappedPort(ctx, "1433/tcp")
 	require.NoError(t, err)
 
-	return net.JoinHostPort(host, port.Port())
+	addr := net.JoinHostPort(host, port.Port())
+	waitForSALogin(ctx, t, addr)
+
+	return addr
+}
+
+// waitForSALogin blocks until the SA account actually accepts a login on addr.
+//
+// The "ready for client connections" log line is printed before the entrypoint
+// has finished applying MSSQL_SA_PASSWORD, so on the emulated amd64 image the
+// very next connection is refused with "Login failed for user 'sa'". Waiting on
+// a successful login here covers every sql.Open the suite performs afterwards,
+// since they all start from the address this fixture returns.
+func waitForSALogin(ctx context.Context, t *testing.T, addr string) {
+	t.Helper()
+
+	const (
+		loginTimeout = 5 * time.Minute
+		pollInterval = 2 * time.Second
+	)
+
+	db, err := sql.Open("sqlserver", dsn(addr, "disable"))
+	require.NoError(t, err)
+
+	defer func() {
+		_ = db.Close()
+	}()
+
+	deadline := time.Now().Add(loginTimeout)
+
+	var lastErr error
+
+	for attempt := 1; ; attempt++ {
+		pingCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		lastErr = db.PingContext(pingCtx)
+
+		cancel()
+
+		if lastErr == nil {
+			return
+		}
+
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			require.FailNowf(t, "SA login never became usable",
+				"the container logged that it was ready but %s still refused the sa login after %s (%d attempts); last error: %v",
+				addr, loginTimeout, attempt, lastErr)
+		}
+
+		time.Sleep(pollInterval)
+	}
 }
 
 // startProxy runs a proxy with no store on an ephemeral port. Every login that
