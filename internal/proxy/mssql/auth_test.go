@@ -14,6 +14,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/store"
@@ -100,6 +101,7 @@ func grantFullAccess(t *testing.T, dataStore *store.Store, userUID, databaseUID 
 type authFixture struct {
 	store     *store.Store
 	fake      *fakeUpstream
+	authCache *cache.AuthCache
 	proxyAddr string
 	user      *store.User
 	database  *store.Server
@@ -161,7 +163,11 @@ func newAuthFixtureWithDump(t *testing.T, upstreamEncryption byte, sslMode, dump
 		}
 	}
 
-	proxy, err := NewServer(dataStore, encryptionKey, dumpConfig, nil,
+	// A live auth cache, because that is what main.go passes: the Argon2id
+	// verification path a real deployment takes is the cached one.
+	authCache := cache.NewAuthCache(cache.AuthCacheConfig{Enabled: true, TTLSeconds: 60, MaxSize: 16})
+
+	proxy, err := NewServer(dataStore, encryptionKey, dumpConfig, authCache,
 		config.MSSQLConfig{TLS: config.TLSConfig{Disable: true}}, testLogger())
 	require.NoError(t, err)
 
@@ -186,6 +192,7 @@ func newAuthFixtureWithDump(t *testing.T, upstreamEncryption byte, sslMode, dump
 	return &authFixture{
 		store:     dataStore,
 		fake:      fake,
+		authCache: authCache,
 		proxyAddr: listener.Addr().String(),
 		user:      user,
 		database:  database,
@@ -444,4 +451,32 @@ func TestSessionReportsAnUpstreamFailureWithoutLeakingIt(t *testing.T) {
 	assert.Contains(t, failure.Message, "could not open a session on the upstream")
 	assert.NotContains(t, failure.Message, fixtureUpstreamUser)
 	assert.NotContains(t, failure.Message, fixture.database.Host)
+}
+
+// TestSessionVerifiesThroughTheAuthCache pins that the proxy goes through
+// internal/cache rather than deriving Argon2id on every connect. A reconnect
+// loop is the normal shape of SQL Server traffic (connection pools), and
+// Argon2id is expensive by design.
+func TestSessionVerifiesThroughTheAuthCache(t *testing.T) {
+	t.Parallel()
+
+	fixture := newAuthFixture(t, encryptNotSup, "disable")
+
+	_, first := fixture.login(t, fixtureUser, fixturePassword, fixtureDBEntry)
+	require.True(t, first.Acked)
+
+	hits, misses, size := fixture.authCache.Stats()
+	assert.Zero(t, hits)
+	assert.Equal(t, int64(1), misses)
+	assert.Equal(t, 1, size)
+
+	_, second := fixture.login(t, fixtureUser, fixturePassword, fixtureDBEntry)
+	require.True(t, second.Acked)
+
+	hits, _, _ = fixture.authCache.Stats()
+	assert.Equal(t, int64(1), hits, "the second connect must be served from the cache")
+
+	// A wrong password is a different cache key, and must still be refused.
+	_, wrong := fixture.login(t, fixtureUser, "not-the-password", fixtureDBEntry)
+	assert.NotNil(t, wrong.Failure)
 }
