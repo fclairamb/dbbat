@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.23.0](https://github.com/fclairamb/dbbat/compare/v0.22.0...v0.23.0) (2026-08-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* SQL Server as a fifth proxied protocol, and grants become instances of definitions ([#301](https://github.com/fclairamb/dbbat/issues/301))
+* `GET /api/v1/connections/{uid}/dump` now requires the admin role; viewer tokens receive 403.
+
+### Features
+
+* durable session captures, capture download in the UI, and an approvals stream security fix ([#300](https://github.com/fclairamb/dbbat/issues/300)) ([f83e511](https://github.com/fclairamb/dbbat/commit/f83e5117efbdd488443ee6aceac53a286a16f57e))
+* SQL Server as a fifth proxied protocol, and grants become instances of definitions ([#301](https://github.com/fclairamb/dbbat/issues/301)) ([85209da](https://github.com/fclairamb/dbbat/commit/85209da031e83b5cb0b4b5ef095236e12d279294))
+
+
+### Bug Fixes
+
+* **api:** keep the login redirect target through the Slack OAuth flow ([#298](https://github.com/fclairamb/dbbat/issues/298)) ([6dcc27c](https://github.com/fclairamb/dbbat/commit/6dcc27c36d8fc802dd93a3a500db584134bfdc7c))
+* **deps:** update module github.com/microsoft/go-mssqldb to v1.10.0 ([#303](https://github.com/fclairamb/dbbat/issues/303)) ([f3ecbce](https://github.com/fclairamb/dbbat/commit/f3ecbcece963eca2ced261a42da752892b51b83e))
+* **deps:** update testcontainers-go monorepo to v0.44.0 ([#302](https://github.com/fclairamb/dbbat/issues/302)) ([a7145ef](https://github.com/fclairamb/dbbat/commit/a7145efb59a5e62d8400d665d664f680abb35e84))
+
 ## [Unreleased]
 
 ### ⚠ BREAKING CHANGES
