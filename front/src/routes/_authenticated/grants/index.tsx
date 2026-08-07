@@ -182,8 +182,33 @@ function GrantsPage() {
       header: "Controls",
       cell: (g) => {
         // The shape lives on the definition the grant was issued from; the
-        // grant row itself carries none of it.
-        const controls = g.definition?.controls ?? [];
+        // grant row itself carries none of it. An absent definition is not
+        // reachable today (the FK is NOT NULL and the store attaches it
+        // unfiltered), but if it ever happened, rendering "no controls"
+        // would read as unrestricted — the opposite of the backend's
+        // fail-closed convention (AccessGrant.Controls() in models.go
+        // returns *every* control when the definition is missing). Render
+        // an explicit unknown state instead of guessing.
+        if (!g.definition) {
+          return (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Badge
+                  variant="destructive"
+                  data-testid={`grant-controls-unknown-${g.uid}`}
+                >
+                  Unknown
+                </Badge>
+              </TooltipTrigger>
+              <TooltipContent>
+                This grant&apos;s definition could not be loaded, so its
+                controls are unknown.
+              </TooltipContent>
+            </Tooltip>
+          );
+        }
+
+        const controls = g.definition.controls;
         if (controls.length === 0) {
           return <Badge variant="default">Full Access</Badge>;
         }
