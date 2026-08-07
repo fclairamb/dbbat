@@ -184,6 +184,7 @@ This applies even when the current task is otherwise complete — capture the fo
 | `DBB_MSSQL_TLS_DISABLE` | Keep the SQL Server listener plaintext — answer `ENCRYPT_NOT_SUP` (default: `false`) | No |
 | `DBB_MSSQL_TLS_CERT_FILE` | PEM cert for SQL Server TLS termination (auto self-signed if empty) | No |
 | `DBB_MSSQL_TLS_KEY_FILE` | PEM key for SQL Server TLS termination (auto-generated if empty) | No |
+| `DBB_MSSQL_TLS_MAX_VERSION` | Client-leg TLS ceiling: `1.2` (default) or `1.3`; anything else fails at startup. TDS encapsulates the handshake and un-wraps it the moment it completes, and at 1.3 the client finishes on a *write*, so drivers differ on whether that last flight is still framed — the proxy sniffs the first byte and follows either choice, but 1.3 is **verified against `go-mssqldb` only** (ODBC/JDBC untested), hence opt-in. The upstream leg stays at 1.2. See `docs/mssql.md` | No |
 | `DBB_SLACK_NOTIFY_BOT_TOKEN` | Slack bot user OAuth token (`xoxb-...`); empty disables notifications | No |
 | `DBB_SLACK_NOTIFY_CHANNEL` | Slack channel id or name for grant-request notifications (default: `#dbbat`) | No |
 | `DBB_SLACK_SIGNING_SECRET` | Slack app signing secret; enables Approve/Deny buttons + inbound interactions endpoint. Empty = link-through-UI (no buttons). Requires the bot token. Legacy alias `DBB_SLACK_NOTIFY_SIGNING_SECRET` is also accepted; the canonical name wins if both are set. | No |

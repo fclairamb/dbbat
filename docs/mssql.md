@@ -107,6 +107,11 @@ the peer waits forever for a packet sitting in a buffer — an opaque client
 hang, not an error. `deactivate()` also flushes anything still pending, so a
 handshake whose last action is a write cannot deadlock either.
 
+The read side has the mirror-image rule: **the first byte of every inbound
+flight is sniffed before it is parsed**, so a peer that stops encapsulating
+first is followed rather than mis-parsed. That is what makes TLS 1.3 possible
+at all — see [TLS version](#tls-version).
+
 ### Encryption negotiation
 
 The full matrix, applied to the client's ENCRYPTION byte:
@@ -130,16 +135,56 @@ learns why rather than watching the socket drop.
 
 ### TLS version
 
-The encapsulated handshake is pinned to **TLS 1.2**. Under 1.2 each side's
-handshake ends on a *read*, which puts the framed→raw switch on the same byte
-for both peers. Under TLS 1.3 the client's handshake ends on a *write*, and
-drivers disagree about whether that final flight is still encapsulated — a
-disagreement that presents as a hang rather than an error. Every SQL Server
-client speaks TLS 1.2, so v1 pins it.
+The client leg defaults to **TLS 1.2** and can be raised to **1.3** with
+`DBB_MSSQL_TLS_MAX_VERSION=1.3`. The floor is 1.2 either way. Anything other
+than `1.2` or `1.3` fails the process at startup rather than falling back
+silently — a deployment that asked for a TLS policy and quietly got another one
+is exactly what nobody notices.
+
+The default is 1.2 because of the encapsulation, not because 1.3 is
+uninteresting. Under 1.2 each side's handshake ends on a *read*, which puts the
+framed→raw switch on the same byte for both peers. Under 1.3 the client's
+handshake ends on a *write*, so a driver has to decide for itself whether that
+last CCS+Finished flight is still inside a PRELOGIN packet — and the classic
+symptom of guessing wrong is a hang, not an error.
+
+Two things make 1.3 work:
+
+- **The read side sniffs.** While framed, `handshakeConn` peeks the first byte
+  of every inbound flight. TDS packet types and TLS content types do not
+  overlap — during the handshake the only legal packet type is PRELOGIN
+  (`0x12`), while a TLS record starts `0x14`–`0x17` — so one byte says which it
+  is, with no ambiguity to trade off. A client that stops encapsulating before
+  dbbat does is *followed* into pass-through, the sniffed byte served first,
+  rather than being parsed as a desynchronised TDS stream.
+- **Session tickets are off at 1.3.** The Go server emits `NewSessionTicket`
+  after its own Finished and *before* it reads the client's, so at 1.3 the
+  tickets ride in the same encapsulated flight — and the client's handshake
+  returns as soon as it has processed Finished. A client that reads exactly
+  what it needs (rather than over-reading, as `crypto/tls` happens to) is then
+  left with ticket bytes stranded in a PRELOGIN message it will never look at
+  again, corrupting the stream a few reads later. Turning tickets off costs a
+  resumption that TDS — one handshake per connection — barely benefits from.
+  Only clients that advertise `psk_key_exchange_modes` provoke this, which is
+  every OpenSSL and SChannel client, so it is not hypothetical.
+
+**Verified against `go-mssqldb` only.** The integration suite drives a real
+driver through a 1.3 handshake with `tlsmin=1.3` (so a proxy that served 1.2
+would fail rather than pass quietly), in both `ENCRYPT_ON` and `ENCRYPT_OFF`.
+The **Microsoft ODBC and JDBC drivers have not been tested at 1.3** — they were
+not available to the work that added this — which is why 1.3 is opt-in rather
+than the default. If you enable it, test your own driver first; a mismatch will
+present as a client that connects and then hangs.
+
+The **upstream** leg stays pinned at 1.2 regardless. There dbbat is the TLS
+client, so it would be dbbat guessing what a server it does not control expects
+of the final flight.
 
 `DBB_MSSQL_TLS_DISABLE`, `DBB_MSSQL_TLS_CERT_FILE` and `DBB_MSSQL_TLS_KEY_FILE`
 mirror `DBB_PG_TLS_*`, `DBB_MYSQL_TLS_*` and `DBB_MONGO_TLS_*`, including the
 self-signed certificate generated at startup when no files are given.
+`DBB_MSSQL_TLS_MAX_VERSION` has no counterpart on the other proxies: they
+upgrade on a clean byte boundary and have nothing to decide.
 
 ## LOGIN7
 
@@ -596,7 +641,9 @@ Plainly, so nobody assumes more coverage than there is:
   stripped there.
 - **Changing a password through the proxy.**
 - **Pre-TDS7 logins** (packet type `0x02`).
-- **TLS 1.3** on the client leg — see above.
+- **TLS 1.3 as the client-leg default**, and TLS 1.3 on the *upstream* leg at
+  all — see above. 1.3 on the client leg is available, opt-in, and verified
+  against `go-mssqldb` only.
 - **TDS below 7.4.** The floor is **7.4 (SQL Server 2012+)**, enforced in
   `Login7.Validate()`. It is not arbitrary: the tokens the proxy emits use the
   TDS 7.2+ wide forms (a 4-byte ERROR line number, an 8-byte DONE row count),
