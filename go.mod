@@ -2,6 +2,13 @@ module github.com/fclairamb/dbbat
 
 go 1.25.5
 
+// Floor the toolchain at the Go release that fixes the standard-library
+// vulnerabilities govulncheck flags in 1.26.1 and earlier, so a local build
+// cannot silently ship what the Dockerfile and CI already exclude. Kept
+// separate from the `go` directive above: this is a security floor, not a
+// language-version bump.
+toolchain go1.26.5
+
 require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-mysql-org/go-mysql v1.16.0
@@ -129,7 +136,7 @@ require (
 	github.com/power-devops/perfstat v0.0.0-20240221224432-82ca36839d55 // indirect
 	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
-	github.com/quic-go/quic-go v0.59.0 // indirect
+	github.com/quic-go/quic-go v0.59.1 // indirect
 	github.com/shirou/gopsutil/v4 v4.26.5 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	github.com/sirupsen/logrus v1.9.4 // indirect
@@ -161,8 +168,8 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	google.golang.org/api v0.272.0 // indirect
-	google.golang.org/genproto/googleapis/rpc v0.0.0-20260316180232-0b37fe3546d5 // indirect
-	google.golang.org/grpc v1.79.3 // indirect
+	google.golang.org/genproto/googleapis/rpc v0.0.0-20260414002931-afd174a4e478 // indirect
+	google.golang.org/grpc v1.82.1 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	mellium.im/sasl v0.3.2 // indirect
