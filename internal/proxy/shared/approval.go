@@ -109,6 +109,16 @@ type ApprovalDeps struct {
 	// while a statement is parked. With no approval timeout, the LimitGuard
 	// is the one remaining server-side bound, so it must keep running.
 	PollInterval time.Duration
+	// HoldRegistered, when set, is called with the pending row's uid *after*
+	// the registry accepted the hold and *before* OnPending publishes that uid
+	// to the protocol's cancellation path.
+	//
+	// It is a test seam and nothing else: that gap — the "arm window" — is a
+	// handful of instructions wide, and the races that live in it (a cancel
+	// landing there and then losing to a human approver) cannot be reached by
+	// timing. Blocking here lets a test occupy the window deliberately. Nil in
+	// production, where it costs one nil check per hold.
+	HoldRegistered func(queryUID uuid.UUID)
 }
 
 // ApprovalGate decides whether a statement needs a human, and parks the
@@ -415,6 +425,12 @@ func (g *ApprovalGate) Hold(ctx context.Context, req HoldRequest) (uuid.UUID, er
 
 	decisions, release := g.deps.Registry.Register(pending.UID)
 	defer release()
+
+	// The arm window is open from here until OnPending returns. Tests hold it
+	// open on purpose; production leaves this nil.
+	if g.deps.HoldRegistered != nil {
+		g.deps.HoldRegistered(pending.UID)
+	}
 
 	// Announce the uid to the protocol's cancellation path before blocking.
 	if req.OnPending != nil {

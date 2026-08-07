@@ -401,9 +401,20 @@ func (s *session) armHoldCancel() {
 // disarmHoldCancel closes that window once the hold is over. In the ordinary
 // case setHeldQuery has already closed it; this is the backstop for the paths
 // where the gate never published a uid at all, such as a failed pending insert.
+//
+// A cancel recorded in the arm window can still be undecided here, and that is
+// the same case: no uid ever appeared, so nothing arbitrated it and nothing
+// ran. The ATTENTION was consumed, the hold is over, and the client is owed its
+// acknowledgement — which the refusal path immediately takes.
 func (s *session) disarmHoldCancel() {
 	s.heldMu.Lock()
 	s.holdArmed = false
+
+	if s.armedCancel {
+		s.armedCancel = false
+		s.attentionAckDue = true
+	}
+
 	s.heldMu.Unlock()
 }
 
@@ -416,21 +427,24 @@ func (s *session) disarmHoldCancel() {
 func (s *session) cancelHeldStatement() bool {
 	s.heldMu.Lock()
 
-	uid, armed, pending := s.heldQueryUID, s.holdArmed, s.attentionAckDue
+	uid, armed := s.heldQueryUID, s.holdArmed
+
+	// A cancel already consumed for the statement in flight — answered, or
+	// still waiting for the uid that will arbitrate it — swallows any repeat,
+	// so a second ATTENTION cannot slip upstream and cancel whatever runs next.
+	consumed := s.attentionAckDue || s.armedCancel
 
 	// The gate is registering the hold right now, so there is no uid to cancel
-	// yet. Record the cancel; the OnPending callback applies it the instant the
-	// uid exists.
-	if uid == uuid.Nil && armed && !pending {
-		s.attentionAckDue = true
+	// yet. Record the cancel *without* deciding what it earns: whether the
+	// client is owed an acknowledgement depends on the resolve winning, which
+	// only the OnPending callback can find out, the instant the uid exists.
+	if uid == uuid.Nil && armed && !consumed {
+		s.armedCancel = true
 	}
 
 	s.heldMu.Unlock()
 
-	// A cancel already being answered for the statement in flight swallows any
-	// repeat, so a second ATTENTION cannot slip upstream and cancel whatever
-	// runs next.
-	if pending {
+	if consumed {
 		return true
 	}
 
@@ -474,6 +488,32 @@ func (s *session) takeAttentionAck() bool {
 
 	due := s.attentionAckDue
 	s.attentionAckDue = false
+
+	return due
+}
+
+// deferAttentionUpstream hands the forward pump an ATTENTION the reader already
+// took off the wire and that turned out to belong upstream after all.
+//
+// It cannot simply be written here: this runs while the gate is still inside
+// Hold, so the statement the cancel is meant to interrupt has not been
+// forwarded yet. Emitting it now would cancel nothing and let the statement run
+// on unbothered — the pump re-emits it *behind* the statement instead, which is
+// exactly where the reader would have queued it had it not consumed it.
+func (s *session) deferAttentionUpstream() {
+	s.heldMu.Lock()
+	s.attentionUpstreamDue = true
+	s.heldMu.Unlock()
+}
+
+// takeAttentionUpstream reports whether a consumed ATTENTION still has to be
+// put back on the upstream leg, consuming the mark.
+func (s *session) takeAttentionUpstream() bool {
+	s.heldMu.Lock()
+	defer s.heldMu.Unlock()
+
+	due := s.attentionUpstreamDue
+	s.attentionUpstreamDue = false
 
 	return due
 }

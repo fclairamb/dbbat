@@ -178,26 +178,53 @@ func (s *session) pumpClientToUpstream(ctx context.Context) error {
 			return s.clientReadError()
 		}
 
-		forward := msg.payload
-
-		if s.onClientMessage != nil {
-			var err error
-
-			forward, err = s.onClientMessage(ctx, msg.msgType, msg.payload)
-			if err != nil {
-				return err
-			}
-
-			// The hook answered the client on its own.
-			if forward == nil {
-				continue
-			}
+		if err := s.forwardClientMessage(ctx, msg); err != nil {
+			return err
 		}
+	}
+}
 
+// forwardClientMessage runs interception over one client message and forwards
+// whatever the upstream is owed for it.
+func (s *session) forwardClientMessage(ctx context.Context, msg clientMessage) error {
+	// forwarded() normalizes the no-hook case: ATTENTION has no payload at all,
+	// and a nil here is the hook's "I answered the client myself" signal.
+	forward := forwarded(msg.payload)
+
+	if s.onClientMessage != nil {
+		var err error
+
+		forward, err = s.onClientMessage(ctx, msg.msgType, msg.payload)
+		if err != nil {
+			return err
+		}
+	}
+
+	// A non-nil payload is forwarded; nil means the hook answered the client on
+	// its own and nothing must reach the upstream.
+	if forward != nil {
 		if err := s.upstream.pkt.WriteMessageWithStatus(msg.msgType, forward, msg.status); err != nil {
 			return err
 		}
 	}
+
+	return s.forwardDeferredAttention()
+}
+
+// forwardDeferredAttention re-emits a cancel the reader consumed inside the arm
+// window but that lost its race to a human approver.
+//
+// It runs after the message the hook was called with, whether that message was
+// forwarded (the hold was approved, so the cancel now has a statement to
+// interrupt) or answered locally (the hold was denied, so the cancel interrupts
+// nothing and the upstream simply acknowledges it) — which is exactly the order
+// the reader would have produced had it forwarded the ATTENTION itself.
+func (s *session) forwardDeferredAttention() error {
+	if !s.takeAttentionUpstream() {
+		return nil
+	}
+
+	return s.upstream.pkt.WriteMessage(packetTypeAttention, nil)
 }
 
 // pumpUpstreamToClient forwards responses to the client a packet at a time.

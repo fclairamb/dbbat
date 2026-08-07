@@ -122,13 +122,23 @@ type session struct {
 	// heldQueryUID is the statement currently parked on a human, uuid.Nil
 	// otherwise. holdArmed says a hold is being taken but its uid is not known
 	// yet — the window between the gate registering the hold and announcing its
-	// uid, which an ATTENTION can land in. attentionAckDue says a client
-	// ATTENTION was answered by the proxy rather than forwarded, so the
-	// statement it canceled owes the client a DONE_ATTN.
-	heldMu          sync.Mutex
-	heldQueryUID    uuid.UUID
-	holdArmed       bool
-	attentionAckDue bool
+	// uid, which an ATTENTION can land in.
+	//
+	// The three flags are the fate of an ATTENTION the reader took off the wire
+	// rather than forwarded, and they are deliberately distinct:
+	//   - armedCancel: consumed inside the arm window, with no uid to arbitrate
+	//     it yet. Undecided — setHeldQuery turns it into one of the other two.
+	//   - attentionAckDue: the cancel won, so the statement it canceled owes the
+	//     client a DONE_ATTN.
+	//   - attentionUpstreamDue: the cancel lost to a human approver, so the
+	//     statement is going to run and the ATTENTION has to be put back on the
+	//     upstream leg behind it.
+	heldMu               sync.Mutex
+	heldQueryUID         uuid.UUID
+	holdArmed            bool
+	armedCancel          bool
+	attentionAckDue      bool
+	attentionUpstreamDue bool
 
 	// pending is the statement whose response is currently being accounted
 	// for. TDS without MARS is strictly alternating, so one slot is enough;
@@ -176,11 +186,27 @@ func (s *session) setHeldQuery(uid uuid.UUID) {
 		s.holdArmed = false
 	}
 
-	catchUp := uid != uuid.Nil && s.attentionAckDue
+	catchUp := uid != uuid.Nil && s.armedCancel
+	if catchUp {
+		s.armedCancel = false
+	}
+
 	s.heldMu.Unlock()
 
-	if catchUp {
-		s.resolveHoldCanceled(uid)
+	if !catchUp {
+		return
+	}
+
+	// The registry arbitrates, here as on the reader's own path, and
+	// resolveHoldCanceled marks the acknowledgement the client is owed only
+	// when it wins — so the arm window decides what the client is owed on
+	// exactly the same condition the normal path does, rather than optimism.
+	//
+	// When it loses, a human approved inside the window and the statement is
+	// about to run. The ATTENTION was already consumed off the wire, so the
+	// forward pump has to re-emit it behind that statement.
+	if !s.resolveHoldCanceled(uid) {
+		s.deferAttentionUpstream()
 	}
 }
 
