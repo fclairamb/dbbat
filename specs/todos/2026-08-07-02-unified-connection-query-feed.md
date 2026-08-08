@@ -126,3 +126,76 @@ unified table, so `front/e2e/` and `front/showcase/` keep passing without being
 modified. Do not rename them, even though the "watch panel" concept goes away.
 If an element genuinely has no equivalent any more, say so explicitly in the
 final report rather than silently dropping its test id.
+
+## Implementation Plan
+
+### 0. Verify the simplifying observation (done first — it decides the shape)
+
+Read the hold path in every proxy. Outcome recorded in the final report as
+`PINNING:`. If any protocol can interpret a *newer* statement while an earlier
+one is parked, holds get pinned above the table; otherwise the
+`executed_at`-descending sort is enough on its own.
+
+### 1. `DataTable` gains three small, backwards-compatible props
+
+`front/src/components/shared/DataTable.tsx`:
+
+- `rowClassName?: (item) => string | undefined` — the amber treatment for a
+  held row.
+- `rowTestId?: (item) => string | undefined` — re-attaches
+  `pending-approval-<uid>` to the held `<tr>`.
+- `rowGroups?: { id, testId?, rows }[]` — renders consecutive `<tbody>`
+  sections instead of one, so the held rows keep a container carrying
+  `data-testid="pending-approvals"` that *disappears* when nothing is held
+  (which is exactly what `front/showcase/approval-poster.spec.ts` asserts).
+  `rowHref`'s return type widens to `string | undefined` for rows that have no
+  query uid yet.
+
+### 2. `ApprovalStatusBadge` / `HeldFor` move to their own module
+
+`front/src/components/shared/ApprovalStatusBadge.tsx`, so the badge no longer
+imports from a component that is going away. `queryColumns.tsx` follows the
+move.
+
+### 3. `ConnectionWatchPanel` becomes `ConnectionQueryFeed`
+
+New `front/src/components/shared/ConnectionQueryFeed.tsx`; the old file is
+deleted. One `Card` (`data-testid="connection-watch-panel"`) holding one
+`DataTable`, fed by three merged sources keyed on query uid:
+
+1. REST `useQueries({ connection_id, limit: 50 })` — the seed and the
+   authority after any gap.
+2. REST `usePendingApprovals()` filtered to this connection — enabled whenever
+   the connection is **active**, independent of the stream, so a hold that
+   predates the page load is visible and actionable.
+3. The `connection/<uid>/queries` stream — folded on top with the existing
+   `mergeFeedItem` / `keep` "last non-empty wins" rule, so held → resolved →
+   completed collapses onto one row.
+
+Sorted `executed_at` descending; a refetch that re-delivers a streamed row
+merges onto it rather than adding a second one.
+
+Live by default: `enabled = !connection.disconnected_at`. The toggle stays but
+its default is inverted — it now pauses. Its label stays `Watch live` /
+`Stop watching` because `front/showcase/` asserts on that text and the binding
+decision is that the showcase keeps passing unmodified. `?watch=1` still
+validates and is simply a no-op on an active connection.
+
+Held rows: amber row treatment, `HeldFor` in the Executed cell, the matched
+pattern truncated (with a `title`) under the SQL, and Approve / Deny inline in
+an actions cell — `relative z-10` so they sit above `rowHref`'s full-row
+overlay link.
+
+### 4. The page loses its second table
+
+`front/src/routes/_authenticated/connections/$uid.tsx` drops the standalone
+`Queries` card and the `ConnectionWatchPanel`, rendering `ConnectionQueryFeed`
+in their place; the "showing the most recent 50" footer moves into the
+component.
+
+### 5. Tests
+
+`front/e2e/approvals.spec.ts` is updated for the new default (active
+connection ⇒ already live, no click), and gains coverage for a hold that
+predates page load being actionable without touching the toggle.
+`front/showcase/` is left untouched and only grepped for the ids it needs.
