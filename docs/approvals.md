@@ -49,8 +49,8 @@ Server) a malformed request is refused outright. **Oracle is the exception**:
 TTC is hand-rolled and the SQL is located heuristically, so a decode failure on
 `OALL8`, the v315+ piggyback exec or the JDBC exec is deliberately treated as
 "pass through" rather than "refuse" — an unparseable frame must not be able to
-break a customer's connection. Two known gaps remain on Oracle, and they are
-the complete list:
+break a customer's connection. Two known gaps remain in what the gate *sees* on
+Oracle (a third, in what it *counts*, is noted under "Re-executing a cursor"):
 
 - **An undecodable frame.** A statement dbbat cannot decode is neither held nor
   recorded. It is also not checked against `read_only`/`block_ddl`, so this is
@@ -110,6 +110,13 @@ Three boundaries, all deliberate:
   `specs/todos/2026-08-08-oracle-ofetch-unknown-cursor-and-query-quota.md`.
   Nothing is recorded in `/queries` for such a fetch either, so it falls under
   "missing query rows mean missing enforcement" above.
+- **A re-execution is not counted against `max_query_counts`.** The gated
+  `OFETCH` path does not re-run the quota check (doing so would also refuse
+  continuation fetches mid-result-set), so a client that parses once and then
+  loops re-executions records a `/queries` row for each while its query-count
+  cap goes unenforced. The statement-shaped controls and the hold still apply to
+  every one of those executions — it is the count alone that leaks. Filed in the
+  same todo as the item above.
 
 **How often real clients do this is unmeasured.** JDBC thin, `go-ora`,
 `python-oracledb`, OCI/sqlplus and SQLcl were not observed on a wire capture
