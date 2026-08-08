@@ -35,8 +35,32 @@ then, approval patterns on grants are inert and nothing is ever held.
    path `ErrDDLBlocked` uses. Anything else ⇒ `abandoned`, and **nothing is
    ever forwarded upstream**.
 
-The gate fails closed. There is no path through it that forwards a statement
-without an explicit approval decision naming that statement's UID.
+The gate fails closed. Once a statement has been matched, there is no path
+through the gate that forwards it without an explicit approval decision naming
+that statement's UID — not a denial, not a lost decision, not a failure to even
+persist the pending row (`ErrApprovalUnavailable`).
+
+**The gate only sees statements the protocol layer hands it, and that is the
+part with a caveat.** A statement must first be recognized as a statement and
+its SQL text extracted; anything the interceptor cannot decode is forwarded
+unmatched *and* unlogged. For four of the five protocols this is not much of a
+gap — the wire format is parsed by the driver library that owns it, or (SQL
+Server) a malformed request is refused outright. **Oracle is the exception**:
+TTC is hand-rolled and the SQL is located heuristically, so a decode failure on
+`OALL8`, the v315+ piggyback exec or the JDBC exec is deliberately treated as
+"pass through" rather than "refuse" — an unparseable frame must not be able to
+break a customer's connection. Two known consequences on Oracle:
+
+- A statement dbbat cannot decode is neither held nor recorded. It is also not
+  checked against `read_only`/`block_ddl`, so this is not specific to
+  approvals — the static controls have exactly the same dependency on decoding.
+- Re-executing an already-parsed cursor without resending its SQL is not
+  re-gated. The approval decision covers the parse, not each subsequent
+  execution of the same cursor within the session. See
+  `specs/todos/2026-08-08-oracle-cursor-reexec-skips-the-gate.md`.
+
+If an Oracle client of yours is not showing up in `/queries` at all, that is the
+same gap: treat missing query rows on Oracle as missing enforcement, and file it.
 
 ## There is no approval timeout
 
@@ -441,7 +465,7 @@ stays correct, only the live feed goes away.
 | MySQL / MariaDB | `COM_QUERY` / `COM_STMT_EXECUTE`, inside `runIntercepted` | go-mysql owns the wire; the hold happens before `exec()`. |
 | MongoDB | `OP_MSG` command dispatch | Matching runs against the rendered `<command> <extJSON>` text, which is what `/queries` shows. |
 | SQL Server | `SQLBatch` / `RPC`, in the client→upstream pump's hook | The one protocol whose cancel is in-band, so the client leg is read by a separate goroutine for the whole session. |
-| Oracle | `OALL8` and the v315+ piggyback exec | Oracle clients are the least forgiving about a silent connection — expect `abandoned` more often here. |
+| Oracle | `OALL8`, the v315+ piggyback exec, and the JDBC thin driver's `func=0x11` / sub-op `0x69` exec | All three go through the same normalize → static controls → hold order. Oracle clients are the least forgiving about a silent connection — expect `abandoned` more often here. A frame whose SQL cannot be decoded is forwarded ungated; see the caveat under "The hold, in order". |
 
 ## Schema
 
