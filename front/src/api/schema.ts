@@ -107,6 +107,11 @@ export interface paths {
          *     - Validate that a session token is still valid
          *     - Check if password change is required
          *     - Get session expiration time
+         *
+         *     Like every authenticated endpoint, this one is rate limited per user
+         *     and can answer `429`. A `429` says nothing about the token: clients
+         *     must keep the session and retry after `Retry-After`, not treat it as
+         *     an invalid session.
          */
         get: operations["getCurrentUser"];
         put?: never;
@@ -3317,6 +3322,7 @@ export interface operations {
                 };
             };
             401: components["responses"]["Unauthorized"];
+            429: components["responses"]["RateLimited"];
         };
     };
     changePasswordPreLogin: {

@@ -1,5 +1,20 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+* **ui:** the connection detail page is one live query table instead of three disconnected surfaces. The stream, pending approval holds and the REST history are merged into a single table that is live from the moment an active connection is opened — no "Watch live" click, no `?watch=1` required. The toggle survives as a pause. Held rows are amber, sit at the top, and carry Approve / Deny inline alongside the held-for counter and the matched pattern, so a hold that predates the page load is visible and actionable immediately. A streamed query and its historical row are now the same row.
+
+### Bug Fixes
+
+* **oracle:** the JDBC thin driver's dedicated exec op forwarded statements without ever consulting the approval gate or the `read_only` / `block_ddl` controls. It recorded a query row and passed the statement upstream ungated, so a hold pattern that matched simply never fired for that client. Every statement-carrying TTC op now runs the same normalize → validate → hold → record sequence, and fails closed. `docs/approvals.md`'s no-bypass claim is corrected to describe what the gate actually guarantees.
+* **ui:** a rate-limited session check no longer destroys a valid session. `GET /auth/me` answering 429 was treated as "this token is invalid", so hitting the rate limit — several tabs booting at once, or noise from the same source address — deleted the stored token and dropped the user on the login screen. Only a 401 is now definitive; a 429, a 5xx or a network error keeps the session, shows a retry notice, and honours `Retry-After` with a single automatic re-check.
+* **ui:** a 429 on login says "too many login attempts" instead of a generic "Login failed", for both of the rate limiters that guard the endpoint.
+* **ui:** the "Active only" toggle on the connections list updates in place. It assigned `window.location.search`, forcing a full document reload that re-bootstrapped the SPA and rebuilt the auth and query caches — for a filter that is applied client-side anyway.
+* **api:** every rate limiter answers 429 with the same body. Three middlewares hand-rolled an ad-hoc `{error, message, retry_after}` envelope while the rest of the API used the canonical `Error` schema, so anything matching on `code == "RATE_LIMITED"` silently never matched behind them. `GET /auth/me` also now declares the 429 it has always been able to return.
+* **test:** `TestCheck_OracleTarget_ThroughTunnel` no longer flakes. The fake TNS listener's refusal write raced its own teardown, so go-ora saw EOF before the ORA-01017 packet and the probe degraded to the same code a genuine connectivity fault produces — indistinguishable from a real regression, and it blocked an unrelated dependency bump twice. The refusal is now ordered via half-close, and both Oracle probe tests additionally assert on what the classifier actually saw.
+
 ## [0.23.0](https://github.com/fclairamb/dbbat/compare/v0.22.0...v0.23.0) (2026-08-07)
 
 

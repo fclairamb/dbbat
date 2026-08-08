@@ -200,6 +200,11 @@ paths:
         - Validate that a session token is still valid
         - Check if password change is required
         - Get session expiration time
+
+        Like every authenticated endpoint, this one is rate limited per user
+        and can answer `429`. A `429` says nothing about the token: clients
+        must keep the session and retry after `Retry-After`, not treat it as
+        an invalid session.
       operationId: getCurrentUser
       responses:
         '200':
@@ -210,6 +215,8 @@ paths:
                 $ref: '#/components/schemas/MeResponse'
         '401':
           $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   /auth/password:
     put:

@@ -1259,15 +1259,7 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 	case TTCFuncPiggyback:
 		// v315+ piggyback: check sub-operation to determine action
 		if IsPiggybackExecSQL(ttcPayload) {
-			if err := s.checkQuotas(); err != nil {
-				_ = s.sendOracleError(err)
-				return true
-			}
-
-			if err := s.handlePiggybackExec(ttcPayload); err != nil {
-				_ = s.sendOracleError(err)
-				return true
-			}
+			return s.gateStatement(s.handlePiggybackExec, ttcPayload)
 		} else if IsPiggybackClose(ttcPayload) {
 			// Sub-op 0x09 = close cursor
 			if len(ttcPayload) > 2 {
@@ -1277,29 +1269,16 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 
 	case TTCFuncOALL8:
 		// Legacy OALL8 (pre-v315)
-		if err := s.checkQuotas(); err != nil {
-			_ = s.sendOracleError(err)
-			return true
-		}
-
-		if err := s.handleOALL8(ttcPayload); err != nil {
-			_ = s.sendOracleError(err)
-			return true
-		}
+		return s.gateStatement(s.handleOALL8, ttcPayload)
 
 	case TTCFuncOFETCH:
 		// JDBC thin driver reuses func=0x11 with sub-op 0x69 for execute-with-SQL.
 		// Distinguish from plain OFETCH by checking the sub-operation byte.
 		if IsExecSQL(ttcPayload) {
-			if err := s.checkQuotas(); err != nil {
-				_ = s.sendOracleError(err)
-				return true
-			}
-
-			s.handleJDBCExec(ttcPayload)
-		} else {
-			s.handleOFETCH(ttcPayload)
+			return s.gateStatement(s.handleJDBCExec, ttcPayload)
 		}
+
+		s.handleOFETCH(ttcPayload)
 
 	case TTCFuncOCLOSE, TTCFuncOClosev2:
 		cursorID, err := decodeCursorIDFromOCLOSE(ttcPayload)
@@ -1309,6 +1288,32 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 
 	default:
 		// Other TTC functions are forwarded as-is
+	}
+
+	return false
+}
+
+// gateStatement runs the full pre-flight every statement-carrying TTC op shares:
+// quotas, expiry and revocation first, then the op's own handler — which runs
+// the static controls, the approval hold, and the query recording, in that
+// order. Reports true when the packet must NOT be forwarded; the client has
+// already been answered with a TTC error by then.
+//
+// All three ops go through here (OALL8, the v315+ piggyback exec, and the JDBC
+// thin driver's func=0x11 exec) so that adding a fourth cannot quietly acquire
+// only half of it — which is exactly how the JDBC exec ended up recording
+// queries while enforcing nothing.
+func (s *session) gateStatement(handle func([]byte) error, ttcPayload []byte) bool {
+	if err := s.checkQuotas(); err != nil {
+		_ = s.sendOracleError(err)
+
+		return true
+	}
+
+	if err := handle(ttcPayload); err != nil {
+		_ = s.sendOracleError(err)
+
+		return true
 	}
 
 	return false

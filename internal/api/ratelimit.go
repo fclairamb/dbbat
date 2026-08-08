@@ -1,7 +1,6 @@
 package api
 
 import (
-	"net/http"
 	"strconv"
 	"sync"
 	"time"
@@ -185,13 +184,12 @@ func (rl *RateLimiter) Middleware() gin.HandlerFunc {
 				retryAfter = 1
 			}
 
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-			c.JSON(http.StatusTooManyRequests, gin.H{
-				"error":       "rate_limit_exceeded",
-				"message":     "Too many requests. Please retry after " + strconv.Itoa(retryAfter) + " seconds.",
-				"retry_after": retryAfter,
-			})
+			// writeRateLimited sets Retry-After and writes the canonical
+			// ErrorBody{code: RATE_LIMITED, ...} — the one 429 shape the
+			// whole API answers with.
+			writeRateLimited(c, retryAfter)
 			c.Abort()
+
 			return
 		}
 
@@ -238,13 +236,12 @@ func (rl *RateLimiter) PostAuthMiddleware() gin.HandlerFunc {
 				retryAfter = 1
 			}
 
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-			c.JSON(http.StatusTooManyRequests, gin.H{
-				"error":       "rate_limit_exceeded",
-				"message":     "Too many requests. Please retry after " + strconv.Itoa(retryAfter) + " seconds.",
-				"retry_after": retryAfter,
-			})
+			// writeRateLimited sets Retry-After and writes the canonical
+			// ErrorBody{code: RATE_LIMITED, ...} — the one 429 shape the
+			// whole API answers with.
+			writeRateLimited(c, retryAfter)
 			c.Abort()
+
 			return
 		}
 
@@ -278,13 +275,12 @@ func (rl *RateLimiter) PreAuthMiddleware() gin.HandlerFunc {
 				retryAfter = 1
 			}
 
-			c.Header("Retry-After", strconv.Itoa(retryAfter))
-			c.JSON(http.StatusTooManyRequests, gin.H{
-				"error":       "rate_limit_exceeded",
-				"message":     "Too many requests. Please retry after " + strconv.Itoa(retryAfter) + " seconds.",
-				"retry_after": retryAfter,
-			})
+			// writeRateLimited sets Retry-After and writes the canonical
+			// ErrorBody{code: RATE_LIMITED, ...} — the one 429 shape the
+			// whole API answers with.
+			writeRateLimited(c, retryAfter)
 			c.Abort()
+
 			return
 		}
 

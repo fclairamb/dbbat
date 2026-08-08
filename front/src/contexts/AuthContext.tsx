@@ -4,6 +4,7 @@ import {
   useState,
   useEffect,
   useCallback,
+  useRef,
   type ReactNode,
 } from "react";
 import { useQueryClient } from "@tanstack/react-query";
@@ -26,21 +27,52 @@ interface Session {
   createdAt: string;
 }
 
+// Surfaced when a session check (GET /auth/me) could not be definitively
+// resolved — e.g. rate limited — so the caller knows a valid token might
+// still be sitting there unconfirmed. Non-destructive: never implies the
+// token was cleared.
+export interface SessionRateLimitInfo {
+  message: string;
+  retryAfterSeconds?: number;
+}
+
 interface AuthState {
   user: User | null;
   session: Session | null;
   isAuthenticated: boolean;
   isLoading: boolean;
   isAdmin: boolean;
+  sessionRateLimit: SessionRateLimitInfo | null;
 }
 
 interface AuthContextType extends AuthState {
   login: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
+  // Re-runs the stored-token session check on demand — used by the
+  // rate-limited notice's manual retry action, in addition to the single
+  // automatic re-validate scheduled from a Retry-After header.
+  retrySessionCheck: () => void;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
+
+// Outcome of a single GET /auth/me attempt. Only a definitive 401 means the
+// token itself is invalid; everything else (429 rate limit, 5xx, a network/
+// transport error) means the check simply could not be performed, and must
+// never be treated as grounds to destroy a stored session.
+type SessionCheckOutcome =
+  | { kind: "valid" }
+  | { kind: "invalid" }
+  | { kind: "indeterminate"; retryAfterSeconds?: number };
+
+function parseRetryAfterSeconds(value: string | null): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const seconds = Number(value);
+  return Number.isFinite(seconds) && seconds > 0 ? seconds : undefined;
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient();
@@ -50,52 +82,106 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     isAuthenticated: false,
     isLoading: true,
     isAdmin: false,
+    sessionRateLimit: null,
   });
 
   // Validate session by calling /auth/me
-  const validateSession = useCallback(async (): Promise<boolean> => {
+  const validateSession = useCallback(async (): Promise<SessionCheckOutcome> => {
     try {
       const response = await apiClient.GET("/auth/me");
 
-      if (response.error || !response.data) {
-        return false;
+      if (!response.error && response.data) {
+        const data = response.data;
+        setState((prev) => ({
+          ...prev,
+          user: {
+            uid: data.uid,
+            username: data.username,
+            roles: data.roles,
+            passwordChangeRequired: data.password_change_required,
+          },
+          session: {
+            expiresAt: data.session?.expires_at || "",
+            createdAt: data.session?.created_at || "",
+          },
+          isAuthenticated: true,
+          isLoading: false,
+          isAdmin: data.roles?.includes("admin") ?? false,
+          sessionRateLimit: null,
+        }));
+        return { kind: "valid" };
       }
 
-      const data = response.data;
-      setState({
-        user: {
-          uid: data.uid,
-          username: data.username,
-          roles: data.roles,
-          passwordChangeRequired: data.password_change_required,
-        },
-        session: {
-          expiresAt: data.session?.expires_at || "",
-          createdAt: data.session?.created_at || "",
-        },
-        isAuthenticated: true,
-        isLoading: false,
-        isAdmin: data.roles?.includes("admin") ?? false,
-      });
-      return true;
+      // openapi-fetch exposes the raw fetch Response as `response.response`.
+      // Only a 401 definitively means the token is invalid.
+      if (response.response.status === 401) {
+        return { kind: "invalid" };
+      }
+
+      return {
+        kind: "indeterminate",
+        retryAfterSeconds: parseRetryAfterSeconds(
+          response.response.headers.get("Retry-After"),
+        ),
+      };
     } catch {
-      return false;
+      // Network / transport error: the check could not be performed either.
+      return { kind: "indeterminate" };
     }
+  }, []);
+
+  // Re-runs the current check; set by the mount effect below so the manual
+  // retry action can trigger the same logic without duplicating it.
+  const checkStoredAuthRef = useRef<(allowAutoRetry: boolean) => void>(
+    () => {},
+  );
+  // The single scheduled automatic re-validate (from a Retry-After), if
+  // any — tracked outside the effect so a manual retry can cancel it.
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+
+  const retrySessionCheck = useCallback(() => {
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = undefined;
+    }
+    // A manual retry gets its own single automatic follow-up if it, too,
+    // comes back rate limited — it isn't chained off a prior automatic
+    // attempt, so it doesn't count against that budget.
+    checkStoredAuthRef.current(true);
   }, []);
 
   // Check for stored token on mount
   useEffect(() => {
-    const checkStoredAuth = async () => {
+    let cancelled = false;
+
+    // `allowAutoRetry` bounds Retry-After-driven re-validates to exactly
+    // one automatic attempt: the initial check (and any manual retry via
+    // retrySessionCheck) may schedule one, but that scheduled attempt
+    // calls back in with allowAutoRetry=false so a persistent rate limit
+    // can't chain retries forever without a user action.
+    const checkStoredAuth = async (allowAutoRetry: boolean) => {
       const token = getStoredToken();
 
       if (!token) {
-        setState((prev) => ({ ...prev, isLoading: false }));
+        if (!cancelled) {
+          setState((prev) => ({ ...prev, isLoading: false }));
+        }
         return;
       }
 
       // Token exists, validate it
-      const valid = await validateSession();
-      if (!valid) {
+      const result = await validateSession();
+      if (cancelled) {
+        return;
+      }
+
+      if (result.kind === "valid") {
+        return; // validateSession already committed the authenticated state
+      }
+
+      if (result.kind === "invalid") {
         clearToken();
         setState({
           user: null,
@@ -103,14 +189,50 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           isAuthenticated: false,
           isLoading: false,
           isAdmin: false,
+          sessionRateLimit: null,
         });
         // Stale token: make sure nothing from a previous identity lingers
         // in the query cache before the login screen renders.
         queryClient.clear();
+        return;
+      }
+
+      // Indeterminate (429 / 5xx / network error): the token may still be
+      // good — keep it and the query cache untouched, finish loading, and
+      // surface a non-destructive notice instead of bouncing to /login.
+      setState((prev) => ({
+        ...prev,
+        isLoading: false,
+        sessionRateLimit: {
+          message: result.retryAfterSeconds
+            ? `Too many requests — retrying in ${result.retryAfterSeconds}s.`
+            : "Too many requests — please retry in a moment.",
+          retryAfterSeconds: result.retryAfterSeconds,
+        },
+      }));
+
+      if (allowAutoRetry && result.retryAfterSeconds) {
+        retryTimerRef.current = setTimeout(() => {
+          retryTimerRef.current = undefined;
+          if (!cancelled) {
+            void checkStoredAuth(false);
+          }
+        }, result.retryAfterSeconds * 1000);
       }
     };
 
-    checkStoredAuth();
+    checkStoredAuthRef.current = (allowAutoRetry: boolean) => {
+      void checkStoredAuth(allowAutoRetry);
+    };
+    void checkStoredAuth(true);
+
+    return () => {
+      cancelled = true;
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = undefined;
+      }
+    };
   }, [validateSession, queryClient]);
 
   const login = useCallback(async (username: string, password: string) => {
@@ -126,7 +248,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const errorData = response.error as {
           code?: string;
           message?: string;
+          retry_after?: number;
         };
+        // POST /auth/login sits behind two different rate limiters — the
+        // per-username tracker and the IP-based PreAuthMiddleware. Both now
+        // answer with the canonical Error schema (code: "RATE_LIMITED", see
+        // writeRateLimited in internal/api/errors.go), but the middlewares
+        // used to write an ad-hoc {error, message, retry_after} body with no
+        // `code` at all. Keep gating on the raw HTTP status rather than the
+        // body shape, so an older deployment (or a proxy answering for us)
+        // still gets the same friendly message; read retry_after from
+        // whichever shape is present, falling back to the Retry-After header
+        // both set.
+        if (response.response.status === 429) {
+          const retryAfterSeconds =
+            errorData?.retry_after ??
+            parseRetryAfterSeconds(
+              response.response.headers.get("Retry-After"),
+            );
+          throw new Error(
+            retryAfterSeconds
+              ? `Too many login attempts. Please try again in ${retryAfterSeconds}s.`
+              : "Too many login attempts. Please try again shortly.",
+          );
+        }
         throw new Error(errorData?.code || "Login failed");
       }
 
@@ -154,6 +299,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isAuthenticated: true,
         isLoading: false,
         isAdmin: data.user.roles?.includes("admin") ?? false,
+        sessionRateLimit: null,
       });
     } catch (error) {
       setState({
@@ -162,6 +308,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isAuthenticated: false,
         isLoading: false,
         isAdmin: false,
+        sessionRateLimit: null,
       });
       throw error;
     }
@@ -184,6 +331,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isAuthenticated: false,
         isLoading: false,
         isAdmin: false,
+        sessionRateLimit: null,
       });
       queryClient.clear();
     }
@@ -194,7 +342,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [validateSession]);
 
   return (
-    <AuthContext.Provider value={{ ...state, login, logout, refreshUser }}>
+    <AuthContext.Provider
+      value={{ ...state, login, logout, refreshUser, retrySessionCheck }}
+    >
       {children}
     </AuthContext.Provider>
   );

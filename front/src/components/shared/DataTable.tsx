@@ -17,14 +17,39 @@ export interface Column<T> {
   className?: string;
 }
 
+/**
+ * A consecutive `<tbody>` section of the table.
+ *
+ * Sections exist so a subset of rows can carry a container of its own — the
+ * connection feed uses one for the statements currently held for approval, so
+ * that container is present exactly while something is held. The rows stay in
+ * one table, with one header and one set of columns.
+ */
+export interface RowGroup<T> {
+  id: string;
+  testId?: string;
+  rows: T[];
+}
+
 interface DataTableProps<T> {
   columns: Column<T>[];
+  /**
+   * Every row, used for the loading/empty decision and rendered as a single
+   * body unless `rowGroups` splits it.
+   */
   data: T[];
   isLoading?: boolean;
   emptyMessage?: string;
   onRowClick?: (item: T) => void;
-  rowHref?: (item: T) => string;
+  /** Row link target; return undefined for a row that has nothing to link to. */
+  rowHref?: (item: T) => string | undefined;
   rowKey: (item: T) => string;
+  /** Extra classes for one row — highlighting, emphasis, state. */
+  rowClassName?: (item: T) => string | undefined;
+  /** Per-row `data-testid`, for rows the E2E suite addresses individually. */
+  rowTestId?: (item: T) => string | undefined;
+  /** Optional split of `data` into consecutive `<tbody>` sections. */
+  rowGroups?: RowGroup<T>[];
   className?: string;
 }
 
@@ -36,6 +61,9 @@ export function DataTable<T>({
   onRowClick,
   rowHref,
   rowKey,
+  rowClassName,
+  rowTestId,
+  rowGroups,
   className,
 }: DataTableProps<T>) {
   if (isLoading) {
@@ -95,6 +123,37 @@ export function DataTable<T>({
     );
   }
 
+  const groups: RowGroup<T>[] = rowGroups ?? [{ id: "rows", rows: data }];
+
+  const renderRow = (item: T) => {
+    const href = rowHref?.(item);
+    const isClickable = !!href || !!onRowClick;
+    return (
+      <TableRow
+        key={rowKey(item)}
+        data-testid={rowTestId?.(item)}
+        className={cn(
+          isClickable && "cursor-pointer",
+          href && "relative",
+          rowClassName?.(item),
+        )}
+        onClick={!href && onRowClick ? () => onRowClick(item) : undefined}
+      >
+        {columns.map((col, colIdx) => (
+          <TableCell key={col.key} className={col.className}>
+            {colIdx === 0 && href ? (
+              <Link to={href} className="after:absolute after:inset-0">
+                {col.cell(item)}
+              </Link>
+            ) : (
+              col.cell(item)
+            )}
+          </TableCell>
+        ))}
+      </TableRow>
+    );
+  };
+
   return (
     <div className={cn("rounded-md border", className)}>
       <Table>
@@ -107,34 +166,11 @@ export function DataTable<T>({
             ))}
           </TableRow>
         </TableHeader>
-        <TableBody>
-          {data.map((item) => {
-            const href = rowHref?.(item);
-            const isClickable = !!href || !!onRowClick;
-            return (
-              <TableRow
-                key={rowKey(item)}
-                className={cn(isClickable && "cursor-pointer", href && "relative")}
-                onClick={!href && onRowClick ? () => onRowClick(item) : undefined}
-              >
-                {columns.map((col, colIdx) => (
-                  <TableCell key={col.key} className={col.className}>
-                    {colIdx === 0 && href ? (
-                      <Link
-                        to={href}
-                        className="after:absolute after:inset-0"
-                      >
-                        {col.cell(item)}
-                      </Link>
-                    ) : (
-                      col.cell(item)
-                    )}
-                  </TableCell>
-                ))}
-              </TableRow>
-            );
-          })}
-        </TableBody>
+        {groups.map((group) => (
+          <TableBody key={group.id} data-testid={group.testId}>
+            {group.rows.map(renderRow)}
+          </TableBody>
+        ))}
       </Table>
     </div>
   );

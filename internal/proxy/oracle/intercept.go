@@ -179,31 +179,75 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 }
 
 // handleJDBCExec intercepts a JDBC execute-with-SQL message (func=0x11, sub=0x69).
-func (s *session) handleJDBCExec(ttcPayload []byte) {
+//
+// This is a statement-carrying op like OALL8 and the v315+ piggyback exec, so it
+// runs the same gate in the same order: static validators, then the approval
+// hold, and only then is the row recorded and the packet allowed upstream. It
+// used to record the query and nothing else, which made the JDBC thin driver's
+// exec path a way around `read_only`, `block_ddl` and every approval pattern.
+//
+// Returns a non-nil error when the statement must not be forwarded; the caller
+// answers the client with a TTC error instead.
+func (s *session) handleJDBCExec(ttcPayload []byte) error {
 	result, err := decodeExecSQL(ttcPayload)
 	if err != nil {
 		s.logger.DebugContext(s.ctx, "failed to decode JDBC exec", slog.Any("error", err))
-		return
+		// Don't block on decode failure — let it pass through, as OALL8 does.
+		// See the Oracle caveat in docs/approvals.md.
+		return nil
 	}
 
+	// The gate matches on the normalized text, so the text recorded and shown in
+	// /queries is the same one the patterns ran against.
+	sql := shared.NormalizeSQL(result.SQL)
+
 	s.logger.InfoContext(s.ctx, "query intercepted",
-		slog.String("sql", truncateSQL(result.SQL, 200)),
+		slog.String("sql", truncateSQL(sql, 200)),
 		slog.String("source", "jdbc"),
 	)
+
+	// Access control check
+	if s.grant != nil {
+		if err := shared.ValidateOracleQuery(sql, s.grant); err != nil {
+			s.logger.WarnContext(s.ctx, "query blocked by access control",
+				slog.String("sql", truncateSQL(sql, 200)),
+				slog.Any("error", err),
+			)
+
+			return err
+		}
+	}
 
 	// Complete previous query if still pending (sets duration)
 	s.flushPendingQuery()
 
+	// Approval hold — after the static validators, before anything reaches
+	// upstream.
+	approvalUID, herr := s.holdIfNeeded(sql)
+	if herr != nil {
+		return herr
+	}
+
 	// Track as pending query and persist immediately
 	cursor := &trackedCursor{
-		sql:      result.SQL,
+		sql:      sql,
 		parsedAt: time.Now(),
 	}
 	s.tracker.pendingQuery = &pendingOracleQuery{
 		cursor:    cursor,
 		startTime: time.Now(),
 	}
-	s.persistQueryRecord()
+
+	// An approval hold already inserted the row; reuse it rather than writing
+	// a second one for the same statement.
+	if approvalUID != uuid.Nil {
+		s.tracker.pendingQuery.queryUID = approvalUID
+		s.tracker.pendingQuery.queryPersisted = true
+	} else {
+		s.persistQueryRecord()
+	}
+
+	return nil
 }
 
 // handleQueryResultV2 processes a v315+ QueryResult (func=0x10) response.

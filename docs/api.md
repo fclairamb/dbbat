@@ -272,22 +272,29 @@ All errors follow a consistent format:
 
 ```json
 {
-  "error": "error_code",
-  "message": "Human-readable description"
+  "code": "ERROR_CODE",
+  "message": "Human-readable description",
+  "detail": "Additional context (optional)",
+  "retry_after": 30
 }
 ```
+
+`retry_after` is only present on rate-limited (429) responses, which also
+carry a `Retry-After` header.
 
 ### Common Error Codes
 
 | Code | HTTP Status | Description |
 |------|-------------|-------------|
-| `unauthorized` | 401 | Missing or invalid authentication |
-| `forbidden` | 403 | Insufficient permissions |
-| `password_change_required` | 403 | Must change initial password |
-| `not_found` | 404 | Resource not found |
-| `rate_limit_exceeded` | 429 | Too many requests |
-| `auth_rate_limited` | 429 | Too many failed login attempts |
-| `weak_password` | 400 | Password doesn't meet requirements |
+| `VALIDATION_ERROR` | 400 | Invalid input |
+| `WEAK_PASSWORD` | 400 | Password doesn't meet requirements |
+| `UNAUTHORIZED` | 401 | Missing or invalid authentication |
+| `INVALID_CREDENTIALS` | 401 | Wrong username or password |
+| `FORBIDDEN` | 403 | Insufficient permissions |
+| `PASSWORD_CHANGE_REQUIRED` | 403 | Must change initial password |
+| `NOT_FOUND` | 404 | Resource not found |
+| `RATE_LIMITED` | 429 | Too many requests — retry after `retry_after` seconds |
+| `INTERNAL_ERROR` | 500 | Unexpected server error |
 
 ## Roles
 

@@ -1,12 +1,14 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/store"
@@ -257,10 +259,24 @@ func TestRateLimiter_ResponseFormat(t *testing.T) {
 		t.Errorf("Second request: status = %d, want %d", w.Code, http.StatusTooManyRequests)
 	}
 
-	// Check response body contains expected fields
-	body := w.Body.String()
-	if body == "" {
-		t.Error("Response body should not be empty")
+	// The body must be the canonical ErrorBody, not an ad-hoc shape: a
+	// client matching code == RATE_LIMITED has to work against every 429
+	// the API can produce.
+	var body ErrorBody
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("429 body is not a valid ErrorBody: %v (%q)", err, w.Body.String())
+	}
+
+	if body.Code != ErrCodeRateLimited {
+		t.Errorf("body.code = %q, want %q", body.Code, ErrCodeRateLimited)
+	}
+
+	if body.Message == "" {
+		t.Error("body.message should not be empty")
+	}
+
+	if body.RetryAfter < 1 {
+		t.Errorf("body.retry_after = %d, want >= 1", body.RetryAfter)
 	}
 
 	// Check all required headers are present
@@ -274,6 +290,101 @@ func TestRateLimiter_ResponseFormat(t *testing.T) {
 		if w.Header().Get(header) == "" {
 			t.Errorf("Header %q should be set", header)
 		}
+	}
+}
+
+// TestRateLimiter_MiddlewaresShareOne429Shape pins all three rate-limit
+// middlewares to the canonical ErrorBody. Each of them used to hand-roll its
+// own {"error": "rate_limit_exceeded", ...} body, so `code` was missing from
+// every 429 they produced and a client matching code == RATE_LIMITED — the
+// shape the OpenAPI Error schema promises — silently never matched.
+func TestRateLimiter_MiddlewaresShareOne429Shape(t *testing.T) {
+	t.Parallel()
+
+	// One request per minute, no burst: the second request is refused.
+	cfg := config.RateLimitConfig{
+		Enabled:               true,
+		RequestsPerMinute:     1,
+		RequestsPerMinuteAnon: 1,
+		Burst:                 0,
+	}
+
+	// One stable user per router: the limiter keys on the user UID, so a
+	// fresh one per request would never hit the limit.
+	withUser := func() gin.HandlerFunc {
+		user := &store.User{UID: uuid.New()}
+
+		return func(c *gin.Context) {
+			c.Set("current_user", user)
+			c.Next()
+		}
+	}
+
+	cases := []struct {
+		name string
+		use  func(router *gin.Engine, rl *RateLimiter)
+	}{
+		{
+			name: "Middleware",
+			use: func(router *gin.Engine, rl *RateLimiter) {
+				router.Use(withUser(), rl.Middleware())
+			},
+		},
+		{
+			name: "PostAuthMiddleware",
+			use: func(router *gin.Engine, rl *RateLimiter) {
+				router.Use(withUser(), rl.PostAuthMiddleware())
+			},
+		},
+		{
+			name: "PreAuthMiddleware",
+			use: func(router *gin.Engine, rl *RateLimiter) {
+				router.Use(rl.PreAuthMiddleware())
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			router := gin.New()
+			tc.use(router, NewRateLimiter(cfg))
+			router.GET("/test", func(c *gin.Context) {
+				c.String(http.StatusOK, "OK")
+			})
+
+			var w *httptest.ResponseRecorder
+
+			// The first request is allowed, the second refused.
+			for range 2 {
+				req := httptest.NewRequest(http.MethodGet, "/test", nil)
+				req.RemoteAddr = "10.0.0.9:12345"
+				w = httptest.NewRecorder()
+				router.ServeHTTP(w, req)
+			}
+
+			if w.Code != http.StatusTooManyRequests {
+				t.Fatalf("status = %d, want %d", w.Code, http.StatusTooManyRequests)
+			}
+
+			var body ErrorBody
+			if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+				t.Fatalf("429 body is not a valid ErrorBody: %v (%q)", err, w.Body.String())
+			}
+
+			if body.Code != ErrCodeRateLimited {
+				t.Errorf("body.code = %q, want %q", body.Code, ErrCodeRateLimited)
+			}
+
+			if body.RetryAfter < 1 {
+				t.Errorf("body.retry_after = %d, want >= 1", body.RetryAfter)
+			}
+
+			if w.Header().Get("Retry-After") == "" {
+				t.Error("Retry-After header should be set")
+			}
+		})
 	}
 }
 
