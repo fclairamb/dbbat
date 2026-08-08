@@ -78,6 +78,14 @@ test.describe("Approval holds", () => {
       path: "test-results/screenshots/connection-watch-panel.png",
       fullPage: true,
     });
+
+    // Rows still navigate to the query detail — the feed replaced the old
+    // history table, so it has to keep what that table did.
+    const items = authenticatedPage.getByTestId("watch-feed-item");
+    if ((await items.count()) > 0) {
+      await items.first().click();
+      await expect(authenticatedPage).toHaveURL(/\/queries\/[0-9a-f-]{36}/);
+    }
   });
 
   test("an open connection is live from mount, and the toggle only pauses", async ({
@@ -187,6 +195,28 @@ test.describe("Approval holds", () => {
     await expect(authenticatedPage.locator("tbody tr").first()).toHaveAttribute(
       "data-testid",
       `pending-approval-${queryUid}`,
+    );
+
+    // The row is a link to the query detail, drawn as an overlay across the
+    // whole row. Approve has to sit above it: if it doesn't, every press
+    // navigates away instead of resolving the hold.
+    let approvePosted = false;
+    await authenticatedPage.route(
+      `**/api/v1/queries/${queryUid}/approve`,
+      (route) => {
+        approvePosted = true;
+        return route.fulfill({
+          json: { query_uid: queryUid, approval_status: "approved" },
+        });
+      },
+    );
+
+    await held.getByTestId(`approve-query-${queryUid}`).click();
+    await expect
+      .poll(() => approvePosted, { timeout: 5_000 })
+      .toBe(true);
+    await expect(authenticatedPage).toHaveURL(
+      new RegExp(`/connections/${ACTIVE_UID}$`),
     );
   });
 

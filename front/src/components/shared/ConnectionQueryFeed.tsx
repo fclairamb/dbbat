@@ -477,7 +477,7 @@ export function ConnectionQueryFeed({
             }
             rowClassName={(row) =>
               isHeld(row)
-                ? "border-l-4 border-l-amber-500 bg-amber-500/10 hover:bg-amber-500/15"
+                ? "border-l-4 border-l-amber-500 bg-amber-500/15 hover:bg-amber-500/20"
                 : undefined
             }
             rowHref={(row) =>
