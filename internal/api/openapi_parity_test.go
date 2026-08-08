@@ -350,7 +350,7 @@ func TestOpenAPI429OnlyOnAllowlist(t *testing.T) {
 
 	for _, id := range unexpected {
 		t.Errorf("operation %q declares a '429' response but is not in the operationsDeclaring429 "+
-			"allowlist in this test — 429 is ambient middleware behaviour and is only documented "+
+			"allowlist in this test — 429 is ambient middleware behavior and is only documented "+
 			"per-operation where a client must branch on it; either remove the '429:' response "+
 			"block from this operation in openapi.yml, or add it to the allowlist with a "+
 			"reviewed justification", id)
