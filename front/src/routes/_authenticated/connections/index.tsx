@@ -34,6 +34,7 @@ export const Route = createFileRoute("/_authenticated/connections/")({
 
 function ConnectionsPage() {
   const { before, size, active } = Route.useSearch();
+  const navigate = Route.useNavigate();
   const { data: connections, isLoading, refetch } = useConnections({
     before,
     limit: size,
@@ -208,12 +209,13 @@ function ConnectionsPage() {
                 id="showActive"
                 checked={!!active}
                 onCheckedChange={(checked) => {
-                  // Navigate to update the search param
-                  window.location.search = new URLSearchParams({
-                    ...(before ? { before } : {}),
-                    size: String(size),
-                    ...(checked ? { active: "true" } : {}),
-                  }).toString();
+                  navigate({
+                    search: (prev) => ({
+                      ...prev,
+                      active: checked ? true : undefined,
+                    }),
+                    replace: true,
+                  });
                 }}
               />
               <Label htmlFor="showActive">Active only</Label>
