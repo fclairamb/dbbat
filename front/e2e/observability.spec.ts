@@ -230,6 +230,74 @@ test.describe("Observability Features", () => {
     ).toBeVisible();
   });
 
+  test("Active only toggle updates the table without a document reload", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("connections");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    // A hard navigation re-creates the document (and its globals). Stamp a
+    // marker on `window` so we can prove the SPA never reloaded.
+    await authenticatedPage.evaluate(() => {
+      (window as unknown as { __noReloadMarker?: boolean }).__noReloadMarker =
+        true;
+    });
+
+    const toggle = authenticatedPage.locator("#showActive");
+    await expect(toggle).toBeVisible();
+    await expect(toggle).toHaveAttribute("data-state", "unchecked");
+
+    await toggle.click();
+
+    // The URL search param updates client-side...
+    await expect(authenticatedPage).toHaveURL(/[?&]active=true/);
+    await expect(toggle).toHaveAttribute("data-state", "checked");
+
+    // ...and the marker survives, proving no document reload happened.
+    const markerAfterOn = await authenticatedPage.evaluate(
+      () =>
+        (window as unknown as { __noReloadMarker?: boolean })
+          .__noReloadMarker,
+    );
+    expect(markerAfterOn).toBe(true);
+
+    // Toggling back off removes the param entirely (matching the pre-router
+    // behavior) rather than leaving `active=false` in the URL.
+    await toggle.click();
+    await expect(authenticatedPage).not.toHaveURL(/[?&]active=/);
+    await expect(toggle).toHaveAttribute("data-state", "unchecked");
+
+    const markerAfterOff = await authenticatedPage.evaluate(
+      () =>
+        (window as unknown as { __noReloadMarker?: boolean })
+          .__noReloadMarker,
+    );
+    expect(markerAfterOff).toBe(true);
+  });
+
+  test("pagination and page-size links carry the active filter through", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("connections?active=true");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const toggle = authenticatedPage.locator("#showActive");
+    await expect(toggle).toHaveAttribute("data-state", "checked");
+
+    // Page-size links (25/50/100) must keep active=true.
+    const pageSizeLink = authenticatedPage.getByRole("link", { name: "25" });
+    await expect(pageSizeLink).toHaveAttribute(
+      "href",
+      /[?&]active=true/,
+    );
+
+    // The "Older" pagination link, when present, must also keep active=true.
+    const olderLink = authenticatedPage.getByRole("link", { name: /Older/ });
+    if (await olderLink.count()) {
+      await expect(olderLink).toHaveAttribute("href", /[?&]active=true/);
+    }
+  });
+
   // upstream_tls records an outcome, not a policy: under the opportunistic
   // ssl_mode values dbbat offers TLS and silently falls back to plaintext when
   // the target refuses. Test mode seeds proxy_target with ssl_mode=disable and
