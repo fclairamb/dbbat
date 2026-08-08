@@ -97,39 +97,61 @@ test.describe("Auth rate limiting", () => {
     expect(authenticatedPage.url()).not.toContain("/login");
   });
 
-  test("a 429 on POST /auth/login shows a rate-limit message, not a generic login failure", async ({
-    page,
-  }) => {
-    await page.route("**/api/v1/auth/login", async (route) => {
-      await route.fulfill({
-        status: 429,
-        headers: { "Retry-After": "30" },
-        contentType: "application/json",
-        body: JSON.stringify({
-          code: "RATE_LIMITED",
-          message: "Too many requests. Try again later.",
-          retry_after: 30,
-        }),
+  // POST /auth/login sits behind two different rate limiters that disagree
+  // on body shape (see AuthContext.tsx login()): the per-username
+  // auth-failure tracker (writeRateLimited, internal/api/errors.go) answers
+  // with the Error schema — `code: "RATE_LIMITED"` — while the IP-based
+  // PreAuthMiddleware (internal/api/ratelimit.go) writes an ad-hoc
+  // `{error, message, retry_after}` body with no `code` field at all. Both
+  // must produce the same friendly message, so both are covered here.
+  for (const scenario of [
+    {
+      name: "per-username limiter (code: RATE_LIMITED)",
+      body: {
+        code: "RATE_LIMITED",
+        message: "Too many requests. Try again later.",
+        retry_after: 30,
+      },
+    },
+    {
+      name: "IP-based limiter (no code field)",
+      body: {
+        error: "rate_limit_exceeded",
+        message: "Too many requests. Please retry after 30 seconds.",
+        retry_after: 30,
+      },
+    },
+  ]) {
+    test(`a 429 on POST /auth/login (${scenario.name}) shows a rate-limit message, not a generic login failure`, async ({
+      page,
+    }) => {
+      await page.route("**/api/v1/auth/login", async (route) => {
+        await route.fulfill({
+          status: 429,
+          headers: { "Retry-After": "30" },
+          contentType: "application/json",
+          body: JSON.stringify(scenario.body),
+        });
+      });
+
+      await page.goto("login");
+      await page.waitForLoadState("networkidle");
+      await expect(page.getByTestId("login-title")).toBeVisible();
+
+      await page.getByTestId("login-username").fill("admin");
+      await page.getByTestId("login-password").fill("admintest");
+      await page.getByTestId("login-submit").click();
+
+      const errorAlert = page.getByTestId("login-error");
+      await expect(errorAlert).toBeVisible({ timeout: 5000 });
+      await expect(errorAlert).toContainText(/too many login attempts/i);
+      await expect(errorAlert).not.toContainText("Login failed");
+
+      expect(page.url()).toContain("/app/login");
+
+      await page.screenshot({
+        path: "test-results/screenshots/login-rate-limited.png",
       });
     });
-
-    await page.goto("login");
-    await page.waitForLoadState("networkidle");
-    await expect(page.getByTestId("login-title")).toBeVisible();
-
-    await page.getByTestId("login-username").fill("admin");
-    await page.getByTestId("login-password").fill("admintest");
-    await page.getByTestId("login-submit").click();
-
-    const errorAlert = page.getByTestId("login-error");
-    await expect(errorAlert).toBeVisible({ timeout: 5000 });
-    await expect(errorAlert).toContainText(/too many login attempts/i);
-    await expect(errorAlert).not.toContainText("Login failed");
-
-    expect(page.url()).toContain("/app/login");
-
-    await page.screenshot({
-      path: "test-results/screenshots/login-rate-limited.png",
-    });
-  });
+  }
 });
