@@ -1296,7 +1296,11 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 				return true
 			}
 
-			s.handleJDBCExec(ttcPayload)
+			if err := s.handleJDBCExec(ttcPayload); err != nil {
+				_ = s.sendOracleError(err)
+
+				return true
+			}
 		} else {
 			s.handleOFETCH(ttcPayload)
 		}
