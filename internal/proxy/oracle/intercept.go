@@ -179,6 +179,12 @@ func (s *session) refuseUnknownCursor(cursorID uint16) error {
 // evade. Deliberately three: approval patterns, read_only, block_ddl.
 // block_copy is left out because an Oracle COPY is a client-side SQL*Plus
 // command, never a server statement, so it cannot ride a re-executed cursor.
+//
+// Note the pattern set is read off the grant regardless of
+// DBB_APPROVAL_ENABLED: a grant carrying patterns while approvals are globally
+// off still counts as restrictive here. Intentional — it errs fail-closed, and
+// the alternative would make an untracked cursor's fate depend on a global
+// switch the grant's author cannot see.
 func (s *session) hasStatementControls() bool {
 	if s.grant == nil {
 		return false

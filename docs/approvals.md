@@ -49,16 +49,22 @@ Server) a malformed request is refused outright. **Oracle is the exception**:
 TTC is hand-rolled and the SQL is located heuristically, so a decode failure on
 `OALL8`, the v315+ piggyback exec or the JDBC exec is deliberately treated as
 "pass through" rather than "refuse" — an unparseable frame must not be able to
-break a customer's connection. Two known consequences on Oracle:
+break a customer's connection. Two known gaps remain on Oracle, and they are
+the complete list:
 
-- A statement dbbat cannot decode is neither held nor recorded. It is also not
-  checked against `read_only`/`block_ddl`, so this is not specific to
-  approvals — the static controls have exactly the same dependency on decoding.
-  **This is the whole of the remaining gap**: an undecodable frame, and nothing
-  else.
+- **An undecodable frame.** A statement dbbat cannot decode is neither held nor
+  recorded. It is also not checked against `read_only`/`block_ddl`, so this is
+  not specific to approvals — the static controls have exactly the same
+  dependency on decoding.
+- **An `OFETCH` naming a cursor dbbat never saw parsed.** It is forwarded
+  ungated under *any* grant, logged only at debug level. The equivalent
+  SQL-less `OALL8` fails closed under a restrictive grant; the `OFETCH` path
+  deliberately does not, and closing that asymmetry is filed as
+  `specs/todos/2026-08-08-oracle-ofetch-unknown-cursor-and-query-quota.md`.
+  See "Re-executing a cursor" below.
 
 If an Oracle client of yours is not showing up in `/queries` at all, that is the
-same gap: treat missing query rows on Oracle as missing enforcement, and file it.
+first gap: treat missing query rows on Oracle as missing enforcement, and file it.
 
 ### Re-executing a cursor **is** gated
 
@@ -70,25 +76,40 @@ SQL-carrying path, on **every** execution. A statement matched by an approval
 pattern is therefore held again on each re-execution; approving it once does
 not buy a free run for the rest of the session.
 
-Two deliberate boundaries:
+That covers a cursor dbbat **saw parsed**, which is what makes the SQL known.
+Three boundaries, all deliberate:
 
 - **A fetch that continues a query already in flight is not re-gated.** It is
   more rows of a statement that has already been through the gate, and holding
   there would park a client mid-result-set. Only the fetch that starts a *fresh*
   pending query — the one that persists its own row in `/queries` — is gated.
-- **An untracked cursor fails closed only under a restrictive grant.** If the
-  cursor id was never seen parsed on this session, dbbat does not know what the
-  execution would run. When the grant carries **statement-shaped controls** — a
-  non-empty approval-pattern set, `read_only`, or `block_ddl` — the execution is
-  **refused** (`ORA-01031`), the same fail-closed shape the SQL Server proxy
-  uses for an unknown prepared-statement handle. When the grant carries none of
-  them, the frame is **forwarded** and a WARN is logged with the cursor id.
+- **A SQL-less `OALL8` naming an untracked cursor fails closed under a
+  restrictive grant.** If the cursor id was never seen parsed on this session,
+  dbbat does not know what the execution would run. When the grant carries
+  **statement-shaped controls** — a non-empty approval-pattern set, `read_only`,
+  or `block_ddl` — the execution is **refused** (`ORA-01031`), the same
+  fail-closed shape the SQL Server proxy uses for an unknown prepared-statement
+  handle. When the grant carries none of them, the frame is **forwarded** and a
+  WARN is logged with the cursor id.
 
-  This asymmetry is a trade-off, not an oversight. An untracked cursor is not by
-  itself an attack — dbbat may have attached mid-session, or the tracker entry
-  may be gone — so refusing unconditionally would break permissive sessions for
-  no security gain. Refusing exactly where a statement control exists keeps the
-  guarantee that matters without that blast radius.
+  That conditional refusal is a trade-off, not an oversight. An untracked cursor
+  is not by itself an attack — dbbat may have attached mid-session, or the
+  tracker entry may be gone — so refusing unconditionally would break permissive
+  sessions for no security gain. Refusing exactly where a statement control
+  exists keeps the guarantee that matters without that blast radius.
+
+  One subtlety worth knowing before filing it as a bug: the approval-pattern
+  half of "restrictive" is read off the grant regardless of
+  `DBB_APPROVAL_ENABLED`. A grant carrying patterns while approvals are globally
+  switched off will still refuse an untracked cursor, under a control that is
+  inert. That is intentional — it errs fail-closed.
+- **An `OFETCH` naming an untracked cursor is *not* refused.** It is forwarded,
+  under any grant, with only a debug-level log — the fail-closed rule above
+  applies to the SQL-less `OALL8` alone. Whether the two should behave alike is
+  an open question, filed as
+  `specs/todos/2026-08-08-oracle-ofetch-unknown-cursor-and-query-quota.md`.
+  Nothing is recorded in `/queries` for such a fetch either, so it falls under
+  "missing query rows mean missing enforcement" above.
 
 **How often real clients do this is unmeasured.** JDBC thin, `go-ora`,
 `python-oracledb`, OCI/sqlplus and SQLcl were not observed on a wire capture
