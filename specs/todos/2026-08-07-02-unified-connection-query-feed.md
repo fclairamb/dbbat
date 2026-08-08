@@ -102,3 +102,27 @@ instead.
   unified table component); the `watch-*` / `pending-approval-*` test ids are
   used by the E2E suite and the showcase project (`front/showcase/`), so
   either keep them or update both consumers in the same change.
+
+## Resolved open questions
+
+**Q: Whether the hold's Approve / Deny actions live inline in the row or in an
+expanded row body — whichever reads better at table density, but they must not
+require a navigation.**
+
+**Decision: inline in the row.** Put Approve / Deny directly in the held row
+(an actions cell), next to the `HeldFor` counter and the matched pattern. Do
+not introduce an expanded row body for holds. Truncate the matched pattern
+(with a title/tooltip carrying the full value) if it costs too much width —
+the buttons take priority over showing the pattern in full.
+
+**Q: `ConnectionWatchPanel` likely dissolves into the page (or becomes the
+unified table component); the `watch-*` / `pending-approval-*` test ids are
+used by the E2E suite and the showcase project (`front/showcase/`), so either
+keep them or update both consumers in the same change.**
+
+**Decision: keep the existing test ids.** Re-attach the current `watch-*` and
+`pending-approval-*` `data-testid` values to the equivalent elements of the
+unified table, so `front/e2e/` and `front/showcase/` keep passing without being
+modified. Do not rename them, even though the "watch panel" concept goes away.
+If an element genuinely has no equivalent any more, say so explicitly in the
+final report rather than silently dropping its test id.
