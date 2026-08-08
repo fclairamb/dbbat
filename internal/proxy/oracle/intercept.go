@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -58,6 +59,14 @@ func newOracleQueryTracker() *oracleQueryTracker {
 func (s *session) handleOALL8(ttcPayload []byte) error {
 	result, err := decodeOALL8(ttcPayload)
 	if err != nil {
+		// A well-formed OALL8 with no SQL text is a re-execution of a cursor
+		// the client already parsed, not a broken frame: it is gated against
+		// the SQL that cursor holds rather than forwarded.
+		var noSQL *OALL8NoSQLError
+		if errors.As(err, &noSQL) {
+			return s.handleCursorReexec(noSQL.CursorID)
+		}
+
 		s.logger.WarnContext(s.ctx, "failed to decode OALL8", slog.Any("error", err))
 		// Don't block on decode failure — let it pass through
 		return nil
@@ -101,6 +110,117 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 	s.tracker.cursors[result.CursorID] = cursor
 
 	// Start pending query and persist immediately
+	s.tracker.pendingQuery = &pendingOracleQuery{
+		cursor:    cursor,
+		startTime: time.Now(),
+	}
+
+	// An approval hold already inserted the row; reuse it rather than writing
+	// a second one for the same statement.
+	if approvalUID != uuid.Nil {
+		s.tracker.pendingQuery.queryUID = approvalUID
+		s.tracker.pendingQuery.queryPersisted = true
+	} else {
+		s.persistQueryRecord()
+	}
+
+	return nil
+}
+
+// handleCursorReexec gates an execution that carries no statement of its own —
+// a SQL-less OALL8, or an OFETCH that starts a fresh pending query — against
+// the SQL the named cursor was parsed with.
+//
+// Without this, an approval decision and every statement-shaped control applied
+// to the *parse* only: a client that parsed once and re-executed the same
+// cursor got one hold and then a free run for the rest of the session.
+func (s *session) handleCursorReexec(cursorID uint16) error {
+	cursor, ok := s.tracker.cursors[cursorID]
+	if !ok {
+		return s.refuseUnknownCursor(cursorID)
+	}
+
+	return s.regateCursor(cursor)
+}
+
+// refuseUnknownCursor decides what to do with a re-execution naming a cursor
+// dbbat never saw parsed. The statement it would run is unknown, so:
+//
+//   - under a grant carrying statement-shaped controls, it fails closed — a
+//     restrictive grant must not be bypassable by an execution the proxy cannot
+//     identify (the shape the SQL Server proxy already chose, see
+//     ErrUnknownPreparedStatement);
+//   - under a grant carrying none of them, it is forwarded with a WARN. An
+//     untracked cursor is not by itself an attack — dbbat may have attached
+//     mid-session, or the entry may be gone — and refusing there would break
+//     permissive sessions for no security gain.
+//
+// This asymmetry is deliberate and documented in docs/approvals.md.
+func (s *session) refuseUnknownCursor(cursorID uint16) error {
+	if !s.hasStatementControls() {
+		s.logger.WarnContext(s.ctx,
+			"forwarding a re-execution of an untracked cursor: the grant carries no statement-shaped control",
+			slog.Uint64("cursor_id", uint64(cursorID)),
+		)
+
+		return nil
+	}
+
+	s.logger.WarnContext(s.ctx,
+		"refused a re-execution of an untracked cursor under a restrictive grant",
+		slog.Uint64("cursor_id", uint64(cursorID)),
+	)
+
+	return ErrUnknownCursor
+}
+
+// hasStatementControls reports whether the session's grant carries controls
+// that are evaluated per statement — the ones a re-execution could otherwise
+// evade. Deliberately three: approval patterns, read_only, block_ddl.
+// block_copy is left out because an Oracle COPY is a client-side SQL*Plus
+// command, never a server statement, so it cannot ride a re-executed cursor.
+func (s *session) hasStatementControls() bool {
+	if s.grant == nil {
+		return false
+	}
+
+	return len(s.grant.ApprovalPatterns()) > 0 || s.grant.IsReadOnly() || s.grant.ShouldBlockDDL()
+}
+
+// regateCursor re-runs the statement gate — static controls, then the approval
+// hold — against the SQL a tracked cursor holds, and starts a fresh pending
+// query for this execution. Same order as the SQL-carrying path, so a
+// re-execution is enforced exactly like the parse that created the cursor.
+func (s *session) regateCursor(cursor *trackedCursor) error {
+	sql := cursor.sql
+
+	s.logger.DebugContext(s.ctx, "intercepted cursor re-execution",
+		slog.String("sql", truncateSQL(sql, 200)),
+		slog.Uint64("cursor_id", uint64(cursor.cursorID)),
+	)
+
+	// Access control check
+	if s.grant != nil {
+		if err := shared.ValidateOracleQuery(sql, s.grant); err != nil {
+			s.logger.WarnContext(s.ctx, "cursor re-execution blocked by access control",
+				slog.String("sql", truncateSQL(sql, 200)),
+				slog.Any("error", err),
+			)
+
+			return err
+		}
+	}
+
+	// Complete previous query if still pending (sets duration)
+	s.flushPendingQuery()
+
+	// Approval hold — after the static validators, before anything reaches
+	// upstream.
+	approvalUID, herr := s.holdIfNeeded(sql)
+	if herr != nil {
+		return herr
+	}
+
 	s.tracker.pendingQuery = &pendingOracleQuery{
 		cursor:    cursor,
 		startTime: time.Now(),
@@ -300,26 +420,37 @@ func (s *session) handleQueryResultV2(ttcPayload []byte) {
 }
 
 // handleOFETCH intercepts an OFETCH message: links the fetch to its cursor.
-func (s *session) handleOFETCH(ttcPayload []byte) {
+//
+// Returns a non-nil error when the fetch must not be forwarded; the caller
+// answers the client with a TTC error instead.
+func (s *session) handleOFETCH(ttcPayload []byte) error {
 	result, err := decodeOFETCH(ttcPayload)
 	if err != nil {
 		s.logger.WarnContext(s.ctx, "failed to decode OFETCH", slog.Any("error", err))
-		return
+
+		return nil
+	}
+
+	// A fetch that CONTINUES a query already in flight is simply more rows of a
+	// statement that has already been through the gate. It is deliberately left
+	// alone: re-validating here would risk parking a client mid-result-set,
+	// which the hold must never do.
+	if s.tracker.pendingQuery != nil {
+		return nil
 	}
 
 	cursor, ok := s.tracker.cursors[result.CursorID]
 	if !ok {
 		s.logger.DebugContext(s.ctx, "OFETCH for unknown cursor", slog.Uint64("cursor_id", uint64(result.CursorID)))
-		return
+
+		return nil
 	}
 
-	// If no pending query, start one for the fetch (re-execution of cursor)
-	if s.tracker.pendingQuery == nil {
-		s.tracker.pendingQuery = &pendingOracleQuery{
-			cursor:    cursor,
-			startTime: time.Now(),
-		}
-	}
+	// No query in flight: this fetch re-executes the cursor and starts its own
+	// pending query, which is persisted as a distinct row in /queries. Anything
+	// recorded as its own query is gated as its own query, or the audit trail
+	// and the enforcement disagree.
+	return s.regateCursor(cursor)
 }
 
 // handleOCLOSE cleans up cursor tracking when a cursor is closed.

@@ -56,6 +56,16 @@ var (
 	ErrQueryLimitExceed = errors.New("query limit exceeded")
 	// ErrDataLimitExceed indicates the grant's data transfer quota has been reached.
 	ErrDataLimitExceed = errors.New("data transfer limit exceeded")
+	// ErrUnknownCursor indicates an OALL8 re-executed a cursor id dbbat never
+	// saw parsed on this session, so the statement it would run is unknown.
+	// It fails closed only under a grant that carries statement-shaped
+	// controls (approval patterns, read_only, block_ddl); a grant with none of
+	// those forwards the frame with a WARN, since there is nothing to bypass.
+	// Same fail-closed shape as the SQL Server proxy's
+	// ErrUnknownPreparedStatement. See docs/approvals.md.
+	ErrUnknownCursor = errors.New(
+		"dbbat: this grant restricts what statements may do, and dbbat did not see this cursor " +
+			"parsed on this session: re-parse the statement instead of re-executing the cursor")
 	// ErrServerNotFound indicates the requested database was not found in the store.
 	ErrServerNotFound = errors.New("database not found")
 	// ErrUserNotFound indicates the requested user was not found in the store.

@@ -1278,7 +1278,16 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 			return s.gateStatement(s.handleJDBCExec, ttcPayload)
 		}
 
-		s.handleOFETCH(ttcPayload)
+		// A fetch that starts a fresh pending query is a cursor re-execution
+		// and is gated like a statement; one that continues a query already in
+		// flight is not. It does not go through gateStatement: quotas are
+		// already enforced mid-stream on the response leg, and a fetch is not
+		// where a new statement enters.
+		if err := s.handleOFETCH(ttcPayload); err != nil {
+			_ = s.sendOracleError(err)
+
+			return true
+		}
 
 	case TTCFuncOCLOSE, TTCFuncOClosev2:
 		cursorID, err := decodeCursorIDFromOCLOSE(ttcPayload)
