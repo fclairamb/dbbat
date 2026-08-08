@@ -132,18 +132,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   // Re-runs the current check; set by the mount effect below so the manual
   // retry action can trigger the same logic without duplicating it.
-  const checkStoredAuthRef = useRef<() => void>(() => {});
+  const checkStoredAuthRef = useRef<(allowAutoRetry: boolean) => void>(
+    () => {},
+  );
+  // The single scheduled automatic re-validate (from a Retry-After), if
+  // any — tracked outside the effect so a manual retry can cancel it.
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
 
   const retrySessionCheck = useCallback(() => {
-    checkStoredAuthRef.current();
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = undefined;
+    }
+    // A manual retry gets its own single automatic follow-up if it, too,
+    // comes back rate limited — it isn't chained off a prior automatic
+    // attempt, so it doesn't count against that budget.
+    checkStoredAuthRef.current(true);
   }, []);
 
   // Check for stored token on mount
   useEffect(() => {
     let cancelled = false;
-    let retryTimer: ReturnType<typeof setTimeout> | undefined;
 
-    const checkStoredAuth = async () => {
+    // `allowAutoRetry` bounds Retry-After-driven re-validates to exactly
+    // one automatic attempt: the initial check (and any manual retry via
+    // retrySessionCheck) may schedule one, but that scheduled attempt
+    // calls back in with allowAutoRetry=false so a persistent rate limit
+    // can't chain retries forever without a user action.
+    const checkStoredAuth = async (allowAutoRetry: boolean) => {
       const token = getStoredToken();
 
       if (!token) {
@@ -193,24 +211,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         },
       }));
 
-      if (result.retryAfterSeconds) {
-        retryTimer = setTimeout(() => {
+      if (allowAutoRetry && result.retryAfterSeconds) {
+        retryTimerRef.current = setTimeout(() => {
+          retryTimerRef.current = undefined;
           if (!cancelled) {
-            void checkStoredAuth();
+            void checkStoredAuth(false);
           }
         }, result.retryAfterSeconds * 1000);
       }
     };
 
-    checkStoredAuthRef.current = () => {
-      void checkStoredAuth();
+    checkStoredAuthRef.current = (allowAutoRetry: boolean) => {
+      void checkStoredAuth(allowAutoRetry);
     };
-    void checkStoredAuth();
+    void checkStoredAuth(true);
 
     return () => {
       cancelled = true;
-      if (retryTimer) {
-        clearTimeout(retryTimer);
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = undefined;
       }
     };
   }, [validateSession, queryClient]);
@@ -230,12 +250,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           message?: string;
           retry_after?: number;
         };
-        // A 429 here means too many login attempts, not "wrong password" —
-        // give the form a message that says so instead of a bare error code.
-        if (errorData?.code === "RATE_LIMITED") {
+        // POST /auth/login sits behind two different rate limiters that
+        // disagree on body shape: the per-username tracker (writeRateLimited,
+        // internal/api/errors.go) uses the Error schema — code:
+        // "RATE_LIMITED" — but the IP-based PreAuthMiddleware
+        // (internal/api/ratelimit.go) writes an ad-hoc
+        // {error, message, retry_after} body with no `code` at all. Gate on
+        // the raw HTTP status, not the error shape, so both paths get the
+        // same friendly message; read retry_after from whichever shape is
+        // present, falling back to the Retry-After header both set.
+        if (response.response.status === 429) {
+          const retryAfterSeconds =
+            errorData?.retry_after ??
+            parseRetryAfterSeconds(
+              response.response.headers.get("Retry-After"),
+            );
           throw new Error(
-            errorData.retry_after
-              ? `Too many login attempts. Please try again in ${errorData.retry_after}s.`
+            retryAfterSeconds
+              ? `Too many login attempts. Please try again in ${retryAfterSeconds}s.`
               : "Too many login attempts. Please try again shortly.",
           );
         }
