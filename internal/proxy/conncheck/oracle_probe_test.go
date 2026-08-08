@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -50,7 +51,23 @@ func tnsRefuseListener(t *testing.T, oraCode int) net.Listener {
 					return
 				}
 
-				_, _ = c.Write(tnsRefusePacket(oraCode))
+				if _, err := c.Write(tnsRefusePacket(oraCode)); err != nil {
+					return
+				}
+
+				// Half-close the write side now that the refusal is on the
+				// wire, then block on a read until the client has drained it
+				// and closed its own side (EOF). Without this, the deferred
+				// Close below can tear the connection down before the bytes
+				// actually reach the client — through a tunnel that pumps
+				// data via an intermediate io.Copy this is a real race, not
+				// a theoretical one, and it degrades the client's read of
+				// the refusal into a bare EOF.
+				if cw, ok := c.(interface{ CloseWrite() error }); ok {
+					_ = cw.CloseWrite()
+				}
+
+				_, _ = io.Copy(io.Discard, c)
 			}(conn)
 		}
 	}()
@@ -129,6 +146,14 @@ func TestCheck_OracleTarget_AuthRejected(t *testing.T) {
 	if res.Stage != StageTargetAuth || res.Code != CodeDBAuthFailed {
 		t.Errorf("stage/code = %s/%s, want %s/%s (msg=%s)",
 			res.Stage, res.Code, StageTargetAuth, CodeDBAuthFailed, res.Message)
+	}
+
+	// Pin the classification *input*, not just its output: the result must
+	// carry go-ora's own rendering of the ORA-01017 text, so a future
+	// regression in isDBAuthRejection's matching shows up as a message
+	// mismatch distinguishable from a transport-level flake.
+	if !strings.Contains(res.Message, "1017") {
+		t.Errorf("message = %q, want it to contain the ORA-01017 text go-ora saw", res.Message)
 	}
 }
 
@@ -215,6 +240,13 @@ func TestCheck_OracleTarget_ThroughTunnel(t *testing.T) {
 	if res.Stage != StageTargetAuth || res.Code != CodeDBAuthFailed {
 		t.Errorf("stage/code = %s/%s, want %s/%s (msg=%s)",
 			res.Stage, res.Code, StageTargetAuth, CodeDBAuthFailed, res.Message)
+	}
+
+	// Same classification-input guard as TestCheck_OracleTarget_AuthRejected:
+	// confirms go-ora actually read the refusal through the tunnel rather
+	// than degrading to a bare EOF that happens to also fail the check.
+	if !strings.Contains(res.Message, "1017") {
+		t.Errorf("message = %q, want it to contain the ORA-01017 text go-ora saw", res.Message)
 	}
 }
 
