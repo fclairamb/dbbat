@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.2](https://github.com/fclairamb/dbbat/compare/v0.23.1...v0.23.2) (2026-08-08)
+
+
+### Bug Fixes
+
+* **oracle:** re-executing a cached cursor no longer skips the approval gate ([#308](https://github.com/fclairamb/dbbat/issues/308)) ([62d9451](https://github.com/fclairamb/dbbat/commit/62d94515b5bd1b7e8c76770dc58d1c85a00ad6c9))
+
 ## [Unreleased]
 
 ### Bug Fixes
