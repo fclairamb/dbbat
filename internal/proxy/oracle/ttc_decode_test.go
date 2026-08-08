@@ -201,7 +201,7 @@ func TestDecodeOALL8_EmptySQL(t *testing.T) {
 	payload := buildOALL8("", nil, 1)
 	_, err := decodeOALL8(payload)
 	require.ErrorIs(t, err, ErrOALL8NoSQL)
-	assert.NotErrorIs(t, err, ErrEmptySQL, "a re-execution must not read as a decode failure")
+	require.NotErrorIs(t, err, ErrEmptySQL, "a re-execution must not read as a decode failure")
 
 	var noSQL *OALL8NoSQLError
 
