@@ -22,10 +22,9 @@ import (
 func buildJDBCExec(sql string) []byte {
 	const sqlOffset = 50
 
-	buf := make([]byte, sqlOffset)
-	buf[0] = byte(TTCFuncOFETCH)
-	buf[1] = execSubOpJDBC
-
+	buf := make([]byte, 0, sqlOffset+5+len(sql))
+	buf = append(buf, byte(TTCFuncOFETCH), execSubOpJDBC)
+	buf = append(buf, make([]byte, sqlOffset-2)...)
 	buf = append(buf, encodeVarLen(uint32(len(sql)))...)
 	buf = append(buf, []byte(sql)...)
 
@@ -170,10 +169,10 @@ func (f *fakeApprovalStore) CreatePendingQuery(
 
 	status := store.ApprovalPending
 	created := &store.Query{
-		UID:              uuid.New(),
-		ConnectionID:     query.ConnectionID,
-		SQLText:          query.SQLText,
-		ExecutedAt:       query.ExecutedAt,
+		UID:             uuid.New(),
+		ConnectionID:    query.ConnectionID,
+		SQLText:         query.SQLText,
+		ExecutedAt:      query.ExecutedAt,
 		ApprovalStatus:  &status,
 		ApprovalPattern: &pattern,
 	}

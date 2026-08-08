@@ -193,7 +193,8 @@ func (s *session) handleJDBCExec(ttcPayload []byte) error {
 	if err != nil {
 		s.logger.DebugContext(s.ctx, "failed to decode JDBC exec", slog.Any("error", err))
 		// Don't block on decode failure — let it pass through, as OALL8 does.
-		return nil //nolint:nilerr // best-effort interception, see docs/approvals.md
+		// See the Oracle caveat in docs/approvals.md.
+		return nil
 	}
 
 	// The gate matches on the normalized text, so the text recorded and shown in
