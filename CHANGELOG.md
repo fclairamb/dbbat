@@ -1,6 +1,7 @@
 # Changelog
 
-## [Unreleased]
+## [0.23.1](https://github.com/fclairamb/dbbat/compare/v0.23.0...v0.23.1) (2026-08-08)
+
 
 ### Features
 
@@ -13,7 +14,7 @@
 * **ui:** a 429 on login says "too many login attempts" instead of a generic "Login failed", for both of the rate limiters that guard the endpoint.
 * **ui:** the "Active only" toggle on the connections list updates in place. It assigned `window.location.search`, forcing a full document reload that re-bootstrapped the SPA and rebuilt the auth and query caches — for a filter that is applied client-side anyway.
 * **api:** every rate limiter answers 429 with the same body. Three middlewares hand-rolled an ad-hoc `{error, message, retry_after}` envelope while the rest of the API used the canonical `Error` schema, so anything matching on `code == "RATE_LIMITED"` silently never matched behind them. `GET /auth/me` also now declares the 429 it has always been able to return.
-* **test:** `TestCheck_OracleTarget_ThroughTunnel` no longer flakes. The fake TNS listener's refusal write raced its own teardown, so go-ora saw EOF before the ORA-01017 packet and the probe degraded to the same code a genuine connectivity fault produces — indistinguishable from a real regression, and it blocked an unrelated dependency bump twice. The refusal is now ordered via half-close, and both Oracle probe tests additionally assert on what the classifier actually saw.
+* **test:** `TestCheck_OracleTarget_ThroughTunnel` no longer flakes. The fake TNS listener's refusal write raced its own teardown, so go-ora saw EOF before the ORA-01017 packet and the probe degraded to the same code a genuine connectivity fault produces — indistinguishable from a real regression, and it blocked an unrelated dependency bump twice ([#305](https://github.com/fclairamb/dbbat/issues/305)). The refusal is now ordered via half-close, and both Oracle probe tests additionally assert on what the classifier actually saw. ([#306](https://github.com/fclairamb/dbbat/issues/306)) ([88f3d6c](https://github.com/fclairamb/dbbat/commit/88f3d6c6aa09d94c6f68e5a63624010d4591595b))
 
 ## [0.23.0](https://github.com/fclairamb/dbbat/compare/v0.22.0...v0.23.0) (2026-08-07)
 
