@@ -250,15 +250,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           message?: string;
           retry_after?: number;
         };
-        // POST /auth/login sits behind two different rate limiters that
-        // disagree on body shape: the per-username tracker (writeRateLimited,
-        // internal/api/errors.go) uses the Error schema — code:
-        // "RATE_LIMITED" — but the IP-based PreAuthMiddleware
-        // (internal/api/ratelimit.go) writes an ad-hoc
-        // {error, message, retry_after} body with no `code` at all. Gate on
-        // the raw HTTP status, not the error shape, so both paths get the
-        // same friendly message; read retry_after from whichever shape is
-        // present, falling back to the Retry-After header both set.
+        // POST /auth/login sits behind two different rate limiters — the
+        // per-username tracker and the IP-based PreAuthMiddleware. Both now
+        // answer with the canonical Error schema (code: "RATE_LIMITED", see
+        // writeRateLimited in internal/api/errors.go), but the middlewares
+        // used to write an ad-hoc {error, message, retry_after} body with no
+        // `code` at all. Keep gating on the raw HTTP status rather than the
+        // body shape, so an older deployment (or a proxy answering for us)
+        // still gets the same friendly message; read retry_after from
+        // whichever shape is present, falling back to the Retry-After header
+        // both set.
         if (response.response.status === 429) {
           const retryAfterSeconds =
             errorData?.retry_after ??

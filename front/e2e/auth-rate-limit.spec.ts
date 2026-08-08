@@ -23,8 +23,8 @@ test.describe("Auth rate limiting", () => {
         status: 429,
         contentType: "application/json",
         body: JSON.stringify({
-          error: "rate_limit_exceeded",
-          message: "Too many requests. Please retry after 60 seconds.",
+          code: "RATE_LIMITED",
+          message: "Too many requests. Try again later.",
           retry_after: 60,
         }),
       });
@@ -70,8 +70,8 @@ test.describe("Auth rate limiting", () => {
           headers: { "Retry-After": "1" },
           contentType: "application/json",
           body: JSON.stringify({
-            error: "rate_limit_exceeded",
-            message: "Too many requests.",
+            code: "RATE_LIMITED",
+            message: "Too many requests. Try again later.",
             retry_after: 1,
           }),
         });
@@ -97,16 +97,18 @@ test.describe("Auth rate limiting", () => {
     expect(authenticatedPage.url()).not.toContain("/login");
   });
 
-  // POST /auth/login sits behind two different rate limiters that disagree
-  // on body shape (see AuthContext.tsx login()): the per-username
-  // auth-failure tracker (writeRateLimited, internal/api/errors.go) answers
-  // with the Error schema — `code: "RATE_LIMITED"` — while the IP-based
-  // PreAuthMiddleware (internal/api/ratelimit.go) writes an ad-hoc
-  // `{error, message, retry_after}` body with no `code` field at all. Both
-  // must produce the same friendly message, so both are covered here.
+  // POST /auth/login sits behind two different rate limiters — the
+  // per-username auth-failure tracker and the IP-based PreAuthMiddleware —
+  // and both now answer with the canonical Error schema
+  // (`code: "RATE_LIMITED"`, see writeRateLimited in
+  // internal/api/errors.go). The second scenario below is the ad-hoc
+  // `{error, message, retry_after}` body those middlewares used to write:
+  // the frontend gates on the HTTP status rather than the body shape (see
+  // AuthContext.tsx login()), so it must stay friendly against an older
+  // deployment or a proxy that still returns the legacy shape.
   for (const scenario of [
     {
-      name: "per-username limiter (code: RATE_LIMITED)",
+      name: "canonical Error schema (code: RATE_LIMITED)",
       body: {
         code: "RATE_LIMITED",
         message: "Too many requests. Try again later.",
@@ -114,7 +116,7 @@ test.describe("Auth rate limiting", () => {
       },
     },
     {
-      name: "IP-based limiter (no code field)",
+      name: "legacy ad-hoc body (no code field)",
       body: {
         error: "rate_limit_exceeded",
         message: "Too many requests. Please retry after 30 seconds.",
