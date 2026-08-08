@@ -419,10 +419,9 @@ verifier type from the challenge's `AUTH_VFR_DATA` flag and uses 6949.
 
 #### Proxy-mode robustness (must never crash on a malformed packet)
 
-Query/response interception in proxy mode is **best-effort observability**: it decodes a
-copy for logging but forwards every packet byte-exact regardless. A decode error must
-never break the connection — and a *panic* must never take down the whole process. Two
-guards enforce this:
+Query/response interception in proxy mode is **best-effort observability**: whatever it
+decodes, it forwards byte-exact. A decode error must never break the connection — and a
+*panic* must never take down the whole process. Two guards enforce this:
 
 - `dlc()` (`describe.go`) rejects a negative length. SQLcl/ojdbc negotiates a high
   TTCVersion, so the server's column-describe records carry the modern domain/annotation
@@ -433,6 +432,17 @@ guards enforce this:
   the decode path and forward the packet unchanged.
 
 See `sqlcl_regression_test.go` for both guards (real SQLcl 26.1.2 fixtures).
+
+"Best-effort" describes what happens when the decode **fails**, not what happens when it
+succeeds. A statement dbbat *did* decode is enforced: `read_only`, `block_copy`,
+`block_ddl`, the Oracle blocklist and the grant's approval patterns all run before the
+packet is forwarded, and a refusal is answered with a TTC error instead
+(`sendOracleError`). The three statement-carrying ops — `OALL8`, the v315+ piggyback exec
+(`func=0x03` / sub-op `0x5e`) and the JDBC exec (`func=0x11` / sub-op `0x69`) — go through
+the identical normalize → validate → hold → record sequence in `intercept.go`; adding a
+fourth means wiring the same sequence, not just a `persistQueryRecord()` call. The
+corollary is that a frame whose SQL cannot be extracted is neither logged nor enforced —
+see the Oracle caveat in `docs/approvals.md`.
 
 #### SQLcl/ojdbc exec SQL capture
 
