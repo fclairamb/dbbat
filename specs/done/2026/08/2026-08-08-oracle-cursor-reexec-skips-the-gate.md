@@ -79,3 +79,58 @@ rather than a live hole, and the fix should say so.
   (`make test-e2e-oracle`) and the dump-per-use-case fixture convention.
 - Re-check the Oracle caveat in `docs/approvals.md` ("The hold, in order")
   afterwards: it currently documents this gap as known.
+
+## Resolved open questions
+
+**Q: "When the cursor is *unknown*, decide explicitly and document it —
+forwarding an unidentifiable execution under a restrictive grant is the same
+fail-open shape the SQL Server proxy chose to refuse."**
+
+**Decision: refuse only under a restrictive grant.** When a SQL-less `OALL8`
+names a cursor id that is not in `s.tracker.cursors`:
+
+- If the session's grant carries **statement-shaped controls** — a non-empty
+  approval-pattern set, `read_only`, or `block_ddl` — **refuse** the execution
+  (fail closed) with a TTC error, in the same shape `handleJDBCExec` uses for a
+  refused statement. A restrictive grant must not be bypassable by an execution
+  the proxy cannot identify.
+- If the grant carries **none** of those controls (or there is no grant), **forward**
+  the frame as today, and log at WARN with the cursor id.
+
+Rationale: an untracked cursor is not necessarily an attack — the proxy may have
+attached mid-session, the tracker may have evicted the entry, or the client may
+have reconnected — so refusing unconditionally would break permissive sessions
+for no security gain. Refusing exactly where a statement control exists keeps the
+guarantee that matters without that blast radius. Document this asymmetry in
+`docs/approvals.md` next to the existing Oracle caveat; it is a deliberate
+trade-off, not an oversight.
+
+**Q: "`handleOFETCH`: decide whether a fetch that starts a *new* pending query is
+a re-execution that should be re-gated, or merely more rows of the statement that
+was already approved."**
+
+**Decision: re-gate it.** Treat the no-query-in-flight branch as a genuine
+re-execution and run `shared.ValidateOracleQuery` + `holdIfNeeded` against the
+tracked `cursor.sql` before forwarding. The justification is the code's own
+behaviour: that branch already persists a **distinct query row**, so anything
+recorded as its own query must be gated as its own query, or the audit trail and
+the enforcement disagree.
+
+A fetch that continues a query already in flight is **not** affected — only the
+branch that starts a fresh `pendingQuery` gates. Do not hold mid-result-set.
+
+**Q: "This needs protocol verification before it is implemented" — how often real
+Oracle clients re-execute by cursor id without resending SQL is inferred from the
+shape of the code, not observed on a wire capture.**
+
+**Decision: implement now with synthesized frames; do not block on a capture.**
+Build the fix and cover it with hand-built TTC frames under the **default build**
+(no Oracle container, no `make test-e2e-oracle`), as the spec's own test bullet
+already asks. The hardening is worth having whatever the real-world frequency
+turns out to be.
+
+State plainly in `docs/approvals.md` (and in the final report) that the
+real-world re-execution rate is **unmeasured** — this is hardening against a
+shape the code permits, not a response to an observed exploit. Capturing a real
+cursor-reuse exchange into `internal/proxy/oracle/testdata` remains worth doing
+and should be filed as its own follow-up in `specs/todos/`, not folded in here.

@@ -342,7 +342,32 @@ var (
 	// that is not an Oracle diagnostic. Callers ignore such payloads instead
 	// of acting on the misread fields.
 	ErrNotLegacyResponse = errors.New("payload is not a legacy TTC Response")
+	// ErrOALL8NoSQL reports a *well-formed* OALL8 that carries no SQL text:
+	// the client is re-executing a cursor it already parsed. This is
+	// deliberately NOT a decode failure — a frame dbbat cannot parse is
+	// forwarded ungated (see the Oracle caveat in docs/approvals.md), whereas
+	// this one decoded fine and names a cursor whose SQL the session already
+	// knows, so it can and must be re-gated against that SQL.
+	//
+	// Match it with errors.Is; use errors.As on *OALL8NoSQLError to recover
+	// the cursor id.
+	ErrOALL8NoSQL = errors.New("OALL8 carries no SQL text (cursor re-execution)")
 )
+
+// OALL8NoSQLError is ErrOALL8NoSQL for one specific cursor. It carries the
+// cursor id that was decoded successfully before the SQL length turned out to
+// be zero — throwing that id away is what used to make a re-execution
+// indistinguishable from a broken frame.
+type OALL8NoSQLError struct {
+	CursorID uint16
+}
+
+func (e *OALL8NoSQLError) Error() string {
+	return fmt.Sprintf("%s: cursor %d", ErrOALL8NoSQL.Error(), e.CursorID)
+}
+
+// Unwrap makes errors.Is(err, ErrOALL8NoSQL) true.
+func (e *OALL8NoSQLError) Unwrap() error { return ErrOALL8NoSQL }
 
 // OALL8Result contains the decoded fields from an OALL8 (parse+execute) message.
 type OALL8Result struct {
@@ -408,8 +433,12 @@ func decodeOALL8(ttcPayload []byte) (*OALL8Result, error) {
 
 	offset += bytesRead
 
+	// A zero SQL length is not a malformed frame: everything up to here parsed,
+	// and the cursor id is good. Report it as its own condition, carrying that
+	// id, so the caller can re-gate the re-execution instead of treating it as
+	// an undecodable packet and waving it through.
 	if sqlLen == 0 {
-		return nil, ErrEmptySQL
+		return nil, &OALL8NoSQLError{CursorID: cursorID}
 	}
 
 	// SQL text

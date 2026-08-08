@@ -180,7 +180,7 @@ func TestHandleOFETCH_LinksToCursor(t *testing.T) {
 	s.tracker.pendingQuery = nil
 
 	// Now fetch should link to the cursor
-	s.handleOFETCH(buildOFETCH(7, 100))
+	require.NoError(t, s.handleOFETCH(buildOFETCH(7, 100)))
 
 	require.NotNil(t, s.tracker.pendingQuery)
 	assert.Equal(t, "SELECT * FROM emp", s.tracker.pendingQuery.cursor.sql)
@@ -191,7 +191,7 @@ func TestHandleOFETCH_UnknownCursor(t *testing.T) {
 	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
 
 	// OFETCH for cursor that doesn't exist
-	s.handleOFETCH(buildOFETCH(99, 100))
+	require.NoError(t, s.handleOFETCH(buildOFETCH(99, 100)))
 	assert.Nil(t, s.tracker.pendingQuery)
 }
 

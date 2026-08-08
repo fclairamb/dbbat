@@ -271,3 +271,93 @@ func TestOpenAPIOperationIDs(t *testing.T) {
 		t.Errorf("duplicate operationId: %s", clash)
 	}
 }
+
+// operationsDeclaring429 is the exhaustive, hand-maintained allowlist of
+// operationIds allowed to document a '429' response. 429 is a cross-cutting
+// middleware outcome every operation can produce (see internal/api/server.go,
+// PreAuthMiddleware/PostAuthMiddleware), so declaring it per-operation is only
+// useful where a client must branch on it instead of just retrying: the
+// session-validation path, where mistaking a 429 for an invalid session or bad
+// credentials logs a user out or shows the wrong error (see
+// specs/done/2026/08/2026-08-07-01-429-must-not-log-out.md). Adding a seventh
+// entry here is a deliberate act that should be justified in code review, not
+// something that drifts back in — do not "fix" a future failure by growing
+// this list without re-reading that rationale.
+var operationsDeclaring429 = map[string]bool{
+	"getCurrentUser":         true,
+	"login":                  true,
+	"logout":                 true,
+	"changePasswordPreLogin": true,
+	"oauthExchange":          true,
+	"deviceAuthorization":    true,
+}
+
+// TestOpenAPI429OnlyOnAllowlist asserts that the set of operations declaring a
+// '429' response in openapi.yml matches operationsDeclaring429 exactly. 429 is
+// ambient (every endpoint can answer it), so anywhere outside the allowlist it
+// is noise at best and misleading at worst — see the allowlist doc comment.
+func TestOpenAPI429OnlyOnAllowlist(t *testing.T) {
+	t.Parallel()
+
+	doc := parseOpenAPISpec(t)
+
+	declared := make(map[string]bool)
+
+	for path, item := range doc.Paths {
+		for key, raw := range item {
+			if !openapiMethods[strings.ToLower(key)] {
+				continue
+			}
+
+			op, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			id, _ := op["operationId"].(string)
+
+			responses, ok := op["responses"].(map[string]any)
+			if !ok {
+				continue
+			}
+
+			if _, has429 := responses["429"]; has429 {
+				if id == "" {
+					id = operationKey(strings.ToUpper(key), path)
+				}
+
+				declared[id] = true
+			}
+		}
+	}
+
+	var unexpected, missing []string
+
+	for id := range declared {
+		if !operationsDeclaring429[id] {
+			unexpected = append(unexpected, id)
+		}
+	}
+
+	for id := range operationsDeclaring429 {
+		if !declared[id] {
+			missing = append(missing, id)
+		}
+	}
+
+	sort.Strings(unexpected)
+	sort.Strings(missing)
+
+	for _, id := range unexpected {
+		t.Errorf("operation %q declares a '429' response but is not in the operationsDeclaring429 "+
+			"allowlist in this test — 429 is ambient middleware behavior and is only documented "+
+			"per-operation where a client must branch on it; either remove the '429:' response "+
+			"block from this operation in openapi.yml, or add it to the allowlist with a "+
+			"reviewed justification", id)
+	}
+
+	for _, id := range missing {
+		t.Errorf("operationsDeclaring429 allowlist expects operation %q to declare a '429' response "+
+			"in openapi.yml, but it does not", id)
+	}
+}

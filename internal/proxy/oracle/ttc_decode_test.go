@@ -191,12 +191,22 @@ func TestDecodeOALL8_LargeSQL(t *testing.T) {
 	assert.Equal(t, sql, result.SQL)
 }
 
+// TestDecodeOALL8_EmptySQL: a zero SQL length is a cursor re-execution, not a
+// decode failure, and the error carries the cursor id so the caller can look
+// the statement up. It used to collapse into the generic ErrEmptySQL, which
+// handleOALL8 read as "unparseable — forward it".
 func TestDecodeOALL8_EmptySQL(t *testing.T) {
 	t.Parallel()
 
 	payload := buildOALL8("", nil, 1)
 	_, err := decodeOALL8(payload)
-	assert.ErrorIs(t, err, ErrEmptySQL)
+	require.ErrorIs(t, err, ErrOALL8NoSQL)
+	require.NotErrorIs(t, err, ErrEmptySQL, "a re-execution must not read as a decode failure")
+
+	var noSQL *OALL8NoSQLError
+
+	require.ErrorAs(t, err, &noSQL)
+	assert.Equal(t, uint16(1), noSQL.CursorID)
 }
 
 func TestDecodeOALL8_UnicodeSQL(t *testing.T) {
