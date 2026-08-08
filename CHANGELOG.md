@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.1](https://github.com/fclairamb/dbbat/compare/v0.23.0...v0.23.1) (2026-08-08)
+
+
+### Bug Fixes
+
+* rate limiting no longer destroys sessions, and Oracle JDBC statements go through the approval gate ([#306](https://github.com/fclairamb/dbbat/issues/306)) ([88f3d6c](https://github.com/fclairamb/dbbat/commit/88f3d6c6aa09d94c6f68e5a63624010d4591595b))
+
 ## [Unreleased]
 
 ### Features
