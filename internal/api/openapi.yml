@@ -31,16 +31,18 @@ info:
 
     ## Rate Limiting
 
-    All authenticated endpoints are rate-limited. Response headers include:
+    Every endpoint is rate limited and may answer `429` with the standard
+    `Error` body (`code: RATE_LIMITED`) and a `Retry-After` header. Because
+    that is true everywhere, it is documented per-operation only where the
+    client must *branch* on it rather than simply retry — the
+    session-validation endpoints under `/auth`, where mistaking a `429` for
+    an invalid session or a bad password is a bug.
+
+    Response headers include:
 
     - `X-RateLimit-Limit`: Maximum requests per minute
     - `X-RateLimit-Remaining`: Remaining requests in current window
     - `X-RateLimit-Reset`: Unix timestamp when limit resets
-
-    Every endpoint is rate limited and may answer `429` with the standard
-    `Error` body (`code: RATE_LIMITED`) and a `Retry-After` header. It is
-    documented per-operation only where the client must branch on it rather
-    than simply retry — the session-validation endpoints under `/auth`.
 
     ## Authentication Rate Limiting
 
