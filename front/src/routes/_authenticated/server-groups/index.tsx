@@ -334,7 +334,8 @@ function ServerGroupDialog({
                     Server groups are not versioned. Adding a server widens
                     every grant bound to this group the instant you save —
                     including sessions already running — and removing one
-                    narrows them.
+                    narrows them, even if it is the database a grant was
+                    originally issued for.
                     {membershipChanged && (
                       <>
                         {" "}

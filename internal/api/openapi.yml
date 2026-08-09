@@ -4682,17 +4682,22 @@ components:
           type: string
           format: uuid
           description: |
-            The grant's anchor database — the one it was issued for. Always
-            covered, whatever happens to `server_group_uid` afterwards.
+            The grant's anchor database — the one it was issued for. It is what
+            an unbound grant covers, and what a group-bound one falls back to
+            if its group is deleted outright.
         server_group_uid:
           type: string
           format: uuid
           nullable: true
           description: |
-            The server group this grant is bound to, *in addition to* its
-            anchor database: the grant covers every server the group contains
-            **right now**. Membership is live and never snapshotted, so adding
-            a server to the group widens this grant the instant it is saved.
+            The server group this grant is bound to. A bound grant covers every
+            server the group contains **right now**, and only those: the
+            binding replaces the single-database scope rather than adding to
+            it, so a server removed from the group stops being covered even
+            when it is the anchor.
+
+            Membership is live and never snapshotted, so adding a server to the
+            group widens this grant the instant it is saved.
 
             `null` — the default, and the state of every grant issued from a
             definition with no server-group scope — means "anchor database

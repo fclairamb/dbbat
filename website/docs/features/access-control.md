@@ -47,8 +47,8 @@ Users can also request the same definition themselves — see [Grant requests](.
 | Field | Lives on | Description |
 |-------|----------|-------------|
 | `user_id` | grant | UID of the user |
-| `database_id` | grant | The grant's **anchor** database — the one it was issued for. Always covered. |
-| `server_group_uid` | grant | The [server group](#server-groups) this grant is bound to, if any. The grant also covers every server that group holds *right now*. `null` = anchor only. |
+| `database_id` | grant | The grant's **anchor** database — the one it was issued for. What an unbound grant covers, and what a bound one falls back to if its group is deleted. |
+| `server_group_uid` | grant | The [server group](#server-groups) this grant is bound to, if any. A bound grant covers every server that group holds *right now*, and only those. `null` = anchor only. |
 | `grant_definition_id` | grant | The definition *version* this grant was issued from |
 | `starts_at` | grant | When the grant becomes active |
 | `expires_at` | grant | When it expires — `starts_at` plus the definition's `duration_seconds` |
@@ -143,7 +143,10 @@ always did.
 Server groups are **not versioned**, and membership is **never snapshotted at
 issuance**. The moment a server joins a group, every grant bound to that group
 covers it — including grants issued weeks ago and sessions already running.
-Removing a server narrows those grants the same way, immediately.
+Removing a server narrows those grants the same way, immediately, with no
+exceptions: a bound grant covers what its group holds *now*, so even the
+database it was originally issued for stops being covered once it leaves the
+group.
 
 This is the single deliberate exception to "a live grant's behaviour never
 changes under it". It is what makes groups useful — a new replica inherits the
@@ -160,9 +163,10 @@ is consumed across **every** database in the group, not one budget per
 database. `priority` ranks group-bound grants against each other on the
 databases where their groups overlap — see below.
 
-Deleting a server group narrows: grants bound to it fall back to their anchor
-database, and definitions scoped to it match no database at all (fail closed)
-until an admin edits them.
+Deleting a server group is the one case where the anchor comes back, and it
+still narrows: grants bound to it unbind and fall back to the single database
+they were issued for. Definitions scoped to it match no database at all (fail
+closed) until an admin edits them.
 
 ## Overlapping grants
 

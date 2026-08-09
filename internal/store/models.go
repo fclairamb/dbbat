@@ -499,15 +499,21 @@ type AccessGrant struct {
 	UID    uuid.UUID `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
 	UserID uuid.UUID `bun:"user_id,notnull,type:uuid" json:"user_id"`
 	// DatabaseID is the grant's anchor: the database it was issued for. It is
-	// always covered, whatever happens to ServerGroupUID afterwards.
+	// what an unbound grant covers, and what a group-bound one falls back to
+	// if its group is deleted outright.
 	DatabaseID uuid.UUID `bun:"database_id,notnull,type:uuid" json:"database_id"`
-	// ServerGroupUID, when set, binds this grant to a server group *in
-	// addition to* its anchor database: the grant covers every server the
-	// group contains **right now**. Membership is live and never snapshotted,
-	// so adding a server to the group widens this grant the instant it is
-	// saved — the one deliberate exception to "a live grant's behavior never
-	// changes under it" (see ServerGroup). nil = anchor database only, which
-	// is what every grant issued from an unscoped definition gets.
+	// ServerGroupUID, when set, binds this grant to a server group: the grant
+	// then covers every server the group contains **right now**, and only
+	// those — the binding replaces the single-database scope rather than
+	// adding to it, so a server removed from the group stops being covered
+	// even when it is the anchor. "Adding widens, removing narrows", with no
+	// exceptions to remember.
+	//
+	// Membership is live and never snapshotted, so an edit takes effect the
+	// instant it is saved — the one deliberate exception to "a live grant's
+	// behavior never changes under it" (see ServerGroup). nil = anchor
+	// database only, which is what every grant issued from an unscoped
+	// definition gets.
 	//
 	// Quotas and Priority follow the grant, not the database: one
 	// max_query_counts and one max_bytes_transferred budget are consumed

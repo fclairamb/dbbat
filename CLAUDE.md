@@ -319,12 +319,14 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   field names `group_uids` / `approver_group_uids` are still **accepted on
   input for one release** and are gone from every response; the per-database
   `database_uids` is removed outright and is now a 400.
-- **Grants bind to a server group**, not just to a database. A grant keeps an
-  anchor database (always covered) and, when its definition is scoped, binds to
-  whichever of those groups holds that database. **Membership is live and never
-  snapshotted: adding a server to a group immediately widens every live grant
-  bound to it, sessions already running included, and removing one narrows
-  them.** That is the single, deliberate exception to the immutable-versioning
+- **Grants bind to a server group**, not to a database. A grant issued from a
+  scoped definition binds to whichever of its groups holds the target database
+  and then covers *that group's current membership, and only that*; the anchor
+  `database_id` is what an unbound grant covers and what a bound one falls back
+  to if its group is deleted (`ON DELETE SET NULL` — narrows, never widens).
+  **Membership is live and never snapshotted: adding a server to a group
+  immediately widens every live grant bound to it, sessions already running
+  included, and removing one narrows them — including the anchor.** That is the single, deliberate exception to the immutable-versioning
   rule below, accepted because group membership is operational data — the admin
   UI warns about the blast radius at the point of edit. One `max_query_counts`
   and one `max_bytes_transferred` budget is consumed across the *whole group*,
