@@ -61,7 +61,7 @@ type userGroupResponse struct {
 }
 
 func (s *Server) groupWithMembers(c *gin.Context, group *store.UserGroup) (*userGroupResponse, error) {
-	members, err := s.store.ListGroupMemberUIDs(c.Request.Context(), group.UID)
+	members, err := s.store.ListUserGroupMemberUIDs(c.Request.Context(), group.UID)
 	if err != nil {
 		return nil, err
 	}
@@ -112,7 +112,7 @@ func (s *Server) handleCreateUserGroup(c *gin.Context) {
 	}
 
 	if len(req.MemberUIDs) > 0 {
-		if err := s.store.SetGroupMembers(ctx, created.UID, req.MemberUIDs); err != nil {
+		if err := s.store.SetUserGroupMembers(ctx, created.UID, req.MemberUIDs); err != nil {
 			writeInternalError(c, s.logger, err, "failed to set group members")
 
 			return
@@ -261,7 +261,7 @@ func (s *Server) handleUpdateUserGroup(c *gin.Context) {
 	// A nil member_uids means "don't touch membership"; an explicit (even
 	// empty) list replaces it wholesale.
 	if req.MemberUIDs != nil {
-		if err := s.store.SetGroupMembers(ctx, group.UID, req.MemberUIDs); err != nil {
+		if err := s.store.SetUserGroupMembers(ctx, group.UID, req.MemberUIDs); err != nil {
 			writeInternalError(c, s.logger, err, "failed to set group members")
 
 			return
@@ -373,7 +373,7 @@ func (s *Server) handleAddUserGroupMember(c *gin.Context) {
 		return
 	}
 
-	if err := s.store.AddUserToGroup(ctx, groupUID, userUID); err != nil {
+	if err := s.store.AddUserToUserGroup(ctx, groupUID, userUID); err != nil {
 		writeInternalError(c, s.logger, err, "failed to add user to group")
 
 		return
@@ -419,7 +419,7 @@ func (s *Server) handleRemoveUserGroupMember(c *gin.Context) {
 		return
 	}
 
-	if err := s.store.RemoveUserFromGroup(ctx, groupUID, userUID); err != nil {
+	if err := s.store.RemoveUserFromUserGroup(ctx, groupUID, userUID); err != nil {
 		writeInternalError(c, s.logger, err, "failed to remove user from group")
 
 		return
@@ -465,7 +465,7 @@ func (s *Server) handleListUserGroupMembers(c *gin.Context) {
 		return
 	}
 
-	users, err := s.store.ListGroupMembers(ctx, uid)
+	users, err := s.store.ListUserGroupMembers(ctx, uid)
 	if err != nil {
 		writeInternalError(c, s.logger, err, "failed to list group members")
 

@@ -496,9 +496,24 @@ type QueryFilter struct {
 type AccessGrant struct {
 	bun.BaseModel `bun:"table:access_grants,alias:ag"`
 
-	UID        uuid.UUID `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
-	UserID     uuid.UUID `bun:"user_id,notnull,type:uuid" json:"user_id"`
+	UID    uuid.UUID `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	UserID uuid.UUID `bun:"user_id,notnull,type:uuid" json:"user_id"`
+	// DatabaseID is the grant's anchor: the database it was issued for. It is
+	// always covered, whatever happens to ServerGroupUID afterwards.
 	DatabaseID uuid.UUID `bun:"database_id,notnull,type:uuid" json:"database_id"`
+	// ServerGroupUID, when set, binds this grant to a server group *in
+	// addition to* its anchor database: the grant covers every server the
+	// group contains **right now**. Membership is live and never snapshotted,
+	// so adding a server to the group widens this grant the instant it is
+	// saved — the one deliberate exception to "a live grant's behaviour never
+	// changes under it" (see ServerGroup). nil = anchor database only, which
+	// is what every grant issued from an unscoped definition gets.
+	//
+	// Quotas and Priority follow the grant, not the database: one
+	// max_query_counts and one max_bytes_transferred budget are consumed
+	// across the whole group, and Priority ranks group-bound grants against
+	// each other on the databases where their groups overlap.
+	ServerGroupUID *uuid.UUID `bun:"server_group_uid,type:uuid" json:"server_group_uid,omitempty"`
 	// GrantDefinitionID pins the exact definition *version* this grant was
 	// issued from. Definitions are immutably versioned (an edit archives the
 	// row and inserts a successor), so this reference can never make a live
@@ -587,16 +602,16 @@ func (g *AccessGrant) ApprovalPatterns() []string {
 	return g.Definition.ApprovalPatterns
 }
 
-// ApproverGroupUIDs lists the groups whose members may resolve holds on this
+// ApproverUserGroupUIDs lists the groups whose members may resolve holds on this
 // grant, in addition to admins, read from the grant's definition. Empty =
 // admins only, which is also what a shapeless grant reports: the narrowest
 // possible approver set.
-func (g *AccessGrant) ApproverGroupUIDs() []uuid.UUID {
+func (g *AccessGrant) ApproverUserGroupUIDs() []uuid.UUID {
 	if g == nil || g.Definition == nil {
 		return nil
 	}
 
-	return g.Definition.ApproverGroupUIDs
+	return g.Definition.ApproverUserGroupUIDs
 }
 
 // newZeroQuota backs the fail-closed quota accessors: an exhausted quota,
@@ -678,15 +693,19 @@ type GrantDefinition struct {
 	// bypass the pending/admin-approval step: the request is approved and
 	// the grant materialized instantly at request time.
 	AutoApprove bool `bun:"auto_approve,notnull,default:false" json:"auto_approve"`
-	// GroupUIDs restricts which users may request this definition: a user
-	// must belong to at least one of the listed groups. Empty = every user
-	// (the pre-scoping behavior, which every existing definition keeps).
+	// UserGroupUIDs restricts which users may request this definition: a user
+	// must belong to at least one of the listed user groups. Empty = every
+	// user (the pre-scoping behavior, which every existing definition keeps).
 	//
 	// Stored as an array on the definition rather than a join table on
 	// purpose: an empty scope means "everyone", so a cascade-on-delete join
 	// table would fail *open* when a group is deleted. A dangling uid here
 	// matches nobody, so the definition fails closed until an admin fixes it.
-	GroupUIDs []uuid.UUID `bun:"group_uids,array,notnull,default:'{}'" json:"group_uids"`
+	//
+	// Named `user_group_uids`, not `group_uids`: server groups exist too, and
+	// a bare "group" is ambiguous. The old JSON name is still accepted on
+	// input for one release; responses only ever emit the new one.
+	UserGroupUIDs []uuid.UUID `bun:"user_group_uids,array,notnull,default:'{}'" json:"user_group_uids"`
 	// DatabaseUIDs restricts which databases this definition can be
 	// requested against. Empty = every database.
 	DatabaseUIDs []uuid.UUID `bun:"database_uids,array,notnull,default:'{}'" json:"database_uids"`
@@ -705,13 +724,13 @@ type GrantDefinition struct {
 	// not block the save — see POST /grant-definitions/validate-patterns,
 	// which reports match/no-match without failing the request.
 	SampleQueries StringArray `bun:"sample_queries,notnull,default:'{}'" json:"sample_queries"`
-	// ApproverGroupUIDs lists groups whose members may resolve holds on
-	// grants built from this definition, *in addition to* admins.
+	// ApproverUserGroupUIDs lists the user groups whose members may resolve
+	// holds on grants built from this definition, *in addition to* admins.
 	// Empty = admins only.
-	ApproverGroupUIDs []uuid.UUID `bun:"approver_group_uids,array,notnull,default:'{}'" json:"approver_group_uids"`
-	IsActive          bool        `bun:"is_active,notnull,default:true" json:"is_active"`
-	CreatedBy         uuid.UUID   `bun:"created_by,notnull,type:uuid" json:"created_by"`
-	CreatedAt         time.Time   `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	ApproverUserGroupUIDs []uuid.UUID `bun:"approver_user_group_uids,array,notnull,default:'{}'" json:"approver_user_group_uids"`
+	IsActive              bool        `bun:"is_active,notnull,default:true" json:"is_active"`
+	CreatedBy             uuid.UUID   `bun:"created_by,notnull,type:uuid" json:"created_by"`
+	CreatedAt             time.Time   `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 
 	// ActiveGrantCount is how many non-revoked, non-expired grants this
 	// definition's *lineage* is currently authorizing. Computed on listing
@@ -726,14 +745,14 @@ func (d *GrantDefinition) IsLive() bool {
 	return d != nil && d.ArchivedAt == nil
 }
 
-// AppliesToGroups reports whether a user belonging to the given groups is
+// AppliesToUserGroups reports whether a user belonging to the given groups is
 // within this definition's group scope. An empty scope applies to everyone.
-func (d *GrantDefinition) AppliesToGroups(userGroupUIDs []uuid.UUID) bool {
-	if len(d.GroupUIDs) == 0 {
+func (d *GrantDefinition) AppliesToUserGroups(userGroupUIDs []uuid.UUID) bool {
+	if len(d.UserGroupUIDs) == 0 {
 		return true
 	}
 
-	for _, scoped := range d.GroupUIDs {
+	for _, scoped := range d.UserGroupUIDs {
 		for _, owned := range userGroupUIDs {
 			if scoped == owned {
 				return true
@@ -765,7 +784,7 @@ func (d *GrantDefinition) AppliesToDatabase(databaseUID uuid.UUID) bool {
 // scope on either axis is unrestricted, which is what keeps every
 // pre-existing (unscoped) definition behaving exactly as before.
 func (d *GrantDefinition) AppliesTo(userGroupUIDs []uuid.UUID, databaseUID uuid.UUID) bool {
-	return d.AppliesToGroups(userGroupUIDs) && d.AppliesToDatabase(databaseUID)
+	return d.AppliesToUserGroups(userGroupUIDs) && d.AppliesToDatabase(databaseUID)
 }
 
 // GrantDefinitionFilter narrows ListGrantDefinitions queries.
@@ -794,6 +813,36 @@ type UserGroupMember struct {
 
 	GroupUID uuid.UUID `bun:"group_uid,pk,type:uuid" json:"group_uid"`
 	UserUID  uuid.UUID `bun:"user_uid,pk,type:uuid" json:"user_uid"`
+}
+
+// ServerGroup is a named set of database servers ("the analytics replicas",
+// "all staging databases") — the unit rights are scoped on, so a policy names
+// a stable set instead of enumerating servers one by one.
+//
+// It is the server-side mirror of UserGroup, and its membership is
+// deliberately **live**: a grant bound to a group covers whatever the group
+// contains *right now*. Adding a server to a group therefore immediately
+// widens every live grant bound to it — the one place where dbbat's
+// "a live grant's behaviour never changes under it" rule is knowingly broken,
+// because group membership is operational data, exactly as user-group
+// membership already is. See docs/grants.md.
+type ServerGroup struct {
+	bun.BaseModel `bun:"table:server_groups,alias:sg"`
+
+	UID         uuid.UUID  `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	Name        string     `bun:"name,notnull" json:"name"`
+	Description string     `bun:"description,notnull,default:''" json:"description"`
+	CreatedBy   *uuid.UUID `bun:"created_by,type:uuid" json:"created_by,omitempty"`
+	CreatedAt   time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+}
+
+// ServerGroupMember is the group ↔ server join row, the exact counterpart of
+// UserGroupMember.
+type ServerGroupMember struct {
+	bun.BaseModel `bun:"table:server_group_members,alias:sgm"`
+
+	GroupUID  uuid.UUID `bun:"group_uid,pk,type:uuid" json:"group_uid"`
+	ServerUID uuid.UUID `bun:"server_uid,pk,type:uuid" json:"server_uid"`
 }
 
 // GrantRequestStatus enumerates the lifecycle states a request can be in.

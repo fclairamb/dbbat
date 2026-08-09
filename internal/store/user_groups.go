@@ -105,8 +105,8 @@ func (s *Store) DeleteUserGroup(ctx context.Context, uid uuid.UUID) error {
 	return nil
 }
 
-// AddUserToGroup adds a membership. Idempotent: re-adding is a no-op.
-func (s *Store) AddUserToGroup(ctx context.Context, groupUID, userUID uuid.UUID) error {
+// AddUserToUserGroup adds a membership. Idempotent: re-adding is a no-op.
+func (s *Store) AddUserToUserGroup(ctx context.Context, groupUID, userUID uuid.UUID) error {
 	_, err := s.db.NewInsert().
 		Model(&UserGroupMember{GroupUID: groupUID, UserUID: userUID}).
 		On("CONFLICT (group_uid, user_uid) DO NOTHING").
@@ -118,9 +118,9 @@ func (s *Store) AddUserToGroup(ctx context.Context, groupUID, userUID uuid.UUID)
 	return nil
 }
 
-// RemoveUserFromGroup drops a membership. Removing a non-membership is a
+// RemoveUserFromUserGroup drops a membership. Removing a non-membership is a
 // no-op rather than an error.
-func (s *Store) RemoveUserFromGroup(ctx context.Context, groupUID, userUID uuid.UUID) error {
+func (s *Store) RemoveUserFromUserGroup(ctx context.Context, groupUID, userUID uuid.UUID) error {
 	_, err := s.db.NewDelete().
 		Model((*UserGroupMember)(nil)).
 		Where("group_uid = ?", groupUID).
@@ -133,8 +133,8 @@ func (s *Store) RemoveUserFromGroup(ctx context.Context, groupUID, userUID uuid.
 	return nil
 }
 
-// ListGroupMemberUIDs returns the user UIDs belonging to a group.
-func (s *Store) ListGroupMemberUIDs(ctx context.Context, groupUID uuid.UUID) ([]uuid.UUID, error) {
+// ListUserGroupMemberUIDs returns the user UIDs belonging to a user group.
+func (s *Store) ListUserGroupMemberUIDs(ctx context.Context, groupUID uuid.UUID) ([]uuid.UUID, error) {
 	var uids []uuid.UUID
 
 	err := s.db.NewSelect().
@@ -143,7 +143,7 @@ func (s *Store) ListGroupMemberUIDs(ctx context.Context, groupUID uuid.UUID) ([]
 		Where("group_uid = ?", groupUID).
 		Scan(ctx, &uids)
 	if err != nil {
-		return nil, fmt.Errorf("list group members: %w", err)
+		return nil, fmt.Errorf("list user group members: %w", err)
 	}
 
 	if uids == nil {
@@ -153,8 +153,8 @@ func (s *Store) ListGroupMemberUIDs(ctx context.Context, groupUID uuid.UUID) ([]
 	return uids, nil
 }
 
-// ListGroupMembers returns the (non-deleted) users belonging to a group.
-func (s *Store) ListGroupMembers(ctx context.Context, groupUID uuid.UUID) ([]User, error) {
+// ListUserGroupMembers returns the (non-deleted) users belonging to a user group.
+func (s *Store) ListUserGroupMembers(ctx context.Context, groupUID uuid.UUID) ([]User, error) {
 	var users []User
 
 	err := s.db.NewSelect().
@@ -164,7 +164,7 @@ func (s *Store) ListGroupMembers(ctx context.Context, groupUID uuid.UUID) ([]Use
 		Order("u.username ASC").
 		Scan(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list group member users: %w", err)
+		return nil, fmt.Errorf("list user group member users: %w", err)
 	}
 
 	return users, nil
@@ -191,9 +191,9 @@ func (s *Store) ListUserGroupUIDs(ctx context.Context, userUID uuid.UUID) ([]uui
 	return uids, nil
 }
 
-// ListGroupsForUser returns the full group rows a user belongs to, for the
-// user detail response and the admin UI.
-func (s *Store) ListGroupsForUser(ctx context.Context, userUID uuid.UUID) ([]UserGroup, error) {
+// ListUserGroupsForUser returns the full user-group rows a user belongs to,
+// for the user detail response and the admin UI.
+func (s *Store) ListUserGroupsForUser(ctx context.Context, userUID uuid.UUID) ([]UserGroup, error) {
 	var groups []UserGroup
 
 	err := s.db.NewSelect().
@@ -203,7 +203,7 @@ func (s *Store) ListGroupsForUser(ctx context.Context, userUID uuid.UUID) ([]Use
 		Order("ug.name ASC").
 		Scan(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("list groups for user: %w", err)
+		return nil, fmt.Errorf("list user groups for user: %w", err)
 	}
 
 	if groups == nil {
@@ -213,10 +213,10 @@ func (s *Store) ListGroupsForUser(ctx context.Context, userUID uuid.UUID) ([]Use
 	return groups, nil
 }
 
-// SetGroupMembers replaces a group's membership with exactly the given set of
+// SetUserGroupMembers replaces a user group's membership with exactly the given set of
 // users, in one transaction so the group is never transiently empty (an empty
 // group is a real access-control state, not a transient one).
-func (s *Store) SetGroupMembers(ctx context.Context, groupUID uuid.UUID, userUIDs []uuid.UUID) error {
+func (s *Store) SetUserGroupMembers(ctx context.Context, groupUID uuid.UUID, userUIDs []uuid.UUID) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("set group members: %w", err)
@@ -227,7 +227,7 @@ func (s *Store) SetGroupMembers(ctx context.Context, groupUID uuid.UUID, userUID
 		Model((*UserGroupMember)(nil)).
 		Where("group_uid = ?", groupUID).
 		Exec(ctx); err != nil {
-		return fmt.Errorf("set group members (clear): %w", err)
+		return fmt.Errorf("set user group members (clear): %w", err)
 	}
 
 	for _, userUID := range userUIDs {
@@ -235,12 +235,12 @@ func (s *Store) SetGroupMembers(ctx context.Context, groupUID uuid.UUID, userUID
 			Model(&UserGroupMember{GroupUID: groupUID, UserUID: userUID}).
 			On("CONFLICT (group_uid, user_uid) DO NOTHING").
 			Exec(ctx); err != nil {
-			return fmt.Errorf("set group members (insert): %w", err)
+			return fmt.Errorf("set user group members (insert): %w", err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("set group members (commit): %w", err)
+		return fmt.Errorf("set user group members (commit): %w", err)
 	}
 
 	return nil

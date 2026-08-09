@@ -24,9 +24,25 @@ type CreateUserRequest struct {
 type UpdateUserRequest struct {
 	Password *string  `json:"password"`
 	Roles    []string `json:"roles"`
-	// GroupUIDs, when non-nil, replaces the user's group memberships
+	// UserGroupUIDs, when non-nil, replaces the user's user-group memberships
 	// wholesale. Admin-only, like Roles.
-	GroupUIDs []uuid.UUID `json:"group_uids"`
+	UserGroupUIDs []uuid.UUID `json:"user_group_uids"`
+	// LegacyUserGroupUIDs is the pre-rename spelling of UserGroupUIDs, kept
+	// readable for one release so existing API clients don't break the day
+	// server groups land. Applied only when the new field is absent;
+	// responses never emit it. See applyLegacyFields.
+	LegacyUserGroupUIDs []uuid.UUID `json:"group_uids"`
+}
+
+// applyLegacyFields folds the deprecated pre-rename JSON field names onto
+// their replacements. A caller that sends both wins with the new name — the
+// old one is a compatibility shim, never an override.
+func (r *UpdateUserRequest) applyLegacyFields() {
+	if r.UserGroupUIDs == nil && r.LegacyUserGroupUIDs != nil {
+		r.UserGroupUIDs = r.LegacyUserGroupUIDs
+	}
+
+	r.LegacyUserGroupUIDs = nil
 }
 
 // setMongoVerifier derives and stores the user's MongoDB SCRAM-SHA-256 verifier
@@ -138,7 +154,7 @@ func (s *Server) handleGetUser(c *gin.Context) {
 
 	// Groups ride along on the detail response so the user editor can render
 	// (and edit) membership without a second round-trip.
-	groups, err := s.store.ListGroupsForUser(c.Request.Context(), uid)
+	groups, err := s.store.ListUserGroupsForUser(c.Request.Context(), uid)
 	if err != nil {
 		writeInternalError(c, s.logger, err, "failed to list user groups")
 		return
@@ -151,7 +167,7 @@ func (s *Server) handleGetUser(c *gin.Context) {
 type userDetailResponse struct {
 	*store.User
 
-	Groups []store.UserGroup `json:"groups"`
+	Groups []store.UserGroup `json:"user_groups"`
 }
 
 // handleUpdateUser updates a user
@@ -167,6 +183,8 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid request: "+err.Error())
 		return
 	}
+
+	req.applyLegacyFields()
 
 	// API keys cannot change passwords (security restriction)
 	if req.Password != nil && isAPIKeyAuth(c) {
@@ -189,7 +207,7 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 		return
 	}
 
-	if !s.checkGroupsExist(c, req.GroupUIDs) {
+	if !s.checkGroupsExist(c, req.UserGroupUIDs) {
 		return
 	}
 
@@ -217,8 +235,8 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 		return
 	}
 
-	if req.GroupUIDs != nil {
-		if err := s.store.SetUserGroups(c.Request.Context(), uid, req.GroupUIDs); err != nil {
+	if req.UserGroupUIDs != nil {
+		if err := s.store.SetUserGroups(c.Request.Context(), uid, req.UserGroupUIDs); err != nil {
 			writeInternalError(c, s.logger, err, "failed to update user groups")
 			return
 		}
@@ -242,10 +260,10 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 
 	// Membership is access-relevant (it gates grant definitions), so record
 	// it as its own event rather than burying it in user.updated.
-	if req.GroupUIDs != nil {
+	if req.UserGroupUIDs != nil {
 		groupDetails, _ := json.Marshal(map[string]interface{}{
-			"user_uid":   uid,
-			"group_uids": req.GroupUIDs,
+			"user_uid":        uid,
+			"user_group_uids": req.UserGroupUIDs,
 		})
 		_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
 			EventType:   "user_group.membership_set",
@@ -282,7 +300,7 @@ func (s *Server) checkSelfUpdateAllowed(
 		return false
 	}
 
-	if req.GroupUIDs != nil {
+	if req.UserGroupUIDs != nil {
 		writeError(c, http.StatusForbidden, ErrCodeForbidden, "cannot change groups")
 		return false
 	}

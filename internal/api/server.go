@@ -356,6 +356,20 @@ func (s *Server) setupRouter() *gin.Engine {
 			userGroups.PUT("/:uid/members/:user_uid", s.requireAdmin(), s.handleAddUserGroupMember)
 			userGroups.DELETE("/:uid/members/:user_uid", s.requireAdmin(), s.handleRemoveUserGroupMember)
 
+			// Server group endpoints — named sets of database servers, the unit
+			// rights are scoped on. Admin-only for the same reason user groups
+			// are: membership is access-relevant, and here it is *live* — see
+			// handleUpdateServerGroup.
+			serverGroups := authenticated.Group("/server-groups")
+			serverGroups.POST("", s.requireAdmin(), s.handleCreateServerGroup)
+			serverGroups.GET("", s.requireAdmin(), s.handleListServerGroups)
+			serverGroups.GET("/:uid", s.requireAdmin(), s.handleGetServerGroup)
+			serverGroups.PATCH("/:uid", s.requireAdmin(), s.handleUpdateServerGroup)
+			serverGroups.DELETE("/:uid", s.requireAdmin(), s.handleDeleteServerGroup)
+			serverGroups.GET("/:uid/members", s.requireAdmin(), s.handleListServerGroupMembers)
+			serverGroups.PUT("/:uid/members/:server_uid", s.requireAdmin(), s.handleAddServerGroupMember)
+			serverGroups.DELETE("/:uid/members/:server_uid", s.requireAdmin(), s.handleRemoveServerGroupMember)
+
 			// Server endpoints. The table now holds SSH bastions too (protocol
 			// 'ssh'); the route is /servers. Database *targets* are listed here
 			// (SSH rows are excluded by the store's targets-only scope).

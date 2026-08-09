@@ -142,7 +142,7 @@ func (s *Server) enforceRequestScope(
 		return false
 	}
 
-	if !def.AppliesToGroups(groupUIDs) {
+	if !def.AppliesToUserGroups(groupUIDs) {
 		writeError(c, http.StatusForbidden, ErrCodeForbidden,
 			"this grant definition is not available to your user groups")
 

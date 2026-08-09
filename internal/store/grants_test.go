@@ -107,7 +107,7 @@ type testGrantSpec struct {
 	MaxQueryCounts      *int64
 	MaxBytesTransferred *int64
 	ApprovalPatterns    []string
-	ApproverGroupUIDs   []uuid.UUID
+	ApproverUserGroupUIDs   []uuid.UUID
 	StartsAt            time.Time
 	ExpiresAt           time.Time
 	Priority            int16
@@ -123,7 +123,7 @@ func createGrantWithShape(t *testing.T, ctx context.Context, s *Store, spec test
 		MaxQueryCounts:      spec.MaxQueryCounts,
 		MaxBytesTransferred: spec.MaxBytesTransferred,
 		ApprovalPatterns:    spec.ApprovalPatterns,
-		ApproverGroupUIDs:   spec.ApproverGroupUIDs,
+		ApproverUserGroupUIDs:   spec.ApproverUserGroupUIDs,
 	})
 
 	grant := BuildGrantFromDefinition(def, spec.UserID, spec.DatabaseID, spec.GrantedBy, spec.StartsAt)

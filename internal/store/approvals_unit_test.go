@@ -70,7 +70,7 @@ func TestGrantMayApprove(t *testing.T) {
 	dba := uuid.New()
 	other := uuid.New()
 
-	grant := &AccessGrant{Definition: &GrantDefinition{ApproverGroupUIDs: []uuid.UUID{sre, dba}}}
+	grant := &AccessGrant{Definition: &GrantDefinition{ApproverUserGroupUIDs: []uuid.UUID{sre, dba}}}
 
 	if !grant.MayApprove([]uuid.UUID{other, dba}) {
 		t.Fatal("a member of an approver group was refused")
@@ -106,7 +106,7 @@ func TestBuildGrantFromDefinitionReadsApprovalFieldsFromTheDefinition(t *testing
 		UID:               defUID,
 		DurationSeconds:   3600,
 		ApprovalPatterns:  []string{`(?i)^DELETE`},
-		ApproverGroupUIDs: []uuid.UUID{group},
+		ApproverUserGroupUIDs: []uuid.UUID{group},
 	}
 
 	grant := BuildGrantFromDefinition(def, uuid.New(), uuid.New(), uuid.New(), time.Now())
@@ -119,8 +119,8 @@ func TestBuildGrantFromDefinitionReadsApprovalFieldsFromTheDefinition(t *testing
 		t.Fatalf("patterns not read from the definition: %v", grant.ApprovalPatterns())
 	}
 
-	if len(grant.ApproverGroupUIDs()) != 1 || grant.ApproverGroupUIDs()[0] != group {
-		t.Fatalf("approver groups not read from the definition: %v", grant.ApproverGroupUIDs())
+	if len(grant.ApproverUserGroupUIDs()) != 1 || grant.ApproverUserGroupUIDs()[0] != group {
+		t.Fatalf("approver groups not read from the definition: %v", grant.ApproverUserGroupUIDs())
 	}
 }
 

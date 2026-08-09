@@ -155,7 +155,7 @@ func TestListGrantDefinitions_FiltersByGroupScope(t *testing.T) {
 
 	group, err := dataStore.CreateUserGroup(ctx, &store.UserGroup{Name: "analysts-" + suffix})
 	require.NoError(t, err)
-	require.NoError(t, dataStore.AddUserToGroup(ctx, group.UID, insider.UID))
+	require.NoError(t, dataStore.AddUserToUserGroup(ctx, group.UID, insider.UID))
 
 	openDef := createTestGrantDefinition(t, dataStore, *admin, "open-"+suffix, false)
 
@@ -164,7 +164,7 @@ func TestListGrantDefinitions_FiltersByGroupScope(t *testing.T) {
 		Slug:            "scoped-" + suffix,
 		DurationSeconds: 3600,
 		Controls:        []string{store.ControlReadOnly},
-		GroupUIDs:       []uuid.UUID{group.UID},
+		UserGroupUIDs:       []uuid.UUID{group.UID},
 		CreatedBy:       admin.UID,
 	})
 	require.NoError(t, err)
@@ -230,7 +230,7 @@ func TestCreateGrantRequest_RejectsOutOfScope(t *testing.T) {
 		DurationSeconds: 3600,
 		Controls:        []string{store.ControlReadOnly},
 		AutoApprove:     true,
-		GroupUIDs:       []uuid.UUID{group.UID},
+		UserGroupUIDs:       []uuid.UUID{group.UID},
 		DatabaseUIDs:    []uuid.UUID{inScopeDB.UID},
 		CreatedBy:       admin.UID,
 	})
@@ -247,7 +247,7 @@ func TestCreateGrantRequest_RejectsOutOfScope(t *testing.T) {
 	require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
 	require.Equal(t, "FORBIDDEN", resp["code"])
 
-	require.NoError(t, dataStore.AddUserToGroup(ctx, group.UID, requester.UID))
+	require.NoError(t, dataStore.AddUserToUserGroup(ctx, group.UID, requester.UID))
 
 	// Member, but the database is out of scope → still 403.
 	w, _ = doJSON(t, router, http.MethodPost, "/api/v1/grant-requests", token, map[string]any{
@@ -305,7 +305,7 @@ func TestApproveGrantRequest_ConflictsWhenScopeTightened(t *testing.T) {
 	// The edit versions the definition; the approval below has to be judged
 	// against the new live version, which is the whole point of re-checking
 	// scope at approval time.
-	def.GroupUIDs = []uuid.UUID{group.UID}
+	def.UserGroupUIDs = []uuid.UUID{group.UID}
 	_, err = dataStore.UpdateGrantDefinition(ctx, def)
 	require.NoError(t, err)
 
@@ -319,7 +319,7 @@ func TestApproveGrantRequest_ConflictsWhenScopeTightened(t *testing.T) {
 	require.Empty(t, grants)
 
 	// Once the requester is in scope again, approval goes through.
-	require.NoError(t, dataStore.AddUserToGroup(ctx, group.UID, requester.UID))
+	require.NoError(t, dataStore.AddUserToUserGroup(ctx, group.UID, requester.UID))
 
 	w, _ = doJSON(t, router, http.MethodPost, "/api/v1/grant-requests/"+requestUID+"/approve", adminToken, nil)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())

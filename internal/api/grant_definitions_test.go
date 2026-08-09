@@ -216,14 +216,14 @@ func TestUpdateGrantDefinition_PartialToggleDoesNotWipeApprovalConfig(t *testing
 
 	priority := int16(5)
 	def, err := dataStore.CreateGrantDefinition(context.Background(), &store.GrantDefinition{
-		Name:              "partial-toggle-" + suffix,
-		Slug:              "partial-toggle-" + suffix,
-		DurationSeconds:   3600,
-		Controls:          []string{store.ControlReadOnly},
-		Priority:          &priority,
-		ApprovalPatterns:  []string{"^DELETE", "^DROP"},
-		ApproverGroupUIDs: []uuid.UUID{approverGroup.UID},
-		CreatedBy:         admin.UID,
+		Name:                  "partial-toggle-" + suffix,
+		Slug:                  "partial-toggle-" + suffix,
+		DurationSeconds:       3600,
+		Controls:              []string{store.ControlReadOnly},
+		Priority:              &priority,
+		ApprovalPatterns:      []string{"^DELETE", "^DROP"},
+		ApproverUserGroupUIDs: []uuid.UUID{approverGroup.UID},
+		CreatedBy:             admin.UID,
 	})
 	require.NoError(t, err)
 	require.False(t, def.AutoApprove)
@@ -236,8 +236,8 @@ func TestUpdateGrantDefinition_PartialToggleDoesNotWipeApprovalConfig(t *testing
 	require.Equal(t, true, resp["auto_approve"])
 	require.ElementsMatch(t, []string{"^DELETE", "^DROP"}, resp["approval_patterns"],
 		"toggling auto_approve alone must not wipe approval_patterns")
-	require.ElementsMatch(t, []string{approverGroup.UID.String()}, resp["approver_group_uids"],
-		"toggling auto_approve alone must not wipe approver_group_uids")
+	require.ElementsMatch(t, []string{approverGroup.UID.String()}, resp["approver_user_group_uids"],
+		"toggling auto_approve alone must not wipe approver_user_group_uids")
 	require.EqualValues(t, priority, resp["priority"], "toggling auto_approve alone must not wipe priority")
 
 	// The edit versioned the definition, so the persisted row to re-read is the
@@ -246,7 +246,7 @@ func TestUpdateGrantDefinition_PartialToggleDoesNotWipeApprovalConfig(t *testing
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	require.Equal(t, true, resp["auto_approve"])
 	require.ElementsMatch(t, []string{"^DELETE", "^DROP"}, resp["approval_patterns"])
-	require.ElementsMatch(t, []string{approverGroup.UID.String()}, resp["approver_group_uids"])
+	require.ElementsMatch(t, []string{approverGroup.UID.String()}, resp["approver_user_group_uids"])
 	require.EqualValues(t, priority, resp["priority"])
 }
 
@@ -277,19 +277,19 @@ func TestUpdateGrantDefinition_FullBodyStillSetsPatterns(t *testing.T) {
 
 	w, resp := doJSON(t, router, http.MethodPatch, "/api/v1/grant-definitions/"+def.UID.String(), adminToken,
 		map[string]any{
-			"name":                  "full-body-updated-" + suffix,
-			"slug":                  def.Slug,
-			"description":           "updated via full body",
-			"duration_seconds":      7200,
-			"controls":              []string{store.ControlReadOnly, store.ControlBlockDDL},
-			"max_query_counts":      nil,
-			"max_bytes_transferred": nil,
-			"priority":              nil,
-			"auto_approve":          false,
-			"group_uids":            []string{},
-			"database_uids":         []string{},
-			"approval_patterns":     []string{"^TRUNCATE", "^DROP"},
-			"approver_group_uids":   []string{},
+			"name":                     "full-body-updated-" + suffix,
+			"slug":                     def.Slug,
+			"description":              "updated via full body",
+			"duration_seconds":         7200,
+			"controls":                 []string{store.ControlReadOnly, store.ControlBlockDDL},
+			"max_query_counts":         nil,
+			"max_bytes_transferred":    nil,
+			"priority":                 nil,
+			"auto_approve":             false,
+			"user_group_uids":          []string{},
+			"database_uids":            []string{},
+			"approval_patterns":        []string{"^TRUNCATE", "^DROP"},
+			"approver_user_group_uids": []string{},
 		})
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	require.Equal(t, "full-body-updated-"+suffix, resp["name"])

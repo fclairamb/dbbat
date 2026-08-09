@@ -300,7 +300,7 @@ func TestApprovalUsesStampedGrantNotNewerOverlappingGrant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create member A: %v", err)
 	}
-	if err := dataStore.AddUserToGroup(ctx, groupA.UID, memberA.UID); err != nil {
+	if err := dataStore.AddUserToUserGroup(ctx, groupA.UID, memberA.UID); err != nil {
 		t.Fatalf("add member A: %v", err)
 	}
 
@@ -308,7 +308,7 @@ func TestApprovalUsesStampedGrantNotNewerOverlappingGrant(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create member B: %v", err)
 	}
-	if err := dataStore.AddUserToGroup(ctx, groupB.UID, memberB.UID); err != nil {
+	if err := dataStore.AddUserToUserGroup(ctx, groupB.UID, memberB.UID); err != nil {
 		t.Fatalf("add member B: %v", err)
 	}
 
@@ -332,7 +332,7 @@ func TestApprovalUsesStampedGrantNotNewerOverlappingGrant(t *testing.T) {
 	grantA := persistGrantWithShape(t, dataStore, store.GrantDefinition{
 		Controls:          []string{},
 		ApprovalPatterns:  []string{`(?i)^DELETE\s+FROM`},
-		ApproverGroupUIDs: []uuid.UUID{groupA.UID},
+		ApproverUserGroupUIDs: []uuid.UUID{groupA.UID},
 	}, requester.UID, target.UID, admin.UID, now.Add(-time.Hour), now.Add(time.Hour), 0)
 
 	// Grant B: created afterwards, higher priority, overlapping window,
@@ -340,7 +340,7 @@ func TestApprovalUsesStampedGrantNotNewerOverlappingGrant(t *testing.T) {
 	persistGrantWithShape(t, dataStore, store.GrantDefinition{
 		Controls:          []string{},
 		ApprovalPatterns:  []string{`(?i)^DELETE\s+FROM`},
-		ApproverGroupUIDs: []uuid.UUID{groupB.UID},
+		ApproverUserGroupUIDs: []uuid.UUID{groupB.UID},
 	}, requester.UID, target.UID, admin.UID, now.Add(-time.Hour), now.Add(2*time.Hour), store.PriorityFullWrite+10)
 
 	active, err := dataStore.GetActiveGrant(ctx, requester.UID, target.UID)
