@@ -81,7 +81,9 @@ dbbat/
 │   │   ├── mysql/           # MySQL/MariaDB proxy (see docs/mysql.md)
 │   │   ├── mongodb/         # MongoDB wire protocol proxy (see docs/mongodb.md)
 │   │   └── mssql/           # SQL Server TDS proxy (see docs/mssql.md)
-│   └── auth/                # OAuth provider abstraction (Slack, etc.)
+│   └── auth/                # OAuth provider abstraction
+│       ├── slack/           # Slack OIDC login (fixed endpoints, userInfo-based)
+│       └── oidc/            # Generic OIDC login: any issuer, verified ID tokens, PKCE
 ├── front/                   # React frontend (see front/CLAUDE.md)
 ├── website/                 # Docusaurus site for dbbat.com
 ├── docs/                    # Protocol-level technical notes (oracle, mysql, mongodb, mssql, dump format)
@@ -185,6 +187,12 @@ This applies even when the current task is otherwise complete — capture the fo
 | `DBB_MSSQL_TLS_CERT_FILE` | PEM cert for SQL Server TLS termination (auto self-signed if empty) | No |
 | `DBB_MSSQL_TLS_KEY_FILE` | PEM key for SQL Server TLS termination (auto-generated if empty) | No |
 | `DBB_MSSQL_TLS_MAX_VERSION` | Client-leg TLS ceiling: `1.2` (default) or `1.3`; anything else fails at startup. TDS encapsulates the handshake and un-wraps it the moment it completes, and at 1.3 the client finishes on a *write*, so drivers differ on whether that last flight is still framed — the proxy sniffs the first byte and follows either choice, but 1.3 is **verified against `go-mssqldb` only** (ODBC/JDBC untested), hence opt-in. The upstream leg stays at 1.2. See `docs/mssql.md` | No |
+| `DBB_OIDC_ISSUER` | OIDC issuer URL for the **generic SSO provider** (`internal/auth/oidc`). Setting it enables the provider; discovery is lazy, so an unreachable IdP delays the first login instead of blocking startup. Registered under provider key `oidc`; the callback is `/api/v1/auth/oidc/callback` | No |
+| `DBB_OIDC_CLIENT_ID` | OIDC client id. Required once the issuer is set — a half-configured provider fails at startup | If issuer set |
+| `DBB_OIDC_CLIENT_SECRET` | OIDC client secret. Same rule | If issuer set |
+| `DBB_OIDC_SCOPES` | Space- or comma-separated scopes (default: `openid email profile`); `openid` is always added | No |
+| `DBB_OIDC_DISPLAY_NAME` | Login-button label, surfaced through `GET /api/v1/auth/providers` as `display_name` (default: `SSO`) | No |
+| `DBB_OIDC_EMAIL_DOMAINS` | Comma-separated allowlist checked against the **verified** ID-token email claim — the generic equivalent of Slack's team-id gating. Empty = any domain the issuer vouches for, which on a multi-tenant issuer (`accounts.google.com`, Entra `/common`) means *any account on the internet* | No |
 | `DBB_SLACK_NOTIFY_BOT_TOKEN` | Slack bot user OAuth token (`xoxb-...`); empty disables notifications | No |
 | `DBB_SLACK_NOTIFY_CHANNEL` | Slack channel id or name for grant-request notifications (default: `#dbbat`) | No |
 | `DBB_SLACK_SIGNING_SECRET` | Slack app signing secret; enables Approve/Deny buttons + inbound interactions endpoint. Empty = link-through-UI (no buttons). Requires the bot token. Legacy alias `DBB_SLACK_NOTIFY_SIGNING_SECRET` is also accepted; the canonical name wins if both are set. | No |

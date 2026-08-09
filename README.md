@@ -225,8 +225,24 @@ sqlcmd -S localhost,1434 -U developer -P temppass123 -d production -C
 | `DBB_MYSQL_TLS_DISABLE` | Disable MySQL TLS termination at the proxy | `false` |
 | `DBB_MYSQL_TLS_CERT_FILE` | PEM cert for MySQL TLS (auto self-signed if empty) | - |
 | `DBB_MYSQL_TLS_KEY_FILE` | PEM RSA key for MySQL TLS (auto-generated if empty) | - |
+| `DBB_OIDC_ISSUER` | OIDC issuer URL for single sign-on; setting it enables the provider | - |
+| `DBB_OIDC_CLIENT_ID` | OIDC client ID (required once the issuer is set) | - |
+| `DBB_OIDC_CLIENT_SECRET` | OIDC client secret (required once the issuer is set) | - |
+| `DBB_OIDC_SCOPES` | Scopes requested from the issuer (`openid` always added) | `openid email profile` |
+| `DBB_OIDC_DISPLAY_NAME` | Login-button label | `SSO` |
+| `DBB_OIDC_EMAIL_DOMAINS` | Comma-separated allowlist checked against the *verified* email claim | - (any domain) |
 
 See [Configuration](https://dbbat.com/docs/configuration) for the full set, including rate limiting, query storage, hash presets, auth cache, Slack OAuth, demo target, and dev redirects.
+
+### Single sign-on
+
+Any OpenID Connect provider works — Google Workspace, Okta, Microsoft Entra,
+Keycloak, Authentik. Point `DBB_OIDC_ISSUER` at your issuer, register
+`https://<your-host>/api/v1/auth/oidc/callback` as the redirect URI, and DBBat
+adds a button to the login page. Every sign-in is carried by an ID token DBBat
+verifies against the issuer's JWKS, and the code flow uses PKCE (S256). See
+[Single sign-on (OIDC)](https://dbbat.com/docs/configuration/sso) for
+per-provider snippets.
 
 ## Security
 
