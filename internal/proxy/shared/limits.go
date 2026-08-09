@@ -46,6 +46,13 @@ type LimitGuard struct {
 	// construction (before this session contributed anything). The live
 	// counters accumulate this session's bytes on top of it, so
 	// baseBytes + from + to is the grant's true running total at any instant.
+	//
+	// "The grant's" total, not "this database's": a grant bound to a server
+	// group covers every database in that group, and its quota is one budget
+	// spanning all of them. The store computes it that way
+	// (Store.populateGrantCounters), so this guard inherits group-wide
+	// accounting with no change of its own — the byte ceiling is consumed by
+	// whichever databases of the group the user connects to.
 	baseBytes int64
 	maxBytes  *int64
 	expiresAt time.Time
