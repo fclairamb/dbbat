@@ -13,6 +13,7 @@ import (
 var (
 	ErrInvalidKeySize     = errors.New("key must be 32 bytes")
 	ErrCiphertextTooShort = errors.New("ciphertext too short")
+	ErrEmptyDeriveInfo    = errors.New("subkey derivation requires a non-empty info string")
 )
 
 // Encrypt encrypts plaintext using AES-256-GCM with the provided key.
