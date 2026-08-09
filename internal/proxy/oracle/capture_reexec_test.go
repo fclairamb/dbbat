@@ -68,8 +68,9 @@ func newCaptureWriter(t *testing.T, outPath, sessionID string) *dump.Writer {
 // TestCapture_GoOraCursorReexec records go-ora running one prepared statement
 // several times over a single session. go-ora clears its `parse` flag after the
 // first execution (`basicWrite` in command.go), so runs 2..N put a piggyback
-// exec (func 0x03, sub 0x5e) on the wire carrying the cursor id and a
-// zero-length SQL field — a cursor re-execution as a real client emits it.
+// exec (func 0x03, sub 0x4e) on the wire carrying the cursor id and no SQL
+// field at all — a cursor re-execution as a real client emits it. The first,
+// SQL-carrying execution is sub 0x5e.
 func TestCapture_GoOraCursorReexec(t *testing.T) {
 	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
 	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
