@@ -1260,6 +1260,13 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 		// v315+ piggyback: check sub-operation to determine action
 		if IsPiggybackExecSQL(ttcPayload) {
 			return s.gateStatement(s.handlePiggybackExec, ttcPayload)
+		} else if IsPiggybackCursorReexec(ttcPayload) {
+			// A re-execution is a fresh execution of a statement: it goes
+			// through the same pre-flight as one carrying its own SQL, quota
+			// check included. (Unlike the OFETCH path below, this frame is
+			// never a continuation of a result set already streaming, so
+			// checking quotas here cannot strand a client mid-fetch.)
+			return s.gateStatement(s.handlePiggybackReexec, ttcPayload)
 		} else if IsPiggybackClose(ttcPayload) {
 			// Sub-op 0x09 = close cursor
 			if len(ttcPayload) > 2 {
@@ -1415,6 +1422,11 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket) {
 	if ttcPayload == nil {
 		return
 	}
+
+	// Before anything is completed: the response to an execute is where the
+	// server names the cursor it allotted, and that mapping is what lets a
+	// later re-execution be gated against the right statement.
+	s.learnCursorID(ttcPayload)
 
 	switch funcCode { //nolint:exhaustive // only handling response-related codes
 	case TTCFuncQueryResult:

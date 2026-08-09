@@ -369,6 +369,54 @@ func (e *OALL8NoSQLError) Error() string {
 // Unwrap makes errors.Is(err, ErrOALL8NoSQL) true.
 func (e *OALL8NoSQLError) Unwrap() error { return ErrOALL8NoSQL }
 
+// ErrNotCursorReexec reports that a payload is not a decodable piggyback
+// cursor re-execution (wrong sub-op, truncated, or a cursor id of zero — which
+// would mean "allocate a new cursor", not "re-run that one").
+var ErrNotCursorReexec = errors.New("payload is not a piggyback cursor re-execution")
+
+// cursorReexecMaxID bounds a plausible cursor id. Oracle allots them from a
+// small per-session pool (open_cursors); anything past 16 bits is a sign the
+// compressed-int walk landed on the wrong bytes.
+const cursorReexecMaxID = 0xFFFF
+
+// decodeCursorReexec extracts the cursor id from a piggyback re-execution —
+// func 0x03, sub-op 0x4e (SELECT) or 0x04 (everything else). This is what a
+// modern thin client puts on the wire to re-run a statement it already parsed;
+// the statement text is never resent.
+//
+// Layout, verified byte-for-byte against testdata/go_ora_cursor_reexec.pcapng,
+// testdata/go_ora_dml_cursor_reexec.pcapng and
+// testdata/python_thin_cursor_reexec.pcapng:
+//
+//	[0]    0x03 (piggyback)
+//	[1]    0x4e or 0x04 (sub-op)
+//	[2]    TTC sequence number
+//	[3]    0x00 — present only from TTC version 18 (v315+) on
+//	[4..]  cursorID, rowsToFetch, execOptions, execFlags — TTC compressed ints
+//
+// The trailing zero of the function header is what distinguishes the two
+// framings: pre-v315 clients emit a 3-byte header, so the fields start one byte
+// earlier. Only the cursor id is read — the rest of the frame says how to run
+// the statement, not which statement it is.
+func decodeCursorReexec(ttcPayload []byte) (uint16, error) {
+	if len(ttcPayload) < 5 || ttcPayload[0] != byte(TTCFuncPiggyback) || !IsPiggybackCursorReexec(ttcPayload) {
+		return 0, ErrNotCursorReexec
+	}
+
+	// TTC >= 18 pads the function header with a zero byte; older ones do not.
+	fieldsAt := 3
+	if ttcPayload[3] == 0 {
+		fieldsAt = 4
+	}
+
+	cursorID, n := readCompressedInt(ttcPayload[fieldsAt:])
+	if n == 0 || cursorID <= 0 || cursorID > cursorReexecMaxID {
+		return 0, fmt.Errorf("%w: cursor id decoded as %d", ErrNotCursorReexec, cursorID)
+	}
+
+	return uint16(cursorID), nil
+}
+
 // OALL8Result contains the decoded fields from an OALL8 (parse+execute) message.
 type OALL8Result struct {
 	SQL        string

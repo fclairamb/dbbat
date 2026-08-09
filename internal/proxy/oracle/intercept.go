@@ -244,6 +244,74 @@ func (s *session) regateCursor(cursor *trackedCursor) error {
 	return nil
 }
 
+// handlePiggybackReexec gates a piggyback cursor re-execution — func 0x03,
+// sub-op 0x4e (SELECT) or 0x04 (everything else). This is the frame every
+// modern thin client actually sends to re-run a statement it already parsed;
+// the SQL-less OALL8 handleCursorReexec was written for is its legacy
+// equivalent, and no tested client emits that one (see docs/oracle.md).
+//
+// A cursor dbbat knows is re-gated exactly like the parse that created it. One
+// it does not know is **forwarded**, not refused — deliberately, and unlike the
+// SQL-less OALL8:
+//
+//   - dbbat learns these cursor ids by reading them off the server's response
+//     (learnCursorID), so an unknown id here usually means dbbat attached
+//     mid-session or missed one response, not that a client is evading anything;
+//   - and this frame is what a plain `cur.execute()` loop sends, so failing it
+//     closed would break ordinary read-only sessions on every second execution.
+//
+// Closing that half is filed in
+// specs/todos/2026-08-09-oracle-piggyback-reexec-unknown-cursor.md.
+func (s *session) handlePiggybackReexec(ttcPayload []byte) error {
+	cursorID, err := decodeCursorReexec(ttcPayload)
+	if err != nil {
+		s.logger.DebugContext(s.ctx, "failed to decode piggyback cursor re-execution", slog.Any("error", err))
+
+		return nil
+	}
+
+	cursor, ok := s.tracker.cursors[cursorID]
+	if !ok {
+		s.logger.WarnContext(s.ctx,
+			"forwarding a piggyback re-execution of an untracked cursor: its statement is unknown",
+			slog.Uint64("cursor_id", uint64(cursorID)),
+		)
+
+		return nil
+	}
+
+	return s.regateCursor(cursor)
+}
+
+// learnCursorID records the cursor id the server assigned to the statement
+// currently in flight, so a later re-execution naming that id resolves to its
+// SQL.
+//
+// Only the legacy OALL8 carries the cursor id on the request; the piggyback and
+// JDBC exec paths leave dbbat to read it off the response. Learning is a
+// one-shot per statement — a cursor that already has an id is never re-read —
+// which is what keeps the anchored scan in findCursorIDInResponse from being
+// re-run against row-stream bytes for the rest of a fetch.
+func (s *session) learnCursorID(ttcPayload []byte) {
+	pending := s.tracker.pendingQuery
+	if pending == nil || pending.cursor == nil || pending.cursor.cursorID != 0 {
+		return
+	}
+
+	cursorID, ok := findCursorIDInResponse(ttcPayload)
+	if !ok {
+		return
+	}
+
+	pending.cursor.cursorID = cursorID
+	s.tracker.cursors[cursorID] = pending.cursor
+
+	s.logger.DebugContext(s.ctx, "learned server-assigned cursor id",
+		slog.Uint64("cursor_id", uint64(cursorID)),
+		slog.String("sql", truncateSQL(pending.cursor.sql, 200)),
+	)
+}
+
 // flushPendingQuery completes any outstanding query that hasn't been finalized.
 // Called before starting a new query to ensure the previous one is persisted.
 func (s *session) flushPendingQuery() {
