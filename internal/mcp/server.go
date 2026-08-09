@@ -205,10 +205,15 @@ func (s *Server) listAccessible(ctx context.Context, caller *Caller) ([]accessib
 	for i := range grants {
 		g := &grants[i]
 
-		// A grant covers its anchor database plus, when it is bound to a
-		// server group, every server currently in that group — the same
-		// coverage the proxy admits sessions under. Listing only the anchor
-		// would hide databases the agent may genuinely reach.
+		// What a grant covers, computed the same way store.GetActiveGrant
+		// computes it: a group-bound grant covers its group's *live*
+		// membership and nothing else, an unbound one covers its anchor.
+		//
+		// The anchor is deliberately not added for a bound grant. A server
+		// removed from the group is no longer reachable — the executor
+		// re-enters the proxy, which refuses it — so listing it here would not
+		// be a hole, but it would be a lie, and an agent that plans against a
+		// database it cannot use is worse off than one that never saw it.
 		covered := []uuid.UUID{g.DatabaseID}
 
 		if g.ServerGroupUID != nil {
@@ -217,7 +222,7 @@ func (s *Server) listAccessible(ctx context.Context, caller *Caller) ([]accessib
 				return nil, fmt.Errorf("listing server group members: %w", err)
 			}
 
-			covered = append(covered, members...)
+			covered = members
 		}
 
 		for _, databaseUID := range covered {
