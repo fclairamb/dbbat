@@ -114,6 +114,29 @@ function QuickStart() {
   );
 }
 
+function Compliance() {
+  return (
+    <section className={styles.compliance}>
+      <div className="container">
+        <Heading as="h2">Ready for the compliance conversation</Heading>
+        <p>
+          Every session is attributed to a person, every statement is logged,
+          access is time-boxed, and risky statements wait for a second pair of
+          eyes. That is the substance behind a SOC 2, ISO 27001 or PCI DSS
+          control narrative — so we wrote down exactly which controls it maps
+          to, and exactly which ones it does not.
+        </p>
+        <p className={styles.complianceCaveat}>
+          DBBat is a control you deploy, not a certificate you inherit.
+        </p>
+        <p>
+          <Link to="/docs/compliance">Read the compliance mapping</Link>
+        </p>
+      </div>
+    </section>
+  );
+}
+
 export default function Home(): ReactNode {
   const { siteConfig } = useDocusaurusContext();
   return (
@@ -125,6 +148,7 @@ export default function Home(): ReactNode {
       <main>
         <HomepageFeatures />
         <ProductShowcase />
+        <Compliance />
         <QuickStart />
       </main>
     </Layout>
