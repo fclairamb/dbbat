@@ -116,15 +116,23 @@ func copyUUIDs(in []uuid.UUID) []uuid.UUID {
 }
 
 // coversDatabaseSQL is the auth path's coverage predicate, in one place
-// because two queries must agree on it exactly: a grant covers a database when
-// that database is the grant's anchor, or when the grant's server group
-// *currently* contains it.
+// because two queries must agree on it exactly.
 //
-// A grant with no server group has server_group_uid NULL, and `NULL IN (...)`
-// is never true, so the second arm simply never fires for anchor-only grants —
-// no special case needed. Both placeholders take the target database uid.
-const coversDatabaseSQL = "(database_id = ? OR server_group_uid IN " +
-	"(SELECT group_uid FROM server_group_members WHERE server_uid = ?))"
+// A grant bound to a server group covers exactly what that group holds *right
+// now* — the binding replaces the single-database scope rather than adding to
+// it. So a server removed from the group stops being covered even if it is the
+// database the grant was originally issued for: "removing narrows" has no
+// exceptions, which is the only version of that rule an operator can hold in
+// their head.
+//
+// The anchor (database_id) is what an unbound grant covers, and it is also the
+// fallback a grant falls back to when its group is deleted outright
+// (server_group_uid is ON DELETE SET NULL) — access narrows to where it
+// started, never widens.
+//
+// Both placeholders take the target database uid.
+const coversDatabaseSQL = "((server_group_uid IS NULL AND database_id = ?) " +
+	"OR server_group_uid IN (SELECT group_uid FROM server_group_members WHERE server_uid = ?))"
 
 // CreateGrant creates a new access grant. The grant must name the definition
 // it is an instance of: a grant with no definition would carry no shape at
@@ -422,15 +430,19 @@ func (s *Store) populateGrantCounters(ctx context.Context, g *AccessGrant) error
 	// covers every database in its group, so one budget is consumed across all
 	// of them. Stamped connections already span it for free — they key on
 	// grant_uid, which says nothing about which database they used.
+	//
+	// Same coverage rule as coversDatabaseSQL, from the connection's side: the
+	// anchor for an unbound grant, the group's current membership for a bound
+	// one.
 	var queryCount int64
 	err := s.db.NewSelect().
 		ColumnExpr("COUNT(*)").
 		TableExpr("queries AS q").
 		Join("JOIN connections AS c ON q.connection_id = c.uid").
 		Where("(c.grant_uid = ? OR (c.grant_uid IS NULL AND c.user_id = ? AND "+
-			"(c.database_id = ? OR c.database_id IN "+
+			"((?::uuid IS NULL AND c.database_id = ?) OR c.database_id IN "+
 			"(SELECT server_uid FROM server_group_members WHERE group_uid = ?))))",
-			g.UID, g.UserID, g.DatabaseID, g.ServerGroupUID).
+			g.UID, g.UserID, g.ServerGroupUID, g.DatabaseID, g.ServerGroupUID).
 		Where("q.executed_at >= ?", g.StartsAt).
 		Where("q.executed_at < ?", upper).
 		Scan(ctx, &queryCount)
@@ -443,9 +455,9 @@ func (s *Store) populateGrantCounters(ctx context.Context, g *AccessGrant) error
 		ColumnExpr("COALESCE(SUM(bytes_transferred), 0)").
 		Model((*Connection)(nil)).
 		Where("(grant_uid = ? OR (grant_uid IS NULL AND user_id = ? AND "+
-			"(database_id = ? OR database_id IN "+
+			"((?::uuid IS NULL AND database_id = ?) OR database_id IN "+
 			"(SELECT server_uid FROM server_group_members WHERE group_uid = ?))))",
-			g.UID, g.UserID, g.DatabaseID, g.ServerGroupUID).
+			g.UID, g.UserID, g.ServerGroupUID, g.DatabaseID, g.ServerGroupUID).
 		Where("connected_at >= ?", g.StartsAt).
 		Where("connected_at < ?", upper).
 		Scan(ctx, &bytesTransferred)

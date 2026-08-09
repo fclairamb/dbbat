@@ -341,3 +341,78 @@ func TestApprovedRequestBindsTheGrantToTheServerGroup(t *testing.T) {
 		t.Errorf("GetActiveGrant(after joining) = %v, want the approved grant %v", got.UID, grant.UID)
 	}
 }
+
+// TestRemovingTheAnchorFromTheGroupNarrowsTheGrant pins the half of "membership
+// is live" that is easy to get wrong: a group-bound grant covers what the group
+// holds *now*, full stop. The database it was originally issued for is not
+// carved out, so "removing a server narrows every grant bound to the group" has
+// no exception an operator has to remember.
+//
+// Deleting the group outright is the different case, and the only case where
+// the anchor comes back: the binding is ON DELETE SET NULL, so the grant falls
+// back to where it started. Access narrows, never widens.
+func TestRemovingTheAnchorFromTheGroupNarrowsTheGrant(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "sgnarrow")
+	user, anchor := createTestUserAndDatabase(t, ctx, store, "sgnarrow")
+	sibling := newTestTargetServer(t, ctx, store, "sgnarrow_sibling")
+
+	group, err := store.CreateServerGroup(ctx, &ServerGroup{Name: "narrow-" + uuid.NewString()[:8]})
+	if err != nil {
+		t.Fatalf("CreateServerGroup() error = %v", err)
+	}
+
+	if err := store.SetServerGroupMembers(ctx, group.UID, []uuid.UUID{anchor.UID, sibling.UID}); err != nil {
+		t.Fatalf("SetServerGroupMembers() error = %v", err)
+	}
+
+	def := newTestGrantDefinition(t, ctx, store, admin.UID, GrantDefinition{
+		Controls:        []string{ControlReadOnly},
+		ServerGroupUIDs: []uuid.UUID{group.UID},
+	})
+
+	now := time.Now()
+	grant := newTestGrant(t, ctx, store, def, user.UID, anchor.UID, admin.UID, now.Add(-time.Minute), now.Add(time.Hour))
+
+	if _, err := store.GetActiveGrant(ctx, user.UID, anchor.UID); err != nil {
+		t.Fatalf("GetActiveGrant(anchor) error = %v", err)
+	}
+
+	// Take the anchor out of the group. The grant is bound to the group, so it
+	// stops covering the anchor too.
+	if err := store.RemoveServerFromGroup(ctx, group.UID, anchor.UID); err != nil {
+		t.Fatalf("RemoveServerFromGroup(anchor) error = %v", err)
+	}
+
+	if _, err := store.GetActiveGrant(ctx, user.UID, anchor.UID); !errors.Is(err, ErrNoActiveGrant) {
+		t.Errorf("GetActiveGrant(anchor after removal) error = %v, want ErrNoActiveGrant", err)
+	}
+
+	// The rest of the group is unaffected.
+	if _, err := store.GetActiveGrant(ctx, user.UID, sibling.UID); err != nil {
+		t.Errorf("GetActiveGrant(sibling) error = %v, want the grant to still cover it", err)
+	}
+
+	// Deleting the group unbinds the grant, which falls back to its anchor.
+	if err := store.DeleteServerGroup(ctx, group.UID); err != nil {
+		t.Fatalf("DeleteServerGroup() error = %v", err)
+	}
+
+	got, err := store.GetActiveGrant(ctx, user.UID, anchor.UID)
+	if err != nil {
+		t.Fatalf("GetActiveGrant(anchor after group delete) error = %v, want the anchor fallback", err)
+	}
+
+	if got.UID != grant.UID || got.ServerGroupUID != nil {
+		t.Errorf("after deleting the group, grant = %v (group %v), want %v unbound",
+			got.UID, got.ServerGroupUID, grant.UID)
+	}
+
+	if _, err := store.GetActiveGrant(ctx, user.UID, sibling.UID); !errors.Is(err, ErrNoActiveGrant) {
+		t.Errorf("GetActiveGrant(sibling after group delete) error = %v, want ErrNoActiveGrant", err)
+	}
+}
