@@ -302,12 +302,65 @@ paths:
                       properties:
                         type:
                           type: string
-                          enum: [password, slack]
+                          enum: [password, slack, oidc]
                         enabled:
                           type: boolean
                         authorize_url:
                           type: string
                           description: URL to initiate OAuth flow (only for OAuth providers)
+                        display_name:
+                          type: string
+                          description: >
+                            Login-button label for providers whose branding is
+                            operator-configured (the generic OIDC provider,
+                            DBB_OIDC_DISPLAY_NAME). Absent for providers the
+                            frontend labels itself, such as Slack.
+
+  /auth/oidc:
+    get:
+      tags:
+        - Auth
+      summary: Initiate generic OIDC login
+      description: >
+        Redirects to the configured OpenID Connect issuer's authorization
+        endpoint (with an S256 PKCE challenge). Registered only when
+        DBB_OIDC_ISSUER is set.
+      operationId: initiateOIDCAuth
+      security: []
+      parameters:
+        - in: query
+          name: redirect
+          schema:
+            type: string
+          description: URL to redirect to after successful login
+      responses:
+        '302':
+          description: Redirect to the issuer's authorization endpoint
+
+  /auth/oidc/callback:
+    get:
+      tags:
+        - Auth
+      summary: Generic OIDC callback
+      description: >
+        Handles the redirect back from the OIDC issuer. Verifies the ID token
+        against the issuer's JWKS, applies the optional email-domain
+        allowlist, creates or links the user, creates a session and redirects
+        to the app.
+      operationId: oidcAuthCallback
+      security: []
+      parameters:
+        - in: query
+          name: code
+          schema:
+            type: string
+        - in: query
+          name: state
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to app with a one-time login exchange code
 
   /auth/slack:
     get:

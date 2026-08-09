@@ -33,6 +33,21 @@ var (
 	// uploaded once complete (S3 objects cannot be appended to), so an upload
 	// URL with no DBB_DUMP_DIR would silently capture nothing.
 	ErrDumpUploadNeedsDir = errors.New("DBB_DUMP_UPLOAD_URL requires DBB_DUMP_DIR")
+
+	// ErrOIDCClientCredentialsRequired is returned when an OIDC issuer is
+	// configured without client credentials. Failing at startup beats
+	// offering a login button that can only ever end in an error page.
+	ErrOIDCClientCredentialsRequired = errors.New(
+		"DBB_OIDC_ISSUER requires DBB_OIDC_CLIENT_ID and DBB_OIDC_CLIENT_SECRET")
+)
+
+// OIDC provider defaults.
+const (
+	// DefaultOIDCScopes is the scope set requested from the issuer.
+	DefaultOIDCScopes = "openid email profile"
+	// DefaultOIDCDisplayName is the login-button label when the operator
+	// does not set one.
+	DefaultOIDCDisplayName = "SSO"
 )
 
 // RunMode represents the application run mode.
@@ -166,6 +181,63 @@ type SlackAuthConfig struct {
 // Enabled returns true if Slack OAuth is configured with both client ID and secret.
 func (c SlackAuthConfig) Enabled() bool {
 	return c.ClientID != "" && c.ClientSecret != ""
+}
+
+// OIDCAuthConfig holds the generic OpenID Connect login provider — the one
+// that lets an organization sign in with Google Workspace, Okta, Microsoft
+// Entra, Keycloak or anything else speaking OIDC discovery. Distinct from
+// SlackAuthConfig: both can be enabled at once, and the login page shows a
+// button per enabled provider.
+type OIDCAuthConfig struct {
+	// Issuer is the OIDC issuer URL (e.g. "https://accounts.google.com").
+	// Setting it is what enables the provider.
+	Issuer string `koanf:"issuer"`
+	// ClientID and ClientSecret identify this dbbat instance to the issuer.
+	ClientID     string `koanf:"client_id"`
+	ClientSecret string `koanf:"client_secret"`
+	// Scopes is the space- or comma-separated scope list requested at
+	// authorization time. "openid" is always added.
+	Scopes string `koanf:"scopes"`
+	// DisplayName is the login-button label (e.g. "Acme SSO").
+	DisplayName string `koanf:"display_name"`
+	// EmailDomains is an optional comma-separated allowlist. When set, a
+	// login is rejected unless the *verified* email claim's domain is
+	// listed — the generic equivalent of Slack's workspace gating.
+	EmailDomains string `koanf:"email_domains"`
+}
+
+// Enabled returns true when an issuer is configured. Client id and secret are
+// validated at startup once Enabled is true, so a half-configured provider
+// fails loudly instead of silently offering a broken login button.
+func (c OIDCAuthConfig) Enabled() bool {
+	return c.Issuer != ""
+}
+
+// ScopeList splits Scopes on whitespace and commas.
+func (c OIDCAuthConfig) ScopeList() []string {
+	return splitList(c.Scopes)
+}
+
+// EmailDomainList splits EmailDomains on whitespace and commas.
+func (c OIDCAuthConfig) EmailDomainList() []string {
+	return splitList(c.EmailDomains)
+}
+
+// splitList tokenizes a comma- or whitespace-separated env-var value,
+// dropping empties so a trailing comma is harmless.
+func splitList(s string) []string {
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f != "" {
+			out = append(out, f)
+		}
+	}
+
+	return out
 }
 
 // SlackNotifyConfig configures outbound Slack notifications for grant
@@ -486,6 +558,9 @@ type Config struct {
 	// SlackAuth holds Slack OAuth configuration.
 	SlackAuth SlackAuthConfig `koanf:"slack_auth"`
 
+	// OIDCAuth holds the generic OpenID Connect login provider.
+	OIDCAuth OIDCAuthConfig `koanf:"oidc"`
+
 	// SlackNotify holds outbound Slack notification configuration for
 	// grant request events.
 	SlackNotify SlackNotifyConfig `koanf:"slack_notify"`
@@ -600,6 +675,10 @@ func defaultConfig() Config {
 			AutoCreateUsers: true,
 			DefaultRole:     "connector",
 		},
+		OIDCAuth: OIDCAuthConfig{
+			Scopes:      DefaultOIDCScopes,
+			DisplayName: DefaultOIDCDisplayName,
+		},
 		SlackNotify: SlackNotifyConfig{
 			Channel: "#dbbat",
 		},
@@ -654,6 +733,10 @@ func envTransform(k, v string) (string, any) {
 	// slack_auth_* -> slack_auth.*
 	if strings.HasPrefix(key, "slack_auth_") {
 		return "slack_auth." + strings.TrimPrefix(key, "slack_auth_"), v
+	}
+	// oidc_* -> oidc.*
+	if strings.HasPrefix(key, "oidc_") {
+		return "oidc." + strings.TrimPrefix(key, "oidc_"), v
 	}
 	// slack_signing_secret -> slack_notify.signing_secret
 	// DBB_SLACK_SIGNING_SECRET is the canonical, documented name; the
@@ -768,6 +851,10 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 	// process, not silently leave the listener on the default.
 	if _, err := cfg.MSSQL.ResolveTLSMaxVersion(); err != nil {
 		return nil, err
+	}
+
+	if cfg.OIDCAuth.Enabled() && (cfg.OIDCAuth.ClientID == "" || cfg.OIDCAuth.ClientSecret == "") {
+		return nil, ErrOIDCClientCredentialsRequired
 	}
 
 	// Load encryption key from Key or KeyFile
