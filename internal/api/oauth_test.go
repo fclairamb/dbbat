@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -52,6 +53,167 @@ func (p *recordingProvider) ExchangeCode(_ context.Context, _, _ string) (*auth.
 		return nil, p.exchangeErr
 	}
 	return p.user, nil
+}
+
+// pkceRecordingProvider is a second registered provider that exercises the
+// auth.PKCEProvider path: it mints a verifier at authorize time and records
+// whatever verifier the callback hands back, so a test can prove the value
+// survived the round trip through the oauth_states row. It also implements
+// auth.DisplayNamer, like the real generic OIDC provider.
+type pkceRecordingProvider struct {
+	name        string
+	displayName string
+	user        *auth.OAuthUser
+
+	mu               sync.Mutex
+	lastState        string
+	mintedVerifier   string
+	receivedVerifier string
+}
+
+func (p *pkceRecordingProvider) Name() string        { return p.name }
+func (p *pkceRecordingProvider) DisplayName() string { return p.displayName }
+
+func (p *pkceRecordingProvider) AuthorizeURL(state, _ string) string {
+	return "https://provider.example/authorize?state=" + state
+}
+
+func (p *pkceRecordingProvider) ExchangeCode(_ context.Context, _, _ string) (*auth.OAuthUser, error) {
+	return p.user, nil
+}
+
+func (p *pkceRecordingProvider) AuthorizeURLWithPKCE(
+	_ context.Context,
+	state, _ string,
+) (string, string, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.lastState = state
+	p.mintedVerifier = "verifier-for-" + state
+
+	return "https://provider.example/authorize?state=" + state + "&code_challenge_method=S256", p.mintedVerifier, nil
+}
+
+func (p *pkceRecordingProvider) ExchangeCodeWithVerifier(
+	_ context.Context,
+	_, _, verifier string,
+) (*auth.OAuthUser, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.receivedVerifier = verifier
+
+	return p.user, nil
+}
+
+// TestOAuthPKCEVerifierSurvivesTheRoundTrip pins the storage half of PKCE: the
+// verifier is minted before the redirect, parked on the oauth_states row, and
+// handed back at the callback. It must never travel through the browser, and
+// it must survive a callback that lands on a different process — which is why
+// it lives in the database and not in memory.
+func TestOAuthPKCEVerifierSurvivesTheRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	server, _ := setupTestServer(t)
+	server.encryptionKey = dbTestEncryptionKey
+	suffix := uuid.NewString()[:8]
+
+	server.config = &config.Config{
+		SlackAuth: config.SlackAuthConfig{
+			AutoCreateUsers: true,
+			DefaultRole:     store.RoleConnector,
+		},
+	}
+
+	providerName := "oidc-" + suffix
+	provider := &pkceRecordingProvider{
+		name:        providerName,
+		displayName: "Acme SSO",
+		user: &auth.OAuthUser{
+			ProviderID:  "OIDC-" + suffix,
+			Email:       "oidc-" + suffix + "@example.com",
+			DisplayName: "OIDC User " + suffix,
+		},
+	}
+	server.oauthProviders[providerName] = provider
+
+	router := gin.New()
+	router.GET("/api/v1/auth/"+providerName, server.handleOAuthAuthorize(providerName))
+	router.GET("/api/v1/auth/"+providerName+"/callback", server.handleOAuthCallback(providerName))
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/auth/"+providerName, nil))
+	require.Equal(t, http.StatusFound, w.Code)
+
+	provider.mu.Lock()
+	state, minted := provider.lastState, provider.mintedVerifier
+	provider.mu.Unlock()
+
+	require.NotEmpty(t, state)
+	require.NotEmpty(t, minted)
+	assert.NotContains(t, w.Header().Get("Location"), minted,
+		"the code verifier must never leave the server")
+
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet,
+		"/api/v1/auth/"+providerName+"/callback?code=x&state="+state, nil))
+	require.Equal(t, http.StatusFound, w.Code)
+
+	provider.mu.Lock()
+	received := provider.receivedVerifier
+	provider.mu.Unlock()
+
+	assert.Equal(t, minted, received,
+		"the callback must present the verifier stored with the state row")
+
+	loc, err := url.Parse(w.Header().Get("Location"))
+	require.NoError(t, err)
+	assert.Equal(t, "/app/login", loc.Path)
+	assert.NotEmpty(t, loc.Query().Get("code"), "a PKCE login must still end in an exchange code")
+	assert.Empty(t, loc.Query().Get("error"))
+}
+
+// TestAuthProvidersExposesDisplayName covers the login page's discovery
+// endpoint with two OAuth providers registered: the generic one carries the
+// operator-configured button label, the branded one does not.
+func TestAuthProvidersExposesDisplayName(t *testing.T) {
+	t.Parallel()
+
+	server, _ := setupTestServer(t)
+	suffix := uuid.NewString()[:8]
+
+	genericName := "oidc-list-" + suffix
+	brandedName := "slack-list-" + suffix
+
+	server.oauthProviders[genericName] = &pkceRecordingProvider{name: genericName, displayName: "Acme SSO"}
+	server.oauthProviders[brandedName] = &mockProvider{name: brandedName}
+
+	router := gin.New()
+	router.GET("/api/v1/auth/providers", server.handleAuthProviders)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/auth/providers", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var body struct {
+		Providers []authProviderInfo `json:"providers"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+
+	byType := make(map[string]authProviderInfo, len(body.Providers))
+	for _, p := range body.Providers {
+		byType[p.Type] = p
+	}
+
+	require.Contains(t, byType, "password")
+	require.Contains(t, byType, genericName)
+	require.Contains(t, byType, brandedName)
+
+	assert.Equal(t, "Acme SSO", byType[genericName].DisplayName)
+	assert.Equal(t, "/api/v1/auth/"+genericName, byType[genericName].AuthorizeURL)
+	assert.Empty(t, byType[brandedName].DisplayName,
+		"a provider the frontend labels itself must not carry a display name")
 }
 
 func TestFindOrCreateOAuthUser_OrphanIdentity(t *testing.T) {
