@@ -15,13 +15,15 @@ import (
 )
 
 // buildOALL8Reexec builds the frame this whole file is about: a well-formed
-// OALL8 naming a cursor, with a zero-length SQL field. That is what an Oracle
-// client sends when it re-runs a statement it already parsed — the statement
-// text is never resent, only the cursor id.
+// OALL8 naming a cursor, with a zero-length SQL field — a re-execution in the
+// legacy (pre-v315) framing, where the statement text is never resent, only the
+// cursor id.
 //
-// Hand-built rather than replayed from a capture: see the note in
-// docs/approvals.md — the real-world frequency of this shape is unmeasured,
-// and capturing one is filed as its own follow-up.
+// Hand-built on purpose, and it stays that way: captures from go-ora,
+// python-oracledb thin, JDBC thin and sqlplus show that no modern client emits
+// this shape — they all use the piggyback re-execution instead, which
+// cursor_reexec_replay_test.go covers from real recordings. This file keeps the
+// legacy shape honest for the older clients that would still send it.
 func buildOALL8Reexec(cursorID uint16) []byte {
 	return buildOALL8("", nil, cursorID)
 }

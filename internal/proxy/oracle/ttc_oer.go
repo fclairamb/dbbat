@@ -57,7 +57,7 @@ func decodeOERAt(payload []byte, offset int) *oerInfo {
 // Split out of decodeOERAt because the end-of-call bit is not universal: every
 // OER go-ora's server leg carries it, while python-oracledb's connections get
 // OERs with CallStatus 1 (see testdata/python_thin_cursor_reexec.pcapng).
-// Completion still keys off the bit — that behaviour is unchanged — but the
+// Completion still keys off the bit — that behavior is unchanged — but the
 // cursor-id lookup below cannot afford to.
 func decodeOERFieldsAt(payload []byte, offset int) (*oerInfo, int) {
 	if offset >= len(payload) || payload[offset] != 0x04 {

@@ -16,7 +16,7 @@ import (
 // could not: what does a real client put on the wire when it re-runs a
 // statement it already parsed?
 //
-// The answer, from three captures against Oracle Free 23ai (regenerate with
+// The answer, from five captures against Oracle Free 23ai (regenerate with
 // `go test -tags capture -run 'TestCapture_.*Reexec' ./internal/proxy/oracle/`):
 // never the SQL-less OALL8 the gate was first written for. Modern thin clients
 // send a **piggyback re-execution** — func 0x03, sub-op 0x4e for a SELECT and
@@ -57,8 +57,13 @@ func clientTTCPayloads(t *testing.T, name string) [][]byte {
 
 // recordedReexecs returns every piggyback cursor re-execution in a recording,
 // with the cursor id each one names.
-func recordedReexecs(t *testing.T, name string) (payloads [][]byte, cursorIDs []uint16) {
+func recordedReexecs(t *testing.T, name string) ([][]byte, []uint16) {
 	t.Helper()
+
+	var (
+		payloads  [][]byte
+		cursorIDs []uint16
+	)
 
 	for _, ttc := range clientTTCPayloads(t, name) {
 		if TTCFunctionCode(ttc[0]) != TTCFuncPiggyback || !IsPiggybackCursorReexec(ttc) {
@@ -78,7 +83,7 @@ func recordedReexecs(t *testing.T, name string) (payloads [][]byte, cursorIDs []
 // TestDumpReplay_CursorReexecFramesAreRealAndSQLLess pins what the captures
 // actually contain: each client parsed its statement once and then re-ran it
 // three times by cursor id alone. If a future decoder change stopped
-// recognising these frames, this fails before the enforcement tests do.
+// recognizing these frames, this fails before the enforcement tests do.
 func TestDumpReplay_CursorReexecFramesAreRealAndSQLLess(t *testing.T) {
 	t.Parallel()
 
@@ -147,9 +152,10 @@ func contains(haystack, needle string) bool {
 
 // replaySession feeds a recording through the real intercept pipeline, in wire
 // order and in both directions, and reports which client packets were blocked.
-func replaySession(t *testing.T, s *session, name string) (blocked int) {
+func replaySession(t *testing.T, s *session, name string) int {
 	t.Helper()
 
+	blocked := 0
 	s.clientConn = drainedPipe(t)
 
 	for _, pkt := range loadTestDump(t, name).Packets {
@@ -174,7 +180,7 @@ func replaySession(t *testing.T, s *session, name string) (blocked int) {
 
 // TestDumpReplay_CursorReexecIsGatedOnRealFrames is the end-to-end claim: run
 // the recorded sessions through the proxy's own client and upstream intercept
-// paths and every re-execution is recognised, resolved to the statement its
+// paths and every re-execution is recognized, resolved to the statement its
 // cursor was parsed with, and gated as a query of its own.
 //
 // Two things have to work for that, and neither is exercised by the hand-built
