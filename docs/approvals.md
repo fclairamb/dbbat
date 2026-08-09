@@ -69,12 +69,14 @@ first gap: treat missing query rows on Oracle as missing enforcement, and file i
 ### Re-executing a cursor **is** gated
 
 An Oracle client can re-run a statement it already parsed by naming the cursor
-id alone, with no SQL text on the wire — a SQL-less `OALL8`, or an `OFETCH`
-arriving when no query is in flight. Both are gated against the SQL that cursor
-was parsed with: the same normalize → static controls → hold order as the
-SQL-carrying path, on **every** execution. A statement matched by an approval
-pattern is therefore held again on each re-execution; approving it once does
-not buy a free run for the rest of the session.
+id alone, with no SQL text on the wire. Three frames do that — a **piggyback
+re-execution** (TTC func `0x03`, sub-op `0x4e` for a SELECT and `0x04` for
+anything else), the legacy SQL-less `OALL8`, and an `OFETCH` arriving when no
+query is in flight. All three are gated against the SQL that cursor was parsed
+with: the same normalize → static controls → hold order as the SQL-carrying
+path, on **every** execution. A statement matched by an approval pattern is
+therefore held again on each re-execution; approving it once does not buy a free
+run for the rest of the session.
 
 That covers a cursor dbbat **saw parsed**, which is what makes the SQL known.
 Three boundaries, all deliberate:
@@ -118,12 +120,36 @@ Three boundaries, all deliberate:
   every one of those executions — it is the count alone that leaks. Filed in the
   same todo as the item above.
 
-**How often real clients do this is unmeasured.** JDBC thin, `go-ora`,
-`python-oracledb`, OCI/sqlplus and SQLcl were not observed on a wire capture
-re-executing by cursor id; the shape is inferred from what the TTC decoder
-accepts. This is hardening against something the code permits, not a response
-to an observed exploit, and the enforcement tests use hand-built frames rather
-than a recorded exchange.
+- **A piggyback re-execution naming an untracked cursor is forwarded, not
+  refused.** This is the opposite of the SQL-less `OALL8` above, and
+  deliberately so: that frame is what an ordinary `execute()` loop sends, so
+  failing it closed would refuse every second execution of a perfectly legal
+  read-only session whenever dbbat missed the response that names the cursor.
+  Filed as `specs/todos/2026-08-09-oracle-piggyback-reexec-unknown-cursor.md`.
+
+**How often real clients do this: measured, and the answer is "constantly".**
+Five captures against Oracle Free 23ai, one per client, are in
+`internal/proxy/oracle/testdata/*_cursor_reexec.pcapng`:
+
+| Client | Re-executes by cursor id? |
+|--------|---------------------------|
+| `go-ora` v3, prepared SELECT and prepared INSERT | yes, every run after the first |
+| `python-oracledb` thin, a plain `cur.execute()` loop | yes — its statement cache does it with no prepared-statement API involved |
+| JDBC thin (ojdbc11), cached `PreparedStatement` | yes |
+| sqlplus / OCI thick | no — resends the full statement text every run |
+
+So the gate is load-bearing, not theoretical: without it a client that parses
+once and loops runs everything after the first execution outside `read_only`,
+`block_ddl` and every approval pattern. That is no longer hypothetical either —
+it is what dbbat did until the piggyback frame was routed through the gate,
+because the shape the gate originally handled (the SQL-less `OALL8`) is the
+**legacy pre-v315 framing and was not observed from any client tested**. It is
+kept as defence in depth for older clients. See the client table and frame
+layout in `docs/oracle.md`.
+
+The enforcement tests run both ways: hand-built frames for the legacy shape
+(`cursor_reexec_gate_test.go`) and the recordings replayed through the real
+intercept paths for the modern one (`cursor_reexec_replay_test.go`).
 
 ## There is no approval timeout
 
@@ -528,7 +554,7 @@ stays correct, only the live feed goes away.
 | MySQL / MariaDB | `COM_QUERY` / `COM_STMT_EXECUTE`, inside `runIntercepted` | go-mysql owns the wire; the hold happens before `exec()`. |
 | MongoDB | `OP_MSG` command dispatch | Matching runs against the rendered `<command> <extJSON>` text, which is what `/queries` shows. |
 | SQL Server | `SQLBatch` / `RPC`, in the client→upstream pump's hook | The one protocol whose cancel is in-band, so the client leg is read by a separate goroutine for the whole session. |
-| Oracle | `OALL8`, the v315+ piggyback exec, the JDBC thin driver's `func=0x11` / sub-op `0x69` exec, plus cursor re-executions (SQL-less `OALL8`, and an `OFETCH` that starts a new query) | All go through the same normalize → static controls → hold order; re-executions are gated against the SQL the cursor was parsed with. Oracle clients are the least forgiving about a silent connection — expect `abandoned` more often here. A frame whose SQL cannot be decoded is forwarded ungated; see the caveat under "The hold, in order". |
+| Oracle | `OALL8`, the v315+ piggyback exec, the JDBC thin driver's `func=0x11` / sub-op `0x69` exec, plus cursor re-executions (the piggyback `0x03`/`0x4e`+`0x04` frames every thin client sends, the legacy SQL-less `OALL8`, and an `OFETCH` that starts a new query) | All go through the same normalize → static controls → hold order; re-executions are gated against the SQL the cursor was parsed with. Oracle clients are the least forgiving about a silent connection — expect `abandoned` more often here. A frame whose SQL cannot be decoded is forwarded ungated; see the caveat under "The hold, in order". |
 
 ## Schema
 

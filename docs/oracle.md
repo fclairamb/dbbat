@@ -75,6 +75,8 @@ In modern Oracle, function code `0x03` is a generic "piggyback" that carries sub
 | 0x01 | — | Set Protocol (session init) |
 | 0x02 | — | Set Data Types (session init) |
 | 0x03 | 0x5e | **Execute with SQL** (OALL8 equivalent) |
+| 0x03 | 0x4e | **Re-execute + fetch an already-parsed SELECT cursor** (no SQL) |
+| 0x03 | 0x04 | **Re-execute an already-parsed non-SELECT cursor** (no SQL) |
 | 0x03 | 0x76 | AUTH Phase 1 |
 | 0x03 | 0x73 | AUTH Phase 2 |
 | 0x03 | 0x09 | Close cursor |
@@ -96,6 +98,80 @@ SQL text is inside piggyback execute messages (func=0x03, sub=0x5e). The SQL is 
 | Go go-ora | varies |
 
 The robust approach: scan offsets 40-70 for a `decodeVarLen` + readable SQL text, then validate with `looksLikeSQL()` (checks for SQL keyword prefix). As a fallback, scan the entire payload for SQL keywords (`SELECT`, `INSERT`, etc.) and extract until end of printable ASCII.
+
+### Cursor re-execution (what clients actually send)
+
+A client that has already parsed a statement re-runs it by naming its **cursor
+id alone** — the statement text is never resent. dbbat has to recognise that or
+the whole statement gate (read_only, block_ddl, approval holds) applies to the
+parse only.
+
+Measured, not assumed. Five recordings against Oracle Free 23ai, one per client,
+each parsing `SELECT 1 AS n FROM dual` (or an `INSERT`) once and then running it
+three more times — regenerate with:
+
+```bash
+docker run -d --name dbbat-ora-cap -p 51521:1521 -e ORACLE_PASSWORD=oracle gvenzl/oracle-free:23-slim
+go test -tags capture -timeout 300s -run 'TestCapture_.*Reexec' -v ./internal/proxy/oracle/
+```
+
+| Client | Re-executes by cursor id? | Frame on the wire | Fixture |
+|--------|---------------------------|-------------------|---------|
+| go-ora v3 (prepared SELECT) | **yes**, every run after the first | func `0x03` sub `0x4e` | `testdata/go_ora_cursor_reexec.pcapng` |
+| go-ora v3 (prepared INSERT) | **yes** | func `0x03` sub `0x04` | `testdata/go_ora_dml_cursor_reexec.pcapng` |
+| python-oracledb thin (plain `cur.execute()` loop) | **yes** — no prepared-statement API needed, its per-connection statement cache does it | func `0x03` sub `0x4e` | `testdata/python_thin_cursor_reexec.pcapng` |
+| JDBC thin / ojdbc11 (cached `PreparedStatement`) | **yes** | func `0x03` sub `0x4e` | `testdata/jdbc_thin_cursor_reexec.pcapng` |
+| sqlplus / OCI thick | **no** — resends the full statement text on every run | func `0x11` sub `0x69` with SQL | `testdata/sqlplus_cursor_reexec.pcapng` |
+
+So this is not an exotic shape: it is what every thin client does by default, and
+python-oracledb reaches it without the caller asking for a prepared statement.
+
+**None of them sends the SQL-less `OALL8` (func `0x0E`, SQL length 0)** the gate
+was originally written against — that is the legacy pre-v315 framing of the same
+idea. It is still handled (`decodeOALL8` → `OALL8NoSQLError`), kept as defence in
+depth for older clients, but it was not observed from any client tested here.
+
+Frame layout (`decodeCursorReexec`), identical for both sub-ops:
+
+```
+[0]    0x03            piggyback
+[1]    0x4e | 0x04     sub-op
+[2]    seq             TTC sequence number
+[3]    0x00            present only from TTC version 18 (v315+) on
+[4..]  cursorID, rowsToFetch, execOptions, execFlags   — TTC compressed ints
+```
+
+The four integers must consume the frame exactly; a trailing byte means it is
+some other sub-op and it is left alone.
+
+#### Learning the cursor id
+
+Only the legacy `OALL8` carries the cursor id on the *request*. The piggyback
+exec (`0x03`/`0x5e`) and the JDBC exec (`0x11`/`0x69`) send the SQL with no id —
+the **server** allots one and reports it back — so without reading the response
+dbbat has a statement with no id and, later, an id with no statement.
+
+`learnCursorID` reads it off the first response to each execute
+(`findCursorIDInResponse`): the OER's seventh field. The scan is anchored rather
+than trusting — seven compressed ints, error code success or ORA-01403, byte-sized
+sequence number, 16-bit cursor id, first match wins — because a run of row bytes
+can otherwise parse as an OER. It runs at most once per statement.
+
+One gotcha the fixtures pinned: the OER **end-of-call bit is not universal**.
+go-ora's connections carry `CallStatus 0x10005`, python-oracledb's carry
+`CallStatus 1`. Query completion still keys off the bit (unchanged); the cursor-id
+lookup deliberately does not, which is why `decodeOERFieldsAt` is split out of
+`decodeOERAt`.
+
+A re-execution naming a cursor dbbat cannot resolve is **forwarded**, not
+refused — unlike the SQL-less `OALL8`, which fails closed. This frame is what an
+ordinary `execute()` loop sends, so failing it closed would break read-only
+sessions on every second execution. See
+`specs/todos/2026-08-09-oracle-piggyback-reexec-unknown-cursor.md`.
+
+Replayed by `cursor_reexec_replay_test.go`, which drives the recordings through
+the real client/upstream intercept paths and asserts the re-executions are
+recognised, resolved to the right statement, and refused under `read_only`.
 
 ### Query Results
 
