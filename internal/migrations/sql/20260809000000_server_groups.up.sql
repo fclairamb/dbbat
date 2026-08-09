@@ -33,15 +33,16 @@ CREATE INDEX server_group_members_server_idx ON server_group_members (server_uid
 
 --bun:split
 
--- A grant binds to a server group in addition to its anchor database: it
--- covers whatever the group contains *right now*, so adding a server to the
--- group extends every already-live grant bound to it. NULL — the default and
--- the state of every pre-existing grant — means "anchor database only", which
--- is exactly today's behavior.
+-- A grant binds to a server group *instead of* to a single database: it covers
+-- whatever the group contains **right now**, and only that. Adding a server to
+-- the group extends every already-live grant bound to it; removing one narrows
+-- them, including the anchor the grant was originally issued for. NULL — the
+-- default and the state of every pre-existing grant — means "anchor database
+-- only", which is exactly today's behavior.
 --
--- ON DELETE SET NULL rather than CASCADE: deleting a group must narrow those
--- grants back to their anchor, never delete access silently and never widen
--- it.
+-- ON DELETE SET NULL rather than CASCADE: deleting a group unbinds those
+-- grants so they fall back to their anchor, never deletes access silently and
+-- never widens it.
 ALTER TABLE access_grants
     ADD COLUMN server_group_uid uuid REFERENCES server_groups(uid) ON DELETE SET NULL;
 

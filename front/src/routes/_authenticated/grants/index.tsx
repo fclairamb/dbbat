@@ -162,18 +162,23 @@ function GrantsPage() {
     {
       key: "database",
       header: "Database",
-      // A group-bound grant covers more than its anchor, and membership is
-      // live — so showing the anchor alone would misstate the grant's reach.
-      cell: (g) => (
-        <div className="flex flex-col gap-0.5">
-          <span className="font-mono text-sm">{getDbName(g.database_id)}</span>
-          {g.server_group_uid && (
-            <span className="text-xs text-muted-foreground">
-              + server group {getServerGroupName(g.server_group_uid)}
+      // A group-bound grant covers its group's *current* membership instead of
+      // the database it was issued for, so naming that database alone would
+      // misstate the grant's reach — and naming it alongside the group would
+      // suggest the two add up, which they don't.
+      cell: (g) =>
+        g.server_group_uid ? (
+          <div className="flex flex-col gap-0.5">
+            <span className="font-mono text-sm">
+              {getServerGroupName(g.server_group_uid)}
             </span>
-          )}
-        </div>
-      ),
+            <span className="text-xs text-muted-foreground">
+              server group — whichever servers it holds right now
+            </span>
+          </div>
+        ) : (
+          <span className="font-mono text-sm">{getDbName(g.database_id)}</span>
+        ),
     },
     {
       key: "definition",
