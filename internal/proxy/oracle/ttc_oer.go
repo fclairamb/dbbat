@@ -11,6 +11,7 @@ type oerInfo struct {
 	SeqNumber    int
 	CurRowNumber int // rows processed (rows affected for DML, 0 for DDL)
 	ErrorCode    int // 0 = success, 1403 = end-of-data, else the ORA-NNNNN code
+	CursorID     int // cursor the server assigned to the statement, 0 when none
 	ErrorMessage string
 }
 
@@ -37,8 +38,30 @@ var oerFieldMaxSizes = [...]int{4, 2, 8, 4, 2, 2, 4}
 // Returns nil when the bytes do not validate as an OER (decode failure,
 // oversized field, or missing end-of-call bit).
 func decodeOERAt(payload []byte, offset int) *oerInfo {
-	if offset >= len(payload) || payload[offset] != 0x04 {
+	info, rest := decodeOERFieldsAt(payload, offset)
+	if info == nil || info.CallStatus&oerEndOfCallBit == 0 {
 		return nil
+	}
+
+	if info.ErrorCode != 0 {
+		info.ErrorMessage = extractORAMessage(payload[rest:])
+	}
+
+	return info
+}
+
+// decodeOERFieldsAt decodes the leading integer fields of an OER whose 0x04
+// marker sits at payload[offset], without judging whether the result is a real
+// OER. It returns the fields and the offset just past them, or nil.
+//
+// Split out of decodeOERAt because the end-of-call bit is not universal: every
+// OER go-ora's server leg carries it, while python-oracledb's connections get
+// OERs with CallStatus 1 (see testdata/python_thin_cursor_reexec.pcapng).
+// Completion still keys off the bit — that behaviour is unchanged — but the
+// cursor-id lookup below cannot afford to.
+func decodeOERFieldsAt(payload []byte, offset int) (*oerInfo, int) {
+	if offset >= len(payload) || payload[offset] != 0x04 {
+		return nil, 0
 	}
 
 	pos := offset + 1
@@ -48,29 +71,65 @@ func decodeOERAt(payload []byte, offset int) *oerInfo {
 	for i, maxSize := range oerFieldMaxSizes {
 		val, n := readCompressedInt(payload[pos:])
 		if n == 0 || n-1 > maxSize {
-			return nil
+			return nil, 0
 		}
 
 		fields[i] = val
 		pos += n
 	}
 
-	info := &oerInfo{
+	return &oerInfo{
 		CallStatus:   fields[0],
 		SeqNumber:    fields[1],
 		CurRowNumber: fields[2],
 		ErrorCode:    fields[3],
+		CursorID:     fields[6],
+	}, pos
+}
+
+// oerMaxSeqNumber bounds a believable OER sequence number: TTC numbers calls
+// with a single byte that wraps at 255.
+const oerMaxSeqNumber = 255
+
+// findCursorIDInResponse scans a server payload for the OER that reports which
+// cursor the server assigned to the statement just executed, and returns that
+// cursor id.
+//
+// dbbat needs this because the modern execute paths (the v315+ piggyback exec
+// and the JDBC thin exec) send the statement text with *no* cursor id — the
+// server picks one and reports it back, and the client then re-runs the
+// statement by that id alone. Without reading it here, a re-execution names a
+// cursor dbbat has no statement for.
+//
+// The scan is anchored rather than trusting: the run must decode as seven
+// compressed ints, the error code must be success or end-of-data (an OER
+// reporting a real failure assigns nothing), the sequence number must fit a
+// byte, and the cursor id must be a plausible 16-bit id. First match wins,
+// which is what keeps a later run of row bytes that happens to parse from
+// overriding the genuine one.
+func findCursorIDInResponse(payload []byte) (uint16, bool) {
+	for i := 1; i < len(payload); i++ {
+		if payload[i] != 0x04 {
+			continue
+		}
+
+		info, _ := decodeOERFieldsAt(payload, i)
+		if info == nil {
+			continue
+		}
+
+		if info.ErrorCode != 0 && info.ErrorCode != oraNoDataFound {
+			continue
+		}
+
+		if info.SeqNumber > oerMaxSeqNumber || info.CursorID <= 0 || info.CursorID > cursorReexecMaxID {
+			continue
+		}
+
+		return uint16(info.CursorID), true
 	}
 
-	if info.CallStatus&oerEndOfCallBit == 0 {
-		return nil
-	}
-
-	if info.ErrorCode != 0 {
-		info.ErrorMessage = extractORAMessage(payload[pos:])
-	}
-
-	return info
+	return 0, false
 }
 
 // findOERInResponse scans a Response (func=0x08) payload for the embedded OER

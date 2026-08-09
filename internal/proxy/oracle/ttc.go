@@ -34,10 +34,12 @@ const (
 
 // Piggyback sub-operation codes (byte 1 when func=0x03).
 const (
-	PiggybackSubClose   byte = 0x09 // Close cursor
-	PiggybackSubExecSQL byte = 0x5e // Execute with SQL (OALL8 equivalent)
-	PiggybackSubAuth1   byte = 0x76 // AUTH Phase 1
-	PiggybackSubAuth2   byte = 0x73 // AUTH Phase 2
+	PiggybackSubReexecDML byte = 0x04 // Re-execute an already-parsed non-SELECT cursor
+	PiggybackSubClose     byte = 0x09 // Close cursor
+	PiggybackSubReexecSel byte = 0x4e // Re-execute + fetch an already-parsed SELECT cursor
+	PiggybackSubExecSQL   byte = 0x5e // Execute with SQL (OALL8 equivalent)
+	PiggybackSubAuth1     byte = 0x76 // AUTH Phase 1
+	PiggybackSubAuth2     byte = 0x73 // AUTH Phase 2
 )
 
 // Execute-with-SQL sub-operation codes for func=0x11.
@@ -109,6 +111,28 @@ func IsPiggybackExecSQL(ttcPayload []byte) bool {
 	// ttcPayload starts at the function code byte
 	// [0] = 0x03 (piggyback), [1] = sub-op
 	return len(ttcPayload) > 1 && ttcPayload[1] == PiggybackSubExecSQL
+}
+
+// IsPiggybackCursorReexec reports whether a piggyback payload re-executes a
+// cursor the client already parsed — no statement text on the wire, only the
+// cursor id.
+//
+// This is the shape every modern thin client actually sends when it re-runs a
+// statement (verified on captures from go-ora and python-oracledb thin, see
+// docs/oracle.md): sub-op 0x4e for a SELECT, sub-op 0x04 for anything else.
+// The SQL-less OALL8 that decodeOALL8 reports is the same idea in the legacy
+// (pre-v315) framing.
+func IsPiggybackCursorReexec(ttcPayload []byte) bool {
+	if len(ttcPayload) < 2 {
+		return false
+	}
+
+	switch ttcPayload[1] {
+	case PiggybackSubReexecSel, PiggybackSubReexecDML:
+		return true
+	default:
+		return false
+	}
 }
 
 // IsPiggybackClose checks if a piggyback payload is a close cursor message.
