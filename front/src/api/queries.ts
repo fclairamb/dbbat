@@ -10,6 +10,9 @@ export type UpdateUserRequest = components["schemas"]["UpdateUserRequest"];
 export type UserGroup = components["schemas"]["UserGroup"];
 export type CreateUserGroupRequest =
   components["schemas"]["CreateUserGroupRequest"];
+export type ServerGroup = components["schemas"]["ServerGroup"];
+export type CreateServerGroupRequest =
+  components["schemas"]["CreateServerGroupRequest"];
 export type Database = components["schemas"]["Database"];
 export type DatabaseLimited = components["schemas"]["DatabaseLimited"];
 export type CreateDatabaseRequest =
@@ -535,6 +538,109 @@ export function useDeleteUserGroup(options?: {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["user-groups"] });
       queryClient.invalidateQueries({ queryKey: ["users"] });
+      options?.onSuccess?.();
+    },
+    onError: options?.onError,
+  });
+}
+
+// ============================================================================
+// Server Groups
+// ============================================================================
+
+export function useServerGroups(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["server-groups"],
+    queryFn: async (): Promise<ServerGroup[]> => {
+      const response = await apiClient.GET("/server-groups");
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to load server groups"
+        );
+      }
+      return response.data?.server_groups || [];
+    },
+    enabled: options?.enabled ?? true,
+  });
+}
+
+export function useCreateServerGroup(options?: {
+  onSuccess?: (group: ServerGroup) => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (data: CreateServerGroupRequest): Promise<ServerGroup> => {
+      const response = await apiClient.POST("/server-groups", { body: data });
+      if (response.error || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to create server group"
+        );
+      }
+      return response.data;
+    },
+    onSuccess: (group) => {
+      queryClient.invalidateQueries({ queryKey: ["server-groups"] });
+      // Membership is live, so a change here changes what live grants cover.
+      queryClient.invalidateQueries({ queryKey: ["grants"] });
+      options?.onSuccess?.(group);
+    },
+    onError: options?.onError,
+  });
+}
+
+export function useUpdateServerGroup(options?: {
+  onSuccess?: (group: ServerGroup) => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (args: {
+      uid: string;
+      body: CreateServerGroupRequest;
+    }): Promise<ServerGroup> => {
+      const response = await apiClient.PATCH("/server-groups/{uid}", {
+        params: { path: { uid: args.uid } },
+        body: args.body,
+      });
+      if (response.error || !response.data) {
+        throw new Error(
+          response.error?.message || "Failed to update server group"
+        );
+      }
+      return response.data;
+    },
+    onSuccess: (group) => {
+      queryClient.invalidateQueries({ queryKey: ["server-groups"] });
+      queryClient.invalidateQueries({ queryKey: ["grants"] });
+      options?.onSuccess?.(group);
+    },
+    onError: options?.onError,
+  });
+}
+
+export function useDeleteServerGroup(options?: {
+  onSuccess?: () => void;
+  onError?: (error: Error) => void;
+}) {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (uid: string): Promise<void> => {
+      const response = await apiClient.DELETE("/server-groups/{uid}", {
+        params: { path: { uid } },
+      });
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to delete server group"
+        );
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["server-groups"] });
+      queryClient.invalidateQueries({ queryKey: ["grants"] });
       options?.onSuccess?.();
     },
     onError: options?.onError,

@@ -4,7 +4,7 @@ import { Plus, Pencil, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import {
-  useDatabases,
+  useServerGroups,
   useUserGroups,
   useGrantDefinitions,
   useCreateGrantDefinition,
@@ -239,20 +239,22 @@ function GrantDefinitionsPage() {
       cell: (d: GrantDefinition) => (
         <div className="flex flex-col gap-0.5 text-xs">
           <span>
-            {d.group_uids.length === 0 ? (
+            {d.user_group_uids.length === 0 ? (
               <span className="text-muted-foreground italic">all users</span>
             ) : (
-              `${d.group_uids.length} group${d.group_uids.length > 1 ? "s" : ""}`
+              `${d.user_group_uids.length} user group${
+                d.user_group_uids.length > 1 ? "s" : ""
+              }`
             )}
           </span>
           <span>
-            {d.database_uids.length === 0 ? (
+            {d.server_group_uids.length === 0 ? (
               <span className="text-muted-foreground italic">
                 all databases
               </span>
             ) : (
-              `${d.database_uids.length} database${
-                d.database_uids.length > 1 ? "s" : ""
+              `${d.server_group_uids.length} server group${
+                d.server_group_uids.length > 1 ? "s" : ""
               }`
             )}
           </span>
@@ -508,11 +510,11 @@ function DefinitionDialog({
   const [priorityTouched, setPriorityTouched] = useState(
     editing?.priority != null
   );
-  const [groupUids, setGroupUids] = useState<string[]>(
-    editing?.group_uids ?? []
+  const [userGroupUids, setUserGroupUids] = useState<string[]>(
+    editing?.user_group_uids ?? []
   );
-  const [databaseUids, setDatabaseUids] = useState<string[]>(
-    editing?.database_uids ?? []
+  const [serverGroupUids, setServerGroupUids] = useState<string[]>(
+    editing?.server_group_uids ?? []
   );
   // One RE2 pattern per line — the shape operators actually think in.
   const [approvalPatterns, setApprovalPatterns] = useState<string>(
@@ -525,8 +527,8 @@ function DefinitionDialog({
   const [sampleQueries, setSampleQueries] = useState<string>(
     (editing?.sample_queries ?? []).join("\n")
   );
-  const [approverGroupUids, setApproverGroupUids] = useState<string[]>(
-    editing?.approver_group_uids ?? []
+  const [approverUserGroupUids, setApproverUserGroupUids] = useState<string[]>(
+    editing?.approver_user_group_uids ?? []
   );
   // Results of the last "Test patterns" run (manual, or the implicit one on
   // submit). null = never run yet, so the panel stays hidden until the
@@ -538,7 +540,7 @@ function DefinitionDialog({
     QueryValidationResult[] | null
   >(null);
   const { data: groups = [] } = useUserGroups();
-  const { data: databases = [] } = useDatabases();
+  const { data: serverGroups = [] } = useServerGroups();
   const [autoApprove, setAutoApprove] = useState(
     editing?.auto_approve ?? false
   );
@@ -713,11 +715,11 @@ function DefinitionDialog({
         priority: priorityValue ?? undefined,
         clear_priority: priorityValue === null,
         auto_approve: autoApprove,
-        group_uids: groupUids,
-        database_uids: databaseUids,
+        user_group_uids: userGroupUids,
+        server_group_uids: serverGroupUids,
         approval_patterns: approvalPatternsValue,
         sample_queries: sampleQueriesValue,
-        approver_group_uids: approverGroupUids,
+        approver_user_group_uids: approverUserGroupUids,
       };
       update.mutate({ uid: editing.uid, body });
     } else {
@@ -731,11 +733,11 @@ function DefinitionDialog({
         max_bytes_transferred: maxBytesTransferred,
         priority: priorityValue,
         auto_approve: autoApprove,
-        group_uids: groupUids,
-        database_uids: databaseUids,
+        user_group_uids: userGroupUids,
+        server_group_uids: serverGroupUids,
         approval_patterns: approvalPatternsValue,
         sample_queries: sampleQueriesValue,
-        approver_group_uids: approverGroupUids,
+        approver_user_group_uids: approverUserGroupUids,
       };
       create.mutate(body);
     }
@@ -897,31 +899,36 @@ function DefinitionDialog({
             </p>
           </div>
           <div className="space-y-2">
-            <Label>Restrict to groups</Label>
+            <Label>Restrict to user groups</Label>
             <p className="text-xs text-muted-foreground">
               Leave empty to let every user request this definition.
             </p>
             <MultiSelect
               options={groups.map((g) => ({ value: g.uid, label: g.name }))}
-              selected={groupUids}
-              onChange={setGroupUids}
+              selected={userGroupUids}
+              onChange={setUserGroupUids}
               placeholder="Every user"
-              emptyMessage="No groups defined yet — this definition applies to every user."
-              testId="grant-definition-groups"
+              emptyMessage="No user groups defined yet — this definition applies to every user."
+              testId="grant-definition-user-groups"
             />
           </div>
           <div className="space-y-2">
-            <Label>Restrict to databases</Label>
+            <Label>Restrict to server groups</Label>
             <p className="text-xs text-muted-foreground">
               Leave empty to allow this definition against every database.
+              Membership is live: a server added to one of these groups is
+              covered immediately, without editing this definition.
             </p>
             <MultiSelect
-              options={databases.map((d) => ({ value: d.uid, label: d.name }))}
-              selected={databaseUids}
-              onChange={setDatabaseUids}
+              options={serverGroups.map((g) => ({
+                value: g.uid,
+                label: g.name,
+              }))}
+              selected={serverGroupUids}
+              onChange={setServerGroupUids}
               placeholder="Every database"
-              emptyMessage="No databases configured yet."
-              testId="grant-definition-databases"
+              emptyMessage="No server groups defined yet — this definition applies to every database."
+              testId="grant-definition-server-groups"
             />
           </div>
           <div className="space-y-2">
@@ -1046,19 +1053,19 @@ function DefinitionDialog({
             )}
           </div>
           <div className="space-y-2">
-            <Label>Approver groups</Label>
+            <Label>Approver user groups</Label>
             <p className="text-xs text-muted-foreground">
-              Members of these groups may resolve holds on grants built from
-              this definition, in addition to admins. Self-approval is always
-              rejected.
+              Members of these user groups may resolve holds on grants built
+              from this definition, in addition to admins. Self-approval is
+              always rejected.
             </p>
             <MultiSelect
               options={groups.map((g) => ({ value: g.uid, label: g.name }))}
-              selected={approverGroupUids}
-              onChange={setApproverGroupUids}
+              selected={approverUserGroupUids}
+              onChange={setApproverUserGroupUids}
               placeholder="Admins only"
-              emptyMessage="No groups defined yet — admins only."
-              testId="grant-definition-approver-groups"
+              emptyMessage="No user groups defined yet — admins only."
+              testId="grant-definition-approver-user-groups"
             />
           </div>
           <div className="flex items-center gap-2">

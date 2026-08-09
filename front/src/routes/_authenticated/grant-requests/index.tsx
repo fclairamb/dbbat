@@ -7,6 +7,7 @@ import {
   useGrantRequests,
   useGrantDefinitions,
   useDatabases,
+  useServerGroups,
   useUsers,
   useCreateGrantRequest,
   useApproveGrantRequest,
@@ -44,6 +45,7 @@ import {
 import { useAuth } from "@/contexts/AuthContext";
 import {
   canApproveGrantRequest,
+  canManageServerGroups,
   canRequestGrant,
 } from "@/lib/permissions";
 
@@ -312,8 +314,13 @@ function GrantRequestsPage() {
 }
 
 function CreateRequestDialog({ onClose }: { onClose: () => void }) {
+  const { user } = useAuth();
   const { data: definitions = [] } = useGrantDefinitions({ active_only: true });
   const { data: databases = [] } = useDatabases();
+  // Admin-only surface: a non-admin gets an empty list and no narrowing.
+  const { data: serverGroups = [] } = useServerGroups({
+    enabled: canManageServerGroups(user?.roles),
+  });
 
   const [definitionId, setDefinitionId] = useState("");
   const [databaseId, setDatabaseId] = useState("");
@@ -322,10 +329,20 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
   const selectedDefinition = definitions.find((d) => d.uid === definitionId);
   const justificationRequired = selectedDefinition?.auto_approve ?? false;
 
-  // A definition can be scoped to specific databases; an empty scope means
-  // every database. Narrow the picker so an out-of-scope pick (which the API
-  // rejects with 403) is not even offered.
-  const scopedDatabaseUids = selectedDefinition?.database_uids ?? [];
+  // A definition can be scoped to server groups; an empty scope means every
+  // database. Narrow the picker so an out-of-scope pick (which the API rejects
+  // with 403) is not even offered.
+  //
+  // Server groups are an admin-only surface, so a non-admin requester cannot
+  // resolve the membership and simply gets the full list — the server still
+  // enforces the scope. Narrowing is a convenience here, never the control.
+  const scopedGroupUids = selectedDefinition?.server_group_uids ?? [];
+  const scopedDatabaseUids =
+    scopedGroupUids.length === 0 || serverGroups.length === 0
+      ? []
+      : serverGroups
+          .filter((g) => scopedGroupUids.includes(g.uid))
+          .flatMap((g) => g.member_uids);
   const selectableDatabases =
     scopedDatabaseUids.length === 0
       ? databases

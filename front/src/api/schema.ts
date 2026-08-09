@@ -621,8 +621,8 @@ export interface paths {
          *     window's length is the definition's `duration_seconds`. There is
          *     deliberately no way to describe an ad-hoc shape here.
          *
-         *     The definition must be active, and its `database_uids` scope (when set)
-         *     must cover the target database. Its `group_uids` scope is *not*
+         *     The definition must be active, and its `server_group_uids` scope (when set)
+         *     must cover the target database. Its `user_group_uids` scope is *not*
          *     enforced: that scope governs who may self-request the definition, and
          *     an admin assigning access is the authority on who receives it.
          */
@@ -761,6 +761,112 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/server-groups": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List server groups (admin) */
+        get: operations["listServerGroups"];
+        put?: never;
+        /**
+         * Create server group (admin)
+         * @description Creates a server group: a named, stable set of database servers that
+         *     grant definitions scope on and grants bind to. SSH bastions cannot be
+         *     members — they are a dial path, not something access is granted on.
+         */
+        post: operations["createServerGroup"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/server-groups/{uid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        /** Get server group by UID (admin) */
+        get: operations["getServerGroup"];
+        put?: never;
+        post?: never;
+        /**
+         * Delete server group (admin)
+         * @description Hard-deletes the group; memberships cascade away and grants bound to it
+         *     fall back to their anchor database (never widen). Grant definitions
+         *     scoped to the group keep the now-dangling uid, so they match no
+         *     database (fail closed) until an admin edits them.
+         */
+        delete: operations["deleteServerGroup"];
+        options?: never;
+        head?: never;
+        /**
+         * Update server group (admin)
+         * @description Replaces name and description. `member_uids` replaces membership
+         *     wholesale when present; omit it to leave membership untouched.
+         *
+         *     **Membership is live.** Adding a server here immediately widens every
+         *     grant bound to this group — there is no versioning in between.
+         *     `active_grant_count` on the response is the blast radius.
+         */
+        patch: operations["updateServerGroup"];
+        trace?: never;
+    };
+    "/server-groups/{uid}/members": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        /** List server group members (admin) */
+        get: operations["listServerGroupMembers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/server-groups/{uid}/members/{server_uid}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+                server_uid: string;
+            };
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Add a server to a group (admin)
+         * @description Idempotent — re-adding an existing member is a no-op. Takes effect
+         *     immediately for every live grant bound to the group.
+         */
+        put: operations["addServerGroupMember"];
+        post?: never;
+        /**
+         * Remove a server from a group (admin)
+         * @description Idempotent — removing a non-member is a no-op. Takes effect
+         *     immediately: live grants bound to the group stop covering this server.
+         */
+        delete: operations["removeServerGroupMember"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/grant-definitions": {
         parameters: {
             query?: never;
@@ -835,13 +941,13 @@ export interface paths {
          *     body is left untouched on the existing definition — so a caller that
          *     only means to flip `auto_approve`, say, can send just that field
          *     without risk of wiping the rest, notably `approval_patterns` and
-         *     `approver_group_uids`.
+         *     `approver_user_group_uids`.
          *
          *     **An edit creates a new version.** The current row is archived
          *     (`archived_at` set) and a successor carrying the change is inserted
          *     with a new `uid` and the same `lineage_uid`; the response is that new
          *     version. Grants already issued keep pointing at the version they were
-         *     issued from, so their behaviour never changes. An edit that changes
+         *     issued from, so their behavior never changes. An edit that changes
          *     nothing is not versioned.
          *
          *     Editing an already-archived version is refused with a 409 — history is
@@ -1891,14 +1997,56 @@ export interface components {
              */
             member_uids?: string[];
         };
+        /**
+         * @description A named set of database servers — the unit rights are scoped on.
+         *     Membership is **live**: a grant bound to this group covers whatever the
+         *     group contains right now, so adding a server widens every live grant
+         *     bound to it the instant it is saved.
+         */
+        ServerGroup: {
+            /** Format: uuid */
+            uid: string;
+            name: string;
+            description: string;
+            /** @description UIDs of the servers belonging to this group. */
+            member_uids: string[];
+            /**
+             * Format: int64
+             * @description How many currently-authorizing grants are bound to this group —
+             *     the blast radius of a membership edit, since membership is live.
+             */
+            readonly active_grant_count: number;
+            /** Format: uuid */
+            readonly created_by?: string | null;
+            /** Format: date-time */
+            readonly created_at: string;
+        };
+        CreateServerGroupRequest: {
+            name: string;
+            description?: string;
+            /**
+             * @description Replaces the group's membership. On update, omit to leave
+             *     membership untouched; an explicit empty array empties the group.
+             *     SSH bastions are rejected.
+             */
+            member_uids?: string[];
+        };
         UpdateUserRequest: {
             /** @description New password */
             password?: string;
             /** @description New roles (admin only) */
             roles?: ("admin" | "viewer" | "connector")[];
             /**
-             * @description Replaces the user's group memberships wholesale (admin only).
+             * @description Replaces the user's user-group memberships wholesale (admin only).
              *     Omit to leave membership untouched.
+             */
+            user_group_uids?: string[];
+            /**
+             * @deprecated
+             * @description **Deprecated** pre-rename spelling of `user_group_uids`, still
+             *     accepted on input for one release so existing clients keep
+             *     working. `user_group_uids` wins when both are present; responses
+             *     never emit this name.
              */
             group_uids?: string[];
         };
@@ -2256,12 +2404,21 @@ export interface components {
              *     keeps behaving. A dangling uid (deleted group) matches nobody, so
              *     the definition fails closed.
              */
-            group_uids: string[];
+            user_group_uids: string[];
             /**
-             * @description Restricts this definition to these databases. An empty array means
-             *     every database.
+             * @description Restricts this definition to the databases currently belonging to
+             *     these server groups. An empty array means every database.
+             *
+             *     Membership is resolved **live**: adding a server to a scoped group
+             *     makes the definition requestable against it immediately, with no
+             *     edit and therefore no new version. A dangling uid (deleted group)
+             *     matches no database, so the definition fails closed.
+             *
+             *     Replaces the removed per-database `database_uids`; existing scopes
+             *     were mirrored into auto-created server groups by migration
+             *     20260809010000.
              */
-            database_uids: string[];
+            server_group_uids: string[];
             /**
              * @description RE2 patterns that suspend a matching statement mid-flight until an
              *     admin or an approver-group member approves it. An empty array means
@@ -2288,7 +2445,7 @@ export interface components {
              *     from this definition, *in addition to* admins. An empty array means
              *     admins only. Self-approval is always rejected.
              */
-            approver_group_uids?: string[];
+            approver_user_group_uids?: string[];
             /**
              * @description `false` once an operator has deactivated the definition. This is a
              *     withdrawal, not an archival: it applies to every version of the
@@ -2346,12 +2503,12 @@ export interface components {
              *     keeps behaving. A dangling uid (deleted group) matches nobody, so
              *     the definition fails closed.
              */
-            group_uids?: string[];
+            user_group_uids?: string[];
             /**
-             * @description Restricts this definition to these databases. An empty array means
-             *     every database.
+             * @description Restricts this definition to the databases currently belonging to
+             *     these server groups. An empty array means every database.
              */
-            database_uids?: string[];
+            server_group_uids?: string[];
             /**
              * @description RE2 patterns that suspend a matching statement mid-flight until an
              *     admin or an approver-group member approves it. An empty array means
@@ -2367,11 +2524,32 @@ export interface components {
              */
             sample_queries?: string[];
             /**
-             * @description Groups whose members may resolve approval holds on grants built
-             *     from this definition, *in addition to* admins. An empty array means
-             *     admins only. Self-approval is always rejected.
+             * @description User groups whose members may resolve approval holds on grants
+             *     built from this definition, *in addition to* admins. An empty
+             *     array means admins only. Self-approval is always rejected.
+             */
+            approver_user_group_uids?: string[];
+            /**
+             * @deprecated
+             * @description **Deprecated** pre-rename spelling of `user_group_uids`, accepted
+             *     on input for one release. `user_group_uids` wins when both are
+             *     present; responses never emit this name.
+             */
+            group_uids?: string[];
+            /**
+             * @deprecated
+             * @description **Deprecated** pre-rename spelling of `approver_user_group_uids`,
+             *     accepted on input for one release. The new name wins when both are
+             *     present; responses never emit this name.
              */
             approver_group_uids?: string[];
+            /**
+             * @deprecated
+             * @description **Removed.** Per-database scoping was replaced by
+             *     `server_group_uids`. Sending this field is a `400`, not a no-op:
+             *     silently ignoring a scope restriction would fail *open*.
+             */
+            database_uids?: string[];
         };
         /**
          * @description PATCH body for `/grant-definitions/{uid}`. Every field is optional —
@@ -2410,16 +2588,37 @@ export interface components {
              *     step and are approved (and the grant materialized) instantly at request time.
              */
             auto_approve?: boolean;
-            /** @description Same semantics as `CreateGrantDefinitionRequest.group_uids`. */
-            group_uids?: string[];
-            /** @description Same semantics as `CreateGrantDefinitionRequest.database_uids`. */
-            database_uids?: string[];
+            /** @description Same semantics as `CreateGrantDefinitionRequest.user_group_uids`. */
+            user_group_uids?: string[];
+            /** @description Same semantics as `CreateGrantDefinitionRequest.server_group_uids`. */
+            server_group_uids?: string[];
             /** @description Same semantics as `CreateGrantDefinitionRequest.approval_patterns`. */
             approval_patterns?: string[];
             /** @description Same semantics as `CreateGrantDefinitionRequest.sample_queries`. */
             sample_queries?: string[];
-            /** @description Same semantics as `CreateGrantDefinitionRequest.approver_group_uids`. */
+            /** @description Same semantics as `CreateGrantDefinitionRequest.approver_user_group_uids`. */
+            approver_user_group_uids?: string[];
+            /**
+             * @deprecated
+             * @description **Deprecated** pre-rename spelling of `user_group_uids`, accepted
+             *     on input for one release. `user_group_uids` wins when both are
+             *     present; responses never emit this name.
+             */
+            group_uids?: string[];
+            /**
+             * @deprecated
+             * @description **Deprecated** pre-rename spelling of `approver_user_group_uids`,
+             *     accepted on input for one release. The new name wins when both are
+             *     present; responses never emit this name.
+             */
             approver_group_uids?: string[];
+            /**
+             * @deprecated
+             * @description **Removed.** Per-database scoping was replaced by
+             *     `server_group_uids`. Sending this field is a `400`, not a no-op:
+             *     silently ignoring a scope restriction would fail *open*.
+             */
+            database_uids?: string[];
         };
         AccessGrant: {
             /**
@@ -2434,14 +2633,31 @@ export interface components {
             user_id: string;
             /**
              * Format: uuid
-             * @description Database UID
+             * @description The grant's anchor database — the one it was issued for. Always
+             *     covered, whatever happens to `server_group_uid` afterwards.
              */
             database_id: string;
             /**
              * Format: uuid
+             * @description The server group this grant is bound to, *in addition to* its
+             *     anchor database: the grant covers every server the group contains
+             *     **right now**. Membership is live and never snapshotted, so adding
+             *     a server to the group widens this grant the instant it is saved.
+             *
+             *     `null` — the default, and the state of every grant issued from a
+             *     definition with no server-group scope — means "anchor database
+             *     only".
+             *
+             *     Quotas and `priority` follow the grant, not the database: one
+             *     `max_query_counts` and one `max_bytes_transferred` budget are
+             *     consumed across the whole group.
+             */
+            server_group_uid?: string | null;
+            /**
+             * Format: uuid
              * @description The exact grant definition *version* this grant was issued from.
              *     Definitions are immutably versioned — an edit archives the current
-             *     row and inserts a successor — so this pins the behaviour the grant
+             *     row and inserts a successor — so this pins the behavior the grant
              *     was issued with and no later edit can change it.
              */
             grant_definition_id: string;
@@ -3260,6 +3476,8 @@ export type User = components['schemas']['User'];
 export type CreateUserRequest = components['schemas']['CreateUserRequest'];
 export type UserGroup = components['schemas']['UserGroup'];
 export type CreateUserGroupRequest = components['schemas']['CreateUserGroupRequest'];
+export type ServerGroup = components['schemas']['ServerGroup'];
+export type CreateServerGroupRequest = components['schemas']['CreateServerGroupRequest'];
 export type UpdateUserRequest = components['schemas']['UpdateUserRequest'];
 export type Database = components['schemas']['Database'];
 export type ConnectionTestResult = components['schemas']['ConnectionTestResult'];
@@ -3894,7 +4112,7 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["User"] & {
-                        groups: components["schemas"]["UserGroup"][];
+                        user_groups: components["schemas"]["UserGroup"][];
                     };
                 };
             };
@@ -4538,6 +4756,221 @@ export interface operations {
             path: {
                 uid: string;
                 user_uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Member removed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    listServerGroups: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of server groups */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        server_groups?: components["schemas"]["ServerGroup"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    createServerGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateServerGroupRequest"];
+            };
+        };
+        responses: {
+            /** @description Group created */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServerGroup"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    getServerGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Group details */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServerGroup"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    deleteServerGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Group deleted */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    updateServerGroup: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateServerGroupRequest"];
+            };
+        };
+        responses: {
+            /** @description Group updated */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ServerGroup"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+        };
+    };
+    listServerGroupMembers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Servers in the group */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        servers?: components["schemas"]["DatabaseLimited"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    addServerGroupMember: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+                server_uid: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Member added */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MessageResponse"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+        };
+    };
+    removeServerGroupMember: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                uid: string;
+                server_uid: string;
             };
             cookie?: never;
         };

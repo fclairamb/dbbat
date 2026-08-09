@@ -437,7 +437,7 @@ function EditUserDialog({
     targetUser.uid === currentUserUid && wasAdmin && !roles.includes("admin");
 
   const submit = () => {
-    updateUser.mutate({ roles, group_uids: selectedGroupUids });
+    updateUser.mutate({ roles, user_group_uids: selectedGroupUids });
   };
 
   const handleSubmit = (e: React.FormEvent) => {
