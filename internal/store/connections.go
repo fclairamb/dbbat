@@ -483,7 +483,8 @@ func (s *Store) GetConnectionByUID(ctx context.Context, uid uuid.UUID) (*Connect
 	err := s.db.NewSelect().
 		Model(conn).
 		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, "+
-			"disconnected_at, queries, bytes_transferred, instance_id, upstream_tls, dump_key, grant_uid").
+			"disconnected_at, queries, bytes_transferred, instance_id, upstream_tls, dump_key, grant_uid, "+
+			"query_chain_mac, query_chain_len").
 		Where("uid = ?", uid).
 		Scan(ctx)
 	if err != nil {

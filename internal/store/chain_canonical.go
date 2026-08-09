@@ -143,6 +143,15 @@ func canonicalJSON(raw []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to parse json for canonicalization: %w", err)
 	}
 
+	// A top-level JSON null is treated as absent, because a NULL jsonb column
+	// and a column holding the literal null are indistinguishable by the time
+	// the driver hands them back: both scan as the four bytes "null". Writing
+	// nil and reading "null" would otherwise report a break on every row whose
+	// details are empty. A null *inside* a document is untouched.
+	if value == nil {
+		return nil, nil
+	}
+
 	var out bytes.Buffer
 	if err := writeCanonicalValue(&out, value); err != nil {
 		return nil, err
