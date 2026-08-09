@@ -63,6 +63,7 @@ Any of these upstreams can be reached directly or through an **SSH bastion** —
 - **Rate Limiting**: Per-user request limits and exponential backoff on failed login
 - **Authentication Cache**: Optional in-memory cache (TTL + max size) shared across REST and proxy auth paths
 - **Session Packet Captures**: Optional capture of post-auth session traffic as tcpdump-compatible `.pcapng` files, so Wireshark dissects them out of the box; same format across all protocols (see [docs/dump-format.md](docs/dump-format.md)) with `dbbat dump anonymise` for sharing
+- **MCP for AI agents**: Claude Code, Claude Desktop or any MCP client can query databases through the *same* pipeline — an agent's statement is executed by dialing dbbat's own proxy listener as the API key's owner, so grants, quotas, logging and mid-flight approval holds all apply with no second execution path (see [docs/mcp.md](docs/mcp.md))
 - **REST API**: OpenAPI 3.0 documented (`/api/docs`), versioned under `/api/v1/`
 - **Web UI**: Embedded React frontend served at `/app` — servers (`/servers`, listing SSH bastions alongside database servers), grants, connections and queries all have detail pages
 - **Demo / Test modes**: Self-provisioning sample data for safe trials and E2E testing
@@ -222,6 +223,7 @@ sqlcmd -S localhost,1434 -U developer -P temppass123 -d production -C
 | `DBB_DUMP_MAX_SIZE` | Max dump file size per session, in bytes | `10485760` (10 MB) |
 | `DBB_DUMP_RETENTION` | Auto-delete dumps older than this (Go duration) | `24h` |
 | `DBB_QUERY_STORAGE_RETENTION` | Auto-delete query history and captured result rows older than this (Go duration; `0` keeps them forever) | `0` (recommended: `720h`) |
+| `DBB_MCP_ENABLED` | Serve the MCP endpoint for AI agents at `/api/v1/mcp` (API-key authenticated; see [docs/mcp.md](docs/mcp.md)) | `true` |
 | `DBB_MYSQL_TLS_DISABLE` | Disable MySQL TLS termination at the proxy | `false` |
 | `DBB_MYSQL_TLS_CERT_FILE` | PEM cert for MySQL TLS (auto self-signed if empty) | - |
 | `DBB_MYSQL_TLS_KEY_FILE` | PEM RSA key for MySQL TLS (auto-generated if empty) | - |

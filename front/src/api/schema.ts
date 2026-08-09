@@ -1629,6 +1629,81 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/mcp": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * MCP server-to-client stream (not served)
+         * @description Part of the MCP Streamable HTTP transport. dbbat runs the server
+         *     stateless, so there is no long-lived server→client stream to open and
+         *     this always answers `405`. It is registered so a client's transport
+         *     probe gets the protocol's own answer instead of a `404` it has to guess
+         *     at.
+         */
+        get: operations["mcpStream"];
+        put?: never;
+        /**
+         * Model Context Protocol endpoint (Streamable HTTP)
+         * @description MCP endpoint for AI agents. This is **not a REST endpoint** — it speaks
+         *     JSON-RPC 2.0 over the MCP Streamable HTTP transport — but it is
+         *     documented here because it is part of the authenticated API surface and
+         *     shares its authentication.
+         *
+         *     Point any MCP-capable client at
+         *     `https://<dbbat>/api/v1/mcp` with an `Authorization: Bearer dbb_…`
+         *     header. Registered only when `DBB_MCP_ENABLED` is true (the default).
+         *
+         *     **Authentication is API-key only.** Basic Auth and browser session
+         *     tokens are refused with `403`: the key is not merely the caller's
+         *     credential here, it is also the password the loopback protocol client
+         *     authenticates to the proxy with.
+         *
+         *     **Execution model.** Every statement the agent runs is executed by
+         *     dialing dbbat's own PostgreSQL or MySQL proxy listener over loopback as
+         *     the API key's owner. There is no internal execution path, so grants,
+         *     `read_only` / `block_ddl` / `block_copy`, quotas, query logging, session
+         *     capture and approval holds all apply unchanged. Phase 1 covers
+         *     PostgreSQL and MySQL/MariaDB; Oracle, MongoDB and SQL Server report
+         *     `supported: false` in `list_databases`.
+         *
+         *     **Session model.** The server runs stateless: no `Mcp-Session-Id`, each
+         *     request re-authenticated, so a revoked key stops working on the next
+         *     call.
+         *
+         *     **Tools.**
+         *
+         *     | Tool | Purpose |
+         *     |---|---|
+         *     | `list_databases` | databases the caller holds an active grant on, with expiry, controls and quota usage |
+         *     | `query` | run one statement — `{database, sql, params?, max_rows?}`; rows are capped server-side |
+         *     | `describe` | list tables, or the columns of one table |
+         *     | `await_approval` | wait for a statement suspended by an approval hold |
+         *
+         *     **Approval holds.** A held statement blocks the wire connection. If it
+         *     is still parked after a short grace window, `query` returns
+         *     `status: "approval_pending"` with an `execution_id` and the held
+         *     `query_uid`, while the loopback connection stays parked in the
+         *     background; `await_approval` long-polls that execution. The agent never
+         *     silently times out — every result names the next action.
+         *
+         *     See `docs/mcp.md`.
+         */
+        post: operations["mcpEndpoint"];
+        /**
+         * Terminate an MCP session (not served)
+         * @description Part of the MCP Streamable HTTP transport. There are no sessions to
+         *     terminate on a stateless server, so this always answers `405`.
+         */
+        delete: operations["mcpDeleteSession"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -3033,6 +3108,31 @@ export interface components {
             /** @description Success message */
             message: string;
         };
+        /**
+         * @description A JSON-RPC 2.0 message as defined by the Model Context Protocol. The
+         *     body may also be a batch (an array of these). The shape is deliberately
+         *     open: MCP owns this schema, and pinning it here would go stale against
+         *     the protocol rather than validate anything useful.
+         */
+        MCPMessage: {
+            /** @enum {string} */
+            jsonrpc: "2.0";
+            /** @description Request id; absent on notifications */
+            id?: string | number;
+            /** @description MCP method, e.g. initialize, tools/list, tools/call */
+            method?: string;
+            params?: {
+                [key: string]: unknown;
+            };
+            result?: {
+                [key: string]: unknown;
+            };
+            error?: {
+                [key: string]: unknown;
+            };
+        } & {
+            [key: string]: unknown;
+        };
     };
     responses: {
         /** @description Invalid request */
@@ -3210,6 +3310,7 @@ export type ResolvedEndpoints = components['schemas']['ResolvedEndpoints'];
 export type InstanceInfo = components['schemas']['InstanceInfo'];
 export type Error = components['schemas']['Error'];
 export type MessageResponse = components['schemas']['MessageResponse'];
+export type McpMessage = components['schemas']['MCPMessage'];
 export type ResponseBadRequest = components['responses']['BadRequest'];
 export type ResponseUnauthorized = components['responses']['Unauthorized'];
 export type ResponseAuthRateLimited = components['responses']['AuthRateLimited'];
@@ -5642,6 +5743,104 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalError"];
+        };
+    };
+    mcpStream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            401: components["responses"]["Unauthorized"];
+            /** @description Not supported by a stateless MCP server */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    mcpEndpoint: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MCPMessage"];
+            };
+        };
+        responses: {
+            /**
+             * @description JSON-RPC response, as `application/json` or as an
+             *     `text/event-stream` SSE body depending on what the client accepted.
+             */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MCPMessage"];
+                    "text/event-stream": string;
+                };
+            };
+            /** @description Notification or response accepted with no body */
+            202: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            /** @description Authenticated, but not with an API key */
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            /** @description MCP is disabled on this instance */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Request body too large */
+            413: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    mcpDeleteSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            401: components["responses"]["Unauthorized"];
+            /** @description Not supported by a stateless MCP server */
+            405: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
 }
