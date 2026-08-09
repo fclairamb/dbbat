@@ -64,6 +64,9 @@ func CallerFrom(ctx context.Context) *Caller {
 type GrantStore interface {
 	ListGrants(ctx context.Context, filter store.GrantFilter) ([]store.Grant, error)
 	GetServerByUID(ctx context.Context, uid uuid.UUID) (*store.Server, error)
+	// ListServerGroupMemberUIDs expands a group-bound grant into the servers
+	// it currently covers — a grant no longer names a single database.
+	ListServerGroupMemberUIDs(ctx context.Context, groupUID uuid.UUID) ([]uuid.UUID, error)
 }
 
 // Deps are the collaborators the MCP layer needs.
@@ -202,27 +205,44 @@ func (s *Server) listAccessible(ctx context.Context, caller *Caller) ([]accessib
 	for i := range grants {
 		g := &grants[i]
 
-		// A user can hold several grants on one database; the proxy admits a
-		// session under the first one in this order, so that is the one whose
-		// controls the agent should be told about.
-		if _, dup := seen[g.DatabaseID]; dup {
-			continue
+		// A grant covers its anchor database plus, when it is bound to a
+		// server group, every server currently in that group — the same
+		// coverage the proxy admits sessions under. Listing only the anchor
+		// would hide databases the agent may genuinely reach.
+		covered := []uuid.UUID{g.DatabaseID}
+
+		if g.ServerGroupUID != nil {
+			members, err := s.deps.Store.ListServerGroupMemberUIDs(ctx, *g.ServerGroupUID)
+			if err != nil {
+				return nil, fmt.Errorf("listing server group members: %w", err)
+			}
+
+			covered = append(covered, members...)
 		}
 
-		seen[g.DatabaseID] = struct{}{}
+		for _, databaseUID := range covered {
+			// A user can hold several grants on one database; the proxy admits
+			// a session under the first one in this order, so that is the one
+			// whose controls the agent should be told about.
+			if _, dup := seen[databaseUID]; dup {
+				continue
+			}
 
-		srv, err := s.deps.Store.GetServerByUID(ctx, g.DatabaseID)
-		if err != nil {
-			// A grant pointing at a deleted server is not something the agent
-			// can act on; skipping it is closer to the truth than failing the
-			// whole listing.
-			s.deps.Logger.DebugContext(ctx, "skipping grant with unresolvable server",
-				slog.String("grant_uid", g.UID.String()), slog.Any("error", err))
+			seen[databaseUID] = struct{}{}
 
-			continue
+			srv, err := s.deps.Store.GetServerByUID(ctx, databaseUID)
+			if err != nil {
+				// A grant pointing at a deleted server is not something the
+				// agent can act on; skipping it is closer to the truth than
+				// failing the whole listing.
+				s.deps.Logger.DebugContext(ctx, "skipping grant with unresolvable server",
+					slog.String("grant_uid", g.UID.String()), slog.Any("error", err))
+
+				continue
+			}
+
+			out = append(out, accessible{grant: g, server: srv})
 		}
-
-		out = append(out, accessible{grant: g, server: srv})
 	}
 
 	return out, nil

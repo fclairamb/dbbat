@@ -21,11 +21,17 @@ import (
 type fakeGrantStore struct {
 	grants  []store.Grant
 	servers map[uuid.UUID]*store.Server
-	err     error
+	// groupMembers is the membership a group-bound grant expands through.
+	groupMembers map[uuid.UUID][]uuid.UUID
+	err          error
 }
 
 func (f *fakeGrantStore) ListGrants(_ context.Context, _ store.GrantFilter) ([]store.Grant, error) {
 	return f.grants, f.err
+}
+
+func (f *fakeGrantStore) ListServerGroupMemberUIDs(_ context.Context, groupUID uuid.UUID) ([]uuid.UUID, error) {
+	return f.groupMembers[groupUID], nil
 }
 
 func (f *fakeGrantStore) GetServerByUID(_ context.Context, uid uuid.UUID) (*store.Server, error) {

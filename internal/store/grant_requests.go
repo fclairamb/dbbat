@@ -308,6 +308,16 @@ func (s *Store) approveGrantRequestTx(
 
 		newGrant := BuildGrantFromDefinition(def, req.UserID, req.DatabaseID, grantedBy, time.Now())
 
+		// Bind the grant to whichever of the definition's server groups holds
+		// the target database, inside the same transaction that issues it, so
+		// the binding is decided against the fleet the approval saw.
+		serverGroupUID, err := resolveServerGroupBinding(ctx, tx, def, req.DatabaseID)
+		if err != nil {
+			return err
+		}
+
+		newGrant.ServerGroupUID = serverGroupUID
+
 		if _, err := tx.NewInsert().Model(newGrant).Returning("*").Exec(ctx); err != nil {
 			return fmt.Errorf("create grant: %w", err)
 		}

@@ -190,9 +190,16 @@ func (s *Store) ListServerGroupMembers(ctx context.Context, groupUID uuid.UUID) 
 // this question about the target database. Membership is read live and never
 // snapshotted — see ServerGroup's doc comment for the consequence.
 func (s *Store) ListServerGroupUIDsForServer(ctx context.Context, serverUID uuid.UUID) ([]uuid.UUID, error) {
+	return serverGroupUIDsForServer(ctx, s.db, serverUID)
+}
+
+// serverGroupUIDsForServer is ListServerGroupUIDsForServer against an
+// arbitrary bun handle, so the grant-materialization path can ask the same
+// question inside the transaction that is issuing the grant.
+func serverGroupUIDsForServer(ctx context.Context, db bun.IDB, serverUID uuid.UUID) ([]uuid.UUID, error) {
 	var uids []uuid.UUID
 
-	err := s.db.NewSelect().
+	err := db.NewSelect().
 		Model((*ServerGroupMember)(nil)).
 		Column("group_uid").
 		Where("server_uid = ?", serverUID).
@@ -206,6 +213,34 @@ func (s *Store) ListServerGroupUIDsForServer(ctx context.Context, serverUID uuid
 	}
 
 	return uids, nil
+}
+
+// resolveServerGroupBinding decides which server group a grant materialized
+// from def against databaseID binds to — the single answer every grant
+// creation path uses, so no path can forget to bind one.
+//
+// nil means "anchor database only": either the definition is unscoped (it
+// applies to every database, which is not the same as covering a named set) or
+// the database is not currently in any of its groups. The latter should not
+// happen — scope is enforced before issuance — but returning nil is the
+// narrow, fail-closed answer either way.
+//
+// absent one: the grant column is nullable and NULL is its normal state.
+//
+//nolint:nilnil // nil here is a meaningful value ("no group binds"), not an
+func resolveServerGroupBinding(
+	ctx context.Context, db bun.IDB, def *GrantDefinition, databaseID uuid.UUID,
+) (*uuid.UUID, error) {
+	if def == nil || len(def.ServerGroupUIDs) == 0 {
+		return nil, nil
+	}
+
+	groups, err := serverGroupUIDsForServer(ctx, db, databaseID)
+	if err != nil {
+		return nil, err
+	}
+
+	return def.MatchingServerGroup(groups), nil
 }
 
 // ListServerGroupsForServer returns the full group rows a server belongs to,
