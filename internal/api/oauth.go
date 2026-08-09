@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -40,6 +41,19 @@ type authProviderInfo struct {
 	Type         string `json:"type"`
 	Enabled      bool   `json:"enabled"`
 	AuthorizeURL string `json:"authorize_url,omitempty"`
+	// DisplayName is the login-button label for providers whose branding is
+	// operator-configured (the generic OIDC one). Empty for providers the
+	// frontend already knows how to label, like Slack.
+	DisplayName string `json:"display_name,omitempty"`
+}
+
+// oauthStateMetadata is the JSON payload stashed on the `oauth_states` row
+// for the duration of a single login round-trip. It currently carries only
+// the PKCE code verifier, which must be minted before the redirect and
+// presented at the callback — and must survive a restart or a hop to another
+// replica, so it cannot live in process memory.
+type oauthStateMetadata struct {
+	PKCEVerifier string `json:"pkce_verifier,omitempty"`
 }
 
 // handleAuthProviders returns which authentication methods are available.
@@ -48,12 +62,18 @@ func (s *Server) handleAuthProviders(c *gin.Context) {
 	providers := make([]authProviderInfo, 0, 1+len(s.oauthProviders))
 	providers = append(providers, authProviderInfo{Type: "password", Enabled: true})
 
-	for name := range s.oauthProviders {
-		providers = append(providers, authProviderInfo{
+	for name, provider := range s.oauthProviders {
+		info := authProviderInfo{
 			Type:         name,
 			Enabled:      true,
 			AuthorizeURL: "/api/v1/auth/" + name,
-		})
+		}
+
+		if namer, ok := provider.(auth.DisplayNamer); ok {
+			info.DisplayName = namer.DisplayName()
+		}
+
+		providers = append(providers, info)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"providers": providers})
@@ -76,6 +96,26 @@ func (s *Server) handleOAuthAuthorize(providerName string) gin.HandlerFunc {
 			return
 		}
 
+		callbackURL := s.buildCallbackURL(c.Request, providerName)
+
+		// PKCE-capable providers mint a code verifier here; it has to be
+		// persisted with the state row *before* the redirect, because the
+		// callback may well land on a different replica.
+		redirectURL, verifier, err := authorizeURLFor(c.Request.Context(), provider, stateToken, callbackURL)
+		if err != nil {
+			writeInternalError(c, s.logger, err, "failed to build OAuth authorization URL")
+			return
+		}
+
+		var metadata json.RawMessage
+		if verifier != "" {
+			metadata, err = json.Marshal(oauthStateMetadata{PKCEVerifier: verifier})
+			if err != nil {
+				writeInternalError(c, s.logger, err, "failed to encode OAuth state metadata")
+				return
+			}
+		}
+
 		// Persist state for CSRF validation. The state row also carries the
 		// post-login redirect target (e.g. the device consent page that
 		// bounced the user here), so the callback can send the user back to
@@ -84,6 +124,7 @@ func (s *Server) handleOAuthAuthorize(providerName string) gin.HandlerFunc {
 			State:       stateToken,
 			Provider:    providerName,
 			RedirectURL: sanitizeLoginRedirect(c.Query("redirect")),
+			Metadata:    metadata,
 			ExpiresAt:   time.Now().Add(oauthStateTTL),
 		}
 
@@ -92,11 +133,54 @@ func (s *Server) handleOAuthAuthorize(providerName string) gin.HandlerFunc {
 			return
 		}
 
-		callbackURL := s.buildCallbackURL(c.Request, providerName)
-		redirectURL := provider.AuthorizeURL(stateToken, callbackURL)
-
 		c.Redirect(http.StatusFound, redirectURL)
 	}
+}
+
+// authorizeURLFor builds the provider's authorization URL, using PKCE when
+// the provider supports it. The second return value is the code verifier to
+// persist ("" for providers without PKCE).
+func authorizeURLFor(
+	ctx context.Context,
+	provider auth.OAuthProvider,
+	state, callbackURL string,
+) (string, string, error) {
+	if pkce, ok := provider.(auth.PKCEProvider); ok {
+		return pkce.AuthorizeURLWithPKCE(ctx, state, callbackURL)
+	}
+
+	return provider.AuthorizeURL(state, callbackURL), "", nil
+}
+
+// exchangeCodeFor completes the code exchange, presenting the PKCE verifier
+// recovered from the state row when the provider supports PKCE.
+func exchangeCodeFor(
+	ctx context.Context,
+	provider auth.OAuthProvider,
+	code, callbackURL, verifier string,
+) (*auth.OAuthUser, error) {
+	if pkce, ok := provider.(auth.PKCEProvider); ok {
+		return pkce.ExchangeCodeWithVerifier(ctx, code, callbackURL, verifier)
+	}
+
+	return provider.ExchangeCode(ctx, code, callbackURL)
+}
+
+// pkceVerifier recovers the code verifier stashed on the state row. A row
+// without usable metadata yields "", which the provider treats as "no PKCE" —
+// the issuer then rejects the exchange if it expected a challenge, which is
+// the correct failure mode.
+func pkceVerifier(state *store.OAuthState) string {
+	if state == nil || len(state.Metadata) == 0 {
+		return ""
+	}
+
+	var metadata oauthStateMetadata
+	if err := json.Unmarshal(state.Metadata, &metadata); err != nil {
+		return ""
+	}
+
+	return metadata.PKCEVerifier
 }
 
 // handleOAuthCallback returns a handler that completes the OAuth flow.
@@ -153,7 +237,7 @@ func (s *Server) handleOAuthCallback(providerName string) gin.HandlerFunc {
 		callbackURL := s.buildCallbackURL(c.Request, providerName)
 		code := c.Query("code")
 
-		oauthUser, err := provider.ExchangeCode(ctx, code, callbackURL)
+		oauthUser, err := exchangeCodeFor(ctx, provider, code, callbackURL, pkceVerifier(oauthState))
 		if err != nil {
 			s.logger.ErrorContext(ctx, "OAuth code exchange failed",
 				slog.String("provider", providerName),

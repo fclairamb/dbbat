@@ -17,6 +17,7 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/auth"
+	"github.com/fclairamb/dbbat/internal/auth/oidc"
 	"github.com/fclairamb/dbbat/internal/auth/slack"
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/config"
@@ -112,6 +113,27 @@ func NewServer(dataStore *store.Store, encryptionKey []byte, logger *slog.Logger
 			cfg.SlackAuth.TeamID,
 		)
 		logger.InfoContext(context.Background(), "Slack OAuth provider enabled")
+	}
+
+	if cfg != nil && cfg.OIDCAuth.Enabled() {
+		// Construction does no network I/O — discovery is lazy — so an
+		// unreachable IdP delays the first login, it does not block startup.
+		provider, err := oidc.NewProvider(oidc.Config{
+			Issuer:       cfg.OIDCAuth.Issuer,
+			ClientID:     cfg.OIDCAuth.ClientID,
+			ClientSecret: cfg.OIDCAuth.ClientSecret,
+			Scopes:       cfg.OIDCAuth.ScopeList(),
+			Label:        cfg.OIDCAuth.DisplayName,
+			EmailDomains: cfg.OIDCAuth.EmailDomainList(),
+		})
+		if err != nil {
+			logger.ErrorContext(context.Background(), "OIDC provider misconfigured", slog.Any("error", err))
+		} else {
+			oauthProviders[oidc.ProviderName] = provider
+			logger.InfoContext(context.Background(), "OIDC provider enabled",
+				slog.String("issuer", cfg.OIDCAuth.Issuer),
+				slog.String("display_name", provider.DisplayName()))
+		}
 	}
 
 	// Initialize Slack notifier (outbound only — distinct from OAuth above)
