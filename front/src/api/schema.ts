@@ -168,6 +168,46 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/auth/oidc": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Initiate generic OIDC login
+         * @description Redirects to the configured OpenID Connect issuer's authorization endpoint (with an S256 PKCE challenge). Registered only when DBB_OIDC_ISSUER is set.
+         */
+        get: operations["initiateOIDCAuth"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/oidc/callback": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Generic OIDC callback
+         * @description Handles the redirect back from the OIDC issuer. Verifies the ID token against the issuer's JWKS, applies the optional email-domain allowlist, creates or links the user, creates a session and redirects to the app.
+         */
+        get: operations["oidcAuthCallback"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/slack": {
         parameters: {
             query?: never;
@@ -3391,13 +3431,57 @@ export interface operations {
                     "application/json": {
                         providers?: {
                             /** @enum {string} */
-                            type?: "password" | "slack";
+                            type?: "password" | "slack" | "oidc";
                             enabled?: boolean;
                             /** @description URL to initiate OAuth flow (only for OAuth providers) */
                             authorize_url?: string;
+                            /** @description Login-button label for providers whose branding is operator-configured (the generic OIDC provider, DBB_OIDC_DISPLAY_NAME). Absent for providers the frontend labels itself, such as Slack. */
+                            display_name?: string;
                         }[];
                     };
                 };
+            };
+        };
+    };
+    initiateOIDCAuth: {
+        parameters: {
+            query?: {
+                /** @description URL to redirect to after successful login */
+                redirect?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to the issuer's authorization endpoint */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    oidcAuthCallback: {
+        parameters: {
+            query?: {
+                code?: string;
+                state?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Redirect to app with a one-time login exchange code */
+            302: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
