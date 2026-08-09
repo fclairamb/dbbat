@@ -47,7 +47,8 @@ Users can also request the same definition themselves — see [Grant requests](.
 | Field | Lives on | Description |
 |-------|----------|-------------|
 | `user_id` | grant | UID of the user |
-| `database_id` | grant | UID of the database configuration |
+| `database_id` | grant | The grant's **anchor** database — the one it was issued for. Always covered. |
+| `server_group_uid` | grant | The [server group](#server-groups) this grant is bound to, if any. The grant also covers every server that group holds *right now*. `null` = anchor only. |
 | `grant_definition_id` | grant | The definition *version* this grant was issued from |
 | `starts_at` | grant | When the grant becomes active |
 | `expires_at` | grant | When it expires — `starts_at` plus the definition's `duration_seconds` |
@@ -56,8 +57,12 @@ Users can also request the same definition themselves — see [Grant requests](.
 | `max_query_counts` | definition | Maximum number of queries allowed |
 | `max_bytes_transferred` | definition | Maximum bytes transferred (response size) |
 | `duration_seconds` | definition | How long a grant issued from it lasts |
+| `user_group_uids` | definition | User groups whose members may request it. Empty = every user. |
+| `server_group_uids` | definition | Server groups it may be issued against. Empty = every database. |
 
 Definitions are immutably versioned, so editing one never changes a grant that is already live — the grant stays pinned to the version it was issued from. Deactivating a definition, on the other hand, **fails closed**: every grant issued from any of its versions stops authorising new connections.
+
+The one thing that *does* change under a live grant is the membership of the [server group](#server-groups) it is bound to. That is deliberate, and it is the point of groups.
 
 The grant model is the same across all engines (PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, SQL Server).
 
@@ -104,12 +109,68 @@ This is useful for:
 - Contractors with limited engagement periods
 - Scheduled maintenance windows
 
+## Server groups
+
+A **server group** is a named set of database servers — "the analytics
+replicas", "all staging databases". Definitions scope on groups instead of
+listing servers, and a grant binds to the group it was issued under, so growing
+the fleet stops meaning "edit every relevant policy".
+
+```bash
+curl -X POST http://localhost:4200/api/v1/server-groups \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "analytics-replicas",
+    "description": "Read replicas the analysts self-serve against",
+    "member_uids": ["660e8400-e29b-41d4-a716-446655440000"]
+  }'
+```
+
+A definition then points at the group rather than at servers:
+
+```json
+{ "server_group_uids": ["<the group uid>"] }
+```
+
+An empty `server_group_uids` means every database, exactly as an empty scope
+always did.
+
+### Membership is live
+
+:::warning Adding a server widens live grants immediately
+
+Server groups are **not versioned**, and membership is **never snapshotted at
+issuance**. The moment a server joins a group, every grant bound to that group
+covers it — including grants issued weeks ago and sessions already running.
+Removing a server narrows those grants the same way, immediately.
+
+This is the single deliberate exception to "a live grant's behaviour never
+changes under it". It is what makes groups useful — a new replica inherits the
+fleet's policy without touching a definition — and it is why membership is an
+admin-only surface that reports how many live grants an edit moves before you
+save it.
+:::
+
+### One budget for the whole group
+
+Quotas and `priority` belong to the grant, and the grant now covers the whole
+group. A single `max_query_counts` and a single `max_bytes_transferred` budget
+is consumed across **every** database in the group, not one budget per
+database. `priority` ranks group-bound grants against each other on the
+databases where their groups overlap — see below.
+
+Deleting a server group narrows: grants bound to it fall back to their anchor
+database, and definitions scoped to it match no database at all (fail closed)
+until an admin edits them.
+
 ## Overlapping grants
 
 Nothing stops a user from holding several active grants on the same database at
 once — a read-only one they requested this morning and a read/write one an
-admin assigned for an incident, say. Exactly one of them applies to a session:
-its controls, quotas and approval patterns are the ones enforced.
+admin assigned for an incident, say, or two grants whose server groups happen
+to overlap on that database. Exactly one of them applies to a session: its
+controls, quotas and approval patterns are the ones enforced.
 
 The winner is the grant with the **highest `priority`**. Ties break on the
 latest `expires_at`, then the newest `created_at`.
