@@ -18,7 +18,10 @@ func setOIDCBaseEnv(t *testing.T) {
 // TestOIDCDefaultsWhenUnset pins the "nobody configured OIDC" case: the
 // provider is off, and the defaults are in place for whoever turns it on.
 func TestOIDCDefaultsWhenUnset(t *testing.T) {
-	setOIDCBaseEnv(t)
+	// t.Setenv inline rather than through setOIDCBaseEnv: it is what tells
+	// the linter this test cannot run in parallel.
+	t.Setenv("DBB_DSN", "postgres://x:x@localhost/x")
+	t.Setenv("DBB_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 
 	cfg, err := Load(LoadOptions{})
 	require.NoError(t, err)
