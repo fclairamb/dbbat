@@ -5,6 +5,7 @@ import {
   useUsers,
   useDatabases,
   useGrantDefinitions,
+  useServerGroups,
   useAssignGrant,
   useRevokeGrant,
   type AccessGrant,
@@ -104,6 +105,10 @@ function GrantsPage() {
   const { data: grants, isLoading, refetch } = useGrants({ active_only: activeOnly });
   const { data: users } = useUsers();
   const { data: databases } = useDatabases();
+  // Admin-only listing; non-admins simply get no group name to render.
+  const { data: serverGroups = [] } = useServerGroups({
+    enabled: canCreateGrant(user?.roles),
+  });
   const [isAssignOpen, setIsAssignOpen] = useState(false);
   const [revokeGrant, setRevokeGrant] = useState<AccessGrant | null>(null);
 
@@ -135,6 +140,8 @@ function GrantsPage() {
     users?.find((u) => u.uid === uid)?.username ?? uid;
   const getDbName = (uid: string) =>
     databases?.find((d) => d.uid === uid)?.name ?? uid;
+  const getServerGroupName = (uid: string) =>
+    serverGroups.find((g) => g.uid === uid)?.name ?? uid.slice(0, 8);
 
   const getStatus = (grant: AccessGrant) => {
     if (grant.revoked_at) return "revoked";
@@ -155,8 +162,17 @@ function GrantsPage() {
     {
       key: "database",
       header: "Database",
+      // A group-bound grant covers more than its anchor, and membership is
+      // live — so showing the anchor alone would misstate the grant's reach.
       cell: (g) => (
-        <span className="font-mono text-sm">{getDbName(g.database_id)}</span>
+        <div className="flex flex-col gap-0.5">
+          <span className="font-mono text-sm">{getDbName(g.database_id)}</span>
+          {g.server_group_uid && (
+            <span className="text-xs text-muted-foreground">
+              + server group {getServerGroupName(g.server_group_uid)}
+            </span>
+          )}
+        </div>
       ),
     },
     {
@@ -388,6 +404,9 @@ function AssignGrantDialog({
   onClose: () => void;
 }) {
   const { data: definitions } = useGrantDefinitions({ active_only: true });
+  // The assign dialog is admin-only (POST /grants requires admin), so the
+  // admin-gated server-group listing is always available here.
+  const { data: serverGroups = [] } = useServerGroups();
   const [definitionUid, setDefinitionUid] = useState("");
   const [userId, setUserId] = useState("");
   const [databaseId, setDatabaseId] = useState("");
@@ -402,13 +421,22 @@ function AssignGrantDialog({
     [definitions, definitionUid],
   );
 
-  // A definition scoped to specific databases can only be assigned against
-  // those — the server enforces it, so the picker shouldn't offer the rest.
+  // A definition scoped to server groups can only be assigned against the
+  // databases those groups currently hold — the server enforces it, so the
+  // picker shouldn't offer the rest. Membership is live, so this narrows to
+  // whatever the groups contain right now.
   const selectableDatabases = useMemo(() => {
-    const scope = definition?.database_uids ?? [];
+    const scope = definition?.server_group_uids ?? [];
     if (scope.length === 0) return databases;
-    return databases.filter((d) => scope.includes(d.uid));
-  }, [databases, definition]);
+
+    const inScope = new Set(
+      serverGroups
+        .filter((g) => scope.includes(g.uid))
+        .flatMap((g) => g.member_uids),
+    );
+
+    return databases.filter((d) => inScope.has(d.uid));
+  }, [databases, definition, serverGroups]);
 
   const durationMs = (definition?.duration_seconds ?? 0) * 1000;
 
@@ -541,9 +569,10 @@ function AssignGrantDialog({
                 ))}
               </SelectContent>
             </Select>
-            {definition && (definition.database_uids ?? []).length > 0 && (
+            {definition && (definition.server_group_uids ?? []).length > 0 && (
               <p className="text-xs text-muted-foreground">
-                This definition is scoped to specific databases.
+                This definition is scoped to server groups — only the servers
+                those groups currently hold are offered.
               </p>
             )}
           </div>
