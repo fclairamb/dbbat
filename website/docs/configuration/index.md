@@ -272,6 +272,25 @@ removes.
 | `DBB_AUTH_CACHE_TTL_SECONDS` | Cache entry TTL | `300` |
 | `DBB_AUTH_CACHE_MAX_SIZE` | Maximum cache entries | `10000` |
 
+### Single sign-on / OIDC (optional)
+
+The generic OpenID Connect provider signs users in with your own identity
+provider — Google Workspace, Okta, Microsoft Entra, Keycloak, Authentik. Every
+sign-in is carried by an ID token DBBat verifies against the issuer's JWKS, and
+the code flow always uses PKCE (S256).
+
+| Variable | Description |
+|----------|-------------|
+| `DBB_OIDC_ISSUER` | Issuer URL. Setting it enables the provider |
+| `DBB_OIDC_CLIENT_ID` | Client ID (required once the issuer is set) |
+| `DBB_OIDC_CLIENT_SECRET` | Client secret (required once the issuer is set) |
+| `DBB_OIDC_SCOPES` | Scopes to request (default `openid email profile`) |
+| `DBB_OIDC_DISPLAY_NAME` | Login-button label (default `SSO`) |
+| `DBB_OIDC_EMAIL_DOMAINS` | Optional comma-separated allowlist checked against the verified email claim |
+
+See [Single sign-on (OIDC)](./sso.md) for the redirect URI and per-provider
+setup snippets.
+
 ### Slack OAuth (optional)
 
 | Variable | Description |
