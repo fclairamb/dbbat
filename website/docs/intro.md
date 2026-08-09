@@ -22,6 +22,8 @@ Giving access to production databases can be dangerous. DBBat provides:
 
 DBBat addresses all these needs without requiring changes to your application code.
 
+If your compliance team needs to know what evidence all of this produces, [Compliance](/docs/compliance) maps each capability to the SOC 2, ISO/IEC 27001:2022 and PCI DSS v4.x controls auditors ask about — and is equally explicit about what DBBat does not do.
+
 ## Supported Databases
 
 | Engine | Protocol | Default proxy port | Notes |
@@ -141,3 +143,4 @@ Experience DBBat without any setup. Our demo instance is available at:
 - [Install DBBat](/docs/installation/docker) using Docker
 - [Configure](/docs/configuration) your environment
 - Learn about [Access Control](/docs/features/access-control)
+- Hand your auditors the [Compliance](/docs/compliance) mapping
