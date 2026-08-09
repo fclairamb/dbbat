@@ -144,7 +144,10 @@ func (s *session) handleCursorReexec(cursorID uint16) error {
 }
 
 // refuseUnknownCursor decides what to do with a re-execution naming a cursor
-// dbbat never saw parsed. The statement it would run is unknown, so:
+// dbbat never saw parsed. Both frames that can only be identified by cursor id
+// route through here — the SQL-less OALL8 and an OFETCH that starts a fresh
+// pending query — so the wire op a client picks cannot change the answer. The
+// statement it would run is unknown, so:
 //
 //   - under a grant carrying statement-shaped controls, it fails closed — a
 //     restrictive grant must not be bypassable by an execution the proxy cannot
@@ -155,7 +158,9 @@ func (s *session) handleCursorReexec(cursorID uint16) error {
 //     mid-session, or the entry may be gone — and refusing there would break
 //     permissive sessions for no security gain.
 //
-// This asymmetry is deliberate and documented in docs/approvals.md.
+// The piggyback re-execution deliberately does NOT come through here — see
+// handlePiggybackReexec for why. This conditional refusal is documented in
+// docs/approvals.md.
 func (s *session) refuseUnknownCursor(cursorID uint16) error {
 	if !s.hasStatementControls() {
 		s.logger.WarnContext(s.ctx,
@@ -495,6 +500,12 @@ func (s *session) handleQueryResultV2(ttcPayload []byte) {
 
 // handleOFETCH intercepts an OFETCH message: links the fetch to its cursor.
 //
+// A fetch arriving with no query in flight is a re-execution, so it carries the
+// full pre-flight of a statement — quota, static controls, approval hold — and
+// a cursor dbbat never saw parsed goes through refuseUnknownCursor, exactly
+// like the SQL-less OALL8. A fetch continuing a query already in flight carries
+// none of it.
+//
 // Returns a non-nil error when the fetch must not be forwarded; the caller
 // answers the client with a TTC error instead.
 func (s *session) handleOFETCH(ttcPayload []byte) error {
@@ -513,17 +524,27 @@ func (s *session) handleOFETCH(ttcPayload []byte) error {
 		return nil
 	}
 
-	cursor, ok := s.tracker.cursors[result.CursorID]
-	if !ok {
-		s.logger.DebugContext(s.ctx, "OFETCH for unknown cursor", slog.Uint64("cursor_id", uint64(result.CursorID)))
-
-		return nil
-	}
-
 	// No query in flight: this fetch re-executes the cursor and starts its own
 	// pending query, which is persisted as a distinct row in /queries. Anything
 	// recorded as its own query is gated as its own query, or the audit trail
-	// and the enforcement disagree.
+	// and the enforcement disagree — and that includes the quota.
+	//
+	// The quota check sits here, on this branch, rather than in the dispatcher's
+	// gateStatement wrapper: routing every OFETCH through gateStatement would
+	// also check quotas on the continuation fetches returned above, and refusing
+	// mid-result-set is exactly what this path must never do. It is not in
+	// regateCursor either, because the other two frames that reach regateCursor
+	// — the SQL-less OALL8 and the piggyback re-execution — already come in
+	// through gateStatement, so it would only check them twice.
+	if err := s.checkQuotas(); err != nil {
+		return err
+	}
+
+	cursor, ok := s.tracker.cursors[result.CursorID]
+	if !ok {
+		return s.refuseUnknownCursor(result.CursorID)
+	}
+
 	return s.regateCursor(cursor)
 }
 
