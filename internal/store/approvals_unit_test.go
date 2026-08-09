@@ -103,9 +103,9 @@ func TestBuildGrantFromDefinitionReadsApprovalFieldsFromTheDefinition(t *testing
 	group := uuid.New()
 	defUID := uuid.New()
 	def := &GrantDefinition{
-		UID:               defUID,
-		DurationSeconds:   3600,
-		ApprovalPatterns:  []string{`(?i)^DELETE`},
+		UID:                   defUID,
+		DurationSeconds:       3600,
+		ApprovalPatterns:      []string{`(?i)^DELETE`},
 		ApproverUserGroupUIDs: []uuid.UUID{group},
 	}
 

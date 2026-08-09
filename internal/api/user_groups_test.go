@@ -164,7 +164,7 @@ func TestListGrantDefinitions_FiltersByGroupScope(t *testing.T) {
 		Slug:            "scoped-" + suffix,
 		DurationSeconds: 3600,
 		Controls:        []string{store.ControlReadOnly},
-		UserGroupUIDs:       []uuid.UUID{group.UID},
+		UserGroupUIDs:   []uuid.UUID{group.UID},
 		CreatedBy:       admin.UID,
 	})
 	require.NoError(t, err)
@@ -222,6 +222,11 @@ func TestCreateGrantRequest_RejectsOutOfScope(t *testing.T) {
 	group, err := dataStore.CreateUserGroup(ctx, &store.UserGroup{Name: "analysts-" + suffix})
 	require.NoError(t, err)
 
+	// The definition scopes on a server group; only inScopeDB is a member.
+	serverGroup, err := dataStore.CreateServerGroup(ctx, &store.ServerGroup{Name: "in-scope-" + suffix})
+	require.NoError(t, err)
+	require.NoError(t, dataStore.AddServerToGroup(ctx, serverGroup.UID, inScopeDB.UID))
+
 	// Auto-approve is the security-critical path: no human reviews it, so the
 	// scope check must hold there too.
 	def, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
@@ -230,8 +235,8 @@ func TestCreateGrantRequest_RejectsOutOfScope(t *testing.T) {
 		DurationSeconds: 3600,
 		Controls:        []string{store.ControlReadOnly},
 		AutoApprove:     true,
-		UserGroupUIDs:       []uuid.UUID{group.UID},
-		DatabaseUIDs:    []uuid.UUID{inScopeDB.UID},
+		UserGroupUIDs:   []uuid.UUID{group.UID},
+		ServerGroupUIDs: []uuid.UUID{serverGroup.UID},
 		CreatedBy:       admin.UID,
 	})
 	require.NoError(t, err)

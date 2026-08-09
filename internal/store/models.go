@@ -505,7 +505,7 @@ type AccessGrant struct {
 	// addition to* its anchor database: the grant covers every server the
 	// group contains **right now**. Membership is live and never snapshotted,
 	// so adding a server to the group widens this grant the instant it is
-	// saved — the one deliberate exception to "a live grant's behaviour never
+	// saved — the one deliberate exception to "a live grant's behavior never
 	// changes under it" (see ServerGroup). nil = anchor database only, which
 	// is what every grant issued from an unscoped definition gets.
 	//
@@ -706,9 +706,24 @@ type GrantDefinition struct {
 	// a bare "group" is ambiguous. The old JSON name is still accepted on
 	// input for one release; responses only ever emit the new one.
 	UserGroupUIDs []uuid.UUID `bun:"user_group_uids,array,notnull,default:'{}'" json:"user_group_uids"`
-	// DatabaseUIDs restricts which databases this definition can be
-	// requested against. Empty = every database.
-	DatabaseUIDs []uuid.UUID `bun:"database_uids,array,notnull,default:'{}'" json:"database_uids"`
+	// ServerGroupUIDs restricts which databases this definition can be
+	// requested against, by naming server groups rather than enumerating
+	// servers: a database is in scope when it currently belongs to at least
+	// one of the listed groups. Empty = every database — the same semantics
+	// the old per-database list had, so every pre-existing definition keeps
+	// behaving as before.
+	//
+	// Membership is resolved **live**, exactly like the user-group scope
+	// above: adding a server to a scoped group makes the definition
+	// requestable against it immediately, with no edit and therefore no new
+	// version. That is the point of groups, and the reason fleet growth is no
+	// longer O(definitions) of toil.
+	//
+	// Stored as an array on the definition rather than a join table for the
+	// same reason UserGroupUIDs is: an empty scope means "every database", so
+	// a cascade-on-delete join table would fail *open* when a group is
+	// deleted. A dangling uid here matches no database — fail closed.
+	ServerGroupUIDs []uuid.UUID `bun:"server_group_uids,array,notnull,default:'{}'" json:"server_group_uids"`
 	// ApprovalPatterns are SQL patterns (RE2) that suspend a matching
 	// statement until an admin or an approver-group member approves it.
 	// Empty = no approval gating. Validated at save time so a bad pattern is
@@ -763,28 +778,58 @@ func (d *GrantDefinition) AppliesToUserGroups(userGroupUIDs []uuid.UUID) bool {
 	return false
 }
 
-// AppliesToDatabase reports whether the given database is within this
-// definition's database scope. An empty scope applies to every database.
-func (d *GrantDefinition) AppliesToDatabase(databaseUID uuid.UUID) bool {
-	if len(d.DatabaseUIDs) == 0 {
+// AppliesToServerGroups reports whether a database belonging to the given
+// server groups is within this definition's scope. An empty scope applies to
+// every database.
+//
+// The caller passes the target database's *current* group membership (see
+// Store.ListServerGroupUIDsForServer) rather than the database uid, which is
+// what makes the scope follow group membership live.
+func (d *GrantDefinition) AppliesToServerGroups(serverGroupUIDs []uuid.UUID) bool {
+	if len(d.ServerGroupUIDs) == 0 {
 		return true
 	}
 
-	for _, scoped := range d.DatabaseUIDs {
-		if scoped == databaseUID {
-			return true
+	for _, scoped := range d.ServerGroupUIDs {
+		for _, owned := range serverGroupUIDs {
+			if scoped == owned {
+				return true
+			}
 		}
 	}
 
 	return false
 }
 
+// MatchingServerGroup returns the definition's server group that the given
+// database currently belongs to — the group a grant materialized from this
+// definition binds to. The first of the definition's groups that contains the
+// database wins, so the choice is stable for a given definition version.
+//
+// nil means "no group binds": either the definition is unscoped (it applies to
+// every database, which is not the same thing as covering a named set) or the
+// database is not in any of its groups. Either way the resulting grant covers
+// its anchor database only.
+func (d *GrantDefinition) MatchingServerGroup(serverGroupUIDs []uuid.UUID) *uuid.UUID {
+	for _, scoped := range d.ServerGroupUIDs {
+		for _, owned := range serverGroupUIDs {
+			if scoped == owned {
+				match := scoped
+
+				return &match
+			}
+		}
+	}
+
+	return nil
+}
+
 // AppliesTo reports whether this definition can be requested by a user in the
 // given groups against the given database. Both scopes must pass; an empty
 // scope on either axis is unrestricted, which is what keeps every
 // pre-existing (unscoped) definition behaving exactly as before.
-func (d *GrantDefinition) AppliesTo(userGroupUIDs []uuid.UUID, databaseUID uuid.UUID) bool {
-	return d.AppliesToUserGroups(userGroupUIDs) && d.AppliesToDatabase(databaseUID)
+func (d *GrantDefinition) AppliesTo(userGroupUIDs, serverGroupUIDs []uuid.UUID) bool {
+	return d.AppliesToUserGroups(userGroupUIDs) && d.AppliesToServerGroups(serverGroupUIDs)
 }
 
 // GrantDefinitionFilter narrows ListGrantDefinitions queries.
@@ -823,7 +868,7 @@ type UserGroupMember struct {
 // deliberately **live**: a grant bound to a group covers whatever the group
 // contains *right now*. Adding a server to a group therefore immediately
 // widens every live grant bound to it — the one place where dbbat's
-// "a live grant's behaviour never changes under it" rule is knowingly broken,
+// "a live grant's behavior never changes under it" rule is knowingly broken,
 // because group membership is operational data, exactly as user-group
 // membership already is. See docs/grants.md.
 type ServerGroup struct {

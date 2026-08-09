@@ -330,16 +330,16 @@ func TestApprovalUsesStampedGrantNotNewerOverlappingGrant(t *testing.T) {
 
 	// Grant A: what the connection is actually stamped with, approver group A.
 	grantA := persistGrantWithShape(t, dataStore, store.GrantDefinition{
-		Controls:          []string{},
-		ApprovalPatterns:  []string{`(?i)^DELETE\s+FROM`},
+		Controls:              []string{},
+		ApprovalPatterns:      []string{`(?i)^DELETE\s+FROM`},
 		ApproverUserGroupUIDs: []uuid.UUID{groupA.UID},
 	}, requester.UID, target.UID, admin.UID, now.Add(-time.Hour), now.Add(time.Hour), 0)
 
 	// Grant B: created afterwards, higher priority, overlapping window,
 	// approver group B — exactly the grant GetActiveGrant now picks.
 	persistGrantWithShape(t, dataStore, store.GrantDefinition{
-		Controls:          []string{},
-		ApprovalPatterns:  []string{`(?i)^DELETE\s+FROM`},
+		Controls:              []string{},
+		ApprovalPatterns:      []string{`(?i)^DELETE\s+FROM`},
 		ApproverUserGroupUIDs: []uuid.UUID{groupB.UID},
 	}, requester.UID, target.UID, admin.UID, now.Add(-time.Hour), now.Add(2*time.Hour), store.PriorityFullWrite+10)
 

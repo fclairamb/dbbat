@@ -126,16 +126,22 @@ type DenyGrantRequestRequest struct {
 const maxJustificationLen = 1000
 
 // enforceRequestScope writes an error response and returns false when the
-// definition's group/database scope does not cover this requester and target.
-// This is the security-critical gate: it also covers the auto-approve path,
-// where no human ever reviews the request.
+// definition's user-group / server-group scope does not cover this requester
+// and target. This is the security-critical gate: it also covers the
+// auto-approve path, where no human ever reviews the request.
+//
+// The database side resolves the target's *current* server-group membership,
+// so a server added to a scoped group becomes requestable immediately, with no
+// edit to any definition.
 func (s *Server) enforceRequestScope(
 	c *gin.Context,
 	def *store.GrantDefinition,
 	requester *store.User,
 	databaseID uuid.UUID,
 ) bool {
-	groupUIDs, err := s.store.ListUserGroupUIDs(c.Request.Context(), requester.UID)
+	ctx := c.Request.Context()
+
+	groupUIDs, err := s.store.ListUserGroupUIDs(ctx, requester.UID)
 	if err != nil {
 		writeInternalError(c, s.logger, err, "failed to list user groups")
 
@@ -149,7 +155,14 @@ func (s *Server) enforceRequestScope(
 		return false
 	}
 
-	if !def.AppliesToDatabase(databaseID) {
+	serverGroupUIDs, err := s.store.ListServerGroupUIDsForServer(ctx, databaseID)
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to list server groups")
+
+		return false
+	}
+
+	if !def.AppliesToServerGroups(serverGroupUIDs) {
 		writeError(c, http.StatusForbidden, ErrCodeForbidden,
 			"this grant definition cannot be requested for this database")
 
@@ -433,7 +446,15 @@ func (s *Server) checkRequestInScope(ctx context.Context, uid uuid.UUID) error {
 		return err
 	}
 
-	if !def.AppliesTo(groupUIDs, request.DatabaseID) {
+	// The target's server-group membership is read now, not at request time:
+	// scope has to be judged against the fleet as it stands when the grant is
+	// issued.
+	serverGroupUIDs, err := s.store.ListServerGroupUIDsForServer(ctx, request.DatabaseID)
+	if err != nil {
+		return err
+	}
+
+	if !def.AppliesTo(groupUIDs, serverGroupUIDs) {
 		return ErrRequestOutOfScope
 	}
 

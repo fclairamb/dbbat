@@ -407,13 +407,29 @@ func assertDatabaseScopeRespected(
 
 	// The end-state invariant the corrective migration also enforces: nothing
 	// anywhere in the table is pinned to a definition that excludes it.
+	//
+	// This helper runs both before and after the rest of the migration stack,
+	// and 20260809010000 replaces the per-database scope with server groups
+	// halfway through — so the invariant is expressed against whichever
+	// spelling of "scope" the schema currently carries. Same question, two
+	// schemas.
+	var scopeQuery string
+
+	if columnExists(t, ctx, db, "grant_definitions", "database_uids") {
+		scopeQuery = "SELECT count(*) FROM access_grants ag " +
+			"JOIN grant_definitions gd ON gd.uid = ag.grant_definition_id " +
+			"WHERE cardinality(gd.database_uids) > 0 AND NOT (ag.database_id = ANY (gd.database_uids))"
+	} else {
+		scopeQuery = "SELECT count(*) FROM access_grants ag " +
+			"JOIN grant_definitions gd ON gd.uid = ag.grant_definition_id " +
+			"WHERE cardinality(gd.server_group_uids) > 0 AND NOT EXISTS (" +
+			"SELECT 1 FROM server_group_members m " +
+			"WHERE m.group_uid = ANY (gd.server_group_uids) AND m.server_uid = ag.database_id)"
+	}
+
 	var mismatched int
 
-	if err := db.NewRaw(
-		"SELECT count(*) FROM access_grants ag "+
-			"JOIN grant_definitions gd ON gd.uid = ag.grant_definition_id "+
-			"WHERE cardinality(gd.database_uids) > 0 AND NOT (ag.database_id = ANY (gd.database_uids))",
-	).Scan(ctx, &mismatched); err != nil {
+	if err := db.NewRaw(scopeQuery).Scan(ctx, &mismatched); err != nil {
 		t.Fatalf("count scope-mismatched grants: %v", err)
 	}
 
@@ -616,4 +632,22 @@ func assertRollback(t *testing.T, ctx context.Context, db *bun.DB, f legacyGrant
 	if realDefinitions != 1 {
 		t.Error("the rollback removed a definition it did not create")
 	}
+}
+
+// columnExists reports whether a column is present, so an assertion that
+// straddles a schema-changing migration can ask the same question of both
+// shapes instead of pinning itself to one.
+func columnExists(t *testing.T, ctx context.Context, db *bun.DB, table, column string) bool {
+	t.Helper()
+
+	var exists bool
+
+	if err := db.NewRaw(
+		"SELECT EXISTS (SELECT 1 FROM information_schema.columns "+
+			"WHERE table_name = ? AND column_name = ?)", table, column,
+	).Scan(ctx, &exists); err != nil {
+		t.Fatalf("check column %s.%s: %v", table, column, err)
+	}
+
+	return exists
 }

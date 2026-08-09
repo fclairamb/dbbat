@@ -1105,7 +1105,7 @@ paths:
         window's length is the definition's `duration_seconds`. There is
         deliberately no way to describe an ad-hoc shape here.
 
-        The definition must be active, and its `database_uids` scope (when set)
+        The definition must be active, and its `server_group_uids` scope (when set)
         must cover the target database. Its `user_group_uids` scope is *not*
         enforced: that scope governs who may self-request the definition, and
         an admin assigning access is the authority on who receives it.
@@ -1813,7 +1813,7 @@ paths:
         (`archived_at` set) and a successor carrying the change is inserted
         with a new `uid` and the same `lineage_uid`; the response is that new
         version. Grants already issued keep pointing at the version they were
-        issued from, so their behaviour never changes. An edit that changes
+        issued from, so their behavior never changes. An edit that changes
         nothing is not versioned.
 
         Editing an already-archived version is refused with a 409 — history is
@@ -4331,14 +4331,23 @@ components:
             array means every user, which is how every pre-scoping definition
             keeps behaving. A dangling uid (deleted group) matches nobody, so
             the definition fails closed.
-        database_uids:
+        server_group_uids:
           type: array
           items:
             type: string
             format: uuid
           description: |
-            Restricts this definition to these databases. An empty array means
-            every database.
+            Restricts this definition to the databases currently belonging to
+            these server groups. An empty array means every database.
+
+            Membership is resolved **live**: adding a server to a scoped group
+            makes the definition requestable against it immediately, with no
+            edit and therefore no new version. A dangling uid (deleted group)
+            matches no database, so the definition fails closed.
+
+            Replaces the removed per-database `database_uids`; existing scopes
+            were mirrored into auto-created server groups by migration
+            20260809010000.
         approval_patterns:
           type: array
           items:
@@ -4397,7 +4406,7 @@ components:
         - duration_seconds
         - controls
         - user_group_uids
-        - database_uids
+        - server_group_uids
         - is_active
         - created_by
         - created_at
@@ -4469,14 +4478,14 @@ components:
             array means every user, which is how every pre-scoping definition
             keeps behaving. A dangling uid (deleted group) matches nobody, so
             the definition fails closed.
-        database_uids:
+        server_group_uids:
           type: array
           items:
             type: string
             format: uuid
           description: |
-            Restricts this definition to these databases. An empty array means
-            every database.
+            Restricts this definition to the databases currently belonging to
+            these server groups. An empty array means every database.
         approval_patterns:
           type: array
           items:
@@ -4524,6 +4533,16 @@ components:
             **Deprecated** pre-rename spelling of `approver_user_group_uids`,
             accepted on input for one release. The new name wins when both are
             present; responses never emit this name.
+        database_uids:
+          type: array
+          deprecated: true
+          items:
+            type: string
+            format: uuid
+          description: |
+            **Removed.** Per-database scoping was replaced by
+            `server_group_uids`. Sending this field is a `400`, not a no-op:
+            silently ignoring a scope restriction would fail *open*.
       required:
         - name
         - slug
@@ -4595,12 +4614,12 @@ components:
             type: string
             format: uuid
           description: Same semantics as `CreateGrantDefinitionRequest.user_group_uids`.
-        database_uids:
+        server_group_uids:
           type: array
           items:
             type: string
             format: uuid
-          description: Same semantics as `CreateGrantDefinitionRequest.database_uids`.
+          description: Same semantics as `CreateGrantDefinitionRequest.server_group_uids`.
         approval_patterns:
           type: array
           items:
@@ -4637,6 +4656,16 @@ components:
             **Deprecated** pre-rename spelling of `approver_user_group_uids`,
             accepted on input for one release. The new name wins when both are
             present; responses never emit this name.
+        database_uids:
+          type: array
+          deprecated: true
+          items:
+            type: string
+            format: uuid
+          description: |
+            **Removed.** Per-database scoping was replaced by
+            `server_group_uids`. Sending this field is a `400`, not a no-op:
+            silently ignoring a scope restriction would fail *open*.
 
     AccessGrant:
       type: object
@@ -4678,7 +4707,7 @@ components:
           description: |
             The exact grant definition *version* this grant was issued from.
             Definitions are immutably versioned — an edit archives the current
-            row and inserts a successor — so this pins the behaviour the grant
+            row and inserts a successor — so this pins the behavior the grant
             was issued with and no later edit can change it.
         definition:
           allOf:

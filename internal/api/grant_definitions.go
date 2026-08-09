@@ -40,8 +40,8 @@ func (s *Server) resolveGrantDefinition(ctx context.Context, idOrSlug string) (*
 	return s.store.GetGrantDefinitionBySlug(ctx, idOrSlug)
 }
 
-// validateDefinitionScope checks that every scoped group and database uid
-// actually exists, so an admin can't silently create a definition that is
+// validateDefinitionScope checks that every scoped user group and server group
+// uid actually exists, so an admin can't silently create a definition that is
 // scoped to nothing (which would fail closed and look like a bug).
 func (s *Server) validateDefinitionScope(ctx context.Context, req *CreateGrantDefinitionRequest) string {
 	for _, groupUID := range req.UserGroupUIDs {
@@ -56,14 +56,9 @@ func (s *Server) validateDefinitionScope(ctx context.Context, req *CreateGrantDe
 		}
 	}
 
-	for _, dbUID := range req.DatabaseUIDs {
-		target, err := s.store.GetServerByUID(ctx, dbUID)
-		if err != nil {
-			return "database does not exist: " + dbUID.String()
-		}
-
-		if target.IsSSH() {
-			return "cannot scope a grant definition to an ssh server: " + dbUID.String()
+	for _, groupUID := range req.ServerGroupUIDs {
+		if _, err := s.store.GetServerGroup(ctx, groupUID); err != nil {
+			return "server group does not exist: " + groupUID.String()
 		}
 	}
 
@@ -96,9 +91,9 @@ type CreateGrantDefinitionRequest struct {
 	// Empty/omitted = every user, which is how every pre-scoping definition
 	// keeps behaving.
 	UserGroupUIDs []uuid.UUID `json:"user_group_uids"`
-	// DatabaseUIDs restricts the definition to these databases.
-	// Empty/omitted = every database.
-	DatabaseUIDs []uuid.UUID `json:"database_uids"`
+	// ServerGroupUIDs restricts the definition to the databases currently
+	// belonging to these server groups. Empty/omitted = every database.
+	ServerGroupUIDs []uuid.UUID `json:"server_group_uids"`
 	// ApprovalPatterns are RE2 patterns that suspend a matching statement
 	// until a second human approves it. Empty/omitted = no approval gating.
 	// Compiled here so a bad pattern is a 400 rather than a runtime surprise
@@ -117,6 +112,13 @@ type CreateGrantDefinitionRequest struct {
 	// fields above by applyLegacyFields; never emitted in a response.
 	LegacyUserGroupUIDs         []uuid.UUID `json:"group_uids"`
 	LegacyApproverUserGroupUIDs []uuid.UUID `json:"approver_group_uids"`
+
+	// RetiredDatabaseUIDs catches the removed per-database scope. It is not a
+	// compatibility shim: server groups are a different entity, so there is
+	// nothing to fold it onto, and silently dropping a scope restriction on
+	// the floor would fail *open*. Its only job is to make the request a 400
+	// that names the replacement — see validateDefinitionRequest.
+	RetiredDatabaseUIDs []uuid.UUID `json:"database_uids"`
 }
 
 // applyLegacyFields folds the deprecated pre-rename JSON field names onto
@@ -144,7 +146,7 @@ func (r *CreateGrantDefinitionRequest) applyLegacyFields() {
 // as a full-replace body, so any field the caller didn't round-trip (most
 // notably approval_patterns and approver_user_group_uids) got silently wiped.
 //
-// Slice fields (controls, user_group_uids, database_uids, approval_patterns,
+// Slice fields (controls, user_group_uids, server_group_uids, approval_patterns,
 // approver_user_group_uids) distinguish "absent" from "explicitly cleared":
 // encoding/json leaves a slice field nil when its key is missing (or its
 // value is JSON null), but allocates a non-nil empty slice for a present
@@ -170,7 +172,7 @@ type UpdateGrantDefinitionRequest struct {
 	ClearPriority            bool        `json:"clear_priority"`
 	AutoApprove              *bool       `json:"auto_approve"`
 	UserGroupUIDs            []uuid.UUID `json:"user_group_uids"`
-	DatabaseUIDs             []uuid.UUID `json:"database_uids"`
+	ServerGroupUIDs          []uuid.UUID `json:"server_group_uids"`
 	ApprovalPatterns         []string    `json:"approval_patterns"`
 	SampleQueries            []string    `json:"sample_queries"`
 	ApproverUserGroupUIDs    []uuid.UUID `json:"approver_user_group_uids"`
@@ -179,6 +181,10 @@ type UpdateGrantDefinitionRequest struct {
 	// CreateGrantDefinitionRequest.applyLegacyFields.
 	LegacyUserGroupUIDs         []uuid.UUID `json:"group_uids"`
 	LegacyApproverUserGroupUIDs []uuid.UUID `json:"approver_group_uids"`
+
+	// RetiredDatabaseUIDs is refused rather than folded; see
+	// CreateGrantDefinitionRequest.RetiredDatabaseUIDs.
+	RetiredDatabaseUIDs []uuid.UUID `json:"database_uids"`
 }
 
 // applyLegacyFields folds the deprecated pre-rename JSON field names onto
@@ -249,8 +255,8 @@ func applyGrantDefinitionUpdate(def *store.GrantDefinition, req *UpdateGrantDefi
 		def.UserGroupUIDs = req.UserGroupUIDs
 	}
 
-	if req.DatabaseUIDs != nil {
-		def.DatabaseUIDs = req.DatabaseUIDs
+	if req.ServerGroupUIDs != nil {
+		def.ServerGroupUIDs = req.ServerGroupUIDs
 	}
 
 	if req.ApprovalPatterns != nil {
@@ -265,6 +271,13 @@ func applyGrantDefinitionUpdate(def *store.GrantDefinition, req *UpdateGrantDefi
 		def.ApproverUserGroupUIDs = normalizeUUIDs(req.ApproverUserGroupUIDs)
 	}
 }
+
+// errRetiredDatabaseUIDs is the message both write handlers answer with when a
+// body still carries the removed per-database scope. Refusing is deliberate:
+// accepting and ignoring the field would drop a scope restriction silently,
+// which fails *open*.
+const errRetiredDatabaseUIDs = "database_uids is no longer supported; " +
+	"scope the definition with server_group_uids instead"
 
 func validateDefinitionRequest(req *CreateGrantDefinitionRequest) string {
 	if req.Name == "" {
@@ -353,6 +366,12 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 
 	req.applyLegacyFields()
 
+	if req.RetiredDatabaseUIDs != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, errRetiredDatabaseUIDs)
+
+		return
+	}
+
 	if msg := validateDefinitionRequest(&req); msg != "" {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
 
@@ -378,7 +397,7 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		Priority:              req.Priority,
 		AutoApprove:           req.AutoApprove,
 		UserGroupUIDs:         req.UserGroupUIDs,
-		DatabaseUIDs:          req.DatabaseUIDs,
+		ServerGroupUIDs:       req.ServerGroupUIDs,
 		ApprovalPatterns:      normalizeStrings(req.ApprovalPatterns),
 		SampleQueries:         normalizeStrings(req.SampleQueries),
 		ApproverUserGroupUIDs: normalizeUUIDs(req.ApproverUserGroupUIDs),
@@ -413,7 +432,7 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		"priority":             created.Priority,
 		"auto_approve":         created.AutoApprove,
 		"user_group_uids":      created.UserGroupUIDs,
-		"database_uids":        created.DatabaseUIDs,
+		"server_group_uids":    created.ServerGroupUIDs,
 	})
 
 	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
@@ -563,6 +582,12 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 
 	req.applyLegacyFields()
 
+	if req.RetiredDatabaseUIDs != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, errRetiredDatabaseUIDs)
+
+		return
+	}
+
 	def, err := s.resolveGrantDefinition(c.Request.Context(), c.Param("uid"))
 	if err != nil {
 		if errors.Is(err, store.ErrGrantDefinitionNotFound) {
@@ -594,7 +619,7 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 		Priority:              def.Priority,
 		AutoApprove:           def.AutoApprove,
 		UserGroupUIDs:         def.UserGroupUIDs,
-		DatabaseUIDs:          def.DatabaseUIDs,
+		ServerGroupUIDs:       def.ServerGroupUIDs,
 		ApprovalPatterns:      def.ApprovalPatterns,
 		SampleQueries:         def.SampleQueries,
 		ApproverUserGroupUIDs: def.ApproverUserGroupUIDs,
@@ -646,7 +671,7 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 		"name":                          updated.Name,
 		"auto_approve":                  updated.AutoApprove,
 		"user_group_uids":               updated.UserGroupUIDs,
-		"database_uids":                 updated.DatabaseUIDs,
+		"server_group_uids":             updated.ServerGroupUIDs,
 	})
 
 	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{

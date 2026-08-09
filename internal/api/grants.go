@@ -77,12 +77,19 @@ func (s *Server) handleAssignGrant(c *gin.Context) {
 		return
 	}
 
-	// The definition's database scope is enforced: a shape declared to apply
-	// only to certain databases must not authorize another one, whoever is
-	// issuing it. Its *group* scope is not — that scope governs who may
+	// The definition's server-group scope is enforced: a shape declared to
+	// apply only to certain servers must not authorize another one, whoever is
+	// issuing it. Its *user-group* scope is not — that scope governs who may
 	// self-request the definition, and an admin assigning access is the
 	// authority on who gets it.
-	if !def.AppliesToDatabase(req.DatabaseID) {
+	serverGroupUIDs, err := s.store.ListServerGroupUIDsForServer(ctx, req.DatabaseID)
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to list server groups")
+
+		return
+	}
+
+	if !def.AppliesToServerGroups(serverGroupUIDs) {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
 			"this grant definition cannot be used for this database")
 
