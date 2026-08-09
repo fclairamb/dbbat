@@ -1289,18 +1289,15 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 		// and is gated like a statement; one that continues a query already in
 		// flight is not.
 		//
-		// It deliberately does NOT go through gateStatement, which would also
-		// run checkQuotas on every fetch — including the continuation ones,
-		// where refusing mid-result-set is exactly what this path must avoid.
-		// The cost is precise and known: the response leg's LimitGuard covers
-		// revocation, the byte quota and expiry, but *not* MaxQueryCounts,
-		// which is incremented in completeQuery and only ever checked in
-		// checkQuotas. So a client that parses once and then loops OFETCH
-		// re-executions records a distinct /queries row per execution while
-		// its query-count cap goes unenforced. Statement-shaped controls and
-		// the approval gate still apply to each of those executions — it is
-		// the count quota alone that leaks. Tracked in
-		// specs/todos/2026-08-08-oracle-ofetch-unknown-cursor-and-query-quota.md.
+		// It deliberately does NOT go through gateStatement, which would run
+		// checkQuotas on every fetch — including the continuation ones, where
+		// refusing mid-result-set is exactly what this path must avoid.
+		// handleOFETCH runs checkQuotas itself, on the re-execution branch
+		// only, so MaxQueryCounts is enforced exactly where a new /queries row
+		// is about to be created and nowhere else. (The other quota-shaped
+		// limits — revocation, bytes, expiry — are additionally covered on the
+		// response leg by LimitGuard, which does not know about
+		// MaxQueryCounts.)
 		if err := s.handleOFETCH(ttcPayload); err != nil {
 			_ = s.sendOracleError(err)
 
