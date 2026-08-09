@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -34,6 +35,10 @@ const (
 	testMaxConns          = 4
 	testContainerMaxConns = "300"
 )
+
+// testChainMasterKey is the master key every test store derives its chain key
+// from. A fixed 32-byte test vector, not a secret.
+var testChainMasterKey = bytes.Repeat([]byte{0x2a}, 32)
 
 var (
 	testContainer       *postgres.PostgresContainer
@@ -190,7 +195,9 @@ func setupTestStore(t *testing.T) *Store {
 		t.Fatalf("failed to create test database %s: %v", name, err)
 	}
 
-	store, err := New(ctx, testDatabaseDSN(name))
+	// Every test store seals its audit and query chains, so the whole package
+	// exercises the chained write paths rather than only the tests that care.
+	store, err := New(ctx, testDatabaseDSN(name), Options{EncryptionKey: testChainMasterKey})
 	if err != nil {
 		t.Fatalf("failed to create store: %v", err)
 	}

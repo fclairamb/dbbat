@@ -15,6 +15,7 @@ import (
 	"github.com/uptrace/bun/migrate"
 
 	"github.com/fclairamb/dbbat/internal/cache"
+	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/migrations"
 )
 
@@ -26,6 +27,16 @@ type Store struct {
 	revocations *cache.RevocationRegistry // In-process fan-out of grant revocations to live proxy sessions
 	instanceID  string                    // Identifies this process among the replicas sharing this store
 	runID       string                    // Identifies this *run*: minted here, never configurable
+
+	// chainKey is the HMAC key sealing the audit and query chains — an HKDF
+	// subkey of the master encryption key, never the master key itself and
+	// never written anywhere. Empty disables chaining. See chain.go.
+	chainKey []byte
+
+	// auditChain caches the head of the store-wide audit chain; queryChains
+	// caches one head per live connection.
+	auditChain  chainState
+	queryChains *queryChains
 }
 
 // Options configures Store creation.
@@ -39,6 +50,13 @@ type Options struct {
 	// touching another replica's live sessions. Empty disables that reconcile
 	// rather than widening it.
 	InstanceID string
+
+	// EncryptionKey is the master AES-256 key (DBB_KEY / DBB_KEYFILE). The
+	// store keeps only an HKDF subkey of it, used to seal the tamper-evident
+	// audit and query chains. Empty leaves those rows unchained — which is
+	// what every test store that does not care about the chain gets, and what
+	// a serving process never gets, because config always resolves a key.
+	EncryptionKey []byte
 }
 
 // New creates a new Store instance and runs migrations
@@ -74,7 +92,19 @@ func New(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
 		// one live process, and anything an operator can set — including
 		// DBB_INSTANCE_ID — can end up shared by several replicas. UUIDv7 so
 		// it also sorts by start time, which makes a registry dump readable.
-		runID: newUIDv7().String(),
+		runID:       newUIDv7().String(),
+		queryChains: newQueryChains(),
+	}
+
+	if len(options.EncryptionKey) > 0 {
+		chainKey, err := crypto.DeriveAuditChainKey(options.EncryptionKey)
+		if err != nil {
+			_ = db.Close()
+
+			return nil, fmt.Errorf("failed to derive the audit chain key: %w", err)
+		}
+
+		s.chainKey = chainKey
 	}
 
 	// Drop-then-migrate is one schema change, so it happens under a single hold

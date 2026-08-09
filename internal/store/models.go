@@ -354,6 +354,19 @@ type Connection struct {
 	// Either way, consumers (mayApproveQuery, populateGrantCounters) fall back
 	// to their pre-stamp heuristics.
 	GrantUID *uuid.UUID `bun:"grant_uid,type:uuid" json:"grant_uid"`
+
+	// QueryChainMAC is the final head of this connection's query chain,
+	// stamped when the session closes, and QueryChainLen is how many statements
+	// that head covers. Without them, deleting the *last* queries of a
+	// connection would leave a chain that still verified; with them the stored
+	// head no longer matches what the surviving rows compute.
+	//
+	// nil/0 on a connection that is still open, that logged nothing, or whose
+	// session died without a clean close — a crash-orphaned row is closed by
+	// the startup reconcile, which has no chain state to stamp. Internal
+	// integrity state, not API surface.
+	QueryChainMAC []byte `bun:"query_chain_mac" json:"-"`
+	QueryChainLen int64  `bun:"query_chain_len,notnull,default:0" json:"-"`
 }
 
 // Instance is one *run* of one dbbat process sharing this store. The row is
@@ -429,6 +442,15 @@ type Query struct {
 	ResolvedBy       *uuid.UUID `bun:"resolved_by,type:uuid" json:"resolved_by,omitempty"`
 	ResolvedAt       *time.Time `bun:"resolved_at" json:"resolved_at,omitempty"`
 	ResolutionReason *string    `bun:"resolution_reason" json:"resolution_reason,omitempty"`
+
+	// Tamper-evidence: this statement's position in its *connection's* chain,
+	// and the HMAC sealing its immutable identity (uid, connection, position,
+	// SQL text, parameters, executed_at) plus PrevMAC. The outcome columns
+	// above are written after the insert and are deliberately not covered —
+	// see queryChainPayload. Internal integrity state, not API surface.
+	ChainSeq *int64 `bun:"chain_seq" json:"-"`
+	PrevMAC  []byte `bun:"prev_mac" json:"-"`
+	MAC      []byte `bun:"mac" json:"-"`
 
 	// Joined fields populated only by ListQueries (via a JOIN on connections);
 	// not stored on the queries table itself.
@@ -977,6 +999,16 @@ type AuditLog struct {
 	PerformedBy *uuid.UUID      `bun:"performed_by,type:uuid" json:"performed_by"`
 	Details     json.RawMessage `bun:"details,type:jsonb" json:"details"`
 	CreatedAt   time.Time       `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+
+	// Tamper-evidence: ChainSeq is this row's position in the audit chain, MAC
+	// is the HMAC over its canonical serialization plus PrevMAC. All three are
+	// nil/zero on rows written before the chain anchor (unverifiable by
+	// construction) and on a store built without an encryption key. They are
+	// internal integrity state, not API surface — hence json:"-"; `dbbat audit
+	// verify` is how they are consumed. See internal/store/chain.go.
+	ChainSeq *int64 `bun:"chain_seq" json:"-"`
+	PrevMAC  []byte `bun:"prev_mac" json:"-"`
+	MAC      []byte `bun:"mac" json:"-"`
 }
 
 // AuditEvent is an alias for backward compatibility
