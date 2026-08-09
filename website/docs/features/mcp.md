@@ -95,7 +95,7 @@ Put a pattern on the grant definition:
   "duration_seconds": 3600,
   "controls": ["block_ddl"],
   "approval_patterns": ["(?i)^\\s*DELETE\\s+FROM", "(?i)^\\s*UPDATE"],
-  "approver_group_uids": ["…sre group uid…"]
+  "approver_user_group_uids": ["…sre group uid…"]
 }
 ```
 

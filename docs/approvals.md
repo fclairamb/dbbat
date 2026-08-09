@@ -243,7 +243,7 @@ silently letting the statements through.
 ## Who may approve
 
 - Any user with the **`admin`** role, plus
-- any member of a group listed in **`approver_group_uids`** on the definition
+- any member of a group listed in **`approver_user_group_uids`** on the definition
   the grant was issued from.
 
 **Self-approval is always rejected**, including for admins. Four eyes means
@@ -325,7 +325,7 @@ to your intent, so this is worth getting right.
     "(?i)^\\s*(GRANT|REVOKE)\\b",
     "(?i)^\\s*ALTER\\s+TABLE"
   ],
-  "approver_group_uids": ["…sre group uid…"]
+  "approver_user_group_uids": ["…sre group uid…"]
 }
 ```
 
@@ -560,7 +560,7 @@ On `queries`: `approval_status` (`null|pending|approved|denied|abandoned`),
 `approval_pattern`, `resolved_by`, `resolved_at`, `resolution_reason`, plus a
 partial index on `approval_status = 'pending'`.
 
-On `grant_definitions`: `approval_patterns text[]`, `approver_group_uids
+On `grant_definitions`: `approval_patterns text[]`, `approver_user_group_uids
 uuid[]`. **Not** on `access_grants` — a grant references its definition through
 `grant_definition_id` and reads both from there.
 

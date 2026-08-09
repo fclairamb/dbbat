@@ -672,7 +672,7 @@ A grant carries no access rules of its own: controls, quotas and approval gating
 |-------|-------------|
 | `grant_definition_id` | The definition to instantiate — its uid **or** its slug. A slug always resolves to the current version. |
 | `user_id` | Who receives the access. |
-| `database_id` | Which server. Must be within the definition's `database_uids` scope when it has one. |
+| `database_id` | Which server. Must belong to one of the definition's `server_group_uids` when it has any. |
 | `starts_at` | Optional; defaults to now. The window's *length* comes from the definition. |
 
 The definition must be active. A deactivated one cannot be assigned — and grants already issued from it have stopped authorising connections anyway.

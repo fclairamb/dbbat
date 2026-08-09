@@ -311,13 +311,34 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   definition's `duration_seconds`)
 - Controls: `read_only`, `block_copy`, `block_ddl` (combinable; empty = full write)
 - Optional quotas: `max_query_counts`, `max_bytes_transferred`
+- **Two kinds of group, never a bare "group"**: `user_groups` name sets of
+  people, `server_groups` name sets of database servers. A definition scopes on
+  both — `user_group_uids` (who may request it), `server_group_uids` (which
+  databases it covers), `approver_user_group_uids` (who may resolve its holds).
+  Empty on either axis means "everyone" / "every database". The pre-rename
+  field names `group_uids` / `approver_group_uids` are still **accepted on
+  input for one release** and are gone from every response; the per-database
+  `database_uids` is removed outright and is now a 400.
+- **Grants bind to a server group**, not just to a database. A grant keeps an
+  anchor database (always covered) and, when its definition is scoped, binds to
+  whichever of those groups holds that database. **Membership is live and never
+  snapshotted: adding a server to a group immediately widens every live grant
+  bound to it, sessions already running included, and removing one narrows
+  them.** That is the single, deliberate exception to the immutable-versioning
+  rule below, accepted because group membership is operational data — the admin
+  UI warns about the blast radius at the point of edit. One `max_query_counts`
+  and one `max_bytes_transferred` budget is consumed across the *whole group*,
+  and `priority` ranks group-bound grants against each other on the databases
+  where their groups overlap. The auth path is one function,
+  `store.GetActiveGrant`, which all five protocols share.
 - Optional **approval holds**: RE2 patterns on the definition that suspend a
   matching statement mid-flight until a second human approves it. Self-approval
   is always rejected; a hold has no timeout. Off by default
   (`DBB_APPROVAL_ENABLED`) — see `docs/approvals.md`
 - **Definitions are immutably versioned**: an edit archives the current row
   (`archived_at`) and inserts a successor sharing its `lineage_uid`, so a live
-  grant's behaviour never changes under it. A slug resolves to the live row.
+  grant's behaviour never changes under it — *except* for the scope it inherits
+  from live server-group membership, above. A slug resolves to the live row.
   **Deactivating** a definition is different from that archival — it withdraws
   the whole lineage and fails closed at auth time; hard deletion is refused
   (409) while anything references it.
