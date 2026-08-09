@@ -208,6 +208,113 @@ func TestCapture_PythonThinCursorReexec(t *testing.T) {
 	t.Logf("capture written to %s (%d executions)", outPath, reexecRuns)
 }
 
+// jdbcReexecSource re-executes one PreparedStatement in a loop, which is what
+// JDBC statement caching turns into on the wire when it is left on.
+const jdbcReexecSource = `
+import java.sql.*;
+public class Reexec {
+  public static void main(String[] a) throws Exception {
+    try (Connection c = DriverManager.getConnection("jdbc:oracle:thin:@//" + a[0], "system", "oracle");
+         PreparedStatement ps = c.prepareStatement("SELECT 1 AS n FROM dual")) {
+      for (int i = 0; i < Integer.parseInt(a[1]); i++) {
+        try (ResultSet rs = ps.executeQuery()) {
+          if (!rs.next() || rs.getInt(1) != 1) throw new IllegalStateException("bad row");
+        }
+      }
+    }
+    System.out.println("ok");
+  }
+}
+`
+
+// TestCapture_JDBCThinCursorReexec records the Oracle JDBC thin driver
+// re-running a cached PreparedStatement. Skipped when no JDK or ojdbc jar is
+// around; point OJDBC_JAR at one to override the default (the jar SQLcl ships).
+func TestCapture_JDBCThinCursorReexec(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_REEXEC_JDBC", "testdata/jdbc_thin_cursor_reexec.pcapng")
+	jar := captureEnv("OJDBC_JAR", "/opt/homebrew/Caskroom/sqlcl/26.1.0.086.1709/sqlcl/lib/ojdbc11.jar")
+
+	requireOracleReachable(t, oracleAddr)
+
+	if _, err := os.Stat(jar); err != nil {
+		t.Skipf("ojdbc jar not found at %s: %v", jar, err)
+	}
+
+	if _, err := exec.LookPath("javac"); err != nil {
+		t.Skipf("javac unavailable: %v", err)
+	}
+
+	dir := t.TempDir()
+	src := dir + "/Reexec.java"
+	require.NoError(t, os.WriteFile(src, []byte(jdbcReexecSource), 0o600))
+
+	if out, err := exec.Command("javac", "-d", dir, src).CombinedOutput(); err != nil {
+		t.Skipf("javac failed: %v (%s)", err, out)
+	}
+
+	w := newCaptureWriter(t, outPath, "capture-jdbc-thin-cursor-reexec")
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	cmd := exec.CommandContext(t.Context(), "java", "-cp", dir+":"+jar, "Reexec",
+		fmt.Sprintf("%s/%s", relayAddr, oracleService), fmt.Sprint(reexecRuns))
+
+	out, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "jdbc client failed: %s", out)
+	t.Logf("jdbc client: %s", out)
+
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s (%d executions)", outPath, reexecRuns)
+}
+
+// sqlplusReexecScript runs the same statement several times from one session.
+// sqlplus has no prepared-statement API, so this is the only reuse an OCI
+// client can be asked for: whatever its own statement cache decides to do.
+const sqlplusReexecScript = `SET PAGESIZE 0
+SET FEEDBACK OFF
+SELECT 1 AS n FROM dual;
+SELECT 1 AS n FROM dual;
+SELECT 1 AS n FROM dual;
+SELECT 1 AS n FROM dual;
+EXIT
+`
+
+// TestCapture_SQLPlusCursorReexec records sqlplus (OCI thick) running one
+// statement repeatedly. It exists to answer "and which clients did *not* do
+// it?" — see the client table in docs/oracle.md.
+func TestCapture_SQLPlusCursorReexec(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_REEXEC_SQLPLUS", "testdata/sqlplus_cursor_reexec.pcapng")
+
+	requireOracleReachable(t, oracleAddr)
+
+	sqlplus, err := exec.LookPath("sqlplus")
+	if err != nil {
+		t.Skipf("sqlplus unavailable: %v", err)
+	}
+
+	w := newCaptureWriter(t, outPath, "capture-sqlplus-cursor-reexec")
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	script := writeTempScript(t, sqlplusReexecScript)
+
+	cmd := exec.CommandContext(t.Context(), sqlplus, "-S",
+		fmt.Sprintf("system/oracle@//%s/%s", relayAddr, oracleService), "@"+script)
+
+	out, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "sqlplus failed: %s", out)
+	t.Logf("sqlplus: %s", out)
+
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s", outPath)
+}
+
 // writeTempScript writes body to a temporary .py file and returns its path.
 func writeTempScript(t *testing.T, body string) string {
 	t.Helper()

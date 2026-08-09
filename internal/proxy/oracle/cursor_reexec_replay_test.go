@@ -26,6 +26,8 @@ const (
 	goOraReexecDump    = "go_ora_cursor_reexec.pcapng"
 	goOraDMLReexecDump = "go_ora_dml_cursor_reexec.pcapng"
 	pythonReexecDump   = "python_thin_cursor_reexec.pcapng"
+	jdbcReexecDump     = "jdbc_thin_cursor_reexec.pcapng"
+	sqlplusReexecDump  = "sqlplus_cursor_reexec.pcapng"
 )
 
 // clientTTCPayloads returns the TTC payloads of every client→server Data packet
@@ -96,6 +98,10 @@ func TestDumpReplay_CursorReexecFramesAreRealAndSQLLess(t *testing.T) {
 		},
 		{
 			name: "python-oracledb thin re-executes on one cursor", dump: pythonReexecDump,
+			subOp: PiggybackSubReexecSel, wantSQL: "SELECT 1 AS n FROM dual",
+		},
+		{
+			name: "JDBC thin re-executes a cached PreparedStatement", dump: jdbcReexecDump,
 			subOp: PiggybackSubReexecSel, wantSQL: "SELECT 1 AS n FROM dual",
 		},
 	}
@@ -186,6 +192,7 @@ func TestDumpReplay_CursorReexecIsGatedOnRealFrames(t *testing.T) {
 		{name: "go-ora SELECT", dump: goOraReexecDump, wantSQL: "SELECT 1 AS n FROM dual"},
 		{name: "go-ora INSERT", dump: goOraDMLReexecDump, wantSQL: "INSERT INTO dbbat_reexec_test VALUES (1)"},
 		{name: "python-oracledb thin SELECT", dump: pythonReexecDump, wantSQL: "SELECT 1 AS n FROM dual"},
+		{name: "JDBC thin SELECT", dump: jdbcReexecDump, wantSQL: "SELECT 1 AS n FROM dual"},
 	}
 
 	for _, tc := range tests {
@@ -238,6 +245,28 @@ func TestDumpReplay_CursorReexecIsRefusedUnderReadOnly(t *testing.T) {
 		pkt := &TNSPacket{Type: TNSPacketTypeData, Payload: append([]byte{0x00, 0x00}, ttc...)}
 		assert.Truef(t, s.interceptClientMessage(pkt), "recorded re-execution %d must not be forwarded", i)
 	}
+}
+
+// TestDumpReplay_SQLPlusResendsItsSQLInstead is the negative half of the
+// measurement, and the reason the client table in docs/oracle.md can name who
+// does *not* do this: sqlplus (OCI thick) has no prepared-statement API and its
+// statement cache does not re-execute by cursor id — it puts the full text on
+// the wire on every run, so the gate sees it on the ordinary path.
+func TestDumpReplay_SQLPlusResendsItsSQLInstead(t *testing.T) {
+	t.Parallel()
+
+	payloads, _ := recordedReexecs(t, sqlplusReexecDump)
+	assert.Empty(t, payloads, "sqlplus emitted no cursor re-execution")
+
+	var carried int
+
+	for _, ttc := range clientTTCPayloads(t, sqlplusReexecDump) {
+		if contains(string(ttc), "SELECT 1 AS n FROM dual") {
+			carried++
+		}
+	}
+
+	assert.Equal(t, 4, carried, "every one of the four runs carried its statement text")
 }
 
 // TestDumpReplay_CursorReexecOfAnUntrackedCursorIsForwarded pins the
