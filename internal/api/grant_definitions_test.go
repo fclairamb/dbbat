@@ -287,7 +287,7 @@ func TestUpdateGrantDefinition_FullBodyStillSetsPatterns(t *testing.T) {
 			"priority":                 nil,
 			"auto_approve":             false,
 			"user_group_uids":          []string{},
-			"database_uids":            []string{},
+			"server_group_uids":        []string{},
 			"approval_patterns":        []string{"^TRUNCATE", "^DROP"},
 			"approver_user_group_uids": []string{},
 		})

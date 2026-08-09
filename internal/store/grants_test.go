@@ -100,17 +100,17 @@ func newTestGrant(
 // spec is split by createGrantWithShape into a definition (the shape) and a
 // grant (the instance).
 type testGrantSpec struct {
-	UserID              uuid.UUID
-	DatabaseID          uuid.UUID
-	GrantedBy           uuid.UUID
-	Controls            []string
-	MaxQueryCounts      *int64
-	MaxBytesTransferred *int64
-	ApprovalPatterns    []string
-	ApproverUserGroupUIDs   []uuid.UUID
-	StartsAt            time.Time
-	ExpiresAt           time.Time
-	Priority            int16
+	UserID                uuid.UUID
+	DatabaseID            uuid.UUID
+	GrantedBy             uuid.UUID
+	Controls              []string
+	MaxQueryCounts        *int64
+	MaxBytesTransferred   *int64
+	ApprovalPatterns      []string
+	ApproverUserGroupUIDs []uuid.UUID
+	StartsAt              time.Time
+	ExpiresAt             time.Time
+	Priority              int16
 }
 
 // createGrantWithShape persists a definition carrying spec's shape and a grant
@@ -119,11 +119,11 @@ func createGrantWithShape(t *testing.T, ctx context.Context, s *Store, spec test
 	t.Helper()
 
 	def := newTestGrantDefinition(t, ctx, s, spec.GrantedBy, GrantDefinition{
-		Controls:            spec.Controls,
-		MaxQueryCounts:      spec.MaxQueryCounts,
-		MaxBytesTransferred: spec.MaxBytesTransferred,
-		ApprovalPatterns:    spec.ApprovalPatterns,
-		ApproverUserGroupUIDs:   spec.ApproverUserGroupUIDs,
+		Controls:              spec.Controls,
+		MaxQueryCounts:        spec.MaxQueryCounts,
+		MaxBytesTransferred:   spec.MaxBytesTransferred,
+		ApprovalPatterns:      spec.ApprovalPatterns,
+		ApproverUserGroupUIDs: spec.ApproverUserGroupUIDs,
 	})
 
 	grant := BuildGrantFromDefinition(def, spec.UserID, spec.DatabaseID, spec.GrantedBy, spec.StartsAt)

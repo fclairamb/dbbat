@@ -320,11 +320,15 @@ func TestAssignGrant(t *testing.T) {
 		require.Equal(t, "VALIDATION_ERROR", resp["code"])
 	})
 
-	t.Run("the definition's database scope is enforced", func(t *testing.T) {
+	t.Run("the definition's server group scope is enforced", func(t *testing.T) {
 		t.Parallel()
 
+		serverGroup, err := dataStore.CreateServerGroup(ctx, &store.ServerGroup{Name: "scope-" + suffix})
+		require.NoError(t, err)
+		require.NoError(t, dataStore.AddServerToGroup(ctx, serverGroup.UID, database.UID))
+
 		def := newTestDefinition(t, dataStore, admin.UID, store.GrantDefinition{
-			DatabaseUIDs: []uuid.UUID{database.UID},
+			ServerGroupUIDs: []uuid.UUID{serverGroup.UID},
 		})
 
 		w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grants", adminToken, map[string]any{

@@ -58,9 +58,9 @@ func (s *Store) CreateGrantDefinition(ctx context.Context, def *GrantDefinition)
 		groupUIDs = []uuid.UUID{}
 	}
 
-	databaseUIDs := def.DatabaseUIDs
-	if databaseUIDs == nil {
-		databaseUIDs = []uuid.UUID{}
+	serverGroupUIDs := def.ServerGroupUIDs
+	if serverGroupUIDs == nil {
+		serverGroupUIDs = []uuid.UUID{}
 	}
 
 	// A brand-new definition is the root of its own lineage, so its uid has to
@@ -68,25 +68,25 @@ func (s *Store) CreateGrantDefinition(ctx context.Context, def *GrantDefinition)
 	uid := uuid.New()
 
 	result := &GrantDefinition{
-		UID:                 uid,
-		LineageUID:          uid,
-		Name:                def.Name,
-		Slug:                def.Slug,
-		Description:         def.Description,
-		DurationSeconds:     def.DurationSeconds,
-		Controls:            controls,
-		MaxQueryCounts:      def.MaxQueryCounts,
-		MaxBytesTransferred: def.MaxBytesTransferred,
-		Priority:            def.Priority,
-		AutoApprove:         def.AutoApprove,
-		UserGroupUIDs:           groupUIDs,
-		DatabaseUIDs:        databaseUIDs,
-		ApprovalPatterns:    copyStrings(def.ApprovalPatterns),
-		SampleQueries:       copyStrings(def.SampleQueries),
-		ApproverUserGroupUIDs:   copyUUIDs(def.ApproverUserGroupUIDs),
-		IsActive:            true,
-		CreatedBy:           def.CreatedBy,
-		CreatedAt:           time.Now(),
+		UID:                   uid,
+		LineageUID:            uid,
+		Name:                  def.Name,
+		Slug:                  def.Slug,
+		Description:           def.Description,
+		DurationSeconds:       def.DurationSeconds,
+		Controls:              controls,
+		MaxQueryCounts:        def.MaxQueryCounts,
+		MaxBytesTransferred:   def.MaxBytesTransferred,
+		Priority:              def.Priority,
+		AutoApprove:           def.AutoApprove,
+		UserGroupUIDs:         groupUIDs,
+		ServerGroupUIDs:       serverGroupUIDs,
+		ApprovalPatterns:      copyStrings(def.ApprovalPatterns),
+		SampleQueries:         copyStrings(def.SampleQueries),
+		ApproverUserGroupUIDs: copyUUIDs(def.ApproverUserGroupUIDs),
+		IsActive:              true,
+		CreatedBy:             def.CreatedBy,
+		CreatedAt:             time.Now(),
 	}
 
 	_, err := s.db.NewInsert().
@@ -321,8 +321,8 @@ func (s *Store) UpdateGrantDefinition(ctx context.Context, def *GrantDefinition)
 		def.UserGroupUIDs = []uuid.UUID{}
 	}
 
-	if def.DatabaseUIDs == nil {
-		def.DatabaseUIDs = []uuid.UUID{}
+	if def.ServerGroupUIDs == nil {
+		def.ServerGroupUIDs = []uuid.UUID{}
 	}
 
 	def.ApprovalPatterns = copyStrings(def.ApprovalPatterns)
@@ -368,21 +368,21 @@ func (s *Store) UpdateGrantDefinition(ctx context.Context, def *GrantDefinition)
 			Slug:       def.Slug,
 			// Description and the rest come from the merged definition the
 			// caller assembled; lifecycle stays with the lineage.
-			Description:         def.Description,
-			DurationSeconds:     def.DurationSeconds,
-			Controls:            def.Controls,
-			MaxQueryCounts:      def.MaxQueryCounts,
-			MaxBytesTransferred: def.MaxBytesTransferred,
-			Priority:            def.Priority,
-			AutoApprove:         def.AutoApprove,
-			UserGroupUIDs:           def.UserGroupUIDs,
-			DatabaseUIDs:        def.DatabaseUIDs,
-			ApprovalPatterns:    def.ApprovalPatterns,
-			SampleQueries:       def.SampleQueries,
-			ApproverUserGroupUIDs:   def.ApproverUserGroupUIDs,
-			IsActive:            current.IsActive,
-			CreatedBy:           current.CreatedBy,
-			CreatedAt:           now,
+			Description:           def.Description,
+			DurationSeconds:       def.DurationSeconds,
+			Controls:              def.Controls,
+			MaxQueryCounts:        def.MaxQueryCounts,
+			MaxBytesTransferred:   def.MaxBytesTransferred,
+			Priority:              def.Priority,
+			AutoApprove:           def.AutoApprove,
+			UserGroupUIDs:         def.UserGroupUIDs,
+			ServerGroupUIDs:       def.ServerGroupUIDs,
+			ApprovalPatterns:      def.ApprovalPatterns,
+			SampleQueries:         def.SampleQueries,
+			ApproverUserGroupUIDs: def.ApproverUserGroupUIDs,
+			IsActive:              current.IsActive,
+			CreatedBy:             current.CreatedBy,
+			CreatedAt:             now,
 		}
 
 		if _, err := tx.NewInsert().Model(next).Returning("*").Exec(ctx); err != nil {
@@ -413,7 +413,7 @@ func sameGrantDefinitionShape(a, b *GrantDefinition) bool {
 		equalInt64Ptr(a.MaxBytesTransferred, b.MaxBytesTransferred) &&
 		equalInt16Ptr(a.Priority, b.Priority) &&
 		slices.Equal(a.UserGroupUIDs, b.UserGroupUIDs) &&
-		slices.Equal(a.DatabaseUIDs, b.DatabaseUIDs) &&
+		slices.Equal(a.ServerGroupUIDs, b.ServerGroupUIDs) &&
 		slices.Equal(a.ApprovalPatterns, b.ApprovalPatterns) &&
 		slices.Equal(a.SampleQueries, b.SampleQueries) &&
 		slices.Equal(a.ApproverUserGroupUIDs, b.ApproverUserGroupUIDs)

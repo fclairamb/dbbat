@@ -218,7 +218,7 @@ func (s *Server) handleGetServerGroup(c *gin.Context) {
 //
 // Membership is live: replacing it here immediately changes what every grant
 // bound to this group covers, with no versioning in between. That is the
-// deliberate exception to dbbat's "a live grant's behaviour never changes
+// deliberate exception to dbbat's "a live grant's behavior never changes
 // under it" rule, so the change is recorded as its own audit event carrying
 // the resulting membership.
 func (s *Server) handleUpdateServerGroup(c *gin.Context) {

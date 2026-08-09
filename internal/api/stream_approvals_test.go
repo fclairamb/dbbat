@@ -101,7 +101,7 @@ func newCrossGrantFixture(t *testing.T) *crossGrantFixture {
 		t.Helper()
 
 		persistGrantWithShape(t, data, store.GrantDefinition{
-			ApprovalPatterns:  []string{`(?i)^DELETE\s+FROM`},
+			ApprovalPatterns:      []string{`(?i)^DELETE\s+FROM`},
 			ApproverUserGroupUIDs: []uuid.UUID{group.UID},
 		}, owner.UID, target.UID, admin.UID, time.Now().Add(-time.Hour), time.Now().Add(time.Hour), 0)
 	}

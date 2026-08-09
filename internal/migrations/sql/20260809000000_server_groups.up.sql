@@ -37,7 +37,7 @@ CREATE INDEX server_group_members_server_idx ON server_group_members (server_uid
 -- covers whatever the group contains *right now*, so adding a server to the
 -- group extends every already-live grant bound to it. NULL — the default and
 -- the state of every pre-existing grant — means "anchor database only", which
--- is exactly today's behaviour.
+-- is exactly today's behavior.
 --
 -- ON DELETE SET NULL rather than CASCADE: deleting a group must narrow those
 -- grants back to their anchor, never delete access silently and never widen
