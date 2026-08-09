@@ -102,11 +102,14 @@ function GrantDefinitionsPage() {
   const { user } = useAuth();
   const isAdmin = canManageGrantDefinitions(user?.roles);
 
-  // Admins see all definitions (active+inactive); other roles never reach
-  // this page in the nav, but the API also enforces the active-only filter
-  // for non-admins as a defense-in-depth.
+  // Deactivated definitions are permanent (hard deletion is refused while
+  // anything references them), so the default view hides them behind an
+  // admin-only toggle instead of letting the list grow unbounded with dead
+  // rows. Non-admins never reach this page in the nav, but the API also
+  // enforces the active-only filter for them as a defense-in-depth.
+  const [showDeactivated, setShowDeactivated] = useState(false);
   const { data: definitions = [], isLoading } = useGrantDefinitions({
-    active_only: !isAdmin,
+    active_only: !isAdmin || !showDeactivated,
   });
 
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -345,30 +348,41 @@ function GrantDefinitionsPage() {
         description="Templates for the grant request workflow. Active definitions appear in the request UI."
         actions={
           isAdmin && (
-            <Dialog
-              open={dialogOpen}
-              onOpenChange={(o) => {
-                setDialogOpen(o);
-                if (!o) setEditing(null);
-              }}
-            >
-              <DialogTrigger asChild>
-                <Button data-testid="create-grant-definition-button">
-                  <Plus className="h-4 w-4 mr-2" />
-                  New Definition
-                </Button>
-              </DialogTrigger>
-              {dialogOpen && (
-                <DefinitionDialog
-                  key={editing?.uid ?? "new"}
-                  editing={editing}
-                  onClose={() => {
-                    setDialogOpen(false);
-                    setEditing(null);
-                  }}
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="showDeactivated"
+                  checked={showDeactivated}
+                  onCheckedChange={setShowDeactivated}
+                  data-testid="show-deactivated-toggle"
                 />
-              )}
-            </Dialog>
+                <Label htmlFor="showDeactivated">Show deactivated</Label>
+              </div>
+              <Dialog
+                open={dialogOpen}
+                onOpenChange={(o) => {
+                  setDialogOpen(o);
+                  if (!o) setEditing(null);
+                }}
+              >
+                <DialogTrigger asChild>
+                  <Button data-testid="create-grant-definition-button">
+                    <Plus className="h-4 w-4 mr-2" />
+                    New Definition
+                  </Button>
+                </DialogTrigger>
+                {dialogOpen && (
+                  <DefinitionDialog
+                    key={editing?.uid ?? "new"}
+                    editing={editing}
+                    onClose={() => {
+                      setDialogOpen(false);
+                      setEditing(null);
+                    }}
+                  />
+                )}
+              </Dialog>
+            </div>
           )
         }
       />
