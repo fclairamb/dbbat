@@ -416,3 +416,115 @@ func TestRemovingTheAnchorFromTheGroupNarrowsTheGrant(t *testing.T) {
 		t.Errorf("GetActiveGrant(sibling after group delete) error = %v, want ErrNoActiveGrant", err)
 	}
 }
+
+// TestGroupBoundGrantStillFailsClosedOnItsWindow pins that widening the
+// coverage predicate did not weaken any of the conditions ANDed next to it.
+// The group-membership arm replaced "database_id = ?", nothing else, so a
+// revoked, expired or not-yet-started grant must still authorize nothing —
+// however live its group's membership is.
+func TestGroupBoundGrantStillFailsClosedOnItsWindow(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	admin := createTestAdmin(t, ctx, store, "sgclosed")
+	anchor := newTestTargetServer(t, ctx, store, "sgclosed_anchor")
+	sibling := newTestTargetServer(t, ctx, store, "sgclosed_sibling")
+
+	group, err := store.CreateServerGroup(ctx, &ServerGroup{Name: "closed-" + uuid.NewString()[:8]})
+	if err != nil {
+		t.Fatalf("CreateServerGroup() error = %v", err)
+	}
+
+	if err := store.SetServerGroupMembers(ctx, group.UID, []uuid.UUID{anchor.UID, sibling.UID}); err != nil {
+		t.Fatalf("SetServerGroupMembers() error = %v", err)
+	}
+
+	def := newTestGrantDefinition(t, ctx, store, admin.UID, GrantDefinition{
+		Controls:        []string{ControlReadOnly},
+		ServerGroupUIDs: []uuid.UUID{group.UID},
+	})
+
+	now := time.Now()
+
+	tests := []struct {
+		name      string
+		startsAt  time.Time
+		expiresAt time.Time
+		revoke    bool
+		want      bool // whether the grant should authorize
+	}{
+		{
+			name:      "expired",
+			startsAt:  now.Add(-2 * time.Hour),
+			expiresAt: now.Add(-time.Hour),
+		},
+		{
+			name:      "not yet started",
+			startsAt:  now.Add(time.Hour),
+			expiresAt: now.Add(2 * time.Hour),
+		},
+		{
+			name:      "revoked",
+			startsAt:  now.Add(-time.Hour),
+			expiresAt: now.Add(time.Hour),
+			revoke:    true,
+		},
+		{
+			// The control: the same fixture, in-window and unrevoked, does
+			// authorize — so the cases above fail for their stated reason and
+			// not because the fixture never worked.
+			name:      "in window",
+			startsAt:  now.Add(-time.Minute),
+			expiresAt: now.Add(time.Hour),
+			want:      true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			// Its own user, so the cases are genuinely independent: a user
+			// holding two of these grants at once would have them compete in
+			// the selection order rather than each answering on its own.
+			user, err := store.CreateUser(ctx, "sgclosed_"+uuid.NewString()[:8], "hash", []string{RoleConnector})
+			if err != nil {
+				t.Fatalf("CreateUser() error = %v", err)
+			}
+
+			grant := newTestGrant(t, ctx, store, def,
+				user.UID, anchor.UID, admin.UID, tt.startsAt, tt.expiresAt)
+
+			if tt.revoke {
+				if err := store.RevokeGrant(ctx, grant.UID, admin.UID); err != nil {
+					t.Fatalf("RevokeGrant() error = %v", err)
+				}
+			}
+
+			// Neither the anchor nor another member of a fully-populated group
+			// is reachable: the window and revocation gates are ANDed with
+			// coverage, not replaced by it.
+			for _, target := range []uuid.UUID{anchor.UID, sibling.UID} {
+				got, err := store.GetActiveGrant(ctx, user.UID, target)
+
+				if !tt.want {
+					if !errors.Is(err, ErrNoActiveGrant) {
+						t.Errorf("GetActiveGrant(%v) error = %v, want ErrNoActiveGrant", target, err)
+					}
+
+					continue
+				}
+
+				if err != nil {
+					t.Fatalf("GetActiveGrant(%v) error = %v", target, err)
+				}
+
+				if got.UID != grant.UID {
+					t.Errorf("GetActiveGrant(%v) = %v, want %v", target, got.UID, grant.UID)
+				}
+			}
+		})
+	}
+}
