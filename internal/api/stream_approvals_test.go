@@ -90,7 +90,7 @@ func newCrossGrantFixture(t *testing.T) *crossGrantFixture {
 	groupA := mkGroup("cg-group-a")
 	groupB := mkGroup("cg-group-b")
 
-	if err := data.AddUserToGroup(ctx, groupA.UID, approverA.UID); err != nil {
+	if err := data.AddUserToUserGroup(ctx, groupA.UID, approverA.UID); err != nil {
 		t.Fatalf("add approver to group A: %v", err)
 	}
 
@@ -102,7 +102,7 @@ func newCrossGrantFixture(t *testing.T) *crossGrantFixture {
 
 		persistGrantWithShape(t, data, store.GrantDefinition{
 			ApprovalPatterns:  []string{`(?i)^DELETE\s+FROM`},
-			ApproverGroupUIDs: []uuid.UUID{group.UID},
+			ApproverUserGroupUIDs: []uuid.UUID{group.UID},
 		}, owner.UID, target.UID, admin.UID, time.Now().Add(-time.Hour), time.Now().Add(time.Hour), 0)
 	}
 

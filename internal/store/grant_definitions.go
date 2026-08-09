@@ -53,7 +53,7 @@ func (s *Store) CreateGrantDefinition(ctx context.Context, def *GrantDefinition)
 		controls = []string{}
 	}
 
-	groupUIDs := def.GroupUIDs
+	groupUIDs := def.UserGroupUIDs
 	if groupUIDs == nil {
 		groupUIDs = []uuid.UUID{}
 	}
@@ -79,11 +79,11 @@ func (s *Store) CreateGrantDefinition(ctx context.Context, def *GrantDefinition)
 		MaxBytesTransferred: def.MaxBytesTransferred,
 		Priority:            def.Priority,
 		AutoApprove:         def.AutoApprove,
-		GroupUIDs:           groupUIDs,
+		UserGroupUIDs:           groupUIDs,
 		DatabaseUIDs:        databaseUIDs,
 		ApprovalPatterns:    copyStrings(def.ApprovalPatterns),
 		SampleQueries:       copyStrings(def.SampleQueries),
-		ApproverGroupUIDs:   copyUUIDs(def.ApproverGroupUIDs),
+		ApproverUserGroupUIDs:   copyUUIDs(def.ApproverUserGroupUIDs),
 		IsActive:            true,
 		CreatedBy:           def.CreatedBy,
 		CreatedAt:           time.Now(),
@@ -317,8 +317,8 @@ func (s *Store) UpdateGrantDefinition(ctx context.Context, def *GrantDefinition)
 		def.Controls = []string{}
 	}
 
-	if def.GroupUIDs == nil {
-		def.GroupUIDs = []uuid.UUID{}
+	if def.UserGroupUIDs == nil {
+		def.UserGroupUIDs = []uuid.UUID{}
 	}
 
 	if def.DatabaseUIDs == nil {
@@ -327,7 +327,7 @@ func (s *Store) UpdateGrantDefinition(ctx context.Context, def *GrantDefinition)
 
 	def.ApprovalPatterns = copyStrings(def.ApprovalPatterns)
 	def.SampleQueries = copyStrings(def.SampleQueries)
-	def.ApproverGroupUIDs = copyUUIDs(def.ApproverGroupUIDs)
+	def.ApproverUserGroupUIDs = copyUUIDs(def.ApproverUserGroupUIDs)
 
 	var result *GrantDefinition
 
@@ -375,11 +375,11 @@ func (s *Store) UpdateGrantDefinition(ctx context.Context, def *GrantDefinition)
 			MaxBytesTransferred: def.MaxBytesTransferred,
 			Priority:            def.Priority,
 			AutoApprove:         def.AutoApprove,
-			GroupUIDs:           def.GroupUIDs,
+			UserGroupUIDs:           def.UserGroupUIDs,
 			DatabaseUIDs:        def.DatabaseUIDs,
 			ApprovalPatterns:    def.ApprovalPatterns,
 			SampleQueries:       def.SampleQueries,
-			ApproverGroupUIDs:   def.ApproverGroupUIDs,
+			ApproverUserGroupUIDs:   def.ApproverUserGroupUIDs,
 			IsActive:            current.IsActive,
 			CreatedBy:           current.CreatedBy,
 			CreatedAt:           now,
@@ -412,11 +412,11 @@ func sameGrantDefinitionShape(a, b *GrantDefinition) bool {
 		equalInt64Ptr(a.MaxQueryCounts, b.MaxQueryCounts) &&
 		equalInt64Ptr(a.MaxBytesTransferred, b.MaxBytesTransferred) &&
 		equalInt16Ptr(a.Priority, b.Priority) &&
-		slices.Equal(a.GroupUIDs, b.GroupUIDs) &&
+		slices.Equal(a.UserGroupUIDs, b.UserGroupUIDs) &&
 		slices.Equal(a.DatabaseUIDs, b.DatabaseUIDs) &&
 		slices.Equal(a.ApprovalPatterns, b.ApprovalPatterns) &&
 		slices.Equal(a.SampleQueries, b.SampleQueries) &&
-		slices.Equal(a.ApproverGroupUIDs, b.ApproverGroupUIDs)
+		slices.Equal(a.ApproverUserGroupUIDs, b.ApproverUserGroupUIDs)
 }
 
 func equalInt64Ptr(a, b *int64) bool {

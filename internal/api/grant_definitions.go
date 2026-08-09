@@ -44,13 +44,13 @@ func (s *Server) resolveGrantDefinition(ctx context.Context, idOrSlug string) (*
 // actually exists, so an admin can't silently create a definition that is
 // scoped to nothing (which would fail closed and look like a bug).
 func (s *Server) validateDefinitionScope(ctx context.Context, req *CreateGrantDefinitionRequest) string {
-	for _, groupUID := range req.GroupUIDs {
+	for _, groupUID := range req.UserGroupUIDs {
 		if _, err := s.store.GetUserGroup(ctx, groupUID); err != nil {
 			return "user group does not exist: " + groupUID.String()
 		}
 	}
 
-	for _, groupUID := range req.ApproverGroupUIDs {
+	for _, groupUID := range req.ApproverUserGroupUIDs {
 		if _, err := s.store.GetUserGroup(ctx, groupUID); err != nil {
 			return "approver group does not exist: " + groupUID.String()
 		}
@@ -92,10 +92,10 @@ type CreateGrantDefinitionRequest struct {
 	// skip the pending/admin-approval step and materialize the grant
 	// instantly.
 	AutoApprove bool `json:"auto_approve"`
-	// GroupUIDs restricts the definition to members of these user groups.
+	// UserGroupUIDs restricts the definition to members of these user groups.
 	// Empty/omitted = every user, which is how every pre-scoping definition
 	// keeps behaving.
-	GroupUIDs []uuid.UUID `json:"group_uids"`
+	UserGroupUIDs []uuid.UUID `json:"user_group_uids"`
 	// DatabaseUIDs restricts the definition to these databases.
 	// Empty/omitted = every database.
 	DatabaseUIDs []uuid.UUID `json:"database_uids"`
@@ -108,9 +108,31 @@ type CreateGrantDefinitionRequest struct {
 	// patterns to validate them against — a test bench for pattern
 	// authoring. See POST /grant-definitions/validate-patterns.
 	SampleQueries []string `json:"sample_queries"`
-	// ApproverGroupUIDs lists groups whose members may resolve those holds,
-	// in addition to admins. Empty/omitted = admins only.
-	ApproverGroupUIDs []uuid.UUID `json:"approver_group_uids"`
+	// ApproverUserGroupUIDs lists the user groups whose members may resolve
+	// those holds, in addition to admins. Empty/omitted = admins only.
+	ApproverUserGroupUIDs []uuid.UUID `json:"approver_user_group_uids"`
+
+	// Deprecated pre-rename spellings, readable for one release so existing
+	// API clients keep working the day server groups land. Folded onto the
+	// fields above by applyLegacyFields; never emitted in a response.
+	LegacyUserGroupUIDs         []uuid.UUID `json:"group_uids"`
+	LegacyApproverUserGroupUIDs []uuid.UUID `json:"approver_group_uids"`
+}
+
+// applyLegacyFields folds the deprecated pre-rename JSON field names onto
+// their replacements. A body carrying both wins with the new name: the old
+// spelling is a compatibility shim, never an override.
+func (r *CreateGrantDefinitionRequest) applyLegacyFields() {
+	if r.UserGroupUIDs == nil && r.LegacyUserGroupUIDs != nil {
+		r.UserGroupUIDs = r.LegacyUserGroupUIDs
+	}
+
+	if r.ApproverUserGroupUIDs == nil && r.LegacyApproverUserGroupUIDs != nil {
+		r.ApproverUserGroupUIDs = r.LegacyApproverUserGroupUIDs
+	}
+
+	r.LegacyUserGroupUIDs = nil
+	r.LegacyApproverUserGroupUIDs = nil
 }
 
 // UpdateGrantDefinitionRequest is the JSON body for PATCH
@@ -120,10 +142,10 @@ type CreateGrantDefinitionRequest struct {
 // makes a targeted PATCH — like the auto-approve toggle, which only means
 // to flip one field — safe: it used to reuse CreateGrantDefinitionRequest
 // as a full-replace body, so any field the caller didn't round-trip (most
-// notably approval_patterns and approver_group_uids) got silently wiped.
+// notably approval_patterns and approver_user_group_uids) got silently wiped.
 //
-// Slice fields (controls, group_uids, database_uids, approval_patterns,
-// approver_group_uids) distinguish "absent" from "explicitly cleared":
+// Slice fields (controls, user_group_uids, database_uids, approval_patterns,
+// approver_user_group_uids) distinguish "absent" from "explicitly cleared":
 // encoding/json leaves a slice field nil when its key is missing (or its
 // value is JSON null), but allocates a non-nil empty slice for a present
 // `[]`. Only a non-nil slice is applied, so an admin can still empty one of
@@ -147,11 +169,31 @@ type UpdateGrantDefinitionRequest struct {
 	Priority                 *int16      `json:"priority"`
 	ClearPriority            bool        `json:"clear_priority"`
 	AutoApprove              *bool       `json:"auto_approve"`
-	GroupUIDs                []uuid.UUID `json:"group_uids"`
+	UserGroupUIDs            []uuid.UUID `json:"user_group_uids"`
 	DatabaseUIDs             []uuid.UUID `json:"database_uids"`
 	ApprovalPatterns         []string    `json:"approval_patterns"`
 	SampleQueries            []string    `json:"sample_queries"`
-	ApproverGroupUIDs        []uuid.UUID `json:"approver_group_uids"`
+	ApproverUserGroupUIDs    []uuid.UUID `json:"approver_user_group_uids"`
+
+	// Deprecated pre-rename spellings; see
+	// CreateGrantDefinitionRequest.applyLegacyFields.
+	LegacyUserGroupUIDs         []uuid.UUID `json:"group_uids"`
+	LegacyApproverUserGroupUIDs []uuid.UUID `json:"approver_group_uids"`
+}
+
+// applyLegacyFields folds the deprecated pre-rename JSON field names onto
+// their replacements, exactly like the create body's namesake.
+func (r *UpdateGrantDefinitionRequest) applyLegacyFields() {
+	if r.UserGroupUIDs == nil && r.LegacyUserGroupUIDs != nil {
+		r.UserGroupUIDs = r.LegacyUserGroupUIDs
+	}
+
+	if r.ApproverUserGroupUIDs == nil && r.LegacyApproverUserGroupUIDs != nil {
+		r.ApproverUserGroupUIDs = r.LegacyApproverUserGroupUIDs
+	}
+
+	r.LegacyUserGroupUIDs = nil
+	r.LegacyApproverUserGroupUIDs = nil
 }
 
 // applyGrantDefinitionUpdate copies every field present in req onto def,
@@ -203,8 +245,8 @@ func applyGrantDefinitionUpdate(def *store.GrantDefinition, req *UpdateGrantDefi
 		def.AutoApprove = *req.AutoApprove
 	}
 
-	if req.GroupUIDs != nil {
-		def.GroupUIDs = req.GroupUIDs
+	if req.UserGroupUIDs != nil {
+		def.UserGroupUIDs = req.UserGroupUIDs
 	}
 
 	if req.DatabaseUIDs != nil {
@@ -219,8 +261,8 @@ func applyGrantDefinitionUpdate(def *store.GrantDefinition, req *UpdateGrantDefi
 		def.SampleQueries = normalizeStrings(req.SampleQueries)
 	}
 
-	if req.ApproverGroupUIDs != nil {
-		def.ApproverGroupUIDs = normalizeUUIDs(req.ApproverGroupUIDs)
+	if req.ApproverUserGroupUIDs != nil {
+		def.ApproverUserGroupUIDs = normalizeUUIDs(req.ApproverUserGroupUIDs)
 	}
 }
 
@@ -309,6 +351,8 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		return
 	}
 
+	req.applyLegacyFields()
+
 	if msg := validateDefinitionRequest(&req); msg != "" {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
 
@@ -324,21 +368,21 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 	currentUser := getCurrentUser(c)
 
 	def := &store.GrantDefinition{
-		Name:                req.Name,
-		Slug:                req.Slug,
-		Description:         req.Description,
-		DurationSeconds:     req.DurationSeconds,
-		Controls:            req.Controls,
-		MaxQueryCounts:      req.MaxQueryCounts,
-		MaxBytesTransferred: req.MaxBytesTransferred,
-		Priority:            req.Priority,
-		AutoApprove:         req.AutoApprove,
-		GroupUIDs:           req.GroupUIDs,
-		DatabaseUIDs:        req.DatabaseUIDs,
-		ApprovalPatterns:    normalizeStrings(req.ApprovalPatterns),
-		SampleQueries:       normalizeStrings(req.SampleQueries),
-		ApproverGroupUIDs:   normalizeUUIDs(req.ApproverGroupUIDs),
-		CreatedBy:           currentUser.UID,
+		Name:                  req.Name,
+		Slug:                  req.Slug,
+		Description:           req.Description,
+		DurationSeconds:       req.DurationSeconds,
+		Controls:              req.Controls,
+		MaxQueryCounts:        req.MaxQueryCounts,
+		MaxBytesTransferred:   req.MaxBytesTransferred,
+		Priority:              req.Priority,
+		AutoApprove:           req.AutoApprove,
+		UserGroupUIDs:         req.UserGroupUIDs,
+		DatabaseUIDs:          req.DatabaseUIDs,
+		ApprovalPatterns:      normalizeStrings(req.ApprovalPatterns),
+		SampleQueries:         normalizeStrings(req.SampleQueries),
+		ApproverUserGroupUIDs: normalizeUUIDs(req.ApproverUserGroupUIDs),
+		CreatedBy:             currentUser.UID,
 	}
 
 	created, err := s.store.CreateGrantDefinition(c.Request.Context(), def)
@@ -368,7 +412,7 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		"controls":             created.Controls,
 		"priority":             created.Priority,
 		"auto_approve":         created.AutoApprove,
-		"group_uids":           created.GroupUIDs,
+		"user_group_uids":      created.UserGroupUIDs,
 		"database_uids":        created.DatabaseUIDs,
 	})
 
@@ -416,7 +460,7 @@ func (s *Server) handleListGrantDefinitions(c *gin.Context) {
 		visible := make([]store.GrantDefinition, 0, len(defs))
 
 		for i := range defs {
-			if defs[i].AppliesToGroups(groupUIDs) {
+			if defs[i].AppliesToUserGroups(groupUIDs) {
 				visible = append(visible, defs[i])
 			}
 		}
@@ -500,7 +544,7 @@ func (s *Server) nonAdminMayViewGrantDefinition(
 		return false, fmt.Errorf("list user groups: %w", err)
 	}
 
-	return def.AppliesToGroups(groupUIDs), nil
+	return def.AppliesToUserGroups(groupUIDs), nil
 }
 
 // handleUpdateGrantDefinition — admin-only. The path param accepts either
@@ -516,6 +560,8 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 
 		return
 	}
+
+	req.applyLegacyFields()
 
 	def, err := s.resolveGrantDefinition(c.Request.Context(), c.Param("uid"))
 	if err != nil {
@@ -538,20 +584,20 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 	// definition. This keeps validation logic in one place regardless of
 	// which fields the PATCH actually touched.
 	merged := &CreateGrantDefinitionRequest{
-		Name:                def.Name,
-		Slug:                def.Slug,
-		Description:         def.Description,
-		DurationSeconds:     def.DurationSeconds,
-		Controls:            def.Controls,
-		MaxQueryCounts:      def.MaxQueryCounts,
-		MaxBytesTransferred: def.MaxBytesTransferred,
-		Priority:            def.Priority,
-		AutoApprove:         def.AutoApprove,
-		GroupUIDs:           def.GroupUIDs,
-		DatabaseUIDs:        def.DatabaseUIDs,
-		ApprovalPatterns:    def.ApprovalPatterns,
-		SampleQueries:       def.SampleQueries,
-		ApproverGroupUIDs:   def.ApproverGroupUIDs,
+		Name:                  def.Name,
+		Slug:                  def.Slug,
+		Description:           def.Description,
+		DurationSeconds:       def.DurationSeconds,
+		Controls:              def.Controls,
+		MaxQueryCounts:        def.MaxQueryCounts,
+		MaxBytesTransferred:   def.MaxBytesTransferred,
+		Priority:              def.Priority,
+		AutoApprove:           def.AutoApprove,
+		UserGroupUIDs:         def.UserGroupUIDs,
+		DatabaseUIDs:          def.DatabaseUIDs,
+		ApprovalPatterns:      def.ApprovalPatterns,
+		SampleQueries:         def.SampleQueries,
+		ApproverUserGroupUIDs: def.ApproverUserGroupUIDs,
 	}
 
 	if msg := validateDefinitionRequest(merged); msg != "" {
@@ -599,7 +645,7 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 		"versioned":                     updated.UID != previousUID,
 		"name":                          updated.Name,
 		"auto_approve":                  updated.AutoApprove,
-		"group_uids":                    updated.GroupUIDs,
+		"user_group_uids":               updated.UserGroupUIDs,
 		"database_uids":                 updated.DatabaseUIDs,
 	})
 

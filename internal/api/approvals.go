@@ -319,7 +319,7 @@ func (s *Server) mayApproveQuery(ctx context.Context, user *store.User, query *s
 	}
 
 	grant, err := s.resolveApprovalGrant(ctx, query)
-	if err != nil || grant == nil || len(grant.ApproverGroupUIDs()) == 0 {
+	if err != nil || grant == nil || len(grant.ApproverUserGroupUIDs()) == 0 {
 		return false
 	}
 
@@ -331,7 +331,7 @@ func (s *Server) mayApproveQuery(ctx context.Context, user *store.User, query *s
 	return grant.MayApprove(groups)
 }
 
-// resolveApprovalGrant finds the grant whose approver_group_uids govern this
+// resolveApprovalGrant finds the grant whose approver_user_group_uids govern this
 // query's hold.
 //
 // Preferred: the grant the query's connection was stamped with at auth time
@@ -341,7 +341,7 @@ func (s *Server) mayApproveQuery(ctx context.Context, user *store.User, query *s
 // stamp, the check re-resolves "the active grant" at approval time via
 // GetActiveGrant, which — if a newer, higher-priority grant was created for
 // the same user/database while the query sat on hold — returns that *newer*
-// grant, whose approver_group_uids have nothing to do with why the hold
+// grant, whose approver_user_group_uids have nothing to do with why the hold
 // exists.
 //
 // A stamped grant that fails to resolve (deleted) is reported as an error,

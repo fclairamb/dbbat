@@ -92,6 +92,23 @@ func TestGrantsRescopeMismatchedDefinitionsMigration(t *testing.T) {
 
 	f := seedRescopeFixture(t, ctx, db)
 
+	// The corrective migration is written against the schema as it stood when
+	// it was authored, and a later migration renamed
+	// grant_definitions.approver_group_uids to approver_user_group_uids
+	// (server groups made a bare "group" ambiguous). bun records a migration
+	// by name and never re-runs it, so that rename is harmless in production —
+	// but this test *does* re-run it, so it has to restore the column name the
+	// migration was written for and put it back afterwards.
+	renameApproverColumn := func(from, to string) {
+		if _, err := db.ExecContext(ctx,
+			"ALTER TABLE grant_definitions RENAME COLUMN "+from+" TO "+to); err != nil {
+			t.Fatalf("rename %s -> %s: %v", from, to, err)
+		}
+	}
+
+	renameApproverColumn("approver_user_group_uids", "approver_group_uids")
+	t.Cleanup(func() { renameApproverColumn("approver_group_uids", "approver_user_group_uids") })
+
 	// Re-apply. Everything the fixture describes as damaged is repaired; the
 	// two grants that must not move are the no-op half.
 	if err := corrective.Up(ctx, migrator, corrective); err != nil {
