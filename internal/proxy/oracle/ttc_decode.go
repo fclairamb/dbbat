@@ -379,6 +379,10 @@ var ErrNotCursorReexec = errors.New("payload is not a piggyback cursor re-execut
 // compressed-int walk landed on the wrong bytes.
 const cursorReexecMaxID = 0xFFFF
 
+// cursorReexecTrailingFields is how many compressed ints follow the cursor id
+// in a re-execution: rows to fetch, execute options, execute flags.
+const cursorReexecTrailingFields = 3
+
 // decodeCursorReexec extracts the cursor id from a piggyback re-execution —
 // func 0x03, sub-op 0x4e (SELECT) or 0x04 (everything else). This is what a
 // modern thin client puts on the wire to re-run a statement it already parsed;
@@ -404,14 +408,34 @@ func decodeCursorReexec(ttcPayload []byte) (uint16, error) {
 	}
 
 	// TTC >= 18 pads the function header with a zero byte; older ones do not.
-	fieldsAt := 3
+	pos := 3
 	if ttcPayload[3] == 0 {
-		fieldsAt = 4
+		pos = 4
 	}
 
-	cursorID, n := readCompressedInt(ttcPayload[fieldsAt:])
+	cursorID, n := readCompressedInt(ttcPayload[pos:])
 	if n == 0 || cursorID <= 0 || cursorID > cursorReexecMaxID {
 		return 0, fmt.Errorf("%w: cursor id decoded as %d", ErrNotCursorReexec, cursorID)
+	}
+
+	// The other three fields are not read, only walked: a re-execution is
+	// exactly these four integers and nothing else, and requiring them to
+	// consume the frame to the byte is what keeps some *other* piggyback
+	// sub-op from being mistaken for one and gated against a cursor it has
+	// nothing to do with.
+	pos += n
+
+	for range cursorReexecTrailingFields {
+		_, n := readCompressedInt(ttcPayload[pos:])
+		if n == 0 {
+			return 0, fmt.Errorf("%w: truncated execution fields", ErrNotCursorReexec)
+		}
+
+		pos += n
+	}
+
+	if pos != len(ttcPayload) {
+		return 0, fmt.Errorf("%w: %d trailing bytes", ErrNotCursorReexec, len(ttcPayload)-pos)
 	}
 
 	return uint16(cursorID), nil
