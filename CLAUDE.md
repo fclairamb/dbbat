@@ -55,6 +55,7 @@ PR titles MUST follow the conventional commit format:
 - **Frontend**: React 19 + TypeScript + Vite (see `front/CLAUDE.md`)
 - **Capture format**: Protocol-agnostic pcapng, readable by tcpdump/Wireshark (`docs/dump-format.md`)
 - **Live stream + approvals**: WebSocket event stream and pattern-triggered approval holds (`docs/approvals.md`)
+- **Tamper-evident audit trail**: `audit_log` and `queries` are HMAC-chained with a key HKDF-derived from `DBB_KEY`; `dbbat audit verify` walks the chain (`docs/audit-chain.md`)
 - **MCP (AI agents)**: Streamable-HTTP endpoint at `/api/v1/mcp` via `github.com/modelcontextprotocol/go-sdk`. Agent statements are executed by dialing dbbat's **own** proxy listener over loopback as the API key's owner — never a parallel internal path (`docs/mcp.md`)
 
 ## Project Structure
@@ -153,6 +154,8 @@ This applies even when the current task is otherwise complete — capture the fo
 ./dbbat db rollback                # Rollback last migration group
 ./dbbat db status                  # Show migration status
 ./dbbat dump anonymise <in> [out]  # Strip session metadata from a .pcapng capture
+./dbbat audit verify               # Walk the audit_log HMAC chain; non-zero exit on a break
+./dbbat audit verify --queries [--connection <uid>]  # Same for the per-connection query chains
 ```
 
 ## Environment Variables
@@ -350,6 +353,13 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
 - Database credentials: AES-256-GCM encrypted (AAD-bound to the database UID)
 - API keys: encrypted blobs, prefix `dbb_`; cannot create/revoke other keys
 - Default admin: `admin`/`admin` (must change on first login)
+- **Tamper-evident audit trail**: every `audit_log` entry and every `queries`
+  row carries an HMAC over its content plus the previous record's MAC, keyed by
+  an HKDF subkey of `DBB_KEY` that is never stored in the database. `audit_log`
+  is one chain; `queries` is one chain **per connection**, so
+  `DBB_QUERY_STORAGE_RETENTION` deleting whole connections never severs it, and
+  the session's final head is stamped on the connection row at close. Verify
+  with `dbbat audit verify [--queries]`. See `docs/audit-chain.md`
 
 ## API Documentation
 
