@@ -119,7 +119,7 @@ export default function Home(): ReactNode {
   return (
     <Layout
       title={`${siteConfig.title} - Database Observability Proxy`}
-      description="Give your devs (temporary) access to prod. PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, and SQL Server proxy with full query logging, fine-grained access control, and session capture."
+      description="Give your devs and AI agents (temporary) access to prod. PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, and SQL Server proxy with full query logging, fine-grained access control, and session capture."
     >
       <HomepageHeader />
       <main>

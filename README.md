@@ -1,8 +1,8 @@
 # DBBat - Database Observability Proxy
 
-**Give your devs access to prod.**
+**Give your devs — and your AI agents — access to prod.**
 
-A transparent database proxy for query observability, access control, and safety. Speaks **PostgreSQL**, **Oracle**, **MySQL/MariaDB**, and **MongoDB** wire protocols. Every query logged. Every connection tracked.
+A transparent database proxy that gives developers and AI agents controlled access to production databases. Speaks **PostgreSQL**, **Oracle**, **MySQL/MariaDB**, **MongoDB**, and **Microsoft SQL Server** wire protocols, so unmodified clients, drivers, and agent tools connect as usual. Every query logged. Every connection tracked.
 
 ## Documentation
 
@@ -17,11 +17,12 @@ Full documentation is available at **[dbbat.com](https://dbbat.com)**:
 **The Problem:**
 - Production databases should not be directly accessible to developers for security and compliance reasons
 - Developers often need access to production data to diagnose issues, debug problems, and understand user behavior
+- AI agents increasingly need the same access — to investigate incidents, answer data questions, run migrations — with even less inherent trust than a human operator
 - Traditional solutions are binary: either full access (risky) or no access (blocks troubleshooting)
 
 **The Solution:**
 
-DBBat acts as a monitoring proxy that allows controlled developer access to production databases with:
+DBBat acts as a monitoring proxy that allows controlled access to production databases — for humans and AI agents alike — with:
 - **Complete monitoring**: Every query and result is logged with full traceability
 - **Strict limitations**: Time-windowed access, fine-grained controls, query quotas, and data transfer limits
 - **Full audit trail**: Track who accessed what, when, and what data they retrieved
@@ -37,19 +38,20 @@ DBBat acts as a monitoring proxy that allows controlled developer access to prod
 | MySQL | MySQL wire (`go-mysql-org/go-mysql`) | `:3307` (`DBB_LISTEN_MYSQL`) | `caching_sha2_password` (default), `mysql_clear_password`; TLS terminated at proxy |
 | MariaDB | MySQL wire (same listener) | `:3307` (`DBB_LISTEN_MYSQL`) | Same as MySQL — `mysql_native_password` not supported, `STMT_BULK_EXECUTE` refused |
 | MongoDB | MongoDB wire (`OP_MSG`, hand-rolled) | `:27018` (`DBB_LISTEN_MONGO`) | `SCRAM-SHA-256` or `PLAIN`-over-TLS at the proxy; upstream via `SCRAM-SHA-256` — see [docs/mongodb.md](docs/mongodb.md) |
+| SQL Server | TDS (hand-rolled) | `:1434` (`DBB_LISTEN_MSSQL`) | PRELOGIN + encapsulated TLS + LOGIN7, SQL auth only (no NTLM/Kerberos/Entra) — see [docs/mssql.md](docs/mssql.md). 1434/tcp is free: the SQL Server Browser that owns 1434 is UDP-only |
 
-Each engine has its own listener; enable only the ones you need by setting the matching `DBB_LISTEN_*` environment variable. PostgreSQL is enabled by default; Oracle/MySQL/MongoDB listen on their default ports unless explicitly disabled in config.
+Each engine has its own listener; enable only the ones you need by setting the matching `DBB_LISTEN_*` environment variable. PostgreSQL is enabled by default; Oracle/MySQL/MongoDB/SQL Server listen on their default ports unless explicitly disabled in config.
 
 Any of these upstreams can be reached directly or through an **SSH bastion** — see [SSH tunnels](#3b-reach-a-server-through-an-ssh-bastion-optional).
 
 ## Features
 
-- **Multi-engine proxy**: PostgreSQL, Oracle, MySQL/MariaDB, MongoDB on independent listeners
+- **Multi-engine proxy**: PostgreSQL, Oracle, MySQL/MariaDB, MongoDB, SQL Server on independent listeners
 - **User Management**: Local user database with username/password (Argon2id) and `admin`/`viewer`/`connector` roles
 - **API Keys**: Long-lived bearer tokens (`dbb_…`) for programmatic access; cannot create or revoke other keys (security restriction)
 - **Slack OAuth (optional)**: Sign-in via Slack workspace, optional auto-provisioning
 - **Slack Grant Approvals (optional)**: Grant requests notify a Slack channel with Approve/Deny buttons (inbound endpoint or Socket Mode); auto-approved requests notify without buttons
-- **Server Configuration**: Store target server connections with AES-256-GCM encrypted credentials; `protocol` field per server (`postgresql`, `oracle`, `mysql`, `mariadb`, `mongodb`, `ssh`)
+- **Server Configuration**: Store target server connections with AES-256-GCM encrypted credentials; `protocol` field per server (`postgresql`, `oracle`, `mysql`, `mariadb`, `mongodb`, `mssql`, `ssh`)
 - **SSH Tunnels**: Route upstream connections for any protocol through an SSH bastion (`via_uid`), with host-key TOFU pinning and a shared pooled dialer
 - **Connection & Query Tracking**: Logs every connection, every query (SQL text, parameters, duration, rows affected, errors), and optionally captures result rows (`query_rows` table) up to configurable size limits
 - **Access Control**: Time-windowed grants (`starts_at` / `expires_at`), independent controls (`read_only`, `block_copy`, `block_ddl`), and optional quotas (`max_query_counts`, `max_bytes_transferred`)
@@ -76,11 +78,12 @@ docker run -d \
   -p 1522:1522 \
   -p 3307:3307 \
   -p 27018:27018 \
+  -p 1434:1434 \
   -p 4200:4200 \
   ghcr.io/fclairamb/dbbat
 ```
 
-Ports: `5433` PostgreSQL proxy, `1522` Oracle proxy, `3307` MySQL/MariaDB proxy, `27018` MongoDB proxy, `4200` REST API + web UI.
+Ports: `5433` PostgreSQL proxy, `1522` Oracle proxy, `3307` MySQL/MariaDB proxy, `27018` MongoDB proxy, `1434` SQL Server proxy, `4200` REST API + web UI.
 
 ### Running with Docker Compose
 
@@ -132,7 +135,7 @@ curl -X POST http://localhost:4200/api/v1/servers \
   }'
 ```
 
-For Oracle, set `"protocol": "oracle"` and add `"oracle_service_name": "ORCL"`. For MySQL/MariaDB, set `"protocol": "mysql"` (or `"mariadb"`) and use port `3306`. For MongoDB, set `"protocol": "mongodb"`, use port `27017`, and optionally add `"mongo_auth_source": "admin"`.
+For Oracle, set `"protocol": "oracle"` and add `"oracle_service_name": "ORCL"`. For MySQL/MariaDB, set `"protocol": "mysql"` (or `"mariadb"`) and use port `3306`. For MongoDB, set `"protocol": "mongodb"`, use port `27017`, and optionally add `"mongo_auth_source": "admin"`. For SQL Server, set `"protocol": "mssql"` and use port `1433`.
 
 Creating a server whose name is already taken returns `409 DUPLICATE_NAME` (same for grant definitions and users).
 
@@ -158,7 +161,7 @@ curl -X POST http://localhost:4200/api/v1/servers \
   -d "{\"name\": \"prod-behind-bastion\", \"protocol\": \"postgresql\", \"host\": \"10.0.1.20\", \"port\": 5432, \"database_name\": \"myapp\", \"username\": \"readonly_user\", \"password\": \"dbpass\", \"via_uid\": \"$BASTION\"}"
 ```
 
-Tunnelling works for all four protocols. The bastion host key is pinned on first use (TOFU) and connections are pooled and shared across sessions. `ssh_private_key` and `ssh_passphrase` are write-only and never returned. Set `"clear_via_uid": true` on update to go back to a direct dial.
+Tunnelling works for all five protocols. The bastion host key is pinned on first use (TOFU) and connections are pooled and shared across sessions. `ssh_private_key` and `ssh_passphrase` are write-only and never returned. Set `"clear_via_uid": true` on update to go back to a direct dial.
 
 ### 4. Grant Access
 
@@ -194,6 +197,9 @@ mysql -h 127.0.0.1 -P 3307 -u developer -p production
 
 # MongoDB (authSource carries the DBBat database name)
 mongosh "mongodb://developer:temppass123@localhost:27018/?authSource=production&authMechanism=SCRAM-SHA-256"
+
+# SQL Server (the -d database names the DBBat entry; -C trusts the proxy's self-signed cert)
+sqlcmd -S localhost,1434 -U developer -P temppass123 -d production -C
 ```
 
 ## Configuration
@@ -205,6 +211,7 @@ mongosh "mongodb://developer:temppass123@localhost:27018/?authSource=production&
 | `DBB_LISTEN_ORA` | Oracle proxy listen address (empty disables) | `:1522` |
 | `DBB_LISTEN_MYSQL` | MySQL/MariaDB proxy listen address (empty disables) | `:3307` |
 | `DBB_LISTEN_MONGO` | MongoDB proxy listen address (empty disables) | `:27018` |
+| `DBB_LISTEN_MSSQL` | SQL Server (TDS) proxy listen address (empty disables) | `:1434` |
 | `DBB_LISTEN_API` | REST API listen address | `:4200` |
 | `DBB_KEY` | Base64-encoded AES-256 encryption key | Auto-generated at `~/.dbbat/key` |
 | `DBB_KEYFILE` | Path to file containing encryption key | - |
@@ -232,11 +239,11 @@ See [Configuration](https://dbbat.com/docs/configuration) for the full set, incl
 ## Architecture
 
 ```
-psql / pg client     ─►  DBBat (auth + grant check + log) ─┐
-sqlplus / go-ora     ─►  DBBat (TNS service-name routing)  ─┤   direct dial   ┌─► PostgreSQL / Oracle
-mysql / mariadb cli  ─►  DBBat (caching_sha2_password)     ─┼───────────────► ┤
-mongosh / driver     ─►  DBBat (SCRAM-SHA-256 / PLAIN-TLS) ─┘   or SSH tunnel └─► MySQL / MariaDB / MongoDB
-                                                                 (via_uid)
+psql / pg client     ─►  DBBat (auth + grant check + log)  ─┐
+sqlplus / go-ora     ─►  DBBat (TNS service-name routing)   ─┤   direct dial   ┌─► PostgreSQL / Oracle
+mysql / mariadb cli  ─►  DBBat (caching_sha2_password)      ─┼───────────────► ┤
+mongosh / driver     ─►  DBBat (SCRAM-SHA-256 / PLAIN-TLS)  ─┤   or SSH tunnel └─► MySQL / MariaDB /
+sqlcmd / TDS driver  ─►  DBBat (PRELOGIN + TLS + LOGIN7)    ─┘    (via_uid)         MongoDB / SQL Server
 ```
 
 DBBat is a single Go binary backed by a PostgreSQL store (users, servers, grants, connections, queries, audit, dumps).
