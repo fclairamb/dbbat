@@ -110,15 +110,20 @@ func ginPathToSpecPath(path string) string {
 	return strings.Join(segments, "/")
 }
 
-// newParityTestServer builds the fully-featured router. Three route families
+// newParityTestServer builds the fully-featured router. Four route families
 // are registered conditionally on configuration — the Slack OAuth login
-// routes, the generic OIDC login routes and the inbound Slack interactions
-// webhook — and all are documented, so they must be enabled here or they would
-// look like spec-only paths.
+// routes, the generic OIDC login routes, the inbound Slack interactions
+// webhook and the MCP endpoint — and all are documented, so they must be
+// enabled here or they would look like spec-only paths.
 func newParityTestServer(t *testing.T) *Server {
 	t.Helper()
 
 	server, dataStore := setupTestServer(t)
+
+	// setupTestServer builds a bare config, so the MCP endpoint's shipped
+	// default (on) has to be restated. TestDefaultConfigEnablesMCP in
+	// internal/config is what pins that default itself.
+	server.config.MCP.Enabled = true
 
 	server.oauthProviders["slack"] = slack.NewProvider("test-client-id", "test-client-secret", "T0TEST")
 
