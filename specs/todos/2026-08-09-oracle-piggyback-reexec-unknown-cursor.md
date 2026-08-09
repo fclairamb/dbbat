@@ -47,3 +47,35 @@ Key files: `internal/proxy/oracle/intercept.go` (`handlePiggybackReexec`,
 `learnCursorID`, `refuseUnknownCursor`), `internal/proxy/oracle/ttc_oer.go`
 (`findCursorIDInResponse`), `internal/proxy/oracle/cursor_reexec_replay_test.go`,
 `docs/approvals.md`.
+
+## Resolved open questions
+
+> Then decide: either make the piggyback path fail closed like
+> `refuseUnknownCursor` (same `hasStatementControls` test), or document the split
+> as permanent in `docs/approvals.md` with the measurement behind it.
+
+**Decision — measure, harden, then fail closed.** The end state is symmetry: an
+untracked cursor on the piggyback path must be refused under the same
+`hasStatementControls` test as `refuseUnknownCursor`, matching the sibling
+decision taken for `OFETCH` in
+`2026-08-08-oracle-ofetch-unknown-cursor-and-query-quota.md`. But do **not**
+flip it first — work the spec's `## Implementation` sequence in order:
+
+1. **Measure** how often cursor-id learning actually misses. Instrument
+   `handlePiggybackReexec` / `learnCursorID` with a counter and a WARN, then run
+   the Oracle integration suite plus real client workloads that stress it:
+   bind-heavy statements, multiple concurrent cursors, REF cursors, PL/SQL
+   blocks, and a statement cache under churn.
+2. **Harden** the learning if the measurement shows any miss.
+   `findCursorIDInResponse` currently takes the first OER-shaped run whose error
+   code is success or ORA-01403; correlating the OER's sequence number with the
+   TTC sequence byte of the request that opened the call is the stricter anchor
+   the spec sketches (the session does not track that today).
+3. **Then fail closed**, with a replay test proving an untracked piggyback frame
+   is refused under a statement-shaped control and still forwarded without one,
+   and update `docs/approvals.md` so the split is recorded as closed rather than
+   open.
+
+If — and only if — the measurement shows learning misses that cannot be made
+reliable by step 2, stop before step 3 and report that back rather than shipping
+a change that breaks the second execute of an ordinary read-only session.
