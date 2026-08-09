@@ -90,7 +90,7 @@ to operate.
 | Upstream credentials encrypted with AES-256-GCM (AAD-bound); Argon2id for user passwords and API keys; TLS terminated on the client leg and available on the upstream leg | **A.8.24 Use of cryptography** | Secrets at rest are encrypted with an authenticated cipher and an explicit key supplied through `DBB_KEY` / `DBB_KEYFILE`. |
 | Per-session pcapng captures plus `dbbat dump anonymise` for sharing them | **A.5.28 Collection of evidence** | Evidence is captured in a standard, tool-readable format, and can be stripped of session metadata before it leaves the organisation. |
 | `DBB_QUERY_STORAGE_RETENTION` (query history and captured rows) and `DBB_DUMP_RETENTION` (local capture spool) | **A.8.10 Information deletion** | Retention is an explicit, configured duration, and the sweep runs continuously rather than as a manual clean-up. |
-| Grant definitions are immutably versioned; deactivation withdraws the lineage; hard deletion is refused while referenced | **A.5.33 Protection of records** | The record of what was authorized, and under which policy version, cannot be quietly altered or removed. |
+| Grant definitions are immutably versioned; deactivation withdraws the whole lineage and fails closed at authentication time; hard deletion is refused while referenced | **A.5.18 Access rights** (withdrawal), **A.5.33 Protection of records** | Withdrawing a definition removes access everywhere it was granted, in one action — and the record of what was authorized, under which policy version, cannot be quietly altered or removed afterwards. |
 
 ## PCI DSS v4.0 / v4.0.1
 
