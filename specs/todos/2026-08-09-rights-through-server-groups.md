@@ -183,3 +183,115 @@ Because grants are group-bound, section 3 is no longer a small tail on section
 (rename) first, then 2 (definitions scope by server group), then 3 (group-bound
 grants: auth-time membership resolution, group-spanning quotas, priority across
 overlapping groups) as its own step with its own tests.
+
+## Implementation Plan
+
+Four commits-worth of work, in the order the "Sequencing consequence" section
+above mandates. Every step keeps `make test` green on its own.
+
+### Step A — server groups entity + the `user_group` rename (spec §1 and §4)
+
+Migration `20260809000000_server_groups_and_user_group_rename`:
+
+- `server_groups` (uid, name, description, created_by, created_at) with a
+  `lower(name)` unique index, and `server_group_members` (group_uid → server_groups
+  ON DELETE CASCADE, server_uid → servers ON DELETE CASCADE, PK on both) —
+  a literal mirror of `user_groups` / `user_group_members`.
+- `ALTER TABLE grant_definitions RENAME COLUMN group_uids TO user_group_uids`
+  and `approver_group_uids TO approver_user_group_uids`. Both columns exist only
+  on `grant_definitions` (20260806020000 already dropped the `access_grants`
+  copy), so the rename is two statements and a working `down`.
+
+Go:
+
+- `internal/store/server_groups.go` + `ServerGroup` / `ServerGroupMember` models,
+  modeled line-for-line on `user_groups.go`, plus
+  `ListServerGroupUIDsForServer` — the lookup the auth path needs.
+- Field renames `GrantDefinition.GroupUIDs → UserGroupUIDs`,
+  `ApproverGroupUIDs → ApproverUserGroupUIDs`, accessor
+  `AccessGrant.ApproverGroupUIDs() → ApproverUserGroupUIDs()`,
+  `AppliesToGroups → AppliesToUserGroups`.
+- Store method renames in `user_groups.go`: `ListGroupMembers →
+  ListUserGroupMembers`, `ListGroupMemberUIDs → ListUserGroupMemberUIDs`,
+  `SetGroupMembers → SetUserGroupMembers`, `ListGroupsForUser →
+  ListUserGroupsForUser`, `AddUserToGroup → AddUserToUserGroup`,
+  `RemoveUserFromGroup → RemoveUserFromUserGroup`.
+
+API:
+
+- `/api/v1/server-groups` CRUD + `/members` sub-routes, admin-gated exactly like
+  `/user-groups`; OpenAPI paths, `ServerGroup`/`CreateServerGroupRequest`
+  schemas, a `Server Groups` tag.
+- JSON renames `group_uids → user_group_uids`,
+  `approver_group_uids → approver_user_group_uids` on the grant-definition
+  create/update bodies and `group_uids → user_group_uids` on the update-user
+  body. **One-release input compatibility**: each request struct keeps a
+  `Legacy*` field bound to the old JSON name; a non-nil legacy value is used
+  only when the new field is absent. Responses emit the new names only.
+
+Frontend: `/server-groups` route + sidebar entry next to "User Groups",
+`canManageServerGroups` in `lib/permissions.ts`, hooks in `api/queries.ts`,
+regenerated `api/schema.ts`, and the renamed fields threaded through the
+grant-definition form / grants / users pages.
+
+### Step B — definitions scope by server group (spec §2)
+
+- `GrantDefinition.DatabaseUIDs` → `ServerGroupUIDs` (`server_group_uids`),
+  empty = every database (unchanged semantics).
+- `AppliesToDatabase(dbUID)` → `AppliesToServerGroups(serverGroupUIDs)`, fed by
+  `ListServerGroupUIDsForServer`. `AppliesTo` takes both group axes.
+- Migration `20260809010000_grant_definitions_server_group_scope`: add
+  `server_group_uids`, then a `DO` block that, for every definition row with a
+  non-empty `database_uids` and an empty `server_group_uids`, reuses-or-creates
+  one server group per *distinct set* of databases (named after the definition
+  that first used it, uniquified), fills the membership, and points the
+  definition at it. Idempotent by construction (the guard is
+  `cardinality(server_group_uids) = 0`).
+  `database_uids` is **kept, not dropped**: it is the pre-migration source of
+  truth and dropping it in the same migration would make the mirroring
+  irreversible. A follow-up todo covers retiring the column.
+- API: `database_uids` on a create/update body is now a **400**, not a silent
+  no-op — dropping a scope restriction on the floor would fail open.
+
+### Step C — group-bound grants (spec §3 + Resolved open questions)
+
+- `access_grants.server_group_uid uuid NULL REFERENCES server_groups(uid) ON
+  DELETE SET NULL` (migration `20260809020000_access_grants_server_group`).
+  A grant keeps its anchor `database_id` (the database it was issued for) and
+  additionally covers every server currently in `server_group_uid`.
+- Materialization (`BuildGrantFromDefinition`, both the admin-assign and the
+  request-approval path) binds the grant to whichever of the definition's
+  server groups currently contains the target database; an unscoped definition
+  yields an anchor-only grant, exactly as today.
+- `GetActiveGrant` matches `database_id = $db OR server_group_uid IN (SELECT
+  group_uid FROM server_group_members WHERE server_uid = $db)`. All five
+  protocols funnel through this one function, so that is the whole auth-path
+  change. Ordering (`priority DESC, expires_at DESC, created_at DESC`) is
+  untouched, which is what ranks overlapping groups against each other.
+- Quotas span the group: `populateGrantCounters`' stamped-connection branch
+  already spans it (it keys on `grant_uid`); the unstamped fallback widens from
+  `database_id = $anchor` to "the anchor or any current member of the group".
+  `LimitGuard` therefore inherits a group-wide `baseBytes` with no signature
+  change; its doc comment says so.
+- `ListGrants(DatabaseID)` widens the same way, so the UI lists the grants the
+  proxy would actually pick for that database.
+
+### Step D — docs + UI warning
+
+Root `CLAUDE.md` "Access Control", `website/docs` grants page and the
+server-group edit dialog all state the accepted consequence: server-group
+membership is **live**, so adding a server to a group immediately widens every
+live grant bound to it. The dialog shows it as a warning at the point of edit.
+
+### Tests
+
+- `internal/store/server_groups_test.go` — CRUD + membership, mirroring
+  `user_groups_test.go`.
+- `internal/store/grants_test.go` — a grant bound to a group authorizes a
+  database added to that group *after* issuance; priority across two
+  overlapping groups; quota counters spanning two databases of one group.
+- `internal/api/grant_definitions_test.go` — legacy `group_uids` /
+  `approver_group_uids` still accepted on input, responses emit the new names,
+  `database_uids` is rejected.
+- `internal/api/server_groups_test.go` — admin gating + CRUD.
+- Migration tests for the definition-scope backfill.
