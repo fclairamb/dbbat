@@ -788,3 +788,58 @@ func TestChainKeyIsNotTheMasterKey(t *testing.T) {
 	require.NotEqual(t, testChainMasterKey, store.chainKey,
 		"the chain key must be derived, never the master key itself")
 }
+
+// TestAuditChainSurvivesAPeerAppend is the multi-replica case: two processes
+// share the store, so one process's cached head goes stale the moment the other
+// appends. The append must retry against a re-read head instead of losing the
+// event to a unique-index collision.
+func TestAuditChainSurvivesAPeerAppend(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	peer := &Store{db: store.db, queryChains: newQueryChains(), chainKey: store.chainKey}
+
+	// Both processes warm their caches on the same head.
+	require.NoError(t, store.LogAuditEvent(ctx, &AuditEvent{EventType: "first"}))
+	require.NoError(t, peer.LogAuditEvent(ctx, &AuditEvent{EventType: "peer"}))
+
+	// store still believes the head is 1; the peer moved it to 2.
+	require.NoError(t, store.LogAuditEvent(ctx, &AuditEvent{EventType: "third"}))
+
+	rows := readChainedAuditRows(t, ctx, store)
+	require.Len(t, rows, 3, "no event may be lost to a stale head")
+
+	for i, row := range rows {
+		require.Equal(t, int64(i+1), *row.ChainSeq)
+	}
+
+	result, err := store.VerifyAuditChain(ctx)
+	require.NoError(t, err)
+	require.True(t, result.OK(), "the chain must stay valid across replicas: %v", result.Break)
+}
+
+// TestQueryChainSurvivesAPeerAppend is the same case on a connection, which a
+// failover can move between replicas mid-session.
+func TestQueryChainSurvivesAPeerAppend(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "peer", 1)
+
+	peer := &Store{db: store.db, queryChains: newQueryChains(), chainKey: store.chainKey}
+
+	_, err := peer.CreateQuery(ctx, &Query{ConnectionID: conn.UID, SQLText: "SELECT 'peer'"})
+	require.NoError(t, err)
+
+	_, err = store.CreateQuery(ctx, &Query{ConnectionID: conn.UID, SQLText: "SELECT 'third'"})
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break, "the chain must stay valid across replicas")
+	require.Equal(t, int64(3), result.Verified)
+}

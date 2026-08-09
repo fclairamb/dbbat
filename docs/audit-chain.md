@@ -144,6 +144,12 @@ chains — with the head cached in memory and re-read under the lock whenever th
 cache is cold or an append failed. A partial unique index on `chain_seq` is the
 backstop.
 
+With several replicas sharing one store, a cached head goes stale as soon as a
+peer appends: this process thinks the head is 5, the peer already wrote 6, and
+the insert collides with that unique index. An append therefore retries — the
+first attempt trusts the cache, every later one re-reads the head under the lock
+— so the event is never lost to a race between replicas.
+
 Audit volume is admin actions, so the contention this buys is negligible. Query
 appends only ever contend with other appends on the *same* connection, which is
 a single session.

@@ -43,11 +43,38 @@ func (s *Store) LogAuditEvent(ctx context.Context, event *AuditEvent) error {
 	return s.appendAuditChain(ctx, logEntry)
 }
 
-// appendAuditChain inserts one sealed audit row.
+// appendAuditChain inserts one sealed audit row, retrying with a re-read head
+// when the cached one turns out to be stale.
+//
+// A stale head is the normal multi-replica case: this process appended seq 5,
+// a peer appended seq 6, and this process still believes the head is 5. The
+// insert then collides with the unique index on chain_seq. The first attempt
+// therefore trusts the cache and every later attempt re-reads under the lock,
+// which is the whole reason the cache is safe to keep.
 func (s *Store) appendAuditChain(ctx context.Context, entry *AuditLog) error {
 	s.auditChain.mu.Lock()
 	defer s.auditChain.mu.Unlock()
 
+	var err error
+
+	for attempt := range chainAppendAttempts {
+		if attempt > 0 {
+			s.auditChain.invalidate()
+
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+		}
+
+		if err = s.appendAuditChainOnce(ctx, entry); err == nil {
+			return nil
+		}
+	}
+
+	return err
+}
+
+func (s *Store) appendAuditChainOnce(ctx context.Context, entry *AuditLog) error {
 	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// Released at commit or rollback, so a crashed process never strands it.
 		if _, err := tx.ExecContext(ctx,
