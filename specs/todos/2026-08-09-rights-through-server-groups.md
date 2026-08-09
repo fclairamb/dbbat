@@ -247,24 +247,33 @@ grant-definition form / grants / users pages.
   that first used it, uniquified), fills the membership, and points the
   definition at it. Idempotent by construction (the guard is
   `cardinality(server_group_uids) = 0`).
-  `database_uids` is **kept, not dropped**: it is the pre-migration source of
-  truth and dropping it in the same migration would make the mirroring
-  irreversible. A follow-up todo covers retiring the column.
+  `database_uids` is then **dropped in a later split of the same migration** —
+  only after the mirroring above has run, so no data is lost before it exists
+  somewhere else, and the `down` rebuilds the column from the group
+  memberships. (An earlier draft of this plan kept the column; that turned out
+  to break the Go model, since bun's `RETURNING *` refuses a column no field
+  maps to, and keeping a dead NOT NULL column alive to satisfy a migration
+  that has already run is worse than a reversible drop.)
 - API: `database_uids` on a create/update body is now a **400**, not a silent
   no-op — dropping a scope restriction on the floor would fail open.
 
 ### Step C — group-bound grants (spec §3 + Resolved open questions)
 
 - `access_grants.server_group_uid uuid NULL REFERENCES server_groups(uid) ON
-  DELETE SET NULL` (migration `20260809020000_access_grants_server_group`).
-  A grant keeps its anchor `database_id` (the database it was issued for) and
-  additionally covers every server currently in `server_group_uid`.
+  DELETE SET NULL`. It ships in `20260809000000` alongside the tables it
+  references rather than in a migration of its own — one FK, one index, same
+  entity. A bound grant covers the servers currently in `server_group_uid`
+  **instead of** its anchor `database_id`; the anchor is what an unbound grant
+  covers and the fallback when the group is deleted (see the fix in
+  `25992ab` — an earlier cut had the two add up, which made "removing a server
+  narrows the grant" false for exactly one server).
 - Materialization (`BuildGrantFromDefinition`, both the admin-assign and the
   request-approval path) binds the grant to whichever of the definition's
   server groups currently contains the target database; an unscoped definition
   yields an anchor-only grant, exactly as today.
-- `GetActiveGrant` matches `database_id = $db OR server_group_uid IN (SELECT
-  group_uid FROM server_group_members WHERE server_uid = $db)`. All five
+- `GetActiveGrant` matches `(server_group_uid IS NULL AND database_id = $db)
+  OR server_group_uid IN (SELECT group_uid FROM server_group_members WHERE
+  server_uid = $db)`. All five
   protocols funnel through this one function, so that is the whole auth-path
   change. Ordering (`priority DESC, expires_at DESC, created_at DESC`) is
   untouched, which is what ranks overlapping groups against each other.
@@ -273,8 +282,10 @@ grant-definition form / grants / users pages.
   `database_id = $anchor` to "the anchor or any current member of the group".
   `LimitGuard` therefore inherits a group-wide `baseBytes` with no signature
   change; its doc comment says so.
-- `ListGrants(DatabaseID)` widens the same way, so the UI lists the grants the
-  proxy would actually pick for that database.
+- `ListGrants(DatabaseID)` uses the same predicate, so the UI lists the grants
+  the proxy would actually pick for that database. The MCP `list_databases`
+  tool expands a grant the same way, so the agent is never told about a
+  database its statements would be refused on.
 
 ### Step D — docs + UI warning
 
