@@ -259,6 +259,19 @@ message; it can never cause a statement to run when it should not, because
 whether the statement ran is decided by the loopback connection returning, not
 by this correlation.
 
+### Why `await_approval` does not read the approval registry
+
+`internal/approval.Registry` is a *delivery* mechanism: it wakes a parked proxy
+session when a decision arrives. It answers "is a hold still parked here", not
+"did the statement run and what did it return".
+
+`await_approval` waits on the loopback execution itself instead, which is the
+same thing the client waiting on a socket is doing. That is deliberately the
+stronger source of truth: the statement's outcome is decided by the connection
+returning, never by a second bookkeeping structure that could disagree with it.
+The registry stays exactly what it is — the proxy's own plumbing — and the MCP
+layer stays a client.
+
 ### Bounds on a parked execution
 
 A hold has no timeout by design. An MCP execution does: after **30 minutes**
