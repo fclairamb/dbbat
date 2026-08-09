@@ -587,6 +587,24 @@ type Config struct {
 
 	// Approval holds pattern-triggered approval-hold configuration.
 	Approval ApprovalConfig `koanf:"approval"`
+
+	// MCP holds the Model Context Protocol endpoint configuration.
+	MCP MCPConfig `koanf:"mcp"`
+}
+
+// MCPConfig configures the Model Context Protocol endpoint that lets AI
+// agents query databases through dbbat.
+//
+// Enabled defaults to **true**, deliberately unlike ApprovalConfig. The
+// endpoint is API-key gated, and every statement it runs is executed by
+// dialing dbbat's own proxy listener as the key's owner — so it grants an
+// agent nothing the key holder could not already do with psql, and it adds no
+// enforcement path of its own. Turning it off is for deployments that want the
+// route surface gone entirely, not a safety default.
+type MCPConfig struct {
+	// Enabled registers POST/GET/DELETE /api/v1/mcp. When false the routes do
+	// not exist at all — a disabled feature should not answer, not even 403.
+	Enabled bool `koanf:"enabled"`
 }
 
 // Default query storage limits.
@@ -675,6 +693,7 @@ func defaultConfig() Config {
 			AutoCreateUsers: true,
 			DefaultRole:     "connector",
 		},
+		MCP: MCPConfig{Enabled: true},
 		OIDCAuth: OIDCAuthConfig{
 			Scopes:      DefaultOIDCScopes,
 			DisplayName: DefaultOIDCDisplayName,
@@ -781,6 +800,10 @@ func envTransform(k, v string) (string, any) {
 	// approval_* -> approval.*
 	if strings.HasPrefix(key, "approval_") {
 		return "approval." + strings.TrimPrefix(key, "approval_"), v
+	}
+	// mcp_* -> mcp.*
+	if strings.HasPrefix(key, "mcp_") {
+		return "mcp." + strings.TrimPrefix(key, "mcp_"), v
 	}
 	return key, v
 }

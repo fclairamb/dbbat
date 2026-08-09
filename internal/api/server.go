@@ -23,6 +23,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/events"
+	"github.com/fclairamb/dbbat/internal/mcp"
 	"github.com/fclairamb/dbbat/internal/notify"
 	"github.com/fclairamb/dbbat/internal/store"
 	"github.com/fclairamb/dbbat/internal/version"
@@ -68,6 +69,11 @@ type Server struct {
 	// storage. nil when DBB_DUMP_UPLOAD_URL is unset, in which case captures
 	// only ever exist in the local spool.
 	dumpStorage *dump.Uploader
+
+	// mcp serves the Model Context Protocol endpoint. Built in setupRouter,
+	// nil when DBB_MCP_ENABLED is false — in which case the routes are not
+	// registered either.
+	mcp *mcp.Server
 }
 
 // SetDumpStorage installs the blob store holding uploaded session captures, so
@@ -452,6 +458,18 @@ func (s *Server) setupRouter() *gin.Engine {
 			// Instance info
 			authenticated.GET("/instance", s.handleGetInstance)
 			authenticated.PUT("/instance/public", s.requireAdmin(), s.handleUpdateInstancePublic)
+
+			// Model Context Protocol endpoint (Streamable HTTP), for AI
+			// agents. Registered only when enabled: a disabled feature should
+			// not answer at all. GET and DELETE exist so an MCP client's
+			// session-management probes get the protocol's own 405 rather than
+			// a 404 it has to guess at — the server runs stateless.
+			if s.mcpEnabled() {
+				s.mcp = s.newMCPServer()
+				authenticated.POST("/mcp", s.handleMCP)
+				authenticated.GET("/mcp", s.handleMCP)
+				authenticated.DELETE("/mcp", s.handleMCP)
+			}
 		}
 	}
 
