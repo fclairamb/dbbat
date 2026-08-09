@@ -6,9 +6,9 @@ sidebar_position: 1
 
 DBBat is a transparent database proxy designed for query observability, access control, and safety.
 
-It gives temporary, audited access to production databases for support, debugging, and data analysis — without handing out raw credentials.
+It gives developers and AI agents temporary, audited access to production databases for support, debugging, and data analysis — without handing out raw credentials.
 
-It speaks the **PostgreSQL**, **Oracle**, **MySQL/MariaDB**, and **MongoDB** wire protocols, so any standard database client (psql, sqlplus, mysql, mongosh, DBeaver, IntelliJ, pgAdmin, your application's ORM or driver, …) can connect through DBBat without modification.
+It speaks the **PostgreSQL**, **Oracle**, **MySQL/MariaDB**, **MongoDB**, and **Microsoft SQL Server** wire protocols, so any standard database client (psql, sqlplus, mysql, mongosh, sqlcmd, DBeaver, IntelliJ, pgAdmin, your application's ORM or driver, an AI agent's database tooling, …) can connect through DBBat without modification.
 
 ## Why DBBat?
 
@@ -18,6 +18,7 @@ Giving access to production databases can be dangerous. DBBat provides:
 - **Access control**: time-windowed grants with fine-grained controls for read-only, blocking COPY, blocking DDL
 - **Audit trails**: append-only record of who did what — both inside the proxy and against the configuration API
 - **Safety**: defense in depth against accidental writes, file-system-touching SQL, and protocol-level data exfiltration
+- **Agent-ready**: AI agents connect with the same unmodified drivers and get the same guardrails — time-boxed grants, read-only enforcement, quotas, and approval holds on risky statements
 
 DBBat addresses all these needs without requiring changes to your application code.
 

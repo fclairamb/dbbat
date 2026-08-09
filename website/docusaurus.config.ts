@@ -6,7 +6,7 @@ import llmsTxtPlugin from "./plugins/llms-txt";
 const config: Config = {
   title: "DBBat",
   tagline:
-    "Give (temporary) access to your PostgreSQL, Oracle, MySQL/MariaDB, MongoDB & SQL Server databases. Every query logged. Every result captured.",
+    "Give your developers and AI agents (temporary) access to your PostgreSQL, Oracle, MySQL/MariaDB, MongoDB & SQL Server databases. Every query logged. Every result captured.",
   favicon: "img/favicon.ico",
 
   url: "https://dbbat.com",
