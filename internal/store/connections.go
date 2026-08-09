@@ -65,15 +65,39 @@ func (s *Store) CreateConnection(
 	return conn, nil
 }
 
-// CloseConnection sets the disconnected_at timestamp
+// CloseConnection sets the disconnected_at timestamp and, when chaining is on,
+// stamps the final head of this connection's query chain onto the row.
+//
+// The stamped head is what makes a *trailing* deletion detectable: without it,
+// removing the last statements of a session would leave a shorter chain that
+// still verified end to end. With it, the surviving rows no longer compute the
+// head the connection claims.
 func (s *Store) CloseConnection(ctx context.Context, uid uuid.UUID) error {
 	now := time.Now()
-	result, err := s.db.NewUpdate().
+
+	q := s.db.NewUpdate().
 		Model((*Connection)(nil)).
 		Where("uid = ?", uid).
 		Where("disconnected_at IS NULL").
-		Set("disconnected_at = ?", now).
-		Exec(ctx)
+		Set("disconnected_at = ?", now)
+
+	if s.ChainEnabled() {
+		seq, mac, err := s.queryChainHead(ctx, uid)
+		if err != nil {
+			return err
+		}
+
+		if mac != nil {
+			q = q.Set("query_chain_mac = ?", mac).Set("query_chain_len = ?", seq)
+		}
+	}
+
+	result, err := q.Exec(ctx)
+
+	// Whatever happened to the row, this process is done writing to that
+	// chain: keeping the cached head would leak an entry per session.
+	s.queryChains.forget(uid)
+
 	if err != nil {
 		return fmt.Errorf("failed to close connection: %w", err)
 	}
@@ -88,6 +112,22 @@ func (s *Store) CloseConnection(ctx context.Context, uid uuid.UUID) error {
 	}
 
 	return nil
+}
+
+// queryChainHead returns the head this process holds for a connection's query
+// chain, falling back to the database when this process never wrote to it (a
+// replica closing a session it did not open, or a store restarted mid-session).
+func (s *Store) queryChainHead(ctx context.Context, connectionUID uuid.UUID) (int64, []byte, error) {
+	state := s.queryChains.get(connectionUID)
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	if state.loaded {
+		return state.seq, state.mac, nil
+	}
+
+	return readQueryChainHead(ctx, s.db, connectionUID)
 }
 
 // OrphanedConnections counts what one startup reconcile closed, split by whose

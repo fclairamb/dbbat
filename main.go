@@ -171,6 +171,7 @@ func CmdRun() {
 				},
 			},
 			dumpCommand(),
+			auditCommand(flags),
 		},
 		Action: func(ctx context.Context, _ *cli.Command) error {
 			// Default action is to serve
@@ -252,6 +253,9 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	storeOpts := store.Options{
 		DropTablesFirst: cfg.RunMode == config.RunModeTest || cfg.RunMode == config.RunModeDemo,
 		InstanceID:      cfg.InstanceID,
+		// Seals the audit and query chains. The store keeps only an HKDF
+		// subkey of this; see docs/audit-chain.md.
+		EncryptionKey: cfg.EncryptionKey,
 	}
 	if cfg.RunMode == config.RunModeTest {
 		logger.InfoContext(ctx, "Test mode enabled, will drop all tables before migration")
@@ -1494,6 +1498,137 @@ func dumpCommand() *cli.Command {
 			},
 		},
 	}
+}
+
+// auditCommand builds the `dbbat audit` command tree.
+func auditCommand(flags *cliFlags) *cli.Command {
+	return &cli.Command{
+		Name:  "audit",
+		Usage: "Tamper-evidence commands for the audit trail",
+		Commands: []*cli.Command{
+			{
+				Name: "verify",
+				Usage: "Walk the HMAC chain and report the first break " +
+					"(exits non-zero when the chain does not verify)",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{
+						Name:  "queries",
+						Usage: "verify the per-connection query chains instead of the audit log",
+					},
+					&cli.StringFlag{
+						Name:  "connection",
+						Usage: "with --queries, verify only this connection uid",
+					},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					return runAuditVerify(ctx, flags, cmd)
+				},
+			},
+		},
+	}
+}
+
+var (
+	errAuditChainBroken     = errors.New("audit chain verification failed")
+	errAuditConnectionScope = errors.New("--connection only applies together with --queries")
+)
+
+func runAuditVerify(ctx context.Context, flags *cliFlags, cmd *cli.Command) error {
+	cfg, err := loadConfigWithCLI(flags)
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	logLevel := config.ParseLogLevel(cfg.LogLevel)
+
+	logger, logCleanup := setupLogger(cfg.RunMode, logLevel)
+	if logCleanup != nil {
+		defer logCleanup()
+	}
+
+	slog.SetDefault(logger)
+
+	connectionArg := cmd.String("connection")
+	if connectionArg != "" && !cmd.Bool("queries") {
+		return errAuditConnectionScope
+	}
+
+	var connectionUID *uuid.UUID
+
+	if connectionArg != "" {
+		parsed, err := uuid.Parse(connectionArg)
+		if err != nil {
+			return fmt.Errorf("invalid --connection uid %q: %w", connectionArg, err)
+		}
+
+		connectionUID = &parsed
+	}
+
+	dataStore, err := store.New(ctx, cfg.DSN, store.Options{EncryptionKey: cfg.EncryptionKey})
+	if err != nil {
+		return fmt.Errorf("failed to initialize store: %w", err)
+	}
+
+	defer dataStore.Close()
+
+	if cmd.Bool("queries") {
+		return verifyQueryChains(ctx, dataStore, logger, connectionUID)
+	}
+
+	return verifyAuditChain(ctx, dataStore, logger)
+}
+
+func verifyAuditChain(ctx context.Context, dataStore *store.Store, logger *slog.Logger) error {
+	result, err := dataStore.VerifyAuditChain(ctx)
+	if err != nil {
+		return fmt.Errorf("audit chain verification failed: %w", err)
+	}
+
+	if !result.OK() {
+		logger.ErrorContext(ctx, "AUDIT CHAIN BROKEN",
+			slog.String("break", result.Break.String()),
+			slog.Int64("verified_before_break", result.Verified))
+
+		return errAuditChainBroken
+	}
+
+	logger.InfoContext(ctx, "Audit chain verified",
+		slog.Int64("entries", result.Verified),
+		slog.Int64("head_seq", result.HeadSeq),
+		slog.String("head_mac", result.HeadMACHex()),
+		// Rows written before the chain anchor. Nothing sealed them, so
+		// nothing can vouch for them; the count is reported rather than
+		// quietly folded into "verified".
+		slog.Int64("unverifiable_pre_anchor_entries", result.Unchained))
+
+	return nil
+}
+
+func verifyQueryChains(
+	ctx context.Context, dataStore *store.Store, logger *slog.Logger, connectionUID *uuid.UUID,
+) error {
+	result, err := dataStore.VerifyQueryChains(ctx, connectionUID)
+	if err != nil {
+		return fmt.Errorf("query chain verification failed: %w", err)
+	}
+
+	if !result.OK() {
+		logger.ErrorContext(ctx, "QUERY CHAIN BROKEN",
+			slog.String("break", result.Break.String()),
+			slog.Int64("verified_before_break", result.Verified))
+
+		return errAuditChainBroken
+	}
+
+	logger.InfoContext(ctx, "Query chains verified",
+		slog.Int64("connections", result.Connections),
+		slog.Int64("statements", result.Verified),
+		// A chain missing its oldest statements is what
+		// DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived session,
+		// so it is counted rather than treated as tampering.
+		slog.Int64("chains_with_retention_truncated_prefix", result.Truncated))
+
+	return nil
 }
 
 var errDumpAnonymiseUsage = errors.New("usage: dbbat dump anonymise [--keep-addresses] <input-file> [output-file]")

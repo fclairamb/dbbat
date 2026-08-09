@@ -70,14 +70,142 @@ func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 		result.ExecutedAt = time.Now()
 	}
 
-	_, err := s.db.NewInsert().
-		Model(result).
-		Exec(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create query: %w", err)
+	// Truncated to what timestamptz can store: this exact value is what the
+	// chain MAC covers and what verification reads back.
+	result.ExecutedAt = normalizeStoredTime(result.ExecutedAt)
+
+	if !s.ChainEnabled() {
+		if _, err := s.db.NewInsert().Model(result).Exec(ctx); err != nil {
+			return nil, fmt.Errorf("failed to create query: %w", err)
+		}
+
+		return result, nil
+	}
+
+	if err := s.appendQueryChain(ctx, result); err != nil {
+		return nil, err
 	}
 
 	return result, nil
+}
+
+// appendQueryChain inserts one sealed query row, extending the chain of the
+// connection it belongs to.
+//
+// The chain is per connection rather than global on purpose: retention
+// (DBB_QUERY_STORAGE_RETENTION) deletes whole connections, which would sever a
+// single global chain on its first sweep. Per connection, a reaped connection
+// takes its own chain with it and every surviving connection still verifies.
+//
+// Ordering comes from an explicit chain_seq, not from uid: UUIDv7 orders by
+// millisecond, and two statements in the same millisecond have no defined
+// order, which a chain cannot tolerate.
+func (s *Store) appendQueryChain(ctx context.Context, query *Query) error {
+	state := s.queryChains.get(query.ConnectionID)
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(?, ?)",
+			queryChainAdvisoryLockClass, queryChainLockID(query.ConnectionID)); err != nil {
+			return fmt.Errorf("failed to take the query chain lock: %w", err)
+		}
+
+		if !state.loaded {
+			seq, mac, err := readQueryChainHead(ctx, tx, query.ConnectionID)
+			if err != nil {
+				return err
+			}
+
+			state.seq = seq
+			state.mac = mac
+			state.loaded = true
+		}
+
+		seq := state.seq + 1
+
+		prevMAC := state.mac
+		if prevMAC == nil {
+			prevMAC = s.queryGenesisMAC(query.ConnectionID)
+		}
+
+		payload, err := queryChainPayload(
+			seq, query.UID, query.ConnectionID, query.SQLText,
+			queryParametersJSON(query.Parameters), query.ExecutedAt, prevMAC,
+		)
+		if err != nil {
+			return err
+		}
+
+		query.ChainSeq = &seq
+		query.PrevMAC = prevMAC
+		query.MAC = s.chainMAC(payload)
+
+		if _, err := tx.NewInsert().Model(query).Exec(ctx); err != nil {
+			return fmt.Errorf("failed to create query: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		state.invalidate()
+
+		return err
+	}
+
+	state.seq = *query.ChainSeq
+	state.mac = query.MAC
+
+	return nil
+}
+
+// queryParametersJSON renders bound parameters the way they are stored, so the
+// MAC covers the same document verification will read back out of the jsonb
+// column. A nil parameter set stays nil, which the canonical payload records as
+// absent rather than as an empty document.
+func queryParametersJSON(params *QueryParameters) json.RawMessage {
+	if params == nil {
+		return nil
+	}
+
+	encoded, err := json.Marshal(params)
+	if err != nil {
+		// QueryParameters is a plain value type; marshaling it cannot fail.
+		// Falling back to nil here would silently make the row's MAC cover
+		// less than the row, so record something that cannot be confused with
+		// a real parameter set instead.
+		return json.RawMessage(`{"__unmarshalable__":true}`)
+	}
+
+	return encoded
+}
+
+// readQueryChainHead returns the highest chain_seq on a connection and its MAC,
+// or (0, nil) when nothing on it has been chained yet.
+func readQueryChainHead(ctx context.Context, db bun.IDB, connectionUID uuid.UUID) (int64, []byte, error) {
+	var row struct {
+		ChainSeq int64  `bun:"chain_seq"`
+		MAC      []byte `bun:"mac"`
+	}
+
+	err := db.NewSelect().
+		Model((*Query)(nil)).
+		Column("chain_seq", "mac").
+		Where("connection_id = ?", connectionUID).
+		Where("chain_seq IS NOT NULL").
+		Order("chain_seq DESC").
+		Limit(1).
+		Scan(ctx, &row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil, nil
+		}
+
+		return 0, nil, fmt.Errorf("failed to read the query chain head: %w", err)
+	}
+
+	return row.ChainSeq, row.MAC, nil
 }
 
 // StoreQueryRows stores captured result rows in a single bulk INSERT.
