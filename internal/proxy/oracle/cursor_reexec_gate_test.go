@@ -182,6 +182,25 @@ func TestCursorReexec_DeniedIsRefused(t *testing.T) {
 	assert.Nil(t, s.tracker.pendingQuery, "a denied re-execution must not be tracked as in flight")
 }
 
+// reexecOps are the two frames that name a cursor and carry nothing else: the
+// legacy SQL-less OALL8 and an OFETCH arriving with no query in flight. They
+// must answer an untracked cursor identically — otherwise the wire op a client
+// picks is a cheaper way past the same grant.
+//
+// The piggyback re-execution is deliberately not one of them: it forwards an
+// untracked cursor under any grant, for the reasons in handlePiggybackReexec.
+var reexecOps = []struct {
+	name string
+	run  func(s *session, cursorID uint16) error
+}{
+	{name: "a SQL-less OALL8", run: func(s *session, cursorID uint16) error {
+		return s.handleOALL8(buildOALL8Reexec(cursorID))
+	}},
+	{name: "an OFETCH", run: func(s *session, cursorID uint16) error {
+		return s.handleOFETCH(buildOFETCH(cursorID, 100))
+	}},
+}
+
 // TestCursorReexec_UnknownCursorFailsClosedOnlyUnderAStatementControl pins the
 // deliberate asymmetry: an execution dbbat cannot identify is refused where
 // there is a statement-shaped control to bypass, and forwarded where there is
@@ -221,24 +240,26 @@ func TestCursorReexec_UnknownCursorFailsClosedOnlyUnderAStatementControl(t *test
 	}
 
 	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+		for _, op := range reexecOps {
+			t.Run(tc.name+"/"+op.name, func(t *testing.T) {
+				t.Parallel()
 
-			s := newTestSession(tc.grant)
+				s := newTestSession(tc.grant)
 
-			// Cursor 42 was never parsed on this session.
-			err := s.handleOALL8(buildOALL8Reexec(42))
+				// Cursor 42 was never parsed on this session.
+				err := op.run(s, 42)
 
-			if tc.refused {
-				require.ErrorIs(t, err, ErrUnknownCursor)
-				assert.Nil(t, s.tracker.pendingQuery)
+				if tc.refused {
+					require.ErrorIs(t, err, ErrUnknownCursor)
+					assert.Nil(t, s.tracker.pendingQuery)
 
-				return
-			}
+					return
+				}
 
-			require.NoError(t, err, "a permissive grant keeps forwarding an unidentifiable re-execution")
-			assert.Nil(t, s.tracker.pendingQuery, "a forwarded but unidentified execution is not tracked")
-		})
+				require.NoError(t, err, "a permissive grant keeps forwarding an unidentifiable re-execution")
+				assert.Nil(t, s.tracker.pendingQuery, "a forwarded but unidentified execution is not tracked")
+			})
+		}
 	}
 }
 
@@ -317,6 +338,105 @@ func TestOFETCH_ContinuationIsNotReGated(t *testing.T) {
 	require.NoError(t, s.handleOFETCH(buildOFETCH(5, 100)))
 	assert.Empty(t, fake.held(), "a fetch continuing a query in flight must not be held")
 	assert.Equal(t, cursor, s.tracker.pendingQuery.cursor, "the in-flight query is untouched")
+
+	// Every refusal the re-execution branch can raise must stay off this path,
+	// not just the hold: a result set already streaming must never be cut short.
+	// The quota is the one added last and the easiest to leak onto it.
+	maxQueries := int64(1)
+	s.grant.QueryCount = 99
+	s.grant.Definition.MaxQueryCounts = &maxQueries
+	s.grant.Definition.Controls = []string{store.ControlReadOnly}
+
+	require.NoError(t, s.handleOFETCH(buildOFETCH(5, 100)),
+		"a fetch continuing a query in flight is never re-gated, quota included")
+
+	// Not even a fetch naming a cursor that is no longer tracked: what decides
+	// is that a query is in flight, and it went through the gate when it started.
+	delete(s.tracker.cursors, 5)
+	require.NoError(t, s.handleOFETCH(buildOFETCH(5, 100)))
+	assert.Equal(t, cursor, s.tracker.pendingQuery.cursor, "the in-flight query is still untouched")
+}
+
+// TestOFETCH_ReexecutionCountsAgainstTheQueryQuota: a fetch that starts a fresh
+// query persists its own /queries row, so it must also be counted against
+// max_query_counts. It was not: handleOFETCH bypasses gateStatement (which
+// would refuse continuation fetches mid-result-set), and MaxQueryCounts is not
+// one of the limits the response leg's LimitGuard re-checks — so a client that
+// parsed once and looped re-executions sailed past its cap.
+func TestOFETCH_ReexecutionCountsAgainstTheQueryQuota(t *testing.T) {
+	t.Parallel()
+
+	maxQueries := int64(3)
+	s := newTestSession(&store.Grant{
+		QueryCount: 3,
+		Definition: &store.GrantDefinition{MaxQueryCounts: &maxQueries},
+	})
+	s.tracker.cursors[5] = &trackedCursor{cursorID: 5, sql: "SELECT 1 FROM DUAL", parsedAt: time.Now()}
+
+	require.ErrorIs(t, s.handleOFETCH(buildOFETCH(5, 100)), ErrQueryLimitExceed)
+	assert.Nil(t, s.tracker.pendingQuery, "a re-execution over quota must not be tracked as in flight")
+
+	// One under the cap and the very same fetch is allowed through.
+	s.grant.QueryCount = 2
+	require.NoError(t, s.handleOFETCH(buildOFETCH(5, 100)))
+	require.NotNil(t, s.tracker.pendingQuery)
+	assert.Equal(t, "SELECT 1 FROM DUAL", s.tracker.pendingQuery.cursor.sql)
+}
+
+// TestCursorReexec_SQLlessOALL8CountsAgainstTheQueryQuota pins the other half of
+// the same guarantee, which was already true by construction: the SQL-less
+// OALL8 reaches its handler through gateStatement, so checkQuotas has always
+// run on it. Cheap to assert, and it is what keeps the two re-execution frames
+// answering alike — the point of routing the OFETCH through the same rules.
+func TestCursorReexec_SQLlessOALL8CountsAgainstTheQueryQuota(t *testing.T) {
+	t.Parallel()
+
+	maxQueries := int64(3)
+	s := newTestSession(&store.Grant{
+		QueryCount: 3,
+		Definition: &store.GrantDefinition{MaxQueryCounts: &maxQueries},
+	})
+	s.clientConn = drainedPipe(t)
+	s.tracker.cursors[6] = &trackedCursor{cursorID: 6, sql: "SELECT 1 FROM DUAL", parsedAt: time.Now()}
+
+	overQuota := &TNSPacket{
+		Type:    TNSPacketTypeData,
+		Payload: append([]byte{0x00, 0x00}, buildOALL8Reexec(6)...),
+	}
+	assert.True(t, s.interceptClientMessage(overQuota),
+		"a cursor re-execution over max_query_counts must be blocked, not forwarded upstream")
+	assert.Nil(t, s.tracker.pendingQuery)
+
+	s.grant.QueryCount = 2
+	assert.False(t, s.interceptClientMessage(overQuota), "under the cap the same frame travels")
+	require.NotNil(t, s.tracker.pendingQuery)
+}
+
+// TestInterceptClientMessageBlocksAnOverQuotaOFETCHReexecution is the property
+// the handler signature only stands for: the refusal has to reach the
+// dispatcher, which is what decides whether the packet travels upstream. The
+// OFETCH branch answers the client itself rather than through gateStatement, so
+// it is worth pinning separately.
+func TestInterceptClientMessageBlocksAnOverQuotaOFETCHReexecution(t *testing.T) {
+	t.Parallel()
+
+	maxQueries := int64(1)
+	s := newTestSession(&store.Grant{
+		QueryCount: 1,
+		Definition: &store.GrantDefinition{MaxQueryCounts: &maxQueries},
+	})
+	s.clientConn = drainedPipe(t)
+	s.tracker.cursors[5] = &trackedCursor{cursorID: 5, sql: "SELECT 1 FROM DUAL", parsedAt: time.Now()}
+
+	fetch := &TNSPacket{
+		Type:    TNSPacketTypeData,
+		Payload: append([]byte{0x00, 0x00}, buildOFETCH(5, 100)...),
+	}
+	assert.True(t, s.interceptClientMessage(fetch),
+		"a fetch re-executing a cursor over max_query_counts must be blocked, not forwarded upstream")
+
+	s.grant.QueryCount = 0
+	assert.False(t, s.interceptClientMessage(fetch), "under the cap the same fetch travels")
 }
 
 // awaitHeld waits until want statements have been parked and returns the last.
