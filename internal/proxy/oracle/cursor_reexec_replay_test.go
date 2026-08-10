@@ -1,6 +1,7 @@
 package oracle
 
 import (
+	"log/slog"
 	"testing"
 	"time"
 
@@ -187,6 +188,12 @@ func replaySession(t *testing.T, s *session, name string) int {
 // fixture: the piggyback re-execution frame must be routed to the gate at all,
 // and the cursor id — which the modern execute paths never send on the request
 // — must have been learned from the server's response.
+//
+// The claim is read off what the gate *logged*, not off what the tracker still
+// holds at the end of the recording, because these captures end with the client
+// closing the very cursor it re-executed — and dbbat now honours that close
+// (decodeCloseCursors). A tracker that still held the entry afterwards would be
+// the bug, not the proof.
 func TestDumpReplay_CursorReexecIsGatedOnRealFrames(t *testing.T) {
 	t.Parallel()
 
@@ -205,16 +212,23 @@ func TestDumpReplay_CursorReexecIsGatedOnRealFrames(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, cursorIDs := recordedReexecs(t, tc.dump)
+			payloads, cursorIDs := recordedReexecs(t, tc.dump)
 			require.NotEmpty(t, cursorIDs)
 
+			logs := newCountingHandler()
+
 			s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
+			s.logger = slog.New(logs)
+
 			require.Zero(t, replaySession(t, s, tc.dump), "a full-write grant blocks nothing")
 
-			cursor, ok := s.tracker.cursors[cursorIDs[0]]
-			require.Truef(t, ok, "cursor %d was never learned from the server's response", cursorIDs[0])
-			assert.Equal(t, tc.wantSQL, cursor.sql,
-				"the re-executed cursor must resolve to the statement it was parsed with")
+			require.Equalf(t, len(payloads), logs.count(logMsgReexecGated),
+				"cursor %d was never learned from the server's response", cursorIDs[0])
+
+			for _, got := range logs.sqlsFor(logMsgReexecGated) {
+				assert.Equal(t, tc.wantSQL, got,
+					"the re-executed cursor must resolve to the statement it was parsed with")
+			}
 		})
 	}
 }

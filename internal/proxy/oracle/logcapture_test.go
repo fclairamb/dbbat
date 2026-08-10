@@ -27,13 +27,18 @@ type countingHandler struct {
 	mu     sync.Mutex
 	counts map[string]int
 	sqls   map[string][]string
-	trace  []string
+	// ints keys on message+"\x00"+attr, so the cursor-close record's `tracked`
+	// size can be read back: that is what the measurement asserts on to show
+	// the tracker stays bounded without a cap.
+	ints  map[string][]int64
+	trace []string
 }
 
 func newCountingHandler() *countingHandler {
 	return &countingHandler{
 		counts: make(map[string]int),
 		sqls:   make(map[string][]string),
+		ints:   make(map[string][]int64),
 	}
 }
 
@@ -50,6 +55,11 @@ func (h *countingHandler) Handle(_ context.Context, rec slog.Record) error {
 	rec.Attrs(func(a slog.Attr) bool {
 		if a.Key == "sql" {
 			h.sqls[rec.Message] = append(h.sqls[rec.Message], a.Value.String())
+		}
+
+		if a.Value.Kind() == slog.KindInt64 {
+			key := rec.Message + "\x00" + a.Key
+			h.ints[key] = append(h.ints[key], a.Value.Int64())
 		}
 
 		if a.Key == "sql" || a.Key == "cursor_id" {
@@ -86,6 +96,38 @@ func (h *countingHandler) sqlsFor(msg string) []string {
 	copy(out, h.sqls[msg])
 
 	return out
+}
+
+// intsFor returns every value the named integer attribute carried on the named
+// message, in the order they were logged.
+func (h *countingHandler) intsFor(msg, attr string) []int64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	values := h.ints[msg+"\x00"+attr]
+	out := make([]int64, len(values))
+	copy(out, values)
+
+	return out
+}
+
+// maxIntFor returns the largest value the named integer attribute reached, and
+// whether it was ever seen at all — an assertion on a bound that was never
+// recorded would pass on nothing.
+func (h *countingHandler) maxIntFor(msg, attr string) (int64, bool) {
+	values := h.intsFor(msg, attr)
+	if len(values) == 0 {
+		return 0, false
+	}
+
+	most := values[0]
+	for _, v := range values[1:] {
+		if v > most {
+			most = v
+		}
+	}
+
+	return most, true
 }
 
 func (h *countingHandler) traceLines() []string {
