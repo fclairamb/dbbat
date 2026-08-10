@@ -39,6 +39,7 @@ const (
 	queryChainDomain = "dbbat-query-chain-v1"
 	rowChainDomain   = "dbbat-row-chain-v1"
 	rowStampDomain   = "dbbat-row-chain-stamp-v1"
+	queryStampDomain = "dbbat-query-chain-stamp-v1"
 
 	auditGenesisLabel = "dbbat-audit-chain-genesis-v1"
 	queryGenesisLabel = "dbbat-query-chain-genesis-v1:"
@@ -314,13 +315,65 @@ func rowChainPayload(
 // with no key and no break reported. Sealing the stamp instead means correcting
 // it after a deletion requires the chain key, exactly like forging a row.
 //
-// See specs/todos/2026-08-10-06-seal-the-connection-query-chain-stamp.md: the
-// per-connection stamp has the same weakness and needs a compatibility story
-// this cannot give it.
+// The per-connection stamp is sealed the same way, one version later — see
+// queryChainStampMAC.
 func (s *Store) rowChainStampMAC(queryUID uuid.UUID, count int64, headMAC []byte) []byte {
 	p := newCanonicalPayload(rowStampDomain)
 	p.writeString("query_id", queryUID.String())
 	p.writeInt("row_chain_len", count)
+	p.writeBytes("head_mac", headMAC)
+
+	return s.chainMAC(p.bytes())
+}
+
+// Stamp formats for connections.query_chain_mac.
+//
+// 0.23.x wrote the head MAC verbatim, which defends against nothing: the head
+// is readable out of `queries`, so an attacker who deleted the tail of a
+// session could copy the new last statement's MAC over the stamp and get a
+// clean `dbbat audit verify --queries`, with no key. Version 1 is a keyed
+// stamp, so correcting it after a deletion needs what an attacker does not
+// have.
+//
+// The two coexist because the chain key lives only in this process: no
+// migration can re-seal rows that are already stored, and failing every
+// pre-upgrade session would be exactly the cry-wolf the truncated-prefix
+// handling exists to avoid. Version 0 rows are therefore accepted and
+// *counted* (QueryChainsResult.LegacyStamps) rather than trusted.
+const (
+	// queryChainStampLegacy is the pre-0.24 verbatim head copy. Unkeyed, and
+	// forgeable by anyone who can write to the store.
+	queryChainStampLegacy int16 = 0
+
+	// queryChainStampKeyed is the keyed stamp, and the version every writer
+	// produces from now on.
+	queryChainStampKeyed int16 = 1
+)
+
+// queryChainStampMAC seals a finished session's head: which stamp format it is
+// in, how many statements the chain holds, and the MAC it ends on, bound to the
+// connection.
+//
+// The version is *inside* the MAC, and that is the reason the column exists at
+// all rather than the verifier simply accepting either format. A stamp that did
+// not cover its own version could be relabelled as legacy — one UPDATE, no key
+// — and would then be checked against the unkeyed rule it was written to
+// replace. Covering it means a keyed stamp only ever verifies as the version it
+// was sealed at.
+//
+// count is the head's chain_seq, not the number of surviving statements.
+// chain_seq is dense from 1, so it is the number of statements the session
+// logged — and unlike a survivor count it does not move when
+// DBB_QUERY_STORAGE_RETENTION reaps the oldest statements of a long-lived
+// session. Sealing a survivor count would report a break on every
+// retention-truncated session, which is precisely what QueryChainResult
+// .TruncatedPrefix exists to avoid. (The row-chain stamp can seal a true count
+// because retention never deletes individual captured rows.)
+func (s *Store) queryChainStampMAC(connectionUID uuid.UUID, version int16, count int64, headMAC []byte) []byte {
+	p := newCanonicalPayload(queryStampDomain)
+	p.writeString("connection_id", connectionUID.String())
+	p.writeInt("stamp_version", int64(version))
+	p.writeInt("query_chain_len", count)
 	p.writeBytes("head_mac", headMAC)
 
 	return s.chainMAC(p.bytes())

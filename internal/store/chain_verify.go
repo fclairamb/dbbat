@@ -97,9 +97,14 @@ type QueryChainResult struct {
 	// expected shape for a connection whose oldest statements were reaped by
 	// DBB_QUERY_STORAGE_RETENTION.
 	TruncatedPrefix bool
-	HeadSeq         int64
-	HeadMAC         []byte
-	Break           *ChainBreak
+	// LegacyStamp is true when the session's head is sealed by the pre-0.24
+	// stamp — a verbatim copy of the head MAC, which anyone who can write to
+	// the store can also write. The chain still verified; what did not happen is
+	// a *keyed* confirmation that nothing was removed from its end.
+	LegacyStamp bool
+	HeadSeq     int64
+	HeadMAC     []byte
+	Break       *ChainBreak
 }
 
 // QueryChainsResult aggregates a sweep over many connections.
@@ -110,6 +115,12 @@ type QueryChainsResult struct {
 	Verified int64
 	// Truncated is how many of those chains were missing a prefix.
 	Truncated int64
+	// LegacyStamps is how many of those connections still carry the pre-0.24
+	// forgeable head stamp. It is not a failure — it is the part of the store
+	// whose *tail* nothing keyed vouches for. Sessions closed by this build are
+	// sealed, so the number drains as old sessions age out of retention; a
+	// number that stops falling, or rises again, is worth looking at.
+	LegacyStamps int64
 	// Break is the first failure found, or nil.
 	Break *ChainBreak
 }
@@ -282,6 +293,10 @@ func (s *Store) VerifyQueryChains(ctx context.Context, connectionUID *uuid.UUID)
 			result.Truncated++
 		}
 
+		if one.LegacyStamp {
+			result.LegacyStamps++
+		}
+
 		if one.Break != nil {
 			result.Break = one.Break
 
@@ -431,12 +446,21 @@ func (s *Store) verifyQueryRow(row *Query, connectionUID uuid.UUID, expectedSeq 
 // head its surviving statements compute, and records a break on the result when
 // they disagree. This is the only check that catches a deletion at the *end* of
 // a chain.
+//
+// The stamp comes in two formats and the column says which (see
+// queryChainStampMAC). The keyed one is checked first, and it is checked *with
+// the version the row claims* — so a sealed row cannot be relabelled as legacy
+// to get the weaker rule applied to it. Only when that fails, and only for a
+// row that says it is legacy, is the pre-0.24 raw-head comparison tried; a row
+// that passes that way is recorded as a legacy stamp rather than as a
+// verification, because an unkeyed stamp proves nothing to anyone who can write
+// to this database.
 func (s *Store) checkStampedHead(ctx context.Context, result *QueryChainResult) error {
 	var conn Connection
 
 	err := s.db.NewSelect().
 		Model(&conn).
-		Column("uid", "query_chain_mac", "query_chain_len").
+		Column("uid", "query_chain_mac", "query_chain_len", "query_chain_stamp_version").
 		Where("uid = ?", result.ConnectionUID).
 		Scan(ctx)
 	if err != nil {
@@ -450,30 +474,70 @@ func (s *Store) checkStampedHead(ctx context.Context, result *QueryChainResult) 
 		return fmt.Errorf("failed to read the connection chain head: %w", err)
 	}
 
-	// Never stamped: the session is still open, or it died without a clean
-	// close. Nothing to compare against.
+	// Never stamped: the session is still open, or it logged nothing. Nothing
+	// to compare against.
 	if conn.QueryChainMAC == nil {
 		return nil
 	}
 
-	if hmac.Equal(conn.QueryChainMAC, result.HeadMAC) {
+	connUID := result.ConnectionUID
+	version := conn.QueryChainStampVersion
+
+	if version > queryChainStampKeyed {
+		// Written by a build that knows a format this one does not. Saying so
+		// is honest; calling it tampering would not be.
+		result.Break = stampBreak(result, conn, fmt.Sprintf(
+			"the connection's chain head is stamped in format version %d, "+
+				"which this build cannot verify: it was written by a newer dbbat", version))
+
 		return nil
 	}
 
+	if version != queryChainStampLegacy && conn.QueryChainLen != result.HeadSeq {
+		// Checked before the MAC purely for the message: the length is sealed
+		// by the stamp either way, since the expected stamp below is computed
+		// from what the surviving statements say, never from the column.
+		result.Break = stampBreak(result, conn, fmt.Sprintf(
+			"the connection recorded %d statements but the surviving statements end at %d: "+
+				"statements were removed from the end of the session",
+			conn.QueryChainLen, result.HeadSeq))
+
+		return nil
+	}
+
+	if hmac.Equal(conn.QueryChainMAC, s.queryChainStampMAC(connUID, version, result.HeadSeq, result.HeadMAC)) {
+		return nil
+	}
+
+	// The pre-0.24 stamp: a verbatim copy of the head MAC. Accepted so that a
+	// store upgraded from 0.23.x does not report a break on every session it
+	// closed before the upgrade — but counted, never called verified, because
+	// anyone who can write to `queries` can also write this.
+	if version == queryChainStampLegacy && hmac.Equal(conn.QueryChainMAC, result.HeadMAC) {
+		result.LegacyStamp = true
+
+		return nil
+	}
+
+	result.Break = stampBreak(result, conn, fmt.Sprintf(
+		"the connection's stamped head %s does not seal the surviving statements ending at %d/%s: "+
+			"statements were removed from the end of the session, or the stamp was rewritten",
+		hex.EncodeToString(conn.QueryChainMAC), result.HeadSeq, hex.EncodeToString(result.HeadMAC)))
+
+	return nil
+}
+
+// stampBreak builds the break a stamped-head mismatch reports. The offending
+// "row" is the connection itself: the statements that are left all verified.
+func stampBreak(result *QueryChainResult, conn Connection, reason string) *ChainBreak {
 	connUID := result.ConnectionUID
 
-	result.Break = &ChainBreak{
+	return &ChainBreak{
 		UID:           connUID,
 		ChainSeq:      conn.QueryChainLen,
 		ConnectionUID: &connUID,
-		Reason: fmt.Sprintf(
-			"the connection recorded %d statements ending in %s, but the surviving statements end at %d/%s: "+
-				"statements were removed from the end of the session",
-			conn.QueryChainLen, hex.EncodeToString(conn.QueryChainMAC),
-			result.HeadSeq, hex.EncodeToString(result.HeadMAC)),
+		Reason:        reason,
 	}
-
-	return nil
 }
 
 // VerifyRowChains walks the result-row chain of every capture that has one, or

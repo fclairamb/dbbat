@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -72,6 +73,11 @@ func (s *Store) CreateConnection(
 // removing the last statements of a session would leave a shorter chain that
 // still verified end to end. With it, the surviving rows no longer compute the
 // head the connection claims.
+//
+// The stamp is keyed (queryChainStampMAC), not a copy of the head MAC. A
+// verbatim head is readable out of `queries`, so an attacker who deleted the
+// tail of a session could simply recopy it; sealing means correcting the stamp
+// after a deletion needs the chain key, exactly like forging a statement.
 func (s *Store) CloseConnection(ctx context.Context, uid uuid.UUID) error {
 	now := time.Now()
 
@@ -88,7 +94,10 @@ func (s *Store) CloseConnection(ctx context.Context, uid uuid.UUID) error {
 		}
 
 		if mac != nil {
-			q = q.Set("query_chain_mac = ?", mac).Set("query_chain_len = ?", seq)
+			q = q.
+				Set("query_chain_mac = ?", s.queryChainStampMAC(uid, queryChainStampKeyed, seq, mac)).
+				Set("query_chain_len = ?", seq).
+				Set("query_chain_stamp_version = ?", queryChainStampKeyed)
 		}
 	}
 
@@ -388,30 +397,86 @@ func noLiveOwner() string {
 }
 
 // closeOrphans runs one scoped reconcile and returns how many rows it closed.
+//
+// With chaining on it is three statements in one transaction rather than one:
+// the close returns the uids it took, their chain heads are read back, and the
+// sealed stamps are written. The transaction is not optional — see
+// stampOrphanHeads for what a second window would cost.
 func (s *Store) closeOrphans(ctx context.Context, scope func(*bun.UpdateQuery) *bun.UpdateQuery) (int64, error) {
-	result, err := scope(s.orphanCloseQuery()).Exec(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("failed to close orphaned connections: %w", err)
+	if !s.ChainEnabled() {
+		result, err := scope(s.orphanCloseQuery(s.db)).Exec(ctx)
+		if err != nil {
+			return 0, fmt.Errorf("failed to close orphaned connections: %w", err)
+		}
+
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("failed to get rows affected: %w", err)
+		}
+
+		return rowsAffected, nil
 	}
 
-	rowsAffected, err := result.RowsAffected()
+	var closed int64
+
+	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		var uids []uuid.UUID
+
+		if err := scope(s.orphanCloseQuery(tx)).Returning("uid").Scan(ctx, &uids); err != nil {
+			return fmt.Errorf("failed to close orphaned connections: %w", err)
+		}
+
+		closed = int64(len(uids))
+
+		if closed == 0 {
+			return nil
+		}
+
+		return s.stampOrphanHeads(ctx, tx, uids)
+	})
 	if err != nil {
-		return 0, fmt.Errorf("failed to get rows affected: %w", err)
+		return 0, err
 	}
 
-	return rowsAffected, nil
+	return closed, nil
 }
 
 // orphanCloseQuery builds the reconcile's UPDATE, minus the scope predicate its
 // caller adds. Split out from closeOrphans so a test can EXPLAIN the real
 // statement instead of a hand-written lookalike.
 //
-// It stamps the query chain head as well as disconnected_at, in the *same*
-// statement, so a crash-orphaned session ends up as tamper-evident at its tail
-// as one CloseConnection closed. The head is recoverable without the process
-// that died — it is the highest chain_seq on the connection and its MAC, which
-// is exactly queryChainHeadSelect — so the reconcile does not need the in-memory
-// chain state that died with it.
+// It only writes disconnected_at. Sealing the query chain head is the caller's
+// second and third statements, because a keyed stamp is HMAC(chain key, …) and
+// the chain key lives only in this process — there is no SQL expression that
+// can produce it. Until 0.24 the stamp *was* computed here, as a correlated
+// subquery copying `mac` verbatim out of `queries`; that copy is exactly the
+// forgery specs/todos/2026-08-10-06 closed.
+func (s *Store) orphanCloseQuery(db bun.IDB) *bun.UpdateQuery {
+	return db.NewUpdate().
+		Model((*Connection)(nil)).
+		Where("disconnected_at IS NULL").
+		// last_activity_at, not now(): retention should measure from when the
+		// session actually stopped talking, and a crashed session must not get
+		// its clock reset by every subsequent restart.
+		Set("disconnected_at = last_activity_at")
+}
+
+// orphanChainHead is one closed orphan's recoverable chain head. ChainSeq and
+// MAC are NULL for a session that logged nothing — the LEFT JOIN keeps the row
+// rather than dropping it, so the caller can tell "nothing to seal" from "not
+// asked about".
+type orphanChainHead struct {
+	ConnectionUID uuid.UUID `bun:"connection_uid"`
+	ChainSeq      *int64    `bun:"chain_seq"`
+	MAC           []byte    `bun:"mac"`
+}
+
+// stampOrphanHeads seals the query chain head of every connection the reconcile
+// just closed, in the same transaction as the close.
+//
+// The head is recoverable without the process that died — it is the highest
+// chain_seq on the connection and its MAC, which is exactly queryChainHeadSelect
+// — so the reconcile does not need the in-memory chain state that died with it.
 //
 // Two caveats, both deliberate:
 //
@@ -419,53 +484,83 @@ func (s *Store) closeOrphans(ctx context.Context, scope func(*bun.UpdateQuery) *
 //     session actually wrote. Someone who deleted trailing statements between
 //     the crash and the reconcile gets the truncated chain blessed. That is
 //     strictly better than no stamp at all — from the reconcile onward the tail
-//     is protected — and it is the reason the stamp goes in this statement
-//     rather than a later pass: the window is the reconcile's own UPDATE, not
-//     the gap between two of them.
-//   - The subquery copies `mac` verbatim, which is the format CloseConnection
-//     writes and therefore the one to stay consistent with today. It is also the
-//     weakness that
-//     specs/todos/2026-08-10-06-seal-the-connection-query-chain-stamp.md exists to
-//     fix: a verbatim head is readable out of `queries`, so an attacker can
-//     recopy it after a trailing deletion. **When that spec lands, this path has
-//     to be reworked** — a keyed stamp is HMAC(chain key, …) and the chain key
-//     lives only in this process, so it cannot be computed in SQL. The reconcile
-//     stops being one pure-SQL UPDATE: it has to select the orphans' heads, seal
-//     each in Go, and write them back (in the same transaction as the close, to
-//     keep the window above from widening).
+//     is protected — and it is why this shares the close's transaction: the
+//     window is the reconcile itself, not the gap between two statements. A
+//     close that committed without its stamp would leave rows that look
+//     cleanly terminated and are sealed by nothing, and no later pass could
+//     tell them apart from a session that logged nothing.
+//   - A session that logged nothing is left unstamped (NULL mac, length 0,
+//     version 0). There is no head to seal, and checkStampedHead skips a NULL
+//     stamp rather than reading it as a break.
 //
-// Cost: PostgreSQL evaluates a SET expression only for rows that pass the
-// WHERE, so this adds two `idx_queries_chain_seq` lookups (one per column) per
-// *closed* row — not per connection in the table, which is what would have made
-// the reconcile scale with the store. Folding the two into one LEFT JOIN LATERAL
-// was considered and dropped: it halves an already negligible cost and turns the
-// "logged nothing" case into a join that has to be kept from filtering the row
-// out. See TestQueryChainOrphanStampCostScalesWithOrphans, which asserts the
-// loop count against a real plan.
-func (s *Store) orphanCloseQuery() *bun.UpdateQuery {
-	q := s.db.NewUpdate().
-		Model((*Connection)(nil)).
-		Where("disconnected_at IS NULL").
-		// last_activity_at, not now(): retention should measure from when the
-		// session actually stopped talking, and a crashed session must not get
-		// its clock reset by every subsequent restart.
-		Set("disconnected_at = last_activity_at")
+// Cost: one index lookup per *closed* row — the LATERAL join runs its inner
+// scan once per uid handed to it, and those uids are what the close returned,
+// not what the table holds. See TestQueryChainOrphanStampCostScalesWithOrphans,
+// which asserts that against a real plan.
+func (s *Store) stampOrphanHeads(ctx context.Context, tx bun.Tx, uids []uuid.UUID) error {
+	var heads []orphanChainHead
 
-	if !s.ChainEnabled() {
-		return q
+	if err := s.orphanHeadSelect(tx, uids).Scan(ctx, &heads); err != nil {
+		return fmt.Errorf("failed to read the orphaned chain heads: %w", err)
 	}
 
-	// Correlated against the row being updated; `c` is bun's alias for
-	// connections, `q` its alias for queries.
-	headMAC := queryChainHeadSelect(s.db, "mac").Where("q.connection_id = c.uid")
-	headLen := queryChainHeadSelect(s.db, "chain_seq").Where("q.connection_id = c.uid")
+	values := make([]string, 0, len(heads))
+	args := make([]any, 0, len(heads)*4) //nolint:mnd // four bound columns per row, see below
 
-	// A connection that logged nothing keeps a NULL mac — there is no head to
-	// seal, and a NULL stamp is never itself a break (checkStampedHead skips
-	// it). query_chain_len is NOT NULL in the schema, so its absence is 0.
-	return q.
-		Set("query_chain_mac = (?)", headMAC).
-		Set("query_chain_len = COALESCE((?), 0)", headLen)
+	for _, head := range heads {
+		if head.ChainSeq == nil || head.MAC == nil {
+			continue
+		}
+
+		values = append(values, "(?::uuid, ?::bytea, ?::bigint, ?::smallint)")
+		args = append(args,
+			head.ConnectionUID,
+			s.queryChainStampMAC(head.ConnectionUID, queryChainStampKeyed, *head.ChainSeq, head.MAC),
+			*head.ChainSeq,
+			queryChainStampKeyed)
+	}
+
+	if len(values) == 0 {
+		return nil
+	}
+
+	stamp := `UPDATE connections AS c
+		   SET query_chain_mac = v.mac,
+		       query_chain_len = v.len,
+		       query_chain_stamp_version = v.version
+		  FROM (VALUES ` + strings.Join(values, ", ") + `) AS v (uid, mac, len, version)
+		 WHERE c.uid = v.uid`
+
+	if _, err := tx.ExecContext(ctx, stamp, args...); err != nil {
+		return fmt.Errorf("failed to stamp the orphaned chain heads: %w", err)
+	}
+
+	return nil
+}
+
+// orphanHeadSelect reads the chain head of each of the given connections in one
+// round trip: a VALUES list of the uids, LEFT JOIN LATERAL the same head lookup
+// CloseConnection uses. Keeping it built from queryChainHeadSelect is what stops
+// the reconcile's notion of "the head" from drifting from the clean-close path's;
+// the LATERAL shape is what keeps it one index lookup per uid instead of a scan
+// over every chained statement in the store.
+func (s *Store) orphanHeadSelect(db bun.IDB, uids []uuid.UUID) *bun.SelectQuery {
+	placeholders := make([]string, len(uids))
+	args := make([]any, len(uids))
+
+	for i, uid := range uids {
+		placeholders[i] = "(?::uuid)"
+		args[i] = uid
+	}
+
+	head := queryChainHeadSelect(db, "chain_seq", "mac").Where("q.connection_id = v.uid")
+
+	return db.NewSelect().
+		ColumnExpr("v.uid AS connection_uid").
+		ColumnExpr("h.chain_seq AS chain_seq").
+		ColumnExpr("h.mac AS mac").
+		TableExpr("(VALUES "+strings.Join(placeholders, ", ")+") AS v (uid)", args...).
+		Join("LEFT JOIN LATERAL (?) AS h ON TRUE", head)
 }
 
 // UpdateConnectionActivity updates the last_activity_at timestamp
@@ -550,7 +645,7 @@ func (s *Store) GetConnectionByUID(ctx context.Context, uid uuid.UUID) (*Connect
 		Model(conn).
 		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, "+
 			"disconnected_at, queries, bytes_transferred, instance_id, upstream_tls, dump_key, grant_uid, "+
-			"query_chain_mac, query_chain_len").
+			"query_chain_mac, query_chain_len, query_chain_stamp_version").
 		Where("uid = ?", uid).
 		Scan(ctx)
 	if err != nil {

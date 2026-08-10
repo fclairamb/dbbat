@@ -430,12 +430,25 @@ type Connection struct {
 	// connection would leave a chain that still verified; with them the stored
 	// head no longer matches what the surviving rows compute.
 	//
-	// nil/0 on a connection that is still open, that logged nothing, or whose
-	// session died without a clean close — a crash-orphaned row is closed by
-	// the startup reconcile, which has no chain state to stamp. Internal
-	// integrity state, not API surface.
+	// nil/0 on a connection that is still open or that logged nothing. A
+	// session whose process died is stamped by the startup reconcile instead,
+	// from what the database can recover. Internal integrity state, not API
+	// surface.
 	QueryChainMAC []byte `bun:"query_chain_mac" json:"-"`
-	QueryChainLen int64  `bun:"query_chain_len,notnull,default:0" json:"-"`
+
+	// QueryChainLen is the head's chain_seq — which, chain_seq being dense from
+	// 1, is the number of statements the session logged. Deliberately not a
+	// count of *surviving* statements: DBB_QUERY_STORAGE_RETENTION reaps the
+	// oldest statements of a long-lived session, and a stamp that moved with
+	// them would report a break on every truncated session.
+	QueryChainLen int64 `bun:"query_chain_len,notnull,default:0" json:"-"`
+
+	// QueryChainStampVersion says which format QueryChainMAC is in:
+	// queryChainStampLegacy (a verbatim copy of the head MAC, written by
+	// 0.23.x, forgeable without the key) or queryChainStampKeyed. Every writer
+	// produces the keyed format now; pre-upgrade rows keep the legacy one
+	// forever, since no migration can re-seal them without the chain key.
+	QueryChainStampVersion int16 `bun:"query_chain_stamp_version,notnull,default:0" json:"-"`
 }
 
 // Instance is one *run* of one dbbat process sharing this store. The row is
