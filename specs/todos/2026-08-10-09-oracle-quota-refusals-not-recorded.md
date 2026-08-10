@@ -1,3 +1,8 @@
+---
+model: opus
+effort: high
+---
+
 # Record Oracle quota refusals in query history, like the other protocols
 
 ## Goal
@@ -62,3 +67,42 @@ spec:
 `internal/proxy/oracle/blocked_persist_test.go` is the pattern — a recorder
 store for the shape, and the real-store test for the query-chain append. Add a
 quota-exhausted grant case to it.
+
+## Resolved open questions
+
+> Options: give `gateStatement` a per-op SQL extractor, or move the quota check
+> inside each handler, after the decode and before the static controls.
+
+**Decision: move the quota check inside each handler.** Take the second option
+— the spec already calls it the cleaner one, and a per-op SQL extractor bolted
+onto `gateStatement` just reimplements the decode dispatch that the handlers
+already are. Remove the `checkQuotas()` call from `gateStatement` and place it
+in each handler after its decode, before the static controls
+(`read_only` / `block_copy` / `block_ddl`).
+
+Three invariants the move must preserve, all called out in the spec and all
+worth a test:
+
+- **Decode failure still forwards, it does not block.** Today's Oracle
+  fail-behaviour on an undecodable payload is forward-don't-block (the caveat in
+  `docs/approvals.md`). Moving the check behind the decode must not silently
+  turn an undecodable statement into a refusal.
+- **Quota stays ahead of the approval hold.** An over-quota statement is
+  refused outright and must never be parked on a human.
+- **Nothing is recorded on the continuation-fetch path.** Refusing or recording
+  mid-result-set is exactly what the comment above the existing check exists to
+  prevent.
+
+> `handleOFETCH`'s check sits before the cursor lookup; the SQL is only known
+> after it. Moving it after would change what an *unknown* cursor gets
+> (`refuseUnknownCursor` vs the quota error), so decide that ordering
+> deliberately.
+
+**Decision: keep `refuseUnknownCursor` first.** In `handleOFETCH`, resolve the
+cursor before the quota check, and let an unknown cursor keep answering
+`refuseUnknownCursor` even when the grant is also over quota. The unknown
+cursor is the more specific and the more security-relevant answer — it is the
+fail-closed path added by the piggyback-reexec work — and masking it behind a
+quota error would make that refusal harder to diagnose. A known cursor whose
+grant is exhausted then gets the quota refusal, recorded with the SQL the
+tracker holds.
