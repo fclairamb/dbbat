@@ -187,7 +187,7 @@ func startOracleThroughProxy(t *testing.T, controls []string) *oracleThroughProx
 
 	pgHost, _ := pgContainer.Host(ctx)
 	pgPort, _ := pgContainer.MappedPort(ctx, "5432")
-	pgDSN := fmt.Sprintf("postgres://test:test@%s:%s/dbbat_test?sslmode=disable", pgHost, pgPort.Port())
+	pgDSN := "postgres://test:test@" + net.JoinHostPort(pgHost, pgPort.Port()) + "/dbbat_test?sslmode=disable"
 
 	dataStore, err := store.New(ctx, pgDSN)
 	require.NoError(t, err)
@@ -293,7 +293,7 @@ func runCursorWorkloads(t *testing.T, db *sql.DB) []string {
 		stmt, err := db.PrepareContext(ctx, "SELECT 1 AS n FROM dual")
 		require.NoError(t, err)
 
-		defer stmt.Close()
+		defer func() { _ = stmt.Close() }()
 
 		for i := 0; i < reexecRuns; i++ {
 			var n int
@@ -310,7 +310,7 @@ func runCursorWorkloads(t *testing.T, db *sql.DB) []string {
 		stmt, err := db.PrepareContext(ctx, q)
 		require.NoError(t, err)
 
-		defer stmt.Close()
+		defer func() { _ = stmt.Close() }()
 
 		for i := 0; i < reexecRuns; i++ {
 			var a, b, c, d, e int
@@ -336,7 +336,7 @@ func runCursorWorkloads(t *testing.T, db *sql.DB) []string {
 
 			stmts[i] = stmt
 
-			defer stmt.Close()
+			defer func() { _ = stmt.Close() }()
 		}
 
 		for run := 0; run < reexecRuns; run++ {
@@ -354,7 +354,7 @@ func runCursorWorkloads(t *testing.T, db *sql.DB) []string {
 		stmt, err := db.PrepareContext(ctx, "INSERT INTO dbbat_learn_probe VALUES (:1, :2)")
 		require.NoError(t, err)
 
-		defer stmt.Close()
+		defer func() { _ = stmt.Close() }()
 
 		for i := 0; i < reexecRuns; i++ {
 			_, err := stmt.ExecContext(ctx, i, fmt.Sprintf("row-%d", i))
@@ -371,7 +371,7 @@ func runCursorWorkloads(t *testing.T, db *sql.DB) []string {
 		stmt, err := db.PrepareContext(ctx, block)
 		require.NoError(t, err)
 
-		defer stmt.Close()
+		defer func() { _ = stmt.Close() }()
 
 		for i := 0; i < reexecRuns; i++ {
 			_, err := stmt.ExecContext(ctx, 1000+i)
@@ -396,7 +396,7 @@ END;`)
 		stmt, err := db.PrepareContext(ctx, call)
 		require.NoError(t, err)
 
-		defer stmt.Close()
+		defer func() { _ = stmt.Close() }()
 
 		for i := 0; i < reexecRuns; i++ {
 			var cursor go_ora.RefCursor
@@ -408,7 +408,7 @@ END;`)
 			require.NoError(t, err)
 
 			row := make([]driver.Value, len(ds.Columns()))
-			for ds.Next(row) == nil { //nolint:revive // draining the ref cursor is the point
+			for ds.Next(row) == nil {
 				continue
 			}
 
@@ -457,7 +457,7 @@ END;`)
 		stmt, err := db.PrepareContext(ctx, "SELECT 1 AS n FROM dual")
 		require.NoError(t, err)
 
-		defer stmt.Close()
+		defer func() { _ = stmt.Close() }()
 
 		for run := 0; run < reexecRuns; run++ {
 			var n int
@@ -759,7 +759,7 @@ func TestIntegration_CursorReexecUnderReadOnlyIsNotBrokenByTheGate(t *testing.T)
 	stmt, err := env.db.PrepareContext(ctx, "SELECT 1 AS n FROM dual")
 	require.NoError(t, err)
 
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	for i := 0; i < 10; i++ {
 		var n int

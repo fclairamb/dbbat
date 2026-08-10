@@ -186,7 +186,8 @@ func TestCursorReexec_DeniedIsRefused(t *testing.T) {
 // a statement it already parsed: func 0x03, sub-op 0x4e, the v315+ zero pad,
 // then the cursor id and the three execution fields decodeCursorReexec walks.
 func buildPiggybackReexec(cursorID uint16) []byte {
-	out := []byte{byte(TTCFuncPiggyback), PiggybackSubReexecSel, 0x01, 0x00}
+	out := make([]byte, 0, 12)
+	out = append(out, byte(TTCFuncPiggyback), PiggybackSubReexecSel, 0x01, 0x00)
 	out = append(out, ttcCompressedUint(uint64(cursorID))...)
 
 	// rowsToFetch, execOptions, execFlags.
