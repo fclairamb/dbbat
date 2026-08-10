@@ -26,6 +26,11 @@ var (
 	// first key, which is what MongoDB uses to name the command.
 	ErrMongoCommandMismatch = errors.New(
 		"the command name must be the first key of the command document")
+	// ErrMongoParamsUnsupported means the caller sent bind parameters. MongoDB
+	// has none, and silently dropping them would run a command that is not the
+	// one the agent thinks it wrote.
+	ErrMongoParamsUnsupported = errors.New(
+		"MongoDB has no bind parameters: put the values in the command document")
 )
 
 // mongoServerSelectionTimeout bounds the handshake with our own listener.
@@ -47,6 +52,10 @@ const mongoServerSelectionTimeout = 10 * time.Second
 // never leaves 127.0.0.1, so it is not verified — that exemption is scoped to
 // this dial and exists nowhere else in the package.
 func executeMongoDB(ctx context.Context, addr string, req ExecRequest) (*QueryResult, error) {
+	if len(req.Params) > 0 {
+		return nil, ErrMongoParamsUnsupported
+	}
+
 	command, doc, err := parseMongoStatement(req.SQL)
 	if err != nil {
 		return nil, err

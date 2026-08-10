@@ -394,3 +394,22 @@ func TestRenderSampledFields(t *testing.T) {
 	assert.Equal(t, "null", columns[4].Type)
 	assert.True(t, columns[4].Nullable)
 }
+
+// TestMongoRefusesBindParameters: MongoDB has none, and quietly dropping them
+// would run a command that is not the one the agent wrote.
+func TestMongoRefusesBindParameters(t *testing.T) {
+	t.Parallel()
+
+	e := NewLoopbackExecutor(LoopbackListeners{MongoDB: "127.0.0.1:59987"})
+
+	_, err := e.Execute(context.Background(), ExecRequest{
+		Protocol: store.ProtocolMongoDB,
+		Database: "db",
+		Username: "agent",
+		APIKey:   "dbb_key",
+		SQL:      `find {"find":"users"}`,
+		Params:   []any{"value"},
+		MaxRows:  10,
+	})
+	require.ErrorIs(t, err, ErrMongoParamsUnsupported)
+}

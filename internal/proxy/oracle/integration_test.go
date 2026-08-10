@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	_ "github.com/sijms/go-ora/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -264,7 +265,7 @@ func TestIntegration_ProxyPassthrough(t *testing.T) {
 	}, encryptionKey)
 	require.NoError(t, err)
 
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{UserID: user.UID, DatabaseID: db.UID, GrantedBy: user.UID, StartsAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(24 * time.Hour), Definition: &store.GrantDefinition{Controls: []string{}}})
+	_, err = createGrantWithControls(ctx, t, dataStore, user.UID, db.UID, []string{})
 	require.NoError(t, err)
 
 	queryStorage := config.QueryStorageConfig{
@@ -491,11 +492,7 @@ func TestIntegration_MCPExecutesThroughTheProxy(t *testing.T) {
 	}, encryptionKey)
 	require.NoError(t, err)
 
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{
-		UserID: user.UID, DatabaseID: db.UID, GrantedBy: user.UID,
-		StartsAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(24 * time.Hour),
-		Definition: &store.GrantDefinition{Controls: []string{}},
-	})
+	_, err = createGrantWithControls(ctx, t, dataStore, user.UID, db.UID, []string{})
 	require.NoError(t, err)
 
 	_, plainKey, err := dataStore.CreateAPIKey(ctx, user.UID, "agent-key", nil, encryptionKey)
@@ -556,4 +553,40 @@ func TestIntegration_MCPExecutesThroughTheProxy(t *testing.T) {
 
 		return false
 	}, 30*time.Second, 250*time.Millisecond, "an agent's statement must be logged like any other")
+}
+
+// createGrantWithControls issues a grant carrying the given controls. Every
+// grant is an *instance of a definition* and carries no shape of its own, so
+// the definition has to exist first and be named by uid — an inline
+// GrantDefinition on the grant is not enough (CreateGrant answers
+// ErrGrantDefinitionRequired), which is what used to fail this suite at setup.
+func createGrantWithControls(
+	ctx context.Context,
+	t *testing.T,
+	dataStore *store.Store,
+	userUID, databaseUID uuid.UUID,
+	controls []string,
+) (*store.Grant, error) {
+	t.Helper()
+
+	name := fmt.Sprintf("itest-%s", uuid.NewString()[:8])
+
+	def, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:            name,
+		Slug:            name,
+		DurationSeconds: int64(24 * time.Hour / time.Second),
+		Controls:        controls,
+		CreatedBy:       userUID,
+	})
+	require.NoError(t, err)
+
+	return dataStore.CreateGrant(ctx, &store.Grant{
+		UserID:            userUID,
+		DatabaseID:        databaseUID,
+		GrantedBy:         userUID,
+		GrantDefinitionID: def.UID,
+		Definition:        def,
+		StartsAt:          time.Now().Add(-time.Hour),
+		ExpiresAt:         time.Now().Add(24 * time.Hour),
+	})
 }
