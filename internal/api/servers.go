@@ -32,6 +32,15 @@ type CreateDatabaseRequest struct {
 	// SSH bastion secrets (write-only, never returned).
 	SSHPrivateKey string `json:"ssh_private_key"`
 	SSHPassphrase string `json:"ssh_passphrase"`
+	// Kubernetes cluster material. The ServiceAccount bearer token is sent as
+	// Password — it is the row's secret, encrypted exactly like a database
+	// password — while the CA bundle and the namespace are public and stored
+	// in clear. There is deliberately no kubeconfig field: EKS/GKE kubeconfigs
+	// authenticate through exec credential plugins, which a server daemon
+	// cannot run.
+	K8sCACert                string `json:"k8s_ca_cert"`
+	K8sNamespace             string `json:"k8s_namespace"`
+	K8sInsecureSkipTLSVerify bool   `json:"k8s_insecure_skip_tls_verify"`
 	// TestConnection asks the API to validate the row by actually dialing it
 	// once created. Opt-in, and never fatal: the outcome comes back as a
 	// connection_test object alongside the created server.
@@ -58,6 +67,11 @@ type UpdateDatabaseRequest struct {
 	// SSH bastion secrets (write-only, never returned).
 	SSHPrivateKey *string `json:"ssh_private_key"`
 	SSHPassphrase *string `json:"ssh_passphrase"`
+	// Kubernetes cluster material; see CreateDatabaseRequest. The bearer token
+	// is rotated through Password like any other secret.
+	K8sCACert                *string `json:"k8s_ca_cert"`
+	K8sNamespace             *string `json:"k8s_namespace"`
+	K8sInsecureSkipTLSVerify *bool   `json:"k8s_insecure_skip_tls_verify"`
 	// TestConnection asks the API to validate the row by actually dialing it
 	// once updated. Opt-in, and never fatal.
 	TestConnection bool `json:"test_connection"`
@@ -82,6 +96,12 @@ type DatabaseResponse struct {
 	// SSHKnownHostKey is the TOFU-pinned bastion host key (read-only). Secrets
 	// (private key, passphrase) are never returned.
 	SSHKnownHostKey string `json:"ssh_known_host_key,omitempty"`
+	// Kubernetes cluster material. Public: the CA bundle is challenge material
+	// and the namespace is scope, so both round-trip. The ServiceAccount token
+	// never does.
+	K8sCACert                string `json:"k8s_ca_cert,omitempty"`
+	K8sNamespace             string `json:"k8s_namespace,omitempty"`
+	K8sInsecureSkipTLSVerify bool   `json:"k8s_insecure_skip_tls_verify,omitempty"`
 	// ConnectionTest is present only when the request set test_connection.
 	ConnectionTest *ConnectionTestResponse `json:"connection_test,omitempty"`
 }
@@ -116,7 +136,7 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 
 	if !isSupportedProtocol(req.Protocol) {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
-			"protocol must be one of: postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh")
+			"protocol must be one of: postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh, kubernetes")
 		return
 	}
 
@@ -153,13 +173,24 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 		}
 		protocolData.SSH = &store.SSHServerData{PrivateKey: req.SSHPrivateKey, Passphrase: req.SSHPassphrase}
 	}
+	if req.Protocol == store.ProtocolKubernetes {
+		if protocolData == nil {
+			protocolData = &store.ServerProtocolData{}
+		}
+		protocolData.Kubernetes = &store.KubernetesServerData{
+			CACert:                req.K8sCACert,
+			Namespace:             req.K8sNamespace,
+			InsecureSkipTLSVerify: req.K8sInsecureSkipTLSVerify,
+		}
+	}
 
 	listable := true
 	if req.Listable != nil {
 		listable = *req.Listable
 	}
-	// SSH bastions are never grantable/connectable targets.
-	if req.Protocol == store.ProtocolSSH {
+	// Tunnel rows (ssh bastions, kubernetes clusters) are dial paths, never
+	// grantable/connectable targets.
+	if store.IsTunnelProtocol(req.Protocol) {
 		listable = false
 	}
 
@@ -393,6 +424,10 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		ClearViaUID:       req.ClearViaUID,
 		SSHPrivateKey:     req.SSHPrivateKey,
 		SSHPassphrase:     req.SSHPassphrase,
+
+		K8sCACert:                req.K8sCACert,
+		K8sNamespace:             req.K8sNamespace,
+		K8sInsecureSkipTLSVerify: req.K8sInsecureSkipTLSVerify,
 	}
 
 	if err := s.store.UpdateServer(c.Request.Context(), uid, updates, s.encryptionKey); err != nil {
@@ -534,6 +569,14 @@ func toDatabaseResponse(db *store.Server) DatabaseResponse {
 		knownHostKey = sd.KnownHostKey
 	}
 
+	var k8sCACert, k8sNamespace string
+	var k8sInsecure bool
+	if kd := db.KubernetesData(); kd != nil {
+		k8sCACert = kd.CACert
+		k8sNamespace = kd.Namespace
+		k8sInsecure = kd.InsecureSkipTLSVerify
+	}
+
 	return DatabaseResponse{
 		UID:               db.UID,
 		Name:              db.Name,
@@ -550,6 +593,10 @@ func toDatabaseResponse(db *store.Server) DatabaseResponse {
 		CreatedBy:         db.CreatedBy,
 		ViaUID:            db.ViaUID,
 		SSHKnownHostKey:   knownHostKey,
+
+		K8sCACert:                k8sCACert,
+		K8sNamespace:             k8sNamespace,
+		K8sInsecureSkipTLSVerify: k8sInsecure,
 	}
 }
 
@@ -561,6 +608,25 @@ func (s *Server) handleListSSHServers(c *gin.Context) {
 	servers, err := s.store.ListSSHServers(c.Request.Context())
 	if err != nil {
 		writeInternalError(c, s.logger, err, "failed to list ssh servers")
+		return
+	}
+	response := make([]DatabaseResponse, len(servers))
+	for i := range servers {
+		response[i] = toDatabaseResponse(&servers[i])
+	}
+	successResponse(c, gin.H{"servers": response})
+}
+
+// handleListTunnelServers lists every dial-path row — SSH bastions and
+// Kubernetes clusters — for the "via" selector (admin only).
+//
+// It exists alongside /ssh-servers rather than replacing it because the two
+// answer different questions: /ssh-servers is the bastion management view,
+// while a target's via_uid may point at either kind.
+func (s *Server) handleListTunnelServers(c *gin.Context) {
+	servers, err := s.store.ListTunnelServers(c.Request.Context())
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to list tunnel servers")
 		return
 	}
 	response := make([]DatabaseResponse, len(servers))
@@ -588,6 +654,18 @@ func validateCreateProtocolFields(req *CreateDatabaseRequest) string {
 		// or a password to authenticate to the bastion.
 		if req.SSHPrivateKey == "" && req.Password == "" {
 			return "ssh_private_key or password is required for ssh servers"
+		}
+	case store.ProtocolKubernetes:
+		// A cluster row authenticates with one thing only: a long-lived
+		// ServiceAccount bearer token, sent in the password field.
+		if req.Password == "" {
+			return "password (the service account bearer token) is required for kubernetes servers"
+		}
+		if req.K8sCACert == "" && !req.K8sInsecureSkipTLSVerify {
+			return "k8s_ca_cert is required for kubernetes servers (or set k8s_insecure_skip_tls_verify)"
+		}
+		if req.K8sNamespace == "" {
+			return "k8s_namespace is required for kubernetes servers"
 		}
 	case store.ProtocolOracle:
 		if req.OracleServiceName == "" && req.DatabaseName == "" {
@@ -632,6 +710,9 @@ func redactUpdateForAudit(req UpdateDatabaseRequest) map[string]any {
 	addPtr("mongo_auth_source", req.MongoAuthSource, req.MongoAuthSource != nil)
 	addPtr("listable", req.Listable, req.Listable != nil)
 	addPtr("via_uid", req.ViaUID, req.ViaUID != nil)
+	addPtr("k8s_ca_cert", req.K8sCACert, req.K8sCACert != nil)
+	addPtr("k8s_namespace", req.K8sNamespace, req.K8sNamespace != nil)
+	addPtr("k8s_insecure_skip_tls_verify", req.K8sInsecureSkipTLSVerify, req.K8sInsecureSkipTLSVerify != nil)
 
 	if req.ClearViaUID {
 		out["clear_via_uid"] = true
@@ -658,7 +739,7 @@ func redactUpdateForAudit(req UpdateDatabaseRequest) map[string]any {
 func isSupportedProtocol(protocol string) bool {
 	switch protocol {
 	case store.ProtocolPostgreSQL, store.ProtocolOracle, store.ProtocolMySQL, store.ProtocolMariaDB,
-		store.ProtocolMongoDB, store.ProtocolMSSQL, store.ProtocolSSH:
+		store.ProtocolMongoDB, store.ProtocolMSSQL, store.ProtocolSSH, store.ProtocolKubernetes:
 		return true
 	default:
 		return false
@@ -688,6 +769,11 @@ func defaultPortFor(protocol string) int {
 		return 1433
 	case store.ProtocolSSH:
 		return 22
+	case store.ProtocolKubernetes:
+		// The Kubernetes API server's port is the row's Port; 443 is what a
+		// managed control plane fronts, 6443 what a self-hosted one usually
+		// binds. 443 is the safer suggestion.
+		return 443
 	default:
 		return 0
 	}
