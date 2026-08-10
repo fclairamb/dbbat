@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -66,10 +67,67 @@ func TestNewKubernetesTunnelRequiresAHost(t *testing.T) {
 	}
 }
 
+// TestNewKubernetesTunnelFailsClosedWithoutTrust is the defense-in-depth half
+// of the CA requirement: the API refuses to write such a row, but the dialer
+// must refuse it too rather than fall back to the host's system trust store on
+// the connection carrying the service account token.
+func TestNewKubernetesTunnelFailsClosedWithoutTrust(t *testing.T) {
+	t.Parallel()
+
+	_, err := NewKubernetesTunnel(KubernetesConfig{
+		Host: "api.example.com", Port: 6443, Token: "t", Namespace: "data",
+	})
+	if !errors.Is(err, ErrKubernetesNoCACert) {
+		t.Fatalf("NewKubernetesTunnel(no CA, no opt-out) error = %v, want ErrKubernetesNoCACert", err)
+	}
+}
+
+func TestNewKubernetesTunnelAcceptsAnExplicitInsecureOptOut(t *testing.T) {
+	t.Parallel()
+
+	if _, err := NewKubernetesTunnel(KubernetesConfig{
+		Host: "api.example.com", Port: 6443, Token: "t", Namespace: "data",
+		InsecureSkipTLSVerify: true,
+	}); err != nil {
+		t.Fatalf("NewKubernetesTunnel(insecure) error = %v", err)
+	}
+}
+
+// errTransportBlip stands in for an unclassified network failure.
+var errTransportBlip = errors.New("connection reset by peer")
+
+func TestIsPermanentError(t *testing.T) {
+	t.Parallel()
+
+	permanent := []error{
+		ErrKubernetesNoToken,
+		ErrKubernetesNoHost,
+		ErrKubernetesNoCACert,
+		ErrKubernetesUnauthorized,
+		ErrKubernetesForbidden,
+		ErrKubernetesTargetNotFound,
+	}
+	for _, err := range permanent {
+		if !IsPermanentError(fmt.Errorf("wrapped: %w", err)) {
+			t.Errorf("IsPermanentError(%v) = false, want true", err)
+		}
+	}
+
+	// Not-Ready is retryable on purpose: re-resolving may land on a healthy
+	// endpoint. So is anything unclassified (a transport blip).
+	for _, err := range []error{ErrKubernetesTargetNotReady, errTransportBlip} {
+		if IsPermanentError(err) {
+			t.Errorf("IsPermanentError(%v) = true, want false", err)
+		}
+	}
+}
+
 func TestNewKubernetesTunnelDefaultsTheNamespace(t *testing.T) {
 	t.Parallel()
 
-	tunnel, err := NewKubernetesTunnel(KubernetesConfig{Host: "api.example.com", Port: 6443, Token: "t"})
+	tunnel, err := NewKubernetesTunnel(KubernetesConfig{
+		Host: "api.example.com", Port: 6443, Token: "t", InsecureSkipTLSVerify: true,
+	})
 	if err != nil {
 		t.Fatalf("NewKubernetesTunnel() error = %v", err)
 	}

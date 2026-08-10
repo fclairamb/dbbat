@@ -112,6 +112,7 @@ func (c *Checker) checkKubernetesTarget(
 func isKubernetesStage(err error) bool {
 	for _, sentinel := range []error{
 		upstream.ErrKubernetesNoToken,
+		upstream.ErrKubernetesNoCACert,
 		upstream.ErrKubernetesUnauthorized,
 		upstream.ErrKubernetesForbidden,
 		upstream.ErrKubernetesTargetNotFound,
@@ -138,6 +139,15 @@ func classifyKubernetesError(err error, stage Stage) Result {
 			Stage:   StageConfig,
 			Code:    CodeNoAuthMethod,
 			Message: "the cluster row has no service account token: paste one from the token Secret (see docs/kubernetes.md)",
+		}
+	case errors.Is(err, upstream.ErrKubernetesNoCACert):
+		return Result{
+			Stage: StageConfig,
+			Code:  CodeMissingConfig,
+			Message: "the cluster row pins no CA certificate — paste the API server's CA bundle " +
+				"(the token Secret's ca.crt key), or explicitly enable \"skip TLS verification\". " +
+				"dbbat will not silently fall back to this host's system trust store for the " +
+				"connection that carries the service account token",
 		}
 	case errors.Is(err, upstream.ErrKubernetesUnauthorized):
 		return Result{

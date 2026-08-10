@@ -2,12 +2,18 @@ package conncheck
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -96,6 +102,36 @@ func writeStatusJSON(w http.ResponseWriter, code int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_, _ = w.Write(body)
+}
+
+// unrelatedCAPEM mints a throwaway self-signed CA. It has to be generated
+// rather than borrowed from a second httptest server: every httptest TLS
+// server presents the same built-in certificate, so two of them would "verify"
+// against each other and the test would pass for the wrong reason.
+func unrelatedCAPEM(t *testing.T) string {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "not-your-cluster"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
 
 // newCluster registers a `protocol: kubernetes` row pointed at f, with its
@@ -222,9 +258,10 @@ func TestCheckClusterWithoutAToken(t *testing.T) {
 	}
 }
 
-// TestCheckClusterUntrustedCertificate covers the mistake an operator makes
-// first: pasting no CA bundle, or the wrong one.
-func TestCheckClusterUntrustedCertificate(t *testing.T) {
+// TestCheckClusterWithoutACABundleFailsClosed covers the state the update path
+// used to be able to write: no CA bundle and no explicit opt-out. It must be
+// refused outright, never quietly verified against the host's system roots.
+func TestCheckClusterWithoutACABundleFailsClosed(t *testing.T) {
 	t.Parallel()
 
 	fake := newFakeAPIServer(t)
@@ -236,7 +273,50 @@ func TestCheckClusterUntrustedCertificate(t *testing.T) {
 
 	res := New(resolver, testKey()).Check(context.Background(), cluster)
 	if res.OK {
-		t.Fatal("Check() succeeded against an untrusted certificate")
+		t.Fatal("Check() succeeded on a row that pins no CA and did not opt out")
+	}
+	if res.Stage != StageConfig || res.Code != CodeMissingConfig {
+		t.Errorf("stage/code = %s/%s, want %s/%s", res.Stage, res.Code, StageConfig, CodeMissingConfig)
+	}
+	if !strings.Contains(res.Message, "CA") {
+		t.Errorf("message %q does not point at the CA certificate field", res.Message)
+	}
+}
+
+// TestCheckClusterWithTheInsecureOptOut pins that the escape hatch actually
+// works: the fake's certificate is untrusted, and the row still connects.
+func TestCheckClusterWithTheInsecureOptOut(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeAPIServer(t)
+	fake.allowed = true
+
+	resolver := newFakeResolver()
+	cluster := fake.newCluster(t, resolver)
+	cluster.ProtocolData.Kubernetes.CACert = ""
+	cluster.ProtocolData.Kubernetes.InsecureSkipTLSVerify = true
+
+	res := New(resolver, testKey()).Check(context.Background(), cluster)
+	if !res.OK {
+		t.Fatalf("Check() = %+v, want OK with verification skipped", res)
+	}
+}
+
+// TestCheckClusterWrongCABundle is the ordinary operator mistake: a CA is
+// pinned, but not the one that signed the API server's certificate.
+func TestCheckClusterWrongCABundle(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeAPIServer(t)
+	fake.allowed = true
+
+	resolver := newFakeResolver()
+	cluster := fake.newCluster(t, resolver)
+	cluster.ProtocolData.Kubernetes.CACert = unrelatedCAPEM(t)
+
+	res := New(resolver, testKey()).Check(context.Background(), cluster)
+	if res.OK {
+		t.Fatal("Check() succeeded against a certificate signed by a different CA")
 	}
 	if !strings.Contains(res.Message, "CA") {
 		t.Errorf("message %q does not point at the CA certificate field", res.Message)
@@ -257,6 +337,11 @@ func TestCheckClusterUnreachableAPIServer(t *testing.T) {
 	cluster := &store.Server{
 		UID: uid, Host: "127.0.0.1", Port: 1, Protocol: store.ProtocolKubernetes,
 		PasswordEncrypted: token,
+		// Trust is configured, so the check gets far enough to be about the
+		// network rather than stopping at the config stage.
+		ProtocolData: &store.ServerProtocolData{
+			Kubernetes: &store.KubernetesServerData{Namespace: "data", InsecureSkipTLSVerify: true},
+		},
 	}
 	resolver.servers[uid] = cluster
 

@@ -216,6 +216,88 @@ func TestTargetMayReferenceAKubernetesCluster(t *testing.T) {
 	assert.Equal(t, 400, w.Code, w.Body.String())
 }
 
+// TestUpdateKubernetesServerCannotBlankTheCABundle is the hole the create-only
+// validation left: PUT could clear ca_cert without setting the insecure flag,
+// producing a row that neither pins a CA nor admits to skipping verification.
+func TestUpdateKubernetesServerCannotBlankTheCABundle(t *testing.T) {
+	t.Parallel()
+
+	router, token := kubernetesTestAdmin(t)
+
+	_, cluster := doJSON(t, router, "POST", "/api/v1/servers", token, validClusterPayload())
+	uid, ok := cluster["uid"].(string)
+	require.True(t, ok, cluster)
+
+	w, _ := doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
+		"k8s_ca_cert": "",
+	})
+	require.Equal(t, 400, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "k8s_ca_cert is required")
+
+	// The same edit *with* the explicit opt-out is allowed: the escape hatch
+	// has to stay usable, it just has to be stated.
+	w, _ = doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
+		"k8s_ca_cert":                  "",
+		"k8s_insecure_skip_tls_verify": true,
+	})
+	require.Equal(t, 200, w.Code, w.Body.String())
+}
+
+func TestUpdateKubernetesServerCannotBlankTheNamespace(t *testing.T) {
+	t.Parallel()
+
+	router, token := kubernetesTestAdmin(t)
+
+	_, cluster := doJSON(t, router, "POST", "/api/v1/servers", token, validClusterPayload())
+	uid, ok := cluster["uid"].(string)
+	require.True(t, ok, cluster)
+
+	w, _ := doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
+		"k8s_namespace": "",
+	})
+	require.Equal(t, 400, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "k8s_namespace is required")
+}
+
+// TestUpdateValidatesTheProtocolItself covers the other half of the same hole:
+// the update path used to accept any protocol string, and could turn an
+// ordinary database row into a kubernetes one carrying no cluster material.
+func TestUpdateValidatesTheProtocolItself(t *testing.T) {
+	t.Parallel()
+
+	router, token := kubernetesTestAdmin(t)
+
+	w, _ := doJSON(t, router, "POST", "/api/v1/servers", token, map[string]any{
+		"name": "plain-db", "host": "db.example.com", "port": 5432,
+		"database_name": "app", "username": "app", "password": "pw",
+		"protocol": "postgresql",
+	})
+	require.Equal(t, 200, w.Code, w.Body.String())
+
+	_, listing := doJSON(t, router, "GET", "/api/v1/servers", token, nil)
+	rows, ok := listing["databases"].([]any)
+	require.True(t, ok, listing)
+	require.Len(t, rows, 1)
+	row, ok := rows[0].(map[string]any)
+	require.True(t, ok, rows[0])
+	uid, ok := row["uid"].(string)
+	require.True(t, ok, row)
+
+	// A protocol that does not exist.
+	w, _ = doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
+		"protocol": "cockroach",
+	})
+	require.Equal(t, 400, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "protocol must be one of")
+
+	// A real protocol whose required material this row does not carry.
+	w, _ = doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
+		"protocol": "kubernetes",
+	})
+	require.Equal(t, 400, w.Code, w.Body.String())
+	assert.Contains(t, w.Body.String(), "k8s_ca_cert is required")
+}
+
 func TestUpdateKubernetesServerMaterial(t *testing.T) {
 	t.Parallel()
 

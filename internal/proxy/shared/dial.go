@@ -168,6 +168,15 @@ func (d *Dialer) dialViaKubernetes(
 		return conn, nil
 	}
 
+	// A permanent failure — a dead token, a missing RBAC verb, a pod name that
+	// does not exist — fails identically on the second attempt. Retrying it
+	// would only double the API calls and evict a perfectly good pooled tunnel
+	// every time someone typos a host.
+	if upstream.IsPermanentError(err) {
+		return nil, fmt.Errorf("failed to reach %s:%d through the kubernetes tunnel: %w",
+			srv.Host, srv.Port, err)
+	}
+
 	d.drop(viaUID)
 
 	tunnel, retryErr := d.kubernetesTunnelFor(ctx, resolver, encryptionKey, viaUID)

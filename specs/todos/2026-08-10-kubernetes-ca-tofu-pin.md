@@ -24,7 +24,9 @@ inherited:
   (`kubectl get secret <token-secret> -o jsonpath='{.data.ca\.crt}'`), unlike an
   SSH host key, which an operator usually does not have to hand. So the case
   that TOFU exists to rescue barely arises here.
-- What shipped instead: `k8s_ca_cert` is **required** on create, with
+- What shipped instead: `k8s_ca_cert` is **required** — on create, on update,
+  and again in the dialer, which refuses a row that pins no CA rather than
+  falling back to the host's system trust store — with
   `k8s_insecure_skip_tls_verify` as the one explicit, labelled escape hatch for
   throwaway clusters. That is a stronger default than TOFU, not a weaker one.
 

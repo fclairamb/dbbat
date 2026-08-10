@@ -101,6 +101,59 @@ func TestKubernetesTunnelForBuildsPoolsAndDrops(t *testing.T) {
 	}
 }
 
+// TestKubernetesTunnelForFailsClosedWithoutTrust checks the dialer's own
+// refusal, independent of the API's validation: a row reaching this code with
+// neither a CA bundle nor the explicit opt-out must not be dialed against the
+// host's system trust store.
+func TestKubernetesTunnelForFailsClosedWithoutTrust(t *testing.T) {
+	t.Parallel()
+
+	resolver := newFakeResolver()
+	cluster := clusterRow(t, "api.example.invalid", 6443)
+	cluster.ProtocolData.Kubernetes.InsecureSkipTLSVerify = false
+	resolver.servers[cluster.UID] = cluster
+
+	_, err := NewDialer().ConnectKubernetes(context.Background(), resolver, testKey(), cluster.UID)
+	if !errors.Is(err, upstream.ErrKubernetesNoCACert) {
+		t.Fatalf("ConnectKubernetes(no CA, no opt-out) error = %v, want ErrKubernetesNoCACert", err)
+	}
+}
+
+// TestDialUpstreamViaKubernetesDoesNotRetryPermanentFailures pins the retry's
+// scope: it exists to recover from a moved pod, not to double the API calls
+// (and evict a healthy pooled tunnel) every time a host field has a typo.
+func TestDialUpstreamViaKubernetesDoesNotRetryPermanentFailures(t *testing.T) {
+	t.Parallel()
+
+	resolver := newFakeResolver()
+	cluster := clusterRow(t, "api.example.invalid", 6443)
+	resolver.servers[cluster.UID] = cluster
+
+	d := NewDialer()
+	if _, err := d.ConnectKubernetes(context.Background(), resolver, testKey(), cluster.UID); err != nil {
+		t.Fatalf("ConnectKubernetes() error = %v", err)
+	}
+
+	// An empty host resolves to ErrKubernetesTargetNotFound without any API
+	// call, so this isolates the retry decision from the network.
+	target := &store.Server{
+		Host: "", Port: 5432, Protocol: store.ProtocolPostgreSQL, ViaUID: &cluster.UID,
+	}
+
+	_, err := d.DialUpstream(context.Background(), resolver, testKey(), target)
+	if !errors.Is(err, upstream.ErrKubernetesTargetNotFound) {
+		t.Fatalf("DialUpstream() error = %v, want ErrKubernetesTargetNotFound", err)
+	}
+
+	d.mu.Lock()
+	pooled := len(d.tunnels)
+	d.mu.Unlock()
+
+	if pooled != 1 {
+		t.Errorf("tunnel pool size = %d, want 1 — a permanent failure must not evict the tunnel", pooled)
+	}
+}
+
 func TestKubernetesTunnelForRejectsAMissingToken(t *testing.T) {
 	t.Parallel()
 
