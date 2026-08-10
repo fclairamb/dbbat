@@ -29,8 +29,20 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
-const defaultOracleImage = "gvenzl/oracle-xe:18.4.0-slim"
+// defaultOracleImage is the image every host and every environment starts by
+// default. It is the 23ai Free image rather than `gvenzl/oracle-xe:18.4.0-slim`
+// for two reasons: 23ai is the version the proxy work is validated against (see
+// the client-compatibility tables in docs/oracle.md), and the XE image is
+// published for linux/amd64 only — under emulation on an Apple Silicon Mac it
+// dies during instance startup (ORA-27300 / ORA-00442), so the whole suite gave
+// a developer no signal at all.
+//
+// 18c XE coverage is not lost: .github/workflows/integration.yml runs the suite
+// a second time with ORACLE_TEST_IMAGE pinned to the XE image.
+const defaultOracleImage = "gvenzl/oracle-free:23-slim"
 
+// oracleTestImage returns the Oracle image the suite starts. ORACLE_TEST_IMAGE
+// overrides defaultOracleImage.
 func oracleTestImage() string {
 	if img := os.Getenv("ORACLE_TEST_IMAGE"); img != "" {
 		return img
