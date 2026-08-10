@@ -79,3 +79,90 @@ flip it first — work the spec's `## Implementation` sequence in order:
 If — and only if — the measurement shows learning misses that cannot be made
 reliable by step 2, stop before step 3 and report that back rather than shipping
 a change that breaks the second execute of an ordinary read-only session.
+
+## Measurement
+
+Run against a real `gvenzl/oracle-free:23-slim` through the real proxy, by
+`TestIntegration_CursorIDLearningMissRate` in
+`internal/proxy/oracle/cursor_learning_integration_test.go`. Workloads: prepared
+SELECT loop, bind-heavy re-executions, three cursors interleaved on one session,
+prepared DML, an anonymous PL/SQL block, a REF cursor, a statement retried after
+it failed, and a statement cache churned past 40 statements. Counting is off the
+proxy's own log records — no instrumentation was left in the production path.
+
+Reproduce:
+
+```bash
+ORACLE_TEST_IMAGE=gvenzl/oracle-free:23-slim \
+  go test -tags integration -timeout 40m -count=1 -v \
+  -run TestIntegration_CursorIDLearningMissRate ./internal/proxy/oracle/
+```
+
+### Step 1 — the first answer was wrong, and finding out why *was* the measurement
+
+The raw count said zero: 64 re-executions from `go-ora`, none naming an unknown
+cursor. That would have licensed step 3 immediately. It was wrong.
+
+The ordered trace (`CURSOR_TRACE=1`) showed cursor-id learning stopping dead
+part-way through the churn loop — parses 37, 38, 39 and the re-prepared
+`SELECT 1 AS n FROM dual` learned nothing — while the *miss rate stayed at zero*.
+Oracle recycles cursor ids, so each of those re-executions found a **stale**
+tracker entry and resolved to the statement that last held the id. Five runs of
+`SELECT 1 AS n FROM dual` were gated, and recorded in `/queries`, as
+`SELECT 35 AS churn FROM dual`.
+
+So the pre-existing behaviour was not "forwards ungated when it cannot resolve";
+it was "enforces the wrong statement, silently". That is worse than the gap the
+spec set out to close, and it was invisible to the metric the spec proposed.
+
+### Step 2 — the cause, and why the proposed anchor was the wrong fix
+
+`findCursorIDInResponse` bounded the OER's sequence number at 255. The constant's
+comment said TTC numbers calls with a byte that wraps. It does not: that field is
+the end-to-end ECID sequence — `SummaryObject.EndToEndECIDSequence` in go-ora, a
+**uint16** counting up across the whole session. Consecutive captured responses
+either side of the boundary (now pinned as unit fixtures in `ttc_oer_test.go`):
+
+| Statement | OER sequence | Cursor id | Learned before the fix? |
+|-----------|--------------|-----------|--------------------------|
+| `SELECT 36 AS churn FROM dual` | 252 | 6 | yes |
+| `SELECT 37 AS churn FROM dual` | 256 | 13 | **no** |
+
+The bound is now the field's real width (`0xFFFF`), which is also what
+`oerFieldMaxSizes` already allows.
+
+Note what this says about the hardening the spec sketched: **correlating the
+OER's sequence number with the TTC sequence byte of the request would have made
+things worse.** The field is not a per-call sequence at all, so the correlation
+has no basis; the existing over-tight reading of that same field is precisely
+what was breaking learning. The lesson is the one from the Phase 1 `user_id_len`
+bug — an anchored scan over an Oracle wire structure fails in both directions,
+and tightening one is as dangerous as loosening it.
+
+### Step 3 — the numbers that licensed failing closed
+
+After the fix, two real thin clients:
+
+| Client | Parses seen | Cursor ids learned | Re-executions | Naming an unknown cursor |
+|--------|-------------|--------------------|---------------|--------------------------|
+| `go-ora` v3 | 57 | 53 | 64 | **0** |
+| `python-oracledb` thin 3.4.2 | 58 | 55 | 60 | **0** |
+
+124 live re-executions, zero unresolved. The parses that learned nothing are
+**exactly** the four statements that failed outright (a `DROP TABLE` on a missing
+table and three retries of a `SELECT` on a missing table); their OER carries a
+real ORA code, which the scan deliberately refuses to read an id from, and no
+client re-executes a statement that errored. The test now asserts that list
+exactly, so a learning regression fails loudly even when a recycled cursor id
+would hide it.
+
+Before the fix the same run learned 49 of 57 — and, again, reported zero misses.
+
+Plus the always-on half: the four recorded captures in
+`internal/proxy/oracle/testdata/*_cursor_reexec.pcapng` (go-ora SELECT, go-ora
+INSERT, python-oracledb thin, JDBC thin) replay 12 more re-executions through
+the real intercept paths, all resolved.
+
+The interleaved-cursor triple came out 4/4/4, which is the mis-learning check
+the miss count cannot make: a cursor id read off the wrong OER shows up as a
+skew there long before it shows up as an unknown statement.

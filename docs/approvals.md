@@ -49,18 +49,13 @@ Server) a malformed request is refused outright. **Oracle is the exception**:
 TTC is hand-rolled and the SQL is located heuristically, so a decode failure on
 `OALL8`, the v315+ piggyback exec or the JDBC exec is deliberately treated as
 "pass through" rather than "refuse" — an unparseable frame must not be able to
-break a customer's connection. Two known gaps remain in what the gate *sees* on
+break a customer's connection. One known gap remains in what the gate *sees* on
 Oracle:
 
 - **An undecodable frame.** A statement dbbat cannot decode is neither held nor
   recorded. It is also not checked against `read_only`/`block_ddl`, so this is
   not specific to approvals — the static controls have exactly the same
   dependency on decoding.
-- **A piggyback re-execution naming a cursor dbbat never saw parsed.** It is
-  forwarded ungated under *any* grant, with a WARN. The two other re-execution
-  frames — the SQL-less `OALL8` and an `OFETCH` that starts a fresh query —
-  fail closed under a restrictive grant; the piggyback one deliberately does
-  not. See "Re-executing a cursor" below.
 
 If an Oracle client of yours is not showing up in `/queries` at all, that is the
 first gap: treat missing query rows on Oracle as missing enforcement, and file it.
@@ -84,8 +79,8 @@ The boundaries, all deliberate:
   more rows of a statement that has already been through the gate, and holding
   there would park a client mid-result-set. Only the fetch that starts a *fresh*
   pending query — the one that persists its own row in `/queries` — is gated.
-- **A SQL-less `OALL8`, or an `OFETCH` starting a fresh query, naming an
-  untracked cursor fails closed under a restrictive grant.** If the cursor id
+- **A re-execution naming an untracked cursor fails closed under a restrictive
+  grant — on all three frames.** If the cursor id
   was never seen parsed on this session, dbbat does not know what the execution
   would run. When the grant carries
   **statement-shaped controls** — a non-empty approval-pattern set, `read_only`,
@@ -100,10 +95,27 @@ The boundaries, all deliberate:
   sessions for no security gain. Refusing exactly where a statement control
   exists keeps the guarantee that matters without that blast radius.
 
-  Both frames answer identically on purpose: an execution dbbat cannot identify
-  is the thing being refused, and the wire op carrying it must not be a cheaper
-  way past the same grant. (The `OFETCH` half of that used to forward under any
-  grant, with only a debug log.)
+  All three frames answer identically on purpose: an execution dbbat cannot
+  identify is the thing being refused, and the wire op carrying it must not be a
+  cheaper way past the same grant. (The `OFETCH` half of that used to forward
+  under any grant, with only a debug log; the piggyback one, the frame every
+  modern thin client actually sends, used to forward under any grant with a
+  WARN.)
+
+  Bringing the piggyback frame in was gated on a measurement, because dbbat only
+  knows what a piggyback-executed cursor holds by *learning* the id off the
+  server's response, and refusing what it failed to learn would break the second
+  execution of ordinary read-only work. The measurement found a real bug first:
+  the OER scan bounded the end-to-end ECID sequence number at 255, so learning
+  quietly stopped a few dozen statements into every session — and because Oracle
+  recycles cursor ids, the re-executions after that resolved to a *stale*
+  statement rather than failing visibly, so the gate ran the wrong SQL and
+  `/queries` recorded the wrong SQL. With that fixed, two real thin clients
+  (`go-ora` v3 and `python-oracledb` thin) drove 124 re-executions through the
+  proxy — prepared loops, bind-heavy statements, interleaved cursors, DML,
+  PL/SQL, a REF cursor, a churned statement cache — and not one named a cursor
+  dbbat could not resolve. Numbers and method in `docs/oracle.md`, "Cursor-id
+  learning".
 
   One subtlety worth knowing before filing it as a bug: the approval-pattern
   half of "restrictive" is read off the grant regardless of
@@ -118,13 +130,6 @@ The boundaries, all deliberate:
   mid-result-set. (The response leg's `LimitGuard` independently covers
   revocation, the byte quota and expiry; it does not know about
   `max_query_counts`, which is why the branch has to check it.)
-- **A piggyback re-execution naming an untracked cursor is forwarded, not
-  refused.** This is the opposite of the two frames above, and
-  deliberately so: that frame is what an ordinary `execute()` loop sends, so
-  failing it closed would refuse every second execution of a perfectly legal
-  read-only session whenever dbbat missed the response that names the cursor.
-  Filed as `specs/todos/2026-08-09-oracle-piggyback-reexec-unknown-cursor.md`.
-
 **How often real clients do this: measured, and the answer is "constantly".**
 Five captures against Oracle Free 23ai, one per client, are in
 `internal/proxy/oracle/testdata/*_cursor_reexec.pcapng`:
