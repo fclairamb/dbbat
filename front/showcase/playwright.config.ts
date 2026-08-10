@@ -10,10 +10,11 @@
  *   live connection, and parallelism would make the output non-deterministic.
  * - Its projects run in declaration order, and that order is load-bearing:
  *   `screenshots` first (its query list must show the traffic global-setup
- *   generated and nothing else), then `poster` and `video`, each of which
- *   opens a further live session. Playwright is not told this with
- *   `dependencies` on purpose — that would drag the whole suite along whenever
- *   SHOWCASE_PROJECT asks for one project.
+ *   generated and nothing else), then `poster` and `video`, then the two MCP
+ *   projects — each of them opens a further live session, and the MCP pair
+ *   also reseeds the upstream table the stills are taken of. Playwright is not
+ *   told this with `dependencies` on purpose — that would drag the whole suite
+ *   along whenever SHOWCASE_PROJECT asks for one project.
  * - It never runs as part of `make test-e2e`, and it must never gate CI. On
  *   pull requests it runs only as a non-blocking rot guard with its output
  *   thrown away (see .github/workflows/showcase.yml).
@@ -68,8 +69,10 @@ export default defineConfig({
       // 1x, unlike the stills above: this one is a <video poster>, and that
       // element is 1280x800. A 2x rendition would only be downscaled back to
       // the same pixels by the WebP step in scripts/showcase.sh.
+      // Anchored on the path separator so it does not also pick up
+      // mcp-approval-poster.spec.ts — testMatch is applied to the full path.
       name: "poster",
-      testMatch: /approval-poster\.spec\.ts/,
+      testMatch: /\/approval-poster\.spec\.ts$/,
       use: {
         ...devices["Desktop Chrome"],
         viewport: VIEWPORT,
@@ -80,7 +83,29 @@ export default defineConfig({
       // 1x for video: the recorder scales frames to the requested size anyway,
       // and 2x only inflates the bitrate for no visible gain after transcode.
       name: "video",
-      testMatch: /approval-video\.spec\.ts/,
+      testMatch: /\/approval-video\.spec\.ts$/,
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: VIEWPORT,
+        deviceScaleFactor: 1,
+        video: { mode: "on", size: VIEWPORT },
+      },
+    },
+    {
+      // The same hold, issued by an AI agent over MCP. Last, because each of
+      // these opens yet another live session, and because its scenario reseeds
+      // the upstream table the stills above have already been taken of.
+      name: "mcp-poster",
+      testMatch: /mcp-approval-poster\.spec\.ts/,
+      use: {
+        ...devices["Desktop Chrome"],
+        viewport: VIEWPORT,
+        deviceScaleFactor: 1,
+      },
+    },
+    {
+      name: "mcp-video",
+      testMatch: /mcp-approval-video\.spec\.ts/,
       use: {
         ...devices["Desktop Chrome"],
         viewport: VIEWPORT,

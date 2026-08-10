@@ -119,6 +119,33 @@ async function ensureGrant(
   return created.uid;
 }
 
+/**
+ * Mint a `dbb_` API key owned by the connector, for the MCP scenario.
+ *
+ * `POST /keys` always creates a key for the *caller*, and it is gated on
+ * requireWebSessionOrBasicAuth — an API key cannot mint another. So this logs
+ * in as the connector rather than reusing the admin client above: the agent has
+ * to act as the user whose grant carries the approval pattern, or its statement
+ * would never be held.
+ *
+ * The plaintext key is shown exactly once, at creation. Demo mode drops every
+ * table on startup and the instance is torn down with the run, so a fresh key
+ * per run is both necessary and free.
+ */
+async function mintConnectorKey(): Promise<string> {
+  const asConnector = new ShowcaseApi(API_URL);
+  await asConnector.login(CONNECTOR.username, CONNECTOR.password);
+
+  const created = await asConnector.post<{ key: string }>("/keys", {
+    name: "claude-code (showcase)",
+  });
+  if (!created.key?.startsWith("dbb_")) {
+    throw new Error("showcase: POST /keys did not return a dbb_ key");
+  }
+
+  return created.key;
+}
+
 export default async function globalSetup(): Promise<void> {
   mkdirSync(OUT_DIR, { recursive: true });
   mkdirSync(WORK_DIR, { recursive: true });
@@ -138,6 +165,9 @@ export default async function globalSetup(): Promise<void> {
   const userUid = await connectorUid(api);
   const grantUid = await ensureGrant(api, definitionUid, userUid, serverUid);
 
+  console.log("[showcase] minting the connector's MCP API key");
+  const connectorApiKey = await mintConnectorKey();
+
   console.log("[showcase] generating proxy traffic");
   await generateTraffic();
 
@@ -153,6 +183,7 @@ export default async function globalSetup(): Promise<void> {
     definitionUid,
     connectorUid: userUid,
     grantUid,
+    connectorApiKey,
     fixedTime: fixedTime().toISOString(),
   });
 
