@@ -1021,6 +1021,44 @@ func applyAuthProvisioningAliases(k *koanf.Koanf) error {
 	return nil
 }
 
+// validate refuses a configuration the process should not boot with. Every
+// check here is one where the alternative — starting anyway — means failing
+// later, at a worse moment, in a way that looks like a different bug.
+func validate(cfg *Config) error {
+	if cfg.DSN == "" {
+		return ErrDSNRequired
+	}
+
+	if cfg.Dump.UploadURL != "" && cfg.Dump.Dir == "" {
+		return ErrDumpUploadNeedsDir
+	}
+
+	// Fail here rather than in the proxy: a typo'd TLS ceiling must stop the
+	// process, not silently leave the listener on the default.
+	if _, err := cfg.MSSQL.ResolveTLSMaxVersion(); err != nil {
+		return err
+	}
+
+	if cfg.OIDCAuth.Enabled() && (cfg.OIDCAuth.ClientID == "" || cfg.OIDCAuth.ClientSecret == "") {
+		return ErrOIDCClientCredentialsRequired
+	}
+
+	// The mapping decides who is an admin, so it is parsed here — a typo stops
+	// the process instead of quietly degrading to "nobody matches", which at
+	// the next login would demote every mapped user.
+	if _, err := cfg.OIDCAuth.ParseRoleMapping(); err != nil {
+		return err
+	}
+
+	// Same reasoning one rung down: the default role is what an unmatched user
+	// ends up with, so a typo must not survive startup.
+	if err := cfg.Auth.Validate(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // Load reads configuration from environment variables and optional config file.
 // Priority order: CLI overrides > Environment variables > Config file > Defaults
 func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
@@ -1078,35 +1116,7 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 		override(cfg)
 	}
 
-	// Validate required fields
-	if cfg.DSN == "" {
-		return nil, ErrDSNRequired
-	}
-
-	if cfg.Dump.UploadURL != "" && cfg.Dump.Dir == "" {
-		return nil, ErrDumpUploadNeedsDir
-	}
-
-	// Fail here rather than in the proxy: a typo'd TLS ceiling must stop the
-	// process, not silently leave the listener on the default.
-	if _, err := cfg.MSSQL.ResolveTLSMaxVersion(); err != nil {
-		return nil, err
-	}
-
-	if cfg.OIDCAuth.Enabled() && (cfg.OIDCAuth.ClientID == "" || cfg.OIDCAuth.ClientSecret == "") {
-		return nil, ErrOIDCClientCredentialsRequired
-	}
-
-	// The mapping decides who is an admin, so it is parsed here — a typo stops
-	// the process instead of quietly degrading to "nobody matches", which at
-	// the next login would demote every mapped user.
-	if _, err := cfg.OIDCAuth.ParseRoleMapping(); err != nil {
-		return nil, err
-	}
-
-	// Same reasoning one rung down: the default role is what an unmatched user
-	// ends up with, so a typo must not survive startup.
-	if err := cfg.Auth.Validate(); err != nil {
+	if err := validate(cfg); err != nil {
 		return nil, err
 	}
 
