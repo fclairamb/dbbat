@@ -1,3 +1,8 @@
+---
+model: opus
+effort: high
+---
+
 # Seal the connection's query-chain head stamp
 
 ## Goal
@@ -123,3 +128,56 @@ Whichever is chosen, the docs corrected alongside this todo have to be updated
 again to match, and the "what it detects" table in
 `website/docs/features/audit-chain.md` needs its trailing-deletion row fixed
 back once the stamp is genuinely unforgeable.
+
+## Resolved open questions
+
+> Options, roughly in order of preference: 1. Verify against both formats,
+> write only the new one. 2. Migrate the existing stamps. 3. Version the
+> column.
+
+**Decision: option 3 — version the column.** Option 1 was listed first, but it
+leaves the hole permanently open: an attacker who can write the database can
+always *downgrade* a stamp to the legacy format, so the forgery this spec
+exists to stop still works. A spec whose entire purpose is an unforgeable stamp
+should not ship with a standing downgrade path.
+
+Implement it as:
+
+- A migration adding `query_chain_stamp_version SMALLINT NOT NULL DEFAULT 0`
+  to `connections` (up **and** down, per the repo's migration convention).
+- **The version is inside the MAC.** `queryChainStampMAC` covers
+  `domain ‖ connection_uid ‖ version ‖ query_chain_len ‖ head_mac`. This is the
+  point of the option — without it, setting the column back to `0` buys the
+  attacker option 1's downgrade for free.
+- Write version `1` from now on, from **both** writers (`Store.CloseConnection`
+  and the reconcile path).
+- `checkStampedHead` branches on the stored version: version `1` compares
+  `conn.QueryChainLen` against `result.Verified` first (precise message) and
+  then the keyed stamp; version `0` keeps today's legacy raw-`HeadMAC`
+  comparison so existing 0.23.x stores do not cry wolf.
+- Count the legacy rows and surface them. Add a `legacy_stamps` counter to
+  `QueryChainsResult`, printed by `dbbat audit verify --queries` and returned
+  by `GET /api/v1/audit/verify/queries`, so an operator can see how much of the
+  store is still on the forgeable stamp. A version-`0` row is **not** a break —
+  it is a weaker result, reported as such.
+- Test the **re-stamping** attacker (the shape of
+  `TestRowChainDetectsRestampedTrailingDeletion`), plus a downgrade attacker who
+  rewrites a sealed row back to version `0` with a raw head MAC — that must be
+  detected, and it is the specific thing option 1 could not do.
+
+> [the reconcile stamp] does it as a correlated subquery in the reconcile's
+> `UPDATE` … A keyed stamp cannot be computed in SQL at all.
+
+**Confirmed, and in scope.** Rework `Store.orphanCloseQuery` into
+select-seal-write in Go, **inside one transaction with the close**, exactly as
+the spec describes — do not leave a second window between marking a row
+disconnected and sealing its tail.
+`TestQueryChainOrphanStampCostScalesWithOrphans` stays the cost guard and must
+still pass; if the rework changes its constant factor, adjust the bound
+deliberately and say so in the commit body, rather than deleting the test.
+
+**Docs.** Update `docs/audit-chain.md`, `website/docs/features/audit-chain.md`
+and `website/docs/compliance.md`: the per-connection stamp is now keyed, the
+trailing-deletion row in the "what it detects" table goes back to detected
+(qualified for version-`0` rows), and the pointer to this todo is replaced by a
+note that pre-upgrade stamps remain legacy until their session closes.
