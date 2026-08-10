@@ -564,6 +564,11 @@ func TestIntegration_CursorIDLearningMissRate(t *testing.T) {
 // is the leak this bound is here to catch. Anything between is a partial
 // regression and should fail too, so the bound sits well below 40 rather than
 // just under it.
+//
+// Measured on gvenzl/oracle-free:23-slim: 66 close-cursors frames decoded, a
+// peak of **3** cursors tracked at once and 1 left at the end. The headroom is
+// for the other images CI runs (18c XE) and for clients that batch differently,
+// not because 20 is expected.
 const trackerPeakBound = 20
 
 // assertTrackerStaysBounded is the standing answer to the question the spec

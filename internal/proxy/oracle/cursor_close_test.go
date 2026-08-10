@@ -164,13 +164,13 @@ func TestDecodeCloseCursorsRejectsWhatItCannotRead(t *testing.T) {
 func TestDecodeCloseCursorsNeverPanics(t *testing.T) {
 	t.Parallel()
 
-	real := []byte{
+	recorded := []byte{
 		0x11, 0x69, 0x77, 0x01, 0x01, 0x03, 0x01, 0x05, 0x01, 0x03, 0x01, 0x04,
 		0x03, 0x5e, 0x78, 0x02, 0x80, 0x29,
 	}
 
-	for i := 0; i <= len(real); i++ {
-		_, _ = decodeCloseCursors(real[:i])
+	for i := 0; i <= len(recorded); i++ {
+		_, _ = decodeCloseCursors(recorded[:i])
 	}
 
 	hostile := [][]byte{
