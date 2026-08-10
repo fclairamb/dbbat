@@ -44,3 +44,32 @@ Two options, in increasing cost:
 Tests belong in `internal/auth/oidc/provider_test.go` (the httptest issuer
 signs arbitrary claims, so an overage token is a two-line fixture) and in
 `internal/api/oauth_roles_test.go` for the "roles untouched" outcome.
+
+## Resolved open questions
+
+> Two options, in increasing cost: 1. Detect and fail closed. 2. Follow the
+> pointer [Microsoft Graph `getMemberObjects`].
+
+**Decision: option 1 only.** Detect the overage claim and fail closed. Do not
+add the Graph call — it puts a second outbound dependency and a timeout budget
+on the user-blocking login path, and the spec is explicit that it is only worth
+it once a real deployment asks. Nobody has.
+
+Concretely:
+
+- In `extractGroups` (`internal/auth/oidc/provider.go`), recognise
+  `_claim_names` carrying an entry for the **configured** groups claim (not
+  just the literal `groups`) and surface it as a distinct signal on
+  `auth.OAuthUser` — a boolean like `GroupsOverage`, not an error, so login
+  itself still succeeds.
+- In `syncOAuthRoles` (`internal/api/oauth_roles.go`), treat that signal as
+  "group membership is unknown", not "member of nothing": leave every role
+  exactly as it is, apply no floor, and log at WARN naming the user and the
+  claim. An overage must never demote anyone.
+- The distinction that matters in the tests: a token with a genuinely empty
+  groups claim still applies the mapping (and still floors at the default
+  role), while an overage token leaves roles untouched. Cover both.
+- Mention the overage behaviour in the groups-claim part of
+  `website/docs/configuration/sso.md`, next to the existing "Groups assigned to
+  the application" guidance — the docs currently steer around the problem and
+  should now also say what happens if an operator hits it anyway.
