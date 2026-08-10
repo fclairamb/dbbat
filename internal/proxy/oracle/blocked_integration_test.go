@@ -14,14 +14,14 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
-// refusalTimeout bounds a statement dbbat is expected to refuse.
+// refusalTimeout is how long a statement dbbat is expected to refuse is given
+// to come back before the test stops waiting on it.
 //
 // It should not be needed, and the fact that it is is a bug of its own: the
-// frame writeTTCError synthesises is a TTC Response (0x08), not the OER (0x04)
+// frame writeTTCError synthesizes is a TTC Response (0x08), not the OER (0x04)
 // an Oracle server ends a call with, so a client parses it as something else
 // and then blocks reading a message that never arrives. Measured here against
-// Oracle 23ai Free, go-ora's ExecContext parks in select forever. That is
-// tracked in
+// Oracle 23ai Free, go-ora's ExecContext parks forever. That is tracked in
 // specs/todos/2026-08-10-17-oracle-refusal-frame-hangs-the-client.md; when it
 // lands this bound comes out and the assertions below become "the client got
 // an ORA error" rather than "the call did not complete".
@@ -106,16 +106,32 @@ func TestIntegration_BlockedStatementsAreLogged(t *testing.T) {
 }
 
 // mustNotComplete runs a statement dbbat is expected to refuse and requires
-// that it does not succeed. See refusalTimeout for why this is not simply
-// `require.Error` on an unbounded call.
+// that it never reports success.
+//
+// The call runs on its own goroutine and is abandoned if it does not come back
+// within refusalTimeout, because there is currently no way to interrupt it: a
+// context deadline does not help — go-ora's Stmt.ExecContext answers
+// `case <-ctx.Done()` with `<-execDone`, so it waits for the inner read
+// regardless — and that read is parked on a frame the proxy will never
+// complete. Abandoning it costs a goroutine and the client's single
+// connection, which is why every check after a refusal uses a fresh one.
 func (e *oracleThroughProxy) mustNotComplete(t *testing.T, client *sql.DB, query string) {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), refusalTimeout)
-	defer cancel()
+	done := make(chan error, 1)
 
-	_, err := client.ExecContext(ctx, query)
-	require.Error(t, err, "a refused statement must never report success: %q", query)
+	go func() {
+		_, err := client.ExecContext(context.Background(), query)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		require.Error(t, err, "a refused statement must never report success: %q", query)
+	case <-time.After(refusalTimeout):
+		t.Logf("the refused statement %q never ended the client's call — "+
+			"expected today, see specs/todos/2026-08-10-17-oracle-refusal-frame-hangs-the-client.md", query)
+	}
 }
 
 // probeRowCount reads the seeded table over a connection that has not been
