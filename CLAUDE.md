@@ -56,7 +56,7 @@ PR titles MUST follow the conventional commit format:
 - **Capture format**: Protocol-agnostic pcapng, readable by tcpdump/Wireshark (`docs/dump-format.md`)
 - **Live stream + approvals**: WebSocket event stream and pattern-triggered approval holds (`docs/approvals.md`)
 - **Tamper-evident audit trail**: `audit_log` and `queries` are HMAC-chained with a key HKDF-derived from `DBB_KEY`; `dbbat audit verify` walks the chain (`docs/audit-chain.md`)
-- **MCP (AI agents)**: Streamable-HTTP endpoint at `/api/v1/mcp` via `github.com/modelcontextprotocol/go-sdk`. Agent statements are executed by dialing dbbat's **own** proxy listener over loopback as the API key's owner — never a parallel internal path (`docs/mcp.md`)
+- **MCP (AI agents)**: Streamable-HTTP endpoint at `/api/v1/mcp` via `github.com/modelcontextprotocol/go-sdk`. Agent statements are executed by dialing dbbat's **own** proxy listener over loopback as the API key's owner — never a parallel internal path. All five protocols (`docs/mcp.md`)
 
 ## Project Structure
 
@@ -206,7 +206,7 @@ This applies even when the current task is otherwise complete — capture the fo
 | `DBB_APPROVAL_ENABLED` | Enable pattern-triggered approval holds (four-eyes on a statement). **Off by default** — a hold blocks a live database connection on a human. See `docs/approvals.md` | No |
 | `DBB_APPROVAL_SLACK_DELAY` | How long a hold stays pending before escalating to Slack (default: `30s`; `0` disables) | No |
 | `DBB_APPROVAL_SLACK_SQL` | Include the (truncated) SQL text in the Slack escalation (default: `true`) | No |
-| `DBB_MCP_ENABLED` | Serve the Model Context Protocol endpoint at `POST /api/v1/mcp` for AI agents (default: `true`). API-key authenticated; every agent statement runs through the proxy listener over loopback, so grants, quotas, logging and approval holds apply unchanged. Phase 1 covers PostgreSQL and MySQL/MariaDB. `false` removes the routes entirely. See `docs/mcp.md` | No |
+| `DBB_MCP_ENABLED` | Serve the Model Context Protocol endpoint at `POST /api/v1/mcp` for AI agents (default: `true`). API-key authenticated; every agent statement runs through the proxy listener over loopback, so grants, quotas, logging and approval holds apply unchanged. All five protocols are covered; on MongoDB the statement is `<command> <extJSON>` rather than SQL. `false` removes the routes entirely. See `docs/mcp.md` | No |
 
 Note: If no encryption key is provided, one is created at `~/.dbbat/key`.
 

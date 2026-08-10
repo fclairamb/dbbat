@@ -4,10 +4,14 @@
 // # The one design decision that matters
 //
 // Every statement an agent runs is executed by **dialing dbbat's own proxy
-// listener over loopback** with a real protocol client (pgx for PostgreSQL,
-// go-mysql for MySQL/MariaDB), authenticating as the API key's owner with that
+// listener over loopback** with a real protocol client (pgx, go-mysql, go-ora,
+// go-mssqldb, mongo-driver), authenticating as the API key's owner with that
 // same key as the password — which is exactly how any `dbb_` key holder
 // connects with psql or the mysql CLI.
+//
+// All five protocols dbbat proxies are covered. Each one is a file next to
+// this doc plus a case in LoopbackExecutor.Execute; none of them adds
+// enforcement, because there is nothing here to enforce with.
 //
 // There is deliberately no internal execution path. The consequence is that
 // authentication, grant resolution, `read_only`/`block_ddl`/`block_copy`,

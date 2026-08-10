@@ -15,7 +15,7 @@ The demo is the point: an agent issues `DELETE FROM users`, the statement freeze
 
 Most database MCP servers hold a connection string and run whatever the model asks. The governance, if there is any, lives in the tool layer — which is to say, in the same place the model is trying to talk its way past.
 
-DBBat inverts that. **An agent's statement is executed by dialing DBBat's own proxy listener** with a real PostgreSQL or MySQL client, authenticating as the API key's owner:
+DBBat inverts that. **An agent's statement is executed by dialing DBBat's own proxy listener** with a real database client — the same library a human's tool would use — authenticating as the API key's owner:
 
 ```
 Claude ──MCP/HTTP──► DBBat API ──loopback──► DBBat proxy ──► your database
@@ -52,15 +52,31 @@ Sessions are stateless: every request is re-authenticated, so revoking a key sto
 
 ## Supported databases
 
-| Protocol | Status |
-|---|---|
-| PostgreSQL | Supported |
-| MySQL / MariaDB | Supported |
-| Oracle | Planned |
-| MongoDB | Planned |
-| Microsoft SQL Server | Planned |
+Every database DBBat proxies.
 
-A grant on a not-yet-supported protocol still shows up in `list_databases`, flagged `supported: false`, so the agent knows the access exists and that this door is not open yet.
+| Protocol | Status | What an agent sends |
+|---|---|---|
+| PostgreSQL | Supported | SQL, `$1…` bind parameters |
+| MySQL / MariaDB | Supported | SQL, `?` bind parameters |
+| Oracle | Supported | SQL, `:1…` bind parameters |
+| Microsoft SQL Server | Supported | SQL, `@p1…` bind parameters |
+| MongoDB | Supported | one command, as `<command> <extended JSON>` |
+
+The proxy listener for the protocol has to be running in the same process. If it is not, the tool says so rather than reaching for the database another way — there is no other way.
+
+### MongoDB has no SQL
+
+So `query` takes the command in the form DBBat itself writes into the query log:
+
+```json
+{ "database": "prod-mongo", "sql": "find {\"find\":\"users\",\"filter\":{\"active\":true},\"limit\":10}" }
+```
+
+That matters for approval patterns: a pattern matches the same text whether the command came from `mongosh` or from an agent. `describe` lists collections, and describing one reports the fields of a **sampled document** — MongoDB has no column catalog, and the tool says so instead of inventing a schema.
+
+### Oracle: read the approval caveat
+
+Oracle's wire protocol is hand-rolled in DBBat and a statement's SQL is located heuristically, so a frame DBBat cannot decode is forwarded ungated *and* unlogged. That is a property of the Oracle proxy, not of MCP — an agent is in exactly the same position as a human at `sqlplus` — but do not read "Oracle is supported" as "Oracle holds are airtight". Cursor re-executions DBBat saw parsed *are* gated, on every execution.
 
 ## The tools
 
@@ -79,7 +95,7 @@ Four, deliberately small.
 
 `max_rows` is a request, not a decision. Unset gives 200; anything above 1000 gives 1000 with `truncated: true`. The cap is applied **before** the statement runs, so a model that decides it needs a million rows simply does not get them.
 
-On MySQL, DBBat stops reading the result set at the cap rather than buffering it — an unbounded `SELECT *` cannot turn one tool call into an out-of-memory.
+DBBat stops reading the result set at the cap rather than buffering it — an unbounded `SELECT *`, or a MongoDB cursor over a large collection, cannot turn one tool call into an out-of-memory.
 
 The statement itself is never rewritten. DBBat does not quietly append a `LIMIT`: what runs is what is logged, and what approval patterns match.
 
