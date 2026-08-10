@@ -111,6 +111,8 @@ func TestBlockedStatements_ArePersisted(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run("simple/"+tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			s := newRefusingSession(t, dataStore, tt.controls)
 
 			require.ErrorIs(t, s.handleQuery(&pgproto3.Query{String: tt.sql}), tt.wantErr)
@@ -120,6 +122,8 @@ func TestBlockedStatements_ArePersisted(t *testing.T) {
 		})
 
 		t.Run("extended/"+tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			s := newRefusingSession(t, dataStore, tt.controls)
 
 			require.ErrorIs(t, s.handleParse(&pgproto3.Parse{Name: "st", Query: tt.sql}), tt.wantErr)

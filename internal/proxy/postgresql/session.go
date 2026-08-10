@@ -96,7 +96,7 @@ type extendedQueryState struct {
 
 	// errorUntilSync mirrors PostgreSQL's own extended-protocol error state:
 	// once a message in a batch fails, every following message is discarded
-	// until the client sends Sync. dbbat has to honour it for the statements
+	// until the client sends Sync. dbbat has to honor it for the statements
 	// *it* refuses too — otherwise a refused Parse is followed by a Bind and an
 	// Execute for a statement upstream never heard of, which both confuses
 	// upstream and queues a phantom pendingQuery here that the next
@@ -403,53 +403,8 @@ func (s *Session) proxyClientToUpstream() error {
 			continue
 		}
 
-		// Handle query interception for Simple and Extended Query Protocols
-		var interceptErr error
-
-		switch m := msg.(type) {
-		case *pgproto3.Query:
-			interceptErr = s.handleQuery(m)
-		case *pgproto3.Parse:
-			interceptErr = s.handleParse(m)
-		case *pgproto3.Bind:
-			s.handleBind(m)
-		case *pgproto3.Execute:
-			interceptErr = s.handleExecute(m)
-		case *pgproto3.Describe:
-			s.handleDescribe(m)
-		case *pgproto3.Close:
-			s.handleClose(m)
-		case *pgproto3.CopyData:
-			// Client sending COPY data to server (COPY FROM)
-			if s.copyState != nil && s.copyState.direction == "in" {
-				s.captureCopyData(m.Data)
-			}
-		case *pgproto3.CopyDone:
-			// Client finished sending COPY data
-			if s.copyState != nil && s.copyState.direction == "in" {
-				s.logger.InfoContext(s.ctx, "COPY IN done (from client)", slog.Int64("total_bytes", s.copyState.totalBytes), slog.Bool("truncated", s.copyState.truncated))
-			}
-		case *pgproto3.CopyFail:
-			// Client aborted COPY
-			if s.copyState != nil {
-				s.logger.WarnContext(s.ctx, "COPY failed", slog.String("message", m.Message))
-				s.copyState = nil
-			}
-		}
-
-		if interceptErr != nil {
-			// A refusal inside an extended-query batch follows the protocol's
-			// error rule: ErrorResponse now, the rest of the batch discarded,
-			// and ReadyForQuery only once the client's Sync has been through
-			// upstream. The simple-query path owns its whole exchange, so it
-			// gets the ReadyForQuery straight away.
-			if isExtendedQueryMessage(msg) {
-				s.extendedState.errorUntilSync = true
-
-				s.sendQueryError(interceptErr, false)
-			} else {
-				s.sendQueryError(interceptErr, true)
-			}
+		if interceptErr := s.interceptClientMessage(msg); interceptErr != nil {
+			s.answerRefusal(msg, interceptErr)
 
 			continue
 		}
@@ -461,6 +416,60 @@ func (s *Session) proxyClientToUpstream() error {
 			return fmt.Errorf("failed to send to upstream: %w", err)
 		}
 	}
+}
+
+// interceptClientMessage runs one client message through the gate for its
+// protocol. A non-nil result means the message must not be forwarded and the
+// client is owed a refusal.
+func (s *Session) interceptClientMessage(msg pgproto3.FrontendMessage) error {
+	switch m := msg.(type) {
+	case *pgproto3.Query:
+		return s.handleQuery(m)
+	case *pgproto3.Parse:
+		return s.handleParse(m)
+	case *pgproto3.Bind:
+		s.handleBind(m)
+	case *pgproto3.Execute:
+		return s.handleExecute(m)
+	case *pgproto3.Describe:
+		s.handleDescribe(m)
+	case *pgproto3.Close:
+		s.handleClose(m)
+	case *pgproto3.CopyData:
+		// Client sending COPY data to server (COPY FROM)
+		if s.copyState != nil && s.copyState.direction == "in" {
+			s.captureCopyData(m.Data)
+		}
+	case *pgproto3.CopyDone:
+		// Client finished sending COPY data
+		if s.copyState != nil && s.copyState.direction == "in" {
+			s.logger.InfoContext(s.ctx, "COPY IN done (from client)", slog.Int64("total_bytes", s.copyState.totalBytes), slog.Bool("truncated", s.copyState.truncated))
+		}
+	case *pgproto3.CopyFail:
+		// Client aborted COPY
+		if s.copyState != nil {
+			s.logger.WarnContext(s.ctx, "COPY failed", slog.String("message", m.Message))
+			s.copyState = nil
+		}
+	}
+
+	return nil
+}
+
+// answerRefusal tells the client dbbat will not forward the message it just
+// sent.
+//
+// A refusal inside an extended-query batch follows the protocol's error rule:
+// ErrorResponse now, the rest of the batch discarded, and ReadyForQuery only
+// once the client's Sync has been through upstream. The simple-query path owns
+// its whole exchange, so it gets the ReadyForQuery straight away.
+func (s *Session) answerRefusal(msg pgproto3.FrontendMessage, refusal error) {
+	extended := isExtendedQueryMessage(msg)
+	if extended {
+		s.extendedState.errorUntilSync = true
+	}
+
+	s.sendQueryError(refusal, !extended)
 }
 
 // isExtendedQueryMessage reports whether a client message belongs to the
