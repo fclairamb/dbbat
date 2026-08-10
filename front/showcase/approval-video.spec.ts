@@ -28,7 +28,7 @@ import { ShowcaseApi, waitForLiveConnection } from "./lib/api";
 import { cursorClick, installFakeCursor } from "./lib/cursor";
 import { CLIP_PACING, playHold } from "./lib/hold";
 import { writeLine } from "./lib/terminal";
-import { proxyClient } from "./lib/traffic";
+import { proxyClient, seedUpstream } from "./lib/traffic";
 
 const VIDEO_DIR = join(WORK_DIR, "video");
 
@@ -44,6 +44,13 @@ test("video: an UPDATE is held for approval and released from the UI", async ({
 
   const api = new ShowcaseApi(API_URL);
   await api.login(ADMIN.username, ADMIN.password);
+
+  // Put the two `starter` rows back. The poster project runs first and its own
+  // UPDATE already flipped them, so without this the released statement here
+  // reports `UPDATE 0` — true, and a poor advertisement for the thing the clip
+  // is about. Written straight to the upstream, so it adds nothing to dbbat's
+  // connection or query lists.
+  await seedUpstream();
 
   // A live session through the proxy — this is what the operator will watch.
   const client: Client = proxyClient();

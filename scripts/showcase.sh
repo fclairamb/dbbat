@@ -31,7 +31,9 @@ SHOWCASE_WORK="${SHOWCASE_WORK:-${REPO_ROOT}/front/showcase/.artifacts}"
 SHOWCASE_PG_IMAGE="${SHOWCASE_PG_IMAGE:-postgres:15}"
 SHOWCASE_CONTAINER="${SHOWCASE_CONTAINER:-dbbat-showcase-postgres}"
 SHOWCASE_PG_TIMEOUT="${SHOWCASE_PG_TIMEOUT:-60}"  # seconds to wait for the upstream (pg_isready + demo db)
-SHOWCASE_PROJECT="${SHOWCASE_PROJECT:-}"        # "screenshots" | "poster" | "video" | ""
+# One or more Playwright projects, comma-separated; empty runs them all.
+# "screenshots" | "poster" | "video" | "mcp-poster" | "mcp-video"
+SHOWCASE_PROJECT="${SHOWCASE_PROJECT:-}"
 SHOWCASE_SKIP_BUILD="${SHOWCASE_SKIP_BUILD:-0}"
 SHOWCASE_SKIP_TRANSCODE="${SHOWCASE_SKIP_TRANSCODE:-0}"
 SHOWCASE_SKIP_WEBP="${SHOWCASE_SKIP_WEBP:-0}"   # leave the PNGs unaccompanied
@@ -237,7 +239,12 @@ curl -fsS "http://localhost:${SHOWCASE_API_PORT}/api/v1/health" >/dev/null \
 log "running the showcase Playwright project"
 PLAYWRIGHT_ARGS=(test --config=showcase/playwright.config.ts)
 if [ -n "${SHOWCASE_PROJECT}" ]; then
-  PLAYWRIGHT_ARGS+=(--project="${SHOWCASE_PROJECT}")
+  # Comma-separated, because a clip and its poster are two projects and asking
+  # for one without the other is almost never what you meant.
+  IFS=',' read -r -a showcase_projects <<< "${SHOWCASE_PROJECT}"
+  for project in "${showcase_projects[@]}"; do
+    [ -n "${project}" ] && PLAYWRIGHT_ARGS+=(--project="${project}")
+  done
 fi
 (cd front && bunx playwright "${PLAYWRIGHT_ARGS[@]}")
 

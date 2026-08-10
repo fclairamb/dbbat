@@ -15,6 +15,17 @@ export interface ShowcaseState {
   connectorUid: string;
   /** Grant carrying the approval pattern. */
   grantUid: string;
+  /**
+   * A `dbb_` API key owned by that same user, for the MCP scenario.
+   *
+   * The MCP endpoint accepts nothing else (see internal/api/mcp.go): the key is
+   * not only the caller's credential, it is also the password the loopback
+   * protocol client authenticates to the proxy with. It is minted for the
+   * *connector*, not for the admin, so the agent's statements are attributed to
+   * the same user the human is watching — and so self-approval never comes into
+   * it, since the browser half is logged in as the admin.
+   */
+  connectorApiKey: string;
   /** Wall clock the browser is pinned to, ISO-8601. */
   fixedTime: string;
 }
