@@ -409,13 +409,13 @@ func TestListDatabasesReportsGrantShape(t *testing.T) {
 	assert.NotEmpty(t, db.GrantExpiresAt)
 }
 
-// TestListDatabasesFlagsUnsupportedProtocols keeps Phase 2 protocols visible
-// rather than invisible: an agent that cannot query Oracle should be told
+// TestListDatabasesFlagsUnsupportedProtocols keeps a database MCP cannot drive
+// visible rather than invisible: an agent that cannot query it should be told
 // that, not left believing the grant does not exist.
 func TestListDatabasesFlagsUnsupportedProtocols(t *testing.T) {
 	t.Parallel()
 
-	f := newFixture(t, store.ProtocolMongoDB, store.GrantDefinition{}, nil)
+	f := newFixture(t, store.ProtocolSSH, store.GrantDefinition{}, nil)
 
 	_, out, err := f.server.toolListDatabases(f.caller)(context.Background(), nil, ListDatabasesInput{})
 	require.NoError(t, err)
@@ -455,6 +455,20 @@ func TestDescribeUsesBoundParameters(t *testing.T) {
 	assert.Contains(t, sqlText, "INFORMATION_SCHEMA.COLUMNS")
 	assert.Contains(t, sqlText, "@p2")
 	assert.Equal(t, []any{"orders", "dbo"}, params)
+
+	// MongoDB has no SQL and no bind parameters, so the same rule is kept the
+	// only other way it can be: the collection name is a value handed to the
+	// BSON encoder, never text concatenated into the command.
+	sqlText, params, err = introspectionSQL(store.ProtocolMongoDB, `users","drop":"accounts`, "")
+	require.NoError(t, err)
+	assert.Nil(t, params)
+	assert.NotContains(t, sqlText, `"drop":"accounts"`)
+	assert.Contains(t, sqlText, `\"drop\":\"accounts`, "the name must be escaped inside the JSON string")
+
+	sqlText, params, err = introspectionSQL(store.ProtocolMongoDB, "", "")
+	require.NoError(t, err)
+	assert.Nil(t, params)
+	assert.Contains(t, sqlText, "listCollections")
 
 	_, _, err = introspectionSQL(store.ProtocolSSH, "", "")
 	require.ErrorIs(t, err, ErrProtocolUnsupported)

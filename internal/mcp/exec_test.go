@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.mongodb.org/mongo-driver/v2/bson"
 
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -22,9 +23,7 @@ func TestSupportedProtocol(t *testing.T) {
 	assert.True(t, SupportedProtocol(store.ProtocolMariaDB))
 	assert.True(t, SupportedProtocol(store.ProtocolOracle))
 	assert.True(t, SupportedProtocol(store.ProtocolMSSQL))
-
-	// Still to come.
-	assert.False(t, SupportedProtocol(store.ProtocolMongoDB))
+	assert.True(t, SupportedProtocol(store.ProtocolMongoDB))
 
 	// An SSH-only entry is a bastion, not a database: there is no listener to
 	// dial and no statement to run.
@@ -73,7 +72,7 @@ func TestLoopbackExecutorRefusesDisabledListener(t *testing.T) {
 
 	for _, protocol := range []string{
 		store.ProtocolPostgreSQL, store.ProtocolMySQL, store.ProtocolMariaDB,
-		store.ProtocolOracle, store.ProtocolMSSQL,
+		store.ProtocolOracle, store.ProtocolMongoDB, store.ProtocolMSSQL,
 	} {
 		_, err := e.Execute(context.Background(), ExecRequest{Protocol: protocol})
 		require.ErrorIsf(t, err, ErrListenerDisabled, "protocol %s", protocol)
@@ -104,6 +103,7 @@ func TestLoopbackExecutorDialsTheRightListener(t *testing.T) {
 		{store.ProtocolMySQL, LoopbackListeners{MySQL: dead}, "SELECT 1"},
 		{store.ProtocolMariaDB, LoopbackListeners{MySQL: dead}, "SELECT 1"},
 		{store.ProtocolOracle, LoopbackListeners{Oracle: dead}, "SELECT 1 FROM dual"},
+		{store.ProtocolMongoDB, LoopbackListeners{MongoDB: dead}, `ping {"ping":1}`},
 		{store.ProtocolMSSQL, LoopbackListeners{MSSQL: dead}, "SELECT 1"},
 	}
 
@@ -275,4 +275,122 @@ func TestContainsIdentifier(t *testing.T) {
 	assert.False(t, containsIdentifier("SELECT outputs FROM t", "output"))
 	assert.False(t, containsIdentifier("SELECT my_output FROM t", "output"))
 	assert.False(t, containsIdentifier("SELECT 1", "output"))
+}
+
+// TestParseMongoStatement pins the statement shape the spec chose over a second
+// `run_command` tool: `<command> <extended JSON>`, which is byte-for-byte what
+// the MongoDB proxy renders into /queries and matches approval patterns
+// against.
+func TestParseMongoStatement(t *testing.T) {
+	t.Parallel()
+
+	command, doc, err := parseMongoStatement(`find {"find":"users","filter":{"active":true},"limit":10}`)
+	require.NoError(t, err)
+	assert.Equal(t, "find", command)
+	require.NotEmpty(t, doc)
+	assert.Equal(t, "find", doc[0].Key)
+	assert.Equal(t, "users", doc[0].Value)
+
+	// The leading word is a readability affordance: MongoDB names a command by
+	// the document's first key, so a bare document works too.
+	command, _, err = parseMongoStatement(`  {"ping": 1}  `)
+	require.NoError(t, err)
+	assert.Equal(t, "ping", command)
+
+	// $db comes from the connection; a second one in the body would be a
+	// duplicate field on the wire.
+	_, doc, err = parseMongoStatement(`find {"find":"users","$db":"elsewhere"}`)
+	require.NoError(t, err)
+
+	for _, element := range doc {
+		assert.NotEqual(t, "$db", element.Key)
+	}
+}
+
+func TestParseMongoStatementRejectsBadInput(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := parseMongoStatement("SELECT 1")
+	require.ErrorIs(t, err, ErrMongoCommandSyntax)
+
+	_, _, err = parseMongoStatement(`find {"find":`)
+	require.ErrorIs(t, err, ErrMongoCommandSyntax)
+
+	_, _, err = parseMongoStatement(`{}`)
+	require.ErrorIs(t, err, ErrMongoCommandEmpty)
+
+	// A mismatch is a real bug in the agent's statement — the document's first
+	// key is what MongoDB would run — so it is refused rather than guessed at.
+	_, _, err = parseMongoStatement(`find {"insert":"users","documents":[{}]}`)
+	require.ErrorIs(t, err, ErrMongoCommandMismatch)
+}
+
+func TestMongoCommandReturnsCursor(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, mongoCommandReturnsCursor("find"))
+	assert.True(t, mongoCommandReturnsCursor("aggregate"))
+	assert.True(t, mongoCommandReturnsCursor("listCollections"))
+	assert.True(t, mongoCommandReturnsCursor("listIndexes"))
+
+	// Running a write through the cursor API would execute it and *then* fail
+	// to parse the reply, which is the one outcome an agent must never see.
+	assert.False(t, mongoCommandReturnsCursor("insert"))
+	assert.False(t, mongoCommandReturnsCursor("update"))
+	assert.False(t, mongoCommandReturnsCursor("ping"))
+	assert.False(t, mongoCommandReturnsCursor("getMore"))
+}
+
+func TestJSONSafeBSON(t *testing.T) {
+	t.Parallel()
+
+	oid := bson.NewObjectID()
+	assert.Equal(t, oid.Hex(), jsonSafeBSON(oid), "an ObjectID must be quotable back into a filter")
+
+	when := time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)
+	assert.Equal(t, "2026-08-10T09:00:00Z", jsonSafeBSON(bson.NewDateTimeFromTime(when)))
+
+	assert.Equal(t, map[string]any{"a": int32(1)},
+		jsonSafeBSON(bson.D{{Key: "a", Value: int32(1)}}))
+	assert.Equal(t, []any{"x", int32(2)}, jsonSafeBSON(bson.A{"x", int32(2)}))
+	assert.Equal(t, "text", jsonSafeBSON("text"))
+}
+
+// TestMongoDocument proves the wire order of a document survives into Columns,
+// which is what lets an agent read a result the way MongoDB laid it out.
+func TestMongoDocument(t *testing.T) {
+	t.Parallel()
+
+	raw, err := bson.Marshal(bson.D{
+		{Key: "_id", Value: int32(1)},
+		{Key: "name", Value: "gadget"},
+		{Key: "qty", Value: int32(7)},
+	})
+	require.NoError(t, err)
+
+	keys, values, err := mongoDocument(raw)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"_id", "name", "qty"}, keys)
+	assert.Equal(t, "gadget", values["name"])
+}
+
+func TestRenderSampledFields(t *testing.T) {
+	t.Parallel()
+
+	columns := renderSampledFields(&QueryResult{
+		Columns: []string{"_id", "name", "tags", "meta", "missing"},
+		Rows: []map[string]any{{
+			"_id":  "68b0…",
+			"name": "gadget",
+			"tags": []any{"a"},
+			"meta": map[string]any{"k": "v"},
+		}},
+	})
+
+	require.Len(t, columns, 5)
+	assert.Equal(t, "string", columns[1].Type)
+	assert.Equal(t, "array", columns[2].Type)
+	assert.Equal(t, "object", columns[3].Type)
+	assert.Equal(t, "null", columns[4].Type)
+	assert.True(t, columns[4].Nullable)
 }

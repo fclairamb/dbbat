@@ -47,19 +47,23 @@ func (s *Server) registerTools(srv *mcpsdk.Server, caller *Caller) {
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:  "query",
-		Title: "Run a SQL statement",
+		Title: "Run a statement",
 		Description: "Run one SQL statement against a granted database. The statement goes through " +
 			"dbbat exactly as a psql or mysql client would: the grant's read-only/DDL controls, " +
 			"quotas, query logging and approval holds all apply. Rows are capped server-side. " +
 			"If the statement is suspended awaiting human approval the result has status " +
-			"'approval_pending' and an execution_id — call await_approval with it rather than retrying.",
+			"'approval_pending' and an execution_id — call await_approval with it rather than retrying. " +
+			`On a MongoDB database there is no SQL: pass the command as "<command> <extended JSON>", ` +
+			`e.g. find {"find":"users","filter":{"active":true},"limit":10}.`,
 	}, s.toolQuery(caller))
 
 	mcpsdk.AddTool(srv, &mcpsdk.Tool{
 		Name:  "describe",
 		Title: "Describe tables and columns",
 		Description: "List the tables of a granted database, or the columns of one table. " +
-			"Introspection runs through the same governed path as query.",
+			"Introspection runs through the same governed path as query. On MongoDB, tables are " +
+			"collections and a described collection reports the fields of one sampled document, " +
+			"since MongoDB has no column catalog.",
 		Annotations: &mcpsdk.ToolAnnotations{ReadOnlyHint: true},
 	}, s.toolDescribe(caller))
 
@@ -141,7 +145,7 @@ func (s *Server) toolListDatabases(caller *Caller) mcpsdk.ToolHandlerFor[ListDat
 // QueryInput is the `query` tool's arguments.
 type QueryInput struct {
 	Database string `json:"database" jsonschema:"database name, as returned by list_databases"`
-	SQL      string `json:"sql" jsonschema:"one SQL statement. It is sent to the database untouched - dbbat never rewrites it"`
+	SQL      string `json:"sql" jsonschema:"one SQL statement, sent to the database untouched - dbbat never rewrites it. On MongoDB, one command as '<command> <extended JSON>'"`
 	Params   []any  `json:"params,omitempty" jsonschema:"bind parameters for the statement's placeholders ($1.. on PostgreSQL, ? on MySQL). Use these for values rather than string-concatenating them into sql"`
 	MaxRows  int    `json:"max_rows,omitempty" jsonschema:"maximum rows to return. Clamped by the server; asking for more than the server cap simply returns the cap with truncated=true"`
 }
@@ -307,7 +311,7 @@ func renderExecution(e *execution, maxRows int) (*QueryOutput, error) {
 // DescribeInput selects what to introspect.
 type DescribeInput struct {
 	Database string `json:"database" jsonschema:"database name, as returned by list_databases"`
-	Table    string `json:"table,omitempty" jsonschema:"table to describe. Omit to list the database's tables instead"`
+	Table    string `json:"table,omitempty" jsonschema:"table (MongoDB: collection) to describe. Omit to list the database's tables instead"`
 	Schema   string `json:"schema,omitempty" jsonschema:"PostgreSQL schema to disambiguate a table name present in several schemas"`
 }
 
@@ -385,9 +389,16 @@ func (s *Server) toolDescribe(caller *Caller) mcpsdk.ToolHandlerFor[DescribeInpu
 		out.Status = StatusOK
 		out.Truncated = e.result != nil && e.result.Truncated
 
-		if in.Table == "" {
+		switch {
+		case in.Table == "":
 			out.Tables = renderTables(e.result)
-		} else {
+		case target.server.Protocol == store.ProtocolMongoDB:
+			// MongoDB has no column catalog, so describe samples a document
+			// instead. Say so: the fields are one document's, not a schema.
+			out.Columns = renderSampledFields(e.result)
+			out.Message = "MongoDB has no column catalog: these are the top-level fields of one " +
+				"sampled document, not a schema. Other documents in the collection may differ."
+		default:
 			out.Columns = renderColumns(e.result)
 		}
 
@@ -458,6 +469,9 @@ func introspectionSQL(protocol, table, schema string) (string, []any, error) {
 			`WHERE table_name = UPPER(:1) AND owner = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') ` +
 			`ORDER BY column_id`, []any{table}, nil
 
+	case store.ProtocolMongoDB:
+		return mongoIntrospection(table)
+
 	case store.ProtocolMSSQL:
 		// Every column is aliased to the lower-case name the renderers key on:
 		// INFORMATION_SCHEMA declares them upper-case, and SQL Server reports
@@ -494,7 +508,9 @@ func renderTables(result *QueryResult) []TableInfo {
 	for _, row := range result.Rows {
 		out = append(out, TableInfo{
 			Schema: rowString(row, "table_schema"),
-			Name:   rowString(row, "table_name"),
+			// "name" is MongoDB's: listCollections answers with documents, not
+			// with an information_schema row.
+			Name: firstString(row, "table_name", "name"),
 		})
 	}
 
