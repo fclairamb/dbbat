@@ -458,6 +458,27 @@ func introspectionSQL(protocol, table, schema string) (string, []any, error) {
 			`WHERE table_name = UPPER(:1) AND owner = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') ` +
 			`ORDER BY column_id`, []any{table}, nil
 
+	case store.ProtocolMSSQL:
+		// Every column is aliased to the lower-case name the renderers key on:
+		// INFORMATION_SCHEMA declares them upper-case, and SQL Server reports
+		// the metadata name as written in the catalog, not as typed here.
+		if table == "" {
+			return `SELECT TABLE_SCHEMA AS table_schema, TABLE_NAME AS table_name ` +
+				`FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_SCHEMA, TABLE_NAME`, nil, nil
+		}
+
+		if schema != "" {
+			return `SELECT COLUMN_NAME AS column_name, DATA_TYPE AS data_type, ` +
+				`IS_NULLABLE AS is_nullable, COLUMN_DEFAULT AS column_default ` +
+				`FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @p1 AND TABLE_SCHEMA = @p2 ` +
+				`ORDER BY ORDINAL_POSITION`, []any{table, schema}, nil
+		}
+
+		return `SELECT COLUMN_NAME AS column_name, DATA_TYPE AS data_type, ` +
+			`IS_NULLABLE AS is_nullable, COLUMN_DEFAULT AS column_default ` +
+			`FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @p1 ` +
+			`ORDER BY TABLE_SCHEMA, ORDINAL_POSITION`, []any{table}, nil
+
 	default:
 		return "", nil, fmt.Errorf("%w: %s", ErrProtocolUnsupported, protocol)
 	}

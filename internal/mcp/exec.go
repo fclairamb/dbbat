@@ -32,7 +32,7 @@ var (
 func SupportedProtocol(protocol string) bool {
 	switch protocol {
 	case store.ProtocolPostgreSQL, store.ProtocolMySQL, store.ProtocolMariaDB,
-		store.ProtocolOracle:
+		store.ProtocolOracle, store.ProtocolMSSQL:
 		return true
 	default:
 		return false
@@ -145,6 +145,13 @@ func (e *LoopbackExecutor) Execute(ctx context.Context, req ExecRequest) (*Query
 		}
 
 		return executeOracle(ctx, addr, req)
+	case store.ProtocolMSSQL:
+		addr, err := loopbackAddr(e.listeners.MSSQL)
+		if err != nil {
+			return nil, err
+		}
+
+		return executeMSSQL(ctx, addr, req)
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrProtocolUnsupported, req.Protocol)
 	}
