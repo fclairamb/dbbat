@@ -198,9 +198,22 @@ function ServersPage() {
       key: "namespace",
       header: "Namespace",
       cell: (srv) => (
-        <span className="font-mono text-sm text-muted-foreground">
-          {srv.k8s_namespace || "-"}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="font-mono text-sm text-muted-foreground">
+            {srv.k8s_namespace || "-"}
+          </span>
+          {/* An escape hatch you cannot see is a trap: a row created with TLS
+              verification off has to say so wherever it is listed. */}
+          {srv.k8s_insecure_skip_tls_verify && (
+            <span
+              data-testid={`tunnel-insecure-badge-${srv.uid}`}
+              title="TLS verification is disabled for this cluster's API server: anything that can intercept that connection can read the service account token."
+              className="inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/30 dark:text-red-400"
+            >
+              Insecure TLS
+            </span>
+          )}
+        </div>
       ),
     },
     {
@@ -1099,6 +1112,9 @@ function EditSSHServerForm({
   const [sshPassphrase, setSshPassphrase] = useState("");
   const [k8sCaCert, setK8sCaCert] = useState(server.k8s_ca_cert || "");
   const [k8sNamespace, setK8sNamespace] = useState(server.k8s_namespace || "");
+  const [k8sInsecure, setK8sInsecure] = useState(
+    server.k8s_insecure_skip_tls_verify ?? false,
+  );
 
   // One form for both dial-path kinds: they share host/port/credential and
   // differ only in the extra material they carry.
@@ -1125,8 +1141,11 @@ function EditSSHServerForm({
         username,
         // Blank means "keep the stored token", exactly like the SSH secrets.
         password: password || undefined,
-        k8s_ca_cert: k8sCaCert || undefined,
+        // Sent unconditionally, unlike the CA: the whole point is that the
+        // flag can be turned back off from here.
+        k8s_ca_cert: k8sCaCert,
         k8s_namespace: k8sNamespace || undefined,
+        k8s_insecure_skip_tls_verify: k8sInsecure,
       });
       return;
     }
@@ -1223,11 +1242,29 @@ function EditSSHServerForm({
                     className="flex min-h-[96px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                     value={k8sCaCert}
                     onChange={(e) => setK8sCaCert(e.target.value)}
+                    required={!k8sInsecure}
                   />
                   <p className="text-xs text-muted-foreground">
                     Public challenge material, so unlike the token it is shown
                     back to you.
                   </p>
+                </div>
+                <div className="flex items-center justify-between rounded-lg border p-3">
+                  <div className="space-y-0.5">
+                    <Label htmlFor="edit-k8s-insecure">
+                      Skip TLS verification
+                    </Label>
+                    <p className="text-sm text-muted-foreground">
+                      Anything that can intercept the API server connection can
+                      read the service account token. Throwaway clusters only.
+                    </p>
+                  </div>
+                  <Switch
+                    id="edit-k8s-insecure"
+                    data-testid="k8s-server-edit-insecure-switch"
+                    checked={k8sInsecure}
+                    onCheckedChange={setK8sInsecure}
+                  />
                 </div>
               </>
             )}

@@ -53,10 +53,45 @@ var (
 	ErrKubernetesTargetNotReady = errors.New("kubernetes: no ready pod backs the target")
 	// ErrKubernetesNoHost means the cluster row carries no API server address.
 	ErrKubernetesNoHost = errors.New("kubernetes: the cluster row has no API server host")
+	// ErrKubernetesNoCACert means the row pins no CA bundle and has not
+	// explicitly opted out of verification. Refusing is the fail-closed
+	// choice: without it, client-go falls back to the *host's* system trust
+	// store, which silently accepts any publicly trusted certificate for that
+	// hostname — a far weaker guarantee than the operator asked for, applied
+	// to the connection that carries the ServiceAccount token.
+	ErrKubernetesNoCACert = errors.New(
+		"kubernetes: the cluster row pins no CA bundle and has not set insecure_skip_tls_verify")
 	// ErrKubernetesProtocolMismatch means the API server negotiated something
 	// other than the port-forward subprotocol.
 	ErrKubernetesProtocolMismatch = errors.New("kubernetes: the API server negotiated an unexpected subprotocol")
 )
+
+// IsPermanentError reports whether err will fail identically however many
+// times it is retried: a misconfigured row, a dead token, a missing RBAC verb,
+// a pod that is simply not there.
+//
+// It exists so the shared dialer's drop-and-retry — which is there to recover
+// from a moved pod — does not double every API call and evict the pooled
+// tunnel on a plain typo in the host field.
+func IsPermanentError(err error) bool {
+	for _, sentinel := range []error{
+		ErrKubernetesNoToken,
+		ErrKubernetesNoHost,
+		ErrKubernetesNoCACert,
+		ErrKubernetesUnauthorized,
+		ErrKubernetesForbidden,
+		ErrKubernetesTargetNotFound,
+	} {
+		if errors.Is(err, sentinel) {
+			return true
+		}
+	}
+
+	// ErrKubernetesTargetNotReady is deliberately absent: a pod that is not
+	// Ready *now* is the one case where re-resolving may legitimately land on
+	// a different, healthy endpoint.
+	return false
+}
 
 // portForwardTimeout bounds the stream upgrade, matching the shared dialer's
 // own per-dial budget.
@@ -72,9 +107,9 @@ type KubernetesConfig struct {
 	Port int
 	// Token is the decrypted ServiceAccount bearer token.
 	Token string
-	// CACert is the API server's PEM CA bundle. Empty falls back to the host's
-	// system trust store — which is right for a cluster behind a publicly
-	// trusted certificate and wrong for the usual self-signed one.
+	// CACert is the API server's PEM CA bundle. Required unless
+	// InsecureSkipTLSVerify is set: an empty bundle is rejected rather than
+	// quietly falling back to the host's system trust store.
 	CACert string
 	// Namespace scopes every lookup and every port-forward.
 	Namespace string
@@ -132,11 +167,20 @@ func NewKubernetesTunnel(cfg KubernetesConfig) (*KubernetesTunnel, error) {
 	// A CA bundle and Insecure are mutually exclusive as far as rest.Config
 	// validation is concerned, and "verify against this CA" is always the
 	// stronger statement — so it wins when an operator set both.
+	//
+	// Neither is a hard error rather than a silent fallback: leaving both
+	// unset yields a tls.Config with a nil RootCAs, i.e. the host's system
+	// trust store, which is not what "no CA configured" should ever mean here.
+	// The API refuses to write such a row, but the API is not the only way a
+	// row reaches this constructor (a hand-edited database, a restore, a
+	// future import path), so the dialer refuses it too.
 	switch {
 	case cfg.CACert != "":
 		rc.CAData = []byte(cfg.CACert)
 	case cfg.InsecureSkipTLSVerify:
 		rc.Insecure = true
+	default:
+		return nil, ErrKubernetesNoCACert
 	}
 
 	clientset, err := kubernetes.NewForConfig(rc)

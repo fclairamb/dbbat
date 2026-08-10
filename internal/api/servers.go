@@ -408,6 +408,21 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		}
 	}
 
+	// Per-protocol validation, which the update path used to skip entirely —
+	// leaving PUT able to reach states POST rejects (a kubernetes row with
+	// neither a CA bundle nor the explicit insecure flag, or any protocol
+	// string at all).
+	current, err := s.store.GetServerByUID(c.Request.Context(), uid)
+	if err != nil {
+		writeError(c, http.StatusNotFound, ErrCodeNotFound, "database not found")
+		return
+	}
+
+	if errMsg := validateUpdateProtocolFields(current, &req); errMsg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, errMsg)
+		return
+	}
+
 	updates := store.ServerUpdate{
 		Description:       req.Description,
 		Host:              req.Host,
@@ -682,6 +697,60 @@ func validateCreateProtocolFields(req *CreateDatabaseRequest) string {
 			req.SSLMode = "prefer"
 		}
 	}
+	return ""
+}
+
+// validateUpdateProtocolFields validates an update against the row it will
+// produce, returning an error message (empty when valid).
+//
+// It exists because the create path's validation used to be the only one:
+// PUT could set any protocol string, and — worse — could blank a kubernetes
+// row's CA bundle without setting the insecure flag, producing a row that
+// neither pins a CA nor admits to skipping verification. The check is written
+// against the *resulting* values (request field, falling back to the stored
+// one) rather than against what the request happens to mention, because a
+// half-specified update is exactly how that state was reachable.
+func validateUpdateProtocolFields(current *store.Server, req *UpdateDatabaseRequest) string {
+	protocol := current.Protocol
+	if req.Protocol != nil {
+		protocol = *req.Protocol
+	}
+
+	if !isSupportedProtocol(protocol) {
+		return "protocol must be one of: postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh, kubernetes"
+	}
+
+	if protocol != store.ProtocolKubernetes {
+		return ""
+	}
+
+	stored := current.KubernetesData()
+	if stored == nil {
+		stored = &store.KubernetesServerData{}
+	}
+
+	caCert := stored.CACert
+	if req.K8sCACert != nil {
+		caCert = *req.K8sCACert
+	}
+
+	insecure := stored.InsecureSkipTLSVerify
+	if req.K8sInsecureSkipTLSVerify != nil {
+		insecure = *req.K8sInsecureSkipTLSVerify
+	}
+
+	namespace := stored.Namespace
+	if req.K8sNamespace != nil {
+		namespace = *req.K8sNamespace
+	}
+
+	if caCert == "" && !insecure {
+		return "k8s_ca_cert is required for kubernetes servers (or set k8s_insecure_skip_tls_verify)"
+	}
+	if namespace == "" {
+		return "k8s_namespace is required for kubernetes servers"
+	}
+
 	return ""
 }
 

@@ -133,8 +133,9 @@ the granularity the model is built around.
 | `host` / `port` | the API server, e.g. `https://api.cluster.example.com` and `6443` |
 | `username` | the ServiceAccount name — informational, shown in the UI |
 | `password` | the ServiceAccount bearer token (encrypted at rest, never returned) |
-| `k8s_ca_cert` | the PEM CA bundle (public; round-trips in the API) |
+| `k8s_ca_cert` | the PEM CA bundle (public; round-trips in the API). **Required**, unless the escape hatch below is set |
 | `k8s_namespace` | the namespace the Role covers |
+| `k8s_insecure_skip_tls_verify` | off by default; see [Skipping TLS verification](#skipping-tls-verification) before turning it on |
 | `via_uid` | *optional* — an SSH bastion row, when the API server is itself only reachable through a jump host |
 
 A cluster row is never listable and never grantable; like an SSH bastion it
@@ -159,6 +160,41 @@ kubelet and speaks to the pod directly; a `Service`'s port *mapping* is never
 applied. `svc/postgres` with port 5432 means "a ready pod behind the service
 `postgres`, port 5432 on that pod".
 
+### Skipping TLS verification
+
+`k8s_insecure_skip_tls_verify` disables verification of the API server's
+certificate. It is the only alternative to pinning a CA bundle, and it is off by
+default.
+
+**What it costs.** The API server connection is the one carrying the
+ServiceAccount bearer token, on every request. With verification off, anything
+positioned to intercept that connection — a compromised egress proxy, a
+misdirected DNS answer, someone on a shared network — can present its own
+certificate, terminate the connection, and **read the token**. That token is
+enough to port-forward into every pod your Role covers. It is not a "slightly
+weaker TLS" setting; it is "the credential is now interceptable".
+
+**When it is defensible.** A throwaway cluster whose CA rotates faster than
+anyone will re-paste it: a local kind/k3s instance, an ephemeral CI cluster, a
+demo. In other words, when the token itself is worthless.
+
+**When it is not.** Anything holding real data. If the difficulty is that you
+cannot find the CA bundle, it is in the token Secret you already created:
+
+```bash
+kubectl -n data get secret dbbat-token -o jsonpath='{.data.ca\.crt}' | base64 -d
+```
+
+**What dbbat does about it.** Two things, deliberately:
+
+- A row that pins **no** CA bundle and has **not** set this flag is refused —
+  by the API on create *and* update, and again by the dialer itself. There is
+  no silent third state where dbbat falls back to the host's system trust
+  store, because "no CA configured" must never quietly mean "trust any
+  publicly trusted certificate for that hostname".
+- Rows with the flag set are labelled as such in the servers list and in the
+  edit dialog, so an insecure row cannot hide once it exists.
+
 ## Connectivity check
 
 `POST /api/v1/servers/{uid}/test` (or the "Test" button) walks the cluster row
@@ -166,6 +202,7 @@ in the order you would debug it, and the stage it stops at is the answer:
 
 | Stage | Question |
 |---|---|
+| `config` | is the row usable at all? — including the refusal above, when it pins no CA and has not opted out |
 | `cluster_api` | can we reach the API server? (DNS, routing, firewall, and whether the pasted CA bundle trusts it) |
 | `cluster_auth` | does the API server accept the token? |
 | `cluster_rbac` | a `SelfSubjectAccessReview` on `pods/portforward` — may this ServiceAccount actually open a tunnel here? |
