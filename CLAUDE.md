@@ -48,6 +48,12 @@ PR titles MUST follow the conventional commit format:
   - MySQL/MariaDB via `go-mysql-org/go-mysql` (server + client) — see `docs/mysql.md`
   - MongoDB wire protocol (hand-rolled `OP_MSG`; BSON via `go.mongodb.org/mongo-driver/v2`) — see `docs/mongodb.md`
   - Microsoft SQL Server TDS (hand-rolled) — see `docs/mssql.md`
+- **Tunnels (`via_uid`)**: a server row with protocol `ssh` or `kubernetes` is a
+  *dial path*, never a grantable target. SSH opens a `direct-tcpip` channel to
+  any `host:port`; Kubernetes opens a `pods/portforward` stream to **a pod's own
+  port** (`host` = `<pod>` or `svc/<name>`, `port` = container port) — a database
+  merely routable from the cluster network is out of scope. See
+  `docs/kubernetes.md`
 - **API**: `gin-gonic/gin` with OpenAPI 3.0 docs
 - **CLI**: `urfave/cli/v3`
 - **Config**: `knadh/koanf`
@@ -76,8 +82,8 @@ dbbat/
 │   ├── api/                 # REST API handlers and middleware
 │   │   └── openapi.yml      # OpenAPI 3.0 specification
 │   ├── proxy/
-│   │   ├── shared/          # Auth, query interception, upstream transport (dial + SSH bastion)
-│   │   ├── upstream/        # One upstream-connect path per protocol, shared by the proxies and the connectivity check (ssl_mode policy lives here)
+│   │   ├── shared/          # Auth, query interception, upstream transport (dial + SSH bastion + K8s tunnel)
+│   │   ├── upstream/        # One upstream-connect path per protocol, shared by the proxies and the connectivity check (ssl_mode policy lives here); also the sole home of `k8s.io/client-go` (`kubernetes*.go`)
 │   │   ├── conncheck/       # Connectivity check: runs the connectors above, classifies the failure
 │   │   ├── postgresql/      # PostgreSQL wire protocol proxy
 │   │   ├── oracle/          # Oracle TNS/TTC proxy (see docs/oracle.md)
@@ -89,7 +95,7 @@ dbbat/
 │       └── oidc/            # Generic OIDC login: any issuer, verified ID tokens, PKCE
 ├── front/                   # React frontend (see front/CLAUDE.md)
 ├── website/                 # Docusaurus site for dbbat.com
-├── docs/                    # Protocol-level technical notes (oracle, mysql, mongodb, mssql, dump format, mcp)
+├── docs/                    # Protocol-level technical notes (oracle, mysql, mongodb, mssql, kubernetes tunnel, dump format, mcp)
 ├── docker-compose.yml
 └── go.mod
 ```
