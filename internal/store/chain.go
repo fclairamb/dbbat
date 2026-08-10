@@ -55,6 +55,13 @@ const auditChainAdvisoryLockKey int64 = 0x4442424154415544
 // harmless.
 const queryChainAdvisoryLockClass int32 = 0x44424251
 
+// chainAppendAttempts bounds the retries an append makes when its cached head
+// turns out to be stale — the multi-replica case, where a peer extended the
+// chain between two of this process's appends. Each retry re-reads the head
+// under the advisory lock, so one is normally enough; the extra attempts cover
+// a burst of peers appending at once.
+const chainAppendAttempts = 3
+
 // ErrChainKeyUnavailable is returned by the verifiers when the store has no
 // chain key. Verification without the key is impossible by design.
 var ErrChainKeyUnavailable = errors.New("audit chain key is not configured")

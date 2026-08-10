@@ -100,12 +100,35 @@ func (s *Store) CreateQuery(ctx context.Context, query *Query) (*Query, error) {
 // Ordering comes from an explicit chain_seq, not from uid: UUIDv7 orders by
 // millisecond, and two statements in the same millisecond have no defined
 // order, which a chain cannot tolerate.
+// A stale cached head — this process's view of the chain after a peer replica
+// appended to the same connection — collides with the unique index and is
+// retried against a head re-read under the lock. See appendAuditChain.
 func (s *Store) appendQueryChain(ctx context.Context, query *Query) error {
 	state := s.queryChains.get(query.ConnectionID)
 
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
+	var err error
+
+	for attempt := range chainAppendAttempts {
+		if attempt > 0 {
+			state.invalidate()
+
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+		}
+
+		if err = s.appendQueryChainOnce(ctx, state, query); err == nil {
+			return nil
+		}
+	}
+
+	return err
+}
+
+func (s *Store) appendQueryChainOnce(ctx context.Context, state *chainState, query *Query) error {
 	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		if _, err := tx.ExecContext(ctx, "SELECT pg_advisory_xact_lock(?, ?)",
 			queryChainAdvisoryLockClass, queryChainLockID(query.ConnectionID)); err != nil {
