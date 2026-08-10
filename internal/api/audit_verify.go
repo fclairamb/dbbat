@@ -22,7 +22,10 @@ import (
 // collect the same numbers over REST like every other artifact on
 // website/docs/compliance.md — with the standing caveat, documented there and
 // in docs/audit-chain.md, that a compromised dbbat can answer
-// {"verified": true} without walking anything.
+// {"verified": true} without walking anything — and that the caching below
+// makes an answer up to chainVerifyTTL old, so a chain broken moments ago keeps
+// reporting verified until the cached walk expires. Monitoring signal, not a
+// point-in-time attestation.
 //
 // Two rules shape what comes back:
 //

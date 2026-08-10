@@ -105,6 +105,12 @@ does **not** trust the running server. `GET /api/v1/audit/verify` is served *by*
 that server — a compromised or modified DBBat can return `"verified": true`
 without walking anything, and the caller cannot tell.
 
+And because a walk's outcome is cached for a minute, **the answer can be up to
+60 seconds old**: a chain broken moments ago keeps reporting
+`"verified": true` until that cached walk expires. Treat the endpoint as a
+monitoring signal, not a point-in-time attestation — `dbbat audit verify` is the
+instrument for the latter.
+
 Use the endpoint for routine evidence collection, and the CLI (or an
 independent re-run of it from a trusted binary against the store directly) when
 the integrity of the DBBat process itself is part of what is being assessed.
