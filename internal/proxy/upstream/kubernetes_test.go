@@ -167,7 +167,7 @@ func TestKubernetesTunnelConnCloseIsIdempotent(t *testing.T) {
 	}
 
 	first := conn.Close()
-	if second := conn.Close(); !errors.Is(second, first) && second != first { //nolint:errorlint // identity comparison is the point
+	if second := conn.Close(); !errors.Is(second, first) {
 		t.Errorf("second Close() = %v, want the first result %v", second, first)
 	}
 }

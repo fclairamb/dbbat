@@ -175,7 +175,7 @@ func (f *fakeCluster) writeStatusBody(w io.Writer, code int, message string) {
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Status"},
 		Status:   metav1.StatusFailure,
 		Message:  message,
-		Code:     int32(code), //nolint:gosec // HTTP status codes are far inside int32
+		Code:     int32(code),
 	})
 	_, _ = w.Write(body)
 }

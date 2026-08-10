@@ -9,7 +9,7 @@ import (
 // makeKubernetesServer creates a Kubernetes cluster row. The ServiceAccount
 // bearer token rides in Password, the same field a database password uses, so
 // it gets the same AAD-bound encryption.
-func makeKubernetesServer(t *testing.T, s *Store, key []byte, name, namespace string) *Server {
+func makeKubernetesServer(t *testing.T, s *Store, key []byte, name string) *Server {
 	t.Helper()
 
 	created, err := s.CreateServer(context.Background(), &Server{
@@ -20,7 +20,7 @@ func makeKubernetesServer(t *testing.T, s *Store, key []byte, name, namespace st
 		Password: "sa-token-" + name,
 		Protocol: ProtocolKubernetes,
 		ProtocolData: &ServerProtocolData{
-			Kubernetes: &KubernetesServerData{CACert: "-----BEGIN CERTIFICATE-----\nAAAA\n", Namespace: namespace},
+			Kubernetes: &KubernetesServerData{CACert: "-----BEGIN CERTIFICATE-----\nAAAA\n", Namespace: "data"},
 		},
 	}, key)
 	if err != nil {
@@ -37,7 +37,7 @@ func TestKubernetesServer_TokenAndPublicMaterialRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	key := testEncryptionKey()
 
-	created := makeKubernetesServer(t, s, key, "prod-cluster", "data")
+	created := makeKubernetesServer(t, s, key, "prod-cluster")
 
 	reloaded, err := s.GetServerByUID(ctx, created.UID)
 	if err != nil {
@@ -99,7 +99,7 @@ func TestKubernetesServer_IsATunnelNotATarget(t *testing.T) {
 	ctx := context.Background()
 	key := testEncryptionKey()
 
-	cluster := makeKubernetesServer(t, s, key, "cluster-scope", "data")
+	cluster := makeKubernetesServer(t, s, key, "cluster-scope")
 
 	if !cluster.IsKubernetes() || !cluster.IsTunnel() || cluster.IsSSH() {
 		t.Errorf("classification wrong: IsKubernetes=%v IsTunnel=%v IsSSH=%v",
@@ -146,7 +146,7 @@ func TestValidateViaUID_AcceptsAKubernetesCluster(t *testing.T) {
 	ctx := context.Background()
 	key := testEncryptionKey()
 
-	cluster := makeKubernetesServer(t, s, key, "via-cluster", "data")
+	cluster := makeKubernetesServer(t, s, key, "via-cluster")
 
 	target, err := s.CreateServer(ctx, &Server{
 		Name: "pg-in-cluster", Host: "svc/postgres", Port: 5432,
@@ -230,7 +230,7 @@ func TestUpdateServer_MergesKubernetesMaterial(t *testing.T) {
 	ctx := context.Background()
 	key := testEncryptionKey()
 
-	cluster := makeKubernetesServer(t, s, key, "merge-cluster", "data")
+	cluster := makeKubernetesServer(t, s, key, "merge-cluster")
 
 	newCA := "-----BEGIN CERTIFICATE-----\nBBBB\n"
 	newNS := "staging"

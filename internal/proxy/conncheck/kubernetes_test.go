@@ -91,7 +91,7 @@ func writeStatusJSON(w http.ResponseWriter, code int, message string) {
 		TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Status"},
 		Status:   metav1.StatusFailure,
 		Message:  message,
-		Code:     int32(code), //nolint:gosec // HTTP status codes fit in int32
+		Code:     int32(code),
 	})
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
