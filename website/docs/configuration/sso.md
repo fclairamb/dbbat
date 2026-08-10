@@ -95,7 +95,10 @@ The rules, in full:
 :::warning A missing claim reads as "member of nothing"
 If the mapping is set but your IdP never emits the claim, every login revokes
 the mapped roles. Turn the mapping on only once you have confirmed the claim
-arrives — the server logs a warning on each login that carries no groups.
+arrives — the server logs a warning on each login that carries no groups. The
+one exception is an Entra [groups overage](#making-your-idp-emit-groups), where
+the issuer says outright that it is withholding the list: that leaves roles
+untouched instead.
 :::
 
 ### Making your IdP emit groups
@@ -114,11 +117,22 @@ Authorization Servers → Claims* instead, included in the **ID token**. Add
 **Microsoft Entra ID** — *App registrations → your app → Token configuration →
 Add groups claim*. Pick **Groups assigned to the application** rather than "All
 groups": the "all" options overflow past ~200 memberships into a `_claim_names`
-pointer to Microsoft Graph, which DBBat does not follow, and the login then
-looks like the user is in no groups at all. Make sure **ID** is ticked as an
-emitted token type. No extra scope is needed. Values are group **object ids**
-unless you opted into sAMAccountName for on-prem synced groups, so the mapping
-reads `DBB_OIDC_ROLE_MAPPING="admin=1f4e8c02-9b7a-4f61-8a1e-3c2d5e6f7a8b"`.
+pointer to Microsoft Graph, which DBBat does not follow. Make sure **ID** is
+ticked as an emitted token type. No extra scope is needed. Values are group
+**object ids** unless you opted into sAMAccountName for on-prem synced groups,
+so the mapping reads
+`DBB_OIDC_ROLE_MAPPING="admin=1f4e8c02-9b7a-4f61-8a1e-3c2d5e6f7a8b"`.
+
+:::note If you hit the overage anyway
+An overflowing token is **not** read as "member of no groups". DBBat detects
+the `_claim_names` pointer for whichever claim `DBB_OIDC_GROUPS_CLAIM` names,
+treats the membership as *unknown* rather than empty, and leaves every role
+exactly as it is — no mapping applied, no floor at `DBB_AUTH_DEFAULT_ROLE`. The
+login still succeeds; the server logs a warning naming the user and the claim
+on each one. So the failure mode is roles that quietly stop following the
+directory, not a mass demotion — fix it by scoping the claim to the groups
+assigned to the application.
+:::
 
 **Keycloak** — *Client scopes → `<client>-dedicated` → Add mapper → By
 configuration → Group Membership*. Token claim name `groups`, **Full group path
