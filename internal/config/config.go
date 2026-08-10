@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -39,12 +40,21 @@ var (
 	// offering a login button that can only ever end in an error page.
 	ErrOIDCClientCredentialsRequired = errors.New(
 		"DBB_OIDC_ISSUER requires DBB_OIDC_CLIENT_ID and DBB_OIDC_CLIENT_SECRET")
+
+	// ErrOIDCRoleMappingInvalid is returned when DBB_OIDC_ROLE_MAPPING cannot
+	// be parsed. A mapping is an authorization rule: a typo must stop the
+	// process, never silently resolve to "no rule" and hand everyone the
+	// default role.
+	ErrOIDCRoleMappingInvalid = errors.New("DBB_OIDC_ROLE_MAPPING is malformed")
 )
 
 // OIDC provider defaults.
 const (
 	// DefaultOIDCScopes is the scope set requested from the issuer.
 	DefaultOIDCScopes = "openid email profile"
+	// DefaultOIDCGroupsClaim is the ID-token claim read for directory group
+	// membership when DBB_OIDC_GROUPS_CLAIM is unset.
+	DefaultOIDCGroupsClaim = "groups"
 	// DefaultOIDCDisplayName is the login-button label when the operator
 	// does not set one.
 	DefaultOIDCDisplayName = "SSO"
@@ -204,7 +214,21 @@ type OIDCAuthConfig struct {
 	// login is rejected unless the *verified* email claim's domain is
 	// listed — the generic equivalent of Slack's workspace gating.
 	EmailDomains string `koanf:"email_domains"`
+	// GroupsClaim names the ID-token claim carrying the user's directory
+	// group membership. Empty means "groups", which is what Okta, Keycloak
+	// and Entra all use by default.
+	GroupsClaim string `koanf:"groups_claim"`
+	// RoleMapping binds dbbat roles to directory groups, e.g.
+	// "admin=db-admins,viewer=analysts". Empty disables the mapping
+	// entirely, leaving role assignment manual.
+	RoleMapping string `koanf:"role_mapping"`
 }
+
+// KnownRoles is the set of role names a role mapping may name. It duplicates
+// store.RoleAdmin/RoleViewer/RoleConnector on purpose: store imports config,
+// so config cannot import store. TestConfigKnownRolesMatchStore in
+// internal/api pins the two lists together.
+var KnownRoles = []string{"admin", "viewer", "connector"}
 
 // Enabled returns true when an issuer is configured. Client id and secret are
 // validated at startup once Enabled is true, so a half-configured provider
@@ -221,6 +245,75 @@ func (c OIDCAuthConfig) ScopeList() []string {
 // EmailDomainList splits EmailDomains on whitespace and commas.
 func (c OIDCAuthConfig) EmailDomainList() []string {
 	return splitList(c.EmailDomains)
+}
+
+// GroupsClaimName returns the configured groups claim, defaulting to "groups".
+func (c OIDCAuthConfig) GroupsClaimName() string {
+	if claim := strings.TrimSpace(c.GroupsClaim); claim != "" {
+		return claim
+	}
+
+	return DefaultOIDCGroupsClaim
+}
+
+// RoleMappingEnabled reports whether a group-to-role mapping is configured.
+// Without one, nothing in the login path ever touches a user's roles.
+func (c OIDCAuthConfig) RoleMappingEnabled() bool {
+	return strings.TrimSpace(c.RoleMapping) != ""
+}
+
+// ParseRoleMapping turns "admin=db-admins,viewer=analysts" into
+// {"admin": ["db-admins"], "viewer": ["analysts"]}.
+//
+// Pairs are separated by commas only — never by whitespace — because directory
+// groups are routinely named "Domain Admins". The role is the part before the
+// first "=", lower-cased and validated against KnownRoles; everything after it
+// is the group value, kept verbatim (Entra sends group **object ids**, not
+// display names, and matching is exact, case included). Repeating a role
+// unions its groups: "admin=db-admins,admin=sre" grants admin to either.
+//
+// A nil map means "no mapping configured"; an error means the operator typed
+// something that cannot be an authorization rule.
+func (c OIDCAuthConfig) ParseRoleMapping() (map[string][]string, error) {
+	if !c.RoleMappingEnabled() {
+		return nil, nil
+	}
+
+	mapping := make(map[string][]string)
+
+	for _, pair := range strings.Split(c.RoleMapping, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+
+		role, group, found := strings.Cut(pair, "=")
+		if !found {
+			return nil, fmt.Errorf("%w: %q is not a role=group pair", ErrOIDCRoleMappingInvalid, pair)
+		}
+
+		role = strings.ToLower(strings.TrimSpace(role))
+		group = strings.TrimSpace(group)
+
+		if !slices.Contains(KnownRoles, role) {
+			return nil, fmt.Errorf("%w: unknown role %q (known: %s)",
+				ErrOIDCRoleMappingInvalid, role, strings.Join(KnownRoles, ", "))
+		}
+
+		if group == "" {
+			return nil, fmt.Errorf("%w: role %q is mapped to an empty group", ErrOIDCRoleMappingInvalid, role)
+		}
+
+		if !slices.Contains(mapping[role], group) {
+			mapping[role] = append(mapping[role], group)
+		}
+	}
+
+	if len(mapping) == 0 {
+		return nil, fmt.Errorf("%w: no role=group pair found", ErrOIDCRoleMappingInvalid)
+	}
+
+	return mapping, nil
 }
 
 // splitList tokenizes a comma- or whitespace-separated env-var value,
@@ -697,6 +790,7 @@ func defaultConfig() Config {
 		OIDCAuth: OIDCAuthConfig{
 			Scopes:      DefaultOIDCScopes,
 			DisplayName: DefaultOIDCDisplayName,
+			GroupsClaim: DefaultOIDCGroupsClaim,
 		},
 		SlackNotify: SlackNotifyConfig{
 			Channel: "#dbbat",
@@ -878,6 +972,13 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 
 	if cfg.OIDCAuth.Enabled() && (cfg.OIDCAuth.ClientID == "" || cfg.OIDCAuth.ClientSecret == "") {
 		return nil, ErrOIDCClientCredentialsRequired
+	}
+
+	// The mapping decides who is an admin, so it is parsed here — a typo stops
+	// the process instead of quietly degrading to "nobody matches", which at
+	// the next login would demote every mapped user.
+	if _, err := cfg.OIDCAuth.ParseRoleMapping(); err != nil {
+		return nil, err
 	}
 
 	// Load encryption key from Key or KeyFile
