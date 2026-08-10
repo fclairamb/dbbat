@@ -1874,3 +1874,424 @@ func queriesScanLoops(node any) []int {
 
 	return loops
 }
+
+// appendChainStatements adds n more statements to an existing connection's
+// chain and returns them, so a test can let a session move on after a sweep has
+// already stamped it.
+func appendChainStatements(
+	t *testing.T, ctx context.Context, store *Store, connectionUID uuid.UUID, n int,
+) []Query {
+	t.Helper()
+
+	appended := make([]Query, 0, n)
+
+	for i := range n {
+		created, err := store.CreateQuery(ctx, &Query{
+			ConnectionID: connectionUID,
+			SQLText:      fmt.Sprintf("SELECT later %d", i),
+		})
+		require.NoError(t, err, "CreateQuery()")
+
+		appended = append(appended, *created)
+	}
+
+	return appended
+}
+
+// TestQueryChainRefreshStampsAnOpenSession is the whole point of the sweep: the
+// stamp used to be written only by a close, so a session that never ends — a
+// psql window left open all day, a pooled connection, an approval hold waiting
+// on a human — had nothing sealing its tail for its entire life.
+func TestQueryChainRefreshStampsAnOpenSession(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, queries := createChainTestConnection(t, ctx, store, "refresh-open", 3)
+
+	before, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, before.QueryChainMAC, "an open session starts unstamped")
+
+	stamped, err := store.RefreshOpenChainStamps(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), stamped)
+
+	after, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, after.DisconnectedAt, "the refresh must not close the session")
+	require.Equal(t, int64(3), after.QueryChainLen)
+	require.Equal(t, queryChainStampKeyed, after.QueryChainStampVersion,
+		"the sweep must write the keyed stamp version like the other two writers")
+	require.Equal(t, store.queryChainStampMAC(conn.UID, queryChainStampKeyed, 3, queries[2].MAC),
+		after.QueryChainMAC)
+	require.NotEqual(t, queries[2].MAC, after.QueryChainMAC,
+		"the stamp must not be a copy of the head MAC: that value is readable from queries")
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break, "a freshly stamped open session must verify: %v", result.Break)
+}
+
+// TestQueryChainOpenSessionMayLagBehindItsStamp is the substantive half of the
+// refresh, and the failure mode that would make it worse than useless: between
+// two sweeps a busy session runs statements the stamp does not cover. If the
+// stamp were still judged exactly, every active session in the store would read
+// as tampered with.
+func TestQueryChainOpenSessionMayLagBehindItsStamp(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "refresh-lag", 3)
+
+	_, err := store.RefreshOpenChainStamps(ctx)
+	require.NoError(t, err)
+
+	later := appendChainStatements(t, ctx, store, conn.UID, 2)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break,
+		"an open session whose stamp is merely behind is not a break: %v", result.Break)
+	require.Equal(t, int64(5), result.Verified)
+	require.Equal(t, int64(5), result.HeadSeq)
+
+	stale, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), stale.QueryChainLen, "the stamp is a prefix, not the head")
+
+	// The next sweep catches it up, and the close seals it exactly.
+	_, err = store.RefreshOpenChainStamps(ctx)
+	require.NoError(t, err)
+
+	caught, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Equal(t, int64(5), caught.QueryChainLen)
+	require.Equal(t, store.queryChainStampMAC(conn.UID, queryChainStampKeyed, 5, later[1].MAC),
+		caught.QueryChainMAC)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	result, err = store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break, "%v", result.Break)
+}
+
+// TestQueryChainClosedSessionStampStaysExact pins the other side of the fork: a
+// prefix is only ever acceptable while disconnected_at IS NULL. Once the session
+// is closed the stamp is final, and one that names fewer statements than survive
+// is a trailing deletion — the closed row's rule must not soften just because
+// the open one's did.
+func TestQueryChainClosedSessionStampStaysExact(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "refresh-closed-exact", 3)
+
+	_, err := store.RefreshOpenChainStamps(ctx)
+	require.NoError(t, err)
+
+	appendChainStatements(t, ctx, store, conn.UID, 2)
+
+	// Close the row behind the store's back, leaving the lagging stamp in
+	// place. This is exactly what the stampOnlyOpen guard exists to prevent a
+	// concurrent sweep from producing.
+	_, err = store.db.ExecContext(ctx,
+		`UPDATE connections SET disconnected_at = NOW() WHERE uid = ?`, conn.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "a closed session's stamp must name the head exactly")
+	require.Contains(t, result.Break.Reason, "recorded 3 statements but the surviving statements end at 5")
+}
+
+// TestQueryChainRefreshGuardSkipsAClosedSession is that guard on its own: a
+// sweep that read a head before a concurrent CloseConnection committed must not
+// land afterwards and overwrite the exact final stamp with an older one.
+func TestQueryChainRefreshGuardSkipsAClosedSession(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, queries := createChainTestConnection(t, ctx, store, "refresh-guard", 3)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	sealed := store.queryChainStampMAC(conn.UID, queryChainStampKeyed, 3, queries[2].MAC)
+
+	stamped, err := store.stampChainHeads(ctx, store.db, []uuid.UUID{conn.UID}, stampOnlyOpen)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), stamped, "a closed row is out of the refresh's reach")
+
+	closed, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Equal(t, sealed, closed.QueryChainMAC, "the close's stamp must survive a late sweep")
+
+	// And the sweep proper never selects it in the first place.
+	swept, err := store.RefreshOpenChainStamps(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), swept)
+}
+
+// TestQueryChainRefreshDetectsTrailingDeletionOnAnOpenSession is what the sweep
+// buys. Deleting the last statements of a live session used to be undetectable
+// until it closed — at which point the close blessed the truncated chain.
+func TestQueryChainRefreshDetectsTrailingDeletionOnAnOpenSession(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, queries := createChainTestConnection(t, ctx, store, "refresh-trailing", 5)
+
+	_, err := store.RefreshOpenChainStamps(ctx)
+	require.NoError(t, err)
+
+	_, err = store.db.ExecContext(ctx,
+		`DELETE FROM queries WHERE uid IN (?, ?)`, queries[3].UID, queries[4].UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "deleting below an open session's stamp must be detected")
+	require.Contains(t, result.Break.Reason, "removed from the end")
+}
+
+// TestQueryChainRefreshDetectsARestampedOpenSession is the same attack with the
+// attacker doing their homework: delete the tail, then rewrite the stamp with
+// the values that are readable straight out of `queries`. The prefix rule
+// loosens *which position* the stamp may name; it does not loosen the seal.
+func TestQueryChainRefreshDetectsARestampedOpenSession(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, queries := createChainTestConnection(t, ctx, store, "refresh-restamp", 5)
+
+	_, err := store.RefreshOpenChainStamps(ctx)
+	require.NoError(t, err)
+
+	_, err = store.db.ExecContext(ctx,
+		`DELETE FROM queries WHERE uid IN (?, ?)`, queries[3].UID, queries[4].UID)
+	require.NoError(t, err)
+
+	_, err = store.db.ExecContext(ctx,
+		`UPDATE connections SET query_chain_mac = ?, query_chain_len = ? WHERE uid = ?`,
+		queries[2].MAC, 3, conn.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "a re-stamped truncation must be caught on an open session too")
+	require.Contains(t, result.Break.Reason, "the stamp was rewritten")
+	require.False(t, result.LegacyStamp, "a forged stamp is a break, not a legacy stamp")
+}
+
+// TestQueryChainRefreshSurvivesRetentionReapingTheStampedStatement is the
+// cry-wolf case the prefix rule has to get right in the other direction.
+// DBB_QUERY_STORAGE_RETENTION reaps the oldest statements of an open,
+// long-lived session — including, eventually, the one an earlier sweep sealed.
+// Nothing is left to check the stamp against, and that is housekeeping, not
+// tampering.
+func TestQueryChainRefreshSurvivesRetentionReapingTheStampedStatement(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, queries := createChainTestConnection(t, ctx, store, "refresh-reaped", 2)
+
+	_, err := store.RefreshOpenChainStamps(ctx)
+	require.NoError(t, err)
+
+	appendChainStatements(t, ctx, store, conn.UID, 2)
+
+	// Age the two statements the stamp covers; the connection stays open, so
+	// only the query-level sweep touches them.
+	_, err = store.db.ExecContext(ctx,
+		`UPDATE queries SET executed_at = NOW() - INTERVAL '30 days' WHERE uid IN (?, ?)`,
+		queries[0].UID, queries[1].UID)
+	require.NoError(t, err)
+
+	swept, err := store.CleanupOldQueryRows(ctx, 24*time.Hour)
+	require.NoError(t, err)
+	require.Equal(t, int64(2), swept.Queries)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break,
+		"a stamp whose statement retention reaped is unverifiable, not a break: %v", result.Break)
+	require.True(t, result.TruncatedPrefix)
+	require.Equal(t, int64(3), result.FirstSeq)
+	require.Equal(t, int64(2), result.Verified)
+
+	// The next sweep re-seals it against what survives, and the tail is
+	// protected again.
+	_, err = store.RefreshOpenChainStamps(ctx)
+	require.NoError(t, err)
+
+	_, err = store.db.ExecContext(ctx, `DELETE FROM queries WHERE chain_seq = 4 AND connection_id = ?`,
+		conn.UID)
+	require.NoError(t, err)
+
+	result, err = store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "a trailing deletion below the fresh stamp must be caught")
+}
+
+// TestQueryChainRefreshOnlyTouchesThisRunsSessions keeps replicas out of each
+// other's way: a row's head is best known to the process serving it, and two
+// replicas rewriting the same stamps every pass would be contention for nothing.
+func TestQueryChainRefreshOnlyTouchesThisRunsSessions(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "refresh_scope")
+
+	mine, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.1")
+	require.NoError(t, err)
+
+	var theirs *Connection
+
+	asRun(t, store, "other-instance", "other-run", func() {
+		theirs, err = store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.2")
+		require.NoError(t, err)
+	})
+
+	for _, conn := range []*Connection{mine, theirs} {
+		_, err = store.CreateQuery(ctx, &Query{ConnectionID: conn.UID, SQLText: "SELECT 1"})
+		require.NoError(t, err)
+	}
+
+	stamped, err := store.RefreshOpenChainStamps(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), stamped, "only the sessions this run owns are swept")
+
+	ours, err := store.GetConnectionByUID(ctx, mine.UID)
+	require.NoError(t, err)
+	require.NotNil(t, ours.QueryChainMAC)
+
+	peer, err := store.GetConnectionByUID(ctx, theirs.UID)
+	require.NoError(t, err)
+	require.Nil(t, peer.QueryChainMAC, "another run's live session is not ours to stamp")
+}
+
+// TestQueryChainRefreshLeavesSilentSessionUnstamped mirrors the reconcile's
+// rule: there is no head to seal, and checkStampedHead reads a NULL stamp as
+// "not stamped" rather than as a break.
+func TestQueryChainRefreshLeavesSilentSessionUnstamped(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "refresh_silent")
+
+	conn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.1")
+	require.NoError(t, err)
+
+	stamped, err := store.RefreshOpenChainStamps(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), stamped)
+
+	row, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, row.QueryChainMAC)
+	require.Equal(t, int64(0), row.QueryChainLen)
+	require.Equal(t, queryChainStampLegacy, row.QueryChainStampVersion)
+}
+
+// TestQueryChainRefreshCostScalesWithOpenSessions is the cost guard the spec
+// asked for, and the counterpart of
+// TestQueryChainOrphanStampCostScalesWithOrphans. The sweep runs on every
+// reclaim tick for the life of the process, so its cost has to track *open
+// sessions this run owns* — concurrency — and never the size of the query
+// history. Both halves are asserted against a real plan: picking the rows never
+// reads `queries` at all, and the head lookup enters it once per open session.
+func TestQueryChainRefreshCostScalesWithOpenSessions(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "refresh_cost")
+
+	const (
+		open        = 4
+		closed      = 20
+		otherRun    = 15
+		perSession  = 5
+		ourInstance = "live-instance"
+		ourRun      = "live-run"
+	)
+
+	store.SetInstanceID(ourInstance)
+	store.SetRunID(ourRun)
+
+	writeSession := func(instanceID, runID string, close bool) {
+		var conn *Connection
+
+		asRun(t, store, instanceID, runID, func() {
+			var err error
+
+			conn, err = store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.1")
+			require.NoError(t, err)
+		})
+
+		for i := range perSession {
+			_, err := store.CreateQuery(ctx, &Query{
+				ConnectionID: conn.UID,
+				SQLText:      fmt.Sprintf("SELECT %d", i),
+			})
+			require.NoError(t, err)
+		}
+
+		if close {
+			require.NoError(t, store.CloseConnection(ctx, conn.UID))
+		}
+	}
+
+	for range open {
+		writeSession(ourInstance, ourRun, false)
+	}
+
+	// History the sweep must never pay for: our own closed sessions, and
+	// another replica's live ones.
+	for range closed {
+		writeSession(ourInstance, ourRun, true)
+	}
+
+	for i := range otherRun {
+		writeSession("other-instance", fmt.Sprintf("other-run-%d", i), false)
+	}
+
+	pickLoops := explainQueriesLoops(t, ctx, store, store.openChainStampSelect(store.db).String())
+	require.Empty(t, pickLoops, "picking the rows to sweep must not read queries at all")
+
+	var uids []uuid.UUID
+
+	require.NoError(t, store.openChainStampSelect(store.db).Scan(ctx, &uids))
+	require.Len(t, uids, open, "the sweep covers this run's open sessions and nothing else")
+
+	headLoops := explainQueriesLoops(t, ctx, store, store.orphanHeadSelect(store.db, uids).String())
+	require.NotEmpty(t, headLoops, "the plan must contain the head lookup over queries")
+
+	for _, l := range headLoops {
+		require.Equal(t, open, l,
+			"the head lookup must run once per open session this run owns, not once per connection")
+	}
+
+	stamped, err := store.RefreshOpenChainStamps(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(open), stamped)
+}
