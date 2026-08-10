@@ -3,10 +3,32 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 )
+
+// queryCountHook counts every query bun executes whose SQL text contains a
+// given substring — the mechanism TestListServerGroupMemberUIDsByGroups uses
+// to prove a batched membership lookup, not one query per group.
+type queryCountHook struct {
+	substring string
+	count     atomic.Int64
+}
+
+func (h *queryCountHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+
+func (h *queryCountHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if strings.Contains(event.Query, h.substring) {
+		h.count.Add(1)
+	}
+}
 
 // newTestTargetServer persists a database target usable as a server-group
 // member. Names are unique per suffix so tests can run in parallel.
@@ -253,4 +275,58 @@ func TestServerGroupDeletionCascadesMembership(t *testing.T) {
 	if len(groupUIDs) != 0 {
 		t.Errorf("ListServerGroupUIDsForServer() after group delete = %v, want empty", groupUIDs)
 	}
+}
+
+// TestListServerGroupMemberUIDsByGroups pins the batching contract that
+// GrantDefinition.ScopedDatabaseUIDs depends on: resolving several groups'
+// membership at once must be one query, not one per group, or a listing of N
+// scoped definitions would fire N membership queries.
+func TestListServerGroupMemberUIDsByGroups(t *testing.T) {
+	t.Parallel()
+
+	testStore := setupTestStore(t)
+	ctx := context.Background()
+
+	dbA := newTestTargetServer(t, ctx, testStore, "batch_a")
+	dbB := newTestTargetServer(t, ctx, testStore, "batch_b")
+	dbC := newTestTargetServer(t, ctx, testStore, "batch_c")
+
+	groupOne, err := testStore.CreateServerGroup(ctx, &ServerGroup{Name: "batch-one"})
+	require.NoError(t, err)
+
+	groupTwo, err := testStore.CreateServerGroup(ctx, &ServerGroup{Name: "batch-two"})
+	require.NoError(t, err)
+
+	groupEmpty, err := testStore.CreateServerGroup(ctx, &ServerGroup{Name: "batch-empty"})
+	require.NoError(t, err)
+
+	require.NoError(t, testStore.AddServerToGroup(ctx, groupOne.UID, dbA.UID))
+	require.NoError(t, testStore.AddServerToGroup(ctx, groupOne.UID, dbB.UID))
+	require.NoError(t, testStore.AddServerToGroup(ctx, groupTwo.UID, dbB.UID))
+	require.NoError(t, testStore.AddServerToGroup(ctx, groupTwo.UID, dbC.UID))
+
+	hook := &queryCountHook{substring: "server_group_members"}
+	testStore.db.AddQueryHook(hook)
+
+	members, err := testStore.ListServerGroupMemberUIDsByGroups(
+		ctx, []uuid.UUID{groupOne.UID, groupTwo.UID, groupEmpty.UID},
+	)
+	require.NoError(t, err)
+
+	require.EqualValues(t, 1, hook.count.Load(),
+		"resolving 3 groups' membership must be one query, not one per group")
+
+	require.ElementsMatch(t, []uuid.UUID{dbA.UID, dbB.UID}, members[groupOne.UID])
+	require.ElementsMatch(t, []uuid.UUID{dbB.UID, dbC.UID}, members[groupTwo.UID])
+
+	_, ok := members[groupEmpty.UID]
+	require.False(t, ok, "a group with no members should be absent from the result, not an empty slice")
+
+	// The empty-input shortcut must not even touch the database.
+	hook.count.Store(0)
+
+	empty, err := testStore.ListServerGroupMemberUIDsByGroups(ctx, nil)
+	require.NoError(t, err)
+	require.Empty(t, empty)
+	require.EqualValues(t, 0, hook.count.Load(), "no groups requested must mean no query at all")
 }
