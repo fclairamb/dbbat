@@ -50,8 +50,8 @@ authorization rule that cannot be read.
 What happens when a verified identity has no local account yet is governed by
 two settings that apply to every login provider: `DBB_AUTH_AUTO_CREATE_USERS`
 (default `true`) and `DBB_AUTH_DEFAULT_ROLE` (default `connector`). A default
-role that is not one of `admin`, `viewer` or `connector` fails at startup, for
-the same reason a malformed mapping does.
+role that is not spelled exactly like `admin`, `viewer` or `connector` fails at
+startup, for the same reason a malformed mapping does.
 
 ## Mapping directory groups to roles
 

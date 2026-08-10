@@ -124,34 +124,157 @@ func TestAuthProvisioningLegacyUnknownRoleFails(t *testing.T) {
 	require.ErrorIs(t, err, ErrAuthDefaultRoleInvalid)
 }
 
-// TestAuthProvisioningLegacyConfigFile covers the same alias promotion for a
-// YAML file, which is how the settings were documented as well: the keys used
-// to be `slack_auth.auto_create_users` / `.default_role`, and the field they
+// writeAuthConfigFile writes a YAML config file and returns its path.
+func writeAuthConfigFile(t *testing.T, content string) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+
+	return path
+}
+
+// TestAuthProvisioningLegacyConfigFile covers the alias promotion for a YAML
+// file, which is how the settings were documented too: the keys used to be
+// `slack_auth.auto_create_users` / `.default_role`, and the field they
 // unmarshalled into no longer exists.
 func TestAuthProvisioningLegacyConfigFile(t *testing.T) {
-	setAuthBaseEnv(t)
+	// t.Setenv inline rather than through setAuthBaseEnv: it is what tells the
+	// linter this test cannot run in parallel.
+	t.Setenv("DBB_DSN", "postgres://x:x@localhost/x")
+	t.Setenv("DBB_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
 
-	configFile := filepath.Join(t.TempDir(), "config.yaml")
-	content := "slack_auth:\n  auto_create_users: false\n  default_role: viewer\n"
-	require.NoError(t, os.WriteFile(configFile, []byte(content), 0o600))
+	configFile := writeAuthConfigFile(t,
+		"slack_auth:\n  auto_create_users: false\n  default_role: viewer\n")
 
 	cfg, err := Load(LoadOptions{ConfigFile: configFile})
 	require.NoError(t, err)
 
 	assert.False(t, cfg.Auth.AutoCreateUsers, "the legacy file keys must still be honored")
 	assert.Equal(t, "viewer", cfg.Auth.Role())
-
-	t.Setenv("DBB_AUTH_DEFAULT_ROLE", "admin")
-
-	cfg, err = Load(LoadOptions{ConfigFile: configFile})
-	require.NoError(t, err)
-
-	assert.Equal(t, "admin", cfg.Auth.Role(), "the canonical variable outranks the legacy file key")
 }
 
-// TestOAuthUsersConfigRole covers the normalization the accessor applies:
-// trimmed, lower-cased, and falling back to the default when unset — the same
-// treatment ParseRoleMapping gives the role names in a group mapping.
+// TestAuthProvisioningPrecedenceAcrossSources is the full matrix the resolution
+// order has to satisfy. The canonical key wins over the legacy one **whatever
+// source each arrived from** — the alias spans two koanf keys, so a canonical
+// value written in the config file has to beat a legacy variable lingering in
+// the environment just as surely as the other way round.
+func TestAuthProvisioningPrecedenceAcrossSources(t *testing.T) {
+	tests := []struct {
+		name     string
+		file     string
+		env      map[string]string
+		wantRole string
+		wantAuto bool
+	}{
+		{
+			name:     "canonical file beats legacy file",
+			file:     "auth:\n  default_role: viewer\n  auto_create_users: true\nslack_auth:\n  default_role: admin\n  auto_create_users: false\n",
+			wantRole: "viewer",
+			wantAuto: true,
+		},
+		{
+			name:     "canonical file beats legacy env",
+			file:     "auth:\n  default_role: viewer\n  auto_create_users: true\n",
+			env:      map[string]string{"DBB_SLACK_AUTH_DEFAULT_ROLE": "admin", "DBB_SLACK_AUTH_AUTO_CREATE_USERS": "false"},
+			wantRole: "viewer",
+			wantAuto: true,
+		},
+		{
+			name:     "canonical env beats legacy file",
+			file:     "slack_auth:\n  default_role: admin\n  auto_create_users: false\n",
+			env:      map[string]string{"DBB_AUTH_DEFAULT_ROLE": "viewer", "DBB_AUTH_AUTO_CREATE_USERS": "true"},
+			wantRole: "viewer",
+			wantAuto: true,
+		},
+		{
+			name:     "legacy file applies when no canonical value exists",
+			file:     "slack_auth:\n  default_role: admin\n  auto_create_users: false\n",
+			wantRole: "admin",
+			wantAuto: false,
+		},
+		{
+			name:     "canonical file false is not overwritten by a legacy true",
+			file:     "auth:\n  auto_create_users: false\nslack_auth:\n  auto_create_users: true\n",
+			wantRole: DefaultOAuthRole,
+			wantAuto: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			setAuthBaseEnv(t)
+
+			for name, value := range tc.env {
+				t.Setenv(name, value)
+			}
+
+			cfg, err := Load(LoadOptions{ConfigFile: writeAuthConfigFile(t, tc.file)})
+			require.NoError(t, err)
+
+			assert.Equal(t, tc.wantRole, cfg.Auth.Role())
+			assert.Equal(t, tc.wantAuto, cfg.Auth.AutoCreateUsers)
+		})
+	}
+}
+
+// TestAuthProvisioningMiscasedRoleFails is the upgrade-safety case. Before
+// these settings moved, the default role was read raw and never validated, so a
+// deployment carrying DBB_SLACK_AUTH_DEFAULT_ROLE=Admin assigned the literal
+// string "Admin" — a role nothing recognizes, granting nothing. Folding it to
+// "admin" would hand every auto-provisioned user real admin rights on an
+// upgrade alone, so it has to fail closed, and say what the canonical spelling
+// is.
+func TestAuthProvisioningMiscasedRoleFails(t *testing.T) {
+	for _, name := range []string{"DBB_SLACK_AUTH_DEFAULT_ROLE", "DBB_AUTH_DEFAULT_ROLE"} {
+		t.Run(name, func(t *testing.T) {
+			setAuthBaseEnv(t)
+			t.Setenv(name, "Admin")
+
+			_, err := Load(LoadOptions{})
+			require.ErrorIs(t, err, ErrAuthDefaultRoleInvalid,
+				"a mis-cased role must not be laundered into a valid one")
+			assert.Contains(t, err.Error(), `"admin"`, "the error must name the canonical spelling")
+		})
+	}
+}
+
+// TestOAuthUsersConfigValidate pins the exact-match rule and the two error
+// shapes without going through Load.
+func TestOAuthUsersConfigValidate(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		role    string
+		wantErr bool
+	}{
+		{"unset is the default", "", false},
+		{"exact known role", "viewer", false},
+		{"mis-cased is refused", "Admin", true},
+		{"padded is refused", " admin ", true},
+		{"unknown is refused", "superuser", true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := OAuthUsersConfig{DefaultRole: tc.role}.Validate()
+			if tc.wantErr {
+				require.ErrorIs(t, err, ErrAuthDefaultRoleInvalid)
+
+				return
+			}
+
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestOAuthUsersConfigRole covers the accessor: verbatim, with a fallback when
+// unset. Normalization deliberately does not happen here — Validate refuses
+// anything that would need it.
 func TestOAuthUsersConfigRole(t *testing.T) {
 	t.Parallel()
 
@@ -161,9 +284,7 @@ func TestOAuthUsersConfigRole(t *testing.T) {
 		want string
 	}{
 		{"unset falls back", "", DefaultOAuthRole},
-		{"whitespace only falls back", "   ", DefaultOAuthRole},
-		{"trimmed", "  viewer ", "viewer"},
-		{"lower-cased", "Admin", "admin"},
+		{"known role passes through", "viewer", "viewer"},
 	}
 
 	for _, tc := range tests {
