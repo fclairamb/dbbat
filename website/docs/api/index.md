@@ -1055,7 +1055,11 @@ contains the chain key or the content of any audited record.
 
 This answer is served by the DBBat process being audited, so a compromised
 instance can return `"verified": true` without walking anything. The CLI runs
-where the key lives and can be run by someone who does not trust the server. See
+where the key lives and can be run by someone who does not trust the server.
+
+The answer is also cached, so it can be up to 60 seconds old: a chain broken
+moments ago keeps reporting `"verified": true` until the cached walk expires.
+This is a monitoring signal, not a point-in-time attestation. See
 [Tamper-Evident Audit Log](/docs/features/audit-chain).
 
 :::

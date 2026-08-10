@@ -211,7 +211,10 @@ Two properties are load-bearing and have tests pinning them:
 **The endpoint is not equivalent to the CLI, and the docs say so.** It is served
 by the process under audit: a compromised dbbat can answer `"verified": true`
 without walking anything. The CLI can be run by someone who does not trust that
-process. Both `website/docs/features/audit-chain.md` and
+process. The caching adds a second, smaller gap: an answer is up to 60 seconds
+old, so a chain broken moments ago keeps reporting `"verified": true` until the
+cached walk expires — the endpoint is a monitoring signal, the CLI is the
+point-in-time attestation. Both `website/docs/features/audit-chain.md` and
 `website/docs/compliance.md` state this where an assessor will read it —
 overselling the endpoint is the failure mode for a compliance-facing feature.
 

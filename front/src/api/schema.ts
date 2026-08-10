@@ -1591,6 +1591,11 @@ export interface paths {
          *     the key lives and can be run by someone who does not trust the running
          *     server; this endpoint is served *by* that server, so a compromised or
          *     modified dbbat can answer `"verified": true` without walking anything.
+         *     The answer is also cached (see below), so it can be up to 60 seconds
+         *     old: a chain broken moments ago keeps reporting `"verified": true`
+         *     until the cached walk expires. This is a monitoring signal, not a
+         *     point-in-time attestation.
+         *
          *     Use it for routine evidence collection, and the CLI (or an independent
          *     re-run of it) when the integrity of the process itself is in question.
          *
@@ -1638,10 +1643,12 @@ export interface paths {
          *     long-lived session. That is expected housekeeping, not tampering, and
          *     everything after the truncation is still verified.
          *
-         *     The same trust caveat as `GET /audit/verify` applies: an answer from
-         *     the server is only as trustworthy as the server. The response never
-         *     contains the chain key, and never contains SQL text, parameters or any
-         *     other statement content.
+         *     The same caveats as `GET /audit/verify` apply: an answer from the
+         *     server is only as trustworthy as the server, and it is cached, so it
+         *     can be up to 60 seconds old — a chain broken moments ago keeps
+         *     reporting `"verified": true` until the cached walk expires. The
+         *     response never contains the chain key, and never contains SQL text,
+         *     parameters or any other statement content.
          *
          *     Requires admin role.
          */

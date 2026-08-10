@@ -238,6 +238,33 @@ func TestVerifyAuditChain_LeaksNothing(t *testing.T) {
 		"a break must expose exactly these fields")
 }
 
+// withFields returns base plus extra, without writing into base's backing
+// array — two expectations built from the same base must not clobber each
+// other.
+func withFields(base []string, extra ...string) []string {
+	out := make([]string, 0, len(base)+len(extra))
+	out = append(out, base...)
+
+	return append(out, extra...)
+}
+
+// jsonFields decodes one JSON object into its raw fields.
+func jsonFields(t *testing.T, body []byte) map[string]json.RawMessage {
+	t.Helper()
+
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(body, &fields))
+
+	return fields
+}
+
+// jsonKeys is jsonFields for the common case of only caring about the field set.
+func jsonKeys(t *testing.T, body []byte) []string {
+	t.Helper()
+
+	return keysOf(jsonFields(t, body))
+}
+
 func keysOf(m map[string]json.RawMessage) []string {
 	keys := make([]string, 0, len(m))
 	for key := range m {
@@ -390,6 +417,78 @@ func TestVerifyQueryChains_ReportsBreak(t *testing.T) {
 
 	// The rewritten text is not echoed back either.
 	require.NotContains(t, w.Body.String(), "SELECT 1")
+}
+
+// TestVerifyQueryChains_LeaksNothing is the query-side twin of
+// TestVerifyAuditChain_LeaksNothing, and matters more than it: a query row
+// carries SQL text and bind parameters, so this is the response where a
+// widening mistake would hurt most. Substring checks only find what you thought
+// to look for, so all three shapes — sweep, scoped, and scoped-with-a-break —
+// have their exact field set pinned.
+func TestVerifyQueryChains_LeaksNothing(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupChainTestServer(t)
+	suffix := "qcleak"
+
+	createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	clean := createChainedSession(t, dataStore, suffix+"a", 3)
+	tampered := createChainedSession(t, dataStore, suffix+"b", 4)
+
+	router := newChainVerifyTestRouter(server)
+
+	sweepFields := []string{
+		"chain", "verified", "connections", "statements",
+		"chains_with_truncated_prefix", "checked_at", "cached",
+	}
+
+	sweep := doChainVerify(router, token, "/api/v1/audit/verify/queries")
+	require.Equal(t, http.StatusOK, sweep.Code, "response body: %s", sweep.Body.String())
+	require.ElementsMatch(t, sweepFields, jsonKeys(t, sweep.Body.Bytes()),
+		"a query-chain sweep must expose exactly these fields")
+
+	scoped := doChainVerify(router, token, "/api/v1/audit/verify/queries?connection="+clean.UID.String())
+	require.Equal(t, http.StatusOK, scoped.Code, "response body: %s", scoped.Body.String())
+	require.ElementsMatch(t, withFields(sweepFields, "connection_uid", "head_seq", "head_mac"),
+		jsonKeys(t, scoped.Body.Bytes()),
+		"a scoped query-chain walk must expose exactly these fields")
+
+	// Now the break path — the one carrying a free-text reason, and the one a
+	// leak would most plausibly creep into. The tampered session has its own
+	// cache scope, so this walk is a real one.
+	_, err := dataStore.DB().ExecContext(context.Background(),
+		"UPDATE queries SET sql_text = 'SELECT leaked_column' WHERE connection_id = ? AND chain_seq = 2",
+		tampered.UID)
+	require.NoError(t, err)
+
+	broken := doChainVerify(router, token, "/api/v1/audit/verify/queries?connection="+tampered.UID.String())
+	require.Equal(t, http.StatusOK, broken.Code, "response body: %s", broken.Body.String())
+
+	var brokenResp queryChainVerifyResponse
+	require.NoError(t, json.Unmarshal(broken.Body.Bytes(), &brokenResp))
+	require.False(t, brokenResp.Verified, "response body: %s", broken.Body.String())
+
+	fields := jsonFields(t, broken.Body.Bytes())
+	require.ElementsMatch(t,
+		withFields(sweepFields, "connection_uid", "head_seq", "head_mac", "break"),
+		keysOf(fields),
+		"a broken query-chain walk must expose exactly these fields")
+
+	var brk map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(fields["break"], &brk))
+	require.ElementsMatch(t, []string{"uid", "chain_seq", "connection_uid", "reason"}, keysOf(brk),
+		"a query-chain break must expose exactly these fields")
+
+	// And the belt-and-braces substring checks, on every shape.
+	for _, body := range []string{sweep.Body.String(), scoped.Body.String(), broken.Body.String()} {
+		require.NotContains(t, body, "secrets_table_", "statement text must never reach the response")
+		require.NotContains(t, body, "leaked_column")
+		require.NotContains(t, body, hex.EncodeToString(chainTestKey), "the chain key must never reach the response")
+		require.NotContains(t, body, "parameters")
+		require.NotContains(t, body, "sql_text")
+	}
 }
 
 // TestVerifyQueryChains_RejectsBadConnectionUID keeps the 400 path honest.
