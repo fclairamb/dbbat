@@ -249,10 +249,21 @@ func setupFixtureWith(ctx context.Context, t *testing.T, opts fixtureOpts) *fixt
 	storeDSN := fmt.Sprintf("postgres://%s:%s@%s/dbbat_test?sslmode=disable",
 		upstreamUsr, upstreamPwd, net.JoinHostPort(storeHost, strconv.Itoa(storePort)))
 
-	dataStore, err := store.New(ctx, storeDSN)
+	// The master key is what the store derives its HMAC subkey from, so passing
+	// it here is what makes the tamper-evident query chain active for the whole
+	// suite — the same configuration a serving process always has. Without it
+	// every proxied query would be written unchained, and the chain assertions
+	// below would silently pass on nothing.
+	fixtureEncKey := make([]byte, 32)
+	for i := range fixtureEncKey {
+		fixtureEncKey[i] = byte(i + 1)
+	}
+
+	dataStore, err := store.New(ctx, storeDSN, store.Options{EncryptionKey: fixtureEncKey})
 	require.NoError(t, err)
 	t.Cleanup(func() { dataStore.Close() })
 	require.NoError(t, dataStore.Migrate(ctx))
+	require.True(t, dataStore.ChainEnabled(), "the fixture store must chain its query rows")
 
 	hash, err := crypto.HashPassword(fixturePass)
 	require.NoError(t, err)
@@ -260,10 +271,7 @@ func setupFixtureWith(ctx context.Context, t *testing.T, opts fixtureOpts) *fixt
 	user, err := dataStore.CreateUser(ctx, fixtureUser, hash, []string{"connector"})
 	require.NoError(t, err)
 
-	encKey := make([]byte, 32)
-	for i := range encKey {
-		encKey[i] = byte(i + 1)
-	}
+	encKey := fixtureEncKey
 
 	db, err := dataStore.CreateServer(ctx, &store.Server{
 		Name:         upstreamDB,
@@ -808,6 +816,17 @@ func (f *fixture) assertBlockedQueryLogged(ctx context.Context, sql string) {
 	conn, err := f.store.GetConnectionByUID(ctx, row.ConnectionID)
 	require.NoError(f.t, err)
 	assert.Equal(f.t, f.user.UID, conn.UserID)
+
+	// And it is an ordinary link in the connection's HMAC chain: `queries` is
+	// chained per connection, so a refusal row that appended twice, or out of
+	// order, or not at all, breaks the walk `dbbat audit verify --queries`
+	// does. This is the assertion that covers the extended-query path's
+	// discard-until-Sync handling on the real wire.
+	result, err := f.store.VerifyQueryChain(ctx, row.ConnectionID)
+	require.NoError(f.t, err)
+	assert.Nil(f.t, result.Break, "a refusal row must be a valid link in the connection's query chain")
+	assert.False(f.t, result.TruncatedPrefix, "nothing was retained away; the chain starts at seq 1")
+	assert.Positive(f.t, result.Verified, "the chain walk must actually cover rows")
 }
 
 // TestIntegration_BlockDDL_BlocksCreateTable verifies block_ddl rejects DDL

@@ -9,6 +9,9 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/modules/postgres"
+	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -159,6 +162,96 @@ func TestBlockedParse_DoesNotDoubleRecordOnExecute(t *testing.T) {
 
 	rows := awaitBlockedQueries(t, s, 1)
 	assertBlockedRow(t, rows[0], sql, ErrWriteNotPermitted)
+}
+
+// TestBlockedStatements_AreOrdinaryChainAppends runs refusals through a store
+// with the HMAC query chain switched on. `queries` is chained per connection,
+// so a refusal row is only correct if it is an ordinary link in that chain —
+// one append, in order, verifiable by `dbbat audit verify --queries`.
+//
+// It matters more here than on Oracle: the extended-query path answers a
+// refusal in the middle of a batch the client already pipelined, which is
+// exactly where a double append or an out-of-order one would show up. Both
+// protocols therefore refuse on the *same* connection, so the two rows land in
+// the same chain, one after the other.
+func TestBlockedStatements_AreOrdinaryChainAppends(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	dataStore := newChainedTestStore(t)
+	require.True(t, dataStore.ChainEnabled(), "the query chain must be on for this test to mean anything")
+
+	s := newRefusingSession(t, dataStore, []string{store.ControlReadOnly})
+
+	const (
+		simpleSQL   = "INSERT INTO ro (id) VALUES (1)"
+		extendedSQL = "UPDATE ro SET id = 2"
+	)
+
+	// Simple query protocol.
+	require.ErrorIs(t, s.handleQuery(&pgproto3.Query{String: simpleSQL}), ErrWriteNotPermitted)
+
+	// The first row has to be settled before the second is driven: the chain is
+	// an ordered append and the writes are asynchronous, so racing them would
+	// test the test, not the chain.
+	first := awaitBlockedQueries(t, s, 1)
+	assertBlockedRow(t, first[0], simpleSQL, ErrWriteNotPermitted)
+
+	// Extended query protocol, with the Bind and Execute the client pipelined
+	// behind the Parse that is about to be refused.
+	require.ErrorIs(t, s.handleParse(&pgproto3.Parse{Name: "st", Query: extendedSQL}), ErrWriteNotPermitted)
+	s.handleBind(&pgproto3.Bind{DestinationPortal: "", PreparedStatement: "st"})
+	require.NoError(t, s.handleExecute(&pgproto3.Execute{Portal: ""}))
+
+	rows := awaitBlockedQueries(t, s, 2)
+	assertBlockedRow(t, rows[0], extendedSQL, ErrWriteNotPermitted)
+	assertBlockedRow(t, rows[1], simpleSQL, ErrWriteNotPermitted)
+
+	result, err := dataStore.VerifyQueryChain(ctx, s.connectionUID)
+	require.NoError(t, err)
+	assert.Nil(t, result.Break, "a refusal row must be a valid link in the connection's query chain")
+	assert.False(t, result.TruncatedPrefix, "nothing was retained away; the chain starts at seq 1")
+	assert.Equal(t, int64(2), result.Verified, "both refusals must be sealed into the chain")
+}
+
+// newChainedTestStore is newCopyTestStore with the tamper-evident chain
+// enabled — the store derives its HMAC subkey from the master key, so passing
+// one is what makes ChainEnabled() true and chain_seq/mac get written.
+func newChainedTestStore(t *testing.T) *store.Store {
+	t.Helper()
+
+	ctx := context.Background()
+
+	container, err := postgres.Run(ctx,
+		"postgres:15-alpine",
+		postgres.WithDatabase("dbbat_test"),
+		postgres.WithUsername("test"),
+		postgres.WithPassword("test"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(60*time.Second),
+		),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = container.Terminate(context.Background()) })
+
+	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err)
+
+	masterKey := make([]byte, 32)
+	for i := range masterKey {
+		masterKey[i] = byte(0xA0 + i)
+	}
+
+	dataStore, err := store.New(ctx, dsn, store.Options{EncryptionKey: masterKey})
+	require.NoError(t, err)
+	t.Cleanup(func() { dataStore.Close() })
+
+	require.NoError(t, dataStore.Migrate(ctx))
+
+	return dataStore
 }
 
 // newRefusingSession builds a store-backed session whose grant carries the
