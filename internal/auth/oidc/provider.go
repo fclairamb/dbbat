@@ -358,7 +358,7 @@ func (p *Provider) ExchangeCodeWithVerifier(
 // The second return value is the *overage* signal, and it is the one thing
 // that distinguishes "in no groups" from "we were not told". See
 // claimNamesOverage.
-func extractGroups(rawClaims json.RawMessage, claim string) (groups []string, overage bool) {
+func extractGroups(rawClaims json.RawMessage, claim string) ([]string, bool) {
 	if len(rawClaims) == 0 {
 		return nil, false
 	}
@@ -372,7 +372,7 @@ func extractGroups(rawClaims json.RawMessage, claim string) (groups []string, ov
 		return nil, false
 	}
 
-	groups = extractGroupsValue(all[claim])
+	groups := extractGroupsValue(all[claim])
 
 	// A token carrying both is self-contradictory; trust what it inlined and
 	// only raise the overage when the list we ended up with is empty.
