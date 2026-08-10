@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	go_ora "github.com/sijms/go-ora/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -42,6 +43,17 @@ type oracleThroughProxy struct {
 	service  string
 	username string
 	apiKey   string
+
+	// dsn is the go-ora URL the client above was opened with; newClient reuses
+	// it to get a *fresh* session, which is the only way to pick up a grant
+	// swapped out from under the fixture (the grant is resolved once, at auth).
+	dsn string
+
+	// The store behind the proxy, and who the fixture is: the blocked-statement
+	// assertions read `queries` rows back and walk the connection's HMAC chain.
+	store *store.Store
+	user  *store.User
+	dbUID uuid.UUID
 }
 
 func startOracleThroughProxy(t *testing.T, controls []string) *oracleThroughProxy {
@@ -74,18 +86,23 @@ func startOracleThroughProxy(t *testing.T, controls []string) *oracleThroughProx
 	pgPort, _ := pgContainer.MappedPort(ctx, "5432")
 	pgDSN := "postgres://test:test@" + net.JoinHostPort(pgHost, pgPort.Port()) + "/dbbat_test?sslmode=disable"
 
-	dataStore, err := store.New(ctx, pgDSN)
+	encryptionKey := []byte("0123456789012345678901234567890X")
+
+	// Handing the master key to the store is what makes the tamper-evident
+	// query chain active, exactly as a serving process always has it. Without
+	// it every proxied query would be written unchained and the chain
+	// assertions in the blocked-statement tests would pass on nothing.
+	dataStore, err := store.New(ctx, pgDSN, store.Options{EncryptionKey: encryptionKey})
 	require.NoError(t, err)
 
 	t.Cleanup(func() { dataStore.Close() })
 	require.NoError(t, dataStore.Migrate(ctx))
+	require.True(t, dataStore.ChainEnabled(), "the fixture store must chain its query rows")
 
 	// Lowercase: Oracle clients uppercase the username on the wire and the proxy
 	// lowercases it again before the dbbat lookup.
 	user, err := dataStore.CreateUser(ctx, "cursorprobe", "$argon2id$v=19$m=4096,t=3,p=1$salt$hash", []string{"connector"})
 	require.NoError(t, err)
-
-	encryptionKey := []byte("0123456789012345678901234567890X")
 
 	service := oracleTestService()
 	db, err := dataStore.CreateServer(ctx, &store.Server{
@@ -144,7 +161,49 @@ func startOracleThroughProxy(t *testing.T, controls []string) *oracleThroughProx
 		service:  service,
 		username: user.Username,
 		apiKey:   plainKey,
+		dsn:      dsn,
+		store:    dataStore,
+		user:     user,
+		dbUID:    db.UID,
 	}
+}
+
+// newClient opens a *second* go-ora connection through the proxy. A session
+// resolves its grant once, at authentication, so anything that swaps the grant
+// out (replaceGrant) only reaches a connection opened afterwards.
+func (e *oracleThroughProxy) newClient(t *testing.T) *sql.DB {
+	t.Helper()
+
+	client, err := sql.Open("oracle", e.dsn)
+	require.NoError(t, err)
+
+	client.SetMaxOpenConns(1)
+	client.SetMaxIdleConns(1)
+
+	t.Cleanup(func() { _ = client.Close() })
+
+	require.NoError(t, client.PingContext(context.Background()))
+
+	return client
+}
+
+// replaceGrant revokes every live grant of the fixture user and issues one
+// carrying the given controls. The same shape as the PostgreSQL fixture's
+// helper, so the two suites narrow a grant the same way.
+func (e *oracleThroughProxy) replaceGrant(t *testing.T, controls []string) {
+	t.Helper()
+
+	ctx := context.Background()
+
+	grants, err := e.store.ListGrants(ctx, store.GrantFilter{ActiveOnly: true})
+	require.NoError(t, err)
+
+	for _, g := range grants {
+		require.NoError(t, e.store.RevokeGrant(ctx, g.UID, e.user.UID))
+	}
+
+	_, err = testsupport.CreateGrantWithControls(ctx, t, e.store, e.user.UID, e.dbUID, controls)
+	require.NoError(t, err)
 }
 
 // runCursorWorkloads drives every shape the spec named as a stress on cursor-id
