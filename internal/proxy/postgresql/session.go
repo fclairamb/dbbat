@@ -93,6 +93,17 @@ type extendedQueryState struct {
 	// ParameterDescription. The server answers describes in order, so the head
 	// of the queue names the statement the next ParameterDescription belongs to.
 	pendingDescribes []string
+
+	// errorUntilSync mirrors PostgreSQL's own extended-protocol error state:
+	// once a message in a batch fails, every following message is discarded
+	// until the client sends Sync. dbbat has to honour it for the statements
+	// *it* refuses too — otherwise a refused Parse is followed by a Bind and an
+	// Execute for a statement upstream never heard of, which both confuses
+	// upstream and queues a phantom pendingQuery here that the next
+	// CommandComplete would pop and log as a second row.
+	//
+	// Only ever touched from the client→upstream goroutine.
+	errorUntilSync bool
 }
 
 // Session represents a proxy session.
@@ -386,6 +397,12 @@ func (s *Session) proxyClientToUpstream() error {
 
 		s.logger.InfoContext(s.ctx, "received message from client", slog.Any("message", msg))
 
+		// A batch dbbat already failed is dead until Sync — see
+		// extendedQueryState.errorUntilSync.
+		if s.discardUntilSync(msg) {
+			continue
+		}
+
 		// Handle query interception for Simple and Extended Query Protocols
 		var interceptErr error
 
@@ -421,7 +438,18 @@ func (s *Session) proxyClientToUpstream() error {
 		}
 
 		if interceptErr != nil {
-			s.sendQueryError(interceptErr)
+			// A refusal inside an extended-query batch follows the protocol's
+			// error rule: ErrorResponse now, the rest of the batch discarded,
+			// and ReadyForQuery only once the client's Sync has been through
+			// upstream. The simple-query path owns its whole exchange, so it
+			// gets the ReadyForQuery straight away.
+			if isExtendedQueryMessage(msg) {
+				s.extendedState.errorUntilSync = true
+
+				s.sendQueryError(interceptErr, false)
+			} else {
+				s.sendQueryError(interceptErr, true)
+			}
 
 			continue
 		}
@@ -435,8 +463,50 @@ func (s *Session) proxyClientToUpstream() error {
 	}
 }
 
-// sendQueryError sends a query error to the client.
-func (s *Session) sendQueryError(queryErr error) {
+// isExtendedQueryMessage reports whether a client message belongs to the
+// extended query protocol, i.e. whether refusing it puts the connection into
+// the "discard until Sync" error state rather than ending an exchange.
+func isExtendedQueryMessage(msg pgproto3.FrontendMessage) bool {
+	switch msg.(type) {
+	case *pgproto3.Parse, *pgproto3.Bind, *pgproto3.Describe, *pgproto3.Execute, *pgproto3.Close:
+		return true
+	default:
+		return false
+	}
+}
+
+// discardUntilSync drops the remainder of an extended-query batch dbbat has
+// already failed, and reports whether the message was swallowed.
+//
+// Sync itself is *forwarded*: upstream answers every Sync with a
+// ReadyForQuery, which is the frame the client is waiting for, and forwarding
+// it also resynchronises an upstream that did see earlier messages of the same
+// batch. Anything that is not an extended-query message (a simple Query, a
+// Terminate) ends the error state and is handled normally.
+func (s *Session) discardUntilSync(msg pgproto3.FrontendMessage) bool {
+	if !s.extendedState.errorUntilSync {
+		return false
+	}
+
+	switch msg.(type) {
+	case *pgproto3.Parse, *pgproto3.Bind, *pgproto3.Describe, *pgproto3.Execute,
+		*pgproto3.Close, *pgproto3.Flush, *pgproto3.CopyData, *pgproto3.CopyDone, *pgproto3.CopyFail:
+		s.logger.DebugContext(s.ctx, "discarding message from a refused extended-query batch",
+			slog.Any("message", msg))
+
+		return true
+	default:
+		// Sync (and anything else) clears the error state.
+		s.extendedState.errorUntilSync = false
+
+		return false
+	}
+}
+
+// sendQueryError sends a query error to the client. ready adds the trailing
+// ReadyForQuery: correct for the simple query protocol, wrong for the extended
+// one, where ReadyForQuery is owed to the client's Sync and nothing else.
+func (s *Session) sendQueryError(queryErr error, ready bool) {
 	errMsg := &pgproto3.ErrorResponse{
 		Severity: "ERROR",
 		Code:     "42000",
@@ -453,6 +523,10 @@ func (s *Session) sendQueryError(queryErr error) {
 	if _, err := s.clientConn.Write(errBuf); err != nil {
 		s.logger.ErrorContext(s.ctx, "failed to write error to client", slog.Any("error", err))
 
+		return
+	}
+
+	if !ready {
 		return
 	}
 
