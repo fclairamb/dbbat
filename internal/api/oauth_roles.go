@@ -213,7 +213,10 @@ func (s *Server) oauthRolesForNewUser(
 	role := s.oauthDefaultRole()
 
 	mapping := s.oauthRoleMapping(ctx, providerName)
-	if len(mapping) == 0 {
+	if len(mapping) == 0 || oauthUser.GroupsOverage {
+		// Same reasoning as syncOAuthRoles: an overage means membership is
+		// unknown, so there is nothing to resolve and the account starts on the
+		// default role rather than on whatever "in no groups" would have meant.
 		return []string{role}
 	}
 
@@ -236,6 +239,23 @@ func (s *Server) syncOAuthRoles(
 ) (*store.User, error) {
 	mapping := s.oauthRoleMapping(ctx, providerName)
 	if len(mapping) == 0 {
+		return user, nil
+	}
+
+	if oauthUser.GroupsOverage {
+		// The issuer handed us a pointer to the group list instead of the list
+		// (Entra's overage, past ~200 memberships). Membership is *unknown*,
+		// not empty, and the mapping has nothing to resolve against: applying
+		// it would revoke every mapped role from the most heavily grouped
+		// people in the tenant. Leave the roles exactly as they are — no
+		// mapping, no floor — and say why.
+		s.logger.WarnContext(ctx,
+			"OIDC login carried a group overage claim; roles left untouched, "+
+				"scope the token's groups claim to the groups assigned to the application",
+			slog.String("provider", providerName),
+			slog.String("username", user.Username),
+			slog.String("groups_claim", s.config.OIDCAuth.GroupsClaimName()))
+
 		return user, nil
 	}
 
