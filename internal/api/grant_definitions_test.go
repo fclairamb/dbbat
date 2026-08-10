@@ -498,7 +498,7 @@ func (h *apiQueryCountHook) AfterQuery(_ context.Context, event *bun.QueryEvent)
 }
 
 // TestListGrantDefinitions_ScopedDatabaseUIDs pins option 1 from
-// specs/todos/2026-08-10-server-group-scope-hint-for-non-admin-requesters.md:
+// specs/done/2026/08/2026-08-10-server-group-scope-hint-for-non-admin-requesters.md:
 // a non-admin requester sees GrantDefinition.scoped_database_uids resolved
 // from server_group_uids, the "every database" (unscoped) and "scoped to
 // zero databases" cases are represented unambiguously (omitted vs. `[]`,

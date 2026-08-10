@@ -180,7 +180,7 @@ the cursor is never learned. That second failure is not theoretical:
 > entries still accumulate, because `handleOCLOSE` removes one cursor per frame
 > while clients batch their closes, so any future learning miss re-arms the same
 > silent wrong-SQL gate. Filed as
-> `specs/todos/2026-08-10-oracle-stale-cursor-resolves-to-the-wrong-statement.md`;
+> `specs/todos/2026-08-10-04-oracle-stale-cursor-resolves-to-the-wrong-statement.md`;
 > listed as an open gap in `docs/approvals.md`.
 
 One gotcha the fixtures pinned: the OER **end-of-call bit is not universal**.

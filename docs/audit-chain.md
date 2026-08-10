@@ -140,7 +140,7 @@ either. `query_chain_len` is likewise stored and printed but never compared.
 So the trailing-deletion guarantee on the *query* chain only holds against an
 attacker who stops after the delete. The row chain does not have this problem —
 its stamp is keyed, below — and the fix for the connection stamp is
-`specs/todos/2026-08-10-seal-the-connection-query-chain-stamp.md`. It is a
+`specs/todos/2026-08-10-06-seal-the-connection-query-chain-stamp.md`. It is a
 separate task because stamps in the old format already exist in shipped
 deployments, so changing the format needs a compatibility story.
 

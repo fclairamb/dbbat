@@ -159,7 +159,7 @@ without `DBB_KEY`.
 If trailing-deletion detection on the query history is load-bearing for a
 control, say so explicitly and lean on the recorded head MAC (below) or on
 shipping the logs to a WORM store or SIEM as well. Fixing the stamp format is
-[tracked](https://github.com/fclairamb/dbbat/blob/main/specs/todos/2026-08-10-seal-the-connection-query-chain-stamp.md);
+[tracked](https://github.com/fclairamb/dbbat/blob/main/specs/todos/2026-08-10-06-seal-the-connection-query-chain-stamp.md);
 it is not a one-line change because stamps in the old format already exist in
 deployed installations.
 

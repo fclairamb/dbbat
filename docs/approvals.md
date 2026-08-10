@@ -71,7 +71,7 @@ Oracle:
   cursor-id learning bug stayed invisible for as long as it did (below). That
   bug is fixed, so the mis-resolution is currently latent rather than firing —
   one missed response away from returning. Filed as
-  `specs/todos/2026-08-10-oracle-stale-cursor-resolves-to-the-wrong-statement.md`.
+  `specs/todos/2026-08-10-04-oracle-stale-cursor-resolves-to-the-wrong-statement.md`.
 
 If an Oracle client of yours is not showing up in `/queries` at all, that is the
 first gap: treat missing query rows on Oracle as missing enforcement, and file it.

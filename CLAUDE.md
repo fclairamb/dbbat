@@ -144,7 +144,13 @@ make clean            # Clean build artifacts
 **Whenever you identify a follow-up task** — an out-of-scope improvement, a deferred fix, a known limitation, or "we should also do X later" — **write it into `specs/todos/` autonomously**, in the same turn, without being asked. Don't just mention it in chat or leave it only in an ephemeral task list: chat scrolls away, `specs/todos/` is the durable backlog.
 
 Conventions (see `specs/README.md`):
-- One markdown file per task, named `specs/todos/YYYY-MM-DD-short-kebab-name.md` (date = today).
+- One markdown file per task, named `specs/todos/YYYY-MM-DD-NN-short-kebab-name.md` (date = today).
+  `NN` is a two-digit **execution order** within that date, so a plain `ls` of
+  `specs/todos/` reads as the queue: lowest date, then lowest number, gets done
+  first. Filing a new todo means picking its slot — append it after the last
+  `NN` of the day unless it genuinely blocks something already queued, in which
+  case renumber. Order by what must happen first (a prerequisite, a suite that
+  currently verifies nothing, a live correctness bug), not by when it was written.
 - Lead with `# Title`, then `## Goal`, `## Why`, and `## Implementation` (sketch the approach + key files). Enough that someone can pick it up cold.
 - Link the originating GitHub issue when there is one: `[#4](https://github.com/fclairamb/dbbat/issues/4)`. If none exists, note that an issue should be filed.
 - When a todo is implemented, move its file to `specs/done/YYYY/MM/` (keep the same filename).
@@ -398,7 +404,7 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   not at the crash. **`row_chain_mac` is a keyed MAC over the head;
   `query_chain_mac` is a verbatim copy of it and is therefore forgeable without
   the key** — a known hole in the shipped query chain, tracked in
-  `specs/todos/2026-08-10-seal-the-connection-query-chain-stamp.md` and stated
+  `specs/todos/2026-08-10-06-seal-the-connection-query-chain-stamp.md` and stated
   in the docs. Verify with `dbbat audit verify [--queries|--rows]` — the
   row chains are CLI-only — or over REST with the admin-only
   `GET /api/v1/audit/verify` and `GET /api/v1/audit/verify/queries` — which
