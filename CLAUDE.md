@@ -244,13 +244,14 @@ Test mode credentials: `admin`/`admintest`, `viewer`/`viewer`, `connector`/`conn
 ### Website showcase media (`make showcase`)
 
 `front/showcase/` is a **separate Playwright project** that regenerates the
-website's marketing screenshots and the approval-hold video into
+website's marketing screenshots and the two approval-hold clips into
 `website/static/img/showcase/`. It is not part of `make test-e2e` and never
 gates CI.
 
 ```bash
 make showcase                       # everything
-SHOWCASE_PROJECT=video make showcase  # just the clip
+SHOWCASE_PROJECT=video make showcase  # just the psql clip
+SHOWCASE_PROJECT=mcp-poster,mcp-video make showcase  # just the MCP clip + its poster
 SHOWCASE_SKIP_BUILD=1 make showcase   # reuse the existing ./dbbat
 SHOWCASE_KEEP=1 make showcase         # leave the stack up to poke at
 SHOWCASE_PG_TIMEOUT=120 make showcase # give the upstream more time on a cold pull
@@ -263,10 +264,15 @@ drops every table on startup, so pointing it at the shared dev stack would
 destroy that database. Demo-mode credentials are `admin`/`admin`,
 `viewer`/`viewer`, `connector`/`connector`.
 
-The approval video drives a real `pg` client through the proxy to create a
-genuine hold; the terminal pane and the mouse pointer are drawn (a real
-terminal is not reproducible in CI, and Playwright records no cursor). ffmpeg
-transcodes the WebM to AV1 (`libsvtav1`) plus an H.264 fallback for Safari.
+There are **two** approval clips, the same hold from either side. The first
+drives a real `pg` client through the proxy; the second (`mcp-approval-hold-*`)
+issues the statement over MCP as an AI agent would — real JSON-RPC against
+`POST /api/v1/mcp` with a `dbb_` key — and shows `query` answering
+`approval_pending`, the human releasing it, and `await_approval` handing back
+the rows. Both draw their client pane and the mouse pointer (neither a real
+terminal nor a real agent is reproducible in CI, and Playwright records no
+cursor); neither fakes a result. ffmpeg transcodes each WebM to AV1
+(`libsvtav1`) plus an H.264 fallback for Safari.
 
 Every run writes `website/static/img/showcase/manifest.json`
 (`version`/`commit`/`generatedAt`), version read from
