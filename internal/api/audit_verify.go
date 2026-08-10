@@ -19,7 +19,7 @@ import (
 // `dbbat audit verify` remains the authoritative way to check the chains: it
 // runs where the key lives and can be run by someone who does not trust the
 // serving process. This endpoint exists so an auditor's evidence script can
-// collect the same numbers over REST like every other artefact on
+// collect the same numbers over REST like every other artifact on
 // website/docs/compliance.md — with the standing caveat, documented there and
 // in docs/audit-chain.md, that a compromised dbbat can answer
 // {"verified": true} without walking anything.
