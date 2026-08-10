@@ -38,6 +38,7 @@ const (
 	auditChainDomain = "dbbat-audit-chain-v1"
 	queryChainDomain = "dbbat-query-chain-v1"
 	rowChainDomain   = "dbbat-row-chain-v1"
+	rowStampDomain   = "dbbat-row-chain-stamp-v1"
 
 	auditGenesisLabel = "dbbat-audit-chain-genesis-v1"
 	queryGenesisLabel = "dbbat-query-chain-genesis-v1:"
@@ -60,6 +61,14 @@ const queryChainAdvisoryLockClass int32 = 0x44424251
 // rowChainAdvisoryLockClass is the same idea for the per-query chains over
 // captured result rows. Its own class, so a query uid and a connection uid
 // mapping to the same object id never serialize against each other.
+//
+// A collision between two captures costs them a little serialization against
+// each other. It is not *entirely* free the way the query-chain one is: a row
+// batch takes several of these locks at once, in query-uid order, and a
+// collision can make two batches disagree about the effective order of the ids
+// they are taking — so two overlapping batches could in principle deadlock.
+// PostgreSQL's deadlock detector aborts one of them and chainAppendAttempts
+// retries it, so the outcome is a retry rather than a lost batch.
 const rowChainAdvisoryLockClass int32 = 0x44425251
 
 // chainAppendAttempts bounds the retries an append makes when its cached head
@@ -292,6 +301,29 @@ func rowChainPayload(
 	p.writeBytes("prev_mac", prevMAC)
 
 	return p.bytes(), nil
+}
+
+// rowChainStampMAC seals a finished capture's head: how many rows the chain
+// holds and the MAC it ends on, bound to the query.
+//
+// It is a *keyed* stamp, and that is the whole point. Storing the head MAC
+// verbatim — which is what connections.query_chain_mac does — would not survive
+// the threat model this feature exists for: the head MAC is readable straight
+// out of query_rows, so an attacker with write access to the store could delete
+// the last captured rows and then copy the new last row's MAC into the stamp,
+// with no key and no break reported. Sealing the stamp instead means correcting
+// it after a deletion requires the chain key, exactly like forging a row.
+//
+// See specs/todos/2026-08-10-seal-the-connection-query-chain-stamp.md: the
+// per-connection stamp has the same weakness and needs a compatibility story
+// this cannot give it.
+func (s *Store) rowChainStampMAC(queryUID uuid.UUID, count int64, headMAC []byte) []byte {
+	p := newCanonicalPayload(rowStampDomain)
+	p.writeString("query_id", queryUID.String())
+	p.writeInt("row_chain_len", count)
+	p.writeBytes("head_mac", headMAC)
+
+	return s.chainMAC(p.bytes())
 }
 
 func optionalUUID(id *uuid.UUID) []byte {

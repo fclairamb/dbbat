@@ -585,10 +585,13 @@ func (s *Store) SealQueryRowChain(ctx context.Context, queryUID uuid.UUID) error
 		return nil
 	}
 
+	// The stamp is a MAC over the head, not the head itself: a verbatim copy
+	// could be recomputed by anyone who can read query_rows, which is exactly
+	// the attacker this is meant to catch. See rowChainStampMAC.
 	_, err := s.db.NewUpdate().
 		Model((*Query)(nil)).
 		Where("uid = ?", queryUID).
-		Set("row_chain_mac = ?", head.mac).
+		Set("row_chain_mac = ?", s.rowChainStampMAC(queryUID, head.count, head.mac)).
 		Set("row_chain_len = ?", head.count).
 		Exec(ctx)
 	if err != nil {

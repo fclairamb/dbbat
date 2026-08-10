@@ -689,6 +689,14 @@ func (s *Store) verifyCapturedRow(
 // head its surviving rows compute. This is the only check that catches rows
 // deleted from the *end* of a capture — or a capture deleted outright while its
 // query survived.
+//
+// The stamp is a keyed MAC over (query, length, head MAC), not a copy of the
+// head MAC, so recomputing it after a deletion needs the chain key. A stamp
+// that stored the head verbatim would defend against nothing: the head is
+// readable from query_rows, so the attacker deleting the last rows could simply
+// copy the new last row's MAC over it. Both halves are therefore checked
+// against what the surviving rows compute — the recorded length as well as the
+// MAC — so an edit to either one is a break.
 func (s *Store) checkStampedRowHead(ctx context.Context, result *RowChainResult) error {
 	var query Query
 
@@ -713,20 +721,35 @@ func (s *Store) checkStampedRowHead(ctx context.Context, result *RowChainResult)
 		return nil
 	}
 
-	if hmac.Equal(query.RowChainMAC, result.HeadMAC) {
+	queryUID := result.QueryUID
+
+	if query.RowChainLen != result.Verified {
+		result.Break = &ChainBreak{
+			UID:      queryUID,
+			ChainSeq: query.RowChainLen,
+			QueryUID: &queryUID,
+			Reason: fmt.Sprintf(
+				"the query recorded %d captured rows but %d survive: "+
+					"rows were removed from the end of the capture",
+				query.RowChainLen, result.Verified),
+		}
+
 		return nil
 	}
 
-	queryUID := result.QueryUID
+	expected := s.rowChainStampMAC(queryUID, result.Verified, result.HeadMAC)
+	if hmac.Equal(query.RowChainMAC, expected) {
+		return nil
+	}
 
 	result.Break = &ChainBreak{
 		UID:      queryUID,
 		ChainSeq: query.RowChainLen,
 		QueryUID: &queryUID,
 		Reason: fmt.Sprintf(
-			"the query recorded %d captured rows ending in %s, but the surviving rows end at %d/%s: "+
-				"rows were removed from the end of the capture",
-			query.RowChainLen, hex.EncodeToString(query.RowChainMAC),
+			"the query's stamped head %s does not seal the %d surviving rows ending at %d/%s: "+
+				"rows were removed from the end of the capture, or the stamp was rewritten",
+			hex.EncodeToString(query.RowChainMAC), result.Verified,
 			result.HeadRowNumber, hex.EncodeToString(result.HeadMAC)),
 	}
 

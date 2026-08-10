@@ -452,11 +452,16 @@ type Query struct {
 	PrevMAC  []byte `bun:"prev_mac" json:"-"`
 	MAC      []byte `bun:"mac" json:"-"`
 
-	// RowChainMAC is the final head of this query's *result row* chain,
-	// stamped when the capture finishes, and RowChainLen is how many captured
-	// rows that head covers. They are to query_rows what QueryChainMAC /
-	// QueryChainLen are to a connection's statements: the only thing that
-	// catches rows deleted from the *end* of a capture.
+	// RowChainMAC seals the final head of this query's *result row* chain when
+	// the capture finishes, and RowChainLen is how many captured rows that head
+	// covers. They are to query_rows what QueryChainMAC / QueryChainLen are to
+	// a connection's statements: the only thing that catches rows deleted from
+	// the *end* of a capture.
+	//
+	// It is a keyed MAC over (query, length, head MAC) — deliberately *not* a
+	// copy of the head MAC, which is readable from query_rows and could
+	// therefore be rewritten to match a truncated capture without the chain
+	// key. See rowChainStampMAC.
 	//
 	// RowChainLen is a count, not the head's row_number — a capture with gaps
 	// (rows the writer dropped, rows that failed to encode) has fewer stored
