@@ -1241,3 +1241,36 @@ func TestRowChainDisabledWithoutKey(t *testing.T) {
 	require.Equal(t, int64(2), result.Unchained)
 	require.Equal(t, int64(0), result.Captures)
 }
+
+// TestRowChainResumesFromTheStoredHead exercises the cold-cache path: a store
+// that never wrote to a capture reads its head back out of query_rows and
+// continues the chain from there. It is what a restarted process — or a peer
+// replica — lands on.
+func TestRowChainResumesFromTheStoredHead(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	query := captureQuery(t, ctx, store, "rows-resume")
+	storeChainedRows(t, ctx, store, query.UID, 1, 2)
+
+	peer := &Store{
+		db:          store.db,
+		queryChains: newQueryChains(),
+		rowChains:   newQueryChains(),
+		chainKey:    store.chainKey,
+	}
+
+	storeChainedRows(t, ctx, peer, query.UID, 3, 4)
+	require.NoError(t, peer.SealQueryRowChain(ctx, query.UID))
+
+	result, err := store.VerifyRowChain(ctx, query.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break, "a cold store must extend the chain, not restart it: %v", result.Break)
+	require.Equal(t, int64(4), result.Verified)
+
+	sealed, err := store.GetQuery(ctx, query.UID)
+	require.NoError(t, err)
+	require.Equal(t, int64(4), sealed.RowChainLen, "the stamp must count the rows the cold store did not write")
+}

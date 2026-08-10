@@ -454,10 +454,9 @@ func (s *Store) sealRowGroup(group *rowChainGroup, rows []QueryRowModel) (rowCha
 // alternative — one round trip per query in the batch — is exactly the cost
 // this write path cannot afford.
 func lockRowChains(ctx context.Context, tx bun.Tx, groups []rowChainGroup) error {
-	var (
-		sb   strings.Builder
-		args []any
-	)
+	var sb strings.Builder
+
+	args := make([]any, 0, 2*len(groups))
 
 	sb.WriteString("SELECT ")
 
@@ -534,7 +533,7 @@ func readRowChainHeads(ctx context.Context, db bun.IDB, queryUIDs []uuid.UUID) (
 		ColumnExpr("COUNT(*) AS cnt").
 		ColumnExpr("(ARRAY_AGG(qr.mac ORDER BY qr.row_number DESC, qr.uid DESC))[1] AS mac").
 		Where("qr.mac IS NOT NULL").
-		Where("qr.query_id IN (?)", bun.In(queryUIDs)).
+		Where("qr.query_id IN (?)", bun.List(queryUIDs)).
 		GroupExpr("qr.query_id").
 		Scan(ctx, &rows)
 	if err != nil {
