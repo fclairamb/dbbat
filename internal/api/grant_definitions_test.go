@@ -582,7 +582,10 @@ func TestListGrantDefinitions_ScopedDatabaseUIDs(t *testing.T) {
 		def, ok := item.(map[string]any)
 		require.True(t, ok)
 
-		byName[def["name"].(string)] = def
+		name, ok := def["name"].(string)
+		require.True(t, ok)
+
+		byName[name] = def
 	}
 
 	scoped, ok := byName[scopedDef.Name]
