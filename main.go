@@ -1515,9 +1515,13 @@ func auditCommand(flags *cliFlags) *cli.Command {
 						Name:  "queries",
 						Usage: "verify the per-connection query chains instead of the audit log",
 					},
+					&cli.BoolFlag{
+						Name:  "rows",
+						Usage: "verify the per-query captured result row chains instead of the audit log",
+					},
 					&cli.StringFlag{
 						Name:  "connection",
-						Usage: "with --queries, verify only this connection uid",
+						Usage: "with --queries or --rows, verify only this connection uid",
 					},
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
@@ -1530,7 +1534,8 @@ func auditCommand(flags *cliFlags) *cli.Command {
 
 var (
 	errAuditChainBroken     = errors.New("audit chain verification failed")
-	errAuditConnectionScope = errors.New("--connection only applies together with --queries")
+	errAuditConnectionScope = errors.New("--connection only applies together with --queries or --rows")
+	errAuditScopeConflict   = errors.New("--queries and --rows are different chains: pass one or the other")
 )
 
 func runAuditVerify(ctx context.Context, flags *cliFlags, cmd *cli.Command) error {
@@ -1548,8 +1553,12 @@ func runAuditVerify(ctx context.Context, flags *cliFlags, cmd *cli.Command) erro
 
 	slog.SetDefault(logger)
 
+	if cmd.Bool("queries") && cmd.Bool("rows") {
+		return errAuditScopeConflict
+	}
+
 	connectionArg := cmd.String("connection")
-	if connectionArg != "" && !cmd.Bool("queries") {
+	if connectionArg != "" && !cmd.Bool("queries") && !cmd.Bool("rows") {
 		return errAuditConnectionScope
 	}
 
@@ -1573,6 +1582,10 @@ func runAuditVerify(ctx context.Context, flags *cliFlags, cmd *cli.Command) erro
 
 	if cmd.Bool("queries") {
 		return verifyQueryChains(ctx, dataStore, logger, connectionUID)
+	}
+
+	if cmd.Bool("rows") {
+		return verifyRowChains(ctx, dataStore, logger, connectionUID)
 	}
 
 	return verifyAuditChain(ctx, dataStore, logger)
@@ -1627,6 +1640,32 @@ func verifyQueryChains(
 		// DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived session,
 		// so it is counted rather than treated as tampering.
 		slog.Int64("chains_with_retention_truncated_prefix", result.Truncated))
+
+	return nil
+}
+
+func verifyRowChains(
+	ctx context.Context, dataStore *store.Store, logger *slog.Logger, connectionUID *uuid.UUID,
+) error {
+	result, err := dataStore.VerifyRowChains(ctx, connectionUID)
+	if err != nil {
+		return fmt.Errorf("captured row chain verification failed: %w", err)
+	}
+
+	if !result.OK() {
+		logger.ErrorContext(ctx, "CAPTURED ROW CHAIN BROKEN",
+			slog.String("break", result.Break.String()),
+			slog.Int64("verified_before_break", result.Verified))
+
+		return errAuditChainBroken
+	}
+
+	logger.InfoContext(ctx, "Captured row chains verified",
+		slog.Int64("captures", result.Captures),
+		slog.Int64("rows", result.Verified),
+		// Rows captured before the row chain migration. Nothing sealed them,
+		// so they are reported rather than folded into "verified".
+		slog.Int64("unverifiable_pre_migration_rows", result.Unchained))
 
 	return nil
 }
