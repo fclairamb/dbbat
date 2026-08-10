@@ -946,8 +946,14 @@ func TestRowChainStampsHeadOnSeal(t *testing.T) {
 	require.NoError(t, err)
 
 	rows := readChainedRows(t, ctx, store, query.UID)
-	require.Equal(t, rows[2].MAC, sealed.RowChainMAC, "the capture head must be stamped on seal")
 	require.Equal(t, int64(3), sealed.RowChainLen)
+	require.Equal(t, store.rowChainStampMAC(query.UID, 3, rows[2].MAC), sealed.RowChainMAC,
+		"the stamp must seal the capture head")
+
+	// The security property: the stamp is not a copy of a value that is
+	// readable from query_rows, so it cannot be recomputed without the key.
+	require.NotEqual(t, rows[2].MAC, sealed.RowChainMAC,
+		"a stamp that echoes the head MAC could be rewritten by anyone who can read the rows")
 }
 
 func TestRowChainDetectsModifiedRow(t *testing.T) {
@@ -1041,6 +1047,63 @@ func TestRowChainDetectsTrailingDeletion(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result.Break, "deleting the last captured row must be detected")
 	require.Contains(t, result.Break.Reason, "removed from the end")
+}
+
+// TestRowChainDetectsRestampedTrailingDeletion is the case that actually
+// matters. An attacker with write access to the store does not stop at deleting
+// the last rows — they fix the stamp up afterwards. That works against a stamp
+// that merely echoes the head MAC, because the head is readable from
+// query_rows. It must not work here: the stamp is keyed, so correcting it needs
+// the chain key.
+func TestRowChainDetectsRestampedTrailingDeletion(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	query := captureQuery(t, ctx, store, "rows-restamped")
+	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
+	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
+
+	rows := readChainedRows(t, ctx, store, query.UID)
+
+	// Delete the last row and re-stamp the query with everything the attacker
+	// can see: the new last row's MAC and the new count.
+	_, err := store.db.ExecContext(ctx, `DELETE FROM query_rows WHERE uid = ?`, rows[2].UID)
+	require.NoError(t, err)
+
+	_, err = store.db.ExecContext(ctx,
+		`UPDATE queries SET row_chain_mac = ?, row_chain_len = ? WHERE uid = ?`,
+		rows[1].MAC, 2, query.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyRowChain(ctx, query.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "a re-stamped truncation must still be detected")
+	require.Contains(t, result.Break.Reason, "the stamp was rewritten")
+}
+
+// TestRowChainDetectsAnEditedStampLength covers the other half of the stamp:
+// row_chain_len is compared against what survives, not just carried in the
+// break message.
+func TestRowChainDetectsAnEditedStampLength(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	query := captureQuery(t, ctx, store, "rows-stamplen")
+	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
+	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
+
+	_, err := store.db.ExecContext(ctx,
+		`UPDATE queries SET row_chain_len = 99 WHERE uid = ?`, query.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyRowChain(ctx, query.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "the recorded length must be checked, not just printed")
+	require.Contains(t, result.Break.Reason, "recorded 99 captured rows but 3 survive")
 }
 
 // TestRowChainDetectsWipedCapture covers the case the enumeration has to reach
