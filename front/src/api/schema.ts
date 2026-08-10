@@ -1643,6 +1643,13 @@ export interface paths {
          *     long-lived session. That is expected housekeeping, not tampering, and
          *     everything after the truncation is still verified.
          *
+         *     `legacy_stamps` counts sessions still carrying the pre-0.24 head stamp,
+         *     which is a verbatim copy of the last statement's MAC and therefore
+         *     forgeable by anyone who can write to the store. Those chains verified;
+         *     what is missing is a keyed confirmation that nothing was removed from
+         *     their end. Sessions closed by this build are sealed, so the number
+         *     drains as the old ones age out.
+         *
          *     The same caveats as `GET /audit/verify` apply: an answer from the
          *     server is only as trustworthy as the server, and it is cached, so it
          *     can be up to 60 seconds old — a chain broken moments ago keeps
@@ -3491,6 +3498,17 @@ export interface components {
              *     truncation is still verified.
              */
             chains_with_truncated_prefix: number;
+            /**
+             * Format: int64
+             * @description Sessions whose head stamp predates 0.24 and is a verbatim copy of
+             *     the last statement's MAC rather than a keyed seal. Anyone who can
+             *     write to the store can write that value, so those chains verified
+             *     but nothing keyed vouches for their *tail*. Not a failure: the
+             *     number drains as pre-upgrade sessions age out of retention, and
+             *     every session closed since is sealed. A number that stops falling
+             *     — or rises — is worth investigating.
+             */
+            legacy_stamps: number;
             /**
              * Format: int64
              * @description Chain position the walk ended on. Reported only for a
