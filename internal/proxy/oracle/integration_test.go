@@ -474,7 +474,13 @@ func TestIntegration_MCPExecutesThroughTheProxy(t *testing.T) {
 	// The proxy matches the username on the wire against the API key's owner,
 	// and the upstream credentials come from the server row — so the dbbat user
 	// is deliberately not the Oracle one.
-	user, err := dataStore.CreateUser(ctx, "SYSTEM", "$argon2id$v=19$m=4096,t=3,p=1$salt$hash", []string{"connector"})
+	//
+	// Lowercase on purpose: Oracle clients uppercase the username on the wire and
+	// the proxy lowercases it again before looking the dbbat user up
+	// (session.authenticateClient), so a dbbat user stored as "SYSTEM" can never
+	// be found. This fixture used to create exactly that and failed the whole
+	// test at the first Execute with "user not found: SYSTEM".
+	user, err := dataStore.CreateUser(ctx, "agent", "$argon2id$v=19$m=4096,t=3,p=1$salt$hash", []string{"connector"})
 	require.NoError(t, err)
 
 	encryptionKey := []byte("0123456789012345678901234567890X")
