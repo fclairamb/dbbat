@@ -3052,6 +3052,73 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /audit/verify/rows:
+    get:
+      tags:
+        - Audit
+      summary: Verify the captured result-row chains (admin only)
+      description: |
+        Walks the result-row chain of every capture that has one, of one
+        session's captures when `connection` is given, or of a single capture
+        when `query` is. A capture-scoped walk additionally reports that
+        chain's head. The two filters cannot be combined — a query already
+        names exactly one capture.
+
+        Unlike the query chains, a capture has no legitimate reason to be
+        missing its oldest rows: retention deletes whole queries (and whole
+        connections) rather than individual captured rows, so there is no
+        `chains_with_truncated_prefix` counterpart here — a first row that does
+        not follow the capture's genesis is a break. There is no
+        `legacy_stamps` counterpart either: a capture's head stamp has always
+        been a keyed MAC, never a copy of the head.
+
+        `unverifiable_pre_migration_rows` counts rows captured before the row
+        chain migration. Nothing sealed them and nothing can after the fact.
+
+        The same caveats as `GET /audit/verify` apply: an answer from the
+        server is only as trustworthy as the server, and it is cached, so it
+        can be up to 60 seconds old — a chain broken moments ago keeps
+        reporting `"verified": true` until the cached walk expires. The
+        response never contains the chain key, and never contains a captured
+        row's data or any other record content.
+
+        Requires admin role.
+      operationId: verifyRowChains
+      parameters:
+        - name: connection
+          in: query
+          description: Verify only this connection's captures
+          schema:
+            type: string
+            format: uuid
+        - name: query
+          in: query
+          description: Verify only this capture (also reports that chain's head)
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Verification outcome
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RowChainVerification'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: This instance has no chain key, so nothing it stores is chained
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /servers/{uid}/connection:
     get:
       tags:
@@ -5868,6 +5935,12 @@ components:
           type: string
           format: uuid
           description: Set for query-chain breaks
+        query_uid:
+          type: string
+          format: uuid
+          description: |
+            Set for captured-row-chain breaks. `chain_seq` then carries the
+            offending row's `row_number` rather than a chain position.
         reason:
           type: string
           description: Human-readable description of what did not add up
@@ -6008,6 +6081,71 @@ components:
         - statements
         - chains_with_truncated_prefix
         - legacy_stamps
+        - checked_at
+        - cached
+
+    RowChainVerification:
+      type: object
+      description: |
+        Outcome of walking the per-capture result-row chains. Carries counts,
+        positions and — for a single-capture walk — that chain's head. Never
+        the chain key, never a captured row's data or any other record content.
+      properties:
+        chain:
+          type: string
+          enum: [rows]
+          description: Which chain was walked
+        verified:
+          type: boolean
+          description: True when every chain walked is intact
+        connection_uid:
+          type: string
+          format: uuid
+          description: Set only when the walk was scoped to one session
+        query_uid:
+          type: string
+          format: uuid
+          description: Set only when the walk was scoped to one capture
+        captures:
+          type: integer
+          format: int64
+          description: How many captures were walked
+        rows:
+          type: integer
+          format: int64
+          description: How many chained captured rows were checked across them
+        unverifiable_pre_migration_rows:
+          type: integer
+          format: int64
+          description: |
+            Rows captured before the row chain migration. No MAC exists for
+            them and none can be created after the fact, so they are reported
+            rather than folded into the verified count.
+        head_row_number:
+          type: integer
+          format: int64
+          description: |
+            The `row_number` the walk ended on. Reported only for a
+            single-capture walk: an aggregate head over many independent
+            chains would not mean anything.
+        head_mac:
+          type: string
+          description: That chain's head, hex-encoded. Single-capture walks only.
+        break:
+          $ref: '#/components/schemas/ChainBreak'
+        checked_at:
+          type: string
+          format: date-time
+          description: When this walk ran
+        cached:
+          type: boolean
+          description: True when this answer is a remembered walk rather than one run for this request
+      required:
+        - chain
+        - verified
+        - captures
+        - rows
+        - unverifiable_pre_migration_rows
         - checked_at
         - cached
 
