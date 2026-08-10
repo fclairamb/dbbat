@@ -24,7 +24,8 @@ import (
 // frequency: every store.InstanceReclaimInterval it reclaims the connections of
 // instances the registry proves are gone (see reclaim). Doing it here rather
 // than only at startup is what stops a crashed pod's rows sitting open until
-// some unrelated process happens to restart.
+// some unrelated process happens to restart. The same tick re-seals the query
+// chain head of the sessions this run still has open (see refreshOpenStamps).
 type instanceHeartbeat struct {
 	store    *store.Store
 	logger   *slog.Logger
@@ -209,6 +210,7 @@ func (h *instanceHeartbeat) run(ctx context.Context) {
 			h.checkSharedInstanceID(ctx)
 		case <-reclaim.C:
 			h.reclaim(ctx)
+			h.refreshOpenStamps(ctx)
 			reclaim.Reset(nextReclaimDelay())
 		case <-h.stop:
 			return
@@ -270,6 +272,42 @@ func (h *instanceHeartbeat) reclaim(ctx context.Context) {
 
 	// After the reclaim, so it still saw the rows it judged.
 	pruneStaleInstances(ctx, h.store, h.logger)
+}
+
+// refreshOpenStamps re-seals the query chain head of the sessions this run
+// still has open.
+//
+// It rides on the reclaim tick rather than a timer of its own because it closes
+// the same class of gap from the other end. The reclaim bounds how long a
+// *crashed* session's tail goes unstamped; this bounds how long a session that
+// simply never ends goes unstamped — a psql window left open all day, a pooled
+// application connection, an approval hold waiting on a human. Before it, the
+// stamp was only ever written by a close, so such a session had no protection
+// against a trailing deletion for its entire life.
+//
+// After it, the protection is a prefix: whatever the last sweep sealed. See
+// store.RefreshOpenChainStamps.
+//
+// A failure is logged at warn, not error: the next tick tries again, and
+// nothing about serving traffic depends on it.
+func (h *instanceHeartbeat) refreshOpenStamps(ctx context.Context) {
+	stamped, err := h.store.RefreshOpenChainStamps(ctx)
+	if err != nil {
+		h.logger.WarnContext(ctx, "failed to refresh the query chain stamps of open sessions",
+			slog.Any("error", err))
+
+		return
+	}
+
+	if stamped == 0 {
+		return
+	}
+
+	// Debug: on a busy replica this is every open session, every pass, and it
+	// is routine housekeeping rather than an event.
+	h.logger.DebugContext(ctx, "Refreshed the query chain stamp of open sessions",
+		slog.Int64("connections", stamped),
+		slog.String("run_id", h.store.RunID()))
 }
 
 // beat refreshes the row. A failure is logged at warn rather than error: one
