@@ -175,6 +175,13 @@ the cursor is never learned. That second failure is not theoretical:
 > ran the wrong SQL and `/queries` recorded the wrong SQL. Caught mid-churn,
 > five runs of `SELECT 1 AS n FROM dual` were all gated as
 > `SELECT 35 AS churn FROM dual`.
+>
+> The sequence bound is fixed. **The masking mechanism is not**: stale tracker
+> entries still accumulate, because `handleOCLOSE` removes one cursor per frame
+> while clients batch their closes, so any future learning miss re-arms the same
+> silent wrong-SQL gate. Filed as
+> `specs/todos/2026-08-10-oracle-stale-cursor-resolves-to-the-wrong-statement.md`;
+> listed as an open gap in `docs/approvals.md`.
 
 One gotcha the fixtures pinned: the OER **end-of-call bit is not universal**.
 go-ora's connections carry `CallStatus 0x10005`, python-oracledb's carry

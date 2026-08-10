@@ -15,6 +15,24 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
+// The log messages the cursor-tracking path emits, named because the
+// cursor-id learning measurement counts them
+// (cursor_learning_integration_test.go) and a measurement that silently counts
+// a string nothing emits any more reports a perfect score forever. Naming them
+// makes the compiler the guard: rewording one here moves the counter with it.
+//
+// logMsgQueryIntercepted is deliberately shared by every statement-carrying op
+// — each one is a chance to learn a cursor id, which is what the measurement
+// counts it for.
+const (
+	logMsgQueryIntercepted         = "query intercepted"
+	logMsgLearnedCursorID          = "learned server-assigned cursor id"
+	logMsgReexecGated              = "intercepted cursor re-execution"
+	logMsgUntrackedCursorForwarded = "forwarding a re-execution of an untracked cursor: " +
+		"the grant carries no statement-shaped control"
+	logMsgUntrackedCursorRefused = "refused a re-execution of an untracked cursor under a restrictive grant"
+)
+
 // trackedCursor tracks a parsed cursor and its SQL.
 type trackedCursor struct {
 	cursorID   uint16
@@ -162,16 +180,14 @@ func (s *session) handleCursorReexec(cursorID uint16) error {
 // This conditional refusal is documented in docs/approvals.md.
 func (s *session) refuseUnknownCursor(cursorID uint16) error {
 	if !s.hasStatementControls() {
-		s.logger.WarnContext(s.ctx,
-			"forwarding a re-execution of an untracked cursor: the grant carries no statement-shaped control",
+		s.logger.WarnContext(s.ctx, logMsgUntrackedCursorForwarded,
 			slog.Uint64("cursor_id", uint64(cursorID)),
 		)
 
 		return nil
 	}
 
-	s.logger.WarnContext(s.ctx,
-		"refused a re-execution of an untracked cursor under a restrictive grant",
+	s.logger.WarnContext(s.ctx, logMsgUntrackedCursorRefused,
 		slog.Uint64("cursor_id", uint64(cursorID)),
 	)
 
@@ -204,7 +220,7 @@ func (s *session) hasStatementControls() bool {
 func (s *session) regateCursor(cursor *trackedCursor) error {
 	sql := cursor.sql
 
-	s.logger.DebugContext(s.ctx, "intercepted cursor re-execution",
+	s.logger.DebugContext(s.ctx, logMsgReexecGated,
 		slog.String("sql", truncateSQL(sql, 200)),
 		slog.Uint64("cursor_id", uint64(cursor.cursorID)),
 	)
@@ -310,7 +326,7 @@ func (s *session) learnCursorID(ttcPayload []byte) {
 	pending.cursor.cursorID = cursorID
 	s.tracker.cursors[cursorID] = pending.cursor
 
-	s.logger.DebugContext(s.ctx, "learned server-assigned cursor id",
+	s.logger.DebugContext(s.ctx, logMsgLearnedCursorID,
 		slog.Uint64("cursor_id", uint64(cursorID)),
 		slog.String("sql", truncateSQL(pending.cursor.sql, 200)),
 	)
@@ -332,7 +348,7 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 		return nil // Don't block on decode failure
 	}
 
-	s.logger.InfoContext(s.ctx, "query intercepted",
+	s.logger.InfoContext(s.ctx, logMsgQueryIntercepted,
 		slog.String("sql", truncateSQL(result.SQL, 200)),
 	)
 
@@ -400,7 +416,7 @@ func (s *session) handleJDBCExec(ttcPayload []byte) error {
 	// /queries is the same one the patterns ran against.
 	sql := shared.NormalizeSQL(result.SQL)
 
-	s.logger.InfoContext(s.ctx, "query intercepted",
+	s.logger.InfoContext(s.ctx, logMsgQueryIntercepted,
 		slog.String("sql", truncateSQL(sql, 200)),
 		slog.String("source", "jdbc"),
 	)

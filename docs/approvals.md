@@ -49,13 +49,29 @@ Server) a malformed request is refused outright. **Oracle is the exception**:
 TTC is hand-rolled and the SQL is located heuristically, so a decode failure on
 `OALL8`, the v315+ piggyback exec or the JDBC exec is deliberately treated as
 "pass through" rather than "refuse" — an unparseable frame must not be able to
-break a customer's connection. One known gap remains in what the gate *sees* on
+break a customer's connection. Two known gaps remain in what the gate *sees* on
 Oracle:
 
 - **An undecodable frame.** A statement dbbat cannot decode is neither held nor
   recorded. It is also not checked against `read_only`/`block_ddl`, so this is
   not specific to approvals — the static controls have exactly the same
   dependency on decoding.
+- **A recycled cursor id can be gated against the *wrong* statement.** Oracle
+  reuses cursor ids within a session, and dbbat's tracker only drops an entry
+  when it sees the cursor closed. It under-sees those closes — `handleOCLOSE`
+  removes exactly one id per frame, while clients batch their closes — so stale
+  entries accumulate for the life of a session. If dbbat ever fails to learn the
+  id the server assigned to a *new* statement, the next re-execution of that id
+  finds a stale entry and is gated, logged in `/queries`, and matched against
+  approval patterns as whatever SQL the entry still holds.
+
+  This is the more severe of the two, because it substitutes a *different*
+  statement rather than skipping one — and it never reaches the untracked-cursor
+  refusal below, since it *finds* an entry. It is not hypothetical: it is how a
+  cursor-id learning bug stayed invisible for as long as it did (below). That
+  bug is fixed, so the mis-resolution is currently latent rather than firing —
+  one missed response away from returning. Filed as
+  `specs/todos/2026-08-10-oracle-stale-cursor-resolves-to-the-wrong-statement.md`.
 
 If an Oracle client of yours is not showing up in `/queries` at all, that is the
 first gap: treat missing query rows on Oracle as missing enforcement, and file it.
@@ -117,6 +133,12 @@ The boundaries, all deliberate:
   dbbat could not resolve. Numbers and method in `docs/oracle.md`, "Cursor-id
   learning".
 
+  Note what that measurement did **not** close: the stale-entry half is still
+  open, and it is listed above as a live gap. The refusal here only covers the
+  case where dbbat finds *no* entry for a cursor id. When a learning miss
+  coincides with an id Oracle has recycled, dbbat finds the wrong entry instead
+  and never reaches this branch at all.
+
   One subtlety worth knowing before filing it as a bug: the approval-pattern
   half of "restrictive" is read off the grant regardless of
   `DBB_APPROVAL_ENABLED`. A grant carrying patterns while approvals are globally
@@ -130,6 +152,7 @@ The boundaries, all deliberate:
   mid-result-set. (The response leg's `LimitGuard` independently covers
   revocation, the byte quota and expiry; it does not know about
   `max_query_counts`, which is why the branch has to check it.)
+
 **How often real clients do this: measured, and the answer is "constantly".**
 Five captures against Oracle Free 23ai, one per client, are in
 `internal/proxy/oracle/testdata/*_cursor_reexec.pcapng`:

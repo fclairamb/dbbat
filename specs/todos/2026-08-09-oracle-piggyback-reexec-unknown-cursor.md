@@ -166,3 +166,22 @@ the real intercept paths, all resolved.
 The interleaved-cursor triple came out 4/4/4, which is the mis-learning check
 the miss count cannot make: a cursor id read off the wrong OER shows up as a
 skew there long before it shows up as an unknown statement.
+
+### What this did not close
+
+The masking mechanism itself. Stale tracker entries still accumulate for the
+life of a session — `handleOCLOSE` removes one cursor id per frame while clients
+batch their closes — so a future learning miss on a recycled id would re-arm the
+same silent wrong-SQL gate, without ever reaching `refuseUnknownCursor`. Filed
+as `specs/todos/2026-08-10-oracle-stale-cursor-resolves-to-the-wrong-statement.md`
+and listed as an open gap in `docs/approvals.md`.
+
+The measurement's counters are guarded by
+`TestCountingHandlerWatchesTheMessagesTheGateEmits` (untagged, runs in
+`make test`). It exists because they rotted once already: routing the piggyback
+frame through `refuseUnknownCursor` deleted the log line the untracked counter
+watched, leaving the headline metric structurally unable to be non-zero while
+still being cited as evidence. The log messages are now named constants in
+`intercept.go`, so a reword moves the counter with it, and the guard proves an
+untracked cursor really does emit a record the counter watches — on both sides
+of the statement-controls branch.

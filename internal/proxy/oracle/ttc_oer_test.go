@@ -248,17 +248,61 @@ func TestFindCursorIDInResponse_SequenceNumberPastAByte(t *testing.T) {
 	}
 }
 
+// oerErrorResponse is a real ORA-00942 OER, captured through the proxy when a
+// client selected from a missing table. Oracle sent it as a standalone OER
+// message, so its 0x04 marker sat at index 0 of the TTC payload — and
+// findCursorIDInResponse starts scanning at index 1, since index 0 is the
+// function-code byte of whatever message carries the OER. The byte below is
+// therefore the leading function code a *carrying* response puts in front of
+// it (0x08, Response); everything after it is untouched capture.
+//
+// Getting that wrong is not hypothetical: this fixture was first written
+// trimmed to the marker, which made the test below pass without the scan ever
+// reaching the error-code filter.
+const oerErrorResponse = "08" +
+	"0401010163000203ae00000109010e03000000000003011d4d02040000028f990104000063000000000000" +
+	"0203ae004e4f52412d30303934323a207461626c65206f722076696577202253595354454d222e"
+
+// oerErrorCodeFieldStart is where the errNum field sits inside oerErrorResponse:
+// one byte of function code, the 0x04 marker, then callStatus (0x0101) and
+// sequence (0x0163) and curRowNumber (0x00). Its three bytes are 0x02 0x03 0xae
+// — a two-byte 942.
+const (
+	oerErrorCodeFieldStart = 7
+	oerErrorCodeFieldLen   = 3
+)
+
 // TestFindCursorIDInResponse_RejectsAnErrorOER pins the other half of the
 // anchor: an OER reporting a real failure assigns no usable cursor, so nothing
 // is learned from it. That is why a statement that errors never yields a cursor
 // id — and it is safe, because no client re-executes a statement that failed.
+//
+// The second half of the test is what makes the first half mean anything: the
+// *same* bytes with the error code zeroed do teach cursor 9, so the rejection
+// above is the error-code filter doing its job and not some other anchor (or
+// the scan never finding an OER-shaped run at all).
 func TestFindCursorIDInResponse_RejectsAnErrorOER(t *testing.T) {
 	t.Parallel()
 
-	// ORA-00942 on a SELECT, captured the same way.
-	payload := decodeHexString(t, "0401010163000203ae00000109010e03000000000003011d4d02040000028f99010400006"+
-		"30000000000000203ae004e4f52412d30303934323a207461626c65206f722076696577202253595354454d222e")
+	payload := decodeHexString(t, oerErrorResponse)
+
+	// The fixture really does contain a decodable OER, at an offset the scan
+	// looks at, carrying a real ORA code and a plausible cursor id.
+	info, _ := decodeOERFieldsAt(payload, 1)
+	require.NotNil(t, info, "the fixture must hold an OER the scan can reach")
+	assert.Equal(t, 942, info.ErrorCode)
+	assert.Equal(t, 9, info.CursorID)
 
 	_, ok := findCursorIDInResponse(payload)
 	assert.False(t, ok, "an OER carrying a real ORA code must not teach a cursor id")
+
+	// Same bytes, error code cleared: now it teaches.
+	succeeded := make([]byte, 0, len(payload))
+	succeeded = append(succeeded, payload[:oerErrorCodeFieldStart]...)
+	succeeded = append(succeeded, 0x00)
+	succeeded = append(succeeded, payload[oerErrorCodeFieldStart+oerErrorCodeFieldLen:]...)
+
+	cursorID, ok := findCursorIDInResponse(succeeded)
+	require.True(t, ok, "with the error cleared the same OER must be read")
+	assert.Equal(t, uint16(9), cursorID)
 }
