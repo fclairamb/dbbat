@@ -47,8 +47,8 @@ func (s *Server) checkServersExist(c *gin.Context, uids []uuid.UUID) string {
 			return "server does not exist: " + uid.String()
 		}
 
-		if target.IsSSH() {
-			return "cannot add an ssh server to a server group: " + uid.String()
+		if target.IsTunnel() {
+			return "cannot add a " + target.Protocol + " tunnel server to a server group: " + uid.String()
 		}
 	}
 

@@ -71,8 +71,8 @@ func (s *Server) handleAssignGrant(c *gin.Context) {
 		return
 	}
 
-	if target.IsSSH() {
-		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "cannot grant access to an ssh server")
+	if target.IsTunnel() {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "cannot grant access to a "+target.Protocol+" tunnel server")
 
 		return
 	}

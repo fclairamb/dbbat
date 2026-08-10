@@ -170,7 +170,18 @@ const (
 	// ProtocolSSH marks a row that is an SSH bastion (a dial path), not a
 	// grantable/connectable database target.
 	ProtocolSSH = "ssh"
+	// ProtocolKubernetes marks a row that is a Kubernetes cluster (a dial path
+	// via `pods/portforward`), not a grantable/connectable database target.
+	// Like ProtocolSSH it is a tunnel discriminator, not a wire protocol.
+	ProtocolKubernetes = "kubernetes"
 )
+
+// IsTunnelProtocol reports whether a protocol names a *dial path* rather than a
+// database target. Tunnel rows are never grantable, never listable, and never
+// appear in target listings; they exist only to be pointed at by a via_uid.
+func IsTunnelProtocol(protocol string) bool {
+	return protocol == ProtocolSSH || protocol == ProtocolKubernetes
+}
 
 // IsMySQLFamily reports whether the given protocol speaks the MySQL wire
 // protocol. The MySQL proxy serves both — they share the same listener,
@@ -220,8 +231,9 @@ type Server struct {
 // as a single jsonb column so protocol-specific settings don't proliferate as
 // table columns — mirrors UserProtocolData. Absent protocols are omitted.
 type ServerProtocolData struct {
-	MongoDB *MongoDatabaseData `json:"mongodb,omitempty"`
-	SSH     *SSHServerData     `json:"ssh,omitempty"`
+	MongoDB    *MongoDatabaseData    `json:"mongodb,omitempty"`
+	SSH        *SSHServerData        `json:"ssh,omitempty"`
+	Kubernetes *KubernetesServerData `json:"kubernetes,omitempty"`
 }
 
 // MongoDatabaseData holds MongoDB-specific per-database settings.
@@ -247,6 +259,25 @@ type SSHServerData struct {
 	Passphrase string `json:"-"`
 }
 
+// KubernetesServerData holds the material for a Kubernetes cluster row. The
+// ServiceAccount bearer token is *not* here: it reuses the row's
+// password_encrypted column, so it travels the same AAD-bound encryption path
+// as a database password or an SSH private key.
+//
+// CACert is the API server's PEM CA bundle — public challenge material, stored
+// in clear and surfaced read-only in the API/UI, exactly like SSH's
+// KnownHostKey. Namespace scopes every lookup and every port-forward: it is the
+// namespace the Role/RoleBinding in docs/kubernetes.md grants access to.
+type KubernetesServerData struct {
+	CACert    string `json:"ca_cert,omitempty"`
+	Namespace string `json:"namespace,omitempty"`
+	// InsecureSkipTLSVerify disables API server certificate verification. It
+	// exists for the throwaway-cluster case (a kind cluster with a rotating CA)
+	// and is deliberately not the default: with it set, anything that can
+	// intercept the API server connection can read the ServiceAccount token.
+	InsecureSkipTLSVerify bool `json:"insecure_skip_tls_verify,omitempty"`
+}
+
 // MongoData returns the server's MongoDB protocol material, or nil if absent.
 func (db *Server) MongoData() *MongoDatabaseData {
 	if db.ProtocolData == nil {
@@ -265,10 +296,42 @@ func (db *Server) SSHData() *SSHServerData {
 	return db.ProtocolData.SSH
 }
 
+// KubernetesData returns the server's Kubernetes material, or nil if absent.
+func (db *Server) KubernetesData() *KubernetesServerData {
+	if db.ProtocolData == nil {
+		return nil
+	}
+
+	return db.ProtocolData.Kubernetes
+}
+
 // IsSSH reports whether this server row is an SSH bastion rather than a
 // database target.
 func (db *Server) IsSSH() bool {
 	return db.Protocol == ProtocolSSH
+}
+
+// IsKubernetes reports whether this server row is a Kubernetes cluster tunnel
+// rather than a database target.
+func (db *Server) IsKubernetes() bool {
+	return db.Protocol == ProtocolKubernetes
+}
+
+// IsTunnel reports whether this row is a dial path (SSH bastion or Kubernetes
+// cluster) rather than a grantable database target.
+func (db *Server) IsTunnel() bool {
+	return IsTunnelProtocol(db.Protocol)
+}
+
+// KubernetesNamespaceOrDefault returns the namespace every lookup and
+// port-forward for this cluster row is scoped to, defaulting to "default" when
+// unset — the same convention kubectl applies to a context with no namespace.
+func (db *Server) KubernetesNamespaceOrDefault() string {
+	if kd := db.KubernetesData(); kd != nil && kd.Namespace != "" {
+		return kd.Namespace
+	}
+
+	return "default"
 }
 
 // ServerUpdate represents fields that can be updated
@@ -289,6 +352,12 @@ type ServerUpdate struct {
 	// SSH secrets (plaintext, to encrypt). Set on SSH server rows.
 	SSHPrivateKey *string
 	SSHPassphrase *string
+	// Kubernetes cluster material. Public (the CA bundle and the namespace),
+	// so unlike the ServiceAccount token — which travels as Password — these
+	// are stored in clear in protocol_data.kubernetes.
+	K8sCACert                *string
+	K8sNamespace             *string
+	K8sInsecureSkipTLSVerify *bool
 }
 
 // Connection represents a connection through the proxy
