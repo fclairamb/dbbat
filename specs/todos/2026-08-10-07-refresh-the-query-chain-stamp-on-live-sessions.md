@@ -19,8 +19,8 @@ The stamp is the only thing that detects statements deleted from the **end** of
 a session. Today it is written at exactly two moments:
 
 - `Store.CloseConnection` — a clean teardown;
-- `Store.orphanCloseQuery` — the reconcile that closes crash orphans
-  (`2026-08-10-stamp-chain-head-on-orphaned-connections.md`).
+- `Store.closeOrphans` / `Store.stampOrphanHeads` — the reconcile that closes
+  crash orphans (`2026-08-10-stamp-chain-head-on-orphaned-connections.md`).
 
 Both are *close* events. So:
 
@@ -42,13 +42,15 @@ No GitHub issue yet — file one when picking this up.
 
 - The head is already recoverable from the database alone:
   `queryChainHeadSelect` (`internal/store/queries.go`) is the shared builder,
-  and `orphanCloseQuery` (`internal/store/connections.go`) shows the correlated
-  subquery shape that stamps without any in-process state.
+  and `Store.orphanHeadSelect` (`internal/store/connections.go`) shows the
+  `LEFT JOIN LATERAL` shape that reads many heads at once without any
+  in-process state.
 - Cheapest shape: fold the stamp into a periodic sweep over open connections —
-  one scoped `UPDATE ... WHERE disconnected_at IS NULL` with the same two
-  correlated subqueries, run on the existing reconcile timer. It costs two index
-  lookups per open connection per pass, so it scales with concurrency, not with
-  the store; measure it the way
+  select the open uids this run owns, read their heads with `orphanHeadSelect`,
+  seal in Go and write them back in one bulk `UPDATE`, run on the existing
+  reconcile timer. That is `Store.stampOrphanHeads` with a different uid source.
+  It costs one index lookup per open connection per pass, so it scales with
+  concurrency, not with the store; measure it the way
   `TestQueryChainOrphanStampCostScalesWithOrphans` measures the reconcile.
   Restricting it to rows this run owns (`run_id = s.runID`) keeps replicas from
   fighting over the same rows.
@@ -61,7 +63,9 @@ No GitHub issue yet — file one when picking this up.
   to become "the stamp is a prefix of what survives" while
   `disconnected_at IS NULL`, and stay exact once the session is closed. That is
   the substantive design work here, and it is why this is not a one-liner.
-- Interacts with
-  `2026-08-10-seal-the-connection-query-chain-stamp.md`: once the stamp is a
-  keyed MAC it cannot be computed in SQL, so a refresh sweep becomes
-  select-seal-write in Go. Do that spec first, or plan for the rework.
+- The keyed stamp landed with
+  `2026-08-10-06-seal-the-connection-query-chain-stamp.md`, so a refresh sweep
+  is already select-seal-write in Go — the reconcile's plumbing
+  (`stampOrphanHeads`, `orphanHeadSelect`, `queryChainStampMAC`) is there to be
+  reused, and a refresh must write `query_chain_stamp_version = 1` like the
+  other two writers.
