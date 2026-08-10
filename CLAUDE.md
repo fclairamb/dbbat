@@ -398,14 +398,18 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   chain by deleting what it is meant to delete, and each stamps its final head
   when it finishes: the session's on the connection row at close
   (`query_chain_mac`), the capture's on the query row at the flush barrier
-  (`row_chain_mac`). A session whose process **crashed** is stamped by the
-  reconcile instead, from the stored statements, in the same `UPDATE` that
+  (`row_chain_mac`). A session whose process **crashed** is sealed by the
+  reconcile instead, from the stored statements, in the same transaction that
   writes `disconnected_at` — so it seals whatever survived at reconcile time,
-  not at the crash. **`row_chain_mac` is a keyed MAC over the head;
-  `query_chain_mac` is a verbatim copy of it and is therefore forgeable without
-  the key** — a known hole in the shipped query chain, tracked in
-  `specs/todos/2026-08-10-06-seal-the-connection-query-chain-stamp.md` and stated
-  in the docs. Verify with `dbbat audit verify [--queries|--rows]` — the
+  not at the crash. **Both stamps are keyed MACs over the head**, not copies of
+  it: a verbatim head is readable out of the table it came from, so copying it
+  after a trailing deletion would need no key. `query_chain_mac` additionally
+  carries a format version (`query_chain_stamp_version`) *inside* its MAC —
+  `0` is the unkeyed stamp 0.23.x wrote, which cannot be re-sealed because the
+  key never enters the database, so those rows keep the old comparison and are
+  counted as `legacy_stamps` rather than reported as verified; sealing the
+  version is what stops a `1` row from being relabelled `0` to get the weaker
+  rule. Verify with `dbbat audit verify [--queries|--rows]` — the
   row chains are CLI-only — or over REST with the admin-only
   `GET /api/v1/audit/verify` and `GET /api/v1/audit/verify/queries` — which
   return counts, the head MAC and the first break, never the key or a record's

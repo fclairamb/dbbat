@@ -21,9 +21,11 @@ It detects:
 - entries **reordered**;
 - rows deleted from the **end** of a captured result set (the capture's final
   head is sealed onto the query row when the capture finishes);
-- entries deleted from the **end** of a session's query history — but only
-  against an attacker who does not also rewrite the stamp; see
-  [The connection stamp is forgeable](#the-connection-stamp-is-forgeable);
+- entries deleted from the **end** of a session's query history, including
+  against an attacker who rewrites the stamp afterwards — the stamp is keyed
+  (see [The connection stamp](#the-connection-stamp)). Sessions closed *before*
+  0.24 carry the old unkeyed stamp and are the exception: they are counted, not
+  trusted;
 - entries deleted from the **start** of the audit chain (the first entry's
   `prev_mac` is a genesis MAC derived from the key, so it cannot be forged).
 
@@ -92,10 +94,12 @@ the previous statement **on the same connection**, and:
   verification reports it as a truncated prefix and keeps verifying everything
   after it.
 
-On a clean session close, the final chain head and its length are stamped onto
-the connection row (`query_chain_mac`, `query_chain_len`). Without that,
-deleting the *last* statements of a session would leave a shorter chain that
-still verified.
+On a clean session close, the final chain head and its length are sealed onto
+the connection row (`query_chain_mac`, `query_chain_len`,
+`query_chain_stamp_version`). Without that, deleting the *last* statements of a
+session would leave a shorter chain that still verified. See
+[The connection stamp](#the-connection-stamp) for the construction and for what
+pre-0.24 rows still mean.
 
 #### A crash-orphaned session is stamped by the reconcile
 
@@ -103,10 +107,11 @@ A session whose process died never reaches `CloseConnection`, and the in-memory
 chain state died with it. It gets a stamp anyway: the head is recoverable from
 the database alone — it is the highest `chain_seq` on the connection and its MAC
 — so the reconcile that closes crash-orphaned rows
-(`CloseOrphanedConnections` / `ReclaimDeadInstanceConnections`) stamps it as a
-correlated subquery in the **same `UPDATE`** that writes `disconnected_at`. A
-connection that logged nothing keeps a NULL stamp, and a NULL stamp is never
-itself a break.
+(`CloseOrphanedConnections` / `ReclaimDeadInstanceConnections`) seals it in the
+**same transaction** that writes `disconnected_at`: the close returns the uids
+it took, their heads are read back in one `LEFT JOIN LATERAL` lookup, and the
+sealed stamps go back in one `UPDATE`. A connection that logged nothing keeps a
+NULL stamp, and a NULL stamp is never itself a break.
 
 **Be honest about what that stamp attests to.** It seals whatever survived *at
 reconcile time*, not what the session actually wrote. A crashed pod's rows sit
@@ -115,34 +120,65 @@ past the 15-minute staleness cutoff — and anyone who deletes trailing statemen
 inside that window gets the truncated chain blessed by the reconcile. That is
 strictly better than never stamping at all (from the reconcile onward the tail
 is protected exactly like a clean close's), and it is the reason the stamp goes
-in the same statement rather than a later pass: the exposure is the crash-to-
+in the same transaction rather than a later pass: the exposure is the crash-to-
 reconcile window, not a second one opened between closing the row and sealing it.
+Until 0.24 the reconcile stamped in one pure-SQL `UPDATE`, reading `mac` out of
+`queries` with a correlated subquery — which is a verbatim copy by construction.
+A keyed stamp has no SQL expression, because the chain key exists only in the
+process, so that path became select-seal-write.
 
-Note also that this stamp shares the forgeability below — a correlated subquery
-reading `mac` out of `queries` produces a verbatim copy *by construction*, which
-is what keeps it consistent with `CloseConnection`'s format. A **keyed** stamp
-cannot be computed in SQL at all, because the chain key exists only in the
-process, so sealing the connection stamp means this reconcile stops being one
-pure-SQL `UPDATE`: it has to read the orphans' heads, seal each in Go and write
-them back inside the same transaction as the close.
+#### The connection stamp
 
-#### The connection stamp is forgeable
+```
+query_chain_mac = HMAC(chain key,
+    "dbbat-query-chain-stamp-v1" ‖ connection_uid ‖ stamp_version ‖ query_chain_len ‖ head_mac)
+```
 
-`query_chain_mac` stores the last statement's MAC **verbatim**, and that value
-is readable from the `queries` table. So the attacker this whole feature is
-built against — someone with write access to the store but without the key —
-can delete the last statements of a session and then copy the new last
-statement's MAC into the stamp, and verification reports a clean chain. Nothing
-else covers it: `queryChainPayload` seals a statement's identity and does not
-reach the connection row, so editing the stamp does not break the query chain
-either. `query_chain_len` is likewise stored and printed but never compared.
+Every field is tagged and length-prefixed by the same canonical writer the row
+MACs use, so no two distinct inputs can produce the same byte string.
 
-So the trailing-deletion guarantee on the *query* chain only holds against an
-attacker who stops after the delete. The row chain does not have this problem —
-its stamp is keyed, below — and the fix for the connection stamp is
-`specs/todos/2026-08-10-06-seal-the-connection-query-chain-stamp.md`. It is a
-separate task because stamps in the old format already exist in shipped
-deployments, so changing the format needs a compatibility story.
+`query_chain_len` is the head's `chain_seq`, not a count of surviving
+statements. `chain_seq` is dense from 1, so it *is* the number of statements the
+session logged — and unlike a survivor count it does not move when retention
+reaps the oldest ones. Sealing a survivor count would report a break on every
+retention-truncated session, which is exactly the cry-wolf the truncated-prefix
+handling exists to avoid. (The row-chain stamp *can* seal a true count, because
+retention never deletes individual captured rows.) Verification compares the
+recorded length against what the surviving statements say before it checks the
+MAC, so an edit to the column alone is caught with a precise message.
+
+**Two formats, and the version is inside the MAC.** Before 0.24 the stamp was
+the last statement's MAC stored **verbatim**, and that value is readable from
+the `queries` table — so the attacker this feature is built against could delete
+the last statements of a session, copy the new last statement's MAC into the
+stamp, and get a clean verification with no key at all.
+
+Those rows cannot be re-sealed: the chain key never enters the database, so no
+migration can rewrite them, and failing them all would report a break on every
+session a 0.23.x deployment ever closed. `connections.query_chain_stamp_version`
+therefore says which format a row is in — `0` legacy, `1` keyed — and
+verification picks the check by version:
+
+- version `1`: the keyed stamp, computed from what the surviving statements say;
+- version `0`: the old raw comparison, which still catches the attacker who
+  deletes and stops. A row that passes this way is **counted, not trusted**:
+  `dbbat audit verify --queries` reports it under
+  `sessions_with_legacy_forgeable_head_stamp` and the API under `legacy_stamps`.
+
+The version is covered by the version-1 MAC, which is why the column is worth
+having at all. Without that, relabelling a sealed row as version `0` would be
+one `UPDATE` away from getting the unkeyed rule applied to a session this build
+sealed. With it, a keyed stamp only ever verifies as the version it was sealed
+at.
+
+**The residual, stated plainly.** An attacker can still replace a version-1 row
+outright — raw head MAC, matching length, version back to `0` — because
+accepting legacy stamps is by construction a path someone can take. What they
+cannot do is make it look like a keyed verification: that session lands in the
+legacy count. Sessions closed by 0.24+ are sealed, so the count drains as
+pre-upgrade sessions age out of retention; a count that stops falling, or rises,
+is the signal. The path closes for good when version `0` acceptance is dropped,
+which is a future release.
 
 ### `query_rows` — one chain per capture
 
@@ -180,8 +216,8 @@ query is about to be marked complete (`QuerySink.Flush` →
 row_chain_mac = HMAC(chain key, "dbbat-row-chain-stamp-v1" ‖ query_uid ‖ row_chain_len ‖ head_mac)
 ```
 
-Storing the head verbatim — which is what `connections.query_chain_mac` does —
-would defend against nothing, because the head is readable straight out of
+Storing the head verbatim — which is what `connections.query_chain_mac` did
+before 0.24 — would defend against nothing, because the head is readable straight out of
 `query_rows`: whoever deletes the last captured rows can copy the new last row's
 MAC over the stamp. Sealing it means correcting the stamp after a truncation
 needs the chain key, exactly like forging a row. Verification checks both halves
@@ -316,6 +352,20 @@ ever grow, and the previously recorded head must still appear in the chain.
 introduced. They are reported rather than folded into the verified count: no
 MAC exists for them and none can be created after the fact.
 
+A `--queries` run reports the same way, plus two counts that are *not* failures:
+
+```json
+{"level":"INFO","msg":"Query chains verified","connections":412,"statements":9871,
+ "chains_with_retention_truncated_prefix":3,"sessions_with_legacy_forgeable_head_stamp":58}
+```
+
+`sessions_with_legacy_forgeable_head_stamp` is how much of the store still
+carries the pre-0.24 unkeyed head stamp — sessions whose statements verified but
+whose *tail* nothing keyed vouches for. Every session closed since the upgrade
+is sealed, so on a store that keeps running the number drains to zero as those
+sessions age out of retention. Watch it: once it has drained, a non-zero count
+means something rewrote a stamp.
+
 ### Over the API
 
 `GET /api/v1/audit/verify` and `GET /api/v1/audit/verify/queries` (the latter
@@ -377,5 +427,6 @@ prevent it, and it says nothing about rows written before the anchor. See
   `internal/store/connections.go` — the write paths
 - `internal/proxy/shared/rowwriter.go` — the flush barrier that seals a capture
 - `internal/migrations/sql/20260810000000_audit_chain.*.sql`,
-  `internal/migrations/sql/20260810010000_query_row_chain.*.sql`
+  `internal/migrations/sql/20260810010000_query_row_chain.*.sql`,
+  `internal/migrations/sql/20260810020000_connections_query_chain_stamp_version.*.sql`
 - `main.go` — the `audit verify` command
