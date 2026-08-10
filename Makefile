@@ -73,7 +73,7 @@ showcase:
 
 # Run Oracle integration tests (requires Docker).
 #
-# Nine tests, each starting its own Oracle container: 15m was never enough and
+# Twelve tests, each starting its own Oracle container: 15m was never enough and
 # turned a slow machine into a red suite. CI budgets 60m for this job; 40m
 # matches the other integration targets below and still fails fast on a real
 # regression.
