@@ -138,7 +138,7 @@ Now when the agent runs `DELETE FROM users`:
 
 Self-approval is rejected, including for admins. An agent acting as its owner cannot wave its own statement through.
 
-<video controls width="100%" poster="/img/showcase/mcp-approval-hold-poster.webp" style={{borderRadius: 8}}>
+<video controls preload="none" width="100%" poster="/img/showcase/mcp-approval-hold-poster.webp" style={{borderRadius: 8}}>
   <source src="/img/showcase/mcp-approval-hold-av1.mp4" type="video/mp4; codecs=av01.0.05M.08" />
   <source src="/img/showcase/mcp-approval-hold-h264.mp4" type="video/mp4" />
 </video>

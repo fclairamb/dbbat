@@ -145,7 +145,9 @@ test("video: an agent's UPDATE is held for approval and released from the UI", a
     await expect(
       page.getByTestId("watch-feed").getByTestId("approval-status-approved"),
     ).toBeVisible({ timeout: 20_000 });
-    await page.waitForTimeout(2200);
+    // Dwell on the payoff: the rows in the pane are what the clip is for, and
+    // they land in its last three seconds.
+    await page.waitForTimeout(3200);
   } finally {
     // Nothing of ours to close: the loopback session is dbbat's and it ended
     // when the statement did. A failure before the approve click leaves the
