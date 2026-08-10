@@ -47,6 +47,11 @@ var (
 // stored in the `provider` column of user identities and OAuth states.
 const ProviderName = "oidc"
 
+// DefaultGroupsClaim is the ID-token claim read for directory group
+// membership when the operator does not name another one. Okta, Keycloak and
+// Entra all default to it.
+const DefaultGroupsClaim = "groups"
+
 // Config is the operator-supplied configuration of the generic provider.
 type Config struct {
 	// Issuer is the OIDC issuer URL, e.g. "https://accounts.google.com".
@@ -63,6 +68,11 @@ type Config struct {
 	// claim's domain must belong to. It is the generic equivalent of the
 	// Slack provider's workspace gating.
 	EmailDomains []string
+	// GroupsClaim names the ID-token claim carrying directory group
+	// membership. Empty defaults to "groups". The values are read verbatim:
+	// Entra sends group **object ids**, Okta and Keycloak send names, and
+	// this package does not try to tell them apart.
+	GroupsClaim string
 }
 
 // Provider implements auth.OAuthProvider, auth.PKCEProvider and
@@ -90,6 +100,10 @@ func NewProvider(cfg Config) (*Provider, error) {
 
 	cfg.Scopes = normalizeScopes(cfg.Scopes)
 	cfg.EmailDomains = normalizeDomains(cfg.EmailDomains)
+
+	if strings.TrimSpace(cfg.GroupsClaim) == "" {
+		cfg.GroupsClaim = DefaultGroupsClaim
+	}
 
 	if cfg.Label == "" {
 		cfg.Label = "SSO"
@@ -313,7 +327,99 @@ func (p *Provider) ExchangeCodeWithVerifier(
 		TeamName:    claims.Organization,
 		AvatarURL:   claims.Picture,
 		RawData:     rawClaims,
+		Groups:      extractGroups(rawClaims, p.cfg.GroupsClaim),
 	}, nil
+}
+
+// extractGroups pulls the configured groups claim out of the **verified** ID
+// token's claim set.
+//
+// Issuers disagree on the encoding, so both shapes are accepted:
+//
+//	"groups": ["db-admins", "analysts"]   // Okta, Keycloak, Entra
+//	"groups": "db-admins"                 // single-membership shorthand
+//
+// A lone string is one group, never a delimited list: directory groups are
+// routinely named "Domain Admins", and splitting on whitespace would invent
+// two memberships out of one.
+//
+// Values are kept verbatim (only surrounding whitespace is trimmed) — Entra
+// sends group object ids rather than names, and the mapping matches whatever
+// the claim actually carries. Non-string array entries are dropped rather
+// than coerced: a number is not a group name, and inventing one would be a
+// silent authorization decision.
+//
+// An absent, null or unusable claim yields nil, which callers read as "in no
+// groups" — the fail-closed direction.
+func extractGroups(rawClaims json.RawMessage, claim string) []string {
+	if len(rawClaims) == 0 {
+		return nil
+	}
+
+	if claim == "" {
+		claim = DefaultGroupsClaim
+	}
+
+	var all map[string]json.RawMessage
+	if err := json.Unmarshal(rawClaims, &all); err != nil {
+		return nil
+	}
+
+	raw, ok := all[claim]
+	if !ok {
+		return nil
+	}
+
+	var list []string
+	if err := json.Unmarshal(raw, &list); err == nil {
+		return normalizeGroups(list)
+	}
+
+	var single string
+	if err := json.Unmarshal(raw, &single); err == nil {
+		return normalizeGroups([]string{single})
+	}
+
+	// Mixed-type array (["a", 1]): salvage the strings, ignore the rest.
+	var mixed []json.RawMessage
+	if err := json.Unmarshal(raw, &mixed); err != nil {
+		return nil
+	}
+
+	out := make([]string, 0, len(mixed))
+
+	for _, item := range mixed {
+		var s string
+		if err := json.Unmarshal(item, &s); err == nil {
+			out = append(out, s)
+		}
+	}
+
+	return normalizeGroups(out)
+}
+
+// normalizeGroups trims each value and drops the empties and duplicates,
+// returning nil for a list with nothing usable in it.
+func normalizeGroups(groups []string) []string {
+	out := make([]string, 0, len(groups))
+	seen := make(map[string]bool, len(groups))
+
+	for _, g := range groups {
+		g = strings.TrimSpace(g)
+		if g == "" || seen[g] {
+			continue
+		}
+
+		seen[g] = true
+
+		out = append(out, g)
+	}
+
+	if len(out) == 0 {
+		return nil
+	}
+
+	return out
 }
 
 // checkEmailDomain enforces the optional allowlist against the *verified*
