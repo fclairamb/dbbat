@@ -27,6 +27,15 @@ type Still = {
   alt: string;
   title: string;
   description: string;
+  /**
+   * Intrinsic size, only to reserve the right aspect ratio.
+   *
+   * The four scenario stills are captured at deviceScaleFactor 2 (2560x1600);
+   * the video posters are 1x, because they are displayed at the <video>
+   * element's own size. Same 16:10 either way.
+   */
+  width?: number;
+  height?: number;
 };
 
 const STILLS: Still[] = [
@@ -61,6 +70,19 @@ const STILLS: Still[] = [
     title: "One proxy, five engines",
     description:
       "Point DBBat at PostgreSQL, Oracle, MySQL/MariaDB, MongoDB or SQL Server. Credentials are encrypted at rest; clients never see them.",
+  },
+  {
+    // The MCP clip's own poster. It earns a card rather than a second <video>:
+    // it is the same hold from the other side, and two clips of the same UI
+    // back to back is one too many. The clip itself fronts /docs/features/mcp.
+    src: "/img/showcase/mcp-approval-hold-poster.png",
+    webp: "/img/showcase/mcp-approval-hold-poster.webp",
+    alt: "An AI agent's UPDATE parked awaiting approval, with the agent's MCP transcript showing the approval_pending result it got back",
+    title: "AI agents, on the same leash",
+    description:
+      "An agent's statement runs through the same proxy a human's does — so a write it did not think through freezes mid-flight and waits for a person, and the agent is told so rather than timing out.",
+    width: 1280,
+    height: 800,
   },
 ];
 
@@ -225,7 +247,8 @@ export default function ProductShowcase(): ReactNode {
         <Heading as="h2">See it in action</Heading>
         <p className={styles.lead}>
           Real captures from a live instance — the query log, the access
-          requests, and a write held for a second pair of eyes.
+          requests, and a write held for a second pair of eyes, whether a person
+          or an AI agent issued it.
         </p>
 
         <ApprovalVideo />
@@ -244,8 +267,8 @@ export default function ProductShowcase(): ReactNode {
                   <img
                     src={still.src}
                     alt={still.alt}
-                    width={2560}
-                    height={1600}
+                    width={still.width ?? 2560}
+                    height={still.height ?? 1600}
                     loading="lazy"
                     decoding="async"
                   />

@@ -10,6 +10,8 @@ Regenerates the website's marketing media into `website/static/img/showcase/`:
 | `query-results.png` | A query's captured result rows |
 | `approval-hold-poster.png` | The hold itself — the video's poster, and what the site shows under `prefers-reduced-motion` |
 | `approval-hold-av1.mp4`, `approval-hold-h264.mp4` | An `UPDATE` held for approval and released from the UI |
+| `mcp-approval-hold-poster.png` | The same hold, issued by an AI agent over MCP |
+| `mcp-approval-hold-av1.mp4`, `mcp-approval-hold-h264.mp4` | The agent's `query` parked on a human, released, and answered |
 | `manifest.json` | `{ version, commit, generatedAt }` for the run |
 
 Run it with `make showcase` from the repo root. Never with a bare
@@ -49,13 +51,29 @@ stack and take its database with it.
 Real: the server row, the grant and its approval pattern, the upstream table,
 every query in the query list, the proxy session, the hold, the approve click,
 and the rows the `UPDATE` touched. All of it produced by a `pg` client dialling
-through the proxy (`lib/traffic.ts`).
+through the proxy (`lib/traffic.ts`), or — for the MCP pair — by JSON-RPC calls
+against `POST /api/v1/mcp` with a `dbb_` key (`lib/mcp.ts`), which dbbat runs by
+dialling its own proxy listener over loopback.
 
-Drawn: the terminal pane (`lib/terminal.ts`) and the mouse pointer
-(`lib/cursor.ts`). A real terminal emulator is not reproducible in CI, and
-Playwright's recorder captures the page rather than the compositor, so a real
-cursor never appears in the frame. Neither fakes a *result*: every line the
-pane prints came back from the real connection.
+Drawn: the terminal pane (`lib/terminal.ts`), the agent pane (`lib/agent.ts`)
+and the mouse pointer (`lib/cursor.ts`). Neither a real terminal emulator nor a
+real agent client is reproducible in CI, and Playwright's recorder captures the
+page rather than the compositor, so a real cursor never appears in the frame.
+None of them fakes a *result*: every line a pane prints — down to each
+`execution_id`, `query_uid` and `duration_ms` — came back from the real call.
+The one edit anywhere is the agent pane clipping the tool's three-sentence
+`message` to its first sentence, which the trailing `…` says.
+
+### The MCP pair's extra constraint
+
+MCP runs every statement on its **own** loopback connection, so the session the
+operator watches does not exist until the call is in flight. Composing the call
+on the connection's own page would therefore mean showing the hold arrive before
+the call that caused it. Instead the agent pane is installed with
+`addInitScript` and replays itself out of `sessionStorage`: the call is composed
+on the connections list, sent, and the session opened afterwards — the real
+order. Both MCP projects also reseed `customers` first, because the earlier
+projects' own `UPDATE` has already flipped the two `starter` rows by then.
 
 Restated afterwards: *when* it all happened, and how long the statements took
 (`lib/normalise.ts`), plus the grant's validity window and the "held for"
@@ -107,9 +125,11 @@ That is the bar, and everything below exists to hold it.
   stills (so the PNGs are 2560×1600), `1` for the video and for its poster,
   which is displayed at the `<video>` element's own size.
 - **Ordering.** One worker, serial, no retries. Projects run in the order
-  `playwright.config.ts` declares them — `screenshots`, then `poster`, then
-  `video` — and that matters: the last two each open a further live session,
-  which would otherwise show up in the query list the first one captures.
+  `playwright.config.ts` declares them — `screenshots`, then `poster`, `video`,
+  `mcp-poster` and `mcp-video` — and that matters: every project after the first
+  opens a further live session, which would otherwise show up in the query list
+  the first one captures, and the MCP pair reseeds the table the stills are
+  taken of.
 
 One thing still moves, on purpose: the version string in the sidebar
 (`git describe`, so every commit changes it). The clips do too, but a recording
@@ -122,7 +142,7 @@ nobody reviews it as a diff.
 |---|---|---|
 | `SHOWCASE_OUT` | `website/static/img/showcase` | Where finished assets land |
 | `SHOWCASE_WORK` | `front/showcase/.artifacts` | Raw WebM, traces, scenario state |
-| `SHOWCASE_PROJECT` | *(all)* | `screenshots`, `poster` or `video` |
+| `SHOWCASE_PROJECT` | *(all)* | `screenshots`, `poster`, `video`, `mcp-poster`, `mcp-video` — comma-separated for several |
 | `SHOWCASE_SKIP_BUILD` | `0` | Reuse the existing `./dbbat` |
 | `SHOWCASE_SKIP_TRANSCODE` | `0` | Copy the raw WebM instead of encoding |
 | `SHOWCASE_KEEP` | `0` | Leave the stack running afterwards |

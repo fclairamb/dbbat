@@ -138,13 +138,16 @@ Now when the agent runs `DELETE FROM users`:
 
 Self-approval is rejected, including for admins. An agent acting as its owner cannot wave its own statement through.
 
-<video controls width="100%" poster="/img/showcase/approval-hold-poster.webp" style={{borderRadius: 8}}>
-  <source src="/img/showcase/approval-hold-av1.mp4" type="video/mp4; codecs=av01.0.05M.08" />
-  <source src="/img/showcase/approval-hold-h264.mp4" type="video/mp4" />
+<video controls width="100%" poster="/img/showcase/mcp-approval-hold-poster.webp" style={{borderRadius: 8}}>
+  <source src="/img/showcase/mcp-approval-hold-av1.mp4" type="video/mp4; codecs=av01.0.05M.08" />
+  <source src="/img/showcase/mcp-approval-hold-h264.mp4" type="video/mp4" />
 </video>
 
-The clip above shows the hold from a human's `psql` session; the agent's
-experience is the same hold, reported as `approval_pending`.
+Captured from a live instance: the `query` call, the ten-second
+`approval_pending`, a human releasing it from the same connection page, and
+`await_approval` returning the rows. Every value in the agent pane — the
+`execution_id`, the `query_uid`, the matched pattern, the rows — is what the
+tools actually returned.
 
 ## What you see afterwards
 
