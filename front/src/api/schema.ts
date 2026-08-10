@@ -1742,6 +1742,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/tunnel-servers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List tunnel (dial-path) servers (admin only)
+         * @description Returns every dial-path row — SSH bastions (`ssh`) and Kubernetes
+         *     clusters (`kubernetes`) — for a target's "via" selector. These rows are
+         *     excluded from the regular database listing and from every
+         *     grantable/connectable target context. Secrets (SSH private key and
+         *     passphrase, ServiceAccount token) are never returned.
+         */
+        get: operations["listTunnelServers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/parameters": {
         parameters: {
             query?: never;
@@ -2158,10 +2182,10 @@ export interface components {
             /** @description SSL mode (disable, prefer, require, etc.) */
             ssl_mode?: string;
             /**
-             * @description Server protocol (ssh = an SSH bastion, not a database target)
+             * @description Server protocol. `ssh` and `kubernetes` are dial paths, not database targets: they are never grantable, never listable, and exist only to be referenced by another row's `via_uid`.
              * @enum {string}
              */
-            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "mssql" | "ssh";
+            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "mssql" | "ssh" | "kubernetes";
             /** @description Oracle SERVICE_NAME (Oracle only) */
             oracle_service_name?: string;
             /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
@@ -2178,11 +2202,17 @@ export interface components {
             created_by?: string | null;
             /**
              * Format: uuid
-             * @description SSH server (bastion) UID to tunnel through; null for a direct dial
+             * @description Tunnel row (`ssh` bastion or `kubernetes` cluster) UID to dial through; null for a direct dial. When it points at a `kubernetes` row, `host` addresses a pod (`<pod-name>`) or a service (`svc/<name>`) **inside that row's namespace** and `port` is the container port — a port-forward reaches a pod's own port and nothing else, so a database merely routable from the cluster network is out of scope.
              */
             via_uid?: string | null;
             /** @description TOFU-pinned SSH bastion host key (read-only; ssh servers only) */
             ssh_known_host_key?: string;
+            /** @description PEM CA bundle of the Kubernetes API server (kubernetes servers only). Public challenge material, so it round-trips; the ServiceAccount token never does. */
+            k8s_ca_cert?: string;
+            /** @description Namespace every lookup and port-forward is scoped to (kubernetes servers only) */
+            k8s_namespace?: string;
+            /** @description Whether API server certificate verification is disabled (kubernetes servers only) */
+            k8s_insecure_skip_tls_verify?: boolean;
             /** @description Present only when the create/update request set `test_connection: true` */
             connection_test?: components["schemas"]["ConnectionTestResult"];
         };
@@ -2202,14 +2232,18 @@ export interface components {
              *     - `bastion_auth`: the SSH handshake failed (host-key mismatch or rejected credentials)
              *     - `target_dial`: the database target could not be reached (through the tunnel when via_uid is set)
              *     - `target_auth`: the database handshake or login failed
+             *     - `cluster_api`: the Kubernetes API server could not be reached (DNS, routing, firewall, untrusted CA)
+             *     - `cluster_auth`: the API server rejected the ServiceAccount token
+             *     - `cluster_rbac`: authenticated, but not allowed to create `pods/portforward` in the namespace
+             *     - `cluster_target`: the addressed pod (or the ready pod behind `svc/<name>`) does not resolve or is not Ready
              * @enum {string}
              */
-            stage: "config" | "bastion_dial" | "bastion_auth" | "target_dial" | "target_auth";
+            stage: "config" | "bastion_dial" | "bastion_auth" | "target_dial" | "target_auth" | "cluster_api" | "cluster_auth" | "cluster_rbac" | "cluster_target";
             /**
              * @description Machine-readable classification within the stage; `ok` on success
              * @enum {string}
              */
-            code: "ok" | "dns_failure" | "timeout" | "unreachable" | "host_key_mismatch" | "auth_rejected" | "bad_private_key" | "no_auth_method" | "missing_config" | "via_cycle" | "via_not_ssh" | "handshake_failed" | "db_auth_failed" | "db_handshake_failed" | "auth_not_verified" | "internal_error";
+            code: "ok" | "dns_failure" | "timeout" | "unreachable" | "host_key_mismatch" | "auth_rejected" | "bad_private_key" | "no_auth_method" | "missing_config" | "via_cycle" | "via_not_ssh" | "handshake_failed" | "db_auth_failed" | "db_handshake_failed" | "auth_not_verified" | "k8s_forbidden" | "k8s_target_not_found" | "k8s_target_not_ready" | "internal_error";
             /** @description Human-readable explanation, safe to display to an admin */
             message: string;
             /** @description True when this check performed the TOFU pin (first successful connect to a bastion) */
@@ -2258,11 +2292,11 @@ export interface components {
              */
             ssl_mode: string;
             /**
-             * @description Server protocol (ssh = an SSH bastion, not a database target)
+             * @description Server protocol. `ssh` and `kubernetes` are dial paths, not database targets: they are never grantable, never listable, and exist only to be referenced by another row's `via_uid`.
              * @default postgresql
              * @enum {string}
              */
-            protocol: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "mssql" | "ssh";
+            protocol: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "mssql" | "ssh" | "kubernetes";
             /** @description Oracle SERVICE_NAME (required for Oracle) */
             oracle_service_name?: string;
             /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
@@ -2274,13 +2308,19 @@ export interface components {
             listable: boolean;
             /**
              * Format: uuid
-             * @description SSH server (bastion) UID to tunnel through; null for a direct dial
+             * @description Tunnel row (`ssh` bastion or `kubernetes` cluster) UID to dial through; null for a direct dial. When it points at a `kubernetes` row, `host` addresses a pod (`<pod-name>`) or a service (`svc/<name>`) **inside that row's namespace** and `port` is the container port — a port-forward reaches a pod's own port and nothing else, so a database merely routable from the cluster network is out of scope.
              */
             via_uid?: string | null;
             /** @description SSH private key (PEM) for an ssh server; write-only, never returned */
             ssh_private_key?: string;
             /** @description Passphrase for the SSH private key; write-only, never returned */
             ssh_passphrase?: string;
+            /** @description PEM CA bundle of the Kubernetes API server. Required for a `kubernetes` row unless `k8s_insecure_skip_tls_verify` is set. */
+            k8s_ca_cert?: string;
+            /** @description Namespace the ServiceAccount's Role covers; every pod/service lookup and every port-forward is scoped to it. Required for a `kubernetes` row. */
+            k8s_namespace?: string;
+            /** @description Disable API server certificate verification. For throwaway clusters only: with it set, anything that can intercept the API server connection can read the ServiceAccount token. */
+            k8s_insecure_skip_tls_verify?: boolean;
             /**
              * @description Optional; defaults to false when omitted. When true, the API dials the newly created
              *     row once and returns the staged outcome as `connection_test` in the response.
@@ -2307,7 +2347,7 @@ export interface components {
              * @description Server protocol
              * @enum {string}
              */
-            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "mssql" | "ssh";
+            protocol?: "postgresql" | "oracle" | "mysql" | "mariadb" | "mongodb" | "mssql" | "ssh" | "kubernetes";
             /** @description Oracle SERVICE_NAME */
             oracle_service_name?: string;
             /** @description Upstream MongoDB SCRAM authSource (MongoDB only; defaults to "admin") */
@@ -2316,15 +2356,21 @@ export interface components {
             listable?: boolean;
             /**
              * Format: uuid
-             * @description SSH server (bastion) UID to tunnel through
+             * @description Tunnel row (`ssh` bastion or `kubernetes` cluster) UID to dial through; null for a direct dial. When it points at a `kubernetes` row, `host` addresses a pod (`<pod-name>`) or a service (`svc/<name>`) **inside that row's namespace** and `port` is the container port — a port-forward reaches a pod's own port and nothing else, so a database merely routable from the cluster network is out of scope.
              */
             via_uid?: string | null;
-            /** @description When true, removes the SSH tunnel (direct dial) */
+            /** @description When true, removes the tunnel (direct dial) */
             clear_via_uid?: boolean;
             /** @description SSH private key (PEM); write-only, never returned */
             ssh_private_key?: string;
             /** @description Passphrase for the SSH private key; write-only, never returned */
             ssh_passphrase?: string;
+            /** @description PEM CA bundle of the Kubernetes API server. Required for a `kubernetes` row unless `k8s_insecure_skip_tls_verify` is set. */
+            k8s_ca_cert?: string;
+            /** @description Namespace the ServiceAccount's Role covers; every pod/service lookup and every port-forward is scoped to it. Required for a `kubernetes` row. */
+            k8s_namespace?: string;
+            /** @description Disable API server certificate verification. For throwaway clusters only: with it set, anything that can intercept the API server connection can read the ServiceAccount token. */
+            k8s_insecure_skip_tls_verify?: boolean;
             /**
              * @description Optional; defaults to false when omitted. When true, the API dials the updated row
              *     once and returns the staged outcome as `connection_test` in the response.
@@ -6298,6 +6344,31 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description List of SSH servers */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        servers?: components["schemas"]["Database"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listTunnelServers: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description List of tunnel servers */
             200: {
                 headers: {
                     [name: string]: unknown;
