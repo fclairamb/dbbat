@@ -51,6 +51,11 @@ var (
 	// ErrKubernetesTargetNotReady means the service exists but no ready
 	// endpoint backs it, so there is nothing to port-forward to.
 	ErrKubernetesTargetNotReady = errors.New("kubernetes: no ready pod backs the target")
+	// ErrKubernetesNoHost means the cluster row carries no API server address.
+	ErrKubernetesNoHost = errors.New("kubernetes: the cluster row has no API server host")
+	// ErrKubernetesProtocolMismatch means the API server negotiated something
+	// other than the port-forward subprotocol.
+	ErrKubernetesProtocolMismatch = errors.New("kubernetes: the API server negotiated an unexpected subprotocol")
 )
 
 // portForwardTimeout bounds the stream upgrade, matching the shared dialer's
@@ -129,9 +134,9 @@ func NewKubernetesTunnel(cfg KubernetesConfig) (*KubernetesTunnel, error) {
 	// stronger statement — so it wins when an operator set both.
 	switch {
 	case cfg.CACert != "":
-		rc.TLSClientConfig.CAData = []byte(cfg.CACert)
+		rc.CAData = []byte(cfg.CACert)
 	case cfg.InsecureSkipTLSVerify:
-		rc.TLSClientConfig.Insecure = true
+		rc.Insecure = true
 	}
 
 	clientset, err := kubernetes.NewForConfig(rc)
@@ -154,7 +159,7 @@ func NewKubernetesTunnel(cfg KubernetesConfig) (*KubernetesTunnel, error) {
 func (c KubernetesConfig) apiServerURL() (string, error) {
 	raw := strings.TrimSpace(c.Host)
 	if raw == "" {
-		return "", errors.New("kubernetes: the cluster row has no API server host")
+		return "", ErrKubernetesNoHost
 	}
 
 	scheme := "https"
@@ -217,7 +222,7 @@ func (t *KubernetesTunnel) ResolvePod(ctx context.Context, host string) (string,
 // resolveService picks a ready pod backing a service, via its EndpointSlices.
 //
 // EndpointSlices rather than the legacy Endpoints object because that is what
-// modern clusters actually populate, and readiness is honoured because
+// modern clusters actually populate, and readiness is honored because
 // forwarding to a pod the service itself would not route to is a confusing way
 // to fail.
 func (t *KubernetesTunnel) resolveService(ctx context.Context, name string) (string, error) {
@@ -297,7 +302,7 @@ func (t *KubernetesTunnel) PortForwardAllowed(ctx context.Context) (bool, string
 
 // DialPod opens one port-forward stream pair to podName's containerPort and
 // returns it as a net.Conn.
-func (t *KubernetesTunnel) DialPod(ctx context.Context, podName string, containerPort int) (net.Conn, error) {
+func (t *KubernetesTunnel) DialPod(_ context.Context, podName string, containerPort int) (net.Conn, error) {
 	if podName == "" {
 		return nil, fmt.Errorf("%w: empty pod name", ErrKubernetesTargetNotFound)
 	}
@@ -322,7 +327,7 @@ func (t *KubernetesTunnel) DialPod(ctx context.Context, podName string, containe
 	if protocol != portforward.PortForwardProtocolV1Name {
 		_ = conn.Close()
 
-		return nil, fmt.Errorf("kubernetes: the API server negotiated %q, not %q",
+		return nil, fmt.Errorf("%w: got %q, want %q", ErrKubernetesProtocolMismatch,
 			protocol, portforward.PortForwardProtocolV1Name)
 	}
 
@@ -358,7 +363,7 @@ func (t *KubernetesTunnel) Dial(ctx context.Context, host string, port int) (net
 // skipped: client-go's websocket round tripper exposes no dial hook, so it
 // would ignore rest.Config.Dial and try to reach the API server directly. The
 // SPDY round tripper can be handed a substitute transport, so that is the one
-// that can honour a bastion.
+// that can honor a bastion.
 func (t *KubernetesTunnel) newStreamDialer(streamURL *url.URL) (httpstream.Dialer, error) {
 	spdyDialer, err := t.newSPDYDialer(streamURL)
 	if err != nil {
@@ -430,22 +435,22 @@ func (t *KubernetesTunnel) classify(err error, what string) error {
 
 	switch {
 	case apierrors.IsUnauthorized(err):
-		return fmt.Errorf("%w (%s): %v", ErrKubernetesUnauthorized, what, err)
+		return fmt.Errorf("%w (%s): %w", ErrKubernetesUnauthorized, what, err)
 	case apierrors.IsForbidden(err):
-		return fmt.Errorf("%w (%s): %v", ErrKubernetesForbidden, what, err)
+		return fmt.Errorf("%w (%s): %w", ErrKubernetesForbidden, what, err)
 	case apierrors.IsNotFound(err):
-		return fmt.Errorf("%w (%s): %v", ErrKubernetesTargetNotFound, what, err)
+		return fmt.Errorf("%w (%s): %w", ErrKubernetesTargetNotFound, what, err)
 	}
 
 	msg := strings.ToLower(err.Error())
 
 	switch {
 	case strings.Contains(msg, "401 unauthorized"), strings.Contains(msg, "\"unauthorized\""):
-		return fmt.Errorf("%w (%s): %v", ErrKubernetesUnauthorized, what, err)
+		return fmt.Errorf("%w (%s): %w", ErrKubernetesUnauthorized, what, err)
 	case strings.Contains(msg, "403 forbidden"), strings.Contains(msg, "is forbidden"):
-		return fmt.Errorf("%w (%s): %v", ErrKubernetesForbidden, what, err)
+		return fmt.Errorf("%w (%s): %w", ErrKubernetesForbidden, what, err)
 	case strings.Contains(msg, "404 not found"), strings.Contains(msg, "not found"):
-		return fmt.Errorf("%w (%s): %v", ErrKubernetesTargetNotFound, what, err)
+		return fmt.Errorf("%w (%s): %w", ErrKubernetesTargetNotFound, what, err)
 	}
 
 	return fmt.Errorf("kubernetes: %s failed: %w", what, err)

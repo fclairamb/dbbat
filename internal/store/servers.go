@@ -247,7 +247,7 @@ func (s *Store) ListTunnelServers(ctx context.Context) ([]Server, error) {
 	var servers []Server
 	err := s.db.NewSelect().
 		Model(&servers).
-		Where("protocol IN (?)", bun.In([]string{ProtocolSSH, ProtocolKubernetes})).
+		Where("protocol IN (?)", bun.List([]string{ProtocolSSH, ProtocolKubernetes})).
 		Order("name ASC").
 		Scan(ctx)
 	if err != nil {
@@ -266,7 +266,7 @@ func (s *Store) GetServerByName(ctx context.Context, name string) (*Server, erro
 		Model(db).
 		Where("name = ?", name).
 		// Targets only: an SSH bastion is a dial path, never connectable by name.
-		Where("protocol NOT IN (?)", bun.In([]string{ProtocolSSH, ProtocolKubernetes})).
+		Where("protocol NOT IN (?)", bun.List([]string{ProtocolSSH, ProtocolKubernetes})).
 		Scan(ctx)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -331,7 +331,7 @@ func (s *Store) ListListableServers(ctx context.Context) ([]Server, error) {
 		Model(&databases).
 		Where("listable = ?", true).
 		// Targets only: SSH bastions are never grantable/listable targets.
-		Where("protocol NOT IN (?)", bun.In([]string{ProtocolSSH, ProtocolKubernetes})).
+		Where("protocol NOT IN (?)", bun.List([]string{ProtocolSSH, ProtocolKubernetes})).
 		Order("name ASC").
 		Scan(ctx)
 	if err != nil {
@@ -366,7 +366,7 @@ func (s *Store) ListServers(ctx context.Context) ([]Server, error) {
 	var databases []Server
 	err := s.db.NewSelect().
 		Model(&databases).
-		Where("protocol NOT IN (?)", bun.In([]string{ProtocolSSH, ProtocolKubernetes})).
+		Where("protocol NOT IN (?)", bun.List([]string{ProtocolSSH, ProtocolKubernetes})).
 		Order("name ASC").
 		Scan(ctx)
 	if err != nil {

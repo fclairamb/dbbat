@@ -23,6 +23,12 @@ import (
 // and no two live pairs may collide.
 var requestIDs atomic.Int64
 
+// ErrPortForwardRefused wraps whatever the kubelet wrote on the error stream.
+// It is a distinct sentinel because that stream is the *only* place a
+// port-forward to a dead container port reports itself: the upgrade succeeds
+// either way.
+var ErrPortForwardRefused = errors.New("kubernetes: the kubelet refused to forward")
+
 // portForwardConn adapts one `pods/portforward` stream pair — a data stream
 // plus the error stream the kubelet reports forwarding failures on — to
 // net.Conn, so every proxy can treat a pod exactly like a dialed TCP endpoint.
@@ -109,7 +115,7 @@ func (c *portForwardConn) watchErrorStream() {
 
 	switch {
 	case len(message) > 0:
-		c.setForwardErr(fmt.Errorf("kubernetes: port-forward to %s failed: %s", c.remote, strings.TrimSpace(string(message))))
+		c.setForwardErr(fmt.Errorf("%w to %s: %s", ErrPortForwardRefused, c.remote, strings.TrimSpace(string(message))))
 	case err != nil && !errors.Is(err, io.EOF):
 		c.setForwardErr(fmt.Errorf("kubernetes: port-forward error stream for %s: %w", c.remote, err))
 	}

@@ -23,7 +23,7 @@ func kubernetesRouter(server *Server) *gin.Engine {
 	return router
 }
 
-func kubernetesTestAdmin(t *testing.T) (*gin.Engine, *Server, string) {
+func kubernetesTestAdmin(t *testing.T) (*gin.Engine, string) {
 	t.Helper()
 
 	server, dataStore := setupTestServer(t)
@@ -32,7 +32,7 @@ func kubernetesTestAdmin(t *testing.T) (*gin.Engine, *Server, string) {
 	createTestUser(t, dataStore, "k8s-admin", "adminpass123", []string{store.RoleAdmin})
 	token := loginUser(t, server, "k8s-admin", "adminpass123")
 
-	return kubernetesRouter(server), server, token
+	return kubernetesRouter(server), token
 }
 
 func validClusterPayload() map[string]any {
@@ -51,7 +51,7 @@ func validClusterPayload() map[string]any {
 func TestCreateKubernetesServer(t *testing.T) {
 	t.Parallel()
 
-	router, _, token := kubernetesTestAdmin(t)
+	router, token := kubernetesTestAdmin(t)
 
 	w, data := doJSON(t, router, "POST", "/api/v1/servers", token, validClusterPayload())
 	require.Equal(t, 200, w.Code, w.Body.String())
@@ -95,7 +95,7 @@ func TestCreateKubernetesServerRejectsIncompleteRows(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			router, _, token := kubernetesTestAdmin(t)
+			router, token := kubernetesTestAdmin(t)
 
 			payload := validClusterPayload()
 			tc.mutate(payload)
@@ -112,7 +112,7 @@ func TestCreateKubernetesServerRejectsIncompleteRows(t *testing.T) {
 func TestCreateKubernetesServerAllowsSkippingTLSVerification(t *testing.T) {
 	t.Parallel()
 
-	router, _, token := kubernetesTestAdmin(t)
+	router, token := kubernetesTestAdmin(t)
 
 	payload := validClusterPayload()
 	delete(payload, "k8s_ca_cert")
@@ -130,7 +130,7 @@ func TestCreateKubernetesServerAllowsSkippingTLSVerification(t *testing.T) {
 func TestTunnelServersListsBothKinds(t *testing.T) {
 	t.Parallel()
 
-	router, _, token := kubernetesTestAdmin(t)
+	router, token := kubernetesTestAdmin(t)
 
 	w, _ := doJSON(t, router, "POST", "/api/v1/servers", token, validClusterPayload())
 	require.Equal(t, 200, w.Code, w.Body.String())
@@ -142,13 +142,17 @@ func TestTunnelServersListsBothKinds(t *testing.T) {
 	require.Equal(t, 200, w.Code, w.Body.String())
 
 	_, resp := doJSON(t, router, "GET", "/api/v1/tunnel-servers", token, nil)
-	tunnels := resp["servers"].([]any)
+	tunnels, ok := resp["servers"].([]any)
+	require.True(t, ok, resp)
 	assert.Len(t, tunnels, 2)
 
 	_, resp = doJSON(t, router, "GET", "/api/v1/ssh-servers", token, nil)
-	sshOnly := resp["servers"].([]any)
+	sshOnly, ok := resp["servers"].([]any)
+	require.True(t, ok, resp)
 	require.Len(t, sshOnly, 1)
-	assert.Equal(t, "ssh", sshOnly[0].(map[string]any)["protocol"])
+	first, ok := sshOnly[0].(map[string]any)
+	require.True(t, ok, sshOnly[0])
+	assert.Equal(t, "ssh", first["protocol"])
 
 	// Neither kind may leak into the target listing.
 	_, resp = doJSON(t, router, "GET", "/api/v1/servers", token, nil)
@@ -170,10 +174,11 @@ func TestTunnelServersListsBothKinds(t *testing.T) {
 func TestTargetMayReferenceAKubernetesCluster(t *testing.T) {
 	t.Parallel()
 
-	router, _, token := kubernetesTestAdmin(t)
+	router, token := kubernetesTestAdmin(t)
 
 	_, cluster := doJSON(t, router, "POST", "/api/v1/servers", token, validClusterPayload())
-	clusterUID := cluster["uid"].(string)
+	clusterUID, ok := cluster["uid"].(string)
+	require.True(t, ok, cluster)
 
 	w, _ := doJSON(t, router, "POST", "/api/v1/servers", token, map[string]any{
 		"name": "pg-in-cluster", "host": "svc/postgres", "port": 5432,
@@ -184,11 +189,18 @@ func TestTargetMayReferenceAKubernetesCluster(t *testing.T) {
 
 	targetUID := func() string {
 		_, r := doJSON(t, router, "GET", "/api/v1/servers", token, nil)
-		for _, entry := range r["databases"].([]any) {
-			row := entry.(map[string]any)
-			if row["name"] == "pg-in-cluster" {
-				return row["uid"].(string)
+		listed, ok := r["databases"].([]any)
+		require.True(t, ok, r)
+
+		for _, entry := range listed {
+			row, ok := entry.(map[string]any)
+			if !ok || row["name"] != "pg-in-cluster" {
+				continue
 			}
+			uid, ok := row["uid"].(string)
+			require.True(t, ok, row)
+
+			return uid
 		}
 
 		t.Fatal("the created target was not listed")
@@ -207,11 +219,12 @@ func TestTargetMayReferenceAKubernetesCluster(t *testing.T) {
 func TestUpdateKubernetesServerMaterial(t *testing.T) {
 	t.Parallel()
 
-	router, _, token := kubernetesTestAdmin(t)
+	router, token := kubernetesTestAdmin(t)
 
 	w, cluster := doJSON(t, router, "POST", "/api/v1/servers", token, validClusterPayload())
 	require.Equal(t, 200, w.Code, w.Body.String())
-	uid := cluster["uid"].(string)
+	uid, ok := cluster["uid"].(string)
+	require.True(t, ok, cluster)
 
 	w, _ = doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
 		"k8s_namespace": "staging",
@@ -220,7 +233,11 @@ func TestUpdateKubernetesServerMaterial(t *testing.T) {
 	require.Equal(t, 200, w.Code, w.Body.String())
 
 	_, resp := doJSON(t, router, "GET", "/api/v1/tunnel-servers", token, nil)
-	row := resp["servers"].([]any)[0].(map[string]any)
+	listed, ok := resp["servers"].([]any)
+	require.True(t, ok, resp)
+	require.Len(t, listed, 1)
+	row, ok := listed[0].(map[string]any)
+	require.True(t, ok, listed[0])
 	assert.Equal(t, "staging", row["k8s_namespace"])
 	assert.Contains(t, row["k8s_ca_cert"], "BBBB")
 }
