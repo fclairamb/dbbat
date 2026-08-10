@@ -18,7 +18,7 @@ loopback**, with a real protocol client, authenticating as the API key's owner
 with that key as the password:
 
 ```
-Claude ──HTTP/MCP──► dbbat API ──loopback pgx / go-mysql──► dbbat proxy ──► your database
+Claude ──HTTP/MCP──► dbbat API ──loopback protocol client──► dbbat proxy ──► your database
                                                               ▲
                                                               └── the same auth, grant,
                                                                   interception, approval
@@ -112,26 +112,85 @@ has to guess at.
 
 ## Supported protocols
 
-| Protocol | MCP support |
-|---|---|
-| PostgreSQL | yes (phase 1) |
-| MySQL / MariaDB | yes (phase 1) |
-| Oracle | not yet — phase 2 |
-| MongoDB | not yet — phase 2 |
-| Microsoft SQL Server | not yet — phase 2 |
+All five. Each is a loopback client and a switch case; none of them adds
+enforcement.
 
-A grant on an unsupported protocol still appears in `list_databases`, flagged
-`supported: false`. An agent that cannot query Oracle should be told that, not
-left believing the grant does not exist.
+| Protocol | Client | Loopback leg | Statement |
+|---|---|---|---|
+| PostgreSQL | `pgx` | plaintext | SQL, `$1…` binds |
+| MySQL / MariaDB | `go-mysql` | plaintext | SQL, `?` binds |
+| Oracle | `go-ora` | plaintext (the listener speaks plain TNS) | SQL, `:1…` binds |
+| Microsoft SQL Server | `go-mssqldb` | plaintext (`ENCRYPT_NOT_SUP`) | SQL, `@p1…` binds |
+| MongoDB | `mongo-driver` | **TLS**, self-signed cert accepted | `<command> <extended JSON>`, no binds |
+
+An SSH-only entry is not a database: it stays `supported: false` in
+`list_databases`, and `query` refuses it. A protocol that is supported but
+whose listener is disabled in this process (`DBB_LISTEN_ORA`,
+`DBB_LISTEN_MONGO`, …) is refused too — there is nothing of ours to dial, and
+the executor will not find another way to the database.
 
 Adding a protocol means adding a case to `SupportedProtocol`, a loopback client
 next to `exec_postgresql.go` / `exec_mysql.go`, and nothing else — no auth, no
 grant check, no approval plumbing.
 
-The proxy listener for the protocol must be running in the same process
-(`DBB_LISTEN_PG`, `DBB_LISTEN_MYSQL`). With it disabled there is nothing of
-ours to dial, and the executor refuses rather than finding another way to the
-database.
+### What travels as the database name
+
+Every proxy resolves its target with `GetServerByName`, so what the loopback
+client puts in the connection string is always the **dbbat entry's name**:
+PostgreSQL's startup `database`, MySQL's schema, Oracle's EZ-Connect service,
+SQL Server's LOGIN7 database, MongoDB's `authSource`.
+
+Oracle is the one worth spelling out: several dbbat entries may proxy one
+mutualized upstream `SERVICE_NAME`, so sending the raw service name would
+resolve to an arbitrary one of them.
+
+MongoDB is the exception in the other direction. A MongoDB command carries its
+own `$db` inside the message and the proxy forwards it verbatim, so that field
+has to name the database as the *upstream* knows it. `ExecRequest` therefore
+carries both names, and only the MongoDB client reads the second.
+
+### Per-protocol notes
+
+**Oracle.** The connection is `user/key@host:port/<dbbat name>` with
+`PROGRAM=dbbat-mcp`. The approval gate is *not* at parity with the other four,
+and the MCP layer does nothing about it: dbbat's TTC parser locates a statement
+heuristically, so a frame whose SQL it cannot decode is forwarded ungated and
+unlogged, and a piggyback re-execution naming a cursor dbbat never saw parsed
+is forwarded ungated too. A cursor re-execution dbbat *did* see parsed is
+gated, on every execution. See `docs/approvals.md`. The consequence for an
+agent is the same as for a human at `sqlplus`, which is the point — but do not
+read "Oracle is supported" as "Oracle holds are airtight".
+
+**SQL Server.** The loopback leg asks for `encrypt=disable`. The proxy never
+*requires* encryption on its client leg, whatever `DBB_MSSQL_TLS_DISABLE` says,
+so no certificate decision arises and `DBB_MSSQL_TLS_MAX_VERSION` (1.2 by
+default) never comes into it: there is no handshake to cap.
+
+**MongoDB.** This leg is TLS, because the listener terminates TLS and SASL
+PLAIN carries the `dbb_` key inside it. The certificate is dbbat's own
+auto-generated self-signed one and the dial never leaves 127.0.0.1, so it is
+not verified — the only `InsecureSkipVerify` in the package, and it is scoped
+to this dial.
+
+`sql` carries the command as `<command> <extended JSON>`:
+
+```jsonc
+{ "database": "prod-mongo", "sql": "find {\"find\":\"users\",\"filter\":{\"active\":true},\"limit\":10}" }
+```
+
+That is deliberately the same rendering the proxy writes into `/queries`, so an
+approval pattern like `(?i)^delete ` means one thing whether the command came
+from `mongosh` or from an agent. A separate `run_command` tool taking a
+document was the alternative and was rejected: it would have grown the tool
+surface and given patterns a second text to match against.
+
+`find`, `aggregate`, `listCollections` and `listIndexes` are read through a
+cursor — its `getMore` round trips go back through the proxy like any other
+command — and the cursor is killed when the row cap is hit. Everything else is
+one command and one reply document, reported as a single row, with `n` (what
+write commands report) surfaced as `rows_affected`. `aggregate` needs its own
+`"cursor":{}` option, exactly as it does from any driver: dbbat does not add it,
+because adding it would change the text `/queries` records.
 
 ---
 
@@ -162,9 +221,10 @@ rewriting would falsify what `/queries` records and what approval patterns
 match, and a `LIMIT` silently appended by a tool layer is exactly the kind of
 divergence that makes an audit log untrustworthy.
 
-`params` are bind parameters (`$1…` on PostgreSQL, `?` on MySQL). Using them is
-what an agent should do with values; a non-empty `params` also forces the
-prepared-statement path on both protocols.
+`params` are bind parameters (`$1…` on PostgreSQL, `?` on MySQL, `:1…` on
+Oracle, `@p1…` on SQL Server). Using them is what an agent should do with
+values; a non-empty `params` also forces the prepared-statement path. MongoDB
+has no bind parameters — values live in the command document.
 
 Rows come back as `[{column: value}]` plus a `columns` array for ordering.
 Repeated column names are suffixed (`id`, `id_2`) so a row never loses a column
@@ -181,6 +241,14 @@ On MySQL the no-parameter path streams and stops reading at the cap rather than
 buffering the result set, so `SELECT * FROM events` cannot make the dbbat
 process hold a table in memory. The parameterized path buffers (go-mysql only
 offers prepared execution through its buffering API) and truncates afterwards.
+Oracle, SQL Server and MongoDB all stop reading at the cap as well.
+
+`rows_affected` is reported wherever the protocol reports it. On Oracle and SQL
+Server that means the client has to choose `Exec` over `Query` up front, which
+it does from the statement's leading keyword; a T-SQL write carrying an `OUTPUT`
+clause takes the query path instead, since it returns rows. Guessing wrong there
+can only omit `rows_affected` — never lose a row, and never change what the
+proxy enforces, which is decided on the other end of the socket.
 
 The row cap is a *response* limit, not a data-volume control. That is what the
 grant's `max_bytes_transferred` quota is for, and it keeps running during MCP
@@ -193,8 +261,27 @@ columns. Introspection runs through the same governed path as `query`, so it is
 logged like everything else and can itself be held by an approval pattern that
 matches `SELECT`.
 
+| Protocol | Tables | Columns |
+|---|---|---|
+| PostgreSQL | `information_schema.tables` | `information_schema.columns` |
+| MySQL / MariaDB | `information_schema.tables`, current schema | `information_schema.columns` |
+| Oracle | `ALL_TABLES`, current schema | `ALL_TAB_COLUMNS` |
+| SQL Server | `INFORMATION_SCHEMA.TABLES` | `INFORMATION_SCHEMA.COLUMNS` |
+| MongoDB | `listCollections` | one **sampled document** |
+
 Table and schema names travel as bind parameters, never interpolated. The input
-comes from a model.
+comes from a model. MongoDB has neither SQL nor bind parameters, so the same
+rule is kept the only other way it can be: the collection name is a *value* in
+a document handed to the BSON encoder, never text concatenated into the
+command.
+
+Two protocol-specific truths the output states rather than hides. Oracle folds
+unquoted identifiers to upper case, so the bound table name is folded the same
+way (`UPPER(:1)`) and `DATA_DEFAULT` is not read at all — it is a `LONG`, and a
+`LONG` in a catalog query is how a describe fails on a driver quirk instead of
+returning columns. MongoDB has no column catalog, so a described collection
+reports the top-level fields of **one sampled document**, and says so in
+`message`: another document in the same collection may look nothing like it.
 
 ### `await_approval`
 
@@ -319,7 +406,8 @@ should not answer, not even with a `403`.
 
 Related settings that shape what an agent can do, all pre-existing:
 `DBB_APPROVAL_ENABLED`, `DBB_APPROVAL_SLACK_DELAY`, `DBB_LISTEN_PG`,
-`DBB_LISTEN_MYSQL`, `DBB_QUERY_STORAGE_RETENTION`.
+`DBB_LISTEN_MYSQL`, `DBB_LISTEN_ORA`, `DBB_LISTEN_MONGO`, `DBB_LISTEN_MSSQL`,
+`DBB_QUERY_STORAGE_RETENTION`.
 
 ---
 
@@ -350,6 +438,10 @@ Related settings that shape what an agent can do, all pre-existing:
 | `internal/mcp/exec.go` | executor interface, protocol dispatch, loopback address resolution |
 | `internal/mcp/exec_postgresql.go` | pgx loopback client |
 | `internal/mcp/exec_mysql.go` | go-mysql loopback client |
+| `internal/mcp/exec_sql.go` | the database/sql half Oracle and SQL Server share |
+| `internal/mcp/exec_oracle.go` | go-ora loopback client |
+| `internal/mcp/exec_mssql.go` | go-mssqldb loopback client |
+| `internal/mcp/exec_mongodb.go` | mongo-driver loopback client, and the command-text shape |
 | `internal/mcp/pending.go` | backgrounded executions, hold correlation, reaping |
 | `internal/api/mcp.go` | route handler: API-key restriction, write deadline, caller injection |
 
