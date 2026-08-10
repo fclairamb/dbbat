@@ -138,7 +138,7 @@ func TestAuthProvisioningLegacyConfigFile(t *testing.T) {
 	cfg, err := Load(LoadOptions{ConfigFile: configFile})
 	require.NoError(t, err)
 
-	assert.False(t, cfg.Auth.AutoCreateUsers, "the legacy file keys must still be honoured")
+	assert.False(t, cfg.Auth.AutoCreateUsers, "the legacy file keys must still be honored")
 	assert.Equal(t, "viewer", cfg.Auth.Role())
 
 	t.Setenv("DBB_AUTH_DEFAULT_ROLE", "admin")
