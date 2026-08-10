@@ -1300,15 +1300,15 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 		// and is gated like a statement; one that continues a query already in
 		// flight is not.
 		//
-		// It deliberately does NOT go through gateStatement, which would run
-		// checkQuotas on every fetch — including the continuation ones, where
-		// refusing mid-result-set is exactly what this path must avoid.
-		// handleOFETCH runs checkQuotas itself, on the re-execution branch
-		// only, so MaxQueryCounts is enforced exactly where a new /queries row
-		// is about to be created and nowhere else. (The other quota-shaped
-		// limits — revocation, bytes, expiry — are additionally covered on the
-		// response leg by LimitGuard, which does not know about
-		// MaxQueryCounts.)
+		// It deliberately does NOT go through gateStatement: a continuation
+		// fetch must reach no gate at all, and refusing mid-result-set is
+		// exactly what this path must avoid. handleOFETCH returns early on
+		// that branch and only the re-execution branch reaches regateCursor,
+		// which runs the quota check — so MaxQueryCounts is enforced exactly
+		// where a new /queries row is about to be created and nowhere else.
+		// (The other quota-shaped limits — revocation, bytes, expiry — are
+		// additionally covered on the response leg by LimitGuard, which does
+		// not know about MaxQueryCounts.)
 		if err := s.handleOFETCH(ttcPayload); err != nil {
 			_ = s.sendOracleError(err)
 
@@ -1328,23 +1328,27 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 	return false
 }
 
-// gateStatement runs the full pre-flight every statement-carrying TTC op shares:
-// quotas, expiry and revocation first, then the op's own handler — which runs
-// the static controls, the approval hold, and the query recording, in that
-// order. Reports true when the packet must NOT be forwarded; the client has
-// already been answered with a TTC error by then.
+// gateStatement runs a statement-carrying TTC op's handler and answers the
+// client itself when the handler refuses. Reports true when the packet must NOT
+// be forwarded; the client has already been answered with a TTC error by then.
 //
-// All three ops go through here (OALL8, the v315+ piggyback exec, and the JDBC
-// thin driver's func=0x11 exec) so that adding a fourth cannot quietly acquire
-// only half of it — which is exactly how the JDBC exec ended up recording
-// queries while enforcing nothing.
+// The pre-flight itself — quotas, expiry and revocation, then the static
+// controls, the approval hold and the query recording — lives inside the
+// handler, in that order. The quota check used to sit here instead, ahead of
+// the handler, and that is precisely why an over-quota statement left no
+// `queries` row: at this point the TTC payload is still undecoded, so there is
+// no SQL to record the refusal against. Each handler decodes differently
+// (decodeOALL8, decodePiggybackExecSQL, decodeExecSQL, decodeCursorReexec), so
+// the check belongs where the SQL is known — after the decode and before the
+// static controls. See regateCursor for the three re-execution frames, which
+// share one insertion point.
+//
+// All three SQL-carrying ops still go through here (OALL8, the v315+ piggyback
+// exec, and the JDBC thin driver's func=0x11 exec) so that adding a fourth
+// cannot quietly acquire only half of the answer-the-client behaviour — which
+// is exactly how the JDBC exec ended up recording queries while enforcing
+// nothing.
 func (s *session) gateStatement(handle func([]byte) error, ttcPayload []byte) bool {
-	if err := s.checkQuotas(); err != nil {
-		_ = s.sendOracleError(err)
-
-		return true
-	}
-
 	if err := handle(ttcPayload); err != nil {
 		_ = s.sendOracleError(err)
 
