@@ -843,3 +843,401 @@ func TestQueryChainSurvivesAPeerAppend(t *testing.T) {
 	require.Nil(t, result.Break, "the chain must stay valid across replicas")
 	require.Equal(t, int64(3), result.Verified)
 }
+
+// --- Result row chains --------------------------------------------------
+//
+// One chain per capture, positioned by row_number, sealed at the flush
+// barrier. See docs/audit-chain.md.
+
+// captureQuery creates a connection with one statement on it, which is the
+// parent every captured row hangs from.
+func captureQuery(t *testing.T, ctx context.Context, store *Store, suffix string) *Query {
+	t.Helper()
+
+	_, queries := createChainTestConnection(t, ctx, store, suffix, 1)
+
+	return &queries[0]
+}
+
+// storeChainedRows writes captured rows through the real store path, with the
+// given row numbers.
+func storeChainedRows(t *testing.T, ctx context.Context, store *Store, queryUID uuid.UUID, numbers ...int) {
+	t.Helper()
+
+	rows := make([]PendingQueryRow, 0, len(numbers))
+
+	for _, n := range numbers {
+		data := json.RawMessage(fmt.Sprintf(`{"n":%d,"b":"x","a":1.0}`, n))
+		rows = append(rows, PendingQueryRow{
+			QueryID:      queryUID,
+			RowNumber:    n,
+			RowData:      data,
+			RowSizeBytes: int64(len(data)),
+		})
+	}
+
+	require.NoError(t, store.StoreQueryRows(ctx, rows), "StoreQueryRows()")
+}
+
+func readChainedRows(t *testing.T, ctx context.Context, store *Store, queryUID uuid.UUID) []QueryRowModel {
+	t.Helper()
+
+	var rows []QueryRowModel
+
+	err := store.db.NewSelect().
+		Model(&rows).
+		Where("query_id = ?", queryUID).
+		Order("row_number ASC").
+		Scan(ctx)
+	require.NoError(t, err, "reading captured rows")
+
+	return rows
+}
+
+func TestRowChainVerifiesClean(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	query := captureQuery(t, ctx, store, "rows-clean")
+	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
+	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
+
+	rows := readChainedRows(t, ctx, store, query.UID)
+	require.Len(t, rows, 3)
+
+	for _, row := range rows {
+		require.NotEmpty(t, row.MAC)
+		require.NotEmpty(t, row.PrevMAC)
+	}
+
+	one, err := store.VerifyRowChain(ctx, query.UID)
+	require.NoError(t, err)
+	require.Nil(t, one.Break, "the capture should verify")
+	require.Equal(t, int64(3), one.Verified)
+	require.Equal(t, rows[2].MAC, one.HeadMAC)
+
+	all, err := store.VerifyRowChains(ctx, nil)
+	require.NoError(t, err)
+	require.True(t, all.OK())
+	require.Equal(t, int64(1), all.Captures)
+	require.Equal(t, int64(3), all.Verified)
+	require.Equal(t, int64(0), all.Unchained)
+}
+
+func TestRowChainStampsHeadOnSeal(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	query := captureQuery(t, ctx, store, "rows-stamp")
+	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
+
+	// Not stamped until the capture reaches its barrier.
+	unsealed, err := store.GetQuery(ctx, query.UID)
+	require.NoError(t, err)
+	require.Nil(t, unsealed.RowChainMAC)
+
+	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
+
+	sealed, err := store.GetQuery(ctx, query.UID)
+	require.NoError(t, err)
+
+	rows := readChainedRows(t, ctx, store, query.UID)
+	require.Equal(t, rows[2].MAC, sealed.RowChainMAC, "the capture head must be stamped on seal")
+	require.Equal(t, int64(3), sealed.RowChainLen)
+}
+
+func TestRowChainDetectsModifiedRow(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	query := captureQuery(t, ctx, store, "rows-modified")
+	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
+	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
+
+	rows := readChainedRows(t, ctx, store, query.UID)
+
+	_, err := store.db.ExecContext(ctx,
+		`UPDATE query_rows SET row_data = '{"n":0,"b":"innocent","a":1.0}'::jsonb WHERE uid = ?`, rows[1].UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyRowChain(ctx, query.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break)
+	require.Equal(t, rows[1].UID, result.Break.UID)
+	require.Equal(t, query.UID, *result.Break.QueryUID)
+	require.Contains(t, result.Break.Reason, "modified")
+}
+
+func TestRowChainDetectsDeletedRow(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	query := captureQuery(t, ctx, store, "rows-deleted")
+	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3, 4)
+	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
+
+	rows := readChainedRows(t, ctx, store, query.UID)
+
+	_, err := store.db.ExecContext(ctx, `DELETE FROM query_rows WHERE uid = ?`, rows[1].UID)
+	require.NoError(t, err)
+
+	// A gap in row_number is not what catches this — the prev_mac linkage is.
+	result, err := store.VerifyRowChain(ctx, query.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break)
+	require.Equal(t, rows[2].UID, result.Break.UID)
+	require.Contains(t, result.Break.Reason, "prev_mac")
+}
+
+func TestRowChainDetectsDeletedFirstRow(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	query := captureQuery(t, ctx, store, "rows-first")
+	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
+	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
+
+	rows := readChainedRows(t, ctx, store, query.UID)
+
+	_, err := store.db.ExecContext(ctx, `DELETE FROM query_rows WHERE uid = ?`, rows[0].UID)
+	require.NoError(t, err)
+
+	// Retention never removes individual captured rows, so unlike a session's
+	// statements a capture missing its start is tampering, not housekeeping.
+	result, err := store.VerifyRowChain(ctx, query.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break)
+	require.Contains(t, result.Break.Reason, "removed from the start")
+}
+
+// TestRowChainDetectsTrailingDeletion is what the row_chain_mac stamp exists
+// for: without it the surviving prefix would still verify end to end.
+func TestRowChainDetectsTrailingDeletion(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	query := captureQuery(t, ctx, store, "rows-trailing")
+	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
+	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
+
+	rows := readChainedRows(t, ctx, store, query.UID)
+
+	_, err := store.db.ExecContext(ctx, `DELETE FROM query_rows WHERE uid = ?`, rows[2].UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyRowChain(ctx, query.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "deleting the last captured row must be detected")
+	require.Contains(t, result.Break.Reason, "removed from the end")
+}
+
+// TestRowChainDetectsWipedCapture covers the case the enumeration has to reach
+// out for: every row of a capture deleted, so query_rows has nothing left to
+// walk and only the stamp remembers the capture existed.
+func TestRowChainDetectsWipedCapture(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	query := captureQuery(t, ctx, store, "rows-wiped")
+	storeChainedRows(t, ctx, store, query.UID, 1, 2, 3)
+	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
+
+	_, err := store.db.ExecContext(ctx, `DELETE FROM query_rows WHERE query_id = ?`, query.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyRowChains(ctx, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "a wiped capture must not disappear silently")
+	require.Equal(t, int64(1), result.Captures)
+	require.Contains(t, result.Break.Reason, "removed from the end")
+}
+
+// TestRowChainGapsAreNotABreak pins the reason row_number is an ordering and
+// not a dense sequence: the batched writer drops rows when its queue is full,
+// and an unencodable row is skipped outright.
+func TestRowChainGapsAreNotABreak(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	query := captureQuery(t, ctx, store, "rows-gaps")
+	storeChainedRows(t, ctx, store, query.UID, 1, 4, 9)
+	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
+
+	result, err := store.VerifyRowChain(ctx, query.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break, "a capture with dropped rows still verifies: %v", result.Break)
+	require.Equal(t, int64(3), result.Verified)
+
+	sealed, err := store.GetQuery(ctx, query.UID)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), sealed.RowChainLen, "row_chain_len counts rows, not row numbers")
+}
+
+// TestRowChainBatchSpansSeveralQueries is the property that shaped the write
+// path: one INSERT carries rows for several captures, so the batch has to be
+// split per query before the MACs are computed — and each capture must come out
+// with its own independent chain.
+func TestRowChainBatchSpansSeveralQueries(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	_, queries := createChainTestConnection(t, ctx, store, "rows-batch", 2)
+	first, second := queries[0], queries[1]
+
+	data := func(n int) json.RawMessage { return json.RawMessage(fmt.Sprintf(`{"n":%d}`, n)) }
+
+	// Interleaved, the way a shared writer drains two concurrent sessions.
+	mixed := []PendingQueryRow{
+		{QueryID: first.UID, RowNumber: 1, RowData: data(1), RowSizeBytes: 8},
+		{QueryID: second.UID, RowNumber: 1, RowData: data(2), RowSizeBytes: 8},
+		{QueryID: first.UID, RowNumber: 2, RowData: data(3), RowSizeBytes: 8},
+		{QueryID: second.UID, RowNumber: 2, RowData: data(4), RowSizeBytes: 8},
+	}
+	require.NoError(t, store.StoreQueryRows(ctx, mixed))
+
+	// A second batch continues both chains from the heads the first one left.
+	more := []PendingQueryRow{
+		{QueryID: second.UID, RowNumber: 3, RowData: data(5), RowSizeBytes: 8},
+		{QueryID: first.UID, RowNumber: 3, RowData: data(6), RowSizeBytes: 8},
+	}
+	require.NoError(t, store.StoreQueryRows(ctx, more))
+
+	require.NoError(t, store.SealQueryRowChain(ctx, first.UID))
+	require.NoError(t, store.SealQueryRowChain(ctx, second.UID))
+
+	firstRows := readChainedRows(t, ctx, store, first.UID)
+	secondRows := readChainedRows(t, ctx, store, second.UID)
+	require.Len(t, firstRows, 3)
+	require.Len(t, secondRows, 3)
+
+	// Independent chains: neither capture's first row links to the other's.
+	require.NotEqual(t, firstRows[0].PrevMAC, secondRows[0].PrevMAC)
+
+	all, err := store.VerifyRowChains(ctx, nil)
+	require.NoError(t, err)
+	require.True(t, all.OK(), "both captures must verify: %v", all.Break)
+	require.Equal(t, int64(2), all.Captures)
+	require.Equal(t, int64(6), all.Verified)
+}
+
+// TestRowChainRetentionCascadeIsNotABreak is the property that dictated a chain
+// per query: retention deletes whole queries and query_rows cascades, so a
+// reaped capture takes its chain with it instead of severing a shared one.
+func TestRowChainRetentionCascadeIsNotABreak(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	oldConn, oldQueries := createChainTestConnection(t, ctx, store, "rows-reaped", 1)
+	keptConn, keptQueries := createChainTestConnection(t, ctx, store, "rows-kept", 1)
+
+	storeChainedRows(t, ctx, store, oldQueries[0].UID, 1, 2, 3)
+	storeChainedRows(t, ctx, store, keptQueries[0].UID, 1, 2, 3)
+	require.NoError(t, store.SealQueryRowChain(ctx, oldQueries[0].UID))
+	require.NoError(t, store.SealQueryRowChain(ctx, keptQueries[0].UID))
+
+	require.NoError(t, store.CloseConnection(ctx, oldConn.UID))
+	require.NoError(t, store.CloseConnection(ctx, keptConn.UID))
+
+	_, err := store.db.ExecContext(ctx,
+		`UPDATE connections SET disconnected_at = NOW() - INTERVAL '30 days' WHERE uid = ?`, oldConn.UID)
+	require.NoError(t, err)
+
+	swept, err := store.CleanupOldQueryRows(ctx, 24*time.Hour)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), swept.Connections)
+
+	result, err := store.VerifyRowChains(ctx, nil)
+	require.NoError(t, err)
+	require.True(t, result.OK(), "retention must not look like tampering: %v", result.Break)
+	require.Equal(t, int64(1), result.Captures)
+	require.Equal(t, int64(3), result.Verified)
+}
+
+// TestRowChainOutcomeFlagsAreNotSealed states the decision the row chain
+// inherited from the query chain: results_truncated and results_dropped are
+// written after the fact by UpdateQueryCompletion, so sealing them would mean
+// re-MACing a record every successor already points at.
+func TestRowChainOutcomeFlagsAreNotSealed(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	query := captureQuery(t, ctx, store, "rows-outcome")
+	storeChainedRows(t, ctx, store, query.UID, 1, 2)
+	require.NoError(t, store.SealQueryRowChain(ctx, query.UID))
+
+	require.NoError(t, store.UpdateQueryCompletion(ctx, query.UID, nil, nil, nil, true, true))
+
+	result, err := store.VerifyRowChain(ctx, query.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break, "completing a query must not break its row chain: %v", result.Break)
+}
+
+func TestVerifyRowChainsScopedToOneConnection(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	connA, queriesA := createChainTestConnection(t, ctx, store, "rows-scope-a", 1)
+	_, queriesB := createChainTestConnection(t, ctx, store, "rows-scope-b", 1)
+
+	storeChainedRows(t, ctx, store, queriesA[0].UID, 1, 2)
+	storeChainedRows(t, ctx, store, queriesB[0].UID, 1, 2, 3)
+
+	scoped, err := store.VerifyRowChains(ctx, &connA.UID)
+	require.NoError(t, err)
+	require.True(t, scoped.OK())
+	require.Equal(t, int64(1), scoped.Captures)
+	require.Equal(t, int64(2), scoped.Verified)
+}
+
+func TestRowChainDisabledWithoutKey(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	query := captureQuery(t, ctx, store, "rows-unkeyed")
+
+	unkeyed := &Store{db: store.db, queryChains: newQueryChains(), rowChains: newQueryChains()}
+
+	storeChainedRows(t, ctx, unkeyed, query.UID, 1, 2)
+	require.NoError(t, unkeyed.SealQueryRowChain(ctx, query.UID))
+
+	for _, row := range readChainedRows(t, ctx, store, query.UID) {
+		require.Empty(t, row.MAC, "an unkeyed store must not chain captured rows")
+	}
+
+	_, err := unkeyed.VerifyRowChains(ctx, nil)
+	require.ErrorIs(t, err, ErrChainKeyUnavailable)
+
+	// The rows are still there, they are just unverifiable — and counted as
+	// such rather than silently ignored.
+	result, err := store.VerifyRowChains(ctx, nil)
+	require.NoError(t, err)
+	require.True(t, result.OK())
+	require.Equal(t, int64(2), result.Unchained)
+	require.Equal(t, int64(0), result.Captures)
+}
