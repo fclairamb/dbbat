@@ -2552,6 +2552,29 @@ export interface components {
              */
             server_group_uids: string[];
             /**
+             * @description `server_group_uids` resolved to the concrete databases currently
+             *     in scope, so a non-admin requester can narrow their database
+             *     picker without needing the admin-only `GET /server-groups`
+             *     (membership there is access-relevant, so that gate stays). Only
+             *     `GET /grant-definitions` and `GET /grant-definitions/{uid}`
+             *     populate this; it leaks no group name or membership shape beyond
+             *     "these databases are in scope," which a requester could already
+             *     discover by trying. It is a convenience only — never the
+             *     control: the server still enforces scope on
+             *     `POST /grant-requests` regardless of what a client sends or
+             *     ignores here.
+             *
+             *     `null` (or the key omitted) means `server_group_uids` is empty:
+             *     every database is in scope. A present array — which may be
+             *     `[]` — means `server_group_uids` is non-empty and this is the
+             *     resolved union of every scoped group's current members; `[]`
+             *     means the definition is scoped but currently covers zero
+             *     databases (e.g. every referenced group is empty). Do not treat
+             *     a missing key the same as `[]`: one is "everything", the other
+             *     is "nothing".
+             */
+            readonly scoped_database_uids?: string[] | null;
+            /**
              * @description RE2 patterns that suspend a matching statement mid-flight until an
              *     admin or an approver-group member approves it. An empty array means
              *     no approval gating. Validated (compiled) at save time, so a bad
