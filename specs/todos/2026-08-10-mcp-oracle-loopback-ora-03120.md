@@ -1,5 +1,8 @@
 # MCP over the Oracle proxy fails upstream auth with `ORA-03120`
 
+**RESOLVED 2026-08-10** — root-caused and fixed; kept here only until the
+coordinator archives it. See "Resolution" below.
+
 **No GitHub issue filed yet — one should be.**
 
 ## Goal
@@ -12,62 +15,66 @@ feature claims it does.
 ## Why
 
 The test landed with `6f9de33 feat(mcp): execute Oracle statements over the
-loopback proxy` and has never been green. Against
-`gvenzl/oracle-free:23-slim` on 2026-08-10 it fails at the first `Execute`:
+loopback proxy` and had never been green. Against `gvenzl/oracle-free:23-slim`
+it failed at the first `Execute`:
 
 ```
 upstream auth failed: upstream auth failed: upstream AUTH Phase 1 rejected:
 ORA-03120 ORA-03120: two-task conversion routine: integer overflow
 ```
 
-`ORA-03120` is the failure mode `docs/oracle.md` ("Authentication path")
-attributes to a **TTC compile-time capability mismatch**: the upstream parses a
-message at a capability level it did not negotiate. Every other client family
-(python-oracledb thin, JDBC/SQLcl, sqlplus/OCI, go-ora as a *human's* client)
-authenticates through the proxy against 23ai, so the loopback path is doing
-something the human path does not.
-
-It had a second, unrelated bug in front of it, now fixed: the fixture created
+It had a second, unrelated bug in front of it, fixed first: the fixture created
 the dbbat user as `SYSTEM`, while the proxy lowercases the wire username before
 looking it up (`session.authenticateClient`), so client auth failed with
-`user not found: SYSTEM` before the upstream leg was ever reached. That is why
-the ORA-03120 was only visible from 2026-08-10 on.
+`user not found: SYSTEM` before the upstream leg was ever reached.
 
-This is the sole remaining failure in `make test-e2e-oracle` on
-`ORACLE_TEST_IMAGE=gvenzl/oracle-free:23-slim` (all eight other integration
-tests pass).
+## Resolution
 
-## Implementation
+**Not a capability mismatch.** The pre-auth relay was byte-for-byte correct: a
+recording TCP relay in front of the same container captured a working direct
+`go-ora` v3 login, and its Set Protocol / Set Data Types / data-negotiation
+exchange (161→127, 28→261, 2766→2788 bytes) is identical to what the relay
+forwarded. The upstream socket state at the AUTH boundary was right.
 
-Ruled out already: disabling go-ora's 23ai fast login on the MCP connect string
-(`FAST LOGIN=FALSE` in `internal/mcp/exec_oracle.go`) changes nothing — the
-error is identical with it on or off.
+The bug was in `findUserIDLenPos` (`internal/proxy/oracle/phase1_forward.go`).
+A thin client writes `[01 01 <numPairs> 01 01]` immediately before the login
+username in AUTH Phase 1, and go-ora's `numPairs` is 5. The thin branch scanned
+*backward* from the username for the first byte equal to the old username
+length — so a 5-character login name matched that pair count, which sits nearer
+the username than the real `user_id_len`, and the splice bumped the number of KV
+pairs while leaving the length stale. Diffing the outgoing packet against the
+working capture showed it directly:
 
-Suggested next steps:
-
-1. Capture both sides. `DBB_DUMP_DIR` gives a pcapng of the loopback session;
-   compare its Set Protocol / Set Data Types exchange against a working go-ora
-   human session (`docs/oracle.md` "Testing" lists the existing fixtures under
-   `internal/proxy/oracle/testdata/`). The caps bytes at the AUTH boundary are
-   what to diff.
-2. Suspect the *pre-auth relay* rather than the client. The relay forwards the
-   client's own Connect descriptor byte for byte and keeps the relay-phase
-   upstream socket open through the AUTH boundary specifically to keep caps
-   aligned (`docs/oracle.md` §"Authentication path", point 1). A loopback client
-   connecting to `127.0.0.1` with an EZ-Connect descriptor whose SERVICE_NAME is
-   the *dbbat entry name* is the one shape not covered by the recorded fixtures.
-3. Check `session.upstreamCustomHash` and the `caps[4]&0x20` strip on this path:
-   if the strip happens but the recorded value is wrong, the outgoing AUTH uses
-   the wrong derivation and 23ai rejects Phase 1.
-
-Key files: `internal/mcp/exec_oracle.go`, `internal/proxy/oracle/phase1_forward.go`,
-`internal/proxy/oracle/ttc_auth.go`, `internal/proxy/oracle/session.go`,
-`docs/oracle.md` ("Authentication path", "Pre-auth relay (Oracle 23ai)").
-
-Reproduce with:
-
-```bash
-ORACLE_TEST_IMAGE=gvenzl/oracle-free:23-slim \
-  go test -tags integration -v -timeout 20m -count=1 \
-  -run TestIntegration_MCPExecutesThroughTheProxy ./internal/proxy/oracle/
 ```
+working (user "system"):  03 76 01 00 01 01 06 ... 01 01 05 01 01 06 "system"
+dbbat   (user "agent"):   03 76 01 00 01 01 05 ... 01 01 06 01 01 06 "SYSTEM"
+                                          ^^ stale        ^^ wrongly bumped
+```
+
+The wide (OCI) branch of the same function already documents this exact trap and
+anchors instead of scanning, citing the 5-char `admin` case; only the thin
+branch still did the condemned scan. Fixed by stepping over the
+`[01 01 <numPairs> 01 01]` block before scanning, with two regression tests
+(`TestRewriteAuthPhase1Username_PairCountCollision` and
+`..._ObservedGoOraCapture`, the latter over the real captured go-ora v3 bytes).
+
+**Scope beyond MCP:** this broke *any* go-ora / python-oracledb thin login whose
+dbbat username is exactly 5 characters — including `admin`, dbbat's own default
+user. The MCP test only surfaced it because its fixture user is `agent`.
+
+### Ruled out along the way (do not re-litigate)
+
+- **go-ora's 23ai "fast login"** — not in play at all. `FAST LOGIN=FALSE` on the
+  MCP connect string produced a byte-identical client Phase 1 (verified from the
+  proxy's own hex logging, not from the error text). The reason is upstream of
+  the option: `stripAcceptModernAuthFlags` already clears `FAST_AUTH` and
+  `HAS_END_OF_RESPONSE` from the Accept forwarded to the client, so the client
+  never negotiates it.
+- **The Phase 1 rewrite being skipped entirely** — forcing the synthetic
+  `buildClientAuthPhase1` fallback failed identically, which is what proved the
+  problem was a field value rather than the rewrite mechanism. (That fallback is
+  separately wrong; filed as
+  `2026-08-10-oracle-synthetic-phase1-preamble-drift.md`.)
+- The `customHash` strip and `session.upstreamCustomHash` were correct
+  (`custom_hash=true verifier_type=18453` in the logs, and Phase 2 succeeded
+  once Phase 1 did).

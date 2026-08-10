@@ -719,6 +719,37 @@ static `capturedAuthOKResponse` remains only as a fallback when no upstream pack
 captured. For OCI the AUTH OK arrives split across two Data packets, so the value is patched
 on the reassembled packet and re-fragmented before forwarding — see "OCI wide encoding".
 
+### `ORA-03120` from a 5-character username (thin clients)
+
+`ORA-03120: two-task conversion routine: integer overflow`, preceded by two TNS
+break markers, is the generic "you sent me a message I cannot parse" answer. It is
+documented above as a *capability* mismatch, but there is a second, much dumber way
+to earn it, fixed 2026-08-10 — worth knowing before you go caps-hunting.
+
+The upstream AUTH Phase 1 dbbat sends is the client's own packet with the username
+swapped for the database user (`rewriteAuthPhase1Username`). A thin client's Phase 1
+preamble looks like this (go-ora v3, captured live against 23ai Free):
+
+```
+03 76 01 00 01 | 01 <user_id_len> | 01 <logon mode> | 01 01 <numPairs> 01 01 | <clr len> username
+```
+
+`numPairs` is 5 for go-ora, and it sits **closer to the username than
+`user_id_len` does**. `findUserIDLenPos` used to scan backward from the username
+for the first byte equal to the old length, so a 5-character login name matched the
+pair count instead: the rewrite bumped the number of KV pairs and left the length
+stale, the upstream read a 5-byte name out of a 6-byte field, and out came
+`ORA-03120`. The wide (OCI) branch of that function already anchors rather than
+scans for exactly this reason — its comment even names the 5-char `admin` case —
+but the thin branch did not, so `admin`, dbbat's own default user, could not log in
+through the proxy with any thin client.
+
+The tell that distinguishes this from a caps mismatch: the pre-auth relay exchange
+is byte-for-byte identical to a working direct client session (compare with a
+recording TCP relay in front of the same server), and the failure survives forcing
+the synthetic `buildClientAuthPhase1` fallback. If both hold, look at field values
+in the outgoing Phase 1, not at capabilities.
+
 ### Connectivity check: fast login hides `ORA-01017`
 
 The connectivity check (`internal/proxy/conncheck`) is the one place dbbat logs in to Oracle
