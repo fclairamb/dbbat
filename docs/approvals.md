@@ -53,9 +53,12 @@ break a customer's connection. Two known gaps remain in what the gate *sees* on
 Oracle:
 
 - **An undecodable frame.** A statement dbbat cannot decode is neither held nor
-  recorded. It is also not checked against `read_only`/`block_ddl`, so this is
-  not specific to approvals — the static controls have exactly the same
-  dependency on decoding.
+  recorded. It is also not checked against `read_only`/`block_ddl` — nor, since
+  the quota check moved behind the decode so that a quota refusal can be
+  recorded against its SQL, against `max_query_counts` — so this is not specific
+  to approvals: every per-statement control has the same dependency on decoding.
+  The response leg's `LimitGuard` still covers revocation, the byte quota and
+  expiry on such a frame's results.
 - **A recycled cursor id can be gated against the *wrong* statement.** Oracle
   reuses cursor ids within a session, and dbbat's tracker only drops an entry
   when it sees the cursor closed. If dbbat ever fails to learn the id the server
@@ -125,6 +128,13 @@ The boundaries, all deliberate:
   modern thin client actually sends, used to forward under any grant with a
   WARN.)
 
+  The untracked-cursor answer is decided **before** the quota, so a cursor dbbat
+  never saw parsed is refused as an unknown cursor rather than as an
+  over-quota statement — the more specific diagnosis wins. The branch that
+  *forwards* still checks the quota, because an execution dbbat cannot identify
+  is still an execution; that refusal is the one refusal on Oracle that leaves
+  no `/queries` row, for want of any statement text to put in it.
+
   Bringing the piggyback frame in was gated on a measurement, because dbbat only
   knows what a piggyback-executed cursor holds by *learning* the id off the
   server's response, and refusing what it failed to learn would break the second
@@ -153,12 +163,12 @@ The boundaries, all deliberate:
   inert. That is intentional — it errs fail-closed.
 - **A re-execution *is* counted against `max_query_counts`.** Each of the three
   frames records its own `/queries` row, so each is checked against the quota
-  before it runs. The check sits on the re-execution branch itself, not on the
-  fetch path as a whole: a fetch continuing a result set already streaming is
-  never refused by it, which is what keeps a client from being cut off
-  mid-result-set. (The response leg's `LimitGuard` independently covers
-  revocation, the byte quota and expiry; it does not know about
-  `max_query_counts`, which is why the branch has to check it.)
+  before it runs. The check sits on the re-execution branch itself
+  (`regateCursor`), not on the fetch path as a whole: a fetch continuing a
+  result set already streaming is never refused by it, which is what keeps a
+  client from being cut off mid-result-set. (The response leg's `LimitGuard`
+  independently covers revocation, the byte quota and expiry; it does not know
+  about `max_query_counts`, which is why the branch has to check it.)
 
 **How often real clients do this: measured, and the answer is "constantly".**
 Five captures against Oracle Free 23ai, one per client, are in
