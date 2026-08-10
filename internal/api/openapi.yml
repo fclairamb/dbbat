@@ -3173,6 +3173,40 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /tunnel-servers:
+    get:
+      tags:
+        - Databases
+      summary: List tunnel (dial-path) servers (admin only)
+      description: |
+        Returns every dial-path row — SSH bastions (`ssh`) and Kubernetes
+        clusters (`kubernetes`) — for a target's "via" selector. These rows are
+        excluded from the regular database listing and from every
+        grantable/connectable target context. Secrets (SSH private key and
+        passphrase, ServiceAccount token) are never returned.
+      operationId: listTunnelServers
+      security:
+        - basicAuth: []
+        - bearerAuth: []
+      responses:
+        '200':
+          description: List of tunnel servers
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  servers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Database'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /parameters:
     get:
       tags:
@@ -3985,8 +4019,11 @@ components:
           description: SSL mode (disable, prefer, require, etc.)
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh]
-          description: Server protocol (ssh = an SSH bastion, not a database target)
+          enum: [postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh, kubernetes]
+          description: >-
+            Server protocol. `ssh` and `kubernetes` are dial paths, not database
+            targets: they are never grantable, never listable, and exist only to
+            be referenced by another row's `via_uid`.
         oracle_service_name:
           type: string
           description: Oracle SERVICE_NAME (Oracle only)
@@ -4006,10 +4043,29 @@ components:
           type: string
           format: uuid
           nullable: true
-          description: SSH server (bastion) UID to tunnel through; null for a direct dial
+          description: >-
+            Tunnel row (`ssh` bastion or `kubernetes` cluster) UID to dial
+            through; null for a direct dial. When it points at a `kubernetes`
+            row, `host` addresses a pod (`<pod-name>`) or a service
+            (`svc/<name>`) **inside that row's namespace** and `port` is the
+            container port — a port-forward reaches a pod's own port and
+            nothing else, so a database merely routable from the cluster
+            network is out of scope.
         ssh_known_host_key:
           type: string
           description: TOFU-pinned SSH bastion host key (read-only; ssh servers only)
+        k8s_ca_cert:
+          type: string
+          description: >-
+            PEM CA bundle of the Kubernetes API server (kubernetes servers only).
+            Public challenge material, so it round-trips; the ServiceAccount
+            token never does.
+        k8s_namespace:
+          type: string
+          description: Namespace every lookup and port-forward is scoped to (kubernetes servers only)
+        k8s_insecure_skip_tls_verify:
+          type: boolean
+          description: Whether API server certificate verification is disabled (kubernetes servers only)
         connection_test:
           allOf:
             - $ref: '#/components/schemas/ConnectionTestResult'
@@ -4031,7 +4087,16 @@ components:
           description: Whether the check succeeded end to end
         stage:
           type: string
-          enum: [config, bastion_dial, bastion_auth, target_dial, target_auth]
+          enum:
+            - config
+            - bastion_dial
+            - bastion_auth
+            - target_dial
+            - target_auth
+            - cluster_api
+            - cluster_auth
+            - cluster_rbac
+            - cluster_target
           description: |
             How far the check got. On failure this is the stage that failed, which is what tells
             the admin which field they got wrong:
@@ -4040,6 +4105,10 @@ components:
             - `bastion_auth`: the SSH handshake failed (host-key mismatch or rejected credentials)
             - `target_dial`: the database target could not be reached (through the tunnel when via_uid is set)
             - `target_auth`: the database handshake or login failed
+            - `cluster_api`: the Kubernetes API server could not be reached (DNS, routing, firewall, untrusted CA)
+            - `cluster_auth`: the API server rejected the ServiceAccount token
+            - `cluster_rbac`: authenticated, but not allowed to create `pods/portforward` in the namespace
+            - `cluster_target`: the addressed pod (or the ready pod behind `svc/<name>`) does not resolve or is not Ready
         code:
           type: string
           enum:
@@ -4058,6 +4127,9 @@ components:
             - db_auth_failed
             - db_handshake_failed
             - auth_not_verified
+            - k8s_forbidden
+            - k8s_target_not_found
+            - k8s_target_not_ready
             - internal_error
           description: Machine-readable classification within the stage; `ok` on success
         message:
@@ -4129,9 +4201,12 @@ components:
           description: SSL mode
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh]
+          enum: [postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh, kubernetes]
           default: postgresql
-          description: Server protocol (ssh = an SSH bastion, not a database target)
+          description: >-
+            Server protocol. `ssh` and `kubernetes` are dial paths, not database
+            targets: they are never grantable, never listable, and exist only to
+            be referenced by another row's `via_uid`.
         oracle_service_name:
           type: string
           description: Oracle SERVICE_NAME (required for Oracle)
@@ -4146,13 +4221,36 @@ components:
           type: string
           format: uuid
           nullable: true
-          description: SSH server (bastion) UID to tunnel through; null for a direct dial
+          description: >-
+            Tunnel row (`ssh` bastion or `kubernetes` cluster) UID to dial
+            through; null for a direct dial. When it points at a `kubernetes`
+            row, `host` addresses a pod (`<pod-name>`) or a service
+            (`svc/<name>`) **inside that row's namespace** and `port` is the
+            container port — a port-forward reaches a pod's own port and
+            nothing else, so a database merely routable from the cluster
+            network is out of scope.
         ssh_private_key:
           type: string
           description: SSH private key (PEM) for an ssh server; write-only, never returned
         ssh_passphrase:
           type: string
           description: Passphrase for the SSH private key; write-only, never returned
+        k8s_ca_cert:
+          type: string
+          description: >-
+            PEM CA bundle of the Kubernetes API server. Required for a
+            `kubernetes` row unless `k8s_insecure_skip_tls_verify` is set.
+        k8s_namespace:
+          type: string
+          description: >-
+            Namespace the ServiceAccount's Role covers; every pod/service lookup
+            and every port-forward is scoped to it. Required for a `kubernetes` row.
+        k8s_insecure_skip_tls_verify:
+          type: boolean
+          description: >-
+            Disable API server certificate verification. For throwaway clusters
+            only: with it set, anything that can intercept the API server
+            connection can read the ServiceAccount token.
         test_connection:
           type: boolean
           description: |
@@ -4190,7 +4288,7 @@ components:
           description: SSL mode
         protocol:
           type: string
-          enum: [postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh]
+          enum: [postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh, kubernetes]
           description: Server protocol
         oracle_service_name:
           type: string
@@ -4205,16 +4303,39 @@ components:
           type: string
           format: uuid
           nullable: true
-          description: SSH server (bastion) UID to tunnel through
+          description: >-
+            Tunnel row (`ssh` bastion or `kubernetes` cluster) UID to dial
+            through; null for a direct dial. When it points at a `kubernetes`
+            row, `host` addresses a pod (`<pod-name>`) or a service
+            (`svc/<name>`) **inside that row's namespace** and `port` is the
+            container port — a port-forward reaches a pod's own port and
+            nothing else, so a database merely routable from the cluster
+            network is out of scope.
         clear_via_uid:
           type: boolean
-          description: When true, removes the SSH tunnel (direct dial)
+          description: When true, removes the tunnel (direct dial)
         ssh_private_key:
           type: string
           description: SSH private key (PEM); write-only, never returned
         ssh_passphrase:
           type: string
           description: Passphrase for the SSH private key; write-only, never returned
+        k8s_ca_cert:
+          type: string
+          description: >-
+            PEM CA bundle of the Kubernetes API server. Required for a
+            `kubernetes` row unless `k8s_insecure_skip_tls_verify` is set.
+        k8s_namespace:
+          type: string
+          description: >-
+            Namespace the ServiceAccount's Role covers; every pod/service lookup
+            and every port-forward is scoped to it. Required for a `kubernetes` row.
+        k8s_insecure_skip_tls_verify:
+          type: boolean
+          description: >-
+            Disable API server certificate verification. For throwaway clusters
+            only: with it set, anything that can intercept the API server
+            connection can read the ServiceAccount token.
         test_connection:
           type: boolean
           description: |

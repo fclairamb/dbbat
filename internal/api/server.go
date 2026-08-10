@@ -395,6 +395,11 @@ func (s *Server) setupRouter() *gin.Engine {
 			sshServers := authenticated.Group("/ssh-servers")
 			sshServers.GET("", s.requireAdmin(), s.handleListSSHServers)
 
+			// Every dial-path row (ssh bastions + kubernetes clusters), for the
+			// target form's "via" selector.
+			tunnelServers := authenticated.Group("/tunnel-servers")
+			tunnelServers.GET("", s.requireAdmin(), s.handleListTunnelServers)
+
 			// Grant endpoints
 			grants := authenticated.Group("/grants")
 			grants.POST("", s.requireAdmin(), s.handleAssignGrant)
