@@ -135,6 +135,16 @@ Cost: one index lookup per open session per pass. It scales with concurrency,
 never with the size of the query history — pinned by
 `TestQueryChainRefreshCostScalesWithOpenSessions`, which EXPLAINs both halves.
 
+**The stamp never moves backwards.** Once a live session carries a sweep's
+stamp, the next writer is either its close or — if the process crashes — the
+reconcile, and both recover the head from what is *left in the database*.
+Someone who deleted the tail in between would otherwise have the later writer
+overwrite the sweep's higher stamp with their truncated one. Chain positions
+only grow and retention removes the oldest, so a recovered head below the stored
+stamp has exactly one meaning; every stamp write is therefore conditional on
+`new length >= stored length`, and the higher stamp stays put so verification
+reports the break.
+
 **A live session's stamp is a prefix, and verification knows it.** Between two
 sweeps a busy session runs statements the stamp does not cover, so while
 `disconnected_at IS NULL` the stamp is checked against the statement at the
