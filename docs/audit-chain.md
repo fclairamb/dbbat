@@ -95,8 +95,36 @@ the previous statement **on the same connection**, and:
 On a clean session close, the final chain head and its length are stamped onto
 the connection row (`query_chain_mac`, `query_chain_len`). Without that,
 deleting the *last* statements of a session would leave a shorter chain that
-still verified. A session that died without closing has no stamp; the startup
-reconcile that closes crash-orphaned connections has no chain state to stamp.
+still verified.
+
+#### A crash-orphaned session is stamped by the reconcile
+
+A session whose process died never reaches `CloseConnection`, and the in-memory
+chain state died with it. It gets a stamp anyway: the head is recoverable from
+the database alone — it is the highest `chain_seq` on the connection and its MAC
+— so the reconcile that closes crash-orphaned rows
+(`CloseOrphanedConnections` / `ReclaimDeadInstanceConnections`) stamps it as a
+correlated subquery in the **same `UPDATE`** that writes `disconnected_at`. A
+connection that logged nothing keeps a NULL stamp, and a NULL stamp is never
+itself a break.
+
+**Be honest about what that stamp attests to.** It seals whatever survived *at
+reconcile time*, not what the session actually wrote. A crashed pod's rows sit
+unstamped from the crash until the reclaim notices — no registry row, or one
+past the 15-minute staleness cutoff — and anyone who deletes trailing statements
+inside that window gets the truncated chain blessed by the reconcile. That is
+strictly better than never stamping at all (from the reconcile onward the tail
+is protected exactly like a clean close's), and it is the reason the stamp goes
+in the same statement rather than a later pass: the exposure is the crash-to-
+reconcile window, not a second one opened between closing the row and sealing it.
+
+Note also that this stamp shares the forgeability below — a correlated subquery
+reading `mac` out of `queries` produces a verbatim copy *by construction*, which
+is what keeps it consistent with `CloseConnection`'s format. A **keyed** stamp
+cannot be computed in SQL at all, because the chain key exists only in the
+process, so sealing the connection stamp means this reconcile stops being one
+pure-SQL `UPDATE`: it has to read the orphans' heads, seal each in Go and write
+them back inside the same transaction as the close.
 
 #### The connection stamp is forgeable
 
@@ -160,8 +188,8 @@ needs the chain key, exactly like forging a row. Verification checks both halves
 against what the surviving rows compute, the recorded length as well as the MAC,
 so editing either one is a break. A capture whose process died before the barrier
 keeps a NULL stamp and only has its prefix and interior protected — structurally
-the same gap `connections.query_chain_mac` has for a session that never closed
-cleanly. Verification enumerates queries that carry a stamp as well as queries
+the same gap `connections.query_chain_mac` has between a crash and the reconcile
+that stamps it. Verification enumerates queries that carry a stamp as well as queries
 with surviving rows, so a capture deleted *outright* still gets caught by its
 orphaned stamp instead of vanishing from the walk.
 
