@@ -286,6 +286,116 @@ func TestExchangeCodeHappyPath(t *testing.T) {
 	assert.NotContains(t, string(user.RawData), "dbbat-secret", "the client secret must never reach RawData")
 }
 
+// TestExchangeCodeReadsGroupsClaim covers the encodings issuers actually use
+// for group membership. The claim is read out of the *verified* ID token, so
+// what this test pins is the whole trust story behind the role mapping.
+func TestExchangeCodeReadsGroupsClaim(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		claim  any // value put in the ID token; nil means "omit the claim"
+		config string
+		want   []string
+	}{
+		{
+			name:  "array encoding",
+			claim: []any{"db-admins", "analysts"},
+			want:  []string{"db-admins", "analysts"},
+		},
+		{
+			name:  "single string encoding",
+			claim: "db-admins",
+			want:  []string{"db-admins"},
+		},
+		{
+			name:  "a lone string is one group, never a delimited list",
+			claim: "Domain Admins",
+			want:  []string{"Domain Admins"},
+		},
+		{
+			name:  "missing claim yields no groups",
+			claim: nil,
+			want:  nil,
+		},
+		{
+			name:  "empty array yields no groups",
+			claim: []any{},
+			want:  nil,
+		},
+		{
+			name:  "blanks and duplicates are dropped",
+			claim: []any{" db-admins ", "", "db-admins", "   "},
+			want:  []string{"db-admins"},
+		},
+		{
+			name:  "non-string entries are dropped, strings survive",
+			claim: []any{"db-admins", 42, nil, "analysts"},
+			want:  []string{"db-admins", "analysts"},
+		},
+		{
+			name:  "entra object ids pass through verbatim",
+			claim: []any{"1f4e8c02-9b7a-4f61-8a1e-3c2d5e6f7a8b"},
+			want:  []string{"1f4e8c02-9b7a-4f61-8a1e-3c2d5e6f7a8b"},
+		},
+		{
+			name:   "a custom claim name is honoured",
+			claim:  []any{"ignored"},
+			config: "roles",
+			want:   nil,
+		},
+		{
+			name:  "an unusable claim type yields no groups",
+			claim: map[string]any{"nested": "value"},
+			want:  nil,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			issuer := newTestIssuer(t)
+			if tc.claim != nil {
+				issuer.claims["groups"] = tc.claim
+			}
+
+			p := issuer.provider(t, func(cfg *Config) { cfg.GroupsClaim = tc.config })
+
+			user, err := p.ExchangeCodeWithVerifier(t.Context(), "auth-code", "https://dbbat.test/cb", "v")
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, user.Groups)
+		})
+	}
+}
+
+// TestGroupsClaimDefaultsToGroups pins the default claim name, since the
+// mapping is inert without it.
+func TestGroupsClaimDefaultsToGroups(t *testing.T) {
+	t.Parallel()
+
+	p, err := NewProvider(Config{Issuer: "https://issuer.example.test"})
+	require.NoError(t, err)
+	assert.Equal(t, "groups", p.cfg.GroupsClaim)
+}
+
+// TestExchangeCodeReadsCustomGroupsClaim proves the configured claim name is
+// the one actually read — the Entra case, where membership lands in a claim
+// the operator names in the token configuration.
+func TestExchangeCodeReadsCustomGroupsClaim(t *testing.T) {
+	t.Parallel()
+
+	issuer := newTestIssuer(t)
+	issuer.claims["groups"] = []any{"decoy"}
+	issuer.claims["wids"] = []any{"62e90394-69f5-4237-9190-012177145e10"}
+
+	p := issuer.provider(t, func(cfg *Config) { cfg.GroupsClaim = "wids" })
+
+	user, err := p.ExchangeCodeWithVerifier(t.Context(), "auth-code", "https://dbbat.test/cb", "v")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"62e90394-69f5-4237-9190-012177145e10"}, user.Groups)
+}
+
 func TestExchangeCodeRejectsBadSignature(t *testing.T) {
 	t.Parallel()
 

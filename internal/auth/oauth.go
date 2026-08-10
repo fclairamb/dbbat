@@ -50,4 +50,13 @@ type OAuthUser struct {
 	TeamName    string          // Optional workspace/org name
 	AvatarURL   string          // Optional profile picture URL
 	RawData     json.RawMessage // Full provider response
+	// Groups is the directory group membership the provider asserted, read
+	// out of a verified token. It is authorization input, so a provider must
+	// only populate it from something the issuer signed.
+	//
+	// nil and empty mean the same thing to consumers — "this identity is in
+	// none of the groups we asked about" — which, under a configured role
+	// mapping, revokes the mapped roles. Whether a mapping is applied to a
+	// given provider at all is decided by the caller, not by this field.
+	Groups []string
 }

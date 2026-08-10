@@ -131,6 +131,7 @@ func NewServer(dataStore *store.Store, encryptionKey []byte, logger *slog.Logger
 			Scopes:       cfg.OIDCAuth.ScopeList(),
 			Label:        cfg.OIDCAuth.DisplayName,
 			EmailDomains: cfg.OIDCAuth.EmailDomainList(),
+			GroupsClaim:  cfg.OIDCAuth.GroupsClaimName(),
 		})
 		if err != nil {
 			logger.ErrorContext(context.Background(), "OIDC provider misconfigured", slog.Any("error", err))
