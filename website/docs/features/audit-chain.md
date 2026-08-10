@@ -2,7 +2,7 @@
 sidebar_position: 8
 sidebar_label: Tamper-Evident Audit Log
 title: Tamper-Evident Audit Log
-description: DBBat HMAC-chains its audit log and query history, so modifying, deleting or reordering a record is detectable with dbbat audit verify.
+description: DBBat HMAC-chains its audit log, query history and captured result rows, so modifying, deleting or reordering a record is detectable with dbbat audit verify.
 ---
 
 # Tamper-Evident Audit Log
@@ -11,11 +11,11 @@ Logging everything is only half the story. The other half is being able to show
 that nobody edited the log afterwards — including the person who runs the
 database it lives in.
 
-DBBat chains its records with a keyed MAC. Every audit entry, and every
-statement in a session's query history, carries an HMAC over its own content
-plus the previous record's MAC. Change a record, delete one, swap two around,
-and the chain no longer adds up. `dbbat audit verify` walks it and names the
-first record that broke.
+DBBat chains its records with a keyed MAC. Every audit entry, every statement in
+a session's query history, and every row of a captured result set carries an
+HMAC over its own content plus the previous record's MAC. Change a record,
+delete one, swap two around, and the chain no longer adds up. `dbbat audit
+verify` walks it and names the first record that broke.
 
 The key is derived from DBBat's own encryption key (`DBB_KEY` /
 `DBB_KEYFILE`) and never leaves the process — it is never stored in the
@@ -36,9 +36,12 @@ dbbat audit verify --queries
 
 # A single session
 dbbat audit verify --queries --connection 019fe8bb-b9d5-74ab-b512-601b6eccda98
+
+# The captured result rows, per query (optionally scoped to one session)
+dbbat audit verify --rows
 ```
 
-Both need the same `DBB_DSN` and encryption key the server runs with. The
+They all need the same `DBB_DSN` and encryption key the server runs with. The
 command exits non-zero if the chain does not verify, so it drops straight into
 a cron job or a CI check.
 
@@ -91,6 +94,10 @@ curl -H "Authorization: Bearer $DBBAT_API_KEY" \
  "checked_at":"2026-08-10T09:14:02Z","cached":false}
 ```
 
+The captured result rows are **CLI-only** for now: there is no
+`/audit/verify/rows` endpoint, so `dbbat audit verify --rows` is the way to
+check them.
+
 Both endpoints require the **admin** role — narrower than the `GET /api/v1/audit`
 list a viewer may read. A broken chain still answers `200`, with
 `"verified": false` and a `break` object naming the first bad record: the
@@ -132,6 +139,8 @@ number, not a fresh timestamp.
 | Records are **reordered** | Yes | Positions and `prev_mac` links no longer line up |
 | The **first** records are deleted | Yes | The first entry's `prev_mac` is a genesis MAC derived from the key, which cannot be forged |
 | The **last** statements of a closed session are deleted | Yes | The session's final chain head is stamped on the connection row when it closes |
+| The **last** rows of a captured result set are deleted | Yes | The capture's final chain head is stamped on the query row when the capture finishes |
+| A captured result set is deleted **outright** | Yes | The stamp on the query still claims a head no surviving row computes |
 | The **whole** chain is truncated and re-sealed by someone holding the key | Only against a head MAC you recorded elsewhere | See the tip above |
 
 ## What it does not do
@@ -152,6 +161,13 @@ Be precise about this in a control narrative:
   columns (duration, rows affected, error, approval resolution), because those
   are written after the statement is logged, and re-sealing them would
   invalidate every record chained after it.
+- **On the captured rows it seals what was stored, not that the capture was
+  complete.** Every column of a captured row is covered, but the
+  `results_truncated` / `results_dropped` flags on the parent query are written
+  after the result set has been read — like the outcome columns above — so they
+  are not sealed either. A capture whose DBBat process died before its rows were
+  finalised also carries no head stamp, so only its beginning and middle are
+  protected; the same is true of a session that never closed cleanly.
 - **It does not defend against someone who has the key.** Anyone who can read
   `DBB_KEY` off the host can rewrite the store and re-seal it. Treat that key
   the way you treat the database credentials it protects.
@@ -168,6 +184,12 @@ single global chain would break the first time it ran.
   truncates that chain's beginning. Verification reports it as a truncated
   prefix — counted, not flagged as tampering — and keeps verifying everything
   after it.
+
+Captured result rows follow the same logic one level down: their chain is per
+query, and retention deletes whole queries, so a reaped capture takes its own
+chain with it. Nothing legitimate ever deletes an *individual* captured row —
+which is why a capture missing its first rows is reported as tampering rather
+than as housekeeping.
 
 ## Where it fits in an audit
 

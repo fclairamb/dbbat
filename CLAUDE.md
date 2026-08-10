@@ -55,7 +55,7 @@ PR titles MUST follow the conventional commit format:
 - **Frontend**: React 19 + TypeScript + Vite (see `front/CLAUDE.md`)
 - **Capture format**: Protocol-agnostic pcapng, readable by tcpdump/Wireshark (`docs/dump-format.md`)
 - **Live stream + approvals**: WebSocket event stream and pattern-triggered approval holds (`docs/approvals.md`)
-- **Tamper-evident audit trail**: `audit_log` and `queries` are HMAC-chained with a key HKDF-derived from `DBB_KEY`; `dbbat audit verify` walks the chain (`docs/audit-chain.md`)
+- **Tamper-evident audit trail**: `audit_log`, `queries` and `query_rows` are HMAC-chained with a key HKDF-derived from `DBB_KEY`; `dbbat audit verify` walks the chains (`docs/audit-chain.md`)
 - **MCP (AI agents)**: Streamable-HTTP endpoint at `/api/v1/mcp` via `github.com/modelcontextprotocol/go-sdk`. Agent statements are executed by dialing dbbat's **own** proxy listener over loopback as the API key's owner — never a parallel internal path. All five protocols (`docs/mcp.md`)
 
 ## Project Structure
@@ -156,6 +156,7 @@ This applies even when the current task is otherwise complete — capture the fo
 ./dbbat dump anonymise <in> [out]  # Strip session metadata from a .pcapng capture
 ./dbbat audit verify               # Walk the audit_log HMAC chain; non-zero exit on a break
 ./dbbat audit verify --queries [--connection <uid>]  # Same for the per-connection query chains
+./dbbat audit verify --rows [--connection <uid>]     # Same for the per-query captured result row chains
 ```
 
 ## Environment Variables
@@ -375,13 +376,18 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   never revoked by a login — the default role is the floor, and the last admin
   is retained exactly as `PATCH /users/:uid` refuses to strip it. Every change
   writes a `user.roles_synced` audit entry
-- **Tamper-evident audit trail**: every `audit_log` entry and every `queries`
-  row carries an HMAC over its content plus the previous record's MAC, keyed by
-  an HKDF subkey of `DBB_KEY` that is never stored in the database. `audit_log`
-  is one chain; `queries` is one chain **per connection**, so
-  `DBB_QUERY_STORAGE_RETENTION` deleting whole connections never severs it, and
-  the session's final head is stamped on the connection row at close. Verify
-  with `dbbat audit verify [--queries]`, or over REST with the admin-only
+- **Tamper-evident audit trail**: every `audit_log` entry, every `queries` row
+  and every `query_rows` row carries an HMAC over its content plus the previous
+  record's MAC, keyed by an HKDF subkey of `DBB_KEY` that is never stored in the
+  database. `audit_log` is one chain; `queries` is one chain **per connection**;
+  `query_rows` is one chain **per query**, positioned by `row_number` — an
+  ordering, not a dense sequence, because dropped or unencodable rows leave
+  gaps. Each scope is chosen so `DBB_QUERY_STORAGE_RETENTION` never severs a
+  chain by deleting what it is meant to delete, and each stamps its final head
+  when it finishes: the session's on the connection row at close
+  (`query_chain_mac`), the capture's on the query row at the flush barrier
+  (`row_chain_mac`). Verify with `dbbat audit verify [--queries|--rows]` — the
+  row chains are CLI-only — or over REST with the admin-only
   `GET /api/v1/audit/verify` and `GET /api/v1/audit/verify/queries` — which
   return counts, the head MAC and the first break, never the key or a record's
   content, and are cached because a walk is O(rows). The endpoint is **not**
