@@ -35,7 +35,7 @@ const (
 // Piggyback sub-operation codes (byte 1 when func=0x03).
 const (
 	PiggybackSubReexecDML byte = 0x04 // Re-execute an already-parsed non-SELECT cursor
-	PiggybackSubClose     byte = 0x09 // Close cursor
+	PiggybackSubLogoff    byte = 0x09 // Session logoff — carries no cursor id (see below)
 	PiggybackSubReexecSel byte = 0x4e // Re-execute + fetch an already-parsed SELECT cursor
 	PiggybackSubExecSQL   byte = 0x5e // Execute with SQL (OALL8 equivalent)
 	PiggybackSubAuth1     byte = 0x76 // AUTH Phase 1
@@ -48,6 +48,15 @@ const (
 	execSubOpJDBC   byte = 0x69 // DBeaver, JDBC thin driver
 	execSubOpPython byte = 0x98 // Python oracledb thin driver
 )
+
+// subOpCloseCursors is the same wire byte as execSubOpJDBC, and deliberately
+// spelled out separately because it is the same *frame* seen from the other
+// end: `0x11`/`0x69` is Oracle's close-cursors piggyback, and a client that has
+// a statement to run staples that execute behind the close list in the same
+// packet — which is why dbbat first met this byte as "the JDBC/DBeaver execute"
+// (docs/oracle.md). Both readings are needed: the close list is decoded first,
+// then the trailing execute, matching wire order.
+const subOpCloseCursors = execSubOpJDBC
 
 // ttcDataFlagsSize is the size of the data flags prefix in a TNS Data payload.
 const ttcDataFlagsSize = 2
@@ -135,9 +144,28 @@ func IsPiggybackCursorReexec(ttcPayload []byte) bool {
 	}
 }
 
-// IsPiggybackClose checks if a piggyback payload is a close cursor message.
-func IsPiggybackClose(ttcPayload []byte) bool {
-	return len(ttcPayload) > 1 && ttcPayload[1] == PiggybackSubClose
+// IsPiggybackLogoff reports whether a func-0x03 payload is the session logoff.
+//
+// It was called IsPiggybackClose and believed to close a cursor, with the byte
+// right after it read as the cursor id. It does neither. Every recording in
+// testdata/ carries exactly one of these frames, as the very last thing the
+// client sends, three or four bytes long — `03 09 <seq>` optionally followed by
+// the 23ai token byte — and there is no room in it for a cursor id at all. The
+// byte that used to be deleted on is the TTC sequence number, so every session
+// teardown evicted an unrelated tracker entry. The real close list is the
+// `0x11`/`0x69` piggyback (decodeCloseCursors).
+func IsPiggybackLogoff(ttcPayload []byte) bool {
+	return len(ttcPayload) > 1 && ttcPayload[1] == PiggybackSubLogoff
+}
+
+// IsCloseCursorsPiggyback reports whether a payload is Oracle's close-cursors
+// piggyback: message type 0x11 (TNS_MSG_TYPE_PIGGYBACK), function 0x69
+// (TNS_FUNC_CLOSE_CURSORS). Say nothing about what follows the close list in
+// the same packet — that is decodeCloseCursors' and the exec path's business.
+func IsCloseCursorsPiggyback(ttcPayload []byte) bool {
+	return len(ttcPayload) > 1 &&
+		TTCFunctionCode(ttcPayload[0]) == TTCFuncOFETCH &&
+		ttcPayload[1] == subOpCloseCursors
 }
 
 // IsExecSQL checks if a func=0x11 payload is an execute-with-SQL message

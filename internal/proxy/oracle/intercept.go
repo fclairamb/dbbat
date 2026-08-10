@@ -31,6 +31,8 @@ const (
 	logMsgUntrackedCursorForwarded = "forwarding a re-execution of an untracked cursor: " +
 		"the grant carries no statement-shaped control"
 	logMsgUntrackedCursorRefused = "refused a re-execution of an untracked cursor under a restrictive grant"
+	logMsgCursorsClosed          = "client closed cursors"
+	logMsgRecycledCursorID       = "cursor id recycled onto a different statement"
 )
 
 // trackedCursor tracks a parsed cursor and its SQL.
@@ -125,7 +127,7 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 		bindValues: result.BindValues,
 		parsedAt:   time.Now(),
 	}
-	s.tracker.cursors[result.CursorID] = cursor
+	s.rememberCursor(result.CursorID, cursor)
 
 	// Start pending query and persist immediately
 	s.tracker.pendingQuery = &pendingOracleQuery{
@@ -324,7 +326,7 @@ func (s *session) learnCursorID(ttcPayload []byte) {
 	}
 
 	pending.cursor.cursorID = cursorID
-	s.tracker.cursors[cursorID] = pending.cursor
+	s.rememberCursor(cursorID, pending.cursor)
 
 	s.logger.DebugContext(s.ctx, logMsgLearnedCursorID,
 		slog.Uint64("cursor_id", uint64(cursorID)),
@@ -567,6 +569,47 @@ func (s *session) handleOFETCH(ttcPayload []byte) error {
 // handleOCLOSE cleans up cursor tracking when a cursor is closed.
 func (s *session) handleOCLOSE(cursorID uint16) {
 	delete(s.tracker.cursors, cursorID)
+}
+
+// handleCloseCursors drops every cursor a close-cursors piggyback named.
+//
+// This is the whole reason s.tracker.cursors stays bounded on a long session,
+// and the reason a recycled id resolves to the statement that owns it now
+// rather than the one that used to: clients batch their closes, so removing one
+// per frame left the rest behind as stale entries. The `tracked` attribute is
+// the tracker's size afterwards — TestIntegration_CursorIDLearningMissRate
+// asserts on it, which is what makes "no cap needed" a measured claim rather
+// than an assumption.
+func (s *session) handleCloseCursors(cursorIDs []uint16) {
+	for _, cursorID := range cursorIDs {
+		s.handleOCLOSE(cursorID)
+	}
+
+	s.logger.DebugContext(s.ctx, logMsgCursorsClosed,
+		slog.Int("closed", len(cursorIDs)),
+		slog.Int("tracked", len(s.tracker.cursors)),
+	)
+}
+
+// rememberCursor records the statement a cursor id now stands for.
+//
+// Overwriting an existing entry is correct — Oracle really does recycle ids
+// from a small per-session pool — but it is also the exact moment at which a
+// re-execution could start resolving to the wrong statement, so an overwrite
+// that changes the SQL is logged at WARN. It stays a signal and never a
+// refusal: the original bug went unnoticed for so long precisely because this
+// window was silent, and a WARN naming the id and both statements is what makes
+// a future one visible.
+func (s *session) rememberCursor(cursorID uint16, cursor *trackedCursor) {
+	if prev, ok := s.tracker.cursors[cursorID]; ok && prev != cursor && prev.sql != cursor.sql {
+		s.logger.WarnContext(s.ctx, logMsgRecycledCursorID,
+			slog.Uint64("cursor_id", uint64(cursorID)),
+			slog.String("previous_sql", truncateSQL(prev.sql, 200)),
+			slog.String("sql", truncateSQL(cursor.sql, 200)),
+		)
+	}
+
+	s.tracker.cursors[cursorID] = cursor
 }
 
 // captureRow hands a single captured row to the shared batching writer.
