@@ -78,13 +78,20 @@ showcase:
 # matches the other integration targets below and still fails fast on a real
 # regression.
 #
-# The default image (gvenzl/oracle-xe:18.4.0-slim) is published for linux/amd64
-# only and does not boot under emulation on Apple Silicon — it dies in instance
-# startup (ORA-27300 / ORA-00442). On arm64, run:
+# The default image is gvenzl/oracle-free:23-slim (Oracle 23ai Free) on every
+# host and in every environment: it has an arm64 build, and 23ai is the version
+# the proxy work is validated against. The former default,
+# gvenzl/oracle-xe:18.4.0-slim, is published for linux/amd64 only and does not
+# boot under emulation on Apple Silicon — it dies in instance startup
+# (ORA-27300 / ORA-00442), so the suite gave an arm64 developer no signal.
 #
-#   ORACLE_TEST_IMAGE=gvenzl/oracle-free:23-slim make test-e2e-oracle
+# Override the image with ORACLE_TEST_IMAGE, e.g. to reproduce the pinned 18c
+# run on an amd64 machine:
 #
-# The default is left as XE because that is what the CI job (amd64) runs.
+#   ORACLE_TEST_IMAGE=gvenzl/oracle-xe:18.4.0-slim make test-e2e-oracle
+#
+# CI (.github/workflows/integration.yml) runs the suite twice: once on this
+# default, and once pinned to the 18c XE image so that coverage is kept.
 test-e2e-oracle:
 	go test -tags integration -v -timeout 40m -count=1 ./internal/proxy/oracle/...
 
