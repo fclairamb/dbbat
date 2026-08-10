@@ -120,7 +120,7 @@ func TestOAuthPKCEVerifierSurvivesTheRoundTrip(t *testing.T) {
 	suffix := uuid.NewString()[:8]
 
 	server.config = &config.Config{
-		SlackAuth: config.SlackAuthConfig{
+		Auth: config.OAuthUsersConfig{
 			AutoCreateUsers: true,
 			DefaultRole:     store.RoleConnector,
 		},
@@ -224,7 +224,7 @@ func TestFindOrCreateOAuthUser_OrphanIdentity(t *testing.T) {
 	suffix := uuid.NewString()[:8]
 
 	server.config = &config.Config{
-		SlackAuth: config.SlackAuthConfig{
+		Auth: config.OAuthUsersConfig{
 			AutoCreateUsers: true,
 			DefaultRole:     store.RoleConnector,
 		},
@@ -291,7 +291,7 @@ func TestOAuthLoginRedirectRoundTrip(t *testing.T) {
 	server.encryptionKey = dbTestEncryptionKey
 
 	server.config = &config.Config{
-		SlackAuth: config.SlackAuthConfig{
+		Auth: config.OAuthUsersConfig{
 			AutoCreateUsers: true,
 			DefaultRole:     store.RoleConnector,
 		},
@@ -442,7 +442,7 @@ func TestOAuthCallbackErrorRedirects(t *testing.T) {
 
 	// Auto-create off and no matching local user: findOrCreateOAuthUser bails
 	// out with errOAuthUserNotLinked.
-	server.config = &config.Config{SlackAuth: config.SlackAuthConfig{AutoCreateUsers: false}}
+	server.config = &config.Config{Auth: config.OAuthUsersConfig{AutoCreateUsers: false}}
 
 	providerName := "slack-nolink-" + suffix
 	provider := &recordingProvider{
@@ -510,7 +510,7 @@ func TestOAuthLoginExchange(t *testing.T) {
 	suffix := uuid.NewString()[:8]
 
 	server.config = &config.Config{
-		SlackAuth: config.SlackAuthConfig{
+		Auth: config.OAuthUsersConfig{
 			AutoCreateUsers: true,
 			DefaultRole:     store.RoleConnector,
 		},

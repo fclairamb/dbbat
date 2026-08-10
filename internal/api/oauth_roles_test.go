@@ -216,12 +216,12 @@ func serverWithRoleMapping(t *testing.T, server *Server, mapping string) {
 }
 
 // serverWithRoleMappingAndDefault is serverWithRoleMapping for the deployments
-// that moved DBB_SLACK_AUTH_DEFAULT_ROLE off `connector`.
+// that moved DBB_AUTH_DEFAULT_ROLE off `connector`.
 func serverWithRoleMappingAndDefault(t *testing.T, server *Server, mapping, defaultRole string) {
 	t.Helper()
 
 	server.config = &config.Config{
-		SlackAuth: config.SlackAuthConfig{
+		Auth: config.OAuthUsersConfig{
 			AutoCreateUsers: true,
 			DefaultRole:     defaultRole,
 		},
