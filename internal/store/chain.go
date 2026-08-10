@@ -37,9 +37,11 @@ const (
 
 	auditChainDomain = "dbbat-audit-chain-v1"
 	queryChainDomain = "dbbat-query-chain-v1"
+	rowChainDomain   = "dbbat-row-chain-v1"
 
 	auditGenesisLabel = "dbbat-audit-chain-genesis-v1"
 	queryGenesisLabel = "dbbat-query-chain-genesis-v1:"
+	rowGenesisLabel   = "dbbat-row-chain-genesis-v1:"
 )
 
 // auditChainAdvisoryLockKey serializes appends to the audit chain across every
@@ -54,6 +56,11 @@ const auditChainAdvisoryLockKey int64 = 0x4442424154415544
 // between two connections only serializes them against each other, which is
 // harmless.
 const queryChainAdvisoryLockClass int32 = 0x44424251
+
+// rowChainAdvisoryLockClass is the same idea for the per-query chains over
+// captured result rows. Its own class, so a query uid and a connection uid
+// mapping to the same object id never serialize against each other.
+const rowChainAdvisoryLockClass int32 = 0x44425251
 
 // chainAppendAttempts bounds the retries an append makes when its cached head
 // turns out to be stale — the multi-replica case, where a peer extended the
@@ -76,6 +83,12 @@ type chainState struct {
 	loaded bool
 	seq    int64
 	mac    []byte
+
+	// count is how many rows the chain holds. For the audit and query chains
+	// it is the same number as seq — those positions are dense — so only the
+	// row chains, whose position (row_number) may have gaps, read it. It is
+	// what row_chain_len is stamped from.
+	count int64
 }
 
 // invalidate forgets the cached head so the next append re-reads it. Called
@@ -85,12 +98,14 @@ func (c *chainState) invalidate() {
 	c.loaded = false
 	c.seq = 0
 	c.mac = nil
+	c.count = 0
 }
 
-// queryChains holds one chainState per live connection. Entries are dropped
-// when the connection closes (Store.CloseConnection); an entry left behind by a
-// session that died without closing is a few dozen bytes, and the next process
-// does not inherit it.
+// queryChains holds one chainState per key: per live connection for the
+// statement chains, per capturing query for the result-row chains. Entries are
+// dropped when the chain is sealed (Store.CloseConnection,
+// Store.SealQueryRowChain); an entry left behind by a session that died is a
+// few dozen bytes, and the next process does not inherit it.
 type queryChains struct {
 	mu sync.Mutex
 	m  map[uuid.UUID]*chainState
@@ -111,6 +126,18 @@ func (q *queryChains) get(connectionUID uuid.UUID) *chainState {
 	}
 
 	return state
+}
+
+// lookup finds an existing chain without creating one. It is what lets a
+// sealing path answer "did this process write anything to that chain?" without
+// a database round trip: no entry means nothing to seal.
+func (q *queryChains) lookup(key uuid.UUID) (*chainState, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	state, ok := q.m[key]
+
+	return state, ok
 }
 
 func (q *queryChains) forget(connectionUID uuid.UUID) {
@@ -222,6 +249,51 @@ func queryChainPayload(
 	return p.bytes(), nil
 }
 
+// rowGenesisMAC is the prev_mac of the first stored row of a capture, bound to
+// the query so a chain cannot be transplanted from one capture to another.
+//
+// Unlike the query chain, a missing genesis link *is* a break: retention never
+// deletes individual query_rows (it deletes whole queries, which cascades), so
+// nothing legitimate ever removes a capture's earliest rows.
+func (s *Store) rowGenesisMAC(queryUID uuid.UUID) []byte {
+	return s.chainMAC([]byte(rowGenesisLabel + queryUID.String()))
+}
+
+// rowChainPayload is the canonical serialization the per-query result-row MAC
+// covers. A query_rows row is insert-only — nothing is ever written to it after
+// the INSERT — so the MAC covers every column of it.
+//
+// What it deliberately does not reach is the capture's own after-the-fact
+// metadata on the parent query: results_truncated and results_dropped are
+// written by UpdateQueryCompletion once the result set has been read, exactly
+// like duration_ms and rows_affected, and sealing them would mean recomputing a
+// MAC whose successors already point at it. That is the same call
+// queryChainPayload made for the query outcome columns. So the row chain proves
+// **which rows were captured, with what content, in what order**; it does not
+// seal the claim that the capture was complete.
+func rowChainPayload(
+	queryUID, uid uuid.UUID,
+	rowNumber int,
+	rowData []byte,
+	rowSizeBytes int64,
+	prevMAC []byte,
+) ([]byte, error) {
+	canonicalData, err := canonicalJSON(rowData)
+	if err != nil {
+		return nil, err
+	}
+
+	p := newCanonicalPayload(rowChainDomain)
+	p.writeString("query_id", queryUID.String())
+	p.writeInt("row_number", int64(rowNumber))
+	p.writeString("uid", uid.String())
+	p.writeOptional("row_data", canonicalData)
+	p.writeInt("row_size_bytes", rowSizeBytes)
+	p.writeBytes("prev_mac", prevMAC)
+
+	return p.bytes(), nil
+}
+
 func optionalUUID(id *uuid.UUID) []byte {
 	if id == nil {
 		return nil
@@ -237,4 +309,10 @@ func optionalUUID(id *uuid.UUID) []byte {
 // and nothing else.
 func queryChainLockID(connectionUID uuid.UUID) int32 {
 	return int32(binary.BigEndian.Uint32(connectionUID[8:12]))
+}
+
+// rowChainLockID is the same mapping for a capture's row chain, in its own lock
+// class. A collision costs two unrelated captures a little serialization.
+func rowChainLockID(queryUID uuid.UUID) int32 {
+	return int32(binary.BigEndian.Uint32(queryUID[8:12]))
 }
