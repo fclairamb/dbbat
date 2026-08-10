@@ -39,6 +39,29 @@ This prevents brute-force attacks while allowing legitimate users to recover fro
 | Web Session | `web_` | 1 hour | Interactive frontend use |
 | API Key | `dbb_` | Configurable (or permanent) | Programmatic access |
 
+### How Keys Are Stored
+
+API keys and web session tokens are **hashed with Argon2id**, through the exact
+same path as user passwords. What the `api_keys` table holds is:
+
+- `key_hash` — the Argon2id hash of the full token
+- `key_prefix` — the first **8 characters** in clear, used only to find the
+  candidate row before verifying the hash
+
+So a key is **not** recoverable from the database: DBBat cannot show it to you
+again after creation, and a leaked dump yields no usable key.
+
+Two related nuances, so the picture is complete:
+
+- A freshly minted key is held **AES-256-GCM-encrypted** inside a pending
+  device-authorization request, bound to that request's UID, for the few minutes
+  between the user approving the device and the device polling for the token.
+  That ciphertext is the only place a plaintext key is ever recoverable.
+- For Oracle, the O5LOGON verifier material *derived* from a key is stored
+  encrypted (AES-256-GCM, bound to the key prefix), because the O5LOGON
+  challenge cannot be answered from a password hash. That is verifier material,
+  not the key itself.
+
 ### API Key Restrictions
 
 API keys have intentional limitations:
@@ -220,8 +243,18 @@ Read-only mode is **defense in depth for trusted users**, not a security boundar
 
 ### Audit Log Integrity
 
-- Audit logs are append-only (no UPDATE/DELETE via API)
-- Protected from modification via proxy (internal table protection)
+- **Tamper-evident, not tamper-proof.** Every `audit_log` entry and every logged
+  query carries an HMAC over its own content plus the previous record's MAC, so
+  modifying, deleting or reordering a record is *detectable* — including by
+  someone with write access to DBBat's PostgreSQL store. The chain key is
+  HKDF-derived from `DBB_KEY` and never stored in the database. Verify with
+  `dbbat audit verify [--queries]`. See
+  [Tamper-Evident Audit Log](/docs/features/audit-chain) for the scope and its
+  limits, and [Compliance](/docs/compliance) for how to phrase it to an auditor.
+- DBBat itself only ever inserts audit rows — it never updates or deletes them —
+  and the REST API exposes reads only (`GET /api/v1/audit`). There is no
+  database-level append-only enforcement (no triggers, no `REVOKE`, no WORM
+  storage); the chain gives you detection, not prevention.
 - Includes `performed_by` for accountability
 
 ## API Rate Limiting

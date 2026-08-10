@@ -61,7 +61,7 @@ Any of these upstreams can be reached directly or through an **SSH bastion** —
 - **Live Enforcement**: Limits are enforced mid-stream (not just between commands), and revoking a grant blocks further queries and disconnects sessions already in flight
 - **Upstream Identity**: The dbbat username is encoded into the upstream connection metadata (`application_name` / `program_name` / `AUTH_PROGRAM_NM`), so target-side monitoring attributes queries to the real person
 - **Read-only enforcement**: Defense in depth — SQL inspection, PostgreSQL `default_transaction_read_only`, MySQL/MariaDB blocks for `LOAD DATA`/`SELECT … INTO OUTFILE`/etc., and proxy-side opt-out from `LOCAL INFILE`
-- **Audit Trail**: Append-only audit log of user, grant, and database changes
+- **Audit Trail**: Every user, grant and database change is recorded in `audit_log` with its actor; dbbat only ever inserts, and the REST API exposes reads only (`GET /api/v1/audit`)
 - **Tamper-evident**: Every audit entry and every logged query carries an HMAC over its content plus the previous record's MAC, keyed by a subkey derived from `DBB_KEY` that is never stored in the database — so modifying, deleting or reordering a record is detectable even by someone with write access to dbbat's own PostgreSQL store. `dbbat audit verify` walks the chain and names the first break (see [docs/audit-chain.md](docs/audit-chain.md))
 - **Rate Limiting**: Per-user request limits and exponential backoff on failed login
 - **Authentication Cache**: Optional in-memory cache (TTL + max size) shared across REST and proxy auth paths
@@ -253,7 +253,7 @@ per-provider snippets.
 
 - User passwords are hashed with Argon2id
 - Database credentials are encrypted with AES-256-GCM (AAD-bound to the database UID)
-- API keys (`dbb_…`) are stored as encrypted blobs and cannot create or revoke other keys
+- API keys (`dbb_…`) are hashed with Argon2id, exactly like passwords — only the 8-character prefix is stored in clear, for lookup, so a leaked database yields no usable key. They cannot create or revoke other keys
 - Failed logins trigger per-username exponential backoff
 - Default admin user (`admin` / `admin`) is created on first startup — **change it immediately**
 
