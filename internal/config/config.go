@@ -272,14 +272,14 @@ func (c OIDCAuthConfig) RoleMappingEnabled() bool {
 // display names, and matching is exact, case included). Repeating a role
 // unions its groups: "admin=db-admins,admin=sre" grants admin to either.
 //
-// A nil map means "no mapping configured"; an error means the operator typed
-// something that cannot be an authorization rule.
+// An empty map means "no mapping configured"; an error means the operator
+// typed something that cannot be an authorization rule.
 func (c OIDCAuthConfig) ParseRoleMapping() (map[string][]string, error) {
-	if !c.RoleMappingEnabled() {
-		return nil, nil
-	}
-
 	mapping := make(map[string][]string)
+
+	if !c.RoleMappingEnabled() {
+		return mapping, nil
+	}
 
 	for _, pair := range strings.Split(c.RoleMapping, ",") {
 		pair = strings.TrimSpace(pair)

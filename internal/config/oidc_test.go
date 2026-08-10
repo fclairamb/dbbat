@@ -106,7 +106,7 @@ func TestParseRoleMapping(t *testing.T) {
 		{
 			name:  "empty means no mapping at all",
 			value: "",
-			want:  nil,
+			want:  map[string][]string{},
 		},
 		{
 			name:  "a single pair",

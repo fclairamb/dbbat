@@ -373,6 +373,11 @@ var errOAuthUserNotLinked = errors.New("no linked account and auto-create disabl
 //  1. Existing identity link (provider + provider_id)
 //  2. Match by email against existing usernames
 //  3. Auto-create if enabled
+//
+// Every path that returns an existing user runs the directory role mapping
+// first (see syncOAuthRoles): roles follow group membership on **every**
+// login, not only at creation, because the login that must demote someone is
+// never their first one.
 func (s *Server) findOrCreateOAuthUser(ctx context.Context, provider auth.OAuthProvider, oauthUser *auth.OAuthUser) (*store.User, error) {
 	providerName := provider.Name()
 
@@ -380,7 +385,7 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, provider auth.OAuthP
 	user, err := s.store.GetUserByIdentity(ctx, providerName, oauthUser.ProviderID)
 	switch {
 	case err == nil:
-		return user, nil
+		return s.syncOAuthRoles(ctx, user, providerName, oauthUser)
 	case errors.Is(err, store.ErrIdentityNotFound):
 		// fall through to email / auto-create
 	case errors.Is(err, store.ErrUserNotFound):
@@ -404,7 +409,7 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, provider auth.OAuthP
 			if linkErr := s.linkIdentity(ctx, user.UID, providerName, oauthUser); linkErr != nil {
 				return nil, fmt.Errorf("link identity: %w", linkErr)
 			}
-			return user, nil
+			return s.syncOAuthRoles(ctx, user, providerName, oauthUser)
 		}
 		if !errors.Is(err, store.ErrUserNotFound) {
 			return nil, fmt.Errorf("email lookup: %w", err)
@@ -412,14 +417,14 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, provider auth.OAuthP
 	}
 
 	// 3. Auto-create if enabled
-	if s.config == nil || !s.config.SlackAuth.AutoCreateUsers {
+	if !s.oauthAutoCreateUsers() {
 		return nil, errOAuthUserNotLinked
 	}
 
-	role := s.config.SlackAuth.DefaultRole
-	if role == "" {
-		role = store.RoleConnector
-	}
+	// A first login already resolves through the mapping, so a new engineer in
+	// db-admins lands on admin immediately rather than on the default role
+	// until they sign in a second time.
+	roles := s.oauthRolesForNewUser(ctx, providerName, oauthUser)
 
 	// Generate a unique username from the display name or email
 	username := s.generateUniqueUsername(ctx, oauthUser.DisplayName, oauthUser.Email)
@@ -435,7 +440,7 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, provider auth.OAuthP
 		return nil, fmt.Errorf("hash password: %w", err)
 	}
 
-	user, err = s.store.CreateUser(ctx, username, passwordHash, []string{role})
+	user, err = s.store.CreateUser(ctx, username, passwordHash, roles)
 	if err != nil {
 		return nil, fmt.Errorf("create user: %w", err)
 	}
@@ -456,6 +461,7 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, provider auth.OAuthP
 		slog.String("provider", providerName),
 		slog.String("username", username),
 		slog.String("email", oauthUser.Email),
+		slog.Any("roles", roles),
 		slog.Any("uid", user.UID))
 
 	return user, nil
