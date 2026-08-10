@@ -53,3 +53,24 @@ than an immediately green suite.
 **While you are there**, consider hoisting the helper into a small shared
 test-support package instead of a fourth copy; four identical definitions of
 the same fixture is how the next schema change breaks four suites again.
+
+## Resolved open questions
+
+> **While you are there**, consider hoisting the helper into a small shared
+> test-support package instead of a fourth copy.
+
+**Decision: yes, hoist it.** Do not add a fourth copy. Put
+`createGrantWithControls` in one shared, integration-tagged test-support
+package and have all four suites (PostgreSQL, MySQL, MongoDB, Oracle) call it,
+deleting their local copies in the same change. Keep the per-call unique slug
+inside the shared helper so no caller has to remember it.
+
+Two constraints on the move:
+
+- The helper is only compiled under `//go:build integration`, so the shared
+  package must carry the same build tag — it must not pull test-only code into
+  a normal `make test` build.
+- Deleting the three existing copies means the other three suites must still
+  compile. Verify with `go vet -tags integration ./internal/proxy/...` (cheap,
+  no containers) before running `make test-integration-mysql`; you are not
+  expected to run the other three suites end to end.
