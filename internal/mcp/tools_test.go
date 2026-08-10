@@ -195,9 +195,11 @@ func TestQueryRefusesDatabaseWithoutGrant(t *testing.T) {
 func TestQueryRefusesUnsupportedProtocol(t *testing.T) {
 	t.Parallel()
 
-	f := newFixture(t, store.ProtocolOracle, store.GrantDefinition{}, nil)
+	// An SSH-only entry is a bastion, not a database: there is no listener to
+	// dial and no statement to run.
+	f := newFixture(t, store.ProtocolSSH, store.GrantDefinition{}, nil)
 
-	_, err := f.query(t, QueryInput{Database: testDBName, SQL: "SELECT 1 FROM dual"})
+	_, err := f.query(t, QueryInput{Database: testDBName, SQL: "SELECT 1"})
 	require.ErrorIs(t, err, ErrProtocolUnsupported)
 }
 
@@ -428,7 +430,7 @@ func TestDescribeUsesBoundParameters(t *testing.T) {
 
 	evil := "users; DROP TABLE accounts--"
 
-	for _, protocol := range []string{store.ProtocolPostgreSQL, store.ProtocolMySQL} {
+	for _, protocol := range []string{store.ProtocolPostgreSQL, store.ProtocolMySQL, store.ProtocolOracle} {
 		sqlText, params, err := introspectionSQL(protocol, evil, "")
 		require.NoError(t, err)
 		assert.NotContains(t, sqlText, "DROP TABLE accounts")
@@ -448,6 +450,32 @@ func TestDescribeUsesBoundParameters(t *testing.T) {
 
 	_, _, err = introspectionSQL(store.ProtocolMSSQL, "", "")
 	require.ErrorIs(t, err, ErrProtocolUnsupported)
+}
+
+// TestOracleIntrospectionSQL pins the two Oracle-specific choices: the result
+// columns must come back lower-cased (Oracle folds unquoted identifiers to
+// upper case, and the renderers key on the lower-case names), and the table
+// name must stay a bind parameter even though it is folded with UPPER().
+func TestOracleIntrospectionSQL(t *testing.T) {
+	t.Parallel()
+
+	sqlText, params, err := introspectionSQL(store.ProtocolOracle, "", "")
+	require.NoError(t, err)
+	assert.Contains(t, sqlText, "all_tables")
+	assert.Contains(t, sqlText, `AS "table_name"`)
+	assert.Nil(t, params)
+
+	sqlText, params, err = introspectionSQL(store.ProtocolOracle, "employees", "")
+	require.NoError(t, err)
+	assert.Contains(t, sqlText, "all_tab_columns")
+	assert.Contains(t, sqlText, "UPPER(:1)")
+	assert.Contains(t, sqlText, `AS "column_name"`)
+	assert.Equal(t, []any{"employees"}, params)
+
+	sqlText, params, err = introspectionSQL(store.ProtocolOracle, "employees", "hr")
+	require.NoError(t, err)
+	assert.Contains(t, sqlText, "UPPER(:2)")
+	assert.Equal(t, []any{"employees", "hr"}, params)
 }
 
 func TestDescribeRendersColumns(t *testing.T) {

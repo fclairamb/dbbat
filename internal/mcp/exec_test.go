@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql/driver"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -14,16 +15,21 @@ import (
 func TestSupportedProtocol(t *testing.T) {
 	t.Parallel()
 
+	// Every protocol is listed explicitly so adding or removing one is a
+	// deliberate change here rather than a silent side effect elsewhere.
 	assert.True(t, SupportedProtocol(store.ProtocolPostgreSQL))
 	assert.True(t, SupportedProtocol(store.ProtocolMySQL))
 	assert.True(t, SupportedProtocol(store.ProtocolMariaDB))
+	assert.True(t, SupportedProtocol(store.ProtocolOracle))
 
-	// Phase 2. Listed explicitly so adding one is a deliberate change here
-	// rather than a silent side effect elsewhere.
-	assert.False(t, SupportedProtocol(store.ProtocolOracle))
+	// Still to come.
 	assert.False(t, SupportedProtocol(store.ProtocolMongoDB))
 	assert.False(t, SupportedProtocol(store.ProtocolMSSQL))
+
+	// An SSH-only entry is a bastion, not a database: there is no listener to
+	// dial and no statement to run.
 	assert.False(t, SupportedProtocol(store.ProtocolSSH))
+	assert.False(t, SupportedProtocol("redis"))
 }
 
 func TestLoopbackAddr(t *testing.T) {
@@ -63,16 +69,63 @@ func TestLoopbackAddr(t *testing.T) {
 func TestLoopbackExecutorRefusesDisabledListener(t *testing.T) {
 	t.Parallel()
 
-	e := NewLoopbackExecutor("", "")
+	e := NewLoopbackExecutor(LoopbackListeners{})
 
-	_, err := e.Execute(context.Background(), ExecRequest{Protocol: store.ProtocolPostgreSQL})
-	require.ErrorIs(t, err, ErrListenerDisabled)
+	for _, protocol := range []string{
+		store.ProtocolPostgreSQL, store.ProtocolMySQL, store.ProtocolMariaDB,
+		store.ProtocolOracle,
+	} {
+		_, err := e.Execute(context.Background(), ExecRequest{Protocol: protocol})
+		require.ErrorIsf(t, err, ErrListenerDisabled, "protocol %s", protocol)
+	}
 
-	_, err = e.Execute(context.Background(), ExecRequest{Protocol: store.ProtocolMySQL})
-	require.ErrorIs(t, err, ErrListenerDisabled)
-
-	_, err = e.Execute(context.Background(), ExecRequest{Protocol: store.ProtocolOracle})
+	_, err := e.Execute(context.Background(), ExecRequest{Protocol: store.ProtocolSSH})
 	require.ErrorIs(t, err, ErrProtocolUnsupported)
+}
+
+// TestLoopbackExecutorDialsTheRightListener: each protocol must reach its own
+// listener. A copy-paste that pointed Oracle at the MySQL address would
+// otherwise only show up against a live proxy.
+func TestLoopbackExecutorDialsTheRightListener(t *testing.T) {
+	t.Parallel()
+
+	// Only one listener is configured per case, and it is an address nothing
+	// runs on — so a dispatch that read the wrong field would report
+	// ErrListenerDisabled instead of failing to connect. No database is
+	// involved: every dial is refused.
+	const dead = "127.0.0.1:59987"
+
+	cases := []struct {
+		protocol  string
+		listeners LoopbackListeners
+		sqlText   string
+	}{
+		{store.ProtocolPostgreSQL, LoopbackListeners{PostgreSQL: dead}, "SELECT 1"},
+		{store.ProtocolMySQL, LoopbackListeners{MySQL: dead}, "SELECT 1"},
+		{store.ProtocolMariaDB, LoopbackListeners{MySQL: dead}, "SELECT 1"},
+		{store.ProtocolOracle, LoopbackListeners{Oracle: dead}, "SELECT 1 FROM dual"},
+	}
+
+	for _, tc := range cases {
+		e := NewLoopbackExecutor(tc.listeners)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+		_, err := e.Execute(ctx, ExecRequest{
+			Protocol: tc.protocol,
+			Database: "db",
+			Username: "agent",
+			APIKey:   "dbb_key",
+			SQL:      tc.sqlText,
+			MaxRows:  10,
+		})
+
+		cancel()
+
+		require.Error(t, err, "protocol %s", tc.protocol)
+		require.NotErrorIs(t, err, ErrListenerDisabled, "protocol %s reads the wrong listen address", tc.protocol)
+		require.NotErrorIs(t, err, ErrProtocolUnsupported, "protocol %s", tc.protocol)
+	}
 }
 
 func TestDedupeColumns(t *testing.T) {
@@ -135,3 +188,54 @@ func TestNormalizePGValue(t *testing.T) {
 type stringValuer struct{ s string }
 
 func (v stringValuer) Value() (driver.Value, error) { return v.s, nil }
+
+func TestLeadingKeyword(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "select", leadingKeyword("  SELECT 1 FROM dual"))
+	assert.Equal(t, "select", leadingKeyword("(SELECT 1)"))
+	assert.Equal(t, "insert", leadingKeyword("insert into t values (1)"))
+	assert.Empty(t, leadingKeyword("-- a comment\nDELETE FROM t"),
+		"a statement that opens with a comment must fall to the query path")
+	assert.Empty(t, leadingKeyword(""))
+}
+
+// TestOracleIsExecStatement pins the one place a protocol client decides
+// between Exec and Query. Being wrong can only drop `rows_affected`, never a
+// row — but a SELECT sent to Exec would drop the whole result set.
+func TestOracleIsExecStatement(t *testing.T) {
+	t.Parallel()
+
+	for _, sqlText := range []string{
+		"INSERT INTO t VALUES (1)",
+		"  update t set a = 1",
+		"MERGE INTO t USING s ON (1=1)",
+		"BEGIN pkg.proc(); END;",
+		"create table t (id number)",
+	} {
+		assert.True(t, oracleIsExecStatement(sqlText), sqlText)
+	}
+
+	for _, sqlText := range []string{
+		"SELECT * FROM t",
+		"  with x as (select 1 from dual) select * from x",
+		"-- comment\nSELECT 1 FROM dual",
+		"",
+	} {
+		assert.False(t, oracleIsExecStatement(sqlText), sqlText)
+	}
+}
+
+func TestNormalizeSQLValue(t *testing.T) {
+	t.Parallel()
+
+	assert.Nil(t, normalizeSQLValue(nil))
+	assert.Equal(t, int64(3), normalizeSQLValue(int64(3)))
+	assert.Equal(t, "x", normalizeSQLValue("x"))
+	// Oracle and SQL Server both hand text back as bytes; base64 would make
+	// every VARCHAR2 unreadable to a model.
+	assert.Equal(t, "étiquette", normalizeSQLValue([]byte("étiquette")))
+	assert.Equal(t, []byte{0xff, 0xfe}, normalizeSQLValue([]byte{0xff, 0xfe}))
+	assert.Equal(t, "2026-08-10T09:00:00Z",
+		normalizeSQLValue(time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)))
+}

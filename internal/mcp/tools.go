@@ -430,6 +430,34 @@ func introspectionSQL(protocol, table, schema string) (string, []any, error) {
 			`FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? ` +
 			`ORDER BY ordinal_position`, []any{table}, nil
 
+	case store.ProtocolOracle:
+		// Every column is aliased to a quoted lower-case name: Oracle folds
+		// unquoted identifiers to upper case and reports them that way in the
+		// result metadata, which the renderers below key on.
+		//
+		// UPPER() on the bound name is the same folding applied to the input, so
+		// `describe employees` finds the EMPLOYEES an Oracle DDL created. It
+		// stays a bind parameter — the folding is Oracle's, not string surgery.
+		//
+		// DATA_DEFAULT is deliberately not selected: it is a LONG, and a LONG in
+		// a catalog query is exactly the kind of value that makes a describe
+		// fail on a driver quirk rather than return columns.
+		if table == "" {
+			return `SELECT owner AS "table_schema", table_name AS "table_name" FROM all_tables ` +
+				`WHERE owner = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') ORDER BY table_name`, nil, nil
+		}
+
+		if schema != "" {
+			return `SELECT column_name AS "column_name", data_type AS "data_type", ` +
+				`DECODE(nullable, 'Y', 'YES', 'NO') AS "is_nullable" FROM all_tab_columns ` +
+				`WHERE table_name = UPPER(:1) AND owner = UPPER(:2) ORDER BY column_id`, []any{table, schema}, nil
+		}
+
+		return `SELECT column_name AS "column_name", data_type AS "data_type", ` +
+			`DECODE(nullable, 'Y', 'YES', 'NO') AS "is_nullable" FROM all_tab_columns ` +
+			`WHERE table_name = UPPER(:1) AND owner = SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') ` +
+			`ORDER BY column_id`, []any{table}, nil
+
 	default:
 		return "", nil, fmt.Errorf("%w: %s", ErrProtocolUnsupported, protocol)
 	}

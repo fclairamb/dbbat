@@ -321,13 +321,14 @@ func (s *Server) start(ctx context.Context, caller *Caller, a accessible, sqlTex
 		defer cancel()
 
 		result, err := s.deps.Executor.Execute(execCtx, ExecRequest{
-			Protocol: a.server.Protocol,
-			Database: a.server.Name,
-			Username: caller.User.Username,
-			APIKey:   caller.APIKey,
-			SQL:      sqlText,
-			Params:   params,
-			MaxRows:  maxRows,
+			Protocol:         a.server.Protocol,
+			Database:         a.server.Name,
+			UpstreamDatabase: a.server.DatabaseName,
+			Username:         caller.User.Username,
+			APIKey:           caller.APIKey,
+			SQL:              sqlText,
+			Params:           params,
+			MaxRows:          maxRows,
 		})
 
 		e.finish(result, err)
