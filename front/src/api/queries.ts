@@ -251,6 +251,7 @@ export function useCreateDatabase(options?: {
     onSuccess: (db) => {
       queryClient.invalidateQueries({ queryKey: ["databases"] });
       queryClient.invalidateQueries({ queryKey: ["ssh-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["tunnel-servers"] });
       options?.onSuccess?.(db);
     },
     onError: options?.onError,
@@ -280,6 +281,7 @@ export function useUpdateDatabase(
       queryClient.invalidateQueries({ queryKey: ["databases"] });
       queryClient.invalidateQueries({ queryKey: ["databases", uid] });
       queryClient.invalidateQueries({ queryKey: ["ssh-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["tunnel-servers"] });
       options?.onSuccess?.();
     },
     onError: options?.onError,
@@ -304,6 +306,7 @@ export function useDeleteDatabase(options?: {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["databases"] });
       queryClient.invalidateQueries({ queryKey: ["ssh-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["tunnel-servers"] });
       options?.onSuccess?.();
     },
     onError: options?.onError,
@@ -332,6 +335,7 @@ export function useTestServerConnection(uid: string) {
     onSuccess: () => {
       // A first successful bastion check pins the host key, so the row changed.
       queryClient.invalidateQueries({ queryKey: ["ssh-servers"] });
+      queryClient.invalidateQueries({ queryKey: ["tunnel-servers"] });
       queryClient.invalidateQueries({ queryKey: ["databases"] });
     },
   });
@@ -346,6 +350,23 @@ export function useSSHServers(enabled = true) {
       const response = await apiClient.GET("/ssh-servers");
       if (response.error) {
         throw new Error(response.error.message || "Failed to load ssh servers");
+      }
+      return response.data?.servers || [];
+    },
+    enabled,
+  });
+}
+
+// Tunnel (dial-path) servers: every ssh bastion *and* kubernetes cluster row.
+// This is what the target form's "via" selector reads — a target may be dialed
+// through either kind, so a bastion-only list would hide half the options.
+export function useTunnelServers(enabled = true) {
+  return useQuery({
+    queryKey: ["tunnel-servers"],
+    queryFn: async (): Promise<Database[]> => {
+      const response = await apiClient.GET("/tunnel-servers");
+      if (response.error) {
+        throw new Error(response.error.message || "Failed to load tunnel servers");
       }
       return response.data?.servers || [];
     },
