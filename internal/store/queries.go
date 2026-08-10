@@ -207,6 +207,29 @@ func queryParametersJSON(params *QueryParameters) json.RawMessage {
 	return encoded
 }
 
+// queryChainHeadSelect builds the one lookup that defines a connection's query
+// chain head: the highest chain_seq on it, projecting the requested columns.
+// It is deliberately left uncorrelated — the caller adds the predicate that
+// picks the connection — because it has two callers that pick it differently:
+//
+//   - readQueryChainHead below binds a concrete uid and scans the row;
+//   - closeOrphans (internal/store/connections.go) correlates it against the
+//     connection being closed (`q.connection_id = c.uid`) and inlines it as a
+//     subquery in the reconcile's SET clause.
+//
+// Keeping it one builder is what stops the reconcile's notion of "the head"
+// from drifting from CloseConnection's. `idx_queries_chain_seq`
+// — (connection_id, chain_seq) WHERE chain_seq IS NOT NULL — serves it, so
+// either shape is an index scan plus one heap fetch.
+func queryChainHeadSelect(db bun.IDB, columns ...string) *bun.SelectQuery {
+	return db.NewSelect().
+		Model((*Query)(nil)).
+		Column(columns...).
+		Where("chain_seq IS NOT NULL").
+		Order("chain_seq DESC").
+		Limit(1)
+}
+
 // readQueryChainHead returns the highest chain_seq on a connection and its MAC,
 // or (0, nil) when nothing on it has been chained yet.
 func readQueryChainHead(ctx context.Context, db bun.IDB, connectionUID uuid.UUID) (int64, []byte, error) {
@@ -215,13 +238,8 @@ func readQueryChainHead(ctx context.Context, db bun.IDB, connectionUID uuid.UUID
 		MAC      []byte `bun:"mac"`
 	}
 
-	err := db.NewSelect().
-		Model((*Query)(nil)).
-		Column("chain_seq", "mac").
+	err := queryChainHeadSelect(db, "chain_seq", "mac").
 		Where("connection_id = ?", connectionUID).
-		Where("chain_seq IS NOT NULL").
-		Order("chain_seq DESC").
-		Limit(1).
 		Scan(ctx, &row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
