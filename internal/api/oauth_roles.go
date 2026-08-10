@@ -30,22 +30,21 @@ const AuditEventUserCreated = "user.created"
 // read. It is the floor a role mapping can never dig below: a mapping that
 // matches nothing leaves the user with this role, never with none at all.
 //
-// The setting still lives on SlackAuthConfig for historical reasons and is
-// shared by every OAuth provider; routing every read through here is what
-// makes moving it onto a provider-agnostic home a one-line change.
+// The value is DBB_AUTH_DEFAULT_ROLE, provider-agnostic on purpose: whichever
+// provider vouched for the identity, this is the role it lands on.
 func (s *Server) oauthDefaultRole() string {
-	if s.config != nil && s.config.SlackAuth.DefaultRole != "" {
-		return s.config.SlackAuth.DefaultRole
+	if s.config == nil {
+		return store.RoleConnector
 	}
 
-	return store.RoleConnector
+	return s.config.Auth.Role()
 }
 
 // oauthAutoCreateUsers reports whether an unknown verified identity may
-// provision itself a local account. Same historical home as the default role,
-// same single-read discipline.
+// provision itself a local account (DBB_AUTH_AUTO_CREATE_USERS). Same
+// provider-agnostic home as the default role, same single-read discipline.
 func (s *Server) oauthAutoCreateUsers() bool {
-	return s.config != nil && s.config.SlackAuth.AutoCreateUsers
+	return s.config != nil && s.config.Auth.AutoCreateUsers
 }
 
 // oauthRoleMapping returns the parsed group-to-role mapping that applies to
@@ -181,7 +180,7 @@ func resolveMappedRoles(
 
 		// Only a grant if the user did not already hold it. The default role
 		// can itself be named in the mapping ("viewer=analysts" with
-		// DBB_SLACK_AUTH_DEFAULT_ROLE=viewer): an unmatched user has it
+		// DBB_AUTH_DEFAULT_ROLE=viewer): an unmatched user has it
 		// dropped and then restored by the floor, which is a round trip back
 		// to where they started — not a promotion. Recording it as one would
 		// make changed() true on every single login, writing identical roles

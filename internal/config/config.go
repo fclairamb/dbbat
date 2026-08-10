@@ -46,7 +46,20 @@ var (
 	// process, never silently resolve to "no rule" and hand everyone the
 	// default role.
 	ErrOIDCRoleMappingInvalid = errors.New("DBB_OIDC_ROLE_MAPPING is malformed")
+
+	// ErrAuthDefaultRoleInvalid is returned when DBB_AUTH_DEFAULT_ROLE (or its
+	// legacy alias DBB_SLACK_AUTH_DEFAULT_ROLE) names a role that does not
+	// exist. Same reasoning as the role mapping: a default role is an
+	// authorization decision, and one that fails closed at startup is far
+	// better than one that quietly provisions users into a role nothing knows.
+	ErrAuthDefaultRoleInvalid = errors.New("DBB_AUTH_DEFAULT_ROLE is not a known role")
 )
+
+// DefaultOAuthRole is the role an auto-provisioned OAuth user starts with when
+// DBB_AUTH_DEFAULT_ROLE is unset. It mirrors store.RoleConnector, which config
+// cannot import (store imports config); TestConfigKnownRolesMatchStore pins the
+// two together.
+const DefaultOAuthRole = "connector"
 
 // OIDC provider defaults.
 const (
@@ -180,12 +193,15 @@ type RedirectRule struct {
 }
 
 // SlackAuthConfig holds Slack OAuth configuration.
+//
+// Auto-provisioning used to live here (`auto_create_users`, `default_role`)
+// even though every OAuth provider read it; it now lives on OAuthUsersConfig.
+// The old env/file keys are still accepted as aliases — see
+// applyAuthProvisioningAliases.
 type SlackAuthConfig struct {
-	ClientID        string `koanf:"client_id"`
-	ClientSecret    string `koanf:"client_secret"`
-	TeamID          string `koanf:"team_id"`
-	AutoCreateUsers bool   `koanf:"auto_create_users"`
-	DefaultRole     string `koanf:"default_role"`
+	ClientID     string `koanf:"client_id"`
+	ClientSecret string `koanf:"client_secret"`
+	TeamID       string `koanf:"team_id"`
 }
 
 // Enabled returns true if Slack OAuth is configured with both client ID and secret.
@@ -229,6 +245,49 @@ type OIDCAuthConfig struct {
 // so config cannot import store. TestConfigKnownRolesMatchStore in
 // internal/api pins the two lists together.
 var KnownRoles = []string{"admin", "viewer", "connector"}
+
+// OAuthUsersConfig holds the auto-provisioning settings that apply to **every**
+// OAuth/OIDC login provider — Slack, the generic OIDC issuer, and whatever
+// comes next.
+//
+// They used to live on SlackAuthConfig, which meant an operator who had never
+// touched Slack still had to set DBB_SLACK_AUTH_AUTO_CREATE_USERS=false to stop
+// their OIDC issuer from minting accounts. The canonical names are now
+// DBB_AUTH_AUTO_CREATE_USERS and DBB_AUTH_DEFAULT_ROLE; the DBB_SLACK_AUTH_*
+// ones keep working as aliases (applyAuthProvisioningAliases).
+type OAuthUsersConfig struct {
+	// AutoCreateUsers lets an unknown but verified identity provision itself a
+	// local account on first login. Defaults to true.
+	AutoCreateUsers bool `koanf:"auto_create_users"`
+	// DefaultRole is the role such an account starts with, and the floor a
+	// group role mapping can never dig below. Empty means DefaultOAuthRole.
+	DefaultRole string `koanf:"default_role"`
+}
+
+// Role returns the configured default role, normalized the same way
+// ParseRoleMapping normalizes the roles it reads, and falling back to
+// DefaultOAuthRole when unset.
+func (c OAuthUsersConfig) Role() string {
+	if role := strings.ToLower(strings.TrimSpace(c.DefaultRole)); role != "" {
+		return role
+	}
+
+	return DefaultOAuthRole
+}
+
+// Validate refuses a default role that is not a real role. A typo here would
+// otherwise provision every auto-created user into a role that grants nothing
+// and that no permission check has ever heard of — failing at startup is the
+// far cheaper outcome, and it is the same rule ParseRoleMapping applies to the
+// role names in a group mapping.
+func (c OAuthUsersConfig) Validate() error {
+	if role := c.Role(); !slices.Contains(KnownRoles, role) {
+		return fmt.Errorf("%w: unknown role %q (known: %s)",
+			ErrAuthDefaultRoleInvalid, role, strings.Join(KnownRoles, ", "))
+	}
+
+	return nil
+}
 
 // Enabled returns true when an issuer is configured. Client id and secret are
 // validated at startup once Enabled is true, so a half-configured provider
@@ -651,6 +710,10 @@ type Config struct {
 	// SlackAuth holds Slack OAuth configuration.
 	SlackAuth SlackAuthConfig `koanf:"slack_auth"`
 
+	// Auth holds the auto-provisioning settings shared by every OAuth/OIDC
+	// login provider.
+	Auth OAuthUsersConfig `koanf:"auth"`
+
 	// OIDCAuth holds the generic OpenID Connect login provider.
 	OIDCAuth OIDCAuthConfig `koanf:"oidc"`
 
@@ -782,9 +845,9 @@ func defaultConfig() Config {
 			TTLSeconds: DefaultAuthCacheTTLSeconds,
 			MaxSize:    DefaultAuthCacheMaxSize,
 		},
-		SlackAuth: SlackAuthConfig{
+		Auth: OAuthUsersConfig{
 			AutoCreateUsers: true,
-			DefaultRole:     "connector",
+			DefaultRole:     DefaultOAuthRole,
 		},
 		MCP: MCPConfig{Enabled: true},
 		OIDCAuth: OIDCAuthConfig{
@@ -842,6 +905,12 @@ func envTransform(k, v string) (string, any) {
 	// auth_cache_* -> auth_cache.*
 	if strings.HasPrefix(key, "auth_cache_") {
 		return "auth_cache." + strings.TrimPrefix(key, "auth_cache_"), v
+	}
+	// auth_* -> auth.* (DBB_AUTH_AUTO_CREATE_USERS, DBB_AUTH_DEFAULT_ROLE).
+	// Must stay *after* the auth_cache_ rule above, which it would otherwise
+	// swallow into auth.cache_*.
+	if strings.HasPrefix(key, "auth_") {
+		return "auth." + strings.TrimPrefix(key, "auth_"), v
 	}
 	// slack_auth_* -> slack_auth.*
 	if strings.HasPrefix(key, "slack_auth_") {
@@ -902,6 +971,56 @@ func envTransform(k, v string) (string, any) {
 	return key, v
 }
 
+// authProvisioningAliases maps the pre-rename keys the two auto-provisioning
+// settings used to live under onto their provider-agnostic home. Both the
+// legacy environment variables (DBB_SLACK_AUTH_*, through the slack_auth_
+// prefix rule in envTransform) and the legacy config-file keys land on the left
+// side, so one table covers both.
+var authProvisioningAliases = map[string]string{
+	"slack_auth.auto_create_users": "auth.auto_create_users",
+	"slack_auth.default_role":      "auth.default_role",
+}
+
+// canonicalAuthProvisioningEnv maps the canonical environment variables onto
+// the same keys, for the deterministic re-apply below.
+var canonicalAuthProvisioningEnv = map[string]string{
+	"DBB_AUTH_AUTO_CREATE_USERS": "auth.auto_create_users",
+	"DBB_AUTH_DEFAULT_ROLE":      "auth.default_role",
+}
+
+// applyAuthProvisioningAliases resolves DBB_AUTH_* against the legacy
+// DBB_SLACK_AUTH_* names: explicit canonical wins, then the legacy alias, then
+// the default.
+//
+// Silently ignoring the legacy names would flip auto-provisioning back on for
+// every deployment that turned it off, on nothing more than an upgrade.
+//
+// The canonical variable is re-applied from the environment explicitly, exactly
+// like DBB_SLACK_SIGNING_SECRET above: the alias promotion below runs after the
+// env provider, so without this a legacy value set alongside a canonical one
+// would overwrite it.
+func applyAuthProvisioningAliases(k *koanf.Koanf) error {
+	for legacy, canonical := range authProvisioningAliases {
+		if !k.Exists(legacy) {
+			continue
+		}
+
+		if err := k.Set(canonical, k.Get(legacy)); err != nil {
+			return fmt.Errorf("failed to apply legacy %s: %w", legacy, err)
+		}
+	}
+
+	for name, canonical := range canonicalAuthProvisioningEnv {
+		if v := os.Getenv(name); v != "" {
+			if err := k.Set(canonical, v); err != nil {
+				return fmt.Errorf("failed to apply %s: %w", name, err)
+			}
+		}
+	}
+
+	return nil
+}
+
 // Load reads configuration from environment variables and optional config file.
 // Priority order: CLI overrides > Environment variables > Config file > Defaults
 func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
@@ -944,6 +1063,10 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 		}
 	}
 
+	if err := applyAuthProvisioningAliases(k); err != nil {
+		return nil, err
+	}
+
 	// Unmarshal into Config struct
 	cfg := &Config{}
 	if err := k.Unmarshal("", cfg); err != nil {
@@ -978,6 +1101,12 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 	// the process instead of quietly degrading to "nobody matches", which at
 	// the next login would demote every mapped user.
 	if _, err := cfg.OIDCAuth.ParseRoleMapping(); err != nil {
+		return nil, err
+	}
+
+	// Same reasoning one rung down: the default role is what an unmatched user
+	// ends up with, so a typo must not survive startup.
+	if err := cfg.Auth.Validate(); err != nil {
 		return nil, err
 	}
 
