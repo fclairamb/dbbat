@@ -71,9 +71,22 @@ test-e2e:
 showcase:
 	@./scripts/showcase.sh
 
-# Run Oracle integration tests (requires Docker)
+# Run Oracle integration tests (requires Docker).
+#
+# Nine tests, each starting its own Oracle container: 15m was never enough and
+# turned a slow machine into a red suite. CI budgets 60m for this job; 40m
+# matches the other integration targets below and still fails fast on a real
+# regression.
+#
+# The default image (gvenzl/oracle-xe:18.4.0-slim) is published for linux/amd64
+# only and does not boot under emulation on Apple Silicon — it dies in instance
+# startup (ORA-27300 / ORA-00442). On arm64, run:
+#
+#   ORACLE_TEST_IMAGE=gvenzl/oracle-free:23-slim make test-e2e-oracle
+#
+# The default is left as XE because that is what the CI job (amd64) runs.
 test-e2e-oracle:
-	go test -tags integration -v -timeout 15m ./internal/proxy/oracle/...
+	go test -tags integration -v -timeout 40m -count=1 ./internal/proxy/oracle/...
 
 # Protocol integration suites (require Docker).
 #
