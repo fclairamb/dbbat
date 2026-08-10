@@ -19,10 +19,11 @@ It detects:
 - an entry whose content was **modified**;
 - an entry **deleted** from the middle of the chain;
 - entries **reordered**;
-- entries deleted from the **end** of a session's query history, or rows deleted
-  from the end of a captured result set (the final chain head is stamped on the
-  connection row when the session closes, and on the query row when the capture
-  finishes);
+- rows deleted from the **end** of a captured result set (the capture's final
+  head is sealed onto the query row when the capture finishes);
+- entries deleted from the **end** of a session's query history — but only
+  against an attacker who does not also rewrite the stamp; see
+  [The connection stamp is forgeable](#the-connection-stamp-is-forgeable);
 - entries deleted from the **start** of the audit chain (the first entry's
   `prev_mac` is a genesis MAC derived from the key, so it cannot be forged).
 
@@ -97,6 +98,24 @@ deleting the *last* statements of a session would leave a shorter chain that
 still verified. A session that died without closing has no stamp; the startup
 reconcile that closes crash-orphaned connections has no chain state to stamp.
 
+#### The connection stamp is forgeable
+
+`query_chain_mac` stores the last statement's MAC **verbatim**, and that value
+is readable from the `queries` table. So the attacker this whole feature is
+built against — someone with write access to the store but without the key —
+can delete the last statements of a session and then copy the new last
+statement's MAC into the stamp, and verification reports a clean chain. Nothing
+else covers it: `queryChainPayload` seals a statement's identity and does not
+reach the connection row, so editing the stamp does not break the query chain
+either. `query_chain_len` is likewise stored and printed but never compared.
+
+So the trailing-deletion guarantee on the *query* chain only holds against an
+attacker who stops after the delete. The row chain does not have this problem —
+its stamp is keyed, below — and the fix for the connection stamp is
+`specs/todos/2026-08-10-seal-the-connection-query-chain-stamp.md`. It is a
+separate task because stamps in the old format already exist in shipped
+deployments, so changing the format needs a compatibility story.
+
 ### `query_rows` — one chain per capture
 
 The optional capture of what a statement actually returned
@@ -125,7 +144,21 @@ has been tampered with, and verification says so.
 The head is stamped on the *query* row (`row_chain_mac`, `row_chain_len`) at the
 capture's flush barrier: the point where every captured row is durable and the
 query is about to be marked complete (`QuerySink.Flush` →
-`Store.SealQueryRowChain`). A capture whose process died before the barrier
+`Store.SealQueryRowChain`).
+
+**That stamp is itself a MAC**, not a copy of the head:
+
+```
+row_chain_mac = HMAC(chain key, "dbbat-row-chain-stamp-v1" ‖ query_uid ‖ row_chain_len ‖ head_mac)
+```
+
+Storing the head verbatim — which is what `connections.query_chain_mac` does —
+would defend against nothing, because the head is readable straight out of
+`query_rows`: whoever deletes the last captured rows can copy the new last row's
+MAC over the stamp. Sealing it means correcting the stamp after a truncation
+needs the chain key, exactly like forging a row. Verification checks both halves
+against what the surviving rows compute, the recorded length as well as the MAC,
+so editing either one is a break. A capture whose process died before the barrier
 keeps a NULL stamp and only has its prefix and interior protected — structurally
 the same gap `connections.query_chain_mac` has for a session that never closed
 cleanly. Verification enumerates queries that carry a stamp as well as queries
