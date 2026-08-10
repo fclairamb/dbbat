@@ -1,3 +1,8 @@
+---
+model: opus
+effort: high
+---
+
 # The synthetic Oracle AUTH Phase 1 fallback builds a preamble no server accepts
 
 **No GitHub issue filed yet — one should be.**

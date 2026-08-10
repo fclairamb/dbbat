@@ -1,3 +1,8 @@
+---
+model: opus
+effort: high
+---
+
 # Refresh the query chain stamp while a session is still open
 
 ## Goal
