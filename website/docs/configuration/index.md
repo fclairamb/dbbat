@@ -314,7 +314,16 @@ issuer, and anything added later.
 They used to be called `DBB_SLACK_AUTH_AUTO_CREATE_USERS` and
 `DBB_SLACK_AUTH_DEFAULT_ROLE`, back when Slack was the only login provider.
 Those names are still accepted, so nothing breaks on upgrade; the `DBB_AUTH_*`
-name wins if both are set.
+setting wins whenever both are present, whichever source each came from — an
+`auth.default_role` in your config file beats a `DBB_SLACK_AUTH_DEFAULT_ROLE`
+left over in the environment, and vice versa.
+
+The role name is matched **exactly**. `DBB_AUTH_DEFAULT_ROLE=Admin` is a startup
+error naming the spelling it wants, not a silent `admin`: before these settings
+moved, the value was read raw and never checked, so a mis-cased one matched no
+role and granted nothing at all. Folding it now would hand every
+auto-provisioned user of that deployment real admin rights on an upgrade alone,
+which is not a change an upgrade gets to make quietly.
 
 ### Slack notifications & interactivity (optional)
 

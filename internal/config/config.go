@@ -264,12 +264,16 @@ type OAuthUsersConfig struct {
 	DefaultRole string `koanf:"default_role"`
 }
 
-// Role returns the configured default role, normalized the same way
-// ParseRoleMapping normalizes the roles it reads, and falling back to
+// Role returns the configured default role verbatim, falling back to
 // DefaultOAuthRole when unset.
+//
+// Deliberately no normalization: Validate refuses anything that is not spelled
+// exactly like a known role, so in a process that booted this is either "" or
+// one of KnownRoles, and there is nothing left to normalize. See Validate for
+// why normalizing here would be actively unsafe.
 func (c OAuthUsersConfig) Role() string {
-	if role := strings.ToLower(strings.TrimSpace(c.DefaultRole)); role != "" {
-		return role
+	if c.DefaultRole != "" {
+		return c.DefaultRole
 	}
 
 	return DefaultOAuthRole
@@ -280,13 +284,29 @@ func (c OAuthUsersConfig) Role() string {
 // and that no permission check has ever heard of — failing at startup is the
 // far cheaper outcome, and it is the same rule ParseRoleMapping applies to the
 // role names in a group mapping.
+//
+// The match is exact, and a near-miss like "Admin" or " admin " is an error
+// rather than something quietly folded to "admin". That looks pedantic and is
+// not: before these settings moved off SlackAuthConfig the default role was
+// read raw and never validated, so DBB_SLACK_AUTH_DEFAULT_ROLE=Admin matched no
+// role and granted precisely nothing. Normalizing it now would turn a dormant
+// typo into a genuine admin default for every auto-provisioned user of that
+// deployment — a privilege escalation delivered by an upgrade, with nothing in
+// the release notes to warn anyone. Refusing to start says it out loud instead,
+// and the fix is one character.
 func (c OAuthUsersConfig) Validate() error {
-	if role := c.Role(); !slices.Contains(KnownRoles, role) {
-		return fmt.Errorf("%w: unknown role %q (known: %s)",
-			ErrAuthDefaultRoleInvalid, role, strings.Join(KnownRoles, ", "))
+	role := c.DefaultRole
+	if role == "" || slices.Contains(KnownRoles, role) {
+		return nil
 	}
 
-	return nil
+	if canonical := strings.ToLower(strings.TrimSpace(role)); slices.Contains(KnownRoles, canonical) {
+		return fmt.Errorf("%w: %q is not spelled like a role name — write %q",
+			ErrAuthDefaultRoleInvalid, role, canonical)
+	}
+
+	return fmt.Errorf("%w: unknown role %q (known: %s)",
+		ErrAuthDefaultRoleInvalid, role, strings.Join(KnownRoles, ", "))
 }
 
 // Enabled returns true when an issuer is configured. Client id and secret are
@@ -981,40 +1001,60 @@ var authProvisioningAliases = map[string]string{
 	"slack_auth.default_role":      "auth.default_role",
 }
 
-// canonicalAuthProvisioningEnv maps the canonical environment variables onto
-// the same keys, for the deterministic re-apply below.
-var canonicalAuthProvisioningEnv = map[string]string{
-	"DBB_AUTH_AUTO_CREATE_USERS": "auth.auto_create_users",
-	"DBB_AUTH_DEFAULT_ROLE":      "auth.default_role",
-}
-
-// applyAuthProvisioningAliases resolves DBB_AUTH_* against the legacy
-// DBB_SLACK_AUTH_* names: explicit canonical wins, then the legacy alias, then
-// the default.
+// operatorLayer returns everything the operator actually configured — the
+// config file and the environment — with the struct defaults left out.
 //
-// Silently ignoring the legacy names would flip auto-provisioning back on for
-// every deployment that turned it off, on nothing more than an upgrade.
-//
-// The canonical variable is re-applied from the environment explicitly, exactly
-// like DBB_SLACK_SIGNING_SECRET above: the alias promotion below runs after the
-// env provider, so without this a legacy value set alongside a canonical one
-// would overwrite it.
-func applyAuthProvisioningAliases(k *koanf.Koanf) error {
-	for legacy, canonical := range authProvisioningAliases {
-		if !k.Exists(legacy) {
-			continue
-		}
+// That distinction is the whole point: in the merged koanf every key exists,
+// because defaultConfig() populates it, so "is auth.default_role set?" cannot
+// be answered there. Here it can.
+func operatorLayer(configPath string) (*koanf.Koanf, error) {
+	explicit := koanf.New(koanfDelim)
 
-		if err := k.Set(canonical, k.Get(legacy)); err != nil {
-			return fmt.Errorf("failed to apply legacy %s: %w", legacy, err)
+	if configPath != "" {
+		if err := loadConfigFile(explicit, configPath); err != nil {
+			return nil, fmt.Errorf("failed to load config file: %w", err)
 		}
 	}
 
-	for name, canonical := range canonicalAuthProvisioningEnv {
-		if v := os.Getenv(name); v != "" {
-			if err := k.Set(canonical, v); err != nil {
-				return fmt.Errorf("failed to apply %s: %w", name, err)
-			}
+	if err := explicit.Load(env.Provider(koanfDelim, env.Opt{Prefix: "DBB_", TransformFunc: envTransform}), nil); err != nil {
+		return nil, fmt.Errorf("failed to load environment variables: %w", err)
+	}
+
+	return explicit, nil
+}
+
+// applyAuthProvisioningAliases resolves the canonical auth.* auto-provisioning
+// keys against the legacy slack_auth.* ones: an explicitly configured canonical
+// value wins, then the legacy alias, then the default.
+//
+// Silently ignoring the legacy names would flip auto-provisioning back on for
+// every deployment that turned it off, on nothing more than an upgrade — hence
+// the promotion. Silently letting a lingering legacy value beat a canonical one
+// would be the same failure in the other direction, hence the precedence check.
+//
+// This is deliberately *not* the shape DBB_SLACK_SIGNING_SECRET uses a few
+// lines above. That alias is a pure environment-variable-name ambiguity onto
+// one koanf key, where the only risk is env-provider map ordering, and
+// re-applying the canonical variable from os.Getenv closes it completely. This
+// one is a two-key alias: the canonical and the legacy value live under
+// different keys and can each arrive from either the config file or the
+// environment. An os.Getenv re-apply would only cover the deployments that set
+// the canonical name in the environment, and would let a legacy value beat a
+// canonical one written in the config file. Asking the operator layer instead
+// covers all four combinations, in both directions.
+func applyAuthProvisioningAliases(k, explicit *koanf.Koanf) error {
+	for legacy, canonical := range authProvisioningAliases {
+		// Canonical set from any source: it already sits in k, and it wins.
+		if explicit.Exists(canonical) {
+			continue
+		}
+
+		if !explicit.Exists(legacy) {
+			continue
+		}
+
+		if err := k.Set(canonical, explicit.Get(legacy)); err != nil {
+			return fmt.Errorf("failed to apply legacy %s: %w", legacy, err)
 		}
 	}
 
@@ -1101,7 +1141,12 @@ func Load(opts LoadOptions, cliOverrides ...func(*Config)) (*Config, error) {
 		}
 	}
 
-	if err := applyAuthProvisioningAliases(k); err != nil {
+	explicit, err := operatorLayer(configPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := applyAuthProvisioningAliases(k, explicit); err != nil {
 		return nil, err
 	}
 

@@ -239,11 +239,12 @@ sqlcmd -S localhost,1434 -U developer -P temppass123 -d production -C
 | `DBB_OIDC_GROUPS_CLAIM` | ID-token claim carrying directory group membership | `groups` |
 | `DBB_OIDC_ROLE_MAPPING` | Binds roles to directory groups (`admin=db-admins,viewer=analysts`); applied on every login | - (roles stay manual) |
 | `DBB_AUTH_AUTO_CREATE_USERS` | Let a verified SSO identity with no local account provision one on first login. Applies to **every** login provider | `true` |
-| `DBB_AUTH_DEFAULT_ROLE` | Role such an account starts with, and the floor a role mapping never digs below. Must be a real role (`admin`, `viewer`, `connector`) or startup fails | `connector` |
+| `DBB_AUTH_DEFAULT_ROLE` | Role such an account starts with, and the floor a role mapping never digs below. Must be spelled exactly like a real role (`admin`, `viewer`, `connector`) or startup fails | `connector` |
 
 The two `DBB_AUTH_*` settings above were previously named
 `DBB_SLACK_AUTH_AUTO_CREATE_USERS` / `DBB_SLACK_AUTH_DEFAULT_ROLE`; those names
-still work as aliases, and the new ones win when both are set.
+still work as aliases, and the `DBB_AUTH_*` setting wins whenever both are
+present, whichever source each came from (environment or config file).
 
 See [Configuration](https://dbbat.com/docs/configuration) for the full set, including rate limiting, query storage, hash presets, auth cache, Slack OAuth, demo target, and dev redirects.
 
