@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 
@@ -337,22 +339,36 @@ func (s *Server) rejectLastAdminDemotion(c *gin.Context, uid uuid.UUID, roles []
 		return true
 	}
 
-	if !targetUser.IsAdmin() {
-		return false
-	}
-
-	adminCount, err := s.store.CountAdmins(c.Request.Context())
+	last, err := s.isLastAdmin(c.Request.Context(), targetUser)
 	if err != nil {
 		writeInternalError(c, s.logger, err, "failed to count admin users")
 		return true
 	}
 
-	if adminCount <= 1 {
+	if last {
 		writeError(c, http.StatusConflict, ErrCodeConflict, "cannot remove the admin role from the last admin user")
 		return true
 	}
 
 	return false
+}
+
+// isLastAdmin reports whether user is the only admin left, i.e. whether taking
+// the admin role away would leave the instance with nobody able to administer
+// it. Shared by the users API (which answers 409) and the OIDC group mapping
+// (which silently retains the role), so the two can never drift apart on what
+// "the last admin" means.
+func (s *Server) isLastAdmin(ctx context.Context, user *store.User) (bool, error) {
+	if !user.IsAdmin() {
+		return false, nil
+	}
+
+	adminCount, err := s.store.CountAdmins(ctx)
+	if err != nil {
+		return false, fmt.Errorf("count admin users: %w", err)
+	}
+
+	return adminCount <= 1, nil
 }
 
 // handleDeleteUser deletes a user

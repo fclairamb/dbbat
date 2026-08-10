@@ -278,12 +278,12 @@ func (s *Server) retainLastAdmin(
 	mapping map[string][]string,
 	resolution roleResolution,
 ) (roleResolution, error) {
-	adminCount, err := s.store.CountAdmins(ctx)
+	last, err := s.isLastAdmin(ctx, user)
 	if err != nil {
-		return resolution, fmt.Errorf("count admins before role sync: %w", err)
+		return resolution, fmt.Errorf("check last admin before role sync: %w", err)
 	}
 
-	if adminCount > 1 {
+	if !last {
 		return resolution, nil
 	}
 
