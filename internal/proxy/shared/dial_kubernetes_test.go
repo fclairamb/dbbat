@@ -1,0 +1,226 @@
+package shared
+
+import (
+	"context"
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/google/uuid"
+
+	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/proxy/upstream"
+	"github.com/fclairamb/dbbat/internal/store"
+)
+
+// The stream mechanics of a port-forward (the SPDY upgrade, the data/error
+// stream pair, the net.Conn adapter) are covered against an in-process fake API
+// server in internal/proxy/upstream. What these tests pin is the *dispatch*
+// this package owns: which via rows are recognized, how the tunnel is built
+// from a row, how it is pooled and dropped, and which nestings are refused.
+
+// clusterRow builds a `protocol: kubernetes` server row with its ServiceAccount
+// token encrypted the way the store stores it.
+func clusterRow(t *testing.T, host string, port int) *store.Server {
+	t.Helper()
+
+	uid := uuid.New()
+
+	token, err := crypto.Encrypt([]byte("sa-token"), testKey(), crypto.ServerAAD(uid.String()))
+	if err != nil {
+		t.Fatalf("encrypt token: %v", err)
+	}
+
+	return &store.Server{
+		UID:               uid,
+		Host:              host,
+		Port:              port,
+		Protocol:          store.ProtocolKubernetes,
+		PasswordEncrypted: token,
+		ProtocolData: &store.ServerProtocolData{
+			Kubernetes: &store.KubernetesServerData{Namespace: "data", InsecureSkipTLSVerify: true},
+		},
+	}
+}
+
+func TestKubernetesTunnelForBuildsPoolsAndDrops(t *testing.T) {
+	t.Parallel()
+
+	resolver := newFakeResolver()
+	cluster := clusterRow(t, "api.example.invalid", 6443)
+	resolver.servers[cluster.UID] = cluster
+
+	d := NewDialer()
+
+	tunnel, err := d.ConnectKubernetes(context.Background(), resolver, testKey(), cluster.UID)
+	if err != nil {
+		t.Fatalf("ConnectKubernetes() error = %v", err)
+	}
+	if tunnel.Namespace() != "data" {
+		t.Errorf("Namespace() = %q, want %q", tunnel.Namespace(), "data")
+	}
+
+	// A second request must reuse the pooled tunnel rather than rebuild it.
+	again, err := d.ConnectKubernetes(context.Background(), resolver, testKey(), cluster.UID)
+	if err != nil {
+		t.Fatalf("ConnectKubernetes() second error = %v", err)
+	}
+	if again != tunnel {
+		t.Error("the tunnel was rebuilt instead of reused from the pool")
+	}
+
+	d.mu.Lock()
+	pooled := len(d.tunnels)
+	d.mu.Unlock()
+	if pooled != 1 {
+		t.Errorf("tunnel pool size = %d, want 1", pooled)
+	}
+
+	d.drop(cluster.UID)
+
+	d.mu.Lock()
+	pooled = len(d.tunnels)
+	d.mu.Unlock()
+	if pooled != 0 {
+		t.Errorf("tunnel pool size after drop = %d, want 0", pooled)
+	}
+
+	// Close must clear the tunnel pool too, or a connectivity check would leak
+	// a stale client into the next probe.
+	if _, err := d.ConnectKubernetes(context.Background(), resolver, testKey(), cluster.UID); err != nil {
+		t.Fatalf("ConnectKubernetes() after drop error = %v", err)
+	}
+
+	d.Close()
+
+	d.mu.Lock()
+	pooled = len(d.tunnels)
+	d.mu.Unlock()
+	if pooled != 0 {
+		t.Errorf("tunnel pool size after Close = %d, want 0", pooled)
+	}
+}
+
+func TestKubernetesTunnelForRejectsAMissingToken(t *testing.T) {
+	t.Parallel()
+
+	resolver := newFakeResolver()
+	uid := uuid.New()
+	resolver.servers[uid] = &store.Server{
+		UID: uid, Host: "api.example.invalid", Port: 6443, Protocol: store.ProtocolKubernetes,
+	}
+
+	_, err := NewDialer().ConnectKubernetes(context.Background(), resolver, testKey(), uid)
+	if !errors.Is(err, upstream.ErrKubernetesNoToken) {
+		t.Fatalf("ConnectKubernetes() error = %v, want ErrKubernetesNoToken", err)
+	}
+}
+
+func TestKubernetesTunnelForRejectsANonClusterRow(t *testing.T) {
+	t.Parallel()
+
+	resolver := newFakeResolver()
+	uid := uuid.New()
+	resolver.servers[uid] = &store.Server{
+		UID: uid, Host: "db.example.invalid", Port: 5432, Protocol: store.ProtocolPostgreSQL,
+	}
+
+	_, err := NewDialer().ConnectKubernetes(context.Background(), resolver, testKey(), uid)
+	if !errors.Is(err, ErrViaNotTunnel) {
+		t.Fatalf("ConnectKubernetes() error = %v, want ErrViaNotTunnel", err)
+	}
+}
+
+// TestDialUpstreamViaKubernetesUnreachableCluster checks that an unreachable
+// API server surfaces as a tunnel failure naming the target, rather than as a
+// panic or as a bare TCP error the admin cannot place.
+func TestDialUpstreamViaKubernetesUnreachableCluster(t *testing.T) {
+	t.Parallel()
+
+	resolver := newFakeResolver()
+	cluster := clusterRow(t, "127.0.0.1", 1) // nothing listens on port 1
+	resolver.servers[cluster.UID] = cluster
+
+	target := &store.Server{
+		Host: "svc/postgres", Port: 5432, Protocol: store.ProtocolPostgreSQL,
+		ViaUID: &cluster.UID,
+	}
+
+	_, err := NewDialer().DialUpstream(context.Background(), resolver, testKey(), target)
+	if err == nil {
+		t.Fatal("DialUpstream() succeeded against an unreachable API server")
+	}
+	if !strings.Contains(err.Error(), "kubernetes tunnel") {
+		t.Errorf("DialUpstream() error = %v, want it to name the kubernetes tunnel", err)
+	}
+}
+
+// TestSSHBastionBehindKubernetesIsRefused pins the one nesting that is
+// deliberately not implemented. The store lets the chain validate, so the
+// dialer must say precisely why it cannot walk it.
+func TestSSHBastionBehindKubernetesIsRefused(t *testing.T) {
+	t.Parallel()
+
+	resolver := newFakeResolver()
+	cluster := clusterRow(t, "api.example.invalid", 6443)
+	resolver.servers[cluster.UID] = cluster
+
+	pk, _ := genClientKey(t)
+	bastionUID := uuid.New()
+	resolver.servers[bastionUID] = &store.Server{
+		UID: bastionUID, Host: "bastion.example.invalid", Port: 22,
+		Username: "tester", Protocol: store.ProtocolSSH,
+		ProtocolData: &store.ServerProtocolData{SSH: &store.SSHServerData{PrivateKey: pk}},
+		ViaUID:       &cluster.UID,
+	}
+
+	target := &store.Server{
+		Host: "db.example.invalid", Port: 5432, Protocol: store.ProtocolPostgreSQL,
+		ViaUID: &bastionUID,
+	}
+
+	_, err := NewDialer().DialUpstream(context.Background(), resolver, testKey(), target)
+	if !errors.Is(err, ErrKubernetesViaUnsupported) {
+		t.Fatalf("DialUpstream() error = %v, want ErrKubernetesViaUnsupported", err)
+	}
+}
+
+// TestKubernetesClusterBehindAnSSHBastion covers the supported nesting: the API
+// server is only reachable through a jump host, so building the tunnel has to
+// establish the bastion connection first and hand its dial function down.
+func TestKubernetesClusterBehindAnSSHBastion(t *testing.T) {
+	t.Parallel()
+
+	pk, pub := genClientKey(t)
+	fake := startFakeSSHServer(t, pub)
+	bastionHost, bastionPort := splitHostPort(t, fake.addr())
+
+	resolver := newFakeResolver()
+	bastionUID := uuid.New()
+	resolver.servers[bastionUID] = &store.Server{
+		UID: bastionUID, Host: bastionHost, Port: bastionPort,
+		Username: "tester", Protocol: store.ProtocolSSH,
+		ProtocolData: &store.ServerProtocolData{SSH: &store.SSHServerData{PrivateKey: pk}},
+	}
+
+	cluster := clusterRow(t, "api.example.invalid", 6443)
+	cluster.ViaUID = &bastionUID
+	resolver.servers[cluster.UID] = cluster
+
+	d := NewDialer()
+
+	if _, err := d.ConnectKubernetes(context.Background(), resolver, testKey(), cluster.UID); err != nil {
+		t.Fatalf("ConnectKubernetes(via bastion) error = %v", err)
+	}
+
+	d.mu.Lock()
+	clients, tunnels := len(d.clients), len(d.tunnels)
+	d.mu.Unlock()
+
+	if clients != 1 {
+		t.Errorf("ssh pool size = %d, want 1 (the bastion must have been dialed)", clients)
+	}
+	if tunnels != 1 {
+		t.Errorf("tunnel pool size = %d, want 1", tunnels)
+	}
+}
