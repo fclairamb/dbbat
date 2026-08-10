@@ -138,10 +138,32 @@ number, not a fresh timestamp.
 | A record is **deleted** from the middle | Yes | The successor's `prev_mac` no longer matches, and its position leaves a gap |
 | Records are **reordered** | Yes | Positions and `prev_mac` links no longer line up |
 | The **first** records are deleted | Yes | The first entry's `prev_mac` is a genesis MAC derived from the key, which cannot be forged |
-| The **last** statements of a closed session are deleted | Yes | The session's final chain head is stamped on the connection row when it closes |
-| The **last** rows of a captured result set are deleted | Yes | The capture's final chain head is stamped on the query row when the capture finishes |
-| A captured result set is deleted **outright** | Yes | The stamp on the query still claims a head no surviving row computes |
+| The **last** statements of a closed session are deleted | Partly — see the warning below | The session's final chain head is stamped on the connection row when it closes, but that stamp is not itself sealed |
+| The **last** rows of a captured result set are deleted | Yes | The capture's final head is sealed onto the query row with a keyed MAC when the capture finishes, so correcting it needs the key |
+| A captured result set is deleted **outright** | Yes | The sealed stamp on the query still attests to rows no longer there |
 | The **whole** chain is truncated and re-sealed by someone holding the key | Only against a head MAC you recorded elsewhere | See the tip above |
+
+:::warning A trailing deletion on the query chain can be covered up
+
+Deleting the **last statements of a session** is caught by the chain head
+stamped on the connection row — but that stamp is a plain copy of the last
+statement's MAC, and that value is readable from the query history itself. So
+someone with write access to DBBat's storage database can delete the last
+statements *and then rewrite the stamp to match*, and the verification reports a
+clean chain. No key is needed.
+
+It catches the careless case, not the deliberate one. The same is **not** true of
+the captured result rows: their stamp is a keyed MAC, so it cannot be corrected
+without `DBB_KEY`.
+
+If trailing-deletion detection on the query history is load-bearing for a
+control, say so explicitly and lean on the recorded head MAC (below) or on
+shipping the logs to a WORM store or SIEM as well. Fixing the stamp format is
+[tracked](https://github.com/fclairamb/dbbat/blob/main/specs/todos/2026-08-10-seal-the-connection-query-chain-stamp.md);
+it is not a one-line change because stamps in the old format already exist in
+deployed installations.
+
+:::
 
 ## What it does not do
 

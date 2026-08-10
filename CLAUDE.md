@@ -386,7 +386,11 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   chain by deleting what it is meant to delete, and each stamps its final head
   when it finishes: the session's on the connection row at close
   (`query_chain_mac`), the capture's on the query row at the flush barrier
-  (`row_chain_mac`). Verify with `dbbat audit verify [--queries|--rows]` — the
+  (`row_chain_mac`). **`row_chain_mac` is a keyed MAC over the head;
+  `query_chain_mac` is a verbatim copy of it and is therefore forgeable without
+  the key** — a known hole in the shipped query chain, tracked in
+  `specs/todos/2026-08-10-seal-the-connection-query-chain-stamp.md` and stated
+  in the docs. Verify with `dbbat audit verify [--queries|--rows]` — the
   row chains are CLI-only — or over REST with the admin-only
   `GET /api/v1/audit/verify` and `GET /api/v1/audit/verify/queries` — which
   return counts, the head MAC and the first break, never the key or a record's

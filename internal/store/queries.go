@@ -305,6 +305,19 @@ type rowChainHead struct {
 //
 // Locks are taken in query-uid order (rowChainGroups sorts), which is the same
 // order for every caller, so two overlapping batches cannot deadlock.
+//
+// One safety net the query chain has is deliberately absent here: there is no
+// unique index on query_rows(query_id, row_number), so a stale cached head does
+// not collide with a constraint and force the retry the way a stale query-chain
+// head does. It does not need to — a query's rows are captured by exactly one
+// sink in one process, drained by the single row-writer goroutine, so no second
+// writer can move a capture's head underneath this one. The retry loop is kept
+// for the transaction-level failures it does cover. A unique index was
+// considered and rejected: row_number is produced by the capture paths, not by
+// the store, so a protocol that ever restarted its numbering would turn a
+// duplicate into a failed INSERT that loses the whole batch — up to a thousand
+// rows across unrelated captures — which is a far worse outcome than the
+// ordering ambiguity it would prevent.
 func (s *Store) appendRowChains(ctx context.Context, rows []QueryRowModel) error {
 	groups := s.rowChainGroups(rows)
 
