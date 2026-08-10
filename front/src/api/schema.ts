@@ -1575,6 +1575,85 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/audit/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Verify the audit chain (admin only)
+         * @description Walks the store-wide HMAC audit chain oldest to newest and reports the
+         *     first record that does not add up, together with the chain head.
+         *
+         *     **This is not equivalent to `dbbat audit verify`.** The CLI runs where
+         *     the key lives and can be run by someone who does not trust the running
+         *     server; this endpoint is served *by* that server, so a compromised or
+         *     modified dbbat can answer `"verified": true` without walking anything.
+         *     Use it for routine evidence collection, and the CLI (or an independent
+         *     re-run of it) when the integrity of the process itself is in question.
+         *
+         *     Record `head_mac` outside the database. A chain always verifies against
+         *     itself, so truncating and re-sealing it with a stolen key is invisible
+         *     from the inside; comparing today's head against the one recorded last
+         *     quarter is what closes that hole.
+         *
+         *     `unverifiable_pre_anchor_entries` counts rows written before chaining
+         *     was introduced. Nothing sealed them, and nothing can after the fact.
+         *
+         *     The response never contains the chain key, and never contains the
+         *     content of any audited record.
+         *
+         *     A full walk is O(rows), so the outcome of a walk is cached for a minute
+         *     (`cached` says whether this answer was reused, `checked_at` when it was
+         *     computed) and at most one walk runs at a time per instance.
+         *
+         *     Requires admin role.
+         */
+        get: operations["verifyAuditChain"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/audit/verify/queries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Verify the per-connection query chains (admin only)
+         * @description Walks the query chain of every connection that has one, or of a single
+         *     session when `connection` is given. A scoped walk additionally reports
+         *     that chain's head.
+         *
+         *     `chains_with_truncated_prefix` counts chains missing their oldest
+         *     statements — what `DBB_QUERY_STORAGE_RETENTION` leaves behind on a
+         *     long-lived session. That is expected housekeeping, not tampering, and
+         *     everything after the truncation is still verified.
+         *
+         *     The same trust caveat as `GET /audit/verify` applies: an answer from
+         *     the server is only as trustworthy as the server. The response never
+         *     contains the chain key, and never contains SQL text, parameters or any
+         *     other statement content.
+         *
+         *     Requires admin role.
+         */
+        get: operations["verifyQueryChains"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/servers/{uid}/connection": {
         parameters: {
             query?: never;
@@ -2633,16 +2712,21 @@ export interface components {
             user_id: string;
             /**
              * Format: uuid
-             * @description The grant's anchor database — the one it was issued for. Always
-             *     covered, whatever happens to `server_group_uid` afterwards.
+             * @description The grant's anchor database — the one it was issued for. It is what
+             *     an unbound grant covers, and what a group-bound one falls back to
+             *     if its group is deleted outright.
              */
             database_id: string;
             /**
              * Format: uuid
-             * @description The server group this grant is bound to, *in addition to* its
-             *     anchor database: the grant covers every server the group contains
-             *     **right now**. Membership is live and never snapshotted, so adding
-             *     a server to the group widens this grant the instant it is saved.
+             * @description The server group this grant is bound to. A bound grant covers every
+             *     server the group contains **right now**, and only those: the
+             *     binding replaces the single-database scope rather than adding to
+             *     it, so a server removed from the group stops being covered even
+             *     when it is the anchor.
+             *
+             *     Membership is live and never snapshotted, so adding a server to the
+             *     group widens this grant the instant it is saved.
              *
              *     `null` — the default, and the state of every grant issued from a
              *     definition with no server-group scope — means "anchor database
@@ -3219,6 +3303,136 @@ export interface components {
              */
             created_at: string;
         };
+        /**
+         * @description The first record that failed to verify. It identifies the record and
+         *     says what did not add up; it never echoes the record's content.
+         */
+        ChainBreak: {
+            /**
+             * Format: uuid
+             * @description UID of the offending row, or of the connection when the break is a
+             *     stamped-head mismatch
+             */
+            uid: string;
+            /**
+             * Format: int64
+             * @description Position in the chain, or 0 when the break is about the chain as a whole
+             */
+            chain_seq: number;
+            /**
+             * Format: uuid
+             * @description Set for query-chain breaks
+             */
+            connection_uid?: string;
+            /** @description Human-readable description of what did not add up */
+            reason: string;
+        };
+        /**
+         * @description Outcome of walking the store-wide audit chain. Carries counts,
+         *     positions and the chain head — never the chain key, never the content
+         *     of an audited record.
+         */
+        AuditChainVerification: {
+            /**
+             * @description Which chain was walked
+             * @enum {string}
+             */
+            chain: "audit";
+            /** @description True when the chain is intact */
+            verified: boolean;
+            /**
+             * Format: int64
+             * @description How many chained rows were walked. When there is a break, this is
+             *     how many verified before it: nothing after a break means anything.
+             */
+            entries: number;
+            /**
+             * Format: int64
+             * @description Chain position the walk ended on
+             */
+            head_seq: number;
+            /**
+             * @description The chain head, hex-encoded. Record it outside the database — it is
+             *     what detects a chain truncated and re-sealed by someone who had the
+             *     key. Publishing a MAC is safe; the key that produced it never
+             *     leaves the process.
+             */
+            head_mac: string;
+            /**
+             * Format: int64
+             * @description Rows written before chaining was introduced. No MAC exists for them
+             *     and none can be created after the fact, so they are reported rather
+             *     than folded into the verified count.
+             */
+            unverifiable_pre_anchor_entries: number;
+            break?: components["schemas"]["ChainBreak"];
+            /**
+             * Format: date-time
+             * @description When this walk ran
+             */
+            checked_at: string;
+            /**
+             * @description True when this answer is a remembered walk rather than one run for
+             *     this request. A chain walk is O(rows), so its outcome is cached for
+             *     a minute.
+             */
+            cached: boolean;
+        };
+        /**
+         * @description Outcome of walking the per-connection query chains. Carries counts,
+         *     positions and — for a single-connection walk — that chain's head. Never
+         *     the chain key, never SQL text, parameters or any other statement
+         *     content.
+         */
+        QueryChainVerification: {
+            /**
+             * @description Which chain was walked
+             * @enum {string}
+             */
+            chain: "queries";
+            /** @description True when every chain walked is intact */
+            verified: boolean;
+            /**
+             * Format: uuid
+             * @description Set only when the walk was scoped to one session
+             */
+            connection_uid?: string;
+            /**
+             * Format: int64
+             * @description How many sessions were walked
+             */
+            connections: number;
+            /**
+             * Format: int64
+             * @description How many chained statements were checked across them
+             */
+            statements: number;
+            /**
+             * Format: int64
+             * @description Chains missing their oldest statements — what
+             *     DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived session.
+             *     Expected housekeeping, not tampering; everything after the
+             *     truncation is still verified.
+             */
+            chains_with_truncated_prefix: number;
+            /**
+             * Format: int64
+             * @description Chain position the walk ended on. Reported only for a
+             *     single-connection walk: an aggregate head over many independent
+             *     chains would not mean anything.
+             */
+            head_seq?: number;
+            /** @description That chain's head, hex-encoded. Single-connection walks only. */
+            head_mac?: string;
+            break?: components["schemas"]["ChainBreak"];
+            /**
+             * Format: date-time
+             * @description When this walk ran
+             */
+            checked_at: string;
+            /** @description True when this answer is a remembered walk rather than one run for this request */
+            cached: boolean;
+        };
         /** @description Ready-to-paste connection URL for a database */
         ConnectionInfo: {
             /** Format: uuid */
@@ -3520,6 +3734,9 @@ export type QueryWithRows = components['schemas']['QueryWithRows'];
 export type QueryRow = components['schemas']['QueryRow'];
 export type QueryRowsResponse = components['schemas']['QueryRowsResponse'];
 export type AuditEvent = components['schemas']['AuditEvent'];
+export type ChainBreak = components['schemas']['ChainBreak'];
+export type AuditChainVerification = components['schemas']['AuditChainVerification'];
+export type QueryChainVerification = components['schemas']['QueryChainVerification'];
 export type ConnectionInfo = components['schemas']['ConnectionInfo'];
 export type GlobalParameter = components['schemas']['GlobalParameter'];
 export type SetParameterRequest = components['schemas']['SetParameterRequest'];
@@ -5930,6 +6147,74 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    verifyAuditChain: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Verification outcome */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditChainVerification"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description This instance has no chain key, so nothing it stores is chained */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    verifyQueryChains: {
+        parameters: {
+            query?: {
+                /** @description Verify only this connection's chain */
+                connection?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Verification outcome */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QueryChainVerification"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description This instance has no chain key, so nothing it stores is chained */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
             500: components["responses"]["InternalError"];
         };
     };
