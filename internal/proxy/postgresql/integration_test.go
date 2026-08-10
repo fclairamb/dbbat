@@ -699,8 +699,69 @@ func TestIntegration_ReadOnlyGrant_BlocksWrite(t *testing.T) {
 	require.NoError(t, conn.QueryRow(ctx, "SELECT count(*) FROM ro").Scan(&got))
 	assert.Equal(t, 0, got)
 
-	_, err = conn.Exec(ctx, "INSERT INTO ro (id) VALUES (1)")
+	// pgx defaults to the extended protocol, so this is a Parse refusal.
+	const extendedSQL = "INSERT INTO ro (id) VALUES (1)"
+
+	_, err = conn.Exec(ctx, extendedSQL)
 	require.Error(t, err, "insert must be refused under a read-only grant")
+
+	// And the same refusal down the simple query protocol.
+	const simpleSQL = "INSERT INTO ro (id) VALUES (2)"
+
+	_, err = conn.Exec(ctx, simpleSQL, pgx.QueryExecModeSimpleProtocol)
+	require.Error(t, err, "insert must be refused under a read-only grant (simple protocol)")
+
+	// The connection must survive both refusals: an extended-protocol refusal
+	// owes the client exactly one ReadyForQuery, and only on its Sync.
+	require.NoError(t, conn.QueryRow(ctx, "SELECT count(*) FROM ro").Scan(&got))
+	assert.Equal(t, 0, got, "neither refused insert may have reached upstream")
+
+	f.assertBlockedQueryLogged(ctx, extendedSQL)
+	f.assertBlockedQueryLogged(ctx, simpleSQL)
+}
+
+// assertBlockedQueryLogged is the point of spec
+// 2026-08-09-log-blocked-statements-pg-oracle: a statement dbbat refused must
+// leave a queries row behind, carrying the refusal as `error`, attributed to
+// the connection, with duration and rows_affected at zero — and exactly one
+// such row, even though the extended protocol pipelines a Bind and an Execute
+// behind the Parse that was refused.
+func (f *fixture) assertBlockedQueryLogged(ctx context.Context, sql string) {
+	f.t.Helper()
+
+	var matches []store.Query
+
+	require.Eventually(f.t, func() bool {
+		queries, err := f.store.ListQueries(ctx, store.QueryFilter{Limit: 500})
+		if err != nil {
+			return false
+		}
+
+		matches = nil
+
+		for i := range queries {
+			if queries[i].SQLText == sql {
+				matches = append(matches, queries[i])
+			}
+		}
+
+		return len(matches) > 0
+	}, 10*time.Second, 100*time.Millisecond, "the refused statement %q was never logged", sql)
+
+	require.Len(f.t, matches, 1, "a refused statement must be logged exactly once")
+
+	row := matches[0]
+	require.NotNil(f.t, row.Error, "a refused statement must be logged with its refusal as error")
+	assert.NotEmpty(f.t, *row.Error)
+	require.NotNil(f.t, row.DurationMs)
+	assert.InDelta(f.t, 0, *row.DurationMs, 0.001, "a refused statement never ran")
+	require.NotNil(f.t, row.RowsAffected)
+	assert.Equal(f.t, int64(0), *row.RowsAffected)
+
+	// It joins to the user and the database like any other query.
+	conn, err := f.store.GetConnectionByUID(ctx, row.ConnectionID)
+	require.NoError(f.t, err)
+	assert.Equal(f.t, f.user.UID, conn.UserID)
 }
 
 // TestIntegration_BlockDDL_BlocksCreateTable verifies block_ddl rejects DDL
@@ -721,8 +782,22 @@ func TestIntegration_BlockDDL_BlocksCreateTable(t *testing.T) {
 	_, err = conn.Exec(ctx, "INSERT INTO ddl (id) VALUES (1)")
 	require.NoError(t, err, "DML should still be allowed under block_ddl")
 
-	_, err = conn.Exec(ctx, "CREATE TABLE blocked_ddl (id int)")
+	const extendedSQL = "CREATE TABLE blocked_ddl (id int)"
+
+	_, err = conn.Exec(ctx, extendedSQL)
 	require.Error(t, err, "CREATE TABLE must be refused under a block_ddl grant")
+
+	const simpleSQL = "CREATE TABLE blocked_ddl_simple (id int)"
+
+	_, err = conn.Exec(ctx, simpleSQL, pgx.QueryExecModeSimpleProtocol)
+	require.Error(t, err, "CREATE TABLE must be refused under a block_ddl grant (simple protocol)")
+
+	// DML still works afterwards: neither refusal desynchronised the session.
+	_, err = conn.Exec(ctx, "INSERT INTO ddl (id) VALUES (2)")
+	require.NoError(t, err, "the session must survive a refused statement")
+
+	f.assertBlockedQueryLogged(ctx, extendedSQL)
+	f.assertBlockedQueryLogged(ctx, simpleSQL)
 }
 
 // TestIntegration_BlockCopy_BlocksCopy verifies block_copy rejects COPY.
