@@ -847,43 +847,25 @@ const (
 // by definition a framing this upstream accepts. With no capture to read (the
 // legacy non-relay path), the modern 4-byte form is assumed: it is what every
 // currently supported client/server pair negotiates.
+// The width comes from ttcAuthFuncHeaderLen — the one place that rule lives, so
+// the side that writes a header and the sides that read one cannot drift apart.
+// Its ok=false (a wide/OCI body, or one too short to tell) means "narrow by
+// default", which is right for a reader and wrong for a writer: narrowing a
+// header dbbat is about to send on a guess is exactly the corruption this whole
+// change is about. So only an affirmative narrow reading shortens it.
 func (s *session) syntheticAuthHeader(sub, seq byte) []byte {
 	header := []byte{byte(TTCFuncPiggyback), sub, seq, 0x00}
 
-	if s.clientAuthPhase1Pkt != nil && len(s.clientAuthPhase1Pkt.Payload) > ttcDataFlagsSize {
-		if extended, ok := ttcAuthFuncHeaderExtended(s.clientAuthPhase1Pkt.Payload[ttcDataFlagsSize:]); ok && !extended {
-			header = header[:3]
-		}
+	if s.clientAuthPhase1Pkt == nil || len(s.clientAuthPhase1Pkt.Payload) <= ttcDataFlagsSize {
+		return header
+	}
+
+	if width, ok := ttcAuthFuncHeaderLen(s.clientAuthPhase1Pkt.Payload[ttcDataFlagsSize:]); ok &&
+		width == ttcAuthFuncHeaderNarrow {
+		header = header[:ttcAuthFuncHeaderNarrow]
 	}
 
 	return header
-}
-
-// ttcAuthFuncHeaderExtended reports whether a captured thin-client AUTH body
-// frames its TTC function call as [03 <sub> <seq> 00] (extended) rather than
-// [03 <sub> <seq>]. ok=false when the body isn't a thin AUTH message and the
-// question doesn't apply.
-//
-// The discriminator is byte 3: after the header every thin client writes the
-// 0x01 "username present" marker, so a 0x00 there can only be the extension
-// byte. Wide (OCI/sqlplus) bodies frame their preamble differently and are
-// excluded rather than guessed at.
-func ttcAuthFuncHeaderExtended(body []byte) (bool, bool) {
-	const minAuthBodyLen = 5
-
-	if len(body) < minAuthBodyLen || body[0] != byte(TTCFuncPiggyback) {
-		return false, false
-	}
-
-	if body[1] != PiggybackSubAuth1 && body[1] != PiggybackSubAuth2 {
-		return false, false
-	}
-
-	if payloadUsesWideKVEncoding(body) {
-		return false, false
-	}
-
-	return body[3] == 0x00, true
 }
 
 // buildClientAuthPhase1 returns the TTC body for an AUTH Phase 1 message.

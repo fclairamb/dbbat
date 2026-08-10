@@ -49,31 +49,48 @@ func TestRewriteAuthPhase1Username_CLREncoding(t *testing.T) {
 func TestTTCAuthFuncHeaderLen(t *testing.T) {
 	t.Parallel()
 
+	// The wide (OCI/sqlplus) preamble captured in sqlplus_cursor_reexec.pcapng:
+	// pointer runs and 4-byte little-endian fields, no username-present marker,
+	// so byte 3 carries no width information at all. Its first AUTH_ key is
+	// framed the wide way so payloadUsesWideKVEncoding recognizes it.
+	wideBody := []byte{
+		0x03, 0x76, 0x02, 0x00, 0x03,
+		0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+		0x12, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+		0x06, 's', 'y', 's', 't', 'e', 'm',
+		0x0d, 0x00, 0x00, 0x00, 0x0d,
+		'A', 'U', 'T', 'H', '_', 'T', 'E', 'R', 'M', 'I', 'N', 'A', 'L',
+	}
+
 	cases := []struct {
-		name string
-		body []byte
-		want int
+		name   string
+		body   []byte
+		want   int
+		wantOK bool
 	}{
-		{"go-ora v3 Phase 1 (go_ora_cursor_reexec.pcapng)", []byte{0x03, 0x76, 0x01, 0x00, 0x01, 0x01, 0x06}, 4},
-		{"JDBC thin Phase 1 (jdbc_thin_cursor_reexec.pcapng)", []byte{0x03, 0x76, 0x01, 0x00, 0x01, 0x01, 0x06}, 4},
-		{"python thin Phase 1 (python_thin.pcapng)", []byte{0x03, 0x76, 0x01, 0x01, 0x01, 0x04}, 3},
-		{"go-ora v2 Phase 1 (go_ora.pcapng)", []byte{0x03, 0x76, 0x00, 0x01, 0x01, 0x04}, 3},
-		{"go-ora v3 Phase 2 (go_ora_cursor_reexec.pcapng)", []byte{0x03, 0x73, 0x02, 0x00, 0x01, 0x01, 0x06}, 4},
-		{"python thin Phase 2 (python_thin.pcapng)", []byte{0x03, 0x73, 0x02, 0x01, 0x01, 0x04}, 3},
+		{"go-ora v3 Phase 1 (go_ora_cursor_reexec.pcapng)", []byte{0x03, 0x76, 0x01, 0x00, 0x01, 0x01, 0x06}, 4, true},
+		{"JDBC thin Phase 1 (jdbc_thin_cursor_reexec.pcapng)", []byte{0x03, 0x76, 0x01, 0x00, 0x01, 0x01, 0x06}, 4, true},
+		{"python thin Phase 1 (python_thin.pcapng)", []byte{0x03, 0x76, 0x01, 0x01, 0x01, 0x04}, 3, true},
+		{"go-ora v2 Phase 1 (go_ora.pcapng)", []byte{0x03, 0x76, 0x00, 0x01, 0x01, 0x04}, 3, true},
+		{"go-ora v3 Phase 2 (go_ora_cursor_reexec.pcapng)", []byte{0x03, 0x73, 0x02, 0x00, 0x01, 0x01, 0x06}, 4, true},
+		{"python thin Phase 2 (python_thin.pcapng)", []byte{0x03, 0x73, 0x02, 0x01, 0x01, 0x04}, 3, true},
 		// A Phase 2 with no username writes [00 00] where one with a username
 		// writes [01], so a narrow header is followed by two zeros and an
 		// extended one by three.
-		{"Phase 2 without a username, narrow header", []byte{0x03, 0x73, 0x02, 0x00, 0x00, 0x02, 0x01, 0x01}, 3},
-		{"Phase 2 without a username, extended header", []byte{0x03, 0x73, 0x02, 0x00, 0x00, 0x00, 0x02, 0x01}, 4},
-		{"too short to tell", []byte{0x03, 0x76}, 3},
+		{"Phase 2 without a username, narrow header", []byte{0x03, 0x73, 0x02, 0x00, 0x00, 0x02, 0x01, 0x01}, 3, true},
+		{"Phase 2 without a username, extended header", []byte{0x03, 0x73, 0x02, 0x00, 0x00, 0x00, 0x02, 0x01}, 4, true},
+		// Unreadable: narrow default, and ok=false so a writer doesn't act on it.
+		{"wide OCI preamble (sqlplus_cursor_reexec.pcapng)", wideBody, 3, false},
+		{"too short to tell", []byte{0x03, 0x76}, 3, false},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := ttcAuthFuncHeaderLen(tc.body); got != tc.want {
-				t.Fatalf("ttcAuthFuncHeaderLen(%x) = %d, want %d", tc.body, got, tc.want)
+			got, ok := ttcAuthFuncHeaderLen(tc.body)
+			if got != tc.want || ok != tc.wantOK {
+				t.Fatalf("ttcAuthFuncHeaderLen(%x) = (%d, %v), want (%d, %v)", tc.body, got, ok, tc.want, tc.wantOK)
 			}
 		})
 	}

@@ -54,7 +54,9 @@ var knownAuthKeys = map[string]bool{
 //
 // Wire layout shared across go-ora, python-oracledb thin, and JDBC thin / SQLcl:
 //
-//	[03 76 b0 b1]                            -- piggyback header (b0/b1 vary by client)
+//	[03 76 <seq> (00)] [01]                  -- TTC function header (its width is
+//	                                            negotiated — ttcAuthFuncHeaderLen)
+//	                                            plus the username-present marker
 //	[compressed-int user_id_len]             -- length of the username
 //	[compressed-int logon_mode]              -- typically 0x01 (NoNewPass)
 //	[01 01 05 01 01]                         -- 5-byte magic
@@ -81,12 +83,22 @@ func parseAuthPhase1(tnsDataPayload []byte) (string, error) {
 		return name, nil
 	}
 
-	// Skip data flags (2 bytes) + func code (0x03) + sub-op (0x76) + 2-byte trailer.
-	if len(tnsDataPayload) < ttcDataFlagsSize+4 {
+	// Skip the data flags (2 bytes), then the TTC function header and the
+	// username-present marker that follows it. The header is [03 76 <seq>] plus
+	// a trailing 0x00 once the negotiated TTC field version reaches 18, so its
+	// width is read off the body rather than assumed — this used to be a flat
+	// +4, which lands a byte short of user_id_len on every go-ora v3 / JDBC thin
+	// login. The anchored path above catches those in practice, which is why
+	// nothing broke; the fixed offset still has to be right for the bodies that
+	// reach it.
+	funcHeaderLen, _ := ttcAuthFuncHeaderLen(tnsDataPayload[ttcDataFlagsSize:])
+	preambleLen := funcHeaderLen + 1
+
+	if len(tnsDataPayload) < ttcDataFlagsSize+preambleLen {
 		return "", ErrAuthPhase1TooShort
 	}
 
-	payload := tnsDataPayload[ttcDataFlagsSize+4:]
+	payload := tnsDataPayload[ttcDataFlagsSize+preambleLen:]
 
 	// Read user_id_len (compressed-int).
 	userIDLen, n := readCompressedInt(payload)

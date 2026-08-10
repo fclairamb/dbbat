@@ -74,6 +74,93 @@ func TestBuildClientAuthPhase1Layout(t *testing.T) {
 	}
 }
 
+// TestSyntheticAuthHeader covers the branch the builder tests never reach: they
+// all run on a session with no captured client packet, so they only ever see
+// the 4-byte default. A regression that always returned 4 bytes would pass every
+// one of them while breaking every client that negotiated the narrow framing.
+func TestSyntheticAuthHeader(t *testing.T) {
+	t.Parallel()
+
+	// A client Phase 1 payload: 2 data flags, then the body.
+	payload := func(body ...byte) *TNSPacket {
+		return &TNSPacket{Payload: append([]byte{0x00, 0x00}, body...)}
+	}
+
+	cases := []struct {
+		name   string
+		phase1 *TNSPacket
+		want   []byte
+	}{
+		{
+			// python_thin.pcapng: 03 76 01 | 01 | 01 04 …
+			name:   "narrow client framing is matched",
+			phase1: payload(0x03, 0x76, 0x01, 0x01, 0x01, 0x04, 0x01, 0x01),
+			want:   []byte{byte(TTCFuncPiggyback), PiggybackSubAuth1, authPhase1FuncSeq},
+		},
+		{
+			// go_ora_cursor_reexec.pcapng: 03 76 01 00 | 01 | 01 06 …
+			name:   "extended client framing is matched",
+			phase1: payload(0x03, 0x76, 0x01, 0x00, 0x01, 0x01, 0x06, 0x01, 0x01),
+			want:   []byte{byte(TTCFuncPiggyback), PiggybackSubAuth1, authPhase1FuncSeq, 0x00},
+		},
+		{
+			name:   "no captured packet falls back to the modern width",
+			phase1: nil,
+			want:   []byte{byte(TTCFuncPiggyback), PiggybackSubAuth1, authPhase1FuncSeq, 0x00},
+		},
+		{
+			// A wide (OCI) body says nothing about the width, so the header must
+			// not be narrowed on the guess — see ttcAuthFuncHeaderLen.
+			name: "wide client framing is not read as narrow",
+			phase1: payload(
+				0x03, 0x76, 0x02, 0x00, 0x03,
+				0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+				0x12, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+				0x06, 's', 'y', 's', 't', 'e', 'm',
+				0x0d, 0x00, 0x00, 0x00, 0x0d,
+				'A', 'U', 'T', 'H', '_', 'T', 'E', 'R', 'M', 'I', 'N', 'A', 'L',
+			),
+			want: []byte{byte(TTCFuncPiggyback), PiggybackSubAuth1, authPhase1FuncSeq, 0x00},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			sess := &session{clientAuthPhase1Pkt: tc.phase1}
+
+			got := sess.syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq)
+			if !bytes.Equal(got, tc.want) {
+				t.Fatalf("syntheticAuthHeader = %x, want %x", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestBuildClientAuthPhase1NarrowFuncHeader confirms the narrow header reaches
+// the packet, not just the helper: a client that negotiated the 3-byte framing
+// must get a synthetic Phase 1 that opens the same way.
+func TestBuildClientAuthPhase1NarrowFuncHeader(t *testing.T) {
+	t.Parallel()
+
+	sess := &session{clientAuthPhase1Pkt: &TNSPacket{
+		Payload: []byte{0x00, 0x00, 0x03, 0x76, 0x01, 0x01, 0x01, 0x04, 0x01, 0x01},
+	}}
+
+	body := buildClientAuthPhase1(
+		sess.syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq),
+		"ADMIN", driverIdentity{HostName: "h", DriverName: "d"}, logonModeNoNewPass)
+
+	want := []byte{
+		byte(TTCFuncPiggyback), PiggybackSubAuth1, authPhase1FuncSeq, 0x01,
+		0x01, 0x05, 0x01, byte(logonModeNoNewPass), 0x01, 0x01, 0x05, 0x01, 0x01,
+	}
+	if !bytes.HasPrefix(body, want) {
+		t.Fatalf("narrow phase1 preamble mismatch:\n got %x\nwant %x", body[:len(want)], want)
+	}
+}
+
 // TestBuildClientAuthPhase2Layout verifies the byte layout of an AUTH Phase 2
 // message — TTC piggyback marker, sub-op, the KV pair list, and that
 // AUTH_SESSKEY / AUTH_PASSWORD appear before any session-* KV pair.
