@@ -564,3 +564,87 @@ func TestOAuthRoleSyncIsInertWithoutAMapping(t *testing.T) {
 	assert.ElementsMatch(t, []string{store.RoleConnector, store.RoleAdmin}, []string(resolved.Roles))
 	assert.Empty(t, roleSyncEvents(t, dataStore, user.UID))
 }
+
+// TestOAuthRoleSyncSeparatesOverageFromEmptyMembership is the crux of the
+// overage work, and it is written as one test on purpose: the two logins it
+// makes are byte-identical in their Groups field, and only the overage flag
+// tells them apart. An empty membership is an answer and must still demote; an
+// overage is the issuer declining to answer and must move nothing.
+//
+// Both accounts run alongside a second admin, so what keeps the role in the
+// overage case is the overage guard and not the last-admin guard.
+func TestOAuthRoleSyncSeparatesOverageFromEmptyMembership(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	ctx := context.Background()
+	suffix := uuid.NewString()[:8]
+
+	serverWithRoleMapping(t, server, "admin=db-admins")
+	createTestUser(t, dataStore, "other-admin-"+suffix, "password", []string{store.RoleAdmin})
+
+	provider := &mockProvider{name: oidc.ProviderName}
+
+	// Both accounts start as admins by way of the group.
+	overageSuffix, emptySuffix := "over-"+suffix, "empty-"+suffix
+
+	overageUser, err := server.findOrCreateOAuthUser(ctx, provider, oidcOAuthUser(overageSuffix, "db-admins"))
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{store.RoleConnector, store.RoleAdmin}, []string(overageUser.Roles))
+
+	emptyUser, err := server.findOrCreateOAuthUser(ctx, provider, oidcOAuthUser(emptySuffix, "db-admins"))
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{store.RoleConnector, store.RoleAdmin}, []string(emptyUser.Roles))
+
+	// The Entra token past ~200 memberships: no groups, plus the pointer.
+	overageLogin := oidcOAuthUser(overageSuffix)
+	overageLogin.GroupsOverage = true
+
+	kept, err := server.findOrCreateOAuthUser(ctx, provider, overageLogin)
+	require.NoError(t, err, "an overage must not fail the login")
+	assert.ElementsMatch(t, []string{store.RoleConnector, store.RoleAdmin}, []string(kept.Roles),
+		"membership is unknown, not empty: an overage must never demote anyone")
+
+	storedKept, err := dataStore.GetUserByUID(ctx, overageUser.UID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{store.RoleConnector, store.RoleAdmin}, []string(storedKept.Roles))
+	assert.Empty(t, roleSyncEvents(t, dataStore, overageUser.UID),
+		"nothing moved, so there is nothing to audit")
+
+	// The same empty Groups, but the issuer really did answer.
+	demoted, err := server.findOrCreateOAuthUser(ctx, provider, oidcOAuthUser(emptySuffix))
+	require.NoError(t, err)
+	assert.Equal(t, []string{store.RoleConnector}, []string(demoted.Roles),
+		"a genuinely empty claim still applies the mapping and still floors at the default role")
+
+	storedDemoted, err := dataStore.GetUserByUID(ctx, emptyUser.UID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{store.RoleConnector}, []string(storedDemoted.Roles))
+	require.Len(t, roleSyncEvents(t, dataStore, emptyUser.UID), 1)
+}
+
+// TestOAuthRoleSyncOverageAppliesNoFloorAtCreation: a first login that carries
+// an overage has nothing to resolve, so the account lands on the default role
+// rather than on whatever "in no groups" would have produced.
+func TestOAuthRoleSyncOverageAppliesNoFloorAtCreation(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	ctx := context.Background()
+	suffix := uuid.NewString()[:8]
+
+	serverWithRoleMapping(t, server, "admin=db-admins")
+
+	provider := &mockProvider{name: oidc.ProviderName}
+
+	login := oidcOAuthUser(suffix)
+	login.GroupsOverage = true
+
+	user, err := server.findOrCreateOAuthUser(ctx, provider, login)
+	require.NoError(t, err)
+	assert.Equal(t, []string{store.RoleConnector}, []string(user.Roles))
+
+	stored, err := dataStore.GetUserByUID(ctx, user.UID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{store.RoleConnector}, []string(stored.Roles))
+}
