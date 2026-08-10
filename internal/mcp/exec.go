@@ -13,8 +13,9 @@ import (
 // Execution errors surfaced to the agent as tool errors.
 var (
 	// ErrProtocolUnsupported means the database speaks a protocol the MCP
-	// server cannot drive a loopback client for yet. Phase 1 is PostgreSQL
-	// and MySQL/MariaDB; Oracle, MongoDB and SQL Server are Phase 2.
+	// server cannot drive a loopback client for. All five database protocols
+	// dbbat proxies are covered; an SSH-only entry is not a database and never
+	// will be.
 	ErrProtocolUnsupported = errors.New("protocol not supported by the MCP server yet")
 	// ErrListenerDisabled means the proxy listener for that protocol is not
 	// running in this process, so there is nothing to dial. The MCP server
@@ -25,12 +26,13 @@ var (
 // SupportedProtocol reports whether the MCP server can execute statements
 // against a database speaking this protocol.
 //
-// The dispatch is one switch on purpose: adding Oracle, MongoDB or SQL Server
-// (Phase 2) means adding a case here and a loopback client next to the two
-// that exist, and nothing else — no new enforcement, no new auth path.
+// The dispatch is one switch on purpose: adding a protocol means adding a case
+// here and a loopback client next to the ones that exist, and nothing else —
+// no new enforcement, no new auth path.
 func SupportedProtocol(protocol string) bool {
 	switch protocol {
-	case store.ProtocolPostgreSQL, store.ProtocolMySQL, store.ProtocolMariaDB:
+	case store.ProtocolPostgreSQL, store.ProtocolMySQL, store.ProtocolMariaDB,
+		store.ProtocolOracle:
 		return true
 	default:
 		return false
@@ -41,10 +43,21 @@ func SupportedProtocol(protocol string) bool {
 type ExecRequest struct {
 	// Protocol is the target's wire protocol; it selects the loopback client.
 	Protocol string
-	// Database is the **dbbat server name**, which is what both proxies
-	// resolve the target from (PostgreSQL's startup `database` parameter and
-	// MySQL's schema name are both looked up with GetServerByName).
+	// Database is the **dbbat server name**, which is what every proxy resolves
+	// the target from (PostgreSQL's startup `database` parameter, MySQL's
+	// schema name, Oracle's SERVICE_NAME, SQL Server's LOGIN7 database and
+	// MongoDB's authSource are all looked up with GetServerByName).
 	Database string
+	// UpstreamDatabase is the database name *on the target server* — the
+	// `database_name` column of the dbbat row.
+	//
+	// Only the MongoDB client needs it, and only because a MongoDB command
+	// carries its own `$db` inside the message, which the proxy forwards
+	// verbatim: a command addressed to the dbbat entry's name would reach the
+	// upstream naming a database that does not exist there. Every other
+	// protocol carries the database once, at login, where the dbbat name is the
+	// right one.
+	UpstreamDatabase string
 	// Username is the API key owner's username. The proxies refuse a key
 	// whose owner does not match the username on the wire.
 	Username string
@@ -86,36 +99,52 @@ type Executor interface {
 	Execute(ctx context.Context, req ExecRequest) (*QueryResult, error)
 }
 
+// LoopbackListeners are this process's proxy listen addresses, one per
+// protocol (config.Config.ListenPG, ListenMySQL, ListenOracle, ListenMongo,
+// ListenMSSQL). An empty address means the listener is not running here, and
+// the executor refuses rather than finding another way to the database.
+type LoopbackListeners struct {
+	PostgreSQL string
+	MySQL      string
+	Oracle     string
+	MongoDB    string
+	MSSQL      string
+}
+
 // LoopbackExecutor dials this process's own proxy listeners.
 type LoopbackExecutor struct {
-	// pgListen and mysqlListen are the configured listen addresses
-	// (config.Config.ListenPG / ListenMySQL). Empty means disabled.
-	pgListen    string
-	mysqlListen string
+	listeners LoopbackListeners
 }
 
 // NewLoopbackExecutor builds the real executor from the proxy listen addresses.
-func NewLoopbackExecutor(pgListen, mysqlListen string) *LoopbackExecutor {
-	return &LoopbackExecutor{pgListen: pgListen, mysqlListen: mysqlListen}
+func NewLoopbackExecutor(listeners LoopbackListeners) *LoopbackExecutor {
+	return &LoopbackExecutor{listeners: listeners}
 }
 
 // Execute dispatches to the loopback client for the request's protocol.
 func (e *LoopbackExecutor) Execute(ctx context.Context, req ExecRequest) (*QueryResult, error) {
 	switch req.Protocol {
 	case store.ProtocolPostgreSQL:
-		addr, err := loopbackAddr(e.pgListen)
+		addr, err := loopbackAddr(e.listeners.PostgreSQL)
 		if err != nil {
 			return nil, err
 		}
 
 		return executePostgreSQL(ctx, addr, req)
 	case store.ProtocolMySQL, store.ProtocolMariaDB:
-		addr, err := loopbackAddr(e.mysqlListen)
+		addr, err := loopbackAddr(e.listeners.MySQL)
 		if err != nil {
 			return nil, err
 		}
 
 		return executeMySQL(ctx, addr, req)
+	case store.ProtocolOracle:
+		addr, err := loopbackAddr(e.listeners.Oracle)
+		if err != nil {
+			return nil, err
+		}
+
+		return executeOracle(ctx, addr, req)
 	default:
 		return nil, fmt.Errorf("%w: %s", ErrProtocolUnsupported, req.Protocol)
 	}

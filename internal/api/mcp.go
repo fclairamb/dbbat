@@ -26,17 +26,23 @@ const mcpWriteDeadline = 5 * time.Minute
 // wiring installs the shared broker with SetEventPlumbing *after* NewServer,
 // and the MCP hold correlator has to see that instance, not the placeholder.
 func (s *Server) newMCPServer() *mcp.Server {
-	pgListen, mysqlListen := "", ""
+	var listeners mcp.LoopbackListeners
+
 	if s.config != nil {
-		pgListen = s.config.ListenPG
-		mysqlListen = s.config.ListenMySQL
+		listeners = mcp.LoopbackListeners{
+			PostgreSQL: s.config.ListenPG,
+			MySQL:      s.config.ListenMySQL,
+			Oracle:     s.config.ListenOracle,
+			MongoDB:    s.config.ListenMongo,
+			MSSQL:      s.config.ListenMSSQL,
+		}
 	}
 
 	return mcp.New(mcp.Deps{
 		Store:    s.store,
 		Logger:   s.logger,
 		Broker:   func() *events.Broker { return s.broker },
-		Executor: mcp.NewLoopbackExecutor(pgListen, mysqlListen),
+		Executor: mcp.NewLoopbackExecutor(listeners),
 	})
 }
 
