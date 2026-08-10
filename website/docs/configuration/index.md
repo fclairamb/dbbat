@@ -287,9 +287,11 @@ the code flow always uses PKCE (S256).
 | `DBB_OIDC_SCOPES` | Scopes to request (default `openid email profile`) |
 | `DBB_OIDC_DISPLAY_NAME` | Login-button label (default `SSO`) |
 | `DBB_OIDC_EMAIL_DOMAINS` | Optional comma-separated allowlist checked against the verified email claim |
+| `DBB_OIDC_GROUPS_CLAIM` | ID-token claim carrying directory group membership (default `groups`) |
+| `DBB_OIDC_ROLE_MAPPING` | Binds roles to directory groups, e.g. `admin=db-admins,viewer=analysts`. Applied on every login |
 
-See [Single sign-on (OIDC)](./sso.md) for the redirect URI and per-provider
-setup snippets.
+See [Single sign-on (OIDC)](./sso.md) for the redirect URI, per-provider setup
+snippets, and what it takes to make each IdP emit groups in the first place.
 
 ### Slack OAuth (optional)
 

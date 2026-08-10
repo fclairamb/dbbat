@@ -198,6 +198,8 @@ This applies even when the current task is otherwise complete — capture the fo
 | `DBB_OIDC_SCOPES` | Space- or comma-separated scopes (default: `openid email profile`); `openid` is always added | No |
 | `DBB_OIDC_DISPLAY_NAME` | Login-button label, surfaced through `GET /api/v1/auth/providers` as `display_name` (default: `SSO`) | No |
 | `DBB_OIDC_EMAIL_DOMAINS` | Comma-separated allowlist checked against the **verified** ID-token email claim — the generic equivalent of Slack's team-id gating. Empty = any domain the issuer vouches for, which on a multi-tenant issuer (`accounts.google.com`, Entra `/common`) means *any account on the internet* | No |
+| `DBB_OIDC_GROUPS_CLAIM` | ID-token claim carrying directory group membership (default: `groups`). Both encodings are accepted — a JSON array and the single-string shorthand — and a lone string is **one** group, never a delimited list | No |
+| `DBB_OIDC_ROLE_MAPPING` | Binds dbbat roles to directory groups: `admin=db-admins,viewer=analysts`. Pairs split on **commas only** (group names contain spaces); repeat a role to union its groups. Values match exactly, case included — **Entra sends group object ids, not names**. Applied on **every** login, authoritative only for the roles it names, floored at the default role, and refuses to strip the last admin. Empty = roles stay manual. Malformed = startup failure. See `website/docs/configuration/sso.md` | No |
 | `DBB_SLACK_NOTIFY_BOT_TOKEN` | Slack bot user OAuth token (`xoxb-...`); empty disables notifications | No |
 | `DBB_SLACK_NOTIFY_CHANNEL` | Slack channel id or name for grant-request notifications (default: `#dbbat`) | No |
 | `DBB_SLACK_SIGNING_SECRET` | Slack app signing secret; enables Approve/Deny buttons + inbound interactions endpoint. Empty = link-through-UI (no buttons). Requires the bot token. Legacy alias `DBB_SLACK_NOTIFY_SIGNING_SECRET` is also accepted; the canonical name wins if both are set. | No |
@@ -364,6 +366,13 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   (`crypto.DeviceAuthAAD`) until the device polls for it. Keys cannot
   create/revoke other keys
 - Default admin: `admin`/`admin` (must change on first login)
+- **Roles can follow the directory**: with `DBB_OIDC_ROLE_MAPPING` set, an OIDC
+  login resolves the user's roles from the ID token's groups claim on *every*
+  sign-in (`internal/api/oauth_roles.go`), so a demotion needs no human. The
+  mapping owns only the roles it names — a role granted by hand in the UI is
+  never revoked by a login — the default role is the floor, and the last admin
+  is retained exactly as `PATCH /users/:uid` refuses to strip it. Every change
+  writes a `user.roles_synced` audit entry
 - **Tamper-evident audit trail**: every `audit_log` entry and every `queries`
   row carries an HMAC over its content plus the previous record's MAC, keyed by
   an HKDF subkey of `DBB_KEY` that is never stored in the database. `audit_log`

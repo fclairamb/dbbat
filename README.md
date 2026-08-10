@@ -236,6 +236,8 @@ sqlcmd -S localhost,1434 -U developer -P temppass123 -d production -C
 | `DBB_OIDC_SCOPES` | Scopes requested from the issuer (`openid` always added) | `openid email profile` |
 | `DBB_OIDC_DISPLAY_NAME` | Login-button label | `SSO` |
 | `DBB_OIDC_EMAIL_DOMAINS` | Comma-separated allowlist checked against the *verified* email claim | - (any domain) |
+| `DBB_OIDC_GROUPS_CLAIM` | ID-token claim carrying directory group membership | `groups` |
+| `DBB_OIDC_ROLE_MAPPING` | Binds roles to directory groups (`admin=db-admins,viewer=analysts`); applied on every login | - (roles stay manual) |
 
 See [Configuration](https://dbbat.com/docs/configuration) for the full set, including rate limiting, query storage, hash presets, auth cache, Slack OAuth, demo target, and dev redirects.
 
@@ -245,9 +247,15 @@ Any OpenID Connect provider works — Google Workspace, Okta, Microsoft Entra,
 Keycloak, Authentik. Point `DBB_OIDC_ISSUER` at your issuer, register
 `https://<your-host>/api/v1/auth/oidc/callback` as the redirect URI, and DBBat
 adds a button to the login page. Every sign-in is carried by an ID token DBBat
-verifies against the issuer's JWKS, and the code flow uses PKCE (S256). See
+verifies against the issuer's JWKS, and the code flow uses PKCE (S256).
+
+`DBB_OIDC_ROLE_MAPPING="admin=db-admins,viewer=analysts"` then lets the
+directory own role assignment: the mapping is re-applied on **every** login, so
+leaving the group demotes at the next sign-in without anyone remembering to
+click. It is authoritative only for the roles it names, never empties a user's
+roles below the default one, and never strips the last admin. See
 [Single sign-on (OIDC)](https://dbbat.com/docs/configuration/sso) for
-per-provider snippets.
+per-provider snippets and the configuration each IdP needs to emit groups.
 
 ## Security
 
