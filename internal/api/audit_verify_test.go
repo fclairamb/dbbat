@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
 	"github.com/fclairamb/dbbat/internal/store"
@@ -42,6 +43,7 @@ func newChainVerifyTestRouter(server *Server) *gin.Engine {
 	router.Use(server.authMiddleware())
 	router.GET("/api/v1/audit/verify", server.requireAdmin(), server.handleVerifyAuditChain)
 	router.GET("/api/v1/audit/verify/queries", server.requireAdmin(), server.handleVerifyQueryChains)
+	router.GET("/api/v1/audit/verify/rows", server.requireAdmin(), server.handleVerifyRowChains)
 
 	return router
 }
@@ -93,7 +95,13 @@ func TestVerifyAuditChain_RequiresAdmin(t *testing.T) {
 
 	router := newChainVerifyTestRouter(server)
 
-	for _, path := range []string{"/api/v1/audit/verify", "/api/v1/audit/verify/queries"} {
+	paths := []string{
+		"/api/v1/audit/verify",
+		"/api/v1/audit/verify/queries",
+		"/api/v1/audit/verify/rows",
+	}
+
+	for _, path := range paths {
 		viewer := doChainVerify(router, loginUser(t, server, "viewer-"+suffix, "viewerpass123"), path)
 		require.Equal(t, http.StatusForbidden, viewer.Code,
 			"viewer must not verify %s: %s", path, viewer.Body.String())
@@ -523,12 +531,319 @@ func TestVerifyChains_WithoutChainKey(t *testing.T) {
 
 	router := newChainVerifyTestRouter(server)
 
-	for _, path := range []string{"/api/v1/audit/verify", "/api/v1/audit/verify/queries"} {
+	noKeyPaths := []string{
+		"/api/v1/audit/verify",
+		"/api/v1/audit/verify/queries",
+		"/api/v1/audit/verify/rows",
+	}
+
+	for _, path := range noKeyPaths {
 		w := doChainVerify(router, token, path)
 		require.Equal(t, http.StatusConflict, w.Code, "%s response body: %s", path, w.Body.String())
 
 		var body ErrorBody
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 		require.Equal(t, ErrCodeConflict, body.Code)
+	}
+}
+
+// capturedRowMarker is the payload every test capture carries. The row-chain
+// responses must never echo it: a captured row is the most sensitive thing the
+// store holds, being the customer data itself rather than a reference to it.
+const capturedRowMarker = "d0-not-leak-this-captured-row-payload"
+
+// createCapturedSession writes a connection whose statements each carry
+// rowsPerQuery sealed captured rows, and returns the connection with its
+// capture UIDs in the order they were written.
+func createCapturedSession(
+	t *testing.T, dataStore *store.Store, suffix string, statements, rowsPerQuery int,
+) (*store.Connection, []uuid.UUID) {
+	t.Helper()
+
+	ctx := context.Background()
+
+	owner := createTestUser(t, dataStore, "owner-"+suffix, "ownerpass123", []string{store.RoleConnector})
+	db := createTestDBEntry(t, dataStore, "db-"+suffix, true)
+
+	conn, err := dataStore.CreateConnection(ctx, owner.UID, db.UID, "10.9.9.9")
+	require.NoError(t, err)
+
+	uids := make([]uuid.UUID, 0, statements)
+
+	for i := range statements {
+		query, err := dataStore.CreateQuery(ctx, &store.Query{
+			ConnectionID: conn.UID,
+			SQLText:      fmt.Sprintf("SELECT %d FROM secrets_table_%s", i, suffix),
+			ExecutedAt:   time.Now(),
+		})
+		require.NoError(t, err)
+
+		rows := make([]store.PendingQueryRow, 0, rowsPerQuery)
+
+		for n := 1; n <= rowsPerQuery; n++ {
+			data := json.RawMessage(fmt.Sprintf(`{"n":%d,"payload":%q}`, n, capturedRowMarker))
+			rows = append(rows, store.PendingQueryRow{
+				QueryID:      query.UID,
+				RowNumber:    n,
+				RowData:      data,
+				RowSizeBytes: int64(len(data)),
+			})
+		}
+
+		require.NoError(t, dataStore.StoreQueryRows(ctx, rows))
+		// The flush barrier a finished capture goes through; without it nothing
+		// stamps the head.
+		require.NoError(t, dataStore.SealQueryRowChain(ctx, query.UID))
+
+		uids = append(uids, query.UID)
+	}
+
+	return conn, uids
+}
+
+// TestVerifyRowChains_SweepScopeAndCapture covers all three shapes of the
+// captured-row endpoint, and the head a single capture reports.
+func TestVerifyRowChains_SweepScopeAndCapture(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupChainTestServer(t)
+	suffix := "rcok"
+
+	createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	conn, captures := createCapturedSession(t, dataStore, suffix, 2, 3)
+
+	router := newChainVerifyTestRouter(server)
+
+	sweep := doChainVerify(router, token, "/api/v1/audit/verify/rows")
+	require.Equal(t, http.StatusOK, sweep.Code, "response body: %s", sweep.Body.String())
+
+	var sweepResp rowChainVerifyResponse
+	require.NoError(t, json.Unmarshal(sweep.Body.Bytes(), &sweepResp))
+	require.Equal(t, "rows", sweepResp.Chain)
+	require.True(t, sweepResp.Verified, "response body: %s", sweep.Body.String())
+	require.Equal(t, int64(2), sweepResp.Captures)
+	require.Equal(t, int64(6), sweepResp.Rows)
+	require.Equal(t, int64(0), sweepResp.UnverifiablePreMigrationRows)
+	require.Empty(t, sweepResp.ConnectionUID, "a sweep is not scoped to a session")
+	require.Empty(t, sweepResp.QueryUID, "a sweep is not scoped to a capture")
+	require.Nil(t, sweepResp.HeadRowNumber, "an aggregate head over independent chains means nothing")
+	require.False(t, sweepResp.Cached, "the first walk is not a cached answer")
+
+	scoped := doChainVerify(router, token, "/api/v1/audit/verify/rows?connection="+conn.UID.String())
+	require.Equal(t, http.StatusOK, scoped.Code, "response body: %s", scoped.Body.String())
+
+	var scopedResp rowChainVerifyResponse
+	require.NoError(t, json.Unmarshal(scoped.Body.Bytes(), &scopedResp))
+	require.True(t, scopedResp.Verified)
+	require.Equal(t, conn.UID.String(), scopedResp.ConnectionUID)
+	require.Equal(t, int64(2), scopedResp.Captures)
+	require.Equal(t, int64(6), scopedResp.Rows)
+	require.Nil(t, scopedResp.HeadRowNumber, "a connection's captures are still independent chains")
+
+	capture := doChainVerify(router, token, "/api/v1/audit/verify/rows?query="+captures[0].String())
+	require.Equal(t, http.StatusOK, capture.Code, "response body: %s", capture.Body.String())
+
+	var captureResp rowChainVerifyResponse
+	require.NoError(t, json.Unmarshal(capture.Body.Bytes(), &captureResp))
+	require.True(t, captureResp.Verified)
+	require.Equal(t, captures[0].String(), captureResp.QueryUID)
+	require.Empty(t, captureResp.ConnectionUID, "a capture-scoped walk names the capture, not the session")
+	require.Equal(t, int64(1), captureResp.Captures)
+	require.Equal(t, int64(3), captureResp.Rows)
+	require.NotNil(t, captureResp.HeadRowNumber)
+	require.Equal(t, int64(3), *captureResp.HeadRowNumber)
+	require.Len(t, captureResp.HeadMAC, 64)
+
+	_, err := hex.DecodeString(captureResp.HeadMAC)
+	require.NoError(t, err, "head_mac must be hex")
+
+	for _, body := range []string{sweep.Body.String(), scoped.Body.String(), capture.Body.String()} {
+		require.NotContains(t, body, capturedRowMarker)
+		require.NotContains(t, body, hex.EncodeToString(chainTestKey))
+	}
+}
+
+// TestVerifyRowChains_ReportsBreak rewrites a captured row and asserts the
+// break comes back naming the row, its capture and its position.
+func TestVerifyRowChains_ReportsBreak(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupChainTestServer(t)
+	suffix := "rcbreak"
+
+	createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	_, captures := createCapturedSession(t, dataStore, suffix, 1, 4)
+
+	var tamperedUID string
+
+	row := dataStore.DB().QueryRowContext(context.Background(),
+		`UPDATE query_rows SET row_data = '{"n":0,"payload":"rewritten"}'::jsonb
+		 WHERE query_id = ? AND row_number = 3 RETURNING uid`, captures[0])
+	require.NoError(t, row.Scan(&tamperedUID))
+
+	router := newChainVerifyTestRouter(server)
+	w := doChainVerify(router, token, "/api/v1/audit/verify/rows?query="+captures[0].String())
+
+	// A broken chain is a successful answer to the question asked — the error
+	// is in the data, not in the request.
+	require.Equal(t, http.StatusOK, w.Code, "response body: %s", w.Body.String())
+
+	var resp rowChainVerifyResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+
+	require.False(t, resp.Verified, "a rewritten captured row must break the chain")
+	require.NotNil(t, resp.Break)
+	require.Equal(t, tamperedUID, resp.Break.UID)
+	require.Equal(t, int64(3), resp.Break.ChainSeq, "chain_seq carries the row_number")
+	require.Equal(t, captures[0].String(), resp.Break.QueryUID)
+	require.Contains(t, resp.Break.Reason, "modified")
+	require.Equal(t, int64(2), resp.Rows, "the walk stops at the break")
+	require.NotContains(t, w.Body.String(), "rewritten", "the rewritten row must not be echoed back")
+}
+
+// TestVerifyRowChains_LeaksNothing is the assertion that matters most on this
+// endpoint: a captured row is the customer's data itself, not a reference to
+// it. Substring checks only find what you thought to look for, so all four
+// shapes — sweep, connection-scoped, capture-scoped and broken — have their
+// exact field set pinned. A widened response fails here rather than shipping.
+func TestVerifyRowChains_LeaksNothing(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupChainTestServer(t)
+	suffix := "rcleak"
+
+	createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	conn, captures := createCapturedSession(t, dataStore, suffix+"a", 2, 3)
+	_, tampered := createCapturedSession(t, dataStore, suffix+"b", 1, 3)
+
+	router := newChainVerifyTestRouter(server)
+
+	sweepFields := []string{
+		"chain", "verified", "captures", "rows",
+		"unverifiable_pre_migration_rows", "checked_at", "cached",
+	}
+
+	sweep := doChainVerify(router, token, "/api/v1/audit/verify/rows")
+	require.Equal(t, http.StatusOK, sweep.Code, "response body: %s", sweep.Body.String())
+	require.ElementsMatch(t, sweepFields, jsonKeys(t, sweep.Body.Bytes()),
+		"a captured-row sweep must expose exactly these fields")
+
+	scoped := doChainVerify(router, token, "/api/v1/audit/verify/rows?connection="+conn.UID.String())
+	require.Equal(t, http.StatusOK, scoped.Code, "response body: %s", scoped.Body.String())
+	require.ElementsMatch(t, withFields(sweepFields, "connection_uid"),
+		jsonKeys(t, scoped.Body.Bytes()),
+		"a connection-scoped captured-row walk must expose exactly these fields")
+
+	capture := doChainVerify(router, token, "/api/v1/audit/verify/rows?query="+captures[0].String())
+	require.Equal(t, http.StatusOK, capture.Code, "response body: %s", capture.Body.String())
+	require.ElementsMatch(t, withFields(sweepFields, "query_uid", "head_row_number", "head_mac"),
+		jsonKeys(t, capture.Body.Bytes()),
+		"a capture-scoped walk must expose exactly these fields")
+
+	// Now the break path — the one carrying a free-text reason, and the one a
+	// leak would most plausibly creep into. The tampered capture has its own
+	// cache scope, so this walk is a real one.
+	_, err := dataStore.DB().ExecContext(context.Background(),
+		`UPDATE query_rows SET row_data = '{"leaked_column":"leaked_value"}'::jsonb
+		 WHERE query_id = ? AND row_number = 2`, tampered[0])
+	require.NoError(t, err)
+
+	broken := doChainVerify(router, token, "/api/v1/audit/verify/rows?query="+tampered[0].String())
+	require.Equal(t, http.StatusOK, broken.Code, "response body: %s", broken.Body.String())
+
+	var brokenResp rowChainVerifyResponse
+	require.NoError(t, json.Unmarshal(broken.Body.Bytes(), &brokenResp))
+	require.False(t, brokenResp.Verified, "response body: %s", broken.Body.String())
+
+	fields := jsonFields(t, broken.Body.Bytes())
+	require.ElementsMatch(t,
+		withFields(sweepFields, "query_uid", "head_row_number", "head_mac", "break"),
+		keysOf(fields),
+		"a broken captured-row walk must expose exactly these fields")
+
+	var brk map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(fields["break"], &brk))
+	require.ElementsMatch(t, []string{"uid", "chain_seq", "query_uid", "reason"}, keysOf(brk),
+		"a captured-row break must expose exactly these fields")
+
+	// And the belt-and-braces substring checks, on every shape.
+	bodies := []string{sweep.Body.String(), scoped.Body.String(), capture.Body.String(), broken.Body.String()}
+	for _, body := range bodies {
+		require.NotContains(t, body, capturedRowMarker, "a captured row's data must never reach the response")
+		require.NotContains(t, body, "leaked_column")
+		require.NotContains(t, body, "leaked_value")
+		require.NotContains(t, body, "secrets_table_", "statement text must never reach the response")
+		require.NotContains(t, body, hex.EncodeToString(chainTestKey), "the chain key must never reach the response")
+		require.NotContains(t, body, "row_data")
+		require.NotContains(t, body, "sql_text")
+	}
+}
+
+// TestVerifyRowChains_CachesTheWalk pins that the captured-row scopes share the
+// same bounding strategy as the other two chains.
+func TestVerifyRowChains_CachesTheWalk(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupChainTestServer(t)
+	suffix := "rccache"
+
+	createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	createCapturedSession(t, dataStore, suffix, 1, 2)
+
+	router := newChainVerifyTestRouter(server)
+
+	first := doChainVerify(router, token, "/api/v1/audit/verify/rows")
+	require.Equal(t, http.StatusOK, first.Code, "response body: %s", first.Body.String())
+
+	var firstResp rowChainVerifyResponse
+	require.NoError(t, json.Unmarshal(first.Body.Bytes(), &firstResp))
+	require.False(t, firstResp.Cached)
+	require.Equal(t, int64(2), firstResp.Rows)
+
+	// More captures land, but the cached answer is what comes back — freshness
+	// bounded to chainVerifyTTL, cost bounded to one walk per scope per TTL.
+	createCapturedSession(t, dataStore, suffix+"more", 1, 2)
+
+	second := doChainVerify(router, token, "/api/v1/audit/verify/rows")
+	require.Equal(t, http.StatusOK, second.Code)
+
+	var secondResp rowChainVerifyResponse
+	require.NoError(t, json.Unmarshal(second.Body.Bytes(), &secondResp))
+	require.True(t, secondResp.Cached, "a repeat call inside the TTL must not walk again")
+	require.Equal(t, firstResp.Rows, secondResp.Rows)
+	require.Equal(t, firstResp.CheckedAt.UnixNano(), secondResp.CheckedAt.UnixNano())
+}
+
+// TestVerifyRowChains_RejectsBadScopes keeps the 400 paths honest, including
+// the one that refuses to answer a question the caller did not unambiguously
+// ask.
+func TestVerifyRowChains_RejectsBadScopes(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupChainTestServer(t)
+	suffix := "rcbadscope"
+
+	createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	conn, captures := createCapturedSession(t, dataStore, suffix, 1, 1)
+
+	router := newChainVerifyTestRouter(server)
+
+	for _, path := range []string{
+		"/api/v1/audit/verify/rows?connection=not-a-uuid",
+		"/api/v1/audit/verify/rows?query=not-a-uuid",
+		"/api/v1/audit/verify/rows?connection=" + conn.UID.String() + "&query=" + captures[0].String(),
+	} {
+		w := doChainVerify(router, token, path)
+		require.Equal(t, http.StatusBadRequest, w.Code, "%s response body: %s", path, w.Body.String())
 	}
 }
