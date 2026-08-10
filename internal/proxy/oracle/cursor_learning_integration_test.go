@@ -129,7 +129,17 @@ func startOracleThroughProxy(t *testing.T, controls []string) *oracleThroughProx
 	proxy := NewServer(dataStore, encryptionKey, nil, config.QueryStorageConfig{}, config.DumpConfig{}, slog.New(logs))
 	go func() { _ = proxy.Start("127.0.0.1:0") }()
 
-	t.Cleanup(func() { _ = proxy.Shutdown(ctx) })
+	// Bounded, like the PostgreSQL fixture's: Shutdown waits for every live
+	// session's goroutine, and a session parked on a client that will never
+	// send another byte — which is what a refused statement leaves behind
+	// today, see the blocked-statement test — would otherwise hang teardown
+	// until the whole suite's timeout.
+	t.Cleanup(func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		_ = proxy.Shutdown(shutdownCtx)
+	})
 
 	require.Eventually(t, func() bool { return proxy.Addr() != nil }, 5*time.Second, 50*time.Millisecond)
 
