@@ -434,9 +434,14 @@ func (s *Store) closeOrphans(ctx context.Context, scope func(*bun.UpdateQuery) *
 //     each in Go, and write them back (in the same transaction as the close, to
 //     keep the window above from widening).
 //
-// Cost: PostgreSQL evaluates a SET expression only for rows that pass the WHERE,
-// so this adds one index lookup per *closed* row — not per connection in the
-// table. See TestCloseOrphanedConnectionsStampCostScalesWithOrphans.
+// Cost: PostgreSQL evaluates a SET expression only for rows that pass the
+// WHERE, so this adds two `idx_queries_chain_seq` lookups (one per column) per
+// *closed* row — not per connection in the table, which is what would have made
+// the reconcile scale with the store. Folding the two into one LEFT JOIN LATERAL
+// was considered and dropped: it halves an already negligible cost and turns the
+// "logged nothing" case into a join that has to be kept from filtering the row
+// out. See TestQueryChainOrphanStampCostScalesWithOrphans, which asserts the
+// loop count against a real plan.
 func (s *Store) orphanCloseQuery() *bun.UpdateQuery {
 	q := s.db.NewUpdate().
 		Model((*Connection)(nil)).

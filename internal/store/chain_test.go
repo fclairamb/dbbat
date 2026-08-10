@@ -1337,3 +1337,255 @@ func TestRowChainResumesFromTheStoredHead(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(4), sealed.RowChainLen, "the stamp must count the rows the cold store did not write")
 }
+
+// createOrphanedChainConnection opens a chained connection under a run that
+// never registered — the crash case — and writes it `statements` statements.
+// The store's own identity is left alone, so the reconcile sees the rows as
+// somebody else's dead run.
+func createOrphanedChainConnection(
+	t *testing.T, ctx context.Context, store *Store, suffix string, statements int,
+) (*Connection, []Query) {
+	t.Helper()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "orphan_chain_"+suffix)
+
+	var conn *Connection
+
+	asRun(t, store, "dead-instance-"+suffix, "dead-run-"+suffix, func() {
+		var err error
+
+		conn, err = store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.1")
+		require.NoError(t, err, "CreateConnection()")
+	})
+
+	queries := make([]Query, 0, statements)
+
+	for i := range statements {
+		created, err := store.CreateQuery(ctx, &Query{
+			ConnectionID: conn.UID,
+			SQLText:      fmt.Sprintf("SELECT %d", i),
+			Parameters:   &QueryParameters{Values: []string{fmt.Sprintf("v%d", i)}},
+		})
+		require.NoError(t, err, "CreateQuery()")
+
+		queries = append(queries, *created)
+	}
+
+	return conn, queries
+}
+
+// TestQueryChainStampsHeadOnOrphanReconcile is the crash half of what
+// TestQueryChainStampsHeadOnClose covers for a clean teardown: a session whose
+// process died must still end up with its tail sealed, using only what the
+// database can recover.
+func TestQueryChainStampsHeadOnOrphanReconcile(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, queries := createOrphanedChainConnection(t, ctx, store, "reconcile", 3)
+
+	store.SetInstanceID("live-instance")
+	store.SetRunID("live-run")
+	require.NoError(t, store.RegisterInstance(ctx))
+
+	reclaimed, err := store.ReclaimDeadInstanceConnections(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), reclaimed, "the dead run's connection must be reconciled")
+
+	closed, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, closed.DisconnectedAt, "the orphan should no longer look open")
+	require.Equal(t, queries[2].MAC, closed.QueryChainMAC,
+		"the reconcile must stamp the head the surviving statements compute")
+	require.Equal(t, int64(3), closed.QueryChainLen)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break, "stamping must not itself break the chain")
+
+	// The point of the stamp: a trailing deletion after the reconcile is now
+	// caught, exactly as it is for a cleanly closed session.
+	_, err = store.db.ExecContext(ctx, `DELETE FROM queries WHERE uid = ?`, queries[2].UID)
+	require.NoError(t, err)
+
+	result, err = store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "deleting the last statement of a reconciled session must be detected")
+	require.Contains(t, result.Break.Reason, "removed from the end")
+}
+
+// TestQueryChainOrphanReconcileLeavesSilentSessionUnstamped pins the NULL case:
+// a session that logged nothing has no head, and a NULL stamp must never be
+// read as a break.
+func TestQueryChainOrphanReconcileLeavesSilentSessionUnstamped(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createOrphanedChainConnection(t, ctx, store, "silent", 0)
+
+	store.SetInstanceID("live-instance")
+	store.SetRunID("live-run")
+	require.NoError(t, store.RegisterInstance(ctx))
+
+	reclaimed, err := store.ReclaimDeadInstanceConnections(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), reclaimed)
+
+	closed, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, closed.DisconnectedAt)
+	require.Nil(t, closed.QueryChainMAC, "a session that logged nothing has no head to seal")
+	require.Equal(t, int64(0), closed.QueryChainLen)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break)
+}
+
+// TestQueryChainOrphanReconcileDoesNotRestampAClosedSession guards the scope:
+// the reconcile only ever touches rows whose disconnected_at is NULL, so a head
+// CloseConnection already stamped is never recomputed from whatever survives
+// today.
+func TestQueryChainOrphanReconcileDoesNotRestampAClosedSession(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, queries := createOrphanedChainConnection(t, ctx, store, "closed", 3)
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	// A trailing deletion between the clean close and the reconcile.
+	_, err := store.db.ExecContext(ctx, `DELETE FROM queries WHERE uid = ?`, queries[2].UID)
+	require.NoError(t, err)
+
+	store.SetInstanceID("live-instance")
+	store.SetRunID("live-run")
+	require.NoError(t, store.RegisterInstance(ctx))
+
+	reclaimed, err := store.ReclaimDeadInstanceConnections(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), reclaimed, "an already-closed connection is out of the reconcile's scope")
+
+	closed, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Equal(t, queries[2].MAC, closed.QueryChainMAC, "the original stamp must survive the reconcile")
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "the reconcile must not launder a trailing deletion")
+}
+
+// TestQueryChainOrphanStampCostScalesWithOrphans is the cost guard the spec
+// asked for. The head lookup is a correlated subquery in the reconcile's SET
+// clause, and PostgreSQL evaluates a SET expression only for rows that pass the
+// WHERE — so the reconcile costs one index lookup per *closed* row, not one per
+// connection in the table. This asserts that against a real plan rather than
+// against the documentation.
+func TestQueryChainOrphanStampCostScalesWithOrphans(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "orphan_cost")
+
+	const (
+		liveSessions = 40
+		orphans      = 3
+	)
+
+	store.SetInstanceID("live-instance")
+	store.SetRunID("live-run")
+	require.NoError(t, store.RegisterInstance(ctx))
+
+	writeSession := func(instanceID, runID string) {
+		var conn *Connection
+
+		asRun(t, store, instanceID, runID, func() {
+			var err error
+
+			conn, err = store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.1")
+			require.NoError(t, err)
+		})
+
+		for i := range 5 {
+			_, err := store.CreateQuery(ctx, &Query{
+				ConnectionID: conn.UID,
+				SQLText:      fmt.Sprintf("SELECT %d", i),
+			})
+			require.NoError(t, err)
+		}
+	}
+
+	// Open sessions this run still owns: in scope for the scan, out of scope
+	// for the update.
+	for range liveSessions {
+		writeSession("live-instance", "live-run")
+	}
+
+	for i := range orphans {
+		writeSession("dead-instance", fmt.Sprintf("dead-run-%d", i))
+	}
+
+	// EXPLAIN the statement the reconcile actually runs, not a lookalike.
+	statement := store.deadRunScope(store.orphanCloseQuery()).String()
+
+	var plan string
+
+	err := store.db.QueryRowContext(ctx, "EXPLAIN (ANALYZE, FORMAT JSON) "+statement).Scan(&plan)
+	require.NoError(t, err, "EXPLAIN of the reconcile statement")
+
+	var explained []struct {
+		Plan planNode `json:"Plan"`
+	}
+
+	require.NoError(t, json.Unmarshal([]byte(plan), &explained))
+	require.Len(t, explained, 1)
+
+	loops := queriesScanLoops(&explained[0].Plan)
+	require.NotEmpty(t, loops, "the plan must contain the head lookup over queries")
+
+	for _, l := range loops {
+		require.Equal(t, orphans, l,
+			"the head lookup must run once per closed row, not once per connection; plan: %s", plan)
+	}
+
+	// And it did the work: EXPLAIN ANALYZE executes the UPDATE.
+	var stamped int
+
+	require.NoError(t, store.db.QueryRowContext(ctx,
+		"SELECT count(*) FROM connections WHERE query_chain_mac IS NOT NULL").Scan(&stamped))
+	require.Equal(t, orphans, stamped)
+}
+
+// planNode is the slice of EXPLAIN (FORMAT JSON) this package cares about.
+type planNode struct {
+	NodeType     string     `json:"Node Type"`
+	RelationName string     `json:"Relation Name"`
+	ActualLoops  int        `json:"Actual Loops"`
+	Plans        []planNode `json:"Plans"`
+}
+
+// queriesScanLoops collects the loop count of every node that reads the queries
+// table. Whether the planner picks the partial index or a sequential scan
+// depends on the table's size, but either way the node is entered once per
+// evaluation of the correlated subquery — which is the number this test is
+// about.
+func queriesScanLoops(node *planNode) []int {
+	var loops []int
+
+	if node.RelationName == "queries" {
+		loops = append(loops, node.ActualLoops)
+	}
+
+	for i := range node.Plans {
+		loops = append(loops, queriesScanLoops(&node.Plans[i])...)
+	}
+
+	return loops
+}
