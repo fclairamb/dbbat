@@ -277,7 +277,7 @@ func setupFixtureWith(ctx context.Context, t *testing.T, opts fixtureOpts) *fixt
 	}, encKey)
 	require.NoError(t, err)
 
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{UserID: user.UID, DatabaseID: db.UID, GrantedBy: user.UID, StartsAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(24 * time.Hour), Definition: &store.GrantDefinition{Controls: []string{}}})
+	_, err = createGrantWithControls(ctx, t, dataStore, user.UID, db.UID, []string{})
 	require.NoError(t, err)
 
 	queryStorage := config.QueryStorageConfig{
@@ -359,8 +359,44 @@ func (f *fixture) replaceGrant(ctx context.Context, controls []string) {
 	dbUID, err := uuid.Parse(f.dbUID)
 	require.NoError(f.t, err)
 
-	_, err = f.store.CreateGrant(ctx, &store.Grant{UserID: f.user.UID, DatabaseID: dbUID, GrantedBy: f.user.UID, StartsAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(24 * time.Hour), Definition: &store.GrantDefinition{Controls: controls}})
+	_, err = createGrantWithControls(ctx, f.t, f.store, f.user.UID, dbUID, controls)
 	require.NoError(f.t, err)
+}
+
+// createGrantWithControls issues a grant carrying the given controls. Every
+// grant is an *instance of a definition* and carries no shape of its own, so
+// the definition has to exist first and be named by uid — an inline
+// GrantDefinition on the grant is not enough (CreateGrant answers
+// ErrGrantDefinitionRequired).
+func createGrantWithControls(
+	ctx context.Context,
+	t *testing.T,
+	dataStore *store.Store,
+	userUID, databaseUID uuid.UUID,
+	controls []string,
+) (*store.Grant, error) {
+	t.Helper()
+
+	name := fmt.Sprintf("itest-%s", uuid.NewString()[:8])
+
+	def, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:            name,
+		Slug:            name,
+		DurationSeconds: int64(24 * time.Hour / time.Second),
+		Controls:        controls,
+		CreatedBy:       userUID,
+	})
+	require.NoError(t, err)
+
+	return dataStore.CreateGrant(ctx, &store.Grant{
+		UserID:            userUID,
+		DatabaseID:        databaseUID,
+		GrantedBy:         userUID,
+		GrantDefinitionID: def.UID,
+		Definition:        def,
+		StartsAt:          time.Now().Add(-time.Hour),
+		ExpiresAt:         time.Now().Add(24 * time.Hour),
+	})
 }
 
 // ---------- Tests ----------
@@ -565,6 +601,14 @@ func TestIntegration_ResultCapture_KeepsPrefixOnLimit(t *testing.T) {
 				continue
 			}
 
+			// A query with rows to store is inserted *bare* and completed only
+			// once the capture has landed, so results_truncated is not readable
+			// until then. DurationMs is the marker for that second write —
+			// reading the row as soon as it appears is a race the test loses.
+			if queries[i].DurationMs == nil {
+				return false
+			}
+
 			selectUID = queries[i].UID.String()
 			truncated = queries[i].ResultsTruncated
 
@@ -590,7 +634,9 @@ func TestIntegration_ResultCapture_KeepsPrefixOnLimit(t *testing.T) {
 
 		stored = result.TotalRows
 
-		return stored > 0
+		// The prefix is written in batches, so the first non-zero count is not
+		// the final one.
+		return stored >= int64(maxResultRows)
 	}, 10*time.Second, 100*time.Millisecond, "the captured prefix should be stored, not discarded")
 
 	assert.EqualValues(t, maxResultRows, stored,
