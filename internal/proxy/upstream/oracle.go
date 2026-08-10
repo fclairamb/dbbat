@@ -54,7 +54,38 @@ type OracleConfig struct {
 // ssl_mode=require therefore proves more than a real session will do. See the
 // package doc.
 func ConnectOracle(ctx context.Context, dial DialFunc, cfg OracleConfig) (driver.Conn, error) {
-	opts := map[string]string{"PROGRAM": cfg.ProgramName}
+	connector, ok := goora.NewConnector(oracleDSN(cfg)).(*goora.OracleConnector)
+	if !ok {
+		return nil, ErrOracleConnectorShape
+	}
+
+	connector.Dialer(oracleDialer(dial))
+
+	return connector.Connect(ctx)
+}
+
+// oracleDSN renders the go-ora connect string for a server row. Split out from
+// ConnectOracle so the option set — which is where the surprises live — can be
+// asserted without an Oracle instance.
+func oracleDSN(cfg OracleConfig) string {
+	opts := map[string]string{
+		"PROGRAM": cfg.ProgramName,
+		// Oracle 23ai's one-round-trip logon ("fast login"), which go-ora turns
+		// on by default, folds the protocol negotiation into the auth exchange —
+		// and go-ora's fast path then reads the server's reply as a negotiation
+		// message without first checking whether it is a TTC error. A rejected
+		// password, which the server *does* answer with ORA-01017, therefore
+		// came back as "message code error: received code 4 and expected code is
+		// 1", and the connectivity check had no choice but to call a wrong
+		// password a handshake failure.
+		//
+		// Turning it off costs one extra round trip on a check that runs when an
+		// admin presses "test connection", and buys back the real error text —
+		// so a wrong password classifies as db_auth_failed and points the admin
+		// at the credentials instead of at the network. Pre-23ai servers never
+		// offered fast login, so this changes nothing against them.
+		"FAST LOGIN": "FALSE",
+	}
 
 	// Deliberately no TIMEOUT/READ TIMEOUT option: it makes go-ora arm real
 	// socket deadlines, which an SSH-tunneled conn cannot honor. Callers bound
@@ -73,16 +104,7 @@ func ConnectOracle(ctx context.Context, dial DialFunc, cfg OracleConfig) (driver
 		opts["SSL VERIFY"] = boolOption(!plan.TLSConfig().InsecureSkipVerify)
 	}
 
-	dsn := goora.BuildUrl(cfg.Host, cfg.Port, cfg.ServiceName, cfg.Username, cfg.Password, opts)
-
-	connector, ok := goora.NewConnector(dsn).(*goora.OracleConnector)
-	if !ok {
-		return nil, ErrOracleConnectorShape
-	}
-
-	connector.Dialer(oracleDialer(dial))
-
-	return connector.Connect(ctx)
+	return goora.BuildUrl(cfg.Host, cfg.Port, cfg.ServiceName, cfg.Username, cfg.Password, opts)
 }
 
 // boolOption renders a go-ora boolean option.
