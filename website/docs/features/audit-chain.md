@@ -139,6 +139,7 @@ number, not a fresh timestamp.
 | Records are **reordered** | Yes | Positions and `prev_mac` links no longer line up |
 | The **first** records are deleted | Yes | The first entry's `prev_mac` is a genesis MAC derived from the key, which cannot be forged |
 | The **last** statements of a closed session are deleted | Yes, for sessions closed by 0.24+ — see the note below for older ones | The session's final chain head is sealed onto the connection row with a keyed MAC when it closes, so correcting it after a deletion needs the key |
+| The **last** statements of a session that is still **open** are deleted | Yes, up to the last stamp sweep | DBBat re-seals the chain head of its open sessions every few minutes, so the exposed tail is the statements run since that sweep rather than the whole session |
 | The **last** rows of a captured result set are deleted | Yes | The capture's final head is sealed onto the query row with a keyed MAC when the capture finishes, so correcting it needs the key |
 | A captured result set is deleted **outright** | Yes | The sealed stamp on the query still attests to rows no longer there |
 | The **whole** chain is truncated and re-sealed by someone holding the key | Only against a head MAC you recorded elsewhere | See the tip above |
@@ -193,15 +194,21 @@ Be precise about this in a control narrative:
   are not sealed either. A capture whose DBBat process died before its rows were
   finalised also carries no head stamp, so only its beginning and middle are
   protected.
-- **A crashed session's tail is sealed late, not at the crash.** A session whose
-  DBBat process died never gets to record its own chain head. The reconcile that
-  closes crash-orphaned sessions recovers it from the stored statements instead,
-  and seals it in the same transaction that marks the session disconnected — so
-  the tail *is* protected, but from the reconcile onward, not from the crash.
-  Statements deleted in between are sealed as if they had never been written.
-  The window is however long it takes DBBat to notice the process is gone: the
-  reclaim runs at startup and then every few minutes, and a process that was
-  killed outright has to miss heartbeats for fifteen minutes first.
+- **A live session is sealed up to the last sweep, not up to its last
+  statement.** DBBat re-stamps the chain head of the sessions it still has open
+  every few minutes, so a session that never ends — a `psql` window left open
+  all day, a pooled application connection, an approval hold waiting on a human
+  — is protected against a trailing deletion the same way a closed one is, but
+  only as far as the last sweep reached. Statements run since then are not yet
+  covered. The exposure is the sweep interval, not the length of the session.
+- **A crashed session's tail is sealed at the last sweep, or at the reconcile.**
+  A session whose DBBat process died never gets to record its own final chain
+  head. It keeps whatever the last sweep sealed, and the reconcile that closes
+  crash-orphaned sessions then seals what is left in the same transaction that
+  marks the session disconnected — but never *below* the sweep's stamp, so
+  deleting the tail of a crashed session and waiting for the reconcile to bless
+  it does not work. What is still exposed is the same as for a live session:
+  statements run after the last sweep before the crash.
 - **It does not defend against someone who has the key.** Anyone who can read
   `DBB_KEY` off the host can rewrite the store and re-seal it. Treat that key
   the way you treat the database credentials it protects.
