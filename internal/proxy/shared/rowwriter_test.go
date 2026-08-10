@@ -24,9 +24,28 @@ var errFakeInsert = errors.New("fake insert failure")
 type fakeRowStore struct {
 	mu       sync.Mutex
 	batches  [][]store.PendingQueryRow
+	sealed   []uuid.UUID // captures sealed at their flush barrier, in order
 	err      error
 	blockOn  chan struct{} // when non-nil, every insert waits for it
 	inserted chan struct{} // when non-nil, signaled after each insert
+}
+
+// SealQueryRowChain stands in for the row-chain stamp the real store writes
+// when a capture reaches its flush barrier.
+func (f *fakeRowStore) SealQueryRowChain(_ context.Context, queryUID uuid.UUID) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.sealed = append(f.sealed, queryUID)
+
+	return nil
+}
+
+func (f *fakeRowStore) sealedQueries() []uuid.UUID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return append([]uuid.UUID(nil), f.sealed...)
 }
 
 func (f *fakeRowStore) StoreQueryRows(_ context.Context, rows []store.PendingQueryRow) error {
