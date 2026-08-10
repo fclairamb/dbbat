@@ -187,6 +187,34 @@ ever grow, and the previously recorded head must still appear in the chain.
 introduced. They are reported rather than folded into the verified count: no
 MAC exists for them and none can be created after the fact.
 
+### Over the API
+
+`GET /api/v1/audit/verify` and `GET /api/v1/audit/verify/queries` (the latter
+takes an optional `?connection=<uid>`) run the same walkers and return the same
+numbers as JSON. Both are **admin-only** — narrower than the `GET /api/v1/audit`
+list a viewer may read. A broken chain is still a `200`, with
+`"verified": false` and a `break` object; the failure is in the data, not the
+request. Handler: `internal/api/audit_verify.go`.
+
+Two properties are load-bearing and have tests pinning them:
+
+- **The response never carries the chain key or a record's content.** It carries
+  counts, chain positions, the head MAC and the human-readable break reason. A
+  MAC is meant to be published; the key never leaves the process.
+- **A walk is O(rows), so it is bounded.** Each scope's outcome is cached for
+  `chainVerifyTTL` (a minute) and at most one walk runs at a time per instance,
+  so an admin hammering the endpoint reads memory instead of scanning the table.
+  A `?since_seq` window was considered and rejected: resuming a walk from a
+  caller-supplied position means trusting that row's `prev_mac`, which is
+  exactly the value an attacker who rewrote the chain controls.
+
+**The endpoint is not equivalent to the CLI, and the docs say so.** It is served
+by the process under audit: a compromised dbbat can answer `"verified": true`
+without walking anything. The CLI can be run by someone who does not trust that
+process. Both `website/docs/features/audit-chain.md` and
+`website/docs/compliance.md` state this where an assessor will read it —
+overselling the endpoint is the failure mode for a compliance-facing feature.
+
 A broken chain names the first bad record:
 
 ```
@@ -210,6 +238,8 @@ prevent it, and it says nothing about rows written before the anchor. See
 - `internal/store/chain.go` — keying, payload construction, head caches
 - `internal/store/chain_canonical.go` — the canonical serialization
 - `internal/store/chain_verify.go` — the walkers
+- `internal/api/audit_verify.go` — the admin-only REST endpoints and the cache
+  that bounds them
 - `internal/store/audit.go`, `internal/store/queries.go`,
   `internal/store/connections.go` — the write paths
 - `internal/migrations/sql/20260810000000_audit_chain.*.sql`

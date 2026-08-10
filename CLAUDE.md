@@ -381,7 +381,12 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   is one chain; `queries` is one chain **per connection**, so
   `DBB_QUERY_STORAGE_RETENTION` deleting whole connections never severs it, and
   the session's final head is stamped on the connection row at close. Verify
-  with `dbbat audit verify [--queries]`. See `docs/audit-chain.md`
+  with `dbbat audit verify [--queries]`, or over REST with the admin-only
+  `GET /api/v1/audit/verify` and `GET /api/v1/audit/verify/queries` — which
+  return counts, the head MAC and the first break, never the key or a record's
+  content, and are cached because a walk is O(rows). The endpoint is **not**
+  equivalent to the CLI: it is served by the process under audit. See
+  `docs/audit-chain.md`
 
 ## API Documentation
 

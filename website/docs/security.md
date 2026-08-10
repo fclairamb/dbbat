@@ -248,7 +248,9 @@ Read-only mode is **defense in depth for trusted users**, not a security boundar
   modifying, deleting or reordering a record is *detectable* — including by
   someone with write access to DBBat's PostgreSQL store. The chain key is
   HKDF-derived from `DBB_KEY` and never stored in the database. Verify with
-  `dbbat audit verify [--queries]`. See
+  `dbbat audit verify [--queries]`, or — for scripted evidence collection —
+  with the admin-only `GET /api/v1/audit/verify`, keeping in mind that an
+  answer from the server is only as trustworthy as the server. See
   [Tamper-Evident Audit Log](/docs/features/audit-chain) for the scope and its
   limits, and [Compliance](/docs/compliance) for how to phrase it to an auditor.
 - DBBat itself only ever inserts audit rows — it never updates or deletes them —

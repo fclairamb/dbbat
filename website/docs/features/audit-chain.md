@@ -66,6 +66,57 @@ AUDIT CHAIN BROKEN break="chain_seq 412, row 019fe8bb-…: mac does not
 match the entry's content: the entry was modified"
 ```
 
+## Verifying over the API
+
+The same walk is reachable over REST, so an evidence script does not need shell
+access to the host:
+
+```bash
+# The administrative audit chain
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
+  "http://localhost:4200/api/v1/audit/verify"
+
+# The per-connection query chains
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
+  "http://localhost:4200/api/v1/audit/verify/queries"
+
+# A single session (also reports that chain's head)
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
+  "http://localhost:4200/api/v1/audit/verify/queries?connection=019fe8bb-b9d5-74ab-b512-601b6eccda98"
+```
+
+```json
+{"chain":"audit","verified":true,"entries":1284,"head_seq":1284,
+ "head_mac":"9f2c…","unverifiable_pre_anchor_entries":37,
+ "checked_at":"2026-08-10T09:14:02Z","cached":false}
+```
+
+Both endpoints require the **admin** role — narrower than the `GET /api/v1/audit`
+list a viewer may read. A broken chain still answers `200`, with
+`"verified": false` and a `break` object naming the first bad record: the
+failure is in the data, not in the request. The response carries counts,
+positions, the head MAC and the break reason, and never the chain key or the
+content of any record.
+
+:::warning The API answer is not equivalent to the CLI
+
+`dbbat audit verify` runs where the key lives and can be run by someone who
+does **not** trust the running server. `GET /api/v1/audit/verify` is served *by*
+that server — a compromised or modified DBBat can return `"verified": true`
+without walking anything, and the caller cannot tell.
+
+Use the endpoint for routine evidence collection, and the CLI (or an
+independent re-run of it from a trusted binary against the store directly) when
+the integrity of the DBBat process itself is part of what is being assessed.
+Do not present the two as interchangeable in a control narrative.
+
+:::
+
+A chain walk is `O(rows)`, so an instance remembers each walk's outcome for a
+minute and runs at most one walk at a time. `cached` tells you whether an answer
+was reused and `checked_at` when it was actually computed — poll for a fresh
+number, not a fresh timestamp.
+
 ## What it detects
 
 | Tampering | Detected | How |
