@@ -173,7 +173,7 @@ The masking mechanism itself. Stale tracker entries still accumulate for the
 life of a session — `handleOCLOSE` removes one cursor id per frame while clients
 batch their closes — so a future learning miss on a recycled id would re-arm the
 same silent wrong-SQL gate, without ever reaching `refuseUnknownCursor`. Filed
-as `specs/todos/2026-08-10-oracle-stale-cursor-resolves-to-the-wrong-statement.md`
+as `specs/todos/2026-08-10-04-oracle-stale-cursor-resolves-to-the-wrong-statement.md`
 and listed as an open gap in `docs/approvals.md`.
 
 The measurement's counters are guarded by

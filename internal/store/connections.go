@@ -425,7 +425,7 @@ func (s *Store) closeOrphans(ctx context.Context, scope func(*bun.UpdateQuery) *
 //   - The subquery copies `mac` verbatim, which is the format CloseConnection
 //     writes and therefore the one to stay consistent with today. It is also the
 //     weakness that
-//     specs/todos/2026-08-10-seal-the-connection-query-chain-stamp.md exists to
+//     specs/todos/2026-08-10-06-seal-the-connection-query-chain-stamp.md exists to
 //     fix: a verbatim head is readable out of `queries`, so an attacker can
 //     recopy it after a trailing deletion. **When that spec lands, this path has
 //     to be reworked** — a keyed stamp is HMAC(chain key, …) and the chain key

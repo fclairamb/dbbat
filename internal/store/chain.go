@@ -314,7 +314,7 @@ func rowChainPayload(
 // with no key and no break reported. Sealing the stamp instead means correcting
 // it after a deletion requires the chain key, exactly like forging a row.
 //
-// See specs/todos/2026-08-10-seal-the-connection-query-chain-stamp.md: the
+// See specs/todos/2026-08-10-06-seal-the-connection-query-chain-stamp.md: the
 // per-connection stamp has the same weakness and needs a compatibility story
 // this cannot give it.
 func (s *Store) rowChainStampMAC(queryUID uuid.UUID, count int64, headMAC []byte) []byte {

@@ -12,7 +12,7 @@ Stop a cursor id that Oracle has recycled from resolving to the statement that
 ## Why
 
 Found while measuring cursor-id learning for
-`specs/todos/2026-08-09-oracle-piggyback-reexec-unknown-cursor.md` (see its
+`specs/done/2026/08/2026-08-09-oracle-piggyback-reexec-unknown-cursor.md` (see its
 `## Measurement` section). While `findCursorIDInResponse` had an over-tight bound
 on the OER sequence number, learning stopped part-way through every session — and
 the failure was invisible precisely *because* of this: instead of an untracked
