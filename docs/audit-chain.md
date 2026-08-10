@@ -1,9 +1,10 @@
 # Tamper-evident audit chain
 
-DBBat's audit trail is HMAC-chained: every audit entry, and every statement in
-a session's query history, carries a MAC over its own content plus the previous
-record's MAC. Altering, deleting or reordering a record breaks the chain, and
-`dbbat audit verify` reports the first record that does not add up.
+DBBat's audit trail is HMAC-chained: every audit entry, every statement in a
+session's query history, and every row of a captured result set carries a MAC
+over its own content plus the previous record's MAC. Altering, deleting or
+reordering a record breaks the chain, and `dbbat audit verify` reports the first
+record that does not add up.
 
 The key is derived from DBBat's master encryption key and never leaves the
 process. That is the difference between this and a plain hash chain: whoever
@@ -18,8 +19,10 @@ It detects:
 - an entry whose content was **modified**;
 - an entry **deleted** from the middle of the chain;
 - entries **reordered**;
-- entries deleted from the **end** of a session's query history (the session's
-  final chain head is stamped on the connection row when it closes);
+- entries deleted from the **end** of a session's query history, or rows deleted
+  from the end of a captured result set (the final chain head is stamped on the
+  connection row when the session closes, and on the query row when the capture
+  finishes);
 - entries deleted from the **start** of the audit chain (the first entry's
   `prev_mac` is a genesis MAC derived from the key, so it cannot be forged).
 
@@ -54,7 +57,7 @@ A store built without an encryption key writes unchained rows and refuses to
 verify (`audit chain key is not configured`). A serving process cannot land
 there: config always resolves a key, creating `~/.dbbat/key` if it has to.
 
-## The two chains
+## The three chains
 
 ### `audit_log` — one chain for the store
 
@@ -94,6 +97,41 @@ deleting the *last* statements of a session would leave a shorter chain that
 still verified. A session that died without closing has no stamp; the startup
 reconcile that closes crash-orphaned connections has no chain state to stamp.
 
+### `query_rows` — one chain per capture
+
+The optional capture of what a statement actually returned
+(`max_result_rows` / `max_result_bytes`) is the evidence an exfiltration
+investigation leans on, so it is chained too. The shape follows the same
+reasoning as the query chain, one level down: retention deletes whole queries
+and `query_rows.query_id` is `ON DELETE CASCADE`, so **one chain per query** is
+severed exactly when its parent goes away and never by housekeeping.
+
+Two things differ from the chains above.
+
+**There is no `chain_seq`.** `row_number` is already the capture's own ordering,
+so it *is* the chain position. It is deliberately **not** required to be dense:
+the batched row writer drops rows when its queue is full, and a row that fails
+to encode is skipped, so gaps are normal. Density is not what makes a deletion
+detectable — the `prev_mac` linkage is. Removing a row from the middle leaves
+its successor pointing at a MAC no surviving row has. `row_chain_len` is
+therefore a *count* of stored rows, not the head's `row_number`; the two differ
+exactly when the capture has gaps.
+
+**A missing prefix is a break.** Retention never deletes an individual captured
+row — it deletes whole queries and whole connections — so unlike a long-lived
+session's oldest statements, a capture that no longer starts at its genesis link
+has been tampered with, and verification says so.
+
+The head is stamped on the *query* row (`row_chain_mac`, `row_chain_len`) at the
+capture's flush barrier: the point where every captured row is durable and the
+query is about to be marked complete (`QuerySink.Flush` →
+`Store.SealQueryRowChain`). A capture whose process died before the barrier
+keeps a NULL stamp and only has its prefix and interior protected — structurally
+the same gap `connections.query_chain_mac` has for a session that never closed
+cleanly. Verification enumerates queries that carry a stamp as well as queries
+with surviving rows, so a capture deleted *outright* still gets caught by its
+orphaned stamp instead of vanishing from the walk.
+
 ## Coverage
 
 The audit chain covers every column of an `audit_log` row: `uid`, `event_type`,
@@ -109,6 +147,19 @@ already points at.
 
 So the query chain proves **which statements ran, with which parameters, in
 which order**. It does not seal their reported outcome.
+
+The row chain covers every column of a `query_rows` row — `uid`, `query_id`,
+`row_number`, `row_data`, `row_size_bytes`, `prev_mac` — because that table is
+insert-only: nothing is ever written to a captured row after its INSERT.
+
+What it deliberately does **not** reach is the capture's after-the-fact metadata
+on the parent query. `results_truncated` and `results_dropped` are written by
+`UpdateQueryCompletion` once the result set has been read, exactly like
+`duration_ms` and `rows_affected`, and sealing them would mean recomputing a MAC
+whose successors already point at it. That is the same call the query chain made
+for the outcome columns, and the row chain follows it. So the row chain proves
+**which rows were captured, with what content, in what order**; it does not seal
+the claim that the capture was complete.
 
 ## Determinism
 
@@ -154,6 +205,16 @@ Audit volume is admin actions, so the contention this buys is negligible. Query
 appends only ever contend with other appends on the *same* connection, which is
 a single session.
 
+The row chains are the exception that shaped their write path: a single batch
+from the shared row writer spans several queries and therefore several chains,
+and that path is the hottest writer in the store. Splitting the batch per query
+is **not** allowed to become a round trip per query, so one transaction covers
+the whole batch — one statement takes every chain lock it needs (in query-uid
+order, so two overlapping batches cannot deadlock), one statement loads whatever
+heads are not cached, and the INSERT stays a single bulk INSERT spanning every
+query in the batch. Batching still amortizes the round trip across ~1000 rows;
+what chaining costs is the transaction plus those two statements *per batch*.
+
 ## Running a verification
 
 ```bash
@@ -165,7 +226,14 @@ dbbat audit verify --queries
 
 # One session
 dbbat audit verify --queries --connection 019fe8bb-b9d5-74ab-b512-601b6eccda98
+
+# The per-capture result row chains (optionally scoped to one session)
+dbbat audit verify --rows
+dbbat audit verify --rows --connection 019fe8bb-b9d5-74ab-b512-601b6eccda98
 ```
+
+`--queries` and `--rows` are different chains; passing both is refused rather
+than silently picking one.
 
 Both need the same `DBB_DSN` and `DBB_KEY` / `DBB_KEYFILE` the server runs
 with. The command exits non-zero when the chain does not verify.
@@ -191,7 +259,8 @@ MAC exists for them and none can be created after the fact.
 
 `GET /api/v1/audit/verify` and `GET /api/v1/audit/verify/queries` (the latter
 takes an optional `?connection=<uid>`) run the same walkers and return the same
-numbers as JSON. Both are **admin-only** — narrower than the `GET /api/v1/audit`
+numbers as JSON. **The row chains are CLI-only for now** — there is no
+`/audit/verify/rows` endpoint yet. Both are **admin-only** — narrower than the `GET /api/v1/audit`
 list a viewer may read. A broken chain is still a `200`, with
 `"verified": false` and a `break` object; the failure is in the data, not the
 request. Handler: `internal/api/audit_verify.go`.
@@ -245,5 +314,7 @@ prevent it, and it says nothing about rows written before the anchor. See
   that bounds them
 - `internal/store/audit.go`, `internal/store/queries.go`,
   `internal/store/connections.go` — the write paths
-- `internal/migrations/sql/20260810000000_audit_chain.*.sql`
+- `internal/proxy/shared/rowwriter.go` — the flush barrier that seals a capture
+- `internal/migrations/sql/20260810000000_audit_chain.*.sql`,
+  `internal/migrations/sql/20260810010000_query_row_chain.*.sql`
 - `main.go` — the `audit verify` command
