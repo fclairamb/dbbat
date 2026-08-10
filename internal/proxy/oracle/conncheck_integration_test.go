@@ -58,6 +58,12 @@ func TestIntegration_ConnCheckOracleLogin(t *testing.T) {
 		assert.Equal(t, conncheck.CodeOK, res.Code)
 	})
 
+	// The server answers a bad password with ORA-01017, but go-ora only lets it
+	// through when Oracle 23ai's one-round-trip "fast login" is off — its fast
+	// path reads the reply as a protocol negotiation and reports "message code
+	// error: received code 4 and expected code is 1", which classified as a
+	// handshake failure. upstream.ConnectOracle disables fast login for exactly
+	// this reason, so asserting on the message here is what keeps that honest.
 	t.Run("wrong password is an auth failure", func(t *testing.T) {
 		res := checker.Check(context.Background(), newServer("definitely-not-the-password"))
 
@@ -65,6 +71,8 @@ func TestIntegration_ConnCheckOracleLogin(t *testing.T) {
 		assert.Equal(t, conncheck.StageTargetAuth, res.Stage)
 		assert.Equal(t, conncheck.CodeDBAuthFailed, res.Code,
 			"wrong password must classify as db_auth_failed (msg=%s)", res.Message)
+		assert.Contains(t, res.Message, "1017",
+			"the admin must see the server's own ORA-01017, not go-ora's fast-login confusion")
 	})
 
 	t.Run("unknown service is a handshake failure", func(t *testing.T) {
