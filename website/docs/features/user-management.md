@@ -163,8 +163,11 @@ When configured, users can sign in with their Slack workspace account. New users
 
 - `slack_auth.client_id` / `slack_auth.client_secret`
 - `slack_auth.team_id` (optional — restrict to one workspace)
-- `slack_auth.auto_create_users` (default `true`)
-- `slack_auth.default_role` (default `connector`)
+
+Auto-provisioning itself is not a Slack setting — it applies to every login
+provider, so it lives under `auth.auto_create_users` (default `true`) and
+`auth.default_role` (default `connector`). See
+[User auto-provisioning](../configuration/index.md#user-auto-provisioning-all-login-providers).
 
 ## Deleting Users
 

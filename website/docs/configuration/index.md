@@ -300,8 +300,21 @@ snippets, and what it takes to make each IdP emit groups in the first place.
 | `DBB_SLACK_AUTH_CLIENT_ID` | Slack app client ID |
 | `DBB_SLACK_AUTH_CLIENT_SECRET` | Slack app client secret |
 | `DBB_SLACK_AUTH_TEAM_ID` | Restrict sign-in to one workspace |
-| `DBB_SLACK_AUTH_AUTO_CREATE_USERS` | Auto-provision new users (default `true`) |
-| `DBB_SLACK_AUTH_DEFAULT_ROLE` | Role assigned to auto-provisioned users (default `connector`) |
+
+### User auto-provisioning (all login providers)
+
+These two apply to **every** OAuth/OIDC provider — Slack, the generic OIDC
+issuer, and anything added later.
+
+| Variable | Description |
+|----------|-------------|
+| `DBB_AUTH_AUTO_CREATE_USERS` | Let a verified identity with no local account provision one on first login (default `true`) |
+| `DBB_AUTH_DEFAULT_ROLE` | Role such an account starts with, and the floor `DBB_OIDC_ROLE_MAPPING` never digs below (default `connector`). Must name a real role — `admin`, `viewer` or `connector` — or DBBat refuses to start |
+
+They used to be called `DBB_SLACK_AUTH_AUTO_CREATE_USERS` and
+`DBB_SLACK_AUTH_DEFAULT_ROLE`, back when Slack was the only login provider.
+Those names are still accepted, so nothing breaks on upgrade; the `DBB_AUTH_*`
+name wins if both are set.
 
 ### Slack notifications & interactivity (optional)
 
@@ -443,6 +456,8 @@ mssql:
 slack_auth:
   client_id: "..."
   client_secret: "..."
+
+auth:
   auto_create_users: true
   default_role: "connector"
 

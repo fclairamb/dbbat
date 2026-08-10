@@ -47,10 +47,11 @@ than shipping a login button that can only ever end on an error page. So does
 a malformed `DBB_OIDC_ROLE_MAPPING`: a mapping that cannot be read is an
 authorization rule that cannot be read.
 
-User auto-provisioning is shared with the Slack provider:
-`DBB_SLACK_AUTH_AUTO_CREATE_USERS` (default `true`) and
-`DBB_SLACK_AUTH_DEFAULT_ROLE` (default `connector`) govern what happens when a
-verified identity has no local account yet.
+What happens when a verified identity has no local account yet is governed by
+two settings that apply to every login provider: `DBB_AUTH_AUTO_CREATE_USERS`
+(default `true`) and `DBB_AUTH_DEFAULT_ROLE` (default `connector`). A default
+role that is not one of `admin`, `viewer` or `connector` fails at startup, for
+the same reason a malformed mapping does.
 
 ## Mapping directory groups to roles
 
@@ -76,7 +77,7 @@ The rules, in full:
   granted by hand in the UI that the mapping never mentions — is never revoked
   by a login.
 - **The default role is the floor.** A user who matches nothing keeps
-  `DBB_SLACK_AUTH_DEFAULT_ROLE` rather than ending up with no roles at all,
+  `DBB_AUTH_DEFAULT_ROLE` rather than ending up with no roles at all,
   which would be a lockout rather than a demotion.
 - **The last admin is never stripped.** If the mapping would remove the `admin`
   role from the only remaining admin, DBBat keeps it and logs a warning —
@@ -250,7 +251,7 @@ Keycloak realms are already tenant-scoped, so the email allowlist is optional.
 | Login bounces back with "Failed to complete single sign-on" | Check the server log for the exchange error: redirect-URI mismatch, wrong client secret, or ID-token verification failure |
 | `id token verification` failure | `aud` or `iss` mismatch — usually a multi-tenant issuer URL, or credentials from a different app registration |
 | "Your workspace or email domain is not authorized" | The verified email's domain is outside `DBB_OIDC_EMAIL_DOMAINS` |
-| "No account is linked to your identity" | Auto-provisioning is off (`DBB_SLACK_AUTH_AUTO_CREATE_USERS=false`) and no local user matches the email |
+| "No account is linked to your identity" | Auto-provisioning is off (`DBB_AUTH_AUTO_CREATE_USERS=false`) and no local user matches the email |
 | Startup fails with `DBB_OIDC_ROLE_MAPPING is malformed` | A pair without `=`, an empty group, or a role that is not `admin`, `viewer` or `connector` |
 | Everyone lost their mapped role at once | The IdP stopped emitting the claim, or it is not the one named by `DBB_OIDC_GROUPS_CLAIM`. The log line "OIDC login carried no group claim" is written on each such login |
 | Nobody is promoted, nobody is demoted | The claim arrives but its values do not match the mapping — most often Entra object ids against a mapping written with group names. Matching is exact, case included |
