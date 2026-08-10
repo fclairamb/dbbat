@@ -25,6 +25,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/mcp"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -993,4 +994,156 @@ func TestProxyReleasesAHoldWhenTheClientCancels(t *testing.T) {
 	require.NoError(t, db.QueryRowContext(ctx,
 		fmt.Sprintf("SELECT COUNT(*) FROM %s", e2eTable)).Scan(&count))
 	assert.Equal(t, 5, count)
+}
+
+// TestMCPExecutesThroughTheProxy is the SQL Server half of the MCP phase-2
+// spec. The property under test is the design decision the whole feature rests
+// on: an agent's statement is executed by *dialing this listener*, so it is
+// governed by the same session as anyone else's — not by a second path that
+// could drift.
+//
+// It therefore asserts what a wrongly-wired loopback client would break (rows,
+// the server-side cap, bind parameters, rows-affected, query history) and,
+// last, the one thing a bypass would silently lose: a read_only grant refusing
+// a write that arrived over MCP.
+func TestMCPExecutesThroughTheProxy(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+
+	upstreamAddr := startUpstreamSQLServer(ctx, t)
+	createE2ETable(ctx, t, upstreamAddr)
+
+	dataStore, encryptionKey := seedE2E(ctx, t, upstreamAddr, "disable")
+	proxyAddr := startProxyWithStore(t, config.MSSQLConfig{}, dataStore, encryptionKey)
+
+	users, err := dataStore.ListUsers(ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, users)
+
+	// The MCP client authenticates with a `dbb_` key, exactly as the endpoint
+	// hands it: the key is both the caller's credential and the password the
+	// loopback client presents to this proxy.
+	_, plainKey, err := dataStore.CreateAPIKey(ctx, users[0].UID, "agent key", nil, encryptionKey)
+	require.NoError(t, err)
+
+	executor := mcp.NewLoopbackExecutor(mcp.LoopbackListeners{MSSQL: proxyAddr})
+
+	run := func(sqlText string, maxRows int, params ...any) (*mcp.QueryResult, error) {
+		return executor.Execute(ctx, mcp.ExecRequest{
+			Protocol: store.ProtocolMSSQL,
+			// The dbbat entry's name, which is what the LOGIN7 database field
+			// carries and what the proxy resolves the server row from.
+			Database:         e2eEntryName,
+			UpstreamDatabase: e2eRealDatabase,
+			Username:         e2eDBBatUser,
+			APIKey:           plainKey,
+			SQL:              sqlText,
+			Params:           params,
+			MaxRows:          maxRows,
+		})
+	}
+
+	const selectSQL = "SELECT id, label FROM " + e2eTable + " ORDER BY id"
+
+	result, err := run(selectSQL, 200)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"id", "label"}, result.Columns)
+	require.Len(t, result.Rows, 5)
+	assert.False(t, result.Truncated)
+	// nvarchar must reach the agent as text, not as base64.
+	assert.Equal(t, "étiquette 1", result.Rows[0]["label"])
+
+	// The cap is applied while the result set is read, not after.
+	capped, err := run(selectSQL, 2)
+	require.NoError(t, err)
+	assert.Len(t, capped.Rows, 2)
+	assert.True(t, capped.Truncated)
+
+	// Bind parameters travel as parameters: go-mssqldb turns this into
+	// sp_executesql, which is the second of the proxy's two statement paths.
+	bound, err := run("SELECT label FROM "+e2eTable+" WHERE id = @p1", 10, 3)
+	require.NoError(t, err)
+	require.Len(t, bound.Rows, 1)
+	assert.Equal(t, "étiquette 3", bound.Rows[0]["label"])
+
+	// A write reports its own row count.
+	written, err := run("UPDATE "+e2eTable+" SET label = N'modifié' WHERE id <= 2", 10)
+	require.NoError(t, err)
+	require.NotNil(t, written.RowsAffected)
+	assert.Equal(t, int64(2), *written.RowsAffected)
+
+	// The `describe` tool's catalog query, verbatim from introspectionSQL: the
+	// point is that the aliases really do come back lower-cased, which is what
+	// the column renderer keys on.
+	described, err := run(
+		"SELECT COLUMN_NAME AS column_name, DATA_TYPE AS data_type, "+
+			"IS_NULLABLE AS is_nullable, COLUMN_DEFAULT AS column_default "+
+			"FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @p1 "+
+			"ORDER BY TABLE_SCHEMA, ORDINAL_POSITION", 100, e2eTable)
+	require.NoError(t, err)
+	require.NotEmpty(t, described.Rows)
+	assert.Equal(t, "id", described.Rows[0]["column_name"])
+
+	// Every one of those landed in the ordinary query history, attributed to
+	// the key's owner — nothing here is a special path.
+	require.Eventually(t, func() bool {
+		queries, listErr := dataStore.ListQueries(ctx, store.QueryFilter{Limit: 100})
+		if listErr != nil {
+			return false
+		}
+
+		for i := range queries {
+			if queries[i].SQLText == selectSQL {
+				return true
+			}
+		}
+
+		return false
+	}, 30*time.Second, 100*time.Millisecond, "an agent's statement must be logged like any other")
+
+	// Finally: the grant's controls apply to MCP because MCP is a proxy client.
+	// Swap the grant for a read-only one — the next execution opens a new
+	// session and resolves it afresh.
+	grants, err := dataStore.ListGrants(ctx, store.GrantFilter{ActiveOnly: true})
+	require.NoError(t, err)
+	require.NotEmpty(t, grants)
+
+	for _, grant := range grants {
+		require.NoError(t, dataStore.RevokeGrant(ctx, grant.UID, users[0].UID))
+	}
+
+	servers, err := dataStore.ListServers(ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, servers)
+
+	readOnlyDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:             "mssql-mcp-read-only",
+		Slug:             "mssql-mcp-read-only",
+		DurationSeconds:  int64((24 * time.Hour).Seconds()),
+		Controls:         []string{store.ControlReadOnly},
+		ApprovalPatterns: []string{},
+		CreatedBy:        users[0].UID,
+	})
+	require.NoError(t, err)
+
+	_, err = dataStore.CreateGrant(ctx, &store.Grant{
+		UserID:            users[0].UID,
+		DatabaseID:        servers[0].UID,
+		GrantDefinitionID: readOnlyDef.UID,
+		Definition:        readOnlyDef,
+		GrantedBy:         users[0].UID,
+		StartsAt:          time.Now().Add(-time.Hour),
+		ExpiresAt:         time.Now().Add(24 * time.Hour),
+	})
+	require.NoError(t, err)
+
+	_, err = run("DELETE FROM "+e2eTable, 10)
+	require.Error(t, err, "a read-only grant must refuse a write that arrived over MCP")
+	assert.Contains(t, err.Error(), "read-only")
+
+	// And the refusal was a refusal, not a partial write.
+	stillThere, err := run("SELECT COUNT(*) AS n FROM "+e2eTable, 10)
+	require.NoError(t, err)
+	require.Len(t, stillThere.Rows, 1)
+	assert.EqualValues(t, 5, stillThere.Rows[0]["n"])
 }

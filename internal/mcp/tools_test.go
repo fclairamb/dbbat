@@ -430,7 +430,9 @@ func TestDescribeUsesBoundParameters(t *testing.T) {
 
 	evil := "users; DROP TABLE accounts--"
 
-	for _, protocol := range []string{store.ProtocolPostgreSQL, store.ProtocolMySQL, store.ProtocolOracle} {
+	for _, protocol := range []string{
+		store.ProtocolPostgreSQL, store.ProtocolMySQL, store.ProtocolOracle, store.ProtocolMSSQL,
+	} {
 		sqlText, params, err := introspectionSQL(protocol, evil, "")
 		require.NoError(t, err)
 		assert.NotContains(t, sqlText, "DROP TABLE accounts")
@@ -448,7 +450,13 @@ func TestDescribeUsesBoundParameters(t *testing.T) {
 	assert.Contains(t, sqlText, "information_schema.tables")
 	assert.Nil(t, params)
 
-	_, _, err = introspectionSQL(store.ProtocolMSSQL, "", "")
+	sqlText, params, err = introspectionSQL(store.ProtocolMSSQL, "orders", "dbo")
+	require.NoError(t, err)
+	assert.Contains(t, sqlText, "INFORMATION_SCHEMA.COLUMNS")
+	assert.Contains(t, sqlText, "@p2")
+	assert.Equal(t, []any{"orders", "dbo"}, params)
+
+	_, _, err = introspectionSQL(store.ProtocolSSH, "", "")
 	require.ErrorIs(t, err, ErrProtocolUnsupported)
 }
 

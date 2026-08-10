@@ -21,10 +21,10 @@ func TestSupportedProtocol(t *testing.T) {
 	assert.True(t, SupportedProtocol(store.ProtocolMySQL))
 	assert.True(t, SupportedProtocol(store.ProtocolMariaDB))
 	assert.True(t, SupportedProtocol(store.ProtocolOracle))
+	assert.True(t, SupportedProtocol(store.ProtocolMSSQL))
 
 	// Still to come.
 	assert.False(t, SupportedProtocol(store.ProtocolMongoDB))
-	assert.False(t, SupportedProtocol(store.ProtocolMSSQL))
 
 	// An SSH-only entry is a bastion, not a database: there is no listener to
 	// dial and no statement to run.
@@ -73,7 +73,7 @@ func TestLoopbackExecutorRefusesDisabledListener(t *testing.T) {
 
 	for _, protocol := range []string{
 		store.ProtocolPostgreSQL, store.ProtocolMySQL, store.ProtocolMariaDB,
-		store.ProtocolOracle,
+		store.ProtocolOracle, store.ProtocolMSSQL,
 	} {
 		_, err := e.Execute(context.Background(), ExecRequest{Protocol: protocol})
 		require.ErrorIsf(t, err, ErrListenerDisabled, "protocol %s", protocol)
@@ -104,6 +104,7 @@ func TestLoopbackExecutorDialsTheRightListener(t *testing.T) {
 		{store.ProtocolMySQL, LoopbackListeners{MySQL: dead}, "SELECT 1"},
 		{store.ProtocolMariaDB, LoopbackListeners{MySQL: dead}, "SELECT 1"},
 		{store.ProtocolOracle, LoopbackListeners{Oracle: dead}, "SELECT 1 FROM dual"},
+		{store.ProtocolMSSQL, LoopbackListeners{MSSQL: dead}, "SELECT 1"},
 	}
 
 	for _, tc := range cases {
@@ -238,4 +239,40 @@ func TestNormalizeSQLValue(t *testing.T) {
 	assert.Equal(t, []byte{0xff, 0xfe}, normalizeSQLValue([]byte{0xff, 0xfe}))
 	assert.Equal(t, "2026-08-10T09:00:00Z",
 		normalizeSQLValue(time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC)))
+}
+
+// TestMSSQLIsExecStatement covers the one dialect difference from Oracle: a
+// T-SQL write can return rows through an OUTPUT clause, so those must not be
+// sent to Exec, which would silently drop the result set.
+func TestMSSQLIsExecStatement(t *testing.T) {
+	t.Parallel()
+
+	for _, sqlText := range []string{
+		"INSERT INTO t (id) VALUES (1)",
+		"  update t set a = 1 where id = @p1",
+		"DELETE FROM dbbat_stage3",
+		"TRUNCATE TABLE t",
+	} {
+		assert.True(t, mssqlIsExecStatement(sqlText), sqlText)
+	}
+
+	for _, sqlText := range []string{
+		"SELECT TOP 10 * FROM t",
+		"DELETE FROM t OUTPUT deleted.id",
+		"INSERT INTO t OUTPUT INSERTED.id VALUES (1)",
+		"EXEC sp_who",
+		"-- comment\nDELETE FROM t",
+	} {
+		assert.False(t, mssqlIsExecStatement(sqlText), sqlText)
+	}
+}
+
+func TestContainsIdentifier(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, containsIdentifier("DELETE FROM t OUTPUT deleted.id", "output"))
+	assert.True(t, containsIdentifier("output x", "output"))
+	assert.False(t, containsIdentifier("SELECT outputs FROM t", "output"))
+	assert.False(t, containsIdentifier("SELECT my_output FROM t", "output"))
+	assert.False(t, containsIdentifier("SELECT 1", "output"))
 }
