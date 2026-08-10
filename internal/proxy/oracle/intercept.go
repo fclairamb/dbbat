@@ -86,7 +86,7 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 				slog.Any("error", err),
 			)
 
-			return err
+			return s.refuseStatement(result.SQL, result.BindValues, err)
 		}
 	}
 
@@ -218,7 +218,7 @@ func (s *session) regateCursor(cursor *trackedCursor) error {
 				slog.Any("error", err),
 			)
 
-			return err
+			return s.refuseStatement(sql, cursor.bindValues, err)
 		}
 	}
 
@@ -344,7 +344,8 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 				slog.String("sql", truncateSQL(result.SQL, 200)),
 				slog.Any("error", err),
 			)
-			return err
+
+			return s.refuseStatement(result.SQL, result.BindValues, err)
 		}
 	}
 
@@ -413,7 +414,7 @@ func (s *session) handleJDBCExec(ttcPayload []byte) error {
 				slog.Any("error", err),
 			)
 
-			return err
+			return s.refuseStatement(sql, result.BindValues, err)
 		}
 	}
 
@@ -649,6 +650,76 @@ func (s *session) persistQueryRecord() {
 	pending.rowSink = s.rowWriter.NewSinkFor(created.UID)
 
 	s.stream.Query(created.UID, query)
+}
+
+// refuseStatement records a statement that access control declined and returns
+// the refusal unchanged, so a caller reads as `return s.refuseStatement(...)`.
+func (s *session) refuseStatement(sql string, binds []string, refusal error) error {
+	s.recordBlockedQuery(sql, binds, refusal)
+
+	return refusal
+}
+
+// recordBlockedQuery persists a queries row for a statement refused by
+// read_only, block_copy or block_ddl before a single byte of it reached
+// upstream.
+//
+// Until this existed the refusal lived only in the process log (the WARN just
+// above every call site) and in the pcapng capture when capture happened to be
+// on — an evidence gap against PCI DSS 10.2.1.4, and an inconsistency with
+// MySQL/MariaDB, MongoDB and SQL Server, which have always recorded one. The
+// row carries the same error-string shape as those three so the UI badge and
+// any log-based alerting treat all five protocols identically.
+//
+// duration_ms and rows_affected are 0 — the statement never ran — and the row
+// is attributed to the session's connection like any other, so it joins to the
+// user and the database. It deliberately does not touch pendingQuery: a
+// refused statement is not in flight, and the previous query (if any) is still
+// owed its own completion.
+func (s *session) recordBlockedQuery(sql string, binds []string, refusal error) {
+	if refusal == nil || s.completionStore == nil || s.connectionUID == uuid.Nil {
+		return
+	}
+
+	errText := refusal.Error()
+	duration := float64(0)
+	rowsAffected := int64(0)
+
+	query := &store.Query{
+		ConnectionID: s.connectionUID,
+		SQLText:      sql,
+		ExecutedAt:   time.Now(),
+		DurationMs:   &duration,
+		RowsAffected: &rowsAffected,
+		Parameters:   formatOracleBinds(binds),
+		// Last gate before the store: never persist an "error" that is not
+		// readable text. See shared.SanitizeQueryError.
+		Error: shared.SanitizeQueryError(s.ctx, s.logger, &errText),
+	}
+
+	go func() {
+		created, err := s.completionStore.CreateQuery(s.ctx, query)
+		if err != nil {
+			s.logger.ErrorContext(s.ctx, "failed to log blocked query", slog.Any("error", err))
+
+			return
+		}
+
+		s.stream.Query(created.UID, query)
+
+		// Bytes are left to the TTC error frame's own accounting; this only
+		// bumps the connection's query counter so a refused attempt shows up
+		// there too.
+		if err := s.completionStore.IncrementConnectionStats(s.ctx, s.connectionUID, 0); err != nil {
+			s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
+		}
+	}()
+
+	// The attempt counts against the in-session query quota, exactly as it
+	// does on the three protocols that already recorded refusals.
+	if s.grant != nil {
+		s.grant.QueryCount++
+	}
 }
 
 // queryCompletionStore is the slice of the store that query completion writes
