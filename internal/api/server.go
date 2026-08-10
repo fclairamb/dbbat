@@ -74,6 +74,10 @@ type Server struct {
 	// nil when DBB_MCP_ENABLED is false — in which case the routes are not
 	// registered either.
 	mcp *mcp.Server
+
+	// chainVerify bounds GET /audit/verify: a chain walk is O(rows), so its
+	// outcome is cached and only one walk runs at a time.
+	chainVerify *chainVerifyCache
 }
 
 // SetDumpStorage installs the blob store holding uploaded session captures, so
@@ -174,6 +178,7 @@ func NewServer(dataStore *store.Store, encryptionKey []byte, logger *slog.Logger
 		config:             cfg,
 		oauthProviders:     oauthProviders,
 		notifier:           notifier,
+		chainVerify:        newChainVerifyCache(),
 	}
 }
 
@@ -462,6 +467,14 @@ func (s *Server) setupRouter() *gin.Engine {
 			authenticated.GET("/queries/:uid/rows", s.requireAdminOrViewer(), s.handleGetQueryRows)
 			// Audit: admin/viewer only
 			authenticated.GET("/audit", s.requireAdminOrViewer(), s.handleListAudit)
+			// Tamper-evidence verification. Admin only — narrower than the
+			// audit list a viewer may read, because this is the control
+			// evidence itself and running it costs a full chain walk. See
+			// internal/api/audit_verify.go for the trust caveat: this answer
+			// is only as good as the process serving it, which is why
+			// `dbbat audit verify` stays the authoritative check.
+			authenticated.GET("/audit/verify", s.requireAdmin(), s.handleVerifyAuditChain)
+			authenticated.GET("/audit/verify/queries", s.requireAdmin(), s.handleVerifyQueryChains)
 
 			// Global parameters (admin-only CRUD; GET /instance open to any authenticated user)
 			params := authenticated.Group("/parameters")
