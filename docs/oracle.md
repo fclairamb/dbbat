@@ -79,12 +79,13 @@ In modern Oracle, function code `0x03` is a generic "piggyback" that carries sub
 | 0x03 | 0x04 | **Re-execute an already-parsed non-SELECT cursor** (no SQL) |
 | 0x03 | 0x76 | AUTH Phase 1 |
 | 0x03 | 0x73 | AUTH Phase 2 |
-| 0x03 | 0x09 | Close cursor |
+| 0x03 | 0x09 | Session logoff (**not** a cursor close — see "Closing cursors") |
 | 0x04 | — | **OER — error/status** (carries DML row count or ORA error) |
 | 0x08 | — | Server response (carries an embedded OER on v315+) |
 | 0x09 | — | Close/marker |
 | 0x10 | — | **Query result with row data** |
 | 0x11 | — | Fetch rows |
+| 0x11 | 0x69 | **Close cursors** (a count + a list of ids), often with an execute stapled behind it |
 | 0xde | — | JDBC initial negotiation |
 
 ### SQL Extraction
@@ -176,12 +177,58 @@ the cursor is never learned. That second failure is not theoretical:
 > five runs of `SELECT 1 AS n FROM dual` were all gated as
 > `SELECT 35 AS churn FROM dual`.
 >
-> The sequence bound is fixed. **The masking mechanism is not**: stale tracker
-> entries still accumulate, because `handleOCLOSE` removes one cursor per frame
-> while clients batch their closes, so any future learning miss re-arms the same
-> silent wrong-SQL gate. Filed as
-> `specs/todos/2026-08-10-04-oracle-stale-cursor-resolves-to-the-wrong-statement.md`;
-> listed as an open gap in `docs/approvals.md`.
+> The sequence bound is fixed, and so is the masking mechanism: dbbat now
+> decodes the client's whole close list (below), so a cursor the client closed
+> leaves the tracker instead of lingering to answer for a recycled id, and an
+> overwrite that changes the SQL behind an id is logged at WARN
+> (`cursor id recycled onto a different statement`) instead of passing silently.
+
+#### Closing cursors
+
+A client tells the server it is done with cursors through the **close-cursors
+piggyback** — message type `0x11` (`TNS_MSG_TYPE_PIGGYBACK`), function `0x69`
+(`TNS_FUNC_CLOSE_CURSORS`). It is a *list*, and clients batch: `dbeaver.pcapng`
+closes three cursors in one frame.
+
+```
+[0]    0x11            message type: piggyback
+[1]    0x69            function: close cursors
+[2]    seq             TTC sequence number
+[3]    0x00            token byte — 23ai-era clients only
+[..]   0x01            pointer flag
+[..]   count           TTC compressed int
+[..]   count x id      TTC compressed ints
+[..]   (optional)      the next TTC message in the same packet
+```
+
+Unlike a re-execution the list is **not** required to consume the frame: a
+client with a statement to run staples that execute behind the close list in the
+same packet (`… 03 5e <execute>`), which is the same frame dbbat also reads as
+the JDBC/DBeaver execute. Wire order is closes first, and dbbat follows it, so
+the tracker drops an id before the execute behind it can be handed the same one.
+What *is* required is that the list itself be complete and plausible — pointer
+flag present, bounded count, every id inside 16 bits — because a half-read list
+would evict cursors the client still holds, and an entry evicted early turns a
+correctly-gated re-execution into ORA-01031.
+
+> **Func `0x03` sub-op `0x09` is the session logoff, not a cursor close.** dbbat
+> read it as one, taking the byte after it — the TTC sequence number — for a
+> cursor id, so every session teardown evicted an unrelated tracker entry while
+> the real close lists went unread. Every recording in `testdata/` carries
+> exactly one of these frames, as the last thing the client sends, three or four
+> bytes long: there is no room in it for a cursor id at all.
+
+sqlplus (OCI thick) sends the same op in the **wide** encoding — an 8-byte
+pointer sentinel and little-endian 32-bit count and ids. dbbat rejects that
+rather than guessing at it; sqlplus never re-executes by cursor id (it resends
+the statement text every run, see the client table above), so an entry it leaves
+behind cannot mis-resolve anything.
+
+There is deliberately **no cap** on `s.tracker.cursors`. A cap only buys memory,
+and every entry it evicted would convert a correctly-gated re-execution into a
+refusal. Instead `TestIntegration_CursorIDLearningMissRate` asserts the tracker's
+peak size stays far below the 40 cursors its statement-cache-churn workload
+opens and closes.
 
 One gotcha the fixtures pinned: the OER **end-of-call bit is not universal**.
 go-ora's connections carry `CallStatus 0x10005`, python-oracledb's carry
