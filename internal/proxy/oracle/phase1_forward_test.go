@@ -207,3 +207,86 @@ func buildPhase1Body(t *testing.T, username string, withCLRPrefix bool) []byte {
 
 	return buf
 }
+
+// TestRewriteAuthPhase1Username_PairCountCollision is the regression for
+// ORA-03120 on the thin path.
+//
+// A thin client writes [01 01 <numPairs> 01 01] immediately before the login
+// username, and go-ora's numPairs is 5. The rewriter used to scan backward from
+// the username for the first byte equal to the old length, so a 5-character
+// login name matched that pair count — nearer than the real user_id_len — and
+// the splice bumped the number of KV pairs while leaving the length stale. The
+// upstream then read a 5-byte name out of a 6-byte field and answered
+// "ORA-03120: two-task conversion routine: integer overflow".
+//
+// Five characters is not an exotic case: it is "admin", dbbat's own default
+// user, and "agent".
+func TestRewriteAuthPhase1Username_PairCountCollision(t *testing.T) {
+	t.Parallel()
+
+	for _, clr := range []bool{true, false} {
+		body := buildPhase1Body(t, "agent", clr)
+
+		// Pin the premise: the pair count and the username length are the same
+		// byte value here, which is exactly what made them confusable.
+		if body[5] != 0x05 || body[10] != 0x05 {
+			t.Fatalf("fixture no longer sets up the collision: %x", body)
+		}
+
+		out, err := rewriteAuthPhase1Username(body, "SYSTEM")
+		if err != nil {
+			t.Fatalf("rewrite (clr=%v): %v", clr, err)
+		}
+
+		expected := buildPhase1Body(t, "SYSTEM", clr)
+		if !bytes.Equal(out, expected) {
+			t.Fatalf("five-char rewrite mismatch (clr=%v):\n got %x\nwant %x", clr, out, expected)
+		}
+
+		if out[10] != 0x05 {
+			t.Errorf("KV pair count was rewritten to %#x (clr=%v); only user_id_len may change", out[10], clr)
+		}
+
+		if out[5] != 0x06 {
+			t.Errorf("user_id_len = %#x, want 0x06 (clr=%v)", out[5], clr)
+		}
+	}
+}
+
+// TestRewriteAuthPhase1Username_ObservedGoOraCapture runs the rewriter over the
+// real preamble go-ora v3 put on the wire through the proxy against Oracle 23ai
+// Free (username "agent"), rather than over the synthetic fixture, so the
+// regression is anchored to bytes an actual client sent.
+func TestRewriteAuthPhase1Username_ObservedGoOraCapture(t *testing.T) {
+	t.Parallel()
+
+	// 03 76 | 01 00 01 | 01 05 (user_id_len) | 01 01 (logon mode)
+	//       | 01 01 05 01 01 (pair-count block) | 05 "agent" | KV pairs...
+	body := []byte{
+		0x03, 0x76, 0x01, 0x00, 0x01, 0x01, 0x05, 0x01, 0x01,
+		0x01, 0x01, 0x05, 0x01, 0x01,
+		0x05, 'a', 'g', 'e', 'n', 't',
+		0x01, 0x0d, 0x0d, 'A', 'U', 'T', 'H', '_', 'T', 'E', 'R', 'M', 'I', 'N', 'A', 'L',
+	}
+
+	out, err := rewriteAuthPhase1Username(body, "SYSTEM")
+	if err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+
+	if out[6] != 0x06 {
+		t.Errorf("user_id_len = %#x, want 0x06", out[6])
+	}
+
+	if out[11] != 0x05 {
+		t.Errorf("KV pair count = %#x, want it untouched at 0x05", out[11])
+	}
+
+	if out[14] != 0x06 {
+		t.Errorf("CLR length prefix = %#x, want 0x06", out[14])
+	}
+
+	if !bytes.Contains(out, []byte("SYSTEM")) || bytes.Contains(out, []byte("agent")) {
+		t.Errorf("username not swapped cleanly: %x", out)
+	}
+}

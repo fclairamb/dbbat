@@ -212,7 +212,28 @@ func findUserIDLenPos(body []byte, fieldStart, oldLen, newLen int) (int, byte) {
 		}
 	}
 
-	for i := fieldStart - 1; i >= 2 && i >= fieldStart-12; i-- {
+	// Thin clients sit a fixed [01 01 <numPairs> 01 01] block between the
+	// preamble integers and the username (go-ora's PutBytes(1, 1, 5, 1, 1);
+	// python-oracledb thin writes its own pair count there). numPairs is a small
+	// integer exactly like user_id_len, and it is *nearer* the username — so a
+	// backward scan from the username finds it first whenever
+	// len(username) == numPairs and rewrites the pair count instead of the
+	// length. That is the same trap the wide branch above anchors around, and it
+	// bites the thin path for every 5-character login name — "admin", dbbat's
+	// own default user, and "agent". The upstream then reads a stale
+	// user_id_len against a longer name and answers ORA-03120 (two-task
+	// conversion routine: integer overflow), preceded by two break markers.
+	//
+	// So step over the block before scanning. Only an exact shape match counts;
+	// anything else falls through to the original scan, which is what the bare
+	// (SQLcl/JDBC thin) preamble needs.
+	scanFrom := fieldStart - 1
+	if b := fieldStart - numPairsBlockLen; b >= 2 &&
+		body[b] == 0x01 && body[b+1] == 0x01 && body[b+3] == 0x01 && body[b+4] == 0x01 {
+		scanFrom = b - 1
+	}
+
+	for i := scanFrom; i >= 2 && i >= scanFrom-12; i-- {
 		if body[i] == byte(oldLen) {
 			return i, byte(newLen)
 		}
@@ -220,6 +241,10 @@ func findUserIDLenPos(body []byte, fieldStart, oldLen, newLen int) (int, byte) {
 
 	return -1, 0
 }
+
+// numPairsBlockLen is the width of the [01 01 <numPairs> 01 01] block a thin
+// client writes immediately before the login username in AUTH Phase 1.
+const numPairsBlockLen = 5
 
 // rewriteAuthPhase1Username takes a TTC AUTH Phase 1 body (everything after
 // the TNS frame header AND the 2-byte data-flags prefix — i.e. what would
