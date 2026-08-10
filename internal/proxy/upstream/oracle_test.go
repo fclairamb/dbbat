@@ -17,6 +17,8 @@ import (
 // re-defaults the option, or a careless edit to the option map, would silently
 // reintroduce that; this test fails instead.
 func TestOracleDSNDisablesFastLogin(t *testing.T) {
+	t.Parallel()
+
 	dsn := oracleDSN(OracleConfig{
 		Host:        "db.example.com",
 		Port:        1521,
@@ -40,6 +42,8 @@ func TestOracleDSNDisablesFastLogin(t *testing.T) {
 // through the extracted DSN builder: the opportunistic modes must not turn into
 // mandatory TLS, and verify-* must keep server verification on.
 func TestOracleDSNCarriesTLSPolicy(t *testing.T) {
+	t.Parallel()
+
 	base := OracleConfig{
 		Host:        "db.example.com",
 		Port:        1521,
@@ -63,6 +67,8 @@ func TestOracleDSNCarriesTLSPolicy(t *testing.T) {
 		"verify-full authenticates": {"verify-full", true, true},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
 			cfg := base
 			cfg.SSLMode = tc.sslMode
 
