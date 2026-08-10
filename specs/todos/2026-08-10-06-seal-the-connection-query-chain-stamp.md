@@ -181,3 +181,85 @@ and `website/docs/compliance.md`: the per-connection stamp is now keyed, the
 trailing-deletion row in the "what it detects" table goes back to detected
 (qualified for version-`0` rows), and the pointer to this todo is replaced by a
 note that pre-upgrade stamps remain legacy until their session closes.
+
+## Implementation Plan
+
+1. **Migration** `20260810020000_connections_query_chain_stamp_version` —
+   `ALTER TABLE connections ADD COLUMN query_chain_stamp_version SMALLINT NOT
+   NULL DEFAULT 0`, dropped on the way down. Every row that exists at upgrade
+   time is therefore version `0`, which is exactly what it is: an unkeyed
+   legacy stamp.
+
+2. **`queryChainStampMAC`** in `internal/store/chain.go`, next to
+   `rowChainStampMAC`, under a new `queryStampDomain =
+   "dbbat-query-chain-stamp-v1"`. It covers, through `canonicalPayload` (every
+   field tagged and length-prefixed, so no two distinct inputs share a byte
+   string): `domain ‖ connection_id ‖ stamp_version ‖ query_chain_len ‖
+   head_mac`. The version is *inside* the MAC — that is the whole point of
+   versioning the column rather than accepting both formats forever.
+
+3. **What `query_chain_len` means, and why it is the head's `chain_seq`.** The
+   row-chain stamp seals a *count* because captured rows are never partially
+   deleted. A session's statements are: `DBB_QUERY_STORAGE_RETENTION` reaps the
+   oldest ones, which is what `TruncatedPrefix` exists to tolerate. Sealing a
+   surviving-count would therefore make every retention-truncated closed
+   session report a break — the exact cry-wolf outcome the truncation handling
+   was written to avoid. `chain_seq` is dense from 1, so the head's `chain_seq`
+   *is* the number of statements the session logged, and it is invariant under
+   prefix truncation. It is also what both writers already store today, so the
+   column's meaning does not change. Verification compares it against
+   `result.HeadSeq`.
+
+4. **Both writers stamp version 1.** `Store.CloseConnection` computes the MAC in
+   Go and sets the three columns in its existing single `UPDATE`.
+
+5. **Reconcile rework** (`Store.closeOrphans` /
+   `Store.orphanCloseQuery`): the keyed stamp cannot be computed in SQL, so the
+   pure-SQL correlated subquery becomes select-seal-write in Go, inside **one**
+   transaction with the close:
+   `UPDATE … SET disconnected_at = last_activity_at … RETURNING uid` →
+   one `LEFT JOIN LATERAL` head lookup over just those uids (still built from
+   `queryChainHeadSelect`, so the reconcile's notion of "the head" cannot drift
+   from `CloseConnection`'s) → one bulk `UPDATE … FROM (VALUES …)` writing the
+   sealed stamps. Three round trips, no second window. A session that logged
+   nothing is left unstamped, as today.
+
+6. **`checkStampedHead`** (`internal/store/chain_verify.go`) — order matters:
+   - a version above the highest this binary knows is reported as
+     "stamped by a newer build", not as tampering;
+   - for a keyed version, `conn.QueryChainLen` vs `result.HeadSeq` first, for a
+     precise message;
+   - then the keyed stamp, computed **with the stored version** and with the
+     length/head *derived from the surviving statements*;
+   - only if that fails, and only when the stored version is `0`, the legacy
+     raw-`HeadMAC` comparison — which sets `LegacyStamp` on the result instead
+     of passing silently.
+
+   Checking the keyed stamp *before* branching to legacy is what makes the
+   version-in-the-MAC load-bearing: relabelling a sealed row as version `0`
+   while keeping its stamp is a **break**, because the stamp no longer seals
+   the version the row now claims. Without the version in the MAC that
+   relabelling would verify clean, which is the downgrade option 1 could not
+   see.
+
+7. **`legacy_stamps`** — `QueryChainResult.LegacyStamp` (bool) and
+   `QueryChainsResult.LegacyStamps` (count), surfaced by
+   `dbbat audit verify --queries` and by `GET /api/v1/audit/verify/queries`
+   (`internal/api/openapi.yml` + regenerated front client).
+
+8. **Tests** in `internal/store/chain_test.go`: the re-stamping attacker; the
+   version relabel (the mutation-sensitive one); the full downgrade to a raw
+   legacy stamp, which must not count as a keyed verification; a genuine legacy
+   row still verifying (no cry-wolf) and being counted; the length column
+   edited on its own; the orphan reconcile stamping version 1; and the reworked
+   cost guard.
+
+### Residual, stated rather than hidden
+
+A full downgrade — replacing the whole stamp with a raw head MAC *and* setting
+the version to `0` — still verifies, because accepting unkeyed legacy stamps is
+by construction a path an attacker can take. What version `1` buys is that the
+attack can no longer hide: the row is reported as a legacy stamp, so an
+operator watching `legacy_stamps` fall to zero as sessions rotate sees it come
+back. The hole closes for good only when version `0` acceptance is removed; a
+follow-up todo picks the release.
