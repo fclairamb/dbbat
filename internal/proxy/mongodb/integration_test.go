@@ -34,6 +34,7 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/mcp"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -321,7 +322,7 @@ func setupFixtureWith(ctx context.Context, t *testing.T, dumpDir, sslMode string
 	}, encKey)
 	require.NoError(t, err)
 
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{UserID: user.UID, DatabaseID: db.UID, GrantedBy: user.UID, StartsAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(24 * time.Hour), Definition: &store.GrantDefinition{Controls: []string{}}})
+	_, err = createGrantWithControls(ctx, t, dataStore, user.UID, db.UID, []string{})
 	require.NoError(t, err)
 
 	queryStorage := config.QueryStorageConfig{StoreResults: true, MaxResultRows: 1000, MaxResultBytes: 1 * 1024 * 1024}
@@ -417,8 +418,44 @@ func (f *fixture) replaceGrant(ctx context.Context, controls []string) {
 	dbUID, err := uuid.Parse(f.dbUID)
 	require.NoError(f.t, err)
 
-	_, err = f.store.CreateGrant(ctx, &store.Grant{UserID: f.user.UID, DatabaseID: dbUID, GrantedBy: f.user.UID, StartsAt: time.Now().Add(-time.Hour), ExpiresAt: time.Now().Add(24 * time.Hour), Definition: &store.GrantDefinition{Controls: controls}})
+	_, err = createGrantWithControls(ctx, f.t, f.store, f.user.UID, dbUID, controls)
 	require.NoError(f.t, err)
+}
+
+// createGrantWithControls issues a grant carrying the given controls. Every
+// grant is an *instance of a definition* and carries no shape of its own, so
+// the definition has to exist first and be named by uid — an inline
+// GrantDefinition on the grant is not enough (CreateGrant answers
+// ErrGrantDefinitionRequired).
+func createGrantWithControls(
+	ctx context.Context,
+	t *testing.T,
+	dataStore *store.Store,
+	userUID, databaseUID uuid.UUID,
+	controls []string,
+) (*store.Grant, error) {
+	t.Helper()
+
+	name := fmt.Sprintf("itest-%s", uuid.NewString()[:8])
+
+	def, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:            name,
+		Slug:            name,
+		DurationSeconds: int64(24 * time.Hour / time.Second),
+		Controls:        controls,
+		CreatedBy:       userUID,
+	})
+	require.NoError(t, err)
+
+	return dataStore.CreateGrant(ctx, &store.Grant{
+		UserID:            userUID,
+		DatabaseID:        databaseUID,
+		GrantedBy:         userUID,
+		GrantDefinitionID: def.UID,
+		Definition:        def,
+		StartsAt:          time.Now().Add(-time.Hour),
+		ExpiresAt:         time.Now().Add(24 * time.Hour),
+	})
 }
 
 // ---------- Tests ----------
@@ -959,4 +996,123 @@ func TestIntegration_UpstreamTLS_Disable(t *testing.T) {
 	f := setupFixtureWithSSLMode(ctx, t, "disable")
 
 	f.assertUpstreamEncryption(ctx, false)
+}
+
+// TestIntegration_MCPExecutesThroughTheProxy is the MongoDB half of the MCP
+// phase-2 spec.
+//
+// Two things here are MongoDB-specific and would go unnoticed anywhere else.
+// First, the loopback leg is the only one that is *not* plaintext: this
+// listener terminates TLS and SASL PLAIN carries the key inside it, so the
+// client has to accept the proxy's self-signed certificate. Second, `sql`
+// carries `<command> <extended JSON>` — the same text the proxy renders into
+// /queries — instead of SQL, which is what keeps an operator's approval
+// patterns meaning one thing.
+func TestIntegration_MCPExecutesThroughTheProxy(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	// Seed through an ordinary client so the MCP reads below have something to
+	// find, and so the fixture data does not depend on the path under test.
+	seed := f.dialThrough(fixtureUser, fixturePass)
+	defer func() { _ = seed.Disconnect(ctx) }()
+
+	coll := seed.Database(testDBName).Collection("widgets")
+	_, err := coll.InsertMany(ctx, []any{
+		bson.D{{Key: "name", Value: "gadget"}, {Key: "qty", Value: 7}},
+		bson.D{{Key: "name", Value: "sprocket"}, {Key: "qty", Value: 3}},
+		bson.D{{Key: "name", Value: "widget"}, {Key: "qty", Value: 11}},
+	})
+	require.NoError(t, err)
+
+	_, plainKey, err := f.store.CreateAPIKey(ctx, f.user.UID, "agent key", nil, f.encKey)
+	require.NoError(t, err)
+
+	executor := mcp.NewLoopbackExecutor(mcp.LoopbackListeners{MongoDB: f.proxyAddr})
+
+	run := func(statement string, maxRows int) (*mcp.QueryResult, error) {
+		return executor.Execute(ctx, mcp.ExecRequest{
+			Protocol: store.ProtocolMongoDB,
+			// authSource carries the dbbat entry's name; the command's own $db
+			// has to name the database as the upstream knows it.
+			Database:         testDBName,
+			UpstreamDatabase: testDBName,
+			Username:         fixtureUser,
+			APIKey:           plainKey,
+			SQL:              statement,
+			MaxRows:          maxRows,
+		})
+	}
+
+	// A cursor-returning command: rows come from the cursor, not from the
+	// reply's firstBatch, so a collection larger than one batch still works.
+	result, err := run(`find {"find":"widgets","sort":{"qty":1}}`, 100)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 3)
+	assert.False(t, result.Truncated)
+	assert.Contains(t, result.Columns, "name")
+	assert.Equal(t, "sprocket", result.Rows[0]["name"])
+	// An ObjectID must reach the agent as hex it can quote back, not as bytes.
+	assert.IsType(t, "", result.Rows[0]["_id"])
+
+	// The cap is applied while the cursor is read.
+	capped, err := run(`find {"find":"widgets","sort":{"qty":1}}`, 2)
+	require.NoError(t, err)
+	assert.Len(t, capped.Rows, 2)
+	assert.True(t, capped.Truncated)
+
+	// A command that answers with a single document comes back as one row, and
+	// a write reports `n` as rows-affected.
+	written, err := run(
+		`insert {"insert":"widgets","documents":[{"name":"bolt","qty":1}]}`, 10)
+	require.NoError(t, err)
+	require.NotNil(t, written.RowsAffected)
+	assert.Equal(t, int64(1), *written.RowsAffected)
+
+	// The `describe` tool's own command, and the collection name really is a
+	// value inside the document rather than concatenated text.
+	listed, err := run(`listCollections {"listCollections":1,"nameOnly":true}`, 100)
+	require.NoError(t, err)
+
+	names := make([]string, 0, len(listed.Rows))
+	for _, row := range listed.Rows {
+		if name, ok := row["name"].(string); ok {
+			names = append(names, name)
+		}
+	}
+
+	assert.Contains(t, names, "widgets")
+
+	// A malformed statement is an agent-fixable error, not a connection.
+	_, err = run("SELECT * FROM widgets", 10)
+	require.ErrorIs(t, err, mcp.ErrMongoCommandSyntax)
+
+	// Everything above is in the ordinary query history, rendered the same way
+	// a mongosh session's commands are.
+	require.Eventually(t, func() bool {
+		queries, listErr := f.store.ListQueries(ctx, store.QueryFilter{Limit: 100})
+		if listErr != nil {
+			return false
+		}
+
+		for i := range queries {
+			if strings.HasPrefix(queries[i].SQLText, "find ") &&
+				strings.Contains(queries[i].SQLText, `"widgets"`) {
+				return true
+			}
+		}
+
+		return false
+	}, 30*time.Second, 200*time.Millisecond, "an agent's command must be logged like any other")
+
+	// And the grant's controls apply, because MCP is a proxy client: a
+	// read_only grant refuses a write that arrived over MCP.
+	f.replaceGrant(ctx, []string{"read_only"})
+
+	_, err = run(`insert {"insert":"widgets","documents":[{"name":"nope"}]}`, 10)
+	require.Error(t, err, "a read-only grant must refuse a write that arrived over MCP")
+
+	remaining, err := coll.CountDocuments(ctx, bson.D{{Key: "name", Value: "nope"}})
+	require.NoError(t, err)
+	assert.Zero(t, remaining, "a refused write must never reach the upstream")
 }
