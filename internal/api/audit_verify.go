@@ -158,7 +158,10 @@ type chainBreakBody struct {
 	UID           string `json:"uid"`
 	ChainSeq      int64  `json:"chain_seq"`
 	ConnectionUID string `json:"connection_uid,omitempty"`
-	Reason        string `json:"reason"`
+	// QueryUID is set for captured-row-chain breaks; chain_seq then carries the
+	// offending row's row_number rather than a chain position.
+	QueryUID string `json:"query_uid,omitempty"`
+	Reason   string `json:"reason"`
 }
 
 func newChainBreakBody(brk *store.ChainBreak) *chainBreakBody {
@@ -174,6 +177,10 @@ func newChainBreakBody(brk *store.ChainBreak) *chainBreakBody {
 
 	if brk.ConnectionUID != nil {
 		body.ConnectionUID = brk.ConnectionUID.String()
+	}
+
+	if brk.QueryUID != nil {
+		body.QueryUID = brk.QueryUID.String()
 	}
 
 	return body
@@ -228,6 +235,38 @@ type queryChainVerifyResponse struct {
 	Break     *chainBreakBody `json:"break,omitempty"`
 	CheckedAt time.Time       `json:"checked_at"`
 	Cached    bool            `json:"cached"`
+}
+
+// rowChainVerifyResponse covers all three captured-row shapes: a sweep over
+// every capture, one connection's captures, and a single capture (which
+// additionally reports that chain's head).
+//
+// There is deliberately no legacy_stamps counterpart here. That counter is
+// about the *connection* head stamp, which was a verbatim copy of the last
+// statement's MAC before 0.24; a capture's stamp has always been a keyed MAC
+// over (query, length, head), so there is no forgeable-stamp population to
+// count.
+type rowChainVerifyResponse struct {
+	Chain    string `json:"chain"`
+	Verified bool   `json:"verified"`
+	// ConnectionUID is set only when the caller scoped the walk to one session.
+	ConnectionUID string `json:"connection_uid,omitempty"`
+	// QueryUID is set only when the caller scoped the walk to one capture.
+	QueryUID string `json:"query_uid,omitempty"`
+	// Captures is how many captures were walked; 1 for a query-scoped walk.
+	Captures int64 `json:"captures"`
+	// Rows is how many chained captured rows were checked across them.
+	Rows int64 `json:"rows"`
+	// UnverifiablePreMigrationRows counts captured rows written before the row
+	// chain migration. Nothing sealed them and nothing can, after the fact.
+	UnverifiablePreMigrationRows int64 `json:"unverifiable_pre_migration_rows"`
+	// HeadRowNumber and HeadMAC are only meaningful for a single capture, so
+	// they are reported for a query-scoped walk and omitted otherwise.
+	HeadRowNumber *int64          `json:"head_row_number,omitempty"`
+	HeadMAC       string          `json:"head_mac,omitempty"`
+	Break         *chainBreakBody `json:"break,omitempty"`
+	CheckedAt     time.Time       `json:"checked_at"`
+	Cached        bool            `json:"cached"`
 }
 
 // handleVerifyAuditChain walks the store-wide audit chain. Admin only.
@@ -364,6 +403,134 @@ func (s *Server) walkQueryChains(ctx context.Context, connectionUID *uuid.UUID) 
 		Break:                     newChainBreakBody(result.Break),
 		CheckedAt:                 time.Now().UTC(),
 	}, nil
+}
+
+// handleVerifyRowChains walks the per-capture result-row chains: every capture
+// with one, one session's captures when ?connection= is given, or a single
+// capture when ?query= is. Admin only.
+//
+// The two filters are mutually exclusive — ?query= already names exactly one
+// capture, so a connection alongside it could only agree or contradict, and
+// silently ignoring one of them is how a caller ends up trusting an answer to a
+// question it did not ask.
+func (s *Server) handleVerifyRowChains(c *gin.Context) {
+	rawConnection, rawQuery := c.Query("connection"), c.Query("query")
+
+	if rawConnection != "" && rawQuery != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
+			"connection and query cannot be combined: a query already names one capture")
+
+		return
+	}
+
+	var (
+		connectionUID *uuid.UUID
+		queryUID      *uuid.UUID
+	)
+
+	scope := "rows"
+
+	switch {
+	case rawConnection != "":
+		parsed, err := uuid.Parse(rawConnection)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid connection UID")
+
+			return
+		}
+
+		connectionUID = &parsed
+		scope = "rows:connection:" + parsed.String()
+	case rawQuery != "":
+		parsed, err := uuid.Parse(rawQuery)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid query UID")
+
+			return
+		}
+
+		queryUID = &parsed
+		scope = "rows:query:" + parsed.String()
+	}
+
+	body, cached, err := s.chainVerify.result(c.Request.Context(), scope,
+		func(ctx context.Context) (any, error) {
+			return s.walkRowChains(ctx, connectionUID, queryUID)
+		})
+	if err != nil {
+		s.writeChainVerifyError(c, err)
+
+		return
+	}
+
+	resp, ok := body.(rowChainVerifyResponse)
+	if !ok {
+		writeInternalError(c, s.logger, errChainVerifyCacheType, "captured row chain verification")
+
+		return
+	}
+
+	resp.Cached = cached
+
+	s.logChainVerification(c, "rows", resp.Verified, cached)
+	successResponse(c, resp)
+}
+
+// walkRowChains runs the capture-scoped or the sweeping walk. A capture-scoped
+// walk uses the single-chain verifier, which is the only one that can report a
+// head — an aggregate head over many independent chains would not mean
+// anything.
+func (s *Server) walkRowChains(ctx context.Context, connectionUID, queryUID *uuid.UUID) (any, error) {
+	if queryUID != nil {
+		one, err := s.store.VerifyRowChain(ctx, *queryUID)
+		if err != nil {
+			return nil, err
+		}
+
+		// VerifyRowChain only sees rows carrying a MAC, so the pre-migration
+		// count has to be asked for separately to keep this shape reporting the
+		// same number the sweep does.
+		unchained, err := s.store.CountUnchainedCapturedRows(ctx, *queryUID)
+		if err != nil {
+			return nil, err
+		}
+
+		headRowNumber := one.HeadRowNumber
+
+		return rowChainVerifyResponse{
+			Chain:                        "rows",
+			Verified:                     one.Break == nil,
+			QueryUID:                     queryUID.String(),
+			Captures:                     1,
+			Rows:                         one.Verified,
+			UnverifiablePreMigrationRows: unchained,
+			HeadRowNumber:                &headRowNumber,
+			HeadMAC:                      hexMAC(one.HeadMAC),
+			Break:                        newChainBreakBody(one.Break),
+			CheckedAt:                    time.Now().UTC(),
+		}, nil
+	}
+
+	result, err := s.store.VerifyRowChains(ctx, connectionUID)
+	if err != nil {
+		return nil, err
+	}
+
+	resp := rowChainVerifyResponse{
+		Chain:                        "rows",
+		Verified:                     result.OK(),
+		Captures:                     result.Captures,
+		Rows:                         result.Verified,
+		UnverifiablePreMigrationRows: result.Unchained,
+		Break:                        newChainBreakBody(result.Break),
+		CheckedAt:                    time.Now().UTC(),
+	}
+
+	if connectionUID != nil {
+		resp.ConnectionUID = connectionUID.String()
+	}
+
+	return resp, nil
 }
 
 // hexMAC renders a chain head for an operator to record. Publishing a MAC is

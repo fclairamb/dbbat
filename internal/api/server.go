@@ -480,6 +480,7 @@ func (s *Server) setupRouter() *gin.Engine {
 			// `dbbat audit verify` stays the authoritative check.
 			authenticated.GET("/audit/verify", s.requireAdmin(), s.handleVerifyAuditChain)
 			authenticated.GET("/audit/verify/queries", s.requireAdmin(), s.handleVerifyQueryChains)
+			authenticated.GET("/audit/verify/rows", s.requireAdmin(), s.handleVerifyRowChains)
 
 			// Global parameters (admin-only CRUD; GET /instance open to any authenticated user)
 			params := authenticated.Group("/parameters")
