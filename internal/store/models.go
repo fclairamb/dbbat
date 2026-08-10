@@ -452,6 +452,22 @@ type Query struct {
 	PrevMAC  []byte `bun:"prev_mac" json:"-"`
 	MAC      []byte `bun:"mac" json:"-"`
 
+	// RowChainMAC is the final head of this query's *result row* chain,
+	// stamped when the capture finishes, and RowChainLen is how many captured
+	// rows that head covers. They are to query_rows what QueryChainMAC /
+	// QueryChainLen are to a connection's statements: the only thing that
+	// catches rows deleted from the *end* of a capture.
+	//
+	// RowChainLen is a count, not the head's row_number — a capture with gaps
+	// (rows the writer dropped, rows that failed to encode) has fewer stored
+	// rows than its last row_number.
+	//
+	// nil/0 for a query that captured nothing, for captures written before the
+	// row chain migration, and for a capture whose process died before the
+	// flush barrier. Internal integrity state, not API surface.
+	RowChainMAC []byte `bun:"row_chain_mac" json:"-"`
+	RowChainLen int64  `bun:"row_chain_len,notnull,default:0" json:"-"`
+
 	// Joined fields populated only by ListQueries (via a JOIN on connections);
 	// not stored on the queries table itself.
 	UserID     *uuid.UUID `bun:"user_id,scanonly" json:"user_id,omitempty"`
@@ -467,6 +483,14 @@ type QueryRowModel struct {
 	RowNumber    int             `bun:"row_number,notnull" json:"row_number"`
 	RowData      json.RawMessage `bun:"row_data,notnull,type:jsonb" json:"row_data"`
 	RowSizeBytes int64           `bun:"row_size_bytes,notnull" json:"row_size_bytes"`
+
+	// Tamper-evidence: the HMAC sealing this captured row (its query, its
+	// row_number, its uid, its data and its size) plus the previous stored
+	// row's MAC. The chain is per query and its position is row_number, which
+	// is an ordering and not a dense sequence — see rowChainPayload. Internal
+	// integrity state, not API surface.
+	PrevMAC []byte `bun:"prev_mac" json:"-"`
+	MAC     []byte `bun:"mac" json:"-"`
 }
 
 // QueryRow is an alias for API compatibility (without bun.BaseModel for simpler usage)
