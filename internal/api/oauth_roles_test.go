@@ -26,6 +26,9 @@ func TestConfigKnownRolesMatchStore(t *testing.T) {
 		[]string{store.RoleAdmin, store.RoleViewer, store.RoleConnector},
 		config.KnownRoles,
 		"config.KnownRoles must list exactly the roles store defines")
+
+	assert.Equal(t, store.RoleConnector, config.DefaultOAuthRole,
+		"config.DefaultOAuthRole must be the same role store calls the connector one")
 }
 
 // TestResolveMappedRoles is the decision table of the whole feature: what a
