@@ -126,7 +126,10 @@ curl -X POST http://localhost:4200/api/v1/keys \
   -d '{ "name": "ci-pipeline", "expires_at": "2025-12-31T23:59:59Z" }'
 ```
 
-The full key is **only returned once**. Store it securely.
+The full key is **only returned once**. Store it securely — DBBat keeps only an
+Argon2id hash of it plus its 8-character prefix, so it genuinely cannot show you
+the key again, and a leaked database yields no usable key. See
+[How Keys Are Stored](/docs/security#how-keys-are-stored).
 
 ### Listing keys
 

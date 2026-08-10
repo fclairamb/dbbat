@@ -351,7 +351,12 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
 ### Security
 - User passwords: Argon2id hashed
 - Database credentials: AES-256-GCM encrypted (AAD-bound to the database UID)
-- API keys: encrypted blobs, prefix `dbb_`; cannot create/revoke other keys
+- API keys: Argon2id-hashed like passwords (`crypto.HashPassword`), prefix `dbb_`
+  with only the first 8 characters kept in clear as `key_prefix` for lookup — a
+  leaked store yields no usable key. The one transient exception: a freshly
+  minted key sits AES-256-GCM-encrypted in a pending device-authorization row
+  (`crypto.DeviceAuthAAD`) until the device polls for it. Keys cannot
+  create/revoke other keys
 - Default admin: `admin`/`admin` (must change on first login)
 - **Tamper-evident audit trail**: every `audit_log` entry and every `queries`
   row carries an HMAC over its content plus the previous record's MAC, keyed by
