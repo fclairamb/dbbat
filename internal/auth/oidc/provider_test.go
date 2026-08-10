@@ -339,7 +339,7 @@ func TestExchangeCodeReadsGroupsClaim(t *testing.T) {
 			want:  []string{"1f4e8c02-9b7a-4f61-8a1e-3c2d5e6f7a8b"},
 		},
 		{
-			name:   "a custom claim name is honoured",
+			name:   "a custom claim name is honored",
 			claim:  []any{"ignored"},
 			config: "roles",
 			want:   nil,
