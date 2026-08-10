@@ -251,9 +251,9 @@ func (s *Server) handleCreateGrantRequest(c *gin.Context) {
 		return
 	}
 
-	// The target must be a database, never an SSH bastion (a dial path).
-	if target, err := s.store.GetServerByUID(ctx, req.DatabaseID); err == nil && target.IsSSH() {
-		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "cannot request access to an ssh server")
+	// The target must be a database, never a tunnel row (a dial path).
+	if target, err := s.store.GetServerByUID(ctx, req.DatabaseID); err == nil && target.IsTunnel() {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "cannot request access to a "+target.Protocol+" tunnel server")
 
 		return
 	}

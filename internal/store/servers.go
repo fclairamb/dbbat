@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -182,9 +183,17 @@ func (s *Store) SetKnownHostKey(ctx context.Context, uid uuid.UUID, hostKey stri
 	return nil
 }
 
-// validateViaUID verifies that viaUID references an existing SSH server and
-// that the via chain neither loops nor passes back through selfUID (pass
-// uuid.Nil for selfUID on create, when the row has no UID yet).
+// validateViaUID verifies that viaUID references an existing *tunnel* row (an
+// SSH bastion or a Kubernetes cluster) and that the via chain neither loops nor
+// passes back through selfUID (pass uuid.Nil for selfUID on create, when the
+// row has no UID yet).
+//
+// A kubernetes row may itself carry a via_uid pointing at an SSH bastion (the
+// API server is only reachable through a jump host), which falls out of this
+// recursion unchanged. The reverse — an SSH bastion reached through a
+// port-forward — is deliberately not wired up in the dialer yet, so it is not
+// special-cased here either: the chain validates, and the dialer is what would
+// have to grow support.
 func (s *Store) validateViaUID(ctx context.Context, selfUID, viaUID uuid.UUID) error {
 	seen := map[uuid.UUID]bool{}
 	cur := viaUID
@@ -201,8 +210,8 @@ func (s *Store) validateViaUID(ctx context.Context, selfUID, viaUID uuid.UUID) e
 		if err != nil {
 			return err
 		}
-		if via.Protocol != ProtocolSSH {
-			return ErrServerViaNotSSH
+		if !IsTunnelProtocol(via.Protocol) {
+			return ErrServerViaNotTunnel
 		}
 		if via.ViaUID == nil {
 			return nil
@@ -230,6 +239,26 @@ func (s *Store) ListSSHServers(ctx context.Context) ([]Server, error) {
 	return servers, nil
 }
 
+// ListTunnelServers returns every *dial path* row — SSH bastions and Kubernetes
+// clusters — for the "via" selector and the tunnels admin view. Like
+// ListSSHServers these rows are excluded from every grantable/connectable
+// target listing; unlike it, it does not pretend SSH is the only way through.
+func (s *Store) ListTunnelServers(ctx context.Context) ([]Server, error) {
+	var servers []Server
+	err := s.db.NewSelect().
+		Model(&servers).
+		Where("protocol IN (?)", bun.In([]string{ProtocolSSH, ProtocolKubernetes})).
+		Order("name ASC").
+		Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list tunnel servers: %w", err)
+	}
+	if servers == nil {
+		servers = []Server{}
+	}
+	return servers, nil
+}
+
 // GetServerByName retrieves a database by name
 func (s *Store) GetServerByName(ctx context.Context, name string) (*Server, error) {
 	db := new(Server)
@@ -237,7 +266,7 @@ func (s *Store) GetServerByName(ctx context.Context, name string) (*Server, erro
 		Model(db).
 		Where("name = ?", name).
 		// Targets only: an SSH bastion is a dial path, never connectable by name.
-		Where("protocol <> ?", ProtocolSSH).
+		Where("protocol NOT IN (?)", bun.In([]string{ProtocolSSH, ProtocolKubernetes})).
 		Scan(ctx)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -302,7 +331,7 @@ func (s *Store) ListListableServers(ctx context.Context) ([]Server, error) {
 		Model(&databases).
 		Where("listable = ?", true).
 		// Targets only: SSH bastions are never grantable/listable targets.
-		Where("protocol <> ?", ProtocolSSH).
+		Where("protocol NOT IN (?)", bun.In([]string{ProtocolSSH, ProtocolKubernetes})).
 		Order("name ASC").
 		Scan(ctx)
 	if err != nil {
@@ -337,7 +366,7 @@ func (s *Store) ListServers(ctx context.Context) ([]Server, error) {
 	var databases []Server
 	err := s.db.NewSelect().
 		Model(&databases).
-		Where("protocol <> ?", ProtocolSSH).
+		Where("protocol NOT IN (?)", bun.In([]string{ProtocolSSH, ProtocolKubernetes})).
 		Order("name ASC").
 		Scan(ctx)
 	if err != nil {
@@ -481,6 +510,7 @@ func applyServerColumnUpdates(q *bun.UpdateQuery, updates ServerUpdate) *bun.Upd
 			*updates.MongoAuthSource,
 		)
 	}
+	q = applyKubernetesUpdates(q, updates)
 	if updates.Listable != nil {
 		q = q.Set("listable = ?", *updates.Listable)
 	}
@@ -490,6 +520,44 @@ func applyServerColumnUpdates(q *bun.UpdateQuery, updates ServerUpdate) *bun.Upd
 		q = q.Set("via_uid = ?", *updates.ViaUID)
 	}
 	return q
+}
+
+// applyKubernetesUpdates merges the cluster row's public material into
+// protocol_data.kubernetes, preserving both the keys it does not touch and the
+// other protocols' sub-objects.
+//
+// Every provided key goes into a *single* Set: PostgreSQL rejects an UPDATE
+// that assigns the same column twice, so emitting one merge per field would
+// break the moment an admin edited the CA bundle and the namespace together.
+func applyKubernetesUpdates(q *bun.UpdateQuery, updates ServerUpdate) *bun.UpdateQuery {
+	var (
+		pairs []string
+		args  []any
+	)
+
+	if updates.K8sCACert != nil {
+		pairs = append(pairs, "?::text, ?::text")
+		args = append(args, "ca_cert", *updates.K8sCACert)
+	}
+	if updates.K8sNamespace != nil {
+		pairs = append(pairs, "?::text, ?::text")
+		args = append(args, "namespace", *updates.K8sNamespace)
+	}
+	if updates.K8sInsecureSkipTLSVerify != nil {
+		pairs = append(pairs, "?::text, ?::boolean")
+		args = append(args, "insecure_skip_tls_verify", *updates.K8sInsecureSkipTLSVerify)
+	}
+
+	if len(pairs) == 0 {
+		return q
+	}
+
+	return q.Set(
+		"protocol_data = coalesce(protocol_data, '{}'::jsonb) || "+
+			"jsonb_build_object('kubernetes', coalesce(protocol_data->'kubernetes', '{}'::jsonb) || "+
+			"jsonb_build_object("+strings.Join(pairs, ", ")+"))",
+		args...,
+	)
 }
 
 // mergedSSHSecrets loads the server's current protocol_data, encrypts any

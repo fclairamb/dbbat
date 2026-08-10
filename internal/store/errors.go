@@ -20,9 +20,15 @@ var (
 	ErrTargetMatchesStorage = errors.New("target database cannot match DBBat storage database")
 	ErrIdentityNotFound     = errors.New("identity not found")
 	ErrOAuthStateNotFound   = errors.New("oauth state not found")
-	// ErrServerViaNotSSH is returned when via_uid points at a row whose protocol
-	// is not 'ssh' — only SSH bastions can be tunneled through.
-	ErrServerViaNotSSH = errors.New("via_uid must reference an ssh server")
+	// ErrServerViaNotSSH is returned when via_uid points at a row that is not a
+	// dial path — only tunnel rows ('ssh' bastions and 'kubernetes' clusters)
+	// can be tunneled through.
+	//
+	// The name predates the Kubernetes tunnel and is kept so existing callers
+	// and tests keep matching; ErrServerViaNotTunnel is the accurate alias.
+	ErrServerViaNotSSH = errors.New("via_uid must reference an ssh or kubernetes server")
+	// ErrServerViaNotTunnel is the protocol-neutral name for ErrServerViaNotSSH.
+	ErrServerViaNotTunnel = ErrServerViaNotSSH
 	// ErrServerViaCycle is returned when a via_uid chain loops back on itself.
 	ErrServerViaCycle = errors.New("via_uid chain forms a cycle")
 	// ErrServerNameConflict is returned when creating or renaming a server to a
