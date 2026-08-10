@@ -32,9 +32,7 @@ audit?". Everything below answers that second question.
   revisions — PCI DSS reorganised Requirement 10 between v3.2.1 and v4.0, so
   older mappings floating around the internet cite the wrong numbers for log
   protection and log retention.
-- Every row describes a capability that ships today, **except** the single row
-  in [On the roadmap](#on-the-roadmap), which is explicitly marked as not
-  shipped.
+- Every row describes a capability that ships today.
 - [What DBBat does not do](#what-dbbat-does-not-do) is the part your auditor
   will care about most. Read it before you write DBBat into a control
   narrative.
@@ -51,6 +49,7 @@ exactly what exists:
 | **Result rows** *(optional)* | The actual rows returned, captured alongside the query and bounded by `max_result_rows` / `max_result_bytes` |
 | **Audit log** | Administrative events against the configuration API: user/database/grant/grant-definition/grant-request/API-key creation, update, revocation and deletion, with the acting user |
 | **Session capture** *(optional)* | The whole post-auth command stream as a [pcapng file](/docs/features/session-dumps) Wireshark reads natively |
+| **Chain MACs** | On every audit entry and every query row: a keyed HMAC over the record plus the previous record's MAC, so the audit log and the query history are [tamper-evident](/docs/features/audit-chain) |
 
 One structural detail worth knowing before you write an evidence procedure: the
 user, the source IP and the byte counter live on the **connection**, not on each
@@ -74,6 +73,7 @@ to operate.
 | Grant definitions are immutably versioned — an edit archives the current row and creates a successor, and a live grant keeps running the version it was issued under | **CC8.1** — changes are authorized, documented and implemented | The exact policy in force for any historical session is recoverable, so a change to a definition cannot silently rewrite the past. |
 | Deactivating a grant definition withdraws the whole lineage and fails closed at authentication time; hard deletion is refused while anything still references it | **CC6.2**, **CC6.3** | Removal of access is a single, immediate, auditable action, and the audit history it is evidence for cannot be deleted out from under you. |
 | Upstream database credentials encrypted with AES-256-GCM (AAD-bound to the database record, so a stolen ciphertext cannot be transplanted); DBBat user passwords and API keys hashed with Argon2id | **CC6.1** | Users never receive the production credential at all — they authenticate to DBBat, and DBBat holds the secret. |
+| [HMAC-chained audit log and query history](/docs/features/audit-chain), verified with `dbbat audit verify`; the key is derived from `DBB_KEY` and never stored in the database | **CC7.1**, **CC7.2** — the integrity of the monitoring record itself | Modifying, deleting or reordering a record is detectable by anyone who can run the verification, including when the person doing it holds write access to DBBat's own PostgreSQL store. It is detection, not prevention — see [what DBBat does not do](#what-dbbat-does-not-do). |
 | Per-session [pcapng capture](/docs/features/session-dumps), readable by Wireshark and tcpdump | **CC7.3** — evaluating security events | When a query log entry is not enough, the raw session is available for forensic reconstruction in an open format. |
 | `DBB_QUERY_STORAGE_RETENTION` and `DBB_DUMP_RETENTION` | **C1.2** — disposal of confidential information *(only in scope if you selected the Confidentiality category)* | Query history, captured result rows and local captures age out on a schedule you set, rather than accumulating forever. |
 
@@ -82,6 +82,7 @@ to operate.
 | DBBat capability | Annex A control | How it helps |
 |---|---|---|
 | Per-query logging with user attribution across all five protocols; administrative changes recorded separately in the audit log | **A.8.15 Logging** | Produces the "user activities, exceptions and faults" record A.8.15 requires, at statement granularity rather than at session granularity. |
+| [HMAC-chained records](/docs/features/audit-chain): each audit entry and each statement carries a MAC over its content plus the previous record's MAC, verified offline with `dbbat audit verify`; the key is HKDF-derived from `DBB_KEY` and never written to the database | **A.8.15 Logging** (log protection), **A.5.33 Protection of records** | A.8.15 requires logs to be protected against unauthorised alteration; the chain makes alteration, deletion and reordering detectable without the log ever leaving DBBat. Read access to the store is not enough to forge it, and neither is write access — only the key is. It detects tampering rather than preventing it, and does not cover rows written before the chain anchor. |
 | Query browsing and filtering by user, database, time range and connection via the API and web UI | **A.8.16 Monitoring activities** | The recorded activity is reviewable, which is what turns a log into a monitoring control. |
 | Time-boxed, scoped grants issued against reusable definitions | **A.5.15 Access control**, **A.8.3 Information access restriction** | Access rules are defined centrally as definitions and applied per user and per database, with the proxy enforcing them on the wire. |
 | Grant provisioning, automatic expiry, immediate revocation, and grant listings filterable by user and database (`GET /api/v1/grants?active_only=true`) | **A.5.18 Access rights** | Covers the provision, review and removal of access rights, and gives you the who-has-access-to-what report a periodic review is performed against. |
@@ -105,6 +106,7 @@ see [what DBBat does not do](#what-dbbat-does-not-do).
 | Every session authenticates as an individual named DBBat user (password or API key); the shared upstream credential is never handed out | **8.2** — user identification is strictly managed; **7.3** — access managed via an access control system | Removes the shared production credential from the human workflow, so activity in the log is attributable to a person. |
 | DBBat user passwords and API keys hashed with Argon2id; upstream credentials encrypted with AES-256-GCM | **8.3.2** — strong cryptography renders authentication factors unreadable during storage | Neither the user's password nor the API key is recoverable from the store; only an 8-character key prefix is kept in clear, for lookup. |
 | Per-query logging with the user, the database, the timestamp, the source IP, the statement and its success or failure | **10.2** — audit logs support detection of anomalies and forensic analysis; **10.2.2** — logs record user identification, event type, date and time, success/failure indication and the affected resource | Every element 10.2.2 enumerates is present, at statement granularity, for all five supported engines. |
+| [HMAC-chained audit log and query history](/docs/features/audit-chain) with an offline `dbbat audit verify` command; the chain key is derived from `DBB_KEY` and never stored alongside the records | **10.3** — audit logs are protected from destruction and unauthorized modifications; **10.3.2** — log files are protected to prevent modifications | 10.3 asks that logs cannot be altered without detection. Each record is sealed against the one before it, so an insertion, an edit, a deletion or a reordering is caught by the verification — including one performed directly against DBBat's PostgreSQL store. Note the scope precisely for your assessor: this is **detection**, not write-protection, it does not cover rows written before the chain anchor, and on the query side it seals the statement and its parameters rather than its reported outcome. Restricting who can reach the storage database (**10.3.1**) remains yours. |
 | `DBB_QUERY_STORAGE_RETENTION` (off by default — history is kept indefinitely unless you set it) | **10.5** — audit log history is retained and available for analysis | The default keeps everything, which satisfies 10.5.1's twelve months by construction; set a retention only if a data-minimisation obligation requires it, and set it above twelve months if this database is in PCI scope. |
 | Per-session pcapng capture of the command stream | **10.2**; supports **12.10** — suspected and confirmed incidents are responded to immediately | Supplements the structured log with the raw session when an investigation needs byte-level detail. |
 
@@ -113,14 +115,20 @@ see [what DBBat does not do](#what-dbbat-does-not-do).
 Skipping this section is how a control narrative gets a finding. None of the
 following exists today:
 
-- **No tamper-evidence on the audit trail.** The query log and the audit log are
-  ordinary PostgreSQL tables. Anyone with write access to DBBat's own storage
-  database can insert, alter or delete rows undetectably. There is no hash
-  chain, no HMAC, no signature and no append-only enforcement. If you need to
-  satisfy **PCI DSS 10.3** (audit logs protected from destruction and
-  unauthorized modification) or the integrity half of **ISO A.8.15**, you must
-  provide it around DBBat — ship the logs to a WORM store or a SIEM, and lock
-  down direct access to the storage database. See [On the roadmap](#on-the-roadmap).
+- **Tamper-evidence is detection, not prevention, and it has edges.** The
+  [audit chain](/docs/features/audit-chain) makes modification, deletion and
+  reordering *detectable*; it does not stop anyone with write access to DBBat's
+  storage database from doing it, and there is no append-only enforcement or
+  WORM storage. Four limits matter in a control narrative: rows written **before
+  the chain anchor** (i.e. before you upgraded to the release that introduced
+  it) carry no MAC and are reported as unverifiable; on the query side the MAC
+  covers the statement, its parameters and its position but **not** the outcome
+  columns written after execution; a chain always verifies against itself, so
+  detecting a wholesale truncate-and-re-seal by someone who holds `DBB_KEY`
+  requires you to **record the head MAC outside the database**; and the key
+  itself is only as protected as the host. If your control requires
+  *prevention* rather than detection, keep shipping the logs to a WORM store or
+  a SIEM as well.
 - **No MFA and no password policy on DBBat's own accounts.** There is no TOTP,
   no WebAuthn, and no minimum length, complexity, rotation or reuse check on
   DBBat passwords. **PCI DSS 8.3.1, 8.4 and the 8.3.6 password-strength rules
@@ -161,19 +169,6 @@ following exists today:
 - **Scope.** DBBat governs database access only. There is no SSH, Kubernetes or
   RDP story here; those controls need a different tool.
 
-## On the roadmap
-
-One row of this mapping is deliberately absent from the tables above because the
-feature does not exist yet:
-
-| Capability | Status | Would map to |
-|---|---|---|
-| Tamper-evident audit chain (HMAC-chained log records with an offline verification command) | **Not shipped.** Planned, not implemented, no release date | ISO **A.8.15** (log integrity), PCI DSS **10.3** — audit logs protected from destruction and unauthorized modifications |
-
-Until it ships, treat log integrity as a gap to be closed outside DBBat, as
-described above. Do not write it into a control narrative on the strength of
-this page.
-
 ## Using this in an audit
 
 Everything an assessor asks for is reachable through the versioned REST API, so
@@ -197,6 +192,21 @@ curl -H "Authorization: Bearer $DBBAT_API_KEY" \
   "http://localhost:4200/api/v1/connections"
 ```
 
+Integrity of that evidence is a separate, offline step — it needs the
+encryption key, so it runs on the host rather than over the API:
+
+```bash
+# The administrative audit log; exits non-zero if the chain is broken
+dbbat audit verify
+
+# The per-connection query history
+dbbat audit verify --queries
+```
+
+Record the reported `head_mac` alongside your evidence: comparing it against the
+head from the previous period is what detects a chain that was truncated and
+re-sealed. See [Tamper-Evident Audit Log](/docs/features/audit-chain).
+
 Reading queries, the audit log and other users' grants requires the `admin` or
 `viewer` role; a plain user only ever sees their own grants. See the
 [API reference](/docs/api) for authentication, pagination and filters.
@@ -206,6 +216,7 @@ Reading queries, the audit log and other users' grants requires the `admin` or
 - [Access Control](/docs/features/access-control) — grants, controls, quotas, revocation
 - [Grant Requests & Auto-Approval](/docs/features/grant-requests) — the request and approval flow
 - [Query Logging](/docs/features/query-logging) — what is recorded and how retention works
+- [Tamper-Evident Audit Log](/docs/features/audit-chain) — the HMAC chain and `dbbat audit verify`
 - [Session Packet Captures](/docs/features/session-dumps) — pcapng captures and anonymisation
 - [Security](/docs/security) — the cryptography and hardening detail behind these mappings
 - [Approval holds](https://github.com/fclairamb/dbbat/blob/main/docs/approvals.md) — the four-eyes design in depth
