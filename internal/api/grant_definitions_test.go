@@ -4,12 +4,14 @@ import (
 	"context"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
+	"github.com/uptrace/bun"
 
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -475,4 +477,136 @@ func TestDeactivateGrantDefinition_ReportsAndForbidsDeletion(t *testing.T) {
 		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 		require.EqualValues(t, 1, resp["affected_grants"])
 	})
+}
+
+// apiQueryCountHook counts queries whose SQL text contains a given
+// substring — used to pin the "one batched query, not one per definition"
+// requirement on the scoped_database_uids listing path.
+type apiQueryCountHook struct {
+	substring string
+	count     atomic.Int64
+}
+
+func (h *apiQueryCountHook) BeforeQuery(ctx context.Context, _ *bun.QueryEvent) context.Context {
+	return ctx
+}
+
+func (h *apiQueryCountHook) AfterQuery(_ context.Context, event *bun.QueryEvent) {
+	if strings.Contains(event.Query, h.substring) {
+		h.count.Add(1)
+	}
+}
+
+// TestListGrantDefinitions_ScopedDatabaseUIDs pins option 1 from
+// specs/todos/2026-08-10-server-group-scope-hint-for-non-admin-requesters.md:
+// a non-admin requester sees GrantDefinition.scoped_database_uids resolved
+// from server_group_uids, the "every database" (unscoped) and "scoped to
+// zero databases" cases are represented unambiguously (omitted vs. `[]`,
+// never confused), no group name or membership shape leaks, and resolving
+// the whole listing costs exactly one membership query — never one per
+// definition.
+func TestListGrantDefinitions_ScopedDatabaseUIDs(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	ctx := context.Background()
+	suffix := "sdu"
+
+	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	createTestUser(t, dataStore, "req-"+suffix, "reqpass1234", []string{store.RoleConnector})
+	requesterToken := loginUser(t, server, "req-"+suffix, "reqpass1234")
+
+	dbA := createTestDBEntry(t, dataStore, "sdu-a-"+suffix, true)
+	dbB := createTestDBEntry(t, dataStore, "sdu-b-"+suffix, true)
+	createTestDBEntry(t, dataStore, "sdu-c-"+suffix, true) // in scope of nothing below
+
+	// A distinctive, secret-looking group name. /server-groups is
+	// admin-only precisely because group identity and membership are
+	// access-relevant — the response here must never carry it, only the
+	// resolved database uids.
+	secretGroupName := "top-secret-finance-replicas-" + suffix
+
+	populatedGroup, err := dataStore.CreateServerGroup(ctx, &store.ServerGroup{Name: secretGroupName})
+	require.NoError(t, err)
+	require.NoError(t, dataStore.AddServerToGroup(ctx, populatedGroup.UID, dbA.UID))
+	require.NoError(t, dataStore.AddServerToGroup(ctx, populatedGroup.UID, dbB.UID))
+
+	emptyGroup, err := dataStore.CreateServerGroup(ctx, &store.ServerGroup{Name: "empty-" + suffix})
+	require.NoError(t, err)
+
+	scopedDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:            "scoped-" + suffix,
+		Slug:            "scoped-" + suffix,
+		DurationSeconds: 3600,
+		Controls:        []string{store.ControlReadOnly},
+		ServerGroupUIDs: []uuid.UUID{populatedGroup.UID},
+		CreatedBy:       admin.UID,
+	})
+	require.NoError(t, err)
+
+	emptyScopedDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
+		Name:            "empty-scoped-" + suffix,
+		Slug:            "empty-scoped-" + suffix,
+		DurationSeconds: 3600,
+		Controls:        []string{store.ControlReadOnly},
+		ServerGroupUIDs: []uuid.UUID{emptyGroup.UID},
+		CreatedBy:       admin.UID,
+	})
+	require.NoError(t, err)
+
+	unscopedDef := createTestGrantDefinition(t, dataStore, *admin, "unscoped-"+suffix, false)
+
+	router := scopedRouter(server)
+
+	// The listing must resolve every definition's scope with exactly one
+	// membership query, regardless of how many scoped definitions (and
+	// groups) it contains.
+	hook := &apiQueryCountHook{substring: "server_group_members"}
+	dataStore.DB().AddQueryHook(hook)
+
+	w, resp := doJSON(t, router, http.MethodGet, "/api/v1/grant-definitions", requesterToken, nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	require.EqualValues(t, 1, hook.count.Load(),
+		"listing grant definitions must batch scope resolution into one query, not one per definition")
+
+	// The group's name must never appear anywhere in the response.
+	require.NotContains(t, w.Body.String(), secretGroupName)
+
+	list, ok := resp["grant_definitions"].([]any)
+	require.True(t, ok)
+
+	byName := make(map[string]map[string]any, len(list))
+
+	for _, item := range list {
+		def, ok := item.(map[string]any)
+		require.True(t, ok)
+
+		byName[def["name"].(string)] = def
+	}
+
+	scoped, ok := byName[scopedDef.Name]
+	require.True(t, ok, "non-admin should see the scoped definition")
+	scopedUIDs, ok := scoped["scoped_database_uids"].([]any)
+	require.True(t, ok, "a definition scoped to a populated group must carry a resolved (non-null) scoped_database_uids")
+	require.ElementsMatch(t, []any{dbA.UID.String(), dbB.UID.String()}, scopedUIDs)
+
+	emptyScoped, ok := byName[emptyScopedDef.Name]
+	require.True(t, ok)
+	emptyScopedRaw, present := emptyScoped["scoped_database_uids"]
+	require.True(t, present, "a definition scoped to an empty group must still carry the key, as []")
+	require.Empty(t, emptyScopedRaw, "an empty resolved set is [], never confused with 'every database'")
+
+	unscoped, ok := byName[unscopedDef.Name]
+	require.True(t, ok)
+	_, present = unscoped["scoped_database_uids"]
+	require.False(t, present,
+		"an unscoped definition (empty server_group_uids) must omit the field entirely: that is what means every database")
+
+	// GET by uid/slug carries the same resolved value.
+	w, resp = doJSON(t, router, http.MethodGet, "/api/v1/grant-definitions/"+scopedDef.UID.String(), requesterToken, nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	getUIDs, ok := resp["scoped_database_uids"].([]any)
+	require.True(t, ok)
+	require.ElementsMatch(t, []any{dbA.UID.String(), dbB.UID.String()}, getUIDs)
 }
