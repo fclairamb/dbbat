@@ -34,9 +34,11 @@ type Store struct {
 	chainKey []byte
 
 	// auditChain caches the head of the store-wide audit chain; queryChains
-	// caches one head per live connection.
+	// caches one head per live connection; rowChains caches one head per query
+	// whose result rows are being captured.
 	auditChain  chainState
 	queryChains *queryChains
+	rowChains   *queryChains
 }
 
 // Options configures Store creation.
@@ -94,6 +96,7 @@ func New(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
 		// it also sorts by start time, which makes a registry dump readable.
 		runID:       newUIDv7().String(),
 		queryChains: newQueryChains(),
+		rowChains:   newQueryChains(),
 	}
 
 	if len(options.EncryptionKey) > 0 {
