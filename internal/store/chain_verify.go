@@ -9,6 +9,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/uptrace/bun"
 )
 
 // Chain verification.
@@ -42,11 +43,19 @@ type ChainBreak struct {
 	ChainSeq int64
 	// ConnectionUID is set for query-chain breaks.
 	ConnectionUID *uuid.UUID
+	// QueryUID is set for result-row-chain breaks. ChainSeq then carries the
+	// offending row's row_number.
+	QueryUID *uuid.UUID
 	// Reason is a human-readable description of what did not add up.
 	Reason string
 }
 
 func (b ChainBreak) String() string {
+	if b.QueryUID != nil {
+		return fmt.Sprintf("query %s, row_number %d, row %s: %s",
+			b.QueryUID, b.ChainSeq, b.UID, b.Reason)
+	}
+
 	if b.ConnectionUID != nil {
 		return fmt.Sprintf("connection %s, chain_seq %d, row %s: %s",
 			b.ConnectionUID, b.ChainSeq, b.UID, b.Reason)
@@ -107,6 +116,33 @@ type QueryChainsResult struct {
 
 // OK reports whether every chain walked verified.
 func (r QueryChainsResult) OK() bool { return r.Break == nil }
+
+// RowChainResult is the outcome of verifying one capture's result-row chain.
+type RowChainResult struct {
+	QueryUID uuid.UUID
+	// Verified is how many captured rows were checked.
+	Verified int64
+	// HeadRowNumber and HeadMAC are where the surviving rows end.
+	HeadRowNumber int64
+	HeadMAC       []byte
+	Break         *ChainBreak
+}
+
+// RowChainsResult aggregates a sweep over many captures.
+type RowChainsResult struct {
+	// Captures is how many queries carried a row chain and were walked.
+	Captures int64
+	// Verified is how many captured rows were checked across them.
+	Verified int64
+	// Unchained is how many query_rows predate the row chain migration.
+	// Nothing sealed them, so they are reported rather than counted as
+	// verified — the same treatment pre-anchor audit rows get.
+	Unchained int64
+	Break     *ChainBreak
+}
+
+// OK reports whether every capture walked verified.
+func (r RowChainsResult) OK() bool { return r.Break == nil }
 
 // chainPageSize bounds how many rows one verification query pulls. The audit
 // log is small; a busy connection's history is not.
@@ -435,6 +471,263 @@ func (s *Store) checkStampedHead(ctx context.Context, result *QueryChainResult) 
 				"statements were removed from the end of the session",
 			conn.QueryChainLen, hex.EncodeToString(conn.QueryChainMAC),
 			result.HeadSeq, hex.EncodeToString(result.HeadMAC)),
+	}
+
+	return nil
+}
+
+// VerifyRowChains walks the result-row chain of every capture that has one, or
+// of one connection's captures when connectionUID is set.
+//
+// The row chains differ from the query chains in one way that matters to a
+// walk: retention never deletes an individual captured row. It deletes whole
+// queries (and whole connections), and query_rows.query_id cascades — so unlike
+// a session's statements, a capture has no legitimate reason to be missing its
+// prefix. A first row whose prev_mac is not the capture's genesis MAC is a
+// break, not housekeeping.
+func (s *Store) VerifyRowChains(ctx context.Context, connectionUID *uuid.UUID) (RowChainsResult, error) {
+	var result RowChainsResult
+
+	if !s.ChainEnabled() {
+		return result, ErrChainKeyUnavailable
+	}
+
+	unchained, err := s.countUnchainedRows(ctx, connectionUID)
+	if err != nil {
+		return result, err
+	}
+
+	result.Unchained = unchained
+
+	uids, err := s.capturedQueryUIDs(ctx, connectionUID)
+	if err != nil {
+		return result, err
+	}
+
+	for _, uid := range uids {
+		one, err := s.VerifyRowChain(ctx, uid)
+		if err != nil {
+			return result, err
+		}
+
+		result.Captures++
+		result.Verified += one.Verified
+
+		if one.Break != nil {
+			result.Break = one.Break
+
+			return result, nil
+		}
+	}
+
+	return result, nil
+}
+
+// countUnchainedRows counts captured rows written before the row chain
+// migration. They carry no MAC and none can be created after the fact.
+func (s *Store) countUnchainedRows(ctx context.Context, connectionUID *uuid.UUID) (int64, error) {
+	q := s.db.NewSelect().
+		Model((*QueryRowModel)(nil)).
+		Where("qr.mac IS NULL")
+
+	if connectionUID != nil {
+		q = q.Where("qr.query_id IN (SELECT uid FROM queries WHERE connection_id = ?)", *connectionUID)
+	}
+
+	count, err := q.Count(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count unchained captured rows: %w", err)
+	}
+
+	return int64(count), nil
+}
+
+// capturedQueryUIDs lists the captures worth walking, oldest first.
+//
+// A query is in scope when it still has chained rows *or* when it carries a
+// stamped head. The second half is what makes deleting a capture wholesale
+// detectable: a query whose rows were all removed has nothing left to enumerate
+// from query_rows, but its stamp still claims a head.
+func (s *Store) capturedQueryUIDs(ctx context.Context, connectionUID *uuid.UUID) ([]uuid.UUID, error) {
+	var uids []uuid.UUID
+
+	q := s.db.NewSelect().
+		Model((*Query)(nil)).
+		Column("uid").
+		WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+			return q.
+				Where("q.row_chain_mac IS NOT NULL").
+				WhereOr("EXISTS (SELECT 1 FROM query_rows r WHERE r.query_id = q.uid AND r.mac IS NOT NULL)")
+		}).
+		Order("q.uid ASC")
+
+	if connectionUID != nil {
+		q = q.Where("q.connection_id = ?", *connectionUID)
+	}
+
+	if err := q.Scan(ctx, &uids); err != nil {
+		return nil, fmt.Errorf("failed to list captures: %w", err)
+	}
+
+	return uids, nil
+}
+
+// VerifyRowChain walks one capture's result-row chain.
+//
+// The position is row_number, and it is deliberately not required to be dense:
+// a row the batched writer had to drop, or one that failed to encode, leaves a
+// gap that is not evidence of anything. Density is not what makes a deletion
+// detectable — the prev_mac linkage is. Removing a row from the middle leaves
+// its successor pointing at a MAC no surviving row has.
+func (s *Store) VerifyRowChain(ctx context.Context, queryUID uuid.UUID) (RowChainResult, error) {
+	result := RowChainResult{QueryUID: queryUID}
+
+	if !s.ChainEnabled() {
+		return result, ErrChainKeyUnavailable
+	}
+
+	prevMAC := s.rowGenesisMAC(queryUID)
+
+	var (
+		started    bool
+		lastNumber int
+		lastUID    uuid.UUID
+	)
+
+	for {
+		var rows []QueryRowModel
+
+		q := s.db.NewSelect().
+			Model(&rows).
+			Where("qr.query_id = ?", queryUID).
+			Where("qr.mac IS NOT NULL").
+			Order("qr.row_number ASC", "qr.uid ASC").
+			Limit(chainPageSize)
+
+		if started {
+			q = q.Where("(qr.row_number, qr.uid) > (?, ?)", lastNumber, lastUID)
+		}
+
+		if err := q.Scan(ctx); err != nil {
+			return result, fmt.Errorf("failed to read captured row chain: %w", err)
+		}
+
+		if len(rows) == 0 {
+			break
+		}
+
+		for i := range rows {
+			row := &rows[i]
+
+			if brk := s.verifyCapturedRow(row, queryUID, started, lastNumber, prevMAC); brk != nil {
+				result.Break = brk
+
+				return result, nil
+			}
+
+			result.Verified++
+			result.HeadRowNumber = int64(row.RowNumber)
+			result.HeadMAC = row.MAC
+			prevMAC = row.MAC
+			lastNumber = row.RowNumber
+			lastUID = row.UID
+			started = true
+		}
+	}
+
+	if err := s.checkStampedRowHead(ctx, &result); err != nil {
+		return result, err
+	}
+
+	return result, nil
+}
+
+func (s *Store) verifyCapturedRow(
+	row *QueryRowModel, queryUID uuid.UUID, started bool, lastNumber int, prevMAC []byte,
+) *ChainBreak {
+	position := int64(row.RowNumber)
+
+	if started && row.RowNumber <= lastNumber {
+		return &ChainBreak{
+			UID: row.UID, ChainSeq: position, QueryUID: &queryUID,
+			Reason: fmt.Sprintf(
+				"row_number %d does not follow %d: captured rows were renumbered or reordered",
+				row.RowNumber, lastNumber),
+		}
+	}
+
+	if !hmac.Equal(row.PrevMAC, prevMAC) {
+		reason := "prev_mac does not match the previous captured row: a row was removed, reordered or rewritten"
+		if !started {
+			reason = "prev_mac is not this capture's genesis: rows were removed from the start of the capture"
+		}
+
+		return &ChainBreak{UID: row.UID, ChainSeq: position, QueryUID: &queryUID, Reason: reason}
+	}
+
+	payload, err := rowChainPayload(
+		row.QueryID, row.UID, row.RowNumber, row.RowData, row.RowSizeBytes, row.PrevMAC,
+	)
+	if err != nil {
+		return &ChainBreak{
+			UID: row.UID, ChainSeq: position, QueryUID: &queryUID,
+			Reason: fmt.Sprintf("captured row could not be serialized for verification: %v", err),
+		}
+	}
+
+	if !hmac.Equal(row.MAC, s.chainMAC(payload)) {
+		return &ChainBreak{
+			UID: row.UID, ChainSeq: position, QueryUID: &queryUID,
+			Reason: "mac does not match the captured row's content: the row was modified",
+		}
+	}
+
+	return nil
+}
+
+// checkStampedRowHead compares the head a finished capture recorded against the
+// head its surviving rows compute. This is the only check that catches rows
+// deleted from the *end* of a capture — or a capture deleted outright while its
+// query survived.
+func (s *Store) checkStampedRowHead(ctx context.Context, result *RowChainResult) error {
+	var query Query
+
+	err := s.db.NewSelect().
+		Model(&query).
+		Column("uid", "row_chain_mac", "row_chain_len").
+		Where("uid = ?", result.QueryUID).
+		Scan(ctx)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// The query is gone, so retention took its rows with it. Nothing
+			// left to compare against.
+			return nil
+		}
+
+		return fmt.Errorf("failed to read the capture chain head: %w", err)
+	}
+
+	// Never stamped: the capture is still running, it captured nothing, or the
+	// process died before the flush barrier.
+	if query.RowChainMAC == nil {
+		return nil
+	}
+
+	if hmac.Equal(query.RowChainMAC, result.HeadMAC) {
+		return nil
+	}
+
+	queryUID := result.QueryUID
+
+	result.Break = &ChainBreak{
+		UID:      queryUID,
+		ChainSeq: query.RowChainLen,
+		QueryUID: &queryUID,
+		Reason: fmt.Sprintf(
+			"the query recorded %d captured rows ending in %s, but the surviving rows end at %d/%s: "+
+				"rows were removed from the end of the capture",
+			query.RowChainLen, hex.EncodeToString(query.RowChainMAC),
+			result.HeadRowNumber, hex.EncodeToString(result.HeadMAC)),
 	}
 
 	return nil
