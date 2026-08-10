@@ -719,6 +719,29 @@ static `capturedAuthOKResponse` remains only as a fallback when no upstream pack
 captured. For OCI the AUTH OK arrives split across two Data packets, so the value is patched
 on the reassembled packet and re-fragmented before forwarding — see "OCI wide encoding".
 
+### Connectivity check: fast login hides `ORA-01017`
+
+The connectivity check (`internal/proxy/conncheck`) is the one place dbbat logs in to Oracle
+as an ordinary client, through `upstream.ConnectOracle` / go-ora, rather than by relaying a
+downstream session. Its connect string sets **`FAST LOGIN=FALSE`**, and that is load-bearing.
+
+Oracle 23ai offers a one-round-trip logon ("fast login") that folds the protocol negotiation
+into the auth exchange. go-ora enables it by default, and its fast path then reads the
+server's reply as a negotiation message *without first checking whether it is a TTC error
+(message code 4)*. The server answers a wrong password with a perfectly readable
+`ORA-01017`; go-ora rendered it as:
+
+```
+message code error: received code 4 and expected code is 1
+```
+
+which the classifier can only call `db_handshake_failed` — pointing the admin at the network
+when the problem is the credentials. With fast login off the real `ORA-01017` comes back and
+the check answers `db_auth_failed`, while an unknown service still yields `ORA-12514` and
+stays `db_handshake_failed`. The cost is one extra round trip, on a check that runs when
+someone presses "test connection". Pre-23ai servers never offered fast login, so this is a
+no-op against them.
+
 ### Client compatibility
 
 All four supported client families authenticate + query + capture end-to-end against Oracle
