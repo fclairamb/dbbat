@@ -1,11 +1,15 @@
 package oracle
 
 import (
+	"context"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go"
+	"github.com/testcontainers/testcontainers-go/modules/postgres"
+	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -121,6 +125,111 @@ func TestBlockedCursorReexecution_IsPersisted(t *testing.T) {
 	got := recorder.awaitCreated(t)
 	assertBlockedOracleRow(t, got, sql, "read-only")
 	recorder.assertNoFurtherCreate(t)
+}
+
+// TestBlockedStatement_IsAnOrdinaryChainAppend runs a refusal through the real
+// store rather than a recorder. Two things only a real store can prove: the
+// row lands in `queries` attributed to the session's connection, and — because
+// `queries` is HMAC-chained per connection — the refusal row is an ordinary
+// chain append that `dbbat audit verify --queries` still walks cleanly.
+func TestBlockedStatement_IsAnOrdinaryChainAppend(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	dataStore := newOracleTestStore(t)
+	require.True(t, dataStore.ChainEnabled(), "the query chain must be on for this test to mean anything")
+
+	user, err := dataStore.CreateUser(ctx, "blocked-oracle", "hash", []string{store.RoleConnector})
+	require.NoError(t, err)
+
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 1)
+	}
+
+	db, err := dataStore.CreateServer(ctx, &store.Server{
+		Name:         "blocked-oracle-db",
+		Host:         "localhost",
+		Port:         1521,
+		DatabaseName: "ORCL",
+		Username:     "u",
+		Password:     "p",
+		Protocol:     store.ProtocolOracle,
+	}, key)
+	require.NoError(t, err)
+
+	conn, err := dataStore.CreateConnection(ctx, user.UID, db.UID, "10.0.0.9")
+	require.NoError(t, err)
+
+	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}})
+	s.completionStore = dataStore
+	s.connectionUID = conn.UID
+
+	const sql = "DELETE FROM emp"
+
+	require.Error(t, s.handleOALL8(buildOALL8(sql, nil, 3)))
+
+	var persisted []store.Query
+
+	require.Eventually(t, func() bool {
+		queries, err := dataStore.ListQueries(ctx, store.QueryFilter{ConnectionID: &conn.UID, Limit: 10})
+		if err != nil || len(queries) == 0 {
+			return false
+		}
+
+		persisted = queries
+
+		return true
+	}, 10*time.Second, 50*time.Millisecond, "the refused statement never reached the store")
+
+	require.Len(t, persisted, 1)
+	assertBlockedOracleRow(t, &persisted[0], sql, "read-only")
+
+	result, err := dataStore.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	assert.Nil(t, result.Break, "a refusal row must be a valid link in the connection's query chain")
+	assert.Equal(t, int64(1), result.Verified)
+}
+
+// newOracleTestStore spins up a throwaway PostgreSQL store with the query
+// chain enabled. Only dbbat's own storage DB is involved — no Oracle container
+// — so this stays out of the integration-tagged suite and runs under
+// `make test`.
+func newOracleTestStore(t *testing.T) *store.Store {
+	t.Helper()
+
+	ctx := context.Background()
+
+	container, err := postgres.Run(ctx,
+		"postgres:15-alpine",
+		postgres.WithDatabase("dbbat_test"),
+		postgres.WithUsername("test"),
+		postgres.WithPassword("test"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(60*time.Second),
+		),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = container.Terminate(context.Background()) })
+
+	dsn, err := container.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err)
+
+	masterKey := make([]byte, 32)
+	for i := range masterKey {
+		masterKey[i] = byte(0xA0 + i)
+	}
+
+	dataStore, err := store.New(ctx, dsn, store.Options{EncryptionKey: masterKey})
+	require.NoError(t, err)
+	t.Cleanup(func() { dataStore.Close() })
+
+	require.NoError(t, dataStore.Migrate(ctx))
+
+	return dataStore
 }
 
 // assertBlockedOracleRow checks the shape every refusal row shares across the
