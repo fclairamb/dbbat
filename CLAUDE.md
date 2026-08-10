@@ -419,9 +419,10 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   key never enters the database, so those rows keep the old comparison and are
   counted as `legacy_stamps` rather than reported as verified; sealing the
   version is what stops a `1` row from being relabelled `0` to get the weaker
-  rule. Verify with `dbbat audit verify [--queries|--rows]` — the
-  row chains are CLI-only — or over REST with the admin-only
-  `GET /api/v1/audit/verify` and `GET /api/v1/audit/verify/queries` — which
+  rule. Verify with `dbbat audit verify [--queries|--rows]`, or over REST with
+  the admin-only `GET /api/v1/audit/verify`, `GET /api/v1/audit/verify/queries`
+  and `GET /api/v1/audit/verify/rows` (the last narrows with `?connection=` or
+  `?query=`, which cannot be combined) — which
   return counts, the head MAC and the first break, never the key or a record's
   content, and are cached because a walk is O(rows). The endpoint is **not**
   equivalent to the CLI: it is served by the process under audit. See
