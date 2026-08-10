@@ -144,10 +144,11 @@ func (s *session) handleCursorReexec(cursorID uint16) error {
 }
 
 // refuseUnknownCursor decides what to do with a re-execution naming a cursor
-// dbbat never saw parsed. Both frames that can only be identified by cursor id
-// route through here — the SQL-less OALL8 and an OFETCH that starts a fresh
-// pending query — so the wire op a client picks cannot change the answer. The
-// statement it would run is unknown, so:
+// dbbat never saw parsed. All three frames that can only be identified by
+// cursor id route through here — the SQL-less OALL8, an OFETCH that starts a
+// fresh pending query, and the piggyback re-execution every modern thin client
+// sends — so the wire op a client picks cannot change the answer. The statement
+// it would run is unknown, so:
 //
 //   - under a grant carrying statement-shaped controls, it fails closed — a
 //     restrictive grant must not be bypassable by an execution the proxy cannot
@@ -158,9 +159,7 @@ func (s *session) handleCursorReexec(cursorID uint16) error {
 //     mid-session, or the entry may be gone — and refusing there would break
 //     permissive sessions for no security gain.
 //
-// The piggyback re-execution deliberately does NOT come through here — see
-// handlePiggybackReexec for why. This conditional refusal is documented in
-// docs/approvals.md.
+// This conditional refusal is documented in docs/approvals.md.
 func (s *session) refuseUnknownCursor(cursorID uint16) error {
 	if !s.hasStatementControls() {
 		s.logger.WarnContext(s.ctx,
@@ -256,17 +255,22 @@ func (s *session) regateCursor(cursor *trackedCursor) error {
 // equivalent, and no tested client emits that one (see docs/oracle.md).
 //
 // A cursor dbbat knows is re-gated exactly like the parse that created it. One
-// it does not know is **forwarded**, not refused — deliberately, and unlike the
-// SQL-less OALL8:
+// it does not know goes through refuseUnknownCursor, exactly like the other two
+// re-execution frames: refused under a grant carrying statement-shaped
+// controls, forwarded with a WARN otherwise. The wire op a client picks cannot
+// change the answer.
 //
-//   - dbbat learns these cursor ids by reading them off the server's response
-//     (learnCursorID), so an unknown id here usually means dbbat attached
-//     mid-session or missed one response, not that a client is evading anything;
-//   - and this frame is what a plain `cur.execute()` loop sends, so failing it
-//     closed would break ordinary read-only sessions on every second execution.
-//
-// Closing that half is filed in
-// specs/todos/2026-08-09-oracle-piggyback-reexec-unknown-cursor.md.
+// That symmetry was not always safe, and the difference is measured rather than
+// assumed. dbbat learns these cursor ids by reading them off the server's
+// response (learnCursorID), and while that scan bounded the OER sequence number
+// at 255 it stopped learning a few dozen statements into every session — under
+// which failing closed here would have refused the second execution of ordinary
+// read-only work. With that bound corrected, two real thin clients (go-ora v3
+// and python-oracledb thin) drove 124 re-executions through this path across
+// prepared loops, bind-heavy statements, interleaved cursors, DML, PL/SQL, a
+// REF cursor and a churned statement cache, and every single one resolved. See
+// docs/oracle.md, "Cursor-id learning", and
+// TestIntegration_CursorIDLearningMissRate.
 func (s *session) handlePiggybackReexec(ttcPayload []byte) error {
 	cursorID, err := decodeCursorReexec(ttcPayload)
 	if err != nil {
@@ -277,12 +281,7 @@ func (s *session) handlePiggybackReexec(ttcPayload []byte) error {
 
 	cursor, ok := s.tracker.cursors[cursorID]
 	if !ok {
-		s.logger.WarnContext(s.ctx,
-			"forwarding a piggyback re-execution of an untracked cursor: its statement is unknown",
-			slog.Uint64("cursor_id", uint64(cursorID)),
-		)
-
-		return nil
+		return s.refuseUnknownCursor(cursorID)
 	}
 
 	return s.regateCursor(cursor)

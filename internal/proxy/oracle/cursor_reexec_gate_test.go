@@ -182,13 +182,42 @@ func TestCursorReexec_DeniedIsRefused(t *testing.T) {
 	assert.Nil(t, s.tracker.pendingQuery, "a denied re-execution must not be tracked as in flight")
 }
 
-// reexecOps are the two frames that name a cursor and carry nothing else: the
-// legacy SQL-less OALL8 and an OFETCH arriving with no query in flight. They
-// must answer an untracked cursor identically — otherwise the wire op a client
-// picks is a cheaper way past the same grant.
-//
-// The piggyback re-execution is deliberately not one of them: it forwards an
-// untracked cursor under any grant, for the reasons in handlePiggybackReexec.
+// buildPiggybackReexec assembles the frame a modern thin client sends to re-run
+// a statement it already parsed: func 0x03, sub-op 0x4e, the v315+ zero pad,
+// then the cursor id and the three execution fields decodeCursorReexec walks.
+func buildPiggybackReexec(cursorID uint16) []byte {
+	out := []byte{byte(TTCFuncPiggyback), PiggybackSubReexecSel, 0x01, 0x00}
+	out = append(out, ttcCompressedUint(uint64(cursorID))...)
+
+	// rowsToFetch, execOptions, execFlags.
+	for _, v := range []uint64{1, 0x20, 0} {
+		out = append(out, ttcCompressedUint(v)...)
+	}
+
+	return out
+}
+
+// TestBuildPiggybackReexecIsDecodedAsARexecution guards that fixture the same
+// way TestBuildOALL8ReexecIsDecodedAsARexecution guards the legacy one: a
+// builder that stopped decoding would make every assertion below pass without
+// the handler ever seeing a re-execution.
+func TestBuildPiggybackReexecIsDecodedAsARexecution(t *testing.T) {
+	t.Parallel()
+
+	frame := buildPiggybackReexec(7)
+
+	require.True(t, IsPiggybackCursorReexec(frame), "the fixture must be recognized as a re-execution")
+
+	cursorID, err := decodeCursorReexec(frame)
+	require.NoError(t, err)
+	assert.Equal(t, uint16(7), cursorID)
+}
+
+// reexecOps are the three frames that name a cursor and carry nothing else: the
+// legacy SQL-less OALL8, an OFETCH arriving with no query in flight, and the
+// piggyback re-execution every modern thin client sends. They must answer an
+// untracked cursor identically — otherwise the wire op a client picks is a
+// cheaper way past the same grant.
 var reexecOps = []struct {
 	name string
 	run  func(s *session, cursorID uint16) error
@@ -198,6 +227,9 @@ var reexecOps = []struct {
 	}},
 	{name: "an OFETCH", run: func(s *session, cursorID uint16) error {
 		return s.handleOFETCH(buildOFETCH(cursorID, 100))
+	}},
+	{name: "a piggyback re-execution", run: func(s *session, cursorID uint16) error {
+		return s.handlePiggybackReexec(buildPiggybackReexec(cursorID))
 	}},
 }
 

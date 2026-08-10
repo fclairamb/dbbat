@@ -275,18 +275,48 @@ func TestDumpReplay_SQLPlusResendsItsSQLInstead(t *testing.T) {
 	assert.Equal(t, 4, carried, "every one of the four runs carried its statement text")
 }
 
-// TestDumpReplay_CursorReexecOfAnUntrackedCursorIsForwarded pins the
-// deliberate asymmetry with the SQL-less OALL8, which fails closed: this frame
-// is what an ordinary `execute()` loop sends, so a cursor dbbat cannot resolve
-// is forwarded rather than refused. See handlePiggybackReexec.
-func TestDumpReplay_CursorReexecOfAnUntrackedCursorIsForwarded(t *testing.T) {
+// TestDumpReplay_CursorReexecOfAnUntrackedCursorFailsClosed is the symmetry
+// claim, on a frame Oracle actually sent: the piggyback re-execution now answers
+// an untracked cursor exactly like the SQL-less OALL8 and the fresh-query
+// OFETCH — refused under a grant carrying a statement-shaped control, forwarded
+// with a WARN under one carrying none.
+//
+// The asymmetry it replaces was real and load-bearing: while cursor-id learning
+// silently stopped part-way through every session (the OER sequence bound in
+// findCursorIDInResponse), refusing here would have broken the second execution
+// of ordinary read-only work. Once that was fixed and measured — 124 live
+// re-executions from go-ora and python-oracledb thin, none untracked, see
+// TestIntegration_CursorIDLearningMissRate — the frame everybody sends stopped
+// being the one that enforced nothing.
+func TestDumpReplay_CursorReexecOfAnUntrackedCursorFailsClosed(t *testing.T) {
 	t.Parallel()
 
 	payloads, _ := recordedReexecs(t, goOraDMLReexecDump)
 	require.NotEmpty(t, payloads)
 
-	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}})
+	t.Run("refused under a statement-shaped control", func(t *testing.T) {
+		t.Parallel()
 
-	require.NoError(t, s.handlePiggybackReexec(payloads[0]), "nothing is known about that cursor")
-	assert.Nil(t, s.tracker.pendingQuery, "a forwarded but unidentified execution is not tracked")
+		s := newTestSession(&store.Grant{
+			Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}},
+		})
+		s.clientConn = drainedPipe(t)
+
+		require.ErrorIs(t, s.handlePiggybackReexec(payloads[0]), ErrUnknownCursor)
+		assert.Nil(t, s.tracker.pendingQuery, "a refused execution must not be tracked as in flight")
+
+		// And the dispatcher agrees: the bytes do not travel upstream.
+		pkt := &TNSPacket{Type: TNSPacketTypeData, Payload: append([]byte{0x00, 0x00}, payloads[0]...)}
+		assert.True(t, s.interceptClientMessage(pkt), "the frame must not be forwarded")
+	})
+
+	t.Run("forwarded without one", func(t *testing.T) {
+		t.Parallel()
+
+		s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
+
+		require.NoError(t, s.handlePiggybackReexec(payloads[0]),
+			"a grant with no statement-shaped control must not be broken by an unidentified execution")
+		assert.Nil(t, s.tracker.pendingQuery, "a forwarded but unidentified execution is not tracked")
+	})
 }

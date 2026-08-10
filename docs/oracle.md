@@ -153,9 +153,28 @@ dbbat has a statement with no id and, later, an id with no statement.
 
 `learnCursorID` reads it off the first response to each execute
 (`findCursorIDInResponse`): the OER's seventh field. The scan is anchored rather
-than trusting — seven compressed ints, error code success or ORA-01403, byte-sized
-sequence number, 16-bit cursor id, first match wins — because a run of row bytes
-can otherwise parse as an OER. It runs at most once per statement.
+than trusting — seven compressed ints, error code success or ORA-01403, a
+sequence number inside its 16-bit field, a 16-bit cursor id, first match wins —
+because a run of row bytes can otherwise parse as an OER. It runs at most once
+per statement.
+
+Every one of those bounds is load-bearing in **both** directions. Too loose and
+row bytes are mistaken for the OER; too tight and the genuine OER is skipped and
+the cursor is never learned. That second failure is not theoretical:
+
+> **The sequence-number bound used to be 255**, on the belief that TTC numbers
+> calls with a byte that wraps. It does not. That field is the end-to-end ECID
+> sequence (`SummaryObject.EndToEndECIDSequence` in go-ora), a **uint16** that
+> counts up across the whole session. A session crosses 255 after a few dozen
+> statements, and from there every OER was rejected — learning silently switched
+> off for the rest of the session.
+>
+> It did not show up as an unknown cursor, which is why it survived. Oracle
+> **recycles cursor ids**, so the re-executions that followed found a *stale*
+> tracker entry and resolved to whatever statement last held that id: the gate
+> ran the wrong SQL and `/queries` recorded the wrong SQL. Caught mid-churn,
+> five runs of `SELECT 1 AS n FROM dual` were all gated as
+> `SELECT 35 AS churn FROM dual`.
 
 One gotcha the fixtures pinned: the OER **end-of-call bit is not universal**.
 go-ora's connections carry `CallStatus 0x10005`, python-oracledb's carry
@@ -163,11 +182,52 @@ go-ora's connections carry `CallStatus 0x10005`, python-oracledb's carry
 lookup deliberately does not, which is why `decodeOERFieldsAt` is split out of
 `decodeOERAt`.
 
-A re-execution naming a cursor dbbat cannot resolve is **forwarded**, not
-refused — unlike the SQL-less `OALL8`, which fails closed. This frame is what an
-ordinary `execute()` loop sends, so failing it closed would break read-only
-sessions on every second execution. See
-`specs/todos/2026-08-09-oracle-piggyback-reexec-unknown-cursor.md`.
+A re-execution naming a cursor dbbat cannot resolve goes through
+`refuseUnknownCursor`, exactly like the SQL-less `OALL8` and a fresh-query
+`OFETCH`: refused under a grant carrying a statement-shaped control, forwarded
+with a WARN under one carrying none. See `docs/approvals.md`.
+
+##### How reliable learning actually is: the numbers
+
+Because failing that frame closed is only safe if learning is reliable, it was
+measured rather than argued. `TestIntegration_CursorIDLearningMissRate` (build
+tag `integration`) stands up a real Oracle plus the real proxy and drives a
+client through a prepared-SELECT loop, bind-heavy re-executions, three cursors
+interleaved on one session, DML, an anonymous PL/SQL block, a REF cursor, a
+statement retried after it failed, and a statement cache churned past 40
+statements. It counts the proxy's own log records.
+
+Against `gvenzl/oracle-free:23-slim`, after the sequence-number fix:
+
+| Client | Parses seen | Cursor ids learned | Re-executions | Naming an unknown cursor |
+|--------|-------------|--------------------|---------------|--------------------------|
+| `go-ora` v3 | 57 | 53 | 64 | **0** |
+| `python-oracledb` thin 3.4.2 | 58 | 55 | 60 | **0** |
+
+The parses that learned nothing are **exactly** the statements that failed
+(`DROP TABLE` on a missing table, three retries of a `SELECT` on a missing
+table): their OER carries a real ORA code, which the scan refuses to read an id
+from, and no client re-executes a statement that errored. The test asserts that
+list exactly — which is what catches a learning regression even when a recycled
+cursor id hides it behind a stale entry.
+
+Before the fix the same run learned 49 of 57, and the four extra misses did
+**not** appear as unknown cursors: they appeared as re-executions gated against
+the wrong statement.
+
+Reproduce with:
+
+```bash
+ORACLE_TEST_IMAGE=gvenzl/oracle-free:23-slim \
+  go test -tags integration -timeout 40m -count=1 -v \
+  -run TestIntegration_CursorIDLearningMissRate ./internal/proxy/oracle/
+```
+
+`CURSOR_TRACE=1` additionally dumps the ordered parse/learn/re-execute trace,
+which is how the stale-entry mis-resolution above was spotted. The
+`python-oracledb` half skips itself when the module is not installed (that is
+the case in CI); the recorded python and JDBC captures replayed below are the
+always-on half of the same evidence.
 
 Replayed by `cursor_reexec_replay_test.go`, which drives the recordings through
 the real client/upstream intercept paths and asserts the re-executions are
