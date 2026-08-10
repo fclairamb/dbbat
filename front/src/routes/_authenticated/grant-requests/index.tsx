@@ -7,7 +7,6 @@ import {
   useGrantRequests,
   useGrantDefinitions,
   useDatabases,
-  useServerGroups,
   useUsers,
   useCreateGrantRequest,
   useApproveGrantRequest,
@@ -43,11 +42,7 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useAuth } from "@/contexts/AuthContext";
-import {
-  canApproveGrantRequest,
-  canManageServerGroups,
-  canRequestGrant,
-} from "@/lib/permissions";
+import { canApproveGrantRequest, canRequestGrant } from "@/lib/permissions";
 
 export const Route = createFileRoute("/_authenticated/grant-requests/")({
   component: GrantRequestsPage,
@@ -314,13 +309,8 @@ function GrantRequestsPage() {
 }
 
 function CreateRequestDialog({ onClose }: { onClose: () => void }) {
-  const { user } = useAuth();
   const { data: definitions = [] } = useGrantDefinitions({ active_only: true });
   const { data: databases = [] } = useDatabases();
-  // Admin-only surface: a non-admin gets an empty list and no narrowing.
-  const { data: serverGroups = [] } = useServerGroups({
-    enabled: canManageServerGroups(user?.roles),
-  });
 
   const [definitionId, setDefinitionId] = useState("");
   const [databaseId, setDatabaseId] = useState("");
@@ -329,22 +319,20 @@ function CreateRequestDialog({ onClose }: { onClose: () => void }) {
   const selectedDefinition = definitions.find((d) => d.uid === definitionId);
   const justificationRequired = selectedDefinition?.auto_approve ?? false;
 
-  // A definition can be scoped to server groups; an empty scope means every
-  // database. Narrow the picker so an out-of-scope pick (which the API rejects
-  // with 403) is not even offered.
+  // The API resolves a definition's server-group scope to the concrete
+  // databases currently in scope (scoped_database_uids), so the picker
+  // narrows for every requester — not just admins, who are the only ones who
+  // could previously read /server-groups to compute this themselves.
   //
-  // Server groups are an admin-only surface, so a non-admin requester cannot
-  // resolve the membership and simply gets the full list — the server still
-  // enforces the scope. Narrowing is a convenience here, never the control.
-  const scopedGroupUids = selectedDefinition?.server_group_uids ?? [];
-  const scopedDatabaseUids =
-    scopedGroupUids.length === 0 || serverGroups.length === 0
-      ? []
-      : serverGroups
-          .filter((g) => scopedGroupUids.includes(g.uid))
-          .flatMap((g) => g.member_uids);
+  // null/omitted means the definition is unscoped: every database is in
+  // scope. A present array — which may be empty — is the resolved set;
+  // treating null and [] the same here would be wrong in both directions
+  // (hiding every database, or offering every database when none are
+  // actually in scope). The server still enforces the scope on submit (403
+  // on an out-of-scope pick) — this is a convenience, never the control.
+  const scopedDatabaseUids = selectedDefinition?.scoped_database_uids ?? null;
   const selectableDatabases =
-    scopedDatabaseUids.length === 0
+    scopedDatabaseUids === null
       ? databases
       : databases.filter((d) => scopedDatabaseUids.includes(d.uid));
 
