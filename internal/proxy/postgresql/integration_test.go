@@ -29,6 +29,7 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/proxy/testsupport"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -285,7 +286,7 @@ func setupFixtureWith(ctx context.Context, t *testing.T, opts fixtureOpts) *fixt
 	}, encKey)
 	require.NoError(t, err)
 
-	_, err = createGrantWithControls(ctx, t, dataStore, user.UID, db.UID, []string{})
+	_, err = testsupport.CreateGrantWithControls(ctx, t, dataStore, user.UID, db.UID, []string{})
 	require.NoError(t, err)
 
 	queryStorage := config.QueryStorageConfig{
@@ -367,44 +368,8 @@ func (f *fixture) replaceGrant(ctx context.Context, controls []string) {
 	dbUID, err := uuid.Parse(f.dbUID)
 	require.NoError(f.t, err)
 
-	_, err = createGrantWithControls(ctx, f.t, f.store, f.user.UID, dbUID, controls)
+	_, err = testsupport.CreateGrantWithControls(ctx, f.t, f.store, f.user.UID, dbUID, controls)
 	require.NoError(f.t, err)
-}
-
-// createGrantWithControls issues a grant carrying the given controls. Every
-// grant is an *instance of a definition* and carries no shape of its own, so
-// the definition has to exist first and be named by uid — an inline
-// GrantDefinition on the grant is not enough (CreateGrant answers
-// ErrGrantDefinitionRequired).
-func createGrantWithControls(
-	ctx context.Context,
-	t *testing.T,
-	dataStore *store.Store,
-	userUID, databaseUID uuid.UUID,
-	controls []string,
-) (*store.Grant, error) {
-	t.Helper()
-
-	name := fmt.Sprintf("itest-%s", uuid.NewString()[:8])
-
-	def, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
-		Name:            name,
-		Slug:            name,
-		DurationSeconds: int64(24 * time.Hour / time.Second),
-		Controls:        controls,
-		CreatedBy:       userUID,
-	})
-	require.NoError(t, err)
-
-	return dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:            userUID,
-		DatabaseID:        databaseUID,
-		GrantedBy:         userUID,
-		GrantDefinitionID: def.UID,
-		Definition:        def,
-		StartsAt:          time.Now().Add(-time.Hour),
-		ExpiresAt:         time.Now().Add(24 * time.Hour),
-	})
 }
 
 // ---------- Tests ----------

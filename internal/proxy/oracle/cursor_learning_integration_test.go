@@ -25,6 +25,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/proxy/testsupport"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -99,7 +100,7 @@ func startOracleThroughProxy(t *testing.T, controls []string) *oracleThroughProx
 	}, encryptionKey)
 	require.NoError(t, err)
 
-	_, err = createGrantWithControls(ctx, t, dataStore, user.UID, db.UID, controls)
+	_, err = testsupport.CreateGrantWithControls(ctx, t, dataStore, user.UID, db.UID, controls)
 	require.NoError(t, err)
 
 	// Oracle clients authenticate to dbbat with an API key as the password.
