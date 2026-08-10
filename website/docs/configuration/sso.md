@@ -157,6 +157,11 @@ make sure that header is set.
 
 ## Per-provider setup
 
+Each snippet below is the minimum to get people signing in. If you also want
+roles to follow directory membership, the env block is not enough on its own —
+every IdP needs extra configuration before it emits a groups claim at all: see
+[Making your IdP emit groups](#making-your-idp-emit-groups).
+
 ### Google Workspace
 
 1. In the [Google Cloud console](https://console.cloud.google.com/apis/credentials),
