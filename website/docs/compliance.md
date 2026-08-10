@@ -206,7 +206,7 @@ The CLI can be run by someone who does not trust the running server. The
 endpoint is served *by* that server, so a compromised DBBat can answer
 `"verified": true` without walking anything. Collect the API result as routine
 evidence; run the CLI from a trusted binary when the integrity of the DBBat
-process itself is in scope, and say which one produced a given artefact.
+process itself is in scope, and say which one produced a given artifact.
 
 Record the reported `head_mac` alongside your evidence: comparing it against the
 head from the previous period is what detects a chain that was truncated and
