@@ -186,16 +186,27 @@ curl -H "Authorization: Bearer $DBBAT_API_KEY" \
   "http://localhost:4200/api/v1/connections"
 ```
 
-Integrity of that evidence is a separate, offline step — it needs the
-encryption key, so it runs on the host rather than over the API:
+Integrity of that evidence is verifiable two ways, and they are **not**
+equivalent:
 
 ```bash
-# The administrative audit log; exits non-zero if the chain is broken
+# On the host, with the encryption key: the authoritative check.
+# Exits non-zero if the chain is broken.
 dbbat audit verify
-
-# The per-connection query history
 dbbat audit verify --queries
+
+# Over the API (admin role), for scripted collection alongside everything above
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
+  "http://localhost:4200/api/v1/audit/verify"
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
+  "http://localhost:4200/api/v1/audit/verify/queries"
 ```
+
+The CLI can be run by someone who does not trust the running server. The
+endpoint is served *by* that server, so a compromised DBBat can answer
+`"verified": true` without walking anything. Collect the API result as routine
+evidence; run the CLI from a trusted binary when the integrity of the DBBat
+process itself is in scope, and say which one produced a given artefact.
 
 Record the reported `head_mac` alongside your evidence: comparing it against the
 head from the previous period is what detects a chain that was truncated and

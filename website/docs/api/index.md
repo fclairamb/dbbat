@@ -1023,6 +1023,79 @@ Returns a list of audit log events. **Requires admin or viewer role.**
 }
 ```
 
+### Verify the Audit Chain
+
+```
+GET /api/v1/audit/verify
+```
+
+Walks the store-wide HMAC audit chain and reports the chain head plus the first
+record that does not add up. **Requires admin role.**
+
+**Response:**
+
+```json
+{
+  "chain": "audit",
+  "verified": true,
+  "entries": 1284,
+  "head_seq": 1284,
+  "head_mac": "9f2c…",
+  "unverifiable_pre_anchor_entries": 37,
+  "checked_at": "2026-08-10T09:14:02Z",
+  "cached": false
+}
+```
+
+A broken chain answers `200` with `"verified": false` and a `break` object
+(`uid`, `chain_seq`, `reason`) naming the first bad record. The response never
+contains the chain key or the content of any audited record.
+
+:::warning Not equivalent to `dbbat audit verify`
+
+This answer is served by the DBBat process being audited, so a compromised
+instance can return `"verified": true` without walking anything. The CLI runs
+where the key lives and can be run by someone who does not trust the server. See
+[Tamper-Evident Audit Log](/docs/features/audit-chain).
+
+:::
+
+A walk is `O(rows)`: outcomes are cached for a minute (`cached`, `checked_at`)
+and at most one walk runs at a time per instance.
+
+### Verify the Query Chains
+
+```
+GET /api/v1/audit/verify/queries
+```
+
+Walks the per-connection query chains. **Requires admin role.**
+
+**Query Parameters:**
+
+| Parameter | Description |
+|-----------|-------------|
+| `connection` | Verify only this connection's chain (also reports that chain's head) |
+
+**Response:**
+
+```json
+{
+  "chain": "queries",
+  "verified": true,
+  "connections": 412,
+  "statements": 98213,
+  "chains_with_truncated_prefix": 3,
+  "checked_at": "2026-08-10T09:14:02Z",
+  "cached": false
+}
+```
+
+`chains_with_truncated_prefix` counts chains missing their oldest statements —
+what `DBB_QUERY_STORAGE_RETENTION` leaves behind on a long-lived session. That
+is expected housekeeping, not tampering. The response never contains SQL text,
+parameters or any other statement content.
+
 ---
 
 ## Error Responses
