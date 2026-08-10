@@ -2238,7 +2238,7 @@ func TestQueryChainRefreshCostScalesWithOpenSessions(t *testing.T) {
 	store.SetInstanceID(ourInstance)
 	store.SetRunID(ourRun)
 
-	writeSession := func(instanceID, runID string, close bool) {
+	writeSession := func(instanceID, runID string, andClose bool) {
 		var conn *Connection
 
 		asRun(t, store, instanceID, runID, func() {
@@ -2256,7 +2256,7 @@ func TestQueryChainRefreshCostScalesWithOpenSessions(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		if close {
+		if andClose {
 			require.NoError(t, store.CloseConnection(ctx, conn.UID))
 		}
 	}
