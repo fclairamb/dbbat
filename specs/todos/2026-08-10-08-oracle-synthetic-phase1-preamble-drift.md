@@ -141,13 +141,29 @@ DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH=1 go test -tags integration -v -timeout 20m \
   -count=1 -run TestIntegration_MCPExecutesThroughTheProxy ./internal/proxy/oracle/
 ```
 
-### Verification result (2026-08-10, gvenzl/oracle-free:23-slim on arm64)
+### Verification result (gvenzl/oracle-free:23-slim on arm64)
 
-- Forced-synthetic run with the fix: **PASS** (170s).
-- Control, same run with `syntheticAuthHeader` temporarily reverted to the
-  pre-fix `03 76 00` / `03 73 00`: **FAIL**, with the upstream answering
+Two runs are needed and neither substitutes for the other: the forced one is
+the only exercise of the synthetic *writers*, and the ordinary one the only
+exercise of the preamble *readers* every real login goes through.
+
+- **Forced synthetic** (`DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH=1`,
+  `TestIntegration_MCPExecutesThroughTheProxy`): **PASS** (170s).
+- **Control** for that run, with `syntheticAuthHeader` temporarily reverted to
+  the pre-fix `03 76 00` / `03 73 00`: **FAIL**, upstream answering
   `upstream AUTH Phase 1 rejected: ORA-03120: two-task conversion routine:
-  integer overflow` — the exact symptom this spec reported, reproduced and
-  then removed. The control also proves the seam really does bypass the
-  rewrite, since with the rewrite in play the run cannot fail this way.
+  integer overflow` — the exact symptom this spec reported, reproduced and then
+  removed. It also proves the seam really does bypass the rewrite, since with
+  the rewrite in play the run cannot fail that way.
+- **`make test-e2e-oracle`, no env var** — the rewrite path live, which is what
+  every real login uses and what the reader changes touch: **PASS**, 585
+  assertions, 0 failures, 0 skips, 349s. Covers the go-ora legs
+  (`TestIntegration_ProxyPassthrough`, `TestIntegration_CursorIDLearningMissRate`,
+  `TestIntegration_ConcurrentSessions`, …), the python-oracledb thin leg
+  (`TestIntegration_CursorIDLearningMissRate_PythonThin`) and the MCP loopback.
 - `make lint` clean, `make test` green, `make build-binary` OK.
+
+Not covered by either: a wide/OCI (sqlplus, Instant Client) session. The suite
+has no OCI client, and the synthetic builders emit thin framing regardless, so
+the fallback remains thin-only — stated in `docs/oracle.md` and in the CI
+follow-up.
