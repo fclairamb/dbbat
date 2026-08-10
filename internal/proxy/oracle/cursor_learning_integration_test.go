@@ -15,7 +15,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -28,121 +27,6 @@ import (
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/store"
 )
-
-// The log messages the measurement counts. They are the proxy's own, unchanged:
-// counting them is the "counter and a WARN" the spec asked for, without leaving
-// instrumentation behind in the production path.
-const (
-	logMsgQueryIntercepted = "query intercepted"
-	logMsgLearnedCursorID  = "learned server-assigned cursor id"
-	logMsgReexecGated      = "intercepted cursor re-execution"
-	logMsgReexecUntracked  = "forwarding a piggyback re-execution of an untracked cursor: its statement is unknown"
-	logMsgReexecRefused    = "refused a re-execution of an untracked cursor under a restrictive grant"
-)
-
-// countingHandler counts slog records by message and keeps the `sql` attribute
-// of each one, so the measurement can check not only *that* a re-execution
-// resolved to a statement but that it resolved to the **right** one — a
-// mis-learned cursor id is a silent wrong-SQL gate, which is worse than a miss.
-type countingHandler struct {
-	mu     sync.Mutex
-	counts map[string]int
-	sqls   map[string][]string
-	trace  []string
-}
-
-func newCountingHandler() *countingHandler {
-	return &countingHandler{
-		counts: make(map[string]int),
-		sqls:   make(map[string][]string),
-	}
-}
-
-func (h *countingHandler) Enabled(context.Context, slog.Level) bool { return true }
-
-func (h *countingHandler) Handle(_ context.Context, rec slog.Record) error {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	h.counts[rec.Message]++
-
-	line := rec.Message
-
-	rec.Attrs(func(a slog.Attr) bool {
-		if a.Key == "sql" {
-			h.sqls[rec.Message] = append(h.sqls[rec.Message], a.Value.String())
-		}
-
-		if a.Key == "sql" || a.Key == "cursor_id" {
-			line += " | " + a.Key + "=" + a.Value.String()
-		}
-
-		return true
-	})
-
-	switch rec.Message {
-	case logMsgQueryIntercepted, logMsgLearnedCursorID, logMsgReexecGated,
-		logMsgReexecUntracked, logMsgReexecRefused:
-		h.trace = append(h.trace, line)
-	}
-
-	return nil
-}
-
-func (h *countingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
-func (h *countingHandler) WithGroup(string) slog.Handler      { return h }
-
-func (h *countingHandler) traceLines() []string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	out := make([]string, len(h.trace))
-	copy(out, h.trace)
-
-	return out
-}
-
-func (h *countingHandler) count(msg string) int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	return h.counts[msg]
-}
-
-func (h *countingHandler) sqlsFor(msg string) []string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	out := make([]string, len(h.sqls[msg]))
-	copy(out, h.sqls[msg])
-
-	return out
-}
-
-// multisetDiff returns the elements of a that b does not account for,
-// respecting multiplicity.
-func multisetDiff(a, b []string) []string {
-	remaining := make(map[string]int, len(b))
-	for _, s := range b {
-		remaining[s]++
-	}
-
-	var out []string
-
-	for _, s := range a {
-		if remaining[s] > 0 {
-			remaining[s]--
-
-			continue
-		}
-
-		out = append(out, s)
-	}
-
-	sort.Strings(out)
-
-	return out
-}
 
 // oracleThroughProxy stands up the whole chain — Oracle container, PostgreSQL
 // store, dbbat Oracle proxy — and hands back a go-ora `*sql.DB` pointed at the
@@ -498,8 +382,8 @@ func TestIntegration_CursorIDLearningMissRate(t *testing.T) {
 		parses    = env.logs.count(logMsgQueryIntercepted)
 		learned   = env.logs.count(logMsgLearnedCursorID)
 		resolved  = env.logs.count(logMsgReexecGated)
-		untracked = env.logs.count(logMsgReexecUntracked)
-		refused   = env.logs.count(logMsgReexecRefused)
+		untracked = env.logs.count(logMsgUntrackedCursorForwarded)
+		refused   = env.logs.count(logMsgUntrackedCursorRefused)
 	)
 
 	reexecs := resolved + untracked
@@ -715,7 +599,7 @@ func TestIntegration_CursorIDLearningMissRate_PythonThin(t *testing.T) {
 		parses    = env.logs.count(logMsgQueryIntercepted)
 		learned   = env.logs.count(logMsgLearnedCursorID)
 		resolved  = env.logs.count(logMsgReexecGated)
-		untracked = env.logs.count(logMsgReexecUntracked)
+		untracked = env.logs.count(logMsgUntrackedCursorForwarded)
 	)
 
 	reexecs := resolved + untracked
@@ -801,8 +685,8 @@ func TestIntegration_CursorReexecUnderReadOnlyIsNotBrokenByTheGate(t *testing.T)
 
 	time.Sleep(2 * time.Second)
 
-	assert.Zero(t, env.logs.count(logMsgReexecRefused),
+	assert.Zero(t, env.logs.count(logMsgUntrackedCursorRefused),
 		"no ordinary read-only re-execution may be refused as an untracked cursor")
-	assert.Zero(t, env.logs.count(logMsgReexecUntracked),
+	assert.Zero(t, env.logs.count(logMsgUntrackedCursorForwarded),
 		"no ordinary read-only re-execution may name a cursor dbbat could not resolve")
 }
