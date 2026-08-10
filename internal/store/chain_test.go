@@ -1540,14 +1540,15 @@ func TestQueryChainOrphanStampCostScalesWithOrphans(t *testing.T) {
 	err := store.db.QueryRowContext(ctx, "EXPLAIN (ANALYZE, FORMAT JSON) "+statement).Scan(&plan)
 	require.NoError(t, err, "EXPLAIN of the reconcile statement")
 
-	var explained []struct {
-		Plan planNode `json:"Plan"`
-	}
+	// Walked as untyped maps rather than a tagged struct: the key names are
+	// PostgreSQL's ("Node Type", "Actual Loops", …) and modeling them as Go
+	// fields buys nothing here.
+	var explained []map[string]any
 
 	require.NoError(t, json.Unmarshal([]byte(plan), &explained))
 	require.Len(t, explained, 1)
 
-	loops := queriesScanLoops(&explained[0].Plan)
+	loops := queriesScanLoops(explained[0]["Plan"])
 	require.NotEmpty(t, loops, "the plan must contain the head lookup over queries")
 
 	for _, l := range loops {
@@ -1563,28 +1564,29 @@ func TestQueryChainOrphanStampCostScalesWithOrphans(t *testing.T) {
 	require.Equal(t, orphans, stamped)
 }
 
-// planNode is the slice of EXPLAIN (FORMAT JSON) this package cares about.
-type planNode struct {
-	NodeType     string     `json:"Node Type"`
-	RelationName string     `json:"Relation Name"`
-	ActualLoops  int        `json:"Actual Loops"`
-	Plans        []planNode `json:"Plans"`
-}
-
-// queriesScanLoops collects the loop count of every node that reads the queries
-// table. Whether the planner picks the partial index or a sequential scan
-// depends on the table's size, but either way the node is entered once per
-// evaluation of the correlated subquery — which is the number this test is
-// about.
-func queriesScanLoops(node *planNode) []int {
-	var loops []int
-
-	if node.RelationName == "queries" {
-		loops = append(loops, node.ActualLoops)
+// queriesScanLoops walks an EXPLAIN plan tree and collects the loop count of
+// every node that reads the queries table. Whether the planner picks the partial
+// index or a sequential scan depends on the table's size, but either way the
+// node is entered once per evaluation of the correlated subquery — which is the
+// number this test is about.
+func queriesScanLoops(node any) []int {
+	plan, ok := node.(map[string]any)
+	if !ok {
+		return nil
 	}
 
-	for i := range node.Plans {
-		loops = append(loops, queriesScanLoops(&node.Plans[i])...)
+	var loops []int
+
+	if relation, _ := plan["Relation Name"].(string); relation == "queries" {
+		actual, ok := plan["Actual Loops"].(float64)
+		if ok {
+			loops = append(loops, int(actual))
+		}
+	}
+
+	children, _ := plan["Plans"].([]any)
+	for _, child := range children {
+		loops = append(loops, queriesScanLoops(child)...)
 	}
 
 	return loops
