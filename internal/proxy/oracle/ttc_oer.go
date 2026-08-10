@@ -87,9 +87,22 @@ func decodeOERFieldsAt(payload []byte, offset int) (*oerInfo, int) {
 	}, pos
 }
 
-// oerMaxSeqNumber bounds a believable OER sequence number: TTC numbers calls
-// with a single byte that wraps at 255.
-const oerMaxSeqNumber = 255
+// oerMaxSeqNumber bounds a believable OER sequence number.
+//
+// It used to be 255, on the belief that TTC numbers calls with a single byte
+// that wraps. It does not: this field is the end-to-end ECID sequence
+// (go-ora's `SummaryObject.EndToEndECIDSequence`), a **uint16** that counts up
+// across the whole session and rolls over at 65535, not at 255. Measured
+// against Oracle Free 23ai, a session crosses 255 after a few dozen
+// statements, and from that point every single OER was rejected by this bound
+// — so `findCursorIDInResponse` stopped learning cursor ids for the rest of the
+// session. See docs/oracle.md, "Cursor-id learning".
+//
+// The bound is therefore the field's real width. `oerFieldMaxSizes` already
+// caps its encoding at two bytes, so this is belt and braces; it is kept
+// spelled out because the value is what the anchor means, not an accident of
+// the encoding.
+const oerMaxSeqNumber = 0xFFFF
 
 // findCursorIDInResponse scans a server payload for the OER that reports which
 // cursor the server assigned to the statement just executed, and returns that
@@ -103,10 +116,15 @@ const oerMaxSeqNumber = 255
 //
 // The scan is anchored rather than trusting: the run must decode as seven
 // compressed ints, the error code must be success or end-of-data (an OER
-// reporting a real failure assigns nothing), the sequence number must fit a
-// byte, and the cursor id must be a plausible 16-bit id. First match wins,
-// which is what keeps a later run of row bytes that happens to parse from
+// reporting a real failure assigns nothing), the sequence number must fit its
+// 16-bit field, and the cursor id must be a plausible 16-bit id. First match
+// wins, which is what keeps a later run of row bytes that happens to parse from
 // overriding the genuine one.
+//
+// Every one of those bounds is load-bearing in both directions: too loose and a
+// run of row bytes is mistaken for the OER, too tight and the genuine OER is
+// skipped and the cursor is never learned. The sequence-number bound was the
+// second of those for a while — see oerMaxSeqNumber.
 func findCursorIDInResponse(payload []byte) (uint16, bool) {
 	for i := 1; i < len(payload); i++ {
 		if payload[i] != 0x04 {

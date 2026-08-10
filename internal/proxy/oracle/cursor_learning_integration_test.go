@@ -9,7 +9,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -44,6 +48,7 @@ type countingHandler struct {
 	mu     sync.Mutex
 	counts map[string]int
 	sqls   map[string][]string
+	trace  []string
 }
 
 func newCountingHandler() *countingHandler {
@@ -61,19 +66,41 @@ func (h *countingHandler) Handle(_ context.Context, rec slog.Record) error {
 
 	h.counts[rec.Message]++
 
+	line := rec.Message
+
 	rec.Attrs(func(a slog.Attr) bool {
 		if a.Key == "sql" {
 			h.sqls[rec.Message] = append(h.sqls[rec.Message], a.Value.String())
 		}
 
+		if a.Key == "sql" || a.Key == "cursor_id" {
+			line += " | " + a.Key + "=" + a.Value.String()
+		}
+
 		return true
 	})
+
+	switch rec.Message {
+	case logMsgQueryIntercepted, logMsgLearnedCursorID, logMsgReexecGated,
+		logMsgReexecUntracked, logMsgReexecRefused:
+		h.trace = append(h.trace, line)
+	}
 
 	return nil
 }
 
 func (h *countingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *countingHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *countingHandler) traceLines() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	out := make([]string, len(h.trace))
+	copy(out, h.trace)
+
+	return out
+}
 
 func (h *countingHandler) count(msg string) int {
 	h.mu.Lock()
@@ -92,12 +119,44 @@ func (h *countingHandler) sqlsFor(msg string) []string {
 	return out
 }
 
+// multisetDiff returns the elements of a that b does not account for,
+// respecting multiplicity.
+func multisetDiff(a, b []string) []string {
+	remaining := make(map[string]int, len(b))
+	for _, s := range b {
+		remaining[s]++
+	}
+
+	var out []string
+
+	for _, s := range a {
+		if remaining[s] > 0 {
+			remaining[s]--
+
+			continue
+		}
+
+		out = append(out, s)
+	}
+
+	sort.Strings(out)
+
+	return out
+}
+
 // oracleThroughProxy stands up the whole chain — Oracle container, PostgreSQL
 // store, dbbat Oracle proxy — and hands back a go-ora `*sql.DB` pointed at the
 // proxy, plus the handler counting what the proxy logged.
 type oracleThroughProxy struct {
 	db   *sql.DB
 	logs *countingHandler
+
+	// The same coordinates, for a client that is not go-ora.
+	host     string
+	port     int
+	service  string
+	username string
+	apiKey   string
 }
 
 func startOracleThroughProxy(t *testing.T, controls []string) *oracleThroughProxy {
@@ -192,7 +251,15 @@ func startOracleThroughProxy(t *testing.T, controls []string) *oracleThroughProx
 
 	require.NoError(t, client.PingContext(ctx))
 
-	return &oracleThroughProxy{db: client, logs: logs}
+	return &oracleThroughProxy{
+		db:       client,
+		logs:     logs,
+		host:     host,
+		port:     port,
+		service:  service,
+		username: user.Username,
+		apiKey:   plainKey,
+	}
 }
 
 // runCursorWorkloads drives every shape the spec named as a stress on cursor-id
@@ -352,7 +419,22 @@ END;`)
 		expected = append(expected, call)
 	})
 
-	// 7. Statement-cache churn: enough distinct statements to push the earlier
+	// 7. A statement that fails, retried. This is the one shape the measurement
+	//    flagged as never yielding a cursor id: findCursorIDInResponse refuses to
+	//    read an id off an OER carrying a real ORA code. If a client re-executed
+	//    such a cursor by id, that would be a learning miss with teeth.
+	t.Run("failing statement retried", func(t *testing.T) {
+		for i := 0; i < 3; i++ {
+			rows, err := db.QueryContext(ctx, "SELECT * FROM dbbat_no_such_table_at_all")
+			require.Error(t, err, "the statement must really fail")
+
+			if rows != nil {
+				_ = rows.Close()
+			}
+		}
+	})
+
+	// 8. Statement-cache churn: enough distinct statements to push the earlier
 	//    ones out of any cache, then the originals again.
 	t.Run("statement cache churn", func(t *testing.T) {
 		for i := 0; i < 40; i++ {
@@ -433,6 +515,22 @@ func TestIntegration_CursorIDLearningMissRate(t *testing.T) {
 		t.Logf("  learning miss rate:                   %d/%d", untracked, reexecs)
 	}
 
+	// Which parses never yielded a cursor id. Only the statements that *failed*
+	// belong here: their OER carries a real ORA code, which
+	// findCursorIDInResponse deliberately refuses to read an id from, and no
+	// client re-executes a statement that errored.
+	unlearned := multisetDiff(env.logs.sqlsFor(logMsgQueryIntercepted),
+		env.logs.sqlsFor(logMsgLearnedCursorID))
+	if len(unlearned) > 0 {
+		t.Logf("  parses with no cursor id learned:     %s", strings.Join(unlearned, " | "))
+	}
+
+	if os.Getenv("CURSOR_TRACE") != "" {
+		for i, l := range env.logs.traceLines() {
+			t.Logf("TRACE %03d %s", i, l)
+		}
+	}
+
 	assert.Positive(t, parses, "the workloads must have reached the proxy at all")
 	assert.Positive(t, reexecs, "the workloads must have produced cursor re-executions")
 
@@ -442,6 +540,22 @@ func TestIntegration_CursorIDLearningMissRate(t *testing.T) {
 		"cursor-id learning missed %d of %d re-executions; failing the piggyback path closed would "+
 			"turn each of those into ORA-01031", untracked, reexecs)
 
+	// The sharper claim, and the one that catches a learning miss even when a
+	// recycled cursor id hides it behind a stale tracker entry: every statement
+	// that *succeeded* got its cursor id learned. Anything else in this list is
+	// a regression in findCursorIDInResponse — it is how the end-to-end ECID
+	// sequence bound (oerMaxSeqNumber) was caught silently switching learning
+	// off part-way through every session.
+	assert.Equal(t,
+		[]string{
+			"DROP TABLE dbbat_learn_probe",
+			"SELECT * FROM dbbat_no_such_table_at_all",
+			"SELECT * FROM dbbat_no_such_table_at_all",
+			"SELECT * FROM dbbat_no_such_table_at_all",
+		},
+		unlearned,
+		"only the statements that failed may go without a learned cursor id")
+
 	// And the ids it did learn point at the right statements.
 	want := make(map[string]bool, len(expected))
 	for _, q := range expected {
@@ -450,7 +564,11 @@ func TestIntegration_CursorIDLearningMissRate(t *testing.T) {
 
 	var unexpected []string
 
+	histogram := make(map[string]int)
+
 	for _, got := range env.logs.sqlsFor(logMsgReexecGated) {
+		histogram[got]++
+
 		if !want[got] {
 			unexpected = append(unexpected, got)
 		}
@@ -460,6 +578,172 @@ func TestIntegration_CursorIDLearningMissRate(t *testing.T) {
 	assert.Emptyf(t, unexpected,
 		"a re-execution resolved to a statement this client never ran — the cursor id was mis-learned: %s",
 		strings.Join(unexpected, " | "))
+
+	// The three interleaved cursors ran the same number of times each, so their
+	// re-execution counts must come out equal. A cursor id learned off the wrong
+	// OER would show up here as a skew long before it showed up as an unknown
+	// statement — this is the mis-learning check the set membership above cannot
+	// make.
+	symmetric := []string{
+		"SELECT 10 AS n FROM dual",
+		"SELECT 20 AS n FROM dual",
+		"SELECT 30 AS n FROM dual",
+	}
+
+	for _, q := range symmetric {
+		t.Logf("  re-executions of %-32s %d", q+":", histogram[q])
+		assert.Positivef(t, histogram[q], "%q was re-executed but never resolved", q)
+		assert.Equalf(t, histogram[symmetric[0]], histogram[q],
+			"three interleaved cursors ran equally often; %q did not", q)
+	}
+}
+
+// pythonThinWorkload is the same set of shapes as runCursorWorkloads, for the
+// client the spec singles out: python-oracledb thin, whose plain `cur.execute()`
+// loop re-executes by cursor id with no prepared-statement API in sight. The
+// statements deliberately match the go-ora ones so the two measurements are
+// comparable.
+//
+// It is a script rather than a Go driver because there is no Go implementation
+// of what is being measured — how *that* client drives the wire.
+const pythonThinWorkload = `
+import sys
+import oracledb
+
+host, port, service, user, password = sys.argv[1:6]
+conn = oracledb.connect(user=user, password=password,
+                        dsn=oracledb.makedsn(host, int(port), service_name=service))
+
+cur = conn.cursor()
+
+# 1. the plain execute() loop
+for _ in range(5):
+    cur.execute("SELECT 1 AS n FROM dual")
+    cur.fetchall()
+
+# 2. bind-heavy, same statement every time
+for i in range(5):
+    cur.execute("SELECT :a AS a, :b AS b, :c AS c FROM dual", a=i, b=i + 1, c=i + 2)
+    cur.fetchall()
+
+# 3. several cursors open at once, interleaved
+cursors = [conn.cursor() for _ in range(3)]
+for _ in range(5):
+    for j, c in enumerate(cursors):
+        c.execute("SELECT %d AS n FROM dual" % (10 * (j + 1)))
+        c.fetchall()
+
+# 4. DML
+cur.execute("BEGIN EXECUTE IMMEDIATE 'DROP TABLE dbbat_py_probe'; EXCEPTION WHEN OTHERS THEN NULL; END;")
+cur.execute("CREATE TABLE dbbat_py_probe (id NUMBER)")
+for i in range(5):
+    cur.execute("INSERT INTO dbbat_py_probe VALUES (:1)", [i])
+conn.commit()
+
+# 5. an anonymous PL/SQL block
+for i in range(5):
+    cur.execute("BEGIN INSERT INTO dbbat_py_probe VALUES (:1); END;", [1000 + i])
+conn.commit()
+
+# 6. a REF cursor
+cur.execute("""CREATE OR REPLACE PROCEDURE dbbat_py_refcur(p OUT SYS_REFCURSOR) AS
+BEGIN
+  OPEN p FOR SELECT LEVEL AS n FROM dual CONNECT BY LEVEL <= 5;
+END;""")
+for _ in range(5):
+    out = cur.var(oracledb.CURSOR)
+    cur.callproc("dbbat_py_refcur", [out])
+    out.getvalue().fetchall()
+
+# 7. a statement that fails, retried: its OER carries a real ORA code, so no
+#    cursor id is read off it
+for _ in range(3):
+    try:
+        cur.execute("SELECT * FROM dbbat_no_such_table_at_all")
+        cur.fetchall()
+    except oracledb.DatabaseError:
+        pass
+
+# 8. statement-cache churn, well past the default cache size of 20
+for i in range(40):
+    for _ in range(2):
+        cur.execute("SELECT %d AS churn FROM dual" % i)
+        cur.fetchall()
+
+# ...and back to the first statement, long after its cursor was churned
+for _ in range(5):
+    cur.execute("SELECT 1 AS n FROM dual")
+    cur.fetchall()
+
+cur.execute("DROP PROCEDURE dbbat_py_refcur")
+cur.execute("DROP TABLE dbbat_py_probe")
+conn.close()
+print("ok")
+`
+
+// TestIntegration_CursorIDLearningMissRate_PythonThin repeats the measurement
+// with python-oracledb thin. go-ora is the client dbbat's own tests are written
+// in, so measuring only it would prove the least: the spec's worry is the client
+// that reaches the piggyback path without ever asking for a prepared statement.
+//
+// Skipped when python-oracledb is not installed, which is the case in CI; the
+// recorded python capture replayed in cursor_reexec_replay_test.go is the
+// always-on half of the same evidence.
+func TestIntegration_CursorIDLearningMissRate_PythonThin(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+
+	if err := exec.Command("python3", "-c", "import oracledb").Run(); err != nil {
+		t.Skip("python-oracledb not installed (pip install oracledb)")
+	}
+
+	env := startOracleThroughProxy(t, nil)
+
+	script := filepath.Join(t.TempDir(), "workload.py")
+	require.NoError(t, os.WriteFile(script, []byte(pythonThinWorkload), 0o600))
+
+	cmd := exec.Command("python3", script,
+		env.host, strconv.Itoa(env.port), env.service, env.username, env.apiKey)
+
+	out, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "python-oracledb workload failed:\n%s", out)
+
+	time.Sleep(2 * time.Second)
+
+	var (
+		parses    = env.logs.count(logMsgQueryIntercepted)
+		learned   = env.logs.count(logMsgLearnedCursorID)
+		resolved  = env.logs.count(logMsgReexecGated)
+		untracked = env.logs.count(logMsgReexecUntracked)
+	)
+
+	reexecs := resolved + untracked
+
+	t.Logf("cursor-id learning measurement, python-oracledb thin (image=%s):", oracleTestImage())
+	t.Logf("  parses seen (query intercepted):      %d", parses)
+	t.Logf("  cursor ids learned:                   %d", learned)
+	t.Logf("  re-executions resolved to their SQL:  %d", resolved)
+	t.Logf("  re-executions naming an unknown id:   %d", untracked)
+
+	if reexecs > 0 {
+		t.Logf("  learning miss rate:                   %d/%d", untracked, reexecs)
+	}
+
+	unlearned := multisetDiff(env.logs.sqlsFor(logMsgQueryIntercepted),
+		env.logs.sqlsFor(logMsgLearnedCursorID))
+	if len(unlearned) > 0 {
+		t.Logf("  parses with no cursor id learned:     %s", strings.Join(unlearned, " | "))
+	}
+
+	for _, q := range unlearned {
+		assert.Contains(t, q, "dbbat_no_such_table_at_all",
+			"only the statement that fails may go without a learned cursor id")
+	}
+
+	assert.Positive(t, reexecs, "python-oracledb must have produced cursor re-executions")
+	assert.Zero(t, untracked,
+		"cursor-id learning missed %d of %d python-oracledb re-executions", untracked, reexecs)
 }
 
 // TestIntegration_CursorReexecUnderReadOnlyIsNotBrokenByTheGate is the guard the
