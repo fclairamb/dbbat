@@ -19,6 +19,13 @@ import (
 // being one" once the answer is "the identity provider did".
 const AuditEventOAuthRolesSynced = "user.roles_synced"
 
+// AuditEventUserCreated is written when an account comes into existence,
+// whether an admin created it through the users API or a verified OAuth
+// identity auto-provisioned it. Deliberately the same event type for both:
+// "where did this account come from" is one question, and it should not need
+// two queries to answer. The details say which path it took.
+const AuditEventUserCreated = "user.created"
+
 // oauthDefaultRole is the single place the auto-provisioning default role is
 // read. It is the floor a role mapping can never dig below: a mapping that
 // matches nothing leaves the user with this role, never with none at all.
@@ -171,7 +178,17 @@ func resolveMappedRoles(
 
 	if len(next) == 0 {
 		next = []string{defaultRole}
-		granted = append(granted, defaultRole)
+
+		// Only a grant if the user did not already hold it. The default role
+		// can itself be named in the mapping ("viewer=analysts" with
+		// DBB_SLACK_AUTH_DEFAULT_ROLE=viewer): an unmatched user has it
+		// dropped and then restored by the floor, which is a round trip back
+		// to where they started — not a promotion. Recording it as one would
+		// make changed() true on every single login, writing identical roles
+		// and appending an audit entry claiming a grant that never happened.
+		if !slices.Contains(current, defaultRole) {
+			granted = append(granted, defaultRole)
+		}
 	}
 
 	revoked := make([]string, 0)
@@ -295,6 +312,47 @@ func (s *Server) retainLastAdmin(
 	// may have added the default role only because the set was about to be
 	// empty, and that reasoning no longer holds once admin stays.
 	return resolveMappedRoles(user.Roles, groups, mapping, s.oauthDefaultRole(), store.RoleAdmin), nil
+}
+
+// auditOAuthUserCreated records an account auto-provisioned by a verified
+// OAuth identity.
+//
+// This matters more since roles started following directory groups: a *first*
+// login can now mint an account that is `admin` outright, and "no account →
+// admin" is precisely the transition an auditor goes looking for. Before the
+// mapping, a new account always landed on the static default role and the slog
+// line was arguably enough; it no longer is.
+func (s *Server) auditOAuthUserCreated(
+	ctx context.Context,
+	user *store.User,
+	providerName string,
+	oauthUser *auth.OAuthUser,
+) {
+	details, err := json.Marshal(map[string]any{
+		"username":     user.Username,
+		"roles":        []string(user.Roles),
+		"provider":     providerName,
+		"email":        oauthUser.Email,
+		"groups":       oauthUser.Groups,
+		"auto_created": true,
+	})
+	if err != nil {
+		s.logger.WarnContext(ctx, "failed to encode OAuth user creation audit details", slog.Any("error", err))
+
+		return
+	}
+
+	// PerformedBy stays nil: no dbbat user created this account, a verified
+	// identity from providerName did.
+	if err := s.store.LogAuditEvent(ctx, &store.AuditEvent{
+		EventType: AuditEventUserCreated,
+		UserID:    &user.UID,
+		Details:   details,
+	}); err != nil {
+		s.logger.WarnContext(ctx, "failed to record OAuth user creation audit event",
+			slog.String("username", user.Username),
+			slog.Any("error", err))
+	}
 }
 
 // auditRoleSync records a role change driven by directory membership. The

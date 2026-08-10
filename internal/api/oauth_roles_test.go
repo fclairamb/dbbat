@@ -40,10 +40,13 @@ func TestResolveMappedRoles(t *testing.T) {
 	}
 
 	cases := []struct {
-		name        string
-		current     []string
-		groups      []string
-		mapping     map[string][]string
+		name    string
+		current []string
+		groups  []string
+		mapping map[string][]string
+		// defaultRole is the floor; empty means store.RoleConnector, which is
+		// what a stock deployment runs.
+		defaultRole string
 		wantRoles   []string
 		wantGranted []string
 		wantRevoked []string
@@ -105,6 +108,30 @@ func TestResolveMappedRoles(t *testing.T) {
 			wantRevoked: []string{"admin"},
 		},
 		{
+			name:    "the floor restoring a role the user already held is not a grant",
+			current: []string{"viewer"},
+			groups:  nil,
+			// viewer is both the default role and a mapped one: an unmatched
+			// user has it dropped and then handed straight back by the floor.
+			// That round trip must read as "nothing happened", or every login
+			// would write identical roles and claim a promotion.
+			mapping:     map[string][]string{"admin": {"db-admins"}, "viewer": {"analysts"}},
+			defaultRole: store.RoleViewer,
+			wantRoles:   []string{"viewer"},
+			wantGranted: []string{},
+			wantRevoked: []string{},
+		},
+		{
+			name:    "the floor still reports a real grant",
+			current: []string{"admin"},
+			groups:  nil,
+			// Here the user genuinely did not hold the default role before.
+			mapping:     map[string][]string{"admin": {"db-admins"}, "connector": {"engineering"}},
+			wantRoles:   []string{"connector"},
+			wantGranted: []string{"connector"},
+			wantRevoked: []string{"admin"},
+		},
+		{
 			name:        "group matching is exact, case included",
 			current:     []string{"connector"},
 			groups:      []string{"DB-Admins"},
@@ -137,7 +164,12 @@ func TestResolveMappedRoles(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := resolveMappedRoles(tc.current, tc.groups, tc.mapping, store.RoleConnector)
+			defaultRole := tc.defaultRole
+			if defaultRole == "" {
+				defaultRole = store.RoleConnector
+			}
+
+			got := resolveMappedRoles(tc.current, tc.groups, tc.mapping, defaultRole)
 
 			assert.Equal(t, tc.wantRoles, got.Roles)
 			assert.Equal(t, tc.wantGranted, got.Granted)
@@ -180,10 +212,18 @@ func oidcOAuthUser(suffix string, groups ...string) *auth.OAuthUser {
 func serverWithRoleMapping(t *testing.T, server *Server, mapping string) {
 	t.Helper()
 
+	serverWithRoleMappingAndDefault(t, server, mapping, store.RoleConnector)
+}
+
+// serverWithRoleMappingAndDefault is serverWithRoleMapping for the deployments
+// that moved DBB_SLACK_AUTH_DEFAULT_ROLE off `connector`.
+func serverWithRoleMappingAndDefault(t *testing.T, server *Server, mapping, defaultRole string) {
+	t.Helper()
+
 	server.config = &config.Config{
 		SlackAuth: config.SlackAuthConfig{
 			AutoCreateUsers: true,
-			DefaultRole:     store.RoleConnector,
+			DefaultRole:     defaultRole,
 		},
 		OIDCAuth: config.OIDCAuthConfig{
 			Issuer:      "https://issuer.example.test",
@@ -192,11 +232,10 @@ func serverWithRoleMapping(t *testing.T, server *Server, mapping string) {
 	}
 }
 
-// roleSyncEvents returns the audit entries written for a user's role syncs.
-func roleSyncEvents(t *testing.T, dataStore *store.Store, userID uuid.UUID) []store.AuditEvent {
+// auditEventsFor returns a user's audit entries of one type.
+func auditEventsFor(t *testing.T, dataStore *store.Store, eventType string, userID uuid.UUID) []store.AuditEvent {
 	t.Helper()
 
-	eventType := AuditEventOAuthRolesSynced
 	events, err := dataStore.ListAuditEvents(context.Background(), store.AuditFilter{
 		EventType: &eventType,
 		UserID:    &userID,
@@ -205,6 +244,13 @@ func roleSyncEvents(t *testing.T, dataStore *store.Store, userID uuid.UUID) []st
 	require.NoError(t, err)
 
 	return events
+}
+
+// roleSyncEvents returns the audit entries written for a user's role syncs.
+func roleSyncEvents(t *testing.T, dataStore *store.Store, userID uuid.UUID) []store.AuditEvent {
+	t.Helper()
+
+	return auditEventsFor(t, dataStore, AuditEventOAuthRolesSynced, userID)
 }
 
 // TestOAuthRoleSyncPromotesOnEveryLogin covers the promotion half: an existing
@@ -382,6 +428,72 @@ func TestOAuthRoleSyncAppliesAtCreation(t *testing.T) {
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{store.RoleConnector, store.RoleViewer}, []string(user.Roles),
 		"the default role is the floor, the mapping adds to it")
+}
+
+// TestOAuthRoleSyncAuditsAutoCreation: with a mapping in play, a *first*
+// login can mint an account that is admin outright. "No account → admin" is
+// the transition an auditor goes looking for, so it has to be in audit_log,
+// not only in a log line.
+func TestOAuthRoleSyncAuditsAutoCreation(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	ctx := context.Background()
+	suffix := uuid.NewString()[:8]
+
+	serverWithRoleMapping(t, server, "admin=db-admins")
+
+	provider := &mockProvider{name: oidc.ProviderName}
+
+	user, err := server.findOrCreateOAuthUser(ctx, provider, oidcOAuthUser(suffix, "db-admins"))
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{store.RoleConnector, store.RoleAdmin}, []string(user.Roles))
+
+	events := auditEventsFor(t, dataStore, AuditEventUserCreated, user.UID)
+	require.Len(t, events, 1, "auto-provisioning an account must be audited")
+
+	var details map[string]any
+	require.NoError(t, json.Unmarshal(events[0].Details, &details))
+	assert.ElementsMatch(t, []any{store.RoleConnector, store.RoleAdmin}, details["roles"],
+		"the entry must carry the roles the account was actually born with")
+	assert.Equal(t, []any{"db-admins"}, details["groups"])
+	assert.Equal(t, oidc.ProviderName, details["provider"])
+	assert.Equal(t, true, details["auto_created"])
+	assert.Nil(t, events[0].PerformedBy, "no dbbat user created this account")
+}
+
+// TestOAuthRoleSyncFloorIsNotAGrant covers the deployment where the default
+// role is itself named in the mapping. An unmatched user has it dropped and
+// handed back by the floor, which must read as "nothing happened": otherwise
+// every single login writes identical roles and appends an audit entry
+// claiming a promotion that never occurred — noise in a hash-chained log.
+func TestOAuthRoleSyncFloorIsNotAGrant(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	ctx := context.Background()
+	suffix := uuid.NewString()[:8]
+
+	serverWithRoleMappingAndDefault(t, server,
+		"admin=db-admins,viewer=analysts", store.RoleViewer)
+
+	provider := &mockProvider{name: oidc.ProviderName}
+
+	// Created in analysts, so the account starts on viewer.
+	user, err := server.findOrCreateOAuthUser(ctx, provider, oidcOAuthUser(suffix, "analysts"))
+	require.NoError(t, err)
+	require.Equal(t, []string{store.RoleViewer}, []string(user.Roles))
+
+	// Now in neither group: viewer is mapped and unmatched, so it is dropped
+	// and then restored by the floor. Net effect, nothing.
+	for range 3 {
+		resolved, syncErr := server.findOrCreateOAuthUser(ctx, provider, oidcOAuthUser(suffix))
+		require.NoError(t, syncErr)
+		assert.Equal(t, []string{store.RoleViewer}, []string(resolved.Roles))
+	}
+
+	assert.Empty(t, roleSyncEvents(t, dataStore, user.UID),
+		"a round trip back to the same role set is not a change and must not be audited")
 }
 
 // TestOAuthRoleSyncIgnoresOtherProviders: the mapping is configured under

@@ -95,7 +95,7 @@ func (s *Server) handleCreateUser(c *gin.Context) {
 		"roles":    user.Roles,
 	})
 	_ = s.store.LogAuditEvent(c.Request.Context(), &store.AuditEvent{
-		EventType:   "user.created",
+		EventType:   AuditEventUserCreated,
 		UserID:      &user.UID,
 		PerformedBy: &currentUser.UID,
 		Details:     details,

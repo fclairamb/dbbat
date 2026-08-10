@@ -464,6 +464,8 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, provider auth.OAuthP
 		slog.Any("roles", roles),
 		slog.Any("uid", user.UID))
 
+	s.auditOAuthUserCreated(ctx, user, providerName, oauthUser)
+
 	return user, nil
 }
 
