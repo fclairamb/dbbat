@@ -54,6 +54,17 @@ const (
 	// StageTargetAuth is the protocol-level handshake and login against the
 	// database target.
 	StageTargetAuth Stage = "target_auth"
+	// StageClusterAPI is reaching the Kubernetes API server (DNS, routing,
+	// firewall, and the TLS trust established by the pasted CA bundle).
+	StageClusterAPI Stage = "cluster_api"
+	// StageClusterAuth is the API server accepting the ServiceAccount token.
+	StageClusterAuth Stage = "cluster_auth"
+	// StageClusterRBAC is the SelfSubjectAccessReview on `pods/portforward`:
+	// authenticated, but may we actually open a tunnel in this namespace.
+	StageClusterRBAC Stage = "cluster_rbac"
+	// StageClusterTarget is resolving the addressed pod (or the ready pod
+	// behind `svc/<name>`) and confirming it is Ready.
+	StageClusterTarget Stage = "cluster_target"
 )
 
 // Code is a stable, machine-readable classification of the failure within a
@@ -98,6 +109,14 @@ const (
 	// CodeUnsupported means no protocol-level probe exists for this protocol;
 	// reachability was verified but credentials were not.
 	CodeUnsupported Code = "auth_not_verified"
+	// CodeK8sForbidden means the ServiceAccount authenticated but RBAC denied
+	// it — practically always a missing `pods/portforward` verb.
+	CodeK8sForbidden Code = "k8s_forbidden"
+	// CodeK8sTargetNotFound means no pod or service by that name exists in the
+	// cluster row's namespace.
+	CodeK8sTargetNotFound Code = "k8s_target_not_found"
+	// CodeK8sTargetNotReady means the target exists but no ready pod backs it.
+	CodeK8sTargetNotReady Code = "k8s_target_not_ready"
 	// CodeInternal is an unclassified failure.
 	CodeInternal Code = "internal_error"
 )
@@ -171,8 +190,21 @@ func (c *Checker) Check(ctx context.Context, srv *store.Server) Result {
 
 // check runs the protocol-appropriate check body against a caller-owned dialer.
 func (c *Checker) check(ctx context.Context, dialer *shared.Dialer, srv *store.Server) Result {
-	if srv.IsSSH() {
+	switch {
+	case srv.IsSSH():
 		return c.checkBastion(ctx, dialer, srv.UID)
+	case srv.IsKubernetes():
+		return c.checkCluster(ctx, dialer, srv)
+	}
+
+	// A target behind a cluster row is pre-flighted against the API server, so
+	// the stage names the cluster problem instead of blaming the database.
+	if srv.ViaUID != nil {
+		if via, err := c.resolver.GetServerByUID(ctx, *srv.ViaUID); err == nil && via.IsKubernetes() {
+			if res := c.checkKubernetesTarget(ctx, dialer, srv, *srv.ViaUID); res != nil {
+				return *res
+			}
+		}
 	}
 
 	return c.checkTarget(ctx, dialer, srv)
@@ -405,9 +437,13 @@ func classifySSHError(err error) Result {
 // classifyDialError maps a target dial failure, distinguishing a failure inside
 // the tunnel from a direct dial failure.
 func classifyDialError(err error, viaTunnel bool) Result {
-	// A dial "through" a bastion can fail because the bastion itself is
-	// unreachable or refuses us — report that as a bastion-stage failure so the
-	// admin fixes the bastion, not the target.
+	// A dial "through" a via row can fail because the via row itself is
+	// unreachable or refuses us — report that as a via-stage failure so the
+	// admin fixes the tunnel, not the target.
+	if viaTunnel && isKubernetesStage(err) {
+		return classifyKubernetesError(err, StageClusterAPI)
+	}
+
 	if viaTunnel && isBastionStage(err) {
 		return classifySSHError(err)
 	}
