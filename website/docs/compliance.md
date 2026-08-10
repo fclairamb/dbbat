@@ -106,6 +106,7 @@ see [what DBBat does not do](#what-dbbat-does-not-do).
 | Every session authenticates as an individual named DBBat user (password or API key); the shared upstream credential is never handed out | **8.2** — user identification is strictly managed; **7.3** — access managed via an access control system | Removes the shared production credential from the human workflow, so activity in the log is attributable to a person. |
 | DBBat user passwords and API keys hashed with Argon2id; upstream credentials encrypted with AES-256-GCM | **8.3.2** — strong cryptography renders authentication factors unreadable during storage | Neither the user's password nor the API key is recoverable from the store; only an 8-character key prefix is kept in clear, for lookup. |
 | Per-query logging with the user, the database, the timestamp, the source IP, the statement and its success or failure | **10.2** — audit logs support detection of anomalies and forensic analysis; **10.2.2** — logs record user identification, event type, date and time, success/failure indication and the affected resource | Every element 10.2.2 enumerates is present, at statement granularity, for all five supported engines. |
+| A statement refused by `read_only`, `block_copy` or `block_ddl` is written to query history with the refusal as its error, on all five engines | **10.2.1.4** — audit logs capture all invalid logical access attempts | The attempt is evidence in its own right: the statement text, who sent it, against which database, and why it was refused — recorded even though it never reached the upstream database. |
 | [HMAC-chained audit log and query history](/docs/features/audit-chain) with an offline `dbbat audit verify` command; the chain key is derived from `DBB_KEY` and never stored alongside the records | **10.3** — audit logs are protected from destruction and unauthorized modifications; **10.3.2** — log files are protected to prevent modifications | 10.3 asks that logs cannot be altered without detection. Each record is sealed against the one before it, so an insertion, an edit, a deletion or a reordering is caught by the verification — including one performed directly against DBBat's PostgreSQL store. Note the scope precisely for your assessor: this is **detection**, not write-protection, it does not cover rows written before the chain anchor, and on the query side it seals the statement and its parameters rather than its reported outcome. Restricting who can reach the storage database (**10.3.1**) remains yours. |
 | `DBB_QUERY_STORAGE_RETENTION` (off by default — history is kept indefinitely unless you set it) | **10.5** — audit log history is retained and available for analysis | The default keeps everything, which satisfies 10.5.1's twelve months by construction; set a retention only if a data-minimisation obligation requires it, and set it above twelve months if this database is in PCI scope. |
 | Per-session pcapng capture of the command stream | **10.2**; supports **12.10** — suspected and confirmed incidents are responded to immediately | Supplements the structured log with the raw session when an investigation needs byte-level detail. |
@@ -153,13 +154,6 @@ following exists today:
 - **No directory integration beyond Slack OAuth.** No SCIM, no LDAP/AD sync, no
   certificate-based authentication. Joiner/mover/leaver has to be driven through
   DBBat's API or UI.
-- **Blocked statements are not uniformly persisted.** A statement refused by
-  `read_only` or `block_ddl` never reaches the upstream database on any
-  protocol. It is recorded in query history with its error on MySQL/MariaDB,
-  MongoDB and SQL Server — but on PostgreSQL and Oracle the refusal currently
-  appears only in the process log and in the session capture, not as a query row.
-  If logging invalid access attempts is an evidence requirement for you
-  (**PCI DSS 10.2.1.4**), account for that gap.
 - **Retention and backup of the evidence itself is yours.** DBBat's sweep
   deletes old records; it does not archive them. `DBB_DUMP_RETENTION` applies
   only to the local capture spool — captures uploaded to a blob bucket are never
