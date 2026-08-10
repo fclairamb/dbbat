@@ -246,14 +246,18 @@ func (s *Store) closeOwnOrphanedConnections(ctx context.Context) (int64, error) 
 		return 0, nil
 	}
 
-	return s.closeOrphans(ctx, func(q *bun.UpdateQuery) *bun.UpdateQuery {
-		// IS DISTINCT FROM, not <>: a NULL run_id — a row opened before run
-		// tracking existed — is one of ours to consider, and plain inequality
-		// would drop it.
-		return q.Where("instance_id = ?", s.instanceID).
-			Where("run_id IS DISTINCT FROM ?", s.runID).
-			Where(noLiveOwner(), s.instanceID, s.runID)
-	})
+	return s.closeOrphans(ctx, s.ownOrphanScope)
+}
+
+// ownOrphanScope narrows the reconcile to rows carrying this instance id but
+// not this run id, that no live run owns.
+func (s *Store) ownOrphanScope(q *bun.UpdateQuery) *bun.UpdateQuery {
+	// IS DISTINCT FROM, not <>: a NULL run_id — a row opened before run
+	// tracking existed — is one of ours to consider, and plain inequality
+	// would drop it.
+	return q.Where("instance_id = ?", s.instanceID).
+		Where("run_id IS DISTINCT FROM ?", s.runID).
+		Where(noLiveOwner(), s.instanceID, s.runID)
 }
 
 // ReclaimDeadInstanceConnections closes the connections of every run other than
@@ -317,24 +321,28 @@ func (s *Store) ReclaimDeadInstanceConnections(ctx context.Context) (int64, erro
 		return 0, nil
 	}
 
-	return s.closeOrphans(ctx, func(q *bun.UpdateQuery) *bun.UpdateQuery {
-		// The exclusion is this *run*, not this instance id. Our own live
-		// sessions must never be touched — on the periodic pass they are what
-		// this process is serving right now — but another run carrying our id
-		// is somebody else's, whether it is our own crashed predecessor or a
-		// replica that was handed the same DBB_INSTANCE_ID. Those are judged
-		// on liveness like everyone else's, which is also what stops a
-		// predecessor's rows from lingering until the next restart when the id
-		// is stable (a StatefulSet, or a pinned id).
-		//
-		// At startup this scope is a superset of the own branch's, and that is
-		// harmless: the own branch runs first and takes its rows, so the two
-		// counts stay disjoint.
-		//
-		// IS DISTINCT FROM, not <>: rows predating run tracking carry NULL.
-		return q.Where("instance_id <> ? OR run_id IS DISTINCT FROM ?", s.instanceID, s.runID).
-			Where(noLiveOwner(), s.instanceID, s.runID)
-	})
+	return s.closeOrphans(ctx, s.deadRunScope)
+}
+
+// deadRunScope narrows the reconcile to every run except this one that the
+// registry proves is gone.
+func (s *Store) deadRunScope(q *bun.UpdateQuery) *bun.UpdateQuery {
+	// The exclusion is this *run*, not this instance id. Our own live
+	// sessions must never be touched — on the periodic pass they are what
+	// this process is serving right now — but another run carrying our id
+	// is somebody else's, whether it is our own crashed predecessor or a
+	// replica that was handed the same DBB_INSTANCE_ID. Those are judged
+	// on liveness like everyone else's, which is also what stops a
+	// predecessor's rows from lingering until the next restart when the id
+	// is stable (a StatefulSet, or a pinned id).
+	//
+	// At startup this scope is a superset of the own branch's, and that is
+	// harmless: the own branch runs first and takes its rows, so the two
+	// counts stay disjoint.
+	//
+	// IS DISTINCT FROM, not <>: rows predating run tracking carry NULL.
+	return q.Where("instance_id <> ? OR run_id IS DISTINCT FROM ?", s.instanceID, s.runID).
+		Where(noLiveOwner(), s.instanceID, s.runID)
 }
 
 // noLiveOwner matches connection rows that no live run owns: either the owning
@@ -381,15 +389,7 @@ func noLiveOwner() string {
 
 // closeOrphans runs one scoped reconcile and returns how many rows it closed.
 func (s *Store) closeOrphans(ctx context.Context, scope func(*bun.UpdateQuery) *bun.UpdateQuery) (int64, error) {
-	q := s.db.NewUpdate().
-		Model((*Connection)(nil)).
-		Where("disconnected_at IS NULL").
-		// last_activity_at, not now(): retention should measure from when the
-		// session actually stopped talking, and a crashed session must not get
-		// its clock reset by every subsequent restart.
-		Set("disconnected_at = last_activity_at")
-
-	result, err := scope(q).Exec(ctx)
+	result, err := scope(s.orphanCloseQuery()).Exec(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("failed to close orphaned connections: %w", err)
 	}
@@ -400,6 +400,67 @@ func (s *Store) closeOrphans(ctx context.Context, scope func(*bun.UpdateQuery) *
 	}
 
 	return rowsAffected, nil
+}
+
+// orphanCloseQuery builds the reconcile's UPDATE, minus the scope predicate its
+// caller adds. Split out from closeOrphans so a test can EXPLAIN the real
+// statement instead of a hand-written lookalike.
+//
+// It stamps the query chain head as well as disconnected_at, in the *same*
+// statement, so a crash-orphaned session ends up as tamper-evident at its tail
+// as one CloseConnection closed. The head is recoverable without the process
+// that died — it is the highest chain_seq on the connection and its MAC, which
+// is exactly queryChainHeadSelect — so the reconcile does not need the in-memory
+// chain state that died with it.
+//
+// Two caveats, both deliberate:
+//
+//   - The stamp seals whatever survived *at reconcile time*, not what the
+//     session actually wrote. Someone who deleted trailing statements between
+//     the crash and the reconcile gets the truncated chain blessed. That is
+//     strictly better than no stamp at all — from the reconcile onward the tail
+//     is protected — and it is the reason the stamp goes in this statement
+//     rather than a later pass: the window is the reconcile's own UPDATE, not
+//     the gap between two of them.
+//   - The subquery copies `mac` verbatim, which is the format CloseConnection
+//     writes and therefore the one to stay consistent with today. It is also the
+//     weakness that
+//     specs/todos/2026-08-10-seal-the-connection-query-chain-stamp.md exists to
+//     fix: a verbatim head is readable out of `queries`, so an attacker can
+//     recopy it after a trailing deletion. **When that spec lands, this path has
+//     to be reworked** — a keyed stamp is HMAC(chain key, …) and the chain key
+//     lives only in this process, so it cannot be computed in SQL. The reconcile
+//     stops being one pure-SQL UPDATE: it has to select the orphans' heads, seal
+//     each in Go, and write them back (in the same transaction as the close, to
+//     keep the window above from widening).
+//
+// Cost: PostgreSQL evaluates a SET expression only for rows that pass the WHERE,
+// so this adds one index lookup per *closed* row — not per connection in the
+// table. See TestCloseOrphanedConnectionsStampCostScalesWithOrphans.
+func (s *Store) orphanCloseQuery() *bun.UpdateQuery {
+	q := s.db.NewUpdate().
+		Model((*Connection)(nil)).
+		Where("disconnected_at IS NULL").
+		// last_activity_at, not now(): retention should measure from when the
+		// session actually stopped talking, and a crashed session must not get
+		// its clock reset by every subsequent restart.
+		Set("disconnected_at = last_activity_at")
+
+	if !s.ChainEnabled() {
+		return q
+	}
+
+	// Correlated against the row being updated; `c` is bun's alias for
+	// connections, `q` its alias for queries.
+	headMAC := queryChainHeadSelect(s.db, "mac").Where("q.connection_id = c.uid")
+	headLen := queryChainHeadSelect(s.db, "chain_seq").Where("q.connection_id = c.uid")
+
+	// A connection that logged nothing keeps a NULL mac — there is no head to
+	// seal, and a NULL stamp is never itself a break (checkStampedHead skips
+	// it). query_chain_len is NOT NULL in the schema, so its absence is 0.
+	return q.
+		Set("query_chain_mac = (?)", headMAC).
+		Set("query_chain_len = COALESCE((?), 0)", headLen)
 }
 
 // UpdateConnectionActivity updates the last_activity_at timestamp
