@@ -189,7 +189,16 @@ Be precise about this in a control narrative:
   after the result set has been read — like the outcome columns above — so they
   are not sealed either. A capture whose DBBat process died before its rows were
   finalised also carries no head stamp, so only its beginning and middle are
-  protected; the same is true of a session that never closed cleanly.
+  protected.
+- **A crashed session's tail is sealed late, not at the crash.** A session whose
+  DBBat process died never gets to record its own chain head. The reconcile that
+  closes crash-orphaned sessions recovers it from the stored statements instead,
+  and stamps it in the same write that marks the session disconnected — so the
+  tail *is* protected, but from the reconcile onward, not from the crash.
+  Statements deleted in between are sealed as if they had never been written.
+  The window is however long it takes DBBat to notice the process is gone: the
+  reclaim runs at startup and then every few minutes, and a process that was
+  killed outright has to miss heartbeats for fifteen minutes first.
 - **It does not defend against someone who has the key.** Anyone who can read
   `DBB_KEY` off the host can rewrite the store and re-seal it. Treat that key
   the way you treat the database credentials it protects.

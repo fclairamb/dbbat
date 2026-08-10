@@ -67,6 +67,25 @@ The mechanism is a straight copy of the row-chain one:
 - Test the **re-stamping** attacker, not just the naive one — see
   `TestRowChainDetectsRestampedTrailingDeletion` for the shape.
 
+### There is a second writer of this stamp, and it is pure SQL
+
+`2026-08-10-stamp-chain-head-on-orphaned-connections.md` made the reconcile that
+closes crash-orphaned sessions stamp the head too, so `CloseConnection` is no
+longer the only writer. It does it as a **correlated subquery in the reconcile's
+`UPDATE`** (`Store.orphanCloseQuery`, `internal/store/connections.go`), reading
+`mac` straight out of `queries` — which is a verbatim copy *by construction*.
+
+A keyed stamp cannot be computed in SQL at all: the chain key lives only in the
+process. So sealing means this path stops being one pure-SQL statement. It has
+to become: select the in-scope orphans and their heads, seal each in Go, write
+them back — all inside **one transaction with the close**, because the reason
+the current design stamps in the same statement is to avoid opening a second
+window between marking a row disconnected and sealing its tail. Budget for it;
+`TestQueryChainOrphanStampCostScalesWithOrphans` (`internal/store/chain_test.go`)
+is the cost guard the rework has to keep honest, and the caveat about the stamp
+sealing what survived at reconcile time (documented in `docs/audit-chain.md`)
+stays true either way.
+
 ## The compatibility problem — this is the whole reason it is a separate task
 
 Unlike the row stamp (which shipped sealed and never existed in the old format),

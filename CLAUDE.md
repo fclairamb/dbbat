@@ -392,7 +392,10 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   chain by deleting what it is meant to delete, and each stamps its final head
   when it finishes: the session's on the connection row at close
   (`query_chain_mac`), the capture's on the query row at the flush barrier
-  (`row_chain_mac`). **`row_chain_mac` is a keyed MAC over the head;
+  (`row_chain_mac`). A session whose process **crashed** is stamped by the
+  reconcile instead, from the stored statements, in the same `UPDATE` that
+  writes `disconnected_at` — so it seals whatever survived at reconcile time,
+  not at the crash. **`row_chain_mac` is a keyed MAC over the head;
   `query_chain_mac` is a verbatim copy of it and is therefore forgeable without
   the key** — a known hole in the shipped query chain, tracked in
   `specs/todos/2026-08-10-seal-the-connection-query-chain-stamp.md` and stated
