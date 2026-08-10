@@ -878,6 +878,31 @@ type GrantDefinition struct {
 	// (one grouped query, never per row) so the UI can tell an operator what
 	// deactivating it would cut off before they confirm.
 	ActiveGrantCount int64 `bun:"-" json:"active_grant_count"`
+
+	// ScopedDatabaseUIDs is ServerGroupUIDs resolved to the concrete
+	// databases currently in scope — a read-only convenience so a non-admin
+	// requester can narrow their database picker without needing the
+	// admin-gated /server-groups endpoint (membership is access-relevant,
+	// so that gate stays). It leaks no group names or membership shape,
+	// only "these databases are in scope," which a requester could already
+	// discover by trying. It is never the access-control gate: that stays
+	// enforceRequestScope in internal/api/grant_requests.go, which
+	// re-resolves scope itself and does not read this field.
+	//
+	// The two "in scope" states an empty ServerGroupUIDs and a scoped-but-
+	// currently-empty group set would otherwise both stringify as `[]` are
+	// told apart with a pointer:
+	//   - nil (omitted from the JSON response): ServerGroupUIDs is empty,
+	//     meaning every database is in scope.
+	//   - non-nil, possibly empty ([]): ServerGroupUIDs is non-empty; this
+	//     is the resolved union of every scoped group's current members. An
+	//     empty slice means the definition is scoped but currently covers
+	//     zero databases (e.g. every referenced group is empty).
+	//
+	// Only handleListGrantDefinitions and handleGetGrantDefinition populate
+	// this (one batched membership query per response, never one per
+	// definition); every other read or write path leaves it nil.
+	ScopedDatabaseUIDs *[]uuid.UUID `bun:"-" json:"scoped_database_uids,omitempty"`
 }
 
 // IsLive reports whether this is the current version of its lineage, as

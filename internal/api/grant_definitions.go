@@ -487,6 +487,17 @@ func (s *Server) handleListGrantDefinitions(c *gin.Context) {
 		defs = visible
 	}
 
+	ptrs := make([]*store.GrantDefinition, len(defs))
+	for i := range defs {
+		ptrs[i] = &defs[i]
+	}
+
+	if err := s.attachScopedDatabaseUIDs(c.Request.Context(), ptrs); err != nil {
+		writeInternalError(c, s.logger, err, "failed to resolve scoped database uids")
+
+		return
+	}
+
 	successResponse(c, gin.H{"grant_definitions": defs})
 }
 
@@ -523,6 +534,12 @@ func (s *Server) handleGetGrantDefinition(c *gin.Context) {
 
 			return
 		}
+	}
+
+	if err := s.attachScopedDatabaseUIDs(ctx, []*store.GrantDefinition{def}); err != nil {
+		writeInternalError(c, s.logger, err, "failed to resolve scoped database uids")
+
+		return
 	}
 
 	successResponse(c, def)
@@ -794,6 +811,71 @@ func (s *Server) hardDeleteGrantDefinition(c *gin.Context, def *store.GrantDefin
 	})
 
 	successResponse(c, gin.H{"message": "grant definition deleted"})
+}
+
+// attachScopedDatabaseUIDs fills GrantDefinition.ScopedDatabaseUIDs on every
+// definition in defs, in place. Whatever server groups the definitions
+// reference — shared or not, however many definitions are passed — their
+// current membership is resolved with exactly one batched store query, never
+// one query per definition. See GrantDefinition.ScopedDatabaseUIDs for what
+// the field represents and why it exists.
+func (s *Server) attachScopedDatabaseUIDs(ctx context.Context, defs []*store.GrantDefinition) error {
+	groupSet := make(map[uuid.UUID]struct{})
+
+	for _, def := range defs {
+		for _, g := range def.ServerGroupUIDs {
+			groupSet[g] = struct{}{}
+		}
+	}
+
+	if len(groupSet) == 0 {
+		return nil
+	}
+
+	groupUIDs := make([]uuid.UUID, 0, len(groupSet))
+	for g := range groupSet {
+		groupUIDs = append(groupUIDs, g)
+	}
+
+	membersByGroup, err := s.store.ListServerGroupMemberUIDsByGroups(ctx, groupUIDs)
+	if err != nil {
+		return fmt.Errorf("resolve scoped database uids: %w", err)
+	}
+
+	for _, def := range defs {
+		def.ScopedDatabaseUIDs = scopedDatabaseUIDsForDefinition(def, membersByGroup)
+	}
+
+	return nil
+}
+
+// scopedDatabaseUIDsForDefinition computes a single definition's
+// scoped_database_uids from a pre-fetched group -> members map. Pure
+// function (no I/O) so attachScopedDatabaseUIDs stays the only place that
+// queries.
+func scopedDatabaseUIDsForDefinition(
+	def *store.GrantDefinition, membersByGroup map[uuid.UUID][]uuid.UUID,
+) *[]uuid.UUID {
+	if len(def.ServerGroupUIDs) == 0 {
+		return nil // unscoped: every database, represented by omitting the field
+	}
+
+	seen := make(map[uuid.UUID]struct{})
+	union := make([]uuid.UUID, 0)
+
+	for _, groupUID := range def.ServerGroupUIDs {
+		for _, serverUID := range membersByGroup[groupUID] {
+			if _, ok := seen[serverUID]; ok {
+				continue
+			}
+
+			seen[serverUID] = struct{}{}
+
+			union = append(union, serverUID)
+		}
+	}
+
+	return &union
 }
 
 // normalizeStrings turns a nil slice into an empty one so bun writes '{}'

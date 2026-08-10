@@ -161,6 +161,40 @@ func (s *Store) ListServerGroupMemberUIDs(ctx context.Context, groupUID uuid.UUI
 	return uids, nil
 }
 
+// ListServerGroupMemberUIDsByGroups is the batched form of
+// ListServerGroupMemberUIDs: it resolves the current membership of every
+// group in groupUIDs with exactly one query, however many groups are asked
+// about. This is what lets a grant-definition listing resolve every
+// definition's scoped_database_uids without firing one membership query per
+// definition (see GrantDefinition.ScopedDatabaseUIDs).
+//
+// A group with no members (or one not present in groupUIDs at all) is simply
+// absent from the result map; callers read it with a plain map index, which
+// yields a nil slice either way.
+func (s *Store) ListServerGroupMemberUIDsByGroups(ctx context.Context, groupUIDs []uuid.UUID) (map[uuid.UUID][]uuid.UUID, error) {
+	result := make(map[uuid.UUID][]uuid.UUID, len(groupUIDs))
+
+	if len(groupUIDs) == 0 {
+		return result, nil
+	}
+
+	var members []ServerGroupMember
+
+	err := s.db.NewSelect().
+		Model(&members).
+		Where("group_uid IN (?)", bun.List(groupUIDs)).
+		Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list server group members by groups: %w", err)
+	}
+
+	for _, m := range members {
+		result[m.GroupUID] = append(result[m.GroupUID], m.ServerUID)
+	}
+
+	return result, nil
+}
+
 // ListServerGroupMembers returns the server rows belonging to a group.
 func (s *Store) ListServerGroupMembers(ctx context.Context, groupUID uuid.UUID) ([]Server, error) {
 	var servers []Server
