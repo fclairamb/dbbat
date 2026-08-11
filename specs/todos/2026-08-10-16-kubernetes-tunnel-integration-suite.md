@@ -58,3 +58,53 @@ interesting failures live:
      `k8s_forbidden` from the conncheck, not a database error.
 - `Makefile`: `test-integration-kubernetes` with `-timeout 40m`, mirroring the
   other suites; add it to `.github/workflows/integration.yml`.
+
+## Implementation Plan
+
+1. **Dependency** — add `github.com/testcontainers/testcontainers-go/modules/k3s`
+   (v0.44.0, matching the pinned testcontainers-go).
+2. **New package `internal/proxy/kubernetes/`** — an e2e package, not a file in
+   `internal/proxy/upstream`, because assertions 2 and 4 need the PostgreSQL
+   proxy and `internal/proxy/conncheck`, both of which import `upstream`
+   (an in-package test there would be an import cycle). `doc.go` carries no
+   build tag so `go build ./...` still sees a package, mirroring
+   `internal/proxy/testsupport`.
+3. **The cluster is driven with `kubectl` inside the k3s container**, never with
+   client-go from the test: `k8s.io/client-go` stays confined to
+   `internal/proxy/upstream/kubernetes*.go` (CLAUDE.md, `docs/kubernetes.md`).
+   Manifests are copied in and applied; the token Secret and pod state are read
+   back with `kubectl get -o jsonpath`.
+4. **Cluster row material** — the API server URL and CA bundle come from the
+   k3s kubeconfig, parsed *once, in the test* (`gopkg.in/yaml.v3` into the
+   module's own `KubeConfigValue`), and the bearer token from the
+   `kubernetes.io/service-account-token` Secret, exactly as `docs/kubernetes.md`
+   tells an operator to. Nothing in product code ever sees a kubeconfig.
+5. **Fixtures** — namespace `data`, a `postgres:15-alpine` Deployment + Service,
+   and three ServiceAccounts differing only in their Role:
+   - `dbbat` — the documented Role (`create` on `pods/portforward`, `get`/`list`
+     on pods and endpointslices);
+   - `dbbat-ws` — `get` on `pods/portforward` only;
+   - `dbbat-norbac` — no `pods/portforward` verb at all.
+6. **Transport assertion, without an audit log.** The apiserver maps the HTTP
+   method onto the RBAC verb (`GET` → `get`, `POST` → `create`), and the
+   websocket upgrade is a GET while the SPDY upgrade is a POST. So the two
+   ServiceAccounts above are a decisive discriminator that needs no
+   instrumentation of client-go's opaque fallback dialer: a dial that succeeds
+   under `dbbat-ws` can only have gone over the **websocket** transport, and one
+   that succeeds under the `create`-only `dbbat` SA can only have gone over the
+   **SPDY fallback**. Both are asserted.
+7. **The four spec assertions** —
+   1. `DialPod` and `Dial("svc/…")` each carry a real pgx session
+      (`pgx` with a `DialFunc` that returns the tunnel conn);
+   2. a full dbbat PostgreSQL proxy session over the tunnel, asserting the
+      queries land in the store's query log;
+   3. delete the pod, let the Deployment recreate it, assert the in-flight
+      session dies and the *next* `svc/…` connection succeeds;
+   4. the no-RBAC ServiceAccount yields `cluster_rbac` / `k8s_forbidden` from
+      `conncheck`, on both the cluster row and a database row behind it.
+   Plus a TOFU case (spec 2026-08-10-15 landed after this one was written): a
+   cluster row with no CA bundle pins the real API server CA on first connect
+   and reports `CAPinned`.
+8. **Plumbing** — `make test-integration-kubernetes` (`-timeout 40m`), a job in
+   `.github/workflows/integration.yml`, and the suite listed in the root
+   `CLAUDE.md` and in `docs/kubernetes.md`.
