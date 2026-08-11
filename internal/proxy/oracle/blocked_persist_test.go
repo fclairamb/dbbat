@@ -2,6 +2,7 @@ package oracle
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -617,4 +618,52 @@ func assertBlockedOracleRow(t *testing.T, row *store.Query, wantSQL, wantErrFrag
 	assert.InDelta(t, 0, *row.DurationMs, 0.001, "a refused statement never ran")
 	require.NotNil(t, row.RowsAffected)
 	assert.Equal(t, int64(0), *row.RowsAffected)
+}
+
+// TestBlockedStatement_ReachesTheClientAsAnORAError closes the gap the tests
+// above leave: they drive handleOALL8 directly and never look at what goes back
+// on the wire, which is how a refusal frame no Oracle client could parse
+// survived for as long as it did. This one runs the same refusal through
+// gateStatement — the one place every SQL-carrying op funnels into — over a
+// real socket, and decodes what the client receives.
+//
+// The live-client half is in blocked_integration_test.go; this is the always-on
+// half, and it is the one that fails fast if the frame regresses.
+func TestBlockedStatement_ReachesTheClientAsAnORAError(t *testing.T) {
+	t.Parallel()
+
+	client, proxyEnd := net.Pipe()
+
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = proxyEnd.Close()
+	})
+
+	s := newTestSession(&store.Grant{
+		Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}},
+	})
+	s.clientConn = proxyEnd
+	s.completionStore = newRecordingCompletionStore()
+
+	const sql = "INSERT INTO emp (id) VALUES (1)"
+
+	blocked := make(chan bool, 1)
+
+	go func() { blocked <- s.gateStatement(s.handleOALL8, buildOALL8(sql, nil, 7)) }()
+
+	pkt, err := readTNSPacket(client)
+	require.NoError(t, err, "the refusal must reach the client")
+	assert.Equal(t, TNSPacketTypeData, pkt.Type)
+
+	fc, err := parseTTCFunctionCode(pkt.Payload)
+	require.NoError(t, err)
+	assert.Equal(t, TTCFuncOERR, fc,
+		"a client only ends its call on the message type a server ends one with")
+
+	info := decodeOERAt(extractTTCPayload(pkt.Payload), 0)
+	require.NotNil(t, info, "the refusal must decode as an end-of-call OER")
+	assert.Equal(t, 1031, info.ErrorCode)
+	assert.Contains(t, info.ErrorMessage, "read-only")
+
+	assert.True(t, <-blocked, "the statement must be reported as blocked")
 }
