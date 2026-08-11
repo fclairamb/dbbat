@@ -1345,7 +1345,7 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 //
 // All three SQL-carrying ops still go through here (OALL8, the v315+ piggyback
 // exec, and the JDBC thin driver's func=0x11 exec) so that adding a fourth
-// cannot quietly acquire only half of the answer-the-client behaviour — which
+// cannot quietly acquire only half of the answer-the-client behavior — which
 // is exactly how the JDBC exec ended up recording queries while enforcing
 // nothing.
 func (s *session) gateStatement(handle func([]byte) error, ttcPayload []byte) bool {

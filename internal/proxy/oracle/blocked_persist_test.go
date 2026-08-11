@@ -144,12 +144,9 @@ func exhaustedGrant(controls ...string) *store.Grant {
 // (func=0x03, sub=0x5e) carrying SELECT 1 FROM DUAL — the same fixture
 // TestDecodePiggybackExecSQL decodes. There is no builder for this op, and a
 // hand-rolled one would only prove the builder agrees with itself.
-func piggybackExecSelect1(t *testing.T) []byte {
-	t.Helper()
-
-	payload, err := hexDecode("035e030280610001011201010d0000000102047fffffff000000000000000000000" +
+func piggybackExecSelect1() []byte {
+	payload, _ := hexDecode("035e030280610001011201010d0000000102047fffffff000000000000000000000" +
 		"0010000000000000000000000000000001253454c45435420312046524f4d204455414c0101000000000000010100")
-	require.NoError(t, err)
 
 	return payload
 }
@@ -172,23 +169,23 @@ func TestQuotaRefusals_ArePersisted(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		refuse func(t *testing.T, s *session) error
+		refuse func(s *session) error
 	}{
 		{
 			name:   "legacy OALL8",
-			refuse: func(_ *testing.T, s *session) error { return s.handleOALL8(buildOALL8(sql, nil, 7)) },
+			refuse: func(s *session) error { return s.handleOALL8(buildOALL8(sql, nil, 7)) },
 		},
 		{
 			name:   "v315+ piggyback exec",
-			refuse: func(t *testing.T, s *session) error { return s.handlePiggybackExec(piggybackExecSelect1(t)) },
+			refuse: func(s *session) error { return s.handlePiggybackExec(piggybackExecSelect1()) },
 		},
 		{
 			name:   "JDBC thin exec",
-			refuse: func(_ *testing.T, s *session) error { return s.handleJDBCExec(buildJDBCExec(sql)) },
+			refuse: func(s *session) error { return s.handleJDBCExec(buildJDBCExec(sql)) },
 		},
 		{
 			name: "OFETCH re-execution",
-			refuse: func(_ *testing.T, s *session) error {
+			refuse: func(s *session) error {
 				s.tracker.cursors[5] = &trackedCursor{cursorID: 5, sql: sql, parsedAt: time.Now()}
 
 				return s.handleOFETCH(buildOFETCH(5, 100))
@@ -196,7 +193,7 @@ func TestQuotaRefusals_ArePersisted(t *testing.T) {
 		},
 		{
 			name: "piggyback re-execution",
-			refuse: func(_ *testing.T, s *session) error {
+			refuse: func(s *session) error {
 				s.tracker.cursors[6] = &trackedCursor{cursorID: 6, sql: sql, parsedAt: time.Now()}
 
 				return s.handlePiggybackReexec(buildPiggybackReexec(6))
@@ -204,7 +201,7 @@ func TestQuotaRefusals_ArePersisted(t *testing.T) {
 		},
 		{
 			name: "SQL-less OALL8 re-execution",
-			refuse: func(_ *testing.T, s *session) error {
+			refuse: func(s *session) error {
 				s.tracker.cursors[9] = &trackedCursor{cursorID: 9, sql: sql, parsedAt: time.Now()}
 
 				return s.handleOALL8(buildOALL8Reexec(9))
@@ -220,7 +217,7 @@ func TestQuotaRefusals_ArePersisted(t *testing.T) {
 			recorder := newRecordingCompletionStore()
 			s.completionStore = recorder
 
-			require.ErrorIs(t, tt.refuse(t, s), ErrQueryLimitExceed, "the statement must be refused")
+			require.ErrorIs(t, tt.refuse(s), ErrQueryLimitExceed, "the statement must be refused")
 
 			got := recorder.awaitCreated(t)
 			assertBlockedOracleRow(t, got, sql, "query limit exceeded")
@@ -317,7 +314,7 @@ func TestQuotaRefusalReasons_ArePersisted(t *testing.T) {
 }
 
 // TestQuotaRefusal_DecodeFailureIsStillForwarded is the first of the three
-// invariants the move had to preserve. Oracle's fail-behaviour on an
+// invariants the move had to preserve. Oracle's fail-behavior on an
 // undecodable payload is forward-don't-block (the caveat in docs/approvals.md),
 // and the quota check now sits *behind* the decode — so a frame dbbat cannot
 // read must still travel untouched, exhausted grant or not, rather than
