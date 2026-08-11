@@ -54,3 +54,30 @@ Either way, update the `test-e2e-oracle` comment in the `Makefile` and the
 Key files: `internal/proxy/oracle/integration_test.go` (`oracleTestImage`),
 `Makefile` (`test-e2e-oracle`), `.github/workflows/integration.yml` (the
 `oracle` job), `docs/oracle.md`.
+
+## Resolved open questions
+
+> Two options, pick one: 1. Auto-select by host architecture in the test
+> helper. 2. Move the default to `gvenzl/oracle-free:23-slim` everywhere and
+> pin CI to the XE image explicitly if 18c coverage is still wanted.
+
+**Decision: option 2.** Make `gvenzl/oracle-free:23-slim` the default in
+`oracleTestImage()` for every host and every environment, so a local run and a
+CI run exercise the same image by default — 23ai is the version the proxy work
+is validated against. `ORACLE_TEST_IMAGE` keeps overriding it.
+
+> …it changes what CI exercises, so it needs a call on whether 18c XE coverage
+> still earns its keep.
+
+**Decision: 18c XE coverage is kept, but explicitly.** Do not simply let CI
+drift onto 23ai. In `.github/workflows/integration.yml`, run the Oracle suite
+against **both** images — a matrix over `ORACLE_TEST_IMAGE` with the 23ai Free
+default and an explicit `gvenzl/oracle-xe:18.4.0-slim` entry (a second job
+pinned to the XE image is equally acceptable if that reads better in the
+workflow's existing shape). Both entries stay on `ubuntu-24.04` (amd64) and
+keep the existing `-timeout 40m`. The XE entry is what preserves 18c coverage
+as a deliberate choice rather than an inherited default.
+
+Update the `test-e2e-oracle` comment in the `Makefile` and the "Integration
+tests" section of `docs/oracle.md` to state the new default, the override, and
+that CI additionally pins an 18c XE run.
