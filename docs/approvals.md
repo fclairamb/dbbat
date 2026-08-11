@@ -58,20 +58,27 @@ Oracle:
   dependency on decoding.
 - **A recycled cursor id can be gated against the *wrong* statement.** Oracle
   reuses cursor ids within a session, and dbbat's tracker only drops an entry
-  when it sees the cursor closed. It under-sees those closes — `handleOCLOSE`
-  removes exactly one id per frame, while clients batch their closes — so stale
-  entries accumulate for the life of a session. If dbbat ever fails to learn the
-  id the server assigned to a *new* statement, the next re-execution of that id
-  finds a stale entry and is gated, logged in `/queries`, and matched against
-  approval patterns as whatever SQL the entry still holds.
+  when it sees the cursor closed. If dbbat ever fails to learn the id the server
+  assigned to a *new* statement, the next re-execution of that id finds a stale
+  entry and is gated, logged in `/queries`, and matched against approval
+  patterns as whatever SQL the entry still holds.
 
   This is the more severe of the two, because it substitutes a *different*
   statement rather than skipping one — and it never reaches the untracked-cursor
   refusal below, since it *finds* an entry. It is not hypothetical: it is how a
-  cursor-id learning bug stayed invisible for as long as it did (below). That
-  bug is fixed, so the mis-resolution is currently latent rather than firing —
-  one missed response away from returning. Filed as
-  `specs/todos/2026-08-10-04-oracle-stale-cursor-resolves-to-the-wrong-statement.md`.
+  cursor-id learning bug stayed invisible for as long as it did (below).
+
+  What used to keep stale entries around has been fixed. dbbat now decodes the
+  client's **whole** close list (`0x11`/`0x69`, a count followed by an array of
+  cursor ids) instead of a single id read out of the session logoff, so batched
+  closes no longer leave anything behind, and an id whose statement changes
+  under it is logged at WARN. Two residues remain: the OCI thick client
+  (sqlplus) sends its closes in a wide encoding dbbat does not decode — harmless,
+  because it never re-executes by cursor id — and a cursor a client abandons
+  without closing stays tracked until the session ends. There is deliberately
+  **no cap** on the tracker: evicting an entry converts a correctly-gated
+  re-execution into a refusal, so the size is asserted rather than bounded
+  (`TestIntegration_CursorIDLearningMissRate`).
 
 If an Oracle client of yours is not showing up in `/queries` at all, that is the
 first gap: treat missing query rows on Oracle as missing enforcement, and file it.
