@@ -1481,6 +1481,10 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket) {
 // Learning is idempotent and cheap; it re-runs on every response so a session
 // that starts before the first sample still converges.
 func (s *session) learnOERTail(ttcPayload []byte) {
+	// A session built without the constructor (tests, and any future path that
+	// skips it) carries a zero shape, which would decode nothing.
+	s.oer = s.oer.orDefault()
+
 	if info, _ := decodeOERFieldsAt(ttcPayload, 0); info != nil && info.SeqNumber > s.oerSeq {
 		s.oerSeq = info.SeqNumber
 	}
