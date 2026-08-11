@@ -676,6 +676,46 @@ func TestQueryChainDetectsStampVersionDowngrade(t *testing.T) {
 	require.False(t, tolerated.LegacyStamp)
 }
 
+// TestQueryChainStampMACSealsItsVersion pins the version-in-the-MAC property
+// where it actually lives — the stamp's payload — because since 0.24 no
+// behavioral test can reach it any more.
+//
+// A version-0 row is now a break decided before any MAC is computed, so every
+// reachable call to queryChainStampMAC passes queryChainStampKeyed. Deleting
+// `stamp_version` from the payload would therefore leave the whole suite green
+// while removing what docs/audit-chain.md and CLAUDE.md both call the lock on
+// relabelling a sealed row as legacy. The behavioral half of that lock is
+// covered by TestQueryChainDetectsStampVersionDowngrade, but only through
+// format distinctness — a keyed MAC is never equal to a raw head MAC — which
+// would still hold with the version gone. This is the assertion that would not.
+func TestQueryChainStampMACSealsItsVersion(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+
+	connUID := uuid.New()
+	head := []byte{0x01, 0x02, 0x03, 0x04}
+
+	keyed := store.queryChainStampMAC(connUID, queryChainStampKeyed, 3, head)
+
+	require.NotEqual(t, keyed, store.queryChainStampMAC(connUID, queryChainStampLegacy, 3, head),
+		"the claimed stamp version must be an input to the MAC: without it, relabelling a sealed "+
+			"row as version 0 is one UPDATE away from getting the weaker rule applied to it")
+
+	require.NotEqual(t, keyed, store.queryChainStampMAC(connUID, queryChainStampKeyed+1, 3, head),
+		"a format this build does not know must not collide with the one it seals")
+
+	// The other three inputs are sealed too — a stamp that moved between
+	// sessions, lengths or heads would be liftable from one row to another.
+	require.NotEqual(t, keyed, store.queryChainStampMAC(uuid.New(), queryChainStampKeyed, 3, head),
+		"the stamp must be bound to its connection")
+	require.NotEqual(t, keyed, store.queryChainStampMAC(connUID, queryChainStampKeyed, 4, head),
+		"the stamp must be bound to the chain length it claims")
+	require.NotEqual(t, keyed,
+		store.queryChainStampMAC(connUID, queryChainStampKeyed, 3, []byte{0x01, 0x02, 0x03, 0x05}),
+		"the stamp must be bound to the head it seals")
+}
+
 // TestQueryChainDowngradeToRawStampIsABreak is the test that inverted when 0.24
 // dropped acceptance of the unkeyed stamp, and it is the whole point of doing
 // so.
