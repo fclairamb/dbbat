@@ -1,3 +1,8 @@
+---
+model: opus
+effort: high
+---
+
 # Kubernetes tunnel: real-cluster integration suite
 
 ## Goal
