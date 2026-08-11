@@ -889,6 +889,52 @@ recording TCP relay in front of the same server), and the failure survives forci
 the synthetic `buildClientAuthPhase1` fallback. If both hold, look at field values
 in the outgoing Phase 1, not at capabilities.
 
+### The AUTH function header is negotiated, not fixed
+
+Every TTC function call opens with `[03 <sub> <seq>]` — piggyback marker, sub-op
+(`0x76` Phase 1, `0x73` Phase 2) and a per-session function sequence number
+(1 for Phase 1, 2 for Phase 2). Once the negotiated TTC field version reaches
+18, **one extra `0x00` follows** (go-ora's `PutTTCFunc`; the version is the min
+of the client's and the server's `CompileTimeCaps[7]`). Both widths are on the
+wire in `internal/proxy/oracle/testdata`:
+
+| capture | Phase 1 | Phase 2 |
+|---|---|---|
+| `go_ora_cursor_reexec.pcapng` (go-ora v3, 23ai) | `03 76 01 00` | `03 73 02 00` |
+| `jdbc_thin_cursor_reexec.pcapng` | `03 76 01 00` | — |
+| `python_thin.pcapng` | `03 76 01` | `03 73 02` |
+
+Anything that reads or writes an AUTH preamble must therefore get the width from
+`ttcAuthFuncHeaderLen` (byte 3 is either the extension zero or the `0x01`
+username-present marker) rather than assume one. Getting it wrong shifts every
+field after the header by a byte, and the upstream answers two break markers plus
+`ORA-03120` — indistinguishable, from the outside, from the caps mismatch above.
+
+Fixed 2026-08-10 in three places: the synthetic `buildClientAuthPhase1` /
+`buildClientAuthPhase2` (which had hard-coded go-ora **v2**'s `03 76 00 01` and
+so could never have logged in against a modern negotiation), and the
+fixed-offset parsers behind the anchored rewrite in `phase1_forward.go` /
+`phase2_forward.go`.
+
+### Exercising the synthetic AUTH fallback
+
+`sendUpstreamAuthPhase1` / `sendUpstreamAuthPhase2` forward the client's own
+packet with the username swapped whenever they can, which in practice is always;
+the synthetic builders are the fallback for a missing or unrewritable client
+packet. That fallback therefore never runs, and it rotted unnoticed — a green
+integration suite proves nothing about it.
+
+Set `DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH=1` to disable the rewrite for a whole
+integration run and drive the synthetic path against a real Oracle instead:
+
+```bash
+DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH=1 go test -tags integration -v -timeout 20m \
+  -count=1 -run TestIntegration_MCPExecutesThroughTheProxy ./internal/proxy/oracle/
+```
+
+Both runs — with and without the variable — must pass. The flag is read once, by
+the integration suite's `TestMain`; nothing in production writes it.
+
 ### Connectivity check: fast login hides `ORA-01017`
 
 The connectivity check (`internal/proxy/conncheck`) is the one place dbbat logs in to Oracle
