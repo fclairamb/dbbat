@@ -457,22 +457,38 @@ func TestIntegration_K8s_ProxySessionLogsQueries(t *testing.T) {
 	require.NotEmpty(t, connections, "the handshake must have created a connection row")
 	assert.Equal(t, f.dbUID, connections[0].DatabaseID)
 
-	queries, err := f.store.ListQueries(ctx, store.QueryFilter{UserID: &f.user.UID, Limit: 100})
-	require.NoError(t, err)
-
-	var sawCreate, sawInsert, sawSelect bool
-
-	for _, q := range queries {
-		switch {
-		case strings.Contains(q.SQLText, "CREATE TABLE") && strings.Contains(q.SQLText, marker):
-			sawCreate = true
-		case strings.Contains(q.SQLText, "INSERT INTO") && strings.Contains(q.SQLText, marker):
-			sawInsert = true
-		case strings.Contains(q.SQLText, "SELECT id FROM "+marker):
-			sawSelect = true
+	// Query logging is written off the session's own goroutine, so the last
+	// statement's row can land a moment after its result has reached the client
+	// — poll rather than read once. (Nothing tunnel-specific: it is why this is
+	// an Eventually and not an assertion on a single snapshot.)
+	logged := func() (create, insert, sel bool) {
+		queries, err := f.store.ListQueries(ctx, store.QueryFilter{UserID: &f.user.UID, Limit: 100})
+		if err != nil {
+			return false, false, false
 		}
+
+		for _, q := range queries {
+			switch {
+			case strings.Contains(q.SQLText, "CREATE TABLE") && strings.Contains(q.SQLText, marker):
+				create = true
+			case strings.Contains(q.SQLText, "INSERT INTO") && strings.Contains(q.SQLText, marker):
+				insert = true
+			case strings.Contains(q.SQLText, "SELECT id FROM "+marker):
+				sel = true
+			}
+		}
+
+		return create, insert, sel
 	}
 
+	assert.Eventually(t, func() bool {
+		create, insert, sel := logged()
+
+		return create && insert && sel
+	}, 20*time.Second, 250*time.Millisecond, "the tunnel session's statements never all reached the query log")
+
+	// Named individually so a failure says *which* statement went missing.
+	sawCreate, sawInsert, sawSelect := logged()
 	assert.True(t, sawCreate, "the CREATE went unlogged")
 	assert.True(t, sawInsert, "the INSERT went unlogged")
 	assert.True(t, sawSelect, "the SELECT went unlogged")
