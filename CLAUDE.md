@@ -427,10 +427,16 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   after a trailing deletion would need no key. `query_chain_mac` additionally
   carries a format version (`query_chain_stamp_version`) *inside* its MAC —
   `0` is the unkeyed stamp 0.23.x wrote, which cannot be re-sealed because the
-  key never enters the database, so those rows keep the old comparison and are
-  counted as `legacy_stamps` rather than reported as verified; sealing the
-  version is what stops a `1` row from being relabelled `0` to get the weaker
-  rule. Verify with `dbbat audit verify [--queries|--rows]`, or over REST with
+  key never enters the database; sealing the version is what stops a `1` row
+  from being relabelled `0` to get the weaker rule. Since 0.24 a `0` row is a
+  **break** ("its tail cannot be verified"), not a weaker pass: tolerating it
+  was a standing downgrade path, since replacing a sealed stamp with a raw head
+  MAC and version `0` needs no key. `dbbat audit verify --queries
+  --allow-legacy-stamps` restores the old counting behavior
+  (`sessions_with_legacy_forgeable_head_stamp`) for the single upgrade from
+  0.23.x that has such rows, and is removed in 0.25; the REST endpoints have no
+  equivalent and no legacy counter. Verify with
+  `dbbat audit verify [--queries|--rows]`, or over REST with
   the admin-only `GET /api/v1/audit/verify`, `GET /api/v1/audit/verify/queries`
   and `GET /api/v1/audit/verify/rows` (the last narrows with `?connection=` or
   `?query=`, which cannot be combined) — which

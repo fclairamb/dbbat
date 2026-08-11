@@ -161,7 +161,7 @@ number, not a fresh timestamp.
 | A captured result set is deleted **outright** | Yes | The sealed stamp on the query still attests to rows no longer there |
 | The **whole** chain is truncated and re-sealed by someone holding the key | Only against a head MAC you recorded elsewhere | See the tip above |
 
-:::note Sessions closed before 0.24 carry a weaker stamp
+:::warning Sessions closed before 0.24 do not verify
 
 Deleting the **last statements of a session** is caught by the chain head
 stamped on the connection row. Up to 0.23.x that stamp was a plain copy of the
@@ -172,15 +172,23 @@ stamp is a keyed MAC over the session, the stamp format version, the chain
 length and the head, so correcting it needs `DBB_KEY`.
 
 Existing stamps cannot be upgraded: the chain key never enters the database, so
-nothing can re-seal what an older version wrote. Those rows keep the old format
-and are **counted rather than trusted** — `dbbat audit verify --queries` reports
-them as `sessions_with_legacy_forgeable_head_stamp` and
-`GET /api/v1/audit/verify/queries` as `legacy_stamps`. Every session closed
-since the upgrade is sealed, so the number drains as the old ones age out of
-retention. Once it has reached zero, a non-zero count means a stamp was
-rewritten.
+nothing can re-seal what an older version wrote. From 0.24 those sessions are
+**reported as a break** — their statements verify, but their stamp attests to
+nothing, so the tail cannot be verified. They are not accepted with a caveat,
+because accepting them let an attacker downgrade a sealed session to the old
+format and get a clean verification with no key.
 
-Until it drains, if trailing-deletion detection on those older sessions is
+**Upgrading from 0.23.x?** A walk stops at its first break, so one pre-upgrade
+session would hide every real break behind it. For that transition only,
+`dbbat audit verify --queries --allow-legacy-stamps` restores the old outcome:
+those sessions are counted as `sessions_with_legacy_forgeable_head_stamp`
+instead of breaking the walk. The flag is **removed in 0.25** — drop it once
+the count reaches zero, which happens as pre-upgrade sessions age out of
+`DBB_QUERY_STORAGE_RETENTION`. A count that stops falling, or rises, means a
+stamp was rewritten. `GET /api/v1/audit/verify/queries` has no equivalent
+option: over REST such a session is always a break.
+
+While pre-upgrade sessions remain, if trailing-deletion detection on them is
 load-bearing for a control, say so explicitly and lean on the recorded head MAC
 (below) or on shipping the logs to a WORM store or SIEM as well.
 

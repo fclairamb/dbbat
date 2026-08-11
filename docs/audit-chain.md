@@ -27,8 +27,8 @@ It detects:
   **open** is covered up to the last periodic sweep of its stamp, not up to its
   last statement (see [An open session is stamped by a periodic
   sweep](#an-open-session-is-stamped-by-a-periodic-sweep)). Sessions closed
-  *before* 0.24 carry the old unkeyed stamp and are the other exception: they
-  are counted, not trusted;
+  *before* 0.24 carry the old unkeyed stamp, which attests to nothing: since
+  0.24 those are reported as a break rather than tolerated;
 - entries deleted from the **start** of the audit chain (the first entry's
   `prev_mac` is a genesis MAC derived from the key, so it cannot be forged).
 
@@ -220,16 +220,14 @@ the last statements of a session, copy the new last statement's MAC into the
 stamp, and get a clean verification with no key at all.
 
 Those rows cannot be re-sealed: the chain key never enters the database, so no
-migration can rewrite them, and failing them all would report a break on every
-session a 0.23.x deployment ever closed. `connections.query_chain_stamp_version`
-therefore says which format a row is in — `0` legacy, `1` keyed — and
-verification picks the check by version:
+migration can rewrite them. `connections.query_chain_stamp_version` says which
+format a row is in — `0` legacy, `1` keyed — and **only version `1` verifies**:
 
 - version `1`: the keyed stamp, computed from what the surviving statements say;
-- version `0`: the old raw comparison, which still catches the attacker who
-  deletes and stops. A row that passes this way is **counted, not trusted**:
-  `dbbat audit verify --queries` reports it under
-  `sessions_with_legacy_forgeable_head_stamp` and the API under `legacy_stamps`.
+- version `0`: a **break**, with its own reason — the tail cannot be verified,
+  because that stamp is a copy of a value anyone with write access can read and
+  rewrite. The break does not accuse anyone of deleting anything; it says the
+  stamp attests to nothing.
 
 The version is covered by the version-1 MAC, which is why the column is worth
 having at all. Without that, relabelling a sealed row as version `0` would be
@@ -237,14 +235,29 @@ one `UPDATE` away from getting the unkeyed rule applied to a session this build
 sealed. With it, a keyed stamp only ever verifies as the version it was sealed
 at.
 
-**The residual, stated plainly.** An attacker can still replace a version-1 row
-outright — raw head MAC, matching length, version back to `0` — because
-accepting legacy stamps is by construction a path someone can take. What they
-cannot do is make it look like a keyed verification: that session lands in the
-legacy count. Sessions closed by 0.24+ are sealed, so the count drains as
-pre-upgrade sessions age out of retention; a count that stops falling, or rises,
-is the signal. The path closes for good when version `0` acceptance is dropped,
-which is a future release.
+**Why version 0 is not simply tolerated.** It was, in development, and it was a
+standing downgrade path: an attacker could delete the tail of a *sealed* session
+and replace the whole stamp — raw head MAC, matching length, version back to `0`
+— and verification accepted it, costing them nothing but a counter they were
+betting nobody watched. 0.24 ships the keyed stamp and the end of that path
+together, so no released build ever had the door open by default.
+
+**The escape hatch, and its expiry.** A store upgraded from 0.23.x has a
+version-0 stamp on every session it closed, and a walk stops at its first break
+— so one pre-upgrade session would mask every real break behind it, forever on a
+deployment that sets no `DBB_QUERY_STORAGE_RETENTION`. For that upgrade only:
+
+```bash
+dbbat audit verify --queries --allow-legacy-stamps
+```
+
+restores the pre-0.24 outcome — version-0 rows accepted against the old raw
+comparison, **counted, not trusted**, under
+`sessions_with_legacy_forgeable_head_stamp`. It is CLI-only (a monitoring job's
+exit code is what it protects), it never launders a *keyed* stamp relabelled as
+legacy, and it is **removed in 0.25**. Drop it as soon as the count reaches
+zero; a count that stops falling, or rises, is the signal to stop using it
+immediately.
 
 ### `query_rows` — one chain per capture
 
@@ -422,15 +435,17 @@ A `--queries` run reports the same way, plus two counts that are *not* failures:
 
 ```json
 {"level":"INFO","msg":"Query chains verified","connections":412,"statements":9871,
- "chains_with_retention_truncated_prefix":3,"sessions_with_legacy_forgeable_head_stamp":58}
+ "chains_with_retention_truncated_prefix":3,"sessions_with_legacy_forgeable_head_stamp":0}
 ```
 
-`sessions_with_legacy_forgeable_head_stamp` is how much of the store still
-carries the pre-0.24 unkeyed head stamp — sessions whose statements verified but
-whose *tail* nothing keyed vouches for. Every session closed since the upgrade
-is sealed, so on a store that keeps running the number drains to zero as those
-sessions age out of retention. Watch it: once it has drained, a non-zero count
-means something rewrote a stamp.
+`sessions_with_legacy_forgeable_head_stamp` is `0` unless the run passed
+`--allow-legacy-stamps`, because a pre-0.24 unkeyed head stamp is otherwise a
+break. Under that flag it is how much of the store the walk *tolerated* —
+sessions whose statements verified but whose *tail* nothing keyed vouches for.
+Every session closed since the upgrade is sealed, so on a store that keeps
+running the number drains to zero as those sessions age out of retention, and
+the flag can be dropped. Watch it: once it has drained, a non-zero count means
+something rewrote a stamp.
 
 ### Over the API
 
@@ -451,11 +466,16 @@ object; the failure is in the data, not the request. Handler:
 On `/audit/verify/rows`, `?connection=` and `?query=` cannot be combined: a
 query already names exactly one capture, so a second filter could only agree or
 contradict, and silently ignoring one is how a caller ends up trusting the
-answer to a question it did not ask. The row response has neither a
-`chains_with_truncated_prefix` nor a `legacy_stamps` field, and deliberately so
-— retention never removes an individual captured row, so a missing prefix is a
-break rather than housekeeping, and a capture's head stamp has always been a
-keyed MAC rather than a copy of the head.
+answer to a question it did not ask. The row response has no
+`chains_with_truncated_prefix` field, and deliberately so — retention never
+removes an individual captured row, so a missing prefix is a break rather than
+housekeeping.
+
+**No endpoint reports a legacy-stamp count, and none takes
+`--allow-legacy-stamps`.** Over REST a version-0 stamp is always a break: the
+tolerating opt-in belongs to the offline CLI, where a monitoring job's exit code
+lives, and a field that could only ever report `0` would be worse than no field.
+The admin audit panel in the UI follows the same rule.
 
 Two properties are load-bearing and have tests pinning them:
 
