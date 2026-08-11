@@ -278,7 +278,7 @@ Keycloak realms are already tenant-scoped, so the email allowlist is optional.
 | Login bounces back with "Failed to complete single sign-on" | Check the server log for the exchange error: redirect-URI mismatch, wrong client secret, or ID-token verification failure |
 | `id token verification` failure | `aud` or `iss` mismatch — usually a multi-tenant issuer URL, or credentials from a different app registration |
 | "Your workspace or email domain is not authorized" | The verified email's domain is outside `DBB_OIDC_EMAIL_DOMAINS` |
-| "No account is linked to your identity" | Auto-provisioning is off (`DBB_AUTH_AUTO_CREATE_USERS=false`) and no local user matches the email |
+| "No account is linked to your identity" | Auto-provisioning is off for this provider (`DBB_AUTH_AUTO_CREATE_USERS=false`, or a `DBB_AUTH_AUTO_CREATE_USERS_<PROVIDER>=false` override) and no local user matches the email |
 | Startup fails with `DBB_OIDC_ROLE_MAPPING is malformed` | A pair without `=`, an empty group, or a role that is not `admin`, `viewer` or `connector` |
 | Everyone lost their mapped role at once | The IdP stopped emitting the claim, or it is not the one named by `DBB_OIDC_GROUPS_CLAIM`. The log line "OIDC login carried no group claim" is written on each such login |
 | Nobody is promoted, nobody is demoted | The claim arrives but its values do not match the mapping — most often Entra object ids against a mapping written with group names. Matching is exact, case included |
