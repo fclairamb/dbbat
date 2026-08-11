@@ -107,6 +107,30 @@ caches (`routeNodeCache`, `routeTreeFileCache`) are in-memory `Map`s on the
 `Generator` instance. Nothing is written to `node_modules/.vite`,
 `node_modules/.cache` or `.tanstack`.
 
+### Reproduced live
+
+Not inferred — provoked, in the working tree, with that six-day-old dev server
+still running. Touching a route file until the server regenerated produced a
+`routeTree.gen.ts` that is **154 insertions / 154 deletions** against `HEAD`, a
+pure reordering (identical import set), and **byte-identical to
+`7a6bb60^:front/src/routeTree.gen.ts`** — the very content the manual re-sync
+had replaced. From then on the file alternated: each `make build-front` wrote
+the 1.167.25 ordering, the stale server noticed the change and wrote the
+1.166.24 one straight back.
+
+Which is why the "three consecutive clean builds" check could not be run in the
+working tree — the stale server is a live participant and stopping it was out
+of scope. It was run instead against an isolated copy of `front/` (same
+`node_modules`, route tree seeded from `HEAD`, no watcher attached): five
+consecutive `vite build` runs, byte-identical to `HEAD` every time.
+
+One nuance worth keeping: the old generator's output was *stable* on this
+machine — the same `e5cf533a` every time. Its sort provably resolves nothing
+between route nodes, so that stability is an accident of how this directory
+layout and this machine's I/O happen to schedule the racing `readdir`s, not a
+property. Across machines, or across a change in the number of route files, the
+old generator had no ordering guarantee at all.
+
 ### What landed
 
 The generator itself is already fixed upstream and is pinned by `front/bun.lock`,
