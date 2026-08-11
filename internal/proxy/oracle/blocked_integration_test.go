@@ -5,6 +5,10 @@ package oracle
 import (
 	"context"
 	"database/sql"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -194,4 +198,83 @@ func (e *oracleThroughProxy) assertBlockedQueryLogged(t *testing.T, wantSQL, wan
 	assert.Nil(t, result.Break, "a refusal row must be a valid link in the connection's query chain")
 	assert.False(t, result.TruncatedPrefix, "nothing was retained away; the chain starts at seq 1")
 	assert.Positive(t, result.Verified, "the chain walk must actually cover rows")
+}
+
+// pythonRefusalScript drives the same refusal as the go-ora halves above from
+// python-oracledb thin, and then keeps using the connection.
+//
+// It is a script rather than a Go driver for the reason the cursor-learning
+// suite gives: what is being measured is how *that* client reads dbbat's frame,
+// and there is no Go implementation of that.
+const pythonRefusalScript = `
+import sys
+import oracledb
+
+host, port, service, user, password = sys.argv[1:6]
+conn = oracledb.connect(user=user, password=password,
+                        dsn=oracledb.makedsn(host, int(port), service_name=service))
+cur = conn.cursor()
+
+cur.execute("SELECT 1 FROM dual")
+print("read-ok", cur.fetchall()[0][0], flush=True)
+
+# The table does not exist on this fixture, which is the point: a refusal
+# never reaches upstream, so the error has to be ORA-01031 and not ORA-00942.
+
+try:
+    cur.execute("INSERT INTO dbbat_blocked_probe VALUES (99)")
+    print("REFUSAL-MISSING", flush=True)
+except oracledb.DatabaseError as e:
+    print("refused:", str(e).strip().splitlines()[0], flush=True)
+
+cur.execute("SELECT 42 FROM dual")
+print("survived", cur.fetchall()[0][0], flush=True)
+
+conn.close()
+print("done", flush=True)
+`
+
+// TestIntegration_BlockedStatementRefusesPythonThin is the second client the
+// spec asked for. go-ora is what dbbat's own tests are written in, and the
+// summary object it parses is not the one python-oracledb parses: measured
+// against Oracle 23ai Free, the server gives python-oracledb two extra fields
+// before the error text. A frame built for one client and handed to the other
+// does not merely lose the message — it hangs the call, which is the bug this
+// whole spec is about.
+//
+// Skipped when python-oracledb is not installed, which is the case in CI; the
+// unit fixtures in ttc_oer_encode_test.go carry the same evidence there.
+func TestIntegration_BlockedStatementRefusesPythonThin(t *testing.T) {
+	if _, err := exec.LookPath("python3"); err != nil {
+		t.Skip("python3 not available")
+	}
+
+	if err := exec.Command("python3", "-c", "import oracledb").Run(); err != nil {
+		t.Skip("python-oracledb not installed (pip install oracledb)")
+	}
+
+	env := startOracleThroughProxy(t, []string{store.ControlReadOnly})
+
+	script := filepath.Join(t.TempDir(), "refusal.py")
+	require.NoError(t, os.WriteFile(script, []byte(pythonRefusalScript), 0o600))
+
+	ctx, cancel := context.WithTimeout(context.Background(), refusalDeadline)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "python3", script,
+		env.host, strconv.Itoa(env.port), env.service, env.username, env.apiKey)
+
+	out, err := cmd.CombinedOutput()
+
+	require.NoErrorf(t, err,
+		"python-oracledb never came back from the refused statement:\n%s", out)
+
+	output := string(out)
+	assert.Contains(t, output, "refused: ORA-01031",
+		"python-oracledb must receive the refusal as an ORA error:\n%s", output)
+	assert.NotContains(t, output, "REFUSAL-MISSING",
+		"the write must be refused, not executed:\n%s", output)
+	assert.Contains(t, output, "survived 42",
+		"the connection must still answer after a refusal:\n%s", output)
+	assert.Contains(t, output, "done", "the client must close cleanly:\n%s", output)
 }
