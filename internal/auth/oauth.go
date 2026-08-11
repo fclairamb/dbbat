@@ -59,4 +59,15 @@ type OAuthUser struct {
 	// mapping, revokes the mapped roles. Whether a mapping is applied to a
 	// given provider at all is decided by the caller, not by this field.
 	Groups []string
+	// GroupsOverage says the issuer refused to inline the group list and
+	// handed us a pointer to it instead — Microsoft Entra ID does this past
+	// roughly 200 memberships, dropping `groups` and substituting
+	// `_claim_names` / `_claim_sources` aimed at a Microsoft Graph endpoint.
+	//
+	// It is the one case where an empty Groups must NOT be read as "in no
+	// groups": membership is *unknown*, not empty. dbbat does not follow the
+	// pointer, so a consumer that maps groups to authorization has to leave
+	// what it cannot establish alone — otherwise the most heavily grouped
+	// people in a tenant are exactly the ones a login silently demotes.
+	GroupsOverage bool
 }

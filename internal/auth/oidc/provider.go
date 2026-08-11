@@ -319,15 +319,18 @@ func (p *Provider) ExchangeCodeWithVerifier(
 		return nil, err
 	}
 
+	groups, overage := extractGroups(rawClaims, p.cfg.GroupsClaim)
+
 	return &auth.OAuthUser{
-		ProviderID:  idToken.Subject,
-		Email:       email,
-		DisplayName: claims.Name,
-		TeamID:      claims.TenantID,
-		TeamName:    claims.Organization,
-		AvatarURL:   claims.Picture,
-		RawData:     rawClaims,
-		Groups:      extractGroups(rawClaims, p.cfg.GroupsClaim),
+		ProviderID:    idToken.Subject,
+		Email:         email,
+		DisplayName:   claims.Name,
+		TeamID:        claims.TenantID,
+		TeamName:      claims.Organization,
+		AvatarURL:     claims.Picture,
+		RawData:       rawClaims,
+		Groups:        groups,
+		GroupsOverage: overage,
 	}, nil
 }
 
@@ -351,9 +354,13 @@ func (p *Provider) ExchangeCodeWithVerifier(
 //
 // An absent, null or unusable claim yields nil, which callers read as "in no
 // groups" — the fail-closed direction.
-func extractGroups(rawClaims json.RawMessage, claim string) []string {
+//
+// The second return value is the *overage* signal, and it is the one thing
+// that distinguishes "in no groups" from "we were not told". See
+// claimNamesOverage.
+func extractGroups(rawClaims json.RawMessage, claim string) (groups []string, overage bool) {
 	if len(rawClaims) == 0 {
-		return nil
+		return nil, false
 	}
 
 	if claim == "" {
@@ -362,11 +369,21 @@ func extractGroups(rawClaims json.RawMessage, claim string) []string {
 
 	var all map[string]json.RawMessage
 	if err := json.Unmarshal(rawClaims, &all); err != nil {
-		return nil
+		return nil, false
 	}
 
-	raw, ok := all[claim]
-	if !ok {
+	groups = extractGroupsValue(all[claim])
+
+	// A token carrying both is self-contradictory; trust what it inlined and
+	// only raise the overage when the list we ended up with is empty.
+	return groups, len(groups) == 0 && claimNamesOverage(all[claimNamesClaim], claim)
+}
+
+// extractGroupsValue decodes one claim value into a group list, accepting
+// every encoding issuers use for it. Returns nil for an absent, null or
+// unusable value.
+func extractGroupsValue(raw json.RawMessage) []string {
+	if len(raw) == 0 {
 		return nil
 	}
 
@@ -396,6 +413,42 @@ func extractGroups(rawClaims json.RawMessage, claim string) []string {
 	}
 
 	return normalizeGroups(out)
+}
+
+// claimNamesClaim is the OpenID Connect *aggregated/distributed claims*
+// pointer (OIDC Core §5.6.2): a map from a claim name to the key of the
+// `_claim_sources` entry that actually holds it.
+const claimNamesClaim = "_claim_names"
+
+// claimNamesOverage reports whether the token delegates the groups claim
+// instead of carrying it — Microsoft Entra ID's "groups overage": past roughly
+// 200 memberships it drops `groups` entirely and emits
+//
+//	"_claim_names":   {"groups": "src1"},
+//	"_claim_sources": {"src1": {"endpoint": ".../users/<id>/getMemberObjects"}}
+//
+// dbbat deliberately does not call Graph to resolve it (a second outbound
+// dependency on the user-blocking login path), so all it can do is notice.
+// Noticing is what matters: without it, the most heavily grouped users in a
+// tenant are indistinguishable from users in no groups at all, and a role
+// mapping revokes everything they had.
+//
+// It is checked against the *configured* claim name, not the literal
+// "groups" — DBB_OIDC_GROUPS_CLAIM renames it, and Entra names the pointer
+// after whatever the token configuration called the claim.
+func claimNamesOverage(raw json.RawMessage, claim string) bool {
+	if len(raw) == 0 {
+		return false
+	}
+
+	var names map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &names); err != nil {
+		return false
+	}
+
+	_, ok := names[claim]
+
+	return ok
 }
 
 // normalizeGroups trims each value and drops the empties and duplicates,
