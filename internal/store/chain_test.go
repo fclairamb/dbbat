@@ -966,6 +966,188 @@ func TestQueryChainRetentionPrefixIsNotABreak(t *testing.T) {
 	require.Equal(t, int64(1), all.Truncated)
 }
 
+// TestQueryChainDetectsWipedSession covers the case the enumeration has to
+// reach out for, the query-chain counterpart of TestRowChainDetectsWipedCapture:
+// every statement of a session deleted, so `queries` has nothing left to
+// enumerate from and only the stamp remembers the session ran anything.
+func TestQueryChainDetectsWipedSession(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "wiped", 3)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	_, err := store.db.ExecContext(ctx, `DELETE FROM queries WHERE connection_id = ?`, conn.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChains(ctx, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "a wiped session must not disappear silently")
+	require.Equal(t, int64(1), result.Connections, "the stamp alone must put the session back in the walk")
+	require.Contains(t, result.Break.Reason, "recorded 3 statements and none survive")
+	require.NotNil(t, result.Break.ConnectionUID)
+	require.Equal(t, conn.UID, *result.Break.ConnectionUID)
+}
+
+// TestQueryChainDetectsWipedOpenSession is the same wipe against a session that
+// is still open, which the periodic sweep has stamped. Deleting the statements
+// of a live session used to be doubly invisible: nothing enumerated it, and the
+// zero-survivor case was excused outright as retention housekeeping.
+func TestQueryChainDetectsWipedOpenSession(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "wiped-open", 3)
+
+	stamped, err := store.RefreshOpenChainStamps(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), stamped)
+
+	_, err = store.db.ExecContext(ctx, `DELETE FROM queries WHERE connection_id = ?`, conn.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "an open session emptied of its statements is a break too")
+	require.Contains(t, result.Break.Reason, "none survive")
+}
+
+// TestQueryChainSilentSessionIsNotWalked pins the other side of the widened
+// enumeration: it reaches sessions that carry a stamp, not every connection ever
+// opened. A session that logged nothing has no stamp and is not evidence of
+// anything.
+func TestQueryChainSilentSessionIsNotWalked(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "chain_silent_walk")
+
+	conn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.1")
+	require.NoError(t, err)
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	result, err := store.VerifyQueryChains(ctx, nil)
+	require.NoError(t, err)
+	require.True(t, result.OK(), "a session that logged nothing is not a break: %v", result.Break)
+	require.Equal(t, int64(0), result.Connections, "there is nothing to walk")
+}
+
+// TestQueryChainRetentionEmptyingASessionIsNotABreak is the no-cry-wolf half of
+// the wiped-session check. A pooled session that ran its statements a month ago
+// and only closed just now survives the connection sweep (its disconnected_at is
+// recent) while the query sweep takes every statement it ran. That is
+// housekeeping, and the walk must say so — not report the deployment's whole
+// connection pool as tampering.
+func TestQueryChainRetentionEmptyingASessionIsNotABreak(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	// What DBB_QUERY_STORAGE_RETENTION is set to, which is what verification
+	// judges an emptied session against.
+	store.queryRetention = 24 * time.Hour
+
+	conn, _ := createChainTestConnection(t, ctx, store, "retention-emptied", 3)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	_, err := store.db.ExecContext(ctx,
+		`UPDATE connections SET connected_at = NOW() - INTERVAL '30 days' WHERE uid = ?`, conn.UID)
+	require.NoError(t, err)
+
+	_, err = store.db.ExecContext(ctx,
+		`UPDATE queries SET executed_at = NOW() - INTERVAL '30 days' WHERE connection_id = ?`, conn.UID)
+	require.NoError(t, err)
+
+	swept, err := store.CleanupOldQueryRows(ctx, 24*time.Hour)
+	require.NoError(t, err)
+	require.Equal(t, int64(0), swept.Connections, "the session closed too recently to be reaped whole")
+	require.Equal(t, int64(3), swept.Queries)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break, "retention emptying a session is not tampering: %v", result.Break)
+	require.True(t, result.TruncatedPrefix, "a fully reaped chain is the extreme of a truncated prefix")
+
+	all, err := store.VerifyQueryChains(ctx, nil)
+	require.NoError(t, err)
+	require.True(t, all.OK(), "%v", all.Break)
+	require.Equal(t, int64(1), all.Connections)
+	require.Equal(t, int64(1), all.Truncated, "the session is counted, not silently skipped")
+}
+
+// TestQueryChainWipeInsideTheRetentionWindowIsABreak is what keeps the excuse
+// above from becoming a blanket one: retention only accounts for statements it
+// could have reaped, and it cannot have reaped any statement of a session that
+// began inside the retention window.
+func TestQueryChainWipeInsideTheRetentionWindowIsABreak(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	store.queryRetention = 30 * 24 * time.Hour
+
+	conn, _ := createChainTestConnection(t, ctx, store, "retention-window", 2)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	_, err := store.db.ExecContext(ctx, `DELETE FROM queries WHERE connection_id = ?`, conn.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "a session too young for the sweep cannot blame it")
+	require.Contains(t, result.Break.Reason, "retention window")
+	require.False(t, result.TruncatedPrefix)
+}
+
+// TestQueryChainWipedLegacySessionStaysALegacyCaveat keeps the pre-0.24 stamp
+// out of the new check. Without the flag such a session is already a break for
+// its own reason. With it, an emptied one is tolerated like every other legacy
+// stamp: the unkeyed value attests to nothing either way, so a session retention
+// emptied and one somebody emptied are the same bytes, and no key separates
+// them.
+func TestQueryChainWipedLegacySessionStaysALegacyCaveat(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, queries := createChainTestConnection(t, ctx, store, "wiped-legacy", 3)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	// Exactly what a 0.23.x CloseConnection left behind, then wiped.
+	_, err := store.db.ExecContext(ctx,
+		`UPDATE connections
+		    SET query_chain_mac = ?, query_chain_len = ?, query_chain_stamp_version = 0
+		  WHERE uid = ?`,
+		queries[2].MAC, 3, conn.UID)
+	require.NoError(t, err)
+
+	_, err = store.db.ExecContext(ctx, `DELETE FROM queries WHERE connection_id = ?`, conn.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "an unkeyed stamp is a break whatever survived")
+	require.Contains(t, result.Break.Reason, "stamp was not keyed")
+
+	tolerated, err := store.VerifyQueryChain(ctx, conn.UID, AllowLegacyStamps())
+	require.NoError(t, err)
+	require.Nil(t, tolerated.Break, "the flag must not turn the legacy caveat into a new break: %v", tolerated.Break)
+	require.True(t, tolerated.LegacyStamp)
+}
+
 // TestQueryChainConcurrentAppends checks the per-connection serialization the
 // advisory lock provides, with several connections writing at once.
 func TestQueryChainConcurrentAppends(t *testing.T) {
