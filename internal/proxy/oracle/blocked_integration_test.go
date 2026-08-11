@@ -14,22 +14,17 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
-// refusalTimeout is how long a statement dbbat is expected to refuse is given
-// to come back before the test stops waiting on it.
+// refusalDeadline bounds a refused statement, which now has to come back on its
+// own. It is a deadlock detector, not a grace period: a refusal answers in a
+// round trip because it never leaves the proxy.
 //
-// It should not be needed, and the fact that it is is a bug of its own: the
-// frame writeTTCError synthesizes is a TTC Response (0x08), not the OER (0x04)
-// an Oracle server ends a call with, so a client parses it as something else
-// and then blocks reading a message that never arrives. Measured here against
-// Oracle 23ai Free, go-ora's ExecContext parks forever. That is tracked in
-// specs/todos/2026-08-10-17-oracle-refusal-frame-hangs-the-client.md; when it
-// lands this bound comes out and the assertions below become "the client got
-// an ORA error" rather than "the call did not complete".
-//
-// What this test does assert is the half that works and the half the spec
-// asked for: the refused statement never reaches upstream, and it leaves a
-// `queries` row carrying the refusal as `error`.
-const refusalTimeout = 20 * time.Second
+// It used to be a 20s "the call never ends, give up" bound, because
+// writeTTCError synthesized a TTC Response (0x08) where a server ends a call
+// with an OER (0x04), and framed it with the legacy 2-byte TNS length on top —
+// measured here against Oracle 23ai Free, go-ora's ExecContext parked forever.
+// Both halves are fixed, so the assertions below are what the spec asked for:
+// the client gets its ORA error back.
+const refusalDeadline = 30 * time.Second
 
 // TestIntegration_BlockedStatementsAreLogged is the Oracle half of spec
 // 2026-08-09-log-blocked-statements-pg-oracle, asserted the way the PostgreSQL
@@ -68,11 +63,9 @@ func TestIntegration_BlockedStatementsAreLogged(t *testing.T) {
 
 		const writeSQL = "INSERT INTO dbbat_blocked_probe VALUES (1)"
 
-		env.mustNotComplete(t, client, writeSQL)
+		env.mustRefuse(t, client, writeSQL)
+		env.mustStaySurvivable(t, client)
 
-		// Nothing of it reached upstream. Asked over a *fresh* connection: the
-		// one that issued the refused statement is left mid-call by the bug
-		// above and cannot be trusted to answer anything else.
 		assert.Zero(t, env.probeRowCount(t), "the refused INSERT must never have reached upstream")
 
 		env.assertBlockedQueryLogged(t, writeSQL, "read-only")
@@ -90,14 +83,13 @@ func TestIntegration_BlockedStatementsAreLogged(t *testing.T) {
 
 		const ddlSQL = "CREATE TABLE dbbat_blocked_ddl (id NUMBER)"
 
-		env.mustNotComplete(t, client, ddlSQL)
-
-		fresh := env.newClient(t)
+		env.mustRefuse(t, client, ddlSQL)
+		env.mustStaySurvivable(t, client)
 
 		var exists int
 
 		require.NoError(t,
-			fresh.QueryRowContext(ctx,
+			client.QueryRowContext(ctx,
 				"SELECT count(*) FROM user_tables WHERE table_name = 'DBBAT_BLOCKED_DDL'").Scan(&exists))
 		assert.Zero(t, exists, "the refused CREATE TABLE must never have reached upstream")
 
@@ -105,17 +97,13 @@ func TestIntegration_BlockedStatementsAreLogged(t *testing.T) {
 	})
 }
 
-// mustNotComplete runs a statement dbbat is expected to refuse and requires
-// that it never reports success.
+// mustRefuse runs a statement dbbat is expected to refuse and requires the
+// client to come back with the ORA error, on its own, without the test having
+// to abandon the call.
 //
-// The call runs on its own goroutine and is abandoned if it does not come back
-// within refusalTimeout, because there is currently no way to interrupt it: a
-// context deadline does not help — go-ora's Stmt.ExecContext answers
-// `case <-ctx.Done()` with `<-execDone`, so it waits for the inner read
-// regardless — and that read is parked on a frame the proxy will never
-// complete. Abandoning it costs a goroutine and the client's single
-// connection, which is why every check after a refusal uses a fresh one.
-func (e *oracleThroughProxy) mustNotComplete(t *testing.T, client *sql.DB, query string) {
+// This is the assertion the whole spec is about. Everything else in this file
+// was already true while a real client hung on every refusal.
+func (e *oracleThroughProxy) mustRefuse(t *testing.T, client *sql.DB, query string) {
 	t.Helper()
 
 	done := make(chan error, 1)
@@ -128,14 +116,29 @@ func (e *oracleThroughProxy) mustNotComplete(t *testing.T, client *sql.DB, query
 	select {
 	case err := <-done:
 		require.Error(t, err, "a refused statement must never report success: %q", query)
-	case <-time.After(refusalTimeout):
-		t.Logf("the refused statement %q never ended the client's call — "+
-			"expected today, see specs/todos/2026-08-10-17-oracle-refusal-frame-hangs-the-client.md", query)
+		assert.Contains(t, err.Error(), "ORA-01031",
+			"the client must receive the refusal as an ORA error, not a protocol failure")
+	case <-time.After(refusalDeadline):
+		t.Fatalf("the refused statement %q never ended the client's call", query)
 	}
 }
 
-// probeRowCount reads the seeded table over a connection that has not been
-// left mid-call, so it reports what actually reached upstream.
+// mustStaySurvivable is the other half of what a refusal owes the session: the
+// PostgreSQL proxy keeps the connection alive across one, and Oracle now does
+// too — which is only observable at all because the call ends.
+func (e *oracleThroughProxy) mustStaySurvivable(t *testing.T, client *sql.DB) {
+	t.Helper()
+
+	var n int
+
+	require.NoError(t,
+		client.QueryRowContext(context.Background(), "SELECT 42 FROM dual").Scan(&n),
+		"the connection that carried a refusal must still answer the next statement")
+	assert.Equal(t, 42, n)
+}
+
+// probeRowCount reads the seeded table over a fresh connection, so it reports
+// what actually reached upstream regardless of the refused session's state.
 func (e *oracleThroughProxy) probeRowCount(t *testing.T) int {
 	t.Helper()
 

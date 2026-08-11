@@ -1,6 +1,9 @@
 package oracle
 
-import "bytes"
+import (
+	"bytes"
+	"encoding/binary"
+)
 
 // This file is the writing half of ttc_oer.go: it builds the OER (message type
 // 0x04) an Oracle server sends to end a call, so a statement dbbat refuses
@@ -52,13 +55,28 @@ type oerShape struct {
 	// the wide RetCode/row-count pair are replaced by three bare length fields.
 	ttcVersion int
 
-	// extraTailFields is how many additional compressed integers sit between
-	// the wide RetCode/row-count pair and the error message. 0 for go-ora, 2
-	// for python-oracledb thin. Learned; see learnOERShape.
+	// extraTailFields is how many additional integers sit between the trailing
+	// RetCode/row-count pair and the error message. 0 for go-ora, 2 for
+	// python-oracledb thin and for OCI. Learned; see learnOERShape.
 	extraTailFields int
 
-	// tailLearned records that extraTailFields came from a real upstream OER
-	// rather than the default.
+	// fixedWidth selects the OCI/sqlplus encoding of the summary object: the
+	// same fields in the same order, but marshaled as fixed-width
+	// little-endian integers instead of TTC compressed ones. Only the row count
+	// stays compressed there. Learned alongside extraTailFields, and seeded
+	// from the client's AUTH framing if nothing was ever learned.
+	fixedWidth bool
+
+	// endOfResponse records that the upstream terminates a message with the TTC
+	// end-of-response marker on this session, in which case dbbat's own frame
+	// has to carry one too. OCI/sqlplus negotiates it even after dbbat has
+	// cleared HAS_END_OF_RESPONSE from the Accept, and without the marker it
+	// waits for the rest of a response that has already arrived — the same hang
+	// this whole change is about, one layer up. Learned; never assumed.
+	endOfResponse bool
+
+	// tailLearned records that extraTailFields, fixedWidth and endOfResponse
+	// came from a real upstream OER rather than the default.
 	tailLearned bool
 }
 
@@ -129,6 +147,10 @@ type oerSummary struct {
 // summary object. The result is a TTC message body — the caller frames it in a
 // TNS Data packet behind the two data-flag bytes.
 func encodeOER(shape oerShape, sum oerSummary) []byte {
+	if shape.fixedWidth {
+		return encodeOERFixedWidth(shape, sum)
+	}
+
 	buf := make([]byte, 0, 64+len(sum.ErrorMessage))
 	buf = append(buf, byte(TTCFuncOERR))
 
@@ -187,6 +209,55 @@ func encodeOER(shape oerShape, sum oerSummary) []byte {
 	return buf
 }
 
+// encodeOERFixedWidth builds the summary object in the OCI/sqlplus encoding.
+//
+// It is the same object, field for field, marshaled differently: every integer
+// but the row count is a fixed-width little-endian value, so the whole leading
+// block has constant offsets and every field dbbat leaves at zero is simply a
+// run of zero bytes. Measured off Oracle 23ai Free against the Homebrew
+// sqlplus 23 client, where the compressed form above hangs exactly the way the
+// old TTC Response did.
+func encodeOERFixedWidth(shape oerShape, sum oerSummary) []byte {
+	buf := make([]byte, oerFixedWidthPrefixLen,
+		oerFixedWidthPrefixLen+1+shape.extraTailFields*oerFixedTailFieldWidth+1+len(sum.ErrorMessage))
+	buf[0] = byte(TTCFuncOERR)
+
+	binary.LittleEndian.PutUint32(buf[oerFixedCallStatusOffset:], uint32(sum.CallStatus|oerEndOfCallBit))
+	binary.LittleEndian.PutUint16(buf[oerFixedECIDOffset:], uint16(sum.SeqNumber))
+	binary.LittleEndian.PutUint16(buf[oerFixedErrNumOffset:], uint16(sum.ErrorCode))
+	binary.LittleEndian.PutUint16(buf[oerFixedCursorIDOffset:], uint16(sum.CursorID))
+	binary.LittleEndian.PutUint32(buf[oerFixedRetCodeOffset:], uint32(sum.ErrorCode))
+
+	// The row count is the one field that stays compressed even here — there is
+	// no fixed 8-byte form on the wire.
+	buf = append(buf, 0x00)
+
+	for range shape.extraTailFields {
+		buf = append(buf, 0x00, 0x00, 0x00, 0x00)
+	}
+
+	if sum.ErrorCode != 0 {
+		buf = append(buf, ttcClr([]byte(sum.ErrorMessage))...)
+	}
+
+	return buf
+}
+
+// Byte offsets of the fields dbbat fills in, in the fixed-width encoding. The
+// rest of the block is zero, so only these and the total length matter.
+const (
+	oerFixedCallStatusOffset = 1
+	oerFixedECIDOffset       = 5
+	oerFixedErrNumOffset     = 11
+	oerFixedCursorIDOffset   = 17
+	oerFixedRetCodeOffset    = 66
+
+	// oerFixedWidthPrefixLen is everything through the trailing RetCode: the
+	// 0x04 marker, the leading integers, the rowid and OS-error block, the
+	// padding/iteration counters and the three empty batch-error counts.
+	oerFixedWidthPrefixLen = 70
+)
+
 // oerRowIDFields is the field count of the rowid the summary carries: rba,
 // partition id, table id, block number, slot number.
 const oerRowIDFields = 5
@@ -214,15 +285,25 @@ const oerRowIDFields = 5
 // the OER, so the genuine one is at the end and any coincidental match is
 // before it.
 func learnOERShape(shape *oerShape, payload []byte) bool {
-	extra, found := 0, false
+	var (
+		learned oerTail
+		found   bool
+	)
 
 	for i := range payload {
 		if payload[i] != byte(TTCFuncOERR) {
 			continue
 		}
 
-		if n, ok := oerTailFieldsAt(*shape, payload, i); ok {
-			extra, found = n, true
+		if tail, ok := oerTailFieldsAt(*shape, payload, i); ok {
+			learned, found = tail, true
+
+			continue
+		}
+
+		if tail, ok := oerFixedWidthTailFieldsAt(payload, i); ok {
+			tail.fixedWidth = true
+			learned, found = tail, true
 		}
 	}
 
@@ -230,36 +311,111 @@ func learnOERShape(shape *oerShape, payload []byte) bool {
 		return false
 	}
 
-	shape.extraTailFields = extra
+	shape.extraTailFields = learned.extraFields
+	shape.fixedWidth = learned.fixedWidth
+	shape.endOfResponse = learned.endOfResponse
 	shape.tailLearned = true
 
 	return true
 }
 
+// oerTail is what one observed OER teaches about the shape of the next one
+// dbbat has to write.
+type oerTail struct {
+	extraFields   int
+	fixedWidth    bool
+	endOfResponse bool
+}
+
+// oerFixedWidthTailFieldsAt is oerTailFieldsAt for the OCI/sqlplus encoding.
+// The leading block has constant offsets there, so validating it is a length
+// check plus the same invariant the compressed walk leans on: the trailing
+// RetCode repeats the leading error number.
+func oerFixedWidthTailFieldsAt(payload []byte, offset int) (oerTail, bool) {
+	if offset >= len(payload) || payload[offset] != byte(TTCFuncOERR) {
+		return oerTail{}, false
+	}
+
+	block := payload[offset:]
+	if len(block) < oerFixedWidthPrefixLen+1 {
+		return oerTail{}, false
+	}
+
+	errCode := int(binary.LittleEndian.Uint16(block[oerFixedErrNumOffset:]))
+	if int(binary.LittleEndian.Uint32(block[oerFixedRetCodeOffset:])) != errCode {
+		return oerTail{}, false
+	}
+
+	// A run of zeroes passes the invariant trivially, so require a call status
+	// too — every OCI OER measured carries a non-zero one.
+	if binary.LittleEndian.Uint32(block[oerFixedCallStatusOffset:]) == 0 {
+		return oerTail{}, false
+	}
+
+	_, n := readCompressedInt(block[oerFixedWidthPrefixLen:])
+	if n == 0 {
+		return oerTail{}, false
+	}
+
+	pos := offset + oerFixedWidthPrefixLen + n
+
+	for extra := 0; extra <= oerMaxExtraTailFields; extra++ {
+		if pos > len(payload) {
+			return oerTail{}, false
+		}
+
+		if tail, ok := oerTailAt(payload, pos, errCode, extra); ok {
+			return tail, true
+		}
+
+		pos += oerFixedTailFieldWidth
+	}
+
+	return oerTail{}, false
+}
+
+// oerFixedTailFieldWidth is the width of a trailing filler field in the
+// fixed-width encoding: both are 4-byte little-endian integers.
+const oerFixedTailFieldWidth = 4
+
+// oerMessageEnd reports whether pos is the end of the message, and whether it
+// is terminated by the TTC end-of-response marker. Oracle sends that marker to
+// OCI clients even after dbbat has cleared HAS_END_OF_RESPONSE from the Accept,
+// and it is not part of the summary object.
+func oerMessageEnd(payload []byte, pos int) (bool, bool) {
+	switch len(payload) - pos {
+	case 0:
+		return false, true
+	case 1:
+		return payload[pos] == ttcEndOfResponse, payload[pos] == ttcEndOfResponse
+	default:
+		return false, false
+	}
+}
+
+// ttcEndOfResponse is the TTC end-of-response marker (message type 0x1d).
+const ttcEndOfResponse = 0x1d
+
 // oerTailFieldsAt decodes the OER whose marker sits at payload[offset] with the
 // given shape and returns how many extra compressed integers separate the wide
 // RetCode/row-count pair from the message (or the end of the payload).
-func oerTailFieldsAt(shape oerShape, payload []byte, offset int) (int, bool) {
+func oerTailFieldsAt(shape oerShape, payload []byte, offset int) (oerTail, bool) {
 	if shape.ttcVersion < 7 {
-		return 0, false
+		return oerTail{}, false
 	}
 
 	pos, errCode, ok := skipOERFixedFields(shape, payload, offset)
 	if !ok {
-		return 0, false
+		return oerTail{}, false
 	}
 
 	for extra := 0; extra <= oerMaxExtraTailFields; extra++ {
 		if pos > len(payload) {
-			return 0, false
+			return oerTail{}, false
 		}
 
-		if errCode == 0 {
-			if pos == len(payload) {
-				return extra, true
-			}
-		} else if msg, n := readCLR(payload[pos:]); n > 0 && bytes.HasPrefix(msg, []byte("ORA-")) {
-			return extra, true
+		if tail, ok := oerTailAt(payload, pos, errCode, extra); ok {
+			return tail, true
 		}
 
 		// Not the message (or not the end) yet — step over one more candidate
@@ -268,13 +424,36 @@ func oerTailFieldsAt(shape oerShape, payload []byte, offset int) (int, bool) {
 		// two-byte SQL type followed by a one-byte zero checksum.
 		_, n := readCompressedInt(payload[pos:])
 		if n == 0 || n-1 > oerMaxTailFieldWidth {
-			return 0, false
+			return oerTail{}, false
 		}
 
 		pos += n
 	}
 
-	return 0, false
+	return oerTail{}, false
+}
+
+// oerTailAt decides whether pos is where this OER's tail ends: the error
+// message for a failure, the end of the message for a status. It also reports
+// whether the message carries the TTC end-of-response marker, which dbbat has
+// to reproduce or an OCI client waits for it.
+func oerTailAt(payload []byte, pos, errCode, extra int) (oerTail, bool) {
+	if errCode == 0 {
+		if end, ok := oerMessageEnd(payload, pos); ok {
+			return oerTail{extraFields: extra, endOfResponse: end}, true
+		}
+
+		return oerTail{}, false
+	}
+
+	msg, n := readCLR(payload[pos:])
+	if n == 0 || !bytes.HasPrefix(msg, []byte("ORA-")) {
+		return oerTail{}, false
+	}
+
+	end, ok := oerMessageEnd(payload, pos+n)
+
+	return oerTail{extraFields: extra, endOfResponse: end && ok}, true
 }
 
 // oerMaxTailFieldWidth bounds a trailing field's value width. Both fields

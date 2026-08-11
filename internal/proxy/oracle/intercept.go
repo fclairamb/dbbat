@@ -966,16 +966,32 @@ func (s *session) writeTTCError(oraErrorCode int, message string) error {
 		errMsg = errMsg[:oerMaxMessageLen]
 	}
 
-	body := encodeOER(s.oer.orDefault(), oerSummary{
+	shape := s.oer.orDefault()
+	if !shape.tailLearned {
+		// Nothing observed yet: an OCI client's AUTH framing is the same signal
+		// that picks the fixed-width summary encoding, so fall back to it
+		// rather than to the thin-client one.
+		shape.fixedWidth = s.clientWideEncoding
+	}
+
+	body := encodeOER(shape, oerSummary{
 		CallStatus:   1,
 		SeqNumber:    s.nextOERSeq(),
 		ErrorCode:    oraErrorCode,
 		ErrorMessage: errMsg,
 	})
 
-	payload := make([]byte, 0, ttcDataFlagsSize+len(body))
+	payload := make([]byte, 0, ttcDataFlagsSize+len(body)+1)
 	payload = append(payload, 0x00, 0x00) // data flags
 	payload = append(payload, body...)
+
+	// A session whose upstream terminates messages with the end-of-response
+	// marker needs one here too. OCI/sqlplus negotiates it and waits for it:
+	// with a byte-perfect OER and no marker it hung exactly as it did on the
+	// old frame.
+	if shape.endOfResponse {
+		payload = append(payload, ttcEndOfResponse)
+	}
 
 	// v315+ framing, for the same reason sendAuthFailed spells out: after the
 	// Accept a modern client reads the packet length as a 4-byte field, and the

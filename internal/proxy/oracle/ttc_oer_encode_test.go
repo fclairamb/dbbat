@@ -338,3 +338,136 @@ func TestSessionLearnOERTail_TracksSequence(t *testing.T) {
 	assert.True(t, s.oer.tailLearned)
 	assert.Equal(t, 9, s.nextOERSeq())
 }
+
+// oerFixtureSqlplusError is ORA-00942 as Oracle 23ai Free sends it to the
+// Homebrew sqlplus 23 client: the same summary object, marshaled as
+// fixed-width little-endian integers (only the row count stays compressed) and
+// terminated by the TTC end-of-response marker. Both of those had to be
+// reproduced before sqlplus stopped hanging on a refusal.
+const oerFixtureSqlplusError = "0401000000330000000000ae0300000000020" +
+	"0" + "0e00" + "03" + "0000000000000000000000000000000000000000000000" +
+	"0e" + "0000000000000000000000000000000000000000" +
+	"ae030000" + "00" + "0300000000000000" + "45"
+
+// oerFixtureSqlplusStatus is the ORA-01403 end-of-fetch status from the same
+// client, which is the shape learned from a session that never errors.
+const oerFixtureSqlplusStatus = "04010000002d000100000" +
+	"07b0500000000020000000" +
+	"3" + "0000000000000000000000000000000000000000000000" +
+	"07" + "0000000000000000000000000000000000000000" +
+	"7b050000" + "0101" + "0300000000000000" + "19"
+
+const oraNoDataText = "ORA-01403: no data found\n"
+
+// TestLearnOERShape_FixedWidthOCI covers the OCI/sqlplus encoding: a third
+// on-wire shape for the same object, learned the same way.
+func TestLearnOERShape_FixedWidthOCI(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		hexPrefix string
+		message   string
+	}{
+		"error":  {oerFixtureSqlplusError, oraErrorText},
+		"status": {oerFixtureSqlplusStatus, oraNoDataText},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			payload := append(oerFixture(t, tc.hexPrefix, tc.message), ttcEndOfResponse)
+
+			shape := defaultOERShape()
+			require.True(t, learnOERShape(&shape, payload))
+			assert.True(t, shape.fixedWidth, "the OCI encoding must not be read as the compressed one")
+			assert.Equal(t, 2, shape.extraTailFields)
+			assert.True(t, shape.endOfResponse, "the marker sqlplus waits for must be learned")
+		})
+	}
+}
+
+// TestLearnOERShape_ThinSessionsLearnNoEndOfResponse is the other side of that:
+// dbbat clears HAS_END_OF_RESPONSE from the Accept, so a thin client's messages
+// carry no marker and dbbat's frame must not invent one.
+func TestLearnOERShape_ThinSessionsLearnNoEndOfResponse(t *testing.T) {
+	t.Parallel()
+
+	shape := defaultOERShape()
+	require.True(t, learnOERShape(&shape, oerFixture(t, oerFixtureGoOraError, oraErrorText)))
+	assert.False(t, shape.fixedWidth)
+	assert.False(t, shape.endOfResponse)
+}
+
+// TestEncodeOER_FixedWidthRoundTrip walks dbbat's OCI frame back through the
+// learner, which is the only reading of it that checks every field offset.
+func TestEncodeOER_FixedWidthRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	shape := defaultOERShape()
+	shape.fixedWidth = true
+	shape.extraTailFields = 2
+
+	frame := encodeOER(shape, oerSummary{
+		CallStatus:   1,
+		SeqNumber:    99,
+		ErrorCode:    1031,
+		ErrorMessage: "ORA-01031: read-only grant",
+	})
+
+	require.Equal(t, byte(TTCFuncOERR), frame[0])
+	assert.Len(t, frame, oerFixedWidthPrefixLen+1+2*oerFixedTailFieldWidth+1+len("ORA-01031: read-only grant"),
+		"the OCI prefix is a constant 70 bytes, then the compressed row count, the tail and the message")
+
+	learned := defaultOERShape()
+	require.True(t, learnOERShape(&learned, frame))
+	assert.True(t, learned.fixedWidth)
+	assert.Equal(t, 2, learned.extraTailFields)
+}
+
+// TestWriteTTCError_OCIFraming is the sqlplus regression: the fixed-width body
+// and the end-of-response marker together, because either one alone still
+// hangs the client.
+func TestWriteTTCError_OCIFraming(t *testing.T) {
+	t.Parallel()
+
+	client, server := newPipeConns(t)
+
+	s := newTestErrorSession(t, server)
+	s.oer = defaultOERShape()
+	s.oer.fixedWidth = true
+	s.oer.endOfResponse = true
+	s.oer.extraTailFields = 2
+	s.oer.tailLearned = true
+
+	go func() { _ = s.writeTTCError(1031, "read-only grant") }()
+
+	pkt, err := readTNSPacket(client)
+	require.NoError(t, err)
+
+	body := pkt.Payload[ttcDataFlagsSize:]
+	require.Equal(t, byte(TTCFuncOERR), body[0])
+	assert.Equal(t, byte(ttcEndOfResponse), body[len(body)-1],
+		"sqlplus waits for the end-of-response marker it negotiated")
+
+	assert.Equal(t, uint16(1031), binary.LittleEndian.Uint16(body[oerFixedErrNumOffset:]))
+	assert.Equal(t, uint32(1031), binary.LittleEndian.Uint32(body[oerFixedRetCodeOffset:]))
+}
+
+// TestWriteTTCError_SeedsOCIEncodingFromAuthFraming keeps a session that never
+// got a sample from falling back to the thin-client encoding for an OCI client.
+func TestWriteTTCError_SeedsOCIEncodingFromAuthFraming(t *testing.T) {
+	t.Parallel()
+
+	client, server := newPipeConns(t)
+
+	s := newTestErrorSession(t, server)
+	s.clientWideEncoding = true
+
+	go func() { _ = s.writeTTCError(1031, "read-only grant") }()
+
+	pkt, err := readTNSPacket(client)
+	require.NoError(t, err)
+
+	body := pkt.Payload[ttcDataFlagsSize:]
+	assert.Equal(t, uint32(1031), binary.LittleEndian.Uint32(body[oerFixedRetCodeOffset:]),
+		"an OCI client must get the fixed-width encoding even with nothing learned")
+}
