@@ -49,9 +49,48 @@ Two smaller things ride on the same missing chain:
   audit evidence in its own right, and only its *statements* are currently
   tamper-evident.
 
+## Resolved open questions
+
+> Decide whether `connections` deserves a chain of its own — and if so, how it
+> survives the retention sweep (chain per day/instance, a sealed high-water
+> mark, or an `audit_log` entry per session open/close instead).
+
+**Decision (2026-08-11): do not chain `connections`. Write a chained
+`audit_log` entry on session open and on session close instead.** `audit_log` is
+already HMAC-chained and is never reaped by retention, so a
+`DELETE FROM connections WHERE uid = …` leaves evidence behind in a table the
+delete does not touch, and no new chain has to be reconciled against
+`CleanupOldQueryRows`.
+
+Concretely, and in place of the sketch below:
+
+- **No migration, no new chain columns on `connections`, no new verify walk.**
+  Do not add `chain_seq` / `prev_mac` / `mac` to that table, and do not add a
+  `--connections` mode to `dbbat audit verify`.
+- Emit an `audit_log` entry from `CreateConnection` and from every writer that
+  closes a session (`CloseConnection`, `CloseOrphanedConnections` /
+  `ReclaimDeadInstanceConnections`), carrying the row's **immutable identity** —
+  connection `uid`, user, database, source IP, `connected_at`, the run/instance
+  stamps — and on close the `disconnected_at` plus the session's
+  `query_chain_mac` stamp, so the sealed record points at the query chain it
+  owned. Mutable counters (`last_activity_at`, `queries`,
+  `bytes_transferred`) stay out.
+- The entries go through the existing `audit_log` chain writer unchanged; they
+  inherit its tamper-evidence for free. They must not fail a connection: a
+  failed audit write is logged, not fatal to the session.
+- **Land the docs honesty fix regardless**, which is the half that is true
+  whether or not anything else ships: `docs/audit-chain.md` ("What it proves,
+  and what it does not"), `website/docs/features/audit-chain.md`'s detection
+  table, `website/docs/compliance.md`, and the connection-row acceptance comment
+  in `checkStampedHead`. Say plainly that a whole-session delete is now
+  detectable *only* through those `audit_log` entries, that `connected_at` on
+  the `connections` row itself is still an unsealed column, and that the
+  retention excuse it buys only bites on a deployment with
+  `DBB_QUERY_STORAGE_RETENTION` set.
+
 ## Implementation
 
-Sketch, not a decision — the design work is the point of the todo:
+Sketch, not a decision — superseded by the decision above, kept for context:
 
 - The obvious shape is a store-wide chain over `connections`, like `audit_log`:
   `chain_seq`, `prev_mac`, `mac` over the row's immutable identity (`uid`,

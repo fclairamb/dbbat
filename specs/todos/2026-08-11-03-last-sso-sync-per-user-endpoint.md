@@ -38,6 +38,19 @@ Two candidate shapes, cheapest first:
   uid DESC`), admin-or-viewer like the audit list it reads. No migration, one
   request per page load, exact regardless of volume.
 
+## Resolved open questions
+
+> Two candidate shapes, cheapest first: a projection on the user row, or a
+> narrow endpoint. Which one?
+
+**Decision (2026-08-11): the narrow endpoint.** Implement
+`GET /api/v1/users/role-syncs` returning the latest `user.roles_synced` per user
+(`DISTINCT ON (user_id) … ORDER BY user_id, uid DESC`), admin-or-viewer like the
+audit list it reads. **Do not add a `last_roles_synced_at` column and do not
+write a migration** — no projection on `users`, so nothing can drift from the
+audit log or become a second authority for what happened. The endpoint is exact
+regardless of audit volume, which is the whole point of the todo.
+
 Either way, keep the edit form's summary reading the full audit entry — the
 groups it carries are the answer to "why did this change?", and neither shape
 above should drop them. Update `front/src/components/shared/SsoRoleSync.tsx`
