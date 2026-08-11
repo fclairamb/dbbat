@@ -140,3 +140,14 @@ disabled:
 DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH=1 go test -tags integration -v -timeout 20m \
   -count=1 -run TestIntegration_MCPExecutesThroughTheProxy ./internal/proxy/oracle/
 ```
+
+### Verification result (2026-08-10, gvenzl/oracle-free:23-slim on arm64)
+
+- Forced-synthetic run with the fix: **PASS** (170s).
+- Control, same run with `syntheticAuthHeader` temporarily reverted to the
+  pre-fix `03 76 00` / `03 73 00`: **FAIL**, with the upstream answering
+  `upstream AUTH Phase 1 rejected: ORA-03120: two-task conversion routine:
+  integer overflow` — the exact symptom this spec reported, reproduced and
+  then removed. The control also proves the seam really does bypass the
+  rewrite, since with the rewrite in play the run cannot fail this way.
+- `make lint` clean, `make test` green, `make build-binary` OK.
