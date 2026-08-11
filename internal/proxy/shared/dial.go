@@ -39,11 +39,13 @@ var ErrKubernetesViaUnsupported = errors.New("kubernetes: an ssh bastion cannot 
 // nor a password to authenticate with.
 var ErrNoSSHAuthMethod = errors.New("ssh: bastion has no usable auth method (private key or password)")
 
-// ServerResolver resolves server rows and persists TOFU host keys. Satisfied by
+// ServerResolver resolves server rows and persists TOFU pins — an SSH
+// bastion's host key, a Kubernetes API server's CA bundle. Satisfied by
 // *store.Store; an interface so the dialer can be unit-tested with a fake.
 type ServerResolver interface {
 	GetServerByUID(ctx context.Context, uid uuid.UUID) (*store.Server, error)
 	SetKnownHostKey(ctx context.Context, uid uuid.UUID, hostKey string) error
+	SetKubernetesCACert(ctx context.Context, uid uuid.UUID, caCert string) error
 }
 
 // Dialer opens upstream connections, tunneling through a *via* row when a
@@ -238,6 +240,7 @@ func (d *Dialer) kubernetesTunnelFor(
 
 	if kd := cluster.KubernetesData(); kd != nil {
 		cfg.CACert = kd.CACert
+		cfg.LearnedCACert = kd.LearnedCACert
 		cfg.InsecureSkipTLSVerify = kd.InsecureSkipTLSVerify
 	}
 
@@ -251,7 +254,19 @@ func (d *Dialer) kubernetesTunnelFor(
 		}
 	}
 
+	// The constructor is the single source of truth for "this row configures no
+	// trust", so it is asked first and the TOFU capture happens only when it
+	// says so. That ordering also means a row missing its token or its host is
+	// rejected before anything is dialed.
 	tunnel, err := upstream.NewKubernetesTunnel(cfg)
+	if errors.Is(err, upstream.ErrKubernetesNoCACert) {
+		if learnErr := learnKubernetesCACert(ctx, resolver, uid, &cfg); learnErr != nil {
+			return nil, learnErr
+		}
+
+		tunnel, err = upstream.NewKubernetesTunnel(cfg)
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -272,6 +287,38 @@ func (d *Dialer) kubernetesTunnelFor(
 // kubernetesUserAgent identifies dbbat in the cluster audit log, which is a
 // large part of why riding the API server is worth it in the first place.
 const kubernetesUserAgent = "dbbat/port-forward"
+
+// learnKubernetesCACert performs the TOFU pin, and is called only when
+// NewKubernetesTunnel has already reported that the row configures no trust —
+// i.e. it supplied no CA bundle, learned none yet, and did not opt out of
+// verification. An operator-supplied bundle always wins, an explicit insecure
+// opt-out is honored, and an existing learned pin is what later connects are
+// verified against; in all three cases this is never reached.
+//
+// Failing to *persist* the pin is fatal here, unlike the SSH path, which pins
+// after a usable connection already exists and so downgrades the failure to a
+// warning. Nothing is connected yet at this point, and a pin that is not
+// recorded means the next connect learns afresh from whatever is presented
+// then — TOFU in name only. Better to refuse than to look pinned.
+func learnKubernetesCACert(
+	ctx context.Context,
+	resolver ServerResolver,
+	uid uuid.UUID,
+	cfg *upstream.KubernetesConfig,
+) error {
+	learned, err := upstream.LearnKubernetesCACert(ctx, *cfg)
+	if err != nil {
+		return err
+	}
+
+	if err := resolver.SetKubernetesCACert(ctx, uid, learned); err != nil {
+		return fmt.Errorf("kubernetes tunnel: learned the API server CA but failed to pin it: %w", err)
+	}
+
+	cfg.LearnedCACert = learned
+
+	return nil
+}
 
 // ConnectBastion dials (or reuses a pooled connection to) the SSH bastion row
 // identified by uid, completing the handshake and — on first connect — pinning
