@@ -1,7 +1,11 @@
 package upstream
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net"
@@ -53,14 +57,27 @@ var (
 	ErrKubernetesTargetNotReady = errors.New("kubernetes: no ready pod backs the target")
 	// ErrKubernetesNoHost means the cluster row carries no API server address.
 	ErrKubernetesNoHost = errors.New("kubernetes: the cluster row has no API server host")
-	// ErrKubernetesNoCACert means the row pins no CA bundle and has not
-	// explicitly opted out of verification. Refusing is the fail-closed
-	// choice: without it, client-go falls back to the *host's* system trust
-	// store, which silently accepts any publicly trusted certificate for that
-	// hostname — a far weaker guarantee than the operator asked for, applied
-	// to the connection that carries the ServiceAccount token.
+	// ErrKubernetesNoCACert means the row pins no CA bundle — neither supplied
+	// nor learned — and has not explicitly opted out of verification. Refusing
+	// is the fail-closed choice: without it, client-go falls back to the
+	// *host's* system trust store, which silently accepts any publicly trusted
+	// certificate for that hostname — a far weaker guarantee than the operator
+	// asked for, applied to the connection that carries the ServiceAccount
+	// token. TOFU adds a *first* connect that learns (LearnKubernetesCACert);
+	// it never adds a connect that falls back to the system store.
 	ErrKubernetesNoCACert = errors.New(
 		"kubernetes: the cluster row pins no CA bundle and has not set insecure_skip_tls_verify")
+	// ErrKubernetesCAPinMismatch means the API server presented a certificate
+	// that the *TOFU-learned* bundle does not vouch for. It is reported apart
+	// from a plain "certificate not trusted" on purpose: with a learned pin
+	// there was a connect that worked, so this is either the cluster CA
+	// rotating or somebody sitting in the middle — and an operator has to be
+	// able to tell those two apart before deciding to re-pin.
+	ErrKubernetesCAPinMismatch = errors.New(
+		"kubernetes: the API server's certificate does not match the CA pinned on first connect")
+	// ErrKubernetesCANotPinnable means the TLS handshake completed but the API
+	// server presented no certificate to learn from.
+	ErrKubernetesCANotPinnable = errors.New("kubernetes: the API server presented no certificate to pin")
 	// ErrKubernetesProtocolMismatch means the API server negotiated something
 	// other than the port-forward subprotocol.
 	ErrKubernetesProtocolMismatch = errors.New("kubernetes: the API server negotiated an unexpected subprotocol")
@@ -78,6 +95,7 @@ func IsPermanentError(err error) bool {
 		ErrKubernetesNoToken,
 		ErrKubernetesNoHost,
 		ErrKubernetesNoCACert,
+		ErrKubernetesCAPinMismatch,
 		ErrKubernetesUnauthorized,
 		ErrKubernetesForbidden,
 		ErrKubernetesTargetNotFound,
@@ -107,10 +125,19 @@ type KubernetesConfig struct {
 	Port int
 	// Token is the decrypted ServiceAccount bearer token.
 	Token string
-	// CACert is the API server's PEM CA bundle. Required unless
-	// InsecureSkipTLSVerify is set: an empty bundle is rejected rather than
-	// quietly falling back to the host's system trust store.
+	// CACert is the API server's PEM CA bundle as the operator supplied it. It
+	// always wins: when it is set, verification runs against it and no TOFU
+	// pin is ever consulted or learned.
 	CACert string
+	// LearnedCACert is the bundle a previous connect pinned itself, used only
+	// when CACert is empty. A tunnel built on it reports a verification failure
+	// as ErrKubernetesCAPinMismatch rather than as an untrusted certificate.
+	//
+	// One of CACert, LearnedCACert or InsecureSkipTLSVerify must be set: an
+	// empty trust configuration is rejected rather than quietly falling back to
+	// the host's system trust store. LearnKubernetesCACert is what fills this
+	// in, and it is a deliberate call, never a fallback.
+	LearnedCACert string
 	// Namespace scopes every lookup and every port-forward.
 	Namespace string
 	// InsecureSkipTLSVerify disables API server certificate verification.
@@ -137,6 +164,10 @@ type KubernetesTunnel struct {
 	restConfig *restclient.Config
 	clientset  kubernetes.Interface
 	namespace  string
+	// learnedPin records that this tunnel verifies against a TOFU-learned
+	// bundle rather than a supplied one, which is what lets classify report a
+	// trust failure as a *changed* CA instead of an unconfigured one.
+	learnedPin bool
 }
 
 // NewKubernetesTunnel builds a tunnel from a cluster row's material. It does no
@@ -166,19 +197,27 @@ func NewKubernetesTunnel(cfg KubernetesConfig) (*KubernetesTunnel, error) {
 
 	// A CA bundle and Insecure are mutually exclusive as far as rest.Config
 	// validation is concerned, and "verify against this CA" is always the
-	// stronger statement — so it wins when an operator set both.
+	// stronger statement — so it wins when an operator set both. The order
+	// below is the trust hierarchy: what the operator pasted, then what the
+	// operator explicitly opted out of, then what we learned ourselves.
 	//
-	// Neither is a hard error rather than a silent fallback: leaving both
-	// unset yields a tls.Config with a nil RootCAs, i.e. the host's system
+	// None of them is a hard error rather than a silent fallback: leaving them
+	// all unset yields a tls.Config with a nil RootCAs, i.e. the host's system
 	// trust store, which is not what "no CA configured" should ever mean here.
-	// The API refuses to write such a row, but the API is not the only way a
-	// row reaches this constructor (a hand-edited database, a restore, a
-	// future import path), so the dialer refuses it too.
+	// The API no longer *requires* a pasted bundle — a row with none gets a
+	// TOFU pin instead — but "learn one" is an explicit call the caller makes
+	// (LearnKubernetesCACert), never something this constructor does behind
+	// its back, and never the system store.
+	var learnedPin bool
+
 	switch {
 	case cfg.CACert != "":
 		rc.CAData = []byte(cfg.CACert)
 	case cfg.InsecureSkipTLSVerify:
 		rc.Insecure = true
+	case cfg.LearnedCACert != "":
+		rc.CAData = []byte(cfg.LearnedCACert)
+		learnedPin = true
 	default:
 		return nil, ErrKubernetesNoCACert
 	}
@@ -193,7 +232,122 @@ func NewKubernetesTunnel(cfg KubernetesConfig) (*KubernetesTunnel, error) {
 		namespace = "default"
 	}
 
-	return &KubernetesTunnel{restConfig: rc, clientset: clientset, namespace: namespace}, nil
+	return &KubernetesTunnel{restConfig: rc, clientset: clientset, namespace: namespace, learnedPin: learnedPin}, nil
+}
+
+// LearnKubernetesCACert performs the trust-on-first-use capture: it opens one
+// TLS connection to the API server, records the certificate chain it presents,
+// and returns it PEM-encoded so the caller can persist it as the row's learned
+// bundle.
+//
+// It is a *dedicated* handshake rather than a hook inside the API client for
+// two reasons. rest.Config exposes no VerifyPeerCertificate callback, so
+// bending the client into capturing a chain means replacing its transport
+// wholesale — on both the REST path and the two stream-upgrade paths, each of
+// which would silently fall back to the system trust store if any of them were
+// missed. And this way nothing is ever sent to an unverified server: this
+// connection carries no request, so the ServiceAccount token does not travel
+// until a bundle is pinned.
+//
+// What gets pinned is the chain's *CA* certificates when the server sends any,
+// which makes this an issuer pin — weaker than SSH's exact-key pin, and the
+// reason a supplied bundle stays the recommendation (see docs/kubernetes.md).
+func LearnKubernetesCACert(ctx context.Context, cfg KubernetesConfig) (string, error) {
+	rawURL, err := cfg.apiServerURL()
+	if err != nil {
+		return "", err
+	}
+
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("kubernetes: invalid API server address %q: %w", rawURL, err)
+	}
+
+	dial := cfg.DialContext
+	if dial == nil {
+		nd := &net.Dialer{Timeout: portForwardTimeout}
+		dial = nd.DialContext
+	}
+
+	raw, err := dial(ctx, "tcp", parsed.Host)
+	if err != nil {
+		return "", fmt.Errorf("kubernetes: could not reach the API server at %s: %w", parsed.Host, err)
+	}
+
+	defer func() { _ = raw.Close() }()
+
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(portForwardTimeout)
+	}
+
+	_ = raw.SetDeadline(deadline)
+
+	var presented [][]byte
+
+	tlsConn := tls.Client(raw, &tls.Config{
+		ServerName: parsed.Hostname(),
+		// Nothing to verify against yet — that is what "first use" means. The
+		// chain is captured below and becomes the thing every later connect is
+		// verified against.
+		InsecureSkipVerify: true, //nolint:gosec // TOFU: the presented chain is the material being learned.
+		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+			presented = rawCerts
+
+			return nil
+		},
+	})
+
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		return "", fmt.Errorf("kubernetes: TLS handshake with the API server at %s failed: %w", parsed.Host, err)
+	}
+
+	_ = tlsConn.Close()
+
+	return pinnableChainPEM(presented)
+}
+
+// pinnableChainPEM turns a presented certificate chain into the bundle to pin.
+//
+// CA certificates are preferred, so the pin follows the *issuer* and survives
+// the API server's serving certificate being reissued — the routine event.
+// A server that presents only its leaf leaves nothing issuer-shaped, so the
+// leaf itself is pinned: stricter, but it then breaks on serving-certificate
+// rotation rather than on CA rotation.
+func pinnableChainPEM(rawCerts [][]byte) (string, error) {
+	if len(rawCerts) == 0 {
+		return "", ErrKubernetesCANotPinnable
+	}
+
+	var cas, all []*x509.Certificate
+
+	for _, der := range rawCerts {
+		cert, err := x509.ParseCertificate(der)
+		if err != nil {
+			return "", fmt.Errorf("kubernetes: the API server presented an unparseable certificate: %w", err)
+		}
+
+		all = append(all, cert)
+
+		if cert.IsCA && cert.BasicConstraintsValid {
+			cas = append(cas, cert)
+		}
+	}
+
+	chosen := cas
+	if len(chosen) == 0 {
+		chosen = all
+	}
+
+	var buf bytes.Buffer
+
+	for _, cert := range chosen {
+		if err := pem.Encode(&buf, &pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}); err != nil {
+			return "", fmt.Errorf("kubernetes: failed to encode the learned CA bundle: %w", err)
+		}
+	}
+
+	return buf.String(), nil
 }
 
 // apiServerURL normalizes Host/Port into a single https URL. Operators type the
@@ -477,6 +631,14 @@ func (t *KubernetesTunnel) classify(err error, what string) error {
 		return nil
 	}
 
+	// A trust failure means something different depending on where the trust
+	// came from. Against a pasted bundle it is "you pasted the wrong CA";
+	// against a bundle we learned ourselves it is "the CA changed since we
+	// pinned it", which is rotation or interception and needs its own name.
+	if t.learnedPin && isCertificateTrustFailure(err) {
+		return fmt.Errorf("%w (%s): %w", ErrKubernetesCAPinMismatch, what, err)
+	}
+
 	switch {
 	case apierrors.IsUnauthorized(err):
 		return fmt.Errorf("%w (%s): %w", ErrKubernetesUnauthorized, what, err)
@@ -498,4 +660,28 @@ func (t *KubernetesTunnel) classify(err error, what string) error {
 	}
 
 	return fmt.Errorf("kubernetes: %s failed: %w", what, err)
+}
+
+// isCertificateTrustFailure reports whether err is certificate verification
+// failing, as opposed to any other transport problem.
+//
+// The typed x509 errors are matched first; the text fallback is there because
+// the stream-upgrade paths wrap failures in their own error types often enough
+// that the chain does not always survive intact.
+func isCertificateTrustFailure(err error) bool {
+	var (
+		unknownAuthority x509.UnknownAuthorityError
+		invalid          x509.CertificateInvalidError
+		hostname         x509.HostnameError
+	)
+
+	if errors.As(err, &unknownAuthority) || errors.As(err, &invalid) || errors.As(err, &hostname) {
+		return true
+	}
+
+	msg := strings.ToLower(err.Error())
+
+	return strings.Contains(msg, "certificate signed by unknown authority") ||
+		strings.Contains(msg, "x509:") ||
+		strings.Contains(msg, "tls: failed to verify")
 }
