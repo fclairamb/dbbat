@@ -966,17 +966,11 @@ func (s *session) writeTTCError(oraErrorCode int, message string) error {
 		errMsg = errMsg[:oerMaxMessageLen]
 	}
 
-	shape := s.oer.orDefault()
-	if !shape.tailLearned {
-		// Nothing observed yet: an OCI client's AUTH framing is the same signal
-		// that picks the fixed-width summary encoding, so fall back to it
-		// rather than to the thin-client one.
-		shape.fixedWidth = s.clientWideEncoding
-	}
+	shape, seq := s.nextOERFrame()
 
 	body := encodeOER(shape, oerSummary{
 		CallStatus:   1,
-		SeqNumber:    s.nextOERSeq(),
+		SeqNumber:    seq,
 		ErrorCode:    oraErrorCode,
 		ErrorMessage: errMsg,
 	})

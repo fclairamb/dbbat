@@ -336,7 +336,8 @@ func TestSessionLearnOERTail_TracksSequence(t *testing.T) {
 	s.learnOERTail(oerFixture(t, oerFixtureGoOraError, oraErrorText))
 	assert.Equal(t, 8, s.oerSeq, "the fixture carries ECID sequence 8")
 	assert.True(t, s.oer.tailLearned)
-	assert.Equal(t, 9, s.nextOERSeq())
+	_, seq := s.nextOERFrame()
+	assert.Equal(t, 9, seq)
 }
 
 // oerFixtureSqlplusError is ORA-00942 as Oracle 23ai Free sends it to the

@@ -185,10 +185,15 @@ type session struct {
 	// capability half is filled in from the relayed Set Protocol / Set Data
 	// Types exchange; its tail half is learned from the upstream's own OERs.
 	// See ttc_oer_encode.go.
-	oer oerShape
-
+	//
 	// oerSeq is the highest end-to-end sequence number seen from the upstream,
 	// so a synthesized OER continues the session's count.
+	//
+	// Both are written by the upstream reader and read by whichever goroutine
+	// refuses a statement — the client reader, the upstream reader on a
+	// mid-stream limit violation, or the limit watchdog — hence the mutex.
+	oerMu  sync.Mutex
+	oer    oerShape
 	oerSeq int
 }
 
@@ -1481,6 +1486,9 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket) {
 // Learning is idempotent and cheap; it re-runs on every response so a session
 // that starts before the first sample still converges.
 func (s *session) learnOERTail(ttcPayload []byte) {
+	s.oerMu.Lock()
+	defer s.oerMu.Unlock()
+
 	// A session built without the constructor (tests, and any future path that
 	// skips it) carries a zero shape, which would decode nothing.
 	s.oer = s.oer.orDefault()
@@ -1495,17 +1503,32 @@ func (s *session) learnOERTail(ttcPayload []byte) {
 
 	if learnOERShape(&s.oer, ttcPayload) {
 		s.logger.DebugContext(s.ctx, "learned OER tail shape from upstream",
-			slog.Int("extra_tail_fields", s.oer.extraTailFields))
+			slog.Int("extra_tail_fields", s.oer.extraTailFields),
+			slog.Bool("fixed_width", s.oer.fixedWidth),
+			slog.Bool("end_of_response", s.oer.endOfResponse))
 	}
 }
 
-// nextOERSeq returns the end-to-end sequence number to stamp on the next
-// synthesized OER. No client validates it, but a value that walks forward with
-// the session is what a server sends and what dbbat's own OER locator bounds.
-func (s *session) nextOERSeq() int {
+// nextOERFrame returns the summary-object layout to write the next synthesized
+// OER with, and the end-to-end sequence number to stamp on it. No client
+// validates the sequence, but a value that walks forward with the session is
+// what a server sends and what dbbat's own OER locator bounds.
+//
+// When nothing has been sampled from the upstream, the client's AUTH framing
+// stands in for the encoding: an OCI client's fixed-width summary is the one
+// the fallback must not get wrong.
+func (s *session) nextOERFrame() (oerShape, int) {
+	s.oerMu.Lock()
+	defer s.oerMu.Unlock()
+
 	s.oerSeq++
 
-	return s.oerSeq
+	shape := s.oer.orDefault()
+	if !shape.tailLearned {
+		shape.fixedWidth = s.clientWideEncoding
+	}
+
+	return shape, s.oerSeq
 }
 
 // handleOERStatus processes a standalone OER (func=0x04) message. Servers send
