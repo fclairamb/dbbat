@@ -269,8 +269,16 @@ type SSHServerData struct {
 // KnownHostKey. Namespace scopes every lookup and every port-forward: it is the
 // namespace the Role/RoleBinding in docs/kubernetes.md grants access to.
 type KubernetesServerData struct {
-	CACert    string `json:"ca_cert,omitempty"`
-	Namespace string `json:"namespace,omitempty"`
+	CACert string `json:"ca_cert,omitempty"`
+	// LearnedCACert is the bundle dbbat pinned itself, on the first connect of
+	// a row that supplied none (TOFU) — deliberately a *separate* field from
+	// CACert so "I pasted this" and "we learned this" never blur into each
+	// other, and the UI can say which of the two is in force.
+	//
+	// It is only ever consulted when CACert is empty: an operator-supplied
+	// bundle always wins, and pasting one is what retires a stale learned pin.
+	LearnedCACert string `json:"learned_ca_cert,omitempty"`
+	Namespace     string `json:"namespace,omitempty"`
 	// InsecureSkipTLSVerify disables API server certificate verification. It
 	// exists for the throwaway-cluster case (a kind cluster with a rotating CA)
 	// and is deliberately not the default: with it set, anything that can
@@ -358,6 +366,10 @@ type ServerUpdate struct {
 	K8sCACert                *string
 	K8sNamespace             *string
 	K8sInsecureSkipTLSVerify *bool
+	// K8sClearLearnedCACert, when true, forgets the TOFU-learned bundle so the
+	// next connect learns afresh. It is the exit for a cluster whose CA
+	// rotated — the case that made TOFU worth having at all.
+	K8sClearLearnedCACert bool
 }
 
 // Connection represents a connection through the proxy
