@@ -1023,8 +1023,14 @@ parsers behind the anchored rewrite in `phase1_forward.go` /
 `sendUpstreamAuthPhase1` / `sendUpstreamAuthPhase2` forward the client's own
 packet with the username swapped whenever they can, which in practice is always;
 the synthetic builders are the fallback for a missing or unrewritable client
-packet. That fallback therefore never runs, and it rotted unnoticed — a green
-integration suite proves nothing about it.
+packet. That fallback therefore never runs on an ordinary integration run, and
+it rotted unnoticed for months — a green integration suite proved nothing
+about it.
+
+`.github/workflows/integration.yml` now runs a third Oracle leg
+(`23ai Free (synthetic AUTH fallback)`) with the variable below set, alongside
+the two ordinary legs, on every scheduled/dispatched run of that workflow —
+so this can't silently rot again.
 
 Set `DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH=1` to disable the rewrite for a whole
 integration run and drive the synthetic path against a real Oracle instead:
@@ -1043,8 +1049,9 @@ the fallback serves every client: the synthetic builders emit the thin
 (compressed) KV encoding and a go-ora-shaped KV set only, so a wide/OCI session
 (sqlplus, Instant Client) whose rewrite failed would still be handed a body its
 caps-conditioned upstream cannot parse. The fallback is a safety net for thin
-clients, not a general-purpose client. Widening it is unfiled work — the
-forced run simply does not cover it.
+clients, not a general-purpose client. Widening it is filed as
+`specs/todos/2026-08-11-14-oracle-synthetic-auth-wide-client-coverage.md` — the
+forced run, in CI or locally, simply does not cover it.
 
 Note also what the forced run does **not** exercise: with the rewrite disabled,
 `rewriteAuthPhase1Username` / `parseAuthPhase2Header` never execute. Those are
