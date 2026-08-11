@@ -133,7 +133,8 @@ the granularity the model is built around.
 | `host` / `port` | the API server, e.g. `https://api.cluster.example.com` and `6443` |
 | `username` | the ServiceAccount name — informational, shown in the UI |
 | `password` | the ServiceAccount bearer token (encrypted at rest, never returned) |
-| `k8s_ca_cert` | the PEM CA bundle (public; round-trips in the API). **Required**, unless the escape hatch below is set |
+| `k8s_ca_cert` | the PEM CA bundle (public; round-trips in the API). *Optional* — leave it blank and the CA is [pinned on first connect](#trust-on-first-use) instead. Pasting it is the recommendation |
+| `k8s_learned_ca_cert` | read-only: the bundle dbbat pinned itself, when none was supplied |
 | `k8s_namespace` | the namespace the Role covers |
 | `k8s_insecure_skip_tls_verify` | off by default; see [Skipping TLS verification](#skipping-tls-verification) before turning it on |
 | `via_uid` | *optional* — an SSH bastion row, when the API server is itself only reachable through a jump host |
@@ -160,11 +161,60 @@ kubelet and speaks to the pod directly; a `Service`'s port *mapping* is never
 applied. `svc/postgres` with port 5432 means "a ready pod behind the service
 `postgres`, port 5432 on that pod".
 
+### Trust on first use
+
+A cluster row that supplies **no** CA bundle does not fall back to anything. On
+its first connect dbbat opens one TLS connection to the API server, records the
+certificate chain it presents, stores that as the row's *learned* bundle, and
+verifies every later connect against it. From then on a certificate the pin does
+not vouch for is refused.
+
+Three properties are worth stating explicitly, because each one is a decision:
+
+- **A supplied bundle always wins.** When `k8s_ca_cert` is set, that is what
+  verification runs against and no pin is consulted or learned. The two fields
+  stay separate — `k8s_ca_cert` is "I checked this", `k8s_learned_ca_cert` is
+  "we met this" — so the UI can always say which is in force.
+- **There is still no system-trust fallback.** With neither a supplied nor a
+  learned bundle, and `k8s_insecure_skip_tls_verify` off, the dialer refuses,
+  exactly as before. TOFU adds a *first* connect that learns; it does not add a
+  connect that trusts the host's certificate store.
+- **The capture carries nothing.** The learning handshake is a dedicated
+  connection with no request on it, so the ServiceAccount token does not travel
+  until a bundle is pinned.
+
+**Why this is a fallback and not the advice.** SSH's TOFU pins the server's
+*exact* public key. Pinning a CA pins an **issuer**, and an issuer still vouches
+for every certificate it signs — a weaker guarantee for more machinery. And
+unlike an SSH host key, a cluster's CA bundle is right there at setup time, in
+the token Secret you already created. So paste it when you can; the pin is for
+when you cannot.
+
+#### When the pin no longer matches
+
+A mismatch is a hard failure, mirroring SSH's changed host key, and it is
+reported apart from "certificate not trusted" (`code: k8s_ca_pin_mismatch`)
+because the two mean different things: the latter is a bundle you pasted wrong,
+the former is a CA that **changed** since a working connect. That is either the
+cluster rotating its CA or somebody intercepting the connection that carries
+your ServiceAccount token, and only you can tell which.
+
+Once you know which, there are two exits:
+
+- paste the cluster's current bundle into `k8s_ca_cert` — it supersedes the pin
+  and clears it, or
+- set `k8s_reset_learned_ca_cert: true` (the edit dialog's "Forget the learned
+  CA") to drop the pin so the next connect learns afresh.
+
+The connectivity check reports `k8s_ca_pinned: true` on the run that performed
+the pin, the way it reports `host_key_pinned` for a bastion.
+
 ### Skipping TLS verification
 
 `k8s_insecure_skip_tls_verify` disables verification of the API server's
-certificate. It is the only alternative to pinning a CA bundle, and it is off by
-default.
+certificate. It is off by default, and it is a different thing from supplying no
+bundle: with no bundle you get the first-connect pin above, which still refuses
+a certificate that changes.
 
 **What it costs.** The API server connection is the one carrying the
 ServiceAccount bearer token, on every request. With verification off, anything
@@ -175,8 +225,10 @@ enough to port-forward into every pod your Role covers. It is not a "slightly
 weaker TLS" setting; it is "the credential is now interceptable".
 
 **When it is defensible.** A throwaway cluster whose CA rotates faster than
-anyone will re-paste it: a local kind/k3s instance, an ephemeral CI cluster, a
-demo. In other words, when the token itself is worthless.
+anyone will re-paste it *and* faster than re-pinning is worth doing: a local
+kind/k3s instance, an ephemeral CI cluster, a demo. In other words, when the
+token itself is worthless. If re-pinning would do, leave the bundle blank
+instead and take the first-connect pin — it is strictly stronger than this.
 
 **When it is not.** Anything holding real data. If the difficulty is that you
 cannot find the CA bundle, it is in the token Secret you already created:
@@ -187,13 +239,13 @@ kubectl -n data get secret dbbat-token -o jsonpath='{.data.ca\.crt}' | base64 -d
 
 **What dbbat does about it.** Two things, deliberately:
 
-- A row that pins **no** CA bundle and has **not** set this flag is refused —
-  by the API on create *and* update, and again by the dialer itself. There is
-  no silent third state where dbbat falls back to the host's system trust
-  store, because "no CA configured" must never quietly mean "trust any
-  publicly trusted certificate for that hostname".
+- A row that supplies no CA bundle, has learned none, and has **not** set this
+  flag is refused by the dialer. There is no silent state where dbbat falls
+  back to the host's system trust store, because "no CA configured" must never
+  quietly mean "trust any publicly trusted certificate for that hostname".
 - Rows with the flag set are labelled as such in the servers list and in the
-  edit dialog, so an insecure row cannot hide once it exists.
+  edit dialog, so an insecure row cannot hide once it exists. Rows running on a
+  first-connect pin are labelled too ("CA pinned (TOFU)").
 
 ## Connectivity check
 
@@ -202,8 +254,8 @@ in the order you would debug it, and the stage it stops at is the answer:
 
 | Stage | Question |
 |---|---|
-| `config` | is the row usable at all? — including the refusal above, when it pins no CA and has not opted out |
-| `cluster_api` | can we reach the API server? (DNS, routing, firewall, and whether the pasted CA bundle trusts it) |
+| `config` | is the row usable at all? — including the refusal above, when no CA can be established and the row has not opted out |
+| `cluster_api` | can we reach the API server? (DNS, routing, firewall, and whether the CA in force — pasted or pinned — trusts it) |
 | `cluster_auth` | does the API server accept the token? |
 | `cluster_rbac` | a `SelfSubjectAccessReview` on `pods/portforward` — may this ServiceAccount actually open a tunnel here? |
 | `cluster_target` | does the pod (or the ready pod behind `svc/<name>`) resolve, and is it Ready? |
