@@ -79,8 +79,9 @@ func TestMain(m *testing.M) {
 // fixtureOpts tweaks what newFixture builds.
 type fixtureOpts struct {
 	// serviceAccount names which of the three ServiceAccounts the cluster row
-	// authenticates as. Empty means saPortForwardCreate — the Role
-	// docs/kubernetes.md documents.
+	// authenticates as. Empty means saPortForwardCreate: the narrowest Role
+	// that still carries a dial on every supported API server version, since
+	// SPDY is the transport all of them speak.
 	serviceAccount string
 	// host is the database row's host field: a bare pod name, or `svc/<name>`.
 	// Empty means `svc/dbbat-pg`.
@@ -379,9 +380,15 @@ func TestIntegration_K8s_DialPodAndService(t *testing.T) {
 // (403 → an httpstream upgrade failure → the fallback fires) and the SPDY POST
 // takes over. Together they pin down both halves of the transport choice.
 //
-// Note what this also demonstrates: the Role in docs/kubernetes.md grants
-// `create` only, so every dial in a deployment that follows it to the letter
-// pays a rejected websocket GET before falling back.
+// Neither fixture Role is the one an operator should copy: docs/kubernetes.md
+// grants `create` **and** `get` so that neither transport is ever refused. The
+// fixture splits that Role in half on purpose — a Role granting both would make
+// every dial ambiguous and prove nothing about which transport carried it.
+//
+// What the create-only half demonstrates in passing is the cost of the advice
+// that predates this suite: a deployment granting `create` alone still works,
+// but pays a rejected websocket GET on every single dial before the fallback
+// fires.
 func TestIntegration_K8s_WebsocketTransport(t *testing.T) {
 	ctx := context.Background()
 	pod := sharedCluster.currentPod(ctx, t)

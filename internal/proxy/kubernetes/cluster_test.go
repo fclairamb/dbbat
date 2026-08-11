@@ -74,11 +74,19 @@ const (
 // websocket transport, and one that succeeds as saPortForwardCreate can only
 // have gone over the SPDY fallback. No instrumentation of client-go's opaque
 // fallback dialer — and no API server audit log — is needed to tell them apart.
+//
+// Both are therefore *deliberately narrower* than the Role docs/kubernetes.md
+// recommends, which grants `create` **and** `get` precisely so neither
+// transport is refused. Granting both here would make every dial ambiguous and
+// destroy the discriminator, so the fixture splits the recommended Role in two
+// and each half is exercised on its own.
 const (
-	// saPortForwardCreate carries the Role documented in docs/kubernetes.md:
-	// `create` on pods/portforward, and nothing else on that subresource.
+	// saPortForwardCreate carries `create` on pods/portforward only — the
+	// documented Role minus its `get` verb, i.e. what a deployment written
+	// against the pre-1.31 advice still has. Only SPDY can satisfy it.
 	saPortForwardCreate = "dbbat"
-	// saPortForwardGet carries `get` on pods/portforward only.
+	// saPortForwardGet carries `get` on pods/portforward only — the other half.
+	// Only the websocket upgrade can satisfy it.
 	saPortForwardGet = "dbbat-ws"
 	// saNoPortForward carries no pods/portforward verb at all — the "somebody
 	// forgot the Role" case the connectivity check exists to name.
