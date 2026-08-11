@@ -101,6 +101,8 @@ func (o oerShape) orDefault() oerShape {
 	if o.ttcVersion == 0 {
 		d := defaultOERShape()
 		d.extraTailFields = o.extraTailFields
+		d.fixedWidth = o.fixedWidth
+		d.endOfResponse = o.endOfResponse
 		d.tailLearned = o.tailLearned
 
 		return d
@@ -123,9 +125,12 @@ const oerMaxExtraTailFields = 4
 // else is written as zero.
 type oerSummary struct {
 	// CallStatus is the end-of-call status word. encodeOER always sets
-	// oerEndOfCallBit in it — this package's own decoder keys completion off
-	// that bit, and it is what a server sends once dbbat has stripped the 23ai
-	// end-of-response marker from the Accept.
+	// oerEndOfCallBit in it, because this package's own decoder keys completion
+	// off that bit. No client does: go-ora leaves its read loop on the message
+	// type alone and python-oracledb reads only the transaction-in-progress and
+	// session-release flags, and a live Oracle 23ai was measured sending a plain
+	// 1 here. Setting the bit is therefore free, and dropping it changed nothing
+	// for any of the three clients tested.
 	CallStatus int
 
 	// SeqNumber is the end-to-end ECID sequence.
