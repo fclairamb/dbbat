@@ -106,3 +106,57 @@ fail-closed path added by the piggyback-reexec work — and masking it behind a
 quota error would make that refusal harder to diagnose. A known cursor whose
 grant is exhausted then gets the quota refusal, recorded with the SQL the
 tracker holds.
+
+## Implementation Plan
+
+Four gated entry points carry SQL, and every one of them already knows its SQL
+by the time its handler has decoded. The quota check moves to exactly those
+four points, expressed as **two** insertions because the three re-execution
+frames converge on one function:
+
+1. `internal/proxy/oracle/session.go` — delete `checkQuotas()` from
+   `gateStatement`, leaving it as the "run the handler, answer the client on
+   refusal" wrapper. Rewrite its doc comment: the quota is now the handler's
+   business, and the reason is that only the handler has the SQL.
+2. `internal/proxy/oracle/intercept.go`, in each SQL-carrying handler, after
+   its decode and immediately **before** `shared.ValidateOracleQuery`:
+   - `handleOALL8` — `decodeOALL8` succeeded, so `result.SQL` /
+     `result.BindValues` are the refusal's evidence.
+   - `handlePiggybackExec` — same, off `decodePiggybackExecSQL`.
+   - `handleJDBCExec` — same, off `decodeExecSQL`, recorded with the
+     **normalized** text, matching what the control refusal just below it
+     records.
+   Each reads `if err := s.checkQuotas(); err != nil { return
+   s.refuseStatement(sql, binds, err) }`.
+3. `regateCursor` gets the same three lines at its top, against `cursor.sql` /
+   `cursor.bindValues`. That single insertion covers all three re-execution
+   frames — the SQL-less OALL8 (`handleCursorReexec`), the piggyback
+   re-execution (`handlePiggybackReexec`) and the `OFETCH` that starts a fresh
+   query — because each resolves its cursor first and then delegates here.
+4. `handleOFETCH` loses its own `checkQuotas()` block; the check it used to do
+   is now `regateCursor`'s, three lines further down the same path. The
+   continuation-fetch early return stays exactly where it is, so a fetch
+   mid-result-set still reaches no check and records nothing.
+
+That placement is what buys the three invariants for free rather than by
+argument: the check is *after* every decode (so an undecodable frame returns
+`nil` and is forwarded before the quota is ever consulted), *before*
+`ValidateOracleQuery` and therefore before `holdIfNeeded` (so an over-quota
+statement is refused, never parked), and *below* the continuation-fetch return
+(so nothing is recorded mid-result-set). `refuseUnknownCursor` runs before
+`regateCursor` on all three re-execution frames, which is the ordering the
+resolved question asked for, and it is now the ordering by construction rather
+than by a check placed in the dispatcher.
+
+### Tests (`internal/proxy/oracle/blocked_persist_test.go`)
+
+- Quota-refusal rows, table-driven over all four ops (OALL8, piggyback exec,
+  JDBC exec, OFETCH re-execution) plus the two non-count refusals the same
+  check raises — a grant expired mid-session and one revoked mid-session —
+  asserting the `queries` row shape via the existing `assertBlockedOracleRow`.
+- The real-store chain-append test extended with a quota refusal, proving it is
+  an ordinary link `dbbat audit verify --queries` walks.
+- One test per invariant: an undecodable payload under an exhausted grant is
+  forwarded and records nothing; an over-quota statement matching an approval
+  pattern is refused without being parked; a continuation fetch under an
+  exhausted grant is neither refused nor recorded.
