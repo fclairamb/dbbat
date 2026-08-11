@@ -33,11 +33,23 @@ func TestBuildClientAuthPhase1Layout(t *testing.T) {
 		DriverName:  "drv",
 	}
 
-	body := buildClientAuthPhase1("ADMIN", ident, logonModeNoNewPass)
+	sess := &session{}
+	body := buildClientAuthPhase1(
+		sess.syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq), "ADMIN", ident, logonModeNoNewPass)
 
-	wantHeader := []byte{byte(TTCFuncPiggyback), PiggybackSubAuth1, 0x00, 0x01}
+	// The preamble go-ora v3 puts on the wire — 03 76 <seq> 00 from PutTTCFunc
+	// (TTCVersion >= 18), then the 0x01 username-present marker. dbbat used to
+	// send 03 76 00 01: one byte short, and the upstream answered ORA-03120.
+	wantHeader := []byte{byte(TTCFuncPiggyback), PiggybackSubAuth1, authPhase1FuncSeq, 0x00, 0x01}
 	if !bytes.HasPrefix(body, wantHeader) {
 		t.Fatalf("phase1 body does not start with %x: got %x", wantHeader, body[:8])
+	}
+
+	// user_id_len and logon mode follow as compressed ints, then the fixed
+	// [01 01 05 01 01] pair-count block.
+	wantPreamble := append(wantHeader, 0x01, 0x05, 0x01, byte(logonModeNoNewPass), 0x01, 0x01, 0x05, 0x01, 0x01)
+	if !bytes.HasPrefix(body, wantPreamble) {
+		t.Fatalf("phase1 preamble mismatch:\n got %x\nwant %x", body[:len(wantPreamble)], wantPreamble)
 	}
 
 	wantClr := append([]byte{0x05}, []byte("ADMIN")...)
@@ -80,18 +92,17 @@ func TestBuildClientAuthPhase2Layout(t *testing.T) {
 		DriverName:  "drv",
 	}
 
-	body := buildClientAuthPhase2("ADMIN", ident, sec, logonModeNoNewPass|logonModeUserAndPass)
+	sess := &session{}
+	body := buildClientAuthPhase2(
+		sess.syntheticAuthHeader(PiggybackSubAuth2, authPhase2FuncSeq),
+		"ADMIN", ident, sec, logonModeNoNewPass|logonModeUserAndPass)
 
-	if body[0] != byte(TTCFuncPiggyback) {
-		t.Fatalf("phase2 body[0] = %x, want piggyback %x", body[0], byte(TTCFuncPiggyback))
-	}
-
-	if body[1] != PiggybackSubAuth2 {
-		t.Fatalf("phase2 body[1] = %x, want sub %x", body[1], PiggybackSubAuth2)
-	}
-
-	if body[2] != 0x00 {
-		t.Fatalf("phase2 body[2] = %x, want 0x00", body[2])
+	// 03 73 02 00 — PutTTCFunc's Phase 2 header on a TTCVersion >= 18 session,
+	// matching testdata/go_ora_cursor_reexec.pcapng. Then the 0x01
+	// username-present marker and the compressed user_id_len.
+	wantHeader := []byte{byte(TTCFuncPiggyback), PiggybackSubAuth2, authPhase2FuncSeq, 0x00, 0x01, 0x01, 0x05}
+	if !bytes.HasPrefix(body, wantHeader) {
+		t.Fatalf("phase2 body does not start with %x: got %x", wantHeader, body[:len(wantHeader)])
 	}
 
 	authSessKeyIdx := bytes.Index(body, []byte("AUTH_SESSKEY"))
@@ -135,7 +146,10 @@ func TestBuildClientAuthPhase2NoSpeedyKeyFor6949(t *testing.T) {
 		encPassword:      strings.Repeat("02", 32),
 	}
 
-	body := buildClientAuthPhase2("ADMIN", driverIdentity{HostName: "h", DriverName: "d"}, sec, logonModeNoNewPass)
+	sess := &session{}
+	body := buildClientAuthPhase2(
+		sess.syntheticAuthHeader(PiggybackSubAuth2, authPhase2FuncSeq),
+		"ADMIN", driverIdentity{HostName: "h", DriverName: "d"}, sec, logonModeNoNewPass)
 
 	if bytes.Contains(body, []byte("AUTH_PBKDF2_SPEEDY_KEY")) {
 		t.Fatalf("phase2 for 6949 must not include AUTH_PBKDF2_SPEEDY_KEY")
