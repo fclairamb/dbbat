@@ -1,3 +1,8 @@
+---
+model: opus
+effort: high
+---
+
 # Oracle: a stale tracker entry makes a recycled cursor id gate the wrong statement
 
 **No GitHub issue filed yet — one should be.**
@@ -62,3 +67,35 @@ Key files: `internal/proxy/oracle/session.go` (`IsPiggybackClose` dispatch),
 `internal/proxy/oracle/intercept.go` (`handleOCLOSE`, `learnCursorID`,
 `oracleQueryTracker`), `internal/proxy/oracle/ttc_decode.go`,
 `internal/proxy/oracle/cursor_learning_integration_test.go`.
+
+## Resolved open questions
+
+> Consider making a recycled id detectable rather than silent: … logging at
+> WARN when the entry it replaces held *different* SQL.
+
+**Decision: yes, log it.** In `learnCursorID`, when the entry being overwritten
+carries SQL that differs from the incoming statement, emit a WARN naming the
+cursor id and both statements (truncated). It stays a signal, never a refusal —
+the server really does recycle ids, so overwriting remains the correct
+behaviour. This is what makes a future mis-resolution window visible instead of
+silent, which is the whole reason the original bug went unnoticed.
+
+> Decide whether the tracker needs a cap at all once closes are handled
+> properly.
+
+**Decision: no cap.** Handling the full piggyback close list is the actual fix
+for unbounded growth — a client that opens cursors also closes them, and the
+measurement's leftover entries were the un-decoded batch closes, not genuine
+leaks. Adding a cap on top would introduce an eviction policy whose only
+benefit is memory, and every evicted entry converts a correctly-gated
+re-execution into a refusal. Do not add one.
+
+Instead, **assert the absence of growth**: extend
+`TestIntegration_CursorIDLearningMissRate`'s statement-cache-churn workload (it
+already opens and closes 40 cursors on one session) with an assertion that the
+tracker's entry count returns to a small bound after the client's closes are
+processed. That assertion is what would catch a real leak, and it is what makes
+"no cap" a defensible decision rather than an untested assumption.
+
+The full close-list decode and its pinned decoder unit test remain the primary
+deliverable — everything above is secondary to that.
