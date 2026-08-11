@@ -429,6 +429,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/users/role-syncs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Latest directory role sync per user
+         * @description Returns the most recent `user.roles_synced` audit entry for each user
+         *     that has one — one row per user, computed in the database, so the answer
+         *     stays exact however large the audit log is.
+         *
+         *     A user absent from this response has never had their roles resolved from
+         *     directory groups. That is the only meaning of absence: it is not a
+         *     windowing artefact.
+         *
+         *     Each row carries the audit entry verbatim, `details` included — the
+         *     directory groups recorded there are the answer to "why did these roles
+         *     change?". The audit log remains the record; this is a projection of it.
+         *
+         *     Requires admin or viewer role, like `GET /audit`.
+         */
+        get: operations["listUserRoleSyncs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/users/{uid}": {
         parameters: {
             query?: never;
@@ -3441,6 +3473,40 @@ export interface components {
             created_at: string;
         };
         /**
+         * @description The newest `user.roles_synced` audit entry of one user, as returned by
+         *     `GET /users/role-syncs`. A projection of the audit log, carrying the
+         *     entry's own UID and details rather than summarising them.
+         */
+        UserRoleSync: {
+            /**
+             * Format: uuid
+             * @description UID of the audit entry this row projects
+             */
+            uid: string;
+            /** @description Always `user.roles_synced` */
+            event_type: string;
+            /**
+             * Format: uuid
+             * @description User whose roles the directory changed
+             */
+            user_id: string;
+            /** @description Username of that user, joined in to save a second lookup */
+            username: string;
+            /**
+             * @description The audit entry's details verbatim — `provider`, `groups`,
+             *     `previous_roles`, `roles`, `granted`, `revoked`. The groups are why
+             *     the change happened.
+             */
+            details?: {
+                [key: string]: unknown;
+            };
+            /**
+             * Format: date-time
+             * @description When the sync happened
+             */
+            created_at: string;
+        };
+        /**
          * @description The first record that failed to verify. It identifies the record and
          *     says what did not add up; it never echoes the record's content.
          */
@@ -3937,6 +4003,7 @@ export type QueryWithRows = components['schemas']['QueryWithRows'];
 export type QueryRow = components['schemas']['QueryRow'];
 export type QueryRowsResponse = components['schemas']['QueryRowsResponse'];
 export type AuditEvent = components['schemas']['AuditEvent'];
+export type UserRoleSync = components['schemas']['UserRoleSync'];
 export type ChainBreak = components['schemas']['ChainBreak'];
 export type AuditChainVerification = components['schemas']['AuditChainVerification'];
 export type QueryChainVerification = components['schemas']['QueryChainVerification'];
@@ -4520,6 +4587,31 @@ export interface operations {
             401: components["responses"]["Unauthorized"];
             403: components["responses"]["Forbidden"];
             409: components["responses"]["Conflict"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    listUserRoleSyncs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Latest role sync per user */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        role_syncs?: components["schemas"]["UserRoleSync"][];
+                    };
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
             500: components["responses"]["InternalError"];
         };
     };

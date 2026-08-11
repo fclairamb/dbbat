@@ -43,6 +43,7 @@ export type GrantSummary = components["schemas"]["GrantSummary"];
 export type Query = components["schemas"]["Query"];
 export type QueryWithRows = components["schemas"]["QueryWithRows"];
 export type AuditEvent = components["schemas"]["AuditEvent"];
+export type UserRoleSync = components["schemas"]["UserRoleSync"];
 export type APIKey = components["schemas"]["APIKey"];
 export type CreateAPIKeyRequest = components["schemas"]["CreateAPIKeyRequest"];
 export type CreateAPIKeyResponse =
@@ -1173,37 +1174,27 @@ export function useAuditEvents(filters?: {
 }
 
 /**
- * Audit event type written when a login re-resolves a user's roles from their
- * directory groups (`internal/api/oauth_roles.go`).
- */
-export const ROLE_SYNC_EVENT_TYPE = "user.roles_synced";
-
-/**
  * The most recent directory role sync per user, keyed by user UID.
  *
- * One listing rather than a request per row: the users page needs the same
- * answer for every user it draws, and the audit list already comes back newest
- * first (its UIDs are UUIDv7), so the first entry seen for a user is theirs.
+ * The backend does the per-user picking (`GET /users/role-syncs`, a DISTINCT ON
+ * over the `user.roles_synced` audit entries), so a user missing from this map
+ * has genuinely never been synced. The earlier shape — fetch the newest 200
+ * audit entries and keep the first one seen per user — could not tell that
+ * apart from "their last sync fell out of the window".
  */
 export function useLastRoleSyncs(options?: { enabled?: boolean }) {
   return useQuery({
-    queryKey: ["audit", "role-syncs"],
+    queryKey: ["users", "role-syncs"],
     enabled: options?.enabled ?? true,
-    queryFn: async (): Promise<Map<string, AuditEvent>> => {
-      const response = await apiClient.GET("/audit", {
-        params: {
-          query: { event_type: ROLE_SYNC_EVENT_TYPE, limit: 200 },
-        },
-      });
+    queryFn: async (): Promise<Map<string, UserRoleSync>> => {
+      const response = await apiClient.GET("/users/role-syncs");
       if (response.error) {
         throw new Error(response.error.message || "Failed to load role syncs");
       }
 
-      const byUser = new Map<string, AuditEvent>();
-      for (const event of response.data?.audit_events ?? []) {
-        if (event.user_id && !byUser.has(event.user_id)) {
-          byUser.set(event.user_id, event);
-        }
+      const byUser = new Map<string, UserRoleSync>();
+      for (const sync of response.data?.role_syncs ?? []) {
+        byUser.set(sync.user_id, sync);
       }
       return byUser;
     },
