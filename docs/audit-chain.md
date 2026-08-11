@@ -23,9 +23,12 @@ It detects:
   head is sealed onto the query row when the capture finishes);
 - entries deleted from the **end** of a session's query history, including
   against an attacker who rewrites the stamp afterwards — the stamp is keyed
-  (see [The connection stamp](#the-connection-stamp)). Sessions closed *before*
-  0.24 carry the old unkeyed stamp and are the exception: they are counted, not
-  trusted;
+  (see [The connection stamp](#the-connection-stamp)). A session that is still
+  **open** is covered up to the last periodic sweep of its stamp, not up to its
+  last statement (see [An open session is stamped by a periodic
+  sweep](#an-open-session-is-stamped-by-a-periodic-sweep)). Sessions closed
+  *before* 0.24 carry the old unkeyed stamp and are the other exception: they
+  are counted, not trusted;
 - entries deleted from the **start** of the audit chain (the first entry's
   `prev_mac` is a genesis MAC derived from the key, so it cannot be forged).
 
@@ -101,6 +104,58 @@ session would leave a shorter chain that still verified. See
 [The connection stamp](#the-connection-stamp) for the construction and for what
 pre-0.24 rows still mean.
 
+There are **three** writers of that stamp, and only the first two are closes:
+
+| writer | when | what it seals |
+|---|---|---|
+| `CloseConnection` | clean teardown | the session's final head |
+| the reconcile (`CloseOrphanedConnections` / `ReclaimDeadInstanceConnections`) | a crashed session is closed | whatever survived at reconcile time |
+| `RefreshOpenChainStamps` | every reclaim tick, for sessions **still open** | the head as of that sweep — a *prefix* |
+
+#### An open session is stamped by a periodic sweep
+
+A close is a bad moment to be the only moment. A session that never ends — a
+`psql` window left open all day, a pooled application connection, an approval
+hold waiting on a human — used to carry no stamp at all for its entire life, so
+deleting its most recent statements was undetectable, and stayed undetectable
+until it closed, at which point the close sealed the already-truncated chain.
+A crashed session had the same hole from the crash until the reclaim noticed it.
+
+`Store.RefreshOpenChainStamps` rides on the reclaim tick
+(`InstanceReclaimInterval`, ~7.5min, spread) and re-seals the head of every
+session **this run** still has open: select the open uids where
+`run_id = <this run>`, read their heads with the same `LEFT JOIN LATERAL`
+lookup the reconcile uses, seal in Go, write back in one `UPDATE`. It is scoped
+to this run's rows so replicas sharing a store never contend over the same
+stamps, and the write is guarded by `disconnected_at IS NULL` so a sweep that
+read a head before a concurrent `CloseConnection` committed can never land
+afterwards and overwrite the exact final stamp with an older one.
+
+Cost: one index lookup per open session per pass. It scales with concurrency,
+never with the size of the query history — pinned by
+`TestQueryChainRefreshCostScalesWithOpenSessions`, which EXPLAINs both halves.
+
+**A live session's stamp is a prefix, and verification knows it.** Between two
+sweeps a busy session runs statements the stamp does not cover, so while
+`disconnected_at IS NULL` the stamp is checked against the statement at the
+`chain_seq` it *names*, not against the current head. Judging it exactly would
+report a break on every active session in the store, which is worse than not
+refreshing at all. The rule, in full:
+
+| stamped `chain_seq` vs the surviving chain | open session | closed session |
+|---|---|---|
+| equals the head | verified | verified |
+| below the head, that statement survives | verified against **that** statement | **break** — a close is final |
+| below the oldest survivor | retention reaped it: unverifiable, already counted as a truncated prefix | **break** |
+| above the head | **break** — retention only removes the oldest | **break** |
+
+**What this does not buy.** The stamp only ever proves the chain up to the
+position it sealed, so statements appended *since the last sweep* are still
+unprotected against a trailing deletion. The refresh bounds that window by the
+sweep interval instead of by the session's lifetime; it does not close it. The
+alternative — stamping from the append path every N statements — would tighten
+it further at the cost of a second write on the hot path, and was not taken.
+
 #### A crash-orphaned session is stamped by the reconcile
 
 A session whose process died never reaches `CloseConnection`, and the in-memory
@@ -143,9 +198,10 @@ session logged — and unlike a survivor count it does not move when retention
 reaps the oldest ones. Sealing a survivor count would report a break on every
 retention-truncated session, which is exactly the cry-wolf the truncated-prefix
 handling exists to avoid. (The row-chain stamp *can* seal a true count, because
-retention never deletes individual captured rows.) Verification compares the
-recorded length against what the surviving statements say before it checks the
-MAC, so an edit to the column alone is caught with a precise message.
+retention never deletes individual captured rows.) For a closed session,
+verification compares the recorded length against what the surviving statements
+say before it checks the MAC, so an edit to the column alone is caught with a
+precise message; for an open one that comparison becomes the prefix rule above.
 
 **Two formats, and the version is inside the MAC.** Before 0.24 the stamp was
 the last statement's MAC stored **verbatim**, and that value is readable from
@@ -426,6 +482,7 @@ prevent it, and it says nothing about rows written before the anchor. See
 - `internal/store/audit.go`, `internal/store/queries.go`,
   `internal/store/connections.go` — the write paths
 - `internal/proxy/shared/rowwriter.go` — the flush barrier that seals a capture
+- `heartbeat.go` — the reclaim tick that also runs the open-session stamp sweep
 - `internal/migrations/sql/20260810000000_audit_chain.*.sql`,
   `internal/migrations/sql/20260810010000_query_row_chain.*.sql`,
   `internal/migrations/sql/20260810020000_connections_query_chain_stamp_version.*.sql`
