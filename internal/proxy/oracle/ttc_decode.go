@@ -441,6 +441,106 @@ func decodeCursorReexec(ttcPayload []byte) (uint16, error) {
 	return uint16(cursorID), nil
 }
 
+// ErrNotCloseCursors reports that a payload is not a decodable close-cursors
+// piggyback — wrong message type or function, missing pointer flag, an
+// implausible count, or truncated before the list ends. Callers delete nothing
+// when they see it: a half-read list would evict tracker entries the client
+// never closed, and an evicted entry turns a correctly-gated re-execution into
+// a refusal.
+var ErrNotCloseCursors = errors.New("payload is not a close-cursors piggyback")
+
+const (
+	// closeCursorsPointer is the one-byte pointer flag Oracle writes between
+	// the function header and the list. Requiring it is what keeps a
+	// wide-encoded (OCI) frame — whose next field is an 8-byte sentinel — from
+	// being walked as compressed ints.
+	closeCursorsPointer byte = 0x01
+
+	// closeCursorsMaxCount bounds a plausible batch. Cursors come from a
+	// per-session pool (open_cursors, a few hundred by default); a count past
+	// this means the walk landed on the wrong bytes.
+	closeCursorsMaxCount = 4096
+)
+
+// decodeCloseCursors extracts every cursor id from Oracle's close-cursors
+// piggyback — message type 0x11 (TNS_MSG_TYPE_PIGGYBACK), function 0x69
+// (TNS_FUNC_CLOSE_CURSORS).
+//
+// This is how a client tells the server it is done with cursors, and it is a
+// *list*: dbbat used to read a single id out of the func-0x03 logoff frame
+// instead, so batched closes left the tracker holding entries for cursors that
+// no longer exist — and Oracle recycles ids, so a later re-execution naming a
+// recycled id resolved to whatever statement used to hold it.
+//
+// Layout, verified byte-for-byte against the recordings in testdata/:
+//
+//	[0]    0x11            message type: piggyback
+//	[1]    0x69            function: close cursors
+//	[2]    seq             TTC sequence number
+//	[3]    0x00            token byte — 23ai-era clients only
+//	[..]   0x01            pointer flag
+//	[..]   count           TTC compressed int
+//	[..]   count x id      TTC compressed ints
+//	[..]   (optional)      the next TTC message in the same packet
+//
+// The trailing zero of the function header is what distinguishes the two
+// framings, exactly as in decodeCursorReexec; the pointer flag is always 0x01,
+// so a zero at [3] can only be the token.
+//
+// Unlike decodeCursorReexec this does **not** require the fields to consume the
+// frame: clients staple the statement they are about to run behind the close
+// list in the same packet (`… 03 5e <execute>`), which is the frame dbbat also
+// knows as the JDBC/DBeaver execute. What it does require is that the list
+// itself be complete and plausible — see ErrNotCloseCursors.
+//
+// The OCI thick client (sqlplus) sends the same op in the wide encoding — an
+// 8-byte pointer sentinel and little-endian 32-bit fields — which is rejected
+// here rather than guessed at. It never re-executes by cursor id (it resends
+// the statement text every time, see docs/oracle.md), so a tracker entry it
+// leaves behind cannot mis-resolve anything.
+func decodeCloseCursors(ttcPayload []byte) ([]uint16, error) {
+	if !IsCloseCursorsPiggyback(ttcPayload) {
+		return nil, ErrNotCloseCursors
+	}
+
+	// TTC >= 18 pads the function header with a zero byte; older ones do not.
+	pos := 3
+	if len(ttcPayload) > 3 && ttcPayload[3] == 0 {
+		pos = 4
+	}
+
+	if pos >= len(ttcPayload) || ttcPayload[pos] != closeCursorsPointer {
+		return nil, fmt.Errorf("%w: no pointer flag at offset %d", ErrNotCloseCursors, pos)
+	}
+
+	pos++
+
+	count, n := readCompressedInt(ttcPayload[pos:])
+	if n == 0 || count < 0 || count > closeCursorsMaxCount {
+		return nil, fmt.Errorf("%w: cursor count decoded as %d", ErrNotCloseCursors, count)
+	}
+
+	pos += n
+
+	cursorIDs := make([]uint16, 0, count)
+
+	for range count {
+		cursorID, n := readCompressedInt(ttcPayload[pos:])
+		if n == 0 {
+			return nil, fmt.Errorf("%w: truncated after %d of %d ids", ErrNotCloseCursors, len(cursorIDs), count)
+		}
+
+		if cursorID <= 0 || cursorID > cursorReexecMaxID {
+			return nil, fmt.Errorf("%w: cursor id decoded as %d", ErrNotCloseCursors, cursorID)
+		}
+
+		cursorIDs = append(cursorIDs, uint16(cursorID))
+		pos += n
+	}
+
+	return cursorIDs, nil
+}
+
 // OALL8Result contains the decoded fields from an OALL8 (parse+execute) message.
 type OALL8Result struct {
 	SQL        string

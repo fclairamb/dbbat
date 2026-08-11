@@ -100,11 +100,22 @@ func TestIsPiggybackExecSQL(t *testing.T) {
 	assert.False(t, IsPiggybackExecSQL([]byte{0x03}))
 }
 
-func TestIsPiggybackClose(t *testing.T) {
+func TestIsPiggybackLogoff(t *testing.T) {
 	t.Parallel()
 
-	assert.True(t, IsPiggybackClose([]byte{0x03, 0x09, 0x05}))
-	assert.False(t, IsPiggybackClose([]byte{0x03, 0x5e, 0x01}))
+	assert.True(t, IsPiggybackLogoff([]byte{0x03, 0x09, 0x05}))
+	assert.False(t, IsPiggybackLogoff([]byte{0x03, 0x5e, 0x01}))
+}
+
+func TestIsCloseCursorsPiggyback(t *testing.T) {
+	t.Parallel()
+
+	assert.True(t, IsCloseCursorsPiggyback([]byte{0x11, 0x69, 0x04, 0x01}))
+	// Same sub-op byte, but under the func-0x03 namespace: not this frame.
+	assert.False(t, IsCloseCursorsPiggyback([]byte{0x03, 0x69, 0x04}))
+	// The other func-0x11 exec sub-op carries no close list.
+	assert.False(t, IsCloseCursorsPiggyback([]byte{0x11, 0x98, 0x04}))
+	assert.False(t, IsCloseCursorsPiggyback([]byte{0x11}))
 }
 
 func TestDecodePiggybackExecSQL(t *testing.T) {

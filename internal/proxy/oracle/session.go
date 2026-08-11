@@ -1267,11 +1267,13 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 			// never a continuation of a result set already streaming, so
 			// checking quotas here cannot strand a client mid-fetch.)
 			return s.gateStatement(s.handlePiggybackReexec, ttcPayload)
-		} else if IsPiggybackClose(ttcPayload) {
-			// Sub-op 0x09 = close cursor
-			if len(ttcPayload) > 2 {
-				s.handleOCLOSE(uint16(ttcPayload[2]))
-			}
+		} else if IsPiggybackLogoff(ttcPayload) {
+			// Sub-op 0x09 is the session logoff, not a cursor close. It used
+			// to delete s.tracker.cursors[ttcPayload[2]] in the belief that
+			// byte 2 was a cursor id; it is the TTC sequence number, and the
+			// frame carries no cursor id at all. The real close list is the
+			// 0x11/0x69 piggyback handled below.
+			s.logger.DebugContext(s.ctx, "client logoff")
 		}
 
 	case TTCFuncOALL8:
@@ -1279,6 +1281,15 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 		return s.gateStatement(s.handleOALL8, ttcPayload)
 
 	case TTCFuncOFETCH:
+		// Func 0x11 sub-op 0x69 is Oracle's close-cursors piggyback, and a
+		// client with a statement to run staples that execute behind the close
+		// list in the same packet — which is the frame dbbat also knows as the
+		// JDBC/DBeaver execute. Wire order is closes first, so the tracker
+		// drops them before the execute below can be assigned a recycled id.
+		if cursorIDs, err := decodeCloseCursors(ttcPayload); err == nil {
+			s.handleCloseCursors(cursorIDs)
+		}
+
 		// JDBC thin driver reuses func=0x11 with sub-op 0x69 for execute-with-SQL.
 		// Distinguish from plain OFETCH by checking the sub-operation byte.
 		if IsExecSQL(ttcPayload) {
