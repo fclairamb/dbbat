@@ -98,6 +98,14 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 		slog.Int("bind_count", len(result.BindValues)),
 	)
 
+	// Quota, expiry and revocation — ahead of the static controls and therefore
+	// ahead of the hold, so an exhausted grant is refused outright and never
+	// parks a statement on a human. Recorded like any other refusal now that the
+	// decode has produced the SQL to record it against.
+	if err := s.checkQuotas(); err != nil {
+		return s.refuseStatement(result.SQL, result.BindValues, err)
+	}
+
 	// Access control check
 	if s.grant != nil {
 		if err := shared.ValidateOracleQuery(result.SQL, s.grant); err != nil {
@@ -215,10 +223,19 @@ func (s *session) hasStatementControls() bool {
 	return len(s.grant.ApprovalPatterns()) > 0 || s.grant.IsReadOnly() || s.grant.ShouldBlockDDL()
 }
 
-// regateCursor re-runs the statement gate — static controls, then the approval
-// hold — against the SQL a tracked cursor holds, and starts a fresh pending
-// query for this execution. Same order as the SQL-carrying path, so a
+// regateCursor re-runs the statement gate — quota, static controls, then the
+// approval hold — against the SQL a tracked cursor holds, and starts a fresh
+// pending query for this execution. Same order as the SQL-carrying path, so a
 // re-execution is enforced exactly like the parse that created the cursor.
+//
+// This is the single quota-check insertion point for all three re-execution
+// frames: the SQL-less OALL8 (handleCursorReexec), the piggyback re-execution
+// (handlePiggybackReexec) and the OFETCH that starts a fresh query. Each
+// resolves its cursor before delegating here, which is deliberate — a cursor
+// dbbat never saw parsed keeps answering refuseUnknownCursor even when the
+// grant is also exhausted. That refusal is the more specific and the more
+// security-relevant one, and burying it under a quota error would make it
+// harder to diagnose.
 func (s *session) regateCursor(cursor *trackedCursor) error {
 	sql := cursor.sql
 
@@ -226,6 +243,12 @@ func (s *session) regateCursor(cursor *trackedCursor) error {
 		slog.String("sql", truncateSQL(sql, 200)),
 		slog.Uint64("cursor_id", uint64(cursor.cursorID)),
 	)
+
+	// Quota, expiry and revocation — recorded against the SQL the cursor holds,
+	// which is the only place this execution's statement text exists.
+	if err := s.checkQuotas(); err != nil {
+		return s.refuseStatement(sql, cursor.bindValues, err)
+	}
 
 	// Access control check
 	if s.grant != nil {
@@ -354,6 +377,11 @@ func (s *session) handlePiggybackExec(ttcPayload []byte) error {
 		slog.String("sql", truncateSQL(result.SQL, 200)),
 	)
 
+	// Quota, expiry and revocation first — see handleOALL8.
+	if err := s.checkQuotas(); err != nil {
+		return s.refuseStatement(result.SQL, result.BindValues, err)
+	}
+
 	// Access control check
 	if s.grant != nil {
 		if err := shared.ValidateOracleQuery(result.SQL, s.grant); err != nil {
@@ -422,6 +450,12 @@ func (s *session) handleJDBCExec(ttcPayload []byte) error {
 		slog.String("sql", truncateSQL(sql, 200)),
 		slog.String("source", "jdbc"),
 	)
+
+	// Quota, expiry and revocation first — see handleOALL8. Recorded against the
+	// normalized text, like the control refusal below it.
+	if err := s.checkQuotas(); err != nil {
+		return s.refuseStatement(sql, result.BindValues, err)
+	}
 
 	// Access control check
 	if s.grant != nil {
@@ -520,9 +554,9 @@ func (s *session) handleQueryResultV2(ttcPayload []byte) {
 //
 // A fetch arriving with no query in flight is a re-execution, so it carries the
 // full pre-flight of a statement — quota, static controls, approval hold — and
-// a cursor dbbat never saw parsed goes through refuseUnknownCursor, exactly
-// like the SQL-less OALL8. A fetch continuing a query already in flight carries
-// none of it.
+// a cursor dbbat never saw parsed goes through refuseUnknownCursor first,
+// exactly like the SQL-less OALL8, before the quota is ever consulted. A fetch
+// continuing a query already in flight carries none of it.
 //
 // Returns a non-nil error when the fetch must not be forwarded; the caller
 // answers the client with a TTC error instead.
@@ -545,19 +579,11 @@ func (s *session) handleOFETCH(ttcPayload []byte) error {
 	// No query in flight: this fetch re-executes the cursor and starts its own
 	// pending query, which is persisted as a distinct row in /queries. Anything
 	// recorded as its own query is gated as its own query, or the audit trail
-	// and the enforcement disagree — and that includes the quota.
-	//
-	// The quota check sits here, on this branch, rather than in the dispatcher's
-	// gateStatement wrapper: routing every OFETCH through gateStatement would
-	// also check quotas on the continuation fetches returned above, and refusing
-	// mid-result-set is exactly what this path must never do. It is not in
-	// regateCursor either, because the other two frames that reach regateCursor
-	// — the SQL-less OALL8 and the piggyback re-execution — already come in
-	// through gateStatement, so it would only check them twice.
-	if err := s.checkQuotas(); err != nil {
-		return err
-	}
-
+	// and the enforcement disagree — and that includes the quota, which
+	// regateCursor checks below once the cursor has resolved. The early return
+	// above is what keeps every one of those refusals off the continuation
+	// path, where cutting a client off mid-result-set is exactly what must
+	// never happen.
 	cursor, ok := s.tracker.cursors[result.CursorID]
 	if !ok {
 		return s.refuseUnknownCursor(result.CursorID)
