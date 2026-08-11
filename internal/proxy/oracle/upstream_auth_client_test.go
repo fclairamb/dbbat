@@ -40,14 +40,18 @@ func TestBuildClientAuthPhase1Layout(t *testing.T) {
 	// The preamble go-ora v3 puts on the wire — 03 76 <seq> 00 from PutTTCFunc
 	// (TTCVersion >= 18), then the 0x01 username-present marker. dbbat used to
 	// send 03 76 00 01: one byte short, and the upstream answered ORA-03120.
-	wantHeader := []byte{byte(TTCFuncPiggyback), PiggybackSubAuth1, authPhase1FuncSeq, 0x00, 0x01}
+	// ... then user_id_len and the logon mode as compressed ints, then the
+	// fixed [01 01 05 01 01] pair-count block.
+	wantPreamble := []byte{
+		byte(TTCFuncPiggyback), PiggybackSubAuth1, authPhase1FuncSeq, 0x00, 0x01,
+		0x01, 0x05, 0x01, byte(logonModeNoNewPass), 0x01, 0x01, 0x05, 0x01, 0x01,
+	}
+
+	wantHeader := wantPreamble[:5]
 	if !bytes.HasPrefix(body, wantHeader) {
 		t.Fatalf("phase1 body does not start with %x: got %x", wantHeader, body[:8])
 	}
 
-	// user_id_len and logon mode follow as compressed ints, then the fixed
-	// [01 01 05 01 01] pair-count block.
-	wantPreamble := append(wantHeader, 0x01, 0x05, 0x01, byte(logonModeNoNewPass), 0x01, 0x01, 0x05, 0x01, 0x01)
 	if !bytes.HasPrefix(body, wantPreamble) {
 		t.Fatalf("phase1 preamble mismatch:\n got %x\nwant %x", body[:len(wantPreamble)], wantPreamble)
 	}

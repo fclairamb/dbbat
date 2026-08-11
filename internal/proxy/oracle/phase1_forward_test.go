@@ -89,7 +89,8 @@ func TestRewriteAuthPhase1Username_NarrowFuncHeader(t *testing.T) {
 	t.Parallel()
 
 	narrow := func(username string) []byte {
-		buf := []byte{byte(TTCFuncPiggyback), PiggybackSubAuth1, 0x01, 0x01}
+		buf := make([]byte, 0, 64)
+		buf = append(buf, byte(TTCFuncPiggyback), PiggybackSubAuth1, 0x01, 0x01)
 		buf = append(buf, ttcCompressedUint(uint64(len(username)))...)
 		buf = append(buf, ttcCompressedUint(1)...)
 		buf = append(buf, 0x01, 0x01, 0x05, 0x01, 0x01)
