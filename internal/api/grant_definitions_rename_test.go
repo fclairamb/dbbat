@@ -11,16 +11,18 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
-// TestGrantDefinition_LegacyGroupFieldNamesAccepted pins the one-release
-// compatibility window for the `group_uids` → `user_group_uids` and
-// `approver_group_uids` → `approver_user_group_uids` rename: the old spellings
-// are still *read* from a request body, and responses emit only the new ones.
-func TestGrantDefinition_LegacyGroupFieldNamesAccepted(t *testing.T) {
+// TestGrantDefinition_RetiredGroupFieldNamesRejected pins that the pre-rename
+// `group_uids` / `approver_group_uids` spellings are a hard 400 rather than a
+// silently ignored or silently folded field. Ignoring either would drop a
+// scope restriction on the floor — failing *open* — which is exactly what
+// this endpoint must never do; mirrors
+// TestGrantDefinition_RetiredDatabaseUIDsRejected.
+func TestGrantDefinition_RetiredGroupFieldNamesRejected(t *testing.T) {
 	t.Parallel()
 
 	server, dataStore := setupTestServer(t)
 	ctx := context.Background()
-	suffix := "gdlegacy"
+	suffix := "gdretiredgroup"
 
 	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
 	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
@@ -34,65 +36,41 @@ func TestGrantDefinition_LegacyGroupFieldNamesAccepted(t *testing.T) {
 
 	router := grantDefinitionsRouter(server)
 
-	body := validCreateDefinitionBody("legacy-"+suffix, "legacy-"+suffix)
-	body["group_uids"] = []string{scopeGroup.UID.String()}
-	body["approver_group_uids"] = []string{approverGroup.UID.String()}
+	bodyGroup := validCreateDefinitionBody("retired-group-"+suffix, "retired-group-"+suffix)
+	bodyGroup["group_uids"] = []string{scopeGroup.UID.String()}
 
-	w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grant-definitions", adminToken, body)
+	w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grant-definitions", adminToken, bodyGroup)
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	require.Equal(t, "VALIDATION_ERROR", resp["code"])
+	require.Contains(t, resp["message"], "user_group_uids")
+
+	bodyApprover := validCreateDefinitionBody("retired-approver-"+suffix, "retired-approver-"+suffix)
+	bodyApprover["approver_group_uids"] = []string{approverGroup.UID.String()}
+
+	w, resp = doJSON(t, router, http.MethodPost, "/api/v1/grant-definitions", adminToken, bodyApprover)
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	require.Equal(t, "VALIDATION_ERROR", resp["code"])
+	require.Contains(t, resp["message"], "approver_user_group_uids")
+
+	// And on PATCH, which is where a stale client is most likely to round-trip
+	// the field it read from an older response.
+	clean := validCreateDefinitionBody("retired-group-ok-"+suffix, "retired-group-ok-"+suffix)
+
+	w, resp = doJSON(t, router, http.MethodPost, "/api/v1/grant-definitions", adminToken, clean)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-
-	require.ElementsMatch(t, []any{scopeGroup.UID.String()}, resp["user_group_uids"],
-		"the deprecated group_uids must still be read on input")
-	require.ElementsMatch(t, []any{approverGroup.UID.String()}, resp["approver_user_group_uids"],
-		"the deprecated approver_group_uids must still be read on input")
-
-	_, hasLegacy := resp["group_uids"]
-	require.False(t, hasLegacy, "responses must not emit the deprecated group_uids")
-
-	_, hasLegacyApprover := resp["approver_group_uids"]
-	require.False(t, hasLegacyApprover, "responses must not emit the deprecated approver_group_uids")
 
 	uid, ok := resp["uid"].(string)
 	require.True(t, ok)
 
-	// The same shim on PATCH.
-	w, resp = doJSON(t, router, http.MethodPatch, "/api/v1/grant-definitions/"+uid, adminToken, map[string]any{
-		"group_uids":          []string{},
-		"approver_group_uids": []string{},
+	w, _ = doJSON(t, router, http.MethodPatch, "/api/v1/grant-definitions/"+uid, adminToken, map[string]any{
+		"group_uids": []string{scopeGroup.UID.String()},
 	})
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	require.Empty(t, resp["user_group_uids"])
-	require.Empty(t, resp["approver_user_group_uids"])
-}
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 
-// TestGrantDefinition_NewGroupFieldNamesWinOverLegacy pins the tie-break: a
-// body carrying both spellings uses the new one. The old name is a
-// compatibility shim, never an override.
-func TestGrantDefinition_NewGroupFieldNamesWinOverLegacy(t *testing.T) {
-	t.Parallel()
-
-	server, dataStore := setupTestServer(t)
-	ctx := context.Background()
-	suffix := "gdboth"
-
-	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
-	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
-
-	newGroup, err := dataStore.CreateUserGroup(ctx, &store.UserGroup{Name: "new-" + suffix, CreatedBy: &admin.UID})
-	require.NoError(t, err)
-
-	oldGroup, err := dataStore.CreateUserGroup(ctx, &store.UserGroup{Name: "old-" + suffix, CreatedBy: &admin.UID})
-	require.NoError(t, err)
-
-	router := grantDefinitionsRouter(server)
-
-	body := validCreateDefinitionBody("both-"+suffix, "both-"+suffix)
-	body["user_group_uids"] = []string{newGroup.UID.String()}
-	body["group_uids"] = []string{oldGroup.UID.String()}
-
-	w, resp := doJSON(t, router, http.MethodPost, "/api/v1/grant-definitions", adminToken, body)
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	require.ElementsMatch(t, []any{newGroup.UID.String()}, resp["user_group_uids"])
+	w, _ = doJSON(t, router, http.MethodPatch, "/api/v1/grant-definitions/"+uid, adminToken, map[string]any{
+		"approver_group_uids": []string{approverGroup.UID.String()},
+	})
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 }
 
 // TestGrantDefinition_RetiredDatabaseUIDsRejected pins that the removed

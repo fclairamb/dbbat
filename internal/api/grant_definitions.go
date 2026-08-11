@@ -107,34 +107,21 @@ type CreateGrantDefinitionRequest struct {
 	// those holds, in addition to admins. Empty/omitted = admins only.
 	ApproverUserGroupUIDs []uuid.UUID `json:"approver_user_group_uids"`
 
-	// Deprecated pre-rename spellings, readable for one release so existing
-	// API clients keep working the day server groups land. Folded onto the
-	// fields above by applyLegacyFields; never emitted in a response.
-	LegacyUserGroupUIDs         []uuid.UUID `json:"group_uids"`
-	LegacyApproverUserGroupUIDs []uuid.UUID `json:"approver_group_uids"`
-
 	// RetiredDatabaseUIDs catches the removed per-database scope. It is not a
 	// compatibility shim: server groups are a different entity, so there is
 	// nothing to fold it onto, and silently dropping a scope restriction on
 	// the floor would fail *open*. Its only job is to make the request a 400
 	// that names the replacement — see validateDefinitionRequest.
 	RetiredDatabaseUIDs []uuid.UUID `json:"database_uids"`
-}
 
-// applyLegacyFields folds the deprecated pre-rename JSON field names onto
-// their replacements. A body carrying both wins with the new name: the old
-// spelling is a compatibility shim, never an override.
-func (r *CreateGrantDefinitionRequest) applyLegacyFields() {
-	if r.UserGroupUIDs == nil && r.LegacyUserGroupUIDs != nil {
-		r.UserGroupUIDs = r.LegacyUserGroupUIDs
-	}
-
-	if r.ApproverUserGroupUIDs == nil && r.LegacyApproverUserGroupUIDs != nil {
-		r.ApproverUserGroupUIDs = r.LegacyApproverUserGroupUIDs
-	}
-
-	r.LegacyUserGroupUIDs = nil
-	r.LegacyApproverUserGroupUIDs = nil
+	// RetiredGroupUIDs / RetiredApproverGroupUIDs catch the pre-rename
+	// spellings of UserGroupUIDs / ApproverUserGroupUIDs. Server groups made a
+	// bare "group" ambiguous, so both fields were renamed; the old spellings
+	// are refused rather than folded onto their replacements — silently
+	// ignoring a scope restriction fails *open*. See errRetiredGroupUIDs /
+	// errRetiredApproverGroupUIDs.
+	RetiredGroupUIDs         []uuid.UUID `json:"group_uids"`
+	RetiredApproverGroupUIDs []uuid.UUID `json:"approver_group_uids"`
 }
 
 // UpdateGrantDefinitionRequest is the JSON body for PATCH
@@ -177,29 +164,14 @@ type UpdateGrantDefinitionRequest struct {
 	SampleQueries            []string    `json:"sample_queries"`
 	ApproverUserGroupUIDs    []uuid.UUID `json:"approver_user_group_uids"`
 
-	// Deprecated pre-rename spellings; see
-	// CreateGrantDefinitionRequest.applyLegacyFields.
-	LegacyUserGroupUIDs         []uuid.UUID `json:"group_uids"`
-	LegacyApproverUserGroupUIDs []uuid.UUID `json:"approver_group_uids"`
-
 	// RetiredDatabaseUIDs is refused rather than folded; see
 	// CreateGrantDefinitionRequest.RetiredDatabaseUIDs.
 	RetiredDatabaseUIDs []uuid.UUID `json:"database_uids"`
-}
 
-// applyLegacyFields folds the deprecated pre-rename JSON field names onto
-// their replacements, exactly like the create body's namesake.
-func (r *UpdateGrantDefinitionRequest) applyLegacyFields() {
-	if r.UserGroupUIDs == nil && r.LegacyUserGroupUIDs != nil {
-		r.UserGroupUIDs = r.LegacyUserGroupUIDs
-	}
-
-	if r.ApproverUserGroupUIDs == nil && r.LegacyApproverUserGroupUIDs != nil {
-		r.ApproverUserGroupUIDs = r.LegacyApproverUserGroupUIDs
-	}
-
-	r.LegacyUserGroupUIDs = nil
-	r.LegacyApproverUserGroupUIDs = nil
+	// RetiredGroupUIDs / RetiredApproverGroupUIDs are refused rather than
+	// folded; see CreateGrantDefinitionRequest.RetiredGroupUIDs.
+	RetiredGroupUIDs         []uuid.UUID `json:"group_uids"`
+	RetiredApproverGroupUIDs []uuid.UUID `json:"approver_group_uids"`
 }
 
 // applyGrantDefinitionUpdate copies every field present in req onto def,
@@ -278,6 +250,17 @@ func applyGrantDefinitionUpdate(def *store.GrantDefinition, req *UpdateGrantDefi
 // which fails *open*.
 const errRetiredDatabaseUIDs = "database_uids is no longer supported; " +
 	"scope the definition with server_group_uids instead"
+
+// errRetiredGroupUIDs and errRetiredApproverGroupUIDs are the messages both
+// write handlers answer with when a body still carries the pre-rename
+// spellings of user_group_uids / approver_user_group_uids. Refusing rather
+// than folding is deliberate: silently ignoring a scope restriction fails
+// *open*.
+const errRetiredGroupUIDs = "group_uids is no longer supported; " +
+	"use user_group_uids instead"
+
+const errRetiredApproverGroupUIDs = "approver_group_uids is no longer supported; " +
+	"use approver_user_group_uids instead"
 
 func validateDefinitionRequest(req *CreateGrantDefinitionRequest) string {
 	if req.Name == "" {
@@ -364,10 +347,20 @@ func (s *Server) handleCreateGrantDefinition(c *gin.Context) {
 		return
 	}
 
-	req.applyLegacyFields()
-
 	if req.RetiredDatabaseUIDs != nil {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError, errRetiredDatabaseUIDs)
+
+		return
+	}
+
+	if req.RetiredGroupUIDs != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, errRetiredGroupUIDs)
+
+		return
+	}
+
+	if req.RetiredApproverGroupUIDs != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, errRetiredApproverGroupUIDs)
 
 		return
 	}
@@ -597,10 +590,20 @@ func (s *Server) handleUpdateGrantDefinition(c *gin.Context) {
 		return
 	}
 
-	req.applyLegacyFields()
-
 	if req.RetiredDatabaseUIDs != nil {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError, errRetiredDatabaseUIDs)
+
+		return
+	}
+
+	if req.RetiredGroupUIDs != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, errRetiredGroupUIDs)
+
+		return
+	}
+
+	if req.RetiredApproverGroupUIDs != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, errRetiredApproverGroupUIDs)
 
 		return
 	}
