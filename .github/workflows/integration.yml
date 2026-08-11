@@ -42,10 +42,28 @@ jobs:
       - name: Run integration suite
         run: go test -tags integration -timeout 40m -count=1 -v ${{ github.event.inputs.package || matrix.package }}
 
-  # The Oracle suite is kept out of the matrix above: its default image is
-  # amd64-only and slow to boot, so it gets its own job with a longer budget.
+  # The Oracle suite is kept out of the matrix above: its images are slow to
+  # boot, so it gets its own job with a longer budget.
+  #
+  # It runs twice, over ORACLE_TEST_IMAGE. The empty entry takes the suite
+  # default — gvenzl/oracle-free:23-slim, see `defaultOracleImage` in
+  # internal/proxy/oracle/integration_test.go — so CI exercises exactly what a
+  # developer gets from a bare `make test-e2e-oracle`. The second pins
+  # gvenzl/oracle-xe:18.4.0-slim: 18c XE coverage is kept, but as a deliberate
+  # choice rather than an inherited default. Both run on amd64, because the XE
+  # image is published for linux/amd64 only.
   oracle:
+    name: oracle (${{ matrix.label }})
     runs-on: ubuntu-24.04
+    strategy:
+      # One image failing should not hide the state of the other.
+      fail-fast: false
+      matrix:
+        include:
+          - label: 23ai Free (suite default)
+            image: ""
+          - label: 18c XE (pinned)
+            image: gvenzl/oracle-xe:18.4.0-slim
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -54,4 +72,6 @@ jobs:
           go-version: "1.26.5"
 
       - name: Run Oracle integration suite
+        env:
+          ORACLE_TEST_IMAGE: ${{ matrix.image }}
         run: go test -tags integration -timeout 60m -count=1 -v ./internal/proxy/oracle/
