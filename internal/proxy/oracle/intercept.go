@@ -188,8 +188,23 @@ func (s *session) handleCursorReexec(cursorID uint16) error {
 //     permissive sessions for no security gain.
 //
 // This conditional refusal is documented in docs/approvals.md.
+//
+// It runs *before* the quota check, which lives one call further down in
+// regateCursor: an unknown cursor keeps answering here even when the grant is
+// also exhausted, because "dbbat cannot identify this statement" is the more
+// specific and more security-relevant answer, and burying it under a quota
+// error would make it harder to diagnose. The quota is only consulted on the
+// branch that decides *not* to refuse — an execution dbbat cannot identify is
+// still an execution, and the quota is the one gate that needs no SQL, so a
+// permissive grant that has run out must not start forwarding again just
+// because the cursor is untracked. That refusal carries no queries row, for
+// want of any statement text to put in it.
 func (s *session) refuseUnknownCursor(cursorID uint16) error {
 	if !s.hasStatementControls() {
+		if err := s.checkQuotas(); err != nil {
+			return err
+		}
+
 		s.logger.WarnContext(s.ctx, logMsgUntrackedCursorForwarded,
 			slog.Uint64("cursor_id", uint64(cursorID)),
 		)
