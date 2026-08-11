@@ -362,6 +362,58 @@ followed by TTC compressed integers:
   which `decodeOERAt` uses to reject stray `0x04` bytes inside the preceding
   return-parameter block. See `ttc_oer.go` and `findOERInResponse`.
 
+#### Ending a call: the OER encoder
+
+Every refusal dbbat issues — `read_only`, `block_ddl`, `block_copy`, a quota, an
+expired or revoked grant — has to *end the client's call*, and the only frame
+that does that is the same OER. `ttc_oer_encode.go` is the writing half of the
+decoder above: `writeTTCError` builds a message-type-`0x04` summary object and
+sends it in a **v315+ framed** Data packet (the legacy 2-byte length form is
+read by a modern client as a multi-megabyte packet — the same trap
+`sendAuthFailed` documents).
+
+Most of the object is fields dbbat has nothing to say about, and it writes zero
+into all of them. That is what makes the encoder tractable: a TTC compressed
+zero and a raw zero byte are the same byte, so every field whose *width* is
+conditioned on the negotiated capabilities costs nothing to get "wrong" as long
+as its value is zero. Only the call status, the error code and the message text
+have to land exactly.
+
+Three variations do change the frame, and they are resolved differently:
+
+| Variation | Where it comes from |
+|---|---|
+| call status present, ECID sequence present | `ServerCompileTimeCaps[15]&1` / `[16]&1`, off the relayed Set Protocol reply |
+| TTC field version (only the `>= 7` boundary matters) | `min(client, server) CompileTimeCaps[7]`, the client's half off its Set Data Types request |
+| extra tail fields, fixed-width encoding, end-of-response marker | **learned from the upstream's own OERs** |
+
+The third row is learned rather than derived because no capability rule predicts
+it. Against one Oracle 23ai Free instance, go-ora v3 and python-oracledb thin
+both negotiate `CompileTimeCaps[7] = 24`, and the server sends python-oracledb
+two extra fields between the trailing RetCode/row-count pair and the message
+text (the "fields added in Oracle Database 20c" its parser reads) and go-ora
+none. Patching each differing capability byte of one client's array to the
+other's did not move the boundary. So dbbat copies what the upstream actually
+emits: the upstream leg negotiated with *this client's* forwarded capabilities,
+so its OERs are shaped exactly the way the client parses one. The AUTH response
+carries the first sample, before any statement runs
+(`readUpstreamAuthMessages`), and every response refreshes it
+(`session.learnOERTail`).
+
+OCI/sqlplus is a third encoding again: the same fields in the same order,
+marshaled as **fixed-width little-endian** integers (only the row count stays
+compressed, at a constant offset 70), and its messages end with the TTC
+end-of-response marker `0x1d` even after dbbat has cleared
+`HAS_END_OF_RESPONSE` from the Accept. Both are learned in the same pass;
+with a byte-perfect compressed OER, or a byte-perfect fixed-width one with no
+trailing marker, sqlplus hangs exactly as it did on the old frame.
+
+Verified end to end against Oracle 23ai Free with go-ora v3, python-oracledb
+thin and sqlplus (OCI): all three surface ORA-01031 and keep the session usable.
+JDBC thin is **not** verified against a live client — the pre-existing claim
+that it parsed the old frame was never true and has been removed rather than
+restated.
+
 ### Oracle NUMBER Encoding
 
 Oracle NUMBER is a variable-length, sign-and-magnitude, base-100 format:
@@ -571,18 +623,23 @@ once with `ORACLE_TEST_IMAGE=gvenzl/oracle-xe:18.4.0-slim`.
 | `ORACLE_TEST_IMAGE` | Container image to start (default `gvenzl/oracle-free:23-slim`) |
 | `ORACLE_TEST_SERVICE` | PDB service name; inferred from the image otherwise (`XEPDB1` for XE, `FREEPDB1` for Free, `ORCLPDB1` for enterprise) |
 
-#### A refusal does not end the client's call
+#### How a refusal ends the client's call
 
 `TestIntegration_BlockedStatementsAreLogged` drives a real go-ora client through
-the proxy under a `read_only` and then a `block_ddl` grant. Both refusals are
-enforced (nothing reaches upstream) and both are logged (a `queries` row
-carrying the refusal as `error`, an ordinary link in the connection's HMAC
-chain) — but **the client never gets its error back**. `session.writeTTCError`
-emits a TTC Response (0x08) where a server ends a call with an OER (0x04), so
-the statement hangs until the client's own timeout, if it has one. The test
-abandons each refused statement after 20s rather than asserting a client-side
-error, and says so where it does it. See
-`specs/todos/2026-08-10-17-oracle-refusal-frame-hangs-the-client.md`.
+the proxy under a `read_only` and then a `block_ddl` grant;
+`TestIntegration_BlockedStatementRefusesPythonThin` does the same from
+python-oracledb thin. Each refusal is enforced (nothing reaches upstream),
+logged (a `queries` row carrying the refusal as `error`, an ordinary link in the
+connection's HMAC chain), returned to the client as ORA-01031, and leaves the
+connection usable for the next statement.
+
+That last part was broken for a long time and no test noticed, because the only
+assertion was on the `queries` row. `session.writeTTCError` emitted a TTC
+Response (0x08) with fixed-width big-endian fields where a server ends a call
+with an OER (0x04), and framed it with the legacy 2-byte TNS length on top — so
+a v315 client read the length bytes as a multi-megabyte packet and blocked
+forever. Measured against Oracle 23ai Free, go-ora's `ExecContext` never
+returned. See "Ending a call: the OER encoder" above.
 
 Note that `buildTNSConnect` in the test file announces TNS version 313 on purpose: from 315
 onwards Oracle expects the extended Connect format (see "TNS Version >= 315" above), which
