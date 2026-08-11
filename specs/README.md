@@ -7,9 +7,17 @@ Something like that: [#4](https://github.com/fclairamb/dbbat/issues/4)
 ## Layout and naming
 
 ```
+specs/ideas/YYYY-MM-DD-NN-short-kebab-name.md   # not queued — needs a design pass
 specs/todos/YYYY-MM-DD-NN-short-kebab-name.md   # queued, in execution order
 specs/done/YYYY/MM/YYYY-MM-DD-NN-short-kebab-name.md   # implemented
 ```
+
+`specs/ideas/` holds work that is wanted but **not ready to be picked up**:
+the design choice is still open, the scope is bigger than a spec, or it moves a
+trust boundary and deserves its own pass. Automation that implements the
+backlog reads `specs/todos/` only, so parking a spec in `ideas/` takes it out
+of the queue without discarding the thinking already in it. Promote it by
+moving it back to `specs/todos/` with a fresh `NN`.
 
 `NN` is a two-digit **execution order** within the date. Sorting the directory
 by name therefore sorts the backlog by "what to do first": oldest date first,
