@@ -6,6 +6,9 @@ import {
   useUpdateUser,
   useUserGroups,
   useDeleteUser,
+  useSsoRoleMapping,
+  useLastRoleSyncs,
+  type AuditEvent,
   type User,
 } from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
@@ -18,10 +21,16 @@ import {
   canDeleteUser,
   canResetPassword,
   canUpdateUser,
+  canViewAudit,
   getDisabledReason,
   getActionTooltip,
   type UserRole,
 } from "@/lib/permissions";
+import {
+  LastRoleSync,
+  ManagedRoleBadge,
+  ManagedRoleMarker,
+} from "@/components/shared/SsoRoleSync";
 import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
@@ -76,6 +85,42 @@ function UsersPage() {
   const adminCount =
     users?.filter((u) => u.roles?.includes("admin")).length ?? 0;
 
+  // Roles the identity provider owns. Editing one here is temporary: the next
+  // login re-resolves it from directory groups, so the page says so up front.
+  const { data: roleMapping } = useSsoRoleMapping();
+  const managedRoles = new Set<string>(
+    roleMapping?.enabled ? roleMapping.roles : [],
+  );
+
+  // The audit list is admin-or-viewer; anyone else would just collect a 403.
+  const { data: lastSyncs } = useLastRoleSyncs({
+    enabled: canViewAudit(user?.roles),
+  });
+
+  // Show the column when the mapping is live, and also when it is not but the
+  // store still holds syncs — a mapping switched off does not unmake history.
+  const showSyncColumn =
+    (roleMapping?.enabled ?? false) || (lastSyncs?.size ?? 0) > 0;
+
+  const syncColumn: Column<User> = {
+    key: "last_synced",
+    header: "SSO sync",
+    cell: (u) => {
+      const event = lastSyncs?.get(u.uid);
+      if (!event) {
+        return <span className="text-muted-foreground">Never</span>;
+      }
+      return (
+        <span
+          className="text-sm text-muted-foreground"
+          data-testid={`last-sync-${u.username}`}
+        >
+          {formatDistanceToNow(new Date(event.created_at), { addSuffix: true })}
+        </span>
+      );
+    },
+  };
+
   const columns: Column<User>[] = [
     {
       key: "username",
@@ -86,11 +131,14 @@ function UsersPage() {
       key: "roles",
       header: "Roles",
       cell: (u) => (
-        <div className="flex gap-1 flex-wrap">
+        <div className="flex gap-1 flex-wrap items-center">
           {u.roles?.map((role) => (
-            <Badge key={role} variant={role === "admin" ? "default" : "secondary"}>
-              {role}
-            </Badge>
+            <span key={role} className="inline-flex items-center gap-1">
+              <Badge variant={role === "admin" ? "default" : "secondary"}>
+                {role}
+              </Badge>
+              {managedRoles.has(role) && <ManagedRoleMarker role={role} />}
+            </span>
           ))}
         </div>
       ),
@@ -114,6 +162,7 @@ function UsersPage() {
         </span>
       ),
     },
+    ...(showSyncColumn ? [syncColumn] : []),
     {
       key: "actions",
       header: "",
@@ -231,6 +280,8 @@ function UsersPage() {
             isLastAdmin={
               (editUser.roles?.includes("admin") ?? false) && adminCount <= 1
             }
+            managedRoles={managedRoles}
+            lastRoleSync={lastSyncs?.get(editUser.uid)}
             onClose={() => setEditUser(null)}
           />
         </Dialog>
@@ -268,12 +319,15 @@ function RoleCheckboxes({
   onChange,
   lockedRole,
   lockedReason,
+  managedRoles,
 }: {
   idPrefix: string;
   roles: UserRole[];
   onChange: (roles: UserRole[]) => void;
   lockedRole?: UserRole;
   lockedReason?: string;
+  /** Roles the directory owns; badged, but still editable (temporarily). */
+  managedRoles?: Set<string>;
 }) {
   const toggleRole = (value: UserRole, checked: boolean) => {
     const next = checked
@@ -306,6 +360,9 @@ function RoleCheckboxes({
             >
               {role.label}
             </Label>
+            {managedRoles?.has(role.value) && (
+              <ManagedRoleBadge role={role.value} />
+            )}
           </div>
         );
 
@@ -404,15 +461,20 @@ function EditUserDialog({
   user: targetUser,
   currentUserUid,
   isLastAdmin,
+  managedRoles,
+  lastRoleSync,
   onClose,
 }: {
   user: User;
   currentUserUid?: string;
   isLastAdmin: boolean;
+  managedRoles: Set<string>;
+  lastRoleSync?: AuditEvent;
   onClose: () => void;
 }) {
   const [roles, setRoles] = useState<UserRole[]>(toUserRoles(targetUser.roles));
   const [confirmSelfDemote, setConfirmSelfDemote] = useState(false);
+  const [confirmManagedRoles, setConfirmManagedRoles] = useState(false);
   // The groups listing carries membership, so we can seed the selection
   // without a second per-user round-trip.
   const { data: groups = [] } = useUserGroups();
@@ -436,17 +498,37 @@ function EditUserDialog({
   const isSelfDemotion =
     targetUser.uid === currentUserUid && wasAdmin && !roles.includes("admin");
 
+  // Which directory-owned roles this edit moves. Saving them is allowed — an
+  // admin may legitimately want the change until the next login — but it is
+  // temporary, and that has to be said before the request goes out.
+  const touchedManagedRoles = ROLE_OPTIONS.map((o) => o.value).filter(
+    (role) =>
+      managedRoles.has(role) &&
+      roles.includes(role) !== (targetUser.roles?.includes(role) ?? false),
+  );
+
   const submit = () => {
     updateUser.mutate({ roles, user_group_uids: selectedGroupUids });
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  // Self-demotion is the second gate rather than the first: the SSO warning is
+  // about the change not lasting, and there is no point confirming a lockout
+  // for an edit the operator abandons once they learn it will be reverted.
+  const confirmSelfDemotionOrSubmit = () => {
     if (isSelfDemotion) {
       setConfirmSelfDemote(true);
       return;
     }
     submit();
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (touchedManagedRoles.length > 0) {
+      setConfirmManagedRoles(true);
+      return;
+    }
+    confirmSelfDemotionOrSubmit();
   };
 
   return (
@@ -476,7 +558,9 @@ function EditUserDialog({
               onChange={setRoles}
               lockedRole={isLastAdmin ? "admin" : undefined}
               lockedReason="Cannot remove the admin role from the last administrator"
+              managedRoles={managedRoles}
             />
+            {lastRoleSync && <LastRoleSync event={lastRoleSync} />}
             <div className="space-y-2">
               <Label>Groups</Label>
               <p className="text-xs text-muted-foreground">
@@ -507,6 +591,42 @@ function EditUserDialog({
           </DialogFooter>
         </form>
       </DialogContent>
+
+      <AlertDialog
+        open={confirmManagedRoles}
+        onOpenChange={setConfirmManagedRoles}
+      >
+        <AlertDialogContent data-testid="edit-user-managed-roles-dialog">
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              This change will be undone at the next login
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {touchedManagedRoles.length === 1
+                ? `The "${touchedManagedRoles[0]}" role is`
+                : `The ${touchedManagedRoles
+                    .map((r) => `"${r}"`)
+                    .join(" and ")} roles are`}{" "}
+              managed by your identity provider: it resolves them from
+              directory group membership every time "{targetUser.username}"
+              signs in. Saving here changes them now, but the next SSO login
+              will put them back the way the directory says. To make this
+              stick, change the user's group membership in the directory.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel data-testid="edit-user-managed-roles-cancel">
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={confirmSelfDemotionOrSubmit}
+              data-testid="edit-user-managed-roles-confirm"
+            >
+              Save anyway
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={confirmSelfDemote} onOpenChange={setConfirmSelfDemote}>
         <AlertDialogContent data-testid="edit-user-demote-self-dialog">
