@@ -94,10 +94,21 @@ func (s *Store) CloseConnection(ctx context.Context, uid uuid.UUID) error {
 		}
 
 		if mac != nil {
+			// Never move the stamp backwards — see stampChainHeadBatch for why
+			// a regression can only mean a trailing deletion. It matters here
+			// too because a live session may already carry a refresh stamp: seq
+			// is this process's own head, authoritative when it served the
+			// session but read back from the database when it did not (a
+			// replica closing a session it did not open, a store restarted
+			// mid-session). Every SET expression sees the pre-update row, so
+			// the three stay consistent.
 			q = q.
-				Set("query_chain_mac = ?", s.queryChainStampMAC(uid, queryChainStampKeyed, seq, mac)).
-				Set("query_chain_len = ?", seq).
-				Set("query_chain_stamp_version = ?", queryChainStampKeyed)
+				Set("query_chain_mac = CASE WHEN ?::bigint >= query_chain_len THEN ?::bytea "+
+					"ELSE query_chain_mac END",
+					seq, s.queryChainStampMAC(uid, queryChainStampKeyed, seq, mac)).
+				Set("query_chain_stamp_version = CASE WHEN ?::bigint >= query_chain_len THEN ?::smallint "+
+					"ELSE query_chain_stamp_version END", seq, queryChainStampKeyed).
+				Set("query_chain_len = GREATEST(query_chain_len, ?::bigint)", seq)
 		}
 	}
 
@@ -594,12 +605,24 @@ func (s *Store) stampChainHeadBatch(
 		return 0, nil
 	}
 
+	// v.len >= c.query_chain_len: the stamp never moves backwards.
+	//
+	// Chain positions only ever grow, and retention removes the *oldest*
+	// statements, so it cannot lower a connection's highest chain_seq without
+	// removing every one of them (in which case there is no head here to stamp
+	// with and the row is skipped above). A recovered head that is lower than a
+	// stamp already on the row therefore means statements were deleted from the
+	// end — and overwriting the older, higher stamp with it would bless exactly
+	// that. This is not hypothetical: a live session carries a refresh stamp
+	// from the last sweep, and if its process then crashes the reconcile is the
+	// next writer. Leaving the higher stamp is what makes verification report
+	// the break instead.
 	stamp := `UPDATE connections AS c
 		   SET query_chain_mac = v.mac,
 		       query_chain_len = v.len,
 		       query_chain_stamp_version = v.version
 		  FROM (VALUES ` + strings.Join(values, ", ") + `) AS v (uid, mac, len, version)
-		 WHERE c.uid = v.uid`
+		 WHERE c.uid = v.uid AND v.len >= c.query_chain_len`
 
 	if guard != stampAnyState {
 		stamp += " AND " + guard

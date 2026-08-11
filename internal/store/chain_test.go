@@ -2295,3 +2295,97 @@ func TestQueryChainRefreshCostScalesWithOpenSessions(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(open), stamped)
 }
+
+// TestQueryChainStampNeverMovesBackwards is the interaction the refresh sweep
+// creates between the three stamp writers. A live session now carries a stamp
+// from the last sweep; if its process then crashes, the reconcile is the next
+// writer and recovers the head from whatever is left in the database. Someone
+// who deleted the tail in between would otherwise get the reconcile to
+// overwrite the sweep's higher stamp with their truncated one — laundering
+// exactly the deletion the stamp exists to catch.
+//
+// Retention cannot lower a connection's highest chain_seq without removing
+// every statement (in which case there is no head to stamp with at all), so a
+// recovered head below the stored stamp has only one meaning.
+func TestQueryChainStampNeverMovesBackwards(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, queries := createOrphanedChainConnection(t, ctx, store, "no-regress", 5)
+
+	// The sweep that stamped it ran as the process that owned the session.
+	asRun(t, store, "dead-instance-no-regress", "dead-run-no-regress", func() {
+		stamped, err := store.RefreshOpenChainStamps(ctx)
+		require.NoError(t, err)
+		require.Equal(t, int64(1), stamped)
+	})
+
+	swept, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Equal(t, int64(5), swept.QueryChainLen)
+
+	// The process crashes, and the tail is deleted before anyone notices.
+	_, err = store.db.ExecContext(ctx,
+		`DELETE FROM queries WHERE uid IN (?, ?)`, queries[3].UID, queries[4].UID)
+	require.NoError(t, err)
+
+	store.SetInstanceID("live-instance")
+	store.SetRunID("live-run")
+	require.NoError(t, store.RegisterInstance(ctx))
+
+	reclaimed, err := store.ReclaimDeadInstanceConnections(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), reclaimed)
+
+	closed, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, closed.DisconnectedAt, "the reconcile must still close the row")
+	require.Equal(t, int64(5), closed.QueryChainLen,
+		"the reconcile must not lower a stamp the sweep already wrote")
+	require.Equal(t, swept.QueryChainMAC, closed.QueryChainMAC)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "the reconcile must not launder a deletion the sweep had sealed")
+	require.Contains(t, result.Break.Reason, "removed from the end")
+}
+
+// TestQueryChainCloseDoesNotLowerASweptStamp is the same invariant on the clean
+// teardown path. CloseConnection normally stamps from the head this process
+// holds in memory, which is authoritative — but it falls back to the database
+// when this process never wrote to the chain (a replica closing a session
+// another opened, a store restarted mid-session), and that fallback sees only
+// what survives.
+func TestQueryChainCloseDoesNotLowerASweptStamp(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, queries := createChainTestConnection(t, ctx, store, "close-no-regress", 5)
+
+	_, err := store.RefreshOpenChainStamps(ctx)
+	require.NoError(t, err)
+
+	_, err = store.db.ExecContext(ctx,
+		`DELETE FROM queries WHERE uid IN (?, ?)`, queries[3].UID, queries[4].UID)
+	require.NoError(t, err)
+
+	// Drop the in-process head so the close takes the database fallback, as a
+	// replica that did not serve this session would.
+	store.queryChains.forget(conn.UID)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	closed, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, closed.DisconnectedAt)
+	require.Equal(t, int64(5), closed.QueryChainLen, "the close must not lower the swept stamp")
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break)
+	require.Contains(t, result.Break.Reason, "removed from the end")
+}
