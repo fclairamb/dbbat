@@ -1643,12 +1643,12 @@ export interface paths {
          *     long-lived session. That is expected housekeeping, not tampering, and
          *     everything after the truncation is still verified.
          *
-         *     `legacy_stamps` counts sessions still carrying the pre-0.24 head stamp,
-         *     which is a verbatim copy of the last statement's MAC and therefore
-         *     forgeable by anyone who can write to the store. Those chains verified;
-         *     what is missing is a keyed confirmation that nothing was removed from
-         *     their end. Sessions closed by this build are sealed, so the number
-         *     drains as the old ones age out.
+         *     A session still carrying the pre-0.24 head stamp — a verbatim copy of
+         *     the last statement's MAC, forgeable by anyone who can write to the
+         *     store — is a **break** since 0.24, reported as a tail that cannot be
+         *     verified. There is no counter for those sessions here: the offline
+         *     `dbbat audit verify --queries --allow-legacy-stamps` is what tolerates
+         *     and counts them while a store upgraded from 0.23.x ages them out.
          *
          *     The same caveats as `GET /audit/verify` apply: an answer from the
          *     server is only as trustworthy as the server, and it is cached, so it
@@ -1687,8 +1687,8 @@ export interface paths {
          *     missing its oldest rows: retention deletes whole queries (and whole
          *     connections) rather than individual captured rows, so there is no
          *     `chains_with_truncated_prefix` counterpart here — a first row that does
-         *     not follow the capture's genesis is a break. There is no
-         *     `legacy_stamps` counterpart either: a capture's head stamp has always
+         *     not follow the capture's genesis is a break. Nor is there any
+         *     unkeyed-stamp population to report: a capture's head stamp has always
          *     been a keyed MAC, never a copy of the head.
          *
          *     `unverifiable_pre_migration_rows` counts rows captured before the row
@@ -3556,17 +3556,6 @@ export interface components {
              *     truncation is still verified.
              */
             chains_with_truncated_prefix: number;
-            /**
-             * Format: int64
-             * @description Sessions whose head stamp predates 0.24 and is a verbatim copy of
-             *     the last statement's MAC rather than a keyed seal. Anyone who can
-             *     write to the store can write that value, so those chains verified
-             *     but nothing keyed vouches for their *tail*. Not a failure: the
-             *     number drains as pre-upgrade sessions age out of retention, and
-             *     every session closed since is sealed. A number that stops falling
-             *     — or rises — is worth investigating.
-             */
-            legacy_stamps: number;
             /**
              * Format: int64
              * @description Chain position the walk ended on. Reported only for a
