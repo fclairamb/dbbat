@@ -130,9 +130,11 @@ following exists today:
   detecting a wholesale truncate-and-re-seal requires you to **record the head
   MAC outside the database**; and the key itself is only as protected as the
   host. Two edges around the *end* of a chain are worth stating precisely,
-  because they are where the guarantee is weakest: a session or a capture whose
-  DBBat process died without finishing carries no head stamp at all, so
-  deletions from its end are not detectable; and sessions closed by DBBat
+  because they are where the guarantee is weakest: a capture whose DBBat process
+  died without finishing carries no head stamp at all, so deletions from its end
+  are not detectable, and a session that is still open — or that was killed with
+  its process — is sealed only as far as the last periodic stamp sweep reached,
+  so statements run since that sweep are in the same position; and sessions closed by DBBat
   **before 0.24** carry a head stamp that is a plain copy of the last
   statement's MAC — readable from the history itself — so on those, deleting the
   last statements and rewriting the stamp to match is **not** detected and needs
