@@ -500,16 +500,28 @@ never runs them. CI does run `go vet -tags integration ./...` so the tagged buil
 silently — but that only compiles them.
 
 ```bash
-# default image: gvenzl/oracle-xe:18.4.0-slim (amd64 only)
-go test -tags integration ./internal/proxy/oracle/
+# default image: gvenzl/oracle-free:23-slim (Oracle 23ai Free; amd64 + arm64)
+make test-e2e-oracle
 
-# on Apple Silicon, use the Free image — it has an arm64 build
-ORACLE_TEST_IMAGE=gvenzl/oracle-free:23-slim go test -tags integration -timeout 40m ./internal/proxy/oracle/
+# pin the older 18c XE image — amd64 only, does not boot on Apple Silicon
+ORACLE_TEST_IMAGE=gvenzl/oracle-xe:18.4.0-slim go test -tags integration -timeout 40m ./internal/proxy/oracle/
 ```
+
+The default is the 23ai Free image on **every host and in every environment**:
+it has an arm64 build, and 23ai is the version the proxy work is validated
+against (see the client-compatibility table below). The previous default,
+`gvenzl/oracle-xe:18.4.0-slim`, is published for `linux/amd64` only and dies
+during instance startup under emulation on Apple Silicon (ORA-27300 /
+ORA-00442, surfacing as ORA-00442 / exit 186), which made the whole suite
+useless on an M-series Mac.
+
+18c XE coverage is **not** dropped, it is pinned: `.github/workflows/integration.yml`
+runs the Oracle suite twice on `ubuntu-24.04` — once on the suite default, and
+once with `ORACLE_TEST_IMAGE=gvenzl/oracle-xe:18.4.0-slim`.
 
 | Variable | Purpose |
 |----------|---------|
-| `ORACLE_TEST_IMAGE` | Container image to start (default `gvenzl/oracle-xe:18.4.0-slim`) |
+| `ORACLE_TEST_IMAGE` | Container image to start (default `gvenzl/oracle-free:23-slim`) |
 | `ORACLE_TEST_SERVICE` | PDB service name; inferred from the image otherwise (`XEPDB1` for XE, `FREEPDB1` for Free, `ORCLPDB1` for enterprise) |
 
 Note that `buildTNSConnect` in the test file announces TNS version 313 on purpose: from 315
