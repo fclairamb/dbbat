@@ -169,6 +169,48 @@ test.describe("Servers Management", () => {
     });
   });
 
+  test("a Kubernetes cluster can be created without pasting a CA bundle", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("servers");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const sshSection = authenticatedPage.getByTestId("ssh-servers-section");
+    await expect(sshSection).toBeVisible();
+
+    const name = `e2e-cluster-${Date.now()}`;
+
+    await authenticatedPage.getByTestId("add-database-button").click();
+    await authenticatedPage.getByTestId("protocol-select").click();
+    await authenticatedPage.getByTestId("protocol-option-kubernetes").click();
+
+    await authenticatedPage.getByTestId("database-name-input").fill(name);
+    await authenticatedPage.locator("#host").fill("api.cluster.example.com");
+    await authenticatedPage.locator("#port").fill("6443");
+    await authenticatedPage.locator("#username").fill("dbbat");
+    await authenticatedPage.locator("#password").fill("sa-token");
+    await authenticatedPage.getByTestId("k8s-namespace-input").fill("data");
+
+    // The CA textarea is deliberately left empty: the row takes a
+    // trust-on-first-use pin instead, so the form must not block on it.
+    const caInput = authenticatedPage.getByTestId("k8s-ca-cert-input");
+    await expect(caInput).toBeVisible();
+    await expect(caInput).not.toHaveAttribute("required", /.*/);
+
+    await authenticatedPage.getByTestId("database-create-submit").click();
+
+    const row = sshSection.locator("tr", { hasText: name });
+    await expect(row).toBeVisible({ timeout: 10000 });
+
+    // Nothing is pinned yet, and this is *not* the insecure escape hatch.
+    await expect(
+      row.locator('[data-testid^="tunnel-insecure-badge-"]')
+    ).toHaveCount(0);
+    await expect(
+      row.locator('[data-testid^="tunnel-ca-pinned-badge-"]')
+    ).toHaveCount(0);
+  });
+
   test("testing an unreachable SSH bastion reports the failing stage", async ({
     authenticatedPage,
   }) => {
