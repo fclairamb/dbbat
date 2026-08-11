@@ -224,7 +224,17 @@ func TestKubernetesTunnelConnCloseIsIdempotent(t *testing.T) {
 		t.Fatalf("DialPod() error = %v", err)
 	}
 
+	// A healthy teardown reports nothing. This is not a formality: the
+	// connectivity check's probes end with `return up.Close()`, so a Close that
+	// invents an error turns every reachable database behind a cluster row into
+	// "the database handshake failed". Resetting the stream and then closing it
+	// did exactly that — spdystream answers "Write on closed stream" to a Close
+	// that follows a Reset.
 	first := conn.Close()
+	if first != nil {
+		t.Errorf("Close() = %v, want nil for a healthy port-forward conn", first)
+	}
+
 	if second := conn.Close(); !errors.Is(second, first) {
 		t.Errorf("second Close() = %v, want the first result %v", second, first)
 	}
