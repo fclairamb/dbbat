@@ -117,6 +117,12 @@ const (
 	CodeK8sTargetNotFound Code = "k8s_target_not_found"
 	// CodeK8sTargetNotReady means the target exists but no ready pod backs it.
 	CodeK8sTargetNotReady Code = "k8s_target_not_ready"
+	// CodeK8sCAPinMismatch means the API server's certificate is not vouched
+	// for by the CA dbbat pinned on first connect. Distinct from a plain
+	// handshake failure because there *was* a working connect: this is the
+	// cluster CA rotating, or somebody in the middle, and only an operator can
+	// tell which.
+	CodeK8sCAPinMismatch Code = "k8s_ca_pin_mismatch"
 	// CodeInternal is an unclassified failure.
 	CodeInternal Code = "internal_error"
 )
@@ -139,6 +145,14 @@ type Result struct {
 	// KnownHostKey is the bastion's public host key after the check. Public
 	// challenge material, safe to return.
 	KnownHostKey string `json:"ssh_known_host_key,omitempty"`
+	// CAPinned is the Kubernetes counterpart of HostKeyPinned: true when this
+	// check performed the TOFU pin (first successful connect to a cluster row
+	// that supplied no CA bundle and had learned none yet).
+	CAPinned bool `json:"k8s_ca_pinned,omitempty"`
+	// LearnedCACert is the cluster's TOFU-learned CA bundle after the check.
+	// Public challenge material, like the host key; empty when the row supplied
+	// its own bundle, which always wins.
+	LearnedCACert string `json:"k8s_learned_ca_cert,omitempty"`
 	// DurationMs is how long the whole check took.
 	DurationMs int64 `json:"duration_ms"`
 }

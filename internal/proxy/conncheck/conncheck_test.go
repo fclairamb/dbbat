@@ -689,7 +689,7 @@ func TestCheck_NeverLeaksSecrets(t *testing.T) {
 		"unreachable": {unreachable, pk},
 	} {
 		res := checker.Check(context.Background(), tc.srv)
-		blob := string(res.Stage) + string(res.Code) + res.Message + res.KnownHostKey
+		blob := string(res.Stage) + string(res.Code) + res.Message + res.KnownHostKey + res.LearnedCACert
 
 		if strings.Contains(blob, "PRIVATE KEY") {
 			t.Errorf("%s: result leaked PEM private-key material: %q", name, blob)
