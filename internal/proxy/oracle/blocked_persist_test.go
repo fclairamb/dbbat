@@ -5,12 +5,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/fclairamb/dbbat/internal/cache"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -127,11 +130,351 @@ func TestBlockedCursorReexecution_IsPersisted(t *testing.T) {
 	recorder.assertNoFurtherCreate(t)
 }
 
+// exhaustedGrant returns a grant whose max_query_counts is already spent.
+func exhaustedGrant(controls ...string) *store.Grant {
+	maxQueries := int64(3)
+
+	return &store.Grant{
+		QueryCount: 3,
+		Definition: &store.GrantDefinition{MaxQueryCounts: &maxQueries, Controls: controls},
+	}
+}
+
+// piggybackExecSelect1 is a real captured piggyback execute-with-SQL frame
+// (func=0x03, sub=0x5e) carrying SELECT 1 FROM DUAL — the same fixture
+// TestDecodePiggybackExecSQL decodes. There is no builder for this op, and a
+// hand-rolled one would only prove the builder agrees with itself.
+func piggybackExecSelect1(t *testing.T) []byte {
+	t.Helper()
+
+	payload, err := hexDecode("035e030280610001011201010d0000000102047fffffff000000000000000000000" +
+		"0010000000000000000000000000000001253454c45435420312046524f4d204455414c0101000000000000010100")
+	require.NoError(t, err)
+
+	return payload
+}
+
+// TestQuotaRefusals_ArePersisted is spec
+// 2026-08-10-09-oracle-quota-refusals-not-recorded: a statement Oracle refused
+// because the grant's quota was exhausted used to leave nothing behind but a
+// log line, while a statement refused by read_only wrote a row. The quota check
+// ran in gateStatement, ahead of the decode, so there was no SQL to record it
+// against; it now runs inside each handler and refuses through the same
+// recorder every control refusal uses.
+//
+// Every gated op is covered, because they decode independently: the three that
+// carry their own SQL, and the three re-execution frames that borrow it from
+// the cursor.
+func TestQuotaRefusals_ArePersisted(t *testing.T) {
+	t.Parallel()
+
+	const sql = "SELECT 1 FROM DUAL"
+
+	tests := []struct {
+		name   string
+		refuse func(t *testing.T, s *session) error
+	}{
+		{
+			name:   "legacy OALL8",
+			refuse: func(_ *testing.T, s *session) error { return s.handleOALL8(buildOALL8(sql, nil, 7)) },
+		},
+		{
+			name:   "v315+ piggyback exec",
+			refuse: func(t *testing.T, s *session) error { return s.handlePiggybackExec(piggybackExecSelect1(t)) },
+		},
+		{
+			name:   "JDBC thin exec",
+			refuse: func(_ *testing.T, s *session) error { return s.handleJDBCExec(buildJDBCExec(sql)) },
+		},
+		{
+			name: "OFETCH re-execution",
+			refuse: func(_ *testing.T, s *session) error {
+				s.tracker.cursors[5] = &trackedCursor{cursorID: 5, sql: sql, parsedAt: time.Now()}
+
+				return s.handleOFETCH(buildOFETCH(5, 100))
+			},
+		},
+		{
+			name: "piggyback re-execution",
+			refuse: func(_ *testing.T, s *session) error {
+				s.tracker.cursors[6] = &trackedCursor{cursorID: 6, sql: sql, parsedAt: time.Now()}
+
+				return s.handlePiggybackReexec(buildPiggybackReexec(6))
+			},
+		},
+		{
+			name: "SQL-less OALL8 re-execution",
+			refuse: func(_ *testing.T, s *session) error {
+				s.tracker.cursors[9] = &trackedCursor{cursorID: 9, sql: sql, parsedAt: time.Now()}
+
+				return s.handleOALL8(buildOALL8Reexec(9))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := newTestSession(exhaustedGrant())
+			recorder := newRecordingCompletionStore()
+			s.completionStore = recorder
+
+			require.ErrorIs(t, tt.refuse(t, s), ErrQueryLimitExceed, "the statement must be refused")
+
+			got := recorder.awaitCreated(t)
+			assertBlockedOracleRow(t, got, sql, "query limit exceeded")
+			assert.Equal(t, s.connectionUID, got.ConnectionID,
+				"a refusal row must still be attributed to the connection")
+
+			assert.Nil(t, s.tracker.pendingQuery,
+				"a statement refused over quota must not be tracked as in flight")
+			recorder.assertNoFurtherCreate(t)
+		})
+	}
+}
+
+// TestQuotaRefusalReasons_ArePersisted covers the rest of what checkQuotas
+// refuses: the byte cap, and the two reasons the goal statement calls out
+// explicitly — a grant that expired or was revoked mid-session. All four write
+// the same row shape, because all four travel the same path.
+func TestQuotaRefusalReasons_ArePersisted(t *testing.T) {
+	t.Parallel()
+
+	const sql = "SELECT 1 FROM DUAL"
+
+	maxBytes := int64(1000)
+
+	tests := []struct {
+		name    string
+		session func() *session
+		wantErr error
+		wantMsg string
+	}{
+		{
+			name:    "max_query_counts spent",
+			session: func() *session { return newTestSession(exhaustedGrant()) },
+			wantErr: ErrQueryLimitExceed,
+			wantMsg: "query limit exceeded",
+		},
+		{
+			name: "max_bytes_transferred spent",
+			session: func() *session {
+				return newTestSession(&store.Grant{
+					BytesTransferred: 1000,
+					Definition:       &store.GrantDefinition{MaxBytesTransferred: &maxBytes},
+				})
+			},
+			wantErr: ErrDataLimitExceed,
+			wantMsg: "data transfer limit exceeded",
+		},
+		{
+			name: "the grant expired mid-session",
+			session: func() *session {
+				return newTestSession(&store.Grant{
+					ExpiresAt:  time.Now().Add(-time.Minute),
+					Definition: &store.GrantDefinition{},
+				})
+			},
+			wantErr: shared.ErrGrantExpired,
+			wantMsg: "grant expired",
+		},
+		{
+			name: "the grant was revoked mid-session",
+			session: func() *session {
+				grant := &store.Grant{
+					UID:        uuid.New(),
+					ExpiresAt:  time.Now().Add(time.Hour),
+					Definition: &store.GrantDefinition{},
+				}
+				registry := cache.NewRevocationRegistry()
+
+				s := newTestSession(grant)
+				s.revocation = registry.Register(grant.UID)
+				registry.Revoke(grant.UID)
+
+				return s
+			},
+			wantErr: shared.ErrGrantRevoked,
+			wantMsg: "grant revoked",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := tt.session()
+			recorder := newRecordingCompletionStore()
+			s.completionStore = recorder
+
+			require.ErrorIs(t, s.handleOALL8(buildOALL8(sql, nil, 7)), tt.wantErr)
+
+			assertBlockedOracleRow(t, recorder.awaitCreated(t), sql, tt.wantMsg)
+			recorder.assertNoFurtherCreate(t)
+		})
+	}
+}
+
+// TestQuotaRefusal_DecodeFailureIsStillForwarded is the first of the three
+// invariants the move had to preserve. Oracle's fail-behaviour on an
+// undecodable payload is forward-don't-block (the caveat in docs/approvals.md),
+// and the quota check now sits *behind* the decode — so a frame dbbat cannot
+// read must still travel untouched, exhausted grant or not, rather than
+// becoming a refusal the client never used to get.
+func TestQuotaRefusal_DecodeFailureIsStillForwarded(t *testing.T) {
+	t.Parallel()
+
+	// A well-formed OALL8 truncated mid-SQL: everything up to the length parses,
+	// the text does not.
+	truncatedOALL8 := buildOALL8("SELECT 1 FROM DUAL", nil, 7)
+	truncatedOALL8 = truncatedOALL8[:20]
+
+	tests := []struct {
+		name    string
+		forward func(s *session) error
+	}{
+		{
+			name:    "legacy OALL8",
+			forward: func(s *session) error { return s.handleOALL8(truncatedOALL8) },
+		},
+		{
+			name:    "v315+ piggyback exec",
+			forward: func(s *session) error { return s.handlePiggybackExec([]byte{0x03, 0x5e, 0x01}) },
+		},
+		{
+			name:    "JDBC thin exec",
+			forward: func(s *session) error { return s.handleJDBCExec([]byte{0x11, 0x69}) },
+		},
+		{
+			name:    "piggyback re-execution",
+			forward: func(s *session) error { return s.handlePiggybackReexec([]byte{0x03}) },
+		},
+		{
+			name:    "OFETCH",
+			forward: func(s *session) error { return s.handleOFETCH([]byte{0x11}) },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := newTestSession(exhaustedGrant())
+			recorder := newRecordingCompletionStore()
+			s.completionStore = recorder
+
+			require.NoError(t, tt.forward(s),
+				"an undecodable frame is forwarded, never turned into a quota refusal")
+			recorder.assertNoFurtherCreate(t)
+		})
+	}
+}
+
+// TestQuotaRefusal_IsNeverParkedOnAHuman is the second invariant: the quota
+// check has to stay ahead of the approval hold. A statement that matches an
+// approval pattern *and* exceeds the quota is refused outright — parking it
+// would ask a human to release something the grant can no longer pay for, and
+// block the client until they answered.
+func TestQuotaRefusal_IsNeverParkedOnAHuman(t *testing.T) {
+	t.Parallel()
+
+	s, fake, _ := gatedTestSession([]string{"(?i)^select"})
+
+	recorder := newRecordingCompletionStore()
+	s.completionStore = recorder
+
+	maxQueries := int64(1)
+	s.grant.QueryCount = 1
+	s.grant.Definition.MaxQueryCounts = &maxQueries
+
+	const sql = "SELECT 1 FROM DUAL"
+
+	require.ErrorIs(t, s.handleOALL8(buildOALL8(sql, nil, 7)), ErrQueryLimitExceed)
+
+	assertBlockedOracleRow(t, recorder.awaitCreated(t), sql, "query limit exceeded")
+	assert.Empty(t, fake.held(), "an over-quota statement must never be parked on a human")
+
+	// The pattern still holds a statement the grant can pay for, so the test is
+	// not passing because the gate is simply inert.
+	s.grant.QueryCount = 0
+
+	go func() { _ = s.handleOALL8(buildOALL8(sql, nil, 8)) }()
+
+	awaitHeld(t, fake, 1)
+}
+
+// TestQuotaRefusal_NeverTouchesTheContinuationFetch is the third invariant. A
+// fetch continuing a result set already streaming reaches no gate at all —
+// refusing (or recording) mid-result-set is exactly what the early return in
+// handleOFETCH exists to prevent, and moving the quota check into the handlers
+// must not leak one onto that path.
+func TestQuotaRefusal_NeverTouchesTheContinuationFetch(t *testing.T) {
+	t.Parallel()
+
+	s := newTestSession(exhaustedGrant())
+	recorder := newRecordingCompletionStore()
+	s.completionStore = recorder
+
+	cursor := &trackedCursor{cursorID: 5, sql: "SELECT * FROM emp", parsedAt: time.Now()}
+	s.tracker.cursors[5] = cursor
+	s.tracker.pendingQuery = &pendingOracleQuery{cursor: cursor, startTime: time.Now()}
+
+	require.NoError(t, s.handleOFETCH(buildOFETCH(5, 100)),
+		"a fetch continuing a query in flight is never re-gated, quota included")
+	assert.Equal(t, cursor, s.tracker.pendingQuery.cursor, "the in-flight query is untouched")
+	recorder.assertNoFurtherCreate(t)
+}
+
+// TestQuotaRefusal_UnknownCursorAnswersFirst pins the ordering the spec
+// resolved deliberately: on a re-execution, the cursor is resolved before the
+// quota is consulted.
+//
+// A cursor dbbat never saw parsed keeps answering refuseUnknownCursor even when
+// the grant is also exhausted — it is the more specific, fail-closed answer,
+// and hiding it behind a quota error would make it harder to diagnose. It
+// records nothing, because the statement it would have run is unknown. The
+// permissive half of refuseUnknownCursor forwards, and there the quota still
+// applies: an execution dbbat cannot identify is still an execution.
+func TestQuotaRefusal_UnknownCursorAnswersFirst(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a restrictive grant answers with the unknown cursor, not the quota", func(t *testing.T) {
+		t.Parallel()
+
+		s := newTestSession(exhaustedGrant(store.ControlReadOnly))
+		recorder := newRecordingCompletionStore()
+		s.completionStore = recorder
+
+		require.ErrorIs(t, s.handleOFETCH(buildOFETCH(404, 100)), ErrUnknownCursor)
+		recorder.assertNoFurtherCreate(t)
+	})
+
+	t.Run("a permissive grant over quota is still refused", func(t *testing.T) {
+		t.Parallel()
+
+		s := newTestSession(exhaustedGrant())
+		recorder := newRecordingCompletionStore()
+		s.completionStore = recorder
+
+		require.ErrorIs(t, s.handleOFETCH(buildOFETCH(404, 100)), ErrQueryLimitExceed,
+			"an untracked cursor must not become a way past the quota")
+		recorder.assertNoFurtherCreate(t)
+
+		// Under the cap the same fetch is forwarded, WARN and all.
+		s.grant.QueryCount = 0
+		require.NoError(t, s.handleOFETCH(buildOFETCH(404, 100)))
+	})
+}
+
 // TestBlockedStatement_IsAnOrdinaryChainAppend runs a refusal through the real
 // store rather than a recorder. Two things only a real store can prove: the
 // row lands in `queries` attributed to the session's connection, and — because
 // `queries` is HMAC-chained per connection — the refusal row is an ordinary
 // chain append that `dbbat audit verify --queries` still walks cleanly.
+//
+// Both refusal reasons are exercised, a control and the quota, because they
+// reach the recorder from different places in the handler.
 func TestBlockedStatement_IsAnOrdinaryChainAppend(t *testing.T) {
 	t.Parallel()
 
@@ -186,10 +529,42 @@ func TestBlockedStatement_IsAnOrdinaryChainAppend(t *testing.T) {
 	require.Len(t, persisted, 1)
 	assertBlockedOracleRow(t, &persisted[0], sql, "read-only")
 
+	// Now a quota refusal, on top of the control refusal already chained.
+	const overQuotaSQL = "SELECT 1 FROM DUAL"
+
+	maxQueries := int64(1)
+	s.grant.QueryCount = 1
+	s.grant.Definition.MaxQueryCounts = &maxQueries
+
+	require.ErrorIs(t, s.handleOALL8(buildOALL8(overQuotaSQL, nil, 4)), ErrQueryLimitExceed)
+
+	require.Eventually(t, func() bool {
+		queries, err := dataStore.ListQueries(ctx, store.QueryFilter{ConnectionID: &conn.UID, Limit: 10})
+		if err != nil || len(queries) < 2 {
+			return false
+		}
+
+		persisted = queries
+
+		return true
+	}, 10*time.Second, 50*time.Millisecond, "the over-quota statement never reached the store")
+
+	require.Len(t, persisted, 2)
+
+	var overQuota *store.Query
+
+	for i := range persisted {
+		if persisted[i].SQLText == overQuotaSQL {
+			overQuota = &persisted[i]
+		}
+	}
+
+	assertBlockedOracleRow(t, overQuota, overQuotaSQL, "query limit exceeded")
+
 	result, err := dataStore.VerifyQueryChain(ctx, conn.UID)
 	require.NoError(t, err)
 	assert.Nil(t, result.Break, "a refusal row must be a valid link in the connection's query chain")
-	assert.Equal(t, int64(1), result.Verified)
+	assert.Equal(t, int64(2), result.Verified)
 }
 
 // newOracleTestStore spins up a throwaway PostgreSQL store with the query
