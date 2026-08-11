@@ -247,7 +247,7 @@ func TestPinnableChainPEM(t *testing.T) {
 }
 
 // leafAndIssuer mints a CA and a non-CA leaf signed by it.
-func leafAndIssuer(t *testing.T) (leaf, ca *x509.Certificate) {
+func leafAndIssuer(t *testing.T) (*x509.Certificate, *x509.Certificate) {
 	t.Helper()
 
 	caKey, err := rsa.GenerateKey(rand.Reader, 2048)
@@ -270,7 +270,7 @@ func leafAndIssuer(t *testing.T) (leaf, ca *x509.Certificate) {
 		t.Fatalf("create ca: %v", err)
 	}
 
-	ca, err = x509.ParseCertificate(caDER)
+	ca, err := x509.ParseCertificate(caDER)
 	if err != nil {
 		t.Fatalf("parse ca: %v", err)
 	}
@@ -294,7 +294,7 @@ func leafAndIssuer(t *testing.T) (leaf, ca *x509.Certificate) {
 		t.Fatalf("create leaf: %v", err)
 	}
 
-	leaf, err = x509.ParseCertificate(leafDER)
+	leaf, err := x509.ParseCertificate(leafDER)
 	if err != nil {
 		t.Fatalf("parse leaf: %v", err)
 	}

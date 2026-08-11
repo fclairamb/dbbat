@@ -290,7 +290,7 @@ func LearnKubernetesCACert(ctx context.Context, cfg KubernetesConfig) (string, e
 		// Nothing to verify against yet — that is what "first use" means. The
 		// chain is captured below and becomes the thing every later connect is
 		// verified against.
-		InsecureSkipVerify: true, //nolint:gosec // TOFU: the presented chain is the material being learned.
+		InsecureSkipVerify: true,
 		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 			presented = rawCerts
 

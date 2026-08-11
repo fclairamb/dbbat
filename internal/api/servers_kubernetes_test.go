@@ -114,7 +114,7 @@ func TestCreateKubernetesServerRejectsIncompleteRows(t *testing.T) {
 	}
 }
 
-// TestCreateKubernetesServerAllowsOmittingTheCABundle is the behaviour change
+// TestCreateKubernetesServerAllowsOmittingTheCABundle is the behavior change
 // TOFU is built on: the CA bundle is no longer required, because a row that
 // supplies none learns one on first connect. Without this there is no "no CA
 // supplied" case for the pin to serve.
