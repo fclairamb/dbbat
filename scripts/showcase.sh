@@ -204,21 +204,133 @@ if [ "${demo_ready}" != "1" ]; then
 fi
 
 # --- demo-mode dbbat --------------------------------------------------------
+#
+# LISTENERS — the showcase dials exactly two of them: the PostgreSQL proxy and
+# the API. Every other listener dbbat knows about must be off. A throwaway
+# instance has no business binding :1522/:3307/:27018/:1434, and on a
+# developer's laptop those are already held by their own `make dev` stack — the
+# SQL Server listener, added to dbbat after this script was written, is exactly
+# how that broke: `dbbat exited during startup`, bind error buried in the log.
+#
+# So there is no denylist to forget to update. The *used* set is named once
+# below; the candidate set is discovered from internal/config at run time; and
+# everything in the candidate set that is not used is exported empty. A sixth
+# protocol is disabled the day it lands.
+
+SHOWCASE_LISTENERS_USED=(DBB_LISTEN_PG DBB_LISTEN_API)
+
+# Every DBB_LISTEN_* dbbat knows about, read off the config package. The
+# `koanf:"listen_x"` struct tags are the source of truth — envTransform() maps
+# DBB_<TAG> onto them — and any literal DBB_LISTEN_* spelled out in there is
+# unioned in, so neither spelling alone can be missed.
+discover_listener_vars() {
+  {
+    grep -rhoE 'koanf:"listen_[a-z0-9_]+"' internal/config/ 2>/dev/null \
+      | sed -E 's/^koanf:"(.*)"$/\1/' \
+      | tr '[:lower:]' '[:upper:]' \
+      | sed 's/^/DBB_/' || true
+    grep -rhoE 'DBB_LISTEN_[A-Z0-9_]+' internal/config/ 2>/dev/null || true
+  } | sort -u
+}
+
+SHOWCASE_LISTENER_VARS=()
+while IFS= read -r listener_var; do
+  if [ -n "${listener_var}" ]; then
+    SHOWCASE_LISTENER_VARS+=("${listener_var}")
+  fi
+done < <(discover_listener_vars)
+
+# Fail loudly rather than degrade silently: an empty (or incomplete) candidate
+# list would disable nothing and reintroduce the very bug this replaces.
+if [ "${#SHOWCASE_LISTENER_VARS[@]}" -eq 0 ]; then
+  die "no DBB_LISTEN_* listeners found in internal/config — the naming convention changed; fix discover_listener_vars() in scripts/showcase.sh before this run binds ports it never needed"
+fi
+for used in "${SHOWCASE_LISTENERS_USED[@]}"; do
+  if ! printf '%s\n' "${SHOWCASE_LISTENER_VARS[@]}" | grep -qx "${used}"; then
+    die "${used} is not among the listeners discovered in internal/config (found: ${SHOWCASE_LISTENER_VARS[*]}) — the DBB_LISTEN_* naming convention changed; fix discover_listener_vars() in scripts/showcase.sh"
+  fi
+done
+
+SHOWCASE_LISTENERS_OFF=()
+for listener_var in "${SHOWCASE_LISTENER_VARS[@]}"; do
+  keep=0
+  for used in "${SHOWCASE_LISTENERS_USED[@]}"; do
+    if [ "${listener_var}" = "${used}" ]; then
+      keep=1
+      break
+    fi
+  done
+  if [ "${keep}" = "0" ]; then
+    SHOWCASE_LISTENERS_OFF+=("${listener_var}")
+  fi
+done
+
+DBBAT_ENV=(
+  DBB_RUN_MODE=demo
+  "DBB_DSN=postgres://postgres:postgres@localhost:${SHOWCASE_PG_PORT}/dbbat?sslmode=disable"
+  "DBB_KEY=${SHOWCASE_KEY}"
+  "DBB_LISTEN_API=:${SHOWCASE_API_PORT}"
+  "DBB_LISTEN_PG=:${SHOWCASE_PROXY_PORT}"
+  DBB_APPROVAL_ENABLED=true
+  DBB_APPROVAL_SLACK_DELAY=0
+  DBB_RATE_LIMIT_ENABLED=false
+  "DBB_LOG_LEVEL=${SHOWCASE_LOG_LEVEL:-warn}"
+)
+for listener_var in "${SHOWCASE_LISTENERS_OFF[@]}"; do
+  DBBAT_ENV+=("${listener_var}=")
+done
+
+# Which listener variable asked for a given port, if any. Used to turn a bare
+# bind error into something actionable.
+listener_var_for_port() {
+  local port="$1" entry name value
+  for entry in "${DBBAT_ENV[@]}"; do
+    name="${entry%%=*}"
+    value="${entry#*=}"
+    case "${name}" in
+      DBB_LISTEN_*) ;;
+      *) continue ;;
+    esac
+    if [ -n "${value}" ] && [ "${value##*:}" = "${port}" ]; then
+      printf '%s' "${name}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# A bind collision is the one startup failure with a specific, actionable
+# cause, so surface exactly that line instead of 30 lines of log. Everything
+# else falls back to the tail.
+dbbat_startup_diagnostics() {
+  local logfile="${SHOWCASE_WORK}/dbbat.log" bind_line="" port="" var=""
+  if [ -f "${logfile}" ]; then
+    bind_line="$(grep -m1 'bind: address already in use' "${logfile}" || true)"
+  fi
+  if [ -z "${bind_line}" ]; then
+    if [ -f "${logfile}" ]; then
+      tail -30 "${logfile}" >&2 || true
+    else
+      warn "no log at ${logfile} — dbbat never got far enough to write one"
+    fi
+    return
+  fi
+  warn "${bind_line}"
+  port="$(printf '%s\n' "${bind_line}" | sed -nE 's/.*:([0-9]+): bind: address already in use.*/\1/p' | head -1)"
+  if [ -n "${port}" ]; then
+    var="$(listener_var_for_port "${port}" || true)"
+    if [ -n "${var}" ]; then
+      warn "port ${port} is the one ${var} asked for — free it, or point the matching SHOWCASE_*_PORT elsewhere"
+    else
+      warn "port ${port} is not one this run asked for — a listener escaped the allowlist above (disabled: ${SHOWCASE_LISTENERS_OFF[*]:-none})"
+    fi
+  fi
+  warn "full log: ${logfile}"
+}
+
 log "starting dbbat in demo mode (api :${SHOWCASE_API_PORT}, pg proxy :${SHOWCASE_PROXY_PORT})"
-DBB_RUN_MODE=demo \
-DBB_DSN="postgres://postgres:postgres@localhost:${SHOWCASE_PG_PORT}/dbbat?sslmode=disable" \
-DBB_KEY="${SHOWCASE_KEY}" \
-DBB_LISTEN_API=":${SHOWCASE_API_PORT}" \
-DBB_LISTEN_PG=":${SHOWCASE_PROXY_PORT}" \
-DBB_LISTEN_ORA="" \
-DBB_LISTEN_MYSQL="" \
-DBB_LISTEN_MONGO="" \
-DBB_LISTEN_MSSQL="" \
-DBB_APPROVAL_ENABLED=true \
-DBB_APPROVAL_SLACK_DELAY=0 \
-DBB_RATE_LIMIT_ENABLED=false \
-DBB_LOG_LEVEL="${SHOWCASE_LOG_LEVEL:-warn}" \
-  "${SHOWCASE_BINARY}" serve >"${SHOWCASE_WORK}/dbbat.log" 2>&1 &
+log "listeners off: ${SHOWCASE_LISTENERS_OFF[*]:-none}"
+env "${DBBAT_ENV[@]}" "${SHOWCASE_BINARY}" serve >"${SHOWCASE_WORK}/dbbat.log" 2>&1 &
 DBBAT_PID=$!
 
 log "waiting for the API"
@@ -227,13 +339,13 @@ for _ in $(seq 1 60); do
     break
   fi
   if ! kill -0 "${DBBAT_PID}" 2>/dev/null; then
-    tail -30 "${SHOWCASE_WORK}/dbbat.log" >&2 || true
+    dbbat_startup_diagnostics
     die "dbbat exited during startup"
   fi
   sleep 1
 done
 curl -fsS "http://localhost:${SHOWCASE_API_PORT}/api/v1/health" >/dev/null \
-  || { tail -30 "${SHOWCASE_WORK}/dbbat.log" >&2 || true; die "the API never became ready"; }
+  || { dbbat_startup_diagnostics; die "the API never became ready"; }
 
 # --- capture ----------------------------------------------------------------
 log "running the showcase Playwright project"
