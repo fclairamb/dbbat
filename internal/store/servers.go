@@ -183,6 +183,27 @@ func (s *Store) SetKnownHostKey(ctx context.Context, uid uuid.UUID, hostKey stri
 	return nil
 }
 
+// SetKubernetesCACert persists the TOFU-learned API server CA bundle for a
+// kubernetes cluster row, merging into protocol_data.kubernetes.learned_ca_cert
+// without disturbing other keys — the analogue of SetKnownHostKey.
+//
+// It writes learned_ca_cert, never ca_cert: an operator-supplied bundle is a
+// statement of intent that dbbat must never overwrite with something it merely
+// observed on the wire.
+func (s *Store) SetKubernetesCACert(ctx context.Context, uid uuid.UUID, caCert string) error {
+	_, err := s.db.NewUpdate().
+		Model((*Server)(nil)).
+		Where("uid = ?", uid).
+		Set("protocol_data = coalesce(protocol_data, '{}'::jsonb) || "+
+			"jsonb_build_object('kubernetes', coalesce(protocol_data->'kubernetes', '{}'::jsonb) || "+
+			"jsonb_build_object('learned_ca_cert', ?::text))", caCert).
+		Exec(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to store kubernetes ca certificate: %w", err)
+	}
+	return nil
+}
+
 // validateViaUID verifies that viaUID references an existing *tunnel* row (an
 // SSH bastion or a Kubernetes cluster) and that the via chain neither loops nor
 // passes back through selfUID (pass uuid.Nil for selfUID on create, when the
@@ -546,6 +567,13 @@ func applyKubernetesUpdates(q *bun.UpdateQuery, updates ServerUpdate) *bun.Updat
 	if updates.K8sInsecureSkipTLSVerify != nil {
 		pairs = append(pairs, "?::text, ?::boolean")
 		args = append(args, "insecure_skip_tls_verify", *updates.K8sInsecureSkipTLSVerify)
+	}
+	// Pasting a bundle retires whatever was learned: the supplied one wins from
+	// here on, so leaving the stale learned value behind would only confuse the
+	// "which CA is in force" question the UI answers.
+	if updates.K8sClearLearnedCACert || (updates.K8sCACert != nil && *updates.K8sCACert != "") {
+		pairs = append(pairs, "?::text, ?::text")
+		args = append(args, "learned_ca_cert", "")
 	}
 
 	if len(pairs) == 0 {
