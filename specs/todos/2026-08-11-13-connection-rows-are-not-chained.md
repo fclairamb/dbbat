@@ -34,6 +34,16 @@ Two smaller things ride on the same missing chain:
   `DBB_QUERY_STORAGE_RETENTION` cutoff, and that timestamp is a plain column
   anyone with write access can backdate. A chained connection row would make
   the excuse unforgeable.
+
+  Until then the docs overstate the new detection: `docs/audit-chain.md` and
+  `website/docs/features/audit-chain.md` describe the emptied-session break
+  without saying that an attacker who can `DELETE FROM queries` can equally
+  `UPDATE connections SET connected_at` to buy the retention excuse — and
+  `website/docs/compliance.md` is the one an assessor reads closely. Note the
+  qualifier there whether or not the chain itself lands, and note that it only
+  bites on a deployment that has `DBB_QUERY_STORAGE_RETENTION` set: with
+  retention off the excuse is unreachable
+  (`internal/store/chain_verify.go`, `queryRetention <= 0`).
 - **The access record itself is unsealed.** Who connected, as which user, from
   which IP, against which database, under which grant — the connection row is
   audit evidence in its own right, and only its *statements* are currently
