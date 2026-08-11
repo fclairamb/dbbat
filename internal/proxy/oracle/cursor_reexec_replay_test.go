@@ -191,7 +191,7 @@ func replaySession(t *testing.T, s *session, name string) int {
 //
 // The claim is read off what the gate *logged*, not off what the tracker still
 // holds at the end of the recording, because these captures end with the client
-// closing the very cursor it re-executed — and dbbat now honours that close
+// closing the very cursor it re-executed — and dbbat now honors that close
 // (decodeCloseCursors). A tracker that still held the entry afterwards would be
 // the bug, not the proof.
 func TestDumpReplay_CursorReexecIsGatedOnRealFrames(t *testing.T) {
