@@ -213,6 +213,19 @@ function ServersPage() {
               Insecure TLS
             </span>
           )}
+          {/* Which CA is in force changes what a failure means, so it has to be
+              visible from the list, not only inside the edit dialog. */}
+          {!srv.k8s_insecure_skip_tls_verify &&
+            !srv.k8s_ca_cert &&
+            srv.k8s_learned_ca_cert && (
+              <span
+                data-testid={`tunnel-ca-pinned-badge-${srv.uid}`}
+                title="No CA bundle was supplied, so dbbat pinned the one the API server presented on first connect and refuses any other. Paste the cluster's own bundle for a CA you verified yourself."
+                className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+              >
+                CA pinned (TOFU)
+              </span>
+            )}
         </div>
       ),
     },
@@ -840,7 +853,12 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
                 </p>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="k8sCaCert">CA certificate (PEM)</Label>
+                <Label htmlFor="k8sCaCert">
+                  CA certificate (PEM){" "}
+                  <span className="font-normal text-muted-foreground">
+                    — optional
+                  </span>
+                </Label>
                 <textarea
                   id="k8sCaCert"
                   data-testid="k8s-ca-cert-input"
@@ -848,11 +866,16 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
                   value={k8sCaCert}
                   onChange={(e) => setK8sCaCert(e.target.value)}
                   placeholder="-----BEGIN CERTIFICATE-----"
-                  required={!k8sInsecure}
                 />
+                {/* Optional, but the recommendation: a pasted bundle is a CA
+                    you verified, where a pin is only a CA we happened to meet
+                    first. Say so at the point of choosing. */}
                 <p className="text-xs text-muted-foreground">
                   From the token Secret&apos;s{" "}
-                  <code className="font-mono">ca.crt</code> key.
+                  <code className="font-mono">ca.crt</code> key. Leave it blank
+                  and dbbat pins whatever the API server presents on the first
+                  connect, then refuses anything else — safer than skipping
+                  verification, weaker than a bundle you checked yourself.
                 </p>
               </div>
               <div className="flex items-center justify-between rounded-lg border p-3">
@@ -1115,6 +1138,9 @@ function EditSSHServerForm({
   const [k8sInsecure, setK8sInsecure] = useState(
     server.k8s_insecure_skip_tls_verify ?? false,
   );
+  // Read-only: the learned pin is the dialer's to write, never a form field.
+  const learnedCaCert = server.k8s_learned_ca_cert || "";
+  const [resetLearnedCa, setResetLearnedCa] = useState(false);
 
   // One form for both dial-path kinds: they share host/port/credential and
   // differ only in the extra material they carry.
@@ -1146,6 +1172,9 @@ function EditSSHServerForm({
         k8s_ca_cert: k8sCaCert,
         k8s_namespace: k8sNamespace || undefined,
         k8s_insecure_skip_tls_verify: k8sInsecure,
+        // Only ever sent when explicitly asked for: forgetting a pin is a
+        // decision, not a side effect of opening the dialog.
+        k8s_reset_learned_ca_cert: resetLearnedCa || undefined,
       });
       return;
     }
@@ -1236,19 +1265,60 @@ function EditSSHServerForm({
                   />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="edit-k8s-ca-cert">CA certificate (PEM)</Label>
+                  <Label htmlFor="edit-k8s-ca-cert">
+                    CA certificate (PEM){" "}
+                    <span className="font-normal text-muted-foreground">
+                      — optional
+                    </span>
+                  </Label>
                   <textarea
                     id="edit-k8s-ca-cert"
+                    data-testid="k8s-server-edit-ca-cert-input"
                     className="flex min-h-[96px] w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm font-mono shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
                     value={k8sCaCert}
                     onChange={(e) => setK8sCaCert(e.target.value)}
-                    required={!k8sInsecure}
                   />
                   <p className="text-xs text-muted-foreground">
                     Public challenge material, so unlike the token it is shown
-                    back to you.
+                    back to you. Blank means the CA pinned on first connect is
+                    what verifies the API server.
                   </p>
                 </div>
+                {/* Which CA is actually in force is the question an operator
+                    asks when a connection starts failing, so answer it here
+                    rather than leaving them to infer it from two fields. */}
+                {learnedCaCert && !k8sCaCert && (
+                  <div
+                    data-testid="k8s-server-edit-learned-ca"
+                    className="space-y-2 rounded-lg border p-3"
+                  >
+                    <p className="text-sm font-medium">
+                      Pinned on first connect
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      dbbat learned this CA itself and refuses anything else. If
+                      the cluster&apos;s CA has rotated, paste the new bundle
+                      above — or forget the pin and let the next connect pin
+                      afresh, which only makes sense once you know why it
+                      changed.
+                    </p>
+                    <pre className="max-h-24 overflow-auto rounded bg-muted p-2 font-mono text-[10px] leading-tight">
+                      {learnedCaCert}
+                    </pre>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      data-testid="k8s-server-edit-reset-learned-ca"
+                      onClick={() => setResetLearnedCa(true)}
+                      disabled={resetLearnedCa}
+                    >
+                      {resetLearnedCa
+                        ? "Will be forgotten on save"
+                        : "Forget the learned CA"}
+                    </Button>
+                  </div>
+                )}
                 <div className="flex items-center justify-between rounded-lg border p-3">
                   <div className="space-y-0.5">
                     <Label htmlFor="edit-k8s-insecure">
