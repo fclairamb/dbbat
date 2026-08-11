@@ -24,6 +24,8 @@ func (nullResolver) GetServerByUID(context.Context, uuid.UUID) (*store.Server, e
 
 func (nullResolver) SetKnownHostKey(context.Context, uuid.UUID, string) error { return nil }
 
+func (nullResolver) SetKubernetesCACert(context.Context, uuid.UUID, string) error { return nil }
+
 // TestIntegration_ConnCheckOracleLogin is the live counterpart to the fake-TNS
 // unit tests: against a real Oracle it proves the connectivity check both
 // accepts good credentials and *rejects* bad ones, which is the whole point of

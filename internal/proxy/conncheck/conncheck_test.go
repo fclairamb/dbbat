@@ -53,6 +53,11 @@ func (f *fakeResolver) GetServerByUID(_ context.Context, uid uuid.UUID) (*store.
 			pd.SSH = &sd
 		}
 
+		if pd.Kubernetes != nil {
+			kd := *pd.Kubernetes
+			pd.Kubernetes = &kd
+		}
+
 		cp.ProtocolData = &pd
 	}
 
@@ -77,6 +82,28 @@ func (f *fakeResolver) SetKnownHostKey(_ context.Context, uid uuid.UUID, hostKey
 	}
 
 	srv.ProtocolData.SSH.KnownHostKey = hostKey
+
+	return nil
+}
+
+func (f *fakeResolver) SetKubernetesCACert(_ context.Context, uid uuid.UUID, caCert string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	srv, ok := f.servers[uid]
+	if !ok {
+		return errTestServerNotFound
+	}
+
+	if srv.ProtocolData == nil {
+		srv.ProtocolData = &store.ServerProtocolData{}
+	}
+
+	if srv.ProtocolData.Kubernetes == nil {
+		srv.ProtocolData.Kubernetes = &store.KubernetesServerData{}
+	}
+
+	srv.ProtocolData.Kubernetes.LearnedCACert = caCert
 
 	return nil
 }
