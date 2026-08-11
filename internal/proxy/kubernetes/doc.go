@@ -15,5 +15,5 @@
 // Everything of substance is behind the `integration` build tag, so a plain
 // `go test ./...` neither compiles nor links it. This file carries no tag
 // purely so the package still exists — and therefore still builds — in a bare
-// `go build ./...`, mirroring internal/proxy/testsupport.
+// `go build ./...`.
 package kubernetes
