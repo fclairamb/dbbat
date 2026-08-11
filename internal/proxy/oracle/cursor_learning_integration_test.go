@@ -550,6 +550,62 @@ func TestIntegration_CursorIDLearningMissRate(t *testing.T) {
 		assert.Equalf(t, histogram[symmetric[0]], histogram[q],
 			"three interleaved cursors ran equally often; %q did not", q)
 	}
+
+	assertTrackerStaysBounded(t, env, parses)
+}
+
+// trackerPeakBound is the ceiling the cursor tracker must stay under across the
+// whole workload above.
+//
+// It is chosen against the statement-cache-churn shape, which parses 40
+// distinct statements one after another and closes each cursor before opening
+// the next: with the close list decoded, the tracker holds a handful of live
+// cursors at a time; with it un-decoded it grows monotonically past 40, which
+// is the leak this bound is here to catch. Anything between is a partial
+// regression and should fail too, so the bound sits well below 40 rather than
+// just under it.
+const trackerPeakBound = 20
+
+// assertTrackerStaysBounded is the standing answer to the question the spec
+// asked and deliberately answered "no" to: does s.tracker.cursors need a cap?
+//
+// It does not — a client that opens cursors also closes them, and the leftover
+// entries the original measurement saw were batched closes dbbat could not
+// read, not genuine leaks. But "no cap" is only defensible if the absence of
+// growth is actually checked, and a cap would have been the *wrong* fix: every
+// evicted entry turns a correctly-gated re-execution into a refusal. So the
+// bound is asserted here instead, on a workload that opens and closes 40
+// cursors on one session.
+//
+// The tracker lives inside a session goroutine, so its size is read back off
+// the record handleCloseCursors emits — which
+// TestHandleCloseCursorsReportsTheTrackerSize keeps honest.
+func assertTrackerStaysBounded(t *testing.T, env *oracleThroughProxy, parses int) {
+	t.Helper()
+
+	closes := env.logs.count(logMsgCursorsClosed)
+
+	peak, seen := env.logs.maxIntFor(logMsgCursorsClosed, "tracked")
+	tracked := env.logs.intsFor(logMsgCursorsClosed, "tracked")
+
+	t.Logf("  close-cursors frames decoded:         %d", closes)
+	t.Logf("  peak cursors tracked at once:         %d", peak)
+
+	if len(tracked) > 0 {
+		t.Logf("  cursors tracked after the last close: %d", tracked[len(tracked)-1])
+	}
+
+	require.True(t, seen,
+		"the workload closed its cursors, so the proxy must have decoded at least one close list; "+
+			"a run with none would make every bound below vacuous")
+
+	assert.Lessf(t, peak, int64(trackerPeakBound),
+		"the cursor tracker peaked at %d entries across %d parses — it is not being emptied by the "+
+			"client's closes, which is what lets a recycled cursor id resolve to a statement the "+
+			"client is no longer running", peak, parses)
+
+	assert.LessOrEqual(t, tracked[len(tracked)-1], int64(trackerPeakBound),
+		"the tracker must come back down once the client's closes have been processed")
 }
 
 // pythonThinWorkload is the same set of shapes as runCursorWorkloads, for the
