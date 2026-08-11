@@ -335,11 +335,13 @@ func (s *Store) rowChainStampMAC(queryUID uuid.UUID, count int64, headMAC []byte
 // stamp, so correcting it after a deletion needs what an attacker does not
 // have.
 //
-// The two coexist because the chain key lives only in this process: no
-// migration can re-seal rows that are already stored, and failing every
-// pre-upgrade session would be exactly the cry-wolf the truncated-prefix
-// handling exists to avoid. Version 0 rows are therefore accepted and
-// *counted* (QueryChainsResult.LegacyStamps) rather than trusted.
+// Version 0 rows still exist — the chain key lives only in this process, so no
+// migration can re-seal what is already stored — but since 0.24 they are a
+// break, not a weaker pass. Accepting them was a standing downgrade path: the
+// stamp is readable out of `queries`, so replacing a sealed row with a raw head
+// MAC and version `0` needed no key at all. `--allow-legacy-stamps`
+// (store.AllowLegacyStamps) restores the counting behaviour for the one upgrade
+// that has such rows, and goes away in 0.25.
 const (
 	// queryChainStampLegacy is the pre-0.24 verbatim head copy. Unkeyed, and
 	// forgeable by anyone who can write to the store.
