@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -349,6 +350,187 @@ func TestIntegration_BlockedStatementRefusesSQLPlus(t *testing.T) {
 		"sqlplus must receive the refusal as an ORA error:\n%s", output)
 	assert.Contains(t, output, "survived=42",
 		"the connection must still answer after a refusal:\n%s", output)
+
+	assert.Zero(t, env.probeRowCount(t), "the refused INSERT must never have reached upstream")
+	env.assertBlockedQueryLogged(t, "INSERT INTO dbbat_blocked_probe VALUES (99)", "read-only")
+}
+
+// ojdbcJarEnv points the JDBC probe below at an `ojdbc*.jar`. There is no
+// packaged Oracle JDBC driver to look up the way python-oracledb is importable
+// or sqlplus is on PATH — the jar is downloaded by hand or dragged in by some
+// other tool (a SQLcl install, a DBeaver driver cache, a Maven repository) — so
+// the knob is an explicit path.
+//
+// A jar already on CLASSPATH is honoured too, which is the literal reading of
+// "the driver is available", and is what a machine that runs JDBC work anyway
+// tends to have.
+const ojdbcJarEnv = "ORACLE_TEST_OJDBC_JAR"
+
+// jdbcRefusalProgram is the JDBC-thin half of the refusal coverage: the same
+// three steps as the python and sqlplus probes — a read that must work, a write
+// that must come back as ORA-01031, and a read afterwards that proves the
+// session outlived the refusal.
+//
+// It is run through `java Refusal.java` (single-file source mode), so no build
+// tooling beyond a JDK is involved; the file must therefore be named Refusal.java.
+//
+// getMessage() is split on the first line because the driver appends a
+// connection id and, on some versions, a "https://docs.oracle.com/..." help
+// link — neither of which the assertion cares about.
+const jdbcRefusalProgram = `import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+
+public class Refusal {
+    public static void main(String[] args) throws Exception {
+        String url = String.format("jdbc:oracle:thin:@//%s:%s/%s", args[0], args[1], args[2]);
+
+        try (Connection conn = DriverManager.getConnection(url, args[3], args[4])) {
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery("SELECT 1 FROM dual")) {
+                rs.next();
+                System.out.println("read-ok " + rs.getInt(1));
+            }
+
+            try (Statement st = conn.createStatement()) {
+                st.executeUpdate("INSERT INTO dbbat_blocked_probe VALUES (99)");
+                System.out.println("REFUSAL-MISSING");
+            } catch (SQLException e) {
+                System.out.println("refused: " + e.getMessage().trim().split("\\R")[0]);
+            }
+
+            try (Statement st = conn.createStatement();
+                 ResultSet rs = st.executeQuery("SELECT 42 FROM dual")) {
+                rs.next();
+                System.out.println("survived " + rs.getInt(1));
+            }
+        }
+
+        System.out.println("done");
+    }
+}
+`
+
+// jdbcRefusalDeadline is refusalDeadline plus room for the JVM: single-file
+// source mode compiles Refusal.java in-process before running it, and the JDBC
+// driver's own connect is slower to start than a thin client's. The deadline is
+// still a deadlock detector — a refusal that comes back at all comes back in a
+// round trip — just one with a JVM's startup subtracted from it.
+const jdbcRefusalDeadline = refusalDeadline + time.Minute
+
+// oracleTestOJDBCJar resolves the Oracle JDBC driver jar, or "" when this
+// machine has none. An ojdbcJarEnv that points at a file which is not there is a
+// failure rather than a skip: it is someone asking for this coverage and not
+// getting it.
+func oracleTestOJDBCJar(t *testing.T) string {
+	t.Helper()
+
+	if jar := os.Getenv(ojdbcJarEnv); jar != "" {
+		_, err := os.Stat(jar)
+		require.NoErrorf(t, err, "%s points at a jar that is not there", ojdbcJarEnv)
+
+		return jar
+	}
+
+	for _, entry := range filepath.SplitList(os.Getenv("CLASSPATH")) {
+		if !strings.Contains(strings.ToLower(filepath.Base(entry)), "ojdbc") {
+			continue
+		}
+
+		if _, err := os.Stat(entry); err == nil {
+			return entry
+		}
+	}
+
+	return ""
+}
+
+// TestIntegration_BlockedStatementRefusesJDBCThin is the fourth client, and the
+// one the fix shipped without: the three verified against a live server needed
+// three different encodings of the same summary object, so JDBC thin being a
+// fourth was a live possibility rather than a theoretical one.
+//
+// It is not, as measured here: JDBC parses the same compressed encoding
+// python-oracledb does, extra tail fields included, which the shape assertion
+// below records rather than leaves implied. That is worth pinning — the point of
+// learning the tail from the upstream instead of deriving it is that no
+// capability rule predicts which client gets which, so the day a driver upgrade
+// moves JDBC to a shape dbbat has never emitted, this is what says so.
+//
+// Skipped when no ojdbc jar is reachable (see ojdbcJarEnv), which is the case in
+// CI; the byte-level fixtures in ttc_oer_encode_test.go carry the same evidence
+// there.
+func TestIntegration_BlockedStatementRefusesJDBCThin(t *testing.T) {
+	java, err := exec.LookPath("java")
+	if err != nil {
+		t.Skipf("java unavailable: %v", err)
+	}
+
+	jar := oracleTestOJDBCJar(t)
+	if jar == "" {
+		t.Skipf("no Oracle JDBC driver: set %s to an ojdbc jar, or put one on CLASSPATH", ojdbcJarEnv)
+	}
+
+	env := startOracleThroughProxy(t, nil)
+
+	ctx := context.Background()
+
+	// Seed under the permissive grant the fixture starts with, so the refusal is
+	// the only thing that can stop the INSERT — an ORA-00942 would otherwise be
+	// indistinguishable from a refusal at the assertion below.
+	_, _ = env.db.ExecContext(ctx, "DROP TABLE dbbat_blocked_probe")
+
+	_, err = env.db.ExecContext(ctx, "CREATE TABLE dbbat_blocked_probe (id NUMBER)")
+	require.NoError(t, err, "the seed DDL must be allowed under an unrestricted grant")
+
+	env.replaceGrant(t, []string{store.ControlReadOnly})
+
+	program := filepath.Join(t.TempDir(), "Refusal.java")
+	require.NoError(t, os.WriteFile(program, []byte(jdbcRefusalProgram), 0o600))
+
+	// Everything this client's session teaches the proxy is appended to the
+	// shared log, so the JDBC session's own shape is what lands after this mark.
+	learnedBefore := len(env.logs.intsFor(logMsgLearnedOERTail, "extra_tail_fields"))
+
+	runCtx, cancel := context.WithTimeout(ctx, jdbcRefusalDeadline)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, java, "-cp", jar, program,
+		env.host, strconv.Itoa(env.port), env.service, env.username, env.apiKey)
+
+	out, err := cmd.CombinedOutput()
+	output := string(out)
+
+	shapes := env.logs.intsFor(logMsgLearnedOERTail, "extra_tail_fields")
+	if len(shapes) > learnedBefore {
+		t.Logf("JDBC thin session learned extra_tail_fields=%v (image=%s)",
+			shapes[learnedBefore:], oracleTestImage())
+	}
+
+	require.NoErrorf(t, err, "JDBC thin never came back from the refused statement:\n%s", output)
+
+	assert.Contains(t, output, "read-ok 1",
+		"reads must still work under read_only:\n%s", output)
+	assert.Contains(t, output, "refused: ORA-01031",
+		"JDBC thin must receive the refusal as an ORA error:\n%s", output)
+	assert.NotContains(t, output, "REFUSAL-MISSING",
+		"the write must be refused, not executed:\n%s", output)
+	assert.Contains(t, output, "survived 42",
+		"the connection must still answer after a refusal:\n%s", output)
+	assert.Contains(t, output, "done", "the client must close cleanly:\n%s", output)
+
+	// The measurement the spec asked for, and the reason this test is not just a
+	// fourth copy of the python one: which summary-object tail JDBC's session
+	// negotiated. Two is what Oracle 23ai Free was measured sending it, the same
+	// as python-oracledb thin.
+	require.Greater(t, len(shapes), learnedBefore,
+		"the JDBC session must have learned its OER shape from the upstream; "+
+			"without a sample dbbat would have answered from defaultOERShape")
+	assert.Equal(t, int64(2), shapes[learnedBefore],
+		"JDBC thin was measured taking the same two-extra-field compressed tail as "+
+			"python-oracledb; a different value here is a fourth shape and belongs in docs/oracle.md")
 
 	assert.Zero(t, env.probeRowCount(t), "the refused INSERT must never have reached upstream")
 	env.assertBlockedQueryLogged(t, "INSERT INTO dbbat_blocked_probe VALUES (99)", "read-only")
