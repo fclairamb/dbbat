@@ -1,6 +1,7 @@
 package oracle
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -462,6 +463,91 @@ const (
 	closeCursorsMaxCount = 4096
 )
 
+// closeCursorsWideSentinel is the 8-byte pointer placeholder the OCI thick
+// client (sqlplus, SQL*Developer via OCI, Instant Client) writes instead of
+// the compressed-int pointer flag — the same sentinel the AUTH path already
+// knows (see payloadUsesWideKVEncoding, findUserIDLenPos).
+var closeCursorsWideSentinel = []byte{0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+
+// closeCursorsWideHeaderLen is the size, in bytes, of the two-byte pad OCI
+// writes between the TTC sequence number and the pointer sentinel — see
+// isCloseCursorsWideHeader.
+const closeCursorsWideHeaderLen = 2
+
+// isCloseCursorsWideHeader reports whether ttcPayload's close-cursors header
+// is OCI's wide encoding: [seq] [0x01] [seq+1] [8-byte pointer sentinel].
+//
+// The two bytes between the sequence number and the sentinel were not
+// guessed at: pinned byte-for-byte against every close-cursors frame in
+// testdata/sqlplus_cursor_reexec.pcapng (client frames 9, 12, 14, 16) plus
+// the piggyback execute-with-SQL header stapled behind three of them (func
+// 0x03 sub 0x5e), which carries the identical two-byte pad ahead of its own
+// sentinel. In every one of those seven headers the first byte is a constant
+// 0x01 and the second equals that header's OWN sequence number plus one —
+// i.e. the sequence number the NEXT TTC message on the wire will carry. That
+// makes it the wide framing's own header padding, not something specific to
+// the close-cursors op, so decodeCloseCursors validates rather than skips it:
+// a payload whose two bytes don't fit this shape is read as the thin
+// (compressed-int) encoding instead, never guessed at as wide.
+func isCloseCursorsWideHeader(ttcPayload []byte) bool {
+	const sentinelStart = 3 + closeCursorsWideHeaderLen
+
+	if len(ttcPayload) < sentinelStart+len(closeCursorsWideSentinel) {
+		return false
+	}
+
+	if ttcPayload[3] != closeCursorsPointer {
+		return false
+	}
+
+	if ttcPayload[4] != ttcPayload[2]+1 {
+		return false
+	}
+
+	return bytes.Equal(ttcPayload[sentinelStart:sentinelStart+len(closeCursorsWideSentinel)], closeCursorsWideSentinel)
+}
+
+// decodeCloseCursorsWide extracts the cursor ids out of an OCI wide-encoded
+// close-cursors piggyback, once isCloseCursorsWideHeader has confirmed the
+// header shape. The count and every id are little-endian uint32 fields
+// (unlike the thin encoding's compressed ints), but the guards mirror
+// decodeCloseCursors exactly: a bounded count, every id inside 16 bits, and
+// enough bytes for the whole list — so a payload that doesn't fit is
+// rejected with ErrNotCloseCursors and deletes nothing, same as the thin
+// path.
+func decodeCloseCursorsWide(ttcPayload []byte) ([]uint16, error) {
+	pos := 3 + closeCursorsWideHeaderLen + len(closeCursorsWideSentinel)
+
+	if pos+4 > len(ttcPayload) {
+		return nil, fmt.Errorf("%w: truncated wide count", ErrNotCloseCursors)
+	}
+
+	count := binary.LittleEndian.Uint32(ttcPayload[pos : pos+4])
+	if count > closeCursorsMaxCount {
+		return nil, fmt.Errorf("%w: wide cursor count decoded as %d", ErrNotCloseCursors, count)
+	}
+
+	pos += 4
+
+	if pos+4*int(count) > len(ttcPayload) {
+		return nil, fmt.Errorf("%w: truncated after wide count of %d", ErrNotCloseCursors, count)
+	}
+
+	cursorIDs := make([]uint16, 0, count)
+
+	for range count {
+		id := binary.LittleEndian.Uint32(ttcPayload[pos : pos+4])
+		if id == 0 || id > cursorReexecMaxID {
+			return nil, fmt.Errorf("%w: wide cursor id decoded as %d", ErrNotCloseCursors, id)
+		}
+
+		cursorIDs = append(cursorIDs, uint16(id))
+		pos += 4
+	}
+
+	return cursorIDs, nil
+}
+
 // decodeCloseCursors extracts every cursor id from Oracle's close-cursors
 // piggyback — message type 0x11 (TNS_MSG_TYPE_PIGGYBACK), function 0x69
 // (TNS_FUNC_CLOSE_CURSORS).
@@ -493,14 +579,20 @@ const (
 // knows as the JDBC/DBeaver execute. What it does require is that the list
 // itself be complete and plausible — see ErrNotCloseCursors.
 //
-// The OCI thick client (sqlplus) sends the same op in the wide encoding — an
-// 8-byte pointer sentinel and little-endian 32-bit fields — which is rejected
-// here rather than guessed at. It never re-executes by cursor id (it resends
-// the statement text every time, see docs/oracle.md), so a tracker entry it
-// leaves behind cannot mis-resolve anything.
+// The OCI thick client (sqlplus, SQL*Developer via OCI, Instant Client) sends
+// the same op in the wide encoding — an 8-byte pointer sentinel and
+// little-endian 32-bit fields — which decodeCloseCursorsWide reads once
+// isCloseCursorsWideHeader confirms the header shape. It never re-executes by
+// cursor id (it resends the statement text every time, see docs/oracle.md),
+// so this is defence in depth rather than something load-bearing: a tracker
+// entry it leaves behind cannot mis-resolve anything on its own.
 func decodeCloseCursors(ttcPayload []byte) ([]uint16, error) {
 	if !IsCloseCursorsPiggyback(ttcPayload) {
 		return nil, ErrNotCloseCursors
+	}
+
+	if isCloseCursorsWideHeader(ttcPayload) {
+		return decodeCloseCursorsWide(ttcPayload)
 	}
 
 	// TTC >= 18 pads the function header with a zero byte; older ones do not.
