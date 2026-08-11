@@ -2258,8 +2258,10 @@ export interface components {
             via_uid?: string | null;
             /** @description TOFU-pinned SSH bastion host key (read-only; ssh servers only) */
             ssh_known_host_key?: string;
-            /** @description PEM CA bundle of the Kubernetes API server (kubernetes servers only). Public challenge material, so it round-trips; the ServiceAccount token never does. */
+            /** @description Operator-supplied PEM CA bundle of the Kubernetes API server (kubernetes servers only). Public challenge material, so it round-trips; the ServiceAccount token never does. Optional — a row that supplies none is pinned on first connect instead, and the result lands in `k8s_learned_ca_cert`. */
             k8s_ca_cert?: string;
+            /** @description PEM CA bundle dbbat pinned itself on the first connect of a cluster row that supplied none (trust on first use). Read-only, and kept apart from `k8s_ca_cert` so a client can say which of the two is in force: a supplied bundle always wins. Clear it with `k8s_reset_learned_ca_cert` when the cluster's CA has rotated. */
+            k8s_learned_ca_cert?: string;
             /** @description Namespace every lookup and port-forward is scoped to (kubernetes servers only) */
             k8s_namespace?: string;
             /** @description Whether API server certificate verification is disabled (kubernetes servers only) */
@@ -2294,13 +2296,17 @@ export interface components {
              * @description Machine-readable classification within the stage; `ok` on success
              * @enum {string}
              */
-            code: "ok" | "dns_failure" | "timeout" | "unreachable" | "host_key_mismatch" | "auth_rejected" | "bad_private_key" | "no_auth_method" | "missing_config" | "via_cycle" | "via_not_ssh" | "handshake_failed" | "db_auth_failed" | "db_handshake_failed" | "auth_not_verified" | "k8s_forbidden" | "k8s_target_not_found" | "k8s_target_not_ready" | "internal_error";
+            code: "ok" | "dns_failure" | "timeout" | "unreachable" | "host_key_mismatch" | "auth_rejected" | "bad_private_key" | "no_auth_method" | "missing_config" | "via_cycle" | "via_not_ssh" | "handshake_failed" | "db_auth_failed" | "db_handshake_failed" | "auth_not_verified" | "k8s_forbidden" | "k8s_target_not_found" | "k8s_target_not_ready" | "k8s_ca_pin_mismatch" | "internal_error";
             /** @description Human-readable explanation, safe to display to an admin */
             message: string;
             /** @description True when this check performed the TOFU pin (first successful connect to a bastion) */
             host_key_pinned?: boolean;
             /** @description The bastion's public host key after the check (ssh servers only) */
             ssh_known_host_key?: string;
+            /** @description True when this check pinned the Kubernetes API server's CA on a first connect (kubernetes servers that supplied no bundle) */
+            k8s_ca_pinned?: boolean;
+            /** @description The cluster's TOFU-learned CA bundle after the check (kubernetes servers only); empty when the row supplied its own, which wins */
+            k8s_learned_ca_cert?: string;
             /**
              * Format: int64
              * @description How long the check took, in milliseconds
@@ -2366,7 +2372,7 @@ export interface components {
             ssh_private_key?: string;
             /** @description Passphrase for the SSH private key; write-only, never returned */
             ssh_passphrase?: string;
-            /** @description PEM CA bundle of the Kubernetes API server. Required for a `kubernetes` row unless `k8s_insecure_skip_tls_verify` is set. */
+            /** @description PEM CA bundle of the Kubernetes API server. Optional: a `kubernetes` row that supplies none learns the API server's CA on first connect and verifies against it from then on (trust on first use), which is weaker than pasting the bundle but never falls back to the host's system trust store. Supplying one always wins over a learned pin, and retires it. */
             k8s_ca_cert?: string;
             /** @description Namespace the ServiceAccount's Role covers; every pod/service lookup and every port-forward is scoped to it. Required for a `kubernetes` row. */
             k8s_namespace?: string;
@@ -2416,12 +2422,14 @@ export interface components {
             ssh_private_key?: string;
             /** @description Passphrase for the SSH private key; write-only, never returned */
             ssh_passphrase?: string;
-            /** @description PEM CA bundle of the Kubernetes API server. Required for a `kubernetes` row unless `k8s_insecure_skip_tls_verify` is set. */
+            /** @description PEM CA bundle of the Kubernetes API server. Optional: a `kubernetes` row that supplies none learns the API server's CA on first connect and verifies against it from then on (trust on first use), which is weaker than pasting the bundle but never falls back to the host's system trust store. Supplying one always wins over a learned pin, and retires it. */
             k8s_ca_cert?: string;
             /** @description Namespace the ServiceAccount's Role covers; every pod/service lookup and every port-forward is scoped to it. Required for a `kubernetes` row. */
             k8s_namespace?: string;
             /** @description Disable API server certificate verification. For throwaway clusters only: with it set, anything that can intercept the API server connection can read the ServiceAccount token. */
             k8s_insecure_skip_tls_verify?: boolean;
+            /** @description When true, forgets the CA bundle pinned on first connect so the next connect pins afresh. The exit from a stale pin when the cluster's CA rotated and you do not have the new bundle to paste; supplying a non-empty `k8s_ca_cert` clears it too. */
+            k8s_reset_learned_ca_cert?: boolean;
             /**
              * @description Optional; defaults to false when omitted. When true, the API dials the updated row
              *     once and returns the staged outcome as `connection_test` in the response.

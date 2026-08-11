@@ -30,19 +30,26 @@ type ConnectionTestResponse struct {
 	Message       string `json:"message"`
 	HostKeyPinned bool   `json:"host_key_pinned,omitempty"`
 	KnownHostKey  string `json:"ssh_known_host_key,omitempty"`
-	DurationMs    int64  `json:"duration_ms"`
+	// CAPinned / LearnedCACert are the Kubernetes counterparts: whether this
+	// check performed the TOFU pin, and the bundle in force afterwards. Public
+	// challenge material, exactly like the host key.
+	CAPinned         bool   `json:"k8s_ca_pinned,omitempty"`
+	K8sLearnedCACert string `json:"k8s_learned_ca_cert,omitempty"`
+	DurationMs       int64  `json:"duration_ms"`
 }
 
 // toConnectionTestResponse converts a check result to its API shape.
 func toConnectionTestResponse(res conncheck.Result) ConnectionTestResponse {
 	return ConnectionTestResponse{
-		OK:            res.OK,
-		Stage:         string(res.Stage),
-		Code:          string(res.Code),
-		Message:       res.Message,
-		HostKeyPinned: res.HostKeyPinned,
-		KnownHostKey:  res.KnownHostKey,
-		DurationMs:    res.DurationMs,
+		OK:               res.OK,
+		Stage:            string(res.Stage),
+		Code:             string(res.Code),
+		Message:          res.Message,
+		HostKeyPinned:    res.HostKeyPinned,
+		KnownHostKey:     res.KnownHostKey,
+		CAPinned:         res.CAPinned,
+		K8sLearnedCACert: res.LearnedCACert,
+		DurationMs:       res.DurationMs,
 	}
 }
 

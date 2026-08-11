@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -26,13 +27,24 @@ func kubernetesRouter(server *Server) *gin.Engine {
 func kubernetesTestAdmin(t *testing.T) (*gin.Engine, string) {
 	t.Helper()
 
+	router, token, _ := kubernetesTestAdminWithStore(t)
+
+	return router, token
+}
+
+// kubernetesTestAdminWithStore also hands back the store, for the tests that
+// need to simulate what the *dialer* writes — the TOFU-learned CA bundle, which
+// no API request can set.
+func kubernetesTestAdminWithStore(t *testing.T) (*gin.Engine, string, *store.Store) {
+	t.Helper()
+
 	server, dataStore := setupTestServer(t)
 	server.encryptionKey = dbTestEncryptionKey
 
 	createTestUser(t, dataStore, "k8s-admin", "adminpass123", []string{store.RoleAdmin})
 	token := loginUser(t, server, "k8s-admin", "adminpass123")
 
-	return kubernetesRouter(server), token
+	return kubernetesRouter(server), token, dataStore
 }
 
 func validClusterPayload() map[string]any {
@@ -80,11 +92,6 @@ func TestCreateKubernetesServerRejectsIncompleteRows(t *testing.T) {
 			wantMsg: "service account bearer token",
 		},
 		{
-			name:    "no CA bundle and no opt-out",
-			mutate:  func(p map[string]any) { delete(p, "k8s_ca_cert") },
-			wantMsg: "k8s_ca_cert is required",
-		},
-		{
 			name:    "no namespace",
 			mutate:  func(p map[string]any) { delete(p, "k8s_namespace") },
 			wantMsg: "k8s_namespace is required",
@@ -107,8 +114,107 @@ func TestCreateKubernetesServerRejectsIncompleteRows(t *testing.T) {
 	}
 }
 
-// TestCreateKubernetesServerAllowsSkippingTLSVerification pins that the CA
-// requirement has exactly one escape hatch, and that it is explicit.
+// TestCreateKubernetesServerAllowsOmittingTheCABundle is the behaviour change
+// TOFU is built on: the CA bundle is no longer required, because a row that
+// supplies none learns one on first connect. Without this there is no "no CA
+// supplied" case for the pin to serve.
+func TestCreateKubernetesServerAllowsOmittingTheCABundle(t *testing.T) {
+	t.Parallel()
+
+	router, token := kubernetesTestAdmin(t)
+
+	payload := validClusterPayload()
+	delete(payload, "k8s_ca_cert")
+
+	w, data := doJSON(t, router, "POST", "/api/v1/servers", token, payload)
+	require.Equal(t, 200, w.Code, w.Body.String())
+
+	assert.Equal(t, "kubernetes", data["protocol"])
+	// Nothing is pinned *yet*: the pin is the dialer's to write, on first connect.
+	assert.Empty(t, data["k8s_ca_cert"])
+	assert.Empty(t, data["k8s_learned_ca_cert"])
+	// And it is still not the insecure escape hatch.
+	assert.Empty(t, data["k8s_insecure_skip_tls_verify"])
+}
+
+// TestKubernetesLearnedCABundleIsReadOnlyAndResettable covers the two halves of
+// the learned pin's lifecycle at the API: it round-trips separately from the
+// supplied bundle, and there is an explicit way to forget it — the exit a
+// rotated cluster CA needs.
+func TestKubernetesLearnedCABundleIsReadOnlyAndResettable(t *testing.T) {
+	t.Parallel()
+
+	router, token, dataStore := kubernetesTestAdminWithStore(t)
+
+	payload := validClusterPayload()
+	delete(payload, "k8s_ca_cert")
+
+	_, cluster := doJSON(t, router, "POST", "/api/v1/servers", token, payload)
+	uid, ok := cluster["uid"].(string)
+	require.True(t, ok, cluster)
+
+	parsed := mustParseUID(t, uid)
+	learned := "-----BEGIN CERTIFICATE-----\nLEARNED\n-----END CERTIFICATE-----\n"
+	require.NoError(t, dataStore.SetKubernetesCACert(t.Context(), parsed, learned))
+
+	row := findTunnelRow(t, router, token, uid)
+	assert.Contains(t, row["k8s_learned_ca_cert"], "LEARNED")
+	assert.Empty(t, row["k8s_ca_cert"], "a learned pin must never be reported as an operator-supplied one")
+
+	// Exit #1: forget the learned value outright, so the next connect re-pins.
+	w, _ := doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
+		"k8s_reset_learned_ca_cert": true,
+	})
+	require.Equal(t, 200, w.Code, w.Body.String())
+
+	row = findTunnelRow(t, router, token, uid)
+	assert.Empty(t, row["k8s_learned_ca_cert"])
+
+	// Exit #2: paste a bundle. It supersedes anything learned, so the stale pin
+	// must not survive alongside it.
+	require.NoError(t, dataStore.SetKubernetesCACert(t.Context(), parsed, learned))
+
+	w, _ = doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
+		"k8s_ca_cert": "-----BEGIN CERTIFICATE-----\nPASTED\n-----END CERTIFICATE-----\n",
+	})
+	require.Equal(t, 200, w.Code, w.Body.String())
+
+	row = findTunnelRow(t, router, token, uid)
+	assert.Contains(t, row["k8s_ca_cert"], "PASTED")
+	assert.Empty(t, row["k8s_learned_ca_cert"], "pasting a bundle must retire the learned pin")
+}
+
+// findTunnelRow reads one cluster row back through the tunnel-servers listing.
+func findTunnelRow(t *testing.T, router *gin.Engine, token, uid string) map[string]any {
+	t.Helper()
+
+	_, resp := doJSON(t, router, "GET", "/api/v1/tunnel-servers", token, nil)
+	listed, ok := resp["servers"].([]any)
+	require.True(t, ok, resp)
+
+	for _, entry := range listed {
+		row, ok := entry.(map[string]any)
+		if ok && row["uid"] == uid {
+			return row
+		}
+	}
+
+	t.Fatalf("cluster row %s was not listed", uid)
+
+	return nil
+}
+
+func mustParseUID(t *testing.T, uid string) uuid.UUID {
+	t.Helper()
+
+	parsed, err := uuid.Parse(uid)
+	require.NoError(t, err)
+
+	return parsed
+}
+
+// TestCreateKubernetesServerAllowsSkippingTLSVerification pins that the
+// insecure escape hatch stays available, and that it is explicit.
 func TestCreateKubernetesServerAllowsSkippingTLSVerification(t *testing.T) {
 	t.Parallel()
 
@@ -216,10 +322,12 @@ func TestTargetMayReferenceAKubernetesCluster(t *testing.T) {
 	assert.Equal(t, 400, w.Code, w.Body.String())
 }
 
-// TestUpdateKubernetesServerCannotBlankTheCABundle is the hole the create-only
-// validation left: PUT could clear ca_cert without setting the insecure flag,
-// producing a row that neither pins a CA nor admits to skipping verification.
-func TestUpdateKubernetesServerCannotBlankTheCABundle(t *testing.T) {
+// TestUpdateKubernetesServerMayBlankTheCABundle: clearing ca_cert used to be
+// refused, because it produced a row that neither pinned a CA nor admitted to
+// skipping verification. It is now the way back to trust-on-first-use — what
+// has not changed is that the dialer still refuses to fall back to the host's
+// system trust store, so the row is weaker, never open.
+func TestUpdateKubernetesServerMayBlankTheCABundle(t *testing.T) {
 	t.Parallel()
 
 	router, token := kubernetesTestAdmin(t)
@@ -231,13 +339,14 @@ func TestUpdateKubernetesServerCannotBlankTheCABundle(t *testing.T) {
 	w, _ := doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
 		"k8s_ca_cert": "",
 	})
-	require.Equal(t, 400, w.Code, w.Body.String())
-	assert.Contains(t, w.Body.String(), "k8s_ca_cert is required")
+	require.Equal(t, 200, w.Code, w.Body.String())
 
-	// The same edit *with* the explicit opt-out is allowed: the escape hatch
-	// has to stay usable, it just has to be stated.
+	row := findTunnelRow(t, router, token, uid)
+	assert.Empty(t, row["k8s_ca_cert"])
+	assert.Empty(t, row["k8s_insecure_skip_tls_verify"])
+
+	// The explicit opt-out stays usable, it just has to be stated.
 	w, _ = doJSON(t, router, "PUT", "/api/v1/servers/"+uid, token, map[string]any{
-		"k8s_ca_cert":                  "",
 		"k8s_insecure_skip_tls_verify": true,
 	})
 	require.Equal(t, 200, w.Code, w.Body.String())
@@ -295,7 +404,7 @@ func TestUpdateValidatesTheProtocolItself(t *testing.T) {
 		"protocol": "kubernetes",
 	})
 	require.Equal(t, 400, w.Code, w.Body.String())
-	assert.Contains(t, w.Body.String(), "k8s_ca_cert is required")
+	assert.Contains(t, w.Body.String(), "k8s_namespace is required")
 }
 
 func TestUpdateKubernetesServerMaterial(t *testing.T) {

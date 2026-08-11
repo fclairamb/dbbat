@@ -38,6 +38,10 @@ type CreateDatabaseRequest struct {
 	// in clear. There is deliberately no kubeconfig field: EKS/GKE kubeconfigs
 	// authenticate through exec credential plugins, which a server daemon
 	// cannot run.
+	//
+	// K8sCACert is optional: a row that supplies none gets a trust-on-first-use
+	// pin instead, learned on the first connect and stored separately. Pasting
+	// the bundle remains the stronger setup — see docs/kubernetes.md.
 	K8sCACert                string `json:"k8s_ca_cert"`
 	K8sNamespace             string `json:"k8s_namespace"`
 	K8sInsecureSkipTLSVerify bool   `json:"k8s_insecure_skip_tls_verify"`
@@ -72,6 +76,12 @@ type UpdateDatabaseRequest struct {
 	K8sCACert                *string `json:"k8s_ca_cert"`
 	K8sNamespace             *string `json:"k8s_namespace"`
 	K8sInsecureSkipTLSVerify *bool   `json:"k8s_insecure_skip_tls_verify"`
+	// K8sResetLearnedCACert forgets the TOFU-learned bundle so the next connect
+	// pins afresh. It is the exit from a stale pin when the cluster's CA
+	// rotated and you do not have the new bundle to paste; supplying a
+	// non-empty k8s_ca_cert clears it too, since a supplied bundle supersedes
+	// anything learned.
+	K8sResetLearnedCACert bool `json:"k8s_reset_learned_ca_cert"`
 	// TestConnection asks the API to validate the row by actually dialing it
 	// once updated. Opt-in, and never fatal.
 	TestConnection bool `json:"test_connection"`
@@ -99,7 +109,11 @@ type DatabaseResponse struct {
 	// Kubernetes cluster material. Public: the CA bundle is challenge material
 	// and the namespace is scope, so both round-trip. The ServiceAccount token
 	// never does.
-	K8sCACert                string `json:"k8s_ca_cert,omitempty"`
+	K8sCACert string `json:"k8s_ca_cert,omitempty"`
+	// K8sLearnedCACert is the bundle dbbat pinned itself on first connect, when
+	// the row supplied none (read-only). Kept apart from K8sCACert so a client
+	// can say which of the two is in force: a supplied bundle always wins.
+	K8sLearnedCACert         string `json:"k8s_learned_ca_cert,omitempty"`
 	K8sNamespace             string `json:"k8s_namespace,omitempty"`
 	K8sInsecureSkipTLSVerify bool   `json:"k8s_insecure_skip_tls_verify,omitempty"`
 	// ConnectionTest is present only when the request set test_connection.
@@ -443,6 +457,7 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		K8sCACert:                req.K8sCACert,
 		K8sNamespace:             req.K8sNamespace,
 		K8sInsecureSkipTLSVerify: req.K8sInsecureSkipTLSVerify,
+		K8sClearLearnedCACert:    req.K8sResetLearnedCACert,
 	}
 
 	if err := s.store.UpdateServer(c.Request.Context(), uid, updates, s.encryptionKey); err != nil {
@@ -584,10 +599,11 @@ func toDatabaseResponse(db *store.Server) DatabaseResponse {
 		knownHostKey = sd.KnownHostKey
 	}
 
-	var k8sCACert, k8sNamespace string
+	var k8sCACert, k8sLearnedCACert, k8sNamespace string
 	var k8sInsecure bool
 	if kd := db.KubernetesData(); kd != nil {
 		k8sCACert = kd.CACert
+		k8sLearnedCACert = kd.LearnedCACert
 		k8sNamespace = kd.Namespace
 		k8sInsecure = kd.InsecureSkipTLSVerify
 	}
@@ -610,6 +626,7 @@ func toDatabaseResponse(db *store.Server) DatabaseResponse {
 		SSHKnownHostKey:   knownHostKey,
 
 		K8sCACert:                k8sCACert,
+		K8sLearnedCACert:         k8sLearnedCACert,
 		K8sNamespace:             k8sNamespace,
 		K8sInsecureSkipTLSVerify: k8sInsecure,
 	}
@@ -676,9 +693,11 @@ func validateCreateProtocolFields(req *CreateDatabaseRequest) string {
 		if req.Password == "" {
 			return "password (the service account bearer token) is required for kubernetes servers"
 		}
-		if req.K8sCACert == "" && !req.K8sInsecureSkipTLSVerify {
-			return "k8s_ca_cert is required for kubernetes servers (or set k8s_insecure_skip_tls_verify)"
-		}
+		// k8s_ca_cert is deliberately *not* required. A row that supplies none
+		// gets a trust-on-first-use pin: the dialer learns the API server's CA
+		// on first connect and verifies against it from then on. It never falls
+		// back to the host's system trust store, so leaving it blank is a
+		// weaker but still closed configuration, not an open one.
 		if req.K8sNamespace == "" {
 			return "k8s_namespace is required for kubernetes servers"
 		}
@@ -703,13 +722,15 @@ func validateCreateProtocolFields(req *CreateDatabaseRequest) string {
 // validateUpdateProtocolFields validates an update against the row it will
 // produce, returning an error message (empty when valid).
 //
-// It exists because the create path's validation used to be the only one:
-// PUT could set any protocol string, and — worse — could blank a kubernetes
-// row's CA bundle without setting the insecure flag, producing a row that
-// neither pins a CA nor admits to skipping verification. The check is written
-// against the *resulting* values (request field, falling back to the stored
-// one) rather than against what the request happens to mention, because a
-// half-specified update is exactly how that state was reachable.
+// It exists because the create path's validation used to be the only one: PUT
+// could set any protocol string, so the check is written against the
+// *resulting* values (request field, falling back to the stored one) rather
+// than against what the request happens to mention.
+//
+// It no longer refuses a kubernetes row that blanks its CA bundle without
+// setting the insecure flag: that row now gets a trust-on-first-use pin
+// instead. What has not changed is that "no CA" never means "the host's system
+// trust store" — the dialer refuses that, whatever this function allows.
 func validateUpdateProtocolFields(current *store.Server, req *UpdateDatabaseRequest) string {
 	protocol := current.Protocol
 	if req.Protocol != nil {
@@ -729,24 +750,11 @@ func validateUpdateProtocolFields(current *store.Server, req *UpdateDatabaseRequ
 		stored = &store.KubernetesServerData{}
 	}
 
-	caCert := stored.CACert
-	if req.K8sCACert != nil {
-		caCert = *req.K8sCACert
-	}
-
-	insecure := stored.InsecureSkipTLSVerify
-	if req.K8sInsecureSkipTLSVerify != nil {
-		insecure = *req.K8sInsecureSkipTLSVerify
-	}
-
 	namespace := stored.Namespace
 	if req.K8sNamespace != nil {
 		namespace = *req.K8sNamespace
 	}
 
-	if caCert == "" && !insecure {
-		return "k8s_ca_cert is required for kubernetes servers (or set k8s_insecure_skip_tls_verify)"
-	}
 	if namespace == "" {
 		return "k8s_namespace is required for kubernetes servers"
 	}
@@ -782,6 +790,10 @@ func redactUpdateForAudit(req UpdateDatabaseRequest) map[string]any {
 	addPtr("k8s_ca_cert", req.K8sCACert, req.K8sCACert != nil)
 	addPtr("k8s_namespace", req.K8sNamespace, req.K8sNamespace != nil)
 	addPtr("k8s_insecure_skip_tls_verify", req.K8sInsecureSkipTLSVerify, req.K8sInsecureSkipTLSVerify != nil)
+
+	if req.K8sResetLearnedCACert {
+		out["k8s_reset_learned_ca_cert"] = true
+	}
 
 	if req.ClearViaUID {
 		out["clear_via_uid"] = true
