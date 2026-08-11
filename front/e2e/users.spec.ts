@@ -163,4 +163,105 @@ test.describe("Users Management", () => {
       fullPage: true,
     });
   });
+
+  // The E2E server runs with DBB_OIDC_ROLE_MAPPING="viewer=analysts", so
+  // `viewer` is owned by the directory and re-applied at every login. The page
+  // has to say so — otherwise an admin edits it, sees a success toast, and the
+  // next SSO login quietly reverts them.
+  test("should mark SSO-managed roles and warn before editing one", async ({
+    authenticatedPage,
+  }) => {
+    await authenticatedPage.goto("users");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const viewerRow = authenticatedPage.getByRole("row").filter({
+      has: authenticatedPage.getByTestId("edit-user-viewer"),
+    });
+
+    // The list badges the managed role, and carries the "last synced from SSO"
+    // column (test mode seeds one sync against the viewer).
+    await expect(viewerRow.getByTestId("managed-role-viewer")).toBeVisible();
+    await expect(authenticatedPage.getByTestId("last-sync-viewer")).toBeVisible();
+
+    await authenticatedPage.screenshot({
+      path: "test-results/screenshots/users-sso-managed-roles.png",
+      fullPage: true,
+    });
+
+    // The edit form says the same, and answers "why did this change?" with the
+    // last sync, groups included.
+    await authenticatedPage.getByTestId("edit-user-viewer").click();
+    await expect(
+      authenticatedPage.getByTestId("edit-user-dialog")
+    ).toBeVisible();
+    await expect(
+      authenticatedPage.getByTestId("managed-role-badge-viewer")
+    ).toBeVisible();
+    const lastSync = authenticatedPage.getByTestId("last-role-sync");
+    await expect(lastSync).toBeVisible();
+    await expect(lastSync).toContainText("analysts");
+
+    await authenticatedPage.screenshot({
+      path: "test-results/screenshots/users-edit-sso-managed.png",
+    });
+
+    await authenticatedPage.keyboard.press("Escape");
+    await expect(authenticatedPage.getByTestId("edit-user-dialog")).toBeHidden();
+
+    // Touching a managed role must be confirmed. Cancelling leaves the edit
+    // dialog open with the change still pending, not saved.
+    await authenticatedPage.getByTestId("edit-user-connector").click();
+    const viewerCheckbox = authenticatedPage.getByTestId(
+      "edit-user-role-viewer"
+    );
+    await expect(viewerCheckbox).toHaveAttribute("aria-checked", "false");
+    await viewerCheckbox.click();
+    await authenticatedPage.getByTestId("edit-user-submit").click();
+
+    const warning = authenticatedPage.getByTestId(
+      "edit-user-managed-roles-dialog"
+    );
+    await expect(warning).toBeVisible();
+    await expect(warning).toContainText("viewer");
+
+    await authenticatedPage.screenshot({
+      path: "test-results/screenshots/users-managed-role-warning.png",
+    });
+
+    await authenticatedPage.getByTestId("edit-user-managed-roles-cancel").click();
+    await expect(warning).toBeHidden();
+    await expect(
+      authenticatedPage.getByTestId("edit-user-dialog")
+    ).toBeVisible();
+
+    // Confirming saves it: the role is editable, just not durable.
+    await authenticatedPage.getByTestId("edit-user-submit").click();
+    await authenticatedPage
+      .getByTestId("edit-user-managed-roles-confirm")
+      .click();
+    await expect(
+      authenticatedPage.getByTestId("edit-user-dialog")
+    ).toBeHidden();
+
+    const connectorRow = authenticatedPage.getByRole("row").filter({
+      has: authenticatedPage.getByTestId("edit-user-connector"),
+    });
+    await expect(
+      connectorRow.getByText("viewer", { exact: true })
+    ).toBeVisible();
+
+    // Put the connector user back the way the other tests expect it.
+    await authenticatedPage.getByTestId("edit-user-connector").click();
+    await viewerCheckbox.click();
+    await authenticatedPage.getByTestId("edit-user-submit").click();
+    await authenticatedPage
+      .getByTestId("edit-user-managed-roles-confirm")
+      .click();
+    await expect(
+      authenticatedPage.getByTestId("edit-user-dialog")
+    ).toBeHidden();
+    await expect(
+      connectorRow.getByText("viewer", { exact: true })
+    ).toHaveCount(0);
+  });
 });
