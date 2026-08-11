@@ -966,7 +966,7 @@ func (s *session) writeTTCError(oraErrorCode int, message string) error {
 		errMsg = errMsg[:oerMaxMessageLen]
 	}
 
-	body := encodeOER(s.oer, oerSummary{
+	body := encodeOER(s.oer.orDefault(), oerSummary{
 		CallStatus:   1,
 		SeqNumber:    s.nextOERSeq(),
 		ErrorCode:    oraErrorCode,

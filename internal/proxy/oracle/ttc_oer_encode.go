@@ -75,6 +75,22 @@ func defaultOERShape() oerShape {
 	}
 }
 
+// orDefault fills in a shape that was never populated from a capability
+// exchange. The session constructor always sets one, so this only stands in for
+// a zero value — where emitting the pre-12c layout with no call status would be
+// a silently wrong frame rather than an obviously missing one.
+func (o oerShape) orDefault() oerShape {
+	if o.ttcVersion == 0 {
+		d := defaultOERShape()
+		d.extraTailFields = o.extraTailFields
+		d.tailLearned = o.tailLearned
+
+		return d
+	}
+
+	return o
+}
+
 // oerModernTTCVersion is the TTC field version assumed until the capability
 // exchange says otherwise. Any value >= 7 selects the same encoding; 12 is what
 // a 19c server advertises, the lowest of the servers dbbat is tested against.
@@ -379,7 +395,7 @@ func (w *oerWalker) skipBytes(count int) {
 // raw is a whole TNS packet. The capability array is located the way go-ora
 // locates it — by parsing the reply's preamble — rather than by scanning for a
 // byte pattern, because the two flags read here sit deep enough in the array
-// that an off-by-four anchor would silently read a neighbouring capability.
+// that an off-by-four anchor would silently read a neighboring capability.
 func observeOERCapabilities(shape *oerShape, raw []byte) bool {
 	caps, ok := serverCompileTimeCaps(raw)
 	if !ok {
