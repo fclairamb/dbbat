@@ -63,15 +63,50 @@ export type RowChainVerification =
 // Auth Providers
 // ============================================================================
 
+// The providers endpoint answers two questions in one round-trip: which login
+// buttons to draw, and which roles the identity provider owns. Both hooks
+// share the cache entry and differ only in what they select out of it.
+const AUTH_PROVIDERS_QUERY_KEY = ["auth-providers"];
+const AUTH_PROVIDERS_STALE_TIME = 5 * 60 * 1000; // Cache for 5 minutes
+
+async function fetchAuthProviders() {
+  const { data, error } = await apiClient.GET("/auth/providers");
+  if (error) throw error;
+  return data;
+}
+
 export function useAuthProviders() {
   return useQuery({
-    queryKey: ["auth-providers"],
-    queryFn: async () => {
-      const { data, error } = await apiClient.GET("/auth/providers");
-      if (error) throw error;
-      return data?.providers ?? [];
-    },
-    staleTime: 5 * 60 * 1000, // Cache for 5 minutes
+    queryKey: AUTH_PROVIDERS_QUERY_KEY,
+    queryFn: fetchAuthProviders,
+    staleTime: AUTH_PROVIDERS_STALE_TIME,
+    select: (data) => data?.providers ?? [],
+  });
+}
+
+/**
+ * Which roles the identity provider's group mapping (DBB_OIDC_ROLE_MAPPING)
+ * owns. Those roles are re-resolved from directory groups on *every* login, so
+ * editing one by hand is temporary — the UI badges them and warns before the
+ * change is saved. Only role names come back; the directory group values never
+ * leave the server.
+ */
+export type SsoRoleMapping = {
+  enabled: boolean;
+  roles: string[];
+  provider?: string;
+};
+
+export function useSsoRoleMapping() {
+  return useQuery({
+    queryKey: AUTH_PROVIDERS_QUERY_KEY,
+    queryFn: fetchAuthProviders,
+    staleTime: AUTH_PROVIDERS_STALE_TIME,
+    select: (data): SsoRoleMapping => ({
+      enabled: data?.role_mapping?.enabled ?? false,
+      roles: data?.role_mapping?.roles ?? [],
+      provider: data?.role_mapping?.provider,
+    }),
   });
 }
 
@@ -1133,6 +1168,44 @@ export function useAuditEvents(filters?: {
         throw new Error(response.error.message || "Failed to load audit events");
       }
       return response.data?.audit_events || [];
+    },
+  });
+}
+
+/**
+ * Audit event type written when a login re-resolves a user's roles from their
+ * directory groups (`internal/api/oauth_roles.go`).
+ */
+export const ROLE_SYNC_EVENT_TYPE = "user.roles_synced";
+
+/**
+ * The most recent directory role sync per user, keyed by user UID.
+ *
+ * One listing rather than a request per row: the users page needs the same
+ * answer for every user it draws, and the audit list already comes back newest
+ * first (its UIDs are UUIDv7), so the first entry seen for a user is theirs.
+ */
+export function useLastRoleSyncs(options?: { enabled?: boolean }) {
+  return useQuery({
+    queryKey: ["audit", "role-syncs"],
+    enabled: options?.enabled ?? true,
+    queryFn: async (): Promise<Map<string, AuditEvent>> => {
+      const response = await apiClient.GET("/audit", {
+        params: {
+          query: { event_type: ROLE_SYNC_EVENT_TYPE, limit: 200 },
+        },
+      });
+      if (response.error) {
+        throw new Error(response.error.message || "Failed to load role syncs");
+      }
+
+      const byUser = new Map<string, AuditEvent>();
+      for (const event of response.data?.audit_events ?? []) {
+        if (event.user_id && !byUser.has(event.user_id)) {
+          byUser.set(event.user_id, event);
+        }
+      }
+      return byUser;
     },
   });
 }
