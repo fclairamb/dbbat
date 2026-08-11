@@ -269,7 +269,10 @@ const numPairsBlockLen = 5
 func rewriteAuthPhase1Username(body []byte, newUsername string) ([]byte, error) {
 	// [03 76 <seq> (00)] TTC function header + the 0x01 username-present marker.
 	// The header's width is negotiated, not fixed — see ttcAuthFuncHeaderLen.
-	headerLen := ttcAuthFuncHeaderLen(body) + 1
+	// A body this parser can't read the width off is a body it can't parse
+	// anyway (it is the thin fixed-offset path), so the narrow default is fine.
+	funcHeaderLen, _ := ttcAuthFuncHeaderLen(body)
+	headerLen := funcHeaderLen + 1
 
 	if len(body) < headerLen {
 		return nil, fmt.Errorf("%w: body too short for header", ErrAuthPhase1Rewrite)
@@ -388,6 +391,10 @@ func isPrintableASCIIRun(b []byte) bool {
 // expected piggyback/sub-op/userLen/mode/magic/username layout.
 var ErrAuthPhase1Rewrite = errors.New("AUTH Phase 1 rewrite failed")
 
+// ttcAuthFuncHeaderNarrow is the width of a TTC function header without the
+// extension byte: [03 <sub> <seq>].
+const ttcAuthFuncHeaderNarrow = 3
+
 // ttcAuthFuncHeaderLen returns the width of the TTC function header opening an
 // AUTH body: [03 <sub> <seq>], plus one trailing 0x00 when the session
 // negotiated a TTC field version of 18 or more (go-ora's PutTTCFunc; the
@@ -395,25 +402,42 @@ var ErrAuthPhase1Rewrite = errors.New("AUTH Phase 1 rewrite failed")
 //
 // Both widths are on the wire in testdata: go-ora v3 and JDBC thin open Phase 1
 // with `03 76 01 00`, older python-oracledb thin with `03 76 01`. Byte 3 tells
-// them apart — a body with a username writes the 0x01 marker there once the
-// header ends, so a 0x00 can only be the extension byte.
+// them apart — a **thin** body writes the 0x01 username-present marker there
+// once the header ends, so a 0x00 can only be the extension byte.
 //
-// The one ambiguity is a Phase 2 body with NO username, which writes [00 00]
-// where a normal one writes [01]: three zeros in a row is the extension byte
-// followed by that pair, two is the pair on a narrow header. dbbat never issues
-// or forwards a username-less AUTH — it cannot authenticate without one — but
-// the check is cheap and keeps the reading side honest.
-func ttcAuthFuncHeaderLen(body []byte) int {
-	const narrow = 3 // [03 <sub> <seq>]
-
-	if len(body) <= narrow || body[narrow] != 0x00 {
-		return narrow
+// ok=false means the width could not be read off this body and the narrow
+// default was returned:
+//
+//   - a wide (OCI/sqlplus) body, whose preamble is 4-byte little-endian fields
+//     and pointer runs rather than the marker — byte 3 says nothing there
+//     (`03 76 02 01 03 fe ff …` in sqlplus_cursor_reexec.pcapng, and a wide
+//     body may just as well carry a 0x00 in that position);
+//   - a body too short to tell.
+//
+// The narrow default is deliberate: it is the width the fixed-offset readers
+// assumed before any of this was understood, so an unreadable body keeps its
+// previous handling. A caller that *writes* a header (syntheticAuthHeader) must
+// not narrow on ok=false — guessing narrow there would corrupt the packet it is
+// about to send.
+//
+// The one ambiguity within thin bodies is a Phase 2 with NO username, which
+// writes [00 00] where a normal one writes [01]: three zeros in a row is the
+// extension byte followed by that pair, two is the pair on a narrow header.
+// dbbat never issues or forwards a username-less AUTH — it cannot authenticate
+// without one — but the check is cheap and keeps the reading side honest.
+func ttcAuthFuncHeaderLen(body []byte) (int, bool) {
+	if len(body) <= ttcAuthFuncHeaderNarrow || payloadUsesWideKVEncoding(body) {
+		return ttcAuthFuncHeaderNarrow, false
 	}
 
-	if body[1] == PiggybackSubAuth2 && len(body) > narrow+2 &&
-		body[narrow+1] == 0x00 && body[narrow+2] != 0x00 {
-		return narrow
+	if body[ttcAuthFuncHeaderNarrow] != 0x00 {
+		return ttcAuthFuncHeaderNarrow, true
 	}
 
-	return narrow + 1
+	if body[1] == PiggybackSubAuth2 && len(body) > ttcAuthFuncHeaderNarrow+2 &&
+		body[ttcAuthFuncHeaderNarrow+1] == 0x00 && body[ttcAuthFuncHeaderNarrow+2] != 0x00 {
+		return ttcAuthFuncHeaderNarrow, true
+	}
+
+	return ttcAuthFuncHeaderNarrow + 1, true
 }

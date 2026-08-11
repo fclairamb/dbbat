@@ -237,7 +237,7 @@ func parseAuthPhase2Header(body []byte) (authPhase2Header, error) {
 	// against 23ai open Phase 2 with `03 73 02 00`, and reading that fourth byte
 	// as the has-username flag makes the whole preamble walk off by one. See
 	// ttcAuthFuncHeaderLen.
-	headerLen := ttcAuthFuncHeaderLen(body)
+	headerLen, _ := ttcAuthFuncHeaderLen(body)
 
 	out := authPhase2Header{headerLen: headerLen}
 
