@@ -257,6 +257,10 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 		// Seals the audit and query chains. The store keeps only an HKDF
 		// subkey of this; see docs/audit-chain.md.
 		EncryptionKey: cfg.EncryptionKey,
+		// Not what drives the sweep (startQueryRetentionSweep owns that) —
+		// what lets chain verification tell a session retention emptied from
+		// one somebody emptied.
+		QueryRetention: cfg.QueryStorage.RetentionDuration(),
 	}
 	if cfg.RunMode == config.RunModeTest {
 		logger.InfoContext(ctx, "Test mode enabled, will drop all tables before migration")
@@ -1624,7 +1628,13 @@ func runAuditVerify(ctx context.Context, flags *cliFlags, cmd *cli.Command) erro
 		connectionUID = &parsed
 	}
 
-	dataStore, err := store.New(ctx, cfg.DSN, store.Options{EncryptionKey: cfg.EncryptionKey})
+	dataStore, err := store.New(ctx, cfg.DSN, store.Options{
+		EncryptionKey: cfg.EncryptionKey,
+		// A session with no statement left is only excusable inside the window
+		// the sweep deletes from, so the verifier has to be told what that
+		// window is — from the same configuration the sweep reads.
+		QueryRetention: cfg.QueryStorage.RetentionDuration(),
+	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize store: %w", err)
 	}

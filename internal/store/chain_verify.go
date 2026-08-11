@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
@@ -15,7 +16,7 @@ import (
 // Chain verification.
 //
 // A walk goes oldest to newest and stops at the first thing that does not add
-// up, because after a break nothing downstream means anything. Four things are
+// up, because after a break nothing downstream means anything. Five things are
 // hard breaks:
 //
 //   - a row whose own MAC does not match its content (the row was edited);
@@ -23,7 +24,10 @@ import (
 //     from the middle, or two rows were swapped);
 //   - a gap in chain_seq (a row was removed);
 //   - a connection whose stamped chain head is not what its surviving queries
-//     compute (rows were removed from the end).
+//     compute (rows were removed from the end);
+//   - a connection whose stamp claims statements when *none* survive, in a
+//     store where retention cannot account for their absence (the session was
+//     emptied outright — see checkEmptiedChain).
 //
 // One thing is not a break, and is reported separately: a chain whose *prefix*
 // is missing. On the queries side that is what DBB_QUERY_STORAGE_RETENTION does
@@ -349,9 +353,19 @@ func (s *Store) VerifyQueryChains(
 	return result, nil
 }
 
-// chainedConnectionUIDs lists the connections worth walking, oldest first. A
-// connection with no chained query is skipped: there is nothing to verify, and
-// a session that logged nothing is not evidence of anything.
+// chainedConnectionUIDs lists the connections worth walking, oldest first.
+//
+// A connection is in scope when it still has chained statements *or* when it
+// carries a stamped head — the same union capturedQueryUIDs makes one level
+// down, and for the same reason. Enumerating from `queries` alone made a
+// *total* wipe invisible while a partial one was caught: a session with no
+// surviving statement produced no row, so the stamp claiming N of them was
+// never compared against anything. Enumerating from `connections` also covers
+// the other half without a UNION, because `queries.connection_id` is
+// ON DELETE CASCADE and no statement can outlive its connection row.
+//
+// A connection with neither is skipped: a session that logged nothing is not
+// evidence of anything.
 func (s *Store) chainedConnectionUIDs(ctx context.Context, only *uuid.UUID) ([]uuid.UUID, error) {
 	if only != nil {
 		return []uuid.UUID{*only}, nil
@@ -360,10 +374,14 @@ func (s *Store) chainedConnectionUIDs(ctx context.Context, only *uuid.UUID) ([]u
 	var uids []uuid.UUID
 
 	err := s.db.NewSelect().
-		Model((*Query)(nil)).
-		ColumnExpr("DISTINCT q.connection_id").
-		Where("q.chain_seq IS NOT NULL").
-		Order("q.connection_id ASC").
+		Model((*Connection)(nil)).
+		Column("uid").
+		WhereGroup(" AND ", func(q *bun.SelectQuery) *bun.SelectQuery {
+			return q.
+				Where("c.query_chain_mac IS NOT NULL").
+				WhereOr("EXISTS (SELECT 1 FROM queries q WHERE q.connection_id = c.uid AND q.chain_seq IS NOT NULL)")
+		}).
+		Order("c.uid ASC").
 		Scan(ctx, &uids)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list chained connections: %w", err)
@@ -494,7 +512,8 @@ func (s *Store) verifyQueryRow(row *Query, connectionUID uuid.UUID, expectedSeq 
 // checkStampedHead compares the head a connection recorded against what its
 // surviving statements compute, and records a break on the result when they
 // disagree. This is the only check that catches a deletion at the *end* of a
-// chain.
+// chain — or, when nothing survives at all, of the whole of it
+// (checkEmptiedChain).
 //
 // The stamp comes in two formats and the column says which (see
 // queryChainStampMAC). Only the keyed one verifies, and it is checked *with the
@@ -531,7 +550,8 @@ func (s *Store) checkStampedHead(
 
 	err := s.db.NewSelect().
 		Model(&conn).
-		Column("uid", "disconnected_at", "query_chain_mac", "query_chain_len", "query_chain_stamp_version").
+		Column("uid", "connected_at", "disconnected_at",
+			"query_chain_mac", "query_chain_len", "query_chain_stamp_version").
 		Where("uid = ?", result.ConnectionUID).
 		Scan(ctx)
 	if err != nil {
@@ -566,6 +586,15 @@ func (s *Store) checkStampedHead(
 
 	if version == queryChainStampLegacy {
 		return s.checkLegacyStampedHead(result, conn, opts)
+	}
+
+	// Nothing survives, yet the stamp claims a session that ran statements.
+	// There is no head to compare against, so this is judged on its own terms
+	// rather than by the prefix rules below.
+	if result.Verified == 0 && conn.QueryChainLen > 0 {
+		s.checkEmptiedChain(result, conn)
+
+		return nil
 	}
 
 	sealedMAC := result.HeadMAC
@@ -608,6 +637,75 @@ func (s *Store) checkStampedHead(
 	return nil
 }
 
+// checkEmptiedChain judges a stamped session that has no surviving statement at
+// all — the case the walk used to never even reach, because it enumerated
+// connections out of `queries`. Deleting *all* of a session's statements was
+// therefore invisible while deleting all but one was caught.
+//
+// Two things produce it, and they are indistinguishable from `queries` alone:
+//
+//  1. DBB_QUERY_STORAGE_RETENTION reaped every statement of a session whose
+//     connection row survived the same sweep. That happens to a long-lived
+//     session — pooled or idle — that went quiet well before it closed, or that
+//     is still open (the sweep never reaps an open connection row, only its
+//     statements). It is housekeeping, and reporting it would cry wolf on every
+//     deployment that sets a retention.
+//  2. Someone deleted the statements.
+//
+// What separates them is *time*, and only the configured retention window says
+// where the line is: the sweep deletes by `executed_at < now - retention`, and
+// every statement of a session ran at or after its `connected_at`. So a session
+// that connected at or after the cutoff cannot have had a single statement
+// reaped, and an empty one is a break. With retention disabled — the default —
+// the cutoff is the beginning of time and nothing is excused.
+//
+// The rule is deliberately the *sound* one rather than the tight one: a session
+// that connected before the cutoff but ran after it is excused too. Reaching
+// that precision would need the deleted statements' timestamps, which is what
+// the attacker just removed.
+//
+// It reads the retention from configuration, not from the data (say, the oldest
+// statement left in the store), because a young or quiet store has its oldest
+// surviving statement a few minutes back, which would excuse nearly every
+// session. The cost of that choice is one caveat: raising or disabling
+// DBB_QUERY_STORAGE_RETENTION moves the cutoff backwards, so sessions the
+// *previous* setting legitimately emptied can start reading as breaks. Lowering
+// it never can.
+func (s *Store) checkEmptiedChain(result *QueryChainResult, conn Connection) {
+	if s.retentionCouldEmpty(conn) {
+		// The whole chain is gone rather than just its oldest statements: the
+		// extreme of a truncated prefix, and counted as one so the sweep still
+		// reports the session instead of walking it silently.
+		result.TruncatedPrefix = true
+
+		return
+	}
+
+	window := "DBB_QUERY_STORAGE_RETENTION is disabled, so nothing legitimately deletes statements"
+	if s.queryRetention > 0 {
+		window = fmt.Sprintf(
+			"the session connected at %s, inside the %s retention window, so the sweep cannot have reaped them",
+			conn.ConnectedAt.UTC().Format(time.RFC3339), s.queryRetention)
+	}
+
+	result.Break = stampBreak(result, conn, fmt.Sprintf(
+		"the connection recorded %d statements and none survive: %s. "+
+			"The session's statements were removed",
+		conn.QueryChainLen, window))
+}
+
+// retentionCouldEmpty reports whether DBB_QUERY_STORAGE_RETENTION can account
+// for a session having no statements left. Every statement of a session ran at
+// or after connected_at, so the sweep can only have taken them all when the
+// session itself began before the cutoff.
+func (s *Store) retentionCouldEmpty(conn Connection) bool {
+	if s.queryRetention <= 0 {
+		return false
+	}
+
+	return conn.ConnectedAt.Before(time.Now().Add(-s.queryRetention))
+}
+
 // checkLegacyStampedHead handles a session still stamped in the pre-0.24
 // format: the head MAC stored verbatim, with no key involved.
 //
@@ -633,6 +731,17 @@ func (s *Store) checkLegacyStampedHead(
 				"verbatim copy of the head MAC and anyone who can write to this store can write it. "+
 				"Pass --allow-legacy-stamps to count these sessions instead, as dbbat 0.23.x-era "+
 				"stores did, until they age out of DBB_QUERY_STORAGE_RETENTION")
+
+		return nil
+	}
+
+	// Nothing survives. Under the opt-in that stays part of the legacy caveat
+	// rather than becoming a break of its own: an unkeyed stamp attests to
+	// nothing either way, so a session retention emptied and a session someone
+	// emptied are the same two bytes here, and no key can separate them. Counted
+	// as tolerated, exactly like every other legacy stamp under the flag.
+	if result.Verified == 0 && conn.QueryChainLen > 0 {
+		result.LegacyStamp = true
 
 		return nil
 	}
@@ -663,6 +772,9 @@ func (s *Store) checkLegacyStampedHead(
 // verified every surviving statement from FirstSeq to HeadSeq against its own
 // content and against its predecessor: a row inside that range whose MAC did not
 // add up would have stopped the walk before it got here.
+//
+// At least one statement survives here by construction: a stamped session with
+// none is settled by checkEmptiedChain before this is reached.
 func (s *Store) stampedPrefixMAC(
 	ctx context.Context, result *QueryChainResult, conn Connection,
 ) ([]byte, *ChainBreak, error) {
@@ -671,15 +783,6 @@ func (s *Store) stampedPrefixMAC(
 	// reached: retention removes the *oldest* statements, so nothing legitimate
 	// leaves a stamp ahead of the head.
 	if conn.DisconnectedAt != nil || conn.QueryChainLen > result.HeadSeq {
-		// Nothing survives at all. For an open session that is what retention
-		// does to a session that has been idle longer than the retention window
-		// (CleanupOldQueryRows never reaps the open connection row itself, only
-		// its statements), so it proves nothing either way. A closed session
-		// keeps the break: its statements and its row are reaped together.
-		if result.Verified == 0 && conn.DisconnectedAt == nil {
-			return nil, nil, nil
-		}
-
 		return nil, stampBreak(result, conn, fmt.Sprintf(
 			"the connection recorded %d statements but the surviving statements end at %d: "+
 				"statements were removed from the end of the session",
@@ -688,7 +791,7 @@ func (s *Store) stampedPrefixMAC(
 
 	// Below the oldest survivor: DBB_QUERY_STORAGE_RETENTION reaped the
 	// statement the stamp sealed. Nothing left to check it against.
-	if result.Verified == 0 || conn.QueryChainLen < result.FirstSeq {
+	if conn.QueryChainLen < result.FirstSeq {
 		return nil, nil, nil
 	}
 
