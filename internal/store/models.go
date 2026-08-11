@@ -1167,6 +1167,24 @@ type AuditLog struct {
 // AuditEvent is an alias for backward compatibility
 type AuditEvent = AuditLog
 
+// UserRoleSync is the newest directory role-sync audit entry of one user.
+//
+// It is a projection of `audit_log`, not a table: the audit entry stays the
+// only record of what happened, and this carries it verbatim — `Details`
+// included, because the directory groups it names are the answer to "why did
+// this change?". The joined `Username` saves the caller a second lookup to
+// render a row.
+type UserRoleSync struct {
+	bun.BaseModel `bun:"table:audit_log,alias:al"`
+
+	UID       uuid.UUID       `bun:"uid,type:uuid" json:"uid"`
+	EventType string          `bun:"event_type" json:"event_type"`
+	UserID    uuid.UUID       `bun:"user_id,type:uuid" json:"user_id"`
+	Username  string          `bun:"username,scanonly" json:"username"`
+	Details   json.RawMessage `bun:"details,type:jsonb" json:"details"`
+	CreatedAt time.Time       `bun:"created_at" json:"created_at"`
+}
+
 // AuditFilter represents filters for listing audit events
 type AuditFilter struct {
 	EventType   *string

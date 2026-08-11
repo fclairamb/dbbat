@@ -159,6 +159,40 @@ func readAuditChainHead(ctx context.Context, db bun.IDB) (int64, []byte, error) 
 	return row.ChainSeq, row.MAC, nil
 }
 
+// ListLatestEventPerUser returns, for each user that has one, the newest audit
+// entry of eventType — one row per user, whatever the volume of the audit log.
+//
+// This exists because the alternative the UI used first — fetch the newest N
+// entries of a type and keep the first one seen per user — degrades silently:
+// a user whose last sync fell outside that window becomes indistinguishable
+// from a user who never had one. Raising N moves the cliff instead of removing
+// it. DISTINCT ON does the picking in the database, so the answer is exact.
+//
+// Ordering is `user_id, uid DESC`: `uid` is a UUIDv7 assigned at insert, so
+// descending is newest-first, and DISTINCT ON keeps the first row of each
+// group. The join to `users` is what supplies the username and, incidentally,
+// drops entries whose user has since been deleted — including soft-deleted
+// ones, filtered here explicitly because bun only applies soft-delete rules to
+// the model's own table.
+func (s *Store) ListLatestEventPerUser(ctx context.Context, eventType string) ([]UserRoleSync, error) {
+	syncs := []UserRoleSync{}
+
+	err := s.db.NewSelect().
+		Model(&syncs).
+		DistinctOn("al.user_id").
+		ColumnExpr("al.uid, al.event_type, al.user_id, al.details, al.created_at").
+		ColumnExpr("u.username").
+		Join("JOIN users AS u ON u.uid = al.user_id AND u.deleted_at IS NULL").
+		Where("al.event_type = ?", eventType).
+		Order("al.user_id", "al.uid DESC").
+		Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list the latest %s per user: %w", eventType, err)
+	}
+
+	return syncs, nil
+}
+
 // ListAuditEvents retrieves audit events with optional filters
 func (s *Store) ListAuditEvents(ctx context.Context, filter AuditFilter) ([]AuditEvent, error) {
 	var events []AuditLog
