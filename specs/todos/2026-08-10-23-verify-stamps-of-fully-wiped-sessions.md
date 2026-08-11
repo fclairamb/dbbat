@@ -67,10 +67,12 @@ statements without tripping the chain.
 - Copy the test shape from `TestRowChainDetectsWipedCapture`
   (`internal/store/chain_test.go`), and add the retention counterpart so the
   no-cry-wolf half is pinned too.
-- Legacy (`query_chain_stamp_version = 0`) rows should keep behaving as they do
-  today — a wiped legacy session cannot be distinguished from a forged one
-  without the key, so it belongs with the rest of the legacy caveat rather than
-  as a new break.
+- Legacy (`query_chain_stamp_version = 0`) rows need no special case at all
+  now that `2026-08-10-22` has landed: such a row is already a break the moment
+  it is walked, whatever survived. The only thing to check is the behaviour
+  under `--allow-legacy-stamps`, where a wiped legacy session cannot be
+  distinguished from a forged one without the key — leave that with the rest of
+  the legacy caveat rather than turning it into a new break.
 
 ## Key files
 
