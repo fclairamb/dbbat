@@ -461,10 +461,10 @@ func (s *Store) orphanCloseQuery(db bun.IDB) *bun.UpdateQuery {
 		Set("disconnected_at = last_activity_at")
 }
 
-// orphanChainHead is one closed orphan's recoverable chain head. ChainSeq and
-// MAC are NULL for a session that logged nothing — the LEFT JOIN keeps the row
-// rather than dropping it, so the caller can tell "nothing to seal" from "not
-// asked about".
+// orphanChainHead is one connection's recoverable chain head, as read back by
+// orphanHeadSelect for either stamp writer. ChainSeq and MAC are NULL for a
+// session that has logged nothing — the LEFT JOIN keeps the row rather than
+// dropping it, so the caller can tell "nothing to seal" from "not asked about".
 type orphanChainHead struct {
 	ConnectionUID uuid.UUID `bun:"connection_uid"`
 	ChainSeq      *int64    `bun:"chain_seq"`
@@ -493,15 +493,82 @@ type orphanChainHead struct {
 //     version 0). There is no head to seal, and checkStampedHead skips a NULL
 //     stamp rather than reading it as a break.
 //
-// Cost: one index lookup per *closed* row — the LATERAL join runs its inner
-// scan once per uid handed to it, and those uids are what the close returned,
-// not what the table holds. See TestQueryChainOrphanStampCostScalesWithOrphans,
-// which asserts that against a real plan.
+// No guard predicate: the rows were closed by the statement immediately before
+// this one, in this transaction, so their state is already known.
 func (s *Store) stampOrphanHeads(ctx context.Context, tx bun.Tx, uids []uuid.UUID) error {
+	_, err := s.stampChainHeads(ctx, tx, uids, stampAnyState)
+
+	return err
+}
+
+// Guard predicates stampChainHeads ANDs onto its write. They are constants, not
+// caller-supplied SQL: the value is interpolated into the statement, so nothing
+// dynamic may reach it.
+const (
+	// stampAnyState writes the stamp whatever state the row is in. The
+	// reconcile's rows were closed one statement earlier in the same
+	// transaction, so there is nothing left to race with.
+	stampAnyState = ""
+
+	// stampOnlyOpen writes the stamp only while the session is still open. It
+	// is what keeps a lagging refresh from landing *after* a concurrent
+	// CloseConnection and overwriting the exact final stamp with an older head
+	// — which, once disconnected_at is set, checkStampedHead judges by the
+	// exact rule and would report as a trailing deletion. Under READ COMMITTED
+	// the losing UPDATE re-evaluates this predicate once it holds the row lock,
+	// so the guard holds whichever of the two commits first.
+	stampOnlyOpen = "c.disconnected_at IS NULL"
+)
+
+// chainStampBatchSize bounds how many connections one stamp statement carries.
+// Each stamped row binds four parameters and PostgreSQL takes 65535 per
+// statement, so the cap is really about a busy replica with thousands of open
+// sessions rather than about the reconcile, whose input is whatever one pass
+// closed. Batching also keeps a single sweep from locking every open connection
+// row at once.
+const chainStampBatchSize = 500
+
+// stampChainHeads reads the query chain head of each given connection and writes
+// the sealed stamp back, returning how many rows it stamped.
+//
+// It is the shared half of all three stamp writers that work off the database
+// rather than off in-process chain state: the reconcile (stampOrphanHeads) and
+// the live refresh (RefreshOpenChainStamps). CloseConnection is the third and
+// stamps a single row from the head it already holds.
+//
+// A connection with no chained statement is skipped rather than stamped with a
+// NULL head — there is nothing to seal, and checkStampedHead reads a NULL stamp
+// as "not stamped" rather than as a break.
+//
+// Cost: one index lookup per *given* row — the LATERAL join runs its inner scan
+// once per uid handed to it, not once per connection in the table. See
+// TestQueryChainOrphanStampCostScalesWithOrphans and
+// TestQueryChainRefreshCostScalesWithOpenSessions, which assert that against
+// real plans.
+func (s *Store) stampChainHeads(ctx context.Context, db bun.IDB, uids []uuid.UUID, guard string) (int64, error) {
+	var stamped int64
+
+	for start := 0; start < len(uids); start += chainStampBatchSize {
+		end := min(start+chainStampBatchSize, len(uids))
+
+		batch, err := s.stampChainHeadBatch(ctx, db, uids[start:end], guard)
+		if err != nil {
+			return stamped, err
+		}
+
+		stamped += batch
+	}
+
+	return stamped, nil
+}
+
+func (s *Store) stampChainHeadBatch(
+	ctx context.Context, db bun.IDB, uids []uuid.UUID, guard string,
+) (int64, error) {
 	var heads []orphanChainHead
 
-	if err := s.orphanHeadSelect(tx, uids).Scan(ctx, &heads); err != nil {
-		return fmt.Errorf("failed to read the orphaned chain heads: %w", err)
+	if err := s.orphanHeadSelect(db, uids).Scan(ctx, &heads); err != nil {
+		return 0, fmt.Errorf("failed to read the chain heads to stamp: %w", err)
 	}
 
 	// Four bound columns per stamped row: uid, mac, length, version.
@@ -524,7 +591,7 @@ func (s *Store) stampOrphanHeads(ctx context.Context, tx bun.Tx, uids []uuid.UUI
 	}
 
 	if len(values) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	stamp := `UPDATE connections AS c
@@ -534,19 +601,84 @@ func (s *Store) stampOrphanHeads(ctx context.Context, tx bun.Tx, uids []uuid.UUI
 		  FROM (VALUES ` + strings.Join(values, ", ") + `) AS v (uid, mac, len, version)
 		 WHERE c.uid = v.uid`
 
-	if _, err := tx.ExecContext(ctx, stamp, args...); err != nil {
-		return fmt.Errorf("failed to stamp the orphaned chain heads: %w", err)
+	if guard != stampAnyState {
+		stamp += " AND " + guard
 	}
 
-	return nil
+	result, err := db.ExecContext(ctx, stamp, args...)
+	if err != nil {
+		return 0, fmt.Errorf("failed to stamp the chain heads: %w", err)
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to count the stamped chain heads: %w", err)
+	}
+
+	return affected, nil
+}
+
+// RefreshOpenChainStamps re-seals the query chain head of every session this run
+// still has open, and returns how many rows it stamped.
+//
+// Without it the stamp is only ever written by a *close* — CloseConnection or
+// the reconcile — so a session that never ends has no stamp at all, and the
+// stamp is the only thing that detects statements deleted from the *end* of a
+// chain. A psql window left open all day, a pooled application connection or an
+// approval hold waiting on a human is therefore unprotected at its tail for its
+// whole life, and a crashed session is unprotected from the crash until the
+// reclaim notices it (up to InstanceStaleAfter plus InstanceReclaimInterval).
+// Running this on the reclaim timer bounds both windows by the sweep interval
+// instead.
+//
+// Scoped to rows this run owns (run_id = s.runID). Two replicas sharing a store
+// would otherwise both read and rewrite the same stamps every pass, for no gain:
+// a row's head is best known to the process serving it, and a run id is minted
+// in memory and cannot be shared. Rows predating run tracking carry NULL and are
+// nobody's to refresh — they belong to a build that never wrote one.
+//
+// What the stamp then attests to is a *prefix*: the chain up to the position the
+// last sweep sealed. Statements appended since are not covered, which is why
+// checkStampedHead judges an open session by the prefix rule and only a closed
+// one exactly. Deleting statements newer than the last sweep stays undetectable;
+// this shrinks that window to the sweep interval rather than closing it.
+func (s *Store) RefreshOpenChainStamps(ctx context.Context) (int64, error) {
+	if !s.ChainEnabled() || s.runID == "" {
+		return 0, nil
+	}
+
+	var uids []uuid.UUID
+
+	if err := s.openChainStampSelect(s.db).Scan(ctx, &uids); err != nil {
+		return 0, fmt.Errorf("failed to list the open connections to stamp: %w", err)
+	}
+
+	if len(uids) == 0 {
+		return 0, nil
+	}
+
+	return s.stampChainHeads(ctx, s.db, uids, stampOnlyOpen)
+}
+
+// openChainStampSelect picks the connections one refresh sweep covers: still
+// open, and owned by this run. Split out so a test can EXPLAIN the real
+// statement — it must never touch `queries`, which is what makes the sweep cost
+// one head lookup per open session rather than a scan over the store's history.
+func (s *Store) openChainStampSelect(db bun.IDB) *bun.SelectQuery {
+	return db.NewSelect().
+		Model((*Connection)(nil)).
+		Column("uid").
+		Where("disconnected_at IS NULL").
+		Where("run_id = ?", s.runID).
+		Order("uid ASC")
 }
 
 // orphanHeadSelect reads the chain head of each of the given connections in one
 // round trip: a VALUES list of the uids, LEFT JOIN LATERAL the same head lookup
 // CloseConnection uses. Keeping it built from queryChainHeadSelect is what stops
-// the reconcile's notion of "the head" from drifting from the clean-close path's;
-// the LATERAL shape is what keeps it one index lookup per uid instead of a scan
-// over every chained statement in the store.
+// the reconcile's and the refresh sweep's notion of "the head" from drifting
+// from the clean-close path's; the LATERAL shape is what keeps it one index
+// lookup per uid instead of a scan over every chained statement in the store.
 func (s *Store) orphanHeadSelect(db bun.IDB, uids []uuid.UUID) *bun.SelectQuery {
 	placeholders := make([]string, len(uids))
 	args := make([]any, len(uids))
