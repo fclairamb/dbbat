@@ -308,8 +308,8 @@ func rowChainPayload(
 // holds and the MAC it ends on, bound to the query.
 //
 // It is a *keyed* stamp, and that is the whole point. Storing the head MAC
-// verbatim — which is what connections.query_chain_mac does — would not survive
-// the threat model this feature exists for: the head MAC is readable straight
+// verbatim — which is what connections.query_chain_mac did before 0.24 — would
+// not survive the threat model this feature exists for: the head MAC is readable straight
 // out of query_rows, so an attacker with write access to the store could delete
 // the last captured rows and then copy the new last row's MAC into the stamp,
 // with no key and no break reported. Sealing the stamp instead means correcting
