@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -53,6 +54,13 @@ var (
 	// authorization decision, and one that fails closed at startup is far
 	// better than one that quietly provisions users into a role nothing knows.
 	ErrAuthDefaultRoleInvalid = errors.New("DBB_AUTH_DEFAULT_ROLE is not a known role")
+
+	// ErrAuthProviderUnknown is returned when a per-provider auto-provisioning
+	// override names a login provider that does not exist. Ignoring it would
+	// fail *open*: an operator writing DBB_AUTH_AUTO_CREATE_USERS_OKTA to gate
+	// their issuer would get no override, no error, and auto-provisioning still
+	// on for everyone.
+	ErrAuthProviderUnknown = errors.New("unknown OAuth provider in a per-provider auto-provisioning override")
 )
 
 // DefaultOAuthRole is the role an auto-provisioned OAuth user starts with when
@@ -246,6 +254,15 @@ type OIDCAuthConfig struct {
 // internal/api pins the two lists together.
 var KnownRoles = []string{"admin", "viewer", "connector"}
 
+// KnownOAuthProviders is the set of login-provider keys a per-provider
+// auto-provisioning override may name. Same duplication as KnownRoles and for
+// the same reason: internal/auth/slack and internal/auth/oidc both import
+// config, so config cannot name their provider constants.
+// TestConfigKnownOAuthProvidersMatchProviders in internal/api pins the lists
+// together — a provider added on one side without the other would make its
+// override a startup failure.
+var KnownOAuthProviders = []string{"slack", "oidc"}
+
 // OAuthUsersConfig holds the auto-provisioning settings that apply to **every**
 // OAuth/OIDC login provider — Slack, the generic OIDC issuer, and whatever
 // comes next.
@@ -255,6 +272,12 @@ var KnownRoles = []string{"admin", "viewer", "connector"}
 // their OIDC issuer from minting accounts. The canonical names are now
 // DBB_AUTH_AUTO_CREATE_USERS and DBB_AUTH_DEFAULT_ROLE; the DBB_SLACK_AUTH_*
 // ones keep working as aliases (applyAuthProvisioningAliases).
+// One knob for every provider is right for the common case and wrong for a
+// deployment running two providers at different trust levels — a tightly-gated
+// Entra tenant where auto-provisioning is exactly what you want, next to a
+// Slack workspace full of contractors that should only admit accounts an admin
+// created by hand. Providers holds that per-provider override; the two
+// accessors below are the only way either setting is read.
 type OAuthUsersConfig struct {
 	// AutoCreateUsers lets an unknown but verified identity provision itself a
 	// local account on first login. Defaults to true.
@@ -262,6 +285,54 @@ type OAuthUsersConfig struct {
 	// DefaultRole is the role such an account starts with, and the floor a
 	// group role mapping can never dig below. Empty means DefaultOAuthRole.
 	DefaultRole string `koanf:"default_role"`
+	// Providers overrides both settings for one login provider, keyed by the
+	// provider's registered name ("slack", "oidc"). Written as
+	// DBB_AUTH_AUTO_CREATE_USERS_<PROVIDER> / DBB_AUTH_DEFAULT_ROLE_<PROVIDER>,
+	// or as auth.providers.<name>.* in a config file. A key nobody registered
+	// is a startup failure (see Validate).
+	Providers map[string]OAuthProviderUsersConfig `koanf:"providers"`
+}
+
+// OAuthProviderUsersConfig is one provider's override of the instance-wide
+// auto-provisioning settings. Every field is optional: what is not set here
+// falls back to the instance-wide value, which itself falls back to the
+// default.
+type OAuthProviderUsersConfig struct {
+	// AutoCreateUsers is a pointer because "unset" and "false" must be
+	// different answers. Auto-provisioning defaults to *on*, so a plain bool
+	// would make an unset override indistinguishable from an explicit
+	// "false" — and the whole point of the override is letting one provider
+	// say false while the instance says true.
+	AutoCreateUsers *bool `koanf:"auto_create_users"`
+	// DefaultRole overrides the role this provider's auto-provisioned accounts
+	// start with. Empty means "no override", so a provider cannot opt back
+	// into the built-in default against an instance-wide setting — spelling the
+	// instance-wide role out is the way to say that, and it is unambiguous.
+	DefaultRole string `koanf:"default_role"`
+}
+
+// AutoCreateUsersFor reports whether providerName may auto-provision accounts:
+// its own override if it set one, otherwise the instance-wide value.
+func (c OAuthUsersConfig) AutoCreateUsersFor(providerName string) bool {
+	if override, ok := c.Providers[providerName]; ok && override.AutoCreateUsers != nil {
+		return *override.AutoCreateUsers
+	}
+
+	return c.AutoCreateUsers
+}
+
+// RoleFor returns the default role providerName's auto-provisioned accounts
+// start with — its override, then the instance-wide value, then
+// DefaultOAuthRole.
+//
+// Same non-normalization as Role: Validate refuses anything a normalizer would
+// have had to fix, per-provider values included.
+func (c OAuthUsersConfig) RoleFor(providerName string) string {
+	if override, ok := c.Providers[providerName]; ok && override.DefaultRole != "" {
+		return override.DefaultRole
+	}
+
+	return c.Role()
 }
 
 // Role returns the configured default role verbatim, falling back to
@@ -294,8 +365,33 @@ func (c OAuthUsersConfig) Role() string {
 // deployment — a privilege escalation delivered by an upgrade, with nothing in
 // the release notes to warn anyone. Refusing to start says it out loud instead,
 // and the fix is one character.
+// A per-provider override goes through exactly the same check — a typo is a
+// typo whichever name carried it, and an override that fails to apply is the
+// more dangerous half of the pair, since it silently leaves the looser
+// instance-wide policy in force.
 func (c OAuthUsersConfig) Validate() error {
-	role := c.DefaultRole
+	if err := validateOAuthRole(c.DefaultRole); err != nil {
+		return err
+	}
+
+	// Sorted so a config with several bad providers always names the same one.
+	for _, name := range slices.Sorted(maps.Keys(c.Providers)) {
+		if !slices.Contains(KnownOAuthProviders, name) {
+			return fmt.Errorf("%w: %q (known: %s)",
+				ErrAuthProviderUnknown, name, strings.Join(KnownOAuthProviders, ", "))
+		}
+
+		if err := validateOAuthRole(c.Providers[name].DefaultRole); err != nil {
+			return fmt.Errorf("provider %q: %w", name, err)
+		}
+	}
+
+	return nil
+}
+
+// validateOAuthRole is the exact-match role check Validate applies to the
+// instance-wide default role and to every per-provider override.
+func validateOAuthRole(role string) error {
 	if role == "" || slices.Contains(KnownRoles, role) {
 		return nil
 	}
@@ -901,6 +997,36 @@ type LoadOptions struct {
 // koanfDelim is the delimiter used for nested config keys in koanf.
 const koanfDelim = "."
 
+// authProviderOverrideSettings maps the environment-variable stem of each
+// per-provider auto-provisioning override onto the key it carries under
+// auth.providers.<provider>. Only these two settings take a provider suffix,
+// which is what makes "whatever follows the stem is the provider name"
+// unambiguous — and why an unknown provider has to be a startup failure rather
+// than a key quietly parked in the map.
+var authProviderOverrideSettings = map[string]string{
+	"auth_auto_create_users_": "auto_create_users",
+	"auth_default_role_":      "default_role",
+}
+
+// authProviderOverrideKey turns an already-lowercased, DBB_-stripped variable
+// name into its auth.providers.* koanf key. The second result is false when the
+// name is not a per-provider override, which is the overwhelmingly common case.
+//
+// The stems are mutually exclusive prefixes, so the map's iteration order does
+// not matter.
+func authProviderOverrideKey(key string) (string, bool) {
+	for stem, setting := range authProviderOverrideSettings {
+		provider, found := strings.CutPrefix(key, stem)
+		if !found || provider == "" {
+			continue
+		}
+
+		return "auth.providers." + provider + "." + setting, true
+	}
+
+	return "", false
+}
+
 // envTransform transforms environment variable names to koanf keys.
 // DBB_LISTEN_PG -> listen_pg
 // DBB_QUERY_STORAGE_MAX_RESULT_ROWS -> query_storage.max_result_rows
@@ -925,6 +1051,16 @@ func envTransform(k, v string) (string, any) {
 	// auth_cache_* -> auth_cache.*
 	if strings.HasPrefix(key, "auth_cache_") {
 		return "auth_cache." + strings.TrimPrefix(key, "auth_cache_"), v
+	}
+	// auth_auto_create_users_<provider> -> auth.providers.<provider>.auto_create_users
+	// auth_default_role_<provider>      -> auth.providers.<provider>.default_role
+	//
+	// Must stay *before* the auth_ rule below, which would otherwise turn
+	// DBB_AUTH_AUTO_CREATE_USERS_OIDC into auth.auto_create_users_oidc — a key
+	// nothing unmarshals, so the operator would get no override, no error, and
+	// the instance-wide policy still in force.
+	if nested, ok := authProviderOverrideKey(key); ok {
+		return nested, v
 	}
 	// auth_* -> auth.* (DBB_AUTH_AUTO_CREATE_USERS, DBB_AUTH_DEFAULT_ROLE).
 	// Must stay *after* the auth_cache_ rule above, which it would otherwise

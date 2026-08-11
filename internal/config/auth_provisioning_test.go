@@ -239,6 +239,236 @@ func TestAuthProvisioningMiscasedRoleFails(t *testing.T) {
 	}
 }
 
+// TestAuthProvisioningPerProviderEnv is the feature: one provider gated, the
+// other left on the instance-wide policy. Both directions are covered because
+// "auto-creation defaults to on" makes the false-over-true case the one an
+// unset/false confusion would break.
+func TestAuthProvisioningPerProviderEnv(t *testing.T) {
+	setAuthBaseEnv(t)
+	t.Setenv("DBB_AUTH_AUTO_CREATE_USERS", "true")
+	t.Setenv("DBB_AUTH_DEFAULT_ROLE", "connector")
+	t.Setenv("DBB_AUTH_AUTO_CREATE_USERS_SLACK", "false")
+	t.Setenv("DBB_AUTH_DEFAULT_ROLE_OIDC", "viewer")
+
+	cfg, err := Load(LoadOptions{})
+	require.NoError(t, err)
+
+	assert.False(t, cfg.Auth.AutoCreateUsersFor("slack"),
+		"the Slack override must beat the instance-wide true")
+	assert.True(t, cfg.Auth.AutoCreateUsersFor("oidc"),
+		"a provider with no override keeps the instance-wide value")
+	assert.True(t, cfg.Auth.AutoCreateUsers,
+		"an override must not rewrite the instance-wide value")
+
+	assert.Equal(t, "viewer", cfg.Auth.RoleFor("oidc"), "the OIDC role override must apply")
+	assert.Equal(t, "connector", cfg.Auth.RoleFor("slack"),
+		"a provider with no role override keeps the instance-wide one")
+}
+
+// TestAuthProvisioningPerProviderOverridesFalseInstanceWide is the other
+// direction — the deployment that turned auto-provisioning off globally and
+// wants exactly one trusted issuer to mint accounts.
+func TestAuthProvisioningPerProviderOverridesFalseInstanceWide(t *testing.T) {
+	setAuthBaseEnv(t)
+	t.Setenv("DBB_AUTH_AUTO_CREATE_USERS", "false")
+	t.Setenv("DBB_AUTH_AUTO_CREATE_USERS_OIDC", "true")
+
+	cfg, err := Load(LoadOptions{})
+	require.NoError(t, err)
+
+	assert.True(t, cfg.Auth.AutoCreateUsersFor("oidc"))
+	assert.False(t, cfg.Auth.AutoCreateUsersFor("slack"))
+}
+
+// TestAuthProvisioningPerProviderFallsBackToDefaults pins the third rung of the
+// chain: with nothing configured at all, a per-provider read is the default.
+func TestAuthProvisioningPerProviderFallsBackToDefaults(t *testing.T) {
+	// t.Setenv inline rather than through setAuthBaseEnv: it is what tells the
+	// linter this test cannot run in parallel.
+	t.Setenv("DBB_DSN", "postgres://x:x@localhost/x")
+	t.Setenv("DBB_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+
+	cfg, err := Load(LoadOptions{})
+	require.NoError(t, err)
+
+	for _, provider := range KnownOAuthProviders {
+		assert.True(t, cfg.Auth.AutoCreateUsersFor(provider))
+		assert.Equal(t, DefaultOAuthRole, cfg.Auth.RoleFor(provider))
+	}
+}
+
+// TestAuthProvisioningPerProviderConfigFile covers the same overrides written
+// as YAML — the env variables map onto exactly these keys, so both spellings
+// have to reach the same place.
+func TestAuthProvisioningPerProviderConfigFile(t *testing.T) {
+	// t.Setenv inline rather than through setAuthBaseEnv: it is what tells the
+	// linter this test cannot run in parallel.
+	t.Setenv("DBB_DSN", "postgres://x:x@localhost/x")
+	t.Setenv("DBB_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+
+	configFile := writeAuthConfigFile(t,
+		"auth:\n"+
+			"  auto_create_users: true\n"+
+			"  providers:\n"+
+			"    slack:\n"+
+			"      auto_create_users: false\n"+
+			"    oidc:\n"+
+			"      default_role: admin\n")
+
+	cfg, err := Load(LoadOptions{ConfigFile: configFile})
+	require.NoError(t, err)
+
+	assert.False(t, cfg.Auth.AutoCreateUsersFor("slack"))
+	assert.True(t, cfg.Auth.AutoCreateUsersFor("oidc"))
+	assert.Equal(t, "admin", cfg.Auth.RoleFor("oidc"))
+	assert.Equal(t, DefaultOAuthRole, cfg.Auth.RoleFor("slack"))
+}
+
+// TestAuthProvisioningPerProviderEnvBeatsConfigFile keeps the ordinary
+// precedence intact one level down: the nested keys are ordinary koanf keys,
+// so the environment still wins over the file.
+func TestAuthProvisioningPerProviderEnvBeatsConfigFile(t *testing.T) {
+	// t.Setenv inline rather than through setAuthBaseEnv: it is what tells the
+	// linter this test cannot run in parallel.
+	t.Setenv("DBB_DSN", "postgres://x:x@localhost/x")
+	t.Setenv("DBB_KEY", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=")
+	t.Setenv("DBB_AUTH_AUTO_CREATE_USERS_SLACK", "false")
+
+	configFile := writeAuthConfigFile(t,
+		"auth:\n  providers:\n    slack:\n      auto_create_users: true\n")
+
+	cfg, err := Load(LoadOptions{ConfigFile: configFile})
+	require.NoError(t, err)
+
+	assert.False(t, cfg.Auth.AutoCreateUsersFor("slack"))
+}
+
+// TestAuthProvisioningPerProviderDoesNotDisturbTheAliases is the regression
+// guard the new envTransform rule most plausibly trips: it sits in front of the
+// generic auth_ rule, and both the canonical instance-wide names and the
+// DBB_AUTH_CACHE_* keys pass through the same chain.
+func TestAuthProvisioningPerProviderDoesNotDisturbTheAliases(t *testing.T) {
+	setAuthBaseEnv(t)
+	t.Setenv("DBB_AUTH_AUTO_CREATE_USERS_OIDC", "true")
+	t.Setenv("DBB_SLACK_AUTH_AUTO_CREATE_USERS", "false")
+	t.Setenv("DBB_SLACK_AUTH_DEFAULT_ROLE", "viewer")
+	t.Setenv("DBB_AUTH_CACHE_TTL_SECONDS", "42")
+
+	cfg, err := Load(LoadOptions{})
+	require.NoError(t, err)
+
+	assert.False(t, cfg.Auth.AutoCreateUsers, "the legacy instance-wide alias must still apply")
+	assert.Equal(t, "viewer", cfg.Auth.Role())
+	assert.True(t, cfg.Auth.AutoCreateUsersFor("oidc"), "the per-provider override still wins for oidc")
+	assert.False(t, cfg.Auth.AutoCreateUsersFor("slack"),
+		"slack has no override, so it follows the aliased instance-wide value")
+	assert.Equal(t, 42, cfg.AuthCache.TTLSeconds)
+}
+
+// TestAuthProvisioningPerProviderUnknownProviderFails covers the fail-closed
+// half: a misspelled provider name would otherwise leave the operator with the
+// policy they were trying to change, silently.
+func TestAuthProvisioningPerProviderUnknownProviderFails(t *testing.T) {
+	setAuthBaseEnv(t)
+	t.Setenv("DBB_AUTH_AUTO_CREATE_USERS_OKTA", "false")
+
+	_, err := Load(LoadOptions{})
+	require.ErrorIs(t, err, ErrAuthProviderUnknown)
+	assert.Contains(t, err.Error(), "okta")
+}
+
+// TestAuthProvisioningPerProviderUnknownRoleFails pins requirement three: the
+// per-provider role goes through the same KnownRoles validation, mis-casing
+// included.
+func TestAuthProvisioningPerProviderUnknownRoleFails(t *testing.T) {
+	for _, role := range []string{"conector", "Admin"} {
+		t.Run(role, func(t *testing.T) {
+			setAuthBaseEnv(t)
+			t.Setenv("DBB_AUTH_DEFAULT_ROLE_OIDC", role)
+
+			_, err := Load(LoadOptions{})
+			require.ErrorIs(t, err, ErrAuthDefaultRoleInvalid)
+			assert.Contains(t, err.Error(), `provider "oidc"`,
+				"the error must say which provider carried the typo")
+		})
+	}
+}
+
+// TestOAuthUsersConfigPerProviderAccessors covers the resolution chain as a
+// pure function, including the two cases the pointer exists for.
+func TestOAuthUsersConfigPerProviderAccessors(t *testing.T) {
+	t.Parallel()
+
+	yes, no := true, false
+
+	tests := []struct {
+		name     string
+		cfg      OAuthUsersConfig
+		provider string
+		wantAuto bool
+		wantRole string
+	}{
+		{
+			name:     "no providers map at all",
+			cfg:      OAuthUsersConfig{AutoCreateUsers: true},
+			provider: "oidc",
+			wantAuto: true,
+			wantRole: DefaultOAuthRole,
+		},
+		{
+			name: "override false beats instance-wide true",
+			cfg: OAuthUsersConfig{
+				AutoCreateUsers: true,
+				Providers:       map[string]OAuthProviderUsersConfig{"slack": {AutoCreateUsers: &no}},
+			},
+			provider: "slack",
+			wantAuto: false,
+			wantRole: DefaultOAuthRole,
+		},
+		{
+			name: "override true beats instance-wide false",
+			cfg: OAuthUsersConfig{
+				AutoCreateUsers: false,
+				Providers:       map[string]OAuthProviderUsersConfig{"oidc": {AutoCreateUsers: &yes}},
+			},
+			provider: "oidc",
+			wantAuto: true,
+			wantRole: DefaultOAuthRole,
+		},
+		{
+			name: "a role-only override leaves auto-creation alone",
+			cfg: OAuthUsersConfig{
+				AutoCreateUsers: true,
+				DefaultRole:     "connector",
+				Providers:       map[string]OAuthProviderUsersConfig{"oidc": {DefaultRole: "viewer"}},
+			},
+			provider: "oidc",
+			wantAuto: true,
+			wantRole: "viewer",
+		},
+		{
+			name: "an entry for another provider does not leak",
+			cfg: OAuthUsersConfig{
+				AutoCreateUsers: true,
+				Providers:       map[string]OAuthProviderUsersConfig{"oidc": {AutoCreateUsers: &no, DefaultRole: "admin"}},
+			},
+			provider: "slack",
+			wantAuto: true,
+			wantRole: DefaultOAuthRole,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			assert.Equal(t, tc.wantAuto, tc.cfg.AutoCreateUsersFor(tc.provider))
+			assert.Equal(t, tc.wantRole, tc.cfg.RoleFor(tc.provider))
+			require.NoError(t, tc.cfg.Validate())
+		})
+	}
+}
+
 // TestOAuthUsersConfigValidate pins the exact-match rule and the two error
 // shapes without going through Load.
 func TestOAuthUsersConfigValidate(t *testing.T) {
