@@ -43,6 +43,15 @@ the e2e suite's (8080/5433/5001):
 | PostgreSQL proxy | 5499 (`SHOWCASE_PROXY_PORT`) |
 | Throwaway upstream | 5099 (`SHOWCASE_PG_PORT`) |
 
+Those three are the only ports the run binds. Every *other* proxy listener
+dbbat has — Oracle, MySQL, MongoDB, SQL Server, and whatever lands next — is
+started empty, so the instance never claims a default port a developer's own
+`make dev` stack is already holding. The set is derived, not listed: the script
+names the two listeners the showcase uses, reads the candidates off
+`internal/config`'s `koanf:"listen_*"` tags at run time, and blanks the rest.
+That derivation aborts loudly if it finds nothing — a silently empty list would
+disable nothing at all.
+
 Nothing in here may call `docker compose`: that would stop a developer's shared
 stack and take its database with it.
 
