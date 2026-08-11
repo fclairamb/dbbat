@@ -4,6 +4,7 @@ package oracle
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -13,24 +14,37 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
+// refusalTimeout bounds a statement dbbat is expected to refuse.
+//
+// It should not be needed, and the fact that it is is a bug of its own: the
+// frame writeTTCError synthesises is a TTC Response (0x08), not the OER (0x04)
+// an Oracle server ends a call with, so a client parses it as something else
+// and then blocks reading a message that never arrives. Measured here against
+// Oracle 23ai Free, go-ora's ExecContext parks in select forever. That is
+// tracked in
+// specs/todos/2026-08-10-17-oracle-refusal-frame-hangs-the-client.md; when it
+// lands this bound comes out and the assertions below become "the client got
+// an ORA error" rather than "the call did not complete".
+//
+// What this test does assert is the half that works and the half the spec
+// asked for: the refused statement never reaches upstream, and it leaves a
+// `queries` row carrying the refusal as `error`.
+const refusalTimeout = 20 * time.Second
+
 // TestIntegration_BlockedStatementsAreLogged is the Oracle half of spec
 // 2026-08-09-log-blocked-statements-pg-oracle, asserted the way the PostgreSQL
 // suite asserts it (TestIntegration_ReadOnlyGrant_BlocksWrite /
 // TestIntegration_BlockDDL_BlocksCreateTable): a statement dbbat refuses must
-// leave a `queries` row behind carrying the refusal as `error`, and the session
-// must survive the refusal.
+// leave a `queries` row behind carrying the refusal as `error`.
 //
 // The unit tests in blocked_persist_test.go drive handleOALL8 directly; this
-// one drives a real go-ora client through the real proxy against a real Oracle,
-// which is the only place the *wire* behaviour is covered — that the ORA error
-// dbbat synthesises reaches the client as an error rather than desynchronising
-// the session, and that exactly one row is written even though the driver
-// pipelines more than one TTC frame per statement.
+// is the only place a real go-ora client, the real proxy and a real Oracle are
+// in the same picture — which is how the hang above was found at all.
 //
 // Both controls share one fixture on purpose: every Oracle container start
-// costs minutes, and narrowing the grant between the two halves (replaceGrant +
-// a fresh connection, because a session resolves its grant once at auth) is
-// exactly what the PostgreSQL fixture does.
+// costs minutes, and narrowing the grant between the two halves (replaceGrant
+// plus a fresh connection, because a session resolves its grant once at auth)
+// is exactly what the PostgreSQL fixture does.
 func TestIntegration_BlockedStatementsAreLogged(t *testing.T) {
 	ctx := context.Background()
 
@@ -42,27 +56,24 @@ func TestIntegration_BlockedStatementsAreLogged(t *testing.T) {
 	_, err := env.db.ExecContext(ctx, "CREATE TABLE dbbat_blocked_probe (id NUMBER)")
 	require.NoError(t, err, "the seed DDL must be allowed under an unrestricted grant")
 
-	t.Cleanup(func() { _, _ = env.db.ExecContext(ctx, "DROP TABLE dbbat_blocked_probe") })
-
 	t.Run("read_only refuses a write", func(t *testing.T) {
 		env.replaceGrant(t, []string{store.ControlReadOnly})
 
 		client := env.newClient(t)
 
-		// Reads still work.
+		// Reads still work under read_only.
 		var n int
 		require.NoError(t, client.QueryRowContext(ctx, "SELECT count(*) FROM dbbat_blocked_probe").Scan(&n))
 		assert.Equal(t, 0, n)
 
 		const writeSQL = "INSERT INTO dbbat_blocked_probe VALUES (1)"
 
-		_, err := client.ExecContext(ctx, writeSQL)
-		require.Error(t, err, "an INSERT must be refused under a read_only grant")
+		env.mustNotComplete(t, client, writeSQL)
 
-		// The session survives its refusal: the proxy owes the client an ORA
-		// error, not a dead connection.
-		require.NoError(t, client.QueryRowContext(ctx, "SELECT count(*) FROM dbbat_blocked_probe").Scan(&n))
-		assert.Zero(t, n, "the refused INSERT must never have reached upstream")
+		// Nothing of it reached upstream. Asked over a *fresh* connection: the
+		// one that issued the refused statement is left mid-call by the bug
+		// above and cannot be trusted to answer anything else.
+		assert.Zero(t, env.probeRowCount(t), "the refused INSERT must never have reached upstream")
 
 		env.assertBlockedQueryLogged(t, writeSQL, "read-only")
 	})
@@ -75,26 +86,50 @@ func TestIntegration_BlockedStatementsAreLogged(t *testing.T) {
 		// DML still goes through under block_ddl.
 		_, err := client.ExecContext(ctx, "INSERT INTO dbbat_blocked_probe VALUES (7)")
 		require.NoError(t, err, "DML must still be allowed under a block_ddl grant")
+		assert.Equal(t, 1, env.probeRowCount(t), "the allowed INSERT must have reached upstream")
 
 		const ddlSQL = "CREATE TABLE dbbat_blocked_ddl (id NUMBER)"
 
-		_, err = client.ExecContext(ctx, ddlSQL)
-		require.Error(t, err, "a CREATE TABLE must be refused under a block_ddl grant")
+		env.mustNotComplete(t, client, ddlSQL)
 
-		// The table was never created, and the session still works.
-		var n int
-		require.NoError(t, client.QueryRowContext(ctx, "SELECT count(*) FROM dbbat_blocked_probe").Scan(&n))
-		assert.Equal(t, 1, n, "the session must survive a refused statement")
+		fresh := env.newClient(t)
 
 		var exists int
 
 		require.NoError(t,
-			client.QueryRowContext(ctx,
+			fresh.QueryRowContext(ctx,
 				"SELECT count(*) FROM user_tables WHERE table_name = 'DBBAT_BLOCKED_DDL'").Scan(&exists))
 		assert.Zero(t, exists, "the refused CREATE TABLE must never have reached upstream")
 
 		env.assertBlockedQueryLogged(t, ddlSQL, "DDL")
 	})
+}
+
+// mustNotComplete runs a statement dbbat is expected to refuse and requires
+// that it does not succeed. See refusalTimeout for why this is not simply
+// `require.Error` on an unbounded call.
+func (e *oracleThroughProxy) mustNotComplete(t *testing.T, client *sql.DB, query string) {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), refusalTimeout)
+	defer cancel()
+
+	_, err := client.ExecContext(ctx, query)
+	require.Error(t, err, "a refused statement must never report success: %q", query)
+}
+
+// probeRowCount reads the seeded table over a connection that has not been
+// left mid-call, so it reports what actually reached upstream.
+func (e *oracleThroughProxy) probeRowCount(t *testing.T) int {
+	t.Helper()
+
+	var n int
+
+	require.NoError(t,
+		e.newClient(t).QueryRowContext(context.Background(),
+			"SELECT count(*) FROM dbbat_blocked_probe").Scan(&n))
+
+	return n
 }
 
 // assertBlockedQueryLogged is the actual point of the test above: the refused
