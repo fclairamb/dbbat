@@ -80,3 +80,93 @@ statements without tripping the chain.
   `capturedQueryUIDs` (the reference implementation)
 - `internal/store/chain_test.go` — `TestRowChainDetectsWipedCapture` is the shape
 - `docs/audit-chain.md` — the "what it detects" table gains a row
+
+## Decisions
+
+### Enumerate from `connections`, not a UNION
+
+`chainedConnectionUIDs` now selects from `connections` where the row carries a
+stamp **or** an `EXISTS` finds a chained statement. That is the same union
+`capturedQueryUIDs` makes, expressed without a `UNION`: `queries.connection_id`
+is `ON DELETE CASCADE`, so a statement can never outlive its connection row and
+the connections table is a complete index of both halves. A session that logged
+nothing has no stamp and is still skipped — pinned by
+`TestQueryChainSilentSessionIsNotWalked`.
+
+### Retention vs. a wipe: the configured window, compared against `connected_at`
+
+The spec's substantive question. A stamped session with zero surviving
+statements is a **break**, unless `DBB_QUERY_STORAGE_RETENTION` can account for
+it. The store is told its own retention window at construction
+(`store.Options.QueryRetention`, wired from the same config the sweep reads, in
+both `serve` and `dbbat audit verify`), and the test is:
+
+> the sweep deletes by `executed_at < now - retention`, and every statement of a
+> session ran at or after its `connected_at` — so a session that connected **at
+> or after** the cutoff cannot have had a single statement reaped, and an empty
+> one is a break.
+
+With retention disabled, the default, the cutoff is the beginning of time and
+nothing is excused. An excused session is reported as `TruncatedPrefix` (the
+extreme of one) rather than skipped silently, so it still appears in the sweep's
+counters.
+
+Why this and not the alternatives:
+
+- **Not "retention clears the stamp when it empties a session."** That makes a
+  NULL stamp a legitimate, operator-visible state and hands an attacker a
+  sanctioned erase path — one `UPDATE … SET query_chain_mac = NULL` and the
+  session is excused. It also directly contradicts
+  `specs/todos/2026-08-11-12-nulled-query-chain-stamp-is-not-a-break.md`, which
+  wants a NULLed stamp to *become* a break.
+- **Not "retention deletes the emptied connection row too."** It would keep
+  verification config-free, and it matches what `CleanupOldQueryRows` already
+  claims ("a closed connection never survives as an empty shell"), but it
+  destroys access evidence — who connected, from where, under which grant —
+  earlier than the retention policy nominally allows, and on a
+  retention-enabled deployment the sweep would erase the evidence of a real wipe
+  on its next tick.
+- **Not a data-derived horizon** (e.g. the oldest statement left in the store).
+  It is self-tuning and immune to config changes, but it collapses on a young or
+  quiet store, where the oldest surviving statement is minutes old and therefore
+  excuses nearly every session. It is also unsound in the other direction on a
+  store whose history starts recently.
+- **Not a persisted "highest cutoff ever swept" parameter.** It would remove the
+  caveat below, but the value would be an unkeyed column an attacker can raise
+  to excuse their own wipe — the same downgrade path that got version-0 stamps
+  dropped in `2026-08-10-22`.
+
+Accepted costs, both documented in `docs/audit-chain.md`:
+
+1. The rule is the **sound** one, not the tight one: a session that connected
+   before the cutoff but ran its statements after it is excused too. Closing
+   that would need the deleted statements' timestamps.
+2. **Raising or disabling `DBB_QUERY_STORAGE_RETENTION` moves the cutoff
+   backwards**, so sessions the previous setting legitimately emptied can start
+   reading as breaks. Lowering it never can.
+
+### Open sessions are judged the same way
+
+Previously `stampedPrefixMAC` excused *every* zero-survivor open session on the
+grounds that retention empties an idle live session (the sweep never reaps an
+open connection row). That blanket excuse is gone: an open session is judged by
+the same `connected_at`-vs-cutoff rule, which strictly tightens it — a live
+session emptied inside the retention window is now a break
+(`TestQueryChainDetectsWipedOpenSession`).
+
+### Legacy stamps keep their caveat
+
+Per the spec's last bullet: under `--allow-legacy-stamps` an emptied version-0
+session is counted as a legacy stamp, not turned into a new break. An unkeyed
+stamp attests to nothing either way, so a wiped legacy session and a
+retention-emptied one are the same bytes and no key separates them. Without the
+flag it is already a break for the version-0 reason, unchanged.
+
+### Not touched: the NULL-stamp hole
+
+`conn.QueryChainMAC == nil` still returns early. That is
+`specs/todos/2026-08-11-12`, deliberately left alone. Its own third
+implementation bullet asked whether retention can leave a closed connection row
+behind with its stamp intact — it can (the closed-but-recently-disconnected
+pooled session pinned by `TestQueryChainRetentionEmptyingASessionIsNotABreak`),
+which is what this spec's rule is for.
