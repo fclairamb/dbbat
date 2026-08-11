@@ -939,67 +939,62 @@ func (s *session) finalizeQuery(
 	}
 }
 
-// writeTTCError sends a TTC error response to the client.
+// writeTTCError ends the client's call with an ORA error.
 //
-// KNOWN BROKEN, do not trust the layout below: an Oracle server ends a call
-// with message type 0x04 (OER), whose body is the summary object encoded as
-// TTC *compressed* integers. This emits 0x08 (Response) with fixed-width
-// fields instead, so a client hands the bytes to the wrong parser and then
-// blocks reading a message that never arrives — measured against Oracle 23ai
-// Free, go-ora never returns from a statement refused this way (see
-// TestIntegration_BlockedStatementsAreLogged). The claim that sqlplus and JDBC
-// parse it has never been checked against a live client either.
+// This is the frame every Oracle refusal rides on — `read_only`, `block_ddl`,
+// `block_copy`, a quota, an expired or revoked grant — so what it emits has to
+// be something a real client accepts as the end of a call, not merely something
+// that looks like an error. It used to emit a TTC Response (0x08) with
+// fixed-width big-endian fields, which no client parses: measured against
+// Oracle 23ai Free, go-ora's ExecContext never returned from a refused
+// statement at all.
 //
-// The refusal itself is enforced and logged correctly; only the client-facing
-// half is wrong. Tracked in
-// specs/todos/2026-08-10-17-oracle-refusal-frame-hangs-the-client.md.
+// A server ends a call with an OER (message type 0x04) whose body is the TTC
+// summary object, and that is what this builds — see encodeOER for the layout
+// and for how the two negotiated variations in it are resolved. Nothing else in
+// the message matters to a client: go-ora leaves its read loop on the message
+// type alone (`msg == 4`), and python-oracledb treats a processed error info as
+// the end of the response, so both come back with the ORA code and text and the
+// connection stays usable for the next statement.
 //
-// Format: TNS Data packet with TTC Response function code + error info.
+// The truncation is deliberate: a message long enough to need the chunked CLR
+// form would have to match the session's negotiated UseBigClrChunks, and no
+// refusal reason needs the room.
 func (s *session) writeTTCError(oraErrorCode int, message string) error {
-	// Build TTC error response payload:
-	// [data flags: 2 bytes] [func code: 1 byte = 0x08 Response]
-	// [sequence number: 1 byte] [error code: 4 bytes BE]
-	// [cursor ID: 2 bytes] [row count: 4 bytes]
-	// [error flag: 2 bytes] [error message length: 2 bytes] [error message]
 	errMsg := fmt.Sprintf("ORA-%05d: %s", oraErrorCode, message)
-	buf := make([]byte, 0, 18+len(errMsg))
-
-	// Data flags
-	buf = append(buf, 0x00, 0x00)
-
-	// TTC function code: Response
-	buf = append(buf, byte(TTCFuncResponse))
-
-	// Sequence number
-	buf = append(buf, 0x01)
-
-	// Error code (4 bytes, big-endian)
-	errCode := make([]byte, 4)
-	binary.BigEndian.PutUint32(errCode, uint32(oraErrorCode))
-	buf = append(buf, errCode...)
-
-	// Cursor ID (2 bytes) — 0 for error
-	buf = append(buf, 0x00, 0x00)
-
-	// Row count (4 bytes) — 0 for error
-	buf = append(buf, 0x00, 0x00, 0x00, 0x00)
-
-	// Error flag (2 bytes) — non-zero indicates error
-	buf = append(buf, 0x00, 0x01)
-
-	// Error message: ORA-NNNNN: message
-	msgLen := make([]byte, 2)
-	binary.BigEndian.PutUint16(msgLen, uint16(len(errMsg)))
-	buf = append(buf, msgLen...)
-	buf = append(buf, []byte(errMsg)...)
-
-	pkt := &TNSPacket{
-		Type:    TNSPacketTypeData,
-		Payload: buf,
+	if len(errMsg) > oerMaxMessageLen {
+		errMsg = errMsg[:oerMaxMessageLen]
 	}
 
-	return writeTNSPacket(s.clientConn, pkt)
+	body := encodeOER(s.oer, oerSummary{
+		CallStatus:   1,
+		SeqNumber:    s.nextOERSeq(),
+		ErrorCode:    oraErrorCode,
+		ErrorMessage: errMsg,
+	})
+
+	payload := make([]byte, 0, ttcDataFlagsSize+len(body))
+	payload = append(payload, 0x00, 0x00) // data flags
+	payload = append(payload, body...)
+
+	// v315+ framing, for the same reason sendAuthFailed spells out: after the
+	// Accept a modern client reads the packet length as a 4-byte field, and the
+	// legacy 2-byte framing writeTNSPacket emits leaves the length bytes reading
+	// as a multi-megabyte packet. That was the *other* half of this frame's
+	// hang, and the half a correct OER body alone does not fix — measured
+	// against Oracle 23ai Free, go-ora parked on a byte-perfect OER until it was
+	// framed this way.
+	if _, err := s.clientConn.Write(encodeV315DataPacket(payload)); err != nil {
+		return fmt.Errorf("write TTC error frame: %w", err)
+	}
+
+	return nil
 }
+
+// oerMaxMessageLen keeps a synthesized error text inside the short (single
+// length byte) CLR form, whose encoding is the same whatever the session
+// negotiated.
+const oerMaxMessageLen = 240
 
 // sendOracleError sends an ORA-01031 (insufficient privileges) error to the client.
 func (s *session) sendOracleError(queryErr error) error {
