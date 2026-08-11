@@ -92,6 +92,14 @@ The rules, in full:
 - Every resolved change writes a `user.roles_synced` audit entry naming the
   groups that caused it.
 
+Once a mapping is configured, the **Users page says so**: every role it owns is
+badged *managed by SSO*, the edit form asks for confirmation before saving a
+change to one of them ("this will be undone at the next login"), and a
+*SSO sync* column plus a summary on the edit form show the last
+`user.roles_synced` entry — when the directory last changed that person's
+roles, what it granted or revoked, and the groups it read. Only the role names
+reach the browser; group values stay on the server.
+
 :::warning A missing claim reads as "member of nothing"
 If the mapping is set but your IdP never emits the claim, every login revokes
 the mapped roles. Turn the mapping on only once you have confirmed the claim
