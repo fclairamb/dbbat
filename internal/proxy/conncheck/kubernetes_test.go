@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/proxy/upstream"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -258,10 +259,85 @@ func TestCheckClusterWithoutAToken(t *testing.T) {
 	}
 }
 
-// TestCheckClusterWithoutACABundleFailsClosed covers the state the update path
-// used to be able to write: no CA bundle and no explicit opt-out. It must be
-// refused outright, never quietly verified against the host's system roots.
+// TestCheckClusterWithoutACABundleFailsClosed: a row that pins no CA, opted out
+// of nothing, and cannot be reached has nothing to learn from — so it must be
+// refused, never quietly verified against the host's system roots.
 func TestCheckClusterWithoutACABundleFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	resolver := newFakeResolver()
+	uid := uuid.New()
+
+	token, err := crypto.Encrypt([]byte("sa-token"), testKey(), crypto.ServerAAD(uid.String()))
+	if err != nil {
+		t.Fatalf("encrypt token: %v", err)
+	}
+
+	cluster := &store.Server{
+		UID: uid, Host: "127.0.0.1", Port: 1, Protocol: store.ProtocolKubernetes,
+		PasswordEncrypted: token,
+		ProtocolData: &store.ServerProtocolData{
+			Kubernetes: &store.KubernetesServerData{Namespace: "data"},
+		},
+	}
+	resolver.servers[uid] = cluster
+
+	res := New(resolver, testKey()).Check(context.Background(), cluster)
+	if res.OK {
+		t.Fatal("Check() succeeded on a row that pins no CA, learned none, and did not opt out")
+	}
+
+	if cluster.ProtocolData.Kubernetes.LearnedCACert != "" {
+		t.Error("a CA was pinned although the capture could not happen")
+	}
+}
+
+// TestCheckClusterPinsTheCAOnFirstConnect is the TOFU flow as an operator meets
+// it: a cluster row with no pasted bundle connects, the check reports that
+// *this* run performed the pin, and the second check does not claim it again.
+func TestCheckClusterPinsTheCAOnFirstConnect(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeAPIServer(t)
+	fake.allowed = true
+
+	resolver := newFakeResolver()
+	cluster := fake.newCluster(t, resolver)
+	wantPEM := cluster.ProtocolData.Kubernetes.CACert
+	cluster.ProtocolData.Kubernetes.CACert = ""
+
+	res := New(resolver, testKey()).Check(context.Background(), cluster)
+	if !res.OK {
+		t.Fatalf("Check() = %+v, want OK with the CA learned on first connect", res)
+	}
+
+	if !res.CAPinned {
+		t.Error("CAPinned = false, want true on the first connect of a row with no pasted bundle")
+	}
+
+	if res.LearnedCACert != wantPEM {
+		t.Errorf("LearnedCACert = %q, want the API server's certificate %q", res.LearnedCACert, wantPEM)
+	}
+
+	if !strings.Contains(res.Message, "pinned") {
+		t.Errorf("message %q does not mention the pin", res.Message)
+	}
+
+	res2 := New(resolver, testKey()).Check(context.Background(), cluster)
+	if !res2.OK {
+		t.Fatalf("second Check() = %+v, want OK against the learned pin", res2)
+	}
+
+	if res2.CAPinned {
+		t.Error("CAPinned = true on the second check, want false")
+	}
+}
+
+// TestCheckClusterCAPinMismatch is binding semantic #5: after pinning, a
+// certificate the pin does not vouch for must be refused *and* named apart from
+// "you pasted the wrong CA", because rotation and interception look identical
+// on the wire and only an operator can tell them apart.
+func TestCheckClusterCAPinMismatch(t *testing.T) {
 	t.Parallel()
 
 	fake := newFakeAPIServer(t)
@@ -270,16 +346,63 @@ func TestCheckClusterWithoutACABundleFailsClosed(t *testing.T) {
 	resolver := newFakeResolver()
 	cluster := fake.newCluster(t, resolver)
 	cluster.ProtocolData.Kubernetes.CACert = ""
+	cluster.ProtocolData.Kubernetes.LearnedCACert = unrelatedCAPEM(t)
 
 	res := New(resolver, testKey()).Check(context.Background(), cluster)
 	if res.OK {
-		t.Fatal("Check() succeeded on a row that pins no CA and did not opt out")
+		t.Fatal("Check() succeeded against a certificate the pin does not vouch for")
 	}
+
+	if res.Code != CodeK8sCAPinMismatch {
+		t.Fatalf("code = %s, want %s (message: %s)", res.Code, CodeK8sCAPinMismatch, res.Message)
+	}
+
+	if res.Stage != StageClusterAPI {
+		t.Errorf("stage = %s, want %s", res.Stage, StageClusterAPI)
+	}
+
+	// The exit from a stale pin is the whole reason TOFU was worth adding.
+	if !strings.Contains(res.Message, "reset") || !strings.Contains(res.Message, "rotated") {
+		t.Errorf("message %q does not offer the rotation exit", res.Message)
+	}
+}
+
+// TestCheckClusterSuppliedCAWinsOverALearnedOne is binding semantic #2 at the
+// check layer: a stale learned value must not shadow the bundle an operator
+// pasted.
+func TestCheckClusterSuppliedCAWinsOverALearnedOne(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeAPIServer(t)
+	fake.allowed = true
+
+	resolver := newFakeResolver()
+	cluster := fake.newCluster(t, resolver)
+	cluster.ProtocolData.Kubernetes.LearnedCACert = unrelatedCAPEM(t)
+
+	res := New(resolver, testKey()).Check(context.Background(), cluster)
+	if !res.OK {
+		t.Fatalf("Check() = %+v, want the supplied bundle to be the one in force", res)
+	}
+
+	if res.CAPinned {
+		t.Error("CAPinned = true although the row supplied its own bundle")
+	}
+}
+
+// TestClassifyMissingCAConfiguration keeps the fail-closed branch of the
+// constructor covered even though the dialer now tries a TOFU capture first: a
+// row can still reach it (a hand-edited database, a restore, an import path).
+func TestClassifyMissingCAConfiguration(t *testing.T) {
+	t.Parallel()
+
+	res := classifyKubernetesError(upstream.ErrKubernetesNoCACert, StageClusterAPI)
 	if res.Stage != StageConfig || res.Code != CodeMissingConfig {
 		t.Errorf("stage/code = %s/%s, want %s/%s", res.Stage, res.Code, StageConfig, CodeMissingConfig)
 	}
-	if !strings.Contains(res.Message, "CA") {
-		t.Errorf("message %q does not point at the CA certificate field", res.Message)
+
+	if !strings.Contains(res.Message, "system trust store") {
+		t.Errorf("message %q drops the reason dbbat refuses rather than falling back", res.Message)
 	}
 }
 

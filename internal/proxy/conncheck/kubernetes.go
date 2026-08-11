@@ -21,6 +21,14 @@ import (
 // between "add `create` on `pods/portforward` to the Role" and a 403 buried in
 // a stream upgrade error.
 func (c *Checker) checkCluster(ctx context.Context, dialer *shared.Dialer, srv *store.Server) Result {
+	// Snapshot the learned pin before connecting so the result can say whether
+	// *this* check performed the TOFU pin — the same bookkeeping checkBastion
+	// does for a host key.
+	var hadPin bool
+	if kd := srv.KubernetesData(); kd != nil && kd.LearnedCACert != "" {
+		hadPin = true
+	}
+
 	tunnel, err := dialer.ConnectKubernetes(ctx, c.resolver, c.encryptionKey, srv.UID)
 	if err != nil {
 		return classifyKubernetesError(err, StageClusterAPI)
@@ -45,13 +53,29 @@ func (c *Checker) checkCluster(ctx context.Context, dialer *shared.Dialer, srv *
 		}
 	}
 
-	return Result{
+	res := Result{
 		OK:    true,
 		Stage: StageClusterRBAC,
 		Code:  CodeOK,
 		Message: "cluster reachable, the service account token was accepted, and it may port-forward in namespace " +
 			tunnel.Namespace(),
 	}
+
+	// Re-read the row: the shared dialer persists the TOFU pin as part of
+	// building the tunnel, so the learned bundle only exists after the connect.
+	if after, err := c.resolver.GetServerByUID(ctx, srv.UID); err == nil {
+		if kd := after.KubernetesData(); kd != nil {
+			res.LearnedCACert = kd.LearnedCACert
+			res.CAPinned = !hadPin && kd.LearnedCACert != ""
+		}
+	}
+
+	if res.CAPinned {
+		res.Message += "; the API server's CA was pinned on this first connect — paste the cluster's own bundle " +
+			"to replace this pin with one you verified"
+	}
+
+	return res
 }
 
 // checkKubernetesTarget resolves a database target that hangs off a cluster row
@@ -113,6 +137,7 @@ func isKubernetesStage(err error) bool {
 	for _, sentinel := range []error{
 		upstream.ErrKubernetesNoToken,
 		upstream.ErrKubernetesNoCACert,
+		upstream.ErrKubernetesCAPinMismatch,
 		upstream.ErrKubernetesUnauthorized,
 		upstream.ErrKubernetesForbidden,
 		upstream.ErrKubernetesTargetNotFound,
@@ -144,10 +169,19 @@ func classifyKubernetesError(err error, stage Stage) Result {
 		return Result{
 			Stage: StageConfig,
 			Code:  CodeMissingConfig,
-			Message: "the cluster row pins no CA certificate — paste the API server's CA bundle " +
-				"(the token Secret's ca.crt key), or explicitly enable \"skip TLS verification\". " +
+			Message: "the cluster row pins no CA certificate and none could be learned — paste the API server's " +
+				"CA bundle (the token Secret's ca.crt key), or explicitly enable \"skip TLS verification\". " +
 				"dbbat will not silently fall back to this host's system trust store for the " +
 				"connection that carries the service account token",
+		}
+	case errors.Is(err, upstream.ErrKubernetesCAPinMismatch):
+		return Result{
+			Stage: StageClusterAPI,
+			Code:  CodeK8sCAPinMismatch,
+			Message: "the API server presented a certificate the CA pinned on first connect does not vouch for. " +
+				"Either the cluster's CA rotated, or something is intercepting the connection that carries the " +
+				"service account token. Confirm which, then clear the pin — paste the cluster's current CA bundle, " +
+				"or reset the learned certificate to pin afresh",
 		}
 	case errors.Is(err, upstream.ErrKubernetesUnauthorized):
 		return Result{
