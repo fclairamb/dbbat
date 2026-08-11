@@ -89,7 +89,8 @@ dbbat/
 │   │   ├── oracle/          # Oracle TNS/TTC proxy (see docs/oracle.md)
 │   │   ├── mysql/           # MySQL/MariaDB proxy (see docs/mysql.md)
 │   │   ├── mongodb/         # MongoDB wire protocol proxy (see docs/mongodb.md)
-│   │   └── mssql/           # SQL Server TDS proxy (see docs/mssql.md)
+│   │   ├── mssql/           # SQL Server TDS proxy (see docs/mssql.md)
+│   │   └── kubernetes/      # No product code: the `//go:build integration` end-to-end suite for the K8s tunnel (a real k3s cluster) — it lives outside `upstream/` because it also drives the proxy and conncheck, which import it
 │   └── auth/                # OAuth provider abstraction
 │       ├── slack/           # Slack OIDC login (fixed endpoints, userInfo-based)
 │       └── oidc/            # Generic OIDC login: any issuer, verified ID tokens, PKCE
@@ -129,6 +130,7 @@ make test-integration-mssql        # ./internal/proxy/mssql/...  (amd64 image)
 make test-integration-mysql        # ./internal/proxy/mysql/...
 make test-integration-postgresql   # ./internal/proxy/postgresql/...
 make test-e2e-oracle               # ./internal/proxy/oracle/...
+make test-integration-kubernetes   # ./internal/proxy/kubernetes/  (a real k3s cluster)
 
 # Other
 make demo             # Build and run in demo mode
@@ -241,6 +243,14 @@ Behind `//go:build integration`, so `make test` neither compiles nor runs them.
 ```bash
 make test-integration-mongodb   # and -mysql, -postgresql, -mssql, plus test-e2e-oracle
 ```
+
+`make test-integration-kubernetes` is the odd one out: instead of an upstream
+database container it boots a **k3s cluster** (privileged container) and runs a
+PostgreSQL pod *inside* it, so the tunnel is exercised against a real API server
+and a real kubelet — the websocket transport, RBAC as the API server evaluates
+it, and a pod that is deleted mid-suite. The cluster is pinned to ≥1.31
+(`K3S_TEST_IMAGE` overrides it) because the websocket port-forward handler is
+only on by default from there. See `docs/kubernetes.md`.
 
 **Use the Make target, not a bare `go test -tags integration ./internal/proxy/...`.**
 Every test starts its own upstream container *and* its own PostgreSQL storage

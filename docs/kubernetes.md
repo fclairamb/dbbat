@@ -76,11 +76,18 @@ metadata:
   name: dbbat-portforward
   namespace: data
 rules:
-  # The tunnel itself. This is the verb that matters: without it every dial
+  # The tunnel itself. These are the verbs that matter: without them every dial
   # fails with a 403 out of the stream upgrade.
+  #
+  # Two verbs, because the API server derives the RBAC verb from the HTTP
+  # method and the two transports below use different ones: the websocket
+  # upgrade is a GET (`get`), the SPDY upgrade a POST (`create`). Granting only
+  # `create` still works — the refused GET is what triggers the SPDY fallback —
+  # but then every single dial pays a rejected request first, and the cluster
+  # audit log fills with 403s that mean nothing.
   - apiGroups: [""]
     resources: ["pods/portforward"]
-    verbs: ["create"]
+    verbs: ["create", "get"]
   # Reading pods is what turns "is this pod Ready?" into a useful connectivity
   # check instead of a mysterious hang.
   - apiGroups: [""]
@@ -302,6 +309,18 @@ speak. The one exception is a cluster row that sits behind an SSH bastion — th
 the SPDY transport is used unconditionally, because client-go's websocket round
 tripper exposes no dial hook and would ignore the bastion entirely.
 
+Which of the two actually carries a dial is decided by two things the operator
+controls: the API server's version (the websocket port-forward handler is on by
+default from Kubernetes 1.31) and the Role. The websocket upgrade is a `GET` and
+the SPDY upgrade a `POST`, and the API server maps the method onto the RBAC
+verb — so `get` on `pods/portforward` is what admits the websocket transport and
+`create` is what admits SPDY. The Role above grants both; see the note there for
+what granting only one costs.
+
+The connectivity check's `cluster_rbac` stage asks only about `create`, so a
+Role granting `get` alone is reported as forbidden even though dials over it
+succeed. Grant both and the question does not arise.
+
 `SetDeadline` on the resulting conn returns `os.ErrNoDeadline`. This matches the
 SSH bastion path, whose channel conns reject deadlines the same way, so every
 caller that already copes with a tunneled connection copes with this one.
@@ -323,6 +342,29 @@ so the dependency tree it drags in touches exactly one package.
   validate, but the dialer rejects it explicitly rather than mis-dialing —
   reaching an sshd that is not itself a pod would need the relay pod this
   version does not have.
+
+## Testing
+
+Two layers, deliberately:
+
+- **In-process**, in `make test`: `internal/proxy/upstream/kubernetes_*_test.go`
+  and `internal/proxy/conncheck/kubernetes_test.go` run against a fake API
+  server built on `httpstream`'s own server-side upgrader. Fast, and enough for
+  the stream plumbing, the `net.Conn` adapter, svc→pod resolution and the
+  classification of every failure.
+- **Against a real cluster**, behind `//go:build integration`:
+  `make test-integration-kubernetes` starts a **k3s** cluster with
+  testcontainers, deploys a PostgreSQL pod plus a Service, and runs the tunnel
+  through it — both addressing modes, a full dbbat proxy session with its query
+  log, a pod deleted and recreated under a live session, a Role with no
+  `pods/portforward` verb, and the first-connect CA pin. It also pins down which
+  transport carried each dial, using ServiceAccounts whose Roles admit exactly
+  one of `get`/`create` (see above). The cluster is pinned to ≥1.31 and
+  overridable with `K3S_TEST_IMAGE`.
+
+The fake cannot serve a websocket upgrade, so everything the second layer covers
+about the *kubelet* — the websocket transport, RBAC as the API server really
+evaluates it, a pod that goes away — is only ever exercised there.
 
 ## Related
 
