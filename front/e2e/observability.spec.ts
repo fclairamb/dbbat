@@ -596,6 +596,25 @@ test.describe("Observability Features", () => {
   test("should verify the audit chains from the audit page", async ({
     authenticatedPage,
   }) => {
+    // The store-wide audit chain only reports a head once something has been
+    // audited, and a freshly provisioned test store has nothing in
+    // `audit_log`. Create and immediately revoke an API key: both are audited,
+    // and the key never outlives the test.
+    const apiBase = new URL(authenticatedPage.url()).origin + "/api/v1";
+    const auth =
+      "Basic " + Buffer.from("admin:admintest").toString("base64");
+    const created = await authenticatedPage.request.post(`${apiBase}/keys`, {
+      headers: { Authorization: auth },
+      data: { name: `e2e-chain-verification-${Date.now()}` },
+    });
+    expect(created.ok()).toBeTruthy();
+    const createdKey = (await created.json()) as { id: string };
+    const revoked = await authenticatedPage.request.delete(
+      `${apiBase}/keys/${createdKey.id}`,
+      { headers: { Authorization: auth } },
+    );
+    expect(revoked.ok()).toBeTruthy();
+
     await authenticatedPage.goto("audit");
     await authenticatedPage.waitForLoadState("networkidle");
 
@@ -612,7 +631,20 @@ test.describe("Observability Features", () => {
       authenticatedPage.getByTestId("chain-verification-docs-link"),
     ).toHaveAttribute("href", /audit-chain/);
 
-    await authenticatedPage.getByTestId("verify-chains-button").click();
+    // The store-wide audit chain reports a head, and the head is copyable —
+    // recording it outside the database is the ritual this panel exists for.
+    // A walk's outcome is cached for a minute, so an answer computed before
+    // the key above was created can legitimately come back headless: click
+    // again until the cache has turned over.
+    const headMac = authenticatedPage.getByTestId("audit-head-mac");
+    await expect(async () => {
+      await authenticatedPage.getByTestId("verify-chains-button").click();
+      await expect(headMac).toBeVisible({ timeout: 10000 });
+    }).toPass({ timeout: 120000, intervals: [5000] });
+    await expect(headMac).toHaveText(/^[0-9a-f]{16,}$/);
+    await expect(
+      authenticatedPage.getByTestId("audit-head-mac-copy"),
+    ).toBeEnabled();
 
     // All three chains are walked: audit_log, the per-connection query chains
     // and the per-capture result-row chains.
@@ -635,15 +667,6 @@ test.describe("Observability Features", () => {
         authenticatedPage.getByTestId(`chain-result-${chain}-break`),
       ).toHaveCount(0);
     }
-
-    // The store-wide audit chain reports a head, and the head is copyable —
-    // recording it outside the database is the ritual this panel exists for.
-    const headMac = authenticatedPage.getByTestId("audit-head-mac");
-    await expect(headMac).toBeVisible();
-    await expect(headMac).toHaveText(/^[0-9a-f]{16,}$/);
-    await expect(
-      authenticatedPage.getByTestId("audit-head-mac-copy"),
-    ).toBeEnabled();
 
     await authenticatedPage.screenshot({
       path: "test-results/screenshots/audit-chain-verification.png",

@@ -119,6 +119,7 @@ export function ChainVerificationCard() {
             }}
             headMac={(data) => (data as AuditChainVerification).head_mac}
             headMacTestId="audit-head-mac"
+            headMacAbsentNote="No chained entries yet — the head appears once the store has recorded its first audited action."
           />
 
           <ChainRow
