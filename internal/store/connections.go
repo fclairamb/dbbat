@@ -504,8 +504,11 @@ func (s *Store) stampOrphanHeads(ctx context.Context, tx bun.Tx, uids []uuid.UUI
 		return fmt.Errorf("failed to read the orphaned chain heads: %w", err)
 	}
 
+	// Four bound columns per stamped row: uid, mac, length, version.
+	const stampColumns = 4
+
 	values := make([]string, 0, len(heads))
-	args := make([]any, 0, len(heads)*4) //nolint:mnd // four bound columns per row, see below
+	args := make([]any, 0, len(heads)*stampColumns)
 
 	for _, head := range heads {
 		if head.ChainSeq == nil || head.MAC == nil {
