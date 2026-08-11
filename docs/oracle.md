@@ -898,23 +898,37 @@ Every TTC function call opens with `[03 <sub> <seq>]` — piggyback marker, sub-
 of the client's and the server's `CompileTimeCaps[7]`). Both widths are on the
 wire in `internal/proxy/oracle/testdata`:
 
-| capture | Phase 1 | Phase 2 |
-|---|---|---|
-| `go_ora_cursor_reexec.pcapng` (go-ora v3, 23ai) | `03 76 01 00` | `03 73 02 00` |
-| `jdbc_thin_cursor_reexec.pcapng` | `03 76 01 00` | — |
-| `python_thin.pcapng` | `03 76 01` | `03 73 02` |
+| capture | Phase 1 | Phase 2 | framing |
+|---|---|---|---|
+| `go_ora_cursor_reexec.pcapng` (go-ora v3, 23ai) | `03 76 01 00` | `03 73 02 00` | thin, extended |
+| `jdbc_thin_cursor_reexec.pcapng` | `03 76 01 00` | `03 73 02 00` | thin, extended |
+| `python_thin_cursor_reexec.pcapng` | `03 76 01` | `03 73 02 00` | thin, mixed |
+| `python_thin.pcapng` | `03 76 01` | `03 73 02` | thin, narrow |
+| `dbeaver.pcapng` | `03 76 01` | `03 73 02` | thin, narrow |
+| `go_ora.pcapng` (go-ora v2 era) | `03 76 00` | `03 73 00` | thin, narrow, sequence hard-coded to 0 |
+| `sqlplus_cursor_reexec.pcapng` | `03 76 02` … | `03 73 03` … | **wide (OCI)** — width not inferable, see below |
 
 Anything that reads or writes an AUTH preamble must therefore get the width from
-`ttcAuthFuncHeaderLen` (byte 3 is either the extension zero or the `0x01`
-username-present marker) rather than assume one. Getting it wrong shifts every
+`ttcAuthFuncHeaderLen` rather than assume one. Getting it wrong shifts every
 field after the header by a byte, and the upstream answers two break markers plus
 `ORA-03120` — indistinguishable, from the outside, from the caps mismatch above.
 
-Fixed 2026-08-10 in three places: the synthetic `buildClientAuthPhase1` /
+The discriminator is byte 3, **and only on a thin (compressed-encoding) body**:
+there the header is always followed by the `0x01` username-present marker, so a
+`0x00` in that position can only be the extension byte. A wide (OCI/sqlplus)
+body frames its preamble as pointer runs and 4-byte little-endian fields with no
+such marker, so byte 3 says nothing at all — `ttcAuthFuncHeaderLen` returns
+`ok=false` for those and for anything too short to tell. `ok=false` carries the
+narrow width, which is the width every reader here assumed before any of this
+was understood; a caller that *writes* a header must not narrow on it.
+
+Fixed 2026-08-10 in four places: the synthetic `buildClientAuthPhase1` /
 `buildClientAuthPhase2` (which had hard-coded go-ora **v2**'s `03 76 00 01` and
-so could never have logged in against a modern negotiation), and the
-fixed-offset parsers behind the anchored rewrite in `phase1_forward.go` /
-`phase2_forward.go`.
+so could never have logged in against a modern negotiation), the fixed-offset
+parsers behind the anchored rewrite in `phase1_forward.go` /
+`phase2_forward.go`, and the client-side username parse in `parseAuthPhase1`
+(`ttc_auth.go`). Every one of them sat behind an anchored path that reads the
+`AUTH_*` keys instead of the preamble, which is why nothing was visibly broken.
 
 ### Exercising the synthetic AUTH fallback
 
@@ -932,8 +946,23 @@ DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH=1 go test -tags integration -v -timeout 20m \
   -count=1 -run TestIntegration_MCPExecutesThroughTheProxy ./internal/proxy/oracle/
 ```
 
-Both runs — with and without the variable — must pass. The flag is read once, by
-the integration suite's `TestMain`; nothing in production writes it.
+The flag is read once, by the integration suite's `TestMain`; nothing in
+production writes it.
+
+Both runs — with and without the variable — must pass **for the thin-client
+tests**, which is what the suite contains. The forced run is not a claim that
+the fallback serves every client: the synthetic builders emit the thin
+(compressed) KV encoding and a go-ora-shaped KV set only, so a wide/OCI session
+(sqlplus, Instant Client) whose rewrite failed would still be handed a body its
+caps-conditioned upstream cannot parse. The fallback is a safety net for thin
+clients, not a general-purpose client. Widening it is unfiled work — the
+forced run simply does not cover it.
+
+Note also what the forced run does **not** exercise: with the rewrite disabled,
+`rewriteAuthPhase1Username` / `parseAuthPhase2Header` never execute. Those are
+the paths every real login takes, so a change to the preamble readers has to be
+proved by the ordinary `make test-e2e-oracle`, and a change to the writers by
+the forced one. Neither run substitutes for the other.
 
 ### Connectivity check: fast login hides `ORA-01017`
 
