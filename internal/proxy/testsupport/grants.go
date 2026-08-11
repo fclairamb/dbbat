@@ -42,7 +42,7 @@ func WithApprovalPatterns(patterns ...string) GrantOption {
 // ErrGrantDefinitionRequired), which is what used to fail these suites at
 // setup.
 //
-// The definition's name/slug is randomised per call: a suite that seeds twice
+// The definition's name/slug is randomized per call: a suite that seeds twice
 // against one store would otherwise trip "grant definition with this slug
 // already exists". Callers never have to think about it.
 func CreateGrantWithControls(
