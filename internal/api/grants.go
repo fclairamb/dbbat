@@ -96,7 +96,19 @@ func (s *Server) handleAssignGrant(c *gin.Context) {
 		return
 	}
 
-	startsAt := time.Now()
+	// "Starts now" means the store's now, not this process's: the auth path
+	// admits a session with `starts_at <= NOW()` evaluated by PostgreSQL, so a
+	// window opened from an API server whose clock runs ahead of the store is
+	// refused by every proxy until the skew elapses. An explicitly requested
+	// start is taken as given — that one is the caller's wall clock by
+	// definition.
+	startsAt, err := s.store.Now(ctx)
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to read the database clock")
+
+		return
+	}
+
 	if req.StartsAt != nil {
 		startsAt = *req.StartsAt
 	}
