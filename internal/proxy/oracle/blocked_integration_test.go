@@ -5,6 +5,7 @@ package oracle
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -277,4 +278,78 @@ func TestIntegration_BlockedStatementRefusesPythonThin(t *testing.T) {
 	assert.Contains(t, output, "survived 42",
 		"the connection must still answer after a refusal:\n%s", output)
 	assert.Contains(t, output, "done", "the client must close cleanly:\n%s", output)
+}
+
+// sqlplusRefusalScript is the OCI half of the refusal coverage. sqlplus reports
+// an ORA error to stderr *and* keeps going, so the surrounding SELECTs are what
+// prove the session survived: the last one only prints when the connection is
+// still usable after the refusal.
+//
+// WHENEVER SQLERROR is deliberately NOT set to EXIT — a refusal that killed the
+// session would be indistinguishable from one that was merely reported.
+const sqlplusRefusalScript = `SET PAGESIZE 0
+SET FEEDBACK OFF
+SELECT 'read-ok=' || 1 FROM dual;
+INSERT INTO dbbat_blocked_probe VALUES (99);
+SELECT 'survived=' || 42 FROM dual;
+EXIT
+`
+
+// TestIntegration_BlockedStatementRefusesSQLPlus is the third client, and the
+// one that needed a third on-wire shape: OCI marshals the summary object as
+// fixed-width little-endian integers and terminates its messages with the TTC
+// end-of-response marker. A frame built for a thin client — or a byte-perfect
+// fixed-width one with no marker — hangs sqlplus exactly the way the old TTC
+// Response did, which is what this test is here to catch.
+//
+// It is the only automated cover for the unlearned fallback in nextOERFrame
+// (see encodeOERFixedWidth): that path seeds both halves of the OCI shape from
+// the client's AUTH framing, and nothing else exercises it end to end.
+//
+// Skipped when sqlplus is not installed, which is the case in CI; the fixtures
+// in ttc_oer_encode_test.go carry the byte-level half of the same evidence
+// there.
+func TestIntegration_BlockedStatementRefusesSQLPlus(t *testing.T) {
+	sqlplus, err := exec.LookPath("sqlplus")
+	if err != nil {
+		t.Skipf("sqlplus unavailable: %v", err)
+	}
+
+	env := startOracleThroughProxy(t, nil)
+
+	ctx := context.Background()
+
+	// Seed the table under the permissive grant the fixture starts with, so the
+	// refusal below is the only thing that can stop the INSERT.
+	_, _ = env.db.ExecContext(ctx, "DROP TABLE dbbat_blocked_probe")
+
+	_, err = env.db.ExecContext(ctx, "CREATE TABLE dbbat_blocked_probe (id NUMBER)")
+	require.NoError(t, err, "the seed DDL must be allowed under an unrestricted grant")
+
+	env.replaceGrant(t, []string{store.ControlReadOnly})
+
+	script := filepath.Join(t.TempDir(), "refusal.sql")
+	require.NoError(t, os.WriteFile(script, []byte(sqlplusRefusalScript), 0o600))
+
+	runCtx, cancel := context.WithTimeout(ctx, refusalDeadline)
+	defer cancel()
+
+	cmd := exec.CommandContext(runCtx, sqlplus, "-S",
+		fmt.Sprintf("%s/%s@//%s:%d/%s", env.username, env.apiKey, env.host, env.port, env.service),
+		"@"+script)
+
+	out, err := cmd.CombinedOutput()
+	output := string(out)
+
+	require.NoErrorf(t, err, "sqlplus never came back from the refused statement:\n%s", output)
+
+	assert.Contains(t, output, "read-ok=1",
+		"reads must still work under read_only:\n%s", output)
+	assert.Contains(t, output, "ORA-01031",
+		"sqlplus must receive the refusal as an ORA error:\n%s", output)
+	assert.Contains(t, output, "survived=42",
+		"the connection must still answer after a refusal:\n%s", output)
+
+	assert.Zero(t, env.probeRowCount(t), "the refused INSERT must never have reached upstream")
+	env.assertBlockedQueryLogged(t, "INSERT INTO dbbat_blocked_probe VALUES (99)", "read-only")
 }
