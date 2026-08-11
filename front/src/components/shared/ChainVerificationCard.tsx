@@ -146,12 +146,6 @@ export function ChainVerificationCard() {
                     value={d.chains_with_truncated_prefix.toLocaleString()}
                     hint="Chains missing their oldest statements — what query retention leaves behind. Expected housekeeping, not tampering."
                   />
-                  <Fact
-                    label="Legacy head stamps"
-                    value={d.legacy_stamps.toLocaleString()}
-                    warn={d.legacy_stamps > 0}
-                    hint="Sessions whose head stamp predates 0.24 and is a verbatim copy of the last statement's MAC rather than a keyed seal: counted, not trusted. The number should drain as those sessions age out of retention."
-                  />
                 </>
               );
             }}

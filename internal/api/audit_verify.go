@@ -223,11 +223,13 @@ type queryChainVerifyResponse struct {
 	// That is what DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived
 	// session, so it is reported rather than treated as tampering.
 	ChainsWithTruncatedPrefix int64 `json:"chains_with_truncated_prefix"`
-	// LegacyStamps counts sessions whose head stamp predates 0.24 and is a
-	// verbatim copy of the last statement's MAC — writable by anyone who can
-	// write to the store. Those chains verified; nothing keyed vouches for
-	// their tail. The number drains as pre-upgrade sessions age out.
-	LegacyStamps int64 `json:"legacy_stamps"`
+	// There is deliberately no legacy-stamp counter. Since 0.24 a session still
+	// carrying the pre-0.24 unkeyed head stamp is a break, so the counter could
+	// only ever report 0 here: the opt-in that tolerates and counts those
+	// sessions (`--allow-legacy-stamps`) is offered by the offline CLI only,
+	// where a monitoring job's exit code lives. This endpoint is served by the
+	// process under audit and answers one question — does it verify.
+	//
 	// HeadSeq and HeadMAC are only meaningful for a single chain, so they are
 	// reported for a scoped walk and omitted for a sweep.
 	HeadSeq   *int64          `json:"head_seq,omitempty"`
@@ -241,11 +243,9 @@ type queryChainVerifyResponse struct {
 // every capture, one connection's captures, and a single capture (which
 // additionally reports that chain's head).
 //
-// There is deliberately no legacy_stamps counterpart here. That counter is
-// about the *connection* head stamp, which was a verbatim copy of the last
-// statement's MAC before 0.24; a capture's stamp has always been a keyed MAC
-// over (query, length, head), so there is no forgeable-stamp population to
-// count.
+// A capture's stamp has always been a keyed MAC over (query, length, head),
+// never a verbatim copy of the head the way the *connection* stamp was before
+// 0.24 — so there is no unkeyed-stamp population here to report on at all.
 type rowChainVerifyResponse struct {
 	Chain    string `json:"chain"`
 	Verified bool   `json:"verified"`
@@ -367,12 +367,6 @@ func (s *Server) walkQueryChains(ctx context.Context, connectionUID *uuid.UUID) 
 			truncated = 1
 		}
 
-		legacy := int64(0)
-
-		if one.LegacyStamp {
-			legacy = 1
-		}
-
 		return queryChainVerifyResponse{
 			Chain:                     "queries",
 			Verified:                  one.Break == nil,
@@ -380,7 +374,6 @@ func (s *Server) walkQueryChains(ctx context.Context, connectionUID *uuid.UUID) 
 			Connections:               1,
 			Statements:                one.Verified,
 			ChainsWithTruncatedPrefix: truncated,
-			LegacyStamps:              legacy,
 			HeadSeq:                   &headSeq,
 			HeadMAC:                   hexMAC(one.HeadMAC),
 			Break:                     newChainBreakBody(one.Break),
@@ -399,7 +392,6 @@ func (s *Server) walkQueryChains(ctx context.Context, connectionUID *uuid.UUID) 
 		Connections:               result.Connections,
 		Statements:                result.Verified,
 		ChainsWithTruncatedPrefix: result.Truncated,
-		LegacyStamps:              result.LegacyStamps,
 		Break:                     newChainBreakBody(result.Break),
 		CheckedAt:                 time.Now().UTC(),
 	}, nil
