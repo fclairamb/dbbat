@@ -365,6 +365,133 @@ func TestExchangeCodeReadsGroupsClaim(t *testing.T) {
 			user, err := p.ExchangeCodeWithVerifier(t.Context(), "auth-code", "https://dbbat.test/cb", "v")
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, user.Groups)
+			assert.False(t, user.GroupsOverage,
+				"no token here delegates the claim, so none of them may look like an overage")
+		})
+	}
+}
+
+// TestExchangeCodeDetectsGroupsOverage is the whole point of the overage
+// signal: an Entra token past ~200 memberships drops `groups` and points at
+// Graph instead, which without this looks byte-for-byte like "this user is in
+// no groups" — and revokes every mapped role from precisely the people who
+// have the most of them.
+func TestExchangeCodeDetectsGroupsOverage(t *testing.T) {
+	t.Parallel()
+
+	// The shape Entra actually emits, alongside the `_claim_sources` pointer we
+	// deliberately never follow.
+	entraOverage := func(i *testIssuer, claim string) {
+		i.claims["_claim_names"] = map[string]any{claim: "src1"}
+		i.claims["_claim_sources"] = map[string]any{
+			"src1": map[string]any{
+				"endpoint": "https://graph.microsoft.com/v1.0/users/user-42/getMemberObjects",
+			},
+		}
+	}
+
+	cases := []struct {
+		name        string
+		setup       func(i *testIssuer)
+		config      string
+		wantGroups  []string
+		wantOverage bool
+	}{
+		{
+			name:        "an overage token is not an empty membership",
+			setup:       func(i *testIssuer) { entraOverage(i, "groups") },
+			wantGroups:  nil,
+			wantOverage: true,
+		},
+		{
+			name: "an empty groups claim is a real, resolvable answer",
+			setup: func(i *testIssuer) {
+				i.claims["groups"] = []any{}
+			},
+			wantGroups:  nil,
+			wantOverage: false,
+		},
+		{
+			name: "the pointer is matched against the configured claim name",
+			setup: func(i *testIssuer) {
+				entraOverage(i, "wids")
+			},
+			config:      "wids",
+			wantOverage: true,
+		},
+		{
+			name: "a pointer to some other claim is not our overage",
+			setup: func(i *testIssuer) {
+				entraOverage(i, "groups")
+			},
+			config:      "wids",
+			wantOverage: false,
+		},
+		{
+			name: "an inlined list wins over a contradictory pointer",
+			setup: func(i *testIssuer) {
+				entraOverage(i, "groups")
+				i.claims["groups"] = []any{"db-admins"}
+			},
+			wantGroups:  []string{"db-admins"},
+			wantOverage: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			issuer := newTestIssuer(t)
+			tc.setup(issuer)
+
+			p := issuer.provider(t, func(cfg *Config) { cfg.GroupsClaim = tc.config })
+
+			user, err := p.ExchangeCodeWithVerifier(t.Context(), "auth-code", "https://dbbat.test/cb", "v")
+			require.NoError(t, err, "an overage is a signal, never a failed login")
+			assert.Equal(t, tc.wantGroups, user.Groups)
+			assert.Equal(t, tc.wantOverage, user.GroupsOverage)
+		})
+	}
+}
+
+// TestExtractGroupsOverageShapes covers the claim shapes a real issuer will
+// not produce and go-oidc's own `_claim_names` decoding therefore rejects
+// before we ever see them (it types the claim as map[string]string). Asserted
+// against the extractor directly, because the point is that a junk pointer
+// must not be read as an overage — an overage freezes roles, so inventing one
+// freezes them for nothing.
+func TestExtractGroupsOverageShapes(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name        string
+		claims      string
+		wantOverage bool
+	}{
+		{name: "no claims at all", claims: ""},
+		{name: "unparseable claim set", claims: "not json"},
+		{name: "_claim_names is not an object", claims: `{"_claim_names":"groups"}`},
+		{name: "_claim_names names another claim", claims: `{"_claim_names":{"roles":"src1"}}`},
+		{
+			name:        "_claim_names names our claim",
+			claims:      `{"_claim_names":{"groups":"src1"}}`,
+			wantOverage: true,
+		},
+		{
+			name:        "a null groups claim next to the pointer is still an overage",
+			claims:      `{"groups":null,"_claim_names":{"groups":"src1"}}`,
+			wantOverage: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			groups, overage := extractGroups(json.RawMessage(tc.claims), "")
+			assert.Nil(t, groups)
+			assert.Equal(t, tc.wantOverage, overage)
 		})
 	}
 }
