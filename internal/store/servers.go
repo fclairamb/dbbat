@@ -185,7 +185,7 @@ func (s *Store) SetKnownHostKey(ctx context.Context, uid uuid.UUID, hostKey stri
 
 // SetKubernetesCACert persists the TOFU-learned API server CA bundle for a
 // kubernetes cluster row, merging into protocol_data.kubernetes.learned_ca_cert
-// without disturbing other keys — the analogue of SetKnownHostKey.
+// without disturbing other keys — the analog of SetKnownHostKey.
 //
 // It writes learned_ca_cert, never ca_cert: an operator-supplied bundle is a
 // statement of intent that dbbat must never overwrite with something it merely
