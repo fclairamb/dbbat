@@ -218,11 +218,42 @@ correctly-gated re-execution into ORA-01031.
 > exactly one of these frames, as the last thing the client sends, three or four
 > bytes long: there is no room in it for a cursor id at all.
 
-sqlplus (OCI thick) sends the same op in the **wide** encoding — an 8-byte
-pointer sentinel and little-endian 32-bit count and ids. dbbat rejects that
-rather than guessing at it; sqlplus never re-executes by cursor id (it resends
-the statement text every run, see the client table above), so an entry it leaves
-behind cannot mis-resolve anything.
+sqlplus (OCI thick, and by extension SQL*Developer via the OCI driver and
+Instant Client generally) sends the same op in the **wide** encoding — the same
+shape the AUTH path already knows (`payloadUsesWideKVEncoding`,
+`replaceAuthKVValueWide`):
+
+```
+[0]    0x11            message type: piggyback
+[1]    0x69            function: close cursors
+[2]    seq             TTC sequence number
+[3]    0x01            constant
+[4]    seq+1           the NEXT TTC message's sequence number
+[5..12] fe ff ff ff ff ff ff ff   8-byte pointer sentinel
+[13..16] count          uint32 little-endian
+[17..]   count x id     uint32 little-endian each
+```
+
+The two bytes at `[3..4]` were not guessed at: pinned against every
+close-cursors frame in `testdata/sqlplus_cursor_reexec.pcapng` (client frames
+9, 12, 14, 16) plus the piggyback execute-with-SQL header (func `0x03` sub
+`0x5e`) stapled behind three of them, whose own header carries the identical
+two-byte pad ahead of its own sentinel — the first byte is always a constant
+`0x01` and the second always equals *that header's own* sequence number plus
+one, i.e. the sequence number the next TTC message on the wire will carry.
+That makes it the wide framing's own header padding, not something specific
+to the close-cursors op, and `decodeCloseCursors` validates the shape (not
+just skips two bytes) before reading the count and ids as little-endian
+uint32s. The guards mirror the thin path exactly — bounded count, every id
+inside 16 bits, enough bytes for the whole list — and a payload that doesn't
+fit either shape still returns `ErrNotCloseCursors` and deletes nothing.
+
+This is defense in depth rather than something load-bearing: sqlplus never
+re-executes by cursor id (it resends the statement text every run, see the
+client table above), so a tracker entry it leaves unread cannot mis-resolve a
+re-execution. What it bounds is a tracker that would otherwise grow for the
+life of a long OCI session, and a mixed deployment where some *other*
+OCI-based client re-executes by id.
 
 There is deliberately **no cap** on `s.tracker.cursors`. A cap only buys memory,
 and every entry it evicted would convert a correctly-gated re-execution into a
