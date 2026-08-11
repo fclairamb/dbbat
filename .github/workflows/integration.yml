@@ -75,3 +75,21 @@ jobs:
         env:
           ORACLE_TEST_IMAGE: ${{ matrix.image }}
         run: go test -tags integration -timeout 60m -count=1 -v ./internal/proxy/oracle/
+
+  # The Kubernetes tunnel suite gets its own job for the same reason Oracle
+  # does: it boots a whole k3s control plane in a privileged container before
+  # any assertion runs, which does not belong in the per-protocol matrix's
+  # budget. It is also the one suite whose *cluster* version matters — the
+  # websocket port-forward transport is only on by default from 1.31 — so the
+  # image is pinned in the suite and overridable here.
+  kubernetes:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: "1.26.5"
+
+      - name: Run Kubernetes tunnel integration suite
+        run: go test -tags integration -timeout 40m -count=1 -v ./internal/proxy/kubernetes/

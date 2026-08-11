@@ -121,6 +121,15 @@ test-integration-postgresql:
 test-integration-mssql:
 	go test -tags integration -v -timeout 40m -count=1 ./internal/proxy/mssql/...
 
+# The Kubernetes tunnel end to end: one k3s cluster (privileged container), a
+# PostgreSQL pod inside it, and dbbat dialing through `pods/portforward`. Unlike
+# the protocol suites this one boots a whole control plane, so the first run on
+# a cold image cache is dominated by pulling k3s. Override the cluster with
+# K3S_TEST_IMAGE=rancher/k3s:vX.Y.Z-k3s1 — it must be 1.31 or newer for the
+# websocket transport assertion to hold.
+test-integration-kubernetes:
+	go test -tags integration -v -timeout 40m -count=1 ./internal/proxy/kubernetes/...
+
 # Run linter
 lint:
 	golangci-lint run
