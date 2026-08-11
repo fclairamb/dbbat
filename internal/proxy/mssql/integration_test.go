@@ -27,6 +27,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/mcp"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/proxy/testsupport"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -451,7 +452,9 @@ func seedE2EWith(
 	}, encryptionKey)
 	require.NoError(t, err)
 
-	grantAccess(t, dataStore, user.UID, database.UID, controls, approvalPatterns)
+	_, err = testsupport.CreateGrantWithControls(ctx, t, dataStore, user.UID, database.UID,
+		controls, testsupport.WithApprovalPatterns(approvalPatterns...))
+	require.NoError(t, err)
 
 	return dataStore, encryptionKey
 }
@@ -1116,25 +1119,8 @@ func TestMCPExecutesThroughTheProxy(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, servers)
 
-	readOnlyDef, err := dataStore.CreateGrantDefinition(ctx, &store.GrantDefinition{
-		Name:             "mssql-mcp-read-only",
-		Slug:             "mssql-mcp-read-only",
-		DurationSeconds:  int64((24 * time.Hour).Seconds()),
-		Controls:         []string{store.ControlReadOnly},
-		ApprovalPatterns: []string{},
-		CreatedBy:        users[0].UID,
-	})
-	require.NoError(t, err)
-
-	_, err = dataStore.CreateGrant(ctx, &store.Grant{
-		UserID:            users[0].UID,
-		DatabaseID:        servers[0].UID,
-		GrantDefinitionID: readOnlyDef.UID,
-		Definition:        readOnlyDef,
-		GrantedBy:         users[0].UID,
-		StartsAt:          time.Now().Add(-time.Hour),
-		ExpiresAt:         time.Now().Add(24 * time.Hour),
-	})
+	_, err = testsupport.CreateGrantWithControls(ctx, t, dataStore, users[0].UID, servers[0].UID,
+		[]string{store.ControlReadOnly})
 	require.NoError(t, err)
 
 	_, err = run("DELETE FROM "+e2eTable, 10)
