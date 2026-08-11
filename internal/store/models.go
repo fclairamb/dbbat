@@ -424,16 +424,21 @@ type Connection struct {
 	// to their pre-stamp heuristics.
 	GrantUID *uuid.UUID `bun:"grant_uid,type:uuid" json:"grant_uid"`
 
-	// QueryChainMAC is the final head of this connection's query chain,
-	// stamped when the session closes, and QueryChainLen is how many statements
-	// that head covers. Without them, deleting the *last* queries of a
-	// connection would leave a chain that still verified; with them the stored
-	// head no longer matches what the surviving rows compute.
+	// QueryChainMAC is the head of this connection's query chain, and
+	// QueryChainLen is the position that head sits at. Without them, deleting
+	// the *last* queries of a connection would leave a chain that still
+	// verified; with them the stored head no longer matches what the surviving
+	// rows compute.
 	//
-	// nil/0 on a connection that is still open or that logged nothing. A
-	// session whose process died is stamped by the startup reconcile instead,
-	// from what the database can recover. Internal integrity state, not API
-	// surface.
+	// Three writers, all sealing with the key: CloseConnection at a clean
+	// teardown, the reconcile for a session whose process died, and
+	// RefreshOpenChainStamps on the reclaim timer for a session that is still
+	// open. The last is why the stamp is not necessarily *final*: a live
+	// session's stamp is a prefix of its chain, re-sealed one sweep at a time,
+	// and checkStampedHead judges an open session accordingly.
+	//
+	// nil/0 on a connection that logged nothing, or one no sweep has reached
+	// yet. Internal integrity state, not API surface.
 	QueryChainMAC []byte `bun:"query_chain_mac" json:"-"`
 
 	// QueryChainLen is the head's chain_seq — which, chain_seq being dense from

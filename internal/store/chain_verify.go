@@ -102,9 +102,14 @@ type QueryChainResult struct {
 	// the store can also write. The chain still verified; what did not happen is
 	// a *keyed* confirmation that nothing was removed from its end.
 	LegacyStamp bool
-	HeadSeq     int64
-	HeadMAC     []byte
-	Break       *ChainBreak
+	// FirstSeq is the oldest surviving statement's chain_seq, or 0 when nothing
+	// survives. It is 1 unless retention reaped the chain's prefix, and it is
+	// what tells a stamp whose sealed position was *reaped* from one that names
+	// a position which never existed. See checkStampedHead.
+	FirstSeq int64
+	HeadSeq  int64
+	HeadMAC  []byte
+	Break    *ChainBreak
 }
 
 // QueryChainsResult aggregates a sweep over many connections.
@@ -381,6 +386,11 @@ func (s *Store) VerifyQueryChain(ctx context.Context, connectionUID uuid.UUID) (
 			}
 
 			result.Verified++
+
+			if result.FirstSeq == 0 {
+				result.FirstSeq = *row.ChainSeq
+			}
+
 			result.HeadSeq = *row.ChainSeq
 			result.HeadMAC = row.MAC
 			prevMAC = row.MAC
@@ -442,10 +452,10 @@ func (s *Store) verifyQueryRow(row *Query, connectionUID uuid.UUID, expectedSeq 
 	return nil
 }
 
-// checkStampedHead compares the head a closed connection recorded against the
-// head its surviving statements compute, and records a break on the result when
-// they disagree. This is the only check that catches a deletion at the *end* of
-// a chain.
+// checkStampedHead compares the head a connection recorded against what its
+// surviving statements compute, and records a break on the result when they
+// disagree. This is the only check that catches a deletion at the *end* of a
+// chain.
 //
 // The stamp comes in two formats and the column says which (see
 // queryChainStampMAC). The keyed one is checked first, and it is checked *with
@@ -455,12 +465,32 @@ func (s *Store) verifyQueryRow(row *Query, connectionUID uuid.UUID, expectedSeq 
 // that passes that way is recorded as a legacy stamp rather than as a
 // verification, because an unkeyed stamp proves nothing to anyone who can write
 // to this database.
+//
+// # Exact for a closed session, a prefix for an open one
+//
+// A closed session's stamp is final: it must name exactly the head the
+// survivors end on. An open session's is not. RefreshOpenChainStamps re-seals
+// live sessions on the reclaim timer, so at any moment a busy session's stamp
+// names an *older, smaller* chain_seq than its current head, and the MAC over
+// the statement at that older position. Judging that by the exact rule would
+// report a break on every session that ran a statement since the last sweep —
+// which is worse than not refreshing at all. So while disconnected_at IS NULL
+// the stamp is checked as a prefix: it must seal the statement at the position
+// it names, and that position must be one the surviving chain reached.
+//
+// What that still catches on an open session: a stamp naming a position *newer*
+// than anything that survives (retention only ever removes the oldest, so
+// nothing legitimate makes the stamp outrun the survivors), and a stamp whose
+// sealed statement has been rewritten — correcting it needs the chain key. What
+// it does not catch, by construction, is a deletion of statements newer than
+// the last sweep. That window is bounded by the sweep interval, and shrinking
+// it is exactly what the refresh buys; it is not closed.
 func (s *Store) checkStampedHead(ctx context.Context, result *QueryChainResult) error {
 	var conn Connection
 
 	err := s.db.NewSelect().
 		Model(&conn).
-		Column("uid", "query_chain_mac", "query_chain_len", "query_chain_stamp_version").
+		Column("uid", "disconnected_at", "query_chain_mac", "query_chain_len", "query_chain_stamp_version").
 		Where("uid = ?", result.ConnectionUID).
 		Scan(ctx)
 	if err != nil {
@@ -474,8 +504,8 @@ func (s *Store) checkStampedHead(ctx context.Context, result *QueryChainResult) 
 		return fmt.Errorf("failed to read the connection chain head: %w", err)
 	}
 
-	// Never stamped: the session is still open, or it logged nothing. Nothing
-	// to compare against.
+	// Never stamped: the session logged nothing, or it is open and no sweep has
+	// reached it yet. Nothing to compare against.
 	if conn.QueryChainMAC == nil {
 		return nil
 	}
@@ -493,19 +523,35 @@ func (s *Store) checkStampedHead(ctx context.Context, result *QueryChainResult) 
 		return nil
 	}
 
+	sealedMAC := result.HeadMAC
+
 	if version != queryChainStampLegacy && conn.QueryChainLen != result.HeadSeq {
 		// Checked before the MAC purely for the message: the length is sealed
 		// by the stamp either way, since the expected stamp below is computed
 		// from what the surviving statements say, never from the column.
-		result.Break = stampBreak(result, conn, fmt.Sprintf(
-			"the connection recorded %d statements but the surviving statements end at %d: "+
-				"statements were removed from the end of the session",
-			conn.QueryChainLen, result.HeadSeq))
+		lagging, brk, err := s.stampedPrefixMAC(ctx, result, conn)
+		if err != nil {
+			return err
+		}
 
-		return nil
+		if brk != nil {
+			result.Break = brk
+
+			return nil
+		}
+
+		if lagging == nil {
+			// The sealed position is below everything that survives: retention
+			// reaped it. Unverifiable, not evidence of anything — and already
+			// visible as result.TruncatedPrefix whenever anything survives.
+			return nil
+		}
+
+		sealedMAC = lagging
 	}
 
-	if hmac.Equal(conn.QueryChainMAC, s.queryChainStampMAC(connUID, version, result.HeadSeq, result.HeadMAC)) {
+	if hmac.Equal(conn.QueryChainMAC,
+		s.queryChainStampMAC(connUID, version, conn.QueryChainLen, sealedMAC)) {
 		return nil
 	}
 
@@ -520,11 +566,78 @@ func (s *Store) checkStampedHead(ctx context.Context, result *QueryChainResult) 
 	}
 
 	result.Break = stampBreak(result, conn, fmt.Sprintf(
-		"the connection's stamped head %s does not seal the surviving statements ending at %d/%s: "+
+		"the connection's stamped head %s does not seal the statement at chain_seq %d (%s): "+
 			"statements were removed from the end of the session, or the stamp was rewritten",
-		hex.EncodeToString(conn.QueryChainMAC), result.HeadSeq, hex.EncodeToString(result.HeadMAC)))
+		hex.EncodeToString(conn.QueryChainMAC), conn.QueryChainLen, hex.EncodeToString(sealedMAC)))
 
 	return nil
+}
+
+// stampedPrefixMAC resolves what a stamp that does not name the current head
+// should be checked against.
+//
+// It returns either the MAC of the statement the stamp sealed (check it against
+// that), nil with no break (the sealed position was reaped by retention —
+// unverifiable), or a break.
+//
+// The MAC is read back raw, which is safe because the walk that precedes this
+// verified every surviving statement from FirstSeq to HeadSeq against its own
+// content and against its predecessor: a row inside that range whose MAC did not
+// add up would have stopped the walk before it got here.
+func (s *Store) stampedPrefixMAC(
+	ctx context.Context, result *QueryChainResult, conn Connection,
+) ([]byte, *ChainBreak, error) {
+	// A closed session's stamp is final and must name the head exactly. So must
+	// an open session's when the stamp claims a position the survivors never
+	// reached: retention removes the *oldest* statements, so nothing legitimate
+	// leaves a stamp ahead of the head.
+	if conn.DisconnectedAt != nil || conn.QueryChainLen > result.HeadSeq {
+		// Nothing survives at all. For an open session that is what retention
+		// does to a session that has been idle longer than the retention window
+		// (CleanupOldQueryRows never reaps the open connection row itself, only
+		// its statements), so it proves nothing either way. A closed session
+		// keeps the break: its statements and its row are reaped together.
+		if result.Verified == 0 && conn.DisconnectedAt == nil {
+			return nil, nil, nil
+		}
+
+		return nil, stampBreak(result, conn, fmt.Sprintf(
+			"the connection recorded %d statements but the surviving statements end at %d: "+
+				"statements were removed from the end of the session",
+			conn.QueryChainLen, result.HeadSeq)), nil
+	}
+
+	// Below the oldest survivor: DBB_QUERY_STORAGE_RETENTION reaped the
+	// statement the stamp sealed. Nothing left to check it against.
+	if result.Verified == 0 || conn.QueryChainLen < result.FirstSeq {
+		return nil, nil, nil
+	}
+
+	var row struct {
+		MAC []byte `bun:"mac"`
+	}
+
+	err := s.db.NewSelect().
+		Model((*Query)(nil)).
+		Column("mac").
+		Where("connection_id = ?", result.ConnectionUID).
+		Where("chain_seq = ?", conn.QueryChainLen).
+		Scan(ctx, &row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// Inside the surviving range yet absent: the walk would have caught
+			// the gap, so this is unreachable in practice. Reported rather than
+			// silently accepted.
+			return nil, stampBreak(result, conn, fmt.Sprintf(
+				"the connection's stamp seals the statement at chain_seq %d, "+
+					"which is missing from the surviving statements %d..%d",
+				conn.QueryChainLen, result.FirstSeq, result.HeadSeq)), nil
+		}
+
+		return nil, nil, fmt.Errorf("failed to read the stamped statement: %w", err)
+	}
+
+	return row.MAC, nil, nil
 }
 
 // stampBreak builds the break a stamped-head mismatch reports. The offending
