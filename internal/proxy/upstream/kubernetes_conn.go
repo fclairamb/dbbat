@@ -180,14 +180,25 @@ func (c *portForwardConn) awaitForwardErr() error {
 // Close tears down the stream pair and the upgraded connection under it. The
 // connection belongs to this conn alone (see the type comment), so leaving it
 // open would leak one HTTPS connection to the API server per database session.
+//
+// The data stream is *reset*, not closed: spdystream's Close writes a
+// zero-length FIN frame, which wedges on a half-written stream, while Reset
+// sends RST_STREAM and unblocks a peer parked in Read.
+//
+// And there is deliberately no Close after that Reset. Reset marks the stream
+// finished as it tears it down, so a following Close does nothing except
+// return spdystream's "Write on closed stream" — for a teardown that in fact
+// succeeded. That value used to be this method's return value, and callers do
+// read it: the connectivity check's probes end with `return up.Close()`, so
+// every healthy database behind a cluster row reported "the target was
+// reachable but the database handshake failed: Write on closed stream". The
+// error worth reporting here is the one from tearing down the upgraded
+// connection, which is what is returned instead.
 func (c *portForwardConn) Close() error {
 	c.closeOnce.Do(func() {
-		// Reset before Close: unsent data on a half-written stream can
-		// otherwise wedge the teardown.
 		_ = c.stream.Reset()
-		c.closeErr = c.stream.Close()
 		c.conn.RemoveStreams(c.stream, c.errStream)
-		_ = c.conn.Close()
+		c.closeErr = c.conn.Close()
 	})
 
 	return c.closeErr

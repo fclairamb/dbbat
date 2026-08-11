@@ -180,7 +180,7 @@ func newFixture(ctx context.Context, t *testing.T, opts fixtureOpts) *fixture {
 	}
 
 	cluster, err := dataStore.CreateServer(ctx, &store.Server{
-		Name:     "k3s-" + uuid.NewString()[:8],
+		Name:     "k3s",
 		Host:     sharedCluster.apiHost,
 		Port:     sharedCluster.apiPort,
 		Username: sa,
@@ -192,8 +192,11 @@ func newFixture(ctx context.Context, t *testing.T, opts fixtureOpts) *fixture {
 	}, encKey)
 	require.NoError(t, err)
 
+	// The row's *name* is what a client asks for in its startup message, so it
+	// has to be the database name the DSN carries. Each test owns its own store
+	// container, so a fixed name collides with nothing.
 	db, err := dataStore.CreateServer(ctx, &store.Server{
-		Name:         "pg-" + uuid.NewString()[:8],
+		Name:         upstreamDB,
 		Host:         host,
 		Port:         pgContainerPort,
 		DatabaseName: upstreamDB,
