@@ -383,10 +383,13 @@ func oerFixedWidthTailFieldsAt(payload []byte, offset int) (oerTail, bool) {
 // fixed-width encoding: both are 4-byte little-endian integers.
 const oerFixedTailFieldWidth = 4
 
-// oerMessageEnd reports whether pos is the end of the message, and whether it
-// is terminated by the TTC end-of-response marker. Oracle sends that marker to
-// OCI clients even after dbbat has cleared HAS_END_OF_RESPONSE from the Accept,
-// and it is not part of the summary object.
+// oerMessageEnd reports whether the message ends at pos, and whether it is
+// terminated by the TTC end-of-response marker. Oracle sends that marker to OCI
+// clients even after dbbat has cleared HAS_END_OF_RESPONSE from the Accept, and
+// it is not part of the summary object — but dbbat's own frame has to carry one
+// or the client waits for it.
+//
+// Returns (marked, atEnd).
 func oerMessageEnd(payload []byte, pos int) (bool, bool) {
 	switch len(payload) - pos {
 	case 0:
@@ -444,8 +447,8 @@ func oerTailFieldsAt(shape oerShape, payload []byte, offset int) (oerTail, bool)
 // to reproduce or an OCI client waits for it.
 func oerTailAt(payload []byte, pos, errCode, extra int) (oerTail, bool) {
 	if errCode == 0 {
-		if end, ok := oerMessageEnd(payload, pos); ok {
-			return oerTail{extraFields: extra, endOfResponse: end}, true
+		if marked, atEnd := oerMessageEnd(payload, pos); atEnd {
+			return oerTail{extraFields: extra, endOfResponse: marked}, true
 		}
 
 		return oerTail{}, false
@@ -456,9 +459,9 @@ func oerTailAt(payload []byte, pos, errCode, extra int) (oerTail, bool) {
 		return oerTail{}, false
 	}
 
-	end, ok := oerMessageEnd(payload, pos+n)
+	marked, atEnd := oerMessageEnd(payload, pos+n)
 
-	return oerTail{extraFields: extra, endOfResponse: end && ok}, true
+	return oerTail{extraFields: extra, endOfResponse: marked && atEnd}, true
 }
 
 // oerMaxTailFieldWidth bounds a trailing field's value width. Both fields
