@@ -694,11 +694,30 @@ standalone messages and carving out the embedded AUTH Phase 1 for terminated O5L
 `HAS_END_OF_RESPONSE` (`0x02000000`) from the Accept's 4-byte connect-flags (offset 41,
 v315+) so clients fall back to the classic flow dbbat terminates.
 
-The Set Protocol response capability array is framed `[numCaps][06 01 01 01][caps…]`, where
-`numCaps` varies by server version (`0x2a` on 19c, `0x36` on 23ai) — `observeCustomHashFlag`
-anchors on the stable `06 01 01 01` prefix (not a version literal) and reads caps[0]&0x20.
-`stripCustomHashFromSetProto` clears that bit toward the client so it negotiates the
-verifier-6949 O5LOGON dbbat issues, while dbbat still uses customHash upstream.
+The Set Protocol response capability array is framed `[numCaps][caps…]`, where `numCaps`
+varies by server version (`0x2a` on 19c, `0x36` on 23ai) and the array **opens with** the
+byte run `06 01 01 01` — that run is `ServerCompileTimeCaps[0..3]`, not a prefix sitting in
+front of the array. Reading it as a prefix and indexing from the byte after it shifts every
+capability by four, which is invisible at index 0 and wrong everywhere else; both
+`observeCustomHashFlag` and `observeBigClrChunksFlag` used to do exactly that. They now go
+through `serverCapBitSet`, which locates the array with `serverCompileTimeCaps` (the same
+preamble walk go-ora's `TCPNego.read` does) and indexes it as Oracle does:
+
+| capability | index | 19c (`numCaps` 0x2a) | 23ai (`numCaps` 0x36) | verdict |
+|---|---|---|---|---|
+| `customHash` (PBKDF2 combined key) | `caps[4]&0x20` | `0x6f` | `0xef` | set on both |
+| `UseBigClrChunks` | `caps[37]&0x20` | `0x7f` | `0x7f` | set on both |
+| *(what the shifted anchor used to read for `UseBigClrChunks`)* | `caps[41]` | `0x0d` | `0x0d` | clear — the bug |
+
+So dbbat used to conclude `UseBigClrChunks = false` on every session where go-ora, JDBC thin
+and python-oracledb all conclude `true`. `customHash` was right by accident: offset 0 of the
+shifted array *is* the real `caps[4]`. The flags are measured off the captures in
+`internal/proxy/oracle/testdata/` and pinned by
+`TestServerCapBitSet_RealSetProtocolReplies`.
+
+`customHash` is relayed to the client unchanged, so a modern client negotiates it and dbbat
+answers with a verifier-18453 challenge; legacy go-ora reads the verifier type from the
+challenge's `AUTH_VFR_DATA` flag and falls back to 6949.
 
 ### Client compatibility on Oracle 23ai
 

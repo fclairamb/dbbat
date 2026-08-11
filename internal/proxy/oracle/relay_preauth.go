@@ -1,7 +1,6 @@
 package oracle
 
 import (
-	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -460,65 +459,60 @@ func encodeTNSDataV315(payload []byte) []byte {
 	return buf
 }
 
+// Capability indices into the Set Protocol reply's ServerCompileTimeCaps,
+// indexed the way Oracle frames the array — the one that *starts* with the
+// 06 01 01 01 run, not four bytes past it. The array is framed
+// [numCaps][06 01 01 01][rest...], numCaps varying by server version (0x2a on
+// 19c, 0x36 on 23ai), so `06 01 01 01` is caps[0..3] and every index below is
+// relative to that 0x06.
+const (
+	// customHashCapIndex's 0x20 bit enables the customHash (PBKDF2 combined-key)
+	// derivation — the byte go-ora's auth_object.go reads customHash from.
+	customHashCapIndex = 4
+
+	// bigClrChunksCapIndex's 0x20 bit (UseBigClrChunks) tells clients (go-ora,
+	// JDBC thin, python-oracledb) to encode long CLR values with compressed-int
+	// chunk lengths after the 0xFE long-form marker instead of single-byte
+	// lengths.
+	bigClrChunksCapIndex = 37
+)
+
 // observeCustomHashFlag reports whether the Set Protocol response advertises
-// customHash (PBKDF2 combined-key derivation) — the first server-capability
-// byte's 0x20 bit. The capability array is framed as
-// [numCaps][06 01 01 01][caps...], where numCaps is the count of capability
-// bytes and varies by server version (0x2a on 19c, 0x36 on Oracle 23ai). We
-// anchor on the stable 06 01 01 01 prefix (validating the preceding count byte)
-// rather than a version-specific literal, then read the first capability byte.
+// customHash (PBKDF2 combined-key derivation), ServerCompileTimeCaps[4]&0x20.
+// Measured 0xef on Oracle 23ai Free and 0x6f on 19c — set on both.
 func observeCustomHashFlag(raw []byte) bool {
-	prefix := []byte{0x06, 0x01, 0x01, 0x01}
-
-	idx := bytes.Index(raw, prefix)
-	if idx < 1 {
-		return false
-	}
-
-	// The byte before the prefix is the capability count; sanity-check it so a
-	// stray 06 01 01 01 elsewhere in the response can't false-match.
-	if numCaps := raw[idx-1]; numCaps < 0x20 || numCaps > 0x60 {
-		return false
-	}
-
-	capsOff := idx + len(prefix)
-	if capsOff >= len(raw) {
-		return false
-	}
-
-	return raw[capsOff]&0x20 != 0
+	return serverCapBitSet(raw, customHashCapIndex, 0x20)
 }
 
-// bigClrChunksCapIndex is the ServerCompileTimeCaps index whose 0x20 bit
-// (UseBigClrChunks) tells clients (go-ora, JDBC thin) to encode long CLR values
-// with compressed-int chunk lengths after the 0xFE long-form marker instead of
-// single-byte lengths.
-const bigClrChunksCapIndex = 37
-
 // observeBigClrChunksFlag reports whether the Set Protocol response advertises
-// UseBigClrChunks (ServerCompileTimeCaps[37]&0x20). Anchors on the same stable
-// 06 01 01 01 capability prefix as observeCustomHashFlag. When set, long CLR
-// values in later AUTH messages carry compressed-int chunk lengths — see
-// readCLRVariant.
+// UseBigClrChunks (ServerCompileTimeCaps[37]&0x20). When set, long CLR values
+// in later AUTH messages carry compressed-int chunk lengths — see
+// readCLRVariant. Measured 0x7f on both Oracle 19c and 23ai Free, i.e. set,
+// which is what go-ora, JDBC thin and python-oracledb all conclude.
 func observeBigClrChunksFlag(raw []byte) bool {
-	prefix := []byte{0x06, 0x01, 0x01, 0x01}
+	return serverCapBitSet(raw, bigClrChunksCapIndex, 0x20)
+}
 
-	idx := bytes.Index(raw, prefix)
-	if idx < 1 {
+// serverCapBitSet reads one bit of the Set Protocol reply's
+// ServerCompileTimeCaps. It locates the array with serverCompileTimeCaps —
+// which parses the reply's preamble the way go-ora's TCPNego.read does — rather
+// than by scanning for the 06 01 01 01 run, because that run *is* caps[0..3]:
+// treating it as a prefix shifts every index by four, which is invisible at
+// index 0 and wrong everywhere else.
+//
+// Anything that is not a parseable Set Protocol reply, or whose array is too
+// short to hold the index, reads as "not advertised". False is the safe default
+// for both callers: it is what a server that predates the capability sends, so
+// it selects the conservative legacy path in each case — the verifier-6949
+// O5LOGON challenge for customHash, and single-byte CLR chunk lengths for
+// UseBigClrChunks (the encoding a client that never saw the bit also uses).
+func serverCapBitSet(raw []byte, index int, mask byte) bool {
+	caps, ok := serverCompileTimeCaps(raw)
+	if !ok || index >= len(caps) {
 		return false
 	}
 
-	numCaps := raw[idx-1]
-	if numCaps < 0x20 || numCaps > 0x60 || int(numCaps) <= bigClrChunksCapIndex {
-		return false
-	}
-
-	capsOff := idx + len(prefix)
-	if capsOff+bigClrChunksCapIndex >= len(raw) {
-		return false
-	}
-
-	return raw[capsOff+bigClrChunksCapIndex]&0x20 != 0
+	return caps[index]&mask != 0
 }
 
 // dialUpstreamWithRedirect opens a TCP connection to the upstream Oracle, sends the
