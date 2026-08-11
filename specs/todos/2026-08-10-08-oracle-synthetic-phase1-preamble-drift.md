@@ -68,3 +68,75 @@ moment to discover it produces garbage.
 Key files: `internal/proxy/oracle/upstream_auth_client.go`,
 `internal/proxy/oracle/phase1_forward_test.go`, `docs/oracle.md`
 ("Authentication path").
+
+## Implementation Plan
+
+### What the evidence says (established before touching code)
+
+go-ora v3 `basicSession.PutTTCFunc` (module cache,
+`network/basic_session.go:487`) writes `[ttcCode][funcCode][ttcIndex]` and
+appends **one extra `0x00` when `TTCVersion >= 18`**; `TTCVersion` is
+`min(client CompileTimeCaps[7], server CompileTimeCaps[7])`
+(`data_type_nego.go:588`). `doAuth` then writes `PutBytes(1)` before the
+compressed `user_id_len`. So Phase 1 is
+
+```
+03 76 <seq> [00]  01  01 <userLen>  01 <mode>  01 01 05 01 01  <clr> user
+```
+
+and Phase 2 (`auth_object.go:332`) is the same header with sub-op `0x73`,
+`seq` one higher, and `01 <numPairs> 01 01` in place of the fixed magic.
+
+Both widths are real, confirmed against the repo's own captures
+(`internal/proxy/oracle/testdata/*.pcapng`, bytes preceding `AUTH_TERMINAL` /
+`AUTH_SESSKEY`):
+
+| capture | Phase 1 header | Phase 2 header |
+|---|---|---|
+| `go_ora_cursor_reexec` (go-ora v3, 23ai) | `03 76 01 00` | `03 73 02 00` |
+| `jdbc_thin_cursor_reexec` | `03 76 01 00` | — |
+| `python_thin_cursor_reexec` | `03 76 01` | `03 73 02 00` |
+| `python_thin` / `dbeaver` (older) | `03 76 01` | `03 73 02` |
+| `go_ora` (go-ora v2 era) | `03 76 00` | `03 73 00` |
+
+So there is no single constant: the trailing `00` follows the negotiated TTC
+field version, and `seq` is a per-session TTC function counter (1 for Phase 1,
+2 for Phase 2 on every modern capture). dbbat currently hard-codes
+`03 76 00 01` / `03 73 00 …` — the go-ora **v2** shape, which is one byte short
+of what a v3/23ai session expects. The spec's transcription is confirmed.
+
+### Changes
+
+1. `internal/proxy/oracle/upstream_auth_client.go`
+   - Add `syntheticAuthHeader(sub, seq byte) []byte` on `session`: returns
+     `[03 <sub> <seq> 00]` by default (modern, what the integration stack
+     negotiates) and drops the trailing `00` when the client's own captured
+     AUTH body shows the 3-byte framing. Detection helper
+     `ttcAuthFuncHeaderExtended(body)`: for a thin (non-wide) AUTH body,
+     byte 3 is either the extension `0x00` or the `0x01` "username present"
+     marker, so it decides the width unambiguously.
+   - `buildClientAuthPhase1` / `buildClientAuthPhase2` take the header as a
+     parameter instead of hard-coding it; call sites pass
+     `s.syntheticAuthHeader(PiggybackSubAuth1, 1)` and
+     `s.syntheticAuthHeader(PiggybackSubAuth2, 2)`.
+2. Test seam so the fallback is testable forever instead of once: package var
+   `forceSyntheticUpstreamAuth` (always false in production code), consulted by
+   `sendUpstreamAuthPhase1` / `sendUpstreamAuthPhase2`, flipped by a `TestMain`
+   in a new `//go:build integration` file when
+   `DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH=1`.
+3. Fixtures: `buildPhase1Body` in `phase1_forward_test.go` moves to the real
+   `03 76 01 00 01` shape (the rewrite tests stay valid as round-trips);
+   `upstream_auth_client_test.go` asserts the new builder output.
+   `oci_instantclient_test.go` bodies (`03 76 02 01 03 …`) already match the
+   captured OCI/wide framing and need no change.
+4. `docs/oracle.md`: state the header rule and how to exercise the fallback.
+
+### Verification
+
+`make lint`, `make test`, plus the run the spec prescribes — with the rewrite
+disabled:
+
+```bash
+DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH=1 go test -tags integration -v -timeout 20m \
+  -count=1 -run TestIntegration_MCPExecutesThroughTheProxy ./internal/proxy/oracle/
+```
