@@ -125,4 +125,5 @@ so there is nothing to fix in `front/vite.config.ts`'s plugin options. What is
 - `front/CLAUDE.md` gained a troubleshooting entry.
 
 Still open: no GitHub issue was filed (creating public content was out of scope
-for the automated run) — see `specs/todos/2026-08-11-03-file-routetree-issue.md`.
+for the automated run) — see
+`specs/todos/2026-08-11-15-file-issue-routetree-nondeterminism.md`.
