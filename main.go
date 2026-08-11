@@ -1639,7 +1639,13 @@ func verifyQueryChains(
 		// A chain missing its oldest statements is what
 		// DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived session,
 		// so it is counted rather than treated as tampering.
-		slog.Int64("chains_with_retention_truncated_prefix", result.Truncated))
+		slog.Int64("chains_with_retention_truncated_prefix", result.Truncated),
+		// Sessions closed before 0.24, whose head stamp is a verbatim copy of
+		// the last statement's MAC rather than a keyed seal. Their statements
+		// verified; nothing keyed vouches for their *tail*, because that stamp
+		// is writable by anyone who can write to the store. The number drains
+		// as those sessions age out of retention.
+		slog.Int64("sessions_with_legacy_forgeable_head_stamp", result.LegacyStamps))
 
 	return nil
 }

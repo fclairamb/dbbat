@@ -216,6 +216,11 @@ type queryChainVerifyResponse struct {
 	// That is what DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived
 	// session, so it is reported rather than treated as tampering.
 	ChainsWithTruncatedPrefix int64 `json:"chains_with_truncated_prefix"`
+	// LegacyStamps counts sessions whose head stamp predates 0.24 and is a
+	// verbatim copy of the last statement's MAC — writable by anyone who can
+	// write to the store. Those chains verified; nothing keyed vouches for
+	// their tail. The number drains as pre-upgrade sessions age out.
+	LegacyStamps int64 `json:"legacy_stamps"`
 	// HeadSeq and HeadMAC are only meaningful for a single chain, so they are
 	// reported for a scoped walk and omitted for a sweep.
 	HeadSeq   *int64          `json:"head_seq,omitempty"`
@@ -323,6 +328,12 @@ func (s *Server) walkQueryChains(ctx context.Context, connectionUID *uuid.UUID) 
 			truncated = 1
 		}
 
+		legacy := int64(0)
+
+		if one.LegacyStamp {
+			legacy = 1
+		}
+
 		return queryChainVerifyResponse{
 			Chain:                     "queries",
 			Verified:                  one.Break == nil,
@@ -330,6 +341,7 @@ func (s *Server) walkQueryChains(ctx context.Context, connectionUID *uuid.UUID) 
 			Connections:               1,
 			Statements:                one.Verified,
 			ChainsWithTruncatedPrefix: truncated,
+			LegacyStamps:              legacy,
 			HeadSeq:                   &headSeq,
 			HeadMAC:                   hexMAC(one.HeadMAC),
 			Break:                     newChainBreakBody(one.Break),
@@ -348,6 +360,7 @@ func (s *Server) walkQueryChains(ctx context.Context, connectionUID *uuid.UUID) 
 		Connections:               result.Connections,
 		Statements:                result.Verified,
 		ChainsWithTruncatedPrefix: result.Truncated,
+		LegacyStamps:              result.LegacyStamps,
 		Break:                     newChainBreakBody(result.Break),
 		CheckedAt:                 time.Now().UTC(),
 	}, nil
