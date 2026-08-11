@@ -524,6 +524,19 @@ once with `ORACLE_TEST_IMAGE=gvenzl/oracle-xe:18.4.0-slim`.
 | `ORACLE_TEST_IMAGE` | Container image to start (default `gvenzl/oracle-free:23-slim`) |
 | `ORACLE_TEST_SERVICE` | PDB service name; inferred from the image otherwise (`XEPDB1` for XE, `FREEPDB1` for Free, `ORCLPDB1` for enterprise) |
 
+#### A refusal does not end the client's call
+
+`TestIntegration_BlockedStatementsAreLogged` drives a real go-ora client through
+the proxy under a `read_only` and then a `block_ddl` grant. Both refusals are
+enforced (nothing reaches upstream) and both are logged (a `queries` row
+carrying the refusal as `error`, an ordinary link in the connection's HMAC
+chain) — but **the client never gets its error back**. `session.writeTTCError`
+emits a TTC Response (0x08) where a server ends a call with an OER (0x04), so
+the statement hangs until the client's own timeout, if it has one. The test
+abandons each refused statement after 20s rather than asserting a client-side
+error, and says so where it does it. See
+`specs/todos/2026-08-10-17-oracle-refusal-frame-hangs-the-client.md`.
+
 Note that `buildTNSConnect` in the test file announces TNS version 313 on purpose: from 315
 onwards Oracle expects the extended Connect format (see "TNS Version >= 315" above), which
 that simplified builder does not emit, and a 23ai listener drops the connection outright.

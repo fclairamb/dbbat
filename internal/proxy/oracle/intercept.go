@@ -856,7 +856,20 @@ func (s *session) finalizeQuery(
 }
 
 // writeTTCError sends a TTC error response to the client.
-// This creates a response that Oracle clients (sqlplus, JDBC) can parse.
+//
+// KNOWN BROKEN, do not trust the layout below: an Oracle server ends a call
+// with message type 0x04 (OER), whose body is the summary object encoded as
+// TTC *compressed* integers. This emits 0x08 (Response) with fixed-width
+// fields instead, so a client hands the bytes to the wrong parser and then
+// blocks reading a message that never arrives — measured against Oracle 23ai
+// Free, go-ora never returns from a statement refused this way (see
+// TestIntegration_BlockedStatementsAreLogged). The claim that sqlplus and JDBC
+// parse it has never been checked against a live client either.
+//
+// The refusal itself is enforced and logged correctly; only the client-facing
+// half is wrong. Tracked in
+// specs/todos/2026-08-10-17-oracle-refusal-frame-hangs-the-client.md.
+//
 // Format: TNS Data packet with TTC Response function code + error info.
 func (s *session) writeTTCError(oraErrorCode int, message string) error {
 	// Build TTC error response payload:
