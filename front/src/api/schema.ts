@@ -4177,6 +4177,15 @@ export interface operations {
                             /** @description Login-button label for providers whose branding is operator-configured (the generic OIDC provider, DBB_OIDC_DISPLAY_NAME). Absent for providers the frontend labels itself, such as Slack. */
                             display_name?: string;
                         }[];
+                        /** @description Which dbbat roles the identity provider's group mapping (DBB_OIDC_ROLE_MAPPING) owns. Applied on every login, so the users page uses this to badge those roles as managed by SSO and to warn that a manual edit will be undone. Only the role names are returned — the directory group values are topology and never leave the server through this unauthenticated endpoint. */
+                        role_mapping?: {
+                            /** @description A mapping is configured and the provider it applies to is registered. False when either is missing. */
+                            enabled: boolean;
+                            /** @description The roles the mapping governs, sorted. Empty when disabled. */
+                            roles: ("admin" | "viewer" | "connector")[];
+                            /** @description Provider key the mapping applies to (`oidc`), so the UI can resolve its display name from the list above. Absent when disabled. */
+                            provider?: string;
+                        };
                     };
                 };
             };

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -22,6 +23,7 @@ import (
 	"golang.org/x/text/unicode/norm"
 
 	"github.com/fclairamb/dbbat/internal/auth"
+	"github.com/fclairamb/dbbat/internal/auth/oidc"
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -45,6 +47,24 @@ type authProviderInfo struct {
 	// operator-configured (the generic OIDC one). Empty for providers the
 	// frontend already knows how to label, like Slack.
 	DisplayName string `json:"display_name,omitempty"`
+}
+
+// roleMappingInfo tells the admin UI which roles the directory owns, so the
+// users page can say "this one is managed by SSO" before someone edits a role
+// that the next login will silently put back (or take away).
+//
+// Only the role *names* travel. The group values are directory topology, this
+// endpoint is unauthenticated, and knowing that `admin` is directory-managed
+// is the whole of what the UI needs — knowing which AD group grants it is not.
+type roleMappingInfo struct {
+	// Enabled reports that a mapping is configured *and* that the provider it
+	// applies to is actually registered.
+	Enabled bool `json:"enabled"`
+	// Roles are the roles the mapping names, sorted. Empty when disabled.
+	Roles []string `json:"roles"`
+	// Provider is the provider key the mapping applies to, so the UI can look
+	// its display name up in the providers list above. Empty when disabled.
+	Provider string `json:"provider,omitempty"`
 }
 
 // oauthStateMetadata is the JSON payload stashed on the `oauth_states` row
@@ -76,7 +96,56 @@ func (s *Server) handleAuthProviders(c *gin.Context) {
 		providers = append(providers, info)
 	}
 
-	c.JSON(http.StatusOK, gin.H{"providers": providers})
+	c.JSON(http.StatusOK, gin.H{
+		"providers":    providers,
+		"role_mapping": s.roleMappingInfo(c.Request.Context()),
+	})
+}
+
+// roleMappingInfo describes DBB_OIDC_ROLE_MAPPING to the frontend.
+//
+// A mapping only ever applies to the generic OIDC provider (see
+// oauthRoleMapping), so one configured while that provider is not registered
+// governs nothing and is reported as disabled — advertising it would have the
+// users page warn about an override that can never happen.
+func (s *Server) roleMappingInfo(ctx context.Context) roleMappingInfo {
+	info := roleMappingInfo{Roles: []string{}}
+
+	if s.config == nil {
+		return info
+	}
+
+	if _, registered := s.oauthProviders[oidc.ProviderName]; !registered {
+		return info
+	}
+
+	mapping, err := s.config.OIDCAuth.ParseRoleMapping()
+	if err != nil {
+		// Unreachable in a booted process: Load refuses a malformed mapping.
+		// Fail closed anyway — claiming nothing is managed is the harmless
+		// direction, it just costs a warning banner.
+		s.logger.ErrorContext(ctx, "OIDC role mapping is malformed, reporting it as disabled",
+			slog.Any("error", err))
+
+		return info
+	}
+
+	if len(mapping) == 0 {
+		return info
+	}
+
+	roles := make([]string, 0, len(mapping))
+	for role := range mapping {
+		roles = append(roles, role)
+	}
+
+	sort.Strings(roles)
+
+	info.Enabled = true
+	info.Roles = roles
+	info.Provider = oidc.ProviderName
+
+	return info
 }
 
 // handleOAuthAuthorize returns a handler that initiates the OAuth flow.

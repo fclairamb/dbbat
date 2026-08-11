@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/fclairamb/dbbat/internal/auth"
+	"github.com/fclairamb/dbbat/internal/auth/oidc"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -214,6 +215,81 @@ func TestAuthProvidersExposesDisplayName(t *testing.T) {
 	assert.Equal(t, "/api/v1/auth/"+genericName, byType[genericName].AuthorizeURL)
 	assert.Empty(t, byType[brandedName].DisplayName,
 		"a provider the frontend labels itself must not carry a display name")
+}
+
+// authProvidersRoleMapping drives GET /auth/providers and returns the
+// role_mapping block plus the raw body, so a test can also assert on what is
+// *not* in it.
+func authProvidersRoleMapping(t *testing.T, server *Server) (roleMappingInfo, string) {
+	t.Helper()
+
+	router := gin.New()
+	router.GET("/api/v1/auth/providers", server.handleAuthProviders)
+
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/v1/auth/providers", nil))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var body struct {
+		RoleMapping roleMappingInfo `json:"role_mapping"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+
+	return body.RoleMapping, w.Body.String()
+}
+
+// TestAuthProvidersExposesManagedRoles is what lets the users page badge a
+// role as directory-owned: the endpoint names the roles the mapping governs,
+// and nothing else about it.
+func TestAuthProvidersExposesManagedRoles(t *testing.T) {
+	t.Parallel()
+
+	server, _ := setupTestServer(t)
+	serverWithRoleMapping(t, server, "viewer=analysts,admin=db-admins")
+	server.oauthProviders[oidc.ProviderName] = &mockProvider{name: oidc.ProviderName}
+
+	mapping, raw := authProvidersRoleMapping(t, server)
+
+	assert.True(t, mapping.Enabled)
+	assert.Equal(t, []string{store.RoleAdmin, store.RoleViewer}, mapping.Roles,
+		"the managed roles must come back sorted, whatever order they were configured in")
+	assert.Equal(t, oidc.ProviderName, mapping.Provider)
+
+	// The endpoint is unauthenticated: directory group names are topology and
+	// must never travel through it.
+	assert.NotContains(t, raw, "db-admins")
+	assert.NotContains(t, raw, "analysts")
+}
+
+// TestAuthProvidersRoleMappingNeedsTheProvider covers a mapping configured
+// while the OIDC provider is not registered. Nothing applies it, so the UI
+// must not warn that anything is managed.
+func TestAuthProvidersRoleMappingNeedsTheProvider(t *testing.T) {
+	t.Parallel()
+
+	server, _ := setupTestServer(t)
+	serverWithRoleMapping(t, server, "admin=db-admins")
+
+	mapping, _ := authProvidersRoleMapping(t, server)
+
+	assert.False(t, mapping.Enabled)
+	assert.Empty(t, mapping.Roles)
+	assert.Empty(t, mapping.Provider)
+}
+
+// TestAuthProvidersRoleMappingUnset is the default deployment: SSO may well be
+// on, but nobody mapped a group to a role, so every role stays manual.
+func TestAuthProvidersRoleMappingUnset(t *testing.T) {
+	t.Parallel()
+
+	server, _ := setupTestServer(t)
+	serverWithRoleMapping(t, server, "")
+	server.oauthProviders[oidc.ProviderName] = &mockProvider{name: oidc.ProviderName}
+
+	mapping, _ := authProvidersRoleMapping(t, server)
+
+	assert.False(t, mapping.Enabled)
+	assert.Empty(t, mapping.Roles)
 }
 
 func TestFindOrCreateOAuthUser_OrphanIdentity(t *testing.T) {
