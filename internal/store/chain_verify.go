@@ -719,6 +719,24 @@ func (s *Store) countUnchainedRows(ctx context.Context, connectionUID *uuid.UUID
 	return int64(count), nil
 }
 
+// CountUnchainedCapturedRows counts one capture's rows written before the row
+// chain migration — the per-query counterpart of what VerifyRowChains reports
+// as Unchained. VerifyRowChain walks a single capture but only sees the rows
+// that carry a MAC, so a caller scoping to one query needs this to report the
+// same "nothing sealed these" number the sweep does.
+func (s *Store) CountUnchainedCapturedRows(ctx context.Context, queryUID uuid.UUID) (int64, error) {
+	count, err := s.db.NewSelect().
+		Model((*QueryRowModel)(nil)).
+		Where("qr.mac IS NULL").
+		Where("qr.query_id = ?", queryUID).
+		Count(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count unchained captured rows: %w", err)
+	}
+
+	return int64(count), nil
+}
+
 // capturedQueryUIDs lists the captures worth walking, oldest first.
 //
 // A query is in scope when it still has chained rows *or* when it carries a
