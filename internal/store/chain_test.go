@@ -569,12 +569,18 @@ func TestQueryChainStampsHeadOnClose(t *testing.T) {
 
 	closed, err := store.GetConnectionByUID(ctx, conn.UID)
 	require.NoError(t, err)
-	require.Equal(t, queries[2].MAC, closed.QueryChainMAC, "the session head must be stamped on close")
 	require.Equal(t, int64(3), closed.QueryChainLen)
+	require.Equal(t, queryChainStampKeyed, closed.QueryChainStampVersion,
+		"a session closed by this build must be sealed, not stamped in the legacy format")
+	require.Equal(t, store.queryChainStampMAC(conn.UID, queryChainStampKeyed, 3, queries[2].MAC),
+		closed.QueryChainMAC, "the session head must be sealed on close")
+	require.NotEqual(t, queries[2].MAC, closed.QueryChainMAC,
+		"the stamp must not be a copy of the head MAC: that value is readable from queries")
 
 	result, err := store.VerifyQueryChain(ctx, conn.UID)
 	require.NoError(t, err)
 	require.Nil(t, result.Break)
+	require.False(t, result.LegacyStamp)
 }
 
 func TestQueryChainDetectsTrailingDeletion(t *testing.T) {
@@ -594,6 +600,229 @@ func TestQueryChainDetectsTrailingDeletion(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result.Break, "deleting the last statement of a closed session must be detected")
 	require.Contains(t, result.Break.Reason, "removed from the end")
+}
+
+// TestQueryChainDetectsRestampedTrailingDeletion is the case that actually
+// matters, and the one the pre-0.24 stamp lost. An attacker with write access
+// to the store does not stop at deleting the last statements — they fix the
+// stamp up afterwards, with values they can read straight out of `queries`.
+// That worked against a stamp that merely echoed the head MAC. It must not
+// work against a keyed one.
+func TestQueryChainDetectsRestampedTrailingDeletion(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, queries := createChainTestConnection(t, ctx, store, "restamped", 3)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	// Delete the last statement and re-stamp with everything the attacker can
+	// see: the new last statement's MAC and the new length.
+	_, err := store.db.ExecContext(ctx, `DELETE FROM queries WHERE uid = ?`, queries[2].UID)
+	require.NoError(t, err)
+
+	_, err = store.db.ExecContext(ctx,
+		`UPDATE connections SET query_chain_mac = ?, query_chain_len = ? WHERE uid = ?`,
+		queries[1].MAC, 2, conn.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "a re-stamped truncation must still be detected")
+	require.Contains(t, result.Break.Reason, "the stamp was rewritten")
+	require.False(t, result.LegacyStamp, "a forged stamp is a break, not a legacy stamp")
+}
+
+// TestQueryChainDetectsStampVersionDowngrade is the test the version column
+// exists for, and the reason the version is *inside* the MAC.
+//
+// Legacy (version 0) stamps have to keep being accepted — the chain key never
+// enters the database, so nothing can re-seal what 0.23.x wrote, and failing
+// every pre-upgrade session would be pure cry-wolf. That acceptance is a door,
+// and this is the lock on it: an attacker cannot take a sealed row and simply
+// relabel it as legacy, because the stamp seals the version the row claims.
+// Without the version in the MAC this passes silently, and the attacker gets
+// the unkeyed rule applied to a session this build sealed.
+func TestQueryChainDetectsStampVersionDowngrade(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "downgrade", 3)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	_, err := store.db.ExecContext(ctx,
+		`UPDATE connections SET query_chain_stamp_version = 0 WHERE uid = ?`, conn.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "relabelling a sealed stamp as legacy must be detected")
+	require.Contains(t, result.Break.Reason, "the stamp was rewritten")
+	require.False(t, result.LegacyStamp, "a relabelled stamp must not be accepted as a legacy one")
+}
+
+// TestQueryChainDowngradeToRawStampIsReportedAsLegacy pins the residual, so it
+// is a documented property rather than a surprise.
+//
+// The attacker's remaining move is to replace the *whole* stamp — raw head MAC,
+// matching length, version back to 0 — which is by construction what accepting
+// legacy stamps allows. What they cannot do is make it look like a keyed
+// verification: the session is counted as a legacy stamp, so a store whose
+// legacy count had drained to zero shows the forgery as a count that came back.
+// The hole closes for good when version 0 acceptance is dropped; until then
+// this is what an operator watches.
+func TestQueryChainDowngradeToRawStampIsReportedAsLegacy(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, queries := createChainTestConnection(t, ctx, store, "downgrade-raw", 3)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	_, err := store.db.ExecContext(ctx, `DELETE FROM queries WHERE uid = ?`, queries[2].UID)
+	require.NoError(t, err)
+
+	_, err = store.db.ExecContext(ctx,
+		`UPDATE connections
+		    SET query_chain_mac = ?, query_chain_len = ?, query_chain_stamp_version = 0
+		  WHERE uid = ?`,
+		queries[1].MAC, 2, conn.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break, "a legacy stamp is a weaker result, not a break")
+	require.True(t, result.LegacyStamp, "the downgraded session must be reported as unsealed")
+
+	all, err := store.VerifyQueryChains(ctx, nil)
+	require.NoError(t, err)
+	require.True(t, all.OK())
+	require.Equal(t, int64(1), all.LegacyStamps,
+		"the sweep must surface how much of the store is still on the forgeable stamp")
+}
+
+// TestQueryChainLegacyStampStillVerifies is the compatibility half: a store
+// upgraded from 0.23.x must not report a break on every session it closed
+// before the upgrade — it must report how many of them are unsealed.
+func TestQueryChainLegacyStampStillVerifies(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, queries := createChainTestConnection(t, ctx, store, "legacy", 3)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	// Exactly what a 0.23.x CloseConnection left behind.
+	_, err := store.db.ExecContext(ctx,
+		`UPDATE connections
+		    SET query_chain_mac = ?, query_chain_len = ?, query_chain_stamp_version = 0
+		  WHERE uid = ?`,
+		queries[2].MAC, 3, conn.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break, "a pre-upgrade stamp must not be read as tampering: %v", result.Break)
+	require.True(t, result.LegacyStamp)
+
+	// And the legacy stamp still catches the naive attacker, exactly as it did
+	// before: what it cannot catch is the one who re-stamps.
+	_, err = store.db.ExecContext(ctx, `DELETE FROM queries WHERE uid = ?`, queries[2].UID)
+	require.NoError(t, err)
+
+	result, err = store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break)
+	require.Contains(t, result.Break.Reason, "removed from the end")
+}
+
+// TestQueryChainDetectsAnEditedStampLength covers the other half of the stamp:
+// query_chain_len is compared against what the surviving statements say, not
+// just carried in the break message.
+func TestQueryChainDetectsAnEditedStampLength(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "stamplen", 3)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	_, err := store.db.ExecContext(ctx,
+		`UPDATE connections SET query_chain_len = 99 WHERE uid = ?`, conn.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "the recorded length must be checked, not just printed")
+	require.Contains(t, result.Break.Reason, "recorded 99 statements but the surviving statements end at 3")
+}
+
+// TestQueryChainStampFromANewerBuildIsNotCalledTampering keeps the failure mode
+// honest for the opposite of an upgrade: a binary rolled back under a store a
+// newer one wrote. Refusing to verify is right; calling it a forgery is not.
+func TestQueryChainStampFromANewerBuildIsNotCalledTampering(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "newer", 2)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	_, err := store.db.ExecContext(ctx,
+		`UPDATE connections SET query_chain_stamp_version = 7 WHERE uid = ?`, conn.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break)
+	require.Contains(t, result.Break.Reason, "written by a newer dbbat")
+}
+
+// TestQueryChainStampSurvivesRetentionTruncatingThePrefix is why the stamp
+// seals the head's chain_seq and not a count of survivors. Retention reaps the
+// oldest statements of a long-lived session; a stamp that moved with them would
+// report a break on every deployment that sets DBB_QUERY_STORAGE_RETENTION.
+func TestQueryChainStampSurvivesRetentionTruncatingThePrefix(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, queries := createChainTestConnection(t, ctx, store, "stamp-truncated", 4)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	_, err := store.db.ExecContext(ctx,
+		`DELETE FROM queries WHERE uid IN (?, ?)`, queries[0].UID, queries[1].UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break, "a reaped prefix must not break the stamp: %v", result.Break)
+	require.True(t, result.TruncatedPrefix)
+	require.Equal(t, int64(2), result.Verified)
+	require.Equal(t, int64(4), result.HeadSeq)
+
+	// And the tail is still sealed underneath the truncation.
+	_, err = store.db.ExecContext(ctx, `DELETE FROM queries WHERE uid = ?`, queries[3].UID)
+	require.NoError(t, err)
+
+	result, err = store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "a trailing deletion must still be caught on a truncated chain")
 }
 
 // TestQueryChainRetentionKeepsOtherConnectionsVerifiable is the property that
@@ -1397,9 +1626,11 @@ func TestQueryChainStampsHeadOnOrphanReconcile(t *testing.T) {
 	closed, err := store.GetConnectionByUID(ctx, conn.UID)
 	require.NoError(t, err)
 	require.NotNil(t, closed.DisconnectedAt, "the orphan should no longer look open")
-	require.Equal(t, queries[2].MAC, closed.QueryChainMAC,
-		"the reconcile must stamp the head the surviving statements compute")
 	require.Equal(t, int64(3), closed.QueryChainLen)
+	require.Equal(t, queryChainStampKeyed, closed.QueryChainStampVersion,
+		"the reconcile must seal, not copy — it is the same evidence a clean close produces")
+	require.Equal(t, store.queryChainStampMAC(conn.UID, queryChainStampKeyed, 3, queries[2].MAC),
+		closed.QueryChainMAC, "the reconcile must seal the head the surviving statements compute")
 
 	result, err := store.VerifyQueryChain(ctx, conn.UID)
 	require.NoError(t, err)
@@ -1473,7 +1704,8 @@ func TestQueryChainOrphanReconcileDoesNotRestampAClosedSession(t *testing.T) {
 
 	closed, err := store.GetConnectionByUID(ctx, conn.UID)
 	require.NoError(t, err)
-	require.Equal(t, queries[2].MAC, closed.QueryChainMAC, "the original stamp must survive the reconcile")
+	require.Equal(t, store.queryChainStampMAC(conn.UID, queryChainStampKeyed, 3, queries[2].MAC),
+		closed.QueryChainMAC, "the original stamp must survive the reconcile")
 
 	result, err := store.VerifyQueryChain(ctx, conn.UID)
 	require.NoError(t, err)
@@ -1481,11 +1713,17 @@ func TestQueryChainOrphanReconcileDoesNotRestampAClosedSession(t *testing.T) {
 }
 
 // TestQueryChainOrphanStampCostScalesWithOrphans is the cost guard the spec
-// asked for. The head lookup is a correlated subquery in the reconcile's SET
-// clause, and PostgreSQL evaluates a SET expression only for rows that pass the
-// WHERE — so the reconcile costs one index lookup per *closed* row, not one per
-// connection in the table. This asserts that against a real plan rather than
-// against the documentation.
+// asked for: the reconcile must cost one head lookup per *closed* row, not one
+// per connection in the table.
+//
+// The shape it guards changed when the stamp became keyed. It used to be a
+// correlated subquery in the reconcile's SET clause, and the guarantee came
+// from PostgreSQL only evaluating a SET expression for rows that pass the
+// WHERE. A keyed stamp cannot be computed in SQL at all, so the close now
+// returns the uids it took and the heads are read back for exactly those — and
+// the guarantee comes from the input list instead of from the planner. Both
+// halves are asserted against a real plan: the close touches `queries` not at
+// all, and the head lookup enters it once per closed row.
 func TestQueryChainOrphanStampCostScalesWithOrphans(t *testing.T) {
 	t.Parallel()
 
@@ -1532,13 +1770,71 @@ func TestQueryChainOrphanStampCostScalesWithOrphans(t *testing.T) {
 		writeSession("dead-instance", fmt.Sprintf("dead-run-%d", i))
 	}
 
-	// EXPLAIN the statement the reconcile actually runs, not a lookalike.
-	statement := store.deadRunScope(store.orphanCloseQuery()).String()
+	orphanUIDs := openConnectionUIDs(t, ctx, store, "dead-instance")
+	require.Len(t, orphanUIDs, orphans)
+
+	// The close half: EXPLAIN the statement the reconcile actually runs, not a
+	// lookalike. EXPLAIN ANALYZE executes it, which is also how the rows get
+	// closed for the assertions below.
+	closeLoops := explainQueriesLoops(t, ctx, store,
+		store.deadRunScope(store.orphanCloseQuery(store.db)).Returning("uid").String())
+	require.Empty(t, closeLoops,
+		"the close no longer reads queries at all: a keyed stamp cannot be computed in SQL")
+
+	// The seal half: one index lookup per closed row, and none for the 40 live
+	// sessions the scan walked past.
+	headLoops := explainQueriesLoops(t, ctx, store, store.orphanHeadSelect(store.db, orphanUIDs).String())
+	require.NotEmpty(t, headLoops, "the plan must contain the head lookup over queries")
+
+	for _, l := range headLoops {
+		require.Equal(t, orphans, l, "the head lookup must run once per closed row, not once per connection")
+	}
+
+	// And the real path does the work: the rows above were closed by the
+	// EXPLAIN ANALYZE, so re-open them and let the reconcile itself run.
+	_, err := store.db.ExecContext(ctx,
+		`UPDATE connections SET disconnected_at = NULL WHERE instance_id = 'dead-instance'`)
+	require.NoError(t, err)
+
+	reclaimed, err := store.ReclaimDeadInstanceConnections(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(orphans), reclaimed)
+
+	var stamped int
+
+	require.NoError(t, store.db.QueryRowContext(ctx,
+		"SELECT count(*) FROM connections WHERE query_chain_mac IS NOT NULL AND query_chain_stamp_version = 1").
+		Scan(&stamped))
+	require.Equal(t, orphans, stamped)
+}
+
+// openConnectionUIDs lists the still-open connections of one instance id.
+func openConnectionUIDs(t *testing.T, ctx context.Context, store *Store, instanceID string) []uuid.UUID {
+	t.Helper()
+
+	var uids []uuid.UUID
+
+	err := store.db.NewSelect().
+		Model((*Connection)(nil)).
+		Column("uid").
+		Where("instance_id = ?", instanceID).
+		Where("disconnected_at IS NULL").
+		Order("uid ASC").
+		Scan(ctx, &uids)
+	require.NoError(t, err)
+
+	return uids
+}
+
+// explainQueriesLoops EXPLAIN ANALYZEs a statement and returns the loop count
+// of every plan node that reads the queries table.
+func explainQueriesLoops(t *testing.T, ctx context.Context, store *Store, statement string) []int {
+	t.Helper()
 
 	var plan string
 
-	err := store.db.QueryRowContext(ctx, "EXPLAIN (ANALYZE, FORMAT JSON) "+statement).Scan(&plan)
-	require.NoError(t, err, "EXPLAIN of the reconcile statement")
+	require.NoError(t, store.db.QueryRowContext(ctx, "EXPLAIN (ANALYZE, FORMAT JSON) "+statement).Scan(&plan),
+		"EXPLAIN of %s", statement)
 
 	// Walked as untyped maps rather than a tagged struct: the key names are
 	// PostgreSQL's ("Node Type", "Actual Loops", …) and modeling them as Go
@@ -1548,20 +1844,7 @@ func TestQueryChainOrphanStampCostScalesWithOrphans(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(plan), &explained))
 	require.Len(t, explained, 1)
 
-	loops := queriesScanLoops(explained[0]["Plan"])
-	require.NotEmpty(t, loops, "the plan must contain the head lookup over queries")
-
-	for _, l := range loops {
-		require.Equal(t, orphans, l,
-			"the head lookup must run once per closed row, not once per connection; plan: %s", plan)
-	}
-
-	// And it did the work: EXPLAIN ANALYZE executes the UPDATE.
-	var stamped int
-
-	require.NoError(t, store.db.QueryRowContext(ctx,
-		"SELECT count(*) FROM connections WHERE query_chain_mac IS NOT NULL").Scan(&stamped))
-	require.Equal(t, orphans, stamped)
+	return queriesScanLoops(explained[0]["Plan"])
 }
 
 // queriesScanLoops walks an EXPLAIN plan tree and collects the loop count of
