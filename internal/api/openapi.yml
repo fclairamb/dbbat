@@ -4162,9 +4162,19 @@ components:
         k8s_ca_cert:
           type: string
           description: >-
-            PEM CA bundle of the Kubernetes API server (kubernetes servers only).
-            Public challenge material, so it round-trips; the ServiceAccount
-            token never does.
+            Operator-supplied PEM CA bundle of the Kubernetes API server
+            (kubernetes servers only). Public challenge material, so it
+            round-trips; the ServiceAccount token never does. Optional — a row
+            that supplies none is pinned on first connect instead, and the
+            result lands in `k8s_learned_ca_cert`.
+        k8s_learned_ca_cert:
+          type: string
+          description: >-
+            PEM CA bundle dbbat pinned itself on the first connect of a cluster
+            row that supplied none (trust on first use). Read-only, and kept
+            apart from `k8s_ca_cert` so a client can say which of the two is in
+            force: a supplied bundle always wins. Clear it with
+            `k8s_reset_learned_ca_cert` when the cluster's CA has rotated.
         k8s_namespace:
           type: string
           description: Namespace every lookup and port-forward is scoped to (kubernetes servers only)
@@ -4235,6 +4245,7 @@ components:
             - k8s_forbidden
             - k8s_target_not_found
             - k8s_target_not_ready
+            - k8s_ca_pin_mismatch
             - internal_error
           description: Machine-readable classification within the stage; `ok` on success
         message:
@@ -4246,6 +4257,16 @@ components:
         ssh_known_host_key:
           type: string
           description: The bastion's public host key after the check (ssh servers only)
+        k8s_ca_pinned:
+          type: boolean
+          description: >-
+            True when this check pinned the Kubernetes API server's CA on a
+            first connect (kubernetes servers that supplied no bundle)
+        k8s_learned_ca_cert:
+          type: string
+          description: >-
+            The cluster's TOFU-learned CA bundle after the check (kubernetes
+            servers only); empty when the row supplied its own, which wins
         duration_ms:
           type: integer
           format: int64
@@ -4343,8 +4364,12 @@ components:
         k8s_ca_cert:
           type: string
           description: >-
-            PEM CA bundle of the Kubernetes API server. Required for a
-            `kubernetes` row unless `k8s_insecure_skip_tls_verify` is set.
+            PEM CA bundle of the Kubernetes API server. Optional: a `kubernetes`
+            row that supplies none learns the API server's CA on first connect
+            and verifies against it from then on (trust on first use), which is
+            weaker than pasting the bundle but never falls back to the host's
+            system trust store. Supplying one always wins over a learned pin,
+            and retires it.
         k8s_namespace:
           type: string
           description: >-
@@ -4428,8 +4453,12 @@ components:
         k8s_ca_cert:
           type: string
           description: >-
-            PEM CA bundle of the Kubernetes API server. Required for a
-            `kubernetes` row unless `k8s_insecure_skip_tls_verify` is set.
+            PEM CA bundle of the Kubernetes API server. Optional: a `kubernetes`
+            row that supplies none learns the API server's CA on first connect
+            and verifies against it from then on (trust on first use), which is
+            weaker than pasting the bundle but never falls back to the host's
+            system trust store. Supplying one always wins over a learned pin,
+            and retires it.
         k8s_namespace:
           type: string
           description: >-
@@ -4441,6 +4470,13 @@ components:
             Disable API server certificate verification. For throwaway clusters
             only: with it set, anything that can intercept the API server
             connection can read the ServiceAccount token.
+        k8s_reset_learned_ca_cert:
+          type: boolean
+          description: >-
+            When true, forgets the CA bundle pinned on first connect so the next
+            connect pins afresh. The exit from a stale pin when the cluster's CA
+            rotated and you do not have the new bundle to paste; supplying a
+            non-empty `k8s_ca_cert` clears it too.
         test_connection:
           type: boolean
           description: |
