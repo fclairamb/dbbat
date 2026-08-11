@@ -485,8 +485,8 @@ func (s *Server) findOrCreateOAuthUser(ctx context.Context, provider auth.OAuthP
 		}
 	}
 
-	// 3. Auto-create if enabled
-	if !s.oauthAutoCreateUsers() {
+	// 3. Auto-create if enabled for this provider
+	if !s.oauthAutoCreateUsers(providerName) {
 		return nil, errOAuthUserNotLinked
 	}
 

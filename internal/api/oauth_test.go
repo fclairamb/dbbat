@@ -336,6 +336,63 @@ func TestFindOrCreateOAuthUser_OrphanIdentity(t *testing.T) {
 	assert.NotEqual(t, user.UID, newUser.UID, "a new user must be created")
 }
 
+// TestFindOrCreateOAuthUserPerProviderAutoCreate is the feature seen from the
+// login path: two providers, one allowed to mint accounts and one not, in the
+// same process. Before the per-provider override the stricter policy applied to
+// both, which made the looser provider unusable.
+func TestFindOrCreateOAuthUserPerProviderAutoCreate(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupTestServer(t)
+	ctx := context.Background()
+	suffix := uuid.NewString()[:8]
+
+	gated := false
+	server.config = &config.Config{
+		Auth: config.OAuthUsersConfig{
+			AutoCreateUsers: true,
+			DefaultRole:     store.RoleConnector,
+			Providers: map[string]config.OAuthProviderUsersConfig{
+				// Slack: a workspace full of contractors — accounts by hand only.
+				store.IdentityTypeSlack: {AutoCreateUsers: &gated},
+				// The corporate issuer keeps the instance-wide "yes", on its own role.
+				oidc.ProviderName: {DefaultRole: store.RoleViewer},
+			},
+		},
+	}
+	require.NoError(t, server.config.Auth.Validate())
+
+	slackUser := &auth.OAuthUser{
+		ProviderID:  "USLACKGATED-" + suffix,
+		Email:       "slack-" + suffix + "@example.com",
+		DisplayName: "Slack User " + suffix,
+	}
+
+	_, err := server.findOrCreateOAuthUser(ctx, &mockProvider{name: store.IdentityTypeSlack}, slackUser)
+	require.ErrorIs(t, err, errOAuthUserNotLinked,
+		"the gated provider must not provision an account despite the instance-wide true")
+
+	// The same identity through the other provider still gets an account, on
+	// that provider's own default role.
+	created, err := server.findOrCreateOAuthUser(ctx, &mockProvider{name: oidc.ProviderName}, &auth.OAuthUser{
+		ProviderID:  "OIDCALLOWED-" + suffix,
+		Email:       "oidc-" + suffix + "@example.com",
+		DisplayName: "OIDC User " + suffix,
+	})
+	require.NoError(t, err, "a provider with no auto-create override keeps the instance-wide yes")
+	assert.Equal(t, []string{store.RoleViewer}, []string(created.Roles),
+		"the per-provider default role must apply to the account it creates")
+
+	// Gating creation must not gate *login*: an account an admin created by
+	// hand is exactly what the deployment wants the Slack provider used for.
+	manual, err := dataStore.CreateUser(ctx, slackUser.Email, "hash", []string{store.RoleConnector})
+	require.NoError(t, err)
+
+	linked, err := server.findOrCreateOAuthUser(ctx, &mockProvider{name: store.IdentityTypeSlack}, slackUser)
+	require.NoError(t, err, "an existing account must still sign in through the gated provider")
+	assert.Equal(t, manual.UID, linked.UID)
+}
+
 // errTestExchangeFailed stands in for a provider token endpoint refusing the
 // authorization code.
 var errTestExchangeFailed = errors.New("token endpoint said no")

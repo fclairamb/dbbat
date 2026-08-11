@@ -11,6 +11,7 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/auth"
 	"github.com/fclairamb/dbbat/internal/auth/oidc"
+	"github.com/fclairamb/dbbat/internal/auth/slack"
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/store"
 )
@@ -29,6 +30,21 @@ func TestConfigKnownRolesMatchStore(t *testing.T) {
 
 	assert.Equal(t, store.RoleConnector, config.DefaultOAuthRole,
 		"config.DefaultOAuthRole must be the same role store calls the connector one")
+}
+
+// TestConfigKnownOAuthProvidersMatchProviders is the same pin one rung over,
+// for the per-provider auto-provisioning overrides. config cannot import the
+// provider packages (they import it), and it refuses to start on a provider
+// name it does not know — so a provider added without updating the list would
+// make DBB_AUTH_AUTO_CREATE_USERS_<IT> a startup failure, and one removed
+// without updating it would leave a dead override that silently does nothing.
+func TestConfigKnownOAuthProvidersMatchProviders(t *testing.T) {
+	t.Parallel()
+
+	assert.ElementsMatch(t,
+		[]string{slack.NewProvider("", "", "").Name(), oidc.ProviderName},
+		config.KnownOAuthProviders,
+		"config.KnownOAuthProviders must list exactly the registrable login providers")
 }
 
 // TestResolveMappedRoles is the decision table of the whole feature: what a

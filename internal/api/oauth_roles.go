@@ -30,21 +30,25 @@ const AuditEventUserCreated = "user.created"
 // read. It is the floor a role mapping can never dig below: a mapping that
 // matches nothing leaves the user with this role, never with none at all.
 //
-// The value is DBB_AUTH_DEFAULT_ROLE, provider-agnostic on purpose: whichever
-// provider vouched for the identity, this is the role it lands on.
-func (s *Server) oauthDefaultRole() string {
+// The value is DBB_AUTH_DEFAULT_ROLE, or DBB_AUTH_DEFAULT_ROLE_<PROVIDER> when
+// providerName set one: the instance-wide setting still answers for every
+// provider that did not, which is the common case.
+func (s *Server) oauthDefaultRole(providerName string) string {
 	if s.config == nil {
 		return store.RoleConnector
 	}
 
-	return s.config.Auth.Role()
+	return s.config.Auth.RoleFor(providerName)
 }
 
-// oauthAutoCreateUsers reports whether an unknown verified identity may
-// provision itself a local account (DBB_AUTH_AUTO_CREATE_USERS). Same
-// provider-agnostic home as the default role, same single-read discipline.
-func (s *Server) oauthAutoCreateUsers() bool {
-	return s.config != nil && s.config.Auth.AutoCreateUsers
+// oauthAutoCreateUsers reports whether an unknown verified identity vouched for
+// by providerName may provision itself a local account
+// (DBB_AUTH_AUTO_CREATE_USERS, overridable per provider). Same single-read
+// discipline as the default role — and the reason both take a provider name: a
+// deployment can trust its corporate issuer to mint accounts while refusing the
+// same from a Slack workspace full of contractors.
+func (s *Server) oauthAutoCreateUsers(providerName string) bool {
+	return s.config != nil && s.config.Auth.AutoCreateUsersFor(providerName)
 }
 
 // oauthRoleMapping returns the parsed group-to-role mapping that applies to
@@ -210,7 +214,7 @@ func (s *Server) oauthRolesForNewUser(
 	providerName string,
 	oauthUser *auth.OAuthUser,
 ) []string {
-	role := s.oauthDefaultRole()
+	role := s.oauthDefaultRole(providerName)
 
 	mapping := s.oauthRoleMapping(ctx, providerName)
 	if len(mapping) == 0 || oauthUser.GroupsOverage {
@@ -270,10 +274,10 @@ func (s *Server) syncOAuthRoles(
 			slog.String("groups_claim", s.config.OIDCAuth.GroupsClaimName()))
 	}
 
-	resolution := resolveMappedRoles(user.Roles, oauthUser.Groups, mapping, s.oauthDefaultRole())
+	resolution := resolveMappedRoles(user.Roles, oauthUser.Groups, mapping, s.oauthDefaultRole(providerName))
 
 	if slices.Contains(resolution.Revoked, store.RoleAdmin) {
-		retained, err := s.retainLastAdmin(ctx, user, oauthUser.Groups, mapping, resolution)
+		retained, err := s.retainLastAdmin(ctx, user, providerName, oauthUser.Groups, mapping, resolution)
 		if err != nil {
 			return nil, err
 		}
@@ -310,6 +314,7 @@ func (s *Server) syncOAuthRoles(
 func (s *Server) retainLastAdmin(
 	ctx context.Context,
 	user *store.User,
+	providerName string,
 	groups []string,
 	mapping map[string][]string,
 	resolution roleResolution,
@@ -330,7 +335,7 @@ func (s *Server) retainLastAdmin(
 	// Re-resolve with admin pinned rather than patching the result: the floor
 	// may have added the default role only because the set was about to be
 	// empty, and that reasoning no longer holds once admin stays.
-	return resolveMappedRoles(user.Roles, groups, mapping, s.oauthDefaultRole(), store.RoleAdmin), nil
+	return resolveMappedRoles(user.Roles, groups, mapping, s.oauthDefaultRole(providerName), store.RoleAdmin), nil
 }
 
 // auditOAuthUserCreated records an account auto-provisioned by a verified
