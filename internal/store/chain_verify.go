@@ -186,7 +186,7 @@ func newQueryChainOptions(opts []QueryChainOption) queryChainOptions {
 }
 
 // AllowLegacyStamps reports a session still carrying the pre-0.24 unkeyed head
-// stamp as a legacy stamp instead of as a break — the behaviour 0.24 replaced.
+// stamp as a legacy stamp instead of as a break — the behavior 0.24 replaced.
 //
 // It exists for one upgrade only. A store written by 0.23.x has a verbatim head
 // stamp on every session it closed, nothing can re-seal them (the chain key
@@ -503,7 +503,7 @@ func (s *Store) verifyQueryRow(row *Query, connectionUID uuid.UUID, expectedSeq 
 // own reason: 0.24 dropped acceptance of the pre-0.24 raw-head stamp, because
 // an unkeyed stamp proves nothing to anyone who can write to this database, and
 // leaving it accepted left a standing downgrade path. AllowLegacyStamps
-// restores the old counting behaviour for the one upgrade that needs it.
+// restores the old counting behavior for the one upgrade that needs it.
 //
 // # Exact for a closed session, a prefix for an open one
 //
@@ -618,7 +618,7 @@ func (s *Store) checkStampedHead(
 // matching stamp — which is exactly what the keyed stamp exists to stop, and
 // what accepting version 0 kept available as a standing downgrade path.
 //
-// AllowLegacyStamps restores the old behaviour — counted, never called verified
+// AllowLegacyStamps restores the old behavior — counted, never called verified
 // — for the single upgrade from 0.23.x that has such rows and no way to re-seal
 // them. Under that opt-in the old raw comparison runs unchanged, so it still
 // catches the attacker who deletes and stops; what it never caught, and still

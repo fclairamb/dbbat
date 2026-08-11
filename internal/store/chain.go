@@ -340,7 +340,7 @@ func (s *Store) rowChainStampMAC(queryUID uuid.UUID, count int64, headMAC []byte
 // break, not a weaker pass. Accepting them was a standing downgrade path: the
 // stamp is readable out of `queries`, so replacing a sealed row with a raw head
 // MAC and version `0` needed no key at all. `--allow-legacy-stamps`
-// (store.AllowLegacyStamps) restores the counting behaviour for the one upgrade
+// (store.AllowLegacyStamps) restores the counting behavior for the one upgrade
 // that has such rows, and goes away in 0.25.
 const (
 	// queryChainStampLegacy is the pre-0.24 verbatim head copy. Unkeyed, and
