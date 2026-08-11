@@ -173,8 +173,10 @@ func rewriteAuthPhase2Anchored(body []byte, newUsername string, sec *upstreamAut
 //
 // Phase 2 wire layout for go-ora-style clients:
 //
-//	[03 73 b0]                 -- piggyback header + sub-op + 1 client-specific byte
-//	                              (0x00 for go-ora; 0x02 for JDBC thin)
+//	[03 73 <seq> (00)]         -- piggyback header + sub-op + TTC function
+//	                              sequence number, plus a trailing 0x00 once the
+//	                              negotiated TTC field version reaches 18
+//	                              (ttcAuthFuncHeaderLen)
 //	[01]                       -- has-username flag
 //	[compressed-int user_id_len]
 //	[compressed-int mode]
@@ -184,9 +186,9 @@ func rewriteAuthPhase2Anchored(body []byte, newUsername string, sec *upstreamAut
 //	[username bare OR CLR-prefixed]
 //	[KV pairs...]
 //
-// Both observed username encodings are handled. The b0 byte at offset 2 is
-// preserved verbatim (its meaning is opaque; preserving it keeps the upstream's
-// caps-conditioned parser happy).
+// Both observed username encodings are handled. The whole function header is
+// preserved verbatim, sequence number and extension byte included — the
+// upstream's caps-conditioned parser reads the preamble at exactly that width.
 //
 // The rewritten body is returned as a fresh slice; the input is not mutated.
 func rewriteAuthPhase2(body []byte, newUsername string, sec *upstreamAuthSecrets, bigChunks bool) ([]byte, error) {
@@ -215,6 +217,10 @@ func rewriteAuthPhase2(body []byte, newUsername string, sec *upstreamAuthSecrets
 // authPhase2Header captures the byte boundaries needed to splice in a new
 // username and KV-pair set.
 type authPhase2Header struct {
+	// headerLen is the width of the leading TTC function header, which is
+	// negotiated rather than fixed (ttcAuthFuncHeaderLen). assembleAuthPhase2
+	// copies exactly those bytes back, extension byte included.
+	headerLen    int
 	hasUsername  bool
 	hasCLRPrefix bool
 	modeStart    int
@@ -227,9 +233,13 @@ type authPhase2Header struct {
 // flag, user_id_len, mode, pair_count, marker, and username field — returning
 // the offsets needed to reassemble the body.
 func parseAuthPhase2Header(body []byte) (authPhase2Header, error) {
-	const headerLen = 3 // [03 73 b0]
+	// [03 73 <seq>], plus the negotiated trailing 0x00 — go-ora v3 and JDBC thin
+	// against 23ai open Phase 2 with `03 73 02 00`, and reading that fourth byte
+	// as the has-username flag makes the whole preamble walk off by one. See
+	// ttcAuthFuncHeaderLen.
+	headerLen := ttcAuthFuncHeaderLen(body)
 
-	out := authPhase2Header{}
+	out := authPhase2Header{headerLen: headerLen}
 
 	if len(body) < headerLen+1 {
 		return out, fmt.Errorf("%w: body too short for header", ErrAuthPhase2Rewrite)
@@ -326,10 +336,8 @@ func readPhase2UserLen(body []byte, pos *int, hasUsername bool) (int, error) {
 // assembleAuthPhase2 builds the rewritten body with the new username and
 // pre-rewritten KV pairs, preserving the original header / mode / marker bytes.
 func assembleAuthPhase2(body []byte, hdr authPhase2Header, newUsername string, rewrittenPairs []byte) []byte {
-	const headerLen = 3
-
 	out := make([]byte, 0, len(body)+len(newUsername))
-	out = append(out, body[:headerLen]...)
+	out = append(out, body[:hdr.headerLen]...)
 
 	if hdr.hasUsername {
 		out = append(out, 0x01)

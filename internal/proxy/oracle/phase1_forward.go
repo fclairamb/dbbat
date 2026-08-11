@@ -267,7 +267,9 @@ const numPairsBlockLen = 5
 // username (AUTH_TERMINAL, AUTH_PROGRAM_NM, ...) are passed through
 // unchanged so the upstream sees the client's actual TTC capabilities.
 func rewriteAuthPhase1Username(body []byte, newUsername string) ([]byte, error) {
-	const headerLen = 4 // [03 76 b0 b1] piggyback marker + sub-op + 2-byte trailer
+	// [03 76 <seq> (00)] TTC function header + the 0x01 username-present marker.
+	// The header's width is negotiated, not fixed — see ttcAuthFuncHeaderLen.
+	headerLen := ttcAuthFuncHeaderLen(body) + 1
 
 	if len(body) < headerLen {
 		return nil, fmt.Errorf("%w: body too short for header", ErrAuthPhase1Rewrite)
@@ -385,3 +387,33 @@ func isPrintableASCIIRun(b []byte) bool {
 // ErrAuthPhase1Rewrite signals a Phase 1 body that does not match the
 // expected piggyback/sub-op/userLen/mode/magic/username layout.
 var ErrAuthPhase1Rewrite = errors.New("AUTH Phase 1 rewrite failed")
+
+// ttcAuthFuncHeaderLen returns the width of the TTC function header opening an
+// AUTH body: [03 <sub> <seq>], plus one trailing 0x00 when the session
+// negotiated a TTC field version of 18 or more (go-ora's PutTTCFunc; the
+// version is the min of both ends' CompileTimeCaps[7]).
+//
+// Both widths are on the wire in testdata: go-ora v3 and JDBC thin open Phase 1
+// with `03 76 01 00`, older python-oracledb thin with `03 76 01`. Byte 3 tells
+// them apart — a body with a username writes the 0x01 marker there once the
+// header ends, so a 0x00 can only be the extension byte.
+//
+// The one ambiguity is a Phase 2 body with NO username, which writes [00 00]
+// where a normal one writes [01]: three zeros in a row is the extension byte
+// followed by that pair, two is the pair on a narrow header. dbbat never issues
+// or forwards a username-less AUTH — it cannot authenticate without one — but
+// the check is cheap and keeps the reading side honest.
+func ttcAuthFuncHeaderLen(body []byte) int {
+	const narrow = 3 // [03 <sub> <seq>]
+
+	if len(body) <= narrow || body[narrow] != 0x00 {
+		return narrow
+	}
+
+	if body[1] == PiggybackSubAuth2 && len(body) > narrow+2 &&
+		body[narrow+1] == 0x00 && body[narrow+2] != 0x00 {
+		return narrow
+	}
+
+	return narrow + 1
+}
