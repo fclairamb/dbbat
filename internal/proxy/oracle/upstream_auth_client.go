@@ -490,6 +490,12 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, err
 		buf = append(buf, fragTTC...)
 
 		if parseAuthMessageStream(buf, resp, s.clientWideEncoding) {
+			// The AUTH response ends with the upstream's own OER, which is the
+			// earliest sample of the summary-object layout this client parses —
+			// and it lands before the first statement, so a session whose very
+			// first statement is refused already has it. See ttc_oer_encode.go.
+			s.learnOERTail(buf)
+
 			resp.dataFlags = dataFlags
 
 			merged := make([]byte, 0, ttcDataFlagsSize+len(buf))

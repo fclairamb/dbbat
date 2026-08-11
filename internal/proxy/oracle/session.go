@@ -179,6 +179,17 @@ type session struct {
 	// revocation is signaled when this session's grant is revoked mid-flight,
 	// so the next command is rejected and the watchdog tears the session down.
 	revocation *cache.RevocationHandle
+
+	// oer holds the negotiated layout of the TTC summary object, so a refusal
+	// dbbat synthesizes is framed the way this client parses one. Its
+	// capability half is filled in from the relayed Set Protocol / Set Data
+	// Types exchange; its tail half is learned from the upstream's own OERs.
+	// See ttc_oer_encode.go.
+	oer oerShape
+
+	// oerSeq is the highest end-to-end sequence number seen from the upstream,
+	// so a synthesized OER continues the session's count.
+	oerSeq int
 }
 
 // cumulativeClientBytes returns the running total of bytes exchanged with
@@ -230,6 +241,7 @@ func newSession(
 		rowWriter:       rowWriter,
 		bytesFromClient: bytesFromClient,
 		bytesToClient:   bytesToClient,
+		oer:             defaultOERShape(),
 	}
 
 	// Assigned separately so a nil store stays a nil interface rather than a
@@ -1440,6 +1452,11 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket) {
 	// later re-execution be gated against the right statement.
 	s.learnCursorID(ttcPayload)
 
+	// Every upstream response is also a sample of the OER layout this client
+	// parses — the upstream negotiated with the client's own forwarded
+	// capabilities — which is what a refusal dbbat synthesizes has to match.
+	s.learnOERTail(ttcPayload)
+
 	switch funcCode { //nolint:exhaustive // only handling response-related codes
 	case TTCFuncQueryResult:
 		s.handleQueryResultV2(ttcPayload)
@@ -1450,6 +1467,41 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket) {
 	case TTCFuncContinuation:
 		s.handleContinuation(ttcPayload)
 	}
+}
+
+// learnOERTail keeps the session's picture of the TTC summary object honest
+// against the one the upstream actually sends, and tracks the end-to-end
+// sequence number so a synthesized error continues the session's count instead
+// of restarting it.
+//
+// Both are read from OERs dbbat is relaying anyway. The upstream leg negotiated
+// with this client's own forwarded capabilities, so its OERs are shaped exactly
+// the way the client parses one — which is the only reliable source for the
+// part of the layout no capability bit predicts (see oerShape.extraTailFields).
+// Learning is idempotent and cheap; it re-runs on every response so a session
+// that starts before the first sample still converges.
+func (s *session) learnOERTail(ttcPayload []byte) {
+	if info, _ := decodeOERFieldsAt(ttcPayload, 0); info != nil && info.SeqNumber > s.oerSeq {
+		s.oerSeq = info.SeqNumber
+	}
+
+	if s.oer.tailLearned {
+		return
+	}
+
+	if learnOERShape(&s.oer, ttcPayload) {
+		s.logger.DebugContext(s.ctx, "learned OER tail shape from upstream",
+			slog.Int("extra_tail_fields", s.oer.extraTailFields))
+	}
+}
+
+// nextOERSeq returns the end-to-end sequence number to stamp on the next
+// synthesized OER. No client validates it, but a value that walks forward with
+// the session is what a server sends and what dbbat's own OER locator bounds.
+func (s *session) nextOERSeq() int {
+	s.oerSeq++
+
+	return s.oerSeq
 }
 
 // handleOERStatus processes a standalone OER (func=0x04) message. Servers send
