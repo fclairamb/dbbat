@@ -324,6 +324,37 @@ paths:
                             operator-configured (the generic OIDC provider,
                             DBB_OIDC_DISPLAY_NAME). Absent for providers the
                             frontend labels itself, such as Slack.
+                  role_mapping:
+                    type: object
+                    description: >
+                      Which dbbat roles the identity provider's group mapping
+                      (DBB_OIDC_ROLE_MAPPING) owns. Applied on every login, so
+                      the users page uses this to badge those roles as managed
+                      by SSO and to warn that a manual edit will be undone.
+                      Only the role names are returned — the directory group
+                      values are topology and never leave the server through
+                      this unauthenticated endpoint.
+                    properties:
+                      enabled:
+                        type: boolean
+                        description: >
+                          A mapping is configured and the provider it applies
+                          to is registered. False when either is missing.
+                      roles:
+                        type: array
+                        description: The roles the mapping governs, sorted. Empty when disabled.
+                        items:
+                          type: string
+                          enum: [admin, viewer, connector]
+                      provider:
+                        type: string
+                        description: >
+                          Provider key the mapping applies to (`oidc`), so the
+                          UI can resolve its display name from the list above.
+                          Absent when disabled.
+                    required:
+                      - enabled
+                      - roles
 
   /auth/oidc:
     get:
