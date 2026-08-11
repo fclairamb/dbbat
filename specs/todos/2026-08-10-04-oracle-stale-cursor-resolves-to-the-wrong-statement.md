@@ -99,3 +99,67 @@ processed. That assertion is what would catch a real leak, and it is what makes
 
 The full close-list decode and its pinned decoder unit test remain the primary
 deliverable — everything above is secondary to that.
+
+## Implementation Plan
+
+### What the captures actually say
+
+Read off `internal/proxy/oracle/testdata/*.pcapng` (all 20 recordings, client
+leg only), the close list is **not** where the code looks for it:
+
+- **`03 09 …` is not a close.** It appears exactly once per recording, as the
+  very last client frame, three or four bytes long: `03 09 <seq> [00]`. Message
+  type `0x03` is `TNS_MSG_TYPE_FUNCTION` and function `0x09` is
+  `TNS_FUNC_LOGOFF`. It carries no cursor id at all, so today's
+  `s.handleOCLOSE(uint16(ttcPayload[2]))` deletes the entry keyed by the **TTC
+  sequence number** — a wrong deletion on every session teardown.
+- **`11 69 …` is the close list.** Message type `0x11` is
+  `TNS_MSG_TYPE_PIGGYBACK` and function `0x69` (105) is
+  `TNS_FUNC_CLOSE_CURSORS`. Body after the header:
+
+  ```
+  [0]    0x11            message type: piggyback
+  [1]    0x69            function: close cursors
+  [2]    TTC sequence number
+  [3]    0x00            token byte — 23ai-era clients only
+  [..]   0x01            pointer flag
+  [..]   count           TTC compressed int
+  [..]   count x id      TTC compressed ints
+  [..]   (optional) the next TTC message in the same packet
+  ```
+
+  Evidence: `go_ora_cursor_reexec.pcapng` closes cursor **2**, the same id its
+  re-executions name; `jdbc_thin_cursor_reexec.pcapng` likewise; and
+  `dbeaver.pcapng` frame 70 carries `01 | 01 03 | 01 05 01 03 01 04` — **count
+  3, ids 5, 3, 4** — which is the batched close the spec predicted and which
+  pins the count field's position unambiguously. `go-ora` v3's own
+  `defaultStmt.Close` writes exactly this (`PutTTCFunc(0x11, 0x69)`,
+  `PutBytes(1, 1, 1)`, `PutInt(cursorID, 4, …)`).
+
+  dbbat already routes `0x11`/`0x69` to `handleJDBCExec`, because clients
+  staple the statement they are about to run behind the close list in the same
+  packet (`… 03 5e <exec>`). That path stays exactly as it is; the close list
+  is decoded *before* it, matching wire order.
+
+- **sqlplus (OCI thick) uses the wide encoding** for the same op — an 8-byte
+  pointer sentinel and little-endian 32-bit count/ids. Out of scope here (it
+  never re-executes by cursor id, so a stale entry cannot mis-resolve one); a
+  follow-up todo is filed.
+
+### Steps
+
+1. `ttc_decode.go`: add `decodeCloseCursors(ttcPayload) ([]uint16, error)`,
+   strict — right message type and function, pointer flag present, bounded
+   count, every id in `(0, 0xFFFF]`, enough bytes for the whole list. Anything
+   else is an error and deletes nothing. `ttc.go`: `IsPiggybackCloseCursors`,
+   and rename `PiggybackSubClose`/`IsPiggybackClose` to the logoff they
+   actually match.
+2. `session.go`: decode the close list on the `0x11` branch and delete every id
+   before the exec handling runs; drop the wrong delete from the logoff branch.
+3. `intercept.go`: `handleCloseCursors`; and a WARN in `rememberCursor` (shared
+   by `learnCursorID` and `handleOALL8`) when the entry being overwritten holds
+   different SQL.
+4. Tests: a decoder unit test pinned on the real capture bytes plus malformed
+   inputs, a replay test over the recordings, and the tracker-bound assertion in
+   `TestIntegration_CursorIDLearningMissRate`.
+5. No cap — per the resolved decision above.
