@@ -21,17 +21,31 @@ touches no route file — the first `make build-front` of the session rewrote
 immediately afterwards produced the committed content again and left the tree
 clean, so the flip was a one-off rather than an alternation.
 
-That reads like the TanStack Router plugin's incremental cache: a cold or
-invalidated cache walks the route directory in one order, a warm one replays a
-remembered order. Whatever the cause, it means a contributor whose cache is
-cold gets a spurious 154-line diff on an unrelated PR, and CI can fail on a
-change that has nothing to do with routing.
+Two candidate causes, in order of likelihood:
+
+1. **A `make dev` Vite server was running throughout.** It watches the route
+   files and re-emits `routeTree.gen.ts` itself, and its ordering may differ
+   from the one a cold `bun run build` produces — the two generators then take
+   turns rewriting the file. Later in the same session `git status` twice
+   reported the file modified while `git diff` was empty, which is the dev
+   server rewriting it with byte-identical content and only bumping its mtime.
+   That half is harmless; a *different* ordering from the same watcher is not.
+2. **The plugin's incremental cache**: a cold or invalidated cache walks the
+   route directory in one order, a warm one replays a remembered order.
+
+Either way a contributor gets a spurious 154-line diff on an unrelated PR, and
+CI can fail on a change that has nothing to do with routing.
 
 No GitHub issue yet — file one when picking this up.
 
 ## Implementation
 
-- Reproduce first: remove the plugin's cache (`front/node_modules/.cache`,
+- Reproduce the dev-server case first, since it is the cheaper of the two: with
+  `make dev` running, run `bun run build` in `front/` and see whether the file
+  changes; then stop the dev server and repeat. If the orderings differ, the
+  two generators disagree and the fix belongs in whatever config they do not
+  share (`front/vite.config.ts` vs the dev-mode plugin options).
+- Otherwise reproduce the cache case: remove the plugin's cache (`front/node_modules/.cache`,
   `front/.tanstack`, and whatever `@tanstack/router-plugin` writes under
   `node_modules/.vite`) and run `bun run build` twice, comparing
   `front/src/routeTree.gen.ts` after each. A cold-vs-warm difference confirms
