@@ -170,6 +170,7 @@ This applies even when the current task is otherwise complete — capture the fo
 ./dbbat dump anonymise <in> [out]  # Strip session metadata from a .pcapng capture
 ./dbbat audit verify               # Walk the audit_log HMAC chain; non-zero exit on a break
 ./dbbat audit verify --queries [--connection <uid>]  # Same for the per-connection query chains
+./dbbat audit verify --queries --allow-legacy-stamps  # Tolerate pre-0.24 unkeyed head stamps (removed in 0.25)
 ./dbbat audit verify --rows [--connection <uid>]     # Same for the per-query captured result row chains
 ```
 
