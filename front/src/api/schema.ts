@@ -1668,6 +1668,50 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/audit/verify/rows": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Verify the captured result-row chains (admin only)
+         * @description Walks the result-row chain of every capture that has one, of one
+         *     session's captures when `connection` is given, or of a single capture
+         *     when `query` is. A capture-scoped walk additionally reports that
+         *     chain's head. The two filters cannot be combined — a query already
+         *     names exactly one capture.
+         *
+         *     Unlike the query chains, a capture has no legitimate reason to be
+         *     missing its oldest rows: retention deletes whole queries (and whole
+         *     connections) rather than individual captured rows, so there is no
+         *     `chains_with_truncated_prefix` counterpart here — a first row that does
+         *     not follow the capture's genesis is a break. There is no
+         *     `legacy_stamps` counterpart either: a capture's head stamp has always
+         *     been a keyed MAC, never a copy of the head.
+         *
+         *     `unverifiable_pre_migration_rows` counts rows captured before the row
+         *     chain migration. Nothing sealed them and nothing can after the fact.
+         *
+         *     The same caveats as `GET /audit/verify` apply: an answer from the
+         *     server is only as trustworthy as the server, and it is cached, so it
+         *     can be up to 60 seconds old — a chain broken moments ago keeps
+         *     reporting `"verified": true` until the cached walk expires. The
+         *     response never contains the chain key, and never contains a captured
+         *     row's data or any other record content.
+         *
+         *     Requires admin role.
+         */
+        get: operations["verifyRowChains"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/servers/{uid}/connection": {
         parameters: {
             query?: never;
@@ -3407,6 +3451,12 @@ export interface components {
              * @description Set for query-chain breaks
              */
             connection_uid?: string;
+            /**
+             * Format: uuid
+             * @description Set for captured-row-chain breaks. `chain_seq` then carries the
+             *     offending row's `row_number` rather than a chain position.
+             */
+            query_uid?: string;
             /** @description Human-readable description of what did not add up */
             reason: string;
         };
@@ -3517,6 +3567,64 @@ export interface components {
              */
             head_seq?: number;
             /** @description That chain's head, hex-encoded. Single-connection walks only. */
+            head_mac?: string;
+            break?: components["schemas"]["ChainBreak"];
+            /**
+             * Format: date-time
+             * @description When this walk ran
+             */
+            checked_at: string;
+            /** @description True when this answer is a remembered walk rather than one run for this request */
+            cached: boolean;
+        };
+        /**
+         * @description Outcome of walking the per-capture result-row chains. Carries counts,
+         *     positions and — for a single-capture walk — that chain's head. Never
+         *     the chain key, never a captured row's data or any other record content.
+         */
+        RowChainVerification: {
+            /**
+             * @description Which chain was walked
+             * @enum {string}
+             */
+            chain: "rows";
+            /** @description True when every chain walked is intact */
+            verified: boolean;
+            /**
+             * Format: uuid
+             * @description Set only when the walk was scoped to one session
+             */
+            connection_uid?: string;
+            /**
+             * Format: uuid
+             * @description Set only when the walk was scoped to one capture
+             */
+            query_uid?: string;
+            /**
+             * Format: int64
+             * @description How many captures were walked
+             */
+            captures: number;
+            /**
+             * Format: int64
+             * @description How many chained captured rows were checked across them
+             */
+            rows: number;
+            /**
+             * Format: int64
+             * @description Rows captured before the row chain migration. No MAC exists for
+             *     them and none can be created after the fact, so they are reported
+             *     rather than folded into the verified count.
+             */
+            unverifiable_pre_migration_rows: number;
+            /**
+             * Format: int64
+             * @description The `row_number` the walk ended on. Reported only for a
+             *     single-capture walk: an aggregate head over many independent
+             *     chains would not mean anything.
+             */
+            head_row_number?: number;
+            /** @description That chain's head, hex-encoded. Single-capture walks only. */
             head_mac?: string;
             break?: components["schemas"]["ChainBreak"];
             /**
@@ -3831,6 +3939,7 @@ export type AuditEvent = components['schemas']['AuditEvent'];
 export type ChainBreak = components['schemas']['ChainBreak'];
 export type AuditChainVerification = components['schemas']['AuditChainVerification'];
 export type QueryChainVerification = components['schemas']['QueryChainVerification'];
+export type RowChainVerification = components['schemas']['RowChainVerification'];
 export type ConnectionInfo = components['schemas']['ConnectionInfo'];
 export type GlobalParameter = components['schemas']['GlobalParameter'];
 export type SetParameterRequest = components['schemas']['SetParameterRequest'];
@@ -6295,6 +6404,44 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["QueryChainVerification"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            /** @description This instance has no chain key, so nothing it stores is chained */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Error"];
+                };
+            };
+            500: components["responses"]["InternalError"];
+        };
+    };
+    verifyRowChains: {
+        parameters: {
+            query?: {
+                /** @description Verify only this connection's captures */
+                connection?: string;
+                /** @description Verify only this capture (also reports that chain's head) */
+                query?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Verification outcome */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RowChainVerification"];
                 };
             };
             400: components["responses"]["BadRequest"];
