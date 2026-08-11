@@ -214,16 +214,20 @@ equivalent:
 # Exits non-zero if the chain is broken.
 dbbat audit verify
 dbbat audit verify --queries
+dbbat audit verify --rows
 
 # Over the API (admin role), for scripted collection alongside everything above
 curl -H "Authorization: Bearer $DBBAT_API_KEY" \
   "http://localhost:4200/api/v1/audit/verify"
 curl -H "Authorization: Bearer $DBBAT_API_KEY" \
   "http://localhost:4200/api/v1/audit/verify/queries"
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
+  "http://localhost:4200/api/v1/audit/verify/rows"
 ```
 
-The captured result rows have no verification endpoint yet — `dbbat audit
-verify --rows` is the only way to check that chain.
+Each of the three chains is checkable both ways. The query and row endpoints
+narrow with `?connection=<uid>`, and the row endpoint additionally with
+`?query=<uid>` for a single capture.
 
 The CLI can be run by someone who does not trust the running server. The
 endpoint is served *by* that server, so a compromised DBBat can answer

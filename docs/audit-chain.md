@@ -434,13 +434,28 @@ means something rewrote a stamp.
 
 ### Over the API
 
-`GET /api/v1/audit/verify` and `GET /api/v1/audit/verify/queries` (the latter
-takes an optional `?connection=<uid>`) run the same walkers and return the same
-numbers as JSON. **The row chains are CLI-only for now** — there is no
-`/audit/verify/rows` endpoint yet. Both are **admin-only** — narrower than the `GET /api/v1/audit`
-list a viewer may read. A broken chain is still a `200`, with
-`"verified": false` and a `break` object; the failure is in the data, not the
-request. Handler: `internal/api/audit_verify.go`.
+All three chains are checkable over REST:
+
+| Endpoint | Scope filters | Reports a head |
+|---|---|---|
+| `GET /api/v1/audit/verify` | — | always (one store-wide chain) |
+| `GET /api/v1/audit/verify/queries` | `?connection=<uid>` | scoped walk only |
+| `GET /api/v1/audit/verify/rows` | `?connection=<uid>` or `?query=<uid>` | `?query=` only |
+
+They run the same walkers as the CLI and return the same numbers as JSON. All
+are **admin-only** — narrower than the `GET /api/v1/audit` list a viewer may
+read. A broken chain is still a `200`, with `"verified": false` and a `break`
+object; the failure is in the data, not the request. Handler:
+`internal/api/audit_verify.go`.
+
+On `/audit/verify/rows`, `?connection=` and `?query=` cannot be combined: a
+query already names exactly one capture, so a second filter could only agree or
+contradict, and silently ignoring one is how a caller ends up trusting the
+answer to a question it did not ask. The row response has neither a
+`chains_with_truncated_prefix` nor a `legacy_stamps` field, and deliberately so
+— retention never removes an individual captured row, so a missing prefix is a
+break rather than housekeeping, and a capture's head stamp has always been a
+keyed MAC rather than a copy of the head.
 
 Two properties are load-bearing and have tests pinning them:
 

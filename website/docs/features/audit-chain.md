@@ -86,6 +86,16 @@ curl -H "Authorization: Bearer $DBBAT_API_KEY" \
 # A single session (also reports that chain's head)
 curl -H "Authorization: Bearer $DBBAT_API_KEY" \
   "http://localhost:4200/api/v1/audit/verify/queries?connection=019fe8bb-b9d5-74ab-b512-601b6eccda98"
+
+# The captured result rows — every capture, one session's, or one capture
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
+  "http://localhost:4200/api/v1/audit/verify/rows"
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
+  "http://localhost:4200/api/v1/audit/verify/rows?connection=019fe8bb-b9d5-74ab-b512-601b6eccda98"
+
+# A single capture (also reports that chain's head)
+curl -H "Authorization: Bearer $DBBAT_API_KEY" \
+  "http://localhost:4200/api/v1/audit/verify/rows?query=019fe8c1-2a0f-70d3-9c14-8d2f0b4a6e77"
 ```
 
 ```json
@@ -94,11 +104,18 @@ curl -H "Authorization: Bearer $DBBAT_API_KEY" \
  "checked_at":"2026-08-10T09:14:02Z","cached":false}
 ```
 
-The captured result rows are **CLI-only** for now: there is no
-`/audit/verify/rows` endpoint, so `dbbat audit verify --rows` is the way to
-check them.
+```json
+{"chain":"rows","verified":true,"captures":318,"rows":54210,
+ "unverifiable_pre_migration_rows":0,
+ "checked_at":"2026-08-10T09:14:02Z","cached":false}
+```
 
-Both endpoints require the **admin** role — narrower than the `GET /api/v1/audit`
+`?connection=` and `?query=` cannot be combined on the row endpoint — a query
+already names exactly one capture — and a capture-scoped walk is the only shape
+that reports a head, because an aggregate head over independent chains would
+not mean anything.
+
+All three endpoints require the **admin** role — narrower than the `GET /api/v1/audit`
 list a viewer may read. A broken chain still answers `200`, with
 `"verified": false` and a `break` object naming the first bad record: the
 failure is in the data, not in the request. The response carries counts,
