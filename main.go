@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -914,7 +915,45 @@ func provisionTestData(ctx context.Context, dataStore *store.Store, encryptionKe
 		logger.InfoContext(ctx, "Created test API key", slog.String("user", tk.user.Username), slog.String("key", tk.key))
 	}
 
+	// 8. Record a directory role sync against the viewer, so the users page
+	// has a "last synced from SSO" row to show. Only an OIDC login writes this
+	// event in production, and E2E has no identity provider to log in through.
+	if err := seedTestRoleSync(ctx, dataStore, viewerUser); err != nil {
+		return err
+	}
+	logger.InfoContext(ctx, "Recorded a directory role sync for the viewer user")
+
 	logger.InfoContext(ctx, "Test data provisioning complete")
+	return nil
+}
+
+// seedTestRoleSync writes the audit entry an OIDC login leaves behind when the
+// directory changes someone's roles (api.AuditEventOAuthRolesSynced), matching
+// auditRoleSync's payload field for field — the users page reads the groups
+// out of it to answer "why did this change?".
+func seedTestRoleSync(ctx context.Context, dataStore *store.Store, user *store.User) error {
+	details, err := json.Marshal(map[string]any{
+		"provider":       "oidc",
+		"groups":         []string{"analysts"},
+		"previous_roles": []string{store.RoleConnector},
+		"roles":          []string{store.RoleViewer},
+		"granted":        []string{store.RoleViewer},
+		"revoked":        []string{store.RoleConnector},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to encode test role sync details: %w", err)
+	}
+
+	// PerformedBy stays nil, as it does in production: no dbbat user made this
+	// decision, the identity provider did.
+	if err := dataStore.LogAuditEvent(ctx, &store.AuditEvent{
+		EventType: api.AuditEventOAuthRolesSynced,
+		UserID:    &user.UID,
+		Details:   details,
+	}); err != nil {
+		return fmt.Errorf("failed to record test role sync audit event: %w", err)
+	}
+
 	return nil
 }
 

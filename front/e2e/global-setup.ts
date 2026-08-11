@@ -157,6 +157,17 @@ export default async function globalSetup(): Promise<void> {
           "postgres://postgres:postgres@localhost:5001/dbbat?sslmode=disable",
         DBB_KEY: "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=", // base64 encoded 32-byte key
         DBB_RATE_LIMIT_ENABLED: "false", // Disable rate limiting for E2E tests
+        // A directory role mapping, so the users page can be tested with roles
+        // the identity provider owns. Discovery is lazy, so this issuer is
+        // never dialled: nothing here logs in through it, the tests only need
+        // the provider registered for the mapping to count as live.
+        DBB_OIDC_ISSUER: "https://oidc.invalid.test",
+        DBB_OIDC_CLIENT_ID: "dbbat-e2e",
+        DBB_OIDC_CLIENT_SECRET: "dbbat-e2e-secret",
+        DBB_OIDC_DISPLAY_NAME: "Test SSO",
+        // Deliberately maps `viewer` only: `admin` stays hand-managed so the
+        // promote/demote test keeps exercising a plain save with no warning.
+        DBB_OIDC_ROLE_MAPPING: "viewer=analysts",
       },
     });
 
