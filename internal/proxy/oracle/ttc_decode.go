@@ -584,7 +584,7 @@ func decodeCloseCursorsWide(ttcPayload []byte) ([]uint16, error) {
 // little-endian 32-bit fields — which decodeCloseCursorsWide reads once
 // isCloseCursorsWideHeader confirms the header shape. It never re-executes by
 // cursor id (it resends the statement text every time, see docs/oracle.md),
-// so this is defence in depth rather than something load-bearing: a tracker
+// so this is defense in depth rather than something load-bearing: a tracker
 // entry it leaves behind cannot mis-resolve anything on its own.
 func decodeCloseCursors(ttcPayload []byte) ([]uint16, error) {
 	if !IsCloseCursorsPiggyback(ttcPayload) {

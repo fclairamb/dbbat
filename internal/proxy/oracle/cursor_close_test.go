@@ -285,6 +285,15 @@ func TestDumpReplay_CloseListsAreRealAndBatched(t *testing.T) {
 			// old one-id read could have got right either.
 			name: "python-oracledb thin closes nothing", dump: pythonReexecDump, wants: nil,
 		},
+		{
+			// sqlplus (OCI thick) frames every one of these in the wide
+			// encoding decodeCloseCursorsWide reads — this is the dump-replay
+			// half of the wide-header fixture pinned byte-for-byte in
+			// TestDecodeCloseCursors. Cursor 2 recurs (frames 9 and 16):
+			// Oracle recycling the id within one session.
+			name: "sqlplus OCI wide encoding", dump: sqlplusReexecDump,
+			wants: [][]uint16{{2}, {4}, {3}, {2}},
+		},
 	}
 
 	for _, tc := range tests {
