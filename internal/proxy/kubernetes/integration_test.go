@@ -400,11 +400,13 @@ func TestIntegration_K8s_WebsocketTransport(t *testing.T) {
 
 		// The SelfSubjectAccessReview asks about `create`, so this Role reads
 		// as "not allowed" even though the websocket dial above works. That is
-		// a real gap in the connectivity check, not an accident of the fixture.
+		// a real gap in the connectivity check, not an accident of the fixture:
+		// see specs/todos/2026-08-11-05-conncheck-portforward-rbac-both-verbs.md.
+		// This assertion is what will have to flip when that lands.
 		allowed, _, err := tunnel.PortForwardAllowed(ctx)
 		require.NoError(t, err)
 		assert.False(t, allowed,
-			"PortForwardAllowed only asks about `create`; see specs/todos for the follow-up")
+			"PortForwardAllowed only asks about `create`; see the follow-up todo")
 	})
 
 	t.Run("spdy_fallback_carries_a_create_only_role", func(t *testing.T) {
