@@ -269,6 +269,76 @@ func TestUpdateServer_MergesKubernetesMaterial(t *testing.T) {
 	}
 }
 
+// TestSetKubernetesCACert_MergesTheLearnedPin is the store half of TOFU: the
+// learned bundle lands in its own key, leaves the operator-supplied one and
+// every sibling key untouched, and can be cleared again.
+func TestSetKubernetesCACert_MergesTheLearnedPin(t *testing.T) {
+	t.Parallel()
+
+	s := setupTestStore(t)
+	ctx := context.Background()
+	key := testEncryptionKey()
+
+	cluster := makeKubernetesServer(t, s, key, "tofu-cluster")
+	suppliedCA := "-----BEGIN CERTIFICATE-----\nAAAA\n"
+	learnedCA := "-----BEGIN CERTIFICATE-----\nLEARNED\n"
+
+	if err := s.SetKubernetesCACert(ctx, cluster.UID, learnedCA); err != nil {
+		t.Fatalf("SetKubernetesCACert() error = %v", err)
+	}
+
+	reloaded, err := s.GetServerByUID(ctx, cluster.UID)
+	if err != nil {
+		t.Fatalf("GetServerByUID() error = %v", err)
+	}
+
+	kd := reloaded.KubernetesData()
+	if kd.LearnedCACert != learnedCA {
+		t.Errorf("LearnedCACert = %q, want %q", kd.LearnedCACert, learnedCA)
+	}
+
+	if kd.CACert != suppliedCA {
+		t.Errorf("CACert = %q, want the operator-supplied bundle untouched", kd.CACert)
+	}
+
+	if kd.Namespace != "data" {
+		t.Errorf("Namespace = %q, want the sibling key untouched", kd.Namespace)
+	}
+
+	// Exit #1: an explicit reset, for a rotated cluster CA you cannot re-paste.
+	if err := s.UpdateServer(ctx, cluster.UID, ServerUpdate{K8sClearLearnedCACert: true}, key); err != nil {
+		t.Fatalf("UpdateServer(clear learned) error = %v", err)
+	}
+
+	reloaded, err = s.GetServerByUID(ctx, cluster.UID)
+	if err != nil {
+		t.Fatalf("GetServerByUID() error = %v", err)
+	}
+
+	if kd = reloaded.KubernetesData(); kd.LearnedCACert != "" {
+		t.Errorf("LearnedCACert = %q after a reset, want it forgotten", kd.LearnedCACert)
+	}
+
+	// Exit #2: pasting a bundle supersedes the pin, so it must not linger.
+	if err := s.SetKubernetesCACert(ctx, cluster.UID, learnedCA); err != nil {
+		t.Fatalf("SetKubernetesCACert() error = %v", err)
+	}
+
+	pasted := "-----BEGIN CERTIFICATE-----\nPASTED\n"
+	if err := s.UpdateServer(ctx, cluster.UID, ServerUpdate{K8sCACert: &pasted}, key); err != nil {
+		t.Fatalf("UpdateServer(paste a bundle) error = %v", err)
+	}
+
+	reloaded, err = s.GetServerByUID(ctx, cluster.UID)
+	if err != nil {
+		t.Fatalf("GetServerByUID() error = %v", err)
+	}
+
+	if kd = reloaded.KubernetesData(); kd.CACert != pasted || kd.LearnedCACert != "" {
+		t.Errorf("after pasting a bundle: %+v, want the pasted CA and no learned pin", kd)
+	}
+}
+
 func containsUID(servers []Server, uid interface{ String() string }) bool {
 	for i := range servers {
 		if servers[i].UID.String() == uid.String() {
