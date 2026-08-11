@@ -138,30 +138,33 @@ number, not a fresh timestamp.
 | A record is **deleted** from the middle | Yes | The successor's `prev_mac` no longer matches, and its position leaves a gap |
 | Records are **reordered** | Yes | Positions and `prev_mac` links no longer line up |
 | The **first** records are deleted | Yes | The first entry's `prev_mac` is a genesis MAC derived from the key, which cannot be forged |
-| The **last** statements of a closed session are deleted | Partly — see the warning below | The session's final chain head is stamped on the connection row when it closes, but that stamp is not itself sealed |
+| The **last** statements of a closed session are deleted | Yes, for sessions closed by 0.24+ — see the note below for older ones | The session's final chain head is sealed onto the connection row with a keyed MAC when it closes, so correcting it after a deletion needs the key |
 | The **last** rows of a captured result set are deleted | Yes | The capture's final head is sealed onto the query row with a keyed MAC when the capture finishes, so correcting it needs the key |
 | A captured result set is deleted **outright** | Yes | The sealed stamp on the query still attests to rows no longer there |
 | The **whole** chain is truncated and re-sealed by someone holding the key | Only against a head MAC you recorded elsewhere | See the tip above |
 
-:::warning A trailing deletion on the query chain can be covered up
+:::note Sessions closed before 0.24 carry a weaker stamp
 
 Deleting the **last statements of a session** is caught by the chain head
-stamped on the connection row — but that stamp is a plain copy of the last
-statement's MAC, and that value is readable from the query history itself. So
-someone with write access to DBBat's storage database can delete the last
-statements *and then rewrite the stamp to match*, and the verification reports a
-clean chain. No key is needed.
+stamped on the connection row. Up to 0.23.x that stamp was a plain copy of the
+last statement's MAC — and that value is readable from the query history itself,
+so someone with write access to DBBat's storage database could delete the last
+statements *and then rewrite the stamp to match*, with no key. From 0.24 the
+stamp is a keyed MAC over the session, the stamp format version, the chain
+length and the head, so correcting it needs `DBB_KEY`.
 
-It catches the careless case, not the deliberate one. The same is **not** true of
-the captured result rows: their stamp is a keyed MAC, so it cannot be corrected
-without `DBB_KEY`.
+Existing stamps cannot be upgraded: the chain key never enters the database, so
+nothing can re-seal what an older version wrote. Those rows keep the old format
+and are **counted rather than trusted** — `dbbat audit verify --queries` reports
+them as `sessions_with_legacy_forgeable_head_stamp` and
+`GET /api/v1/audit/verify/queries` as `legacy_stamps`. Every session closed
+since the upgrade is sealed, so the number drains as the old ones age out of
+retention. Once it has reached zero, a non-zero count means a stamp was
+rewritten.
 
-If trailing-deletion detection on the query history is load-bearing for a
-control, say so explicitly and lean on the recorded head MAC (below) or on
-shipping the logs to a WORM store or SIEM as well. Fixing the stamp format is
-[tracked](https://github.com/fclairamb/dbbat/blob/main/specs/todos/2026-08-10-06-seal-the-connection-query-chain-stamp.md);
-it is not a one-line change because stamps in the old format already exist in
-deployed installations.
+Until it drains, if trailing-deletion detection on those older sessions is
+load-bearing for a control, say so explicitly and lean on the recorded head MAC
+(below) or on shipping the logs to a WORM store or SIEM as well.
 
 :::
 
@@ -193,8 +196,8 @@ Be precise about this in a control narrative:
 - **A crashed session's tail is sealed late, not at the crash.** A session whose
   DBBat process died never gets to record its own chain head. The reconcile that
   closes crash-orphaned sessions recovers it from the stored statements instead,
-  and stamps it in the same write that marks the session disconnected — so the
-  tail *is* protected, but from the reconcile onward, not from the crash.
+  and seals it in the same transaction that marks the session disconnected — so
+  the tail *is* protected, but from the reconcile onward, not from the crash.
   Statements deleted in between are sealed as if they had never been written.
   The window is however long it takes DBBat to notice the process is gone: the
   reclaim runs at startup and then every few minutes, and a process that was
