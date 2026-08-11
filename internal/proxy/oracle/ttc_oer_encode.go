@@ -146,6 +146,21 @@ type oerSummary struct {
 	// CLR only when ErrorCode is non-zero, exactly as both client parsers read
 	// it.
 	ErrorMessage string
+
+	// CallNumber is the TTC sequence number of the call this OER ends — the
+	// byte the client put in its own request header (clientCallNumber).
+	//
+	// It is the one field in the "dbbat has nothing to say about it, write
+	// zero" block that a client actually reads. ojdbc 26.1's T4CTTIfun.receive
+	// compares it against the sequence number it sent and only calls
+	// processError() when the two match; on a mismatch it goes to
+	// handleOutOfSequenceError, which surfaces the real ORA code demoted to the
+	// *cause* of an ORA-18745 "Execution error in sessionless transaction
+	// piggybacked call". Measured against Oracle 23ai Free: a real server's OER
+	// carries the client's sequence number here for go-ora (6 for a call sent
+	// as `03 5e 06 00`) and for JDBC (7 behind a stapled close-cursors list),
+	// and dbbat's zero is what made 26.1 mislabel every refusal.
+	CallNumber byte
 }
 
 // encodeOER builds a complete TTC OER message: the 0x04 marker followed by the
@@ -184,9 +199,14 @@ func encodeOER(shape oerShape, sum oerSummary) []byte {
 	putZero(2)              // upiParam, warningFlag (raw bytes)
 	putZero(oerRowIDFields) // rba, partitionID, tableID, blockNumber, slotNumber
 	putZero(1)              // osError
-	putZero(2)              // stmtNumber, callNumber (raw bytes)
-	putZero(2)              // padding, successIterations
-	putZero(1)              // oerrdd (logical rowid), a zero-length DLC
+	putZero(1)              // stmtNumber (raw byte)
+
+	// callNumber, the one zero-by-default field a client reads back: see
+	// oerSummary.CallNumber.
+	buf = append(buf, sum.CallNumber)
+
+	putZero(2) // padding, successIterations
+	putZero(1) // oerrdd (logical rowid), a zero-length DLC
 
 	if shape.ttcVersion < 7 {
 		// Pre-12c framing: three bare DLC lengths where the batch-error blocks
@@ -247,6 +267,7 @@ func encodeOERFixedWidth(shape oerShape, sum oerSummary) []byte {
 	binary.LittleEndian.PutUint16(buf[oerFixedECIDOffset:], uint16(sum.SeqNumber))
 	binary.LittleEndian.PutUint16(buf[oerFixedErrNumOffset:], uint16(sum.ErrorCode))
 	binary.LittleEndian.PutUint16(buf[oerFixedCursorIDOffset:], uint16(sum.CursorID))
+	binary.LittleEndian.PutUint32(buf[oerFixedCallNumberOffset:], uint32(sum.CallNumber))
 	binary.LittleEndian.PutUint32(buf[oerFixedRetCodeOffset:], uint32(sum.ErrorCode))
 
 	// The row count is the one field that stays compressed even here — there is
@@ -264,6 +285,44 @@ func encodeOERFixedWidth(shape oerShape, sum oerSummary) []byte {
 	return buf
 }
 
+// clientCallNumber returns the TTC sequence number of the call carried by a
+// client message — the byte a server echoes back in the summary object's
+// callNumber, and which a refusal has to echo too (see oerSummary.CallNumber).
+//
+// Every modern TTC op opens `[func][sub-op][seq][0x00]`, so the sequence number
+// is at a constant offset. The wrinkle is that a client may staple several ops
+// into one packet, and the call the client is waiting on is the LAST of them,
+// not the first: JDBC sends its execute behind a close-cursors list
+// (`11 69 06 00 …closes… 03 5e 07 00 …INSERT…`), and Oracle 23ai Free answers
+// that packet with an OER carrying 7. dbbat already walks the close list to its
+// end to drop the closed cursors, so the stapled op's header is right there.
+//
+// ok is false for a payload too short to carry a header, in which case the
+// caller keeps whatever it had — a stale call number is no worse than the zero
+// this used to always write.
+func clientCallNumber(ttcPayload []byte) (byte, bool) {
+	if len(ttcPayload) <= ttcOpSeqOffset {
+		return 0, false
+	}
+
+	seq := ttcPayload[ttcOpSeqOffset]
+
+	if end, ok := closeCursorsEnd(ttcPayload); ok && end+ttcOpSeqOffset < len(ttcPayload) {
+		switch TTCFunctionCode(ttcPayload[end]) { //nolint:exhaustive // only the two ops a client staples behind a close list
+		case TTCFuncPiggyback, TTCFuncOFETCH:
+			seq = ttcPayload[end+ttcOpSeqOffset]
+		default:
+			// Not an op header — the close list is the whole message.
+		}
+	}
+
+	return seq, true
+}
+
+// ttcOpSeqOffset is where a TTC op header carries its sequence number:
+// [0] function, [1] sub-op, [2] sequence.
+const ttcOpSeqOffset = 2
+
 // Byte offsets of the fields dbbat fills in, in the fixed-width encoding. The
 // rest of the block is zero, so only these and the total length matter.
 const (
@@ -271,7 +330,17 @@ const (
 	oerFixedECIDOffset       = 5
 	oerFixedErrNumOffset     = 11
 	oerFixedCursorIDOffset   = 17
-	oerFixedRetCodeOffset    = 66
+
+	// oerFixedCallNumberOffset is where the OCI encoding carries the field the
+	// compressed one puts right after osError. Measured, not derived: two
+	// consecutive OERs Oracle 23ai Free sent the Homebrew sqlplus 23 client
+	// carry 6 and 4 at offset 45, which are exactly the TTC sequence numbers of
+	// the two requests they answer (`03 05 06 …` and `03 05 04 …`). The fixture
+	// in ttc_oer_encode_test.go carries a third value there for a third
+	// sequence number.
+	oerFixedCallNumberOffset = 45
+
+	oerFixedRetCodeOffset = 66
 
 	// oerFixedWidthPrefixLen is everything through the trailing RetCode: the
 	// 0x04 marker, the leading integers, the rowid and OS-error block, the
@@ -428,7 +497,7 @@ func oerTailFieldsAt(shape oerShape, payload []byte, offset int) (oerTail, bool)
 		return oerTail{}, false
 	}
 
-	pos, errCode, ok := skipOERFixedFields(shape, payload, offset)
+	pos, errCode, _, ok := skipOERFixedFields(shape, payload, offset)
 	if !ok {
 		return oerTail{}, false
 	}
@@ -486,17 +555,20 @@ const oerMaxTailFieldWidth = 4
 
 // skipOERFixedFields walks the version-independent middle of a summary object —
 // everything from the marker through the wide RetCode/row-count pair — and
-// returns the offset just past it plus the error code it read. ok=false when
-// the bytes do not decode as a summary at all.
+// returns the offset just past it, the error code it read and the callNumber it
+// walked over (the client's TTC sequence number — see oerSummary.CallNumber, and
+// TestServerOERsCarryTheClientCallNumber, which reads it back off real server
+// frames through this very walk). ok=false when the bytes do not decode as a
+// summary at all.
 //
 // The walk mirrors both client parsers field for field, raw single bytes
 // included: `callNumber` and `sqlType` are routinely non-zero on the wire, so
 // reading either as a compressed integer would swallow the bytes that follow.
 // The wide RetCode must repeat the leading one, which is the check that makes a
 // stray 0x04 inside row data fail rather than yield a plausible tail count.
-func skipOERFixedFields(shape oerShape, payload []byte, offset int) (int, int, bool) {
+func skipOERFixedFields(shape oerShape, payload []byte, offset int) (int, int, byte, bool) {
 	if offset >= len(payload) || payload[offset] != byte(TTCFuncOERR) {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 
 	w := oerWalker{payload: payload, pos: offset + 1, ok: true}
@@ -509,45 +581,46 @@ func skipOERFixedFields(shape oerShape, payload []byte, offset int) (int, int, b
 		w.readInt(2)
 	}
 
-	w.readInt(8)             // curRowNumber
-	errCode := w.readInt(4)  // errNum
-	w.readInt(2)             // arrayElemWithError
-	w.readInt(2)             // arrayElemErrno
-	w.readInt(2)             // cursorID
-	w.readInt(2)             // errorPos
-	w.skipBytes(2)           // sqlType, oerFatal
-	w.readInt(2)             // flags
-	w.readInt(2)             // userCursorOPT
-	w.skipBytes(2)           // upiParam, warningFlag
-	w.readInt(4)             // rba
-	w.readInt(2)             // partitionID
-	w.skipBytes(1)           // tableID
-	w.readInt(4)             // blockNumber
-	w.readInt(2)             // slotNumber
-	w.readInt(4)             // osError
-	w.skipBytes(2)           // stmtNumber, callNumber
-	w.readInt(2)             // padding
-	w.readInt(4)             // successIterations
-	oerrdd := w.readInt(4)   // logical rowid length
-	codes := w.readInt(2)    // batch error codes
-	offsets := w.readInt(4)  // batch error row offsets
-	messages := w.readInt(2) // batch error messages
+	w.readInt(8)               // curRowNumber
+	errCode := w.readInt(4)    // errNum
+	w.readInt(2)               // arrayElemWithError
+	w.readInt(2)               // arrayElemErrno
+	w.readInt(2)               // cursorID
+	w.readInt(2)               // errorPos
+	w.skipBytes(2)             // sqlType, oerFatal
+	w.readInt(2)               // flags
+	w.readInt(2)               // userCursorOPT
+	w.skipBytes(2)             // upiParam, warningFlag
+	w.readInt(4)               // rba
+	w.readInt(2)               // partitionID
+	w.skipBytes(1)             // tableID
+	w.readInt(4)               // blockNumber
+	w.readInt(2)               // slotNumber
+	w.readInt(4)               // osError
+	w.skipBytes(1)             // stmtNumber
+	callNumber := w.readByte() // callNumber — the one of these a client reads
+	w.readInt(2)               // padding
+	w.readInt(4)               // successIterations
+	oerrdd := w.readInt(4)     // logical rowid length
+	codes := w.readInt(2)      // batch error codes
+	offsets := w.readInt(4)    // batch error row offsets
+	messages := w.readInt(2)   // batch error messages
 
 	// dbbat only learns from a plain OER. One carrying a logical rowid or batch
 	// errors has variable-length blocks here that would have to be walked to
 	// reach the tail, and it teaches nothing the next plain one will not.
 	if !w.ok || oerrdd != 0 || codes != 0 || offsets != 0 || messages != 0 {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 
 	wideErr := w.readInt(4)
 	w.readInt(8) // wide row count
 
 	if !w.ok || wideErr != errCode {
-		return 0, 0, false
+		return 0, 0, 0, false
 	}
 
-	return w.pos, errCode, true
+	return w.pos, errCode, callNumber, true
 }
 
 // oerWalker is a cursor over a summary object that latches a decode failure,
@@ -578,6 +651,20 @@ func (w *oerWalker) readInt(maxSize int) int {
 	w.pos += n
 
 	return val
+}
+
+// readByte consumes one raw single-byte field and returns it.
+func (w *oerWalker) readByte() byte {
+	if !w.ok || w.pos >= len(w.payload) {
+		w.ok = false
+
+		return 0
+	}
+
+	b := w.payload[w.pos]
+	w.pos++
+
+	return b
 }
 
 // skipBytes consumes raw single-byte fields.

@@ -336,7 +336,7 @@ func TestSessionLearnOERTail_TracksSequence(t *testing.T) {
 	s.learnOERTail(oerFixture(t, oerFixtureGoOraError, oraErrorText))
 	assert.Equal(t, 8, s.oerSeq, "the fixture carries ECID sequence 8")
 	assert.True(t, s.oer.tailLearned)
-	_, seq := s.nextOERFrame()
+	_, seq, _ := s.nextOERFrame()
 	assert.Equal(t, 9, seq)
 }
 
@@ -471,4 +471,164 @@ func TestWriteTTCError_SeedsOCIEncodingFromAuthFraming(t *testing.T) {
 	body := pkt.Payload[ttcDataFlagsSize:]
 	assert.Equal(t, uint32(1031), binary.LittleEndian.Uint32(body[oerFixedRetCodeOffset:]),
 		"an OCI client must get the fixed-width encoding even with nothing learned")
+}
+
+// TestServerOERsCarryTheClientCallNumber is the measurement behind
+// oerSummary.CallNumber, made on frames that were already in this repo before
+// the field was written at all: every OER a real Oracle sends carries the TTC
+// sequence number of the request it answers, in the field dbbat used to leave
+// at zero.
+//
+// It is read back through skipOERFixedFields — the same walk the tail learner
+// makes — so the field's position is pinned by one decoder, not by an offset
+// spelled out twice.
+func TestServerOERsCarryTheClientCallNumber(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		hexPrefix string
+		want      byte
+	}{
+		"go-ora":          {oerFixtureGoOraError, 8},
+		"python-oracledb": {oerFixturePythonError, 4},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			_, errCode, callNumber, ok := skipOERFixedFields(defaultOERShape(),
+				oerFixture(t, tc.hexPrefix, oraErrorText), 0)
+
+			require.True(t, ok)
+			assert.Equal(t, 942, errCode)
+			assert.Equal(t, tc.want, callNumber,
+				"a server answers the client's own TTC sequence number; dbbat wrote zero here until "+
+					"ojdbc 26.1 was measured refusing to read the error out of such a frame")
+		})
+	}
+
+	// The OCI encoding carries it too, at a constant offset.
+	oci := oerFixture(t, oerFixtureSqlplusError, oraErrorText)
+	assert.Equal(t, uint32(14), binary.LittleEndian.Uint32(oci[oerFixedCallNumberOffset:]),
+		"the sqlplus fixture answers TTC sequence 14")
+}
+
+// TestEncodeOER_CarriesTheCallNumber is the writing half: dbbat's own frame has
+// to put the number where a server puts it, in both encodings.
+//
+// This is what ojdbc 26.1 checks before it will read an OER at all
+// (T4CTTIfun.receive: `oer.callNumber == this.sequenceNumber`, else
+// handleOutOfSequenceError). With a zero here, a live JDBC client reported
+// every refusal as "ORA-18745: Execution error in sessionless transaction
+// piggybacked call" with the real ORA-01031 demoted to its cause.
+func TestEncodeOER_CarriesTheCallNumber(t *testing.T) {
+	t.Parallel()
+
+	t.Run("compressed", func(t *testing.T) {
+		t.Parallel()
+
+		shape := defaultOERShape()
+		shape.extraTailFields = 2
+
+		frame := encodeOER(shape, oerSummary{
+			CallStatus:   1,
+			SeqNumber:    8,
+			ErrorCode:    1031,
+			ErrorMessage: "ORA-01031: read-only grant",
+			CallNumber:   0x2a,
+		})
+
+		_, errCode, callNumber, ok := skipOERFixedFields(shape, frame, 0)
+		require.True(t, ok, "the frame must still walk as a summary object")
+		assert.Equal(t, 1031, errCode)
+		assert.Equal(t, byte(0x2a), callNumber)
+
+		// And the rest of the frame is undisturbed: the tail learner still finds
+		// the message exactly where the tail count says it is.
+		learned := defaultOERShape()
+		require.True(t, learnOERShape(&learned, frame))
+		assert.Equal(t, 2, learned.extraTailFields)
+	})
+
+	t.Run("fixed width", func(t *testing.T) {
+		t.Parallel()
+
+		shape := defaultOERShape()
+		shape.fixedWidth = true
+		shape.extraTailFields = 2
+
+		frame := encodeOER(shape, oerSummary{
+			CallStatus:   1,
+			SeqNumber:    8,
+			ErrorCode:    1031,
+			ErrorMessage: "ORA-01031: read-only grant",
+			CallNumber:   0x2a,
+		})
+
+		assert.Equal(t, uint32(0x2a), binary.LittleEndian.Uint32(frame[oerFixedCallNumberOffset:]))
+
+		learned := defaultOERShape()
+		require.True(t, learnOERShape(&learned, frame))
+		assert.True(t, learned.fixedWidth)
+		assert.Equal(t, 2, learned.extraTailFields)
+	})
+}
+
+// TestClientCallNumber covers how the number is picked off the client's own
+// request, including the shape that made this bug visible: JDBC staples the
+// execute behind a close-cursors list, and the call the client waits on is the
+// stapled one, not the closes.
+func TestClientCallNumber(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		payload string
+		want    byte
+		ok      bool
+	}{
+		// `03 5e 06 00 …` — a piggyback execute, as go-ora sends it.
+		"piggyback execute": {"035e0600028021000101", 6, true},
+
+		// `11 69 06 00 <closes> 03 5e 07 00 …` — JDBC's execute behind its
+		// close list. Oracle 23ai Free answers this exact packet with an OER
+		// carrying 7.
+		"close list then execute": {"11690600" + "0101010102" + "035e0700" + "028121000101", 7, true},
+
+		// A close list with nothing stapled behind it is its own call.
+		"close list alone": {"116906000101010102", 6, true},
+
+		"too short": {"0311", 0, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			got, ok := clientCallNumber(decodeHexString(t, tc.payload))
+			assert.Equal(t, tc.ok, ok)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestSessionRefusalUsesTheClientCallNumber is the wiring: whatever the client
+// last asked for is what a refusal ends.
+func TestSessionRefusalUsesTheClientCallNumber(t *testing.T) {
+	t.Parallel()
+
+	client, server := newPipeConns(t)
+
+	s := newTestErrorSession(t, server)
+	s.oer = defaultOERShape()
+	s.oer.tailLearned = true
+
+	s.observeClientCallNumber(decodeHexString(t, "035e1100028021000101"))
+
+	go func() { _ = s.writeTTCError(1031, "read-only grant") }()
+
+	pkt, err := readTNSPacket(client)
+	require.NoError(t, err)
+
+	body := pkt.Payload[ttcDataFlagsSize:]
+
+	_, _, callNumber, ok := skipOERFixedFields(s.oer, body, 0)
+	require.True(t, ok)
+	assert.Equal(t, byte(0x11), callNumber, "the refusal ends the call the client is waiting on")
 }

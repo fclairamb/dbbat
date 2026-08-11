@@ -33,6 +33,12 @@ const (
 	logMsgUntrackedCursorRefused = "refused a re-execution of an untracked cursor under a restrictive grant"
 	logMsgCursorsClosed          = "client closed cursors"
 	logMsgRecycledCursorID       = "cursor id recycled onto a different statement"
+
+	// logMsgLearnedOERTail is the one record that says which summary-object
+	// shape a session will answer a refusal with. The per-client refusal tests
+	// read extra_tail_fields back off it (see blocked_integration_test.go), so
+	// the shape a client actually got is reported rather than assumed.
+	logMsgLearnedOERTail = "learned OER tail shape from upstream"
 )
 
 // trackedCursor tracks a parsed cursor and its SQL.
@@ -966,13 +972,14 @@ func (s *session) writeTTCError(oraErrorCode int, message string) error {
 		errMsg = errMsg[:oerMaxMessageLen]
 	}
 
-	shape, seq := s.nextOERFrame()
+	shape, seq, callNumber := s.nextOERFrame()
 
 	body := encodeOER(shape, oerSummary{
 		CallStatus:   1,
 		SeqNumber:    seq,
 		ErrorCode:    oraErrorCode,
 		ErrorMessage: errMsg,
+		CallNumber:   callNumber,
 	})
 
 	payload := make([]byte, 0, ttcDataFlagsSize+len(body)+1)
