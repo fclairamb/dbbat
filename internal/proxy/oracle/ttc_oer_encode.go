@@ -222,6 +222,22 @@ func encodeOER(shape oerShape, sum oerSummary) []byte {
 // run of zero bytes. Measured off Oracle 23ai Free against the Homebrew
 // sqlplus 23 client, where the compressed form above hangs exactly the way the
 // old TTC Response did.
+//
+// It deliberately ignores hasEndOfCallStatus, hasECIDSequence and ttcVersion.
+// Those three shift the *compressed* layout by removing or narrowing fields;
+// here the prefix is a flat 70 bytes with the call status and ECID sequence at
+// fixed offsets, and there is no observation of an OCI session where it is not.
+// That is not an assumption dbbat has to carry on faith either: whenever the
+// shape was learned, oerFixedWidthTailFieldsAt validated these very offsets on
+// a real server OER — it only accepts a block whose error number at offset 11
+// is repeated as the RetCode at offset 66, which no other prefix length
+// satisfies. The unlearned fallback (nextOERFrame) is the only path that takes
+// the 70 bytes on trust, and it is covered live by the sqlplus case in
+// blocked_integration_test.go.
+//
+// If a server ever clears one of those capability bits for an OCI client, this
+// is where it will show up, and the fix is to learn the prefix length the same
+// way the tail is learned rather than to reintroduce the capability branch.
 func encodeOERFixedWidth(shape oerShape, sum oerSummary) []byte {
 	buf := make([]byte, oerFixedWidthPrefixLen,
 		oerFixedWidthPrefixLen+1+shape.extraTailFields*oerFixedTailFieldWidth+1+len(sum.ErrorMessage))

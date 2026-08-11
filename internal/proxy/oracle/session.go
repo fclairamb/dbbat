@@ -1515,8 +1515,12 @@ func (s *session) learnOERTail(ttcPayload []byte) {
 // what a server sends and what dbbat's own OER locator bounds.
 //
 // When nothing has been sampled from the upstream, the client's AUTH framing
-// stands in for the encoding: an OCI client's fixed-width summary is the one
-// the fallback must not get wrong.
+// stands in for **both** halves of the OCI shape. Seeding only the encoding
+// would be worse than useless: by encodeOERFixedWidth's own measurement, an OCI
+// client handed a fixed-width body with no end-of-response marker hangs exactly
+// as it did on the frame this whole change replaces. The two travel together
+// because the same client is on both sides of them — an OCI session's messages
+// carry the marker whatever the Accept said, and no thin session's do.
 func (s *session) nextOERFrame() (oerShape, int) {
 	s.oerMu.Lock()
 	defer s.oerMu.Unlock()
@@ -1526,9 +1530,36 @@ func (s *session) nextOERFrame() (oerShape, int) {
 	shape := s.oer.orDefault()
 	if !shape.tailLearned {
 		shape.fixedWidth = s.clientWideEncoding
+		shape.endOfResponse = s.clientWideEncoding
 	}
 
 	return shape, s.oerSeq
+}
+
+// observeOERServerCaps and observeOERClientVersion are the locked wrappers the
+// pre-auth relay uses.
+//
+// The relay is two goroutines by design (see relayPreAuthNegotiation): the pump
+// forwards the upstream's Set Protocol reply while the main loop is already
+// forwarding the client's Set Data Types. Both land on this shape, and the
+// version each writes is `min(existing, observed)` — a read-modify-write, not a
+// torn word, so it needs the mutex and not just an atomic.
+//
+// This did not show up in testing because make test-e2e-oracle runs without
+// -race, unlike make test. See
+// specs/todos/2026-08-11-10-race-detector-on-the-integration-suites.md.
+func (s *session) observeOERServerCaps(raw []byte) {
+	s.oerMu.Lock()
+	defer s.oerMu.Unlock()
+
+	observeOERCapabilities(&s.oer, raw)
+}
+
+func (s *session) observeOERClientVersion(ttcBody []byte) {
+	s.oerMu.Lock()
+	defer s.oerMu.Unlock()
+
+	observeClientTTCVersion(&s.oer, ttcBody)
 }
 
 // handleOERStatus processes a standalone OER (func=0x04) message. Servers send

@@ -159,7 +159,7 @@ func (s *session) relayPreAuthNegotiation(connectPkt *TNSPacket) (*TNSPacket, ne
 
 		// The client's Set Data Types carries its own TTC field version; the
 		// negotiated one is the lower of the two ends'.
-		observeClientTTCVersion(&s.oer, extractTTCPayload(clientPkt.Payload))
+		s.observeOERClientVersion(extractTTCPayload(clientPkt.Payload))
 
 		s.logger.DebugContext(s.ctx, "pre-auth relay: client→upstream",
 			slog.String("type", clientPkt.Type.String()),
@@ -205,7 +205,7 @@ func (s *session) pumpPreAuthUpstream(upstream net.Conn, pumpDone chan<- error) 
 		// The Set Protocol reply carries the capabilities that shape the TTC
 		// summary object, which is what a refusal dbbat synthesizes has to
 		// match. See ttc_oer_encode.go.
-		observeOERCapabilities(&s.oer, pkt.Raw)
+		s.observeOERServerCaps(pkt.Raw)
 
 		s.logger.DebugContext(s.ctx, "pre-auth relay: upstream→client",
 			slog.String("type", pkt.Type.String()),
@@ -226,7 +226,7 @@ func (s *session) pumpPreAuthUpstream(upstream net.Conn, pumpDone chan<- error) 
 // caller. On any write/drain failure it closes the upstream and returns the error.
 func (s *session) replayDepipelinedPrefix(upstream net.Conn, prefixMsgs [][]byte, auth1Payload []byte) (*TNSPacket, error) {
 	for _, msg := range prefixMsgs {
-		observeClientTTCVersion(&s.oer, msg)
+		s.observeOERClientVersion(msg)
 
 		if _, err := upstream.Write(encodeTNSDataV315(msg)); err != nil {
 			_ = upstream.Close()
@@ -390,7 +390,7 @@ func drainUpstreamToClient(s *session, upstream net.Conn) error {
 			s.clientBigClrChunks = true
 		}
 
-		observeOERCapabilities(&s.oer, pkt.Raw)
+		s.observeOERServerCaps(pkt.Raw)
 
 		s.logger.DebugContext(s.ctx, "pre-auth relay: upstream→client (pipelined prefix reply)",
 			slog.String("type", pkt.Type.String()),
