@@ -14,8 +14,9 @@ import { ChevronDown, ChevronLeft, ChevronRight } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
 import { useState, useRef, useCallback } from "react";
 import { useAuth } from "@/contexts/AuthContext";
-import { canViewAudit } from "@/lib/permissions";
+import { canViewAudit, canVerifyChains } from "@/lib/permissions";
 import { AccessDenied } from "@/components/shared/AccessDenied";
+import { ChainVerificationCard } from "@/components/shared/ChainVerificationCard";
 
 const DEFAULT_PAGE_SIZE = 50;
 const PAGE_SIZE_OPTIONS = [25, 50, 100];
@@ -137,6 +138,9 @@ function AuditPage() {
           ) : undefined
         }
       />
+
+      {/* Admin-only: the verification endpoints answer 403 for a viewer. */}
+      {canVerifyChains(user?.roles) && <ChainVerificationCard />}
 
       <DataTable
         columns={columns}

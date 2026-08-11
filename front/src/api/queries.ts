@@ -51,6 +51,13 @@ export type ConnectionInfo = components["schemas"]["ConnectionInfo"];
 export type ConnectionTestResult =
   components["schemas"]["ConnectionTestResult"];
 export type DeviceConsentInfo = components["schemas"]["DeviceConsentInfo"];
+export type ChainBreak = components["schemas"]["ChainBreak"];
+export type AuditChainVerification =
+  components["schemas"]["AuditChainVerification"];
+export type QueryChainVerification =
+  components["schemas"]["QueryChainVerification"];
+export type RowChainVerification =
+  components["schemas"]["RowChainVerification"];
 
 // ============================================================================
 // Auth Providers
@@ -1126,6 +1133,71 @@ export function useAuditEvents(filters?: {
         throw new Error(response.error.message || "Failed to load audit events");
       }
       return response.data?.audit_events || [];
+    },
+  });
+}
+
+// ============================================================================
+// Audit chain verification (admin-only endpoints)
+// ============================================================================
+
+/**
+ * Walk the store-wide `audit_log` chain.
+ *
+ * A mutation rather than a query: verification is an explicit operator action
+ * (a walk is O(rows)), never something a page load should trigger.
+ */
+export function useVerifyAuditChain() {
+  return useMutation({
+    mutationFn: async (): Promise<AuditChainVerification> => {
+      const response = await apiClient.GET("/audit/verify");
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to verify the audit chain",
+        );
+      }
+      return response.data;
+    },
+  });
+}
+
+/** Walk the per-connection query chains (store-wide when unscoped). */
+export function useVerifyQueryChains() {
+  return useMutation({
+    mutationFn: async (
+      params?: { connection?: string },
+    ): Promise<QueryChainVerification> => {
+      const response = await apiClient.GET("/audit/verify/queries", {
+        params: { query: params?.connection ? { connection: params.connection } : {} },
+      });
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to verify the query chains",
+        );
+      }
+      return response.data;
+    },
+  });
+}
+
+/** Walk the per-capture result-row chains (store-wide when unscoped). */
+export function useVerifyRowChains() {
+  return useMutation({
+    mutationFn: async (
+      params?: { connection?: string; query?: string },
+    ): Promise<RowChainVerification> => {
+      const query: Record<string, string> = {};
+      if (params?.connection) query.connection = params.connection;
+      if (params?.query) query.query = params.query;
+      const response = await apiClient.GET("/audit/verify/rows", {
+        params: { query },
+      });
+      if (response.error) {
+        throw new Error(
+          response.error.message || "Failed to verify the row chains",
+        );
+      }
+      return response.data;
     },
   });
 }
