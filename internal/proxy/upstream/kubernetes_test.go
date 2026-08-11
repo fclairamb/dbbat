@@ -446,39 +446,93 @@ func TestKubernetesTunnelCheckPodReady(t *testing.T) {
 	})
 }
 
+// TestKubernetesTunnelPortForwardAllowed covers all four combinations of the
+// two RBAC verbs the check now asks about: the API server derives `create`
+// from the SPDY (POST) upgrade and `get` from the websocket (GET) one, and a
+// Role need not grant both.
 func TestKubernetesTunnelPortForwardAllowed(t *testing.T) {
 	t.Parallel()
 
-	t.Run("allowed", func(t *testing.T) {
+	t.Run("both verbs granted", func(t *testing.T) {
 		t.Parallel()
 
 		fake := newFakeCluster(t)
 		fake.allowed = true
 
-		allowed, _, err := fake.tunnel(t).PortForwardAllowed(context.Background())
+		access, err := fake.tunnel(t).PortForwardAllowed(context.Background())
 		if err != nil {
 			t.Fatalf("PortForwardAllowed() error = %v", err)
 		}
-		if !allowed {
-			t.Error("PortForwardAllowed() = false, want true")
+		if !access.Create || !access.Get {
+			t.Errorf("access = %+v, want both Create and Get true", access)
+		}
+		if !access.Allowed() {
+			t.Error("Allowed() = false, want true when both verbs are granted")
 		}
 	})
 
-	t.Run("denied carries the reason", func(t *testing.T) {
+	t.Run("create only", func(t *testing.T) {
+		t.Parallel()
+
+		fake := newFakeCluster(t)
+		fake.allowedByVerb = map[string]bool{"create": true, "get": false}
+		fake.reasonByVerb = map[string]string{"get": "no RBAC policy matched for get"}
+
+		access, err := fake.tunnel(t).PortForwardAllowed(context.Background())
+		if err != nil {
+			t.Fatalf("PortForwardAllowed() error = %v", err)
+		}
+		if !access.Create || access.Get {
+			t.Errorf("access = %+v, want Create true and Get false", access)
+		}
+		if !access.Allowed() {
+			t.Error("Allowed() = false, want true: the SPDY transport still works")
+		}
+		if access.GetReason != "no RBAC policy matched for get" {
+			t.Errorf("GetReason = %q, want the API server's reason for the denied verb", access.GetReason)
+		}
+	})
+
+	t.Run("get only", func(t *testing.T) {
+		t.Parallel()
+
+		fake := newFakeCluster(t)
+		fake.allowedByVerb = map[string]bool{"create": false, "get": true}
+		fake.reasonByVerb = map[string]string{"create": "no RBAC policy matched for create"}
+
+		access, err := fake.tunnel(t).PortForwardAllowed(context.Background())
+		if err != nil {
+			t.Fatalf("PortForwardAllowed() error = %v", err)
+		}
+		if access.Create || !access.Get {
+			t.Errorf("access = %+v, want Create false and Get true", access)
+		}
+		if !access.Allowed() {
+			t.Error("Allowed() = false, want true: the websocket transport still works")
+		}
+		if access.CreateReason != "no RBAC policy matched for create" {
+			t.Errorf("CreateReason = %q, want the API server's reason for the denied verb", access.CreateReason)
+		}
+	})
+
+	t.Run("neither verb granted", func(t *testing.T) {
 		t.Parallel()
 
 		fake := newFakeCluster(t)
 		fake.reason = "no RBAC policy matched"
 
-		allowed, reason, err := fake.tunnel(t).PortForwardAllowed(context.Background())
+		access, err := fake.tunnel(t).PortForwardAllowed(context.Background())
 		if err != nil {
 			t.Fatalf("PortForwardAllowed() error = %v", err)
 		}
-		if allowed {
-			t.Error("PortForwardAllowed() = true, want false")
+		if access.Create || access.Get {
+			t.Errorf("access = %+v, want both false", access)
 		}
-		if reason != "no RBAC policy matched" {
-			t.Errorf("reason = %q, want the API server's reason", reason)
+		if access.Allowed() {
+			t.Error("Allowed() = true, want false when neither verb is granted")
+		}
+		if access.CreateReason != "no RBAC policy matched" || access.GetReason != "no RBAC policy matched" {
+			t.Errorf("reasons = %q/%q, want the API server's reason for both", access.CreateReason, access.GetReason)
 		}
 	})
 }
@@ -542,7 +596,7 @@ func TestKubernetesTunnelSendsAUserAgent(t *testing.T) {
 		t.Fatalf("NewKubernetesTunnel() error = %v", err)
 	}
 
-	if _, _, err := tunnel.PortForwardAllowed(context.Background()); err != nil {
+	if _, err := tunnel.PortForwardAllowed(context.Background()); err != nil {
 		t.Fatalf("PortForwardAllowed() error = %v", err)
 	}
 

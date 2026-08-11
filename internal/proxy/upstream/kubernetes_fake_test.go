@@ -16,6 +16,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/httpstream"
 	apispdy "k8s.io/apimachinery/pkg/util/httpstream/spdy"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/portforward"
 )
 
@@ -40,6 +41,11 @@ type fakeCluster struct {
 	pod     *corev1.Pod
 	allowed bool
 	reason  string
+	// allowedByVerb overrides allowed/reason for one RBAC verb ("create" or
+	// "get") when present; a verb absent from the map falls back to
+	// allowed/reason, so most tests can keep answering both verbs alike.
+	allowedByVerb map[string]bool
+	reasonByVerb  map[string]string
 
 	mu           sync.Mutex
 	authHeaders  []string
@@ -126,10 +132,7 @@ func (f *fakeCluster) route(w http.ResponseWriter, req *http.Request) {
 	case strings.Contains(req.URL.Path, "/endpointslices"):
 		f.writeJSON(w, f.endpointSliceList())
 	case strings.Contains(req.URL.Path, "/selfsubjectaccessreviews"):
-		f.writeJSON(w, &authv1.SelfSubjectAccessReview{
-			TypeMeta: metav1.TypeMeta{APIVersion: "authorization.k8s.io/v1", Kind: "SelfSubjectAccessReview"},
-			Status:   authv1.SubjectAccessReviewStatus{Allowed: f.allowed, Reason: f.reason},
-		})
+		f.handleSelfSubjectAccessReview(w, req)
 	case strings.Contains(req.URL.Path, "/pods/"):
 		if f.pod == nil {
 			f.writeStatus(w, http.StatusNotFound, "pods \"x\" not found")
@@ -140,6 +143,45 @@ func (f *fakeCluster) route(w http.ResponseWriter, req *http.Request) {
 	default:
 		f.writeStatus(w, http.StatusNotFound, "unhandled path "+req.URL.Path)
 	}
+}
+
+// handleSelfSubjectAccessReview answers per the requested verb: PortForwardAllowed
+// now sends one review each for "create" and "get", and a test that wants them
+// to disagree sets allowedByVerb/reasonByVerb rather than the plain
+// allowed/reason fields, which answer identically for every verb.
+func (f *fakeCluster) handleSelfSubjectAccessReview(w http.ResponseWriter, req *http.Request) {
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		f.t.Errorf("fake cluster: read selfsubjectaccessreview body: %v", err)
+
+		return
+	}
+
+	// The typed clientset negotiates protobuf for built-in types like this one
+	// (magic-prefixed "k8s\x00..."), not JSON, so the universal deserializer —
+	// which recognizes either — is what has to read it back.
+	var review authv1.SelfSubjectAccessReview
+	if _, _, err := scheme.Codecs.UniversalDeserializer().Decode(body, nil, &review); err != nil {
+		f.t.Errorf("fake cluster: decode selfsubjectaccessreview: %v", err)
+
+		return
+	}
+
+	var verb string
+	if review.Spec.ResourceAttributes != nil {
+		verb = review.Spec.ResourceAttributes.Verb
+	}
+
+	allowed, reason := f.allowed, f.reason
+	if v, ok := f.allowedByVerb[verb]; ok {
+		allowed = v
+		reason = f.reasonByVerb[verb]
+	}
+
+	f.writeJSON(w, &authv1.SelfSubjectAccessReview{
+		TypeMeta: metav1.TypeMeta{APIVersion: "authorization.k8s.io/v1", Kind: "SelfSubjectAccessReview"},
+		Status:   authv1.SubjectAccessReviewStatus{Allowed: allowed, Reason: reason},
+	})
 }
 
 func (f *fakeCluster) endpointSliceList() *discoveryv1.EndpointSliceList {

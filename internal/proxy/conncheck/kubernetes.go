@@ -34,31 +34,24 @@ func (c *Checker) checkCluster(ctx context.Context, dialer *shared.Dialer, srv *
 		return classifyKubernetesError(err, StageClusterAPI)
 	}
 
-	allowed, reason, err := tunnel.PortForwardAllowed(ctx)
+	access, err := tunnel.PortForwardAllowed(ctx)
 	if err != nil {
 		return classifyKubernetesError(err, StageClusterAPI)
 	}
 
-	if !allowed {
-		message := "the service account may not create pods/portforward in namespace " + tunnel.Namespace() +
-			" — grant `create` on `pods/portforward` in a Role bound to it (see docs/kubernetes.md)"
-		if reason != "" {
-			message += "; the API server said: " + sanitizeText(reason)
-		}
-
+	if !access.Allowed() {
 		return Result{
 			Stage:   StageClusterRBAC,
 			Code:    CodeK8sForbidden,
-			Message: message,
+			Message: portForwardForbiddenMessage(tunnel.Namespace(), access),
 		}
 	}
 
 	res := Result{
-		OK:    true,
-		Stage: StageClusterRBAC,
-		Code:  CodeOK,
-		Message: "cluster reachable, the service account token was accepted, and it may port-forward in namespace " +
-			tunnel.Namespace(),
+		OK:      true,
+		Stage:   StageClusterRBAC,
+		Code:    CodeOK,
+		Message: portForwardAllowedMessage(tunnel.Namespace(), access),
 	}
 
 	// Re-read the row: the shared dialer persists the TOFU pin as part of
@@ -94,18 +87,16 @@ func (c *Checker) checkKubernetesTarget(
 		return &res
 	}
 
-	if allowed, reason, err := tunnel.PortForwardAllowed(ctx); err != nil {
+	if access, err := tunnel.PortForwardAllowed(ctx); err != nil {
 		res := classifyKubernetesError(err, StageClusterAPI)
 
 		return &res
-	} else if !allowed {
-		message := "the service account may not create pods/portforward in namespace " + tunnel.Namespace() +
-			" — grant `create` on `pods/portforward` in a Role bound to it (see docs/kubernetes.md)"
-		if reason != "" {
-			message += "; the API server said: " + sanitizeText(reason)
+	} else if !access.Allowed() {
+		return &Result{
+			Stage:   StageClusterRBAC,
+			Code:    CodeK8sForbidden,
+			Message: portForwardForbiddenMessage(tunnel.Namespace(), access),
 		}
-
-		return &Result{Stage: StageClusterRBAC, Code: CodeK8sForbidden, Message: message}
 	}
 
 	podName, err := tunnel.ResolvePod(ctx, srv.Host)
@@ -129,6 +120,57 @@ func (c *Checker) checkKubernetesTarget(
 	// Everything the cluster can tell us checks out; the caller carries on with
 	// the ordinary dial + database login.
 	return nil
+}
+
+// portForwardForbiddenMessage explains a cluster_rbac failure when neither
+// verb is granted, naming both so an admin can grant whichever transport(s)
+// they want without having to guess which one the check meant.
+func portForwardForbiddenMessage(namespace string, access upstream.PortForwardAccess) string {
+	message := "the service account may not port-forward pods in namespace " + namespace +
+		" — grant `create` and/or `get` on `pods/portforward` in a Role bound to it (see docs/kubernetes.md)"
+
+	var reasons []string
+
+	if access.CreateReason != "" {
+		reasons = append(reasons, "create: "+sanitizeText(access.CreateReason))
+	}
+
+	if access.GetReason != "" {
+		reasons = append(reasons, "get: "+sanitizeText(access.GetReason))
+	}
+
+	if len(reasons) > 0 {
+		message += "; the API server said: " + strings.Join(reasons, "; ")
+	}
+
+	return message
+}
+
+// portForwardAllowedMessage reports which transport(s) a granted Role admits.
+//
+// Both verbs granted is silent about the split — the recommended
+// configuration should just read as "it works". Only one granted still
+// succeeds (the check fails cluster_rbac only when *neither* is), but the
+// message names what that one-verb Role costs so an operator can decide
+// whether to close the gap: `create` alone means every dial pays a refused
+// websocket GET before the SPDY fallback carries it; `get` alone means the
+// row cannot work at all against an API server older than Kubernetes 1.31,
+// which has no websocket port-forward handler.
+func portForwardAllowedMessage(namespace string, access upstream.PortForwardAccess) string {
+	base := "cluster reachable, the service account token was accepted, and it may port-forward in namespace " + namespace
+
+	switch {
+	case access.Create && access.Get:
+		return base
+	case access.Create:
+		return base + " over the SPDY transport only (`create` is granted but not `get`) — every dial pays a " +
+			"refused websocket upgrade before the SPDY fallback carries it; grant `get` on `pods/portforward` too " +
+			"to skip that (see docs/kubernetes.md)"
+	default: // access.Get only
+		return base + " over the websocket transport only (`get` is granted but not `create`) — this row cannot " +
+			"work against an API server older than Kubernetes 1.31, which has no websocket port-forward handler; " +
+			"grant `create` on `pods/portforward` too for a working SPDY fallback (see docs/kubernetes.md)"
+	}
 }
 
 // isKubernetesStage reports whether a target dial failure originates from the
