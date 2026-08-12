@@ -416,7 +416,9 @@ being answered — the byte the client put at offset 2 of its own op header
 (`03 5e 07 00` → 7) — and every real server OER carries it back: 8 and 4 in the
 two fixtures in `ttc_oer_encode_test.go`, 45 in the OCI encoding at a constant
 offset. **ojdbc 26.1 refuses to read an error out of an OER whose call number is
-not the one it sent**: `T4CTTIfun.receive` calls `processError()` only when
+not the one it sent** (driver versions throughout this section are attribution,
+not something the tree pins — see "Which ojdbc these results are attributed to"
+below): `T4CTTIfun.receive` calls `processError()` only when
 `oer.callNumber == this.sequenceNumber` and otherwise goes to
 `handleOutOfSequenceError`, which surfaces `ORA-18745: Execution error in
 sessionless transaction piggybacked call` with the real ORA-01031 demoted to its
@@ -459,7 +461,8 @@ trailing marker, sqlplus hangs exactly as it did on the old frame.
 
 Verified end to end against Oracle 23ai Free with **four** live clients — go-ora
 v3, python-oracledb thin, sqlplus (OCI) and JDBC thin (ojdbc11 23.2.0.0 and
-26.1): all four surface ORA-01031 and keep the session usable.
+26.1 when it was taken; re-run since on 23.7.0.25.01 — see the version note
+below): all four surface ORA-01031 and keep the session usable.
 
 JDBC needed no fourth `oerShape` variation. It negotiates the same compressed
 encoding python-oracledb does, two extra tail fields included
@@ -468,8 +471,9 @@ session), which is what
 `TestIntegration_BlockedStatementRefusesJDBCThin` asserts rather than assumes.
 What it did need was the call number above: measured on 26.1 the refusal came
 back as ORA-18745 wrapping the real ORA-01031, and on 23.2 as a clean ORA-01031,
-from the same dbbat frame. The JDBC case is skipped unless an Oracle JDBC driver
-is reachable, which is the case in CI:
+from the same dbbat frame (both attributions, again — see the version note
+below). The JDBC case is skipped unless an Oracle JDBC driver is reachable, which
+is the case in CI:
 
 | Variable | Meaning |
 |---|---|
@@ -484,6 +488,27 @@ ORACLE_TEST_OJDBC_JAR=/path/to/ojdbc11.jar \
 That pattern picks up the refusal case here plus the two asynchronous ones and
 the real-Oracle reference capture, all of which need the same jar — see the next
 section.
+
+###### Which ojdbc these results are attributed to
+
+**No JDBC result in this document is pinned to a driver version by anything in
+the tree.** Every JDBC test runs whatever jar `ORACLE_TEST_OJDBC_JAR` supplies
+and none of them asserts on its version — pinning would mean checking
+`DatabaseMetaData.getDriverVersion()`, which nothing does. So each result is
+*attributed* to the driver that was on the machine when it was taken:
+
+| Result | Taken on |
+|---|---|
+| the ORA-18745 wrap of a refusal stamped with call number zero, and the clean ORA-01031 from the same frame once the number was stamped; ojdbc 23.2 not checking the number at all | ojdbc11 26.1 and 23.2.0.0, as recorded when the call number was found |
+| the two asynchronous refusals and the real-Oracle kill capture (2026-08-12) | **ojdbc 23.7.0.25.01** — the jar SQLcl 26.1 bundles, and the only one reachable on that machine |
+
+The later measurement neither repeats nor retracts the earlier one. 23.7 carries
+the same check the 26.1 finding rests on — `T4CTTIfun.receive` compares
+`T4CTTIoer11.callNumber` against its own `sequenceNumber` and routes a mismatch
+to `handleOutOfSequenceError`, which logs *"TTIOER call number {0} does not match
+TTIFUN sequence number {1}"* — so "ORA-18745 did not appear" is meaningful under
+it rather than vacuous. What no run on 23.7 did is *reproduce* the ORA-18745 wrap
+itself; only its absence was observed.
 
 ##### An asynchronous refusal: which call number, and whether to send one at all
 
@@ -574,15 +599,10 @@ diagnosis is wrong.
 Confidence: the enumeration and the `hasPendingQuery()` gate are read off the
 code and pinned by `TestMidStreamRefusalEndsTheCallTheClientIsWaitingOn` and
 `TestIdleLimitViolationSendsNoOER`; the two live cases above are measured against
-Oracle 23ai Free and pinned by the integration tests named with them. One caveat
-on the driver: the measurement was made with **ojdbc 23.7.0.25.01** (the jar
-bundled with SQLcl 26.1), not 26.1 — no 26.1 jar was reachable on the machine.
-That driver carries the same sequence check the 26.1 finding rests on
-(`T4CTTIfun.receive` compares `T4CTTIoer11.callNumber` against its own
-`sequenceNumber` and routes a mismatch to `handleOutOfSequenceError`, which logs
-*"TTIOER call number {0} does not match TTIFUN sequence number {1}"*), so
-"ORA-18745 did not appear" is meaningful rather than vacuous — but the ORA-18745
-mislabelling itself was not re-observed on 23.7, only its absence.
+Oracle 23ai Free and pinned by the integration tests named with them. The driver
+they were taken on is **ojdbc 23.7.0.25.01**, not the 26.1 the call-number
+finding is attributed to; what that does and does not license is in "Which ojdbc
+these results are attributed to" above.
 
 ### Oracle NUMBER Encoding
 
@@ -754,7 +774,7 @@ The Oracle proxy has been tested with:
 |--------|---------|--------|
 | Go | go-ora | SQL + rows + **bind values** end-to-end (verified vs Oracle 23ai Free) |
 | Python | oracledb (thin mode) | SQL works vs Oracle 19c; **fails at AUTH vs Oracle 23ai** — see "Modern thin clients" below |
-| Java | ojdbc11 (JDBC thin) | SQL works, row capture partial (older tests); refusals verified end-to-end vs Oracle 23ai Free on ojdbc11 23.2.0.0 **and** 26.1 (`TestIntegration_BlockedStatementRefusesJDBCThin`) |
+| Java | ojdbc11 (JDBC thin) | SQL works, row capture partial (older tests); refusals verified end-to-end vs Oracle 23ai Free on ojdbc11 23.2.0.0 **and** 26.1, and since on 23.7.0.25.01 (`TestIntegration_BlockedStatementRefusesJDBCThin`; the test takes whatever `ORACLE_TEST_OJDBC_JAR` points at and asserts nothing about the version — see "Which ojdbc these results are attributed to") |
 | DBeaver | JDBC thin via ojdbc | Connects, SQL logged, row capture partial (older tests) |
 | SQLcl | JDBC thin (Oracle 23c+) | SQL works vs 19c; **fails at AUTH vs Oracle 23ai** (`ORA-03113 … Get the session key`) |
 | sqlplus | OCI (Oracle 23c) | Fails at AUTH vs Oracle 23ai |
