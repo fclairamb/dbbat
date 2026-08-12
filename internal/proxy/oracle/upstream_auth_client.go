@@ -252,7 +252,8 @@ func (s *session) sendUpstreamAuthPhase1(username string, identity driverIdentit
 		if s.clientWideEncoding {
 			f := s.wideAuthFramingFor(s.clientAuthPhase1Pkt, PiggybackSubAuth1, authPhase1FuncSeq, mode)
 
-			return s.writeUpstreamData(buildClientAuthPhase1Wide(f, username, identity), wideAuthDataFlags)
+			return s.writeUpstreamData(
+				buildClientAuthPhase1Wide(f, username, identity, s.clientBigClrChunks), wideAuthDataFlags)
 		}
 
 		header := s.syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq)
@@ -321,7 +322,8 @@ func (s *session) sendUpstreamAuthPhase2(username string, identity driverIdentit
 			// different lead bytes and different logon-mode bits.
 			f := s.wideAuthFramingFor(s.clientAuthPhase2Pkt, PiggybackSubAuth2, authPhase2FuncSeq, mode)
 
-			return s.writeUpstreamData(buildClientAuthPhase2Wide(f, username, identity, sec), wideAuthDataFlags)
+			return s.writeUpstreamData(
+				buildClientAuthPhase2Wide(f, username, identity, sec, s.clientBigClrChunks), wideAuthDataFlags)
 		}
 
 		header := s.syntheticAuthHeader(PiggybackSubAuth2, authPhase2FuncSeq)
@@ -509,7 +511,7 @@ func (s *session) readUpstreamAuthMessages() (*upstreamAuthResponse, []byte, err
 		resp.fragTTCLens = append(resp.fragTTCLens, len(fragTTC))
 		buf = append(buf, fragTTC...)
 
-		if parseAuthMessageStream(buf, resp, s.clientWideEncoding) {
+		if parseAuthMessageStream(buf, resp, s.clientWideEncoding, s.clientBigClrChunks) {
 			// The AUTH response ends with the upstream's own OER, which is the
 			// earliest sample of the summary-object layout this client parses —
 			// and it lands before the first statement, so a session whose very
@@ -589,7 +591,7 @@ func reframeAuthOK(mergedPacket, dataFlags []byte, fragTTCLens []int) []byte {
 //
 // The function is tolerant: when it cannot decode a region it returns false
 // so the caller reads more bytes.
-func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse, wide bool) bool {
+func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse, wide, bigChunks bool) bool {
 	pos := 0
 
 	for pos < len(buf) {
@@ -598,7 +600,7 @@ func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse, wide bool) b
 
 		switch msgCode {
 		case 0x08:
-			consumed, ok := parseAuthKVDictionary(buf[pos:], resp, wide)
+			consumed, ok := parseAuthKVDictionary(buf[pos:], resp, wide, bigChunks)
 			if !ok {
 				return false
 			}
@@ -638,7 +640,13 @@ func parseAuthMessageStream(buf []byte, resp *upstreamAuthResponse, wide bool) b
 // The dictionary length is a TTC compressed integer, matching go-ora's
 // session.GetInt(2, bigEndian=true, compress=true). A 1-byte size prefix is
 // followed by `size` big-endian bytes encoding the count of KV pairs.
-func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse, wide bool) (int, bool) {
+//
+// bigChunks is the session's negotiated CLR long form. It is the upstream
+// *server* that wrote these pairs, and the server is the peer that advertised
+// the capability in the first place, so this walk has to read in the form it
+// advertised — on either dialect. Without it the flag would never reach
+// readAuthKVPairWide at all: this is its only wide caller.
+func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse, wide, bigChunks bool) (int, bool) {
 	var dictLen, pos int
 
 	if wide {
@@ -661,7 +669,7 @@ func parseAuthKVDictionary(buf []byte, resp *upstreamAuthResponse, wide bool) (i
 	}
 
 	for i := 0; i < dictLen; i++ {
-		pair, ok := readAuthKVPair(buf[pos:], wide, false)
+		pair, ok := readAuthKVPair(buf[pos:], wide, bigChunks)
 		if !ok {
 			return 0, false
 		}
@@ -685,11 +693,12 @@ type authKVPairResult struct {
 // session.GetKeyVal in go-ora. ok=false signals the buffer is truncated. wide
 // selects the OCI fixed 4-byte little-endian length/flag encoding. bigChunks
 // selects the UseBigClrChunks long-value encoding (compressed-int chunk lengths)
-// for the value CLR; keys are always short so are unaffected. bigChunks is
-// ignored in the wide path (OCI does not use it).
+// for the value CLR; keys are always short so are unaffected. It applies to both
+// dialects: the capability is negotiated per session, not per client flavor (see
+// readAuthKVPairWide).
 func readAuthKVPair(buf []byte, wide, bigChunks bool) (authKVPairResult, bool) {
 	if wide {
-		return readAuthKVPairWide(buf)
+		return readAuthKVPairWide(buf, bigChunks)
 	}
 
 	pos := 0
@@ -743,7 +752,27 @@ func readAuthKVPair(buf []byte, wide, bigChunks bool) (authKVPairResult, bool) {
 
 // readAuthKVPairWide is the OCI (4-byte little-endian) counterpart of
 // readAuthKVPair: keyLen:4 LE + keyCLR + valueLen:4 LE + valueCLR + flag:4 LE.
-func readAuthKVPairWide(buf []byte) (authKVPairResult, bool) {
+//
+// bigChunks is the session's negotiated CLR long form and applies here exactly
+// as it does on the thin path. It used to be dropped on the floor, on the claim
+// that "OCI does not use it" — an assertion no capture in this repo supports.
+// What testdata/sqlplus_cursor_reexec.pcapng (macOS Instant Client 23.3 →
+// Oracle 23ai Free) actually shows is measured by
+// TestSqlplusCapture_NegotiatesBigClrChunksAndCarriesNoLongValue:
+//
+//   - the session DOES negotiate UseBigClrChunks — the Set Protocol reply's
+//     ServerCompileTimeCaps[37] is 0x7f, the 0x20 bit set, so clientBigClrChunks
+//     is true on an OCI session too. The capability is a property of the
+//     *server*, not of the client dialect;
+//   - and every AUTH value in that login is short (longest 172 bytes,
+//     AUTH_CONNECT_STRING), so not one of them reaches the 0xFE long form. The
+//     capture therefore cannot show which chunk-length encoding OCI writes: the
+//     two are byte-identical over the whole capture.
+//
+// So the negotiated capability is the only evidence there is, and this leg now
+// follows it instead of hard-coding the opposite. It changes nothing below the
+// 252-byte short-form limit, which is every value dbbat handles today.
+func readAuthKVPairWide(buf []byte, bigChunks bool) (authKVPairResult, bool) {
 	pos := 0
 	out := authKVPairResult{}
 
@@ -772,7 +801,7 @@ func readAuthKVPairWide(buf []byte) (authKVPairResult, bool) {
 	pos += 4
 
 	if vLen > 0 {
-		v, vClrN := readCLR(buf[pos:])
+		v, vClrN := readCLRVariant(buf[pos:], bigChunks)
 		if vClrN == 0 {
 			return authKVPairResult{}, false
 		}

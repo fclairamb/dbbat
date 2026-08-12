@@ -130,7 +130,7 @@ func TestBuildWideAuthBody_PreambleMatchesCapture(t *testing.T) {
 
 			// Only the pair COUNT reaches the preamble, so placeholder pairs are
 			// enough to reproduce it; the pairs themselves are covered below.
-			got := buildWideAuthBody(f, "system", make([]authKV, pairCount))
+			got := buildWideAuthBody(f, "system", make([]authKV, pairCount), false)
 
 			// prefix + ptr + userLen + mode + ptr + pairCount + ptr + ptr + CLR user.
 			preambleLen := anchor + 8 + 4 + 4 + 8 + 4 + 8 + 8 + 1 + len("system")
@@ -259,7 +259,7 @@ func TestDetectWideAuthFraming_BundledFlavor(t *testing.T) {
 
 			// A body built back in the detected flavor must round-trip through
 			// the same detector, which is what keeps the two apart end to end.
-			rebuilt := buildWideAuthBody(f, "system", authPhase1Pairs(driverIdentity{}))
+			rebuilt := buildWideAuthBody(f, "system", authPhase1Pairs(driverIdentity{}), false)
 
 			again, ok := detectWideAuthFraming(rebuilt)
 			require.True(t, ok)
@@ -277,7 +277,7 @@ func TestDetectWideAuthFraming_BundledFlavor(t *testing.T) {
 func TestTtcKeyValWideSized_EmptyValue(t *testing.T) {
 	t.Parallel()
 
-	got := ttcKeyValWideSized("AUTH_TERMINAL", "", 0, true)
+	got := ttcKeyValWideSized("AUTH_TERMINAL", "", 0, true, false)
 
 	// 27 00 00 00 | 0d "AUTH_TERMINAL" | 00 00 00 00 | 00 00 00 00
 	want := make([]byte, 0, 26)
@@ -292,7 +292,7 @@ func TestTtcKeyValWideSized_EmptyValue(t *testing.T) {
 	assert.Len(t, ttcKeyValWide("AUTH_TERMINAL", "", 0), len(got)+1,
 		"ttcKeyValWide is the encoding that must NOT be used for empty values")
 
-	kv, ok := readAuthKVPairWide(got)
+	kv, ok := readAuthKVPairWide(got, false)
 	require.True(t, ok)
 	assert.Equal(t, "AUTH_TERMINAL", string(kv.Key))
 	assert.Empty(t, kv.Value)
@@ -323,7 +323,7 @@ func TestWideAuthBody_ParsesBackThroughTheReaders(t *testing.T) {
 			f.bufferSized = bufferSized
 
 			pairs := authPhase1Pairs(ident)
-			body := buildClientAuthPhase1Wide(f, "system", ident)
+			body := buildClientAuthPhase1Wide(f, "system", ident, false)
 
 			require.True(t, payloadUsesWideKVEncoding(body),
 				"a wide body must be recognized as wide, or the upstream reads it as thin")
@@ -333,7 +333,7 @@ func TestWideAuthBody_ParsesBackThroughTheReaders(t *testing.T) {
 			pos += 1 + int(body[pos]) // CLR username
 
 			for i, want := range pairs {
-				kv, ok := readAuthKVPairWide(body[pos:])
+				kv, ok := readAuthKVPairWide(body[pos:], false)
 				require.Truef(t, ok, "pair %d (%s) unreadable", i, want.key)
 				assert.Equal(t, want.key, string(kv.Key))
 				assert.Equal(t, want.value, string(kv.Value))
@@ -381,7 +381,7 @@ func TestWideAuthPhase2_ParsesBackThroughParseAuthPhase2(t *testing.T) {
 	f := defaultWideAuthFraming(PiggybackSubAuth2, authPhase2FuncSeq,
 		logonModeNoNewPass|logonModeUserAndPass)
 
-	body := buildClientAuthPhase2Wide(f, "system", ident, sec)
+	body := buildClientAuthPhase2Wide(f, "system", ident, sec, false)
 
 	payload := append(append([]byte(nil), wideAuthDataFlags...), body...)
 
