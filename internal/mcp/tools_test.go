@@ -18,6 +18,17 @@ import (
 // metadata from it, so a map is a faithful substitute — and keeping these
 // tests off a database is what lets them assert the row cap and the
 // approval-pending dance in milliseconds.
+//
+// It is also why the grant windows in this package are stamped from
+// time.Now() and left that way, deliberately: ListGrants here hands back
+// whatever the test put in the slice, no window filter of any kind, and the
+// only consumer of the bounds is the RFC3339 string the tool layer echoes
+// back. There is one clock in this package, so the two-clock hazard the store
+// fixed (a Go-stamped window judged by PostgreSQL's `starts_at <= NOW()`)
+// cannot arise — no database is ever reached. The backdated minute is
+// cosmetic, describing a live grant rather than gating anything. Anything in
+// this package that *does* grow a real store must stamp from
+// Store.Now/dbNow instead, as internal/proxy/testsupport does.
 type fakeGrantStore struct {
 	grants  []store.Grant
 	servers map[uuid.UUID]*store.Server
@@ -94,6 +105,8 @@ func newFixture(t *testing.T, protocol string, def store.GrantDefinition, run fu
 		UID:        uuid.New(),
 		UserID:     userUID,
 		DatabaseID: dbUID,
+		// Process clock on purpose — nothing here reaches a database that
+		// would judge this window. See fakeGrantStore.
 		StartsAt:   time.Now().Add(-time.Minute),
 		ExpiresAt:  time.Now().Add(time.Hour),
 		Definition: &def,

@@ -176,6 +176,27 @@ func (s *Store) DB() *bun.DB {
 // stamped a few milliseconds in the store's future is refused by the auth path
 // (`starts_at <= NOW()` in GetActiveGrant) for exactly as long as the skew
 // lasts. See dbNow.
+//
+// Which writers must use it, decided site by site when the short TTLs were
+// moved over:
+//
+//   - Production code writing a bound that SQL later judges — grant windows
+//     (IssueGrant, ApproveGrantRequest) and the oauth_states TTLs (device
+//     authorizations, login exchanges, OAuth CSRF states) — must. The last
+//     three do it SQL-side, inside the insert, so there is no extra round
+//     trip: see CreateOAuthState.
+//   - Integration fixtures that insert a window into a real store and then
+//     drive the auth path over it must too, because the container's clock is
+//     nobody's guarantee — internal/proxy/testsupport does.
+//   - Unit tests holding a store.Grant in memory (internal/mcp,
+//     internal/proxy/*) need not: no database ever judges those bounds, so
+//     there is only one clock. Same for a Go value compared against
+//     time.Now() on both sides, like an APIKey's expiry.
+//   - This package's own tests keep time.Now() deliberately. They backdate
+//     starts_at by a minute or more, and it was a *zero*-margin window — one
+//     issued at "now" and read back immediately — that produced the flake
+//     this rule came from. A margin wider than any plausible skew is a
+//     sufficient answer; a zero margin never is.
 func (s *Store) Now(ctx context.Context) (time.Time, error) {
 	return dbNow(ctx, s.db)
 }
