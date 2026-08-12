@@ -1036,7 +1036,19 @@ export interface paths {
         };
         /**
          * List grant requests
-         * @description Admins see all (filterable). Non-admins see only their own.
+         * @description Admins see all, and the query parameters below filter that view.
+         *
+         *     Everybody else sees their own requests, plus the **pending** ones they
+         *     may decide as an access approver for the target server (see
+         *     `POST /grant-requests/{uid}/approve` for how that is resolved). The
+         *     query parameters do not apply to this view.
+         *
+         *     The pending restriction is about enumeration, not secrecy: an unfiltered
+         *     listing would turn an approver's page into the full request history of
+         *     every colleague who ever asked for access to their servers.
+         *     `GET /grant-requests/{uid}` is deliberately not status-scoped the same
+         *     way — re-reading one row you were entitled to decide is a different
+         *     exposure from browsing all of them.
          */
         get: operations["listGrantRequests"];
         put?: never;
@@ -1067,7 +1079,18 @@ export interface paths {
             };
             cookie?: never;
         };
-        /** Get grant request */
+        /**
+         * Get grant request
+         * @description Readable by the requester, by any admin, and by an access approver for
+         *     the target server.
+         *
+         *     Unlike the listing, this is **not** restricted to pending requests: an
+         *     approver may re-read one after it has been decided, including one they
+         *     decided themselves. Hiding the outcome of your own decision would be a
+         *     worse answer than the marginal exposure of a row you were entitled to
+         *     resolve — and a client refetching a request straight after approving it
+         *     would otherwise get a 403.
+         */
         get: operations["getGrantRequest"];
         put?: never;
         post?: never;

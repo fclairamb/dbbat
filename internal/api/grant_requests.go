@@ -452,10 +452,19 @@ func (s *Server) withApproverHats(
 }
 
 // listGrantRequestsForNonAdmin returns the caller's own requests plus the
-// *pending* ones they may decide as an access approver. Deliberately only the
-// pending ones: delegation is about answering what is waiting, not about
-// handing an ops group the decision history of every colleague who ever
-// requested access to their servers.
+// *pending* ones they may decide as an access approver.
+//
+// The pending restriction is about **enumeration**, not about secrecy. A
+// listing is a bulk read, and an unfiltered one would hand an ops group the
+// entire decision history of every colleague who ever requested access to their
+// servers, in one page, as a browsing surface. Answering what is waiting needs
+// none of that.
+//
+// It is deliberately *not* the same rule as handleGetGrantRequest, which
+// resolves a single uid the caller already holds and therefore does not
+// status-scope — see the comment there. Enumerating a history and re-reading
+// one row of it are different exposures, so they get different rules; what they
+// share is who counts as an approver.
 //
 // The approver side is resolved per request rather than by a store-side filter
 // because the chain (server list, else its groups' union) is live and lives in
@@ -502,6 +511,18 @@ func (s *Server) listGrantRequestsForNonAdmin(c *gin.Context, currentUser *store
 
 // handleGetGrantRequest — role-aware: requesters fetch their own, admins fetch
 // anyone's, and an access approver fetches the ones they may decide.
+//
+// **Not status-scoped, on purpose**, unlike listGrantRequestsForNonAdmin above.
+// An approver may re-read a request after it has been decided — including one
+// they decided themselves — because hiding the outcome of your own decision is
+// a worse answer than the marginal exposure of a row you were entitled to
+// resolve a moment earlier. The UI refetches a row straight after approving it,
+// and a pending-only rule would 403 on exactly that.
+//
+// The two paths differ only in what they scope, and each scopes the thing that
+// is actually risky about it: a listing enumerates, a lookup needs a uid the
+// caller already holds. `mayDecideGrantRequest` — the *who* — is the same
+// function on both, so they cannot drift on the part that matters.
 func (s *Server) handleGetGrantRequest(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
