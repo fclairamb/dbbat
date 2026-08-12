@@ -67,6 +67,11 @@ type oerShape struct {
 	// from the client's AUTH framing if nothing was ever learned.
 	fixedWidth bool
 
+	// fixedWidth64 selects the 64-bit variant of that encoding — the same
+	// fields at wider offsets. See oerFixed64Layout for why this cannot be
+	// derived from the negotiation and has to be learned off a real OER.
+	fixedWidth64 bool
+
 	// endOfResponse records that the upstream terminates a message with the TTC
 	// end-of-response marker on this session, in which case dbbat's own frame
 	// has to carry one too. OCI/sqlplus negotiates it even after dbbat has
@@ -102,6 +107,7 @@ func (o oerShape) orDefault() oerShape {
 		d := defaultOERShape()
 		d.extraTailFields = o.extraTailFields
 		d.fixedWidth = o.fixedWidth
+		d.fixedWidth64 = o.fixedWidth64
 		d.endOfResponse = o.endOfResponse
 		d.tailLearned = o.tailLearned
 
@@ -259,20 +265,23 @@ func encodeOER(shape oerShape, sum oerSummary) []byte {
 // is where it will show up, and the fix is to learn the prefix length the same
 // way the tail is learned rather than to reintroduce the capability branch.
 func encodeOERFixedWidth(shape oerShape, sum oerSummary) []byte {
-	buf := make([]byte, oerFixedWidthPrefixLen,
-		oerFixedWidthPrefixLen+1+shape.extraTailFields*oerFixedTailFieldWidth+1+len(sum.ErrorMessage))
+	layout := shape.layoutFor()
+
+	buf := make([]byte, layout.prefixLen,
+		layout.prefixLen+8+shape.extraTailFields*oerFixedTailFieldWidth+1+len(sum.ErrorMessage))
 	buf[0] = byte(TTCFuncOERR)
 
-	binary.LittleEndian.PutUint32(buf[oerFixedCallStatusOffset:], uint32(sum.CallStatus|oerEndOfCallBit))
-	binary.LittleEndian.PutUint16(buf[oerFixedECIDOffset:], uint16(sum.SeqNumber))
-	binary.LittleEndian.PutUint16(buf[oerFixedErrNumOffset:], uint16(sum.ErrorCode))
-	binary.LittleEndian.PutUint16(buf[oerFixedCursorIDOffset:], uint16(sum.CursorID))
-	binary.LittleEndian.PutUint32(buf[oerFixedCallNumberOffset:], uint32(sum.CallNumber))
-	binary.LittleEndian.PutUint32(buf[oerFixedRetCodeOffset:], uint32(sum.ErrorCode))
+	binary.LittleEndian.PutUint32(buf[layout.callStatus:], uint32(sum.CallStatus|oerEndOfCallBit))
+	binary.LittleEndian.PutUint16(buf[layout.ecid:], uint16(sum.SeqNumber))
+	binary.LittleEndian.PutUint16(buf[layout.errNum:], uint16(sum.ErrorCode))
+	binary.LittleEndian.PutUint16(buf[layout.cursorID:], uint16(sum.CursorID))
+	binary.LittleEndian.PutUint32(buf[layout.callNumber:], uint32(sum.CallNumber))
+	binary.LittleEndian.PutUint32(buf[layout.retCode:], uint32(sum.ErrorCode))
 
-	// The row count is the one field that stays compressed even here — there is
-	// no fixed 8-byte form on the wire.
-	buf = append(buf, 0x00)
+	// The row count is a compressed integer in the 32-bit layout — there is no
+	// fixed form for it on the wire there — and a plain fixed-width field in
+	// the 64-bit one. Zero either way; only its width moves the message.
+	buf = append(buf, make([]byte, max(layout.rowCountWidth, 1))...)
 
 	for range shape.extraTailFields {
 		buf = append(buf, 0x00, 0x00, 0x00, 0x00)
@@ -369,6 +378,77 @@ const (
 	oerFixedWidthPrefixLen = 70
 )
 
+// oerFixedLayout places the handful of fields dbbat fills in inside a
+// fixed-width summary object. Everything else in the prefix is zero, so a
+// layout is exactly these offsets plus the prefix length.
+//
+// There are two of them because "the OCI encoding" is two encodings, and the
+// difference is not a capability dbbat can read off the negotiation: the
+// Instant Client 23.3 the first one was measured from marshals the summary at
+// 32-bit widths, and the client bundled in gvenzl/oracle-free:23-slim (23.26)
+// marshals the same fields, in the same order, at 64-bit widths — same
+// protocol version, same upstream, same session flow. Handed the 32-bit frame,
+// the 64-bit client reads past the end of every field it cares about and never
+// finishes the call: sqlplus hung with no output at all, which is the defect
+// this layout exists to fix.
+type oerFixedLayout struct {
+	callStatus int
+	ecid       int
+	errNum     int
+	cursorID   int
+	callNumber int
+	retCode    int
+
+	// prefixLen is everything through the trailing RetCode.
+	prefixLen int
+
+	// rowCountWidth is the width of the row count that follows the prefix, or
+	// 0 when it is a TTC compressed integer. The 32-bit layout keeps it
+	// compressed — there is no fixed form for it on the wire there — while the
+	// 64-bit one writes a plain 8-byte field.
+	rowCountWidth int
+}
+
+// oerFixed32Layout is the OCI encoding measured against Oracle 23ai Free and
+// the Homebrew/Instant Client sqlplus 23.3, and the one the constants above
+// were named for.
+var oerFixed32Layout = oerFixedLayout{
+	callStatus: oerFixedCallStatusOffset,
+	ecid:       oerFixedECIDOffset,
+	errNum:     oerFixedErrNumOffset,
+	cursorID:   oerFixedCursorIDOffset,
+	callNumber: oerFixedCallNumberOffset,
+	retCode:    oerFixedRetCodeOffset,
+	prefixLen:  oerFixedWidthPrefixLen,
+}
+
+// oerFixed64Layout is the same object at 64-bit widths, read off two real
+// ORA-01403 summaries Oracle 23ai Free sent the client bundled in
+// gvenzl/oracle-free:23-slim during one session (testdata/oci_bundled_oer.hex).
+// Every offset below is corroborated by both: the call status is 1, the error
+// number 1403 at offset 12 and again as the RetCode at 132, the cursor id 2,
+// and the call number is the sequence of the client call each one answers (7
+// and 12). Measured, not derived — exactly like oerFixedCallNumberOffset.
+var oerFixed64Layout = oerFixedLayout{
+	callStatus:    1,
+	ecid:          5,
+	errNum:        12,
+	cursorID:      18,
+	callNumber:    49,
+	retCode:       132,
+	prefixLen:     136,
+	rowCountWidth: 8,
+}
+
+// layoutFor picks the fixed-width layout a shape asks for.
+func (o oerShape) layoutFor() oerFixedLayout {
+	if o.fixedWidth64 {
+		return oerFixed64Layout
+	}
+
+	return oerFixed32Layout
+}
+
 // oerRowIDFields is the field count of the rowid the summary carries: rba,
 // partition id, table id, block number, slot number.
 const oerRowIDFields = 5
@@ -424,6 +504,7 @@ func learnOERShape(shape *oerShape, payload []byte) bool {
 
 	shape.extraTailFields = learned.extraFields
 	shape.fixedWidth = learned.fixedWidth
+	shape.fixedWidth64 = learned.fixedWidth64
 	shape.endOfResponse = learned.endOfResponse
 	shape.tailLearned = true
 
@@ -435,6 +516,7 @@ func learnOERShape(shape *oerShape, payload []byte) bool {
 type oerTail struct {
 	extraFields   int
 	fixedWidth    bool
+	fixedWidth64  bool
 	endOfResponse bool
 }
 
@@ -443,32 +525,53 @@ type oerTail struct {
 // check plus the same invariant the compressed walk leans on: the trailing
 // RetCode repeats the leading error number.
 func oerFixedWidthTailFieldsAt(payload []byte, offset int) (oerTail, bool) {
+	// Widest first. The 64-bit layout's own error number sits where the 32-bit
+	// one has zeroes, so a 64-bit block can never satisfy the 32-bit
+	// invariant — but trying the wider one first keeps that independent of how
+	// the zero runs happen to fall.
+	if tail, ok := oerFixedWidthTailFieldsAtLayout(payload, offset, oerFixed64Layout); ok {
+		tail.fixedWidth64 = true
+
+		return tail, true
+	}
+
+	return oerFixedWidthTailFieldsAtLayout(payload, offset, oerFixed32Layout)
+}
+
+// oerFixedWidthTailFieldsAtLayout is oerFixedWidthTailFieldsAt for one
+// candidate layout. Both are validated by the same invariant, which is what
+// makes trying two of them safe rather than a coin toss: the trailing RetCode
+// has to repeat the leading error number *at that layout's offsets*, and the
+// message has to end exactly where the tail-field walk says it does.
+func oerFixedWidthTailFieldsAtLayout(payload []byte, offset int, layout oerFixedLayout) (oerTail, bool) {
 	if offset >= len(payload) || payload[offset] != byte(TTCFuncOERR) {
 		return oerTail{}, false
 	}
 
 	block := payload[offset:]
-	if len(block) < oerFixedWidthPrefixLen+1 {
+	if len(block) < layout.prefixLen+1 {
 		return oerTail{}, false
 	}
 
-	errCode := int(binary.LittleEndian.Uint16(block[oerFixedErrNumOffset:]))
-	if int(binary.LittleEndian.Uint32(block[oerFixedRetCodeOffset:])) != errCode {
+	errCode := int(binary.LittleEndian.Uint16(block[layout.errNum:]))
+	if int(binary.LittleEndian.Uint32(block[layout.retCode:])) != errCode {
 		return oerTail{}, false
 	}
 
 	// A run of zeroes passes the invariant trivially, so require a call status
 	// too — every OCI OER measured carries a non-zero one.
-	if binary.LittleEndian.Uint32(block[oerFixedCallStatusOffset:]) == 0 {
+	if binary.LittleEndian.Uint32(block[layout.callStatus:]) == 0 {
 		return oerTail{}, false
 	}
 
-	_, n := readCompressedInt(block[oerFixedWidthPrefixLen:])
+	n := layout.rowCountWidth
 	if n == 0 {
-		return oerTail{}, false
+		if _, n = readCompressedInt(block[layout.prefixLen:]); n == 0 {
+			return oerTail{}, false
+		}
 	}
 
-	pos := offset + oerFixedWidthPrefixLen + n
+	pos := offset + layout.prefixLen + n
 
 	for extra := 0; extra <= oerMaxExtraTailFields; extra++ {
 		if pos > len(payload) {

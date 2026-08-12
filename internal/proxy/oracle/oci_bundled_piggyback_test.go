@@ -1,6 +1,8 @@
 package oracle
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"log/slog"
 	"os"
@@ -146,6 +148,78 @@ func TestBundledOCICloseCursorsWalkFindsTheStapledCall(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, byte(0x0e), call,
 		"the refusal must end the call stapled behind the close list, not the piggyback")
+}
+
+// TestBundledOCIOERIsLearnedAsTheWideSixtyFourBitShape is the third layer, and
+// the one that finally let the refusal through: naming the right call is no use
+// if the frame carrying it is marshaled at the wrong widths.
+//
+// The two recorded summaries are what Oracle 23ai Free sends *this* client, on
+// the leg that negotiated with this client's own forwarded capabilities, so
+// they are the definition of what it can parse. The learner has to recognize
+// them — before this it recognized neither, left the session on the unlearned
+// default, and dbbat answered a 64-bit client with a 32-bit frame.
+func TestBundledOCIOERIsLearnedAsTheWideSixtyFourBitShape(t *testing.T) {
+	t.Parallel()
+
+	for i, payload := range recordedFrames(t, "testdata/oci_bundled_oer.hex") {
+		shape := defaultOERShape()
+
+		require.Truef(t, learnOERShape(&shape, extractTTCPayload(payload)),
+			"summary %d taught nothing", i)
+
+		assert.True(t, shape.fixedWidth, "summary %d is a fixed-width OCI shape", i)
+		assert.True(t, shape.fixedWidth64, "summary %d is the 64-bit one", i)
+		assert.Equal(t, 2, shape.extraTailFields, "summary %d", i)
+		assert.True(t, shape.endOfResponse, "summary %d ends with the 0x1d marker", i)
+	}
+}
+
+// TestBundledOCIRefusalMatchesTheServersOwnFrame is the encoder half: dbbat's
+// synthesized refusal has to put its fields where the server puts them, or the
+// client reads past every one of them.
+//
+// The recorded summary is the reference. Same layout, same total length up to
+// the message, and the message itself where the server's CLR starts.
+func TestBundledOCIRefusalMatchesTheServersOwnFrame(t *testing.T) {
+	t.Parallel()
+
+	reference := extractTTCPayload(recordedFrames(t, "testdata/oci_bundled_oer.hex")[0])
+
+	shape := defaultOERShape()
+	require.True(t, learnOERShape(&shape, reference))
+
+	body := encodeOER(shape, oerSummary{
+		CallStatus:   1,
+		SeqNumber:    5,
+		ErrorCode:    1031,
+		ErrorMessage: "ORA-01031: insufficient privileges",
+		CursorID:     2,
+		CallNumber:   7,
+	})
+
+	// Every field the client reads, at the offsets the server used.
+	assert.Equal(t, byte(TTCFuncOERR), body[0])
+	assert.Equal(t, uint16(1031), binary.LittleEndian.Uint16(body[oerFixed64Layout.errNum:]))
+	assert.Equal(t, uint16(2), binary.LittleEndian.Uint16(body[oerFixed64Layout.cursorID:]))
+	assert.Equal(t, uint32(7), binary.LittleEndian.Uint32(body[oerFixed64Layout.callNumber:]))
+	assert.Equal(t, uint32(1031), binary.LittleEndian.Uint32(body[oerFixed64Layout.retCode:]))
+	assert.Equal(t, uint16(5), binary.LittleEndian.Uint16(body[oerFixed64Layout.ecid:]))
+
+	// And the message starts where the server's does — 152 in the recording,
+	// which is what pins the row count's width and the tail-field count
+	// together rather than one at a time.
+	clrStart := bytes.Index(reference, []byte("ORA-")) - 1
+	require.Positive(t, clrStart)
+	assert.Equal(t, clrStart, bytes.Index(body, []byte("ORA-"))-1,
+		"the refusal's message must begin where the server's does")
+
+	// The frame dbbat writes must be readable back as the same shape it was
+	// built for: a round trip is what catches a layout that only looks right.
+	back := defaultOERShape()
+	require.True(t, learnOERShape(&back, append(body, ttcEndOfResponse)))
+	assert.True(t, back.fixedWidth64)
+	assert.Equal(t, shape.extraTailFields, back.extraTailFields)
 }
 
 // TestObserveClientCallNumberKeepsTheLastNamedCall pins the second-order half:
