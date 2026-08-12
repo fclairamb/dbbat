@@ -45,6 +45,12 @@ type CreateDatabaseRequest struct {
 	K8sCACert                string `json:"k8s_ca_cert"`
 	K8sNamespace             string `json:"k8s_namespace"`
 	K8sInsecureSkipTLSVerify bool   `json:"k8s_insecure_skip_tls_verify"`
+	// AccessApproverUserGroupUIDs / QueryApproverUserGroupUIDs name the user
+	// groups allowed to decide grant *requests* for this server and to release
+	// approval *holds* on statements against it. Omitted or empty falls back to
+	// the server groups this server belongs to, and then to admins.
+	AccessApproverUserGroupUIDs []uuid.UUID `json:"access_approver_user_group_uids"`
+	QueryApproverUserGroupUIDs  []uuid.UUID `json:"query_approver_user_group_uids"`
 	// TestConnection asks the API to validate the row by actually dialing it
 	// once created. Opt-in, and never fatal: the outcome comes back as a
 	// connection_test object alongside the created server.
@@ -82,6 +88,13 @@ type UpdateDatabaseRequest struct {
 	// non-empty k8s_ca_cert clears it too, since a supplied bundle supersedes
 	// anything learned.
 	K8sResetLearnedCACert bool `json:"k8s_reset_learned_ca_cert"`
+	// AccessApproverUserGroupUIDs / QueryApproverUserGroupUIDs replace the
+	// server's approver lists wholesale. Omitted (null) leaves them alone; an
+	// explicit `[]` clears them, handing the decision back to the server groups
+	// and then to admins. Effective immediately, for grant requests already
+	// filed and statements already parked — see docs/approvals.md.
+	AccessApproverUserGroupUIDs *[]uuid.UUID `json:"access_approver_user_group_uids"`
+	QueryApproverUserGroupUIDs  *[]uuid.UUID `json:"query_approver_user_group_uids"`
 	// TestConnection asks the API to validate the row by actually dialing it
 	// once updated. Opt-in, and never fatal.
 	TestConnection bool `json:"test_connection"`
@@ -116,6 +129,11 @@ type DatabaseResponse struct {
 	K8sLearnedCACert         string `json:"k8s_learned_ca_cert,omitempty"`
 	K8sNamespace             string `json:"k8s_namespace,omitempty"`
 	K8sInsecureSkipTLSVerify bool   `json:"k8s_insecure_skip_tls_verify,omitempty"`
+	// The two approver lists. Always rendered, empty included: an empty list is
+	// a meaningful state (fall back to the server groups, then to admins), so
+	// omitting it would make "cleared" indistinguishable from "unknown".
+	AccessApproverUserGroupUIDs []uuid.UUID `json:"access_approver_user_group_uids"`
+	QueryApproverUserGroupUIDs  []uuid.UUID `json:"query_approver_user_group_uids"`
 	// ConnectionTest is present only when the request set test_connection.
 	ConnectionTest *ConnectionTestResponse `json:"connection_test,omitempty"`
 }
@@ -151,6 +169,12 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 	if !isSupportedProtocol(req.Protocol) {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError,
 			"protocol must be one of: postgresql, oracle, mysql, mariadb, mongodb, mssql, ssh, kubernetes")
+		return
+	}
+
+	if msg := s.validateApproverUserGroups(c.Request.Context(),
+		req.AccessApproverUserGroupUIDs, req.QueryApproverUserGroupUIDs); msg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
 		return
 	}
 
@@ -209,20 +233,22 @@ func (s *Server) handleCreateDatabase(c *gin.Context) {
 	}
 
 	db := &store.Server{
-		Name:              req.Name,
-		Description:       req.Description,
-		Host:              req.Host,
-		Port:              req.Port,
-		DatabaseName:      req.DatabaseName,
-		Username:          req.Username,
-		Password:          req.Password,
-		SSLMode:           req.SSLMode,
-		Protocol:          req.Protocol,
-		OracleServiceName: oracleServiceName,
-		ViaUID:            req.ViaUID,
-		ProtocolData:      protocolData,
-		Listable:          listable,
-		CreatedBy:         &currentUser.UID,
+		Name:                        req.Name,
+		Description:                 req.Description,
+		Host:                        req.Host,
+		Port:                        req.Port,
+		DatabaseName:                req.DatabaseName,
+		Username:                    req.Username,
+		Password:                    req.Password,
+		SSLMode:                     req.SSLMode,
+		Protocol:                    req.Protocol,
+		OracleServiceName:           oracleServiceName,
+		ViaUID:                      req.ViaUID,
+		ProtocolData:                protocolData,
+		Listable:                    listable,
+		AccessApproverUserGroupUIDs: normalizeUUIDs(req.AccessApproverUserGroupUIDs),
+		QueryApproverUserGroupUIDs:  normalizeUUIDs(req.QueryApproverUserGroupUIDs),
+		CreatedBy:                   &currentUser.UID,
 	}
 
 	result, err := s.store.CreateServer(c.Request.Context(), db, s.encryptionKey)
@@ -437,6 +463,12 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		return
 	}
 
+	if msg := s.validateApproverUserGroups(c.Request.Context(),
+		derefUUIDs(req.AccessApproverUserGroupUIDs), derefUUIDs(req.QueryApproverUserGroupUIDs)); msg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
+		return
+	}
+
 	updates := store.ServerUpdate{
 		Description:       req.Description,
 		Host:              req.Host,
@@ -458,6 +490,9 @@ func (s *Server) handleUpdateDatabase(c *gin.Context) {
 		K8sNamespace:             req.K8sNamespace,
 		K8sInsecureSkipTLSVerify: req.K8sInsecureSkipTLSVerify,
 		K8sClearLearnedCACert:    req.K8sResetLearnedCACert,
+
+		AccessApproverUserGroupUIDs: req.AccessApproverUserGroupUIDs,
+		QueryApproverUserGroupUIDs:  req.QueryApproverUserGroupUIDs,
 	}
 
 	if err := s.store.UpdateServer(c.Request.Context(), uid, updates, s.encryptionKey); err != nil {
@@ -629,6 +664,9 @@ func toDatabaseResponse(db *store.Server) DatabaseResponse {
 		K8sLearnedCACert:         k8sLearnedCACert,
 		K8sNamespace:             k8sNamespace,
 		K8sInsecureSkipTLSVerify: k8sInsecure,
+
+		AccessApproverUserGroupUIDs: normalizeUUIDs(db.AccessApproverUserGroupUIDs),
+		QueryApproverUserGroupUIDs:  normalizeUUIDs(db.QueryApproverUserGroupUIDs),
 	}
 }
 
@@ -790,6 +828,12 @@ func redactUpdateForAudit(req UpdateDatabaseRequest) map[string]any {
 	addPtr("k8s_ca_cert", req.K8sCACert, req.K8sCACert != nil)
 	addPtr("k8s_namespace", req.K8sNamespace, req.K8sNamespace != nil)
 	addPtr("k8s_insecure_skip_tls_verify", req.K8sInsecureSkipTLSVerify, req.K8sInsecureSkipTLSVerify != nil)
+	// Approver lists are recorded in full, not as a "changed" marker: who may
+	// decide is the audit-relevant fact, and the value is not a secret.
+	addPtr("access_approver_user_group_uids", req.AccessApproverUserGroupUIDs,
+		req.AccessApproverUserGroupUIDs != nil)
+	addPtr("query_approver_user_group_uids", req.QueryApproverUserGroupUIDs,
+		req.QueryApproverUserGroupUIDs != nil)
 
 	if req.K8sResetLearnedCACert {
 		out["k8s_reset_learned_ca_cert"] = true

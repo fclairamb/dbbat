@@ -18,6 +18,16 @@ type CreateServerGroupRequest struct {
 	// MemberUIDs, when non-nil, replaces the group's membership. On create it
 	// seeds it; on update a nil value leaves membership untouched.
 	MemberUIDs []uuid.UUID `json:"member_uids"`
+	// AccessApproverUserGroupUIDs / QueryApproverUserGroupUIDs are the
+	// group-level fallback for the two approver kinds: they cover every member
+	// server that names no approvers of its own. Several groups holding the same
+	// server union. Empty means the group names nobody, which leaves the
+	// decision to admins.
+	//
+	// Unlike member_uids these are written on every update, empty included —
+	// clearing a list is a real policy change and has to be expressible.
+	AccessApproverUserGroupUIDs []uuid.UUID `json:"access_approver_user_group_uids"`
+	QueryApproverUserGroupUIDs  []uuid.UUID `json:"query_approver_user_group_uids"`
 }
 
 // UpdateServerGroupRequest is the body for PATCH /server-groups/:uid. Same
@@ -109,10 +119,19 @@ func (s *Server) handleCreateServerGroup(c *gin.Context) {
 	currentUser := getCurrentUser(c)
 	ctx := c.Request.Context()
 
+	if msg := s.validateApproverUserGroups(ctx,
+		req.AccessApproverUserGroupUIDs, req.QueryApproverUserGroupUIDs); msg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
+
+		return
+	}
+
 	created, err := s.store.CreateServerGroup(ctx, &store.ServerGroup{
-		Name:        req.Name,
-		Description: req.Description,
-		CreatedBy:   &currentUser.UID,
+		Name:                        req.Name,
+		Description:                 req.Description,
+		AccessApproverUserGroupUIDs: normalizeUUIDs(req.AccessApproverUserGroupUIDs),
+		QueryApproverUserGroupUIDs:  normalizeUUIDs(req.QueryApproverUserGroupUIDs),
+		CreatedBy:                   &currentUser.UID,
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrServerGroupDuplicate) {
@@ -135,9 +154,11 @@ func (s *Server) handleCreateServerGroup(c *gin.Context) {
 	}
 
 	details, _ := json.Marshal(map[string]any{
-		"server_group_uid": created.UID,
-		"name":             created.Name,
-		"member_uids":      req.MemberUIDs,
+		"server_group_uid":                created.UID,
+		"name":                            created.Name,
+		"member_uids":                     req.MemberUIDs,
+		"access_approver_user_group_uids": created.AccessApproverUserGroupUIDs,
+		"query_approver_user_group_uids":  created.QueryApproverUserGroupUIDs,
 	})
 
 	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{
@@ -264,8 +285,20 @@ func (s *Server) handleUpdateServerGroup(c *gin.Context) {
 		return
 	}
 
+	if msg := s.validateApproverUserGroups(ctx,
+		req.AccessApproverUserGroupUIDs, req.QueryApproverUserGroupUIDs); msg != "" {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, msg)
+
+		return
+	}
+
 	group.Name = req.Name
 	group.Description = req.Description
+	// Live, like membership: this immediately changes who may decide grant
+	// requests and holds for every member server that names no approvers of its
+	// own — including requests already filed and statements already parked.
+	group.AccessApproverUserGroupUIDs = normalizeUUIDs(req.AccessApproverUserGroupUIDs)
+	group.QueryApproverUserGroupUIDs = normalizeUUIDs(req.QueryApproverUserGroupUIDs)
 
 	if err := s.store.UpdateServerGroup(ctx, group); err != nil {
 		if errors.Is(err, store.ErrServerGroupDuplicate) {
@@ -292,9 +325,11 @@ func (s *Server) handleUpdateServerGroup(c *gin.Context) {
 	currentUser := getCurrentUser(c)
 
 	details, _ := json.Marshal(map[string]any{
-		"server_group_uid": group.UID,
-		"name":             group.Name,
-		"member_uids":      req.MemberUIDs,
+		"server_group_uid":                group.UID,
+		"name":                            group.Name,
+		"member_uids":                     req.MemberUIDs,
+		"access_approver_user_group_uids": group.AccessApproverUserGroupUIDs,
+		"query_approver_user_group_uids":  group.QueryApproverUserGroupUIDs,
 	})
 
 	_ = s.store.LogAuditEvent(ctx, &store.AuditEvent{

@@ -542,16 +542,27 @@ func (s *Server) mayReadTopic(ctx context.Context, user *store.User, topic strin
 }
 
 // isApproverSomewhere reports whether the user belongs to any group named as
-// an approver group on a live grant. Cheap enough for a subscribe check and
-// for the per-send re-check: it is one membership lookup plus one indexed
-// grant scan, and it only runs for the low-volume approvals topic.
+// an approver group anywhere: on a live grant's definition, or — since approver
+// lists moved onto the fleet — on a server or a server group, of either kind.
+// Cheap enough for a subscribe check and for the per-send re-check: one
+// membership lookup plus indexed overlap probes, and it only runs for the
+// low-volume approvals topic.
+//
+// Both approver kinds count. This gate is deliberately coarse — it decides
+// whether the pending-work surfaces (the approvals topic, the pending badge)
+// are visible at all, while what the user actually sees is filtered per event
+// by mayViewQuery/mayApproveQuery.
 func (s *Server) isApproverSomewhere(ctx context.Context, user *store.User) bool {
 	groups, err := s.store.ListUserGroupUIDs(ctx, user.UID)
 	if err != nil || len(groups) == 0 {
 		return false
 	}
 
-	ok, err := s.store.HasApproverGroups(ctx, groups)
+	if ok, err := s.store.HasApproverGroups(ctx, groups); err == nil && ok {
+		return true
+	}
+
+	ok, err := s.store.HasServerApproverGroups(ctx, groups)
 	if err != nil {
 		return false
 	}

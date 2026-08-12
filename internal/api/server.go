@@ -430,14 +430,17 @@ func (s *Server) setupRouter() *gin.Engine {
 			grantDefs.DELETE("/:uid", s.requireAdmin(), s.handleDeactivateGrantDefinition)
 
 			// Grant request endpoints — user self-service workflow.
-			// Approve/deny require admin; cancel is open to the requester
+			// Approve/deny are authorized in the handler, not by middleware:
+			// an admin decides anything, and an access approver resolved off
+			// the target server (or its server groups) decides that server's
+			// requests — never their own. Cancel is open to the requester
 			// (handler enforces ownership).
 			grantReqs := authenticated.Group("/grant-requests")
 			grantReqs.POST("", s.handleCreateGrantRequest)
 			grantReqs.GET("", s.handleListGrantRequests)
 			grantReqs.GET("/:uid", s.handleGetGrantRequest)
-			grantReqs.POST("/:uid/approve", s.requireAdmin(), s.handleApproveGrantRequest)
-			grantReqs.POST("/:uid/deny", s.requireAdmin(), s.handleDenyGrantRequest)
+			grantReqs.POST("/:uid/approve", s.handleApproveGrantRequest)
+			grantReqs.POST("/:uid/deny", s.handleDenyGrantRequest)
 			grantReqs.POST("/:uid/cancel", s.handleCancelGrantRequest)
 
 			// API Key endpoints
