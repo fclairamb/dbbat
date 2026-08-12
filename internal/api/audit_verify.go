@@ -223,12 +223,10 @@ type queryChainVerifyResponse struct {
 	// That is what DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived
 	// session, so it is reported rather than treated as tampering.
 	ChainsWithTruncatedPrefix int64 `json:"chains_with_truncated_prefix"`
-	// There is deliberately no legacy-stamp counter. Since 0.24 a session still
-	// carrying the pre-0.24 unkeyed head stamp is a break, so the counter could
-	// only ever report 0 here: the opt-in that tolerates and counts those
-	// sessions (`--allow-legacy-stamps`) is offered by the offline CLI only,
-	// where a monitoring job's exit code lives. This endpoint is served by the
-	// process under audit and answers one question — does it verify.
+	// There is deliberately no unkeyed-stamp counter. A session carrying the
+	// unkeyed head stamp is a break, everywhere and with no opt-out, so there is
+	// nothing tolerated to count. This endpoint is served by the process under
+	// audit and answers one question — does it verify.
 	//
 	// HeadSeq and HeadMAC are only meaningful for a single chain, so they are
 	// reported for a scoped walk and omitted for a sweep.
@@ -244,8 +242,9 @@ type queryChainVerifyResponse struct {
 // additionally reports that chain's head).
 //
 // A capture's stamp has always been a keyed MAC over (query, length, head),
-// never a verbatim copy of the head the way the *connection* stamp was before
-// 0.24 — so there is no unkeyed-stamp population here to report on at all.
+// never a verbatim copy of the head the way an early revision of the
+// *connection* stamp was — so there is no unkeyed-stamp population here to
+// report on at all.
 type rowChainVerifyResponse struct {
 	Chain    string `json:"chain"`
 	Verified bool   `json:"verified"`

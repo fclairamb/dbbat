@@ -328,23 +328,22 @@ func (s *Store) rowChainStampMAC(queryUID uuid.UUID, count int64, headMAC []byte
 
 // Stamp formats for connections.query_chain_mac.
 //
-// 0.23.x wrote the head MAC verbatim, which defends against nothing: the head
-// is readable out of `queries`, so an attacker who deleted the tail of a
-// session could copy the new last statement's MAC over the stamp and get a
-// clean `dbbat audit verify --queries`, with no key. Version 1 is a keyed
-// stamp, so correcting it after a deletion needs what an attacker does not
-// have.
+// An early revision of this feature wrote the head MAC verbatim, which defends
+// against nothing: the head is readable out of `queries`, so an attacker who
+// deleted the tail of a session could copy the new last statement's MAC over
+// the stamp and get a clean `dbbat audit verify --queries`, with no key.
+// Version 1 is a keyed stamp, so correcting it after a deletion needs what an
+// attacker does not have.
 //
-// Version 0 rows still exist — the chain key lives only in this process, so no
-// migration can re-seal what is already stored — but since 0.24 they are a
-// break, not a weaker pass. Accepting them was a standing downgrade path: the
-// stamp is readable out of `queries`, so replacing a sealed row with a raw head
-// MAC and version `0` needed no key at all. `--allow-legacy-stamps`
-// (store.AllowLegacyStamps) restores the counting behavior for the one upgrade
-// that has such rows, and goes away in 0.25.
+// Only a store written by a pre-0.24 development build can hold a version-0 row
+// — the chain, the stamp and this version column all ship together in 0.24 —
+// and such a row is a **break**, not a weaker pass. Nothing can re-seal one
+// (the chain key lives only in this process), and there is no opt-out:
+// accepting version 0 would be a standing downgrade path, since replacing a
+// sealed row with a raw head MAC and version `0` needs no key at all.
 const (
-	// queryChainStampLegacy is the pre-0.24 verbatim head copy. Unkeyed, and
-	// forgeable by anyone who can write to the store.
+	// queryChainStampLegacy is the unkeyed verbatim head copy. Forgeable by
+	// anyone who can write to the store.
 	queryChainStampLegacy int16 = 0
 
 	// queryChainStampKeyed is the keyed stamp, and the version every writer
