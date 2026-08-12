@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -23,6 +24,64 @@ func TestCreateDeviceAuthRequest(t *testing.T) {
 	assert.Equal(t, "ABCD1234", req.UserCode)
 	assert.Equal(t, DeviceAuthStatusPending, req.Status)
 	assert.False(t, req.ExpiresAt.IsZero())
+}
+
+// TestDeviceAuthTTLIsNotLengthenedByAStoreClockThatLags pins the clock a device
+// authorization's expiry is stamped from. Every reader of the row filters
+// `expires_at > NOW()`, evaluated by PostgreSQL against *its* clock, so an
+// expiry stamped from time.Now() makes the real lifetime `DeviceAuthTTL + skew`
+// whenever the process runs ahead of its store — the security-relevant
+// direction: a pending authorization (and the API key it can mint) stays
+// redeemable past the ten minutes RFC 8628 told the client it had.
+//
+// Thirty seconds of lag is an absurd skew for a machine and a tiny one for a
+// test: it fails deterministically against a process-stamped expiry and is
+// invisible to a database-stamped one.
+func TestDeviceAuthTTLIsNotLengthenedByAStoreClockThatLags(t *testing.T) {
+	t.Parallel()
+
+	const skew = 30 * time.Second
+
+	store := setupTestStoreWithClockSkew(t, -skew)
+	ctx := context.Background()
+
+	req, err := store.CreateDeviceAuthRequest(ctx, "cli", "device-"+uuid.NewString(), "SKEW1234")
+	require.NoError(t, err)
+
+	// Measured against the store's clock, which is the only one that decides
+	// when the row stops being readable.
+	now, err := dbNow(ctx, store.db)
+	require.NoError(t, err)
+
+	life := req.ExpiresAt.Sub(now)
+	assert.InDelta(t, DeviceAuthTTL.Seconds(), life.Seconds(), 5,
+		"device authorization lifetime, on the clock that expires it")
+	assert.Less(t, life, DeviceAuthTTL+skew,
+		"a process-stamped expiry would have granted the extra skew")
+}
+
+// TestLoginExchangeSurvivesAStoreClockThatRunsAhead is the mirror direction:
+// a store *ahead* of the process shortens a process-stamped TTL, and the login
+// exchange's window is two minutes, so a skew larger than that used to produce
+// a code that was already expired when it was written — a login that can never
+// complete.
+func TestLoginExchangeSurvivesAStoreClockThatRunsAhead(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStoreWithClockSkew(t, LoginExchangeTTL+time.Minute)
+	ctx := context.Background()
+
+	exchangeUID := uuid.New()
+	code := "exchange-" + uuid.NewString()
+	userID := uuid.New()
+
+	require.NoError(t, store.CreateLoginExchange(ctx, exchangeUID, code, userID, []byte("ciphertext")))
+
+	gotUID, gotUser, encrypted, err := store.ConsumeLoginExchange(ctx, code)
+	require.NoError(t, err, "the code must still be live: it was just created")
+	assert.Equal(t, exchangeUID, gotUID)
+	assert.Equal(t, userID, gotUser)
+	assert.Equal(t, []byte("ciphertext"), encrypted)
 }
 
 func TestCreateDeviceAuthRequest_UserCodeCollision(t *testing.T) {

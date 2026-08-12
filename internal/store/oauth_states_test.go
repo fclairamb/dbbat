@@ -27,10 +27,9 @@ func TestCreateOAuthState(t *testing.T) {
 			Provider:    IdentityTypeSlack,
 			RedirectURL: "https://example.com/callback",
 			Metadata:    json.RawMessage(`{"team_id":"T123"}`),
-			ExpiresAt:   time.Now().Add(10 * time.Minute),
 		}
 
-		created, err := store.CreateOAuthState(ctx, state)
+		created, err := store.CreateOAuthState(ctx, state, 10*time.Minute)
 		require.NoError(t, err)
 		assert.NotEqual(t, uuid.Nil, created.UID)
 		assert.Equal(t, stateToken, created.State)
@@ -52,9 +51,8 @@ func TestConsumeOAuthState(t *testing.T) {
 			State:       "consume-valid-" + uuid.NewString(),
 			Provider:    IdentityTypeSlack,
 			RedirectURL: "https://example.com/callback",
-			ExpiresAt:   time.Now().Add(10 * time.Minute),
 		}
-		_, err := store.CreateOAuthState(ctx, state)
+		_, err := store.CreateOAuthState(ctx, state, 10*time.Minute)
 		require.NoError(t, err)
 
 		consumed, err := store.ConsumeOAuthState(ctx, state.State)
@@ -71,11 +69,11 @@ func TestConsumeOAuthState(t *testing.T) {
 		t.Parallel()
 
 		state := &OAuthState{
-			State:     "consume-expired-" + uuid.NewString(),
-			Provider:  IdentityTypeSlack,
-			ExpiresAt: time.Now().Add(-1 * time.Minute), // Already expired
+			State:    "consume-expired-" + uuid.NewString(),
+			Provider: IdentityTypeSlack,
 		}
-		_, err := store.CreateOAuthState(ctx, state)
+		// Negative TTL: born expired, on the database's clock.
+		_, err := store.CreateOAuthState(ctx, state, -1*time.Minute)
 		require.NoError(t, err)
 
 		_, err = store.ConsumeOAuthState(ctx, state.State)
@@ -99,20 +97,18 @@ func TestCleanupExpiredOAuthStates(t *testing.T) {
 	// Create some expired states
 	for i := 0; i < 3; i++ {
 		_, err := store.CreateOAuthState(ctx, &OAuthState{
-			State:     "expired-" + uuid.NewString(),
-			Provider:  IdentityTypeSlack,
-			ExpiresAt: time.Now().Add(-1 * time.Hour),
-		})
+			State:    "expired-" + uuid.NewString(),
+			Provider: IdentityTypeSlack,
+		}, -1*time.Hour)
 		require.NoError(t, err)
 	}
 
 	// Create a valid state
 	validState := &OAuthState{
-		State:     "valid-" + uuid.NewString(),
-		Provider:  IdentityTypeSlack,
-		ExpiresAt: time.Now().Add(1 * time.Hour),
+		State:    "valid-" + uuid.NewString(),
+		Provider: IdentityTypeSlack,
 	}
-	_, err := store.CreateOAuthState(ctx, validState)
+	_, err := store.CreateOAuthState(ctx, validState, 1*time.Hour)
 	require.NoError(t, err)
 
 	// Cleanup

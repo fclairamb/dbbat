@@ -194,10 +194,11 @@ func (s *Server) handleOAuthAuthorize(providerName string) gin.HandlerFunc {
 			Provider:    providerName,
 			RedirectURL: sanitizeLoginRedirect(c.Query("redirect")),
 			Metadata:    metadata,
-			ExpiresAt:   time.Now().Add(oauthStateTTL),
 		}
 
-		if _, err := s.store.CreateOAuthState(c.Request.Context(), oauthState); err != nil {
+		// The TTL is applied by the store from the database clock — the same one
+		// the callback's `expires_at > NOW()` check reads.
+		if _, err := s.store.CreateOAuthState(c.Request.Context(), oauthState, oauthStateTTL); err != nil {
 			writeInternalError(c, s.logger, err, "failed to persist OAuth state")
 			return
 		}
