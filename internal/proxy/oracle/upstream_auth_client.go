@@ -277,7 +277,8 @@ func (s *session) sendUpstreamAuthPhase1(username string, identity driverIdentit
 		return synthetic()
 	}
 
-	rewritten = replaceAuthKVValue(rewritten, authKeyProgramNM, identity.ProgramName, payloadUsesWideKVEncoding(clientBody))
+	rewritten = replaceAuthKVValue(rewritten, authKeyProgramNM, identity.ProgramName,
+		payloadUsesWideKVEncoding(clientBody), s.clientBigClrChunks)
 
 	s.logger.DebugContext(s.ctx, "upstream AUTH: forwarding rewritten client Phase 1",
 		slog.Int("original_body_len", len(clientBody)),
@@ -345,7 +346,8 @@ func (s *session) sendUpstreamAuthPhase2(username string, identity driverIdentit
 		return synthetic()
 	}
 
-	rewritten = replaceAuthKVValue(rewritten, authKeyProgramNM, identity.ProgramName, payloadUsesWideKVEncoding(clientBody))
+	rewritten = replaceAuthKVValue(rewritten, authKeyProgramNM, identity.ProgramName,
+		payloadUsesWideKVEncoding(clientBody), s.clientBigClrChunks)
 
 	s.logger.DebugContext(s.ctx, "upstream AUTH: forwarding rewritten client Phase 2",
 		slog.Int("original_body_len", len(clientBody)),

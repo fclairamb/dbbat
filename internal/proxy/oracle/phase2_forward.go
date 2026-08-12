@@ -15,7 +15,14 @@ import (
 // without relying on the preamble layout (which varies by client). wide selects
 // the OCI fixed 4-byte little-endian length/flag encoding instead of the
 // compressed form thin clients use.
-func replaceAuthKVValue(body []byte, key, newValue string, wide bool) []byte {
+//
+// bigChunks selects the CLR long form on the thin path — both for reading the
+// value being replaced and for writing the new one — so a value over the
+// 252-byte short-form limit is framed the way the session negotiated. It is a
+// no-op for every value dbbat substitutes today (all short), and does not apply
+// to the wide/OCI path, which negotiates single-byte chunks (see
+// readAuthKVPairWide).
+func replaceAuthKVValue(body []byte, key, newValue string, wide, bigChunks bool) []byte {
 	if wide {
 		return replaceAuthKVValueWide(body, key, newValue)
 	}
@@ -46,7 +53,7 @@ func replaceAuthKVValue(body []byte, key, newValue string, wide bool) []byte {
 
 	valPos := pos + n
 
-	_, clrN := readCLR(body[valPos:])
+	_, clrN := readCLRVariant(body[valPos:], bigChunks)
 	if clrN == 0 {
 		return body
 	}
@@ -62,7 +69,7 @@ func replaceAuthKVValue(body []byte, key, newValue string, wide bool) []byte {
 
 	out := make([]byte, 0, kvStart+len(body)-end+len(newValue)+8)
 	out = append(out, body[:kvStart]...)
-	out = append(out, ttcKeyVal(key, newValue, flagVal)...)
+	out = append(out, ttcKeyValChunked(key, newValue, flagVal, bigChunks)...)
 	out = append(out, body[end:]...)
 
 	return out
@@ -137,7 +144,10 @@ func replaceAuthKVValueWide(body []byte, key, newValue string) []byte {
 // AUTH_PBKDF2_SPEEDY_KEY values by key search. Handles client Phase 2 framings
 // the fixed-offset parser misreads (notably python-oracledb thin's 18453 login,
 // whose preamble has an extra byte so hasUsername is read from the wrong offset).
-func rewriteAuthPhase2Anchored(body []byte, newUsername string, sec *upstreamAuthSecrets) ([]byte, bool) {
+//
+// bigChunks is the session's negotiated CLR long form, forwarded to every
+// splice so the values it rewrites are read and re-encoded in that form.
+func rewriteAuthPhase2Anchored(body []byte, newUsername string, sec *upstreamAuthSecrets, bigChunks bool) ([]byte, bool) {
 	out, ok := rewriteAuthPhase1UsernameAnchored(body, newUsername)
 	if !ok {
 		return nil, false
@@ -145,11 +155,11 @@ func rewriteAuthPhase2Anchored(body []byte, newUsername string, sec *upstreamAut
 
 	wide := payloadUsesWideKVEncoding(body)
 
-	out = replaceAuthKVValue(out, authKeySessKey, sec.encClientSessKey, wide)
-	out = replaceAuthKVValue(out, authKeyPassword, sec.encPassword, wide)
+	out = replaceAuthKVValue(out, authKeySessKey, sec.encClientSessKey, wide, bigChunks)
+	out = replaceAuthKVValue(out, authKeyPassword, sec.encPassword, wide, bigChunks)
 
 	if sec.eSpeedyKey != "" {
-		out = replaceAuthKVValue(out, pbkdf2SpeedyKeyLabel, sec.eSpeedyKey, wide)
+		out = replaceAuthKVValue(out, pbkdf2SpeedyKeyLabel, sec.eSpeedyKey, wide, bigChunks)
 	}
 
 	return out, true
@@ -193,11 +203,13 @@ func rewriteAuthPhase2Anchored(body []byte, newUsername string, sec *upstreamAut
 // The rewritten body is returned as a fresh slice; the input is not mutated.
 func rewriteAuthPhase2(body []byte, newUsername string, sec *upstreamAuthSecrets, bigChunks bool) ([]byte, error) {
 	// Preferred: anchor on the AUTH_* keys (handles all client preambles,
-	// including python-oracledb thin's 18453 login). The anchored path splices
-	// only the short AUTH_SESSKEY / AUTH_PASSWORD / speedy-key values and never
-	// decodes long values, so it is unaffected by big-CLR-chunk encoding. Fall
-	// back to the full KV walk only if the anchor can't locate the username.
-	if out, ok := rewriteAuthPhase2Anchored(body, newUsername, sec); ok {
+	// including python-oracledb thin's 18453 login). The anchored path never
+	// decodes the long values it walks past, and the ones it does splice are all
+	// short today — but it takes bigChunks all the same, so a value that grows
+	// past the short-form limit is read and re-encoded in the negotiated form
+	// rather than silently desyncing. Fall back to the full KV walk only if the
+	// anchor can't locate the username.
+	if out, ok := rewriteAuthPhase2Anchored(body, newUsername, sec, bigChunks); ok {
 		return out, nil
 	}
 
@@ -386,7 +398,7 @@ func rewritePhase2KVPairs(buf []byte, pairCount int, sec *upstreamAuthSecrets, b
 
 		newValue, replaced := upstreamPhase2Value(string(pair.Key), sec)
 		if replaced {
-			out = append(out, ttcKeyVal(string(pair.Key), newValue, pair.Flag)...)
+			out = append(out, ttcKeyValChunked(string(pair.Key), newValue, pair.Flag, bigChunks)...)
 		} else {
 			out = append(out, buf[pos:pos+pair.Consumed]...)
 		}

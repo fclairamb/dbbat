@@ -465,17 +465,27 @@ func buildAuthFailed(oraCode int, message string) []byte {
 	return buf
 }
 
-// ttcKeyVal encodes a key-value pair using Oracle's TTC wire format.
+// ttcKeyVal encodes a key-value pair using Oracle's TTC wire format with
+// single-byte CLR chunk lengths.
 // Matches go-ora's PutKeyVal: PutUint(keyLen) + PutClr(key) + PutUint(valLen) + PutClr(val) + PutInt(flag).
 func ttcKeyVal(key, value string, flag int) []byte {
+	return ttcKeyValChunked(key, value, flag, false)
+}
+
+// ttcKeyValChunked is ttcKeyVal with the CLR long form selectable: when
+// bigChunks is set, a value over the 252-byte short-form limit is written with
+// compressed-int chunk lengths (see ttcClrVariant), which is what a peer that
+// negotiated UseBigClrChunks parses. Short values — every value dbbat
+// substitutes today — are byte-identical either way.
+func ttcKeyValChunked(key, value string, flag int, bigChunks bool) []byte {
 	buf := make([]byte, 0, len(key)+len(value)+20)
 	keyBytes := []byte(key)
 	valBytes := []byte(value)
 
 	buf = append(buf, ttcCompressedUint(uint64(len(keyBytes)))...)
-	buf = append(buf, ttcClr(keyBytes)...)
+	buf = append(buf, ttcClrVariant(keyBytes, bigChunks)...)
 	buf = append(buf, ttcCompressedUint(uint64(len(valBytes)))...)
-	buf = append(buf, ttcClr(valBytes)...)
+	buf = append(buf, ttcClrVariant(valBytes, bigChunks)...)
 	buf = append(buf, ttcCompressedUint(uint64(flag))...)
 
 	return buf

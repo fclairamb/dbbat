@@ -20,26 +20,6 @@ func encodeBigChunkCLR(data []byte) []byte {
 	return out
 }
 
-// encodeBigChunkCLRSplit is encodeBigChunkCLR with the value split across
-// several chunks, the way a client streams a long value out of a fixed buffer.
-// Each chunk length is a compressed int, which is the whole difference from
-// ttcClr's single-byte lengths.
-func encodeBigChunkCLRSplit(data []byte, chunkSize int) []byte {
-	out := make([]byte, 0, len(data)+16)
-	out = append(out, 0xFE)
-
-	for i := 0; i < len(data); i += chunkSize {
-		end := min(i+chunkSize, len(data))
-
-		out = append(out, ttcCompressedUint(uint64(end-i))...)
-		out = append(out, data[i:end]...)
-	}
-
-	out = append(out, 0x00)
-
-	return out
-}
-
 // bigChunkKeyVal encodes one TTC AUTH KV pair whose value uses the
 // UseBigClrChunks long form — what a client sends once the server advertises
 // ServerCompileTimeCaps[37]&0x20. Keys are always short, so they keep the
@@ -243,7 +223,7 @@ func TestRewriteAuthPhase2_FallbackBigChunkConnectString(t *testing.T) {
 	body = append(body, ttcKeyVal("AUTH_PASSWORD", "OLDPWD_HEX", 0)...)
 	body = append(body, ttcKeyVal("AUTH_ACL", "4400", 0)...)
 
-	_, anchored := rewriteAuthPhase2Anchored(body, "CONNECTOR", sec)
+	_, anchored := rewriteAuthPhase2Anchored(body, "CONNECTOR", sec, true)
 	require.False(t, anchored, "this body must exercise the KV-walk fallback, not the anchor")
 
 	out, err := rewriteAuthPhase2(body, "CONNECTOR", sec, true)
