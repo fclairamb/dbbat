@@ -8,8 +8,8 @@ import {
   useDeleteUser,
   useSsoRoleMapping,
   useLastRoleSyncs,
-  type AuditEvent,
   type User,
+  type UserRoleSync,
 } from "@/api";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { PageHeader } from "@/components/shared/PageHeader";
@@ -92,7 +92,8 @@ function UsersPage() {
     roleMapping?.enabled ? roleMapping.roles : [],
   );
 
-  // The audit list is admin-or-viewer; anyone else would just collect a 403.
+  // The role-syncs endpoint is admin-or-viewer, like the audit list it reads
+  // from; anyone else would just collect a 403.
   const { data: lastSyncs } = useLastRoleSyncs({
     enabled: canViewAudit(user?.roles),
   });
@@ -106,8 +107,10 @@ function UsersPage() {
     key: "last_synced",
     header: "SSO sync",
     cell: (u) => {
-      const event = lastSyncs?.get(u.uid);
-      if (!event) {
+      const sync = lastSyncs?.get(u.uid);
+      // Absent means never synced, full stop: the endpoint answers per user
+      // rather than from a window over the audit log.
+      if (!sync) {
         return <span className="text-muted-foreground">Never</span>;
       }
       return (
@@ -115,7 +118,7 @@ function UsersPage() {
           className="text-sm text-muted-foreground"
           data-testid={`last-sync-${u.username}`}
         >
-          {formatDistanceToNow(new Date(event.created_at), { addSuffix: true })}
+          {formatDistanceToNow(new Date(sync.created_at), { addSuffix: true })}
         </span>
       );
     },
@@ -469,7 +472,7 @@ function EditUserDialog({
   currentUserUid?: string;
   isLastAdmin: boolean;
   managedRoles: Set<string>;
-  lastRoleSync?: AuditEvent;
+  lastRoleSync?: UserRoleSync;
   onClose: () => void;
 }) {
   const [roles, setRoles] = useState<UserRole[]>(toUserRoles(targetUser.roles));
@@ -560,7 +563,7 @@ function EditUserDialog({
               lockedReason="Cannot remove the admin role from the last administrator"
               managedRoles={managedRoles}
             />
-            {lastRoleSync && <LastRoleSync event={lastRoleSync} />}
+            {lastRoleSync && <LastRoleSync sync={lastRoleSync} />}
             <div className="space-y-2">
               <Label>Groups</Label>
               <p className="text-xs text-muted-foreground">

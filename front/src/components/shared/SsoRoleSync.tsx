@@ -10,7 +10,7 @@
  */
 import { ShieldCheck } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
-import type { AuditEvent } from "@/api";
+import type { UserRoleSync } from "@/api";
 import { Badge } from "@/components/ui/badge";
 import {
   Tooltip,
@@ -30,8 +30,8 @@ const asStringArray = (value: unknown): string[] =>
   Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
 
 /** Read a role-sync audit entry's details defensively — it is free-form JSON. */
-export function parseRoleSyncDetails(event: AuditEvent): RoleSyncDetails {
-  const details = event.details ?? {};
+export function parseRoleSyncDetails(sync: UserRoleSync): RoleSyncDetails {
+  const details = sync.details ?? {};
   return {
     provider:
       typeof details.provider === "string" ? details.provider : undefined,
@@ -94,11 +94,12 @@ export function ManagedRoleBadge({ role }: { role: string }) {
 /**
  * The last time the directory changed this user's roles, and what it changed.
  *
- * The groups come from the audit row itself — they are the reason the change
- * happened, and reconstructing it later without them is impossible.
+ * The groups come from the audit row itself — `GET /users/role-syncs` hands
+ * back the entry verbatim precisely so they survive: they are the reason the
+ * change happened, and reconstructing it later without them is impossible.
  */
-export function LastRoleSync({ event }: { event: AuditEvent }) {
-  const { provider, groups, granted, revoked } = parseRoleSyncDetails(event);
+export function LastRoleSync({ sync }: { sync: UserRoleSync }) {
+  const { provider, groups, granted, revoked } = parseRoleSyncDetails(sync);
 
   return (
     <div
@@ -109,7 +110,7 @@ export function LastRoleSync({ event }: { event: AuditEvent }) {
         <ShieldCheck className="h-4 w-4 text-muted-foreground" />
         <span className="font-medium">Last synced from SSO</span>
         <span className="text-muted-foreground">
-          {formatDistanceToNow(new Date(event.created_at), {
+          {formatDistanceToNow(new Date(sync.created_at), {
             addSuffix: true,
           })}
           {provider ? ` · ${provider}` : ""}

@@ -264,4 +264,55 @@ test.describe("Users Management", () => {
       connectorRow.getByText("viewer", { exact: true })
     ).toHaveCount(0);
   });
+
+  // The column is fed by GET /users/role-syncs, which answers per user rather
+  // than from a window over the audit log. That is what makes "Never" truthful:
+  // a user missing from the response has genuinely never been synced, instead
+  // of merely having dropped off the end of a bounded audit fetch.
+  test("should read the last SSO sync from the per-user endpoint", async ({
+    authenticatedPage,
+  }) => {
+    const syncsResponse = authenticatedPage.waitForResponse(
+      (response) =>
+        response.url().includes("/api/v1/users/role-syncs") &&
+        response.request().method() === "GET"
+    );
+
+    await authenticatedPage.goto("users");
+    await authenticatedPage.waitForLoadState("networkidle");
+
+    const response = await syncsResponse;
+    expect(response.status()).toBe(200);
+
+    const body = (await response.json()) as {
+      role_syncs: {
+        user_id: string;
+        username: string;
+        event_type: string;
+        created_at: string;
+        details?: { groups?: string[] };
+      }[];
+    };
+
+    // Test mode seeds exactly one sync, against the viewer — one row per user.
+    const viewerSync = body.role_syncs.find((s) => s.username === "viewer");
+    expect(viewerSync).toBeDefined();
+    expect(viewerSync?.event_type).toBe("user.roles_synced");
+    // The groups ride along, so the edit form can answer "why did this change?".
+    expect(viewerSync?.details?.groups).toContain("analysts");
+    expect(
+      body.role_syncs.filter((s) => s.user_id === viewerSync?.user_id)
+    ).toHaveLength(1);
+
+    // Users the directory never touched are absent from the response, and the
+    // list says so rather than showing a stale-window artefact.
+    expect(body.role_syncs.some((s) => s.username === "admin")).toBe(false);
+    await expect(authenticatedPage.getByTestId("last-sync-viewer")).toBeVisible();
+    await expect(authenticatedPage.getByTestId("last-sync-admin")).toHaveCount(0);
+
+    const adminRow = authenticatedPage.getByRole("row").filter({
+      has: authenticatedPage.getByTestId("edit-user-admin"),
+    });
+    await expect(adminRow.getByText("Never", { exact: true })).toBeVisible();
+  });
 });
