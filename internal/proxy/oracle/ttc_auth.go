@@ -280,7 +280,16 @@ func isIdentifierRun(b []byte) bool {
 // AUTH_PBKDF2_SDER_COUNT. Together they tell the client to derive the
 // combined key via PBKDF2 (matching what real Oracle 19c sends when
 // caps[4]&0x20 is set in the Set Protocol response).
-func buildAuthChallenge(encServerSessKey, authVfrData, pbkdf2ChkSaltHex string, vgenCount, sderCount, verifierType int, wide bool) []byte {
+//
+// bigChunks is the session's negotiated CLR long form (UseBigClrChunks, see
+// ttcClrVariant). It only changes values at or past the 252-byte short-form
+// limit; every value in today's challenge is far shorter, so the bytes are
+// identical either way — it is threaded so a future oversized salt or verifier
+// does not silently desync a big-chunk client. The wide/OCI leg keeps
+// single-byte chunk lengths: readAuthKVPairWide and replaceAuthKVValueWide both
+// read plain readCLR, so that framing is settled independently of the
+// capability.
+func buildAuthChallenge(encServerSessKey, authVfrData, pbkdf2ChkSaltHex string, vgenCount, sderCount, verifierType int, wide, bigChunks bool) []byte {
 	pairs := 2
 
 	if pbkdf2ChkSaltHex != "" {
@@ -299,7 +308,9 @@ func buildAuthChallenge(encServerSessKey, authVfrData, pbkdf2ChkSaltHex string, 
 	// key/value lengths and flags; thin clients (go-ora, python-oracledb thin,
 	// JDBC thin) use the compressed length-prefixed form. Encode the challenge to
 	// match the client, observed from its AUTH Phase 1 (see payloadUsesWideKVEncoding).
-	kv := ttcKeyVal
+	kv := func(key, value string, flag int) []byte {
+		return ttcKeyValChunked(key, value, flag, bigChunks)
+	}
 	if wide {
 		kv = ttcKeyValWide
 	}

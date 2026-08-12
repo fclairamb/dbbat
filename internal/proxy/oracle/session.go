@@ -930,8 +930,9 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 		slog.Int("vfrdata_len", len(vfrData)),
 		slog.Bool("custom_hash", o5.CustomHashEnabled()),
 		slog.Int("verifier_type", o5.VerifierType()),
-		slog.Bool("wide_encoding", s.clientWideEncoding))
-	challengePayload := buildAuthChallenge(encSessKey, vfrData, o5.PBKDF2ChkSalt(), o5.PBKDF2VgenCount(), o5.PBKDF2SderCount(), o5.VerifierType(), s.clientWideEncoding)
+		slog.Bool("wide_encoding", s.clientWideEncoding),
+		slog.Bool("big_clr_chunks", s.clientBigClrChunks))
+	challengePayload := buildAuthChallenge(encSessKey, vfrData, o5.PBKDF2ChkSalt(), o5.PBKDF2VgenCount(), o5.PBKDF2SderCount(), o5.VerifierType(), s.clientWideEncoding, s.clientBigClrChunks)
 	challengePayload = append(challengePayload, s.clientChallengeTrailer(o5.VerifierType())...)
 	s.logger.DebugContext(s.ctx, "AUTH challenge payload",
 		slog.Int("len", len(challengePayload)),
