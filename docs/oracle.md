@@ -1141,15 +1141,68 @@ DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH=1 go test -tags integration -v -timeout 20m \
 The flag is read once, by the integration suite's `TestMain`; nothing in
 production writes it.
 
-Both runs — with and without the variable — must pass **for the thin-client
-tests**, which is what the suite contains. The forced run is not a claim that
-the fallback serves every client: the synthetic builders emit the thin
-(compressed) KV encoding and a go-ora-shaped KV set only, so a wide/OCI session
-(sqlplus, Instant Client) whose rewrite failed would still be handed a body its
-caps-conditioned upstream cannot parse. The fallback is a safety net for thin
-clients, not a general-purpose client. Widening it is filed as
-`specs/todos/2026-08-11-14-oracle-synthetic-auth-wide-client-coverage.md` — the
-forced run, in CI or locally, simply does not cover it.
+Both runs — with and without the variable — must pass.
+
+#### The fallback covers wide/OCI clients too
+
+The synthetic builders used to emit the thin (compressed) KV encoding and a
+go-ora-shaped KV set only, so a wide/OCI session (sqlplus, Instant Client)
+whose rewrite failed was handed a body its caps-conditioned upstream could not
+parse. That is no longer true: `upstream_auth_client_wide.go` is the OCI
+counterpart, dispatched on `clientWideEncoding`, and
+`TestIntegration_SqlplusLoginThroughSyntheticAuth` drives a real sqlplus login
+through it end to end. The test skips when sqlplus is absent, which is the case
+in CI today, so the byte-level evidence lives in
+`upstream_auth_client_wide_test.go` against a real capture.
+
+The premise is measured, not assumed. With the wide dispatch disabled so a thin
+body goes out on an OCI session, that sqlplus login dies with **ORA-03113**
+(end-of-file on communication channel) and never authenticates.
+
+Five things differ between the wide body and the thin one, all measured against
+`testdata/sqlplus_cursor_reexec.pcapng` (macOS Instant Client 23.3 → Oracle 23ai
+Free) and cross-checked against the DB-bundled 23.26 client:
+
+| # | Delta | Thin | Wide (OCI) |
+|---|-------|------|-----------|
+| 1 | TNS data flags on the AUTH packet | `0x0000` | `0x2000` |
+| 2 | Preamble encoding | compressed integers | pointer runs (`fe ff…`) + 4-byte little-endian fields |
+| 3 | Key/value length fields | compressed | 4-byte LE; on the Instant Client a UTF-8 max-expansion **buffer** size (3x the CLR byte length), on the DB-bundled client a plain length |
+| 4 | Empty value | CLR `0x00` | zero length field, **no CLR byte at all** |
+| 5 | Logon mode | dbbat's own | carries client high bits (`0x40000000` captured in Phase 2) |
+
+Conventions 3 and 4 cannot be derived from first principles, so
+`detectWideAuthFraming` reads them off the client's own AUTH packet **for that
+same phase** — Phase 2 carries different lead bytes and different logon-mode
+bits from Phase 1 — falling back to the Instant Client shape. Only the framing
+is borrowed; every value in the body is dbbat's own, the same division of labor
+the rewrite path makes.
+
+Which deltas the upstream actually *enforces* was measured the same way, by
+breaking one at a time and re-running the login against Oracle 23ai Free:
+
+- **Only the structure (2) is enforced.** It is what separates a readable body
+  from ORA-03113.
+- Oracle 23ai accepted the login with **thin data flags (1)**, and with **plain
+  length fields in place of the 3x buffer sizes (3)** as long as every field
+  agreed. The ORA-28041 trap is *mixing* the two conventions inside one body —
+  the rewrite path's hazard, see `replaceAuthKVValueWide` — not picking the
+  wrong flavor wholesale.
+- **(4) is unreachable unless a value is genuinely empty**, which needs a host
+  with no name; it is pinned byte-exactly by unit test instead.
+
+All five are reproduced anyway: "this server tolerates it" is a weaker contract
+than "this is what the client we are impersonating sends", and that tolerance is
+unlikely to be uniform across the Oracle versions and OCI builds dbbat fronts.
+
+Three keys the captured sqlplus sends are deliberately **not** reproduced —
+`AUTH_CONNECT_STRING`, `AUTH_LOGICAL_SESSION_ID`, `AUTH_FAILOVER_ID`. All three
+are informational, and the last two would have to be invented; the synthetic
+body declares what dbbat is, not a fabricated OCI identity. For the same reason
+`SESSION_CLIENT_CHARSET` and `SESSION_CLIENT_VERSION` keep the thin path's
+values. What wide Phase 2 *does* add over thin is the four keys no thin client
+sends (`AUTH_RTT`, `AUTH_CLNT_MEM`, `AUTH_ACL`, `AUTH_FLAGS`) and
+`SESSION_CLIENT_LIB_TYPE=2` (OCI) rather than `0`.
 
 Note also what the forced run does **not** exercise: with the rewrite disabled,
 `rewriteAuthPhase1Username` / `parseAuthPhase2Header` never execute. Those are
