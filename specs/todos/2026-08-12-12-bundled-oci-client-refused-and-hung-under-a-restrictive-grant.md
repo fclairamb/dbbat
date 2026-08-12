@@ -160,3 +160,39 @@ hot path and is filed as its own todo rather than smuggled in here.
   call number survives it (the hang's own half).
 - `TestIntegration_BlockedStatementRefusesSQLPlus` loses its
   `knownBadBundledRefusal` skip and must pass on the container flavor.
+
+### What it actually took
+
+The invariant above was necessary and not sufficient. Removing the false
+refusal let the session get as far as the *real* one — the `INSERT` a
+`read_only` grant has to refuse — and it hung there too, twice more, for
+reasons fail-open cannot cover: dbbat must answer that statement, and answer it
+correctly. Two further layers, each measured against the live client:
+
+- **The close-cursors list has a 64-bit header.** The bundled client writes
+  `11 69 <seq> 00 00 <ub4> <sb8 seq+1>` where the Instant Client writes
+  `11 69 <seq> 01 <seq+1>`, and its count is 8 bytes ahead of the same 4-byte
+  ids. Until the walk understood it, the *execute stapled behind the list* was
+  invisible and the refusal carried the last sequence dbbat had seen (12)
+  instead of the call's (14). `isCloseCursorsWide8Header` /
+  `decodeCloseCursorsWide8`, pinned on `testdata/oci_bundled_close_cursors.hex`.
+- **The summary object has a 64-bit layout.** Call status `u32@1`, ECID
+  `u16@5`, error number `u16@12`, cursor id `u16@18`, call number `u32@49`,
+  RetCode `u32@132`, a 136-byte prefix, then an 8-byte row count. `learnOERShape`
+  recognized neither of the two real ORA-01403 summaries the upstream sent this
+  client, so the session stayed on the unlearned default and dbbat answered a
+  64-bit client with a 32-bit frame. `oerFixed64Layout`, pinned on
+  `testdata/oci_bundled_oer.hex`; the learner tries both layouts, widest first,
+  each validated by the invariant it already used (the trailing RetCode repeats
+  the leading error number *at that layout's offsets*).
+
+`TestIntegration_BlockedStatementRefusesSQLPlus` now passes on the container
+flavor, the skip is gone, and the whole `./internal/proxy/oracle/...`
+integration suite is green under `-race` on that flavor.
+
+Two follow-ups filed rather than smuggled in:
+`specs/todos/2026-08-13-03-oracle-unlearned-oer-assumes-the-32-bit-oci-layout.md`
+(the unlearned fallback still seeds the 32-bit layout) and
+`specs/todos/2026-08-13-04-oracle-fetch-gate-watches-a-frame-no-client-sends.md`
+(the `0x11` fetch reading is unreachable now that it is no longer misfed
+piggybacks).

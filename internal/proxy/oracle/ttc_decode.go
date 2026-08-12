@@ -530,7 +530,7 @@ const closeCursorsWide8SeqOffset = 9
 // and, far worse, never finds the call stapled behind it:
 //
 //	11 69 0d 00 00 7b 05 00 00 0e 00 00 00 00 00 00 00  ← header, seq 13
-//	fe ff ff ff ff ff ff ff                             ← pointer sentinel
+//	fe(x8)                                              ← pointer sentinel
 //	01 00 00 00 00 00 00 00  02 00 00 00                ← one cursor: id 2
 //	03 5e 0e …                                          ← the call, sequence 14
 //
