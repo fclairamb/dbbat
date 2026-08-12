@@ -1236,6 +1236,20 @@ func (s *session) proxyMessages() error {
 // is crossed. It force-closes both conns, unblocking whichever relay goroutine
 // is parked in a Read/Write so the session tears down. This is the only way to
 // terminate a query that is blocked producing no traffic (idle expiry).
+//
+// It deliberately sends no ORA-00028 frame, and that is the decision rather than
+// an omission: this is the one refusal path that can fire while the client is
+// idle between calls, so there is no call to end. TTC has no unsolicited server
+// message — an OER written to an idle socket is not read when it is sent, it
+// waits in the buffer for the client's next request and is consumed as *that*
+// request's answer, carrying by construction the previous call's number. On
+// ojdbc 26.1 that mismatch is exactly what handleOutOfSequenceError turns into
+// an ORA-18745 wrapping the real code, so a "graceful" frame here would be
+// strictly worse than the close, which surfaces as a plain I/O error. A real
+// Oracle does the same: ALTER SYSTEM KILL SESSION pushes nothing and the client
+// learns at its next call; DISCONNECT SESSION drops the socket, which is what
+// this imitates. See docs/oracle.md, "An asynchronous refusal: which call
+// number, and whether to send one at all", and TestIdleLimitViolationSendsNoOER.
 func (s *session) onLimitViolation(err error) {
 	s.logger.WarnContext(s.ctx, "terminating Oracle session: grant no longer valid mid-stream",
 		slog.Any("error", err))
@@ -1453,6 +1467,20 @@ func (s *session) upstreamToClient() error {
 		// the session rather than streaming the rest of a huge result.
 		if s.hasPendingQuery() {
 			if verr := s.guard.Check(); verr != nil {
+				// This refusal is not answering a client request the way a
+				// client-leg one is — the call was forwarded upstream a while
+				// ago and dbbat is cutting into its reply — but it still ends a
+				// call the client is *waiting on*: hasPendingQuery() is only
+				// true between an execute/re-execute and its end-of-call OER,
+				// and that OER has not reached the client yet. So the last
+				// number observeClientCallNumber saw is the right one to stamp,
+				// for the same reason it is right on the client leg, and the
+				// ojdbc 26.1 measurement behind oerSummary.CallNumber carries
+				// over unchanged. A fetch is its own call with its own sequence
+				// number, and observeClientCallNumber runs on fetches too, so
+				// the number tracks the reply being cut into. See docs/oracle.md,
+				// "An asynchronous refusal: which call number, and whether to
+				// send one at all".
 				_ = s.writeTTCError(int(ORA00028), "session terminated: "+verr.Error())
 
 				// Finalize the in-flight query so its streamed-so-far bytes are
@@ -1597,9 +1625,15 @@ func (s *session) nextOERFrame() (oerShape, int, byte) {
 // observeClientCallNumber records the TTC sequence number of the call the
 // client is waiting on, so a refusal can end that call by number rather than by
 // zero. Every client message goes through here, including the ones dbbat has no
-// opinion about: the number that matters is the one on the call in flight when
-// a refusal happens, and a limit violation caught on the *response* leg refuses
-// a call the client reader has long since forwarded.
+// opinion about — a fetch continuing a result set in particular, which is its
+// own call with its own sequence number. That is what makes the number right for
+// a limit violation caught on the *response* leg: the call was forwarded
+// upstream a while ago, but its end-of-call OER has not reached the client, so
+// the client is still parked in the receive for it.
+//
+// It is never read outside a call. The one refusal that can fire while the
+// client is idle — the limit watchdog — writes no OER at all, deliberately; see
+// onLimitViolation.
 func (s *session) observeClientCallNumber(ttcPayload []byte) {
 	number, ok := clientCallNumber(ttcPayload)
 	if !ok {
