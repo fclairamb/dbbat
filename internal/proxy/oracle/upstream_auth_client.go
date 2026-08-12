@@ -249,9 +249,15 @@ func (s *session) finishUpstreamAuth() error {
 // addition on top of the existing rewrite.
 func (s *session) sendUpstreamAuthPhase1(username string, identity driverIdentity, mode uint32) error {
 	synthetic := func() error {
+		if s.clientWideEncoding {
+			f := s.wideAuthFramingFor(s.clientAuthPhase1Pkt, PiggybackSubAuth1, authPhase1FuncSeq, mode)
+
+			return s.writeUpstreamData(buildClientAuthPhase1Wide(f, username, identity), wideAuthDataFlags)
+		}
+
 		header := s.syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq)
 
-		return s.writeUpstreamData(buildClientAuthPhase1(header, username, identity, mode))
+		return s.writeUpstreamData(buildClientAuthPhase1(header, username, identity, mode), thinAuthDataFlags)
 	}
 
 	if forceSyntheticUpstreamAuth ||
@@ -309,9 +315,17 @@ func (s *session) sendUpstreamAuthPhase1(username string, identity driverIdentit
 // existing rewrite.
 func (s *session) sendUpstreamAuthPhase2(username string, identity driverIdentity, sec *upstreamAuthSecrets, mode uint32) error {
 	synthetic := func() error {
+		if s.clientWideEncoding {
+			// Phase 2's own captured packet, not Phase 1's: the two carry
+			// different lead bytes and different logon-mode bits.
+			f := s.wideAuthFramingFor(s.clientAuthPhase2Pkt, PiggybackSubAuth2, authPhase2FuncSeq, mode)
+
+			return s.writeUpstreamData(buildClientAuthPhase2Wide(f, username, identity, sec), wideAuthDataFlags)
+		}
+
 		header := s.syntheticAuthHeader(PiggybackSubAuth2, authPhase2FuncSeq)
 
-		return s.writeUpstreamData(buildClientAuthPhase2(header, username, identity, sec, mode))
+		return s.writeUpstreamData(buildClientAuthPhase2(header, username, identity, sec, mode), thinAuthDataFlags)
 	}
 
 	if forceSyntheticUpstreamAuth ||
@@ -362,11 +376,15 @@ func (s *session) writeUpstreamPayload(payload []byte) error {
 	return nil
 }
 
-// writeUpstreamData wraps a TTC body in a v315+ TNS Data packet with a
-// zero data-flag prefix and writes it to the upstream socket.
-func (s *session) writeUpstreamData(body []byte) error {
+// thinAuthDataFlags is the TTC data-flags prefix a thin client puts on its AUTH
+// packets. OCI sends wideAuthDataFlags instead — see upstream_auth_client_wide.go.
+var thinAuthDataFlags = []byte{0x00, 0x00}
+
+// writeUpstreamData wraps a TTC body in a v315+ TNS Data packet with the given
+// data-flag prefix and writes it to the upstream socket.
+func (s *session) writeUpstreamData(body, dataFlags []byte) error {
 	payload := make([]byte, 0, ttcDataFlagsSize+len(body))
-	payload = append(payload, 0x00, 0x00) // data flags
+	payload = append(payload, dataFlags...)
 	payload = append(payload, body...)
 
 	pkt := encodeV315DataPacket(payload)
@@ -891,18 +909,8 @@ func buildClientAuthPhase1(header []byte, username string, ident driverIdentity,
 	buf = append(buf, 0x01, 0x01, 0x05, 0x01, 0x01)
 	buf = append(buf, ttcClr([]byte(username))...)
 
-	pairs := []struct {
-		key, value string
-	}{
-		{"AUTH_TERMINAL", ident.HostName},
-		{"AUTH_PROGRAM_NM", ident.ProgramName},
-		{"AUTH_MACHINE", ident.HostName},
-		{"AUTH_PID", strconv.Itoa(ident.PID)},
-		{"AUTH_SID", ident.OSUser},
-	}
-
-	for _, p := range pairs {
-		buf = append(buf, ttcKeyVal(p.key, p.value, 0)...)
+	for _, p := range authPhase1Pairs(ident) {
+		buf = append(buf, ttcKeyVal(p.key, p.value, p.flag)...)
 	}
 
 	return buf
@@ -916,36 +924,7 @@ func buildClientAuthPhase1(header []byte, username string, ident driverIdentity,
 // header is the TTC function header from syntheticAuthHeader; see
 // buildClientAuthPhase1.
 func buildClientAuthPhase2(header []byte, username string, ident driverIdentity, sec *upstreamAuthSecrets, mode uint32) []byte {
-	type kv struct {
-		key, value string
-		flag       int
-	}
-
-	tz := localTimezoneString(time.Now())
-
-	pairs := []kv{
-		{"AUTH_SESSKEY", sec.encClientSessKey, 1},
-		{"AUTH_PASSWORD", sec.encPassword, 0},
-	}
-
-	if sec.eSpeedyKey != "" {
-		pairs = append(pairs, kv{"AUTH_PBKDF2_SPEEDY_KEY", sec.eSpeedyKey, 0})
-	}
-
-	pairs = append(pairs,
-		kv{"AUTH_TERMINAL", ident.HostName, 0},
-		kv{"AUTH_PROGRAM_NM", ident.ProgramName, 0},
-		kv{"AUTH_MACHINE", ident.HostName, 0},
-		kv{"AUTH_PID", strconv.Itoa(ident.PID), 0},
-		kv{"AUTH_SID", ident.OSUser, 0},
-		kv{"SESSION_CLIENT_CHARSET", "871", 0},
-		kv{"SESSION_CLIENT_LIB_TYPE", "0", 0},
-		kv{"SESSION_CLIENT_DRIVER_NAME", ident.DriverName, 0},
-		kv{"SESSION_CLIENT_VERSION", "2.0.0.0", 0},
-		kv{"SESSION_CLIENT_LOBATTR", "1", 0},
-		kv{"AUTH_ALTER_SESSION", fmt.Sprintf(
-			"ALTER SESSION SET NLS_LANGUAGE='AMERICAN' NLS_TERRITORY='AMERICA'  TIME_ZONE='%s'\x00", tz), 1},
-	)
+	pairs := authPhase2Pairs(ident, sec, false)
 
 	buf := make([]byte, 0, 512)
 	buf = append(buf, header...)
