@@ -184,7 +184,7 @@ groups:
 | `query_approver_user_group_uids` | **Approval holds** — a pattern-matched statement parked mid-flight against this server |
 
 ```bash
-curl -X PUT http://localhost:4200/api/v1/databases/$DB_UID \
+curl -X PUT http://localhost:4200/api/v1/servers/$DB_UID \
   -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{

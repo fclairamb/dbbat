@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -427,6 +428,217 @@ func mustQueryWithOwner(t *testing.T, f *serverApproverFixture, q *store.Query) 
 	}
 
 	return full
+}
+
+// newTargetServer adds a second (or third) database target to the fixture, for
+// the tests that need a server the approver has no say over.
+func (f *serverApproverFixture) newTargetServer(t *testing.T, name string) *store.Server {
+	t.Helper()
+
+	created, err := f.dataStore.CreateServer(f.ctx, &store.Server{
+		Name:         name,
+		Host:         "127.0.0.1",
+		Port:         5432,
+		DatabaseName: "other",
+		Username:     "pg",
+		Password:     "secret",
+		Protocol:     store.ProtocolPostgreSQL,
+		SSLMode:      "disable",
+	}, approvalTestKey)
+	if err != nil {
+		t.Fatalf("create server %s: %v", name, err)
+	}
+
+	return created
+}
+
+// newGrantRequestFor is newGrantRequest against an explicit server.
+func (f *serverApproverFixture) newGrantRequestFor(
+	t *testing.T, suffix string, requester *store.User, databaseID uuid.UUID,
+) *store.GrantRequest {
+	t.Helper()
+
+	def := createTestGrantDefinition(t, f.dataStore, *f.admin, "def-"+suffix, false)
+
+	created, err := f.dataStore.CreateGrantRequest(f.ctx, &store.GrantRequest{
+		UserID:            requester.UID,
+		GrantDefinitionID: def.UID,
+		DatabaseID:        databaseID,
+		Justification:     "because",
+	})
+	if err != nil {
+		t.Fatalf("CreateGrantRequest(): %v", err)
+	}
+
+	return created
+}
+
+// listRequestsAs runs the listing handler as one user and returns the uids it
+// answered with, plus each row's reported approver_role.
+func (f *serverApproverFixture) listRequestsAs(t *testing.T, user *store.User) map[string]string {
+	t.Helper()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/grant-requests", nil)
+	c.Set(contextKeyUser, user)
+
+	f.server.handleListGrantRequests(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("list got %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	var body struct {
+		GrantRequests []struct {
+			UID          string `json:"uid"`
+			ApproverRole string `json:"approver_role"`
+		} `json:"grant_requests"`
+	}
+
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode listing: %v (%s)", err, w.Body.String())
+	}
+
+	out := make(map[string]string, len(body.GrantRequests))
+	for _, r := range body.GrantRequests {
+		out[r.UID] = r.ApproverRole
+	}
+
+	return out
+}
+
+// TestListGrantRequests_NonAdminScoping pins the one data-exposure path this
+// change widened: what a non-admin sees in the listing.
+//
+// An ordinary user sees their own requests and nothing else. An access approver
+// additionally sees the *pending* requests for the servers they approve — not
+// the decided ones (a listing is an enumeration, and their history is not the
+// approver's business), and not other servers' at all.
+func TestListGrantRequests_NonAdminScoping(t *testing.T) {
+	t.Parallel()
+
+	f := newServerApproverFixture(t, "list-scope")
+	elsewhere := f.newTargetServer(t, "elsewhere-list-scope")
+
+	mine := f.newGrantRequestFor(t, "list-scope-mine", f.approver, elsewhere.UID)
+	pendingHere := f.newGrantRequestFor(t, "list-scope-here", f.requester, f.target.UID)
+	pendingElsewhere := f.newGrantRequestFor(t, "list-scope-away", f.requester, elsewhere.UID)
+	decidedHere := f.newGrantRequestFor(t, "list-scope-done", f.requester, f.target.UID)
+
+	if _, err := f.dataStore.DenyGrantRequest(f.ctx, decidedHere.UID, f.admin.UID, "no"); err != nil {
+		t.Fatalf("DenyGrantRequest(): %v", err)
+	}
+
+	// Before any delegation: the approver is an ordinary user and sees only
+	// the one request they filed themselves.
+	got := f.listRequestsAs(t, f.approver)
+	if len(got) != 1 {
+		t.Fatalf("unconfigured listing = %v, want only the caller's own request", got)
+	}
+
+	if _, ok := got[mine.UID.String()]; !ok {
+		t.Errorf("unconfigured listing = %v, missing the caller's own request", got)
+	}
+
+	// Delegated: the pending request for their server joins the list.
+	f.setServerApprovers(t, store.ApproverKindAccess, f.group.UID)
+
+	got = f.listRequestsAs(t, f.approver)
+
+	if _, ok := got[mine.UID.String()]; !ok {
+		t.Errorf("approver listing = %v, missing the caller's own request", got)
+	}
+
+	if role, ok := got[pendingHere.UID.String()]; !ok {
+		t.Errorf("approver listing = %v, missing the pending request for their server", got)
+	} else if role != ApproverHatServer {
+		t.Errorf("approver_role on the decidable row = %q, want %q", role, ApproverHatServer)
+	}
+
+	if _, ok := got[decidedHere.UID.String()]; ok {
+		t.Errorf("approver listing = %v, leaked a *decided* request for their server", got)
+	}
+
+	if _, ok := got[pendingElsewhere.UID.String()]; ok {
+		t.Errorf("approver listing = %v, leaked a request for a server they do not approve", got)
+	}
+
+	// Somebody in no approver group still sees nothing but their own — and
+	// they filed none, so nothing at all.
+	if got := f.listRequestsAs(t, f.outsider); len(got) != 0 {
+		t.Errorf("outsider listing = %v, want empty", got)
+	}
+
+	// The row the caller filed themselves carries no hat: nobody self-approves.
+	if role := f.listRequestsAs(t, f.approver)[mine.UID.String()]; role != ApproverHatNone {
+		t.Errorf("approver_role on the caller's own request = %q, want empty", role)
+	}
+
+	// An admin still sees everything, unfiltered.
+	if got := f.listRequestsAs(t, f.admin); len(got) != 4 {
+		t.Errorf("admin listing = %v, want all four requests", got)
+	}
+}
+
+// TestSlackMayDecideRequest exercises the *real* slackDecider gate, not the
+// stub the Slack transport tests use. Both Slack paths — the inbound endpoint
+// and Socket Mode — reach processSlackDecision, which authorizes solely through
+// this method, so "a delegated approver clicks Approve in Slack" hinges
+// entirely on it.
+func TestSlackMayDecideRequest(t *testing.T) {
+	t.Parallel()
+
+	f := newServerApproverFixture(t, "slack-gate")
+
+	req := f.newGrantRequest(t, "slack-gate-1", f.requester)
+	own := f.newGrantRequest(t, "slack-gate-2", f.approver)
+
+	// Nothing delegated yet: admins only, exactly as before the feature.
+	if f.server.mayDecideRequest(f.ctx, f.approver, req.UID) {
+		t.Error("mayDecideRequest(unconfigured approver) = true, want false")
+	}
+
+	if !f.server.mayDecideRequest(f.ctx, f.admin, req.UID) {
+		t.Error("mayDecideRequest(admin) = false, want true")
+	}
+
+	f.setServerApprovers(t, store.ApproverKindAccess, f.group.UID)
+
+	if !f.server.mayDecideRequest(f.ctx, f.approver, req.UID) {
+		t.Error("mayDecideRequest(named access approver) = false, want true")
+	}
+
+	// The security invariant, over Slack too: never your own request.
+	if f.server.mayDecideRequest(f.ctx, f.approver, own.UID) {
+		t.Error("mayDecideRequest(own request) = true, want false")
+	}
+
+	// Somebody in no approver group.
+	if f.server.mayDecideRequest(f.ctx, f.outsider, req.UID) {
+		t.Error("mayDecideRequest(outsider) = true, want false")
+	}
+
+	// No hierarchy: a query approver has no say over a grant request.
+	f.setServerApprovers(t, store.ApproverKindAccess)
+	f.setServerApprovers(t, store.ApproverKindQuery, f.group.UID)
+
+	if f.server.mayDecideRequest(f.ctx, f.approver, req.UID) {
+		t.Error("mayDecideRequest(query approver) = true, want false")
+	}
+
+	// A request that no longer exists lets an admin through — so the decision
+	// that follows reports "no longer exists" rather than a misleading refusal
+	// — and stops everybody else.
+	missing := uuid.New()
+
+	if !f.server.mayDecideRequest(f.ctx, f.admin, missing) {
+		t.Error("mayDecideRequest(admin, missing) = false, want true")
+	}
+
+	if f.server.mayDecideRequest(f.ctx, f.approver, missing) {
+		t.Error("mayDecideRequest(non-admin, missing) = true, want false")
+	}
 }
 
 // TestQueryHold_DefinitionApproversWinOverServerChain pins the precedence: a

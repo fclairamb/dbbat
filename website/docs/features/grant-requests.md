@@ -96,7 +96,7 @@ Set neither and nothing changes: only admins decide, exactly as before. Set the 
 
 ```bash
 # The ops group decides requests for this server, alongside admins.
-curl -X PUT http://localhost:4200/api/v1/databases/$DB_UID \
+curl -X PUT http://localhost:4200/api/v1/servers/$DB_UID \
   -H "Authorization: Bearer $DBBAT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"access_approver_user_group_uids": ["'$OPS_GROUP_UID'"]}'
