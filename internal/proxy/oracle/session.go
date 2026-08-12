@@ -126,7 +126,33 @@ type session struct {
 	// and JDBC trips ORA-17401 in T4CTTIfun.receive.
 	clientAuthPhase2Pkt *TNSPacket
 
-	// Query tracking
+	// Query tracking.
+	//
+	// trackerMu guards every piece of per-session query bookkeeping: the
+	// cursor map, the in-flight query pointer *and the fields of the
+	// pendingOracleQuery (and trackedCursor) it points at*, lastBytesSnapshot,
+	// and the in-session grant counters (QueryCount / BytesTransferred).
+	//
+	// All of it is touched by both relay goroutines. The client reader starts,
+	// gates and completes statements (handleOALL8, handlePiggybackExec,
+	// completeQuery); the upstream reader learns cursor ids, captures rows and
+	// completes the *same* statement off the server's own answer
+	// (learnCursorID, handleQueryResultV2, completeQueryFromOER) while reading
+	// pendingQuery once per forwarded packet for the mid-stream limit check.
+	// Two of those pairs were live data races until this mutex existed; they
+	// were invisible because make test-e2e-oracle ran without -race, unlike
+	// make test. See
+	// specs/todos/2026-08-11-10-race-detector-on-the-integration-suites.md.
+	//
+	// The convention, in the same spirit as heldMu / oerMu above: it is a
+	// per-concern lock, never a session-wide one. It is taken around
+	// bookkeeping only — never across a socket read, a forwarded write, or an
+	// approval hold — so the two directions keep relaying concurrently. The
+	// upstream leg takes it once for the whole of interceptUpstreamMessage
+	// (which does no I/O); the client leg takes it in explicit regions, with
+	// holdIfNeeded deliberately outside them. Functions below are annotated
+	// with which side of that boundary they sit on.
+	trackerMu    sync.Mutex
 	tracker      *oracleQueryTracker
 	queryStorage config.QueryStorageConfig
 
@@ -154,6 +180,10 @@ type session struct {
 	// the previous query. completeQuery diffs against it to attribute
 	// bytes to the just-finished query (the first query absorbs the
 	// auth/handshake traffic, which is the right place for it).
+	//
+	// Guarded by trackerMu: completeQuery runs on either relay goroutine, and
+	// a read-modify-write of this from both is how bytes get double-counted
+	// against a byte quota.
 	lastBytesSnapshot int64
 
 	// watched sits below the counting conn so an approval hold can keep
@@ -1421,7 +1451,7 @@ func (s *session) upstreamToClient() error {
 		// re-check after every forwarded packet: the moment the grant's byte
 		// quota is crossed or the grant expires, send a TTC error frame and end
 		// the session rather than streaming the rest of a huge result.
-		if s.tracker.pendingQuery != nil {
+		if s.hasPendingQuery() {
 			if verr := s.guard.Check(); verr != nil {
 				_ = s.writeTTCError(int(ORA00028), "session terminated: "+verr.Error())
 
@@ -1433,7 +1463,12 @@ func (s *session) upstreamToClient() error {
 				// bytes since the last query boundary, persists, bumps the
 				// in-session grant, and clears pendingQuery (no double-count).
 				errMsg := "aborted: " + verr.Error()
+
+				// completeQuery expects trackerMu; this is one of the few
+				// callers that reaches it from outside an intercept.
+				s.trackerMu.Lock()
 				s.completeQuery(nil, &errMsg)
+				s.trackerMu.Unlock()
 
 				return verr
 			}
@@ -1446,6 +1481,14 @@ func (s *session) upstreamToClient() error {
 // Like interceptClientMessage, this is best-effort observability: any panic in
 // the response-decode path is recovered so the upstream packet is still
 // forwarded to the client and the session survives.
+//
+// This is the upstream leg's single trackerMu boundary: everything it reaches
+// (learnCursorID, handleQueryResultV2, handleResponse, handleContinuation,
+// handleOERStatus, completeQuery, captureRow…) runs with the lock held and
+// therefore takes it nowhere itself. Nothing in here does socket I/O, so
+// holding it for the whole call cannot stall the client leg on the network.
+// Note the defer order: the unlock is registered last and so runs *before* the
+// recover, releasing the lock even on a recovered decode panic.
 func (s *session) interceptUpstreamMessage(pkt *TNSPacket) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -1453,6 +1496,9 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket) {
 				slog.Any("panic", r))
 		}
 	}()
+
+	s.trackerMu.Lock()
+	defer s.trackerMu.Unlock()
 
 	funcCode, err := parseTTCFunctionCode(pkt.Payload)
 	if err != nil {
@@ -1595,6 +1641,8 @@ func (s *session) observeOERClientVersion(ttcBody []byte) {
 // handleOERStatus processes a standalone OER (func=0x04) message. Servers send
 // it directly (after a marker exchange) when a statement fails, and as an
 // end-of-call status in some flows.
+//
+// Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) handleOERStatus(ttcPayload []byte) {
 	info := decodeOERAt(ttcPayload, 0)
 	if info == nil {
@@ -1607,6 +1655,8 @@ func (s *session) handleOERStatus(ttcPayload []byte) {
 // completeQueryFromOER finalizes the pending query from decoded OER fields:
 // rows affected on success, error text on failure, plain completion on
 // ORA-01403 (end-of-data, keeps captured-row counts).
+//
+// Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) completeQueryFromOER(info *oerInfo) {
 	switch {
 	case info.ErrorCode == oraNoDataFound:
@@ -1632,6 +1682,8 @@ func (s *session) completeQueryFromOER(info *oerInfo) {
 // row (0x15 [flag] [count] [bitmask] 0x07) indicates which columns will
 // have new values in the NEXT row. Columns not in the bitmask retain their
 // previous values.
+//
+// Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) handleContinuation(ttcPayload []byte) {
 	if s.tracker.pendingQuery == nil || s.tracker.pendingQuery.cursor == nil {
 		return
@@ -1675,6 +1727,8 @@ func (s *session) handleContinuation(ttcPayload []byte) {
 // code. Column definitions are the marker of that window because they are set
 // exactly once per fetch (handleQueryResultV2 / handleResponse) and cleared
 // with the cursor.
+//
+// Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) rowStreamActive() bool {
 	pending := s.tracker.pendingQuery
 
@@ -1684,6 +1738,8 @@ func (s *session) rowStreamActive() bool {
 // handleResponse processes a legacy TTC Response (func=0x08).
 // In v315+, most responses don't follow the legacy format so we skip them.
 // Query completion is handled by handleQueryResultV2 for func=0x10.
+//
+// Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) handleResponse(ttcPayload []byte) {
 	// Mid-fetch, a leading 0x08 is NOT a fresh Response: it is row-stream
 	// content — an 8-byte first column value's length prefix, or the
@@ -1768,7 +1824,13 @@ func (s *session) cleanup() {
 	// unset, and the streamed bytes never charged to the connection or the
 	// grant, which is a way to under-report against a byte quota. Same reasoning
 	// as the completeQuery on the quota-kill path in upstreamToClient.
+	//
+	// Under trackerMu: cleanup runs as soon as *one* relay direction returns,
+	// and the other goroutine can still be intercepting packets on the same
+	// tracker for as long as its own socket stays open.
+	s.trackerMu.Lock()
 	s.flushPendingQuery()
+	s.trackerMu.Unlock()
 
 	s.stream.Connection(s.ctx, shared.ConnectionClosed)
 
