@@ -201,6 +201,12 @@ func (s *Store) CreateGrant(ctx context.Context, grant *Grant) (*Grant, error) {
 // **archived** (superseded by an edit) is explicitly not deactivation and is
 // never consulted here: a grant keeps authorizing under the exact version it
 // was issued from.
+//
+// The window is compared against the *database's* clock (NOW() below), which
+// is why every issuance path stamps starts_at from that same clock rather than
+// from time.Now() — see Store.Now. A grant stamped from a process running
+// ahead of its store would be approved and refused here until the skew
+// elapsed.
 func (s *Store) GetActiveGrant(ctx context.Context, userID, databaseID uuid.UUID) (*Grant, error) {
 	grant := new(AccessGrant)
 	err := s.db.NewSelect().
