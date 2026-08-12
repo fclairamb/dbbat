@@ -20,12 +20,14 @@ import {
   useQueries,
   useUsers,
   type Query,
+  type PendingQuery,
 } from "@/api";
 import {
   useEventStream,
   type StreamEvent,
   type StreamEventData,
 } from "@/hooks/use-event-stream";
+import { APPROVER_HAT } from "@/lib/approvers";
 import { formatDistanceToNow } from "date-fns";
 
 /** How many queries the REST seed asks for. */
@@ -52,6 +54,14 @@ interface FeedRow {
   approvalPattern?: string;
   resolvedBy?: string;
   resolutionReason?: string;
+  /**
+   * Why *this* viewer may resolve this hold, as the server reports it:
+   * "admin", "definition_approver", "server_approver", or "" for somebody who
+   * may watch it but not release it. Only the authoritative pending fetch
+   * carries it — the stream does not — so `undefined` means "not known yet",
+   * which is deliberately different from the explicit "".
+   */
+  approverRole?: string;
 }
 
 /**
@@ -101,6 +111,12 @@ function mergeFeedItem(
       incoming.resolutionReason,
       previous.resolutionReason,
     ),
+    // Not through keep(): "" is a real answer here ("you may not resolve
+    // this"), and keep() treats an empty string as "nothing to say".
+    approverRole:
+      incoming.approverRole !== undefined
+        ? incoming.approverRole
+        : previous.approverRole,
   };
 }
 
@@ -109,7 +125,10 @@ function mergeFeedItem(
  * name. `resolveUser` bridges the two so a resolved hold reads the same
  * whether the page just loaded it or watched it happen.
  */
-function fromQuery(q: Query, resolveUser: (uid: string) => string): FeedRow {
+function fromQuery(
+  q: Query | PendingQuery,
+  resolveUser: (uid: string) => string,
+): FeedRow {
   return {
     key: q.uid,
     queryUid: q.uid,
@@ -122,6 +141,7 @@ function fromQuery(q: Query, resolveUser: (uid: string) => string): FeedRow {
     approvalPattern: q.approval_pattern ?? undefined,
     resolvedBy: q.resolved_by ? resolveUser(q.resolved_by) : undefined,
     resolutionReason: q.resolution_reason ?? undefined,
+    approverRole: (q as PendingQuery).approver_role,
   };
 }
 
@@ -145,6 +165,19 @@ function fromEvent(ev: StreamEvent): FeedRow {
 
 function isHeld(row: FeedRow): boolean {
   return row.approvalStatus === "pending";
+}
+
+/**
+ * Whether to offer the Approve / Deny buttons on a held row.
+ *
+ * The server is the authority and reports its verdict per hold, so the UI
+ * reads it rather than re-deriving one that could disagree. `undefined` means
+ * the authoritative pending fetch has not landed for this row yet (the stream
+ * alone does not carry the hat), and the buttons stay up: a transient hidden
+ * Approve on a live hold is worse than a button that answers 403.
+ */
+function mayResolve(row: FeedRow): boolean {
+  return row.approverRole === undefined || row.approverRole !== "";
 }
 
 function millis(at: string): number {
@@ -360,6 +393,7 @@ export function ConnectionQueryFeed({
       header: "Actions",
       cell: (row) =>
         isHeld(row) && row.queryUid ? (
+          mayResolve(row) ? (
           // Above rowHref's full-row overlay link, or the buttons would be
           // unclickable and every press would navigate instead.
           <span className="relative z-10 flex gap-2">
@@ -392,7 +426,30 @@ export function ConnectionQueryFeed({
             >
               Deny
             </Button>
+            {/* Which authority you are acting under. Approval is no longer
+                admin-only, so an enabled button is no longer self-explanatory:
+                a delegated approver should be able to read *why* they can act
+                on this statement and not on the next one. */}
+            {row.approverRole && APPROVER_HAT[row.approverRole] && (
+              <span
+                className="self-center text-xs text-muted-foreground whitespace-nowrap"
+                title={APPROVER_HAT[row.approverRole].hint}
+                data-testid={`query-approver-role-${row.queryUid}`}
+              >
+                as {APPROVER_HAT[row.approverRole].label}
+              </span>
+            )}
           </span>
+        ) : (
+          // The server said this viewer may watch the hold but not release it
+          // — their own statement, most often. Saying so beats an empty cell.
+          <span
+            className="text-xs text-muted-foreground italic"
+            data-testid={`query-not-approver-${row.queryUid}`}
+          >
+            not yours to resolve
+          </span>
+        )
         ) : null,
     });
   }

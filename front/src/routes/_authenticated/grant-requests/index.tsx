@@ -43,6 +43,7 @@ import {
 } from "@/components/ui/tooltip";
 import { useAuth } from "@/contexts/AuthContext";
 import { canApproveGrantRequest, canRequestGrant } from "@/lib/permissions";
+import { APPROVER_HAT } from "@/lib/approvers";
 
 export const Route = createFileRoute("/_authenticated/grant-requests/")({
   component: GrantRequestsPage,
@@ -60,6 +61,12 @@ function GrantRequestsPage() {
   const { user } = useAuth();
   const isAdmin = canApproveGrantRequest(user?.roles);
   const canRequest = canRequestGrant(user?.roles);
+
+  // Whether *this* viewer may decide *this* request. The server is the
+  // authority — it answers per request, because the answer is per server — so
+  // the UI reads its verdict instead of re-deriving one that could disagree.
+  const canDecide = (r: GrantRequest) =>
+    r.approver_role === "admin" || r.approver_role === "server_approver";
 
   const [tab, setTab] = useState<"pending" | "all">("pending");
   const [createOpen, setCreateOpen] = useState(false);
@@ -179,12 +186,42 @@ function GrantRequestsPage() {
         r.requested_at ? new Date(r.requested_at).toLocaleString() : "",
     },
     {
+      // Why *you* may decide this one. Approval is no longer admin-only, so
+      // "the buttons are there" is no longer a self-explanatory state: a
+      // delegated approver seeing them on the staging rows and not the
+      // production ones should be able to read the reason off the row.
+      key: "approver_role",
+      header: "You decide as",
+      cell: (r: GrantRequest) => {
+        if (r.status !== "pending") return null;
+
+        const hat = APPROVER_HAT[r.approver_role ?? ""];
+        if (!hat) {
+          return (
+            <span className="text-xs text-muted-foreground italic">
+              {r.user_id === user?.uid ? "your own request" : "—"}
+            </span>
+          );
+        }
+
+        return (
+          <span
+            className="text-xs bg-secondary px-1.5 py-0.5 rounded"
+            title={hat.hint}
+            data-testid={`request-approver-role-${r.uid}`}
+          >
+            {hat.label}
+          </span>
+        );
+      },
+    },
+    {
       key: "actions",
       header: "",
       cell: (r: GrantRequest) =>
         r.status !== "pending" ? null : (
           <div className="flex gap-1 justify-end">
-            {isAdmin && (
+            {canDecide(r) && (
               <>
                 <Button
                   size="sm"
@@ -252,7 +289,7 @@ function GrantRequestsPage() {
         description={
           isAdmin
             ? "Approve or deny grant requests submitted by users."
-            : "Track the status of your grant requests."
+            : "Track the status of your grant requests, and decide the ones you are an access approver for."
         }
         actions={
           canRequest && (
