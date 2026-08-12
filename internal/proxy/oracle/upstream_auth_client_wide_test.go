@@ -492,6 +492,27 @@ func TestSyntheticWideAuthDeclaresTheCallersLogonMode(t *testing.T) {
 	}
 }
 
+// TestCountingHandlerCapturesTheNegotiatedEncoding covers the accessor the
+// sqlplus integration test leans on to prove it exercised the wide path. That
+// assertion is the only thing stopping the integration test from passing on a
+// thin session, so an accessor that silently returned nothing would make it
+// vacuous — and only the integration build calls it, where a mistake surfaces
+// slowly and behind a container.
+func TestCountingHandlerCapturesTheNegotiatedEncoding(t *testing.T) {
+	t.Parallel()
+
+	h := newCountingHandler()
+	logger := slog.New(h)
+
+	logger.DebugContext(t.Context(), "sending AUTH challenge", slog.Bool("wide_encoding", false))
+	logger.DebugContext(t.Context(), "sending AUTH challenge", slog.Bool("wide_encoding", true))
+
+	assert.Equal(t, []bool{false, true}, h.boolsFor("sending AUTH challenge", "wide_encoding"),
+		"every value must be recorded, in order")
+	assert.Empty(t, h.boolsFor("sending AUTH challenge", "no_such_attr"))
+	assert.Empty(t, h.boolsFor("no such message", "wide_encoding"))
+}
+
 // sendSyntheticAuth drives one synthetic AUTH send over a pipe and returns the
 // packet that reached the upstream. clientAuthPhase1Pkt/Phase2Pkt are left nil,
 // which is what selects the synthetic path without touching the

@@ -14,11 +14,16 @@ import (
 // relay, and the upstream parses AUTH at *those* caps, so a thin body handed to
 // an OCI-conditioned upstream is unreadable (two break markers + ORA-03120).
 //
+// That premise is measured, not assumed: with the wide dispatch below disabled
+// so a thin body goes out on an OCI session, a real sqlplus login through the
+// proxy dies with ORA-03113 (end-of-file on communication channel) and never
+// authenticates. TestIntegration_SqlplusLoginThroughSyntheticAuth is the same
+// login with the dispatch on, and it passes.
+//
 // Everything below is the wide (OCI) counterpart. It was measured against
 // testdata/sqlplus_cursor_reexec.pcapng (macOS Instant Client 23.3 → Oracle
 // 23ai Free), cross-checked against the DB-bundled 23.26 client fixtures in
-// oci_instantclient_test.go. Five things differ from the thin body, and all
-// five are load-bearing:
+// oci_instantclient_test.go. Five things differ from the thin body:
 //
 //  1. TNS data flags are 0x2000, not 0x0000 (both captured AUTH packets).
 //  2. The preamble is pointer runs and 4-byte little-endian fields, not
@@ -36,6 +41,19 @@ import (
 //     captured Phase 2), so it is copied from the client rather than invented.
 //
 // The username field, by contrast, is the same CLR form in both dialects.
+//
+// Which of the five the upstream actually enforces was measured the same way,
+// by breaking one at a time and re-running that login against Oracle 23ai Free.
+// Only the structure (2) is enforced — it is what separates a readable body
+// from ORA-03113. Oracle 23ai accepted the login with thin data flags (1), and
+// accepted plain length fields in place of the 3x buffer sizes (3) as long as
+// every field agreed: the ORA-28041 trap is MIXING the two conventions inside
+// one body, which is the rewrite path's hazard (see replaceAuthKVValueWide),
+// not picking the wrong flavor wholesale. (4) is unreachable unless a value is
+// actually empty, which needs a host with no name. They are reproduced anyway,
+// because "this server tolerates it" is a weaker contract than "this is what
+// the client we are impersonating sends", and the tolerance is unlikely to be
+// uniform across the Oracle versions and OCI builds dbbat fronts.
 
 // wideAuthPointerRun is the 8-byte placeholder OCI writes where a marshaled
 // pointer would go. Four of them frame the Phase 1/Phase 2 preamble, and the

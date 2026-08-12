@@ -30,7 +30,11 @@ type countingHandler struct {
 	// ints keys on message+"\x00"+attr, so the cursor-close record's `tracked`
 	// size can be read back: that is what the measurement asserts on to show
 	// the tracker stays bounded without a cap.
-	ints  map[string][]int64
+	ints map[string][]int64
+	// bools keys the same way, so a session's negotiated shape can be read
+	// back: the synthetic-AUTH suite asserts on `wide_encoding` to prove an
+	// OCI client really did drive the wide path rather than the thin one.
+	bools map[string][]bool
 	trace []string
 }
 
@@ -39,6 +43,7 @@ func newCountingHandler() *countingHandler {
 		counts: make(map[string]int),
 		sqls:   make(map[string][]string),
 		ints:   make(map[string][]int64),
+		bools:  make(map[string][]bool),
 	}
 }
 
@@ -60,6 +65,11 @@ func (h *countingHandler) Handle(_ context.Context, rec slog.Record) error {
 		if a.Value.Kind() == slog.KindInt64 {
 			key := rec.Message + "\x00" + a.Key
 			h.ints[key] = append(h.ints[key], a.Value.Int64())
+		}
+
+		if a.Value.Kind() == slog.KindBool {
+			key := rec.Message + "\x00" + a.Key
+			h.bools[key] = append(h.bools[key], a.Value.Bool())
 		}
 
 		if a.Key == "sql" || a.Key == "cursor_id" {
@@ -106,6 +116,19 @@ func (h *countingHandler) intsFor(msg, attr string) []int64 {
 
 	values := h.ints[msg+"\x00"+attr]
 	out := make([]int64, len(values))
+	copy(out, values)
+
+	return out
+}
+
+// boolsFor returns every value the named boolean attribute carried on the named
+// message, in the order they were logged.
+func (h *countingHandler) boolsFor(msg, attr string) []bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	values := h.bools[msg+"\x00"+attr]
+	out := make([]bool, len(values))
 	copy(out, values)
 
 	return out
