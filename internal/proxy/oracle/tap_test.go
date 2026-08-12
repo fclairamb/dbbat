@@ -235,6 +235,24 @@ func tappedOERs(t *testing.T, stream []byte) []tappedOER {
 	}
 }
 
+// tappedPacketTypes lists the TNS packet types in a tapped stream, in order. It
+// is what shows a marker (break) exchange for what it is rather than as
+// unexplained bytes ahead of an error frame.
+func tappedPacketTypes(stream []byte) []TNSPacketType {
+	var out []TNSPacketType
+
+	reader := &replayConn{Reader: bytes.NewReader(stream)}
+
+	for {
+		pkt, err := readTNSPacket(reader)
+		if err != nil {
+			return out
+		}
+
+		out = append(out, pkt.Type)
+	}
+}
+
 // replayConn makes a recorded byte stream readable by readTNSPacket, which
 // takes a net.Conn but only ever reads from it. Reusing the production reader
 // is the point: a tapped frame is then parsed by the same code that parses a

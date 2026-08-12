@@ -243,7 +243,11 @@ func TestIntegration_AsyncRefusalAgainstJDBCThin(t *testing.T) {
 	// a frame written and lost look identical from there.
 	tap := startRecordingTap(t, env.host, env.port)
 
-	probe := jdbcProbeRun{java: java, jar: jar, program: program, host: tap.host, port: tap.port, env: env}
+	probe := jdbcProbeRun{
+		java: java, jar: jar, program: program,
+		host: tap.host, port: tap.port,
+		service: env.service, user: env.username, password: env.apiKey,
+	}
 
 	t.Run("byte quota tripped mid-result-set", func(t *testing.T) {
 		// Every earlier connection's bytes are already persisted against the
@@ -373,7 +377,7 @@ func TestIntegration_AsyncRefusalAgainstJDBCThin(t *testing.T) {
 
 		var idleQuiet, idleClosed bool
 
-		run.onIdle = func() {
+		run.onIdle = func(string) {
 			// The client is parked between calls: no statement in flight and
 			// nothing in its receive buffer. This is the only refusal path that
 			// can fire there.
@@ -460,15 +464,23 @@ type jdbcProbeRun struct {
 	host string
 	port int
 
-	env   *oracleThroughProxy
+	// service/user/password are the connect coordinates. They live here rather
+	// than being read off a fixture, because the real-Oracle capture points the
+	// same program at a database with no dbbat in front of it.
+	service  string
+	user     string
+	password string
+
 	mode  string
 	extra []string
 
 	// onIdle, when non-nil, is what the measurement is about: the probe prints
 	// `idle-ready` and blocks on stdin, so onIdle runs with the client provably
 	// parked between calls — not merely "probably idle because the test slept".
-	// The probe is released by a newline on stdin afterwards.
-	onIdle func()
+	// It is handed everything the probe has printed so far, which is how the
+	// real-Oracle capture learns the session id it has to kill. The probe is
+	// released by a newline on stdin afterwards.
+	onIdle func(printedSoFar string)
 }
 
 // run starts the probe and returns everything it printed.
@@ -476,7 +488,7 @@ func (r jdbcProbeRun) run(t *testing.T) string {
 	t.Helper()
 
 	args := append([]string{"-cp", r.jar, r.program,
-		r.host, strconv.Itoa(r.port), r.env.service, r.env.username, r.env.apiKey, r.mode}, r.extra...)
+		r.host, strconv.Itoa(r.port), r.service, r.user, r.password, r.mode}, r.extra...)
 
 	return runProbeProcess(t, r.java, args, r.onIdle)
 }
@@ -484,7 +496,7 @@ func (r jdbcProbeRun) run(t *testing.T) string {
 // runProbeProcess is the process half of runJDBCProbe, shared with the
 // real-Oracle capture, which points the same program at a raw tap instead of at
 // the proxy.
-func runProbeProcess(t *testing.T, java string, args []string, onIdle func()) string {
+func runProbeProcess(t *testing.T, java string, args []string, onIdle func(string)) string {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), jdbcRefusalDeadline)
@@ -504,7 +516,7 @@ func runProbeProcess(t *testing.T, java string, args []string, onIdle func()) st
 	if onIdle != nil {
 		select {
 		case <-watcher.hit:
-			onIdle()
+			onIdle(watcher.String())
 		case <-ctx.Done():
 			_ = cmd.Process.Kill()
 			t.Fatalf("the probe never reached its idle point:\n%s", watcher.String())
