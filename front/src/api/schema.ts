@@ -1089,11 +1089,25 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Approve grant request (admin)
+         * Approve grant request (admin or access approver)
          * @description Atomically transitions pending → approved and creates a real
          *     AccessGrant from the linked definition + the request's
          *     user/database. Returns 409 if not pending or if the linked
          *     definition has been deactivated.
+         *
+         *     **Who may call this.** Any admin, plus any member of the
+         *     access-approver groups resolved for the target server: its own
+         *     `access_approver_user_group_uids` when non-empty, otherwise the union of
+         *     those on the server groups it belongs to. A server (and its groups) that
+         *     name none leave the decision to admins, which is the behavior of an
+         *     instance that configures none of this.
+         *
+         *     Resolution is live, at decision time — editing a list changes who may
+         *     decide requests that are already filed.
+         *
+         *     A non-admin can never decide **their own** request (403), however they
+         *     are named. Admins keep their long-standing ability to, since they can
+         *     issue the same access directly with `POST /grants`.
          */
         post: operations["approveGrantRequest"];
         delete?: never;
@@ -1113,7 +1127,12 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Deny grant request (admin) */
+        /**
+         * Deny grant request (admin or access approver)
+         * @description Same authorization as `approve`: admins, plus the access approvers
+         *     resolved off the target server and its server groups, never the
+         *     requester themselves.
+         */
         post: operations["denyGrantRequest"];
         delete?: never;
         options?: never;
@@ -1413,7 +1432,12 @@ export interface paths {
          *     is best-effort for history, so clients refetch this on reconnect.
          *
          *     Admins and viewers see every hold; other users see only holds they are
-         *     an approver for.
+         *     an approver for — through the grant definition's
+         *     `approver_user_group_uids`, or through the target server's (or its
+         *     server groups') `query_approver_user_group_uids`.
+         *
+         *     Each row carries `approver_role`, the hat the calling user would wear to
+         *     resolve *that* hold.
          */
         get: operations["listPendingApprovals"];
         put?: never;
@@ -2219,6 +2243,24 @@ export interface components {
              *     the blast radius of a membership edit, since membership is live.
              */
             readonly active_grant_count: number;
+            /**
+             * @description User groups whose members may approve or deny **grant requests**
+             *     targeting any server in this group. It is the group-level fallback:
+             *     a server that names its own access approvers ignores it entirely.
+             *     Several groups holding the same server **union** their lists.
+             *     Empty everywhere leaves the decision to admins.
+             */
+            access_approver_user_group_uids: string[];
+            /**
+             * @description User groups whose members may release **approval holds** on
+             *     statements against any server in this group. Same fallback and
+             *     union rules as `access_approver_user_group_uids`, and no hierarchy
+             *     between the two — neither implies the other.
+             *
+             *     Read live at decision time: editing this changes who may decide
+             *     immediately, including for statements already parked.
+             */
+            query_approver_user_group_uids: string[];
             /** Format: uuid */
             readonly created_by?: string | null;
             /** Format: date-time */
@@ -2233,6 +2275,20 @@ export interface components {
              *     SSH bastions are rejected.
              */
             member_uids?: string[];
+            /**
+             * @description Group-level fallback for who may decide **grant requests** on this
+             *     group's servers. Unlike `member_uids`, this is written on every
+             *     update — omitting it clears the list, which is a real policy change
+             *     (the decision falls back to admins). Every uid must name an
+             *     existing user group.
+             */
+            access_approver_user_group_uids?: string[];
+            /**
+             * @description Group-level fallback for who may release **approval holds** on this
+             *     group's servers. Same write semantics as
+             *     `access_approver_user_group_uids`.
+             */
+            query_approver_user_group_uids?: string[];
         };
         UpdateUserRequest: {
             /** @description New password */
@@ -2307,6 +2363,10 @@ export interface components {
             k8s_namespace?: string;
             /** @description Whether API server certificate verification is disabled (kubernetes servers only) */
             k8s_insecure_skip_tls_verify?: boolean;
+            /** @description User groups allowed to decide **grant requests** for this server. Always present, empty included: empty is a meaningful state — the decision falls back to this server's groups, then to admins. */
+            access_approver_user_group_uids: string[];
+            /** @description User groups allowed to release **approval holds** on statements against this server, under the same fallback chain. Neither approver kind implies the other. */
+            query_approver_user_group_uids: string[];
             /** @description Present only when the create/update request set `test_connection: true` */
             connection_test?: components["schemas"]["ConnectionTestResult"];
         };
@@ -2420,6 +2480,25 @@ export interface components {
             /** @description Disable API server certificate verification. For throwaway clusters only: with it set, anything that can intercept the API server connection can read the ServiceAccount token. */
             k8s_insecure_skip_tls_verify?: boolean;
             /**
+             * @description User groups whose members may approve or deny **grant requests**
+             *     targeting this server, in addition to admins. Omitted or empty falls
+             *     back to the `access_approver_user_group_uids` of the server groups
+             *     this server belongs to (unioned across groups), and then to admins
+             *     alone — which is the behavior of a server that configures none of
+             *     this.
+             */
+            access_approver_user_group_uids?: string[];
+            /**
+             * @description User groups whose members may release **approval holds** on
+             *     statements against this server. Same fallback chain as
+             *     `access_approver_user_group_uids`, and no hierarchy between the two:
+             *     a query approver gains no say over grant requests, nor the reverse.
+             *
+             *     The grant definition's own `approver_user_group_uids` still wins
+             *     outright when it is non-empty; this is the fallback under it.
+             */
+            query_approver_user_group_uids?: string[];
+            /**
              * @description Optional; defaults to false when omitted. When true, the API dials the newly created
              *     row once and returns the staged outcome as `connection_test` in the response.
              *     Never fatal: the row is created either way.
@@ -2471,6 +2550,19 @@ export interface components {
             k8s_insecure_skip_tls_verify?: boolean;
             /** @description When true, forgets the CA bundle pinned on first connect so the next connect pins afresh. The exit from a stale pin when the cluster's CA rotated and you do not have the new bundle to paste; supplying a non-empty `k8s_ca_cert` clears it too. */
             k8s_reset_learned_ca_cert?: boolean;
+            /**
+             * @description Replaces the server's grant-request approver list. Omit to leave it
+             *     alone; an explicit empty array clears it, handing the decision back
+             *     to the server groups and then to admins. Takes effect immediately,
+             *     including for requests already filed.
+             */
+            access_approver_user_group_uids?: string[];
+            /**
+             * @description Replaces the server's approval-hold approver list. Same semantics —
+             *     and it applies to statements *already parked*, since resolution is
+             *     live at decision time.
+             */
+            query_approver_user_group_uids?: string[];
             /**
              * @description Optional; defaults to false when omitted. When true, the API dials the updated row
              *     once and returns the staged outcome as `connection_test` in the response.
@@ -2527,6 +2619,19 @@ export interface components {
             decision_reason?: string | null;
             /** Format: uuid */
             resulting_grant_id?: string | null;
+            /**
+             * @description Which hat the **calling** user would wear to decide this request:
+             *     `admin`, `server_approver` (a member of the access-approver groups
+             *     resolved off the target server or its server groups), or empty when
+             *     they may see it but not decide it — most often their own request,
+             *     which nobody may self-approve.
+             *
+             *     Computed per request, because the answer is per server: an ops lead
+             *     can get `server_approver` on the staging rows of a listing and empty
+             *     on the production ones.
+             * @enum {string}
+             */
+            readonly approver_role?: "" | "admin" | "server_approver";
         };
         CreateGrantRequestPayload: {
             /**
@@ -6185,7 +6290,21 @@ export interface operations {
                 };
                 content: {
                     "application/json": {
-                        queries?: components["schemas"]["Query"][];
+                        queries?: (components["schemas"]["Query"] & {
+                            /**
+                             * @description Why the calling user may resolve this hold:
+                             *     `admin`; `definition_approver` (a member of the
+                             *     grant definition's approver groups, which wins
+                             *     whenever that list is non-empty);
+                             *     `server_approver` (a member of the query-approver
+                             *     groups resolved off the target server or its
+                             *     server groups); or empty when they may watch the
+                             *     hold but not release it — always the case for
+                             *     their own statement.
+                             * @enum {string}
+                             */
+                            readonly approver_role?: "" | "admin" | "definition_approver" | "server_approver";
+                        })[];
                     };
                 };
             };

@@ -21,11 +21,39 @@ type denyRequest struct {
 	Reason string `json:"reason"`
 }
 
+// Approver hats — *why* the current user may resolve something. Returned
+// alongside each pending item so the UI can say which authority the viewer is
+// acting under instead of just enabling a button, which is the difference
+// between a delegated approver trusting the screen and guessing.
+const (
+	// ApproverHatNone means the viewer may see the item but not resolve it.
+	ApproverHatNone = ""
+	// ApproverHatAdmin — the admin role, which decides everything.
+	ApproverHatAdmin = "admin"
+	// ApproverHatDefinition — a member of the grant definition's
+	// approver_user_group_uids. Query holds only; it wins over the server chain.
+	ApproverHatDefinition = "definition_approver"
+	// ApproverHatServer — a member of a group resolved off the target server or
+	// its server groups (query approvers for a hold, access approvers for a
+	// grant request).
+	ApproverHatServer = "server_approver"
+)
+
+// pendingQueryResponse is a held query plus the hat the *current* viewer would
+// wear to resolve it.
+type pendingQueryResponse struct {
+	*store.Query
+
+	ApproverRole string `json:"approver_role"`
+}
+
 // handleListPendingApprovals returns every query currently parked awaiting a
 // decision. This is the authoritative "what is pending now" view: the stream
 // is best-effort for history and clients refetch this on every reconnect.
 func (s *Server) handleListPendingApprovals(c *gin.Context) {
-	pending, err := s.store.ListPendingApprovalQueries(c.Request.Context())
+	ctx := c.Request.Context()
+
+	pending, err := s.store.ListPendingApprovalQueries(ctx)
 	if err != nil {
 		writeInternalError(c, s.logger, err, "failed to list pending approvals")
 
@@ -34,15 +62,84 @@ func (s *Server) handleListPendingApprovals(c *gin.Context) {
 
 	currentUser := getCurrentUser(c)
 
-	visible := make([]store.Query, 0, len(pending))
+	visible := make([]pendingQueryResponse, 0, len(pending))
 
 	for i := range pending {
-		if s.mayViewQuery(c.Request.Context(), currentUser, &pending[i]) {
-			visible = append(visible, pending[i])
+		if !s.mayViewQuery(ctx, currentUser, &pending[i]) {
+			continue
 		}
+
+		visible = append(visible, pendingQueryResponse{
+			Query:        &pending[i],
+			ApproverRole: s.approverHatForQuery(ctx, currentUser, &pending[i]),
+		})
 	}
 
 	successResponse(c, gin.H{"queries": visible})
+}
+
+// approverHatForQuery names the authority under which the user may resolve this
+// hold, following the same order mayApproveQuery does — so the label can never
+// claim a right the gate would refuse.
+//
+// Self-approval yields no hat at all: the viewer can watch their own held
+// statement, but nothing lets them release it.
+func (s *Server) approverHatForQuery(ctx context.Context, user *store.User, query *store.Query) string {
+	if user == nil {
+		return ApproverHatNone
+	}
+
+	if query.UserID != nil && *query.UserID == user.UID {
+		return ApproverHatNone
+	}
+
+	if user.IsAdmin() {
+		return ApproverHatAdmin
+	}
+
+	groups, err := s.store.ListUserGroupUIDs(ctx, user.UID)
+	if err != nil || len(groups) == 0 {
+		return ApproverHatNone
+	}
+
+	grant, err := s.resolveApprovalGrant(ctx, query)
+	if err == nil && grant != nil && len(grant.ApproverUserGroupUIDs()) > 0 {
+		if grant.MayApprove(groups) {
+			return ApproverHatDefinition
+		}
+
+		return ApproverHatNone
+	}
+
+	if query.DatabaseID == nil {
+		return ApproverHatNone
+	}
+
+	if ok, err := s.store.MayApproveForServer(
+		ctx, *query.DatabaseID, store.ApproverKindQuery, groups,
+	); err == nil && ok {
+		return ApproverHatServer
+	}
+
+	return ApproverHatNone
+}
+
+// approverHatForRequest is approverHatForQuery's grant-request counterpart.
+// There is no definition-level hat here: grant-request approval never had one.
+func (s *Server) approverHatForRequest(ctx context.Context, user *store.User, req *store.GrantRequest) string {
+	if user == nil || req == nil {
+		return ApproverHatNone
+	}
+
+	if user.IsAdmin() {
+		return ApproverHatAdmin
+	}
+
+	if s.mayDecideGrantRequest(ctx, user, req) {
+		return ApproverHatServer
+	}
+
+	return ApproverHatNone
 }
 
 // handleApproveQuery releases a parked statement.

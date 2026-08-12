@@ -2123,12 +2123,26 @@ paths:
     post:
       tags:
         - Grant Requests
-      summary: Approve grant request (admin)
+      summary: Approve grant request (admin or access approver)
       description: |
         Atomically transitions pending → approved and creates a real
         AccessGrant from the linked definition + the request's
         user/database. Returns 409 if not pending or if the linked
         definition has been deactivated.
+
+        **Who may call this.** Any admin, plus any member of the
+        access-approver groups resolved for the target server: its own
+        `access_approver_user_group_uids` when non-empty, otherwise the union of
+        those on the server groups it belongs to. A server (and its groups) that
+        name none leave the decision to admins, which is the behavior of an
+        instance that configures none of this.
+
+        Resolution is live, at decision time — editing a list changes who may
+        decide requests that are already filed.
+
+        A non-admin can never decide **their own** request (403), however they
+        are named. Admins keep their long-standing ability to, since they can
+        issue the same access directly with `POST /grants`.
       operationId: approveGrantRequest
       responses:
         '200':
@@ -2167,7 +2181,11 @@ paths:
     post:
       tags:
         - Grant Requests
-      summary: Deny grant request (admin)
+      summary: Deny grant request (admin or access approver)
+      description: |
+        Same authorization as `approve`: admins, plus the access approvers
+        resolved off the target server and its server groups, never the
+        requester themselves.
       operationId: denyGrantRequest
       requestBody:
         content:
@@ -2636,7 +2654,12 @@ paths:
         is best-effort for history, so clients refetch this on reconnect.
 
         Admins and viewers see every hold; other users see only holds they are
-        an approver for.
+        an approver for — through the grant definition's
+        `approver_user_group_uids`, or through the target server's (or its
+        server groups') `query_approver_user_group_uids`.
+
+        Each row carries `approver_role`, the hat the calling user would wear to
+        resolve *that* hold.
       operationId: listPendingApprovals
       responses:
         '200':
@@ -2649,7 +2672,24 @@ paths:
                   queries:
                     type: array
                     items:
-                      $ref: '#/components/schemas/Query'
+                      allOf:
+                        - $ref: '#/components/schemas/Query'
+                        - type: object
+                          properties:
+                            approver_role:
+                              type: string
+                              readOnly: true
+                              enum: ["", admin, definition_approver, server_approver]
+                              description: |
+                                Why the calling user may resolve this hold:
+                                `admin`; `definition_approver` (a member of the
+                                grant definition's approver groups, which wins
+                                whenever that list is non-empty);
+                                `server_approver` (a member of the query-approver
+                                groups resolved off the target server or its
+                                server groups); or empty when they may watch the
+                                hold but not release it — always the case for
+                                their own statement.
         '401':
           $ref: '#/components/responses/Unauthorized'
 
@@ -4075,6 +4115,30 @@ components:
           description: |
             How many currently-authorizing grants are bound to this group —
             the blast radius of a membership edit, since membership is live.
+        access_approver_user_group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            User groups whose members may approve or deny **grant requests**
+            targeting any server in this group. It is the group-level fallback:
+            a server that names its own access approvers ignores it entirely.
+            Several groups holding the same server **union** their lists.
+            Empty everywhere leaves the decision to admins.
+        query_approver_user_group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            User groups whose members may release **approval holds** on
+            statements against any server in this group. Same fallback and
+            union rules as `access_approver_user_group_uids`, and no hierarchy
+            between the two — neither implies the other.
+
+            Read live at decision time: editing this changes who may decide
+            immediately, including for statements already parked.
         created_by:
           type: string
           format: uuid
@@ -4090,6 +4154,8 @@ components:
         - description
         - member_uids
         - active_grant_count
+        - access_approver_user_group_uids
+        - query_approver_user_group_uids
         - created_at
 
     CreateServerGroupRequest:
@@ -4109,6 +4175,26 @@ components:
             Replaces the group's membership. On update, omit to leave
             membership untouched; an explicit empty array empties the group.
             SSH bastions are rejected.
+        access_approver_user_group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            Group-level fallback for who may decide **grant requests** on this
+            group's servers. Unlike `member_uids`, this is written on every
+            update — omitting it clears the list, which is a real policy change
+            (the decision falls back to admins). Every uid must name an
+            existing user group.
+        query_approver_user_group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            Group-level fallback for who may release **approval holds** on this
+            group's servers. Same write semantics as
+            `access_approver_user_group_uids`.
       required:
         - name
 
@@ -4232,6 +4318,24 @@ components:
         k8s_insecure_skip_tls_verify:
           type: boolean
           description: Whether API server certificate verification is disabled (kubernetes servers only)
+        access_approver_user_group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: >-
+            User groups allowed to decide **grant requests** for this server.
+            Always present, empty included: empty is a meaningful state — the
+            decision falls back to this server's groups, then to admins.
+        query_approver_user_group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: >-
+            User groups allowed to release **approval holds** on statements
+            against this server, under the same fallback chain. Neither approver
+            kind implies the other.
         connection_test:
           allOf:
             - $ref: '#/components/schemas/ConnectionTestResult'
@@ -4240,6 +4344,8 @@ components:
       required:
         - uid
         - name
+        - access_approver_user_group_uids
+        - query_approver_user_group_uids
 
     ConnectionTestResult:
       type: object
@@ -4432,6 +4538,31 @@ components:
             Disable API server certificate verification. For throwaway clusters
             only: with it set, anything that can intercept the API server
             connection can read the ServiceAccount token.
+        access_approver_user_group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            User groups whose members may approve or deny **grant requests**
+            targeting this server, in addition to admins. Omitted or empty falls
+            back to the `access_approver_user_group_uids` of the server groups
+            this server belongs to (unioned across groups), and then to admins
+            alone — which is the behavior of a server that configures none of
+            this.
+        query_approver_user_group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            User groups whose members may release **approval holds** on
+            statements against this server. Same fallback chain as
+            `access_approver_user_group_uids`, and no hierarchy between the two:
+            a query approver gains no say over grant requests, nor the reverse.
+
+            The grant definition's own `approver_user_group_uids` still wins
+            outright when it is non-empty; this is the fallback under it.
         test_connection:
           type: boolean
           description: |
@@ -4528,6 +4659,25 @@ components:
             connect pins afresh. The exit from a stale pin when the cluster's CA
             rotated and you do not have the new bundle to paste; supplying a
             non-empty `k8s_ca_cert` clears it too.
+        access_approver_user_group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            Replaces the server's grant-request approver list. Omit to leave it
+            alone; an explicit empty array clears it, handing the decision back
+            to the server groups and then to admins. Takes effect immediately,
+            including for requests already filed.
+        query_approver_user_group_uids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: |
+            Replaces the server's approval-hold approver list. Same semantics —
+            and it applies to statements *already parked*, since resolution is
+            live at decision time.
         test_connection:
           type: boolean
           description: |
@@ -4606,6 +4756,20 @@ components:
           type: string
           format: uuid
           nullable: true
+        approver_role:
+          type: string
+          readOnly: true
+          enum: ["", admin, server_approver]
+          description: |
+            Which hat the **calling** user would wear to decide this request:
+            `admin`, `server_approver` (a member of the access-approver groups
+            resolved off the target server or its server groups), or empty when
+            they may see it but not decide it — most often their own request,
+            which nobody may self-approve.
+
+            Computed per request, because the answer is per server: an ops lead
+            can get `server_approver` on the staging rows of a listing and empty
+            on the production ones.
       required:
         - uid
         - user_id
