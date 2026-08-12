@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect/pgdialect"
 
 	"github.com/fclairamb/dbbat/internal/crypto"
 )
@@ -52,9 +53,21 @@ func (s *Store) CreateServer(ctx context.Context, db *Server, encryptionKey []by
 		ViaUID:            db.ViaUID,
 		ProtocolData:      db.ProtocolData,
 		Listable:          db.Listable,
-		CreatedBy:         db.CreatedBy,
-		CreatedAt:         time.Now(),
-		UpdatedAt:         time.Now(),
+		// Both default to empty, i.e. "the server groups decide, and failing
+		// that the admins" — see ResolveServerApproverGroups.
+		AccessApproverUserGroupUIDs: copyUUIDs(db.AccessApproverUserGroupUIDs),
+		QueryApproverUserGroupUIDs:  copyUUIDs(db.QueryApproverUserGroupUIDs),
+		CreatedBy:                   db.CreatedBy,
+		CreatedAt:                   time.Now(),
+		UpdatedAt:                   time.Now(),
+	}
+
+	if result.AccessApproverUserGroupUIDs == nil {
+		result.AccessApproverUserGroupUIDs = []uuid.UUID{}
+	}
+
+	if result.QueryApproverUserGroupUIDs == nil {
+		result.QueryApproverUserGroupUIDs = []uuid.UUID{}
 	}
 
 	// Use a transaction to insert with a placeholder, get UID, then update with real encrypted password
@@ -539,6 +552,15 @@ func applyServerColumnUpdates(q *bun.UpdateQuery, updates ServerUpdate) *bun.Upd
 		q = q.Set("via_uid = NULL")
 	} else if updates.ViaUID != nil {
 		q = q.Set("via_uid = ?", *updates.ViaUID)
+	}
+	// A non-nil pointer replaces the list wholesale, empty included — clearing
+	// is a real policy change (it hands the decision back to the server groups),
+	// so it has to be expressible.
+	if updates.AccessApproverUserGroupUIDs != nil {
+		q = q.Set("access_approver_user_group_uids = ?", pgdialect.Array(*updates.AccessApproverUserGroupUIDs))
+	}
+	if updates.QueryApproverUserGroupUIDs != nil {
+		q = q.Set("query_approver_user_group_uids = ?", pgdialect.Array(*updates.QueryApproverUserGroupUIDs))
 	}
 	return q
 }
