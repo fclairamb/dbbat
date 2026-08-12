@@ -9,33 +9,33 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as LoginRouteImport } from './routes/login'
+import { Route as AuthenticatedRouteImport } from './routes/_authenticated'
 import { Route as AuthenticatedIndexRouteImport } from './routes/_authenticated/index'
 import { Route as AuthenticatedDeviceRouteImport } from './routes/_authenticated/device'
-import { Route as AuthenticatedApiKeysIndexRouteImport } from './routes/_authenticated/api-keys/index'
-import { Route as AuthenticatedAuditIndexRouteImport } from './routes/_authenticated/audit/index'
-import { Route as AuthenticatedConnectionsIndexRouteImport } from './routes/_authenticated/connections/index'
-import { Route as AuthenticatedConnectionsUidRouteImport } from './routes/_authenticated/connections/$uid'
-import { Route as AuthenticatedDatabasesIndexRouteImport } from './routes/_authenticated/databases/index'
-import { Route as AuthenticatedGrantDefinitionsIndexRouteImport } from './routes/_authenticated/grant-definitions/index'
-import { Route as AuthenticatedGrantRequestsIndexRouteImport } from './routes/_authenticated/grant-requests/index'
-import { Route as AuthenticatedGrantsIndexRouteImport } from './routes/_authenticated/grants/index'
-import { Route as AuthenticatedQueriesIndexRouteImport } from './routes/_authenticated/queries/index'
-import { Route as AuthenticatedQueriesUidRouteImport } from './routes/_authenticated/queries/$uid'
-import { Route as AuthenticatedServerGroupsIndexRouteImport } from './routes/_authenticated/server-groups/index'
-import { Route as AuthenticatedServersIndexRouteImport } from './routes/_authenticated/servers/index'
-import { Route as AuthenticatedSettingsIndexRouteImport } from './routes/_authenticated/settings/index'
-import { Route as AuthenticatedUserGroupsIndexRouteImport } from './routes/_authenticated/user-groups/index'
 import { Route as AuthenticatedUsersIndexRouteImport } from './routes/_authenticated/users/index'
+import { Route as AuthenticatedUserGroupsIndexRouteImport } from './routes/_authenticated/user-groups/index'
+import { Route as AuthenticatedSettingsIndexRouteImport } from './routes/_authenticated/settings/index'
+import { Route as AuthenticatedServersIndexRouteImport } from './routes/_authenticated/servers/index'
+import { Route as AuthenticatedServerGroupsIndexRouteImport } from './routes/_authenticated/server-groups/index'
+import { Route as AuthenticatedQueriesIndexRouteImport } from './routes/_authenticated/queries/index'
+import { Route as AuthenticatedGrantsIndexRouteImport } from './routes/_authenticated/grants/index'
+import { Route as AuthenticatedGrantRequestsIndexRouteImport } from './routes/_authenticated/grant-requests/index'
+import { Route as AuthenticatedGrantDefinitionsIndexRouteImport } from './routes/_authenticated/grant-definitions/index'
+import { Route as AuthenticatedDatabasesIndexRouteImport } from './routes/_authenticated/databases/index'
+import { Route as AuthenticatedConnectionsIndexRouteImport } from './routes/_authenticated/connections/index'
+import { Route as AuthenticatedAuditIndexRouteImport } from './routes/_authenticated/audit/index'
+import { Route as AuthenticatedApiKeysIndexRouteImport } from './routes/_authenticated/api-keys/index'
+import { Route as AuthenticatedQueriesUidRouteImport } from './routes/_authenticated/queries/$uid'
+import { Route as AuthenticatedConnectionsUidRouteImport } from './routes/_authenticated/connections/$uid'
 
-const AuthenticatedRoute = AuthenticatedRouteImport.update({
-  id: '/_authenticated',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const LoginRoute = LoginRouteImport.update({
   id: '/login',
   path: '/login',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const AuthenticatedRoute = AuthenticatedRouteImport.update({
+  id: '/_authenticated',
   getParentRoute: () => rootRouteImport,
 } as any)
 const AuthenticatedIndexRoute = AuthenticatedIndexRouteImport.update({
@@ -48,74 +48,15 @@ const AuthenticatedDeviceRoute = AuthenticatedDeviceRouteImport.update({
   path: '/device',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
-const AuthenticatedApiKeysIndexRoute =
-  AuthenticatedApiKeysIndexRouteImport.update({
-    id: '/api-keys/',
-    path: '/api-keys/',
-    getParentRoute: () => AuthenticatedRoute,
-  } as any)
-const AuthenticatedAuditIndexRoute = AuthenticatedAuditIndexRouteImport.update({
-  id: '/audit/',
-  path: '/audit/',
+const AuthenticatedUsersIndexRoute = AuthenticatedUsersIndexRouteImport.update({
+  id: '/users/',
+  path: '/users/',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
-const AuthenticatedConnectionsIndexRoute =
-  AuthenticatedConnectionsIndexRouteImport.update({
-    id: '/connections/',
-    path: '/connections/',
-    getParentRoute: () => AuthenticatedRoute,
-  } as any)
-const AuthenticatedConnectionsUidRoute =
-  AuthenticatedConnectionsUidRouteImport.update({
-    id: '/connections/$uid',
-    path: '/connections/$uid',
-    getParentRoute: () => AuthenticatedRoute,
-  } as any)
-const AuthenticatedDatabasesIndexRoute =
-  AuthenticatedDatabasesIndexRouteImport.update({
-    id: '/databases/',
-    path: '/databases/',
-    getParentRoute: () => AuthenticatedRoute,
-  } as any)
-const AuthenticatedGrantDefinitionsIndexRoute =
-  AuthenticatedGrantDefinitionsIndexRouteImport.update({
-    id: '/grant-definitions/',
-    path: '/grant-definitions/',
-    getParentRoute: () => AuthenticatedRoute,
-  } as any)
-const AuthenticatedGrantRequestsIndexRoute =
-  AuthenticatedGrantRequestsIndexRouteImport.update({
-    id: '/grant-requests/',
-    path: '/grant-requests/',
-    getParentRoute: () => AuthenticatedRoute,
-  } as any)
-const AuthenticatedGrantsIndexRoute =
-  AuthenticatedGrantsIndexRouteImport.update({
-    id: '/grants/',
-    path: '/grants/',
-    getParentRoute: () => AuthenticatedRoute,
-  } as any)
-const AuthenticatedQueriesIndexRoute =
-  AuthenticatedQueriesIndexRouteImport.update({
-    id: '/queries/',
-    path: '/queries/',
-    getParentRoute: () => AuthenticatedRoute,
-  } as any)
-const AuthenticatedQueriesUidRoute = AuthenticatedQueriesUidRouteImport.update({
-  id: '/queries/$uid',
-  path: '/queries/$uid',
-  getParentRoute: () => AuthenticatedRoute,
-} as any)
-const AuthenticatedServerGroupsIndexRoute =
-  AuthenticatedServerGroupsIndexRouteImport.update({
-    id: '/server-groups/',
-    path: '/server-groups/',
-    getParentRoute: () => AuthenticatedRoute,
-  } as any)
-const AuthenticatedServersIndexRoute =
-  AuthenticatedServersIndexRouteImport.update({
-    id: '/servers/',
-    path: '/servers/',
+const AuthenticatedUserGroupsIndexRoute =
+  AuthenticatedUserGroupsIndexRouteImport.update({
+    id: '/user-groups/',
+    path: '/user-groups/',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
 const AuthenticatedSettingsIndexRoute =
@@ -124,17 +65,76 @@ const AuthenticatedSettingsIndexRoute =
     path: '/settings/',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
-const AuthenticatedUserGroupsIndexRoute =
-  AuthenticatedUserGroupsIndexRouteImport.update({
-    id: '/user-groups/',
-    path: '/user-groups/',
+const AuthenticatedServersIndexRoute =
+  AuthenticatedServersIndexRouteImport.update({
+    id: '/servers/',
+    path: '/servers/',
     getParentRoute: () => AuthenticatedRoute,
   } as any)
-const AuthenticatedUsersIndexRoute = AuthenticatedUsersIndexRouteImport.update({
-  id: '/users/',
-  path: '/users/',
+const AuthenticatedServerGroupsIndexRoute =
+  AuthenticatedServerGroupsIndexRouteImport.update({
+    id: '/server-groups/',
+    path: '/server-groups/',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedQueriesIndexRoute =
+  AuthenticatedQueriesIndexRouteImport.update({
+    id: '/queries/',
+    path: '/queries/',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedGrantsIndexRoute =
+  AuthenticatedGrantsIndexRouteImport.update({
+    id: '/grants/',
+    path: '/grants/',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedGrantRequestsIndexRoute =
+  AuthenticatedGrantRequestsIndexRouteImport.update({
+    id: '/grant-requests/',
+    path: '/grant-requests/',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedGrantDefinitionsIndexRoute =
+  AuthenticatedGrantDefinitionsIndexRouteImport.update({
+    id: '/grant-definitions/',
+    path: '/grant-definitions/',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedDatabasesIndexRoute =
+  AuthenticatedDatabasesIndexRouteImport.update({
+    id: '/databases/',
+    path: '/databases/',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedConnectionsIndexRoute =
+  AuthenticatedConnectionsIndexRouteImport.update({
+    id: '/connections/',
+    path: '/connections/',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedAuditIndexRoute = AuthenticatedAuditIndexRouteImport.update({
+  id: '/audit/',
+  path: '/audit/',
   getParentRoute: () => AuthenticatedRoute,
 } as any)
+const AuthenticatedApiKeysIndexRoute =
+  AuthenticatedApiKeysIndexRouteImport.update({
+    id: '/api-keys/',
+    path: '/api-keys/',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
+const AuthenticatedQueriesUidRoute = AuthenticatedQueriesUidRouteImport.update({
+  id: '/queries/$uid',
+  path: '/queries/$uid',
+  getParentRoute: () => AuthenticatedRoute,
+} as any)
+const AuthenticatedConnectionsUidRoute =
+  AuthenticatedConnectionsUidRouteImport.update({
+    id: '/connections/$uid',
+    path: '/connections/$uid',
+    getParentRoute: () => AuthenticatedRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof AuthenticatedIndexRoute
@@ -269,18 +269,18 @@ export interface RootRouteChildren {
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/_authenticated': {
-      id: '/_authenticated'
-      path: ''
-      fullPath: '/'
-      preLoaderRoute: typeof AuthenticatedRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/login': {
       id: '/login'
       path: '/login'
       fullPath: '/login'
       preLoaderRoute: typeof LoginRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_authenticated': {
+      id: '/_authenticated'
+      path: ''
+      fullPath: '/'
+      preLoaderRoute: typeof AuthenticatedRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_authenticated/': {
@@ -297,95 +297,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedDeviceRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
-    '/_authenticated/api-keys/': {
-      id: '/_authenticated/api-keys/'
-      path: '/api-keys'
-      fullPath: '/api-keys/'
-      preLoaderRoute: typeof AuthenticatedApiKeysIndexRouteImport
-      parentRoute: typeof AuthenticatedRoute
-    }
-    '/_authenticated/audit/': {
-      id: '/_authenticated/audit/'
-      path: '/audit'
-      fullPath: '/audit/'
-      preLoaderRoute: typeof AuthenticatedAuditIndexRouteImport
-      parentRoute: typeof AuthenticatedRoute
-    }
-    '/_authenticated/connections/': {
-      id: '/_authenticated/connections/'
-      path: '/connections'
-      fullPath: '/connections/'
-      preLoaderRoute: typeof AuthenticatedConnectionsIndexRouteImport
-      parentRoute: typeof AuthenticatedRoute
-    }
-    '/_authenticated/connections/$uid': {
-      id: '/_authenticated/connections/$uid'
-      path: '/connections/$uid'
-      fullPath: '/connections/$uid'
-      preLoaderRoute: typeof AuthenticatedConnectionsUidRouteImport
-      parentRoute: typeof AuthenticatedRoute
-    }
-    '/_authenticated/databases/': {
-      id: '/_authenticated/databases/'
-      path: '/databases'
-      fullPath: '/databases/'
-      preLoaderRoute: typeof AuthenticatedDatabasesIndexRouteImport
-      parentRoute: typeof AuthenticatedRoute
-    }
-    '/_authenticated/grant-definitions/': {
-      id: '/_authenticated/grant-definitions/'
-      path: '/grant-definitions'
-      fullPath: '/grant-definitions/'
-      preLoaderRoute: typeof AuthenticatedGrantDefinitionsIndexRouteImport
-      parentRoute: typeof AuthenticatedRoute
-    }
-    '/_authenticated/grant-requests/': {
-      id: '/_authenticated/grant-requests/'
-      path: '/grant-requests'
-      fullPath: '/grant-requests/'
-      preLoaderRoute: typeof AuthenticatedGrantRequestsIndexRouteImport
-      parentRoute: typeof AuthenticatedRoute
-    }
-    '/_authenticated/grants/': {
-      id: '/_authenticated/grants/'
-      path: '/grants'
-      fullPath: '/grants/'
-      preLoaderRoute: typeof AuthenticatedGrantsIndexRouteImport
-      parentRoute: typeof AuthenticatedRoute
-    }
-    '/_authenticated/queries/': {
-      id: '/_authenticated/queries/'
-      path: '/queries'
-      fullPath: '/queries/'
-      preLoaderRoute: typeof AuthenticatedQueriesIndexRouteImport
-      parentRoute: typeof AuthenticatedRoute
-    }
-    '/_authenticated/queries/$uid': {
-      id: '/_authenticated/queries/$uid'
-      path: '/queries/$uid'
-      fullPath: '/queries/$uid'
-      preLoaderRoute: typeof AuthenticatedQueriesUidRouteImport
-      parentRoute: typeof AuthenticatedRoute
-    }
-    '/_authenticated/server-groups/': {
-      id: '/_authenticated/server-groups/'
-      path: '/server-groups'
-      fullPath: '/server-groups/'
-      preLoaderRoute: typeof AuthenticatedServerGroupsIndexRouteImport
-      parentRoute: typeof AuthenticatedRoute
-    }
-    '/_authenticated/servers/': {
-      id: '/_authenticated/servers/'
-      path: '/servers'
-      fullPath: '/servers/'
-      preLoaderRoute: typeof AuthenticatedServersIndexRouteImport
-      parentRoute: typeof AuthenticatedRoute
-    }
-    '/_authenticated/settings/': {
-      id: '/_authenticated/settings/'
-      path: '/settings'
-      fullPath: '/settings/'
-      preLoaderRoute: typeof AuthenticatedSettingsIndexRouteImport
+    '/_authenticated/users/': {
+      id: '/_authenticated/users/'
+      path: '/users'
+      fullPath: '/users/'
+      preLoaderRoute: typeof AuthenticatedUsersIndexRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
     '/_authenticated/user-groups/': {
@@ -395,11 +311,95 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AuthenticatedUserGroupsIndexRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
-    '/_authenticated/users/': {
-      id: '/_authenticated/users/'
-      path: '/users'
-      fullPath: '/users/'
-      preLoaderRoute: typeof AuthenticatedUsersIndexRouteImport
+    '/_authenticated/settings/': {
+      id: '/_authenticated/settings/'
+      path: '/settings'
+      fullPath: '/settings/'
+      preLoaderRoute: typeof AuthenticatedSettingsIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/servers/': {
+      id: '/_authenticated/servers/'
+      path: '/servers'
+      fullPath: '/servers/'
+      preLoaderRoute: typeof AuthenticatedServersIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/server-groups/': {
+      id: '/_authenticated/server-groups/'
+      path: '/server-groups'
+      fullPath: '/server-groups/'
+      preLoaderRoute: typeof AuthenticatedServerGroupsIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/queries/': {
+      id: '/_authenticated/queries/'
+      path: '/queries'
+      fullPath: '/queries/'
+      preLoaderRoute: typeof AuthenticatedQueriesIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/grants/': {
+      id: '/_authenticated/grants/'
+      path: '/grants'
+      fullPath: '/grants/'
+      preLoaderRoute: typeof AuthenticatedGrantsIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/grant-requests/': {
+      id: '/_authenticated/grant-requests/'
+      path: '/grant-requests'
+      fullPath: '/grant-requests/'
+      preLoaderRoute: typeof AuthenticatedGrantRequestsIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/grant-definitions/': {
+      id: '/_authenticated/grant-definitions/'
+      path: '/grant-definitions'
+      fullPath: '/grant-definitions/'
+      preLoaderRoute: typeof AuthenticatedGrantDefinitionsIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/databases/': {
+      id: '/_authenticated/databases/'
+      path: '/databases'
+      fullPath: '/databases/'
+      preLoaderRoute: typeof AuthenticatedDatabasesIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/connections/': {
+      id: '/_authenticated/connections/'
+      path: '/connections'
+      fullPath: '/connections/'
+      preLoaderRoute: typeof AuthenticatedConnectionsIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/audit/': {
+      id: '/_authenticated/audit/'
+      path: '/audit'
+      fullPath: '/audit/'
+      preLoaderRoute: typeof AuthenticatedAuditIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/api-keys/': {
+      id: '/_authenticated/api-keys/'
+      path: '/api-keys'
+      fullPath: '/api-keys/'
+      preLoaderRoute: typeof AuthenticatedApiKeysIndexRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/queries/$uid': {
+      id: '/_authenticated/queries/$uid'
+      path: '/queries/$uid'
+      fullPath: '/queries/$uid'
+      preLoaderRoute: typeof AuthenticatedQueriesUidRouteImport
+      parentRoute: typeof AuthenticatedRoute
+    }
+    '/_authenticated/connections/$uid': {
+      id: '/_authenticated/connections/$uid'
+      path: '/connections/$uid'
+      fullPath: '/connections/$uid'
+      preLoaderRoute: typeof AuthenticatedConnectionsUidRouteImport
       parentRoute: typeof AuthenticatedRoute
     }
   }
