@@ -39,6 +39,13 @@ const (
 	// read extra_tail_fields back off it (see blocked_integration_test.go), so
 	// the shape a client actually got is reported rather than assumed.
 	logMsgLearnedOERTail = "learned OER tail shape from upstream"
+
+	// logMsgWatchdogTeardown is the limit watchdog's own record
+	// (session.onLimitViolation). It is the only teardown that writes no error
+	// frame, so a measurement of the idle-revocation path reads it back to show
+	// the session died there and not on the mid-stream check that does write
+	// one — see async_refusal_integration_test.go.
+	logMsgWatchdogTeardown = "terminating Oracle session: grant no longer valid mid-stream"
 )
 
 // trackedCursor tracks a parsed cursor and its SQL.
