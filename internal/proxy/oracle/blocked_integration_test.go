@@ -311,17 +311,16 @@ EXIT
 // CI too; ORACLE_TEST_REQUIRE_OCI_CLIENT=1 makes "no client" a failure rather
 // than a skip. See oci_client_integration_test.go. The fixtures in
 // ttc_oer_encode_test.go carry the byte-level half of the same evidence.
+//
+// It ran on the Instant Client only for a while: the DB-bundled client was
+// refused on its very first message and hung, so this skipped on that flavor.
+// Three defects were behind it — a piggyback read as a fetch, a close-cursors
+// list dbbat could not walk, and a summary object marshaled at the wrong widths
+// — and both flavors run it now. oci_bundled_piggyback_test.go pins all three
+// from recorded bytes; this is where they are proven end to end.
 func TestIntegration_BlockedStatementRefusesSQLPlus(t *testing.T) {
 	env := startOracleThroughProxyForOCI(t, nil)
 	oci := requireOCIClient(t, env)
-
-	// Not "the client is missing" — the client is right there and the login
-	// test drives it. This is a defect with a repro and a filed spec; the skip
-	// goes away when it is fixed, and it names what it is waiting on rather
-	// than being a silent hole the way exec.LookPath was.
-	if oci.kind == ociClientContainer {
-		t.Skip(knownBadBundledRefusal)
-	}
 
 	ctx := context.Background()
 
