@@ -36,6 +36,10 @@ It detects:
   enumerates stamped connections as well as connections with surviving
   statements, so an emptied session is judged rather than skipped (see [A
   session emptied of every statement](#a-session-emptied-of-every-statement));
+- a **whole session** deleted, connection row and all — but *only* through the
+  two `audit_log` entries every session writes, never through the `connections`
+  row itself, which is not chained (see [The session
+  entries](#the-session-entries));
 - entries deleted from the **start** of the audit chain (the first entry's
   `prev_mac` is a genesis MAC derived from the key, so it cannot be forged).
 
@@ -48,6 +52,14 @@ It does **not**:
   reported separately as unverifiable, rather than silently counted as
   verified.
 - seal a query's **outcome**. See [Coverage](#coverage) below.
+- seal the `connections` **row**. That table carries no MAC. A whole-session
+  delete is detectable only by comparing the surviving rows against the
+  `connection.opened` / `connection.closed` entries in `audit_log`; nothing in
+  `dbbat audit verify` performs that comparison for you, and every column of a
+  connection row — `connected_at` included — can still be edited in place
+  without breaking any chain. The two entries record the immutable half of that
+  row, so an edit is *detectable by comparison*; it is not detected by a walk.
+  See [The session entries](#the-session-entries).
 - protect against someone who has the **key**. An attacker who reads
   `DBB_KEY` / `DBB_KEYFILE` off the host can rewrite the store and re-seal it.
   This is why the head MAC is meant to be recorded outside the database (see
@@ -89,6 +101,84 @@ Columns added by `20260810000000_audit_chain`:
 Ordering is `chain_seq`, **not** `uid`. UUIDv7 only orders by millisecond, and
 two entries minted in the same millisecond have no defined order — which a
 chain cannot tolerate.
+
+#### The session entries
+
+`audit_log` also carries two entries per proxied session, and they are there for
+a reason that has nothing to do with administration:
+
+```sql
+DELETE FROM connections WHERE uid = '…';
+```
+
+`queries.connection_id` and `query_rows.query_id` are both `ON DELETE CASCADE`,
+so one statement removes a session, everything it ran and everything it read.
+Every *other* deletion is covered — middle, start, end, and the whole of a
+session's statements — but nothing references a connection row once it is gone,
+so this one used to leave no trace at all.
+
+Chaining `connections` was the obvious answer and was rejected. That table is
+one retention deletes from, which is exactly why the query chain is split per
+connection in the first place, and a global chain over it would report a
+truncated prefix after every sweep — worse, `disconnected_at` is what the sweep
+orders by while `connected_at` is what the chain would, so a long-lived session
+breaks the assumption that a sweep only ever removes the oldest links.
+
+So instead: `Store.CreateConnection` writes a `connection.opened` entry and every
+writer that closes a session (`CloseConnection`, and the reconcile's
+`CloseOrphanedConnections` / `ReclaimDeadInstanceConnections`) writes a
+`connection.closed` one. `audit_log` is already chained and is never reaped by
+retention, so the evidence survives in a table the delete does not touch, and no
+new chain has to be reconciled against `CleanupOldQueryRows`.
+
+Each entry's `details` carries the connection row's **immutable identity** — the
+connection uid, the user, the database, the source IP, `connected_at`, the
+instance and run stamps, and the grant it authenticated under. The close entry
+adds `disconnected_at`, who closed it (`session` or `reconcile`) and the
+session's `query_chain_mac` / `query_chain_len` / `query_chain_stamp_version`, so
+the sealed record points at the query chain that session owned. The mutable
+counters — `last_activity_at`, `queries`, `bytes_transferred` — are deliberately
+out: they keep changing after the entry is sealed, so recording them could only
+ever produce a record that disagrees with the row, exactly like the query chain's
+outcome columns.
+
+**Be precise about what this buys.** It makes a whole-session delete *detectable
+by comparison* — the entries name a session no `connections` row accounts for —
+and it makes an edited connection row detectable the same way, `connected_at`
+included. It does **not** seal the `connections` row: `dbbat audit verify`
+performs no such comparison, and every column of that table is still an unchained
+column anyone with write access can rewrite. The one place that matters inside
+verification is the retention excuse of [A session emptied of every
+statement](#a-session-emptied-of-every-statement), which reads `connected_at`:
+backdating it buys the excuse, and only on a deployment that actually sets
+`DBB_QUERY_STORAGE_RETENTION` — with retention off, the default, `queryRetention
+<= 0` and no session is excused at all, so there is nothing to buy.
+
+**Two writes, not fatal ones.** A failed audit write is logged and the session
+carries on; the store must not be able to take a live database session down over
+a log line. Both entries are written *after* the state they describe is
+committed, so an entry can be missing but never fabricated, and neither goes
+inside the caller's transaction: the chain append owns its own — it takes the
+store-wide advisory lock and retries on a stale head, and a colliding INSERT
+aborts whatever transaction it is in. Nesting it would invert the rule (a lost
+entry rolling back a completed close) and would hold every closed connection row
+while contending with every admin action in the store. The reconcile, which
+closes an arbitrary number of sessions at once, appends its entries as one
+chained batch per 500 connections (`Store.LogAuditEvents`) rather than one round
+trip each.
+
+**Volume, and why they are hidden by default.** Two entries per session, in a
+table retention never reaps, is a real growth rate: a proxy serving ten thousand
+sessions a day writes twenty thousand of these against a handful of grant, user
+and key changes. Folded into the audit listing they would push every
+control-plane event off the first page within seconds, so `GET /api/v1/audit`
+leaves them out of an unfiltered listing — `?event_type=connection.closed`
+returns them, the connections list is the purpose-built surface for browsing
+sessions, and a partial index
+(`20260812000000_audit_log_control_plane_index`) keeps the default page costing
+its own length rather than the ratio between the two kinds of event. Nothing
+about the chain changes: these are ordinary chained rows, walked and verified
+like every other.
 
 ### `queries` — one chain per connection
 
@@ -365,7 +455,14 @@ Two consequences worth stating plainly:
 - The rule is the *sound* one, not the tight one. A session that connected
   before the cutoff but ran its statements after it is excused too. Closing that
   gap would need the deleted statements' timestamps — which is exactly what was
-  deleted.
+  deleted. And `connected_at` is itself a plain column on an unchained table, so
+  an attacker who can `DELETE FROM queries` can equally
+  `UPDATE connections SET connected_at` to buy the excuse. That is only worth
+  anything where the excuse exists: with `DBB_QUERY_STORAGE_RETENTION` unset —
+  the default — nothing is excused and the backdating buys nothing. Where a
+  retention *is* set, the session's `connection.opened` entry carries the
+  `connected_at` it really had, chained; comparing the two is what catches the
+  edit, and no walk does it for you.
 - Verification reads the retention from configuration rather than from the data
   (say, the oldest statement left in the store), because a young or quiet store
   has its oldest surviving statement minutes old, which would excuse nearly
@@ -646,9 +743,12 @@ prevent it, and it says nothing about rows written before the anchor. See
   that bounds them
 - `internal/store/audit.go`, `internal/store/queries.go`,
   `internal/store/connections.go` — the write paths
+- `internal/store/connection_audit.go` — the per-session `audit_log` entries,
+  and why `connections` is not chained
 - `internal/proxy/shared/rowwriter.go` — the flush barrier that seals a capture
 - `heartbeat.go` — the reclaim tick that also runs the open-session stamp sweep
 - `internal/migrations/sql/20260810000000_audit_chain.*.sql`,
   `internal/migrations/sql/20260810010000_query_row_chain.*.sql`,
-  `internal/migrations/sql/20260810020000_connections_query_chain_stamp_version.*.sql`
+  `internal/migrations/sql/20260810020000_connections_query_chain_stamp_version.*.sql`,
+  `internal/migrations/sql/20260812000000_audit_log_control_plane_index.*.sql`
 - `main.go` — the `audit verify` command

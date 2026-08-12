@@ -560,9 +560,17 @@ func (s *Store) checkStampedHead(
 		Scan(ctx)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			// A connection row that is gone is not a break: retention deletes
-			// whole connections, queries and all, and the foreign key cascades,
-			// so there is nothing left to compare against.
+			// A connection row that is gone is not a break *here*: retention
+			// deletes whole connections, queries and all, and the foreign key
+			// cascades, so this walk has nothing left to compare against.
+			//
+			// It is not evidence of nothing, though. `connections` is not
+			// chained — see connection_audit.go for why — so a whole-session
+			// delete is detectable only through the `connection.opened` /
+			// `connection.closed` entries in `audit_log`, which the delete does
+			// not touch and retention never reaps. Comparing those against the
+			// surviving connection rows is what catches the deletion; this walk
+			// is not that comparison and does not pretend to be.
 			return nil
 		}
 
@@ -773,6 +781,15 @@ func (s *Store) checkMissingStamp(result *QueryChainResult, conn Connection) {
 // DBB_QUERY_STORAGE_RETENTION moves the cutoff backwards, so sessions the
 // *previous* setting legitimately emptied can start reading as breaks. Lowering
 // it never can.
+//
+// Be honest about the other end of it: `connected_at` is a plain column on an
+// unchained table, so an attacker who can DELETE FROM queries can equally
+// backdate it and buy the excuse. That only helps them where the excuse exists
+// at all — with retention off, the default, queryRetention <= 0 and no session
+// is excused, so the backdating buys nothing. Where a retention *is* set, the
+// session's `connection.opened` audit entry carries the connected_at the session
+// actually had, chained; comparing the two is what catches the backdating, and
+// nothing in this walk does that for you.
 func (s *Store) checkEmptiedChain(result *QueryChainResult, conn Connection) {
 	if s.retentionCouldEmpty(conn) {
 		// The whole chain is gone rather than just its oldest statements: the
