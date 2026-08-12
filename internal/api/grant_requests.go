@@ -421,7 +421,34 @@ func (s *Server) handleListGrantRequests(c *gin.Context) {
 		return
 	}
 
-	successResponse(c, gin.H{"grant_requests": requests})
+	successResponse(c, gin.H{"grant_requests": s.withApproverHats(c.Request.Context(), currentUser, requests)})
+}
+
+// grantRequestResponse is a request plus the hat the *current* viewer would
+// wear to decide it — "admin", "server_approver", or empty for somebody who may
+// see it but not resolve it (their own request, most often).
+type grantRequestResponse struct {
+	store.GrantRequest
+
+	ApproverRole string `json:"approver_role"`
+}
+
+// withApproverHats decorates a request list for one viewer. The hat is computed
+// per request because the answer is per *server*: an ops lead may decide the
+// staging rows in a list and none of the production ones.
+func (s *Server) withApproverHats(
+	ctx context.Context, user *store.User, requests []store.GrantRequest,
+) []grantRequestResponse {
+	out := make([]grantRequestResponse, 0, len(requests))
+
+	for i := range requests {
+		out = append(out, grantRequestResponse{
+			GrantRequest: requests[i],
+			ApproverRole: s.approverHatForRequest(ctx, user, &requests[i]),
+		})
+	}
+
+	return out
 }
 
 // listGrantRequestsForNonAdmin returns the caller's own requests plus the
@@ -470,7 +497,7 @@ func (s *Server) listGrantRequestsForNonAdmin(c *gin.Context, currentUser *store
 		}
 	}
 
-	successResponse(c, gin.H{"grant_requests": out})
+	successResponse(c, gin.H{"grant_requests": s.withApproverHats(ctx, currentUser, out)})
 }
 
 // handleGetGrantRequest — role-aware: requesters fetch their own, admins fetch
@@ -505,7 +532,10 @@ func (s *Server) handleGetGrantRequest(c *gin.Context) {
 		return
 	}
 
-	successResponse(c, req)
+	successResponse(c, grantRequestResponse{
+		GrantRequest: *req,
+		ApproverRole: s.approverHatForRequest(c.Request.Context(), currentUser, req),
+	})
 }
 
 // decisionSource records where a grant decision originated, recorded in the
