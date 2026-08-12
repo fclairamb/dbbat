@@ -192,11 +192,19 @@ func (s *Store) DB() *bun.DB {
 //     internal/proxy/*) need not: no database ever judges those bounds, so
 //     there is only one clock. Same for a Go value compared against
 //     time.Now() on both sides, like an APIKey's expiry.
-//   - This package's own tests keep time.Now() deliberately. They backdate
-//     starts_at by a minute or more, and it was a *zero*-margin window — one
-//     issued at "now" and read back immediately — that produced the flake
-//     this rule came from. A margin wider than any plausible skew is a
-//     sufficient answer; a zero margin never is.
+//   - This package's own tests keep time.Now() for the same reason, margins
+//     notwithstanding: several of them stamp `starts_at: now` with no margin
+//     at all, and it is harmless because nothing filters those rows on it.
+//     They assert on the value CreateGrant returns, or fetch it back with
+//     GetGrantByUID — a primary-key lookup with no window predicate. The
+//     moment a test reads a row through GetActiveGrant instead, the SQL
+//     window filter is in play and it has to stamp from here, whatever the
+//     margin: a zero-margin window issued and immediately read back through
+//     that filter is precisely the parent flake.
+//
+// So the criterion is "is this window ever judged by SQL?", not "is the
+// margin wide enough". Margin width only buys comfort where the answer is
+// already yes.
 func (s *Store) Now(ctx context.Context) (time.Time, error) {
 	return dbNow(ctx, s.db)
 }
