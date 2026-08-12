@@ -407,8 +407,26 @@ Most of the object is fields dbbat has nothing to say about, and it writes zero
 into all of them. That is what makes the encoder tractable: a TTC compressed
 zero and a raw zero byte are the same byte, so every field whose *width* is
 conditioned on the negotiated capabilities costs nothing to get "wrong" as long
-as its value is zero. Only the call status, the error code and the message text
-have to land exactly.
+as its value is zero. Only the call status, the error code, the message text and
+the **call number** have to land exactly.
+
+The call number is the exception to "zero is free", and it was found by
+measuring, not by reading a parser. It is the TTC sequence number of the request
+being answered — the byte the client put at offset 2 of its own op header
+(`03 5e 07 00` → 7) — and every real server OER carries it back: 8 and 4 in the
+two fixtures in `ttc_oer_encode_test.go`, 45 in the OCI encoding at a constant
+offset. **ojdbc 26.1 refuses to read an error out of an OER whose call number is
+not the one it sent**: `T4CTTIfun.receive` calls `processError()` only when
+`oer.callNumber == this.sequenceNumber` and otherwise goes to
+`handleOutOfSequenceError`, which surfaces `ORA-18745: Execution error in
+sessionless transaction piggybacked call` with the real ORA-01031 demoted to its
+*cause*. With dbbat's zero that is exactly what a live JDBC client reported for
+every refusal — the call did end and the session stayed usable, but the headline
+error named the wrong thing. `clientCallNumber` picks the number off the client's
+own request; a packet may staple several ops, and the one the client is waiting
+on is the **last** (JDBC sends its execute behind a close-cursors list:
+`11 69 06 00 …closes… 03 5e 07 00 …`, and 23ai answers that packet with 7).
+go-ora v3, python-oracledb thin, sqlplus and ojdbc 23.2 never check it.
 
 Three variations do change the frame, and they are resolved differently:
 
@@ -439,11 +457,28 @@ end-of-response marker `0x1d` even after dbbat has cleared
 with a byte-perfect compressed OER, or a byte-perfect fixed-width one with no
 trailing marker, sqlplus hangs exactly as it did on the old frame.
 
-Verified end to end against Oracle 23ai Free with go-ora v3, python-oracledb
-thin and sqlplus (OCI): all three surface ORA-01031 and keep the session usable.
-JDBC thin is **not** verified against a live client — the pre-existing claim
-that it parsed the old frame was never true and has been removed rather than
-restated.
+Verified end to end against Oracle 23ai Free with **four** live clients — go-ora
+v3, python-oracledb thin, sqlplus (OCI) and JDBC thin (ojdbc11 23.2.0.0 and
+26.1): all four surface ORA-01031 and keep the session usable.
+
+JDBC needed no fourth `oerShape` variation. It negotiates the same compressed
+encoding python-oracledb does, two extra tail fields included
+(`learned OER tail shape from upstream` reports `extra_tail_fields=2` on a JDBC
+session), which is what
+`TestIntegration_BlockedStatementRefusesJDBCThin` asserts rather than assumes.
+What it did need was the call number above: measured on 26.1 the refusal came
+back as ORA-18745 wrapping the real ORA-01031, and on 23.2 as a clean ORA-01031,
+from the same dbbat frame. The JDBC case is skipped unless an Oracle JDBC driver
+is reachable, which is the case in CI:
+
+| Variable | Meaning |
+|---|---|
+| `ORACLE_TEST_OJDBC_JAR` | Path to an `ojdbc11.jar` (or any `ojdbc*.jar`). A `CLASSPATH` entry whose file name contains `ojdbc` is used when the variable is unset; a variable that points at a missing file fails the test rather than skipping it |
+
+```bash
+ORACLE_TEST_OJDBC_JAR=/path/to/ojdbc11.jar \
+  go test -tags integration -timeout 40m -run JDBCThin ./internal/proxy/oracle/
+```
 
 ### Oracle NUMBER Encoding
 
@@ -615,7 +650,7 @@ The Oracle proxy has been tested with:
 |--------|---------|--------|
 | Go | go-ora | SQL + rows + **bind values** end-to-end (verified vs Oracle 23ai Free) |
 | Python | oracledb (thin mode) | SQL works vs Oracle 19c; **fails at AUTH vs Oracle 23ai** — see "Modern thin clients" below |
-| Java | ojdbc11 (JDBC thin) | SQL works, row capture partial (older tests) |
+| Java | ojdbc11 (JDBC thin) | SQL works, row capture partial (older tests); refusals verified end-to-end vs Oracle 23ai Free on ojdbc11 23.2.0.0 **and** 26.1 (`TestIntegration_BlockedStatementRefusesJDBCThin`) |
 | DBeaver | JDBC thin via ojdbc | Connects, SQL logged, row capture partial (older tests) |
 | SQLcl | JDBC thin (Oracle 23c+) | SQL works vs 19c; **fails at AUTH vs Oracle 23ai** (`ORA-03113 … Get the session key`) |
 | sqlplus | OCI (Oracle 23c) | Fails at AUTH vs Oracle 23ai |
@@ -653,13 +688,17 @@ once with `ORACLE_TEST_IMAGE=gvenzl/oracle-xe:18.4.0-slim`.
 |----------|---------|
 | `ORACLE_TEST_IMAGE` | Container image to start (default `gvenzl/oracle-free:23-slim`) |
 | `ORACLE_TEST_SERVICE` | PDB service name; inferred from the image otherwise (`XEPDB1` for XE, `FREEPDB1` for Free, `ORCLPDB1` for enterprise) |
+| `ORACLE_TEST_OJDBC_JAR` | Oracle JDBC driver jar for the JDBC-thin refusal case; without it (and without an `ojdbc*.jar` on `CLASSPATH`) that one test skips |
 
 #### How a refusal ends the client's call
 
 `TestIntegration_BlockedStatementsAreLogged` drives a real go-ora client through
 the proxy under a `read_only` and then a `block_ddl` grant;
-`TestIntegration_BlockedStatementRefusesPythonThin` does the same from
-python-oracledb thin. Each refusal is enforced (nothing reaches upstream),
+`TestIntegration_BlockedStatementRefusesPythonThin`,
+`TestIntegration_BlockedStatementRefusesSQLPlus` and
+`TestIntegration_BlockedStatementRefusesJDBCThin` do the same from
+python-oracledb thin, sqlplus (OCI) and JDBC thin — the last two skipped when
+that client is not installed. Each refusal is enforced (nothing reaches upstream),
 logged (a `queries` row carrying the refusal as `error`, an ordinary link in the
 connection's HMAC chain), returned to the client as ORA-01031, and leaves the
 connection usable for the next statement.
