@@ -798,16 +798,18 @@ for names containing spaces or parentheses.
 
 ## Testing
 
-The Oracle proxy has been tested with:
+**Per-client verdicts live in exactly one place: "Client compatibility on Oracle
+23ai" below.** That is the table that is kept current, that names the test
+behind each verdict, and that carries the DBeaver / ojdbc notes. There used to
+be a second table here; it was a snapshot from before the 23ai auth work landed
+and it disagreed with the real one on every client that mattered (sqlplus /
+OCI, python-oracledb thin and SQLcl were all listed as failing at AUTH, and all
+three now work), so it is gone rather than duplicated.
 
-| Client | Library | Status |
-|--------|---------|--------|
-| Go | go-ora | SQL + rows + **bind values** end-to-end (verified vs Oracle 23ai Free) |
-| Python | oracledb (thin mode) | SQL works vs Oracle 19c; **fails at AUTH vs Oracle 23ai** — see "Modern thin clients" below |
-| Java | ojdbc11 (JDBC thin) | SQL works, row capture partial (older tests); refusals verified end-to-end vs Oracle 23ai Free on ojdbc11 23.2.0.0 **and** 26.1, and since on 23.7.0.25.01 (`TestIntegration_BlockedStatementRefusesJDBCThin`; the test takes whatever `ORACLE_TEST_OJDBC_JAR` points at and asserts nothing about the version — see "Which ojdbc these results are attributed to") |
-| DBeaver | JDBC thin via ojdbc | Connects, SQL logged, row capture partial (older tests) |
-| SQLcl | JDBC thin (Oracle 23c+) | SQL works vs 19c; **fails at AUTH vs Oracle 23ai** (`ORA-03113 … Get the session key`) |
-| sqlplus | OCI (Oracle 23c) | Fails at AUTH vs Oracle 23ai |
+The short version: all four supported client families — go-ora,
+python-oracledb thin, SQLcl/ojdbc and sqlplus / OCI instant client —
+authenticate, query and capture end-to-end against Oracle 23ai through the
+proxy. Against Oracle 19c the historical behaviour still applies.
 
 For debugging, enable `DBB_LOG_LEVEL=debug` to see TTC function codes and SQL extraction details.
 
@@ -1042,6 +1044,25 @@ Verified end-to-end (authenticate + query + observability capture) against Oracl
 | python-oracledb thin | thin | ✅ works | FAST_AUTH de-pipelined; verifier 18453 |
 | SQLcl 26.1.2 (ojdbc) | thin | ✅ works | classic O5LOGON; verifier 18453 |
 | sqlplus / OCI instant client | thick | ✅ works | auth + query work via the **wide** (4-byte LE) TTC encoding, with **no dependency on OOB/`DISABLE_OOB`** — verified locally against Oracle 23ai and through an OOB-stripping TCP relay (a NodePort/NLB stand-in). See "OCI wide encoding" and "OCI break/reset before AUTH Phase 2" below |
+
+Go (`go-ora`) additionally has **bind values** captured end-to-end against
+Oracle 23ai Free, which no other client family is ground-truth-verified for yet.
+
+Two more clients are exercised outside that campaign, so they sit next to the
+table rather than in it:
+
+- **ojdbc11 driven directly (JDBC thin)** — statement *refusals* are verified
+  end-to-end against Oracle 23ai Free on ojdbc11 23.2.0.0, 26.1 and
+  23.7.0.25.01, by `TestIntegration_BlockedStatementRefusesJDBCThin`. That test
+  takes whatever `ORACLE_TEST_OJDBC_JAR` points at and asserts nothing about the
+  version, so the versions above are what the trees were *observed* to carry —
+  see "Which ojdbc these results are attributed to". Row capture on ojdbc was
+  only ever **partial** in the older tests; the modern column-describe path
+  ("SQLcl/ojdbc result capture" below) is what improved it, and it has not been
+  re-measured across ojdbc versions.
+- **DBeaver** (JDBC thin via ojdbc) — connects and its SQL is logged; row
+  capture **partial**, from those same older manual runs. DBeaver is not part of
+  the automated suite, so nothing in CI would notice if that regressed.
 
 Each API key now stores **both** verifiers (`api_keys.o5logon_verifier` 6949 and
 `o5logon_verifier_18453` + `o5logon_salt_18453`). When the upstream's Set Protocol

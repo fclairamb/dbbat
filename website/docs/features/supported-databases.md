@@ -47,15 +47,17 @@ Implemented as a hand-rolled TNS/TTC proxy in `internal/proxy/oracle`. See the f
 
 ### Tested clients
 
+Verified end-to-end (authenticate, query, and observability capture) against Oracle 23ai:
+
 | Client | Status |
 |--------|--------|
-| `go-ora` | SQL + rows work end-to-end |
-| Python `oracledb` (thin) | Authenticates; client rejects captured AUTH OK with `DPY-4035` |
-| `ojdbc11` / DBeaver | SQL works, row capture partial |
-| SQLcl 23c+ | Reaches AUTH; client rejects captured AUTH OK with `ORA-17401` |
-| `sqlplus` (OCI) | Not yet supported (NS protocol not implemented; fails with `ORA-12630`) |
+| `go-ora` | Works — SQL, rows and bind values end-to-end |
+| Python `oracledb` (thin) | Works — verifier 18453 |
+| SQLcl 26.1+ (ojdbc) | Works — classic O5LOGON, verifier 18453 |
+| `sqlplus` (OCI instant client) | Works — via the wide (4-byte) TTC encoding, no `DISABLE_OOB` needed |
+| `ojdbc11` / DBeaver | Connects, SQL logged; result-row capture partial |
 
-For now, use `go-ora` (or older thin-driver clients) end-to-end.
+Row capture is best-effort: the TTC binary layout varies across client versions, so some clients or query shapes capture partial rows. SQL text extraction is reliable across all of them.
 
 ## MySQL & MariaDB
 
