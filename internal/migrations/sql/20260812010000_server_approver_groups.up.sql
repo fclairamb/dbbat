@@ -7,7 +7,7 @@
 --   query_approver_user_group_uids  — may release approval *holds* on
 --                                     statements running against this server.
 --
--- Both default to '{}', which is exactly today's behaviour: nothing resolves,
+-- Both default to '{}', which is exactly today's behavior: nothing resolves,
 -- and only admins decide. There is no hierarchy between the two — a query
 -- approver does not inherit access approval, nor the reverse; an org wanting
 -- overlap lists the same user group in both columns.

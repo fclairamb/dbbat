@@ -301,14 +301,29 @@ func resolverPayload(u *store.User) map[string]any {
 	}
 }
 
-// mayApproveQuery reports whether the user may resolve holds on this query:
-// any admin, plus members of the grant's approver groups.
+// mayApproveQuery reports whether the user may resolve holds on this query.
 //
-// The grant is the one resolveApprovalGrant names — the connection's stamped
-// grant_uid when there is one, otherwise the (legacy) active grant for the
-// connection's user/database pair. Either way, if it is gone (deleted, or
-// — on the legacy path — revoked or expired since), only admins can still
-// resolve: that is the fail-closed direction.
+// The chain, most specific first:
+//
+//  1. any admin;
+//  2. a member of the **grant definition's** approver groups, when that list is
+//     non-empty — an explicit policy choice, so it wins outright;
+//  3. otherwise a member of the groups ResolveServerApproverGroups yields for
+//     the target database and ApproverKindQuery: the server's own query
+//     approvers, else the union of its server groups';
+//  4. otherwise nobody — admin-only, which is exactly the behavior of an
+//     instance that configures none of this.
+//
+// The grant in step 2 is the one resolveApprovalGrant names — the connection's
+// stamped grant_uid when there is one, otherwise the (legacy) active grant for
+// the connection's user/database pair. A grant that no longer resolves (deleted,
+// or revoked/expired on the legacy path) carries no readable approver list, so
+// it falls through to step 3 rather than to a hard deny: the server-level lists
+// are a property of the database, not of the grant, and an instance that
+// configures none of them still ends up exactly where it used to — admins only.
+//
+// Self-approval is *not* checked here. It is refused by every caller before
+// this function runs, and no membership can override it.
 func (s *Server) mayApproveQuery(ctx context.Context, user *store.User, query *store.Query) bool {
 	if user == nil {
 		return false
@@ -318,17 +333,91 @@ func (s *Server) mayApproveQuery(ctx context.Context, user *store.User, query *s
 		return true
 	}
 
-	grant, err := s.resolveApprovalGrant(ctx, query)
-	if err != nil || grant == nil || len(grant.ApproverUserGroupUIDs()) == 0 {
+	groups, err := s.store.ListUserGroupUIDs(ctx, user.UID)
+	if err != nil || len(groups) == 0 {
 		return false
 	}
 
-	groups, err := s.store.ListUserGroupUIDs(ctx, user.UID)
+	grant, err := s.resolveApprovalGrant(ctx, query)
+	if err == nil && grant != nil && len(grant.ApproverUserGroupUIDs()) > 0 {
+		return grant.MayApprove(groups)
+	}
+
+	if query.DatabaseID == nil {
+		return false
+	}
+
+	ok, err := s.store.MayApproveForServer(ctx, *query.DatabaseID, store.ApproverKindQuery, groups)
 	if err != nil {
 		return false
 	}
 
-	return grant.MayApprove(groups)
+	return ok
+}
+
+// derefUUIDs reads an optional uid list, yielding nil when the field was
+// omitted. Used by the PATCH-shaped request bodies, where nil and [] mean
+// different things.
+func derefUUIDs(in *[]uuid.UUID) []uuid.UUID {
+	if in == nil {
+		return nil
+	}
+
+	return *in
+}
+
+// validateApproverUserGroups checks that every uid in the given approver lists
+// names a real user group, returning the message for a 400 otherwise. A list
+// pointing at a group that does not exist would fail closed and read as a bug,
+// exactly like a mis-scoped grant definition.
+func (s *Server) validateApproverUserGroups(ctx context.Context, lists ...[]uuid.UUID) string {
+	for _, list := range lists {
+		for _, groupUID := range list {
+			if _, err := s.store.GetUserGroup(ctx, groupUID); err != nil {
+				return "approver user group does not exist: " + groupUID.String()
+			}
+		}
+	}
+
+	return ""
+}
+
+// mayDecideGrantRequest reports whether the user may approve or deny a grant
+// request: any admin, plus whoever ResolveServerApproverGroups names as an
+// **access** approver for the target database — the server's own list, else the
+// union of its server groups'. Configuring neither leaves the decision
+// admin-only, which is exactly today's behavior.
+//
+// Self-approval is refused for everyone but an admin, and deliberately so on
+// both counts. A non-admin approver deciding their own request would defeat the
+// point of delegating: an ops group that can approve its members' requests to
+// its own servers must not be able to approve its *own*. An admin already has
+// POST /grants — refusing them here would be theater, not a control — so that
+// long-standing behavior is left alone.
+func (s *Server) mayDecideGrantRequest(ctx context.Context, user *store.User, req *store.GrantRequest) bool {
+	if user == nil || req == nil {
+		return false
+	}
+
+	if user.IsAdmin() {
+		return true
+	}
+
+	if req.UserID == user.UID {
+		return false
+	}
+
+	groups, err := s.store.ListUserGroupUIDs(ctx, user.UID)
+	if err != nil || len(groups) == 0 {
+		return false
+	}
+
+	ok, err := s.store.MayApproveForServer(ctx, req.DatabaseID, store.ApproverKindAccess, groups)
+	if err != nil {
+		return false
+	}
+
+	return ok
 }
 
 // resolveApprovalGrant finds the grant whose approver_user_group_uids govern this

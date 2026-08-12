@@ -92,6 +92,10 @@ type stubDecider struct {
 	user    *store.User
 	userErr error
 
+	// mayDecide overrides the stub's admin-based authorization answer, so a
+	// test can play a non-admin who *is* an access approver.
+	mayDecide *bool
+
 	approveOutcome *decideOutcome
 	approveErr     error
 	denyOutcome    *decideOutcome
@@ -133,6 +137,18 @@ func (s *stubDecider) userBySlackID(_ context.Context, _ string) (*store.User, e
 	}
 
 	return s.user, nil
+}
+
+// mayDecideRequest stands in for the real gate (admin, or an access approver
+// resolved off the target server). The stub has no store, so it answers on the
+// admin half alone — which is what the Slack tests exercise — unless a test
+// overrides it.
+func (s *stubDecider) mayDecideRequest(_ context.Context, user *store.User, _ uuid.UUID) bool {
+	if s.mayDecide != nil {
+		return *s.mayDecide
+	}
+
+	return user != nil && user.IsAdmin()
 }
 
 func (s *stubDecider) approve(_ context.Context, uid uuid.UUID, decider *store.User) (*decideOutcome, error) {

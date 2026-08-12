@@ -77,7 +77,7 @@ func (g *ServerGroup) ApproverUserGroupUIDs(kind ApproverKind) []uuid.UUID {
 // Every read is live. Editing a list — or moving a server between groups —
 // changes who may decide immediately, including for grant requests already
 // filed and statements already parked. That is the deliberate second exception
-// to dbbat's "a live grant's behaviour never changes under it" rule (the first
+// to dbbat's "a live grant's behavior never changes under it" rule (the first
 // being server-group membership itself): approver lists are operational data,
 // and a departed lead's replacement has to be effective now.
 func (s *Store) ResolveServerApproverGroups(

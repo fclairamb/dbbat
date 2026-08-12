@@ -70,14 +70,70 @@ func (s *Server) loadEventContext(ctx context.Context, req *store.GrantRequest, 
 		ev.RequesterSlackID = s.slackIDForUser(ctx, req.UserID)
 		ev.DeciderSlackID = s.deciderSlackID(ctx, decider)
 
-		if admins, err := s.store.ListAdminSlackUserIDs(ctx); err == nil {
-			ev.AdminSlackIDs = admins
-		} else {
-			s.logger.WarnContext(ctx, "list admin slack ids failed", slog.Any("error", err))
-		}
+		ev.ApproverSlackIDs = s.approverSlackIDsForRequest(ctx, req)
 	}
 
 	return ev
+}
+
+// approverSlackIDsForRequest returns the Slack user IDs to @-mention on a
+// pending request: every admin, plus every member of the access-approver groups
+// resolved for the target database (its own list, else the union of its server
+// groups'). The two sets are unioned and de-duplicated, so an admin who is also
+// in an approver group is mentioned once.
+//
+// The requester is deliberately *not* filtered out: they may well be a member
+// of the approving group, and the mention is informational — the decision
+// itself refuses self-approval on every path.
+//
+// Best-effort throughout: this decorates a notification, and a lookup failure
+// must not stop it going out.
+func (s *Server) approverSlackIDsForRequest(ctx context.Context, req *store.GrantRequest) []string {
+	seen := make(map[string]struct{})
+	ids := make([]string, 0)
+
+	add := func(candidates []string) {
+		for _, id := range candidates {
+			if id == "" {
+				continue
+			}
+
+			if _, dup := seen[id]; dup {
+				continue
+			}
+
+			seen[id] = struct{}{}
+			ids = append(ids, id)
+		}
+	}
+
+	if admins, err := s.store.ListAdminSlackUserIDs(ctx); err == nil {
+		add(admins)
+	} else {
+		s.logger.WarnContext(ctx, "list admin slack ids failed", slog.Any("error", err))
+	}
+
+	groupUIDs, err := s.store.ResolveServerApproverGroups(ctx, req.DatabaseID, store.ApproverKindAccess)
+	if err != nil {
+		s.logger.WarnContext(ctx, "resolve access approver groups failed", slog.Any("error", err))
+
+		return ids
+	}
+
+	for _, groupUID := range groupUIDs {
+		members, err := s.store.ListUserGroupMemberUIDs(ctx, groupUID)
+		if err != nil {
+			s.logger.WarnContext(ctx, "list approver group members failed", slog.Any("error", err))
+
+			continue
+		}
+
+		for _, memberUID := range members {
+			add([]string{s.slackIDForUser(ctx, memberUID)})
+		}
+	}
+
+	return ids
 }
 
 // slackIDForUser returns the given user's linked Slack provider_id, or ""
@@ -328,14 +384,20 @@ func (s *Server) handleCreateGrantRequest(c *gin.Context) {
 }
 
 // handleListGrantRequests — role-aware. Admins see all (filterable);
-// non-admins see only their own.
+// everybody else sees their own, plus the pending requests they are an access
+// approver for. Without that second half the Slack deep-link and the
+// pending-requests badge would send a delegated approver to an empty page.
 func (s *Server) handleListGrantRequests(c *gin.Context) {
 	currentUser := getCurrentUser(c)
 	filter := store.GrantRequestFilter{}
 
 	if !currentUser.IsAdmin() {
-		filter.UserID = &currentUser.UID
-	} else if userID := c.Query("user_id"); userID != "" {
+		s.listGrantRequestsForNonAdmin(c, currentUser)
+
+		return
+	}
+
+	if userID := c.Query("user_id"); userID != "" {
 		if uid, err := uuid.Parse(userID); err == nil {
 			filter.UserID = &uid
 		}
@@ -362,8 +424,57 @@ func (s *Server) handleListGrantRequests(c *gin.Context) {
 	successResponse(c, gin.H{"grant_requests": requests})
 }
 
-// handleGetGrantRequest — role-aware: requesters can fetch their own,
-// admins fetch anyone's.
+// listGrantRequestsForNonAdmin returns the caller's own requests plus the
+// *pending* ones they may decide as an access approver. Deliberately only the
+// pending ones: delegation is about answering what is waiting, not about
+// handing an ops group the decision history of every colleague who ever
+// requested access to their servers.
+//
+// The approver side is resolved per request rather than by a store-side filter
+// because the chain (server list, else its groups' union) is live and lives in
+// one function — a second, SQL-shaped implementation is exactly the drift the
+// single resolver exists to prevent. The pending set is small by nature.
+func (s *Server) listGrantRequestsForNonAdmin(c *gin.Context, currentUser *store.User) {
+	ctx := c.Request.Context()
+
+	own, err := s.store.ListGrantRequests(ctx, store.GrantRequestFilter{UserID: &currentUser.UID})
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to list grant requests")
+
+		return
+	}
+
+	pendingStatus := store.GrantRequestPending
+
+	pending, err := s.store.ListGrantRequests(ctx, store.GrantRequestFilter{Status: &pendingStatus})
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to list grant requests")
+
+		return
+	}
+
+	seen := make(map[uuid.UUID]struct{}, len(own))
+	for i := range own {
+		seen[own[i].UID] = struct{}{}
+	}
+
+	out := own
+
+	for i := range pending {
+		if _, dup := seen[pending[i].UID]; dup {
+			continue
+		}
+
+		if s.mayDecideGrantRequest(ctx, currentUser, &pending[i]) {
+			out = append(out, pending[i])
+		}
+	}
+
+	successResponse(c, gin.H{"grant_requests": out})
+}
+
+// handleGetGrantRequest — role-aware: requesters fetch their own, admins fetch
+// anyone's, and an access approver fetches the ones they may decide.
 func (s *Server) handleGetGrantRequest(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
@@ -387,7 +498,8 @@ func (s *Server) handleGetGrantRequest(c *gin.Context) {
 
 	currentUser := getCurrentUser(c)
 
-	if !currentUser.IsAdmin() && req.UserID != currentUser.UID {
+	if !currentUser.IsAdmin() && req.UserID != currentUser.UID &&
+		!s.mayDecideGrantRequest(c.Request.Context(), currentUser, req) {
 		writeError(c, http.StatusForbidden, ErrCodeForbidden, "no access to this grant request")
 
 		return
@@ -563,13 +675,59 @@ func decisionDetails(base map[string]any, source decisionSource) json.RawMessage
 	return details
 }
 
-// handleApproveGrantRequest — admin-only; flips pending → approved and
-// materializes the grant in the same transaction.
+// authorizeGrantRequestDecision loads the request named by the URL and gates
+// the decision on it, writing the error response itself. It is the sole
+// authorization for approve and deny: the routes are no longer behind
+// requireAdmin, because an access approver resolved off the target server is
+// now a legitimate decider.
+//
+// The 403 messages separate "you're the requester" from "you're not an
+// approver" — unlike the Slack ephemeral, a signed-in user looking at their own
+// request deserves to know which rule stopped them.
+func (s *Server) authorizeGrantRequestDecision(c *gin.Context, uid uuid.UUID) bool {
+	ctx := c.Request.Context()
+
+	req, err := s.store.GetGrantRequest(ctx, uid)
+	if err != nil {
+		if errors.Is(err, store.ErrGrantRequestNotFound) {
+			writeError(c, http.StatusNotFound, ErrCodeNotFound, "grant request not found")
+
+			return false
+		}
+
+		writeInternalError(c, s.logger, err, "failed to get grant request")
+
+		return false
+	}
+
+	currentUser := getCurrentUser(c)
+
+	if s.mayDecideGrantRequest(ctx, currentUser, req) {
+		return true
+	}
+
+	if currentUser != nil && req.UserID == currentUser.UID {
+		writeError(c, http.StatusForbidden, ErrCodeForbidden, "you cannot decide your own grant request")
+
+		return false
+	}
+
+	writeError(c, http.StatusForbidden, ErrCodeForbidden, "you are not an approver for this database")
+
+	return false
+}
+
+// handleApproveGrantRequest — admin or access approver; flips pending →
+// approved and materializes the grant in the same transaction.
 func (s *Server) handleApproveGrantRequest(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid grant request UID")
 
+		return
+	}
+
+	if !s.authorizeGrantRequestDecision(c, uid) {
 		return
 	}
 
@@ -597,12 +755,16 @@ func (s *Server) handleApproveGrantRequest(c *gin.Context) {
 	successResponse(c, gin.H{"grant_request": outcome.Request, "grant": outcome.Grant})
 }
 
-// handleDenyGrantRequest — admin-only.
+// handleDenyGrantRequest — admin or access approver, same gate as approve.
 func (s *Server) handleDenyGrantRequest(c *gin.Context) {
 	uid, err := parseUIDParam(c)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid grant request UID")
 
+		return
+	}
+
+	if !s.authorizeGrantRequestDecision(c, uid) {
 		return
 	}
 

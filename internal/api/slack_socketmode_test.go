@@ -128,7 +128,7 @@ func TestDispatchSlackCallback_NonAdminEphemeral(t *testing.T) {
 		t.Error("a non-admin click must not trigger approve")
 	}
 
-	if got := rec.lastPost(); got != msgNotAdmin {
+	if got := rec.lastPost(); got != msgNotApprover {
 		t.Errorf("expected the non-admin ephemeral, got %q", got)
 	}
 }

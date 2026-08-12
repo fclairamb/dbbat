@@ -385,7 +385,7 @@ func TestNotifier_CreatedInteractiveRendersButtonsAndMentions(t *testing.T) {
 	ev.Request.SlackMessageTS = nil
 	ev.Interactive = true
 	ev.RequesterSlackID = "U0REQ"
-	ev.AdminSlackIDs = []string{"U0ADM1", "U0ADM2"}
+	ev.ApproverSlackIDs = []string{"U0ADM1", "U0ADM2"}
 
 	n.NotifyGrantRequest(context.Background(), ev)
 
@@ -520,7 +520,7 @@ func TestNotifier_MentionLineFallsBackToUsername(t *testing.T) {
 	ev.Request.SlackChannel = nil
 	ev.Request.SlackMessageTS = nil
 	ev.Interactive = true
-	// No RequesterSlackID and no AdminSlackIDs: requester renders as plain
+	// No RequesterSlackID and no ApproverSlackIDs: requester renders as plain
 	// username, and the second sentence is dropped.
 
 	n.NotifyGrantRequest(context.Background(), ev)
