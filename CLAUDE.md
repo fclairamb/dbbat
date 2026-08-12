@@ -454,6 +454,24 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   content, and are cached because a walk is O(rows). The endpoint is **not**
   equivalent to the CLI: it is served by the process under audit. See
   `docs/audit-chain.md`
+- **Sessions are evidenced, not chained.** `connections` carries no MAC, and
+  deliberately: it is a table retention deletes from, so a chain over it would
+  report a truncated prefix after every sweep. Instead every session writes two
+  chained `audit_log` entries — `connection.opened` at `CreateConnection`,
+  `connection.closed` from whichever writer closes it (`CloseConnection` or the
+  reconcile, recorded as `closed_by`) — carrying the row's **immutable**
+  identity (connection uid, user, database, source IP, `connected_at`,
+  instance/run, grant) plus, on close, `disconnected_at` and the session's
+  sealed `query_chain_mac`. The mutable counters stay out. That is what makes
+  `DELETE FROM connections` (which cascades to `queries` and `query_rows`) leave
+  evidence — but only **by comparison**: no walk reports it, and every column of
+  a connection row, `connected_at` included, is still unsealed. The write is
+  never fatal to a session and never joins the caller's transaction (the chain
+  append owns its own, with a retry a nested transaction could not run); the
+  reconcile batches its entries through `Store.LogAuditEvents`. Volume being
+  what it is, the two event types are excluded from an unfiltered
+  `GET /api/v1/audit` and reachable with `?event_type=` — see
+  `internal/store/connection_audit.go`
 
 ## API Documentation
 

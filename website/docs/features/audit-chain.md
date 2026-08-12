@@ -161,7 +161,40 @@ number, not a fresh timestamp.
 | The stamp itself is **cleared** rather than rewritten, to remove the check instead of defeating it | Yes | A session that closed with statements in its history always carries a stamp, so a closed session whose statements survive without one is a break. And because the stamp's MAC, length and version are only ever written together, a length left behind by a cleared MAC is a break on its own — open sessions included |
 | The **last** rows of a captured result set are deleted | Yes | The capture's final head is sealed onto the query row with a keyed MAC when the capture finishes, so correcting it needs the key |
 | A captured result set is deleted **outright** | Yes | The sealed stamp on the query still attests to rows no longer there |
+| A **whole session** is deleted — the connection row, and with it every statement and captured row it cascades to | By comparison only — see the note below | Every session writes a chained `connection.opened` and `connection.closed` entry into the audit log, which the delete does not touch and retention never reaps |
+| A connection row is **edited in place** — `connected_at` backdated, for instance | By comparison only — see the note below | The same two entries record the row's immutable identity when it was written |
 | The **whole** chain is truncated and re-sealed by someone holding the key | Only against a head MAC you recorded elsewhere | See the tip above |
+
+:::warning The connection row itself is not chained
+
+`connections` carries no MAC. Deleting a whole session, or editing the row in
+place, breaks no chain — and `dbbat audit verify` will not report it.
+
+What it leaves behind is the pair of chained audit entries every session writes:
+`connection.opened` when the session starts and `connection.closed` when it
+ends, each carrying the row's immutable identity (connection uid, user,
+database, source IP, `connected_at`, the instance and run stamps, the grant) and
+the close additionally carrying `disconnected_at` and the session's sealed
+query-chain head. Those entries live in the audit log, which the cascade does
+not touch and `DBB_QUERY_STORAGE_RETENTION` never reaps. So the evidence exists
+— but turning it into a finding is a **comparison you run**, listing
+`?event_type=connection.opened` against the connections that still exist, not
+something a chain walk does for you.
+
+One place this bites inside verification: a session whose statements are *all*
+gone is excused when it connected before the retention cutoff, and
+`connected_at` is exactly the unsealed column an attacker would backdate to earn
+that excuse. It only helps them on a deployment that sets
+`DBB_QUERY_STORAGE_RETENTION` — with retention off, which is the default, no
+session is excused and there is nothing to buy.
+
+These entries are kept out of the audit page's default listing on purpose: a
+busy proxy writes tens of thousands a day and they would bury the access changes
+the page exists for. Filter by event type to see them; the
+[connections list](/docs/features/query-logging) is the surface for browsing
+sessions.
+
+:::
 
 :::warning Sessions closed before 0.24 do not verify
 
@@ -208,6 +241,12 @@ Be precise about this in a control narrative:
   anchor have no MAC and none can be created after the fact, so verification
   reports them separately as `unverifiable_pre_anchor_entries` instead of
   counting them as verified.
+- **It does not seal the connection row.** `connections` is not chained. A whole
+  session can be deleted, or its row edited in place, without breaking anything
+  a chain walk checks. The `connection.opened` / `connection.closed` audit
+  entries are what make that detectable, and only by comparing them against the
+  rows that remain — see [the warning above](#what-it-detects). Say "detectable
+  by comparison", not "detected by verification", in a control narrative.
 - **On the query side it seals what ran, not how it went.** The MAC covers a
   statement's identity — the SQL text, the bind parameters, the execution time,
   the connection and the position in the session. It does not cover the outcome
