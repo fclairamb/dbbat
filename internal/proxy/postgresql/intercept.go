@@ -75,30 +75,40 @@ func (s *Session) validateStatement(sqlText string) error {
 func (s *Session) handleQuery(query *pgproto3.Query) error {
 	sqlText := query.String
 
-	// Check quotas before executing query
-	if err := s.checkQuotas(); err != nil {
-		return s.refuse(sqlText, nil, err)
-	}
+	if err := s.book(func() error {
+		// Check quotas before executing query
+		if err := s.checkQuotas(); err != nil {
+			return s.refuse(sqlText, nil, err)
+		}
 
-	if err := s.validateStatement(sqlText); err != nil {
-		return s.refuse(sqlText, nil, err)
+		if err := s.validateStatement(sqlText); err != nil {
+			return s.refuse(sqlText, nil, err)
+		}
+
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	// Approval hold — last, after every cheap deterministic deny, and before
-	// a single byte reaches upstream. Blocks until a human decides.
+	// a single byte reaches upstream. Blocks until a human decides. Outside
+	// bookMu on purpose: the upstream reader takes that lock for every message
+	// it relays, and a hold has no timeout.
 	approvalUID, err := s.holdIfNeeded(sqlText, nil)
 	if err != nil {
 		return err
 	}
 
 	// Start tracking query for logging
-	s.currentQuery = &pendingQuery{
-		sql:         sqlText,
-		startTime:   time.Now(),
-		approvalUID: approvalUID,
-	}
+	return s.book(func() error {
+		s.currentQuery = &pendingQuery{
+			sql:         sqlText,
+			startTime:   time.Now(),
+			approvalUID: approvalUID,
+		}
 
-	return nil
+		return nil
+	})
 }
 
 // handleParse handles Parse messages (prepared statement creation) for Extended Query Protocol.
@@ -108,7 +118,9 @@ func (s *Session) handleParse(msg *pgproto3.Parse) error {
 	// Same controls as the simple-query path, at Parse time (defense in depth:
 	// the statement is refused before it is even prepared upstream).
 	if err := s.validateStatement(sqlText); err != nil {
-		return s.refuse(sqlText, nil, err)
+		// refuse counts the attempt against the in-session quota, so it is
+		// booked like every other writer of those counters.
+		return s.book(func() error { return s.refuse(sqlText, nil, err) })
 	}
 
 	// Store the prepared statement with type OIDs. The OID slice is copied
@@ -243,8 +255,14 @@ func (s *Session) handleExecute(msg *pgproto3.Execute) error {
 	}
 
 	// Check quotas before executing
-	if err := s.checkQuotas(); err != nil {
-		return s.refuse(sqlText, params, err)
+	if err := s.book(func() error {
+		if err := s.checkQuotas(); err != nil {
+			return s.refuse(sqlText, params, err)
+		}
+
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	if portal == nil {
@@ -254,22 +272,26 @@ func (s *Session) handleExecute(msg *pgproto3.Execute) error {
 
 	// Approval hold at Execute, deliberately not at Parse: at Parse time the
 	// bind parameters are not yet known, and the SQL that ultimately runs is
-	// the portal's.
+	// the portal's. Outside bookMu — see handleQuery.
 	approvalUID, err := s.holdIfNeeded(sqlText, portal.parameters)
 	if err != nil {
 		return err
 	}
 
-	// Queue the query for logging (will be popped on CommandComplete)
+	// Queue the query for logging (will be popped on CommandComplete, by the
+	// upstream leg — hence the lock).
 	query := &pendingQuery{
 		sql:         sqlText,
 		startTime:   time.Now(),
 		parameters:  portal.parameters,
 		approvalUID: approvalUID,
 	}
-	s.extendedState.pendingQueries = append(s.extendedState.pendingQueries, query)
 
-	return nil
+	return s.book(func() error {
+		s.extendedState.pendingQueries = append(s.extendedState.pendingQueries, query)
+
+		return nil
+	})
 }
 
 // handleClose handles Close messages (cleanup) for Extended Query Protocol.
@@ -354,6 +376,8 @@ func (s *Session) refuse(sqlText string, params *store.QueryParameters, refusal 
 // attributed to the *next* query rather than to this row — lastBytesSnapshot
 // belongs to the upstream→client goroutine and a refusal happens on the
 // client→upstream one, so the counter is deliberately left alone.
+//
+// Callers hold bookMu (it bumps the in-session query counter).
 func (s *Session) recordBlockedQuery(sqlText string, params *store.QueryParameters, refusal error) {
 	if refusal == nil {
 		return
@@ -391,6 +415,9 @@ func (s *Session) recordBlockedQuery(sqlText string, params *store.QueryParamete
 }
 
 // logQuery persists the query record to the store.
+//
+// Callers hold bookMu: it reads the in-flight query and advances the grant's
+// in-session counters, both of which the client leg also touches.
 func (s *Session) logQuery(rowsAffected *int64, queryError *string, bytesTransferred int64) {
 	if s.currentQuery == nil {
 		return

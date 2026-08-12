@@ -161,6 +161,27 @@ type Session struct {
 	heldMu       sync.Mutex
 	heldQueryUID uuid.UUID
 
+	// bookMu guards the per-session query bookkeeping: currentQuery,
+	// extendedState.pendingQueries, copyState, lastBytesSnapshot, and the
+	// in-session grant counters (QueryCount / BytesTransferred).
+	//
+	// All of it is touched by both relay goroutines. proxyClientToUpstream
+	// starts queries (handleQuery, handleExecute) and counts refusals against
+	// the quota; proxyUpstreamToClient pops the pending queue, captures rows,
+	// tracks COPY state, completes the query on ReadyForQuery, and reads
+	// currentQuery once per forwarded message for the mid-stream limit check
+	// (enforceStreamLimits). That last pair is a live data race the detector
+	// reports on the first integration test that runs a simple query — see
+	// specs/todos/2026-08-11-10-race-detector-on-the-integration-suites.md.
+	//
+	// Same convention as the Oracle proxy's trackerMu: a per-concern lock, not
+	// a session-wide one. The upstream leg takes it once around its message
+	// switch (no I/O in there); the client leg takes it in explicit book()
+	// steps, with the approval hold deliberately outside them — a hold has no
+	// timeout, and holding this across one would park the response leg on a
+	// human. It nests *above* extendedState.mu, never below.
+	bookMu sync.Mutex
+
 	// cancels routes PostgreSQL CancelRequests (separate TCP connection) back
 	// to the session that owns the BackendKeyData they carry.
 	cancels     *cancelRegistry
@@ -436,24 +457,52 @@ func (s *Session) interceptClientMessage(msg pgproto3.FrontendMessage) error {
 	case *pgproto3.Close:
 		s.handleClose(m)
 	case *pgproto3.CopyData:
-		// Client sending COPY data to server (COPY FROM)
-		if s.copyState != nil && s.copyState.direction == "in" {
-			s.captureCopyData(m.Data)
-		}
+		// Client sending COPY data to server (COPY FROM). copyState is created
+		// and cleared by the *upstream* leg, so every touch of it is booked.
+		return s.book(func() error {
+			if s.copyState != nil && s.copyState.direction == "in" {
+				s.captureCopyData(m.Data)
+			}
+
+			return nil
+		})
 	case *pgproto3.CopyDone:
 		// Client finished sending COPY data
-		if s.copyState != nil && s.copyState.direction == "in" {
-			s.logger.InfoContext(s.ctx, "COPY IN done (from client)", slog.Int64("total_bytes", s.copyState.totalBytes), slog.Bool("truncated", s.copyState.truncated))
-		}
+		return s.book(func() error {
+			if s.copyState != nil && s.copyState.direction == "in" {
+				s.logger.InfoContext(s.ctx, "COPY IN done (from client)",
+					slog.Int64("total_bytes", s.copyState.totalBytes), slog.Bool("truncated", s.copyState.truncated))
+			}
+
+			return nil
+		})
 	case *pgproto3.CopyFail:
 		// Client aborted COPY
-		if s.copyState != nil {
-			s.logger.WarnContext(s.ctx, "COPY failed", slog.String("message", m.Message))
-			s.copyState = nil
-		}
+		return s.book(func() error {
+			if s.copyState != nil {
+				s.logger.WarnContext(s.ctx, "COPY failed", slog.String("message", m.Message))
+				s.copyState = nil
+			}
+
+			return nil
+		})
 	}
 
 	return nil
+}
+
+// book runs one bookkeeping step under bookMu.
+//
+// The client leg's way of taking the lock. Unlike the upstream leg — which
+// holds it across its whole message switch — the client leg must not hold it
+// across an approval hold, so a statement handler is two book() steps with
+// holdIfNeeded between them. Everything called from inside fn assumes the lock
+// is held and must never take it again.
+func (s *Session) book(fn func() error) error {
+	s.bookMu.Lock()
+	defer s.bookMu.Unlock()
+
+	return fn()
 }
 
 // answerRefusal tells the client dbbat will not forward the message it just
@@ -556,6 +605,8 @@ func (s *Session) sendQueryError(queryErr error, ready bool) {
 // getCurrentPendingQuery returns the query that should receive result data.
 // For Simple Query Protocol: s.currentQuery
 // For Extended Query Protocol: last item in pendingQueries (most recent Execute).
+//
+// Callers hold bookMu.
 func (s *Session) getCurrentPendingQuery() *pendingQuery {
 	// Simple Query Protocol
 	if s.currentQuery != nil {
@@ -572,6 +623,8 @@ func (s *Session) getCurrentPendingQuery() *pendingQuery {
 
 // captureRowDescription records the result column metadata of the current or
 // pending query so DataRow values can later be decoded and named.
+//
+// Callers hold bookMu (see proxyUpstreamToClient).
 func (s *Session) captureRowDescription(msg *pgproto3.RowDescription) {
 	query := s.getCurrentPendingQuery()
 	if query == nil {
@@ -596,6 +649,8 @@ func (s *Session) captureRowDescription(msg *pgproto3.RowDescription) {
 // (the huge ones) stored nothing at all. The truncation is persisted as
 // queries.results_truncated so a short row set is never mistaken for a complete
 // one.
+//
+// Callers hold bookMu (see proxyUpstreamToClient).
 func (s *Session) captureDataRow(msg *pgproto3.DataRow) {
 	// Compute the row's payload size for the result-capture limits only —
 	// wire-level bytes_transferred is tracked via the CountingConn around
@@ -721,7 +776,15 @@ func (s *Session) proxyUpstreamToClient() error {
 			return fmt.Errorf("failed to receive from upstream: %w", err)
 		}
 
-		// Capture query result data for logging
+		// Capture query result data for logging.
+		//
+		// The whole switch is the upstream leg's bookMu region: it pops the
+		// pending queue, mutates the in-flight query, owns copyState and
+		// finishes queries — all of which the client leg also touches. Nothing
+		// in here does socket I/O, so holding the lock across it cannot stall
+		// the client leg on the network.
+		s.bookMu.Lock()
+
 		switch m := msg.(type) {
 		case *pgproto3.ParameterDescription:
 			// Server-resolved bind parameter types for the statement the client
@@ -812,6 +875,8 @@ func (s *Session) proxyUpstreamToClient() error {
 			}
 		}
 
+		s.bookMu.Unlock()
+
 		// Forward message to client (send as backend message to client)
 		s.clientBackend.Send(msg)
 
@@ -834,7 +899,15 @@ func (s *Session) proxyUpstreamToClient() error {
 // has been crossed, sending the client a clean error frame first. It returns
 // the abort reason, or nil when no query is in flight or the grant is still
 // within bounds.
+//
+// Takes bookMu for the whole check, abortStream included: the in-flight query
+// it reads is started by the client leg, and the abort finalizes it. The error
+// frame abortStream writes goes out under the lock, which is bounded and only
+// happens on a session that is being torn down anyway.
 func (s *Session) enforceStreamLimits() error {
+	s.bookMu.Lock()
+	defer s.bookMu.Unlock()
+
 	if s.getCurrentPendingQuery() == nil {
 		return nil
 	}
@@ -898,6 +971,8 @@ func (s *Session) abortStream(cause error) {
 // and attributes its streamed-so-far bytes to the connection/grant. Called at
 // the end of abortStream, once the error frame has been written (so the frame's
 // bytes are included in the attribution).
+//
+// Callers hold bookMu (see enforceStreamLimits).
 func (s *Session) persistAbortedQuery(cause error) {
 	query := s.getCurrentPendingQuery()
 	if query == nil {
