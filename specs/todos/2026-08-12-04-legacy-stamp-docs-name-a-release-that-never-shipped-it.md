@@ -64,8 +64,46 @@ break, and that is independent of who could have written one.
 
 No GitHub issue yet — file one when picking this up.
 
+## Resolved open questions
+
+> Decide first, then edit once: (1) reword to "pre-0.24 development builds", or
+> (2) 0.24 ships the chain and the version column together, so
+> `--allow-legacy-stamps` and `sessions_with_legacy_forgeable_head_stamp` are
+> dead on arrival — consider whether the flag should ship at all.
+
+**Decision (2026-08-12): branch 2 — remove the flag now.** Take the reading that
+0.24 ships the chain and the version column together, which is what the code
+already does. Therefore:
+
+- **Delete `--allow-legacy-stamps` outright**, rather than waiting for the 0.25
+  removal already slated for it: the CLI flag in `main.go`, the
+  `AllowLegacyStamps` option in `internal/store/chain_verify.go`, and the
+  `sessions_with_legacy_forgeable_head_stamp` counter it feeds (including its
+  `main.go` reporting). The REST endpoints never had an equivalent, so nothing
+  changes there.
+- **Keep `checkLegacyStampedHead` itself.** A `query_chain_stamp_version 0` row
+  stays a break — that is independent of who could have written one, and it is
+  the whole point of sealing the version inside the MAC. Only the escape hatch
+  goes; the check does not.
+- **Accept the consequence**: a dev/test store that already carries version-0
+  rows becomes unverifiable with no escape hatch. That is fine — only
+  intermediate `main` builds can hold such rows, and re-creating such a store is
+  cheap.
+- **Reword every "0.23.x" mention** in the same pass, to "a store written by a
+  pre-0.24 development build" (or equivalent). Every site listed under `## Why`
+  above, plus `CLAUDE.md`. Note that after the removal most of these passages
+  shrink to a sentence rather than needing careful rewording — there is no flag
+  left to explain, only the fact that a version-0 stamp does not verify.
+- **Drop the upgrade framing entirely from `website/docs/features/audit-chain.md`**
+  — no "Upgrading from 0.23.x?" paragraph and no "Sessions closed before 0.24 do
+  not verify" warning box. A released-version reader has no such rows and needs
+  no instruction.
+
 ## Key files
 
 - `internal/migrations/sql/20260810020000_connections_query_chain_stamp_version.up.sql`
 - `docs/audit-chain.md`, `website/docs/features/audit-chain.md`
 - `internal/store/chain_verify.go`, `internal/store/models.go`, `main.go`
+- `CLAUDE.md` — the `audit verify --allow-legacy-stamps` line under
+  "CLI Commands" and the `--allow-legacy-stamps` /
+  `sessions_with_legacy_forgeable_head_stamp` passage under "Security"
