@@ -354,9 +354,8 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   both — `user_group_uids` (who may request it), `server_group_uids` (which
   databases it covers), `approver_user_group_uids` (who may resolve its holds).
   Empty on either axis means "everyone" / "every database". The pre-rename
-  field names `group_uids` / `approver_group_uids` are still **accepted on
-  input for one release** and are gone from every response; the per-database
-  `database_uids` is removed outright and is now a 400.
+  field names `group_uids` / `approver_group_uids` are removed outright and
+  are now a 400, same as the per-database `database_uids`.
 - **Grants bind to a server group**, not to a database. A grant issued from a
   scoped definition binds to whichever of its groups holds the target database
   and then covers *that group's current membership, and only that*; the anchor

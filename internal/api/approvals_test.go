@@ -270,7 +270,7 @@ func TestNonApproverIsRefused(t *testing.T) {
 // must stay resolvable by grant A's approver group even after a newer,
 // higher-priority grant B is created for the same user/database — the exact
 // situation where the pre-stamp code (re-resolving GetActiveGrant at approval
-// time) picked B's approver_group_uids instead of A's.
+// time) picked B's approver_user_group_uids instead of A's.
 func TestApprovalUsesStampedGrantNotNewerOverlappingGrant(t *testing.T) {
 	t.Parallel()
 

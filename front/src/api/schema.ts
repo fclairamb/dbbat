@@ -2207,10 +2207,9 @@ export interface components {
             user_group_uids?: string[];
             /**
              * @deprecated
-             * @description **Deprecated** pre-rename spelling of `user_group_uids`, still
-             *     accepted on input for one release so existing clients keep
-             *     working. `user_group_uids` wins when both are present; responses
-             *     never emit this name.
+             * @description **Removed.** Pre-rename spelling of `user_group_uids`. Sending
+             *     this field is a `400`, not a no-op: silently ignoring a scope
+             *     restriction would fail *open*.
              */
             group_uids?: string[];
         };
@@ -2748,25 +2747,25 @@ export interface components {
             approver_user_group_uids?: string[];
             /**
              * @deprecated
-             * @description **Deprecated** pre-rename spelling of `user_group_uids`, accepted
-             *     on input for one release. `user_group_uids` wins when both are
-             *     present; responses never emit this name.
-             */
-            group_uids?: string[];
-            /**
-             * @deprecated
-             * @description **Deprecated** pre-rename spelling of `approver_user_group_uids`,
-             *     accepted on input for one release. The new name wins when both are
-             *     present; responses never emit this name.
-             */
-            approver_group_uids?: string[];
-            /**
-             * @deprecated
              * @description **Removed.** Per-database scoping was replaced by
              *     `server_group_uids`. Sending this field is a `400`, not a no-op:
              *     silently ignoring a scope restriction would fail *open*.
              */
             database_uids?: string[];
+            /**
+             * @deprecated
+             * @description **Removed.** Pre-rename spelling of `user_group_uids`. Sending
+             *     this field is a `400`, not a no-op: silently ignoring a scope
+             *     restriction would fail *open*.
+             */
+            group_uids?: string[];
+            /**
+             * @deprecated
+             * @description **Removed.** Pre-rename spelling of `approver_user_group_uids`.
+             *     Sending this field is a `400`, not a no-op: silently ignoring a
+             *     scope restriction would fail *open*.
+             */
+            approver_group_uids?: string[];
         };
         /**
          * @description PATCH body for `/grant-definitions/{uid}`. Every field is optional —
@@ -2817,25 +2816,25 @@ export interface components {
             approver_user_group_uids?: string[];
             /**
              * @deprecated
-             * @description **Deprecated** pre-rename spelling of `user_group_uids`, accepted
-             *     on input for one release. `user_group_uids` wins when both are
-             *     present; responses never emit this name.
-             */
-            group_uids?: string[];
-            /**
-             * @deprecated
-             * @description **Deprecated** pre-rename spelling of `approver_user_group_uids`,
-             *     accepted on input for one release. The new name wins when both are
-             *     present; responses never emit this name.
-             */
-            approver_group_uids?: string[];
-            /**
-             * @deprecated
              * @description **Removed.** Per-database scoping was replaced by
              *     `server_group_uids`. Sending this field is a `400`, not a no-op:
              *     silently ignoring a scope restriction would fail *open*.
              */
             database_uids?: string[];
+            /**
+             * @deprecated
+             * @description **Removed.** Pre-rename spelling of `user_group_uids`. Sending
+             *     this field is a `400`, not a no-op: silently ignoring a scope
+             *     restriction would fail *open*.
+             */
+            group_uids?: string[];
+            /**
+             * @deprecated
+             * @description **Removed.** Pre-rename spelling of `approver_user_group_uids`.
+             *     Sending this field is a `400`, not a no-op: silently ignoring a
+             *     scope restriction would fail *open*.
+             */
+            approver_group_uids?: string[];
         };
         AccessGrant: {
             /**

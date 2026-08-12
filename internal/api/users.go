@@ -29,22 +29,10 @@ type UpdateUserRequest struct {
 	// UserGroupUIDs, when non-nil, replaces the user's user-group memberships
 	// wholesale. Admin-only, like Roles.
 	UserGroupUIDs []uuid.UUID `json:"user_group_uids"`
-	// LegacyUserGroupUIDs is the pre-rename spelling of UserGroupUIDs, kept
-	// readable for one release so existing API clients don't break the day
-	// server groups land. Applied only when the new field is absent;
-	// responses never emit it. See applyLegacyFields.
-	LegacyUserGroupUIDs []uuid.UUID `json:"group_uids"`
-}
-
-// applyLegacyFields folds the deprecated pre-rename JSON field names onto
-// their replacements. A caller that sends both wins with the new name — the
-// old one is a compatibility shim, never an override.
-func (r *UpdateUserRequest) applyLegacyFields() {
-	if r.UserGroupUIDs == nil && r.LegacyUserGroupUIDs != nil {
-		r.UserGroupUIDs = r.LegacyUserGroupUIDs
-	}
-
-	r.LegacyUserGroupUIDs = nil
+	// RetiredGroupUIDs catches the pre-rename spelling of UserGroupUIDs. It
+	// is refused rather than folded onto UserGroupUIDs — silently ignoring a
+	// scope restriction fails *open*. See errRetiredGroupUIDs.
+	RetiredGroupUIDs []uuid.UUID `json:"group_uids"`
 }
 
 // setMongoVerifier derives and stores the user's MongoDB SCRAM-SHA-256 verifier
@@ -172,6 +160,25 @@ type userDetailResponse struct {
 	Groups []store.UserGroup `json:"user_groups"`
 }
 
+// bindUpdateUserRequest decodes the PUT /users/:uid body and rejects it up
+// front when it is malformed or still carries the retired pre-rename
+// group_uids spelling — refusing rather than folding, since silently
+// ignoring a membership change would fail *open*. Returns false, having
+// already written the error response, when the update must not proceed.
+func (s *Server) bindUpdateUserRequest(c *gin.Context, req *UpdateUserRequest) bool {
+	if err := c.ShouldBindJSON(req); err != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid request: "+err.Error())
+		return false
+	}
+
+	if req.RetiredGroupUIDs != nil {
+		writeError(c, http.StatusBadRequest, ErrCodeValidationError, errRetiredGroupUIDs)
+		return false
+	}
+
+	return true
+}
+
 // handleUpdateUser updates a user
 func (s *Server) handleUpdateUser(c *gin.Context) {
 	uid, err := parseUIDParam(c)
@@ -181,12 +188,9 @@ func (s *Server) handleUpdateUser(c *gin.Context) {
 	}
 
 	var req UpdateUserRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		writeError(c, http.StatusBadRequest, ErrCodeValidationError, "invalid request: "+err.Error())
+	if !s.bindUpdateUserRequest(c, &req) {
 		return
 	}
-
-	req.applyLegacyFields()
 
 	// API keys cannot change passwords (security restriction)
 	if req.Password != nil && isAPIKeyAuth(c) {

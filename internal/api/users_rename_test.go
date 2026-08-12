@@ -5,89 +5,49 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
-// The user surface carries the same one-release compatibility window as the
+// The user surface carries the same pre-rename spelling as the
 // grant-definition surface (see grant_definitions_rename_test.go): server
 // groups made a bare "group" ambiguous, so `group_uids` became
 // `user_group_uids` on input and the user-detail response's `groups` key
-// became `user_groups`. These tests pin both halves of that promise — the old
-// spelling still *works*, and no response emits it.
+// became `user_groups`. These tests pin both halves of the rename — the old
+// input spelling is now a hard 400, and no response emits it.
 
-// TestUpdateUser_LegacyGroupUIDsAccepted pins that a client written against
-// the pre-rename API can still set a user's group membership.
-func TestUpdateUser_LegacyGroupUIDsAccepted(t *testing.T) {
+// TestUpdateUser_RetiredGroupUIDsRejected pins that the pre-rename
+// `group_uids` spelling is refused with a 400 rather than silently applied or
+// silently ignored. Ignoring it would drop a group-membership change on the
+// floor — failing *open* — which is exactly what this endpoint must never do;
+// mirrors TestGrantDefinition_RetiredGroupFieldNamesRejected.
+func TestUpdateUser_RetiredGroupUIDsRejected(t *testing.T) {
 	t.Parallel()
 
 	server, dataStore := setupTestServer(t)
 	ctx := context.Background()
-	suffix := "ulegacy"
+	suffix := "uretiredgroup"
 
 	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
 	target := createTestUser(t, dataStore, "target-"+suffix, "targetpass123", []string{store.RoleConnector})
 	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
 
-	group, err := dataStore.CreateUserGroup(ctx, &store.UserGroup{Name: "legacy-" + suffix, CreatedBy: &admin.UID})
+	group, err := dataStore.CreateUserGroup(ctx, &store.UserGroup{Name: "retired-" + suffix, CreatedBy: &admin.UID})
 	require.NoError(t, err)
 
 	router := newUsersTestRouter(server)
 
-	w, _ := doJSON(t, router, http.MethodPut, "/api/v1/users/"+target.UID.String(), adminToken, map[string]any{
+	w, resp := doJSON(t, router, http.MethodPut, "/api/v1/users/"+target.UID.String(), adminToken, map[string]any{
 		"group_uids": []string{group.UID.String()},
 	})
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+	require.Equal(t, "VALIDATION_ERROR", resp["code"])
+	require.Contains(t, resp["message"], "user_group_uids")
 
 	membership, err := dataStore.ListUserGroupUIDs(ctx, target.UID)
 	require.NoError(t, err)
-	require.Equal(t, []string{group.UID.String()}, uidStrings(membership),
-		"the deprecated group_uids must still be read on input")
-
-	// And the explicit-empty case, which is how a caller clears membership.
-	w, _ = doJSON(t, router, http.MethodPut, "/api/v1/users/"+target.UID.String(), adminToken, map[string]any{
-		"group_uids": []string{},
-	})
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-
-	membership, err = dataStore.ListUserGroupUIDs(ctx, target.UID)
-	require.NoError(t, err)
-	require.Empty(t, membership)
-}
-
-// TestUpdateUser_NewGroupFieldNameWinsOverLegacy pins the same precedence the
-// grant-definition bodies use: sending both spellings applies the new one. The
-// old name is a compatibility shim, never an override.
-func TestUpdateUser_NewGroupFieldNameWinsOverLegacy(t *testing.T) {
-	t.Parallel()
-
-	server, dataStore := setupTestServer(t)
-	ctx := context.Background()
-	suffix := "uboth"
-
-	admin := createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
-	target := createTestUser(t, dataStore, "target-"+suffix, "targetpass123", []string{store.RoleConnector})
-	adminToken := loginUser(t, server, "admin-"+suffix, "adminpass123")
-
-	newGroup, err := dataStore.CreateUserGroup(ctx, &store.UserGroup{Name: "new-" + suffix, CreatedBy: &admin.UID})
-	require.NoError(t, err)
-
-	oldGroup, err := dataStore.CreateUserGroup(ctx, &store.UserGroup{Name: "old-" + suffix, CreatedBy: &admin.UID})
-	require.NoError(t, err)
-
-	router := newUsersTestRouter(server)
-
-	w, _ := doJSON(t, router, http.MethodPut, "/api/v1/users/"+target.UID.String(), adminToken, map[string]any{
-		"user_group_uids": []string{newGroup.UID.String()},
-		"group_uids":      []string{oldGroup.UID.String()},
-	})
-	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-
-	membership, err := dataStore.ListUserGroupUIDs(ctx, target.UID)
-	require.NoError(t, err)
-	require.Equal(t, []string{newGroup.UID.String()}, uidStrings(membership))
+	require.Empty(t, membership, "a rejected request must not have applied any membership change")
 }
 
 // TestGetUser_EmitsUserGroupsNotGroups pins the response half of the rename:
@@ -119,15 +79,4 @@ func TestGetUser_EmitsUserGroupsNotGroups(t *testing.T) {
 
 	_, hasLegacy := resp["groups"]
 	require.False(t, hasLegacy, "responses must not emit the deprecated bare groups key")
-}
-
-// uidStrings renders uids for comparison without importing a sorting helper
-// into every assertion.
-func uidStrings(uids []uuid.UUID) []string {
-	out := make([]string, 0, len(uids))
-	for _, uid := range uids {
-		out = append(out, uid.String())
-	}
-
-	return out
 }
