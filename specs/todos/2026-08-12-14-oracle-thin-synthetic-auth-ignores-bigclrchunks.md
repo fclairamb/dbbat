@@ -32,6 +32,16 @@ short values are byte-identical in both encodings. It becomes reachable the
 moment one of those outgrows the 252-byte short form (a long hostname in
 `AUTH_TERMINAL` / `AUTH_MACHINE` is the most plausible route, at 253 bytes).
 
+A second, narrower site is in the same family and can ride along:
+`parseAuthPhase2`'s finders — `findKVByKeyBytes`, `findKVByKeyBytesWide` and
+`scanTTCKeyValPairs` / `readKVValue` (`internal/proxy/oracle/ttc_auth.go`) — all
+read with plain `readCLR` on both dialects, and `parseAuthPhase2` carries no
+capability argument to thread. They are the most defensible of the lot: the only
+values they extract are `AUTH_SESSKEY` (64 hex chars) and `AUTH_PASSWORD`
+(96/64), fixed-size by construction rather than merely short today. Either
+thread the flag from the two `parseAuthPhase2` call sites, or state the
+fixed-size argument in a comment so this is a decision rather than an omission.
+
 No GitHub issue yet — file one when picking this up.
 
 ## Implementation
