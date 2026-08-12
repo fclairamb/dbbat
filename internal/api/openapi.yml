@@ -3036,7 +3036,10 @@ paths:
         `chains_with_truncated_prefix` counts chains missing their oldest
         statements — what `DBB_QUERY_STORAGE_RETENTION` leaves behind on a
         long-lived session. That is expected housekeeping, not tampering, and
-        everything after the truncation is still verified.
+        everything after the truncation is still verified. A session retention
+        emptied *entirely* is counted there too; one emptied while it was too
+        young for the sweep to have reached it is a **break**, because the
+        stamp on the connection row still attests to statements that are gone.
 
         A session still carrying the pre-0.24 head stamp — a verbatim copy of
         the last statement's MAC, forgeable by anyone who can write to the
@@ -6110,7 +6113,9 @@ components:
             Chains missing their oldest statements — what
             DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived session.
             Expected housekeeping, not tampering; everything after the
-            truncation is still verified.
+            truncation is still verified. A session the sweep emptied of every
+            statement is counted here as well; an emptied session the sweep
+            cannot account for is a break instead.
         head_seq:
           type: integer
           format: int64
