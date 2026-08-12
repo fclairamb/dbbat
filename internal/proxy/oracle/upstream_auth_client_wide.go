@@ -37,7 +37,7 @@ import (
 //
 // The username field, by contrast, is the same CLR form in both dialects.
 
-// wideAuthPointerRun is the 8-byte placeholder OCI writes where a marshalled
+// wideAuthPointerRun is the 8-byte placeholder OCI writes where a marshaled
 // pointer would go. Four of them frame the Phase 1/Phase 2 preamble, and the
 // first is the anchor every field offset below is measured from — exactly as
 // findUserIDLenPos anchors the rewrite path.
@@ -57,7 +57,7 @@ const maxWideAuthLead = 16
 // wideAuthFraming is the set of OCI framing conventions dbbat cannot derive
 // from first principles and therefore reads off the client's own AUTH packet.
 // Every *value* in the synthetic body is dbbat's own; only the framing is
-// borrowed, which is the same division of labour the rewrite path makes when it
+// borrowed, which is the same division of labor the rewrite path makes when it
 // preserves the client's wire shape and swaps the fields it owns.
 type wideAuthFraming struct {
 	// prefix is everything from the TTC function header up to (not including)
@@ -123,6 +123,10 @@ func detectWideAuthFraming(body []byte) (wideAuthFraming, bool) {
 	f := wideAuthFraming{
 		prefix: append([]byte(nil), body[:anchor]...),
 		mode:   binary.LittleEndian.Uint32(body[anchor+12 : anchor+16]),
+		// Undecidable below (no locatable username) keeps the Instant Client
+		// convention, so a detected framing and defaultWideAuthFraming answer
+		// the same thing rather than disagreeing on the same client.
+		bufferSized: true,
 	}
 
 	// The 3x-vs-plain convention is decided by comparing the user-len field
@@ -256,6 +260,15 @@ func authPhase1Pairs(ident driverIdentity) []authKV {
 // SESSION_CLIENT_LIB_TYPE=2 (OCI) rather than 0 (thin), matching the captured
 // sqlplus login — the upstream conditions its AUTH OK on this dictionary, and
 // that AUTH OK is forwarded to a real OCI client.
+//
+// Three keys the captured sqlplus sends are deliberately NOT reproduced:
+// AUTH_CONNECT_STRING, AUTH_LOGICAL_SESSION_ID and AUTH_FAILOVER_ID. All three
+// are informational client state, and the last two would have to be invented —
+// the synthetic body declares what dbbat is, not a fabricated OCI identity. The
+// thin dictionary omits them too and authenticates, so they are not what the
+// upstream gates AUTH OK on. For the same reason SESSION_CLIENT_CHARSET and
+// SESSION_CLIENT_VERSION keep the thin path's values rather than sqlplus's:
+// they are dbbat's own declaration in both dialects.
 func authPhase2Pairs(ident driverIdentity, sec *upstreamAuthSecrets, wide bool) []authKV {
 	pairs := []authKV{
 		{authKeySessKey, sec.encClientSessKey, 1},
