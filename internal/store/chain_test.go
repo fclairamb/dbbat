@@ -660,7 +660,7 @@ func TestQueryChainDetectsStampVersionDowngrade(t *testing.T) {
 	result, err := store.VerifyQueryChain(ctx, conn.UID)
 	require.NoError(t, err)
 	require.NotNil(t, result.Break, "relabelling a sealed stamp as legacy must be detected")
-	require.Contains(t, result.Break.Reason, "stamp was not keyed")
+	require.Contains(t, result.Break.Reason, "stamped in the unkeyed format")
 }
 
 // TestQueryChainStampMACSealsItsVersion pins the version-in-the-MAC property
@@ -734,7 +734,7 @@ func TestQueryChainDowngradeToRawStampIsABreak(t *testing.T) {
 	result, err := store.VerifyQueryChain(ctx, conn.UID)
 	require.NoError(t, err)
 	require.NotNil(t, result.Break, "a downgrade to the unkeyed stamp must be a break, not a count")
-	require.Contains(t, result.Break.Reason, "stamp was not keyed")
+	require.Contains(t, result.Break.Reason, "stamped in the unkeyed format")
 
 	all, err := store.VerifyQueryChains(ctx, nil)
 	require.NoError(t, err)
@@ -767,7 +767,7 @@ func TestQueryChainLegacyStampIsABreak(t *testing.T) {
 	result, err := store.VerifyQueryChain(ctx, conn.UID)
 	require.NoError(t, err)
 	require.NotNil(t, result.Break, "an unkeyed head stamp must not verify")
-	require.Contains(t, result.Break.Reason, "stamp was not keyed",
+	require.Contains(t, result.Break.Reason, "stamped in the unkeyed format",
 		"the break must say the tail cannot be verified, not accuse anyone of deleting it")
 	require.NotContains(t, result.Break.Reason, "allow-legacy-stamps",
 		"there is no escape hatch to point at")
@@ -1246,7 +1246,7 @@ func TestQueryChainWipedUnkeyedSessionBreaksForItsStamp(t *testing.T) {
 	result, err := store.VerifyQueryChain(ctx, conn.UID)
 	require.NoError(t, err)
 	require.NotNil(t, result.Break, "an unkeyed stamp is a break whatever survived")
-	require.Contains(t, result.Break.Reason, "stamp was not keyed")
+	require.Contains(t, result.Break.Reason, "stamped in the unkeyed format")
 	require.NotContains(t, result.Break.Reason, "none survive",
 		"the unkeyed stamp is judged before the emptied-chain rule, which it cannot answer")
 }
