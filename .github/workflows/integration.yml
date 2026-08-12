@@ -35,12 +35,11 @@ jobs:
         # without / 6m16s with, because these suites spend their time booting
         # containers, not burning CPU.
         #
-        # mssql is the one leg without it. It is published for linux/amd64
-        # only, so nobody on an arm64 machine can run it under the detector to
-        # find out what it reports, and switching it on unverified would turn
-        # this nightly red on a Monday morning for reasons nobody had looked
-        # at. Flipping it is a one-word change — see
-        # specs/todos/2026-08-12-03-race-detector-on-mssql-and-kubernetes.md.
+        # mssql was the last leg without it, on the grounds that its image is
+        # published for linux/amd64 only. That turned out not to stop anyone:
+        # the suite was run green under the detector on an arm64 host through
+        # Rosetta (3m39s wall, 175 cases, nothing reported) before this leg was
+        # switched on, so the setting is measured rather than assumed.
         include:
           - package: ./internal/proxy/postgresql/
             race: "-race"
@@ -49,7 +48,7 @@ jobs:
           - package: ./internal/proxy/mongodb/
             race: "-race"
           - package: ./internal/proxy/mssql/
-            race: ""
+            race: "-race"
     steps:
       - uses: actions/checkout@v7.0.1
 
