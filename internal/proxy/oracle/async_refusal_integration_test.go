@@ -433,7 +433,7 @@ func TestIntegration_AsyncRefusalAgainstJDBCThin(t *testing.T) {
 // missing — the same rule TestIntegration_BlockedStatementRefusesJDBCThin
 // applies, and for the same reason: there is no packaged Oracle JDBC driver to
 // look up, so CI has none.
-func requireOJDBC(t *testing.T) (java, jar string) {
+func requireOJDBC(t *testing.T) (string, string) {
 	t.Helper()
 
 	java, err := exec.LookPath("java")
@@ -441,7 +441,7 @@ func requireOJDBC(t *testing.T) (java, jar string) {
 		t.Skipf("java unavailable: %v", err)
 	}
 
-	jar = oracleTestOJDBCJar(t)
+	jar := oracleTestOJDBCJar(t)
 	if jar == "" {
 		t.Skipf("no Oracle JDBC driver: set %s to an ojdbc jar, or put one on CLASSPATH", ojdbcJarEnv)
 	}
@@ -487,8 +487,10 @@ type jdbcProbeRun struct {
 func (r jdbcProbeRun) run(t *testing.T) string {
 	t.Helper()
 
-	args := append([]string{"-cp", r.jar, r.program,
-		r.host, strconv.Itoa(r.port), r.service, r.user, r.password, r.mode}, r.extra...)
+	args := append([]string{
+		"-cp", r.jar, r.program,
+		r.host, strconv.Itoa(r.port), r.service, r.user, r.password, r.mode,
+	}, r.extra...)
 
 	return runProbeProcess(t, r.java, args, r.onIdle)
 }
