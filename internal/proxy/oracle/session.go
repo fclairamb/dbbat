@@ -1316,17 +1316,19 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 		return false
 	}
 
-	s.logger.DebugContext(s.ctx, "TTC message", slog.String("func", funcCode.String()))
-
 	ttcPayload := extractTTCPayload(pkt.Payload)
 	if ttcPayload == nil {
 		return false
 	}
 
+	s.logger.DebugContext(s.ctx, "TTC message",
+		slog.String("func", funcCode.String()),
+		slog.String("op", ttcOpFunction(ttcPayload)))
+
 	// Whatever this message turns out to be, it names the call the client is
 	// now waiting on, and a refusal has to end *that* call by number — see
 	// oerSummary.CallNumber.
-	s.observeClientCallNumber(ttcPayload)
+	named := s.observeClientCallNumber(ttcPayload)
 
 	switch funcCode { //nolint:exhaustive // only intercepting specific TTC functions, rest pass through
 	case TTCFuncPiggyback:
@@ -1367,6 +1369,30 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 		// Distinguish from plain OFETCH by checking the sub-operation byte.
 		if IsExecSQL(ttcPayload) {
 			return s.gateStatement(s.handleJDBCExec, ttcPayload)
+		}
+
+		// Everything below reads a cursor id out of bytes 1..3 of the frame,
+		// and those bytes are only a cursor id if the frame really is a fetch.
+		// On a piggyback dbbat cannot walk they are (function, sequence), so
+		// the id is noise and the refusal it produces lands on a call the
+		// client is not parked on: the bundled OCI client's first message,
+		// `11 6b 04 …` with the real call stapled behind it, decoded as a
+		// re-execution of cursor 27396, was refused under any restrictive
+		// grant, and the refusal hung sqlplus with no output at all.
+		//
+		// So dbbat gets out of the way of a message it could not name: no
+		// cursor id read out of it, no gate, no refusal, forwarded as it
+		// arrived. Failing open is the deliberate trade — a message dbbat
+		// cannot name is one it could not identify either, so refusing it
+		// protects nothing, while answering it strands the client. The two
+		// readings above are unaffected: they identify the frame from its own
+		// contents (a close list that walks, a statement that decodes) rather
+		// than from an offset. See clientCallNumber and docs/oracle.md.
+		if !named {
+			s.logger.DebugContext(s.ctx, logMsgUnnamedCallForwarded,
+				slog.String("op", ttcOpFunction(ttcPayload)))
+
+			return false
 		}
 
 		// A fetch that starts a fresh pending query is a cursor re-execution
@@ -1634,16 +1660,25 @@ func (s *session) nextOERFrame() (oerShape, int, byte) {
 // It is never read outside a call. The one refusal that can fire while the
 // client is idle — the limit watchdog — writes no OER at all, deliberately; see
 // onLimitViolation.
-func (s *session) observeClientCallNumber(ttcPayload []byte) {
+//
+// Reports whether the call could be named. False means the previous number is
+// kept rather than overwritten with a number that is *wrong* — a piggyback's
+// own sequence, with the real call stapled behind a body dbbat cannot walk.
+// Both legs depend on that: the client leg refuses nothing on a message it
+// could not name, and the response leg's mid-stream limit refusal keeps
+// pointing at the last call dbbat actually saw.
+func (s *session) observeClientCallNumber(ttcPayload []byte) bool {
 	number, ok := clientCallNumber(ttcPayload)
 	if !ok {
-		return
+		return false
 	}
 
 	s.oerMu.Lock()
 	defer s.oerMu.Unlock()
 
 	s.oerCallNumber = number
+
+	return true
 }
 
 // observeOERServerCaps and observeOERClientVersion are the locked wrappers the

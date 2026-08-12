@@ -28,9 +28,27 @@ const (
 	TTCFuncOVersion     TTCFunctionCode = 0x0B // OVERSION — version request
 	TTCFuncOALL8        TTCFunctionCode = 0x0E // OALL8 — parse+execute (legacy)
 	TTCFuncQueryResult  TTCFunctionCode = 0x10 // Query result with row data
-	TTCFuncOFETCH       TTCFunctionCode = 0x11 // OFETCH — fetch rows
+	TTCFuncOFETCH       TTCFunctionCode = 0x11 // TTC piggyback message type — see below
 	TTCFuncOCANCEL      TTCFunctionCode = 0x14 // OCANCEL — cancel query
 )
+
+// TTCFuncOFETCH keeps its name for continuity, but the name is wrong and the
+// distinction cost a hung client, so it is written down here rather than left
+// to be rediscovered:
+//
+//   - 0x11 is the TTC **piggyback message type**, not a fetch. Byte 1 is a TTC
+//     *function code* — 0x69 close-cursors, 0x6b (an OCI session piggyback),
+//     0x87 set-end-to-end-attrs, 0x98 set-schema — and never a cursor id.
+//   - A real fetch is message type 0x03 with function 0x05 (TNS_FUNC_FETCH),
+//     which is what every recording in testdata/ shows and what dbbat labels
+//     PIGGYBACK.
+//
+// decodeOFETCH's layout (cursor id as a big-endian uint16 at bytes 1..3) is
+// therefore a fiction for any frame Oracle actually sends: on `11 6b 04 …` it
+// reads 0x6b04 = 27396 and refuses it as a re-execution of a cursor nobody
+// opened. The dispatcher no longer reaches it for a frame it cannot name; see
+// interceptClientMessage and clientCallNumber.
+const ttcPiggybackMessageType = TTCFuncOFETCH
 
 // Piggyback sub-operation codes (byte 1 when func=0x03).
 const (
@@ -79,6 +97,19 @@ func extractTTCPayload(tnsDataPayload []byte) []byte {
 	}
 
 	return tnsDataPayload[ttcDataFlagsSize:]
+}
+
+// ttcOpFunction names the TTC function a message carries, which for a
+// piggyback (message type 0x11) is byte 1 and not the message type at all.
+// It exists so the "TTC message" log line says `func=OFETCH op=0x6b` instead of
+// claiming a fetch that no client ever sent — the misreading this whole
+// distinction was rediscovered through.
+func ttcOpFunction(ttcPayload []byte) string {
+	if len(ttcPayload) < 2 {
+		return "?"
+	}
+
+	return fmt.Sprintf("0x%02x", ttcPayload[1])
 }
 
 // String returns a human-readable name for the TTC function code.
