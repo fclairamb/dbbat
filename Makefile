@@ -129,9 +129,6 @@ test-e2e-oracle:
 # container startup, and the same holds here (PostgreSQL 2m37s with it on).
 # Each of the three has been run green under the detector; PostgreSQL needed a
 # fix first (see `bookMu` in internal/proxy/postgresql/session.go).
-#
-# test-integration-mssql and test-integration-kubernetes below are deliberately
-# left without it — see their own comments.
 test-integration-mongodb:
 	go test -race -tags integration -v -timeout 40m -count=1 ./internal/proxy/mongodb/...
 
@@ -141,19 +138,19 @@ test-integration-mysql:
 test-integration-postgresql:
 	go test -race -tags integration -v -timeout 40m -count=1 ./internal/proxy/postgresql/...
 
-# mcr.microsoft.com/mssql/server is published for linux/amd64 only and takes a
-# couple of minutes to finish recovery, so on an arm64 laptop this suite runs
-# under emulation if it runs at all. CI (ubuntu-24.04) is where it is expected
-# to pass.
+# mcr.microsoft.com/mssql/server is published for linux/amd64 only, so on an
+# arm64 laptop this suite runs under emulation. CI (ubuntu-24.04) is where it is
+# expected to pass, but emulation is not a reason to skip it locally: measured
+# under Rosetta on an M-series host, the whole suite (175 cases) took 3m39s wall
+# with `-race` on, SQL Server itself reaching "ready for client connections" in
+# ~6s per container.
 #
-# No `-race`, unlike the three targets above, and the reason is that emulation:
-# this suite has never been run under the detector, so turning it on would be a
-# guess that the TDS proxy has no races — and of the four protocols that *were*
-# measured, two of them did. Enabling it here is a one-word change once someone
-# can run the suite natively; see
-# specs/todos/2026-08-12-03-race-detector-on-mssql-and-kubernetes.md.
+# `-race`, same reason as the targets above. The TDS proxy runs the two relay
+# pumps over one session like the others do, and the detector reported nothing —
+# it guards the in-flight statement behind `pendingMu`, `statsMu`, `heldMu` and
+# `preparedMu` already, which is what the other proxies had to be taught.
 test-integration-mssql:
-	go test -tags integration -v -timeout 40m -count=1 ./internal/proxy/mssql/...
+	go test -race -tags integration -v -timeout 40m -count=1 ./internal/proxy/mssql/...
 
 # The Kubernetes tunnel end to end: one k3s cluster (privileged container), a
 # PostgreSQL pod inside it, and dbbat dialing through `pods/portforward`. Unlike
