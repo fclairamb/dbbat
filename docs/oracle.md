@@ -690,6 +690,46 @@ once with `ORACLE_TEST_IMAGE=gvenzl/oracle-xe:18.4.0-slim`.
 | `ORACLE_TEST_SERVICE` | PDB service name; inferred from the image otherwise (`XEPDB1` for XE, `FREEPDB1` for Free, `ORCLPDB1` for enterprise) |
 | `ORACLE_TEST_OJDBC_JAR` | Oracle JDBC driver jar for the JDBC-thin refusal case; without it (and without an `ojdbc*.jar` on `CLASSPATH`) that one test skips |
 
+#### The suite runs under `-race`, and why that matters here
+
+`make test-e2e-oracle` passes `-race`, as does the CI job. It is not
+belt-and-braces: this suite is the only thing that puts the proxy's *two*
+session goroutines — the client reader and the upstream reader, plus the limit
+watchdog and the approval gate — on the same session at once. The unit tests
+carry the detector but drive a single goroutine, so every shared-state bug in
+`session.go` / `intercept.go` was invisible to both halves of the test suite at
+the same time: the tests that could see it had no detector, and the tests that
+had the detector could not reach it.
+
+It found three, all the same shape — the client goroutine and the upstream
+goroutine writing one session's bookkeeping with nothing between them:
+`session.oer` (the OER shape learned from the pre-auth relay, a
+`min(existing, observed)` read-modify-write from both sides — found by review,
+not by the suite), and then `tracker.pendingQuery`, written by
+`handlePiggybackExec` / `completeQuery` on the client leg while
+`upstreamToClient` read it once per forwarded packet to decide whether the
+mid-stream limit check applied. `completeQuery` is also a read-modify-write of
+`lastBytesSnapshot` and of the grant's in-session byte counter, which is what a
+cumulative byte quota is enforced against.
+
+The fix is `trackerMu` (and `oerMu` before it): per-concern locks, not a
+session-wide one. The upstream leg takes `trackerMu` once for the whole of
+`interceptUpstreamMessage`, which does no socket I/O; the client leg takes it in
+explicit `book()` steps, with `holdIfNeeded` deliberately between two of them
+rather than inside one — an approval hold has no timeout, and holding the lock
+across one would park the response leg on a human.
+
+The cost was measured rather than assumed, on this target, back to back:
+
+| | wall | test time | user CPU |
+|---|---|---|---|
+| without `-race` | 6m38s | 392s | 8.7s |
+| with `-race` | 6m16s | 371s | 14.6s |
+
+The detector is the expected ~2x CPU tax, but on ~6 seconds of CPU in a suite
+that spends six minutes booting Oracle containers — so it disappears into the
+run-to-run noise, and `-timeout 40m` needed no change.
+
 #### How a refusal ends the client's call
 
 `TestIntegration_BlockedStatementsAreLogged` drives a real go-ora client through

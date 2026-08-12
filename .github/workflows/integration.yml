@@ -27,11 +27,29 @@ jobs:
       # One protocol failing should not hide the state of the others.
       fail-fast: false
       matrix:
-        package:
-          - ./internal/proxy/postgresql/
-          - ./internal/proxy/mysql/
-          - ./internal/proxy/mongodb/
-          - ./internal/proxy/mssql/
+        # `race` is per leg on purpose, and mirrors the Makefile targets. These
+        # suites are the only ones that run two proxy goroutines over one
+        # session, so the detector is what makes them worth more than a smoke
+        # test — it found a live race in the PostgreSQL proxy the moment it was
+        # switched on. It costs little: measured on the Oracle target at 6m38s
+        # without / 6m16s with, because these suites spend their time booting
+        # containers, not burning CPU.
+        #
+        # mssql is the one leg without it. It is published for linux/amd64
+        # only, so nobody on an arm64 machine can run it under the detector to
+        # find out what it reports, and switching it on unverified would turn
+        # this nightly red on a Monday morning for reasons nobody had looked
+        # at. Flipping it is a one-word change — see
+        # specs/todos/2026-08-12-03-race-detector-on-mssql-and-kubernetes.md.
+        include:
+          - package: ./internal/proxy/postgresql/
+            race: "-race"
+          - package: ./internal/proxy/mysql/
+            race: "-race"
+          - package: ./internal/proxy/mongodb/
+            race: "-race"
+          - package: ./internal/proxy/mssql/
+            race: ""
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -39,8 +57,11 @@ jobs:
         with:
           go-version: "1.26.5"
 
+      # A manual dispatch naming its own package keeps the leg's race setting;
+      # the four legs all still run, so `-race` is exercised whichever package
+      # is asked for.
       - name: Run integration suite
-        run: go test -tags integration -timeout 40m -count=1 -v ${{ github.event.inputs.package || matrix.package }}
+        run: go test ${{ matrix.race }} -tags integration -timeout 40m -count=1 -v ${{ github.event.inputs.package || matrix.package }}
 
   # The Oracle suite is kept out of the matrix above: its images are slow to
   # boot, so it gets its own job with a longer budget.
@@ -102,6 +123,11 @@ jobs:
   # budget. It is also the one suite whose *cluster* version matters — the
   # websocket port-forward transport is only on by default from 1.31 — so the
   # image is pinned in the suite and overridable here.
+  #
+  # No -race on this one, unlike the protocol legs above: it has never been run
+  # under the detector (a k3s boot per run is expensive), and it exercises the
+  # tunnel rather than a session's two relay goroutines, which is where every
+  # race found so far has been. Same todo as mssql.
   kubernetes:
     runs-on: ubuntu-24.04
     steps:

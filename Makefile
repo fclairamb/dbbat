@@ -93,12 +93,12 @@ showcase:
 # CI (.github/workflows/integration.yml) runs the suite twice: once on this
 # default, and once pinned to the 18c XE image so that coverage is kept.
 #
-# `-race`, and it costs nothing measurable. This is the only suite that puts
-# two proxy goroutines on the same session at once — client reader, upstream
-# reader, limit watchdog, approval gate — so it is the only place those pairs
-# get exercised at all; the unit tests carry the detector but drive one
-# goroutine. Running without it hid two live races on the in-flight query
-# (see `trackerMu` in internal/proxy/oracle/session.go).
+# `-race`, and it costs nothing measurable. The integration suites are the only
+# place two proxy goroutines meet on one session — client reader, upstream
+# reader, limit watchdog, approval gate — and this is the suite with the most
+# of that state and the most client shapes; the unit tests carry the detector
+# but drive a single goroutine. Running without it hid two live races on the
+# in-flight query (see `trackerMu` in internal/proxy/oracle/session.go).
 #
 # Measured on this target, same machine, back to back:
 #
@@ -121,19 +121,37 @@ test-e2e-oracle:
 # `go test -tags integration ./internal/proxy/mongodb/...` panics on a busy
 # machine even when nothing is wrong. These targets carry the same -timeout 40m
 # the CI workflow uses. A run that exceeds *that* is a real regression.
+#
+# `-race` on the three below, for the reason spelled out on test-e2e-oracle:
+# these are the only suites that put two proxy goroutines on one session, and
+# the detector is what turns that into signal. Measured on the Oracle target at
+# 6m38s without / 6m16s with — the CPU tax is real but invisible next to
+# container startup, and the same holds here (PostgreSQL 2m37s with it on).
+# Each of the three has been run green under the detector; PostgreSQL needed a
+# fix first (see `bookMu` in internal/proxy/postgresql/session.go).
+#
+# test-integration-mssql and test-integration-kubernetes below are deliberately
+# left without it — see their own comments.
 test-integration-mongodb:
-	go test -tags integration -v -timeout 40m -count=1 ./internal/proxy/mongodb/...
+	go test -race -tags integration -v -timeout 40m -count=1 ./internal/proxy/mongodb/...
 
 test-integration-mysql:
-	go test -tags integration -v -timeout 40m -count=1 ./internal/proxy/mysql/...
+	go test -race -tags integration -v -timeout 40m -count=1 ./internal/proxy/mysql/...
 
 test-integration-postgresql:
-	go test -tags integration -v -timeout 40m -count=1 ./internal/proxy/postgresql/...
+	go test -race -tags integration -v -timeout 40m -count=1 ./internal/proxy/postgresql/...
 
 # mcr.microsoft.com/mssql/server is published for linux/amd64 only and takes a
 # couple of minutes to finish recovery, so on an arm64 laptop this suite runs
 # under emulation if it runs at all. CI (ubuntu-24.04) is where it is expected
 # to pass.
+#
+# No `-race`, unlike the three targets above, and the reason is that emulation:
+# this suite has never been run under the detector, so turning it on would be a
+# guess that the TDS proxy has no races — and of the four protocols that *were*
+# measured, two of them did. Enabling it here is a one-word change once someone
+# can run the suite natively; see
+# specs/todos/2026-08-12-03-race-detector-on-mssql-and-kubernetes.md.
 test-integration-mssql:
 	go test -tags integration -v -timeout 40m -count=1 ./internal/proxy/mssql/...
 
@@ -143,6 +161,11 @@ test-integration-mssql:
 # a cold image cache is dominated by pulling k3s. Override the cluster with
 # K3S_TEST_IMAGE=rancher/k3s:vX.Y.Z-k3s1 — it must be 1.31 or newer for the
 # websocket transport assertion to hold.
+#
+# No `-race` here either, for the same reason as mssql: booting a k3s control
+# plane is expensive enough that the suite has not been run under the detector,
+# and this one exercises the tunnel rather than a proxy session's two relay
+# goroutines, so it is the least likely of the six to be hiding one. Same todo.
 test-integration-kubernetes:
 	go test -tags integration -v -timeout 40m -count=1 ./internal/proxy/kubernetes/...
 
