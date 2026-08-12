@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	dockercontainer "github.com/moby/moby/api/types/container"
 	_ "github.com/sijms/go-ora/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -74,6 +75,17 @@ func oracleTestService() string {
 
 // startOracleContainer starts an Oracle XE container for testing.
 func startOracleContainer(t *testing.T) (testcontainers.Container, string, int) {
+	return startOracleContainerWith(t, false)
+}
+
+// startOracleContainerWith is startOracleContainer plus the one knob the
+// container-hosted OCI client needs: `hostGateway` gives the container a
+// `host.docker.internal` entry pointing back at the Docker host, so a client
+// run *inside* it (see oci_client_integration_test.go) can dial a proxy the
+// test bound on the host. It is off for every other test — the entry costs
+// nothing but it also buys nothing, and `host-gateway` is a Docker-20.10-and-up
+// feature we would rather not make every Oracle test depend on.
+func startOracleContainerWith(t *testing.T, hostGateway bool) (testcontainers.Container, string, int) {
 	t.Helper()
 
 	ctx := context.Background()
@@ -98,6 +110,12 @@ func startOracleContainer(t *testing.T) (testcontainers.Container, string, int) 
 		ExposedPorts: []string{"1521/tcp"},
 		Env:          env,
 		WaitingFor:   wait.ForLog("DATABASE IS READY TO USE!").WithStartupTimeout(timeout),
+	}
+
+	if hostGateway {
+		req.HostConfigModifier = func(hc *dockercontainer.HostConfig) {
+			hc.ExtraHosts = append(hc.ExtraHosts, hostGatewayAlias+":host-gateway")
+		}
 	}
 
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{

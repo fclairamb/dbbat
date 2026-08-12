@@ -54,14 +54,41 @@ type oracleThroughProxy struct {
 	store *store.Store
 	user  *store.User
 	dbUID uuid.UUID
+
+	// oracle is the upstream container itself. It is kept rather than dropped
+	// into a cleanup because the container-hosted OCI client runs sqlplus
+	// *inside* it — see oci_client_integration_test.go.
+	oracle testcontainers.Container
+}
+
+// oracleFixtureOptions are the knobs startOracleThroughProxyWith takes. The
+// zero value is what every test had before the container-hosted OCI client
+// existed: no controls on the grant, proxy bound on loopback only.
+type oracleFixtureOptions struct {
+	// controls are the grant controls the fixture user is issued.
+	controls []string
+
+	// reachableFromContainers binds the proxy on every interface instead of
+	// loopback, and gives the Oracle container a route back to the host, so a
+	// client running inside that container can dial the proxy. Off by default:
+	// binding a test listener on 0.0.0.0 is a real (if brief) exposure and, on
+	// macOS with the firewall on, an interactive prompt.
+	reachableFromContainers bool
 }
 
 func startOracleThroughProxy(t *testing.T, controls []string) *oracleThroughProxy {
 	t.Helper()
 
-	ctx := context.Background()
+	return startOracleThroughProxyWith(t, oracleFixtureOptions{controls: controls})
+}
 
-	oracleContainer, oracleHost, oraclePort := startOracleContainer(t)
+func startOracleThroughProxyWith(t *testing.T, opts oracleFixtureOptions) *oracleThroughProxy {
+	t.Helper()
+
+	ctx := context.Background()
+	controls := opts.controls
+
+	oracleContainer, oracleHost, oraclePort := startOracleContainerWith(t, opts.reachableFromContainers)
 	t.Cleanup(func() { _ = oracleContainer.Terminate(ctx) })
 
 	pgContainer, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
@@ -126,8 +153,13 @@ func startOracleThroughProxy(t *testing.T, controls []string) *oracleThroughProx
 
 	logs := newCountingHandler()
 
+	bindAddr := "127.0.0.1:0"
+	if opts.reachableFromContainers {
+		bindAddr = "0.0.0.0:0"
+	}
+
 	proxy := NewServer(dataStore, encryptionKey, nil, config.QueryStorageConfig{}, config.DumpConfig{}, slog.New(logs))
-	go func() { _ = proxy.Start("127.0.0.1:0") }()
+	go func() { _ = proxy.Start(bindAddr) }()
 
 	// Bounded, like the PostgreSQL fixture's: Shutdown waits for every live
 	// session's goroutine, and a session parked on a client that will never
@@ -145,6 +177,12 @@ func startOracleThroughProxy(t *testing.T, controls []string) *oracleThroughProx
 
 	host, portStr, err := net.SplitHostPort(proxy.Addr().String())
 	require.NoError(t, err)
+
+	// A wildcard bind reports 0.0.0.0, which is not an address a client should
+	// be handed; every in-process client still goes to loopback.
+	if host == "0.0.0.0" {
+		host = "127.0.0.1"
+	}
 
 	port := 0
 	_, err = fmt.Sscanf(portStr, "%d", &port)
@@ -175,6 +213,7 @@ func startOracleThroughProxy(t *testing.T, controls []string) *oracleThroughProx
 		store:    dataStore,
 		user:     user,
 		dbUID:    db.UID,
+		oracle:   oracleContainer,
 	}
 }
 

@@ -4,16 +4,14 @@ package oracle
 
 import (
 	"context"
-	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/fclairamb/dbbat/internal/store"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/fclairamb/dbbat/internal/store"
 )
 
 // forceSyntheticAuthEnv turns the upstream AUTH rewrite off for the whole
@@ -81,47 +79,31 @@ const syntheticWideLoginDeadline = 3 * time.Minute
 //     which keeps the two paths honest about producing a body the same upstream
 //     accepts.
 //
-// Skipped when sqlplus is not installed, which is the case in CI today; the
-// byte-level half of the same evidence lives in upstream_auth_client_wide_test.go,
+// The OCI client is sqlplus from PATH when there is one, and otherwise the one
+// bundled in the Oracle container the fixture already started — so this runs in
+// CI, where nothing is installed on the runner. It skips only when neither can
+// be used, and ORACLE_TEST_REQUIRE_OCI_CLIENT=1 (set on every CI leg) turns
+// even that into a failure; see oci_client_integration_test.go. The byte-level
+// half of the same evidence lives in upstream_auth_client_wide_test.go,
 // measured against a real sqlplus capture.
 func TestIntegration_SqlplusLoginThroughSyntheticAuth(t *testing.T) {
-	sqlplus, err := exec.LookPath("sqlplus")
-	if err != nil {
-		t.Skipf("sqlplus unavailable: %v", err)
-	}
+	ociAuthModeNote(t)
 
-	if forceSyntheticUpstreamAuth {
-		t.Logf("%s=1: this login runs on the wide SYNTHETIC AUTH builders", forceSyntheticAuthEnv)
-	} else {
-		t.Logf("%s unset: this login runs on the wide AUTH REWRITE path; "+
-			"set it to 1 to exercise the synthetic builders", forceSyntheticAuthEnv)
-	}
-
-	env := startOracleThroughProxy(t, nil)
-
-	script := filepath.Join(t.TempDir(), "wide_login.sql")
-	require.NoError(t, os.WriteFile(script, []byte(syntheticWideLoginScript), 0o600))
+	env := startOracleThroughProxyForOCI(t, nil)
+	oci := requireOCIClient(t, env)
 
 	runCtx, cancel := context.WithTimeout(context.Background(), syntheticWideLoginDeadline)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, sqlplus, "-S",
-		fmt.Sprintf("%s/%s@//%s:%d/%s", env.username, env.apiKey, env.host, env.port, env.service),
-		"@"+script)
+	output, err := oci.run(t, runCtx, syntheticWideLoginScript)
 
-	out, err := cmd.CombinedOutput()
-	output := string(out)
-
-	require.NoErrorf(t, err, "sqlplus could not complete a login through the proxy:\n%s", output)
+	require.NoErrorf(t, err, "%s could not complete a login through the proxy:\n%s", oci.label, output)
 
 	// ORA-03120 and ORA-28041 are the two failures a wrong wide body produces:
 	// the first when the upstream cannot parse the preamble, the second when the
 	// 3x-buffer-size and plain-length conventions get mixed. Naming them makes a
 	// regression legible instead of just "missing output".
-	assert.NotContains(t, output, "ORA-03120",
-		"the upstream could not parse dbbat's AUTH body:\n%s", output)
-	assert.NotContains(t, output, "ORA-28041",
-		"dbbat mixed the two OCI length conventions:\n%s", output)
+	assertNoOCIAuthMalformation(t, output)
 
 	assert.Contains(t, output, "wide-auth-ok=1",
 		"an OCI client must be able to authenticate through dbbat:\n%s", output)
