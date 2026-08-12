@@ -77,13 +77,23 @@ func CreateGrantWithControls(
 	def, err := dataStore.CreateGrantDefinition(ctx, definition)
 	require.NoError(t, err)
 
+	// The window is stamped from the *store's* clock, not the process's:
+	// CreateGrant copies both bounds onto the row verbatim, and GetActiveGrant
+	// then evaluates `starts_at <= NOW() AND expires_at > NOW()` inside
+	// PostgreSQL. The backdated hour would swallow any realistic skew on its
+	// own, but these suites run against a container whose clock is nobody's
+	// guarantee, and a fixture that disagrees with the code it exercises is
+	// exactly how the parent flake presented.
+	now, err := dataStore.Now(ctx)
+	require.NoError(t, err)
+
 	return dataStore.CreateGrant(ctx, &store.Grant{
 		UserID:            userUID,
 		DatabaseID:        databaseUID,
 		GrantedBy:         userUID,
 		GrantDefinitionID: def.UID,
 		Definition:        def,
-		StartsAt:          time.Now().Add(-time.Hour),
-		ExpiresAt:         time.Now().Add(grantDuration),
+		StartsAt:          now.Add(-time.Hour),
+		ExpiresAt:         now.Add(grantDuration),
 	})
 }

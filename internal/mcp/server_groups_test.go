@@ -33,9 +33,11 @@ func newServerGroupFixture(
 		UserID:         userUID,
 		DatabaseID:     anchor,
 		ServerGroupUID: &groupUID,
-		StartsAt:       time.Now().Add(-time.Minute),
-		ExpiresAt:      time.Now().Add(time.Hour),
-		Definition:     &def,
+		// Process clock on purpose — nothing here reaches a database that
+		// would judge this window. See fakeGrantStore.
+		StartsAt:   time.Now().Add(-time.Minute),
+		ExpiresAt:  time.Now().Add(time.Hour),
+		Definition: &def,
 	}
 
 	st := &fakeGrantStore{
@@ -128,6 +130,7 @@ func TestListDatabasesKeepsTheAnchorForAnUnboundGrant(t *testing.T) {
 			UID:        uuid.New(),
 			UserID:     userUID,
 			DatabaseID: anchor,
+			// Process clock on purpose — see fakeGrantStore.
 			StartsAt:   time.Now().Add(-time.Minute),
 			ExpiresAt:  time.Now().Add(time.Hour),
 			Definition: &def,
