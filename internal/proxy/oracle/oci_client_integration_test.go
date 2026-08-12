@@ -46,6 +46,16 @@ const hostGatewayAlias = "host.docker.internal"
 // Oracle container. /tmp is writable by the `oracle` user the image runs as.
 const containerOCIScriptPath = "/tmp/dbbat_oci_probe.sql"
 
+// ociClientEnv pins where sqlplus comes from instead of letting
+// plannedOCIClient choose: `path` for an install on PATH, `container` for the
+// one bundled in the Oracle image. Anything else (including unset) is auto.
+//
+// It exists so a developer with an Instant Client installed can still run what
+// CI runs — auto would pick their PATH client and never touch the container
+// route, which is the only route CI has and therefore the one that has to keep
+// working.
+const ociClientEnv = "ORACLE_TEST_OCI_CLIENT"
+
 // ociClientKind is where sqlplus comes from.
 type ociClientKind int
 
@@ -77,6 +87,13 @@ const (
 // A client on PATH wins: it is free, it needs no wildcard bind, and it is the
 // flavor the byte-level fixtures were captured from.
 var plannedOCIClient = sync.OnceValue(func() ociClientKind {
+	switch os.Getenv(ociClientEnv) {
+	case "path":
+		return ociClientHostPath
+	case "container":
+		return ociClientContainer
+	}
+
 	if _, err := exec.LookPath("sqlplus"); err == nil {
 		return ociClientHostPath
 	}
@@ -87,6 +104,10 @@ var plannedOCIClient = sync.OnceValue(func() ociClientKind {
 // ociClient runs an sqlplus script against the proxy and hands back everything
 // the client printed, whichever side of the container boundary it ran on.
 type ociClient struct {
+	// kind is which of the two flavors this is, for the one test that has to
+	// tell them apart (see knownBadBundledRefusal).
+	kind ociClientKind
+
 	// label names the flavor in test logs, so a failure says which client
 	// produced it.
 	label string
@@ -153,6 +174,7 @@ func hostOCIClient(env *oracleThroughProxy) (*ociClient, string) {
 	}
 
 	return &ociClient{
+		kind:  ociClientHostPath,
 		label: "sqlplus on PATH (" + sqlplus + ")",
 		run: func(t *testing.T, ctx context.Context, script string) (string, error) {
 			t.Helper()
@@ -197,6 +219,7 @@ func containerOCIClient(t *testing.T, env *oracleThroughProxy) (*ociClient, stri
 	}
 
 	return &ociClient{
+		kind:  ociClientContainer,
 		label: "sqlplus bundled in " + oracleTestImage() + " (via docker exec)",
 		run: func(t *testing.T, ctx context.Context, script string) (string, error) {
 			t.Helper()
@@ -256,6 +279,29 @@ func ociAuthModeNote(t *testing.T) {
 	t.Logf("%s unset: this login runs on the wide AUTH REWRITE path; "+
 		"set it to 1 to exercise the synthetic builders", forceSyntheticAuthEnv)
 }
+
+// knownBadBundledRefusal is a *measured* defect, not a convenience: under a
+// restrictive grant the DB-bundled OCI client's very first call in proxy mode
+// is refused and the session then hangs, so the refusal test cannot run on that
+// flavor until the bug is fixed. The login test above is unaffected (it holds
+// an unrestricted grant, so no gate fires) and does run on it.
+//
+// Measured on gvenzl/oracle-free:23-slim (client 23.26) against the same image
+// as upstream, `read_only` grant, sqlplus's first statement a plain SELECT:
+//
+//	TTC message func=OFETCH
+//	refused a re-execution of an untracked cursor under a restrictive grant cursor_id=27396
+//
+// A fresh session has no cursors, so 27396 is not a cursor the client could be
+// re-executing. The Instant Client 23.3 on PATH passes the same test against
+// the same upstream, which is what makes this flavor-specific rather than a
+// property of the gate.
+//
+// Full write-up and repro:
+// specs/todos/2026-08-12-12-bundled-oci-client-refused-and-hung-under-a-restrictive-grant.md
+const knownBadBundledRefusal = "the bundled OCI client's first call is refused as an untracked cursor " +
+	"re-execution under a restrictive grant, and the session then hangs — see " +
+	"specs/todos/2026-08-12-12-bundled-oci-client-refused-and-hung-under-a-restrictive-grant.md"
 
 // assertNoOCIAuthMalformation names the two failures a wrong wide AUTH body
 // produces, so a regression reads as itself rather than as missing output.

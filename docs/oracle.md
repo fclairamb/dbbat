@@ -747,6 +747,7 @@ once with `ORACLE_TEST_IMAGE=gvenzl/oracle-xe:18.4.0-slim`.
 | `ORACLE_TEST_SERVICE` | PDB service name; inferred from the image otherwise (`XEPDB1` for XE, `FREEPDB1` for Free, `ORCLPDB1` for enterprise) |
 | `ORACLE_TEST_OJDBC_JAR` | Oracle JDBC driver jar for the JDBC-thin refusal case; without it (and without an `ojdbc*.jar` on `CLASSPATH`) that one test skips |
 | `ORACLE_TEST_REQUIRE_OCI_CLIENT` | `1` turns "no OCI client available" from a skip into a failure. Set on every Oracle leg in CI — see below |
+| `ORACLE_TEST_OCI_CLIENT` | Pins where sqlplus comes from: `path` (an install on `PATH`) or `container` (the one bundled in the Oracle image). Unset = auto, `PATH` first |
 
 #### Where the OCI client comes from
 
@@ -783,6 +784,17 @@ table under "The fallback covers wide/OCI clients too"). Only the Instant
 Client shape had live coverage before; the bundled one existed as a captured
 cross-check.
 
+Auto-selection means a machine with an Instant Client installed never exercises
+route (2) — the only route CI has. `ORACLE_TEST_OCI_CLIENT=container` pins it,
+which is how the container route is reproduced locally:
+
+```bash
+ORACLE_TEST_REQUIRE_OCI_CLIENT=1 ORACLE_TEST_OCI_CLIENT=container \
+  go test -race -tags integration -timeout 40m -count=1 -v \
+  -run 'TestIntegration_SqlplusLoginThroughSyntheticAuth|TestIntegration_BlockedStatementRefusesSQLPlus' \
+  ./internal/proxy/oracle/
+```
+
 Two probes run before the client is accepted, and each maps to a different
 verdict — a missing or unroutable *client* is an environment fact, while a
 client that runs and then fails to log in is a finding about the proxy and must
@@ -790,6 +802,17 @@ reach the assertions as a failure:
 
 - `sqlplus -v` inside the container, and
 - a TCP connect from the container back to the proxy's port.
+
+One test is **not** yet run on route (2), and the reason is a measured defect
+rather than a harness limit: under a restrictive grant the bundled 23.26 client's
+first call in proxy mode is refused as an untracked cursor re-execution
+(`cursor_id=27396` on a session that has executed nothing) and the session then
+hangs. `TestIntegration_BlockedStatementRefusesSQLPlus` skips on that flavor
+naming
+`specs/todos/2026-08-12-12-bundled-oci-client-refused-and-hung-under-a-restrictive-grant.md`;
+the login test holds an unrestricted grant, fires no gate, and runs on it. The
+Instant Client on PATH passes both against the same upstream — which is what
+makes this a statement about that client flavor and not about the gate.
 
 When neither route yields a client the tests skip, **unless**
 `ORACLE_TEST_REQUIRE_OCI_CLIENT=1`, which turns that into a failure.
