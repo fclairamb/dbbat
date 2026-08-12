@@ -15,6 +15,7 @@ import {
 import { PageHeader } from "@/components/shared/PageHeader";
 import { DataTable, type Column } from "@/components/shared/DataTable";
 import { MultiSelect } from "@/components/shared/MultiSelect";
+import { ApproverGroupPickers } from "@/components/shared/ApproverGroupPickers";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -229,6 +230,12 @@ function ServerGroupDialog({
   const [memberUids, setMemberUids] = useState<string[]>(
     editing?.member_uids ?? []
   );
+  const [accessApproverUids, setAccessApproverUids] = useState<string[]>(
+    editing?.access_approver_user_group_uids ?? []
+  );
+  const [queryApproverUids, setQueryApproverUids] = useState<string[]>(
+    editing?.query_approver_user_group_uids ?? []
+  );
 
   const create = useCreateServerGroup({
     onSuccess: () => {
@@ -258,6 +265,8 @@ function ServerGroupDialog({
       name,
       description,
       member_uids: memberUids,
+      access_approver_user_group_uids: accessApproverUids,
+      query_approver_user_group_uids: queryApproverUids,
     };
 
     if (editing) {
@@ -348,6 +357,19 @@ function ServerGroupDialog({
               </div>
             )}
           </div>
+          {/*
+            The group-level fallback for both approver kinds. A server that
+            names its own approvers ignores these entirely; several groups
+            holding the same server union their lists.
+          */}
+          <ApproverGroupPickers
+            scope="group"
+            accessSelected={accessApproverUids}
+            onAccessChange={setAccessApproverUids}
+            querySelected={queryApproverUids}
+            onQueryChange={setQueryApproverUids}
+            testIdPrefix="server-group"
+          />
         </div>
         <DialogFooter>
           <Button type="button" variant="outline" onClick={onClose}>

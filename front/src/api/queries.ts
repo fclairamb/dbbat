@@ -41,6 +41,13 @@ export type Connection = components["schemas"]["Connection"];
 export type ConnectionDetail = components["schemas"]["ConnectionDetail"];
 export type GrantSummary = components["schemas"]["GrantSummary"];
 export type Query = components["schemas"]["Query"];
+/**
+ * A held query as GET /queries/pending returns it: a Query plus
+ * `approver_role`, the hat the *calling* user would wear to resolve that
+ * particular hold ("admin", "definition_approver", "server_approver", or ""
+ * when they may see it but not release it).
+ */
+export type PendingQuery = Query & { approver_role?: string };
 export type QueryWithRows = components["schemas"]["QueryWithRows"];
 export type AuditEvent = components["schemas"]["AuditEvent"];
 export type UserRoleSync = components["schemas"]["UserRoleSync"];
@@ -1579,7 +1586,7 @@ export function usePendingApprovals(options?: {
 }) {
   return useQuery({
     queryKey: ["queries", "pending"],
-    queryFn: async (): Promise<Query[]> => {
+    queryFn: async (): Promise<PendingQuery[]> => {
       const response = await apiClient.GET("/queries/pending");
       if (response.error) {
         throw new Error(

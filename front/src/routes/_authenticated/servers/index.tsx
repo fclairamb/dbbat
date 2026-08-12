@@ -57,12 +57,14 @@ import {
   Plus,
   Trash2,
   Pencil,
+  ShieldCheck,
   AlertCircle,
   PlugZap,
   Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { CopyableField } from "@/components/shared/CopyableField";
+import { ApproverGroupPickers } from "@/components/shared/ApproverGroupPickers";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 
 export const Route = createFileRoute("/_authenticated/servers/")({
@@ -141,6 +143,7 @@ function ServersPage() {
   const [deleteDb, setDeleteDb] = useState<DatabaseItem | null>(null);
   const [detailDb, setDetailDb] = useState<DatabaseItem | null>(null);
   const [editSshServer, setEditSshServer] = useState<Database | null>(null);
+  const [approversDb, setApproversDb] = useState<Database | null>(null);
 
   const canCreate = canCreateDatabase(user?.roles);
   const canDelete = canDeleteDatabase(user?.roles);
@@ -357,6 +360,20 @@ function ServersPage() {
               disabledReason={getDisabledReason("update-database", user?.roles)}
             />
           )}
+          {canUpdate && isFullDatabase(db) && (
+            <Button
+              variant="ghost"
+              size="icon"
+              title="Approvers"
+              data-testid={`database-approvers-${db.uid}`}
+              onClick={(e) => {
+                e.stopPropagation();
+                setApproversDb(db);
+              }}
+            >
+              <ShieldCheck className="h-4 w-4" />
+            </Button>
+          )}
           <PermissionButton
             variant="ghost"
             size="icon"
@@ -434,7 +451,115 @@ function ServersPage() {
         server={editSshServer}
         onClose={() => setEditSshServer(null)}
       />
+      <EditServerApproversDialog
+        server={approversDb}
+        onClose={() => setApproversDb(null)}
+      />
     </div>
+  );
+}
+
+/**
+ * Editing the two approver lists on one server.
+ *
+ * Kept out of the create dialog's edit counterpart because there isn't one:
+ * databases are otherwise edited nowhere in this UI, and who may approve for a
+ * server is exactly the field an operator revisits after the row was created —
+ * on a rotation change, a team split, a departure.
+ */
+function EditServerApproversDialog({
+  server,
+  onClose,
+}: {
+  server: Database | null;
+  onClose: () => void;
+}) {
+  return (
+    <Dialog open={!!server} onOpenChange={() => onClose()}>
+      {/* Keyed on the UID so the pickers re-seed from the row being opened. */}
+      {server && (
+        <EditServerApproversForm
+          key={server.uid}
+          server={server}
+          onClose={onClose}
+        />
+      )}
+    </Dialog>
+  );
+}
+
+function EditServerApproversForm({
+  server,
+  onClose,
+}: {
+  server: Database;
+  onClose: () => void;
+}) {
+  const [accessApproverUids, setAccessApproverUids] = useState<string[]>(
+    server.access_approver_user_group_uids ?? [],
+  );
+  const [queryApproverUids, setQueryApproverUids] = useState<string[]>(
+    server.query_approver_user_group_uids ?? [],
+  );
+
+  const updateServer = useUpdateDatabase(server.uid, {
+    onSuccess: () => {
+      toast.success("Approvers updated");
+      onClose();
+    },
+    onError: (error) => {
+      toast.error(error.message);
+    },
+  });
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    // Both sent unconditionally, empty included: clearing a list is a real
+    // policy change (the decision falls back to the server groups, then to
+    // admins), so it has to be expressible from this form.
+    updateServer.mutate({
+      access_approver_user_group_uids: accessApproverUids,
+      query_approver_user_group_uids: queryApproverUids,
+    });
+  };
+
+  return (
+    <DialogContent
+      data-testid="server-approvers-dialog"
+      className="max-w-md"
+    >
+      <form onSubmit={handleSubmit}>
+        <DialogHeader>
+          <DialogTitle>Approvers for {server.name}</DialogTitle>
+          <DialogDescription>
+            Who, besides admins, may decide access requests and release approval
+            holds on this server.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4 py-4 max-h-[60vh] overflow-y-auto">
+          <ApproverGroupPickers
+            scope="server"
+            accessSelected={accessApproverUids}
+            onAccessChange={setAccessApproverUids}
+            querySelected={queryApproverUids}
+            onQueryChange={setQueryApproverUids}
+            testIdPrefix="server-approvers"
+          />
+        </div>
+        <DialogFooter>
+          <Button type="button" variant="outline" onClick={onClose}>
+            Cancel
+          </Button>
+          <Button
+            type="submit"
+            disabled={updateServer.isPending}
+            data-testid="server-approvers-submit"
+          >
+            Save
+          </Button>
+        </DialogFooter>
+      </form>
+    </DialogContent>
   );
 }
 
@@ -526,6 +651,8 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
   const [k8sCaCert, setK8sCaCert] = useState("");
   const [k8sNamespace, setK8sNamespace] = useState("");
   const [k8sInsecure, setK8sInsecure] = useState(false);
+  const [accessApproverUids, setAccessApproverUids] = useState<string[]>([]);
+  const [queryApproverUids, setQueryApproverUids] = useState<string[]>([]);
 
   const isSSH = protocol === "ssh";
   const isKubernetes = protocol === "kubernetes";
@@ -612,6 +739,8 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
           : undefined,
       listable,
       via_uid: viaUid || undefined,
+      access_approver_user_group_uids: accessApproverUids,
+      query_approver_user_group_uids: queryApproverUids,
     });
   };
 
@@ -704,6 +833,18 @@ function CreateDatabaseDialog({ onClose }: { onClose: () => void }) {
                 onCheckedChange={setListable}
               />
             </div>
+          )}
+          {/* Tunnel rows are dial paths — nothing is ever granted or held on
+              them, so neither approver kind applies. */}
+          {!isTunnel && (
+            <ApproverGroupPickers
+              scope="server"
+              accessSelected={accessApproverUids}
+              onAccessChange={setAccessApproverUids}
+              querySelected={queryApproverUids}
+              onQueryChange={setQueryApproverUids}
+              testIdPrefix="database"
+            />
           )}
           <div className="grid grid-cols-3 gap-2">
             <div className="col-span-2 space-y-2">
