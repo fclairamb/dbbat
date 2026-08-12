@@ -515,22 +515,22 @@ func isCloseCursorsWideHeader(ttcPayload []byte) bool {
 // enough bytes for the whole list — so a payload that doesn't fit is
 // rejected with ErrNotCloseCursors and deletes nothing, same as the thin
 // path.
-func decodeCloseCursorsWide(ttcPayload []byte) ([]uint16, error) {
+func decodeCloseCursorsWide(ttcPayload []byte) ([]uint16, int, error) {
 	pos := 3 + closeCursorsWideHeaderLen + len(closeCursorsWideSentinel)
 
 	if pos+4 > len(ttcPayload) {
-		return nil, fmt.Errorf("%w: truncated wide count", ErrNotCloseCursors)
+		return nil, 0, fmt.Errorf("%w: truncated wide count", ErrNotCloseCursors)
 	}
 
 	count := binary.LittleEndian.Uint32(ttcPayload[pos : pos+4])
 	if count > closeCursorsMaxCount {
-		return nil, fmt.Errorf("%w: wide cursor count decoded as %d", ErrNotCloseCursors, count)
+		return nil, 0, fmt.Errorf("%w: wide cursor count decoded as %d", ErrNotCloseCursors, count)
 	}
 
 	pos += 4
 
 	if pos+4*int(count) > len(ttcPayload) {
-		return nil, fmt.Errorf("%w: truncated after wide count of %d", ErrNotCloseCursors, count)
+		return nil, 0, fmt.Errorf("%w: truncated after wide count of %d", ErrNotCloseCursors, count)
 	}
 
 	cursorIDs := make([]uint16, 0, count)
@@ -538,14 +538,14 @@ func decodeCloseCursorsWide(ttcPayload []byte) ([]uint16, error) {
 	for range count {
 		id := binary.LittleEndian.Uint32(ttcPayload[pos : pos+4])
 		if id == 0 || id > cursorReexecMaxID {
-			return nil, fmt.Errorf("%w: wide cursor id decoded as %d", ErrNotCloseCursors, id)
+			return nil, 0, fmt.Errorf("%w: wide cursor id decoded as %d", ErrNotCloseCursors, id)
 		}
 
 		cursorIDs = append(cursorIDs, uint16(id))
 		pos += 4
 	}
 
-	return cursorIDs, nil
+	return cursorIDs, pos, nil
 }
 
 // decodeCloseCursors extracts every cursor id from Oracle's close-cursors
@@ -587,8 +587,27 @@ func decodeCloseCursorsWide(ttcPayload []byte) ([]uint16, error) {
 // so this is defense in depth rather than something load-bearing: a tracker
 // entry it leaves behind cannot mis-resolve anything on its own.
 func decodeCloseCursors(ttcPayload []byte) ([]uint16, error) {
+	ids, _, err := decodeCloseCursorsAt(ttcPayload)
+
+	return ids, err
+}
+
+// closeCursorsEnd returns the offset just past a close-cursors list — where a
+// stapled TTC op begins, if the client put one there. It is how
+// clientCallNumber reaches the execute JDBC staples behind its closes; false
+// when the payload is not a close-cursors piggyback or its list does not
+// decode.
+func closeCursorsEnd(ttcPayload []byte) (int, bool) {
+	_, end, err := decodeCloseCursorsAt(ttcPayload)
+
+	return end, err == nil
+}
+
+// decodeCloseCursorsAt is decodeCloseCursors plus the offset the close list
+// ends at.
+func decodeCloseCursorsAt(ttcPayload []byte) ([]uint16, int, error) {
 	if !IsCloseCursorsPiggyback(ttcPayload) {
-		return nil, ErrNotCloseCursors
+		return nil, 0, ErrNotCloseCursors
 	}
 
 	if isCloseCursorsWideHeader(ttcPayload) {
@@ -602,14 +621,14 @@ func decodeCloseCursors(ttcPayload []byte) ([]uint16, error) {
 	}
 
 	if pos >= len(ttcPayload) || ttcPayload[pos] != closeCursorsPointer {
-		return nil, fmt.Errorf("%w: no pointer flag at offset %d", ErrNotCloseCursors, pos)
+		return nil, 0, fmt.Errorf("%w: no pointer flag at offset %d", ErrNotCloseCursors, pos)
 	}
 
 	pos++
 
 	count, n := readCompressedInt(ttcPayload[pos:])
 	if n == 0 || count < 0 || count > closeCursorsMaxCount {
-		return nil, fmt.Errorf("%w: cursor count decoded as %d", ErrNotCloseCursors, count)
+		return nil, 0, fmt.Errorf("%w: cursor count decoded as %d", ErrNotCloseCursors, count)
 	}
 
 	pos += n
@@ -619,18 +638,18 @@ func decodeCloseCursors(ttcPayload []byte) ([]uint16, error) {
 	for range count {
 		cursorID, n := readCompressedInt(ttcPayload[pos:])
 		if n == 0 {
-			return nil, fmt.Errorf("%w: truncated after %d of %d ids", ErrNotCloseCursors, len(cursorIDs), count)
+			return nil, 0, fmt.Errorf("%w: truncated after %d of %d ids", ErrNotCloseCursors, len(cursorIDs), count)
 		}
 
 		if cursorID <= 0 || cursorID > cursorReexecMaxID {
-			return nil, fmt.Errorf("%w: cursor id decoded as %d", ErrNotCloseCursors, cursorID)
+			return nil, 0, fmt.Errorf("%w: cursor id decoded as %d", ErrNotCloseCursors, cursorID)
 		}
 
 		cursorIDs = append(cursorIDs, uint16(cursorID))
 		pos += n
 	}
 
-	return cursorIDs, nil
+	return cursorIDs, pos, nil
 }
 
 // OALL8Result contains the decoded fields from an OALL8 (parse+execute) message.

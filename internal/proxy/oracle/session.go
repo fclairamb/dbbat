@@ -189,12 +189,19 @@ type session struct {
 	// oerSeq is the highest end-to-end sequence number seen from the upstream,
 	// so a synthesized OER continues the session's count.
 	//
-	// Both are written by the upstream reader and read by whichever goroutine
-	// refuses a statement — the client reader, the upstream reader on a
-	// mid-stream limit violation, or the limit watchdog — hence the mutex.
-	oerMu  sync.Mutex
-	oer    oerShape
-	oerSeq int
+	// oerCallNumber is the TTC sequence number of the call the client is
+	// waiting on, taken off its own request (clientCallNumber). A server echoes
+	// it in the summary object's callNumber, and ojdbc 26.1 refuses to read the
+	// error out of an OER whose callNumber is not the one it sent.
+	//
+	// All three are written by the upstream reader or the client reader and read
+	// by whichever goroutine refuses a statement — the client reader, the
+	// upstream reader on a mid-stream limit violation, or the limit watchdog —
+	// hence the mutex.
+	oerMu         sync.Mutex
+	oer           oerShape
+	oerSeq        int
+	oerCallNumber byte
 }
 
 // cumulativeClientBytes returns the running total of bytes exchanged with
@@ -1272,6 +1279,11 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 		return false
 	}
 
+	// Whatever this message turns out to be, it names the call the client is
+	// now waiting on, and a refusal has to end *that* call by number — see
+	// oerSummary.CallNumber.
+	s.observeClientCallNumber(ttcPayload)
+
 	switch funcCode { //nolint:exhaustive // only intercepting specific TTC functions, rest pass through
 	case TTCFuncPiggyback:
 		// v315+ piggyback: check sub-operation to determine action
@@ -1502,7 +1514,7 @@ func (s *session) learnOERTail(ttcPayload []byte) {
 	}
 
 	if learnOERShape(&s.oer, ttcPayload) {
-		s.logger.DebugContext(s.ctx, "learned OER tail shape from upstream",
+		s.logger.DebugContext(s.ctx, logMsgLearnedOERTail,
 			slog.Int("extra_tail_fields", s.oer.extraTailFields),
 			slog.Bool("fixed_width", s.oer.fixedWidth),
 			slog.Bool("end_of_response", s.oer.endOfResponse))
@@ -1521,7 +1533,7 @@ func (s *session) learnOERTail(ttcPayload []byte) {
 // as it did on the frame this whole change replaces. The two travel together
 // because the same client is on both sides of them — an OCI session's messages
 // carry the marker whatever the Accept said, and no thin session's do.
-func (s *session) nextOERFrame() (oerShape, int) {
+func (s *session) nextOERFrame() (oerShape, int, byte) {
 	s.oerMu.Lock()
 	defer s.oerMu.Unlock()
 
@@ -1533,7 +1545,25 @@ func (s *session) nextOERFrame() (oerShape, int) {
 		shape.endOfResponse = s.clientWideEncoding
 	}
 
-	return shape, s.oerSeq
+	return shape, s.oerSeq, s.oerCallNumber
+}
+
+// observeClientCallNumber records the TTC sequence number of the call the
+// client is waiting on, so a refusal can end that call by number rather than by
+// zero. Every client message goes through here, including the ones dbbat has no
+// opinion about: the number that matters is the one on the call in flight when
+// a refusal happens, and a limit violation caught on the *response* leg refuses
+// a call the client reader has long since forwarded.
+func (s *session) observeClientCallNumber(ttcPayload []byte) {
+	number, ok := clientCallNumber(ttcPayload)
+	if !ok {
+		return
+	}
+
+	s.oerMu.Lock()
+	defer s.oerMu.Unlock()
+
+	s.oerCallNumber = number
 }
 
 // observeOERServerCaps and observeOERClientVersion are the locked wrappers the
