@@ -84,11 +84,17 @@ jobs:
         with:
           go-version: "1.26.5"
 
+      # -race, matching `make test-e2e-oracle`. This suite is the only one that
+      # runs two proxy goroutines over one session, and it hid two live races
+      # on the in-flight query for as long as it ran without the detector.
+      # Measured locally at 6m38s without / 6m16s with — the tax is real in CPU
+      # (~2x) but invisible in wall clock next to Oracle container startup, so
+      # the 60m budget is unchanged.
       - name: Run Oracle integration suite
         env:
           ORACLE_TEST_IMAGE: ${{ matrix.image }}
           DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH: ${{ matrix.synthetic_auth || '' }}
-        run: go test -tags integration -timeout 60m -count=1 -v ./internal/proxy/oracle/
+        run: go test -race -tags integration -timeout 60m -count=1 -v ./internal/proxy/oracle/
 
   # The Kubernetes tunnel suite gets its own job for the same reason Oracle
   # does: it boots a whole k3s control plane in a privileged container before
