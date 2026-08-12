@@ -110,10 +110,24 @@ jobs:
       # Measured locally at 6m38s without / 6m16s with — the tax is real in CPU
       # (~2x) but invisible in wall clock next to Oracle container startup, so
       # the 60m budget is unchanged.
+      # ORACLE_TEST_REQUIRE_OCI_CLIENT makes "no OCI client here" a failure
+      # instead of a skip. The two sqlplus-driven tests are the only end-to-end
+      # proof that an OCI client can authenticate through dbbat, and the only
+      # automated cover for the unlearned fallback in nextOERFrame; they used to
+      # skip on every runner, so both were green by proving nothing. Nothing is
+      # installed on the runner for them: sqlplus comes from the Oracle
+      # container the suite already starts (gvenzl images bundle one — 23.26 in
+      # oracle-free, 18.4 in oracle-xe), reached back over host.docker.internal.
+      #
+      # It is set on all three legs on purpose, so the OCI login is proved in
+      # both AUTH modes — the first two legs run it through the wide AUTH
+      # *rewrite*, the third through the wide *synthetic* builders — and on both
+      # Oracle versions.
       - name: Run Oracle integration suite
         env:
           ORACLE_TEST_IMAGE: ${{ matrix.image }}
           DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH: ${{ matrix.synthetic_auth || '' }}
+          ORACLE_TEST_REQUIRE_OCI_CLIENT: "1"
         run: go test -race -tags integration -timeout 60m -count=1 -v ./internal/proxy/oracle/
 
   # The Kubernetes tunnel suite gets its own job for the same reason Oracle

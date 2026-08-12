@@ -746,6 +746,58 @@ once with `ORACLE_TEST_IMAGE=gvenzl/oracle-xe:18.4.0-slim`.
 | `ORACLE_TEST_IMAGE` | Container image to start (default `gvenzl/oracle-free:23-slim`) |
 | `ORACLE_TEST_SERVICE` | PDB service name; inferred from the image otherwise (`XEPDB1` for XE, `FREEPDB1` for Free, `ORCLPDB1` for enterprise) |
 | `ORACLE_TEST_OJDBC_JAR` | Oracle JDBC driver jar for the JDBC-thin refusal case; without it (and without an `ojdbc*.jar` on `CLASSPATH`) that one test skips |
+| `ORACLE_TEST_REQUIRE_OCI_CLIENT` | `1` turns "no OCI client available" from a skip into a failure. Set on every Oracle leg in CI — see below |
+
+#### Where the OCI client comes from
+
+The sqlplus-driven tests — `TestIntegration_SqlplusLoginThroughSyntheticAuth`
+and `TestIntegration_BlockedStatementRefusesSQLPlus` — are the only end-to-end
+proof that an OCI client can authenticate through dbbat at all, and the only
+automated cover for the unlearned fallback in `nextOERFrame`. They used to open
+with `exec.LookPath("sqlplus")` and skip when it was absent, which was every CI
+runner: green by proving nothing.
+
+They now take a client from one of two places, decided once per process in
+`oci_client_integration_test.go` and *before any container starts* (the second
+option is a container- and listener-creation-time decision the fixture cannot
+revisit):
+
+1. **sqlplus on `PATH`** — an Instant Client install. Preferred when present: it
+   costs nothing, and it is the flavor `testdata/sqlplus_cursor_reexec.pcapng`
+   was captured from.
+2. **the sqlplus bundled in the Oracle container the suite already started**,
+   run over `docker exec`. gvenzl's images all ship one — 23.26 in
+   `oracle-free:23-slim`, 18.4 in `oracle-xe:18.4.0-slim` — so CI needs no
+   Instant Client zip, no download and no cache.
+
+Route (2) needs two things the ordinary fixture does not do, so they are opt-in
+per test (`startOracleThroughProxyForOCI`) rather than global: the proxy binds
+`0.0.0.0` instead of loopback, and the Oracle container is created with a
+`host.docker.internal:host-gateway` entry so it can dial back. Every in-process
+client still connects to `127.0.0.1`.
+
+Route (2) is also a *different* OCI flavor from route (1), and that is a second
+reason to prefer it in CI: the DB-bundled client sends plain key/value length
+fields where the Instant Client sends 3x UTF-8 buffer sizes (delta 3 in the
+table under "The fallback covers wide/OCI clients too"). Only the Instant
+Client shape had live coverage before; the bundled one existed as a captured
+cross-check.
+
+Two probes run before the client is accepted, and each maps to a different
+verdict — a missing or unroutable *client* is an environment fact, while a
+client that runs and then fails to log in is a finding about the proxy and must
+reach the assertions as a failure:
+
+- `sqlplus -v` inside the container, and
+- a TCP connect from the container back to the proxy's port.
+
+When neither route yields a client the tests skip, **unless**
+`ORACLE_TEST_REQUIRE_OCI_CLIENT=1`, which turns that into a failure.
+`.github/workflows/integration.yml` sets it on all three Oracle legs, so the
+OCI login is proved on both Oracle versions and in both AUTH modes (legs 1 and
+2 exercise the wide AUTH *rewrite*, leg 3 the wide *synthetic* builders). A
+red 18c leg on these two tests is therefore a real statement about that OCI
+vintage against dbbat, not a harness gap.
 
 #### The suite runs under `-race`, and why that matters here
 
@@ -794,8 +846,12 @@ the proxy under a `read_only` and then a `block_ddl` grant;
 `TestIntegration_BlockedStatementRefusesPythonThin`,
 `TestIntegration_BlockedStatementRefusesSQLPlus` and
 `TestIntegration_BlockedStatementRefusesJDBCThin` do the same from
-python-oracledb thin, sqlplus (OCI) and JDBC thin — the last two skipped when
-that client is not installed. Each refusal is enforced (nothing reaches upstream),
+python-oracledb thin, sqlplus (OCI) and JDBC thin. The python and JDBC ones skip
+when that client is not installed; the sqlplus one falls back to the client
+bundled in the Oracle container (see "Where the OCI client comes from") and
+skips only when even that is unusable — never in CI, where
+`ORACLE_TEST_REQUIRE_OCI_CLIENT=1` makes it a failure. Each refusal is enforced
+(nothing reaches upstream),
 logged (a `queries` row carrying the refusal as `error`, an ordinary link in the
 connection's HMAC chain), returned to the client as ORA-01031, and leaves the
 connection usable for the next statement.
@@ -1208,9 +1264,12 @@ whose rewrite failed was handed a body its caps-conditioned upstream could not
 parse. That is no longer true: `upstream_auth_client_wide.go` is the OCI
 counterpart, dispatched on `clientWideEncoding`, and
 `TestIntegration_SqlplusLoginThroughSyntheticAuth` drives a real sqlplus login
-through it end to end. The test skips when sqlplus is absent, which is the case
-in CI today, so the byte-level evidence lives in
-`upstream_auth_client_wide_test.go` against a real capture.
+through it end to end. That test runs in CI: when no sqlplus is on `PATH` it
+uses the one bundled in the Oracle container the suite already starts, and
+`ORACLE_TEST_REQUIRE_OCI_CLIENT=1` makes a run without any client a failure
+rather than a skip — see "Where the OCI client comes from" above. The
+byte-level evidence lives alongside it in `upstream_auth_client_wide_test.go`,
+against a real capture.
 
 The premise is measured, not assumed. With the wide dispatch disabled so a thin
 body goes out on an OCI session, that sqlplus login dies with **ORA-03113**
