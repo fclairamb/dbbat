@@ -347,9 +347,10 @@ func TestIntegration_K8s_DialPodAndService(t *testing.T) {
 	t.Run("pod_readiness_and_rbac_are_answerable", func(t *testing.T) {
 		require.NoError(t, tunnel.CheckPodReady(ctx, pod))
 
-		allowed, _, err := tunnel.PortForwardAllowed(ctx)
+		access, err := tunnel.PortForwardAllowed(ctx)
 		require.NoError(t, err)
-		assert.True(t, allowed, "the documented Role must satisfy the SelfSubjectAccessReview")
+		assert.True(t, access.Allowed(), "the documented Role must satisfy at least one SelfSubjectAccessReview")
+		assert.True(t, access.Create, "this fixture's Role carries `create`, so the review for it must succeed")
 	})
 
 	t.Run("missing_pod_is_told_apart", func(t *testing.T) {
@@ -405,15 +406,14 @@ func TestIntegration_K8s_WebsocketTransport(t *testing.T) {
 			"a Role carrying only `get` on pods/portforward can only be satisfied by the websocket upgrade")
 		assert.Equal(t, 1, got)
 
-		// The SelfSubjectAccessReview asks about `create`, so this Role reads
-		// as "not allowed" even though the websocket dial above works. That is
-		// a real gap in the connectivity check, not an accident of the fixture:
-		// see specs/todos/2026-08-11-05-conncheck-portforward-rbac-both-verbs.md.
-		// This assertion is what will have to flip when that lands.
-		allowed, _, err := tunnel.PortForwardAllowed(ctx)
+		// PortForwardAllowed reviews both verbs now, so a get-only Role reads
+		// as Get-admitted and Create-refused — Allowed() is true, matching the
+		// websocket dial above.
+		access, err := tunnel.PortForwardAllowed(ctx)
 		require.NoError(t, err)
-		assert.False(t, allowed,
-			"PortForwardAllowed only asks about `create`; see the follow-up todo")
+		assert.True(t, access.Get, "the get-only Role must satisfy the `get` SelfSubjectAccessReview")
+		assert.False(t, access.Create, "the get-only Role must not satisfy the `create` SelfSubjectAccessReview")
+		assert.True(t, access.Allowed(), "at least one transport is admitted, so PortForwardAllowed must say so")
 	})
 
 	t.Run("spdy_fallback_carries_a_create_only_role", func(t *testing.T) {

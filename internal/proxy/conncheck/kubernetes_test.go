@@ -8,6 +8,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +22,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/scheme"
 
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/proxy/upstream"
@@ -37,8 +39,13 @@ type fakeAPIServer struct {
 
 	allowed bool
 	reason  string
-	pod     *corev1.Pod
-	slices  *discoveryv1.EndpointSliceList
+	// allowedByVerb overrides allowed/reason for one RBAC verb ("create" or
+	// "get") when present; a verb absent from the map falls back to
+	// allowed/reason, so most tests can keep answering both verbs alike.
+	allowedByVerb map[string]bool
+	reasonByVerb  map[string]string
+	pod           *corev1.Pod
+	slices        *discoveryv1.EndpointSliceList
 	// status, when non-zero, is returned for every request.
 	status int
 }
@@ -62,10 +69,7 @@ func (f *fakeAPIServer) route(w http.ResponseWriter, req *http.Request) {
 
 	switch {
 	case strings.Contains(req.URL.Path, "/selfsubjectaccessreviews"):
-		writeObjJSON(w, &authv1.SelfSubjectAccessReview{
-			TypeMeta: metav1.TypeMeta{APIVersion: "authorization.k8s.io/v1", Kind: "SelfSubjectAccessReview"},
-			Status:   authv1.SubjectAccessReviewStatus{Allowed: f.allowed, Reason: f.reason},
-		})
+		f.handleSelfSubjectAccessReview(w, req)
 	case strings.Contains(req.URL.Path, "/endpointslices"):
 		if f.slices == nil {
 			writeObjJSON(w, &discoveryv1.EndpointSliceList{
@@ -85,6 +89,45 @@ func (f *fakeAPIServer) route(w http.ResponseWriter, req *http.Request) {
 	default:
 		writeStatusJSON(w, http.StatusNotFound, "unhandled "+req.URL.Path)
 	}
+}
+
+// handleSelfSubjectAccessReview answers per the requested verb: checkCluster
+// now sends one review each for "create" and "get", and a test that wants
+// them to disagree sets allowedByVerb/reasonByVerb rather than the plain
+// allowed/reason fields, which answer identically for every verb.
+func (f *fakeAPIServer) handleSelfSubjectAccessReview(w http.ResponseWriter, req *http.Request) {
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		writeStatusJSON(w, http.StatusBadRequest, "could not read the request body")
+
+		return
+	}
+
+	// The typed clientset negotiates protobuf for built-in types like this one
+	// (magic-prefixed "k8s\x00..."), not JSON, so the universal deserializer —
+	// which recognizes either — is what has to read it back.
+	var review authv1.SelfSubjectAccessReview
+	if _, _, err := scheme.Codecs.UniversalDeserializer().Decode(body, nil, &review); err != nil {
+		writeStatusJSON(w, http.StatusBadRequest, "could not decode the request body")
+
+		return
+	}
+
+	var verb string
+	if review.Spec.ResourceAttributes != nil {
+		verb = review.Spec.ResourceAttributes.Verb
+	}
+
+	allowed, reason := f.allowed, f.reason
+	if v, ok := f.allowedByVerb[verb]; ok {
+		allowed = v
+		reason = f.reasonByVerb[verb]
+	}
+
+	writeObjJSON(w, &authv1.SelfSubjectAccessReview{
+		TypeMeta: metav1.TypeMeta{APIVersion: "authorization.k8s.io/v1", Kind: "SelfSubjectAccessReview"},
+		Status:   authv1.SubjectAccessReviewStatus{Allowed: allowed, Reason: reason},
+	})
 }
 
 func writeObjJSON(w http.ResponseWriter, obj any) {
@@ -207,6 +250,87 @@ func TestCheckClusterMissingRBAC(t *testing.T) {
 	}
 	if !strings.Contains(res.Message, "no RBAC policy matched") {
 		t.Errorf("message %q drops the API server's reason", res.Message)
+	}
+}
+
+// TestCheckClusterCreateOnlyRoleSucceedsWithACostNote covers the Role that
+// grants `create` but not `get`: the check must still pass — the SPDY
+// transport carries every dial — but the message has to say the websocket
+// upgrade is refused first on each one.
+func TestCheckClusterCreateOnlyRoleSucceedsWithACostNote(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeAPIServer(t)
+	fake.allowedByVerb = map[string]bool{"create": true, "get": false}
+
+	resolver := newFakeResolver()
+	cluster := fake.newCluster(t, resolver)
+
+	res := New(resolver, testKey()).Check(context.Background(), cluster)
+	if !res.OK {
+		t.Fatalf("Check() = %+v, want OK: the SPDY transport still works with `create` alone", res)
+	}
+	if res.Stage != StageClusterRBAC || res.Code != CodeOK {
+		t.Errorf("stage/code = %s/%s, want %s/%s", res.Stage, res.Code, StageClusterRBAC, CodeOK)
+	}
+	if !strings.Contains(res.Message, "SPDY") || !strings.Contains(res.Message, "websocket") {
+		t.Errorf("message %q does not explain the refused-GET-then-fallback cost of a create-only Role", res.Message)
+	}
+}
+
+// TestCheckClusterGetOnlyRoleSucceedsWithACostNote covers the Role that grants
+// `get` but not `create`: it succeeds too (the websocket transport carries the
+// dial), but the message must warn that this cannot work at all against a
+// pre-1.31 API server.
+func TestCheckClusterGetOnlyRoleSucceedsWithACostNote(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeAPIServer(t)
+	fake.allowedByVerb = map[string]bool{"create": false, "get": true}
+
+	resolver := newFakeResolver()
+	cluster := fake.newCluster(t, resolver)
+
+	res := New(resolver, testKey()).Check(context.Background(), cluster)
+	if !res.OK {
+		t.Fatalf("Check() = %+v, want OK: the websocket transport still works with `get` alone", res)
+	}
+	if res.Stage != StageClusterRBAC || res.Code != CodeOK {
+		t.Errorf("stage/code = %s/%s, want %s/%s", res.Stage, res.Code, StageClusterRBAC, CodeOK)
+	}
+	if !strings.Contains(res.Message, "1.31") {
+		t.Errorf("message %q does not warn about pre-1.31 API servers", res.Message)
+	}
+}
+
+// TestCheckClusterNeitherVerbGrantedFails is the fourth combination: with
+// neither verb granted, the check must fail cluster_rbac and name both verbs
+// so an admin can grant whichever transport they want.
+func TestCheckClusterNeitherVerbGrantedFails(t *testing.T) {
+	t.Parallel()
+
+	fake := newFakeAPIServer(t)
+	fake.allowedByVerb = map[string]bool{"create": false, "get": false}
+	fake.reasonByVerb = map[string]string{
+		"create": "no policy grants create",
+		"get":    "no policy grants get",
+	}
+
+	resolver := newFakeResolver()
+	cluster := fake.newCluster(t, resolver)
+
+	res := New(resolver, testKey()).Check(context.Background(), cluster)
+	if res.OK {
+		t.Fatal("Check() succeeded although neither verb is granted")
+	}
+	if res.Stage != StageClusterRBAC || res.Code != CodeK8sForbidden {
+		t.Errorf("stage/code = %s/%s, want %s/%s", res.Stage, res.Code, StageClusterRBAC, CodeK8sForbidden)
+	}
+	if !strings.Contains(res.Message, "create") || !strings.Contains(res.Message, "get") {
+		t.Errorf("message %q does not name both verbs", res.Message)
+	}
+	if !strings.Contains(res.Message, "no policy grants create") || !strings.Contains(res.Message, "no policy grants get") {
+		t.Errorf("message %q drops the per-verb reasons", res.Message)
 	}
 }
 

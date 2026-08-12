@@ -117,7 +117,7 @@ func TestLearnedPinNeverOverridesASuppliedBundle(t *testing.T) {
 		t.Error("tunnel.learnedPin = true although a bundle was supplied")
 	}
 
-	if _, _, err := tunnel.PortForwardAllowed(context.Background()); err != nil {
+	if _, err := tunnel.PortForwardAllowed(context.Background()); err != nil {
 		t.Fatalf("PortForwardAllowed() error = %v, want the supplied bundle to be the one in force", err)
 	}
 }
@@ -145,12 +145,12 @@ func TestALearnedPinVerifiesLaterConnects(t *testing.T) {
 		t.Fatalf("NewKubernetesTunnel() error = %v", err)
 	}
 
-	allowed, _, err := tunnel.PortForwardAllowed(context.Background())
+	access, err := tunnel.PortForwardAllowed(context.Background())
 	if err != nil {
 		t.Fatalf("PortForwardAllowed() error = %v, want the learned pin to verify", err)
 	}
 
-	if !allowed {
+	if !access.Allowed() {
 		t.Error("PortForwardAllowed() = false, want true")
 	}
 }
@@ -173,7 +173,7 @@ func TestAChangedCAAgainstALearnedPinIsItsOwnFailure(t *testing.T) {
 		t.Fatalf("NewKubernetesTunnel() error = %v", err)
 	}
 
-	_, _, err = tunnel.PortForwardAllowed(context.Background())
+	_, err = tunnel.PortForwardAllowed(context.Background())
 	if err == nil {
 		t.Fatal("PortForwardAllowed() succeeded against a certificate the pin does not vouch for")
 	}
@@ -204,7 +204,7 @@ func TestAWrongSuppliedBundleIsNotAPinMismatch(t *testing.T) {
 		t.Fatalf("NewKubernetesTunnel() error = %v", err)
 	}
 
-	_, _, err = tunnel.PortForwardAllowed(context.Background())
+	_, err = tunnel.PortForwardAllowed(context.Background())
 	if err == nil {
 		t.Fatal("PortForwardAllowed() succeeded against a certificate signed by a different CA")
 	}

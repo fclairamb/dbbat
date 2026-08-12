@@ -264,14 +264,34 @@ in the order you would debug it, and the stage it stops at is the answer:
 | `config` | is the row usable at all? — including the refusal above, when no CA can be established and the row has not opted out |
 | `cluster_api` | can we reach the API server? (DNS, routing, firewall, and whether the CA in force — pasted or pinned — trusts it) |
 | `cluster_auth` | does the API server accept the token? |
-| `cluster_rbac` | a `SelfSubjectAccessReview` on `pods/portforward` — may this ServiceAccount actually open a tunnel here? |
+| `cluster_rbac` | two `SelfSubjectAccessReview`s on `pods/portforward`, one for `create` and one for `get` — may this ServiceAccount actually open a tunnel here, over either transport? |
 | `cluster_target` | does the pod (or the ready pod behind `svc/<name>`) resolve, and is it Ready? |
 
 The RBAC question is asked explicitly rather than inferred from a failed
-port-forward, because that is the difference between being told to add `create`
-on `pods/portforward` to the Role and reading a 403 out of a stream-upgrade
+port-forward, because that is the difference between being told which verb to
+add on `pods/portforward` to the Role and reading a 403 out of a stream-upgrade
 error. Testing a *database* row behind a cluster runs the same pre-flight before
 it dials, so a missing verb is never reported as the database refusing you.
+
+`cluster_rbac` asks about **both** verbs because the tunnel has two upgrade
+transports and a Role need not grant both — see
+[Transport details](#transport-details) for why. The stage fails only when
+*neither* is granted; when just one is, it still succeeds but names the gap in
+its message:
+
+- **both granted** — the recommended configuration; the message says nothing
+  more than "it works".
+- **`create` only** — succeeds, but every single dial pays a refused websocket
+  GET before the SPDY fallback carries it. Grant `get` too to stop paying that
+  cost (and to stop filling the cluster audit log with 403s that mean
+  nothing).
+- **`get` only** — succeeds against a Kubernetes 1.31+ API server (the
+  websocket port-forward handler is on there by default), but the row cannot
+  work at all against an older one, which has no websocket handler and would
+  need the SPDY fallback `create` admits. Grant `create` too unless every
+  cluster this row might ever point at is known to be 1.31+.
+- **neither** — `cluster_rbac` fails; the message names both verbs so you can
+  grant whichever transport you want.
 
 ## Stability caveats
 
@@ -317,9 +337,9 @@ verb — so `get` on `pods/portforward` is what admits the websocket transport a
 `create` is what admits SPDY. The Role above grants both; see the note there for
 what granting only one costs.
 
-The connectivity check's `cluster_rbac` stage asks only about `create`, so a
-Role granting `get` alone is reported as forbidden even though dials over it
-succeed. Grant both and the question does not arise.
+The connectivity check's `cluster_rbac` stage reviews both verbs and fails only
+when neither is granted; granting just one still passes, with the message
+naming what that one-verb Role costs (see [Connectivity check](#connectivity-check)).
 
 `SetDeadline` on the resulting conn returns `os.ErrNoDeadline`. This matches the
 SSH bastion path, whose channel conns reject deadlines the same way, so every

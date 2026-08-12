@@ -471,19 +471,64 @@ func (t *KubernetesTunnel) CheckPodReady(ctx context.Context, podName string) er
 	return fmt.Errorf("%w: pod %s/%s is %s", ErrKubernetesTargetNotReady, t.namespace, podName, pod.Status.Phase)
 }
 
-// PortForwardAllowed asks the API server, through a SelfSubjectAccessReview,
-// whether this ServiceAccount may create `pods/portforward` in the namespace.
+// PortForwardAccess reports which upgrade transports a ServiceAccount is
+// admitted to use for `pods/portforward`, one bool per RBAC verb the API
+// server derives from that transport's HTTP method: the websocket upgrade is
+// a GET (`get`), the SPDY upgrade a POST (`create`). "May we port-forward
+// here?" has two answers because the tunnel has two transports, and a Role
+// need not grant both.
+type PortForwardAccess struct {
+	// Create reports whether `create` on `pods/portforward` is granted, which
+	// is what admits the SPDY transport.
+	Create bool
+	// Get reports whether `get` on `pods/portforward` is granted, which is
+	// what admits the websocket transport.
+	Get bool
+	// CreateReason and GetReason carry the API server's own explanation for
+	// each verdict, verbatim, since that is what an operator debugs from.
+	CreateReason string
+	GetReason    string
+}
+
+// Allowed reports whether at least one transport is admitted — i.e. whether a
+// dial can succeed at all, however it gets there.
+func (a PortForwardAccess) Allowed() bool {
+	return a.Create || a.Get
+}
+
+// PortForwardAllowed asks the API server, through two SelfSubjectAccessReviews
+// (one per verb), whether this ServiceAccount may port-forward in the
+// namespace over either transport.
 //
-// It is the difference between telling an admin "add `create` on
+// It is the difference between telling an admin "add `create` and/or `get` on
 // `pods/portforward` to the Role" and making them read a 403 out of a stream
-// upgrade failure. The review itself needs no RBAC: system:basic-user grants it
-// to every authenticated identity, ServiceAccounts included.
-func (t *KubernetesTunnel) PortForwardAllowed(ctx context.Context) (bool, string, error) {
+// upgrade failure. The reviews themselves need no RBAC: system:basic-user
+// grants them to every authenticated identity, ServiceAccounts included.
+func (t *KubernetesTunnel) PortForwardAllowed(ctx context.Context) (PortForwardAccess, error) {
+	create, createReason, err := t.reviewPortForward(ctx, "create")
+	if err != nil {
+		return PortForwardAccess{}, err
+	}
+
+	get, getReason, err := t.reviewPortForward(ctx, "get")
+	if err != nil {
+		return PortForwardAccess{}, err
+	}
+
+	return PortForwardAccess{
+		Create: create, Get: get,
+		CreateReason: createReason, GetReason: getReason,
+	}, nil
+}
+
+// reviewPortForward runs one SelfSubjectAccessReview for verb on
+// `pods/portforward`.
+func (t *KubernetesTunnel) reviewPortForward(ctx context.Context, verb string) (bool, string, error) {
 	review := &authv1.SelfSubjectAccessReview{
 		Spec: authv1.SelfSubjectAccessReviewSpec{
 			ResourceAttributes: &authv1.ResourceAttributes{
 				Namespace:   t.namespace,
-				Verb:        "create",
+				Verb:        verb,
 				Resource:    "pods",
 				Subresource: "portforward",
 			},
@@ -492,7 +537,7 @@ func (t *KubernetesTunnel) PortForwardAllowed(ctx context.Context) (bool, string
 
 	result, err := t.clientset.AuthorizationV1().SelfSubjectAccessReviews().Create(ctx, review, metav1.CreateOptions{})
 	if err != nil {
-		return false, "", t.classify(err, "selfsubjectaccessreview")
+		return false, "", t.classify(err, "selfsubjectaccessreview ("+verb+")")
 	}
 
 	return result.Status.Allowed, result.Status.Reason, nil
