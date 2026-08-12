@@ -123,10 +123,10 @@ jobs:
   # websocket port-forward transport is only on by default from 1.31 — so the
   # image is pinned in the suite and overridable here.
   #
-  # No -race on this one, unlike the protocol legs above: it has never been run
-  # under the detector (a k3s boot per run is expensive), and it exercises the
-  # tunnel rather than a session's two relay goroutines, which is where every
-  # race found so far has been. Same todo as mssql.
+  # -race, like every leg above. The k3s boot makes this look like the one suite
+  # where the detector would cost more than it returns; measured, it does not —
+  # 1m09s wall for the whole suite with a warm image, nothing reported. The 40m
+  # budget is unchanged.
   kubernetes:
     runs-on: ubuntu-24.04
     steps:
@@ -137,4 +137,4 @@ jobs:
           go-version: "1.26.5"
 
       - name: Run Kubernetes tunnel integration suite
-        run: go test -tags integration -timeout 40m -count=1 -v ./internal/proxy/kubernetes/
+        run: go test -race -tags integration -timeout 40m -count=1 -v ./internal/proxy/kubernetes/

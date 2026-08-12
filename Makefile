@@ -159,12 +159,15 @@ test-integration-mssql:
 # K3S_TEST_IMAGE=rancher/k3s:vX.Y.Z-k3s1 — it must be 1.31 or newer for the
 # websocket transport assertion to hold.
 #
-# No `-race` here either, for the same reason as mssql: booting a k3s control
-# plane is expensive enough that the suite has not been run under the detector,
-# and this one exercises the tunnel rather than a proxy session's two relay
-# goroutines, so it is the least likely of the six to be hiding one. Same todo.
+# `-race`, like every other integration target. Booting a control plane sounds
+# like the one suite where the detector would not be worth its cost, and it is
+# also the one least likely to hide a race — it exercises the tunnel, not a
+# session's two relay goroutines. Both guesses were checkable and were checked:
+# with a warm k3s image the whole suite (7 cases, cluster boot included) ran in
+# 1m09s wall under the detector, on arm64, with nothing reported. The cost was
+# never the reason to skip it.
 test-integration-kubernetes:
-	go test -tags integration -v -timeout 40m -count=1 ./internal/proxy/kubernetes/...
+	go test -race -tags integration -v -timeout 40m -count=1 ./internal/proxy/kubernetes/...
 
 # Run linter
 lint:
