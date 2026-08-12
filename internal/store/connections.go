@@ -39,13 +39,18 @@ func (s *Store) CreateConnection(
 	sourceIP string,
 	opts ...ConnectionOption,
 ) (*Connection, error) {
+	// Truncated to what timestamptz can store: connected_at is copied into the
+	// session's audit entry, and a value the row cannot reproduce would make the
+	// two disagree on read.
+	now := normalizeStoredTime(time.Now())
+
 	conn := &Connection{
 		UID:              newUIDv7(), // Generate UUIDv7 for time-ordered inserts
 		UserID:           userID,
 		DatabaseID:       databaseID,
 		SourceIP:         sourceIP,
-		ConnectedAt:      time.Now(),
-		LastActivityAt:   time.Now(),
+		ConnectedAt:      now,
+		LastActivityAt:   now,
 		Queries:          0,
 		BytesTransferred: 0,
 		InstanceID:       s.instanceID,
@@ -62,6 +67,11 @@ func (s *Store) CreateConnection(
 	if err != nil {
 		return nil, fmt.Errorf("failed to create connection: %w", err)
 	}
+
+	// After the row exists, so the entry can only ever be missing, never
+	// describe a session that was not opened. Never fatal to the session — see
+	// writeConnectionAudit.
+	s.recordConnectionOpened(ctx, conn)
 
 	return conn, nil
 }
@@ -112,7 +122,14 @@ func (s *Store) CloseConnection(ctx context.Context, uid uuid.UUID) error {
 		}
 	}
 
-	result, err := q.Exec(ctx)
+	// RETURNING rather than a second SELECT: the session audit entry is built
+	// from the row as the close left it — disconnected_at and the stamp above —
+	// and the guard on disconnected_at is also what makes the returned rows the
+	// answer to "did this call close anything?". A second call closes nothing,
+	// returns nothing and therefore writes no second entry.
+	var closed []Connection
+
+	err := q.Returning(connectionAuditColumns).Scan(ctx, &closed)
 
 	// Whatever happened to the row, this process is done writing to that
 	// chain: keeping the cached head would leak an entry per session.
@@ -122,14 +139,11 @@ func (s *Store) CloseConnection(ctx context.Context, uid uuid.UUID) error {
 		return fmt.Errorf("failed to close connection: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
-	}
-
-	if rowsAffected == 0 {
+	if len(closed) == 0 {
 		return ErrConnectionNotFound
 	}
+
+	s.recordConnectionClosed(ctx, &closed[0], connectionClosedBySession)
 
 	return nil
 }
@@ -413,33 +427,35 @@ func noLiveOwner() string {
 // the close returns the uids it took, their chain heads are read back, and the
 // sealed stamps are written. The transaction is not optional — see
 // stampOrphanHeads for what a second window would cost.
+//
+// Both paths return the uids they closed, because each of those sessions owes
+// `audit_log` a connection.closed entry. That is written after the transaction
+// commits and in batches (recordReconciledCloses), never inside it and never one
+// connection at a time — see writeConnectionAudit for why the audit write must
+// not be able to roll a completed reconcile back.
 func (s *Store) closeOrphans(ctx context.Context, scope func(*bun.UpdateQuery) *bun.UpdateQuery) (int64, error) {
+	var uids []uuid.UUID
+
 	if !s.ChainEnabled() {
-		result, err := scope(s.orphanCloseQuery(s.db)).Exec(ctx)
-		if err != nil {
+		if err := scope(s.orphanCloseQuery(s.db)).Returning("uid").Scan(ctx, &uids); err != nil {
 			return 0, fmt.Errorf("failed to close orphaned connections: %w", err)
 		}
 
-		rowsAffected, err := result.RowsAffected()
-		if err != nil {
-			return 0, fmt.Errorf("failed to get rows affected: %w", err)
-		}
+		s.recordReconciledCloses(ctx, uids)
 
-		return rowsAffected, nil
+		return int64(len(uids)), nil
 	}
 
-	var closed int64
-
 	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		var uids []uuid.UUID
+		// Reset per attempt: RunInTx does not retry, but a partially filled
+		// slice from a failed statement must not survive into the audit pass.
+		uids = nil
 
 		if err := scope(s.orphanCloseQuery(tx)).Returning("uid").Scan(ctx, &uids); err != nil {
 			return fmt.Errorf("failed to close orphaned connections: %w", err)
 		}
 
-		closed = int64(len(uids))
-
-		if closed == 0 {
+		if len(uids) == 0 {
 			return nil
 		}
 
@@ -449,7 +465,9 @@ func (s *Store) closeOrphans(ctx context.Context, scope func(*bun.UpdateQuery) *
 		return 0, err
 	}
 
-	return closed, nil
+	s.recordReconciledCloses(ctx, uids)
+
+	return int64(len(uids)), nil
 }
 
 // orphanCloseQuery builds the reconcile's UPDATE, minus the scope predicate its

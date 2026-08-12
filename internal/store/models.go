@@ -1199,6 +1199,13 @@ type AuditFilter struct {
 	BeforeUID   *uuid.UUID // Cursor: return events with UID < this value
 	Limit       int
 	Offset      int
+
+	// IncludeSessionEvents folds the per-session entries
+	// (SessionAuditEventTypes) back into an otherwise unfiltered listing. They
+	// are excluded by default because they outnumber control-plane events by
+	// orders of magnitude on a busy proxy; naming one in EventType returns it
+	// whatever this says.
+	IncludeSessionEvents bool
 }
 
 // ExtractSourceIP extracts the IP address from a net.Addr
