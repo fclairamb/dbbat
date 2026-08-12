@@ -61,3 +61,68 @@ No GitHub issue yet — file one when picking this up.
 - Whatever lands, add a note next to the CI check in `.github/workflows/ci.yml`
   saying what makes the comparison sound, since that check is the only thing
   keeping the file honest.
+
+## Findings
+
+Candidate cause #1 was right, but the mechanism is sharper than "the two
+generators may disagree": they are **different versions of the generator**, and
+only one of them sorts.
+
+- `@tanstack/router-generator` **1.166.24** ended its `multiSortBy` accessor
+  list with `(d) => d` — the whole route-node *object*. `multiSortBy` compares
+  with `>`/`<`, so every pair coerces to `"[object Object]"`, compares equal,
+  and the "tiebreaker" resolves nothing. The order that survives is the stable
+  fallback: the order `acc.routeNodes` was built in. That order comes from
+  `getRouteNodes`, which recurses with
+  `await Promise.all(dirList.map(...))` and pushes into a shared array from
+  concurrently racing `readdir`s — i.e. it is I/O-timing dependent.
+- **1.167.25** replaced that accessor with `(d) => d.routePath` and added
+  `sortRouteNodes()`. Every route path is distinct, so the sort is now total
+  and the readdir race is neutralised.
+- Commit `85209da` (2026-08-07) bumped `@tanstack/router-plugin`
+  1.167.12 → 1.168.27, dragging `router-generator` 1.166.24 → 1.167.25. That is
+  the "the plugin now sorts its route imports" that `7a6bb60` re-synced against.
+- The `make dev` Vite server in the working tree had been running since
+  **2026-08-05 19:25** — *before* that bump. Node's ESM module cache means a
+  live process keeps the code it imported at start, so that server was still
+  emitting `routeTree.gen.ts` with **1.166.24**'s unsorted ordering while every
+  cold `bun run build` emitted **1.167.25**'s sorted one. Hence the 154/154
+  flip, and hence its one-off shape: the dev server only re-emits when it sees a
+  route-file change.
+
+Evidence:
+
+- Replaying both accessor lists over 200 shuffled permutations of the repo's 20
+  real route nodes: 1.166.24's yields **200 distinct orderings**, 1.167.25's
+  yields **1**.
+- Patching the installed `getRouteNodes.js` to shuffle every `readdir` result
+  and add random per-directory jitter, then running `bun run build` six times:
+  byte-identical output every time. The installed generator is order-insensitive.
+- `git show 7a6bb60^:front/src/routeTree.gen.ts` has its imports in a
+  roughly reverse-alphabetical traversal order — an unsorted artefact, not any
+  total order.
+
+Candidate cause #2 (an incremental disk cache) is ruled out: the generator's
+caches (`routeNodeCache`, `routeTreeFileCache`) are in-memory `Map`s on the
+`Generator` instance. Nothing is written to `node_modules/.vite`,
+`node_modules/.cache` or `.tanstack`.
+
+### What landed
+
+The generator itself is already fixed upstream and is pinned by `front/bun.lock`,
+so there is nothing to fix in `front/vite.config.ts`'s plugin options. What is
+*not* fixed by a lockfile is a dev server that outlives a dependency bump, so:
+
+- `front/vite.config.ts` gained a dev-only guard that snapshots the
+  `@tanstack/router-generator` and `@tanstack/router-plugin` versions this
+  process actually imported and re-checks them against `node_modules` every 30s,
+  printing a loud "restart `make dev`" warning when they diverge. It never
+  restarts or kills anything — `server.restart()` would not help, because Vite
+  externalises node_modules when it reloads a config, so the stale plugin stays
+  in Node's ESM cache either way. Only a new process picks up the new generator.
+- `.github/workflows/ci.yml` documents what makes the committed-route-tree
+  comparison sound.
+- `front/CLAUDE.md` gained a troubleshooting entry.
+
+Still open: no GitHub issue was filed (creating public content was out of scope
+for the automated run) — see `specs/todos/2026-08-11-03-file-routetree-issue.md`.
