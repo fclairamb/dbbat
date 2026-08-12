@@ -16,7 +16,7 @@ import (
 // Chain verification.
 //
 // A walk goes oldest to newest and stops at the first thing that does not add
-// up, because after a break nothing downstream means anything. Five things are
+// up, because after a break nothing downstream means anything. Six things are
 // hard breaks:
 //
 //   - a row whose own MAC does not match its content (the row was edited);
@@ -27,7 +27,11 @@ import (
 //     compute (rows were removed from the end);
 //   - a connection whose stamp claims statements when *none* survive, in a
 //     store where retention cannot account for their absence (the session was
-//     emptied outright — see checkEmptiedChain).
+//     emptied outright — see checkEmptiedChain);
+//   - a *closed* connection whose statements survive but whose stamp is gone,
+//     and any connection whose stamped length outlived its stamped MAC — the
+//     cheapest attack on the stamp is not forging it but clearing it (see
+//     checkMissingStamp).
 //
 // One thing is not a break, and is reported separately: a chain whose *prefix*
 // is missing. On the queries side that is what DBB_QUERY_STORAGE_RETENTION does
@@ -565,9 +569,11 @@ func (s *Store) checkStampedHead(
 		return fmt.Errorf("failed to read the connection chain head: %w", err)
 	}
 
-	// Never stamped: the session logged nothing, or it is open and no sweep has
-	// reached it yet. Nothing to compare against.
+	// No stamp at all. That means one of four things and only two of them are
+	// legitimate, so the judgment lives on its own — see checkMissingStamp.
 	if conn.QueryChainMAC == nil {
+		s.checkMissingStamp(result, conn)
+
 		return nil
 	}
 
@@ -635,6 +641,102 @@ func (s *Store) checkStampedHead(
 		hex.EncodeToString(conn.QueryChainMAC), conn.QueryChainLen, hex.EncodeToString(sealedMAC)))
 
 	return nil
+}
+
+// checkMissingStamp judges a connection whose query_chain_mac is NULL.
+//
+// The stamp is the only thing that catches a deletion from the *end* of a
+// session's history, and clearing it is cheaper than forging it. One
+//
+//	UPDATE connections SET query_chain_mac = NULL, query_chain_len = 0 WHERE uid = …
+//
+// removes the check instead of defeating it, and reading every NULL stamp as
+// "never stamped" — which the walk did before this rule — handed that back a
+// clean verification: the surviving statements are all self-consistent, and
+// nothing remembers how many there used to be.
+//
+// # The three NULL stamps, and which two are legitimate
+//
+//  1. A session that logged nothing. Every writer skips a connection with no
+//     chained statement rather than sealing a NULL head (CloseConnection's
+//     `mac != nil` guard, stampChainHeadBatch's `head.MAC == nil` skip), so the
+//     stamp stays NULL for good. Not a break, and there is nothing to compare
+//     it against: result.Verified is 0 by construction. Pinned by
+//     TestQueryChainRefreshLeavesSilentSessionUnstamped,
+//     TestQueryChainSilentSessionIsNotWalked and
+//     TestQueryChainClosedSilentSessionIsNotABreak (the scoped walk, which
+//     enumerates a connection whatever it carries).
+//
+//  2. A session that is still open and no sweep has reached yet.
+//     RefreshOpenChainStamps runs on the reclaim tick, so a session younger
+//     than one tick carries no stamp through nobody's fault. Pinned by
+//     TestQueryChainOpenSessionWithoutAStampIsNotABreak.
+//
+//  3. A *closed* session whose chained statements survive. That is neither of
+//     the above: every writer that closes a connection stamps it in the same
+//     breath — CloseConnection in one UPDATE, the reconcile in the same
+//     transaction as `disconnected_at` (stampOrphanHeads) — so no code path in
+//     this build leaves that state behind, and it is a break.
+//
+// # Why no escape hatch for older stores
+//
+// The version-0 stamp got one (AllowLegacyStamps) because a store upgraded
+// from a build that wrote unkeyed stamps has rows nothing can re-seal. Nothing
+// analogous exists here: `query_chain_mac` itself, and the close-path writer
+// that fills it, arrived in the *same* release as the chain — migration
+// 20260810000000, everything after v0.23.2, i.e. 0.24 — so no released dbbat
+// ever closed a chained session without stamping it. A connection that predates
+// that migration has no stamp *and* no chained statement (it backfills neither),
+// so it is case 1, not case 3.
+//
+// And a hatch here would be worse than the one it copied. A version-0 stamp is
+// at least a distinguishable, countable state; a NULL stamp is precisely what
+// the attacker writes, so an opt-in that tolerated it would not be a weaker
+// check but the absence of this one.
+//
+// # Why retention cannot cry wolf
+//
+// CleanupOldQueryRows only ever deletes rows; no sweep clears a stamp. A closed
+// session whose statements it reaped down to nothing therefore keeps its stamp
+// and is checkEmptiedChain's business, never this function's — which is why
+// case 3 can key off surviving statements without re-deriving the retention
+// argument. Pinned by TestQueryChainRetentionNeverClearsTheStamp.
+//
+// # A stamped length without a stamp
+//
+// All three writers set the MAC, the length and the version in one statement,
+// so `query_chain_len > 0` beside a NULL MAC is not a stamp that was never
+// written — it is a row that was edited, and it says so with its own reason.
+// That check is not conditioned on the session being closed: a live session
+// carries a sweep's stamp with the same three columns, so clearing only its MAC
+// is caught too.
+//
+// The one race this shares with the existing rules is a statement appended
+// *after* a close. It is already a break today (the stamp then names a shorter
+// chain than the survivors end on, and a closed session's stamp is exact), so
+// case 3 is the zero-statement variant of an outcome the length rule reaches
+// anyway — no new class of false positive.
+func (s *Store) checkMissingStamp(result *QueryChainResult, conn Connection) {
+	if conn.QueryChainLen > 0 {
+		result.Break = stampBreak(result, conn, fmt.Sprintf(
+			"the connection records a chain of %d statements but carries no head stamp: "+
+				"every writer seals the MAC, the length and the version together, "+
+				"so the stamp was cleared after it was written",
+			conn.QueryChainLen))
+
+		return
+	}
+
+	// Open, or nothing survives to have been stamped: legitimately unstamped.
+	if conn.DisconnectedAt == nil || result.Verified == 0 {
+		return
+	}
+
+	result.Break = stampBreak(result, conn, fmt.Sprintf(
+		"the session closed at %s with %d statements in its history but carries no head stamp: "+
+			"closing a session that logged statements always seals its head, so the stamp was removed — "+
+			"and with it the only thing that would have shown statements deleted from the end of the session",
+		conn.DisconnectedAt.UTC().Format(time.RFC3339), result.Verified))
 }
 
 // checkEmptiedChain judges a stamped session that has no surviving statement at

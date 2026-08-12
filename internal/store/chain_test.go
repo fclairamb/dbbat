@@ -1017,6 +1017,154 @@ func TestQueryChainDetectsWipedOpenSession(t *testing.T) {
 	require.Contains(t, result.Break.Reason, "none survive")
 }
 
+// TestQueryChainClearedStampOnAClosedSessionIsABreak covers the cheapest attack
+// on the stamp: not forging it, deleting it. The tail of the session goes, and
+// then the one thing that would have noticed goes too — a single UPDATE, no key
+// needed. The walk used to read that as "never stamped" and verify clean.
+func TestQueryChainClearedStampOnAClosedSessionIsABreak(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, queries := createChainTestConnection(t, ctx, store, "cleared-stamp", 3)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	_, err := store.db.ExecContext(ctx, `DELETE FROM queries WHERE uid = ?`, queries[2].UID)
+	require.NoError(t, err)
+
+	_, err = store.db.ExecContext(ctx,
+		`UPDATE connections SET query_chain_mac = NULL, query_chain_len = 0 WHERE uid = ?`, conn.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "clearing the stamp must not be cheaper than defeating it")
+	require.Contains(t, result.Break.Reason, "carries no head stamp")
+	require.NotNil(t, result.Break.ConnectionUID)
+	require.Equal(t, conn.UID, *result.Break.ConnectionUID)
+
+	all, err := store.VerifyQueryChains(ctx, nil)
+	require.NoError(t, err)
+	require.False(t, all.OK(), "the sweep must report it too, not just a scoped walk")
+	require.Equal(t, int64(1), all.Connections)
+}
+
+// TestQueryChainClearedStampMACKeepsItsLength is the sloppier version of the
+// same edit, and it is caught on an *open* session too: all three writers set
+// the MAC, the length and the version in one statement, so a length that
+// outlived its MAC is a row somebody wrote to.
+func TestQueryChainClearedStampMACKeepsItsLength(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "cleared-mac", 3)
+
+	stamped, err := store.RefreshOpenChainStamps(ctx)
+	require.NoError(t, err)
+	require.Equal(t, int64(1), stamped)
+
+	_, err = store.db.ExecContext(ctx,
+		`UPDATE connections SET query_chain_mac = NULL WHERE uid = ?`, conn.UID)
+	require.NoError(t, err)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, result.Break, "a stamped length without a stamp is an edited row")
+	require.Contains(t, result.Break.Reason, "records a chain of 3 statements")
+	require.Equal(t, int64(3), result.Break.ChainSeq)
+}
+
+// TestQueryChainClosedSilentSessionIsNotABreak is the first no-cry-wolf half of
+// the rule above: a session that logged nothing is stamped NULL on purpose, and
+// a scoped walk enumerates a connection whatever it carries, so the judgment
+// cannot lean on the enumeration to keep it out.
+func TestQueryChainClosedSilentSessionIsNotABreak(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "chain_closed_silent")
+
+	conn, err := store.CreateConnection(ctx, user.UID, database.UID, "10.0.0.1")
+	require.NoError(t, err)
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	row, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, row.DisconnectedAt)
+	require.Nil(t, row.QueryChainMAC, "a session that logged nothing has no head to seal")
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break, "a silent session is not tampering: %v", result.Break)
+}
+
+// TestQueryChainOpenSessionWithoutAStampIsNotABreak is the second: a live
+// session younger than one reclaim tick has no stamp through nobody's fault,
+// and the sweep is what will give it one.
+func TestQueryChainOpenSessionWithoutAStampIsNotABreak(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	conn, _ := createChainTestConnection(t, ctx, store, "unswept-open", 3)
+
+	row, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, row.QueryChainMAC, "no sweep has run yet")
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break, "an unswept live session is not tampering: %v", result.Break)
+	require.Equal(t, int64(3), result.Verified)
+}
+
+// TestQueryChainRetentionNeverClearsTheStamp is the third: retention only ever
+// deletes rows, so it cannot produce the unstamped-but-chained state above. A
+// closed session it emptied keeps its stamp and stays checkEmptiedChain's
+// business — which is what lets the missing-stamp rule key off surviving
+// statements without re-deriving the retention argument.
+func TestQueryChainRetentionNeverClearsTheStamp(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	store.queryRetention = 24 * time.Hour
+
+	conn, _ := createChainTestConnection(t, ctx, store, "retention-keeps-stamp", 3)
+
+	require.NoError(t, store.CloseConnection(ctx, conn.UID))
+
+	_, err := store.db.ExecContext(ctx,
+		`UPDATE connections SET connected_at = NOW() - INTERVAL '30 days' WHERE uid = ?`, conn.UID)
+	require.NoError(t, err)
+
+	_, err = store.db.ExecContext(ctx,
+		`UPDATE queries SET executed_at = NOW() - INTERVAL '30 days' WHERE connection_id = ?`, conn.UID)
+	require.NoError(t, err)
+
+	swept, err := store.CleanupOldQueryRows(ctx, 24*time.Hour)
+	require.NoError(t, err)
+	require.Equal(t, int64(3), swept.Queries)
+
+	row, err := store.GetConnectionByUID(ctx, conn.UID)
+	require.NoError(t, err)
+	require.NotNil(t, row.QueryChainMAC, "the sweep deletes statements, never a stamp")
+	require.Equal(t, int64(3), row.QueryChainLen)
+
+	result, err := store.VerifyQueryChain(ctx, conn.UID)
+	require.NoError(t, err)
+	require.Nil(t, result.Break, "retention emptying a session is not tampering: %v", result.Break)
+	require.True(t, result.TruncatedPrefix)
+}
+
 // TestQueryChainSilentSessionIsNotWalked pins the other side of the widened
 // enumeration: it reaches sessions that carry a stamp, not every connection ever
 // opened. A session that logged nothing has no stamp and is not evidence of
@@ -2443,8 +2591,9 @@ func TestQueryChainRefreshOnlyTouchesThisRunsSessions(t *testing.T) {
 }
 
 // TestQueryChainRefreshLeavesSilentSessionUnstamped mirrors the reconcile's
-// rule: there is no head to seal, and checkStampedHead reads a NULL stamp as
-// "not stamped" rather than as a break.
+// rule: there is no head to seal, and checkMissingStamp reads a NULL stamp on a
+// session with no surviving statements as "logged nothing" rather than as a
+// break.
 func TestQueryChainRefreshLeavesSilentSessionUnstamped(t *testing.T) {
 	t.Parallel()
 

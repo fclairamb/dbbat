@@ -450,7 +450,11 @@ type Connection struct {
 	// and checkStampedHead judges an open session accordingly.
 	//
 	// nil/0 on a connection that logged nothing, or one no sweep has reached
-	// yet. Internal integrity state, not API surface.
+	// yet. Those are the only two legitimate NULLs: a *closed* connection whose
+	// chained statements survive always carries a stamp, so a NULL one there is
+	// a break (checkMissingStamp), as is a surviving QueryChainLen beside a nil
+	// MAC — the three columns are only ever written together. Internal
+	// integrity state, not API surface.
 	QueryChainMAC []byte `bun:"query_chain_mac" json:"-"`
 
 	// QueryChainLen is the head's chain_seq — which, chain_seq being dense from
