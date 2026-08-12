@@ -306,7 +306,20 @@ func (s *Store) approveGrantRequestTx(
 			return ErrDefinitionInactive
 		}
 
-		newGrant := BuildGrantFromDefinition(def, req.UserID, req.DatabaseID, grantedBy, time.Now())
+		// The window is stamped from the *store's* clock, never this process's.
+		// GetActiveGrant admits a session with `starts_at <= NOW()`, evaluated
+		// by PostgreSQL, so a window opened from time.Now() on a process
+		// running ahead of its store leaves the grant approved but refused by
+		// every proxy until the skew elapses. Inside the transaction NOW() is
+		// the transaction's start, which is at or before every later
+		// statement's — so the window is already open the moment anybody can
+		// see the row.
+		issuedAt, err := dbNow(ctx, tx)
+		if err != nil {
+			return err
+		}
+
+		newGrant := BuildGrantFromDefinition(def, req.UserID, req.DatabaseID, grantedBy, issuedAt)
 
 		// Bind the grant to whichever of the definition's server groups holds
 		// the target database, inside the same transaction that issues it, so
@@ -322,9 +335,10 @@ func (s *Store) approveGrantRequestTx(
 			return fmt.Errorf("create grant: %w", err)
 		}
 
-		now := time.Now()
 		req.Status = GrantRequestApproved
-		req.DecidedAt = &now
+		// Same clock as the window, so the decision cannot read as having
+		// happened after the access it granted began.
+		req.DecidedAt = &issuedAt
 		req.DecidedBy = decidedBy
 		req.ResultingGrantID = &newGrant.UID
 		// The live definition is already in hand here — it is the one the

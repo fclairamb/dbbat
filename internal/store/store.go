@@ -168,6 +168,32 @@ func (s *Store) DB() *bun.DB {
 	return s.db
 }
 
+// Now returns the *database server's* clock.
+//
+// Anything whose window is later evaluated in SQL against NOW() has to be
+// stamped from here rather than from time.Now(): dbbat and its store are two
+// machines, their clocks are only ever approximately equal, and a grant
+// stamped a few milliseconds in the store's future is refused by the auth path
+// (`starts_at <= NOW()` in GetActiveGrant) for exactly as long as the skew
+// lasts. See dbNow.
+func (s *Store) Now(ctx context.Context) (time.Time, error) {
+	return dbNow(ctx, s.db)
+}
+
+// dbNow reads the database clock through the given handle — a *bun.DB or an
+// open transaction. Inside a transaction NOW() is the transaction's start
+// timestamp, which is what callers issuing a row in that transaction want: it
+// is at or before every subsequent statement's NOW(), so a window opened at
+// that instant is already open by the time anyone can read the row.
+func dbNow(ctx context.Context, db bun.IDB) (time.Time, error) {
+	var now time.Time
+	if err := db.NewSelect().ColumnExpr("NOW()").Scan(ctx, &now); err != nil {
+		return time.Time{}, fmt.Errorf("failed to read the database clock: %w", err)
+	}
+
+	return now, nil
+}
+
 // SetAuthCache sets the authentication cache for API key verification.
 func (s *Store) SetAuthCache(authCache *cache.AuthCache) {
 	s.authCache = authCache
