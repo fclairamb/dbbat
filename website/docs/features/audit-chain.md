@@ -158,6 +158,7 @@ number, not a fresh timestamp.
 | The **last** statements of a closed session are deleted | Yes, for sessions closed by 0.24+ — see the note below for older ones | The session's final chain head is sealed onto the connection row with a keyed MAC when it closes, so correcting it after a deletion needs the key |
 | The **last** statements of a session that is still **open** are deleted | Yes, up to the last stamp sweep | DBBat re-seals the chain head of its open sessions every few minutes, so the exposed tail is the statements run since that sweep rather than the whole session |
 | **Every** statement of a session is deleted, not just the last ones | Yes, unless retention could account for it | The sealed stamp on the connection still attests to statements no longer there. Only a session that began before the retention cutoff is excused — with `DBB_QUERY_STORAGE_RETENTION` unset, the default, none is |
+| The stamp itself is **cleared** rather than rewritten, to remove the check instead of defeating it | Yes | A session that closed with statements in its history always carries a stamp, so a closed session whose statements survive without one is a break. And because the stamp's MAC, length and version are only ever written together, a length left behind by a cleared MAC is a break on its own — open sessions included |
 | The **last** rows of a captured result set are deleted | Yes | The capture's final head is sealed onto the query row with a keyed MAC when the capture finishes, so correcting it needs the key |
 | A captured result set is deleted **outright** | Yes | The sealed stamp on the query still attests to rows no longer there |
 | The **whole** chain is truncated and re-sealed by someone holding the key | Only against a head MAC you recorded elsewhere | See the tip above |
@@ -226,7 +227,9 @@ Be precise about this in a control narrative:
   all day, a pooled application connection, an approval hold waiting on a human
   — is protected against a trailing deletion the same way a closed one is, but
   only as far as the last sweep reached. Statements run since then are not yet
-  covered. The exposure is the sweep interval, not the length of the session.
+  covered. The exposure is the sweep interval, not the length of the session. A
+  session younger than one sweep carries no stamp at all yet, which is why an
+  unstamped session is only a break once it has *closed*.
 - **A crashed session's tail is sealed at the last sweep, or at the reconcile.**
   A session whose DBBat process died never gets to record its own final chain
   head. It keeps whatever the last sweep sealed, and the reconcile that closes

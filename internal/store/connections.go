@@ -548,8 +548,11 @@ const chainStampBatchSize = 500
 // stamps a single row from the head it already holds.
 //
 // A connection with no chained statement is skipped rather than stamped with a
-// NULL head — there is nothing to seal, and checkStampedHead reads a NULL stamp
-// as "not stamped" rather than as a break.
+// NULL head — there is nothing to seal, and checkMissingStamp reads a NULL
+// stamp on a session with no surviving statements as "logged nothing" rather
+// than as a break. That skip is what makes the converse safe: a *closed*
+// session whose statements survive and whose stamp is NULL is a state no writer
+// produces, so verification calls it tampering.
 //
 // Cost: one index lookup per *given* row — the LATERAL join runs its inner scan
 // once per uid handed to it, not once per connection in the table. See

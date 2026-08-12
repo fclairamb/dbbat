@@ -427,6 +427,45 @@ func TestVerifyQueryChains_ReportsBreak(t *testing.T) {
 	require.NotContains(t, w.Body.String(), "SELECT 1")
 }
 
+// TestVerifyQueryChains_ReportsAClearedStamp pins the endpoint half of the
+// missing-stamp rule: an attacker who deletes a closed session's trailing
+// statements and then clears the stamp that would have caught it must not get a
+// {"verified": true} out of the API either.
+func TestVerifyQueryChains_ReportsAClearedStamp(t *testing.T) {
+	t.Parallel()
+
+	server, dataStore := setupChainTestServer(t)
+	suffix := "qcnostamp"
+	ctx := context.Background()
+
+	createTestUser(t, dataStore, "admin-"+suffix, "adminpass123", []string{store.RoleAdmin})
+	token := loginUser(t, server, "admin-"+suffix, "adminpass123")
+
+	conn := createChainedSession(t, dataStore, suffix, 3)
+	require.NoError(t, dataStore.CloseConnection(ctx, conn.UID))
+
+	_, err := dataStore.DB().ExecContext(ctx,
+		"DELETE FROM queries WHERE connection_id = ? AND chain_seq = 3", conn.UID)
+	require.NoError(t, err)
+
+	_, err = dataStore.DB().ExecContext(ctx,
+		"UPDATE connections SET query_chain_mac = NULL, query_chain_len = 0 WHERE uid = ?", conn.UID)
+	require.NoError(t, err)
+
+	router := newChainVerifyTestRouter(server)
+	w := doChainVerify(router, token, "/api/v1/audit/verify/queries?connection="+conn.UID.String())
+	require.Equal(t, http.StatusOK, w.Code, "response body: %s", w.Body.String())
+
+	var resp queryChainVerifyResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+
+	require.False(t, resp.Verified, "a closed session with no stamp must not verify")
+	require.NotNil(t, resp.Break)
+	require.Equal(t, conn.UID.String(), resp.Break.ConnectionUID)
+	require.Contains(t, resp.Break.Reason, "carries no head stamp")
+	require.NotContains(t, w.Body.String(), "secrets_table_")
+}
+
 // TestVerifyQueryChains_LeaksNothing is the query-side twin of
 // TestVerifyAuditChain_LeaksNothing, and matters more than it: a query row
 // carries SQL text and bind parameters, so this is the response where a

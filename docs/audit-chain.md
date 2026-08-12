@@ -22,8 +22,11 @@ It detects:
 - rows deleted from the **end** of a captured result set (the capture's final
   head is sealed onto the query row when the capture finishes);
 - entries deleted from the **end** of a session's query history, including
-  against an attacker who rewrites the stamp afterwards — the stamp is keyed
-  (see [The connection stamp](#the-connection-stamp)). A session that is still
+  against an attacker who rewrites the stamp afterwards *or clears it outright*
+  — the stamp is keyed, and its absence on a closed session that logged
+  statements is itself a break (see [The connection
+  stamp](#the-connection-stamp) and [A stamp that was
+  cleared](#a-stamp-that-was-cleared)). A session that is still
   **open** is covered up to the last periodic sweep of its stamp, not up to its
   last statement (see [An open session is stamped by a periodic
   sweep](#an-open-session-is-stamped-by-a-periodic-sweep)). Sessions closed
@@ -163,6 +166,9 @@ refreshing at all. The rule, in full:
 | below the oldest survivor | retention reaped it: unverifiable, already counted as a truncated prefix | **break** |
 | above the head | **break** — retention only removes the oldest | **break** |
 | nothing survives at all | **break**, unless retention could have reaped every statement — see below | same |
+| no stamp at all, statements survive | no sweep has reached it yet: verified | **break** — a close always stamps a session that logged statements |
+| no stamp at all, nothing survives | the session logged nothing: verified | same |
+| no stamp but `query_chain_len` survives | **break** — the three stamp columns are only ever written together | same |
 
 **What this does not buy.** The stamp only ever proves the chain up to the
 position it sealed, so statements appended *since the last sweep* are still
@@ -181,7 +187,9 @@ the database alone — it is the highest `chain_seq` on the connection and its M
 **same transaction** that writes `disconnected_at`: the close returns the uids
 it took, their heads are read back in one `LEFT JOIN LATERAL` lookup, and the
 sealed stamps go back in one `UPDATE`. A connection that logged nothing keeps a
-NULL stamp, and a NULL stamp is never itself a break.
+NULL stamp — which is legitimate precisely because it logged nothing; on a
+closed session whose statements survive, a NULL stamp is a break (see [A stamp
+that was cleared](#a-stamp-that-was-cleared)).
 
 **Be honest about what that stamp attests to.** It seals whatever survived *at
 reconcile time*, not what the session actually wrote. A crashed pod's rows sit
@@ -263,6 +271,58 @@ exit code is what it protects), it never launders a *keyed* stamp relabelled as
 legacy, and it is **removed in 0.25**. Drop it as soon as the count reaches
 zero; a count that stops falling, or rises, is the signal to stop using it
 immediately.
+
+#### A stamp that was cleared
+
+Forging a stamp needs the key. **Removing** one does not, and that was the whole
+attack the stamp's other hardening never touched:
+
+```sql
+DELETE FROM queries WHERE connection_id = … AND chain_seq > 7;
+UPDATE connections SET query_chain_mac = NULL, query_chain_len = 0 WHERE uid = …;
+```
+
+The surviving statements are all self-consistent, the walk found no stamp to
+compare them against, and `dbbat audit verify --queries` reported the session
+verified. Every hardening the stamp received — the keyed format, the sealed
+version, the end of the version-0 acceptance — raised the cost of *defeating*
+the check while leaving the cost of *deleting* it at one `UPDATE`. So a NULL
+stamp is now judged rather than skipped.
+
+A NULL stamp now means three different things, and only two of them are
+innocent:
+
+| the connection | verdict |
+|---|---|
+| logged nothing (no chained statement survives) | not a break: no writer stamps a NULL head, so this is the expected state |
+| is still **open** | not a break: `RefreshOpenChainStamps` runs on the reclaim tick, so a session younger than one sweep has no stamp yet |
+| is **closed** and its chained statements survive | **break** |
+
+The third is a state no writer produces. `CloseConnection` seals the head in the
+same `UPDATE` that writes `disconnected_at`, and the reconcile seals it in the
+same transaction — so a closed session that logged statements always carries a
+stamp.
+
+`query_chain_len > 0` beside a NULL MAC gets its **own** reason, and applies to
+an open session too: all three writers set the MAC, the length and the version
+in one statement, so a length that outlived its MAC is not a stamp that was
+never written. It is a row somebody wrote to.
+
+**There is no `--allow-legacy-stamps` equivalent, deliberately.** That escape
+hatch exists because a store upgraded from a build with unkeyed stamps holds
+rows nothing can re-seal. Nothing analogous exists here: `query_chain_mac` and
+the close-path writer that fills it arrived in the *same* release as the chain
+itself, so no released dbbat ever closed a chained session without stamping it,
+and a connection predating the chain migration has no stamp *and* no chained
+statement — the first row of the table, not the third. An opt-in here would also
+be worse than the one it copied: a version-0 stamp is at least a
+distinguishable, countable state, whereas a NULL stamp is exactly what the
+attacker writes, so tolerating it would not be a weaker check but the absence of
+this one.
+
+Retention cannot trip it either. `CleanupOldQueryRows` only ever deletes rows;
+no sweep clears a stamp. A closed session it emptied keeps its stamp and is
+judged by the next section instead.
 
 #### A session emptied of every statement
 
