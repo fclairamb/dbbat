@@ -33,6 +33,12 @@ type Store struct {
 	// never written anywhere. Empty disables chaining. See chain.go.
 	chainKey []byte
 
+	// queryRetention is the configured DBB_QUERY_STORAGE_RETENTION. The sweep
+	// itself takes its window as an argument (CleanupOldQueryRows), so this is
+	// not what drives deletion; it is what lets *verification* tell a session
+	// retention emptied from one somebody emptied. See checkEmptiedChain.
+	queryRetention time.Duration
+
 	// auditChain caches the head of the store-wide audit chain; queryChains
 	// caches one head per live connection; rowChains caches one head per query
 	// whose result rows are being captured.
@@ -59,6 +65,14 @@ type Options struct {
 	// what every test store that does not care about the chain gets, and what
 	// a serving process never gets, because config always resolves a key.
 	EncryptionKey []byte
+
+	// QueryRetention is the configured query-history retention window
+	// (DBB_QUERY_STORAGE_RETENTION), zero when retention is disabled — the
+	// default. Chain verification needs it to judge a session whose statements
+	// are *all* gone: retention can only account for that when the session ran
+	// entirely before the retention cutoff. Zero therefore means "nothing
+	// legitimately deletes statements here", which is the strictest reading.
+	QueryRetention time.Duration
 }
 
 // New creates a new Store instance and runs migrations
@@ -94,9 +108,10 @@ func New(ctx context.Context, dsn string, opts ...Options) (*Store, error) {
 		// one live process, and anything an operator can set — including
 		// DBB_INSTANCE_ID — can end up shared by several replicas. UUIDv7 so
 		// it also sorts by start time, which makes a registry dump readable.
-		runID:       newUIDv7().String(),
-		queryChains: newQueryChains(),
-		rowChains:   newQueryChains(),
+		runID:          newUIDv7().String(),
+		queryChains:    newQueryChains(),
+		rowChains:      newQueryChains(),
+		queryRetention: options.QueryRetention,
 	}
 
 	if len(options.EncryptionKey) > 0 {
