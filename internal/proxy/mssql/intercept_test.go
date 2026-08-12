@@ -435,17 +435,25 @@ func TestSessionParksAStatementOnAnApprovalHold(t *testing.T) {
 
 	registry := approval.NewRegistry()
 
+	// registered fires the instant the gate's Registry.Register call returns —
+	// strictly after the pending row is persisted (Hold persists first, then
+	// registers). Waiting on it instead of polling the store removes the race
+	// where a busy machine lets the test observe the pending row before the
+	// registry has the hold, and Resolve below finds nothing to resolve.
+	registered := make(chan uuid.UUID, 1)
+
 	fixture := newAuthFixtureWith(t, fixtureOptions{
 		upstreamEncryption: encryptNotSup,
 		sslMode:            "disable",
 		approvalPatterns:   []string{`(?i)^DELETE`},
 		approvalDepsFor: func(dataStore *store.Store) shared.ApprovalDeps {
 			return shared.ApprovalDeps{
-				Enabled:      true,
-				Store:        dataStore,
-				Registry:     registry,
-				Logger:       testLogger(),
-				PollInterval: 100 * time.Millisecond,
+				Enabled:        true,
+				Store:          dataStore,
+				Registry:       registry,
+				Logger:         testLogger(),
+				PollInterval:   100 * time.Millisecond,
+				HoldRegistered: func(uid uuid.UUID) { registered <- uid },
 			}
 		},
 	})
@@ -472,20 +480,21 @@ func TestSessionParksAStatementOnAnApprovalHold(t *testing.T) {
 		replies <- payload
 	}()
 
+	var pendingUID uuid.UUID
+
+	select {
+	case pendingUID = <-registered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the hold was never registered")
+	}
+
 	// The statement is persisted as pending while it hangs, and nothing has
-	// reached the upstream.
-	pendingUID := uuid.Nil
-
-	require.Eventually(t, func() bool {
-		queries, err := fixture.store.ListQueries(context.Background(), store.QueryFilter{Limit: 10})
-		if err != nil || len(queries) != 1 || queries[0].ApprovalStatus == nil {
-			return false
-		}
-
-		pendingUID = queries[0].UID
-
-		return *queries[0].ApprovalStatus == store.ApprovalPending
-	}, 15*time.Second, 50*time.Millisecond)
+	// reached the upstream. The row is guaranteed to exist by now: Hold
+	// persists it before registering, and registered only fires after that.
+	pending, err := fixture.store.GetQuery(context.Background(), pendingUID)
+	require.NoError(t, err)
+	require.NotNil(t, pending.ApprovalStatus)
+	assert.Equal(t, store.ApprovalPending, *pending.ApprovalStatus)
 
 	assert.Empty(t, fixture.fake.receivedRequests(),
 		"a parked statement must not reach the upstream before it is approved")
@@ -1173,17 +1182,24 @@ func TestApprovalHoldMatchesAPreparedStatement(t *testing.T) {
 
 	registry := approval.NewRegistry()
 
+	// registered fires the instant each hold's Registry.Register call returns,
+	// in order — the test parks two statements in sequence (prepare, then
+	// execute) and releaseHold drains one uid per call. See the comment on
+	// releaseHold for why this replaces polling the store for "pending".
+	registered := make(chan uuid.UUID, 2)
+
 	fixture := newAuthFixtureWith(t, fixtureOptions{
 		upstreamEncryption: encryptNotSup,
 		sslMode:            "disable",
 		approvalPatterns:   []string{`(?i)^DELETE`},
 		approvalDepsFor: func(dataStore *store.Store) shared.ApprovalDeps {
 			return shared.ApprovalDeps{
-				Enabled:      true,
-				Store:        dataStore,
-				Registry:     registry,
-				Logger:       testLogger(),
-				PollInterval: 100 * time.Millisecond,
+				Enabled:        true,
+				Store:          dataStore,
+				Registry:       registry,
+				Logger:         testLogger(),
+				PollInterval:   100 * time.Millisecond,
+				HoldRegistered: func(uid uuid.UUID) { registered <- uid },
 			}
 		},
 	})
@@ -1228,7 +1244,7 @@ func TestApprovalHoldMatchesAPreparedStatement(t *testing.T) {
 	}()
 
 	approver := fixture.user.UID
-	prepared := releaseHold(t, fixture, registry, approver, uuid.Nil)
+	prepared := releaseHold(t, fixture, registry, approver, registered)
 	assert.Equal(t, sql, prepared.SQLText)
 
 	select {
@@ -1256,7 +1272,7 @@ func TestApprovalHoldMatchesAPreparedStatement(t *testing.T) {
 		executing <- payload
 	}()
 
-	held := releaseHold(t, fixture, registry, approver, prepared.UID)
+	held := releaseHold(t, fixture, registry, approver, registered)
 	assert.Equal(t, sql, held.SQLText,
 		"the hold must be recorded against the statement, not against EXEC sp_execute")
 
@@ -1279,46 +1295,43 @@ func TestApprovalHoldMatchesAPreparedStatement(t *testing.T) {
 	require.NoError(t, err, "a statement missing the approval pattern was held anyway")
 }
 
-// releaseHold waits for a statement other than skip to be parked, approves it,
-// and returns the row it was parked as. skip is the previously released hold,
-// whose row can still read as pending for a moment after it resolves.
+// releaseHold waits for the next statement to be parked, approves it, and
+// returns the row it was parked as. registered is the fixture's
+// HoldRegistered channel: it fires exactly once per hold, strictly after the
+// gate's Registry.Register call returns for that hold, which is also
+// strictly after the pending row is persisted (Hold persists first, then
+// registers). Waiting on that signal — rather than polling the store for a
+// row with approval_status = 'pending' — removes the race outright: a poll
+// can observe the persisted row before Register has run, and Resolve on an
+// unregistered uid returns false. That race is exactly what made this test
+// flaky under a loaded machine (the goroutine gap between persist and
+// register widens under contention).
 func releaseHold(
-	t *testing.T, fixture *authFixture, registry *approval.Registry, approver, skip uuid.UUID,
+	t *testing.T, fixture *authFixture, registry *approval.Registry, approver uuid.UUID,
+	registered <-chan uuid.UUID,
 ) store.Query {
 	t.Helper()
 
-	var pending store.Query
+	var pendingUID uuid.UUID
 
-	require.Eventually(t, func() bool {
-		queries, err := fixture.store.ListQueries(context.Background(), store.QueryFilter{Limit: 50})
-		if err != nil {
-			return false
-		}
+	select {
+	case pendingUID = <-registered:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the hold was never registered")
+	}
 
-		for _, query := range queries {
-			if query.UID == skip || query.ApprovalStatus == nil {
-				continue
-			}
-
-			if *query.ApprovalStatus == store.ApprovalPending {
-				pending = query
-
-				return true
-			}
-		}
-
-		return false
-	}, 15*time.Second, 50*time.Millisecond)
+	pending, err := fixture.store.GetQuery(context.Background(), pendingUID)
+	require.NoError(t, err)
 
 	require.True(t, registry.Resolve(approval.Decision{
-		QueryUID: pending.UID,
+		QueryUID: pendingUID,
 		Status:   store.ApprovalApproved,
 		By:       &approver,
 		ByName:   "an approver",
 		At:       time.Now(),
 	}))
 
-	return pending
+	return *pending
 }
 
 // TestTruncateSQLCutsOnARuneBoundary: the limit is in bytes but the text is
