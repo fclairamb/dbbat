@@ -57,7 +57,7 @@ func TestBuildAuthChallengeWide(t *testing.T) {
 		t.Fatalf("compressed data flags = %02x %02x, want 00 00", cc[0], cc[1])
 	}
 
-	// The wide/OCI leg honours UseBigClrChunks like the thin one — but every
+	// The wide/OCI leg honors UseBigClrChunks like the thin one — but every
 	// value in today's challenge is far under the 252-byte short-form limit,
 	// where the two encodings are byte-identical, so setting the flag must not
 	// move a byte. TestWideAuthLeg_ShortValues_ByteIdentical states the same
