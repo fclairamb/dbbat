@@ -761,5 +761,20 @@ make test-integration-mssql
 | `MSSQL_TEST_IMAGE` | Upstream SQL Server image (default `mcr.microsoft.com/mssql/server:2022-latest`) |
 
 Microsoft publishes that image for **linux/amd64 only**, so on Apple Silicon it
-runs under emulation if it runs at all. The CI job (`ubuntu-24.04`, in
-`.github/workflows/integration.yml`) is where it is expected to pass.
+runs under emulation. The CI job (`ubuntu-24.04`, in
+`.github/workflows/integration.yml`) is where it is expected to pass — but
+"expected to pass in CI" is not the same as "cannot be run here", and the
+difference mattered: the suite spent a release carrying no `-race` on the theory
+that nobody on arm64 could run it under the detector. Measured through Rosetta
+on an M-series host, the whole suite (175 cases) ran green in **3m39s** with
+`-race` on, SQL Server reaching *ready for client connections* in ~6s per
+container.
+
+So this target runs under `-race` like every other integration suite, and the
+detector reported nothing. That is a real result rather than a lucky one: the
+TDS session already guards the state the Oracle and PostgreSQL proxies were
+caught racing on — the in-flight statement behind `pendingMu`, the byte snapshot
+and in-session grant counters behind `statsMu`, the hold flags behind `heldMu`,
+the prepared-handle map behind `preparedMu` — each a per-concern lock, none of
+them session-wide. See `docs/oracle.md`, "The suite runs under `-race`", for
+what the detector found where that discipline was missing.

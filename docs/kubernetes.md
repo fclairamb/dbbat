@@ -386,6 +386,14 @@ The fake cannot serve a websocket upgrade, so everything the second layer covers
 about the *kubelet* — the websocket transport, RBAC as the API server really
 evaluates it, a pod that goes away — is only ever exercised there.
 
+Both layers run under `-race`. Booting a control plane per run made the second
+layer look like the one place the detector would not earn its keep; measured, it
+is not close — the whole suite, cluster boot included, takes **1m09s** wall with
+`-race` on and a warm k3s image, and reported nothing. The tunnel is also not
+where the detector has historically paid off in this repo (that is a proxy
+session's two relay goroutines, see `docs/oracle.md`), but "unlikely" was worth
+one run to convert into "checked".
+
 ## Related
 
 - `docs/postgresql.md`, `docs/mysql.md`, … — the per-protocol proxies, which are
