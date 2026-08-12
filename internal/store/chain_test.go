@@ -580,7 +580,6 @@ func TestQueryChainStampsHeadOnClose(t *testing.T) {
 	result, err := store.VerifyQueryChain(ctx, conn.UID)
 	require.NoError(t, err)
 	require.Nil(t, result.Break)
-	require.False(t, result.LegacyStamp)
 }
 
 func TestQueryChainDetectsTrailingDeletion(t *testing.T) {
@@ -632,20 +631,18 @@ func TestQueryChainDetectsRestampedTrailingDeletion(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result.Break, "a re-stamped truncation must still be detected")
 	require.Contains(t, result.Break.Reason, "the stamp was rewritten")
-	require.False(t, result.LegacyStamp, "a forged stamp is a break, not a legacy stamp")
 }
 
 // TestQueryChainDetectsStampVersionDowngrade is the test the version column
 // exists for, and the reason the version is *inside* the MAC.
 //
 // Relabelling a sealed row as legacy is one UPDATE away, and it must never buy
-// the attacker a weaker rule. Since 0.24 the outer answer is a break either
-// way, so the *interesting* half of this test is now what happens under
-// --allow-legacy-stamps: with the escape hatch on, a relabelled row is checked
-// against the raw-head comparison it asked for, and fails it, because a keyed
-// stamp is not a copy of the head MAC. Without the version in the MAC the
-// relabelling would be free; with it the row can only ever verify as the
-// version it was sealed at.
+// the attacker a weaker rule. There is no weaker rule left to reach — a
+// version-0 row is a break with no opt-out — so what this pins is the outer
+// answer: the relabelled row is refused, and refused *for being unkeyed*,
+// rather than being checked against the keyed rule it was sealed under. The
+// payload half of the property, which no behavioral test can reach any more,
+// lives in TestQueryChainStampMACSealsItsVersion.
 func TestQueryChainDetectsStampVersionDowngrade(t *testing.T) {
 	t.Parallel()
 
@@ -664,16 +661,6 @@ func TestQueryChainDetectsStampVersionDowngrade(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result.Break, "relabelling a sealed stamp as legacy must be detected")
 	require.Contains(t, result.Break.Reason, "stamp was not keyed")
-	require.False(t, result.LegacyStamp, "a relabelled stamp must not be accepted as a legacy one")
-
-	// The escape hatch is not a way out of this: the relabelled row is held to
-	// the unkeyed rule it claims, and a keyed stamp does not satisfy it.
-	tolerated, err := store.VerifyQueryChain(ctx, conn.UID, AllowLegacyStamps())
-	require.NoError(t, err)
-	require.NotNil(t, tolerated.Break,
-		"--allow-legacy-stamps must not launder a sealed stamp relabelled as legacy")
-	require.Contains(t, tolerated.Break.Reason, "the stamp was rewritten")
-	require.False(t, tolerated.LegacyStamp)
 }
 
 // TestQueryChainStampMACSealsItsVersion pins the version-in-the-MAC property
@@ -716,17 +703,14 @@ func TestQueryChainStampMACSealsItsVersion(t *testing.T) {
 		"the stamp must be bound to the head it seals")
 }
 
-// TestQueryChainDowngradeToRawStampIsABreak is the test that inverted when 0.24
-// dropped acceptance of the unkeyed stamp, and it is the whole point of doing
-// so.
+// TestQueryChainDowngradeToRawStampIsABreak is why the unkeyed stamp is not
+// accepted at all, and it is the whole point of the version being sealed.
 //
-// The attacker's move was to replace the *whole* stamp — raw head MAC, matching
-// length, version back to 0 — which accepting legacy stamps allowed by
-// construction. All it cost them was landing in a counter. Now it is a break,
+// The attacker's move is to replace the *whole* stamp — raw head MAC, matching
+// length, version back to 0 — which any tolerance for version 0 would allow by
+// construction, at no cost beyond landing in a counter. It is a break instead,
 // so a trailing deletion followed by a downgrade is reported as one rather than
-// as a number an operator has to be watching. Under --allow-legacy-stamps the
-// old, weaker outcome is still reachable — that is exactly what the flag is,
-// and why it goes away in 0.25.
+// as a number an operator has to be watching.
 func TestQueryChainDowngradeToRawStampIsABreak(t *testing.T) {
 	t.Parallel()
 
@@ -751,30 +735,17 @@ func TestQueryChainDowngradeToRawStampIsABreak(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result.Break, "a downgrade to the unkeyed stamp must be a break, not a count")
 	require.Contains(t, result.Break.Reason, "stamp was not keyed")
-	require.False(t, result.LegacyStamp, "a break is not a legacy stamp: one meaning, not two")
 
 	all, err := store.VerifyQueryChains(ctx, nil)
 	require.NoError(t, err)
 	require.False(t, all.OK(), "the sweep must surface the downgrade as a break")
-	require.Equal(t, int64(0), all.LegacyStamps,
-		"nothing was tolerated, so nothing is counted as a legacy stamp")
-
-	// The escape hatch buys back exactly the pre-0.24 outcome, no more: the
-	// forged stamp passes the raw comparison it was built for, and is counted.
-	tolerated, err := store.VerifyQueryChains(ctx, nil, AllowLegacyStamps())
-	require.NoError(t, err)
-	require.True(t, tolerated.OK())
-	require.Equal(t, int64(1), tolerated.LegacyStamps,
-		"under the flag the sweep must surface how much of the store the walk tolerated")
 }
 
-// TestQueryChainLegacyStampIsABreak is the compatibility half, inverted by 0.24:
-// a store upgraded from 0.23.x now reports every session it closed before the
-// upgrade as a break, because an unkeyed stamp cannot attest to anything.
-//
-// That is the cliff --allow-legacy-stamps exists for, and the second half here
-// is what it buys: the pre-0.24 behavior, unchanged, for the one upgrade that
-// has rows nothing can re-seal.
+// TestQueryChainLegacyStampIsABreak covers the one population that can carry an
+// unkeyed stamp: a store written by a pre-0.24 development build. Every session
+// such a build closed reports as a break, because an unkeyed stamp cannot
+// attest to anything, and there is no opt-out — nothing can re-seal those rows,
+// and tolerating them would be a standing downgrade path.
 func TestQueryChainLegacyStampIsABreak(t *testing.T) {
 	t.Parallel()
 
@@ -785,7 +756,7 @@ func TestQueryChainLegacyStampIsABreak(t *testing.T) {
 
 	require.NoError(t, store.CloseConnection(ctx, conn.UID))
 
-	// Exactly what a 0.23.x CloseConnection left behind.
+	// Exactly what a pre-0.24 development build's CloseConnection left behind.
 	_, err := store.db.ExecContext(ctx,
 		`UPDATE connections
 		    SET query_chain_mac = ?, query_chain_len = ?, query_chain_stamp_version = 0
@@ -795,28 +766,15 @@ func TestQueryChainLegacyStampIsABreak(t *testing.T) {
 
 	result, err := store.VerifyQueryChain(ctx, conn.UID)
 	require.NoError(t, err)
-	require.NotNil(t, result.Break, "an unkeyed head stamp must no longer verify")
+	require.NotNil(t, result.Break, "an unkeyed head stamp must not verify")
 	require.Contains(t, result.Break.Reason, "stamp was not keyed",
 		"the break must say the tail cannot be verified, not accuse anyone of deleting it")
-	require.Contains(t, result.Break.Reason, "--allow-legacy-stamps",
-		"the break must name the way out for a store mid-upgrade")
-	require.False(t, result.LegacyStamp)
+	require.NotContains(t, result.Break.Reason, "allow-legacy-stamps",
+		"there is no escape hatch to point at")
 
-	// With the flag, the pre-0.24 behavior: accepted, counted, never verified.
-	tolerated, err := store.VerifyQueryChain(ctx, conn.UID, AllowLegacyStamps())
+	all, err := store.VerifyQueryChains(ctx, nil)
 	require.NoError(t, err)
-	require.Nil(t, tolerated.Break, "the flag must restore the pre-0.24 outcome: %v", tolerated.Break)
-	require.True(t, tolerated.LegacyStamp)
-
-	// And under the flag the legacy stamp still catches the naive attacker,
-	// exactly as it did before: what it cannot catch is the one who re-stamps.
-	_, err = store.db.ExecContext(ctx, `DELETE FROM queries WHERE uid = ?`, queries[2].UID)
-	require.NoError(t, err)
-
-	tolerated, err = store.VerifyQueryChain(ctx, conn.UID, AllowLegacyStamps())
-	require.NoError(t, err)
-	require.NotNil(t, tolerated.Break)
-	require.Contains(t, tolerated.Break.Reason, "removed from the end")
+	require.False(t, all.OK(), "the sweep must surface an unkeyed stamp as a break")
 }
 
 // TestQueryChainDetectsAnEditedStampLength covers the other half of the stamp:
@@ -1258,13 +1216,13 @@ func TestQueryChainWipeInsideTheRetentionWindowIsABreak(t *testing.T) {
 	require.False(t, result.TruncatedPrefix)
 }
 
-// TestQueryChainWipedLegacySessionStaysALegacyCaveat keeps the pre-0.24 stamp
-// out of the new check. Without the flag such a session is already a break for
-// its own reason. With it, an emptied one is tolerated like every other legacy
-// stamp: the unkeyed value attests to nothing either way, so a session retention
-// emptied and one somebody emptied are the same bytes, and no key separates
-// them.
-func TestQueryChainWipedLegacySessionStaysALegacyCaveat(t *testing.T) {
+// TestQueryChainWipedUnkeyedSessionBreaksForItsStamp keeps the unkeyed stamp
+// out of the emptied-chain check. Such a session is a break either way, and it
+// must be reported for the reason that is actually true of it: the stamp cannot
+// attest to anything, so nothing can be said about what was deleted. An unkeyed
+// value emptied by retention and one emptied by an attacker are the same bytes,
+// and no key separates them.
+func TestQueryChainWipedUnkeyedSessionBreaksForItsStamp(t *testing.T) {
 	t.Parallel()
 
 	store := setupTestStore(t)
@@ -1274,7 +1232,7 @@ func TestQueryChainWipedLegacySessionStaysALegacyCaveat(t *testing.T) {
 
 	require.NoError(t, store.CloseConnection(ctx, conn.UID))
 
-	// Exactly what a 0.23.x CloseConnection left behind, then wiped.
+	// Exactly what a pre-0.24 development build left behind, then wiped.
 	_, err := store.db.ExecContext(ctx,
 		`UPDATE connections
 		    SET query_chain_mac = ?, query_chain_len = ?, query_chain_stamp_version = 0
@@ -1289,11 +1247,8 @@ func TestQueryChainWipedLegacySessionStaysALegacyCaveat(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result.Break, "an unkeyed stamp is a break whatever survived")
 	require.Contains(t, result.Break.Reason, "stamp was not keyed")
-
-	tolerated, err := store.VerifyQueryChain(ctx, conn.UID, AllowLegacyStamps())
-	require.NoError(t, err)
-	require.Nil(t, tolerated.Break, "the flag must not turn the legacy caveat into a new break: %v", tolerated.Break)
-	require.True(t, tolerated.LegacyStamp)
+	require.NotContains(t, result.Break.Reason, "none survive",
+		"the unkeyed stamp is judged before the emptied-chain rule, which it cannot answer")
 }
 
 // TestQueryChainConcurrentAppends checks the per-connection serialization the
@@ -2496,7 +2451,6 @@ func TestQueryChainRefreshDetectsARestampedOpenSession(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, result.Break, "a re-stamped truncation must be caught on an open session too")
 	require.Contains(t, result.Break.Reason, "the stamp was rewritten")
-	require.False(t, result.LegacyStamp, "a forged stamp is a break, not a legacy stamp")
 }
 
 // TestQueryChainRefreshSurvivesRetentionReapingTheStampedStatement is the

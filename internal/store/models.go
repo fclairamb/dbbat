@@ -465,10 +465,11 @@ type Connection struct {
 	QueryChainLen int64 `bun:"query_chain_len,notnull,default:0" json:"-"`
 
 	// QueryChainStampVersion says which format QueryChainMAC is in:
-	// queryChainStampLegacy (a verbatim copy of the head MAC, written by
-	// 0.23.x, forgeable without the key) or queryChainStampKeyed. Every writer
-	// produces the keyed format now; pre-upgrade rows keep the legacy one
-	// forever, since no migration can re-seal them without the chain key.
+	// queryChainStampLegacy (a verbatim copy of the head MAC, forgeable without
+	// the key) or queryChainStampKeyed. Every writer produces the keyed format,
+	// and only a store written by a pre-0.24 development build can hold an
+	// unkeyed one — which no migration can re-seal without the chain key, so it
+	// stays a break forever.
 	QueryChainStampVersion int16 `bun:"query_chain_stamp_version,notnull,default:0" json:"-"`
 }
 

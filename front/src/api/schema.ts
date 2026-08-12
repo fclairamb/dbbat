@@ -1596,6 +1596,14 @@ export interface paths {
          * List audit events
          * @description Returns a list of audit log events.
          *
+         *     The per-session entries (`connection.opened` and `connection.closed`)
+         *     are left out of an unfiltered listing: a busy proxy writes tens of
+         *     thousands of them a day and they would bury the control-plane changes
+         *     this list exists for. Ask for one by name with `event_type` to get it
+         *     back. They are ordinary chained audit rows either way — see
+         *     `docs/audit-chain.md`; the connections list is the surface for browsing
+         *     sessions.
+         *
          *     Requires admin or viewer role.
          */
         get: operations["listAudit"];
@@ -1678,12 +1686,11 @@ export interface paths {
          *     young for the sweep to have reached it is a **break**, because the
          *     stamp on the connection row still attests to statements that are gone.
          *
-         *     A session still carrying the pre-0.24 head stamp — a verbatim copy of
-         *     the last statement's MAC, forgeable by anyone who can write to the
-         *     store — is a **break** since 0.24, reported as a tail that cannot be
-         *     verified. There is no counter for those sessions here: the offline
-         *     `dbbat audit verify --queries --allow-legacy-stamps` is what tolerates
-         *     and counts them while a store upgraded from 0.23.x ages them out.
+         *     A session carrying an unkeyed head stamp — a verbatim copy of the last
+         *     statement's MAC, forgeable by anyone who can write to the store — is a
+         *     **break**, reported as a tail that cannot be verified. There is no
+         *     counter for those sessions and no way to tolerate one; only a store
+         *     written by a pre-0.24 development build can hold such a row.
          *
          *     The same caveats as `GET /audit/verify` apply: an answer from the
          *     server is only as trustworthy as the server, and it is cached, so it
@@ -6418,7 +6425,11 @@ export interface operations {
     listAudit: {
         parameters: {
             query?: {
-                /** @description Filter by event type (e.g., user.created, grant.revoked) */
+                /**
+                 * @description Filter by event type (e.g., user.created, grant.revoked). Naming
+                 *     `connection.opened` or `connection.closed` is also how those
+                 *     session entries are listed, since they are excluded by default.
+                 */
                 event_type?: string;
                 /** @description Filter by user UID (the user being acted upon) */
                 user_id?: string;

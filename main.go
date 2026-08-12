@@ -1566,12 +1566,6 @@ func auditCommand(flags *cliFlags) *cli.Command {
 						Name:  "connection",
 						Usage: "with --queries or --rows, verify only this connection uid",
 					},
-					&cli.BoolFlag{
-						Name: "allow-legacy-stamps",
-						Usage: "with --queries, report sessions closed before 0.24 " +
-							"(unkeyed head stamp) as unverified rather than as a break " +
-							"— removed in 0.25",
-					},
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					return runAuditVerify(ctx, flags, cmd)
@@ -1585,8 +1579,6 @@ var (
 	errAuditChainBroken     = errors.New("audit chain verification failed")
 	errAuditConnectionScope = errors.New("--connection only applies together with --queries or --rows")
 	errAuditScopeConflict   = errors.New("--queries and --rows are different chains: pass one or the other")
-	errAuditLegacyScope     = errors.New("--allow-legacy-stamps only applies together with --queries: " +
-		"the unkeyed head stamp it tolerates is on the connection row, and only the query chains read it")
 )
 
 func runAuditVerify(ctx context.Context, flags *cliFlags, cmd *cli.Command) error {
@@ -1611,10 +1603,6 @@ func runAuditVerify(ctx context.Context, flags *cliFlags, cmd *cli.Command) erro
 	connectionArg := cmd.String("connection")
 	if connectionArg != "" && !cmd.Bool("queries") && !cmd.Bool("rows") {
 		return errAuditConnectionScope
-	}
-
-	if cmd.Bool("allow-legacy-stamps") && !cmd.Bool("queries") {
-		return errAuditLegacyScope
 	}
 
 	var connectionUID *uuid.UUID
@@ -1642,12 +1630,7 @@ func runAuditVerify(ctx context.Context, flags *cliFlags, cmd *cli.Command) erro
 	defer dataStore.Close()
 
 	if cmd.Bool("queries") {
-		var opts []store.QueryChainOption
-		if cmd.Bool("allow-legacy-stamps") {
-			opts = append(opts, store.AllowLegacyStamps())
-		}
-
-		return verifyQueryChains(ctx, dataStore, logger, connectionUID, opts...)
+		return verifyQueryChains(ctx, dataStore, logger, connectionUID)
 	}
 
 	if cmd.Bool("rows") {
@@ -1685,9 +1668,8 @@ func verifyAuditChain(ctx context.Context, dataStore *store.Store, logger *slog.
 
 func verifyQueryChains(
 	ctx context.Context, dataStore *store.Store, logger *slog.Logger, connectionUID *uuid.UUID,
-	opts ...store.QueryChainOption,
 ) error {
-	result, err := dataStore.VerifyQueryChains(ctx, connectionUID, opts...)
+	result, err := dataStore.VerifyQueryChains(ctx, connectionUID)
 	if err != nil {
 		return fmt.Errorf("query chain verification failed: %w", err)
 	}
@@ -1706,15 +1688,7 @@ func verifyQueryChains(
 		// A chain missing its oldest statements is what
 		// DBB_QUERY_STORAGE_RETENTION leaves behind on a long-lived session,
 		// so it is counted rather than treated as tampering.
-		slog.Int64("chains_with_retention_truncated_prefix", result.Truncated),
-		// Sessions closed before 0.24, whose head stamp is a verbatim copy of
-		// the last statement's MAC rather than a keyed seal. Since 0.24 such a
-		// session is a break, so this is 0 unless --allow-legacy-stamps was
-		// passed; under that flag it counts what was tolerated. Their
-		// statements verified; nothing keyed vouches for their *tail*, because
-		// that stamp is writable by anyone who can write to the store. The
-		// number drains as those sessions age out of retention.
-		slog.Int64("sessions_with_legacy_forgeable_head_stamp", result.LegacyStamps))
+		slog.Int64("chains_with_retention_truncated_prefix", result.Truncated))
 
 	return nil
 }

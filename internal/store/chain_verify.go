@@ -105,15 +105,6 @@ type QueryChainResult struct {
 	// expected shape for a connection whose oldest statements were reaped by
 	// DBB_QUERY_STORAGE_RETENTION.
 	TruncatedPrefix bool
-	// LegacyStamp is true when the session's head carries the pre-0.24 stamp — a
-	// verbatim copy of the head MAC, which anyone who can write to the store can
-	// also write — *and* the walk was asked to tolerate it (AllowLegacyStamps).
-	// The chain still verified; what did not happen is a *keyed* confirmation
-	// that nothing was removed from its end. Without that opt-in a legacy stamp
-	// is a break, so this is false and Break is set instead: there is one
-	// meaning here, "accepted despite an unkeyed stamp", never "broke because of
-	// one".
-	LegacyStamp bool
 	// FirstSeq is the oldest surviving statement's chain_seq, or 0 when nothing
 	// survives. It is 1 unless retention reaped the chain's prefix, and it is
 	// what tells a stamp whose sealed position was *reaped* from one that names
@@ -132,12 +123,6 @@ type QueryChainsResult struct {
 	Verified int64
 	// Truncated is how many of those chains were missing a prefix.
 	Truncated int64
-	// LegacyStamps is how many of those connections carried the pre-0.24
-	// forgeable head stamp and were accepted anyway because the walk was run
-	// with AllowLegacyStamps. It is the part of the store whose *tail* nothing
-	// keyed vouches for. Without that opt-in it is always 0 and such a session
-	// is Break instead.
-	LegacyStamps int64
 	// Break is the first failure found, or nil.
 	Break *ChainBreak
 }
@@ -175,37 +160,6 @@ func (r RowChainsResult) OK() bool { return r.Break == nil }
 // chainPageSize bounds how many rows one verification query pulls. The audit
 // log is small; a busy connection's history is not.
 const chainPageSize = 1000
-
-// QueryChainOption tunes a query-chain walk.
-type QueryChainOption func(*queryChainOptions)
-
-type queryChainOptions struct {
-	allowLegacyStamps bool
-}
-
-func newQueryChainOptions(opts []QueryChainOption) queryChainOptions {
-	var o queryChainOptions
-
-	for _, opt := range opts {
-		opt(&o)
-	}
-
-	return o
-}
-
-// AllowLegacyStamps reports a session still carrying the pre-0.24 unkeyed head
-// stamp as a legacy stamp instead of as a break — the behavior 0.24 replaced.
-//
-// It exists for one upgrade only. A store written by 0.23.x has a verbatim head
-// stamp on every session it closed, nothing can re-seal them (the chain key
-// never enters the database), and a walk stops at its first break — so without
-// this opt-in one pre-upgrade session would mask every real break behind it,
-// forever on a deployment that sets no DBB_QUERY_STORAGE_RETENTION. The opt-in
-// is deliberately not the default, because an unkeyed stamp proves nothing to
-// anyone who can write to this database, and it goes away in 0.25.
-func AllowLegacyStamps() QueryChainOption {
-	return func(o *queryChainOptions) { o.allowLegacyStamps = true }
-}
 
 // VerifyAuditChain walks the store-wide audit chain oldest to newest.
 func (s *Store) VerifyAuditChain(ctx context.Context) (AuditChainResult, error) {
@@ -317,7 +271,7 @@ func (s *Store) verifyAuditRow(row *AuditLog, expectedSeq int64, prevMAC []byte)
 // VerifyQueryChains walks the query chain of every connection that has one, or
 // of one connection when connectionUID is set.
 func (s *Store) VerifyQueryChains(
-	ctx context.Context, connectionUID *uuid.UUID, opts ...QueryChainOption,
+	ctx context.Context, connectionUID *uuid.UUID,
 ) (QueryChainsResult, error) {
 	var result QueryChainsResult
 
@@ -331,7 +285,7 @@ func (s *Store) VerifyQueryChains(
 	}
 
 	for _, uid := range uids {
-		one, err := s.VerifyQueryChain(ctx, uid, opts...)
+		one, err := s.VerifyQueryChain(ctx, uid)
 		if err != nil {
 			return result, err
 		}
@@ -341,10 +295,6 @@ func (s *Store) VerifyQueryChains(
 
 		if one.TruncatedPrefix {
 			result.Truncated++
-		}
-
-		if one.LegacyStamp {
-			result.LegacyStamps++
 		}
 
 		if one.Break != nil {
@@ -396,7 +346,7 @@ func (s *Store) chainedConnectionUIDs(ctx context.Context, only *uuid.UUID) ([]u
 
 // VerifyQueryChain walks one connection's query chain.
 func (s *Store) VerifyQueryChain(
-	ctx context.Context, connectionUID uuid.UUID, opts ...QueryChainOption,
+	ctx context.Context, connectionUID uuid.UUID,
 ) (QueryChainResult, error) {
 	result := QueryChainResult{ConnectionUID: connectionUID}
 
@@ -459,7 +409,7 @@ func (s *Store) VerifyQueryChain(
 		}
 	}
 
-	if err := s.checkStampedHead(ctx, &result, newQueryChainOptions(opts)); err != nil {
+	if err := s.checkStampedHead(ctx, &result); err != nil {
 		return result, err
 	}
 
@@ -523,10 +473,9 @@ func (s *Store) verifyQueryRow(row *Query, connectionUID uuid.UUID, expectedSeq 
 // queryChainStampMAC). Only the keyed one verifies, and it is checked *with the
 // version the row claims* — so a sealed row cannot be relabelled as legacy to
 // dodge the keyed rule. A row that says it is legacy is a **break** with its
-// own reason: 0.24 dropped acceptance of the pre-0.24 raw-head stamp, because
-// an unkeyed stamp proves nothing to anyone who can write to this database, and
-// leaving it accepted left a standing downgrade path. AllowLegacyStamps
-// restores the old counting behavior for the one upgrade that needs it.
+// own reason, and there is no way to ask for anything softer: an unkeyed stamp
+// proves nothing to anyone who can write to this database, so accepting one
+// would be a standing downgrade path.
 //
 // # Exact for a closed session, a prefix for an open one
 //
@@ -547,9 +496,7 @@ func (s *Store) verifyQueryRow(row *Query, connectionUID uuid.UUID, expectedSeq 
 // it does not catch, by construction, is a deletion of statements newer than
 // the last sweep. That window is bounded by the sweep interval, and shrinking
 // it is exactly what the refresh buys; it is not closed.
-func (s *Store) checkStampedHead(
-	ctx context.Context, result *QueryChainResult, opts queryChainOptions,
-) error {
+func (s *Store) checkStampedHead(ctx context.Context, result *QueryChainResult) error {
 	var conn Connection
 
 	err := s.db.NewSelect().
@@ -599,7 +546,9 @@ func (s *Store) checkStampedHead(
 	}
 
 	if version == queryChainStampLegacy {
-		return s.checkLegacyStampedHead(result, conn, opts)
+		s.checkLegacyStampedHead(result, conn)
+
+		return nil
 	}
 
 	// Nothing survives, yet the stamp claims a session that ran statements.
@@ -688,19 +637,17 @@ func (s *Store) checkStampedHead(
 //
 // # Why no escape hatch for older stores
 //
-// The version-0 stamp got one (AllowLegacyStamps) because a store upgraded
-// from a build that wrote unkeyed stamps has rows nothing can re-seal. Nothing
-// analogous exists here: `query_chain_mac` itself, and the close-path writer
-// that fills it, arrived in the *same* release as the chain — migration
-// 20260810000000, everything after v0.23.2, i.e. 0.24 — so no released dbbat
-// ever closed a chained session without stamping it. A connection that predates
-// that migration has no stamp *and* no chained statement (it backfills neither),
-// so it is case 1, not case 3.
+// There is none, and none is needed: `query_chain_mac` itself, and the
+// close-path writer that fills it, arrived in the *same* release as the chain —
+// migration 20260810000000, everything after v0.23.2, i.e. 0.24 — so no
+// released dbbat ever closed a chained session without stamping it. A
+// connection that predates that migration has no stamp *and* no chained
+// statement (it backfills neither), so it is case 1, not case 3.
 //
-// And a hatch here would be worse than the one it copied. A version-0 stamp is
-// at least a distinguishable, countable state; a NULL stamp is precisely what
-// the attacker writes, so an opt-in that tolerated it would not be a weaker
-// check but the absence of this one.
+// A hatch here would also be worse than one for the unkeyed version-0 stamp. A
+// version-0 stamp is at least a distinguishable state; a NULL stamp is
+// precisely what the attacker writes, so an opt-in that tolerated it would not
+// be a weaker check but the absence of this one.
 //
 // # Why retention cannot cry wolf
 //
@@ -825,59 +772,25 @@ func (s *Store) retentionCouldEmpty(conn Connection) bool {
 	return conn.ConnectedAt.Before(time.Now().Add(-s.queryRetention))
 }
 
-// checkLegacyStampedHead handles a session still stamped in the pre-0.24
-// format: the head MAC stored verbatim, with no key involved.
+// checkLegacyStampedHead handles a session stamped in the unkeyed format: the
+// head MAC stored verbatim, with no key involved.
 //
-// Since 0.24 that is a break of its own, and the reason says why rather than
-// borrowing the trailing-deletion wording: nothing was necessarily removed, the
-// stamp simply cannot attest to anything. The value is readable straight out of
-// `queries`, so anyone who can delete the tail of a session can also write the
-// matching stamp — which is exactly what the keyed stamp exists to stop, and
-// what accepting version 0 kept available as a standing downgrade path.
+// That is always a break, and the reason says why rather than borrowing the
+// trailing-deletion wording: nothing was necessarily removed, the stamp simply
+// cannot attest to anything. The value is readable straight out of `queries`,
+// so anyone who can delete the tail of a session can also write the matching
+// stamp — which is exactly what the keyed stamp exists to stop, and what
+// accepting version 0 would keep available as a standing downgrade path.
 //
-// AllowLegacyStamps restores the old behavior — counted, never called verified
-// — for the single upgrade from 0.23.x that has such rows and no way to re-seal
-// them. Under that opt-in the old raw comparison runs unchanged, so it still
-// catches the attacker who deletes and stops; what it never caught, and still
-// does not, is the one who re-stamps.
-func (s *Store) checkLegacyStampedHead(
-	result *QueryChainResult, conn Connection, opts queryChainOptions,
-) error {
-	if !opts.allowLegacyStamps {
-		result.Break = stampBreak(result, conn,
-			"the connection's chain head is stamped by a version of dbbat whose stamp was not keyed "+
-				"(query_chain_stamp_version 0): its tail cannot be verified, because that stamp is a "+
-				"verbatim copy of the head MAC and anyone who can write to this store can write it. "+
-				"Pass --allow-legacy-stamps to count these sessions instead, as dbbat 0.23.x-era "+
-				"stores did, until they age out of DBB_QUERY_STORAGE_RETENTION")
-
-		return nil
-	}
-
-	// Nothing survives. Under the opt-in that stays part of the legacy caveat
-	// rather than becoming a break of its own: an unkeyed stamp attests to
-	// nothing either way, so a session retention emptied and a session someone
-	// emptied are the same two bytes here, and no key can separate them. Counted
-	// as tolerated, exactly like every other legacy stamp under the flag.
-	if result.Verified == 0 && conn.QueryChainLen > 0 {
-		result.LegacyStamp = true
-
-		return nil
-	}
-
-	if hmac.Equal(conn.QueryChainMAC, result.HeadMAC) {
-		result.LegacyStamp = true
-
-		return nil
-	}
-
-	result.Break = stampBreak(result, conn, fmt.Sprintf(
-		"the connection's unkeyed stamped head %s is not the head its surviving statements end on "+
-			"at chain_seq %d (%s): statements were removed from the end of the session, "+
-			"or the stamp was rewritten",
-		hex.EncodeToString(conn.QueryChainMAC), result.HeadSeq, hex.EncodeToString(result.HeadMAC)))
-
-	return nil
+// There is no opt-out. Only a store written by a pre-0.24 development build can
+// hold such a row — the chain, the stamp and the version column all ship
+// together in 0.24 — so no upgrade path leads here, and an escape hatch would
+// buy nothing but a way to downgrade the check.
+func (s *Store) checkLegacyStampedHead(result *QueryChainResult, conn Connection) {
+	result.Break = stampBreak(result, conn,
+		"the connection's chain head is stamped in the unkeyed format "+
+			"(query_chain_stamp_version 0): its tail cannot be verified, because that stamp is a "+
+			"verbatim copy of the head MAC and anyone who can write to this store can write it")
 }
 
 // stampedPrefixMAC resolves what a stamp that does not name the current head
