@@ -91,3 +91,72 @@ Key files: `internal/proxy/oracle/session.go` (`nextOERFrame`,
 `observeClientCallNumber`), `internal/proxy/oracle/intercept.go` (the untracked
 re-execution gate), `internal/proxy/oracle/cursor_reexec_gate_test.go`,
 `internal/proxy/oracle/oci_client_integration_test.go`.
+
+## Implementation Plan
+
+Written after measuring both flavors against a live 23ai upstream with the
+proxy's own log teed to stderr (`ORACLE_TEST_LOG=1`, added to the fixture's
+capturing handler) and a temporary hex dump of every client packet.
+
+### What was measured
+
+The first client message in proxy mode, byte for byte:
+
+	bundled 23.26   00 00 | 11 6b 04 00 | 00 00 00 00 00 05 00 … | 03 3b 05 00 …
+	Instant 23.3    20 00 | 11 6b 04 01 | 05 2f 00 00 00 9d 2d … | 03 3b 05 01 …
+
+Three findings, and the first two overturn the write-up above:
+
+1. **Both** flavors send that frame, and **both** are refused on it —
+   `cursor_id=27396` on the Instant Client too. The PATH leg was never clean;
+   it passes because that client shrugs the bogus refusal off and carries on,
+   while the bundled one parks forever. So symptoms 1 and 2 are not
+   flavor-specific at all: only the hang is.
+2. `0x11` is **not** a fetch. It is the TTC *piggyback message type*, and byte
+   1 is a TTC **function code** — `0x69` close-cursors, `0x6b` (this one),
+   `0x87` set-end-to-end-attrs, `0x98` set-schema. A real fetch is message type
+   `0x03`, function `0x05` (`TNS_FUNC_FETCH`), which the histogram over
+   `testdata/*.pcapng` confirms: every recorded `0x11` frame is `11/69`, plus
+   the single `11/6b` already sitting in `sqlplus_cursor_reexec.pcapng`. So
+   `decodeOFETCH`, which reads a big-endian cursor id out of bytes 1..3, was
+   reading (function, sequence) — 27396 is exactly `0x6b04`.
+3. The refusal ends the wrong call. `clientCallNumber` takes the sequence at
+   offset 2, which for this packet is the *piggyback's* (4), while the client
+   is parked on the call stapled behind it (`03 3b`, sequence 5). dbbat cannot
+   walk an unrecognized piggyback body, so it cannot see that call at all.
+
+### The fix, one invariant
+
+**dbbat intercepts — and therefore refuses — only a message whose call it can
+name.**
+
+- `clientCallNumber` reports `ok=false` for a message-type-`0x11` piggyback it
+  cannot walk (i.e. anything but a decodable close-cursors list). The sequence
+  at offset 2 belongs to the piggyback, and any real call is stapled behind
+  bytes dbbat cannot parse.
+- `observeClientCallNumber` passes that through, and leaves the last
+  known-good call number alone instead of overwriting it with the piggyback's
+  — which also protects the *response*-leg refusal that fires while the client
+  is parked on a call.
+- `interceptClientMessage` forwards an unnamed message untouched: no cursor id
+  read out of it, no gate, no refusal. This is the spec's "failing open on an
+  undecodable message is the safer default", and it is what stops the next
+  client whose framing dbbat misreads from hanging too.
+- The `TTC message` DEBUG line carries the function byte, so `func=OFETCH` on a
+  `11/6b` frame stops being a lie in the log.
+
+Consequence, stated plainly: the `0x11` fetch reading is now unreachable for
+real Oracle traffic, because no client sends a fetch that way. Wiring the gate
+to the frames Oracle *does* fetch with (`03/05`) is a behaviour change on the
+hot path and is filed as its own todo rather than smuggled in here.
+
+### Tests
+
+- `testdata/oci_bundled_first_call.hex` — the bundled client's first proxy-mode
+  packet, so the unit half pins this without a container.
+- The dispatcher forwards it under a `read_only` grant and writes nothing back
+  to the client (symptoms 1, 2 and 3 in one assertion).
+- `clientCallNumber` on it reports "cannot name", and the session's previous
+  call number survives it (the hang's own half).
+- `TestIntegration_BlockedStatementRefusesSQLPlus` loses its
+  `knownBadBundledRefusal` skip and must pass on the container flavor.

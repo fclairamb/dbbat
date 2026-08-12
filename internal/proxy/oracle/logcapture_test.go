@@ -2,7 +2,9 @@ package oracle
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
+	"os"
 	"sort"
 	"sync"
 	"testing"
@@ -47,11 +49,36 @@ func newCountingHandler() *countingHandler {
 	}
 }
 
+// teeLogsEnv makes the captured records visible. The handler swallows
+// everything by design — the integration fixture hands it to the proxy as the
+// *only* logger — so a failing session leaves no trace of what the proxy
+// decoded. Setting it to 1 tees every record to stderr, which is how the
+// bundled-OCI-client refusal was diagnosed:
+//
+//	ORACLE_TEST_LOG=1 ORACLE_TEST_OCI_CLIENT=container go test -tags integration ...
+const teeLogsEnv = "ORACLE_TEST_LOG"
+
+// teeLogs is read once: os.Getenv on every record would show up on a suite that
+// logs a row per fetched row.
+var teeLogs = os.Getenv(teeLogsEnv) == "1"
+
 func (h *countingHandler) Enabled(context.Context, slog.Level) bool { return true }
 
 func (h *countingHandler) Handle(_ context.Context, rec slog.Record) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	if teeLogs {
+		out := rec.Level.String() + " " + rec.Message
+
+		rec.Attrs(func(a slog.Attr) bool {
+			out += " " + a.Key + "=" + a.Value.String()
+
+			return true
+		})
+
+		fmt.Fprintln(os.Stderr, out)
+	}
 
 	h.counts[rec.Message]++
 
