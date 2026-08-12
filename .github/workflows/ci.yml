@@ -132,6 +132,23 @@ jobs:
       # likewise only ever visible as a dirty tree. It has to be checked after
       # the build rather than next to the types, because the build *is* its
       # generator.
+      #
+      # What makes this comparison sound is that the generator's output is a
+      # pure function of the route files — which it is, but only from
+      # `@tanstack/router-generator` 1.167.25 onwards. Earlier versions ended
+      # their sort with the route-node object itself as the tiebreaker, so every
+      # node compared equal and the order that survived was whatever the
+      # parallel `readdir` recursion in `getRouteNodes` happened to build. Two
+      # runs over identical sources could then differ by a couple of hundred
+      # lines. `front/bun.lock` pins the generator and `bun install` above
+      # installs from it into a fresh process, so this job always compares two
+      # outputs of the *same* generator.
+      #
+      # Locally that guarantee has one more precondition CI does not: a `make
+      # dev` Vite server keeps the plugin it imported at startup, so one that
+      # outlived a dependency bump writes this file with the superseded
+      # generator. `front/vite.config.ts` warns when it detects that; see
+      # `specs/done/2026/08/2026-08-11-02-routetree-generator-nondeterminism.md`.
       - name: Check generated route tree is committed
         run: |
           if ! git diff --exit-code front/src/routeTree.gen.ts; then
