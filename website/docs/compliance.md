@@ -148,7 +148,12 @@ following exists today:
   removed in 0.25. See
   [Tamper-Evident Audit Log](/docs/features/audit-chain) for the detail; while
   pre-0.24 sessions remain in the store, treat trailing-deletion detection on
-  that *older* part of the query history as unproven rather than as covered. If
+  that *older* part of the query history as unproven rather than as covered.
+  One further edge exists only where you have set
+  `DBB_QUERY_STORAGE_RETENTION`: deleting **every** statement of a session is
+  detected through the same stamp, but a session that *began* before the
+  retention cutoff is excused, because the sweep could legitimately have taken
+  all of them. With retention off — the default — no session is excused. If
   your control requires *prevention* rather than detection, keep shipping the
   logs to a WORM store or a SIEM as well.
 - **No MFA and no password policy on DBBat's own accounts.** There is no TOTP,

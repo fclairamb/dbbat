@@ -157,6 +157,7 @@ number, not a fresh timestamp.
 | The **first** records are deleted | Yes | The first entry's `prev_mac` is a genesis MAC derived from the key, which cannot be forged |
 | The **last** statements of a closed session are deleted | Yes, for sessions closed by 0.24+ — see the note below for older ones | The session's final chain head is sealed onto the connection row with a keyed MAC when it closes, so correcting it after a deletion needs the key |
 | The **last** statements of a session that is still **open** are deleted | Yes, up to the last stamp sweep | DBBat re-seals the chain head of its open sessions every few minutes, so the exposed tail is the statements run since that sweep rather than the whole session |
+| **Every** statement of a session is deleted, not just the last ones | Yes, unless retention could account for it | The sealed stamp on the connection still attests to statements no longer there. Only a session that began before the retention cutoff is excused — with `DBB_QUERY_STORAGE_RETENTION` unset, the default, none is |
 | The **last** rows of a captured result set are deleted | Yes | The capture's final head is sealed onto the query row with a keyed MAC when the capture finishes, so correcting it needs the key |
 | A captured result set is deleted **outright** | Yes | The sealed stamp on the query still attests to rows no longer there |
 | The **whole** chain is truncated and re-sealed by someone holding the key | Only against a head MAC you recorded elsewhere | See the tip above |
@@ -250,6 +251,16 @@ single global chain would break the first time it ran.
   truncates that chain's beginning. Verification reports it as a truncated
   prefix — counted, not flagged as tampering — and keeps verifying everything
   after it.
+- Retention deleting *every* statement of a session whose connection record
+  survives — a pooled connection that went quiet long before it closed, or one
+  still open — is the extreme of the same case, and is counted the same way.
+  Verification excuses it only when the session began before the retention
+  cutoff, which is the only way the sweep could have taken all of them;
+  otherwise an emptied session is a break. One caveat follows from that: after
+  you **raise or disable** `DBB_QUERY_STORAGE_RETENTION`, sessions the previous
+  setting had legitimately emptied can start reading as breaks, because the
+  cutoff they are judged against moves backwards. Lowering it never has that
+  effect.
 
 Captured result rows follow the same logic one level down: their chain is per
 query, and retention deletes whole queries, so a reaped capture takes its own

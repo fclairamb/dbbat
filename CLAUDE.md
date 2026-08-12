@@ -436,7 +436,17 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   --allow-legacy-stamps` restores the old counting behavior
   (`sessions_with_legacy_forgeable_head_stamp`) for the single upgrade from
   0.23.x that has such rows, and is removed in 0.25; the REST endpoints have no
-  equivalent and no legacy counter. Verify with
+  equivalent and no legacy counter. The query walk enumerates **stamped
+  connections**, not only connections found in `queries`, so a session whose
+  statements are deleted *in full* is judged instead of skipped (deleting all
+  but one was always caught). Zero survivors under a keyed stamp is a break
+  unless retention can account for it: the store is told its own
+  `DBB_QUERY_STORAGE_RETENTION` (`store.Options.QueryRetention`) and excuses
+  only a session that **connected before the cutoff**, since every statement
+  runs at or after `connected_at` — with retention off, the default, nothing is
+  excused, and an excused session is counted as a truncated prefix. Raising or
+  disabling retention moves that cutoff backwards, so previously reaped sessions
+  can start reading as breaks; lowering it never does. Verify with
   `dbbat audit verify [--queries|--rows]`, or over REST with
   the admin-only `GET /api/v1/audit/verify`, `GET /api/v1/audit/verify/queries`
   and `GET /api/v1/audit/verify/rows` (the last narrows with `?connection=` or

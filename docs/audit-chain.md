@@ -29,6 +29,10 @@ It detects:
   sweep](#an-open-session-is-stamped-by-a-periodic-sweep)). Sessions closed
   *before* 0.24 carry the old unkeyed stamp, which attests to nothing: since
   0.24 those are reported as a break rather than tolerated;
+- **every** statement of a session deleted — not just its tail. The walk
+  enumerates stamped connections as well as connections with surviving
+  statements, so an emptied session is judged rather than skipped (see [A
+  session emptied of every statement](#a-session-emptied-of-every-statement));
 - entries deleted from the **start** of the audit chain (the first entry's
   `prev_mac` is a genesis MAC derived from the key, so it cannot be forged).
 
@@ -158,6 +162,7 @@ refreshing at all. The rule, in full:
 | below the head, that statement survives | verified against **that** statement | **break** — a close is final |
 | below the oldest survivor | retention reaped it: unverifiable, already counted as a truncated prefix | **break** |
 | above the head | **break** — retention only removes the oldest | **break** |
+| nothing survives at all | **break**, unless retention could have reaped every statement — see below | same |
 
 **What this does not buy.** The stamp only ever proves the chain up to the
 position it sealed, so statements appended *since the last sweep* are still
@@ -258,6 +263,61 @@ exit code is what it protects), it never launders a *keyed* stamp relabelled as
 legacy, and it is **removed in 0.25**. Drop it as soon as the count reaches
 zero; a count that stops falling, or rises, is the signal to stop using it
 immediately.
+
+#### A session emptied of every statement
+
+Until 0.24 the walk enumerated connections out of `queries`
+(`SELECT DISTINCT connection_id ...`), so a session with **no** surviving
+statement produced no row, was never walked, and its stamp — claiming N
+statements — was never compared against anything. Deleting all but one of a
+session's statements was caught; deleting all of them was not. The row chain had
+already closed the same hole one level down, which is why `capturedQueryUIDs`
+unions in `row_chain_mac IS NOT NULL`.
+
+`chainedConnectionUIDs` now enumerates from `connections` instead: a connection
+is in scope when it carries a stamp **or** still has chained statements. The
+second half needs no `UNION` — `queries.connection_id` is `ON DELETE CASCADE`,
+so no statement outlives its connection row. A session that logged nothing has
+no stamp and is still skipped.
+
+That leaves the judgment. A stamped session with zero surviving statements has
+two possible causes, and `queries` alone cannot tell them apart:
+
+1. `DBB_QUERY_STORAGE_RETENTION` reaped them all. The connection sweep only
+   reaps rows whose `disconnected_at` is already past the cutoff, so a session
+   that went quiet long before it closed — a pooled connection, an idle
+   `psql` — keeps its row while the query sweep empties it. A session still
+   **open** is the same story: the sweep never reaps a live connection row.
+2. Someone deleted them.
+
+What separates them is time, and the only thing that says where the line runs is
+the configured retention window itself, which the store is given at startup
+(`store.Options.QueryRetention`, from the same `DBB_QUERY_STORAGE_RETENTION` the
+sweep reads). The sweep deletes by `executed_at < now - retention`, and every
+statement of a session ran at or after its `connected_at` — so a session that
+**connected at or after the cutoff** cannot have had a single statement reaped,
+and an empty one is a break. With retention disabled, which is the default, the
+cutoff is the beginning of time and nothing is excused. An excused session is
+reported as a truncated prefix (the extreme of one), never silently skipped.
+
+Two consequences worth stating plainly:
+
+- The rule is the *sound* one, not the tight one. A session that connected
+  before the cutoff but ran its statements after it is excused too. Closing that
+  gap would need the deleted statements' timestamps — which is exactly what was
+  deleted.
+- Verification reads the retention from configuration rather than from the data
+  (say, the oldest statement left in the store), because a young or quiet store
+  has its oldest surviving statement minutes old, which would excuse nearly
+  every session. The cost is one caveat: **raising or disabling
+  `DBB_QUERY_STORAGE_RETENTION` moves the cutoff backwards**, so sessions the
+  previous setting legitimately emptied can start reading as breaks. Lowering it
+  never can.
+
+Under `--allow-legacy-stamps` an emptied session with a pre-0.24 stamp stays
+part of the legacy caveat instead of becoming a new break: an unkeyed stamp
+attests to nothing either way, so a session retention emptied and one somebody
+emptied are the same bytes, and no key separates them.
 
 ### `query_rows` — one chain per capture
 
