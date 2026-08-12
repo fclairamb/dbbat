@@ -480,6 +480,63 @@ ORACLE_TEST_OJDBC_JAR=/path/to/ojdbc11.jar \
   go test -tags integration -timeout 40m -run JDBCThin ./internal/proxy/oracle/
 ```
 
+##### An asynchronous refusal: which call number, and whether to send one at all
+
+The call number above is the sequence number of the call *being answered*, which
+raises the obvious question for the refusals that are not answers — a grant
+revoked or expired while the client sits idle, and a byte quota tripped while
+dbbat is relaying a reply. In both, `session.oerCallNumber` still holds the last
+op the client sent, and it is not self-evident that ending *that* call is right.
+
+The answer is that the question only ever has one live case, because **dbbat
+never writes an OER outside a call**. Enumerated, the sites are:
+
+| Site | Is the client inside a call? | Call number written |
+|---|---|---|
+| `gateStatement` / the `OFETCH` refusal, on the client leg | yes — the packet being refused is the call | the op just observed |
+| `upstreamToClient`'s `writeTTCError(ORA00028, …)` | yes — guarded by `hasPendingQuery()` | the op the client is waiting on |
+| `onLimitViolation` (the limit watchdog: revocation, expiry, idle) | no | **none — it force-closes both sockets and writes no frame** |
+
+So the mid-reply case is not asynchronous in the sense that matters. dbbat cuts
+into the reply *before* the call's own end-of-call OER has reached the client,
+so the client is still parked in the receive for the very op `oerCallNumber`
+names. That is the same situation as a refusal on the client leg, one round trip
+later, and the measured JDBC result therefore carries over unchanged: ojdbc's
+`sequenceNumber` is still the one it sent, `T4CTTIfun.receive` matches, and the
+ORA-00028 is reported as itself rather than wrapped in an ORA-18745. Note the
+byte-quota refusal follows a *fetch*, and each fetch is its own call with its own
+sequence number — `observeClientCallNumber` runs on every client message, fetches
+included, so the number tracks the reply being cut into rather than the execute
+that opened the result set.
+
+The genuinely asynchronous case — the watchdog, with the client idle between
+calls — resolves the other way: there is no call to end, and dbbat must not
+invent one. An unsolicited OER on an idle socket is not read when it is sent; it
+sits in the receive buffer until the client's *next* request and is then consumed
+as that request's answer, carrying by construction the number of the *previous*
+call. On ojdbc 26.1 that is precisely the mismatch `handleOutOfSequenceError`
+turns into ORA-18745, so a "graceful" error frame would be strictly worse than
+the socket close, which surfaces as a plain ORA-17002/ORA-03113 I/O error. A real
+Oracle behaves the same way: `ALTER SYSTEM KILL SESSION` marks the session and
+pushes nothing, and the client learns at its next call — answered with ORA-00028
+stamped with *that* call's number. `DISCONNECT SESSION` drops the socket, which
+is what the watchdog imitates. **Do not add an error frame to
+`onLimitViolation`**; the code comment there says the same thing.
+
+Confidence: the enumeration and the `hasPendingQuery()` gate are read off the
+code and pinned by `TestMidStreamRefusalEndsTheCallTheClientIsWaitingOn` and
+`TestIdleLimitViolationSendsNoOER`. The *consequence* for a live client is
+**reasoned, not measured** — it rests on the ojdbc 26.1 behaviour measured for
+the answering case above, not on a new capture of a revocation or a mid-fetch
+quota trip against a live JDBC client. The residual gap is
+`specs/todos/2026-08-12-09-measure-the-mid-reply-refusal-against-jdbc.md`, which
+also records the one way the reasoning could fail: `hasPendingQuery()` is dbbat's
+own bookkeeping, not the client's, so a missed completion would leave it set past
+the real end of a call and a violation would then stamp a call the client has
+already been answered for. That degrades to exactly the pre-fix ORA-18745
+wrapping — no worse than before the call number existed — and the session is torn
+down regardless.
+
 ### Oracle NUMBER Encoding
 
 Oracle NUMBER is a variable-length, sign-and-magnitude, base-100 format:
