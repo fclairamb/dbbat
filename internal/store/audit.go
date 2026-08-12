@@ -21,37 +21,66 @@ import (
 // one of them would be silently overwritten. Volume here is admin actions, so
 // the contention that buys is negligible.
 func (s *Store) LogAuditEvent(ctx context.Context, event *AuditEvent) error {
-	logEntry := &AuditLog{
-		UID:         newUIDv7(), // Generate UUIDv7 for time-ordered inserts
-		EventType:   event.EventType,
-		UserID:      event.UserID,
-		PerformedBy: event.PerformedBy,
-		Details:     event.Details,
-		// Truncated to what timestamptz can store, because this exact value is
-		// what the MAC covers and what verification must read back.
-		CreatedAt: normalizeStoredTime(time.Now()),
+	return s.LogAuditEvents(ctx, event)
+}
+
+// LogAuditEvents appends several audit entries as one chained batch: one
+// transaction, one advisory lock, one bulk INSERT, and the entries linked to
+// each other in the order they were given.
+//
+// It exists for the session reconcile, which closes an arbitrary number of
+// crash-orphaned connections in one pass and owes each of them a
+// `connection.closed` entry. Appending those one at a time would be one
+// transaction and one round trip to the store-wide chain lock *per connection*,
+// which is exactly the shape the row-chain batching exists to avoid.
+//
+// The batch is all-or-nothing. A chain is a sequence, so a partially applied
+// batch would either leave a gap or force the survivors to be re-linked; the
+// transaction is what makes "some of these landed" not a state.
+func (s *Store) LogAuditEvents(ctx context.Context, events ...*AuditEvent) error {
+	if len(events) == 0 {
+		return nil
+	}
+
+	entries := make([]*AuditLog, 0, len(events))
+
+	for _, event := range events {
+		entries = append(entries, &AuditLog{
+			UID:         newUIDv7(), // Generate UUIDv7 for time-ordered inserts
+			EventType:   event.EventType,
+			UserID:      event.UserID,
+			PerformedBy: event.PerformedBy,
+			Details:     event.Details,
+			// Truncated to what timestamptz can store, because this exact value
+			// is what the MAC covers and what verification must read back.
+			CreatedAt: normalizeStoredTime(time.Now()),
+		})
 	}
 
 	if !s.ChainEnabled() {
-		if _, err := s.db.NewInsert().Model(logEntry).Exec(ctx); err != nil {
+		if _, err := s.db.NewInsert().Model(&entries).Exec(ctx); err != nil {
 			return fmt.Errorf("failed to log audit event: %w", err)
 		}
 
 		return nil
 	}
 
-	return s.appendAuditChain(ctx, logEntry)
+	return s.appendAuditChain(ctx, entries)
 }
 
-// appendAuditChain inserts one sealed audit row, retrying with a re-read head
-// when the cached one turns out to be stale.
+// appendAuditChain inserts one sealed batch of audit rows, retrying with a
+// re-read head when the cached one turns out to be stale.
 //
 // A stale head is the normal multi-replica case: this process appended seq 5,
 // a peer appended seq 6, and this process still believes the head is 5. The
 // insert then collides with the unique index on chain_seq. The first attempt
 // therefore trusts the cache and every later attempt re-reads under the lock,
 // which is the whole reason the cache is safe to keep.
-func (s *Store) appendAuditChain(ctx context.Context, entry *AuditLog) error {
+//
+// The retry is also why the append owns its transaction rather than joining a
+// caller's: a colliding INSERT aborts the enclosing transaction, so recovering
+// from it needs a fresh one.
+func (s *Store) appendAuditChain(ctx context.Context, entries []*AuditLog) error {
 	s.auditChain.mu.Lock()
 	defer s.auditChain.mu.Unlock()
 
@@ -66,7 +95,7 @@ func (s *Store) appendAuditChain(ctx context.Context, entry *AuditLog) error {
 			}
 		}
 
-		if err = s.appendAuditChainOnce(ctx, entry); err == nil {
+		if err = s.appendAuditChainOnce(ctx, entries); err == nil {
 			return nil
 		}
 	}
@@ -74,7 +103,7 @@ func (s *Store) appendAuditChain(ctx context.Context, entry *AuditLog) error {
 	return err
 }
 
-func (s *Store) appendAuditChainOnce(ctx context.Context, entry *AuditLog) error {
+func (s *Store) appendAuditChainOnce(ctx context.Context, entries []*AuditLog) error {
 	err := s.db.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
 		// Released at commit or rollback, so a crashed process never strands it.
 		if _, err := tx.ExecContext(ctx,
@@ -93,26 +122,36 @@ func (s *Store) appendAuditChainOnce(ctx context.Context, entry *AuditLog) error
 			s.auditChain.loaded = true
 		}
 
-		seq := s.auditChain.seq + 1
+		seq := s.auditChain.seq
 
 		prevMAC := s.auditChain.mac
 		if prevMAC == nil {
 			prevMAC = s.auditGenesisMAC()
 		}
 
-		payload, err := auditChainPayload(
-			seq, entry.UID, entry.EventType, entry.UserID, entry.PerformedBy,
-			entry.Details, entry.CreatedAt, prevMAC,
-		)
-		if err != nil {
-			return err
+		for _, entry := range entries {
+			seq++
+
+			payload, err := auditChainPayload(
+				seq, entry.UID, entry.EventType, entry.UserID, entry.PerformedBy,
+				entry.Details, entry.CreatedAt, prevMAC,
+			)
+			if err != nil {
+				return err
+			}
+
+			// Copied per entry: ChainSeq is a pointer, so every row needs its
+			// own storage rather than a view of the loop's cursor.
+			entrySeq := seq
+
+			entry.ChainSeq = &entrySeq
+			entry.PrevMAC = prevMAC
+			entry.MAC = s.chainMAC(payload)
+
+			prevMAC = entry.MAC
 		}
 
-		entry.ChainSeq = &seq
-		entry.PrevMAC = prevMAC
-		entry.MAC = s.chainMAC(payload)
-
-		if _, err := tx.NewInsert().Model(entry).Exec(ctx); err != nil {
+		if _, err := tx.NewInsert().Model(&entries).Exec(ctx); err != nil {
 			return fmt.Errorf("failed to log audit event: %w", err)
 		}
 
@@ -126,8 +165,10 @@ func (s *Store) appendAuditChainOnce(ctx context.Context, entry *AuditLog) error
 		return err
 	}
 
-	s.auditChain.seq = *entry.ChainSeq
-	s.auditChain.mac = entry.MAC
+	head := entries[len(entries)-1]
+
+	s.auditChain.seq = *head.ChainSeq
+	s.auditChain.mac = head.MAC
 
 	return nil
 }
@@ -193,13 +234,20 @@ func (s *Store) ListLatestEventPerUser(ctx context.Context, eventType string) ([
 	return syncs, nil
 }
 
-// ListAuditEvents retrieves audit events with optional filters
+// ListAuditEvents retrieves audit events with optional filters.
+//
+// The session events (connection.opened / connection.closed) are left out of an
+// unfiltered listing — see SessionAuditEventTypes for why, and ask for one by
+// name to get it back.
 func (s *Store) ListAuditEvents(ctx context.Context, filter AuditFilter) ([]AuditEvent, error) {
 	var events []AuditLog
 	q := s.db.NewSelect().Model(&events)
 
-	if filter.EventType != nil {
+	switch {
+	case filter.EventType != nil:
 		q = q.Where("event_type = ?", *filter.EventType)
+	case !filter.IncludeSessionEvents:
+		q = q.Where("event_type NOT IN (?)", bun.List(SessionAuditEventTypes))
 	}
 
 	if filter.UserID != nil {

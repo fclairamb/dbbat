@@ -2951,12 +2951,23 @@ paths:
       description: |
         Returns a list of audit log events.
 
+        The per-session entries (`connection.opened` and `connection.closed`)
+        are left out of an unfiltered listing: a busy proxy writes tens of
+        thousands of them a day and they would bury the control-plane changes
+        this list exists for. Ask for one by name with `event_type` to get it
+        back. They are ordinary chained audit rows either way — see
+        `docs/audit-chain.md`; the connections list is the surface for browsing
+        sessions.
+
         Requires admin or viewer role.
       operationId: listAudit
       parameters:
         - name: event_type
           in: query
-          description: Filter by event type (e.g., user.created, grant.revoked)
+          description: |
+            Filter by event type (e.g., user.created, grant.revoked). Naming
+            `connection.opened` or `connection.closed` is also how those
+            session entries are listed, since they are excluded by default.
           schema:
             type: string
         - name: user_id
