@@ -477,8 +477,13 @@ is reachable, which is the case in CI:
 
 ```bash
 ORACLE_TEST_OJDBC_JAR=/path/to/ojdbc11.jar \
-  go test -tags integration -timeout 40m -run JDBCThin ./internal/proxy/oracle/
+  go test -tags integration -timeout 40m \
+    -run 'JDBCThin|RealOracleSessionTermination' ./internal/proxy/oracle/
 ```
+
+That pattern picks up the refusal case here plus the two asynchronous ones and
+the real-Oracle reference capture, all of which need the same jar — see the next
+section.
 
 ##### An asynchronous refusal: which call number, and whether to send one at all
 
@@ -500,42 +505,84 @@ never writes an OER outside a call**. Enumerated, the sites are:
 So the mid-reply case is not asynchronous in the sense that matters. dbbat cuts
 into the reply *before* the call's own end-of-call OER has reached the client,
 so the client is still parked in the receive for the very op `oerCallNumber`
-names. That is the same situation as a refusal on the client leg, one round trip
-later, and the measured JDBC result therefore carries over unchanged: ojdbc's
-`sequenceNumber` is still the one it sent, `T4CTTIfun.receive` matches, and the
-ORA-00028 is reported as itself rather than wrapped in an ORA-18745. Note the
-byte-quota refusal follows a *fetch*, and each fetch is its own call with its own
-sequence number — `observeClientCallNumber` runs on every client message, fetches
-included, so the number tracks the reply being cut into rather than the execute
-that opened the result set.
+names. Note the byte-quota refusal follows a *fetch*, and each fetch is its own
+call with its own sequence number — `observeClientCallNumber` runs on every
+client message, fetches included, so the number tracks the reply being cut into
+rather than the execute that opened the result set. **The number is right; the
+frame is unreadable anyway** — see the measurement below.
 
 The genuinely asynchronous case — the watchdog, with the client idle between
 calls — resolves the other way: there is no call to end, and dbbat must not
 invent one. An unsolicited OER on an idle socket is not read when it is sent; it
 sits in the receive buffer until the client's *next* request and is then consumed
 as that request's answer, carrying by construction the number of the *previous*
-call. On ojdbc 26.1 that is precisely the mismatch `handleOutOfSequenceError`
-turns into ORA-18745, so a "graceful" error frame would be strictly worse than
-the socket close, which surfaces as a plain ORA-17002/ORA-03113 I/O error. A real
-Oracle behaves the same way: `ALTER SYSTEM KILL SESSION` marks the session and
-pushes nothing, and the client learns at its next call — answered with ORA-00028
-stamped with *that* call's number. `DISCONNECT SESSION` drops the socket, which
-is what the watchdog imitates. **Do not add an error frame to
-`onLimitViolation`**; the code comment there says the same thing.
+call. That is precisely the mismatch ojdbc's `handleOutOfSequenceError` turns
+into ORA-18745, so a "graceful" error frame would be strictly worse than the
+socket close, which surfaces as a plain ORA-17002/ORA-03113 I/O error. **Do not
+add an error frame to `onLimitViolation`**; the code comment there says the same
+thing.
+
+###### What a real Oracle does, measured
+
+`TestIntegration_RealOracleSessionTermination` puts ojdbc in front of Oracle 23ai
+Free with **no proxy in between**, through a recording TCP tap
+(`tap_test.go`), parks it between calls, and kills its session from a second
+connection. All three forms agree on the part that matters: **not one byte is
+pushed at the idle client.**
+
+| Form | While the client is idle | At the client's next call |
+|---|---|---|
+| `ALTER SYSTEM KILL SESSION` | 0 bytes, socket held open | two Control packets (the break — ojdbc logs *"Break received from server. Responding with reset…"*) then a Data packet carrying `ORA-00028`, stamped with **that call's own** sequence number. Client reports a clean ORA-00028 |
+| `ALTER SYSTEM KILL SESSION … IMMEDIATE` | 0 bytes, **socket dropped** | ORA-03113 |
+| `ALTER SYSTEM DISCONNECT SESSION … IMMEDIATE` | 0 bytes, **socket dropped** | ORA-03113 |
+
+The IMMEDIATE forms are what `onLimitViolation` imitates, and the measurement of
+dbbat's own idle path matches them exactly: the tap records **zero** bytes
+between the revoke and the client's next statement, the socket is dropped, and
+ojdbc reports ORA-03113 — no ORA-00028, no ORA-18745.
+
+###### The mid-reply refusal: right number, unreadable frame
+
+The mid-reply case measured **worse than the reasoning predicted**, though not in
+the way the reasoning worried about.
+`TestIntegration_AsyncRefusalAgainstJDBCThin` trips a `max_bytes_transferred`
+quota inside a streaming result set, with the same tap in front of the proxy:
+
+- dbbat does everything the decision intended. The **inline** check fires (the
+  watchdog does not), and writes exactly one well-formed
+  `ORA-00028: session terminated: bandwidth quota exceeded for this grant`,
+  carrying a non-zero call number — read back off the wire, not off dbbat's logs;
+- **no client reports it.** ojdbc answers `ORA-03113: database connection closed
+  by peer` (`last_rpc=Fetch a row`, cause `ORA-17800: Got minus one from a read
+  call`); go-ora, driven through the same trip, answers `driver: bad connection`.
+
+The call number is *not* what breaks it — that was the identified risk and it is
+ruled out: a rejected call number produces ORA-18745, and no ORA-18745 appears
+anywhere. What is wrong is **where** the frame goes: dbbat cuts in at a *TNS
+packet* boundary, while a fetch reply is a *TTC message* stream whose messages
+straddle packets (which is why `handleContinuation` carries `lastRow` state
+across them). The OER therefore lands inside a half-delivered row batch, is
+consumed as row bytes, and the client waits for a remainder that never comes.
+Two drivers reading it the same way is what makes this the injection point and
+not either driver's error handling. The fix — hold the refusal until the row
+stream reaches a boundary, or stop writing a frame there at all — is
+`specs/todos/2026-08-13-01-mid-reply-refusal-lands-mid-ttc-message.md`. Nothing
+is under-enforced meanwhile: the session is torn down and the statement is logged
+with `aborted: bandwidth quota exceeded for this grant`; only the client's
+diagnosis is wrong.
 
 Confidence: the enumeration and the `hasPendingQuery()` gate are read off the
 code and pinned by `TestMidStreamRefusalEndsTheCallTheClientIsWaitingOn` and
-`TestIdleLimitViolationSendsNoOER`. The *consequence* for a live client is
-**reasoned, not measured** — it rests on the ojdbc 26.1 behaviour measured for
-the answering case above, not on a new capture of a revocation or a mid-fetch
-quota trip against a live JDBC client. The residual gap is
-`specs/todos/2026-08-12-09-measure-the-mid-reply-refusal-against-jdbc.md`, which
-also records the one way the reasoning could fail: `hasPendingQuery()` is dbbat's
-own bookkeeping, not the client's, so a missed completion would leave it set past
-the real end of a call and a violation would then stamp a call the client has
-already been answered for. That degrades to exactly the pre-fix ORA-18745
-wrapping — no worse than before the call number existed — and the session is torn
-down regardless.
+`TestIdleLimitViolationSendsNoOER`; the two live cases above are measured against
+Oracle 23ai Free and pinned by the integration tests named with them. One caveat
+on the driver: the measurement was made with **ojdbc 23.7.0.25.01** (the jar
+bundled with SQLcl 26.1), not 26.1 — no 26.1 jar was reachable on the machine.
+That driver carries the same sequence check the 26.1 finding rests on
+(`T4CTTIfun.receive` compares `T4CTTIoer11.callNumber` against its own
+`sequenceNumber` and routes a mismatch to `handleOutOfSequenceError`, which logs
+*"TTIOER call number {0} does not match TTIFUN sequence number {1}"*), so
+"ORA-18745 did not appear" is meaningful rather than vacuous — but the ORA-18745
+mislabelling itself was not re-observed on 23.7, only its absence.
 
 ### Oracle NUMBER Encoding
 
