@@ -170,7 +170,6 @@ This applies even when the current task is otherwise complete — capture the fo
 ./dbbat dump anonymise <in> [out]  # Strip session metadata from a .pcapng capture
 ./dbbat audit verify               # Walk the audit_log HMAC chain; non-zero exit on a break
 ./dbbat audit verify --queries [--connection <uid>]  # Same for the per-connection query chains
-./dbbat audit verify --queries --allow-legacy-stamps  # Tolerate pre-0.24 unkeyed head stamps (removed in 0.25)
 ./dbbat audit verify --rows [--connection <uid>]     # Same for the per-query captured result row chains
 ```
 
@@ -426,16 +425,15 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   it: a verbatim head is readable out of the table it came from, so copying it
   after a trailing deletion would need no key. `query_chain_mac` additionally
   carries a format version (`query_chain_stamp_version`) *inside* its MAC —
-  `0` is the unkeyed stamp 0.23.x wrote, which cannot be re-sealed because the
-  key never enters the database; sealing the version is what stops a `1` row
-  from being relabelled `0` to get the weaker rule. Since 0.24 a `0` row is a
-  **break** ("its tail cannot be verified"), not a weaker pass: tolerating it
-  was a standing downgrade path, since replacing a sealed stamp with a raw head
-  MAC and version `0` needs no key. `dbbat audit verify --queries
-  --allow-legacy-stamps` restores the old counting behavior
-  (`sessions_with_legacy_forgeable_head_stamp`) for the single upgrade from
-  0.23.x that has such rows, and is removed in 0.25; the REST endpoints have no
-  equivalent and no legacy counter. The query walk enumerates **stamped
+  `0` is the unkeyed stamp an early revision of the feature wrote, which cannot
+  be re-sealed because the key never enters the database; sealing the version is
+  what stops a `1` row from being relabelled `0` to get the weaker rule. A `0`
+  row is a **break** ("its tail cannot be verified"), not a weaker pass, with no
+  opt-out anywhere — CLI or REST: tolerating it was a standing downgrade path,
+  since replacing a sealed stamp with a raw head MAC and version `0` needs no
+  key. 0.24 ships the chain, the keyed stamp and the version column together, so
+  only a store written by a **pre-0.24 development build** can hold a `0` row,
+  and such a store stays unverifiable. The query walk enumerates **stamped
   connections**, not only connections found in `queries`, so a session whose
   statements are deleted *in full* is judged instead of skipped (deleting all
   but one was always caught). Zero survivors under a keyed stamp is a break
