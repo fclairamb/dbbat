@@ -287,13 +287,56 @@ silently letting the statements through.
 
 ## Who may approve
 
-- Any user with the **`admin`** role, plus
-- any member of a group listed in **`approver_user_group_uids`** on the definition
-  the grant was issued from.
+Resolution is a **fallback chain**, most specific first. The first step that
+yields a non-empty set is the answer; the steps do not union with each other.
 
-**Self-approval is always rejected**, including for admins. Four eyes means
-four eyes; an admin who could wave their own statements through would make the
-control decorative.
+1. Any user with the **`admin`** role. Always, at every step.
+2. Any member of a group listed in **`approver_user_group_uids`** on the
+   definition the grant was issued from — an explicit policy choice, so a
+   non-empty list here **wins outright** and the steps below never run.
+3. Otherwise, any member of a group listed in
+   **`query_approver_user_group_uids` on the target server**.
+4. Otherwise, any member of the **union** of the
+   `query_approver_user_group_uids` of every server group that server currently
+   belongs to. Several groups holding the same server union their lists, the
+   same way multiple approver groups on a definition already do.
+5. Otherwise **nobody but admins** — which is exactly the behavior of an
+   instance that configures none of this, so nothing changes on upgrade.
+
+A grant that no longer resolves (deleted; revoked or expired on the legacy
+lookup) carries no readable approver list, so it falls through to step 3 rather
+than to a hard deny: the server-level lists are a property of the *database*,
+not of the grant. An instance with none configured still lands on admins only.
+
+**The two approver kinds do not imply one another.**
+`query_approver_user_group_uids` governs holds, as above;
+`access_approver_user_group_uids` governs **grant requests** and has no say over
+a held statement. An organization wanting overlap lists the same user group in
+both. See `website/docs/features/access-control.md`.
+
+### Resolution is live, not snapshotted
+
+The server- and group-level lists are read **at decision time**, on every
+decision. Editing one — or moving a server between groups — changes who may
+resolve immediately, including for statements *already parked*. Nothing is
+copied onto the grant when it is issued.
+
+That is deliberate, and it is the **second** exception to dbbat's rule that a
+live grant's behavior never changes under it (the first being live server-group
+membership). Approver lists are operational data: when a lead leaves, their
+replacement has to be able to answer the hold that is blocking a connection
+right now, not from the next grant issuance onwards. The definition's
+`approver_user_group_uids` keeps the opposite, versioned behavior — editing a
+definition inserts a successor and leaves live grants alone.
+
+**Self-approval is always rejected**, including for admins, and including for
+somebody named in every list above. Four eyes means four eyes; an admin who
+could wave their own statements through would make the control decorative.
+
+The API reports which of these applies to the caller: every row of
+`GET /api/v1/queries/pending` carries `approver_role` — `admin`,
+`definition_approver`, `server_approver`, or empty — so the UI can say *why* a
+viewer may resolve a given hold rather than merely enabling a button.
 
 Two independent checks guard substitution:
 
@@ -311,7 +354,11 @@ unblocked.
 ## Configuring patterns
 
 Patterns live on the **grant definition** only (no server-level patterns; that
-is a possible follow-up, deliberately out of scope). A grant carries no shape
+is a possible follow-up, deliberately out of scope). Note the asymmetry with
+approvers, which *did* move onto the fleet: what to gate is a property of the
+policy, while who guards a database is a property of that database.
+
+A grant carries no shape
 of its own: it pins the definition *version* it was issued from, and
 `store.AccessGrant`'s accessors read the patterns and approver groups back off
 that row. The proxy session still holds only a `*store.Grant` — the definition
@@ -608,6 +655,11 @@ partial index on `approval_status = 'pending'`.
 On `grant_definitions`: `approval_patterns text[]`, `approver_user_group_uids
 uuid[]`. **Not** on `access_grants` — a grant references its definition through
 `grant_definition_id` and reads both from there.
+
+On `servers` **and** `server_groups`: `access_approver_user_group_uids uuid[]`
+and `query_approver_user_group_uids uuid[]`, both defaulting to `{}`. These are
+the fallback steps above; they are read live rather than pinned onto anything,
+so there is nothing to copy at issuance time.
 
 ## Environment variables
 

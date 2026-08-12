@@ -362,8 +362,10 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   to if its group is deleted (`ON DELETE SET NULL` — narrows, never widens).
   **Membership is live and never snapshotted: adding a server to a group
   immediately widens every live grant bound to it, sessions already running
-  included, and removing one narrows them — including the anchor.** That is the single, deliberate exception to the immutable-versioning
-  rule below, accepted because group membership is operational data — the admin
+  included, and removing one narrows them — including the anchor.** That is the
+  **first of two** deliberate exceptions to the immutable-versioning
+  rule below (the second is the approver lists), accepted because group
+  membership is operational data — the admin
   UI warns about the blast radius at the point of edit. One `max_query_counts`
   and one `max_bytes_transferred` budget is consumed across the *whole group*,
   and `priority` ranks group-bound grants against each other on the databases
@@ -373,10 +375,31 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   matching statement mid-flight until a second human approves it. Self-approval
   is always rejected; a hold has no timeout. Off by default
   (`DBB_APPROVAL_ENABLED`) — see `docs/approvals.md`
+- **Two approver kinds live on the fleet, not on the policy.** `servers` and
+  `server_groups` each carry `access_approver_user_group_uids` (who may
+  approve/deny **grant requests** for that database) and
+  `query_approver_user_group_uids` (who may release **approval holds** on
+  statements against it). Neither implies the other — an org wanting overlap
+  lists the same user group in both. Resolution is a fallback chain, in one
+  place (`store.ResolveServerApproverGroups`): for a grant request, the server's
+  list → the *union* of its server groups' lists → admins; for a hold, the
+  definition's `approver_user_group_uids` (which wins outright when non-empty) →
+  the server's → its groups' union → admins. Empty everywhere = admin-only =
+  exactly the pre-feature behaviour. **Self-approval is refused on every path**,
+  including both Slack transports. Each pending item reports `approver_role` for
+  the caller (`admin` / `definition_approver` / `server_approver` / empty) so the
+  UI can say which hat they wear
+- **Approver lists are live, never snapshotted**: they are read at decision time,
+  so an edit — or moving a server between groups — immediately changes who may
+  decide requests already filed and statements already parked. That is the
+  **second** deliberate exception to the immutable-versioning rule, alongside
+  live server-group membership above, and for the same reason: a departed lead's
+  replacement has to be effective now
 - **Definitions are immutably versioned**: an edit archives the current row
   (`archived_at`) and inserts a successor sharing its `lineage_uid`, so a live
   grant's behaviour never changes under it — *except* for the scope it inherits
-  from live server-group membership, above. A slug resolves to the live row.
+  from live server-group membership and the approvers it resolves off the
+  server/server-group chain, both above. A slug resolves to the live row.
   **Deactivating** a definition is different from that archival — it withdraws
   the whole lineage and fails closed at auth time; hard deletion is refused
   (409) while anything references it.

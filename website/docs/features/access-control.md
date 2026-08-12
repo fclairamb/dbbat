@@ -148,9 +148,10 @@ exceptions: a bound grant covers what its group holds *now*, so even the
 database it was originally issued for stops being covered once it leaves the
 group.
 
-This is the single deliberate exception to "a live grant's behaviour never
-changes under it". It is what makes groups useful — a new replica inherits the
-fleet's policy without touching a definition — and it is why membership is an
+This is one of two deliberate exceptions to "a live grant's behaviour never
+changes under it" — the other being the approver lists below, for the same
+reason. It is what makes groups useful — a new replica inherits the fleet's
+policy without touching a definition — and it is why membership is an
 admin-only surface that reports how many live grants an edit moves before you
 save it.
 :::
@@ -167,6 +168,94 @@ Deleting a server group is the one case where the anchor comes back, and it
 still narrows: grants bound to it unbind and fall back to the single database
 they were issued for. Definitions scoped to it match no database at all (fail
 closed) until an admin edits them.
+
+## Approvers on servers and server groups
+
+Who guards a database is a property of that **database**, not of the policy
+shape used to reach it. Two prod databases with different on-call teams should
+not force two clones of the same grant definition.
+
+So a server — and, as a fallback, a server group — carries two lists of user
+groups:
+
+| Field | Decides |
+|---|---|
+| `access_approver_user_group_uids` | **Grant requests** targeting this server: `POST /grant-requests/:uid/approve` and `/deny` |
+| `query_approver_user_group_uids` | **Approval holds** — a pattern-matched statement parked mid-flight against this server |
+
+```bash
+curl -X PUT http://localhost:4200/api/v1/databases/$DB_UID \
+  -H "Authorization: Bearer $DBBAT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "access_approver_user_group_uids": ["'$OPS_GROUP_UID'"],
+    "query_approver_user_group_uids": ["'$LEAD_OPS_GROUP_UID'"]
+  }'
+```
+
+The split matches the two decisions' actual shape. A grant request is an
+asynchronous policy call: ops can take an hour over it. A hold blocks a live
+wire-protocol connection and needs the fastest competent responder, which is
+usually a smaller group. Different audiences, different latency.
+
+### The fallback chain
+
+For a **grant request**:
+
+1. the target server's `access_approver_user_group_uids`, if non-empty;
+2. otherwise the **union** of that field across every server group the server
+   currently belongs to;
+3. otherwise admins only.
+
+For an **approval hold**, one step is prepended:
+
+1. the grant definition's own `approver_user_group_uids`, if non-empty — an
+   explicit policy choice, so it wins outright;
+2. otherwise the server's `query_approver_user_group_uids`;
+3. otherwise the **union** across the server's groups;
+4. otherwise admins only.
+
+Admins decide at every step. Levels do not union with each other: naming a group
+on the server is how you *override* the group-level default for that one
+database. Groups at the same level do union — several server groups holding the
+same server contribute all their approvers, exactly as several approver groups
+on one definition already do.
+
+Configure none of it and you get today's behaviour unchanged: admin-only
+decisions, everywhere.
+
+### No hierarchy between the two kinds
+
+A query approver gains no say over grant requests, and an access approver gains
+no say over a held statement. Neither implies the other; an organisation that
+wants the same people doing both lists the same user group in both fields.
+
+### Resolution is live
+
+:::warning Editing an approver list changes who can act on work already waiting
+
+Both lists are read **at decision time** and never snapshotted onto a grant.
+Editing one — or moving a server between groups — immediately changes who may
+approve, including for requests already filed and statements already parked.
+
+This is the **second** deliberate exception to "a live grant's behaviour never
+changes under it", after live server-group membership, and for the same reason:
+approver lists are operational data. When a lead leaves, their replacement has to
+be able to release the hold that is blocking a connection *right now*, not from
+the next grant issuance onwards. The definition's `approver_user_group_uids`
+keeps the opposite, versioned behaviour.
+:::
+
+### Self-approval is never delegated
+
+Being named as an approver never lets you decide your own request or release
+your own held statement. That holds on every path — the API, the web UI, and
+both Slack transports.
+
+Each pending item reports `approver_role` for the calling user (`admin`,
+`definition_approver`, `server_approver`, or empty), which the UI renders as the
+hat you are wearing — so an approver can see *why* they can act on one row and
+not the next.
 
 ## Overlapping grants
 
