@@ -1,0 +1,19 @@
+# Two close-cursors piggybacks from the DB-bundled OCI client (sqlplus 23.26,
+# gvenzl/oracle-free:23-slim), captured off the wire against a dbbat proxy in
+# the same session as oci_bundled_first_call.hex. TNS Data payloads again: two
+# data-flag bytes, then the TTC message, truncated at 128 bytes -- past
+# everything this decode reads.
+#
+# They carry the 64-bit OCI op header the Instant Client 23.3 does not write:
+#
+#   11 69 <seq> 00 00 <ub4> <sb8 seq+1>   op header, 17 bytes
+#   fe ff ff ff ff ff ff ff               pointer sentinel
+#   <sb8 count> <ub4 id>...               the list
+#   <stapled op>                          the call the client is parked on
+#
+# The first staples a set-end-to-end-attrs piggyback (11 87) behind its list;
+# the second staples the INSERT this suite refuses (03 5e), whose sequence
+# number (0x0e) is the one a refusal has to carry, and which dbbat can only
+# reach by walking the list. One frame per non-comment line.
+000011690800007b0500000900000000000000feffffffffffffff01000000000000000200000011870900007b0500000a0000000000000000000000000000000000000000000000180000000000000000000000000000000000000000000000feffffffffffffff0800000000000000b8664138000000000000000000000000
+000011690d00007b0500000e00000000000000feffffffffffffff010000000000000002000000035e0e00007b0500000f000000000000002180000000000000feffffffffffffff2b00000000000000feffffffffffffff0d00000000000000fefffffffffffffffeffffffffffffff00000000010000000000000000000000

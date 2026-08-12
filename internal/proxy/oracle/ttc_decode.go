@@ -507,6 +507,101 @@ func isCloseCursorsWideHeader(ttcPayload []byte) bool {
 	return bytes.Equal(ttcPayload[sentinelStart:sentinelStart+len(closeCursorsWideSentinel)], closeCursorsWideSentinel)
 }
 
+// closeCursorsWide8HeaderLen is the size of the op header the *other* OCI
+// flavor writes — see isCloseCursorsWide8Header. It replaces the 5-byte header
+// above and everything after it shifts by the difference, which is the whole
+// reason this needs its own walk rather than an offset tweak.
+const closeCursorsWide8HeaderLen = 17
+
+// closeCursorsWide8SeqOffset is where that header carries its "next sequence"
+// field, as a little-endian uint64.
+const closeCursorsWide8SeqOffset = 9
+
+// isCloseCursorsWide8Header reports whether ttcPayload uses the 64-bit variant
+// of the OCI header: `[msg][func][seq][0x00][0x00][ub4 …][sb8 seq+1]` followed
+// by the same 8-byte pointer sentinel.
+//
+// It exists because "the OCI encoding" turned out to be two encodings, and the
+// difference hung a client. The Instant Client 23.3 the wide support was
+// captured from writes the 5-byte header above, with 4-byte integers after it;
+// the client bundled in gvenzl/oracle-free:23-slim (23.26) writes this one,
+// with 8-byte integers. Same protocol version, same upstream, different widths
+// — so a decoder pinned to one of them reads the other's close list as garbage
+// and, far worse, never finds the call stapled behind it:
+//
+//	11 69 0d 00 00 7b 05 00 00 0e 00 00 00 00 00 00 00  ← header, seq 13
+//	fe ff ff ff ff ff ff ff                             ← pointer sentinel
+//	01 00 00 00 00 00 00 00  02 00 00 00                ← one cursor: id 2
+//	03 5e 0e …                                          ← the call, sequence 14
+//
+// Refusing that INSERT with the sequence dbbat could see (13, or whatever the
+// previous call was) rather than 14 is what left sqlplus waiting forever.
+//
+// The guard is the same one the 4-byte variant uses, and for the same reason:
+// the second field must be this header's own sequence number plus one — the
+// sequence the next TTC message will carry — so a payload that does not fit
+// the shape is read as one of the other encodings instead of guessed at.
+func isCloseCursorsWide8Header(ttcPayload []byte) bool {
+	const sentinelStart = 3 + closeCursorsWide8HeaderLen - 3
+
+	if len(ttcPayload) < sentinelStart+len(closeCursorsWideSentinel) {
+		return false
+	}
+
+	if ttcPayload[3] != 0x00 || ttcPayload[4] != 0x00 {
+		return false
+	}
+
+	next := binary.LittleEndian.Uint64(ttcPayload[closeCursorsWide8SeqOffset : closeCursorsWide8SeqOffset+8])
+	if next != uint64(ttcPayload[2])+1 {
+		return false
+	}
+
+	return bytes.Equal(ttcPayload[sentinelStart:sentinelStart+len(closeCursorsWideSentinel)], closeCursorsWideSentinel)
+}
+
+// decodeCloseCursorsWide8 walks the 64-bit OCI close list: an 8-byte count,
+// then one 4-byte id per cursor. The id width is *not* symmetric with the
+// count, and that is measured rather than assumed — the stapled op that follows
+// lands exactly at count*4 bytes past the count in every recorded frame, which
+// is the only reading under which dbbat can find the call behind the list.
+//
+// Same guards as the other two walks: a bounded count, every id inside 16 bits,
+// enough bytes for the whole list. A payload that does not fit is rejected and
+// nothing is deleted.
+func decodeCloseCursorsWide8(ttcPayload []byte) ([]uint16, int, error) {
+	pos := closeCursorsWide8HeaderLen + len(closeCursorsWideSentinel)
+
+	if pos+8 > len(ttcPayload) {
+		return nil, 0, fmt.Errorf("%w: truncated wide count", ErrNotCloseCursors)
+	}
+
+	count := binary.LittleEndian.Uint64(ttcPayload[pos : pos+8])
+	if count == 0 || count > closeCursorsMaxCount {
+		return nil, 0, fmt.Errorf("%w: wide cursor count decoded as %d", ErrNotCloseCursors, count)
+	}
+
+	pos += 8
+
+	if pos+4*int(count) > len(ttcPayload) {
+		return nil, 0, fmt.Errorf("%w: truncated after wide count of %d", ErrNotCloseCursors, count)
+	}
+
+	cursorIDs := make([]uint16, 0, count)
+
+	for range count {
+		id := binary.LittleEndian.Uint32(ttcPayload[pos : pos+4])
+		if id == 0 || id > cursorReexecMaxID {
+			return nil, 0, fmt.Errorf("%w: wide cursor id decoded as %d", ErrNotCloseCursors, id)
+		}
+
+		cursorIDs = append(cursorIDs, uint16(id))
+		pos += 4
+	}
+
+	return cursorIDs, pos, nil
+}
+
 // decodeCloseCursorsWide extracts the cursor ids out of an OCI wide-encoded
 // close-cursors piggyback, once isCloseCursorsWideHeader has confirmed the
 // header shape. The count and every id are little-endian uint32 fields
@@ -612,6 +707,10 @@ func decodeCloseCursorsAt(ttcPayload []byte) ([]uint16, int, error) {
 
 	if isCloseCursorsWideHeader(ttcPayload) {
 		return decodeCloseCursorsWide(ttcPayload)
+	}
+
+	if isCloseCursorsWide8Header(ttcPayload) {
+		return decodeCloseCursorsWide8(ttcPayload)
 	}
 
 	// TTC >= 18 pads the function header with a zero byte; older ones do not.
