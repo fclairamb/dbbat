@@ -29,3 +29,15 @@ the natural place to point the `front/CLAUDE.md` troubleshooting entry at.
   `.github/workflows/ci.yml`.
 - Close it immediately as resolved-by-`<commit>` if the issue tracker is only
   used for open work; the point is the searchable record.
+
+## Resolved open questions
+
+> May an implementing agent run `gh issue create` on the owner's behalf?
+
+**Decision (2026-08-11): no.** The owner was asked directly during an
+`/implement-todos` batch and answered "proceed but do not create issues".
+Creating a public issue is an outward-facing publish action and stays a human
+action — which is exactly why the automated investigation session left it
+undone. **This spec is therefore not implementable by automation** — it stays in
+`specs/todos/` until the owner files the issue themselves, at which point only
+the `[#N](…)` link edit remains. Do not implement it, and do not archive it.

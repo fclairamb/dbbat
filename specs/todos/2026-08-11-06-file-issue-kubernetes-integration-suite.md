@@ -29,3 +29,14 @@ from outside the repo, and the release notes reference issue numbers.
   todo `2026-08-11-05`.
 - Add the `[#N](https://github.com/fclairamb/dbbat/issues/N)` links to both spec
   files (the first one now lives under `specs/done/2026/08/`).
+
+## Resolved open questions
+
+> May an implementing agent run `gh issue create` on the owner's behalf?
+
+**Decision (2026-08-11): no.** The owner was asked directly during an
+`/implement-todos` batch and answered "proceed but do not create issues".
+Creating a public issue is an outward-facing publish action and stays a human
+action. **This spec is therefore not implementable by automation** — it stays in
+`specs/todos/` until the owner files the issues themselves, at which point only
+the `[#N](…)` link edits remain. Do not implement it, and do not archive it.

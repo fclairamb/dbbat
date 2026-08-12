@@ -27,3 +27,15 @@ authorization to make one on the user's behalf.
 - Add the `[#N](https://github.com/fclairamb/dbbat/issues/N)` link to the spec
   file, wherever it has been archived to under `specs/done/`.
 - Do the same for the parent rename spec if its issue is still missing.
+
+## Resolved open questions
+
+> May an implementing agent run `gh issue create` on the owner's behalf?
+
+**Decision (2026-08-11): no.** The owner was asked directly during an
+`/implement-todos` batch and answered "proceed but do not create issues".
+Creating a public issue is an outward-facing publish action and stays a human
+action — which is the same reason the original spec left it undone. **This spec
+is therefore not implementable by automation** — it stays in `specs/todos/`
+until the owner files the issue themselves, at which point only the `[#N](…)`
+link edits remain. Do not implement it, and do not archive it.

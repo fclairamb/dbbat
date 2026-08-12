@@ -55,3 +55,24 @@ release-please owns `CHANGELOG.md`.
 
 Check `.release-please-manifest.json`: the shims must survive at least one
 tagged release after the one that introduced them.
+
+## Resolved open questions
+
+> The release gate above: may the shims be removed yet?
+
+**Checked on 2026-08-11 — the gate does NOT pass, and the owner has waived it.**
+The rename commit `a1cb52c` is contained in no tag; the newest release is
+`v0.23.2` (2026-08-08), which still speaks the old field names. So the shims
+have never shipped in a release, and removing them means the rename and the
+removal land in the same version, with no deprecation window at all.
+
+**Decision (2026-08-11): remove them now anyway.** Implement the removal exactly
+as described above. Consequence to accept knowingly: an API client written
+against `v0.23.2` that still sends `group_uids` / `approver_group_uids` gets a
+**400** on upgrade rather than a silently-honoured legacy spelling. That is the
+intended behaviour — prefer the 400 over ignoring the field, since ignoring a
+user-group scope fails **open** (mirror `errRetiredDatabaseUIDs`).
+
+The commit body must carry a `BREAKING CHANGE:` trailer saying the pre-rename
+`group_uids` / `approver_group_uids` input spellings are gone and are now
+rejected with 400; release-please owns `CHANGELOG.md`.
