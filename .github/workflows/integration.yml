@@ -45,18 +45,28 @@ jobs:
   # The Oracle suite is kept out of the matrix above: its images are slow to
   # boot, so it gets its own job with a longer budget.
   #
-  # It runs twice, over ORACLE_TEST_IMAGE. The empty entry takes the suite
-  # default — gvenzl/oracle-free:23-slim, see `defaultOracleImage` in
-  # internal/proxy/oracle/integration_test.go — so CI exercises exactly what a
-  # developer gets from a bare `make test-e2e-oracle`. The second pins
-  # gvenzl/oracle-xe:18.4.0-slim: 18c XE coverage is kept, but as a deliberate
-  # choice rather than an inherited default. Both run on amd64, because the XE
-  # image is published for linux/amd64 only.
+  # Three legs, over ORACLE_TEST_IMAGE / DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH. The
+  # first entry takes the suite default — gvenzl/oracle-free:23-slim, see
+  # `defaultOracleImage` in internal/proxy/oracle/integration_test.go — so CI
+  # exercises exactly what a developer gets from a bare `make test-e2e-oracle`.
+  # The second pins gvenzl/oracle-xe:18.4.0-slim: 18c XE coverage is kept, but
+  # as a deliberate choice rather than an inherited default. Both run on
+  # amd64, because the XE image is published for linux/amd64 only.
+  #
+  # The third leg re-runs the suite default image with
+  # DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH=1, which disables the client-packet
+  # rewrite so every AUTH exchange goes through the synthetic builders
+  # instead. That fallback is otherwise unreachable — nothing else ever calls
+  # it — and it rotted unnoticed for months (see docs/oracle.md, "Exercising
+  # the synthetic AUTH fallback"). This job only runs nightly and on manual
+  # dispatch, never per-push or per-PR, and matrix legs run in parallel, so a
+  # third leg adds no wall-clock cost to anyone's inner loop; it was not worth
+  # gating separately.
   oracle:
     name: oracle (${{ matrix.label }})
     runs-on: ubuntu-24.04
     strategy:
-      # One image failing should not hide the state of the other.
+      # One leg failing should not hide the state of the others.
       fail-fast: false
       matrix:
         include:
@@ -64,6 +74,9 @@ jobs:
             image: ""
           - label: 18c XE (pinned)
             image: gvenzl/oracle-xe:18.4.0-slim
+          - label: 23ai Free (synthetic AUTH fallback)
+            image: ""
+            synthetic_auth: "1"
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -74,6 +87,7 @@ jobs:
       - name: Run Oracle integration suite
         env:
           ORACLE_TEST_IMAGE: ${{ matrix.image }}
+          DBBAT_ORACLE_FORCE_SYNTHETIC_AUTH: ${{ matrix.synthetic_auth || '' }}
         run: go test -tags integration -timeout 60m -count=1 -v ./internal/proxy/oracle/
 
   # The Kubernetes tunnel suite gets its own job for the same reason Oracle
