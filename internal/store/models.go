@@ -221,10 +221,22 @@ type Server struct {
 	// mirroring User.ProtocolData — rather than a dedicated column per setting.
 	ProtocolData *ServerProtocolData `bun:"protocol_data,type:jsonb,nullzero" json:"-"`
 	Listable     bool                `bun:"listable,notnull" json:"listable"`
-	CreatedBy    *uuid.UUID          `bun:"created_by,type:uuid" json:"created_by"`
-	CreatedAt    time.Time           `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
-	UpdatedAt    time.Time           `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
-	DeletedAt    *time.Time          `bun:"deleted_at,soft_delete" json:"-"`
+	// AccessApproverUserGroupUIDs / QueryApproverUserGroupUIDs are the two
+	// approver kinds attached to this server: who may decide grant *requests*
+	// targeting it, and who may release approval *holds* on statements against
+	// it. Empty (the default) falls back to the server groups this server
+	// belongs to, and then to admins — see ResolveServerApproverGroups.
+	//
+	// Read live at decision time, never snapshotted onto a grant: this is the
+	// second deliberate exception to the immutable-versioning rule, alongside
+	// live server-group membership.
+	AccessApproverUserGroupUIDs []uuid.UUID `bun:"access_approver_user_group_uids,array,notnull,default:'{}'" json:"access_approver_user_group_uids"`
+	QueryApproverUserGroupUIDs  []uuid.UUID `bun:"query_approver_user_group_uids,array,notnull,default:'{}'" json:"query_approver_user_group_uids"`
+
+	CreatedBy *uuid.UUID `bun:"created_by,type:uuid" json:"created_by"`
+	CreatedAt time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	UpdatedAt time.Time  `bun:"updated_at,notnull,default:current_timestamp" json:"updated_at"`
+	DeletedAt *time.Time `bun:"deleted_at,soft_delete" json:"-"`
 }
 
 // ServerProtocolData is per-protocol material attached to a server, stored
@@ -370,6 +382,12 @@ type ServerUpdate struct {
 	// next connect learns afresh. It is the exit for a cluster whose CA
 	// rotated — the case that made TOFU worth having at all.
 	K8sClearLearnedCACert bool
+	// AccessApproverUserGroupUIDs / QueryApproverUserGroupUIDs replace the
+	// server's approver lists wholesale. nil leaves them untouched; an explicit
+	// empty slice clears them, which is what hands the decision back to the
+	// server groups (and then to admins).
+	AccessApproverUserGroupUIDs *[]uuid.UUID
+	QueryApproverUserGroupUIDs  *[]uuid.UUID
 }
 
 // Connection represents a connection through the proxy
@@ -1060,11 +1078,19 @@ type UserGroupMember struct {
 type ServerGroup struct {
 	bun.BaseModel `bun:"table:server_groups,alias:sg"`
 
-	UID         uuid.UUID  `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
-	Name        string     `bun:"name,notnull" json:"name"`
-	Description string     `bun:"description,notnull,default:''" json:"description"`
-	CreatedBy   *uuid.UUID `bun:"created_by,type:uuid" json:"created_by,omitempty"`
-	CreatedAt   time.Time  `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
+	UID         uuid.UUID `bun:"uid,pk,type:uuid,default:gen_random_uuid()" json:"uid"`
+	Name        string    `bun:"name,notnull" json:"name"`
+	Description string    `bun:"description,notnull,default:''" json:"description"`
+	// AccessApproverUserGroupUIDs / QueryApproverUserGroupUIDs are the
+	// group-level fallback for the two approver kinds: they apply to every
+	// server in this group that names none of its own. Several groups holding
+	// the same server union, matching how a definition's approver groups union.
+	//
+	// Read live at decision time, like membership itself.
+	AccessApproverUserGroupUIDs []uuid.UUID `bun:"access_approver_user_group_uids,array,notnull,default:'{}'" json:"access_approver_user_group_uids"`
+	QueryApproverUserGroupUIDs  []uuid.UUID `bun:"query_approver_user_group_uids,array,notnull,default:'{}'" json:"query_approver_user_group_uids"`
+	CreatedBy                   *uuid.UUID  `bun:"created_by,type:uuid" json:"created_by,omitempty"`
+	CreatedAt                   time.Time   `bun:"created_at,notnull,default:current_timestamp" json:"created_at"`
 }
 
 // ServerGroupMember is the group ↔ server join row, the exact counterpart of

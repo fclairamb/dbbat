@@ -24,8 +24,21 @@ func (s *Store) CreateServerGroup(ctx context.Context, group *ServerGroup) (*Ser
 	result := &ServerGroup{
 		Name:        group.Name,
 		Description: group.Description,
-		CreatedBy:   group.CreatedBy,
-		CreatedAt:   time.Now(),
+		// Empty is the default and means "this group names no approvers", not
+		// "nobody may approve": member servers with their own lists still use
+		// them, and admins always decide.
+		AccessApproverUserGroupUIDs: copyUUIDs(group.AccessApproverUserGroupUIDs),
+		QueryApproverUserGroupUIDs:  copyUUIDs(group.QueryApproverUserGroupUIDs),
+		CreatedBy:                   group.CreatedBy,
+		CreatedAt:                   time.Now(),
+	}
+
+	if result.AccessApproverUserGroupUIDs == nil {
+		result.AccessApproverUserGroupUIDs = []uuid.UUID{}
+	}
+
+	if result.QueryApproverUserGroupUIDs == nil {
+		result.QueryApproverUserGroupUIDs = []uuid.UUID{}
 	}
 
 	if _, err := s.db.NewInsert().Model(result).Returning("*").Exec(ctx); err != nil {
@@ -70,10 +83,23 @@ func (s *Store) ListServerGroups(ctx context.Context) ([]ServerGroup, error) {
 }
 
 // UpdateServerGroup mutates the editable fields of a server group.
+//
+// The approver lists are written unconditionally, like name and description:
+// the caller passes the group it read and mutated, so an unchanged list writes
+// itself back. They take effect immediately for every decision — see
+// ResolveServerApproverGroups.
 func (s *Store) UpdateServerGroup(ctx context.Context, group *ServerGroup) error {
+	if group.AccessApproverUserGroupUIDs == nil {
+		group.AccessApproverUserGroupUIDs = []uuid.UUID{}
+	}
+
+	if group.QueryApproverUserGroupUIDs == nil {
+		group.QueryApproverUserGroupUIDs = []uuid.UUID{}
+	}
+
 	res, err := s.db.NewUpdate().
 		Model(group).
-		Column("name", "description").
+		Column("name", "description", "access_approver_user_group_uids", "query_approver_user_group_uids").
 		Where("uid = ?", group.UID).
 		Exec(ctx)
 	if err != nil {
