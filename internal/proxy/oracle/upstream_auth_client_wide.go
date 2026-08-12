@@ -12,13 +12,16 @@ import (
 // (thin) encoding every Go/Java/Python driver speaks. An OCI client — sqlplus,
 // the Instant Client — negotiates a different dialect during the pre-auth
 // relay, and the upstream parses AUTH at *those* caps, so a thin body handed to
-// an OCI-conditioned upstream is unreadable (two break markers + ORA-03120).
+// an OCI-conditioned upstream is unreadable.
 //
 // That premise is measured, not assumed: with the wide dispatch below disabled
 // so a thin body goes out on an OCI session, a real sqlplus login through the
 // proxy dies with ORA-03113 (end-of-file on communication channel) and never
-// authenticates. TestIntegration_SqlplusLoginThroughSyntheticAuth is the same
-// login with the dispatch on, and it passes.
+// authenticates — the upstream stops answering rather than reporting anything.
+// TestIntegration_SqlplusLoginThroughSyntheticAuth is the same login with the
+// dispatch on, and it passes. (The thin *preamble* bug this file's thin
+// counterpart once had presented differently, as two break markers and
+// ORA-03120; a wholly wrong dialect does not get that far.)
 //
 // Everything below is the wide (OCI) counterpart. It was measured against
 // testdata/sqlplus_cursor_reexec.pcapng (macOS Instant Client 23.3 → Oracle
