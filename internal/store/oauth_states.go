@@ -5,12 +5,26 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 )
 
-// CreateOAuthState persists a new OAuth state for CSRF protection.
-func (s *Store) CreateOAuthState(ctx context.Context, state *OAuthState) (*OAuthState, error) {
+// CreateOAuthState persists a new OAuth state (or one of the rows that share
+// its table: a device authorization request, a login exchange) with a lifetime
+// of ttl.
+//
+// The expiry is stamped by the *database* clock, in the very statement that
+// inserts the row, because that is the clock every reader tests it against
+// (`expires_at > NOW()`). Stamping it from time.Now() instead made the real
+// TTL `ttl ± skew`: a process running ahead of its store lengthened it — a
+// login exchange or device authorization redeemable past its intended life —
+// and one running behind shortened it. See Store.Now.
+//
+// A negative ttl yields a row that is already expired; tests use that to
+// build historical rows without reintroducing the process clock.
+func (s *Store) CreateOAuthState(ctx context.Context, state *OAuthState, ttl time.Duration) (*OAuthState, error) {
 	_, err := s.db.NewInsert().
 		Model(state).
+		Value("expires_at", "NOW() + make_interval(secs => ?)", ttl.Seconds()).
 		Returning("*").
 		Exec(ctx)
 	if err != nil {

@@ -46,14 +46,17 @@ func (s *Store) CreateLoginExchange(ctx context.Context, exchangeUID uuid.UUID, 
 	}
 
 	state := &OAuthState{
-		UID:       exchangeUID,
-		State:     code,
-		Provider:  LoginExchangeProvider,
-		Metadata:  encoded,
-		ExpiresAt: time.Now().Add(LoginExchangeTTL),
+		UID:      exchangeUID,
+		State:    code,
+		Provider: LoginExchangeProvider,
+		Metadata: encoded,
 	}
 
-	if _, err := s.CreateOAuthState(ctx, state); err != nil {
+	// Database-stamped expiry: ConsumeLoginExchange filters on
+	// `expires_at > NOW()`, so a process-stamped one would make this two-minute
+	// window `2m ± skew` — long enough, on a process ahead of its store, to
+	// keep a session token redeemable past its intended life.
+	if _, err := s.CreateOAuthState(ctx, state, LoginExchangeTTL); err != nil {
 		return err
 	}
 
