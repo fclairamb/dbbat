@@ -112,6 +112,27 @@ func (s *Server) handleListUsers(c *gin.Context) {
 	successResponse(c, gin.H{"users": []any{currentUser}})
 }
 
+// handleListRoleSyncs returns the latest directory role sync per user.
+//
+// One row per user, computed in the database, rather than a slice of the audit
+// log filtered client-side: on an instance where hundreds of people sign in
+// through SSO, a user whose last sync fell outside such a slice would render as
+// "never synced" — the same thing shown for a user the directory has genuinely
+// never touched. Absent from this response is therefore the *exact* meaning of
+// "never synced".
+//
+// Admin-or-viewer, matching GET /audit, which is where these rows are read
+// from and where the same entries can be listed one by one.
+func (s *Server) handleListRoleSyncs(c *gin.Context) {
+	syncs, err := s.store.ListLatestEventPerUser(c.Request.Context(), AuditEventOAuthRolesSynced)
+	if err != nil {
+		writeInternalError(c, s.logger, err, "failed to list role syncs")
+		return
+	}
+
+	successResponse(c, gin.H{"role_syncs": syncs})
+}
+
 // handleGetUser retrieves a specific user.
 //
 // Visibility matches handleListUsers: admins and viewers see everyone, anyone

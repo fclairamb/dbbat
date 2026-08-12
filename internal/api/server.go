@@ -343,6 +343,11 @@ func (s *Server) setupRouter() *gin.Engine {
 			users := authenticated.Group("/users")
 			users.POST("", s.requireAdmin(), s.handleCreateUser)
 			users.GET("", s.handleListUsers) // Non-admins see only themselves
+			// Declared before the :uid route it shares a level with. gin
+			// matches the literal segment first either way, but the order
+			// keeps that obvious to a reader; users_test.go asserts both
+			// still resolve.
+			users.GET("/role-syncs", s.requireAdminOrViewer(), s.handleListRoleSyncs)
 			users.GET("/:uid", s.handleGetUser)
 			users.PUT("/:uid", s.handleUpdateUser)
 			// Note: PUT /:uid/password is registered separately (uses credential auth, not Bearer)

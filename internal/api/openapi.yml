@@ -740,6 +740,45 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /users/role-syncs:
+    get:
+      tags:
+        - Users
+      summary: Latest directory role sync per user
+      description: |
+        Returns the most recent `user.roles_synced` audit entry for each user
+        that has one — one row per user, computed in the database, so the answer
+        stays exact however large the audit log is.
+
+        A user absent from this response has never had their roles resolved from
+        directory groups. That is the only meaning of absence: it is not a
+        windowing artefact.
+
+        Each row carries the audit entry verbatim, `details` included — the
+        directory groups recorded there are the answer to "why did these roles
+        change?". The audit log remains the record; this is a projection of it.
+
+        Requires admin or viewer role, like `GET /audit`.
+      operationId: listUserRoleSyncs
+      responses:
+        '200':
+          description: Latest role sync per user
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  role_syncs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UserRoleSync'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
   /users/{uid}:
     parameters:
       - $ref: '#/components/parameters/UserUID'
@@ -5982,6 +6021,45 @@ components:
       required:
         - uid
         - event_type
+        - created_at
+
+    UserRoleSync:
+      type: object
+      description: |
+        The newest `user.roles_synced` audit entry of one user, as returned by
+        `GET /users/role-syncs`. A projection of the audit log, carrying the
+        entry's own UID and details rather than summarising them.
+      properties:
+        uid:
+          type: string
+          format: uuid
+          description: UID of the audit entry this row projects
+        event_type:
+          type: string
+          description: Always `user.roles_synced`
+        user_id:
+          type: string
+          format: uuid
+          description: User whose roles the directory changed
+        username:
+          type: string
+          description: Username of that user, joined in to save a second lookup
+        details:
+          type: object
+          additionalProperties: true
+          description: |
+            The audit entry's details verbatim — `provider`, `groups`,
+            `previous_roles`, `roles`, `granted`, `revoked`. The groups are why
+            the change happened.
+        created_at:
+          type: string
+          format: date-time
+          description: When the sync happened
+      required:
+        - uid
+        - event_type
+        - user_id
+        - username
         - created_at
 
     ChainBreak:
