@@ -92,8 +92,24 @@ showcase:
 #
 # CI (.github/workflows/integration.yml) runs the suite twice: once on this
 # default, and once pinned to the 18c XE image so that coverage is kept.
+#
+# `-race`, and it costs nothing measurable. This is the only suite that puts
+# two proxy goroutines on the same session at once — client reader, upstream
+# reader, limit watchdog, approval gate — so it is the only place those pairs
+# get exercised at all; the unit tests carry the detector but drive one
+# goroutine. Running without it hid two live races on the in-flight query
+# (see `trackerMu` in internal/proxy/oracle/session.go).
+#
+# Measured on this target, same machine, back to back:
+#
+#   without -race   6m38s wall   (392s test time,  8.7s user CPU)
+#   with    -race   6m16s wall   (371s test time, 14.6s user CPU)
+#
+# The detector really is a ~2x CPU tax — but on ~6 seconds of CPU against a
+# suite that spends six minutes booting Oracle containers, so the wall-clock
+# difference is inside the run-to-run noise. -timeout 40m is unchanged.
 test-e2e-oracle:
-	go test -tags integration -v -timeout 40m -count=1 ./internal/proxy/oracle/...
+	go test -race -tags integration -v -timeout 40m -count=1 ./internal/proxy/oracle/...
 
 # Protocol integration suites (require Docker).
 #
