@@ -5,7 +5,6 @@ package oracle
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -307,16 +306,14 @@ EXIT
 // (see encodeOERFixedWidth): that path seeds both halves of the OCI shape from
 // the client's AUTH framing, and nothing else exercises it end to end.
 //
-// Skipped when sqlplus is not installed, which is the case in CI; the fixtures
-// in ttc_oer_encode_test.go carry the byte-level half of the same evidence
-// there.
+// The OCI client is sqlplus from PATH when there is one, and otherwise the one
+// bundled in the Oracle container the fixture already started, so this runs in
+// CI too; ORACLE_TEST_REQUIRE_OCI_CLIENT=1 makes "no client" a failure rather
+// than a skip. See oci_client_integration_test.go. The fixtures in
+// ttc_oer_encode_test.go carry the byte-level half of the same evidence.
 func TestIntegration_BlockedStatementRefusesSQLPlus(t *testing.T) {
-	sqlplus, err := exec.LookPath("sqlplus")
-	if err != nil {
-		t.Skipf("sqlplus unavailable: %v", err)
-	}
-
-	env := startOracleThroughProxy(t, nil)
+	env := startOracleThroughProxyForOCI(t, nil)
+	oci := requireOCIClient(t, env)
 
 	ctx := context.Background()
 
@@ -324,25 +321,17 @@ func TestIntegration_BlockedStatementRefusesSQLPlus(t *testing.T) {
 	// refusal below is the only thing that can stop the INSERT.
 	_, _ = env.db.ExecContext(ctx, "DROP TABLE dbbat_blocked_probe")
 
-	_, err = env.db.ExecContext(ctx, "CREATE TABLE dbbat_blocked_probe (id NUMBER)")
+	_, err := env.db.ExecContext(ctx, "CREATE TABLE dbbat_blocked_probe (id NUMBER)")
 	require.NoError(t, err, "the seed DDL must be allowed under an unrestricted grant")
 
 	env.replaceGrant(t, []string{store.ControlReadOnly})
 
-	script := filepath.Join(t.TempDir(), "refusal.sql")
-	require.NoError(t, os.WriteFile(script, []byte(sqlplusRefusalScript), 0o600))
-
 	runCtx, cancel := context.WithTimeout(ctx, refusalDeadline)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, sqlplus, "-S",
-		fmt.Sprintf("%s/%s@//%s:%d/%s", env.username, env.apiKey, env.host, env.port, env.service),
-		"@"+script)
+	output, err := oci.run(t, runCtx, sqlplusRefusalScript)
 
-	out, err := cmd.CombinedOutput()
-	output := string(out)
-
-	require.NoErrorf(t, err, "sqlplus never came back from the refused statement:\n%s", output)
+	require.NoErrorf(t, err, "%s never came back from the refused statement:\n%s", oci.label, output)
 
 	assert.Contains(t, output, "read-ok=1",
 		"reads must still work under read_only:\n%s", output)
