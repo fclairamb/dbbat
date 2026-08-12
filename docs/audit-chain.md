@@ -29,9 +29,9 @@ It detects:
   cleared](#a-stamp-that-was-cleared)). A session that is still
   **open** is covered up to the last periodic sweep of its stamp, not up to its
   last statement (see [An open session is stamped by a periodic
-  sweep](#an-open-session-is-stamped-by-a-periodic-sweep)). Sessions closed
-  *before* 0.24 carry the old unkeyed stamp, which attests to nothing: since
-  0.24 those are reported as a break rather than tolerated;
+  sweep](#an-open-session-is-stamped-by-a-periodic-sweep)). A session carrying
+  the unkeyed stamp — only a store written by a pre-0.24 development build has
+  any — attests to nothing and is reported as a break;
 - **every** statement of a session deleted — not just its tail. The walk
   enumerates stamped connections as well as connections with surviving
   statements, so an emptied session is judged rather than skipped (see [A
@@ -199,7 +199,7 @@ the connection row (`query_chain_mac`, `query_chain_len`,
 `query_chain_stamp_version`). Without that, deleting the *last* statements of a
 session would leave a shorter chain that still verified. See
 [The connection stamp](#the-connection-stamp) for the construction and for what
-pre-0.24 rows still mean.
+an unkeyed row still means.
 
 There are **three** writers of that stamp, and only the first two are closes:
 
@@ -290,7 +290,7 @@ strictly better than never stamping at all (from the reconcile onward the tail
 is protected exactly like a clean close's), and it is the reason the stamp goes
 in the same transaction rather than a later pass: the exposure is the crash-to-
 reconcile window, not a second one opened between closing the row and sealing it.
-Until 0.24 the reconcile stamped in one pure-SQL `UPDATE`, reading `mac` out of
+An earlier revision of the reconcile stamped in one pure-SQL `UPDATE`, reading `mac` out of
 `queries` with a correlated subquery — which is a verbatim copy by construction.
 A keyed stamp has no SQL expression, because the chain key exists only in the
 process, so that path became select-seal-write.
@@ -316,15 +316,15 @@ verification compares the recorded length against what the surviving statements
 say before it checks the MAC, so an edit to the column alone is caught with a
 precise message; for an open one that comparison becomes the prefix rule above.
 
-**Two formats, and the version is inside the MAC.** Before 0.24 the stamp was
-the last statement's MAC stored **verbatim**, and that value is readable from
-the `queries` table — so the attacker this feature is built against could delete
-the last statements of a session, copy the new last statement's MAC into the
-stamp, and get a clean verification with no key at all.
+**Two formats, and the version is inside the MAC.** An earlier revision of this
+feature stored the last statement's MAC **verbatim**, and that value is readable
+from the `queries` table — so the attacker this feature is built against could
+delete the last statements of a session, copy the new last statement's MAC into
+the stamp, and get a clean verification with no key at all.
 
-Those rows cannot be re-sealed: the chain key never enters the database, so no
+Such rows cannot be re-sealed: the chain key never enters the database, so no
 migration can rewrite them. `connections.query_chain_stamp_version` says which
-format a row is in — `0` legacy, `1` keyed — and **only version `1` verifies**:
+format a row is in — `0` unkeyed, `1` keyed — and **only version `1` verifies**:
 
 - version `1`: the keyed stamp, computed from what the surviving statements say;
 - version `0`: a **break**, with its own reason — the tail cannot be verified,
@@ -338,29 +338,16 @@ one `UPDATE` away from getting the unkeyed rule applied to a session this build
 sealed. With it, a keyed stamp only ever verifies as the version it was sealed
 at.
 
-**Why version 0 is not simply tolerated.** It was, in development, and it was a
-standing downgrade path: an attacker could delete the tail of a *sealed* session
-and replace the whole stamp — raw head MAC, matching length, version back to `0`
-— and verification accepted it, costing them nothing but a counter they were
-betting nobody watched. 0.24 ships the keyed stamp and the end of that path
-together, so no released build ever had the door open by default.
-
-**The escape hatch, and its expiry.** A store upgraded from 0.23.x has a
-version-0 stamp on every session it closed, and a walk stops at its first break
-— so one pre-upgrade session would mask every real break behind it, forever on a
-deployment that sets no `DBB_QUERY_STORAGE_RETENTION`. For that upgrade only:
-
-```bash
-dbbat audit verify --queries --allow-legacy-stamps
-```
-
-restores the pre-0.24 outcome — version-0 rows accepted against the old raw
-comparison, **counted, not trusted**, under
-`sessions_with_legacy_forgeable_head_stamp`. It is CLI-only (a monitoring job's
-exit code is what it protects), it never launders a *keyed* stamp relabelled as
-legacy, and it is **removed in 0.25**. Drop it as soon as the count reaches
-zero; a count that stops falling, or rises, is the signal to stop using it
-immediately.
+**Why version 0 is not simply tolerated, and why there is no way to ask for it
+to be.** It was tolerated, in development, and it was a standing downgrade path:
+an attacker could delete the tail of a *sealed* session and replace the whole
+stamp — raw head MAC, matching length, version back to `0` — and verification
+accepted it, costing them nothing but a counter they were betting nobody
+watched. 0.24 ships the chain, the keyed stamp and the version column together,
+so no released build ever had the door open, and no upgrade path arrives here
+carrying version-0 rows: only a store written by a **pre-0.24 development
+build** can hold one. Such a store is unverifiable and stays that way — nothing
+can re-seal those rows, and re-creating a dev store is cheap.
 
 #### A stamp that was cleared
 
@@ -398,17 +385,15 @@ an open session too: all three writers set the MAC, the length and the version
 in one statement, so a length that outlived its MAC is not a stamp that was
 never written. It is a row somebody wrote to.
 
-**There is no `--allow-legacy-stamps` equivalent, deliberately.** That escape
-hatch exists because a store upgraded from a build with unkeyed stamps holds
-rows nothing can re-seal. Nothing analogous exists here: `query_chain_mac` and
-the close-path writer that fills it arrived in the *same* release as the chain
+**There is no escape hatch here, deliberately.** `query_chain_mac` and the
+close-path writer that fills it arrived in the *same* release as the chain
 itself, so no released dbbat ever closed a chained session without stamping it,
 and a connection predating the chain migration has no stamp *and* no chained
 statement — the first row of the table, not the third. An opt-in here would also
-be worse than the one it copied: a version-0 stamp is at least a
-distinguishable, countable state, whereas a NULL stamp is exactly what the
-attacker writes, so tolerating it would not be a weaker check but the absence of
-this one.
+be worse than one for the unkeyed version-0 stamp: a version-0 stamp is at least
+a distinguishable state, whereas a NULL stamp is exactly what the attacker
+writes, so tolerating it would not be a weaker check but the absence of this
+one.
 
 Retention cannot trip it either. `CleanupOldQueryRows` only ever deletes rows;
 no sweep clears a stamp. A closed session it emptied keeps its stamp and is
@@ -416,7 +401,7 @@ judged by the next section instead.
 
 #### A session emptied of every statement
 
-Until 0.24 the walk enumerated connections out of `queries`
+An earlier revision of the walk enumerated connections out of `queries`
 (`SELECT DISTINCT connection_id ...`), so a session with **no** surviving
 statement produced no row, was never walked, and its stamp — claiming N
 statements — was never compared against anything. Deleting all but one of a
@@ -471,10 +456,10 @@ Two consequences worth stating plainly:
   previous setting legitimately emptied can start reading as breaks. Lowering it
   never can.
 
-Under `--allow-legacy-stamps` an emptied session with a pre-0.24 stamp stays
-part of the legacy caveat instead of becoming a new break: an unkeyed stamp
-attests to nothing either way, so a session retention emptied and one somebody
-emptied are the same bytes, and no key separates them.
+An emptied session carrying an **unkeyed** stamp never reaches this rule: it is
+already a break for its stamp, and it is reported that way rather than as a
+deletion. An unkeyed stamp attests to nothing either way, so a session retention
+emptied and one somebody emptied are the same bytes, and no key separates them.
 
 ### `query_rows` — one chain per capture
 
@@ -512,8 +497,8 @@ query is about to be marked complete (`QuerySink.Flush` →
 row_chain_mac = HMAC(chain key, "dbbat-row-chain-stamp-v1" ‖ query_uid ‖ row_chain_len ‖ head_mac)
 ```
 
-Storing the head verbatim — which is what `connections.query_chain_mac` did
-before 0.24 — would defend against nothing, because the head is readable straight out of
+Storing the head verbatim — which is what an earlier revision of
+`connections.query_chain_mac` did — would defend against nothing, because the head is readable straight out of
 `query_rows`: whoever deletes the last captured rows can copy the new last row's
 MAC over the stamp. Sealing it means correcting the stamp after a truncation
 needs the chain key, exactly like forging a row. Verification checks both halves
@@ -648,21 +633,16 @@ ever grow, and the previously recorded head must still appear in the chain.
 introduced. They are reported rather than folded into the verified count: no
 MAC exists for them and none can be created after the fact.
 
-A `--queries` run reports the same way, plus two counts that are *not* failures:
+A `--queries` run reports the same way, plus a count that is *not* a failure:
 
 ```json
 {"level":"INFO","msg":"Query chains verified","connections":412,"statements":9871,
- "chains_with_retention_truncated_prefix":3,"sessions_with_legacy_forgeable_head_stamp":0}
+ "chains_with_retention_truncated_prefix":3}
 ```
 
-`sessions_with_legacy_forgeable_head_stamp` is `0` unless the run passed
-`--allow-legacy-stamps`, because a pre-0.24 unkeyed head stamp is otherwise a
-break. Under that flag it is how much of the store the walk *tolerated* —
-sessions whose statements verified but whose *tail* nothing keyed vouches for.
-Every session closed since the upgrade is sealed, so on a store that keeps
-running the number drains to zero as those sessions age out of retention, and
-the flag can be dropped. Watch it: once it has drained, a non-zero count means
-something rewrote a stamp.
+`chains_with_retention_truncated_prefix` is what `DBB_QUERY_STORAGE_RETENTION`
+leaves behind on a long-lived session — housekeeping, and everything after the
+truncation is still verified.
 
 ### Over the API
 
@@ -688,11 +668,10 @@ answer to a question it did not ask. The row response has no
 removes an individual captured row, so a missing prefix is a break rather than
 housekeeping.
 
-**No endpoint reports a legacy-stamp count, and none takes
-`--allow-legacy-stamps`.** Over REST a version-0 stamp is always a break: the
-tolerating opt-in belongs to the offline CLI, where a monitoring job's exit code
-lives, and a field that could only ever report `0` would be worse than no field.
-The admin audit panel in the UI follows the same rule.
+**No endpoint reports an unkeyed-stamp count.** A version-0 stamp is always a
+break, everywhere and with no opt-out, so there is nothing tolerated to count
+and a field that could only ever report `0` would be worse than no field. The
+admin audit panel in the UI follows the same rule.
 
 Two properties are load-bearing and have tests pinning them:
 

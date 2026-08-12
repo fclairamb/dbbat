@@ -155,7 +155,7 @@ number, not a fresh timestamp.
 | A record is **deleted** from the middle | Yes | The successor's `prev_mac` no longer matches, and its position leaves a gap |
 | Records are **reordered** | Yes | Positions and `prev_mac` links no longer line up |
 | The **first** records are deleted | Yes | The first entry's `prev_mac` is a genesis MAC derived from the key, which cannot be forged |
-| The **last** statements of a closed session are deleted | Yes, for sessions closed by 0.24+ — see the note below for older ones | The session's final chain head is sealed onto the connection row with a keyed MAC when it closes, so correcting it after a deletion needs the key |
+| The **last** statements of a closed session are deleted | Yes | The session's final chain head is sealed onto the connection row with a keyed MAC when it closes, so correcting it after a deletion needs the key |
 | The **last** statements of a session that is still **open** are deleted | Yes, up to the last stamp sweep | DBBat re-seals the chain head of its open sessions every few minutes, so the exposed tail is the statements run since that sweep rather than the whole session |
 | **Every** statement of a session is deleted, not just the last ones | Yes, unless retention could account for it | The sealed stamp on the connection still attests to statements no longer there. Only a session that began before the retention cutoff is excused — with `DBB_QUERY_STORAGE_RETENTION` unset, the default, none is |
 | The stamp itself is **cleared** rather than rewritten, to remove the check instead of defeating it | Yes | A session that closed with statements in its history always carries a stamp, so a closed session whose statements survive without one is a break. And because the stamp's MAC, length and version are only ever written together, a length left behind by a cleared MAC is a break on its own — open sessions included |
@@ -193,39 +193,6 @@ busy proxy writes tens of thousands a day and they would bury the access changes
 the page exists for. Filter by event type to see them; the
 [connections list](/docs/features/query-logging) is the surface for browsing
 sessions.
-
-:::
-
-:::warning Sessions closed before 0.24 do not verify
-
-Deleting the **last statements of a session** is caught by the chain head
-stamped on the connection row. Up to 0.23.x that stamp was a plain copy of the
-last statement's MAC — and that value is readable from the query history itself,
-so someone with write access to DBBat's storage database could delete the last
-statements *and then rewrite the stamp to match*, with no key. From 0.24 the
-stamp is a keyed MAC over the session, the stamp format version, the chain
-length and the head, so correcting it needs `DBB_KEY`.
-
-Existing stamps cannot be upgraded: the chain key never enters the database, so
-nothing can re-seal what an older version wrote. From 0.24 those sessions are
-**reported as a break** — their statements verify, but their stamp attests to
-nothing, so the tail cannot be verified. They are not accepted with a caveat,
-because accepting them let an attacker downgrade a sealed session to the old
-format and get a clean verification with no key.
-
-**Upgrading from 0.23.x?** A walk stops at its first break, so one pre-upgrade
-session would hide every real break behind it. For that transition only,
-`dbbat audit verify --queries --allow-legacy-stamps` restores the old outcome:
-those sessions are counted as `sessions_with_legacy_forgeable_head_stamp`
-instead of breaking the walk. The flag is **removed in 0.25** — drop it once
-the count reaches zero, which happens as pre-upgrade sessions age out of
-`DBB_QUERY_STORAGE_RETENTION`. A count that stops falling, or rises, means a
-stamp was rewritten. `GET /api/v1/audit/verify/queries` has no equivalent
-option: over REST such a session is always a break.
-
-While pre-upgrade sessions remain, if trailing-deletion detection on them is
-load-bearing for a control, say so explicitly and lean on the recorded head MAC
-(below) or on shipping the logs to a WORM store or SIEM as well.
 
 :::
 
