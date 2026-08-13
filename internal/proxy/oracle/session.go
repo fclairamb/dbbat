@@ -71,6 +71,17 @@ type session struct {
 	// shape the challenge dbbat issues so OCI can parse it.
 	clientWideEncoding bool
 
+	// clientWide64Encoding records the *other* OCI dialect: the one whose TTC
+	// op headers and summary objects are marshaled at 64-bit widths (the client
+	// bundled in gvenzl/oracle-free:23-slim, 23.26), as opposed to the 32-bit
+	// ones the Instant Client 23.3 writes. Detected from the same AUTH Phase 1,
+	// and read by nextOERFrame: a session that has to refuse *before* any
+	// upstream OER taught it a shape would otherwise answer a 64-bit client
+	// with a 32-bit frame, which that client cannot parse — it waits for the
+	// rest of a response that has already arrived. See docs/oracle.md,
+	// "Two OCI encodings, not one".
+	clientWide64Encoding bool
+
 	// clientBigClrChunks records whether the upstream advertised
 	// ServerCompileTimeCaps[37]&0x20 (UseBigClrChunks) during the pre-auth relay.
 	// When set, clients encode long CLR values with compressed-int chunk lengths
@@ -357,7 +368,8 @@ func (s *session) run() error {
 	// the AUTH call with a break/reset marker exchange — the "sqlplus stalls
 	// before AUTH Phase 2" failure. Thin clients keep the proven hand-built
 	// summaries and the original ordering.
-	s.clientWideEncoding = payloadUsesWideKVEncoding(phase1Pkt.Payload)
+	s.observeClientAuthEncoding(phase1Pkt.Payload)
+
 	if s.clientWideEncoding {
 		if err := s.beginUpstreamAuth(); err != nil {
 			return fmt.Errorf("upstream auth failed: %w", err)
@@ -922,7 +934,7 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	// compressed length-prefixed form. Detect the client's encoding from its
 	// AUTH Phase 1 and mirror it in the challenge — OCI breaks/aborts on a
 	// compressed challenge it cannot parse.
-	s.clientWideEncoding = payloadUsesWideKVEncoding(phase1Pkt.Payload)
+	s.observeClientAuthEncoding(phase1Pkt.Payload)
 
 	// Send AUTH challenge to client
 	s.logger.DebugContext(s.ctx, "sending AUTH challenge",
@@ -931,6 +943,7 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 		slog.Bool("custom_hash", o5.CustomHashEnabled()),
 		slog.Int("verifier_type", o5.VerifierType()),
 		slog.Bool("wide_encoding", s.clientWideEncoding),
+		slog.Bool("wide_encoding_64", s.clientWide64Encoding),
 		slog.Bool("big_clr_chunks", s.clientBigClrChunks))
 	challengePayload := buildAuthChallenge(encSessKey, vfrData, o5.PBKDF2ChkSalt(), o5.PBKDF2VgenCount(), o5.PBKDF2SderCount(), o5.VerifierType(), s.clientWideEncoding, s.clientBigClrChunks)
 	challengePayload = append(challengePayload, s.clientChallengeTrailer(o5.VerifierType())...)
@@ -1365,34 +1378,28 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 			s.handleCloseCursors(cursorIDs)
 		}
 
+		// A frame whose call dbbat could not name is handled apart from
+		// everything below, and *before* the readings below, because both of
+		// them end in an OER: the refusal would be stamped with whatever call
+		// number dbbat last saw, which ends a call the client is not waiting
+		// for and parks it forever (the ORA-18745 / hang mode of
+		// specs/done/2026/08/2026-08-12-02-oracle-async-refusal-call-number.md).
+		// That includes the exec reading — a `11 69` execute whose close list
+		// does not walk is exactly as unnameable as any other piggyback, and
+		// gating it here while stamping a stale number was the one place this
+		// invariant leaked.
+		//
+		// It is emphatically not a bypass: gateUnnameableFrame still gates the
+		// statement, it just refuses by ending the session rather than by
+		// answering a call it cannot name.
+		if !named {
+			return s.gateUnnameableFrame(ttcPayload)
+		}
+
 		// JDBC thin driver reuses func=0x11 with sub-op 0x69 for execute-with-SQL.
 		// Distinguish from plain OFETCH by checking the sub-operation byte.
 		if IsExecSQL(ttcPayload) {
 			return s.gateStatement(s.handleJDBCExec, ttcPayload)
-		}
-
-		// Everything below reads a cursor id out of bytes 1..3 of the frame,
-		// and those bytes are only a cursor id if the frame really is a fetch.
-		// On a piggyback dbbat cannot walk they are (function, sequence), so
-		// the id is noise and the refusal it produces lands on a call the
-		// client is not parked on: the bundled OCI client's first message,
-		// `11 6b 04 …` with the real call stapled behind it, decoded as a
-		// re-execution of cursor 27396, was refused under any restrictive
-		// grant, and the refusal hung sqlplus with no output at all.
-		//
-		// So dbbat gets out of the way of a message it could not name: no
-		// cursor id read out of it, no gate, no refusal, forwarded as it
-		// arrived. Failing open is the deliberate trade — a message dbbat
-		// cannot name is one it could not identify either, so refusing it
-		// protects nothing, while answering it strands the client. The two
-		// readings above are unaffected: they identify the frame from its own
-		// contents (a close list that walks, a statement that decodes) rather
-		// than from an offset. See clientCallNumber and docs/oracle.md.
-		if !named {
-			s.logger.DebugContext(s.ctx, logMsgUnnamedCallForwarded,
-				slog.String("op", ttcOpFunction(ttcPayload)))
-
-			return false
 		}
 
 		// A fetch that starts a fresh pending query is a cursor re-execution
@@ -1447,6 +1454,103 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 // cannot quietly acquire only half of the answer-the-client behavior — which
 // is exactly how the JDBC exec ended up recording queries while enforcing
 // nothing.
+// gateUnnameableFrame decides what happens to a client message whose call dbbat
+// could not name — a piggyback (message type 0x11) whose body it cannot walk,
+// so the call the client is parked on is stapled behind bytes of unknown
+// length. Reports true when the packet must NOT be forwarded.
+//
+// The default is to forward it, and that is the point: dbbat could not identify
+// this frame, so refusing it protects nothing, while answering it ends the
+// wrong call and strands the client. That is how the DB-bundled OCI client's
+// first message (`11 6b …`) stopped being refused as "a re-execution of cursor
+// 27396" and stopped hanging sqlplus.
+//
+// But "forward it" cannot be unconditional, and this is the bound. A piggyback
+// is by construction a frame with something stapled behind it — dbbat's own
+// recordings show `11 69 … 03 5e <exec>` — so a frame dbbat cannot walk can
+// carry a statement past the gate. Under a restrictive grant that would be a
+// smuggling channel for the exact adversary the controls exist for: an
+// authenticated user who has a grant and wants to exceed it. So the frame is
+// scanned for a stapled statement with the same extractor the JDBC exec path
+// trusts, and one that a statement-shaped control refuses does not travel.
+//
+// It is refused by **ending the session**, not by an OER, and that is the whole
+// reason this is a separate path: dbbat cannot name the call, so it has no
+// legitimate frame to answer with. Dropping the socket is the same answer
+// onLimitViolation gives for the same reason (there is no call to end), it is
+// what a real Oracle does on DISCONNECT SESSION, and it surfaces to the client
+// as a plain I/O error rather than a wait that never returns. The statement is
+// recorded as blocked first, so the refusal is in the audit trail exactly like
+// every other one.
+func (s *session) gateUnnameableFrame(ttcPayload []byte) bool {
+	sql := stapledStatement(ttcPayload)
+
+	if sql == "" || !s.hasStatementControls() {
+		s.logger.DebugContext(s.ctx, logMsgUnnamedCallForwarded,
+			slog.String("op", ttcOpFunction(ttcPayload)),
+			slog.Bool("carries_statement", sql != ""))
+
+		return false
+	}
+
+	refusal := shared.ValidateOracleQuery(sql, s.grant)
+	if refusal == nil {
+		// The static controls allow it. An approval pattern still might not,
+		// and a hold works here even though a refusal does not: it parks the
+		// *forwarding* and lets the packet through once a human approves, with
+		// no call to answer either way.
+		if _, err := s.holdIfNeeded(sql); err != nil {
+			refusal = err
+		}
+	}
+
+	if refusal == nil {
+		s.logger.DebugContext(s.ctx, logMsgUnnamedCallForwarded,
+			slog.String("op", ttcOpFunction(ttcPayload)),
+			slog.Bool("carries_statement", true),
+			slog.String("sql", truncateSQL(sql, 200)))
+
+		return false
+	}
+
+	s.logger.WarnContext(s.ctx, logMsgUnnameableStatementRefused,
+		slog.String("op", ttcOpFunction(ttcPayload)),
+		slog.String("sql", truncateSQL(sql, 200)),
+		slog.Any("error", refusal))
+
+	_ = s.book(func() error {
+		s.recordBlockedQuery(sql, nil, refusal)
+
+		return nil
+	})
+
+	if s.upstreamConn != nil {
+		_ = s.upstreamConn.Close()
+	}
+
+	if s.clientConn != nil {
+		_ = s.clientConn.Close()
+	}
+
+	return true
+}
+
+// stapledStatement returns the SQL a frame carries, or "" when it carries none.
+//
+// It is the same extractor the JDBC exec path gates on (decodeExecSQL, which
+// scans the known offsets and then falls back to a keyword search over the
+// whole payload), used here for detection rather than for gating. Using the
+// same one is deliberate: a statement dbbat would enforce against if it could
+// name the call is a statement it has to enforce against when it cannot.
+func stapledStatement(ttcPayload []byte) string {
+	result, err := decodeExecSQL(ttcPayload)
+	if err != nil || result == nil {
+		return ""
+	}
+
+	return result.SQL
+}
+
 func (s *session) gateStatement(handle func([]byte) error, ttcPayload []byte) bool {
 	if err := handle(ttcPayload); err != nil {
 		_ = s.sendOracleError(err)
@@ -1586,6 +1690,25 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket) {
 	}
 }
 
+// observeClientAuthEncoding reads both OCI dialect flags off the client's AUTH
+// Phase 1, which is the earliest — and, for a session that never gets an OER
+// before it has to refuse one, the only — evidence of which one this client
+// speaks.
+//
+// The two are not redundant. clientWideEncoding says the key/value *lengths*
+// are fixed 4-byte fields rather than compressed ones, and shapes the challenge
+// dbbat issues. clientWide64Encoding says the *op headers and summary objects*
+// are 64-bit, and shapes the OER dbbat writes when it has learned nothing. Every
+// 64-bit client is also a wide one; the reverse does not hold, which is exactly
+// the Instant Client.
+func (s *session) observeClientAuthEncoding(phase1Payload []byte) {
+	s.clientWideEncoding = payloadUsesWideKVEncoding(phase1Payload)
+
+	if ttc := extractTTCPayload(phase1Payload); ttc != nil {
+		s.clientWide64Encoding = usesWide64OpHeader(ttc)
+	}
+}
+
 // learnOERTail keeps the session's picture of the TTC summary object honest
 // against the one the upstream actually sends, and tracks the end-to-end
 // sequence number so a synthesized error continues the session's count instead
@@ -1614,9 +1737,14 @@ func (s *session) learnOERTail(ttcPayload []byte) {
 	}
 
 	if learnOERShape(&s.oer, ttcPayload) {
+		// fixed_width_64 is the discriminator between the two OCI layouts, and
+		// it is on this line because it is the first thing anyone debugging a
+		// hung OCI client needs: `fixed_width=true fixed_width_64=false` on a
+		// 64-bit client is the whole bug, and nothing else in the log says it.
 		s.logger.DebugContext(s.ctx, logMsgLearnedOERTail,
 			slog.Int("extra_tail_fields", s.oer.extraTailFields),
 			slog.Bool("fixed_width", s.oer.fixedWidth),
+			slog.Bool("fixed_width_64", s.oer.fixedWidth64),
 			slog.Bool("end_of_response", s.oer.endOfResponse))
 	}
 }
@@ -1627,12 +1755,22 @@ func (s *session) learnOERTail(ttcPayload []byte) {
 // what a server sends and what dbbat's own OER locator bounds.
 //
 // When nothing has been sampled from the upstream, the client's AUTH framing
-// stands in for **both** halves of the OCI shape. Seeding only the encoding
+// stands in for **all three** halves of the OCI shape. Seeding only the encoding
 // would be worse than useless: by encodeOERFixedWidth's own measurement, an OCI
 // client handed a fixed-width body with no end-of-response marker hangs exactly
 // as it did on the frame this whole change replaces. The two travel together
 // because the same client is on both sides of them — an OCI session's messages
 // carry the marker whatever the Accept said, and no thin session's do.
+//
+// fixedWidth64 is seeded from the same place, and it is not a nicety: learning
+// happens off the upstream's own OERs, so a session that must refuse *before*
+// one has arrived — an approval pattern matching the opening statement, a quota
+// already exhausted, a first statement that is a write under `read_only` — gets
+// this fallback and nothing else. A 64-bit client handed the 32-bit layout there
+// hangs exactly the way it did on every other frame written for the wrong
+// dialect, and no integration test can reach it, because sqlplus issues its own
+// login SELECTs before anything a grant would refuse. See
+// TestUnlearnedRefusalFollowsTheClientsOwnDialect.
 func (s *session) nextOERFrame() (oerShape, int, byte) {
 	s.oerMu.Lock()
 	defer s.oerMu.Unlock()
@@ -1643,6 +1781,7 @@ func (s *session) nextOERFrame() (oerShape, int, byte) {
 	if !shape.tailLearned {
 		shape.fixedWidth = s.clientWideEncoding
 		shape.endOfResponse = s.clientWideEncoding
+		shape.fixedWidth64 = s.clientWide64Encoding
 	}
 
 	return shape, s.oerSeq, s.oerCallNumber
