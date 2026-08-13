@@ -214,6 +214,48 @@ func surveyIsFragmentOf(legacy, exact string) bool {
 	return strings.Contains(exact, head)
 }
 
+// TestSurveyAlterSessionMisreadAsSet computes the sub-count the docs quote, so
+// the figure is measured rather than remembered: how many recorded executes
+// carry an ALTER SESSION that the pre-fix scan handed to the gate as a bare
+// SET — a statement read_only and block_ddl refuse, arriving as one they do not.
+func TestSurveyAlterSessionMisreadAsSet(t *testing.T) {
+	t.Parallel()
+
+	misread := 0
+	byFile := map[string]int{}
+	distinct := map[string]struct{}{}
+
+	for _, name := range surveyCorpus(t) {
+		td := loadTestDump(t, name)
+
+		for _, ttc := range surveyClientTTC(t, td) {
+			for _, body := range surveyExecOps(ttc) {
+				exact, ok := decodeExecStatement(body)
+				if !ok || !strings.HasPrefix(strings.ToUpper(exact), "ALTER SESSION") {
+					continue
+				}
+
+				distinct[exact] = struct{}{}
+
+				if strings.HasPrefix(strings.ToUpper(strings.TrimSpace(legacyExecScan(body))), "SET") {
+					misread++
+					byFile[name]++
+				}
+			}
+		}
+	}
+
+	t.Logf("ALTER SESSION executes the old scan handed over as a bare SET: %d", misread)
+	t.Logf("  by recording: %v", byFile)
+	t.Logf("  distinct ALTER SESSION statements in the corpus: %d", len(distinct))
+
+	require.Equal(t, 9, misread,
+		"the figure docs/oracle.md quotes; recompute and update both if the corpus is re-recorded")
+	require.Len(t, distinct, 5, "and the count of distinct statements behind it")
+	require.Equal(t, map[string]int{"dbeaver.pcapng": 5, "dbeaver_init.pcapng": 4}, byFile,
+		"every one of them is DBeaver's connection setup; no other client in the corpus sends one")
+}
+
 // legacyExecScan is decodeExecSQL's pre-fix strategy, kept here so the report
 // can quantify what it used to return. It is not called by production code.
 func legacyExecScan(body []byte) string {

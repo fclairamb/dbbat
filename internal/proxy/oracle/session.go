@@ -1853,14 +1853,21 @@ var ttcStatementOpHeaders = [][2]byte{
 // recorded `11 69` walks) against fail-open on a live exec. See
 // TestUnnameableExecFrameIsGatedOnItsOwnPayload.
 //
-// The carve-out survived the measurement that was meant to settle it
-// (the 2026-08-13-05 spec), but it costs much less than it
-// did. decodeExecSQL reads the execute's *declared* length now, so the ordinary
-// case — a `11 69` close list with `03 5e <exec>` stapled behind it — is decoded
-// from the stapled op's own header and never scans loose bytes at all. The
-// whole-payload scan is reached only when the close list does not walk *and*
-// no `03 5e` anchor is present, which is what makes the frame unnameable in the
-// first place.
+// The carve-out survived the measurement that was meant to settle it (the
+// 2026-08-13-05 spec), and it is worth being precise about what did and did not
+// change. decodeExecSQL reads the execute's *declared* length now, so the
+// ordinary case — a `11 69` close list that walks, with `03 5e <exec>` behind
+// it — is decoded from the stapled op's own header and never scans loose bytes.
+//
+// The exposure this carve-out names is **unchanged**, though. When the close
+// list does not walk, the offset-0 anchor calls decodeExecSQL on the whole
+// payload; the precise decode declines (a `11 69` header is not an exec header
+// and closeCursorsEnd already failed), and the window scan and findSQLInPayload
+// run over the whole frame exactly as before. A `03 5e` elsewhere in the
+// payload adds a *second* anchor that decodes precisely — it does not suppress
+// the offset-0 loose scan. So a caller-supplied module string that reads as a
+// refused statement still ends the session, and that is the trade this
+// carve-out was always making.
 func statementOpOffsets(ttcPayload []byte) []int {
 	var out []int
 

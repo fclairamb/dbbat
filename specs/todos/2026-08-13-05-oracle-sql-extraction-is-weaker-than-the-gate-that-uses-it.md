@@ -204,10 +204,11 @@ reported against the 22 recordings in `testdata/`.
    prefix (an ASCII space is 32, `T` is 84), `looksLikeSQL` matches a keyword
    with no word boundary, and nothing requires the declared run to be printable.
    The measured consequences:
-   - 18 frames of `ALTER SESSION SET …` extracted as `SET …` — `ALTER` is in
-     both `writeKeywords` and `ddlKeywords`, `SET` is in neither, so
-     `read_only`/`block_ddl` **did not fire on a statement they are written to
-     refuse**;
+   - 9 execute ops of `ALTER SESSION SET …` extracted as `SET …` (five distinct
+     statements, all DBeaver connection setup; computed by
+     `TestSurveyAlterSessionMisreadAsSet`) — `ALTER` is in both `writeKeywords`
+     and `ddlKeywords`, `SET` is in neither, so `read_only`/`block_ddl` **did not
+     fire on a statement they are written to refuse**;
    - go-ora's `UPDATE … SET …` extracted as `SET name = 'updated' WHERE id <=`,
      same bypass;
    - `SELECT 'YES' FROM USER_ROLE_PRIVS WHERE GRANTED_ROLE='DBA'` extracted as
