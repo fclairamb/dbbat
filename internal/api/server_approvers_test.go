@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -967,5 +968,162 @@ func TestListGrantRequests_BatchedMatchesPerRow(t *testing.T) {
 				t.Errorf("hat for %s on %s: batched = %q, per-row = %q", user.Username, uid, role, hat)
 			}
 		}
+	}
+}
+
+// newTargetServersInGroup creates n fresh database targets, all held by one new
+// server group that names `approvers` for `kind`. Each server is a distinct
+// database_id, which is what makes a per-row resolver's cost visible.
+func (f *serverApproverFixture) newTargetServersInGroup(
+	t *testing.T, prefix string, n int, kind store.ApproverKind, approvers ...uuid.UUID,
+) []*store.Server {
+	t.Helper()
+
+	sg := &store.ServerGroup{Name: "sg-" + prefix}
+	if kind == store.ApproverKindAccess {
+		sg.AccessApproverUserGroupUIDs = approvers
+	} else {
+		sg.QueryApproverUserGroupUIDs = approvers
+	}
+
+	created, err := f.dataStore.CreateServerGroup(f.ctx, sg)
+	if err != nil {
+		t.Fatalf("CreateServerGroup(): %v", err)
+	}
+
+	servers := make([]*store.Server, 0, n)
+
+	for i := range n {
+		srv := f.newTargetServer(t, fmt.Sprintf("%s-%d", prefix, i))
+
+		if err := f.dataStore.AddServerToGroup(f.ctx, created.UID, srv.UID); err != nil {
+			t.Fatalf("AddServerToGroup(): %v", err)
+		}
+
+		servers = append(servers, srv)
+	}
+
+	return servers
+}
+
+// approverResolutionQueryHook counts the queries the approver chain itself
+// issues. Both of them — the server row read and the server-group join — name
+// `access_approver_user_group_uids`, and nothing else on either listing path
+// does, so this counts the resolver's round trips and only those.
+//
+// It is attached to the store the handlers actually use, the way
+// TestListGrantDefinitions_ScopedDatabaseUIDs pins its own batching.
+func (f *serverApproverFixture) approverResolutionQueryHook() *apiQueryCountHook {
+	hook := &apiQueryCountHook{substring: "access_approver_user_group_uids"}
+	f.dataStore.DB().AddQueryHook(hook)
+
+	return hook
+}
+
+// approverResolutionQueries is the count both listings must hold flat: one read
+// of the server rows plus one of their server groups, per listing, whatever the
+// page size. It is derived from ResolveServerApproverGroupsByServers' two
+// queries — the same contract TestResolveServerApproverGroupsByServers pins at
+// the store level.
+const approverResolutionQueries = 2
+
+// TestListPendingApprovals_ApproverResolutionIsFlat is the point of batching,
+// asserted where the regression would actually happen: in the handler.
+//
+// The store-level count test proves the batched resolver is batched; it cannot
+// notice a handler that goes back to calling it once per row. So this runs the
+// *same* listing at two page sizes — 2 holds on 2 databases, then 6 on 6 — and
+// requires the approver-resolution query count to be identical. The assertion
+// is about the shape being flat, not about a magic number; the absolute value
+// is checked too, with its provenance in approverResolutionQueries.
+func TestListPendingApprovals_ApproverResolutionIsFlat(t *testing.T) {
+	t.Parallel()
+
+	f := newServerApproverFixture(t, "pending-flat")
+
+	servers := f.newTargetServersInGroup(t, "pending-flat", 6, store.ApproverKindQuery, f.group.UID)
+
+	// A small page first.
+	for _, srv := range servers[:2] {
+		f.queryHoldOn(t, f.requester, srv.UID)
+	}
+
+	hook := f.approverResolutionQueryHook()
+
+	small := f.listPendingAs(t, f.approver)
+	if len(small) != 2 {
+		t.Fatalf("small pending listing = %v, want 2 holds", small)
+	}
+
+	smallCount := hook.count.Load()
+
+	if smallCount != approverResolutionQueries {
+		t.Errorf("2-row pending listing took %d approver queries, want %d",
+			smallCount, approverResolutionQueries)
+	}
+
+	// Three times the rows, on three times as many distinct databases.
+	for _, srv := range servers[2:] {
+		f.queryHoldOn(t, f.requester, srv.UID)
+	}
+
+	hook.count.Store(0)
+
+	large := f.listPendingAs(t, f.approver)
+	if len(large) != 6 {
+		t.Fatalf("large pending listing = %v, want 6 holds", large)
+	}
+
+	largeCount := hook.count.Load()
+
+	if largeCount != smallCount {
+		t.Errorf("approver resolution grew with the page: %d queries for 2 rows, %d for 6 — it must be flat",
+			smallCount, largeCount)
+	}
+}
+
+// TestListGrantRequests_ApproverResolutionIsFlat is the grant-request half of
+// the same handler-level guarantee, on the listing the spec was written about.
+func TestListGrantRequests_ApproverResolutionIsFlat(t *testing.T) {
+	t.Parallel()
+
+	f := newServerApproverFixture(t, "gr-flat")
+
+	servers := f.newTargetServersInGroup(t, "gr-flat", 6, store.ApproverKindAccess, f.group.UID)
+
+	for i, srv := range servers[:2] {
+		f.newGrantRequestFor(t, fmt.Sprintf("gr-flat-small-%d", i), f.requester, srv.UID)
+	}
+
+	hook := f.approverResolutionQueryHook()
+
+	small := f.listRequestsAs(t, f.approver)
+	if len(small) != 2 {
+		t.Fatalf("small request listing = %v, want 2 requests", small)
+	}
+
+	smallCount := hook.count.Load()
+
+	if smallCount != approverResolutionQueries {
+		t.Errorf("2-row grant-request listing took %d approver queries, want %d",
+			smallCount, approverResolutionQueries)
+	}
+
+	for i, srv := range servers[2:] {
+		f.newGrantRequestFor(t, fmt.Sprintf("gr-flat-large-%d", i), f.requester, srv.UID)
+	}
+
+	hook.count.Store(0)
+
+	large := f.listRequestsAs(t, f.approver)
+	if len(large) != 6 {
+		t.Fatalf("large request listing = %v, want 6 requests", large)
+	}
+
+	largeCount := hook.count.Load()
+
+	if largeCount != smallCount {
+		t.Errorf("approver resolution grew with the page: %d queries for 2 rows, %d for 6 — it must be flat",
+			smallCount, largeCount)
 	}
 }
