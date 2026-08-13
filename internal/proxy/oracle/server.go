@@ -232,12 +232,17 @@ func (s *Server) runDumpCleanup() {
 	for {
 		select {
 		case <-ticker.C:
-			deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
-			if err != nil {
-				s.logger.ErrorContext(s.ctx, "dump cleanup failed", slog.Any("error", err))
-			} else if deleted > 0 {
-				s.logger.InfoContext(s.ctx, "cleaned up old dumps", slog.Int("deleted", deleted))
-			}
+			// One turn under the guard rather than the whole loop: a panic in a
+			// sweep must not take the process down, and must not retire retention
+			// for the life of the process either. See shared.RunMaintenance.
+			shared.RunMaintenance(s.ctx, s.logger, goroutineNameDumpRetention, func() {
+				deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
+				if err != nil {
+					s.logger.ErrorContext(s.ctx, "dump cleanup failed", slog.Any("error", err))
+				} else if deleted > 0 {
+					s.logger.InfoContext(s.ctx, "cleaned up old dumps", slog.Int("deleted", deleted))
+				}
+			})
 		case <-s.shutdown:
 			return
 		}

@@ -517,7 +517,12 @@ func (s *Session) persistQueryAsync(
 		return
 	}
 
-	go func() {
+	go shared.RunGuarded(s.ctx, s.logger, goroutineNameQueryRecord, func() {
+		// A panic here must not leave the sink unresolved: the shared row writer
+		// waits on it before inserting anything this query queued. Fail is a
+		// no-op once Resolve has run, so this only bites on the panic path.
+		defer sink.Fail()
+
 		queryUID, exists := s.resolveQueryRecord(query, sink, recordPending, len(copyRows) > 0)
 		if queryUID == uuid.Nil {
 			return
@@ -555,7 +560,7 @@ func (s *Session) persistQueryAsync(
 		if err := s.store.IncrementConnectionStats(s.ctx, s.connectionUID, bytesTransferred); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
 		}
-	}()
+	})
 }
 
 // resolveQueryRecord returns the uid of this query's row, inserting it when

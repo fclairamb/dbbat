@@ -243,6 +243,9 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 const dumpCleanupInterval = 1 * time.Hour
 
+// goroutineNameDumpRetention is what a panic in a retention sweep is logged under.
+const goroutineNameDumpRetention = "mysql dump retention sweep"
+
 func (s *Server) runDumpCleanup() {
 	retention, err := time.ParseDuration(s.dumpConfig.Retention)
 	if err != nil {
@@ -255,12 +258,17 @@ func (s *Server) runDumpCleanup() {
 	for {
 		select {
 		case <-ticker.C:
-			deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
-			if err != nil {
-				s.logger.ErrorContext(s.ctx, "MySQL dump cleanup failed", slog.Any("error", err))
-			} else if deleted > 0 {
-				s.logger.InfoContext(s.ctx, "MySQL dump cleanup", slog.Int("deleted", deleted))
-			}
+			// One turn under the guard rather than the whole loop: a panic in a
+			// sweep must not take the process down, and must not retire retention
+			// for the life of the process either. See shared.RunMaintenance.
+			shared.RunMaintenance(s.ctx, s.logger, goroutineNameDumpRetention, func() {
+				deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
+				if err != nil {
+					s.logger.ErrorContext(s.ctx, "MySQL dump cleanup failed", slog.Any("error", err))
+				} else if deleted > 0 {
+					s.logger.InfoContext(s.ctx, "MySQL dump cleanup", slog.Int("deleted", deleted))
+				}
+			})
 		case <-s.shutdown:
 			return
 		}

@@ -58,6 +58,13 @@ const (
 	relayNameUpstreamToClient = "mssql upstream→client"
 	relayNameClientReader     = "mssql client reader"
 	relayNameWatchdog         = "mssql limit watchdog"
+
+	// The detached store writes. Each is named after what it writes, because
+	// that is the only thing the log line can usefully say: these goroutines
+	// outlive the call that spawned them, so the recover on handleConnection
+	// never sees them and nothing else records which write died.
+	goroutineNameQueryRecord         = "mssql query record"
+	goroutineNameHeldQueryCompletion = "mssql held query completion"
 )
 
 // relay pumps TDS both ways until either side closes.

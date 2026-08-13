@@ -242,11 +242,11 @@ func (s *Session) rejectHeldCommand(
 	if approvalUID != uuid.Nil && s.server != nil && s.server.store != nil {
 		errStr := cause.Error()
 
-		go func() {
+		go shared.RunGuarded(s.ctx, s.logger, goroutineNameHeldCommandCompletion, func() {
 			if err := s.server.store.UpdateQueryCompletion(s.ctx, approvalUID, nil, nil, &errStr, false, false); err != nil {
 				s.logger.DebugContext(s.ctx, "failed to complete held command", slog.Any("error", err))
 			}
-		}()
+		})
 
 		// The row already exists; only send the protocol-native error.
 		s.logger.InfoContext(s.ctx, "MongoDB command blocked by approval hold",

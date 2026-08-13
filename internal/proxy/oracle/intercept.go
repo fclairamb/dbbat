@@ -948,7 +948,7 @@ func (s *session) recordBlockedQuery(sql string, binds []string, refusal error) 
 		Error: shared.SanitizeQueryError(s.ctx, s.logger, &errText),
 	}
 
-	go func() {
+	go shared.RunGuarded(s.ctx, s.logger, goroutineNameBlockedQuery, func() {
 		created, err := s.completionStore.CreateQuery(s.ctx, query)
 		if err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to log blocked query", slog.Any("error", err))
@@ -964,7 +964,7 @@ func (s *session) recordBlockedQuery(sql string, binds []string, refusal error) 
 		if err := s.completionStore.IncrementConnectionStats(s.ctx, s.connectionUID, 0); err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
 		}
-	}()
+	})
 
 	// The attempt counts against the in-session query quota, exactly as it
 	// does on the three protocols that already recorded refusals.
@@ -1035,7 +1035,10 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 		// Update with duration, error, rows affected. results_truncated is only
 		// known now: the row was inserted before any row was streamed.
 		if s.completionStore != nil {
-			go s.finalizeQuery(pending.queryUID, pending.rowSink, &duration, rowsAffected, queryError, pending.truncated, bytesTransferred)
+			go shared.RunGuarded(s.ctx, s.logger, goroutineNameQueryCompletion, func() {
+				s.finalizeQuery(pending.queryUID, pending.rowSink, &duration,
+					rowsAffected, queryError, pending.truncated, bytesTransferred)
+			})
 		}
 	} else if s.completionStore != nil {
 		// Create the query record (no rows to stream)
@@ -1050,7 +1053,7 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 			ResultsTruncated: pending.truncated,
 		}
 
-		go func() {
+		go shared.RunGuarded(s.ctx, s.logger, goroutineNameQueryRecord, func() {
 			if _, err := s.completionStore.CreateQuery(s.ctx, query); err != nil {
 				s.logger.ErrorContext(s.ctx, "failed to log query", slog.Any("error", err))
 			}
@@ -1058,7 +1061,7 @@ func (s *session) completeQuery(rowsAffected *int64, queryError *string) {
 			if err := s.completionStore.IncrementConnectionStats(s.ctx, s.connectionUID, bytesTransferred); err != nil {
 				s.logger.ErrorContext(s.ctx, "failed to increment connection stats", slog.Any("error", err))
 			}
-		}()
+		})
 	}
 
 	// Update local grant state for in-session quota checks
