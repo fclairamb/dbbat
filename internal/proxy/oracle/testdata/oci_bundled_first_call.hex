@@ -15,6 +15,7 @@
 # 03 3b 05     the call the client is actually parked on, stapled behind it,
 #              sequence 5
 #
-# Read bytes 1..3 as a big-endian cursor id, the way decodeOFETCH does, and you
-# get 0x6b04 = 27396: the "untracked cursor" this frame used to be refused as.
+# Read bytes 1..3 as a big-endian cursor id, the way the since-deleted
+# decodeOFETCH did, and you get 0x6b04 = 27396: the "untracked cursor" this
+# frame used to be refused as.
 0000116b0400000000000005000000000000003a0000003775000001000000033b050000000000000600000000000000fefffffffffffffff401000000000000fefffffffffffffffeffffffffffffff0100000000000000
