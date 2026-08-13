@@ -168,7 +168,7 @@ func (s *Store) ResolveServerApproverGroupsByServers(
 	err := s.db.NewSelect().
 		Model(&servers).
 		Column("uid", "access_approver_user_group_uids", "query_approver_user_group_uids").
-		Where("uid IN (?)", bun.In(serverUIDs)).
+		Where("uid IN (?)", bun.List(serverUIDs)).
 		Scan(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("resolve server approver groups (servers): %w", err)
@@ -204,7 +204,7 @@ func (s *Store) ResolveServerApproverGroupsByServers(
 		ColumnExpr("sg.access_approver_user_group_uids").
 		ColumnExpr("sg.query_approver_user_group_uids").
 		Join("JOIN server_groups AS sg ON sg.uid = sgm.group_uid").
-		Where("sgm.server_uid IN (?)", bun.In(needGroups)).
+		Where("sgm.server_uid IN (?)", bun.List(needGroups)).
 		Order("sg.name ASC").
 		Scan(ctx)
 	if err != nil {
