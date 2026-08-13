@@ -217,6 +217,14 @@ type session struct {
 	// guard enforces the grant's time-window and bandwidth limits mid-stream.
 	guard *shared.LimitGuard
 
+	// held is the mid-stream limit violation waiting for a call boundary, nil
+	// when none is armed. It is written by the upstream reader (which arms it),
+	// read by the client reader (which answers the client's next call with it)
+	// and by the limit watchdog (which must not pre-empt that handoff), hence
+	// the mutex. See holdRefusal.
+	refusalMu sync.Mutex
+	held      *heldRefusal
+
 	// revocation is signaled when this session's grant is revoked mid-flight,
 	// so the next command is rejected and the watchdog tears the session down.
 	revocation *cache.RevocationHandle
@@ -1246,6 +1254,106 @@ func (s *session) proxyMessages() error {
 	return <-errChan
 }
 
+// heldRefusal is a mid-stream limit violation that has been *decided* but not
+// yet delivered: the client is parked in the middle of a reply, so there is no
+// point in the stream where a frame can be written that it will read.
+//
+// It carries what the two escalation bounds need — when it was armed, and the
+// session's cumulative byte count at that moment — plus a channel the client leg
+// closes once it has answered, which is how the watchdog knows the handoff
+// landed and it must not drop the sockets on top of it.
+type heldRefusal struct {
+	err     error
+	armedAt time.Time
+	atBytes int64
+	done    chan struct{}
+}
+
+// refusalHandoffGrace bounds how long a held refusal may wait for the client to
+// speak again, and refusalHoldMaxBytes bounds how much of the in-flight reply
+// may still be relayed while it waits.
+//
+// Neither is a tuning knob; both are the fail-safes that keep "hold the refusal
+// for the next call" from becoming an enforcement hole. The expected wait is the
+// tail of one fetch batch — milliseconds on a loopback, a fetch-size-bounded
+// number of bytes anywhere — and the values below are generous multiples of
+// that, chosen so that hitting either one means something is wrong (a reply with
+// no end, or a client that stopped talking) rather than that a legitimate
+// handoff ran late. Crossing either falls back to the socket close, which is the
+// pre-fix behaviour: an ORA-03113 that is meant.
+const (
+	refusalHandoffGrace = 30 * time.Second
+	refusalHoldMaxBytes = 8 << 20
+)
+
+// holdRefusal arms a mid-stream refusal, reporting false when one is already
+// armed (the relay keeps checking after every packet, and the violation stays
+// true the whole time it is held).
+func (s *session) holdRefusal(verr error) bool {
+	s.refusalMu.Lock()
+	defer s.refusalMu.Unlock()
+
+	if s.held != nil {
+		return false
+	}
+
+	s.held = &heldRefusal{
+		err:     verr,
+		armedAt: time.Now(),
+		atBytes: s.cumulativeClientBytes(),
+		done:    make(chan struct{}),
+	}
+
+	return true
+}
+
+// heldRefusalNow returns the armed refusal, or nil.
+func (s *session) heldRefusalNow() *heldRefusal {
+	s.refusalMu.Lock()
+	defer s.refusalMu.Unlock()
+
+	return s.held
+}
+
+// finishRefusalHandoff marks a held refusal as delivered (or as abandoned by an
+// escalation), releasing whatever is waiting on it. Idempotent.
+func (s *session) finishRefusalHandoff(held *heldRefusal) {
+	s.refusalMu.Lock()
+	defer s.refusalMu.Unlock()
+
+	select {
+	case <-held.done:
+	default:
+		close(held.done)
+	}
+}
+
+// awaitRefusalHandoff blocks while a mid-stream refusal is held and undelivered,
+// and reports whether the client leg answered it. False means the caller owns
+// the teardown.
+//
+// This exists because LimitGuard.Watch calls its violation hook exactly once and
+// then returns, while the violation itself stays true for as long as the refusal
+// is held: without the wait, the watchdog would drop both sockets ~250ms after
+// the quota was crossed and the client would meet the same ORA-03113 this whole
+// change exists to replace. Waiting rather than skipping is what keeps the
+// watchdog as the fail-safe — a client that never speaks again still loses the
+// session, just at the grace rather than at the poll.
+func (s *session) awaitRefusalHandoff(held *heldRefusal) bool {
+	timer := time.NewTimer(time.Until(held.armedAt.Add(refusalHandoffGrace)))
+	defer timer.Stop()
+
+	select {
+	case <-held.done:
+		return true
+	case <-s.ctx.Done():
+		// The session is going away on its own; nothing left to tear down.
+		return true
+	case <-timer.C:
+		return false
+	}
+}
+
 // onLimitViolation is invoked by the limit watchdog when a time/bandwidth limit
 // is crossed. It force-closes both conns, unblocking whichever relay goroutine
 // is parked in a Read/Write so the session tears down. This is the only way to
@@ -1264,7 +1372,25 @@ func (s *session) proxyMessages() error {
 // learns at its next call; DISCONNECT SESSION drops the socket, which is what
 // this imitates. See docs/oracle.md, "An asynchronous refusal: which call
 // number, and whether to send one at all", and TestIdleLimitViolationSendsNoOER.
+//
+// The one case it stands down for is a refusal already held for the client's
+// next call (holdRefusal): there the client leg has a call to answer and will
+// answer it, so closing the socket here would race the ORA-00028 and win. It
+// stands down for a bounded wait only — a handoff that never happens is exactly
+// what this path is the fail-safe for.
 func (s *session) onLimitViolation(err error) {
+	if held := s.heldRefusalNow(); held != nil {
+		if s.awaitRefusalHandoff(held) {
+			return
+		}
+
+		// The handoff never landed: the client stopped talking with a refusal
+		// undelivered. Fall back to the close, and record the statement the way
+		// the delivered path would have — the reason must survive either way.
+		s.abortHeldQuery(held.err)
+		s.finishRefusalHandoff(held)
+	}
+
 	s.logger.WarnContext(s.ctx, logMsgWatchdogTeardown, slog.Any("error", err))
 
 	if s.upstreamConn != nil {
@@ -1342,6 +1468,14 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 	// now waiting on, and a refusal has to end *that* call by number — see
 	// oerSummary.CallNumber.
 	named := s.observeClientCallNumber(ttcPayload)
+
+	// A limit crossed while dbbat was relaying a reply is answered here rather
+	// than written into that reply: this message is the proof the client has
+	// finished consuming it and is parked on a fresh call that can be ended.
+	// See enforceMidStreamLimits.
+	if held := s.heldRefusalNow(); held != nil {
+		return s.answerHeldRefusal(held, named)
+	}
 
 	switch funcCode { //nolint:exhaustive // only intercepting specific TTC functions, rest pass through
 	case TTCFuncPiggyback:
@@ -1709,47 +1843,139 @@ func (s *session) upstreamToClient() error {
 			return fmt.Errorf("client write error: %w", err)
 		}
 
-		// Enforce time/bandwidth limits mid-stream. While a query is in flight,
-		// re-check after every forwarded packet: the moment the grant's byte
-		// quota is crossed or the grant expires, send a TTC error frame and end
-		// the session rather than streaming the rest of a huge result.
-		if s.hasPendingQuery() {
-			if verr := s.guard.Check(); verr != nil {
-				// This refusal is not answering a client request the way a
-				// client-leg one is — the call was forwarded upstream a while
-				// ago and dbbat is cutting into its reply — but it still ends a
-				// call the client is *waiting on*: hasPendingQuery() is only
-				// true between an execute/re-execute and its end-of-call OER,
-				// and that OER has not reached the client yet. So the last
-				// number observeClientCallNumber saw is the right one to stamp,
-				// for the same reason it is right on the client leg, and the
-				// ojdbc 26.1 measurement behind oerSummary.CallNumber carries
-				// over unchanged. A fetch is its own call with its own sequence
-				// number, and observeClientCallNumber runs on fetches too, so
-				// the number tracks the reply being cut into. See docs/oracle.md,
-				// "An asynchronous refusal: which call number, and whether to
-				// send one at all".
-				_ = s.writeTTCError(int(ORA00028), "session terminated: "+verr.Error())
-
-				// Finalize the in-flight query so its streamed-so-far bytes are
-				// flushed to the store before we return. Otherwise those bytes
-				// live only in the CountingConn atomics and a reconnect recomputes
-				// BytesTransferred without them, letting the cumulative cap be
-				// bypassed across short-lived connections. completeQuery diffs the
-				// bytes since the last query boundary, persists, bumps the
-				// in-session grant, and clears pendingQuery (no double-count).
-				errMsg := "aborted: " + verr.Error()
-
-				// completeQuery expects trackerMu; this is one of the few
-				// callers that reaches it from outside an intercept.
-				s.trackerMu.Lock()
-				s.completeQuery(nil, &errMsg)
-				s.trackerMu.Unlock()
-
-				return verr
-			}
+		if verr := s.enforceMidStreamLimits(); verr != nil {
+			return verr
 		}
 	}
+}
+
+// enforceMidStreamLimits runs after every forwarded packet: the moment the
+// grant's byte quota is crossed, the grant expires or it is revoked, the rest of
+// a huge result must not keep streaming. A non-nil return ends the relay, and
+// with it the session.
+//
+// What it does *not* do is write the refusal here, and that is the whole point
+// of this function. dbbat cuts into the reply at a **TNS packet** boundary,
+// while a fetch reply is a **TTC message** stream whose messages straddle
+// packets — which is why handleContinuation carries lastRow state across them.
+// An OER written at this point therefore lands inside a half-delivered row
+// batch: measured against Oracle 23ai Free, dbbat wrote exactly one well-formed
+// ORA-00028 with the right call number and *neither* ojdbc 23.7 nor go-ora
+// reported it — both consumed it as row bytes and then met EOF (ORA-03113 /
+// "driver: bad connection"). Two drivers reading it the same way is what makes
+// the injection point, and not either driver's parser, the thing that was wrong.
+//
+// So the violation is *held* instead, and the client announces the boundary
+// itself: a client that sends its next TTC op has by construction finished
+// consuming the previous reply, so interceptClientMessage answers that op with
+// the refusal through the ordinary path — the same one measured working on all
+// four clients. It is also what a real Oracle does, measured in
+// TestIntegration_RealOracleSessionTermination: ALTER SYSTEM KILL SESSION pushes
+// nothing at the parked client and answers its *next* call with an ORA-00028
+// stamped with that call's own number.
+//
+// The cost is the tail of the fetch batch already in flight, bounded by the
+// client's fetch size — and, when the reply has no end at all, by
+// refusalHoldMaxBytes below. See docs/oracle.md, "An asynchronous refusal: which
+// call number, and whether to send one at all".
+func (s *session) enforceMidStreamLimits() error {
+	if held := s.heldRefusalNow(); held != nil {
+		// A refusal is already decided and waiting for the client's next call.
+		// Keep relaying so the client can finish the reply it is parked in and
+		// get there — but not without end: a reply whose boundary never arrives
+		// would otherwise stream past the quota indefinitely.
+		if s.cumulativeClientBytes()-held.atBytes <= refusalHoldMaxBytes {
+			return nil
+		}
+
+		s.logger.WarnContext(s.ctx, logMsgRefusalHandoffAbandoned,
+			slog.Int64("relayed_bytes_since", s.cumulativeClientBytes()-held.atBytes),
+			slog.Any("error", held.err))
+
+		s.abortHeldQuery(held.err)
+		s.finishRefusalHandoff(held)
+
+		return held.err
+	}
+
+	if !s.hasPendingQuery() {
+		return nil
+	}
+
+	verr := s.guard.Check()
+	if verr == nil {
+		return nil
+	}
+
+	if s.holdRefusal(verr) {
+		s.logger.WarnContext(s.ctx, logMsgRefusalHeld, slog.Any("error", verr))
+	}
+
+	return nil
+}
+
+// abortHeldQuery finalizes the in-flight query a held refusal cut short, so its
+// streamed-so-far bytes are flushed to the store and the statement carries the
+// real reason it ended.
+//
+// Both halves matter. Without the flush those bytes live only in the
+// CountingConn atomics, and a reconnect recomputes BytesTransferred without
+// them — which lets a cumulative cap be bypassed across short-lived
+// connections. completeQuery diffs the bytes since the last query boundary,
+// persists, bumps the in-session grant and clears pendingQuery (no
+// double-count). Every path that ends a held refusal calls this: the delivered
+// one, and both escalations.
+func (s *session) abortHeldQuery(verr error) {
+	errMsg := "aborted: " + verr.Error()
+
+	// completeQuery expects trackerMu; this is one of the few callers that
+	// reaches it from outside an intercept.
+	s.trackerMu.Lock()
+	s.completeQuery(nil, &errMsg)
+	s.trackerMu.Unlock()
+}
+
+// answerHeldRefusal ends the call the client has just made with the limit
+// violation dbbat decided mid-reply but could not deliver then. Reports true so
+// the caller does not forward the packet.
+//
+// It runs before anything else interceptClientMessage would do with the message,
+// and immediately after observeClientCallNumber, which is what makes the frame
+// readable where the mid-reply one was not: the number stamped on it is the
+// number of the call the client is parked on *right now*, and the client is
+// between TTC messages by construction — it would not have sent this op
+// otherwise.
+//
+// A message dbbat could not name gets the gateUnnameableFrame answer instead:
+// no frame, both sockets dropped. Stamping such a frame with the last number
+// dbbat saw ends a call the client is not waiting for, which is the ORA-18745 /
+// hang mode of
+// specs/done/2026/08/2026-08-12-02-oracle-async-refusal-call-number.md.
+func (s *session) answerHeldRefusal(held *heldRefusal, named bool) bool {
+	defer s.finishRefusalHandoff(held)
+
+	if named {
+		_ = s.writeTTCError(int(ORA00028), "session terminated: "+held.err.Error())
+
+		s.logger.WarnContext(s.ctx, logMsgRefusalDelivered, slog.Any("error", held.err))
+	} else {
+		s.logger.WarnContext(s.ctx, logMsgRefusalUnnameable, slog.Any("error", held.err))
+	}
+
+	s.abortHeldQuery(held.err)
+
+	// The session is over either way — the message says "session terminated" and
+	// the grant no longer permits anything. Closing the upstream first stops any
+	// tail of the reply from being relayed on top of the frame just written.
+	if s.upstreamConn != nil {
+		_ = s.upstreamConn.Close()
+	}
+
+	if s.clientConn != nil {
+		_ = s.clientConn.Close()
+	}
+
+	return true
 }
 
 // interceptUpstreamMessage handles response interception from upstream.

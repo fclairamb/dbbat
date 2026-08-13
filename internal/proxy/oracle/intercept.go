@@ -71,6 +71,20 @@ const (
 	// the session died there and not on the mid-stream check that does write
 	// one — see async_refusal_integration_test.go.
 	logMsgWatchdogTeardown = "terminating Oracle session: grant no longer valid mid-stream"
+
+	// The records of a mid-stream limit refusal held for the client's next call
+	// (session.enforceMidStreamLimits). They are separate messages because they
+	// are different outcomes and the measurement reads them apart:
+	// held is the decision, delivered is the ORA-00028 the client can actually
+	// parse, and the other two are the fail-safes — a call dbbat cannot name, and
+	// a reply that never reached a boundary. logMsgWatchdogTeardown covers the
+	// fourth (a client that stopped talking), which is the watchdog's own.
+	logMsgRefusalHeld = "holding a mid-stream limit refusal until the client's next call: " +
+		"a frame written into a reply in progress is not readable"
+	logMsgRefusalDelivered  = "refused the client's next call with the limit violation held mid-reply"
+	logMsgRefusalUnnameable = "ended the session: a held limit refusal met a call dbbat cannot name, " +
+		"so there is no frame to answer with"
+	logMsgRefusalHandoffAbandoned = "ended the session: a held limit refusal never reached a call boundary"
 )
 
 // trackedCursor tracks a parsed cursor and its SQL.
