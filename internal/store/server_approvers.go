@@ -251,6 +251,11 @@ func (s *Store) ResolveServerApproverGroupsByServers(
 //
 // A server that cannot be loaded (deleted since) resolves to false: the
 // fail-closed direction.
+//
+// This is the one-server convenience. A caller judging many rows at once
+// resolves with ResolveServerApproverGroupsByServers and asks the resulting
+// ServerApprovers.MayApprove instead — the same intersection over the same
+// chain, minus the per-row round trips.
 func (s *Store) MayApproveForServer(
 	ctx context.Context, serverUID uuid.UUID, kind ApproverKind, userGroupUIDs []uuid.UUID,
 ) (bool, error) {

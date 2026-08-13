@@ -421,7 +421,11 @@ func (s *Server) handleListGrantRequests(c *gin.Context) {
 		return
 	}
 
-	successResponse(c, gin.H{"grant_requests": s.withApproverHats(c.Request.Context(), currentUser, requests)})
+	// Admins wear the admin hat on every row and never consult the chain, so
+	// this path needs no prefetch.
+	successResponse(c, gin.H{
+		"grant_requests": s.withApproverHats(c.Request.Context(), currentUser, requests, nil),
+	})
 }
 
 // grantRequestResponse is a request plus the hat the *current* viewer would
@@ -436,15 +440,19 @@ type grantRequestResponse struct {
 // withApproverHats decorates a request list for one viewer. The hat is computed
 // per request because the answer is per *server*: an ops lead may decide the
 // staging rows in a list and none of the production ones.
+//
+// approvers is the page-wide resolution when the caller has one, and nil when
+// it does not (an admin listing, where the chain is never reached). Passing it
+// changes only how many round trips the decoration costs, never a hat.
 func (s *Server) withApproverHats(
-	ctx context.Context, user *store.User, requests []store.GrantRequest,
+	ctx context.Context, user *store.User, requests []store.GrantRequest, approvers *listingApprovers,
 ) []grantRequestResponse {
 	out := make([]grantRequestResponse, 0, len(requests))
 
 	for i := range requests {
 		out = append(out, grantRequestResponse{
 			GrantRequest: requests[i],
-			ApproverRole: s.approverHatForRequest(ctx, user, &requests[i]),
+			ApproverRole: s.approverHatForRequestWith(ctx, user, &requests[i], approvers),
 		})
 	}
 
@@ -494,6 +502,25 @@ func (s *Server) listGrantRequestsForNonAdmin(c *gin.Context, currentUser *store
 		seen[own[i].UID] = struct{}{}
 	}
 
+	// Resolve the access approvers of every distinct database on this page once,
+	// then decide each row against that. The chain is the same one
+	// mayDecideGrantRequest walks row by row — it is simply asked about the
+	// whole page in one go, and the hats below reuse the very same answer
+	// instead of walking it a second time.
+	databases := make([]*uuid.UUID, 0, len(pending)+len(own))
+	for i := range pending {
+		databases = append(databases, &pending[i].DatabaseID)
+	}
+
+	// The caller's own rows never reach the chain (self-approval is refused
+	// before it), but they are decorated from the same map, so keeping their
+	// databases in it means the map covers every row it is ever asked about.
+	for i := range own {
+		databases = append(databases, &own[i].DatabaseID)
+	}
+
+	approvers := s.prefetchApprovers(ctx, currentUser, store.ApproverKindAccess, distinctUIDs(databases))
+
 	out := own
 
 	for i := range pending {
@@ -501,12 +528,12 @@ func (s *Server) listGrantRequestsForNonAdmin(c *gin.Context, currentUser *store
 			continue
 		}
 
-		if s.mayDecideGrantRequest(ctx, currentUser, &pending[i]) {
+		if s.mayDecideGrantRequestWith(ctx, currentUser, &pending[i], approvers) {
 			out = append(out, pending[i])
 		}
 	}
 
-	successResponse(c, gin.H{"grant_requests": s.withApproverHats(ctx, currentUser, out)})
+	successResponse(c, gin.H{"grant_requests": s.withApproverHats(ctx, currentUser, out, approvers)})
 }
 
 // handleGetGrantRequest — role-aware: requesters fetch their own, admins fetch
