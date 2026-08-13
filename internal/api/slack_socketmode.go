@@ -5,9 +5,10 @@ import (
 	"errors"
 	"log/slog"
 
-	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
+
+	"github.com/fclairamb/dbbat/internal/safe"
 )
 
 // What a panic on the Socket Mode transport is logged under.

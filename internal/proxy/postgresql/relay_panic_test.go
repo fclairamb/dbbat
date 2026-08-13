@@ -7,9 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/require"
+
+	"github.com/fclairamb/dbbat/internal/safe"
 )
 
 // panicOnReadConn blows up the moment a relay reads it — standing in for any
