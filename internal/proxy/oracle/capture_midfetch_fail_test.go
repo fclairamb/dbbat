@@ -22,7 +22,9 @@ package oracle
 import (
 	"database/sql"
 	"fmt"
+	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -176,6 +178,145 @@ func TestCapture_GoOraMidFetchFailure(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, db.Close())
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s", outPath)
+}
+
+// jdbcMidFetchSource drives the same failure from the Oracle JDBC thin driver.
+// The fetch size is set explicitly rather than left at ojdbc's default of 10, so
+// the batching matches the other three clients; the counter lives outside the
+// try-with-resources because the exception that ends the fetch is raised by
+// ResultSet.next(), not by the execute.
+const jdbcMidFetchSource = `
+import java.sql.*;
+public class MidFetch {
+  public static void main(String[] a) throws Exception {
+    try (Connection c = DriverManager.getConnection("jdbc:oracle:thin:@//" + a[0], "system", "oracle")) {
+      try (Statement s = c.createStatement()) {
+        try { s.execute("DROP TABLE dbbat_midfetch"); }
+        catch (SQLException e) { System.out.println("drop-setup : " + e.getMessage().split("\n")[0]); }
+        s.execute(a[1]);
+        s.execute(a[2]);
+      }
+      int n = 0;
+      try (Statement s = c.createStatement()) {
+        s.setFetchSize(Integer.parseInt(a[4]));
+        try (ResultSet rs = s.executeQuery(a[3])) {
+          while (rs.next()) n++;
+          System.out.println("midfetch : DID-NOT-FAIL after " + n + " rows");
+        } catch (SQLException e) {
+          System.out.println("midfetch : " + n + " rows then " + e.getMessage().split("\n")[0]);
+        }
+      }
+      try (Statement s = c.createStatement()) { s.execute("DROP TABLE dbbat_midfetch"); }
+    }
+    System.out.println("ok");
+  }
+}
+`
+
+// TestCapture_JDBCThinMidFetchFailure records the third client. It is the one
+// the anchor could not be assumed for: JDBC reaches the execute behind a
+// close-cursors list and reads a different OER tail than go-ora, so whether its
+// mid-fetch diagnostic names the cursor whose rows it interrupted is a
+// measurement, not an inference.
+func TestCapture_JDBCThinMidFetchFailure(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_MIDFETCH_JDBC", "testdata/jdbc_thin_midfetch_fail.pcapng")
+	jar := captureEnv("OJDBC_JAR", "/opt/homebrew/Caskroom/sqlcl/26.1.0.086.1709/sqlcl/lib/ojdbc11.jar")
+
+	requireOracleReachable(t, oracleAddr)
+
+	if _, err := os.Stat(jar); err != nil {
+		t.Skipf("ojdbc jar not found at %s: %v", jar, err)
+	}
+
+	if _, err := exec.LookPath("javac"); err != nil {
+		t.Skipf("javac unavailable: %v", err)
+	}
+
+	dir := t.TempDir()
+	src := dir + "/MidFetch.java"
+	require.NoError(t, os.WriteFile(src, []byte(jdbcMidFetchSource), 0o600))
+
+	if out, err := exec.Command("javac", "-d", dir, src).CombinedOutput(); err != nil {
+		t.Skipf("javac failed: %v (%s)", err, out)
+	}
+
+	w := newCaptureWriter(t, outPath, "capture-jdbc-thin-midfetch-fail")
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	ddl := midFetchDDL()
+
+	cmd := exec.CommandContext(t.Context(), "java", "-cp", dir+":"+jar, "MidFetch",
+		fmt.Sprintf("%s/%s", relayAddr, oracleService),
+		ddl[0], ddl[1], midFetchQuery, fmt.Sprint(midFetchArray))
+
+	out, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "jdbc client failed: %s", out)
+	t.Logf("jdbc client: %s", out)
+
+	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
+	require.NoError(t, w.Close())
+
+	t.Logf("capture written to %s", outPath)
+}
+
+// sqlplusMidFetchScript is the same fixture for an OCI client. SET ARRAYSIZE is
+// the only fetch-size control sqlplus has, and TERMOUT is left on so the
+// ORA-01722 lands in the process output the test logs; the rows themselves are
+// spooled away, because 14 900 of them are not evidence of anything.
+func sqlplusMidFetchScript(spool string) string {
+	ddl := midFetchDDL()
+
+	return fmt.Sprintf(`SET PAGESIZE 0
+SET FEEDBACK OFF
+SET SQLBLANKLINES ON
+SET ARRAYSIZE %d
+WHENEVER SQLERROR CONTINUE
+DROP TABLE dbbat_midfetch;
+%s;
+%s;
+COMMIT;
+SPOOL %s
+%s;
+SPOOL OFF
+DROP TABLE dbbat_midfetch;
+EXIT
+`, midFetchArray, ddl[0], ddl[1], spool, midFetchQuery)
+}
+
+// TestCapture_SQLPlusMidFetchFailure records the fourth client, and the only
+// one on the OCI/wide path: sqlplus negotiates the fixed-width summary-object
+// encoding (see docs/oracle.md), so what its mid-fetch OER looks like on the
+// wire is the one thing the three thin clients cannot stand in for.
+func TestCapture_SQLPlusMidFetchFailure(t *testing.T) {
+	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
+	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")
+	outPath := captureEnv("CAPTURE_OUT_MIDFETCH_SQLPLUS", "testdata/sqlplus_midfetch_fail.pcapng")
+
+	requireOracleReachable(t, oracleAddr)
+
+	sqlplus, err := exec.LookPath("sqlplus")
+	if err != nil {
+		t.Skipf("sqlplus unavailable: %v", err)
+	}
+
+	w := newCaptureWriter(t, outPath, "capture-sqlplus-midfetch-fail")
+	relayAddr := startCaptureRelay(t, oracleAddr, w)
+
+	script := writeTempScript(t, sqlplusMidFetchScript(t.TempDir()+"/rows.lst"))
+
+	cmd := exec.CommandContext(t.Context(), sqlplus, "-S",
+		fmt.Sprintf("system/oracle@//%s/%s", relayAddr, oracleService), "@"+script)
+
+	out, _ := cmd.CombinedOutput() // sqlplus exits non-zero on the ORA-01722 it is here to raise
+	t.Logf("sqlplus: %s", strings.TrimSpace(string(out)))
+	require.Contains(t, string(out), "ORA-01722", "the fixture must have failed mid-fetch")
+
 	time.Sleep(500 * time.Millisecond) // let the relay drain the final packets
 	require.NoError(t, w.Close())
 
