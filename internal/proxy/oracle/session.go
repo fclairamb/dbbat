@@ -1435,6 +1435,8 @@ func (s *session) awaitRefusalHandoff(held *heldRefusal) bool {
 // stands down for a bounded wait only — a handoff that never happens is exactly
 // what this path is the fail-safe for.
 func (s *session) onLimitViolation(err error) {
+	attrs := []any{slog.Any("error", err)}
+
 	if held := s.heldRefusalNow(); held != nil {
 		if s.awaitRefusalHandoff(held) {
 			return
@@ -1445,9 +1447,17 @@ func (s *session) onLimitViolation(err error) {
 		// the delivered path would have — the reason must survive either way.
 		s.abortHeldQuery(held.err)
 		s.finishRefusalHandoff(held)
+
+		// What the abandoned hold cost, on the same two axes every other exit
+		// reports. The time is the grace by construction; the bytes are not, and
+		// they say how much of a reply a client that went quiet was still fed.
+		cost := s.refusalHandoffCost(held)
+		attrs = append(attrs,
+			slog.Int64(logAttrRelayedBytesSince, cost.bytes),
+			slog.Int64(logAttrHeldForMillis, cost.millis))
 	}
 
-	s.logger.WarnContext(s.ctx, logMsgWatchdogTeardown, slog.Any("error", err))
+	s.logger.WarnContext(s.ctx, logMsgWatchdogTeardown, attrs...)
 
 	s.closeConns()
 }
@@ -2026,8 +2036,11 @@ func (s *session) enforceMidStreamLimits() error {
 			return nil
 		}
 
+		cost := s.refusalHandoffCost(held)
+
 		s.logger.WarnContext(s.ctx, logMsgRefusalHandoffAbandoned,
-			slog.Int64("relayed_bytes_since", s.cumulativeClientBytes()-held.atBytes),
+			slog.Int64(logAttrRelayedBytesSince, cost.bytes),
+			slog.Int64(logAttrHeldForMillis, cost.millis),
 			slog.Any("error", held.err))
 
 		s.abortHeldQuery(held.err)
@@ -2126,15 +2139,49 @@ func (s *session) answerHeldRefusal(held *heldRefusal, named bool) bool {
 		}
 	}()
 
+	// What the handoff actually cost, recorded on the way out. Both bounds are
+	// sized against these two numbers and nothing else, so they are logged on
+	// every delivery rather than inferred from a client's row count: the byte
+	// side is the tail of the in-flight fetch batch, the time side is how long
+	// the client took to announce its boundary. See refusalHandoffCost and
+	// docs/oracle.md, "What a legitimate handoff costs, measured".
+	cost := s.refusalHandoffCost(held)
+
 	if named {
 		_ = s.writeTTCError(int(ORA00028), "session terminated: "+held.err.Error())
 
-		s.logger.WarnContext(s.ctx, logMsgRefusalDelivered, slog.Any("error", held.err))
+		s.logger.WarnContext(s.ctx, logMsgRefusalDelivered,
+			slog.Any("error", held.err),
+			slog.Int64(logAttrRelayedBytesSince, cost.bytes),
+			slog.Int64(logAttrHeldForMillis, cost.millis))
 	} else {
-		s.logger.WarnContext(s.ctx, logMsgRefusalUnnameable, slog.Any("error", held.err))
+		s.logger.WarnContext(s.ctx, logMsgRefusalUnnameable,
+			slog.Any("error", held.err),
+			slog.Int64(logAttrRelayedBytesSince, cost.bytes),
+			slog.Int64(logAttrHeldForMillis, cost.millis))
 	}
 
 	return true
+}
+
+// handoffCost is what one held refusal cost before it was answered: the bytes
+// relayed to the client past the violation, and how long the hold lasted.
+//
+// These are exactly the two quantities refusalHoldMaxBytes and
+// refusalHandoffGrace bound, which is the point — the constants are sized
+// against observations of this struct, taken from live clients through the
+// integration suites, rather than against a reasoned expectation.
+type handoffCost struct {
+	bytes  int64
+	millis int64
+}
+
+// refusalHandoffCost measures a held refusal at the moment it is resolved.
+func (s *session) refusalHandoffCost(held *heldRefusal) handoffCost {
+	return handoffCost{
+		bytes:  s.cumulativeClientBytes() - held.atBytes,
+		millis: time.Since(held.armedAt).Milliseconds(),
+	}
 }
 
 // heldRefusalBlocks is the exit interceptClientMessage takes when it could not

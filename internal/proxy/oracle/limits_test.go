@@ -326,6 +326,77 @@ func TestHeldRefusalEndsTheCallTheClientIsNextParkedOn(t *testing.T) {
 	}
 }
 
+// TestHeldRefusalRecordsWhatTheHandoffCost guards the measurement the two
+// fail-safe bounds are sized against.
+//
+// refusalHoldMaxBytes and refusalHandoffGrace are no longer reasoned numbers:
+// docs/oracle.md carries per-client observations of `relayed_bytes_since` and
+// `held_for_ms` taken off the delivered path by the integration suites. Those
+// suites read the attributes back through countingHandler.intsFor, so an
+// attribute that stopped being emitted — or was renamed — would turn every one
+// of those measurements into an assertion on an empty slice. The compiler
+// catches a rename of the constants; this catches the emission.
+//
+// It also pins the arithmetic itself, which nothing else does: the byte figure
+// is the session's cumulative client-leg traffic *since* the violation, not
+// since the session opened.
+func TestHeldRefusalRecordsWhatTheHandoffCost(t *testing.T) {
+	t.Parallel()
+
+	grant := &store.Grant{
+		UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
+	}
+
+	var from, to atomic.Int64
+
+	// Where the session stood when the quota was crossed. Everything before this
+	// belongs to the reply the client was already draining and must not be
+	// counted against the hold.
+	to.Store(4096)
+
+	logs := newCountingHandler()
+
+	client, _ := recordingPipe(t)
+
+	s := newTestSession(grant)
+	s.logger = slog.New(logs)
+	s.clientConn = client
+	s.bytesFromClient = &from
+	s.bytesToClient = &to
+	s.oer = defaultOERShape()
+	s.oer.tailLearned = true
+
+	require.True(t, s.holdRefusal(shared.ErrByteQuotaExceeded))
+
+	// The tail of the in-flight fetch batch, relayed while the refusal waited.
+	const tailBytes = 1500
+
+	to.Store(4096 + tailBytes)
+
+	next := buildOALL8("SELECT id FROM emp", nil, 1)
+	next[ttcOpSeqOffset] = 0x2a
+
+	require.True(t, s.interceptClientMessage(&TNSPacket{
+		Type:    TNSPacketTypeData,
+		Payload: append([]byte{0x00, 0x00}, next...),
+	}))
+
+	require.Equal(t, 1, logs.count(logMsgRefusalDelivered), "the refusal must have been delivered")
+
+	assert.Equal(t, []int64{tailBytes},
+		logs.intsFor(logMsgRefusalDelivered, logAttrRelayedBytesSince),
+		"the delivered record must carry the bytes relayed *past the violation*, which is the "+
+			"quantity refusalHoldMaxBytes bounds and the integration suites read back")
+
+	waits := logs.intsFor(logMsgRefusalDelivered, logAttrHeldForMillis)
+	require.Len(t, waits, 1,
+		"and how long the hold lasted, which is the quantity refusalHandoffGrace bounds")
+	assert.GreaterOrEqual(t, waits[0], int64(0))
+	assert.Less(t, waits[0], refusalHandoffGrace.Milliseconds(),
+		"a hold answered in-process cannot have taken the whole grace")
+}
+
 // TestHeldRefusalMeetingAnUnnameableCallClosesInstead pins the fail-safe on the
 // delivery side. dbbat can only end a call it can name; stamping a frame with
 // the last number it saw ends a call the client is not parked on, which is the
