@@ -225,6 +225,17 @@ type session struct {
 	refusalMu sync.Mutex
 	held      *heldRefusal
 
+	// refusalHoldBytes / refusalHoldGrace override the two fail-safe bounds
+	// below, and exist so a test can actually *reach* them. Both are sized so a
+	// live client never hits them — that is the whole point of their values —
+	// which used to leave the relay and the watchdog that enforce them coverable
+	// only by hand-mutating a held refusal's own marks. Zero means "use the
+	// constant", so a bare &session{} (which is how a dozen unit tests build
+	// one) keeps the production bounds; read them through refusalBytesBound and
+	// refusalGrace rather than directly.
+	refusalHoldBytes int64
+	refusalHoldGrace time.Duration
+
 	// revocation is signaled when this session's grant is revoked mid-flight,
 	// so the next command is rejected and the watchdog tears the session down.
 	revocation *cache.RevocationHandle
@@ -1286,6 +1297,25 @@ const (
 	refusalHoldMaxBytes = 8 << 20
 )
 
+// refusalBytesBound and refusalGrace are how the two bounds are read: the
+// session's own override when it has one, the constant otherwise. See the
+// fields on session for why the override exists.
+func (s *session) refusalBytesBound() int64 {
+	if s.refusalHoldBytes > 0 {
+		return s.refusalHoldBytes
+	}
+
+	return refusalHoldMaxBytes
+}
+
+func (s *session) refusalGrace() time.Duration {
+	if s.refusalHoldGrace > 0 {
+		return s.refusalHoldGrace
+	}
+
+	return refusalHandoffGrace
+}
+
 // holdRefusal arms a mid-stream refusal, reporting false when one is already
 // armed (the relay keeps checking after every packet, and the violation stays
 // true the whole time it is held).
@@ -1340,7 +1370,7 @@ func (s *session) finishRefusalHandoff(held *heldRefusal) {
 // watchdog as the fail-safe — a client that never speaks again still loses the
 // session, just at the grace rather than at the poll.
 func (s *session) awaitRefusalHandoff(held *heldRefusal) bool {
-	timer := time.NewTimer(time.Until(held.armedAt.Add(refusalHandoffGrace)))
+	timer := time.NewTimer(time.Until(held.armedAt.Add(s.refusalGrace())))
 	defer timer.Stop()
 
 	select {
@@ -1955,7 +1985,7 @@ func (s *session) enforceMidStreamLimits() error {
 		// Keep relaying so the client can finish the reply it is parked in and
 		// get there — but not without end: a reply whose boundary never arrives
 		// would otherwise stream past the quota indefinitely.
-		if s.cumulativeClientBytes()-held.atBytes <= refusalHoldMaxBytes {
+		if s.cumulativeClientBytes()-held.atBytes <= s.refusalBytesBound() {
 			return nil
 		}
 
