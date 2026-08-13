@@ -290,10 +290,10 @@ func TestDumpReplay_SQLPlusResendsItsSQLInstead(t *testing.T) {
 }
 
 // TestDumpReplay_CursorReexecOfAnUntrackedCursorFailsClosed is the symmetry
-// claim, on a frame Oracle actually sent: the piggyback re-execution now answers
-// an untracked cursor exactly like the SQL-less OALL8 and the fresh-query
-// OFETCH — refused under a grant carrying a statement-shaped control, forwarded
-// with a WARN under one carrying none.
+// claim, on a frame Oracle actually sent: the piggyback re-execution answers an
+// untracked cursor exactly like the SQL-less OALL8 — refused under a grant
+// carrying a statement-shaped control, forwarded with a WARN under one carrying
+// none.
 //
 // The asymmetry it replaces was real and load-bearing: while cursor-id learning
 // silently stopped part-way through every session (the OER sequence bound in

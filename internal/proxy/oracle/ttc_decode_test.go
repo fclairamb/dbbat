@@ -97,16 +97,6 @@ func buildOALL8WithBinaryBind(sql string, binaryVal []byte, cursorID uint16) []b
 	return buf
 }
 
-// buildOFETCH creates a well-formed OFETCH TTC payload for testing.
-func buildOFETCH(cursorID uint16, fetchSize uint32) []byte {
-	buf := make([]byte, ofetchMinPayloadSize)
-	buf[0] = byte(TTCFuncOFETCH)
-	binary.BigEndian.PutUint16(buf[1:3], cursorID)
-	binary.BigEndian.PutUint32(buf[3:7], fetchSize)
-
-	return buf
-}
-
 // encodeVarLen encodes a length value using TTC variable-length encoding.
 func encodeVarLen(val uint32) []byte {
 	switch {
@@ -287,32 +277,6 @@ func TestDecodeOALL8_FuzzInputs(t *testing.T) {
 		_, _ = decodeOALL8(input)
 		_ = i
 	}
-}
-
-func TestDecodeOFETCH(t *testing.T) {
-	t.Parallel()
-
-	payload := buildOFETCH(7, 100)
-	result, err := decodeOFETCH(payload)
-	require.NoError(t, err)
-	assert.Equal(t, uint16(7), result.CursorID)
-	assert.Equal(t, uint32(100), result.FetchSize)
-}
-
-func TestDecodeOFETCH_TooShort(t *testing.T) {
-	t.Parallel()
-
-	_, err := decodeOFETCH([]byte{0x11, 0x00})
-	assert.ErrorIs(t, err, ErrOFETCHTooShort)
-}
-
-func TestDecodeOFETCH_LargeFetchSize(t *testing.T) {
-	t.Parallel()
-
-	payload := buildOFETCH(1, 10000)
-	result, err := decodeOFETCH(payload)
-	require.NoError(t, err)
-	assert.Equal(t, uint32(10000), result.FetchSize)
 }
 
 func TestDecodeVarLen(t *testing.T) {

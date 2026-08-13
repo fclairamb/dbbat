@@ -170,31 +170,6 @@ func TestHandleOALL8_PasswordChangeBlocked(t *testing.T) {
 	assert.ErrorIs(t, err, shared.ErrPasswordChangeBlocked)
 }
 
-func TestHandleOFETCH_LinksToCursor(t *testing.T) {
-	t.Parallel()
-	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
-
-	// First, register a cursor via OALL8
-	_ = s.handleOALL8(buildOALL8("SELECT * FROM emp", nil, 7))
-	// Clear the pending query (as if response was received)
-	s.tracker.pendingQuery = nil
-
-	// Now fetch should link to the cursor
-	require.NoError(t, s.handleOFETCH(buildOFETCH(7, 100)))
-
-	require.NotNil(t, s.tracker.pendingQuery)
-	assert.Equal(t, "SELECT * FROM emp", s.tracker.pendingQuery.cursor.sql)
-}
-
-func TestHandleOFETCH_UnknownCursor(t *testing.T) {
-	t.Parallel()
-	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
-
-	// OFETCH for cursor that doesn't exist
-	require.NoError(t, s.handleOFETCH(buildOFETCH(99, 100)))
-	assert.Nil(t, s.tracker.pendingQuery)
-}
-
 func TestHandleOCLOSE_CleansCursor(t *testing.T) {
 	t.Parallel()
 	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})

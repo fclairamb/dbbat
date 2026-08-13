@@ -603,8 +603,6 @@ func TestDumpReplay_NoTNSParsePanics(t *testing.T) {
 				switch fc { //nolint:exhaustive // only handling relevant function codes
 				case TTCFuncOALL8:
 					_, _ = decodeOALL8(ttcPayload)
-				case TTCFuncOFETCH:
-					_, _ = decodeOFETCH(ttcPayload)
 				case TTCFuncResponse:
 					_, _ = decodeTTCResponse(ttcPayload)
 				case TTCFuncQueryResult:

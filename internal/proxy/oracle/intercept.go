@@ -154,7 +154,7 @@ func (s *session) book(fn func() error) error {
 
 // hasPendingQuery reports whether a query is in flight. Takes trackerMu, so it
 // is for callers that do *not* already hold it — the mid-stream limit check in
-// upstreamToClient, and the continuation test in handleOFETCH.
+// upstreamToClient.
 func (s *session) hasPendingQuery() bool {
 	s.trackerMu.Lock()
 	defer s.trackerMu.Unlock()
@@ -267,8 +267,7 @@ func (s *session) handleOALL8(ttcPayload []byte) error {
 }
 
 // handleCursorReexec gates an execution that carries no statement of its own —
-// a SQL-less OALL8, or an OFETCH that starts a fresh pending query — against
-// the SQL the named cursor was parsed with.
+// a SQL-less OALL8 — against the SQL the named cursor was parsed with.
 //
 // Without this, an approval decision and every statement-shaped control applied
 // to the *parse* only: a client that parsed once and re-executed the same
@@ -283,11 +282,10 @@ func (s *session) handleCursorReexec(cursorID uint16) error {
 }
 
 // refuseUnknownCursor decides what to do with a re-execution naming a cursor
-// dbbat never saw parsed. All three frames that can only be identified by
-// cursor id route through here — the SQL-less OALL8, an OFETCH that starts a
-// fresh pending query, and the piggyback re-execution every modern thin client
-// sends — so the wire op a client picks cannot change the answer. The statement
-// it would run is unknown, so:
+// dbbat never saw parsed. Both frames that can only be identified by cursor id
+// route through here — the SQL-less OALL8 and the piggyback re-execution every
+// modern thin client sends — so the wire op a client picks cannot change the
+// answer. The statement it would run is unknown, so:
 //
 //   - under a grant carrying statement-shaped controls, it fails closed — a
 //     restrictive grant must not be bypassable by an execution the proxy cannot
@@ -357,9 +355,9 @@ func (s *session) hasStatementControls() bool {
 // pending query for this execution. Same order as the SQL-carrying path, so a
 // re-execution is enforced exactly like the parse that created the cursor.
 //
-// This is the single quota-check insertion point for all three re-execution
-// frames: the SQL-less OALL8 (handleCursorReexec), the piggyback re-execution
-// (handlePiggybackReexec) and the OFETCH that starts a fresh query. Each
+// This is the single quota-check insertion point for both re-execution frames:
+// the SQL-less OALL8 (handleCursorReexec) and the piggyback re-execution
+// (handlePiggybackReexec). Each
 // resolves its cursor before delegating here, which is deliberate — a cursor
 // dbbat never saw parsed keeps answering refuseUnknownCursor even when the
 // grant is also exhausted. That refusal is the more specific and the more
@@ -715,48 +713,6 @@ func (s *session) handleQueryResultV2(ttcPayload []byte) {
 	if result.NoData {
 		s.completeQuery(nil, nil)
 	}
-}
-
-// handleOFETCH intercepts an OFETCH message: links the fetch to its cursor.
-//
-// A fetch arriving with no query in flight is a re-execution, so it carries the
-// full pre-flight of a statement — quota, static controls, approval hold — and
-// a cursor dbbat never saw parsed goes through refuseUnknownCursor first,
-// exactly like the SQL-less OALL8, before the quota is ever consulted. A fetch
-// continuing a query already in flight carries none of it.
-//
-// Returns a non-nil error when the fetch must not be forwarded; the caller
-// answers the client with a TTC error instead.
-func (s *session) handleOFETCH(ttcPayload []byte) error {
-	result, err := decodeOFETCH(ttcPayload)
-	if err != nil {
-		s.logger.WarnContext(s.ctx, "failed to decode OFETCH", slog.Any("error", err))
-
-		return nil
-	}
-
-	// A fetch that CONTINUES a query already in flight is simply more rows of a
-	// statement that has already been through the gate. It is deliberately left
-	// alone: re-validating here would risk parking a client mid-result-set,
-	// which the hold must never do.
-	if s.hasPendingQuery() {
-		return nil
-	}
-
-	// No query in flight: this fetch re-executes the cursor and starts its own
-	// pending query, which is persisted as a distinct row in /queries. Anything
-	// recorded as its own query is gated as its own query, or the audit trail
-	// and the enforcement disagree — and that includes the quota, which
-	// regateCursor checks below once the cursor has resolved. The early return
-	// above is what keeps every one of those refusals off the continuation
-	// path, where cutting a client off mid-result-set is exactly what must
-	// never happen.
-	cursor, ok := s.lookupCursor(result.CursorID)
-	if !ok {
-		return s.refuseUnknownCursor(result.CursorID)
-	}
-
-	return s.regateCursor(cursor)
 }
 
 // handleOCLOSE cleans up cursor tracking when a cursor is closed. Takes

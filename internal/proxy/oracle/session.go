@@ -1495,9 +1495,9 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) (blocked bool) {
 		} else if IsPiggybackCursorReexec(ttcPayload) {
 			// A re-execution is a fresh execution of a statement: it goes
 			// through the same pre-flight as one carrying its own SQL, quota
-			// check included. (Unlike the OFETCH path below, this frame is
-			// never a continuation of a result set already streaming, so
-			// checking quotas here cannot strand a client mid-fetch.)
+			// check included. This frame is never a continuation of a result
+			// set already streaming, so checking quotas here cannot strand a
+			// client mid-fetch.
 			return s.gateStatement(s.handlePiggybackReexec, ttcPayload)
 		} else if IsPiggybackLogoff(ttcPayload) {
 			// Sub-op 0x09 is the session logoff, not a cursor close. It used
@@ -1546,24 +1546,14 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) (blocked bool) {
 			return s.gateStatement(s.handleJDBCExec, ttcPayload)
 		}
 
-		// A fetch that starts a fresh pending query is a cursor re-execution
-		// and is gated like a statement; one that continues a query already in
-		// flight is not.
-		//
-		// It deliberately does NOT go through gateStatement: a continuation
-		// fetch must reach no gate at all, and refusing mid-result-set is
-		// exactly what this path must avoid. handleOFETCH returns early on
-		// that branch and only the re-execution branch reaches regateCursor,
-		// which runs the quota check — so MaxQueryCounts is enforced exactly
-		// where a new /queries row is about to be created and nowhere else.
-		// (The other quota-shaped limits — revocation, bytes, expiry — are
-		// additionally covered on the response leg by LimitGuard, which does
-		// not know about MaxQueryCounts.)
-		if err := s.handleOFETCH(ttcPayload); err != nil {
-			_ = s.sendOracleError(err)
-
-			return true
-		}
+		// Nothing else in a 0x11 frame is intercepted. There used to be a
+		// third re-execution reading here — "a fetch arriving with no query in
+		// flight is a re-execution" — but it was written against a layout no
+		// Oracle client sends (see the note on TTCFuncOFETCH in ttc.go), so it
+		// only ever fired on misparsed piggybacks. It is gone; the two real
+		// re-execution frames (the SQL-less OALL8 and the 03/0x4e|0x04
+		// piggyback) are unaffected. Real fetches are message type 0x03
+		// function 0x05, which dbbat does not intercept.
 
 	case TTCFuncOCLOSE, TTCFuncOClosev2:
 		cursorID, err := decodeCursorIDFromOCLOSE(ttcPayload)
