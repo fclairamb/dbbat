@@ -647,17 +647,70 @@ func TestMatchableSQL_LiteralAware(t *testing.T) {
 			in:     "SELECT `co/*l` /*c*/ FROM t",
 			want:   "SELECT `co/*l`   FROM t",
 		},
+		// The executable-comment family. MySQL strips the introducer, its optional
+		// version number *and* the closing `*/` before running the body, so the
+		// scratch copy has to strip exactly the same three things: a version number
+		// left behind sits between two keywords the patterns expect adjacent, which
+		// is an evasion rather than a leftover.
 		{
-			name:   "mysql executable comment keeps its body",
+			name:   "mysql executable comment, 5-digit version",
 			syntax: syntaxMySQL,
 			in:     "/*!40101 SET GLOBAL x=1 */",
-			want:   " 40101 SET GLOBAL x=1 */",
+			want:   "  SET GLOBAL x=1  ",
 		},
 		{
-			name:   "mariadb executable comment keeps its body",
+			name:   "mysql executable comment, 6-digit version",
+			syntax: syntaxMySQL,
+			in:     "/*!100101 SET GLOBAL x=1 */",
+			want:   "  SET GLOBAL x=1  ",
+		},
+		{
+			name:   "mysql executable comment, no version",
+			syntax: syntaxMySQL,
+			in:     "/*!SET GLOBAL x=1*/",
+			want:   " SET GLOBAL x=1 ",
+		},
+		{
+			name:   "mysql executable comment wrapping only a keyword",
+			syntax: syntaxMySQL,
+			in:     "SET /*!32302 GLOBAL */ max_connections=1",
+			want:   "SET   GLOBAL   max_connections=1",
+		},
+		{
+			name:   "mariadb executable comment, 6-digit version",
 			syntax: syntaxMySQL,
 			in:     "/*M!100001 SET GLOBAL x=1 */",
-			want:   " 100001 SET GLOBAL x=1 */",
+			want:   "  SET GLOBAL x=1  ",
+		},
+		{
+			name:   "mariadb executable comment, no version",
+			syntax: syntaxMySQL,
+			in:     "/*M!SET GLOBAL x=1*/",
+			want:   " SET GLOBAL x=1 ",
+		},
+		{
+			name:   "unterminated executable comment falls back to the raw text",
+			syntax: syntaxMySQL,
+			in:     "/*!40101 SET GLOBAL x=1",
+			want:   "/*!40101 SET GLOBAL x=1",
+		},
+		{
+			name:   "nested executable comment falls back to the raw text",
+			syntax: syntaxMySQL,
+			in:     "/*!40101 /*!40102 SET GLOBAL x=1 */ */",
+			want:   "/*!40101 /*!40102 SET GLOBAL x=1 */ */",
+		},
+		{
+			name:   "plain comment inside an executable one falls back to the raw text",
+			syntax: syntaxMySQL,
+			in:     "/*!40101 /*x*/ SET GLOBAL x=1 */",
+			want:   "/*!40101 /*x*/ SET GLOBAL x=1 */",
+		},
+		{
+			name:   "an executable comment is a plain comment for the other dialects",
+			syntax: syntaxStandard,
+			in:     "SELECT /*!40101 1 */ FROM t",
+			want:   "SELECT   FROM t",
 		},
 		{
 			name:   "a mysql optimizer hint is a plain comment",
@@ -709,6 +762,17 @@ func TestValidateMySQLQuery_Comments(t *testing.T) {
 		{"SET # note\nGLOBAL max_connections=1", "hash comment"},
 		{"/*!40101 SET GLOBAL max_connections=1 */", "version-gated comment MySQL executes"},
 		{"/*M!100001 SET GLOBAL max_connections=1 */", "MariaDB flavor of the same"},
+		{"/*!SET GLOBAL max_connections=1*/", "version-gated comment with no version"},
+		// The version number is part of the marker, not of the body. Left in the
+		// scratch copy it lands between two keywords the pattern expects adjacent,
+		// which is how `SET /*!32302 GLOBAL */ x=1` reached the server as
+		// `SET GLOBAL x=1` while reading as neither to dbbat.
+		{"SET /*!32302 GLOBAL */ max_connections=1", "version number splitting SET from GLOBAL"},
+		{"LOAD /*!50000 DATA */ LOCAL INFILE '/etc/passwd' INTO TABLE t", "same, splitting LOAD from DATA"},
+		{"SELECT * FROM t INTO /*!50000 OUTFILE */ '/tmp/x'", "same, splitting INTO from OUTFILE"},
+		// Unterminated and nested executable comments fail closed onto the raw
+		// text, which still carries the keywords adjacent.
+		{"/*!40101 SET GLOBAL max_connections=1", "unterminated, matched against the raw text"},
 		{"LOAD/**/DATA LOCAL INFILE '/etc/passwd' INTO TABLE t", "LOAD DATA INFILE"},
 		{"SELECT * FROM t INTO/**/OUTFILE '/tmp/x'", "INTO OUTFILE"},
 		{"SET/**/PASSWORD = PASSWORD('x')", "SET PASSWORD"},
@@ -735,6 +799,31 @@ func TestValidateMySQLQuery_Comments(t *testing.T) {
 	for _, sql := range allowed {
 		assert.NoError(t, ValidateMySQLQuery(sql, grant), "should allow: %s", sql)
 	}
+}
+
+// TestValidateMySQLQuery_ExecutableCommentIsNotAWriteEscape is the general case
+// behind the pattern list: MySQL runs the body of `/*!… */`, so wrapping *any*
+// write in one must not make it read as a non-write. Nothing in
+// mysqlBlockedPatterns is involved — this is the read_only control itself.
+func TestValidateMySQLQuery_ExecutableCommentIsNotAWriteEscape(t *testing.T) {
+	t.Parallel()
+
+	readOnly := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
+	blockDDL := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlBlockDDL}}}
+
+	writes := []string{
+		"/*!00000 INSERT INTO t VALUES (1)*/",
+		"/*!40101 UPDATE t SET x = 1 */",
+		"/*M!100001 DELETE FROM t */",
+		"/*! REPLACE INTO t VALUES (1) */",
+	}
+	for _, sql := range writes {
+		require.ErrorIs(t, ValidateMySQLQuery(sql, readOnly), ErrReadOnlyViolation, "write: %s", sql)
+	}
+
+	require.ErrorIs(t,
+		ValidateMySQLQuery("/*!00000 DROP TABLE t*/", blockDDL),
+		ErrDDLBlocked)
 }
 
 // BenchmarkValidateOracleQuery guards the hot path: this runs on every
