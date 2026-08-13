@@ -260,6 +260,7 @@ func TestIntegration_HeldRefusalHandoffCost(t *testing.T) {
 		tap := startThrottledRecordingTap(t, env.host, env.port, crossoverLinkBytesPerSecond)
 		before := newRefusalCounters(env)
 		crossoversBefore := env.logs.count(logMsgRefusalGraceOutranBytes)
+		declinedBefore := env.logs.count(logMsgRefusalCrossoverDeclined)
 
 		runCtx, cancel := context.WithTimeout(ctx, crossoverProbeDeadline)
 		defer cancel()
@@ -293,7 +294,8 @@ func TestIntegration_HeldRefusalHandoffCost(t *testing.T) {
 
 		require.Equal(t, crossoversBefore+1, env.logs.count(logMsgRefusalGraceOutranBytes),
 			"a client still draining when its grace ran out must be reported as the crossover, not "+
-				"left indistinguishable from one that stopped talking")
+				"left indistinguishable from one that stopped talking.\n%s",
+			whyTheCrossoverWasDeclined(env, declinedBefore))
 
 		effective := env.logs.intsFor(logMsgRefusalGraceOutranBytes, logAttrEffectiveBytesPerSec)
 		crossover := env.logs.intsFor(logMsgRefusalGraceOutranBytes, logAttrCrossoverBytesPerSec)
@@ -308,6 +310,49 @@ func TestIntegration_HeldRefusalHandoffCost(t *testing.T) {
 		assert.Less(t, effective[len(effective)-1], crossover[len(crossover)-1],
 			"the record's whole claim: the link was below the rate the two bounds meet at")
 	})
+}
+
+// whyTheCrossoverWasDeclined renders the measurement the crossover decision was
+// actually made from, for the assertion above to fail *with* rather than to
+// leave the reader guessing at a bare count.
+//
+// The four numbers come off logMsgRefusalCrossoverDeclined, which the product
+// emits at DEBUG on exactly the path that skips the WARN. Without them a red
+// subtest here says only "expected 1, actual 0", which is true of a link that
+// was fast enough, of a hold nothing was ever relayed past, and of the record
+// being broken — three findings with three different fixes.
+func whyTheCrossoverWasDeclined(env *oracleThroughProxy, before int) string {
+	declines := env.logs.count(logMsgRefusalCrossoverDeclined)
+	if declines <= before {
+		return "and nothing declined it either: the grace-expiry path never ran the crossover check " +
+			"at all, so the hold was not abandoned by the clock the way the assertions above claim"
+	}
+
+	last := func(values []int64) int64 {
+		if len(values) == 0 {
+			return -1
+		}
+
+		return values[len(values)-1]
+	}
+
+	outOfReach := env.logs.boolsFor(logMsgRefusalCrossoverDeclined, logAttrBoundOutOfReach)
+	reachable := len(outOfReach) > 0 && !outOfReach[len(outOfReach)-1]
+	silence := last(env.logs.intsFor(logMsgRefusalCrossoverDeclined, logAttrSinceLastRelayMillis))
+
+	return fmt.Sprintf(
+		"the crossover check ran and declined: %d bytes relayed past the violation in %d ms "+
+			"(%d B/s effective against a %d B/s crossover rate), last fed the client %d ms before "+
+			"the grace expired (idle window %s, -1 = never fed), byte bound out of reach: %t.\n"+
+			"still-receiving is %t and out-of-reach is %t; the false one is the finding",
+		last(env.logs.intsFor(logMsgRefusalCrossoverDeclined, logAttrRelayedBytesSince)),
+		last(env.logs.intsFor(logMsgRefusalCrossoverDeclined, logAttrHeldForMillis)),
+		last(env.logs.intsFor(logMsgRefusalCrossoverDeclined, logAttrEffectiveBytesPerSec)),
+		last(env.logs.intsFor(logMsgRefusalCrossoverDeclined, logAttrCrossoverBytesPerSec)),
+		silence, refusalHandoffGrace/refusalStillReceivingIdleFraction,
+		!reachable,
+		silence >= 0 && silence <= (refusalHandoffGrace/refusalStillReceivingIdleFraction).Milliseconds(),
+		!reachable)
 }
 
 // wideProbeDeadline is refusalDeadline with room for the two runs here, which

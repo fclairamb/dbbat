@@ -1441,14 +1441,25 @@ func (s *session) noteRefusalRelayProgress(held *heldRefusal, relayed int64) {
 // hundred kilobytes — and the crossover this exists to name only arises for
 // overshoots far larger than that, which cannot be hidden that way.
 func (s *session) heldRefusalWasStillReceiving(held *heldRefusal, at time.Time) bool {
+	silence, fed := s.refusalRelaySilence(held, at)
+
+	return fed && silence <= s.refusalStillReceivingIdle()
+}
+
+// refusalRelaySilence is the raw measurement behind that predicate: how long
+// before `at` the relay last fed the client past this hold, and whether it ever
+// did. Split out because the number is what makes an abandonment legible — the
+// predicate alone cannot say whether it answered no because nothing was ever
+// relayed or because the last byte was too long ago.
+func (s *session) refusalRelaySilence(held *heldRefusal, at time.Time) (time.Duration, bool) {
 	s.refusalMu.Lock()
 	defer s.refusalMu.Unlock()
 
 	if held.lastRelayAt.IsZero() || held.lastRelayBytes <= held.atBytes {
-		return false
+		return 0, false
 	}
 
-	return at.Sub(held.lastRelayAt) <= s.refusalStillReceivingIdle()
+	return at.Sub(held.lastRelayAt), true
 }
 
 // refusalBoundOutOfReach reports whether the byte bound could not have been
@@ -1494,7 +1505,29 @@ func (s *session) refusalCrossoverBytesPerSecond() int64 {
 // bounds were not sized for. Nothing branches on it — see refusalHandoffGrace
 // for why the values are left where they are.
 func (s *session) reportRefusalBoundCrossover(held *heldRefusal, cost handoffCost, at time.Time) {
-	if !s.heldRefusalWasStillReceiving(held, at) || !s.refusalBoundOutOfReach(cost) {
+	stillReceiving := s.heldRefusalWasStillReceiving(held, at)
+	outOfReach := s.refusalBoundOutOfReach(cost)
+
+	if !stillReceiving || !outOfReach {
+		// Say so rather than falling silent. The four numbers the decision is
+		// made from are otherwise nowhere, which is what made "the record never
+		// fires" indistinguishable from "the link was fast enough" — see
+		// logMsgRefusalCrossoverDeclined.
+		silence, fed := s.refusalRelaySilence(held, at)
+		sinceLastRelay := int64(-1)
+
+		if fed {
+			sinceLastRelay = silence.Milliseconds()
+		}
+
+		s.logger.DebugContext(s.ctx, logMsgRefusalCrossoverDeclined,
+			slog.Int64(logAttrRelayedBytesSince, cost.bytes),
+			slog.Int64(logAttrHeldForMillis, cost.millis),
+			slog.Int64(logAttrEffectiveBytesPerSec, cost.bytesPerSecond()),
+			slog.Int64(logAttrCrossoverBytesPerSec, s.refusalCrossoverBytesPerSecond()),
+			slog.Int64(logAttrSinceLastRelayMillis, sinceLastRelay),
+			slog.Bool(logAttrBoundOutOfReach, outOfReach))
+
 		return
 	}
 
