@@ -71,10 +71,13 @@ const (
 	// oracle-free:23-slim, 18.4 in oracle-xe:18.4.0-slim — so this needs no
 	// artifact, no download and no cache in CI.
 	//
-	// It is also a *different* OCI flavor from the Instant Client: the bundled
-	// client sends plain key/value length fields where the Instant Client sends
-	// 3x UTF-8 buffer sizes (see docs/oracle.md, "OCI wide (4-byte
-	// little-endian) TTC encoding"). Nothing exercised it live before.
+	// It is also a *different* OCI flavor from the Instant Client, and running
+	// it found three defects the Instant Client hid, every one of which hung a
+	// session under a restrictive grant: it sends plain key/value length fields
+	// where the Instant Client sends 3x UTF-8 buffer sizes, it writes its TTC op
+	// headers and close-cursors lists at 64-bit widths, and its server answers
+	// it with the 64-bit summary object (see docs/oracle.md, "Two OCI
+	// encodings, not one"). Nothing exercised it live before.
 	ociClientContainer
 )
 
@@ -104,8 +107,10 @@ var plannedOCIClient = sync.OnceValue(func() ociClientKind {
 // ociClient runs an sqlplus script against the proxy and hands back everything
 // the client printed, whichever side of the container boundary it ran on.
 type ociClient struct {
-	// kind is which of the two flavors this is, for the one test that has to
-	// tell them apart (see knownBadBundledRefusal).
+	// kind is which of the two flavors this is. Nothing branches on it any
+	// more — the refusal test used to skip the bundled client, which is the
+	// defect this field outlived (see the note above ociClientContainer) — but
+	// a test that needs to tell them apart has it.
 	kind ociClientKind
 
 	// label names the flavor in test logs, so a failure says which client
@@ -279,29 +284,6 @@ func ociAuthModeNote(t *testing.T) {
 	t.Logf("%s unset: this login runs on the wide AUTH REWRITE path; "+
 		"set it to 1 to exercise the synthetic builders", forceSyntheticAuthEnv)
 }
-
-// knownBadBundledRefusal is a *measured* defect, not a convenience: under a
-// restrictive grant the DB-bundled OCI client's very first call in proxy mode
-// is refused and the session then hangs, so the refusal test cannot run on that
-// flavor until the bug is fixed. The login test above is unaffected (it holds
-// an unrestricted grant, so no gate fires) and does run on it.
-//
-// Measured on gvenzl/oracle-free:23-slim (client 23.26) against the same image
-// as upstream, `read_only` grant, sqlplus's first statement a plain SELECT:
-//
-//	TTC message func=OFETCH
-//	refused a re-execution of an untracked cursor under a restrictive grant cursor_id=27396
-//
-// A fresh session has no cursors, so 27396 is not a cursor the client could be
-// re-executing. The Instant Client 23.3 on PATH passes the same test against
-// the same upstream, which is what makes this flavor-specific rather than a
-// property of the gate.
-//
-// Full write-up and repro:
-// specs/todos/2026-08-12-12-bundled-oci-client-refused-and-hung-under-a-restrictive-grant.md
-const knownBadBundledRefusal = "the bundled OCI client's first call is refused as an untracked cursor " +
-	"re-execution under a restrictive grant, and the session then hangs — see " +
-	"specs/todos/2026-08-12-12-bundled-oci-client-refused-and-hung-under-a-restrictive-grant.md"
 
 // assertNoOCIAuthMalformation names the two failures a wrong wide AUTH body
 // produces, so a regression reads as itself rather than as missing output.
