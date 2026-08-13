@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+	"github.com/uptrace/bun"
 	"github.com/uptrace/bun/dialect/pgdialect"
 )
 
@@ -83,35 +84,163 @@ func (g *ServerGroup) ApproverUserGroupUIDs(kind ApproverKind) []uuid.UUID {
 func (s *Store) ResolveServerApproverGroups(
 	ctx context.Context, serverUID uuid.UUID, kind ApproverKind,
 ) ([]uuid.UUID, error) {
-	server, err := s.GetServerByUID(ctx, serverUID)
+	resolved, err := s.ResolveServerApproverGroupsByServers(ctx, []uuid.UUID{serverUID}, kind)
 	if err != nil {
 		return nil, err
 	}
 
-	if own := server.ApproverUserGroupUIDs(kind); len(own) > 0 {
-		return copyUUIDs(own), nil
+	groups, found := resolved[serverUID]
+	if !found {
+		return nil, ErrServerNotFound
 	}
 
-	groups, err := s.ListServerGroupsForServer(ctx, serverUID)
+	return groups, nil
+}
+
+// ServerApprovers is a resolved approver answer for a set of servers, keyed by
+// server uid: exactly what ResolveServerApproverGroups would have returned for
+// each of them, computed in one shot.
+//
+// A server present in the store has an entry, possibly an empty one ("nobody
+// but admins"). A server that does not exist — deleted since the row naming it
+// was written — is **absent**, and every read of an absent key yields nil,
+// which is the same fail-closed answer the per-server path gives by erroring.
+type ServerApprovers map[uuid.UUID][]uuid.UUID
+
+// MayApprove is MayApproveForServer's decision half applied to an
+// already-resolved answer. Same rule, same fail-closed direction: no user
+// groups, an unknown server, or a server naming nobody all mean false.
+func (a ServerApprovers) MayApprove(serverUID uuid.UUID, userGroupUIDs []uuid.UUID) bool {
+	if len(userGroupUIDs) == 0 {
+		return false
+	}
+
+	return intersectsUUIDs(a[serverUID], userGroupUIDs)
+}
+
+// serverApproverGroupRow is the join projection the batched resolver reads: one
+// row per (server, server group) membership, carrying the *group's* two
+// approver lists. It exists only so the group step costs one query for any
+// number of servers.
+type serverApproverGroupRow struct {
+	bun.BaseModel `bun:"table:server_group_members,alias:sgm"`
+
+	ServerUID                   uuid.UUID   `bun:"server_uid,type:uuid"`
+	AccessApproverUserGroupUIDs []uuid.UUID `bun:"access_approver_user_group_uids,array"`
+	QueryApproverUserGroupUIDs  []uuid.UUID `bun:"query_approver_user_group_uids,array"`
+}
+
+// approverUserGroupUIDs picks the list for one kind through ServerGroup's own
+// accessor, so which column answers which kind is decided in exactly one place.
+func (r *serverApproverGroupRow) approverUserGroupUIDs(kind ApproverKind) []uuid.UUID {
+	group := ServerGroup{
+		AccessApproverUserGroupUIDs: r.AccessApproverUserGroupUIDs,
+		QueryApproverUserGroupUIDs:  r.QueryApproverUserGroupUIDs,
+	}
+
+	return group.ApproverUserGroupUIDs(kind)
+}
+
+// ResolveServerApproverGroupsByServers is the batched form of
+// ResolveServerApproverGroups, and — since that function is now a thin wrapper
+// over this one — the actual home of the chain documented there. There is still
+// one implementation; a listing simply asks it about every row at once.
+//
+// Cost is two queries whatever the number of servers: one for the server rows
+// and their own lists, one joining server_group_members to server_groups for
+// the group-level fallback. That is what keeps a delegated approver's pending
+// page from firing two round trips per row.
+//
+// Liveness is unchanged: both reads happen now, so the answer reflects the
+// approver lists and the group membership as they stand at this instant, not as
+// they stood when the request was filed or the statement parked.
+func (s *Store) ResolveServerApproverGroupsByServers(
+	ctx context.Context, serverUIDs []uuid.UUID, kind ApproverKind,
+) (ServerApprovers, error) {
+	resolved := make(ServerApprovers, len(serverUIDs))
+
+	if len(serverUIDs) == 0 {
+		return resolved, nil
+	}
+
+	var servers []Server
+
+	err := s.db.NewSelect().
+		Model(&servers).
+		Column("uid", "access_approver_user_group_uids", "query_approver_user_group_uids").
+		Where("uid IN (?)", bun.In(serverUIDs)).
+		Scan(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("resolve server approver groups (servers): %w", err)
 	}
 
-	seen := make(map[uuid.UUID]struct{})
-	union := make([]uuid.UUID, 0)
+	// Level 1: a server naming its own approvers overrides the group level
+	// outright. Everything else starts empty and may be filled by level 2.
+	needGroups := make([]uuid.UUID, 0, len(servers))
 
-	for i := range groups {
-		for _, uid := range groups[i].ApproverUserGroupUIDs(kind) {
-			if _, dup := seen[uid]; dup {
+	for i := range servers {
+		if own := servers[i].ApproverUserGroupUIDs(kind); len(own) > 0 {
+			resolved[servers[i].UID] = copyUUIDs(own)
+
+			continue
+		}
+
+		resolved[servers[i].UID] = make([]uuid.UUID, 0)
+		needGroups = append(needGroups, servers[i].UID)
+	}
+
+	if len(needGroups) == 0 {
+		return resolved, nil
+	}
+
+	// Level 2: the union of the lists on every group the server belongs to,
+	// ordered by group name so the union reads the same way the per-server
+	// path (which ordered its groups by name) always did.
+	var rows []serverApproverGroupRow
+
+	err = s.db.NewSelect().
+		Model(&rows).
+		ColumnExpr("sgm.server_uid").
+		ColumnExpr("sg.access_approver_user_group_uids").
+		ColumnExpr("sg.query_approver_user_group_uids").
+		Join("JOIN server_groups AS sg ON sg.uid = sgm.group_uid").
+		Where("sgm.server_uid IN (?)", bun.In(needGroups)).
+		Order("sg.name ASC").
+		Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve server approver groups (groups): %w", err)
+	}
+
+	// Only servers in needGroups may be filled from here — a server that named
+	// its own approvers was excluded from the query, and level 1 wins outright.
+	seen := make(map[uuid.UUID]map[uuid.UUID]struct{}, len(needGroups))
+	for _, uid := range needGroups {
+		seen[uid] = make(map[uuid.UUID]struct{})
+	}
+
+	for i := range rows {
+		serverUID := rows[i].ServerUID
+
+		dedup, wanted := seen[serverUID]
+		if !wanted {
+			continue
+		}
+
+		union := resolved[serverUID]
+
+		for _, uid := range rows[i].approverUserGroupUIDs(kind) {
+			if _, dup := dedup[uid]; dup {
 				continue
 			}
 
-			seen[uid] = struct{}{}
+			dedup[uid] = struct{}{}
 			union = append(union, uid)
 		}
+
+		resolved[serverUID] = union
 	}
 
-	return union, nil
+	return resolved, nil
 }
 
 // MayApproveForServer reports whether a user holding userGroupUIDs is named,
