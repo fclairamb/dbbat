@@ -661,7 +661,212 @@ func backdateHeldRefusal(s *session) {
 	s.refusalMu.Lock()
 	defer s.refusalMu.Unlock()
 
-	s.held.armedAt = s.held.armedAt.Add(-refusalHandoffGrace - time.Second)
+	s.held.armedAt = s.held.armedAt.Add(-s.refusalGrace() - time.Second)
+}
+
+// TestUpstreamToClient_StopsRelayingPastTheOvershootBound is the same fail-safe
+// as TestHeldRefusalStopsRelayingOnceTheOvershootBoundIsCrossed, reached the way
+// a live session reaches it: by the **relay** running out of bound, rather than
+// by a direct call to enforceMidStreamLimits with a mark moved by hand.
+//
+// The distinction is the reason this test exists. The arithmetic test pins the
+// subtraction; it cannot show that upstreamToClient consults the bound after
+// every forwarded packet, nor that a non-nil return there actually ends the
+// relay. The upstream here is one that never finishes its reply — the exact
+// failure the bound is a fail-safe for, and one no real database produces, which
+// is why the bound had never fired end to end.
+//
+// The bound is shrunk rather than the pipe fed 8 MiB: at ~48 bytes a packet that
+// would be ~180k round trips through a synchronous net.Pipe, and it would make
+// the loop count, not the relay, the thing being measured.
+func TestUpstreamToClient_StopsRelayingPastTheOvershootBound(t *testing.T) {
+	t.Parallel()
+
+	clientProxyEnd, clientTestEnd := net.Pipe()
+	upstreamProxyEnd, upstreamTestEnd := net.Pipe()
+
+	t.Cleanup(func() {
+		_ = clientProxyEnd.Close()
+		_ = clientTestEnd.Close()
+		_ = upstreamProxyEnd.Close()
+		_ = upstreamTestEnd.Close()
+	})
+
+	var from, to atomic.Int64
+
+	counted := shared.NewCountingConn(clientProxyEnd, &from, &to)
+
+	maxBytes := int64(200)
+	grant := &store.Grant{
+		ExpiresAt:  time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{MaxBytesTransferred: &maxBytes},
+	}
+
+	logs := newCountingHandler()
+
+	const (
+		overshootBound   = 4096
+		replyPayloadSize = 40
+		replyPacketSize  = tnsHeaderSize + replyPayloadSize
+	)
+
+	s := newTestSession(grant)
+	s.logger = slog.New(logs)
+	s.clientConn = counted
+	s.upstreamConn = upstreamProxyEnd
+	s.bytesFromClient = &from
+	s.bytesToClient = &to
+	s.guard = shared.NewLimitGuard(grant, &from, &to)
+	s.refusalHoldBytes = overshootBound
+	s.tracker.pendingQuery = &pendingOracleQuery{
+		cursor:    &trackedCursor{sql: "SELECT * FROM never_ends"},
+		startTime: time.Now(),
+	}
+
+	// An upstream whose reply has no end: it keeps writing row-shaped Data
+	// packets until the relay gives up and the pipe breaks under it. Byte 2 is
+	// an unhandled TTC function code, so the response interceptor is a no-op and
+	// only the byte flow matters.
+	go func() {
+		payload := make([]byte, replyPayloadSize)
+		payload[2] = 0x99
+
+		pkt := &TNSPacket{Type: TNSPacketTypeData, Payload: payload}
+
+		for {
+			if err := writeTNSPacket(upstreamTestEnd, pkt); err != nil {
+				return
+			}
+		}
+	}()
+
+	// A client that keeps reading, so nothing stalls on pipe back-pressure and
+	// the relay is bounded by the fail-safe rather than by a blocked write.
+	relayed := make(chan int, 1)
+
+	go func() {
+		count := 0
+
+		for {
+			if _, err := readTNSPacket(clientTestEnd); err != nil {
+				relayed <- count
+
+				return
+			}
+
+			count++
+		}
+	}()
+
+	err := s.upstreamToClient()
+	require.ErrorIs(t, err, shared.ErrByteQuotaExceeded,
+		"past the bound the relay must end the session rather than keep streaming a reply with no end")
+
+	held := s.heldRefusalNow()
+	require.NotNil(t, held)
+
+	overshoot := s.cumulativeClientBytes() - held.atBytes
+	t.Logf("relayed %d bytes past the violation under a %d-byte bound", overshoot, overshootBound)
+
+	assert.Greater(t, overshoot, int64(overshootBound),
+		"the relay must have run past the bound before giving up — otherwise it stopped for some other reason")
+	assert.LessOrEqual(t, overshoot, int64(overshootBound+replyPacketSize),
+		"and it must give up within one packet of the bound; anything more is an unbounded relay")
+
+	assert.Positive(t, logs.count(logMsgRefusalHandoffAbandoned),
+		"the abandonment must be logged as itself, not as a watchdog teardown")
+	assert.Nil(t, s.tracker.pendingQuery, "the abandoned query must still be finalized")
+	assert.Positive(t, grant.BytesTransferred, "its streamed bytes must still be charged to the grant")
+
+	select {
+	case <-held.done:
+	default:
+		t.Fatal("the handoff must be marked done, or the watchdog waits out its whole grace on top of it")
+	}
+
+	_ = clientProxyEnd.Close()
+	_ = clientTestEnd.Close()
+
+	select {
+	case count := <-relayed:
+		assert.Positive(t, count, "the client must have received the reply it was parked in")
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for the client reader to finish")
+	}
+}
+
+// TestHeldRefusalWatchdogFallsBackAfterItsGraceRunsOut is the grace fail-safe
+// reached through the path a stuck client really takes: the violation is armed
+// by enforceMidStreamLimits, the real LimitGuard.Watch fires onLimitViolation,
+// the client never speaks, and the grace expires on its own.
+//
+// TestHeldRefusalFallsBackToTheCloseWhenTheClientStopsTalking pins the same
+// teardown, but reaches it by backdating armedAt and calling onLimitViolation
+// directly — which cannot show that the watchdog gets there at all, nor that
+// awaitRefusalHandoff's timer is armed off the grace rather than off something
+// that never fires. A millisecond grace is what makes the real wait testable.
+func TestHeldRefusalWatchdogFallsBackAfterItsGraceRunsOut(t *testing.T) {
+	t.Parallel()
+
+	clientProxyEnd, clientTestEnd := net.Pipe()
+	upstreamProxyEnd, upstreamTestEnd := net.Pipe()
+
+	t.Cleanup(func() {
+		_ = clientProxyEnd.Close()
+		_ = clientTestEnd.Close()
+		_ = upstreamProxyEnd.Close()
+		_ = upstreamTestEnd.Close()
+	})
+
+	var from, to atomic.Int64
+
+	// The quota is already spent: this is the state the relay would be in when
+	// it noticed the crossing mid-reply.
+	maxBytes := int64(200)
+	to.Store(4096)
+
+	grant := &store.Grant{
+		UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{MaxBytesTransferred: &maxBytes},
+	}
+
+	recorder := newRecordingCompletionStore()
+
+	s := newTestSession(grant)
+	s.clientConn = clientProxyEnd
+	s.upstreamConn = upstreamProxyEnd
+	s.completionStore = recorder
+	s.bytesFromClient = &from
+	s.bytesToClient = &to
+	s.guard = shared.NewLimitGuard(grant, &from, &to)
+	s.refusalHoldGrace = 20 * time.Millisecond
+	s.tracker.pendingQuery = &pendingOracleQuery{
+		cursor:    &trackedCursor{sql: "SELECT * FROM big"},
+		startTime: time.Now(),
+	}
+
+	// Armed the way the relay arms it, not by calling holdRefusal: this is the
+	// production path from "the guard says the quota is gone" to "a refusal is
+	// waiting for the client's next call".
+	require.NoError(t, s.enforceMidStreamLimits(), "arming the hold must not end the relay")
+	require.NotNil(t, s.heldRefusalNow(), "the violation must be held for the client's next call")
+
+	go s.guard.Watch(context.Background(), 5*time.Millisecond, s.onLimitViolation)
+
+	// The client never speaks again, so the handoff never lands and the grace is
+	// what ends the session — with the fallback the hold exists to avoid only
+	// when it is working: both sockets dropped, an ORA-03113 that is meant.
+	assertOraclePeerClosed(t, clientTestEnd, "client conn")
+	assertOraclePeerClosed(t, upstreamTestEnd, "upstream conn")
+
+	logged := recorder.awaitCreated(t)
+	require.NotNil(t, logged.Error)
+	assert.Equal(t, "aborted: "+shared.ErrByteQuotaExceeded.Error(), *logged.Error,
+		"the statement must carry the real reason even when nobody was there to be told it")
+	assert.Equal(t, "SELECT * FROM big", logged.SQLText)
+
+	assert.Nil(t, s.tracker.pendingQuery, "the abandoned query must be finalized")
+	assert.Positive(t, grant.BytesTransferred, "its streamed bytes must still be charged to the grant")
 }
 
 // assertOracleConnStillOpen is the inverse of assertOraclePeerClosed: a read
