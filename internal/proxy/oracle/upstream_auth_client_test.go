@@ -35,7 +35,7 @@ func TestBuildClientAuthPhase1Layout(t *testing.T) {
 
 	sess := &session{}
 	body := buildClientAuthPhase1(
-		sess.syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq), "ADMIN", ident, logonModeNoNewPass)
+		sess.syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq), "ADMIN", ident, logonModeNoNewPass, false)
 
 	// The preamble go-ora v3 puts on the wire — 03 76 <seq> 00 from PutTTCFunc
 	// (TTCVersion >= 18), then the 0x01 username-present marker. dbbat used to
@@ -150,7 +150,7 @@ func TestBuildClientAuthPhase1NarrowFuncHeader(t *testing.T) {
 
 	body := buildClientAuthPhase1(
 		sess.syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq),
-		"ADMIN", driverIdentity{HostName: "h", DriverName: "d"}, logonModeNoNewPass)
+		"ADMIN", driverIdentity{HostName: "h", DriverName: "d"}, logonModeNoNewPass, false)
 
 	want := []byte{
 		byte(TTCFuncPiggyback), PiggybackSubAuth1, authPhase1FuncSeq, 0x01,
@@ -186,7 +186,7 @@ func TestBuildClientAuthPhase2Layout(t *testing.T) {
 	sess := &session{}
 	body := buildClientAuthPhase2(
 		sess.syntheticAuthHeader(PiggybackSubAuth2, authPhase2FuncSeq),
-		"ADMIN", ident, sec, logonModeNoNewPass|logonModeUserAndPass)
+		"ADMIN", ident, sec, logonModeNoNewPass|logonModeUserAndPass, false)
 
 	// 03 73 02 00 — PutTTCFunc's Phase 2 header on a TTCVersion >= 18 session,
 	// matching testdata/go_ora_cursor_reexec.pcapng. Then the 0x01
@@ -240,7 +240,7 @@ func TestBuildClientAuthPhase2NoSpeedyKeyFor6949(t *testing.T) {
 	sess := &session{}
 	body := buildClientAuthPhase2(
 		sess.syntheticAuthHeader(PiggybackSubAuth2, authPhase2FuncSeq),
-		"ADMIN", driverIdentity{HostName: "h", DriverName: "d"}, sec, logonModeNoNewPass)
+		"ADMIN", driverIdentity{HostName: "h", DriverName: "d"}, sec, logonModeNoNewPass, false)
 
 	if bytes.Contains(body, []byte("AUTH_PBKDF2_SPEEDY_KEY")) {
 		t.Fatalf("phase2 for 6949 must not include AUTH_PBKDF2_SPEEDY_KEY")
