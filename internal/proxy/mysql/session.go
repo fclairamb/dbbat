@@ -137,6 +137,10 @@ func newSession(clientConn net.Conn, server *Server) *Session {
 	}
 }
 
+// goroutineNameWatchdog is the label the limit watchdog reports itself under
+// when it panics. A log label, not an identifier.
+const goroutineNameWatchdog = "mysql limit watchdog"
+
 // Run drives the session lifecycle:
 //  1. MySQL handshake with auth termination
 //  2. Connect to upstream MySQL using stored credentials
@@ -196,8 +200,16 @@ func (s *Session) Run() error {
 	upstreamConn := s.upstreamConn
 	clientConn := s.clientConn
 
-	go s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
-		s.onLimitViolation(upstreamConn, clientConn, err)
+	// Guarded because it is a goroutine of its own: the recover on
+	// handleConnection sits elsewhere and catches nothing raised here, and Go
+	// ends the process on an unrecovered panic in any goroutine. Unlike the other
+	// four protocols, MySQL has no second guarded site — go-mysql owns the wire
+	// and commandLoop runs synchronously on the connection's own goroutine, under
+	// that recover, so there are no relay goroutines to wrap.
+	go shared.RunGuarded(watchCtx, s.logger, goroutineNameWatchdog, func() {
+		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
+			s.onLimitViolation(upstreamConn, clientConn, err)
+		})
 	})
 
 	s.logger.InfoContext(s.ctx, "MySQL session ready",

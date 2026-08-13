@@ -334,6 +334,14 @@ func (s *Session) Run() error {
 	return s.proxyMessages()
 }
 
+// Names the per-session goroutines report themselves under when one of them
+// panics. Log labels, not identifiers.
+const (
+	relayNameClientToUpstream = "postgresql client→upstream"
+	relayNameUpstreamToClient = "postgresql upstream→client"
+	relayNameWatchdog         = "postgresql limit watchdog"
+)
+
 // proxyMessages proxies messages between client and upstream.
 func (s *Session) proxyMessages() error {
 	// Register this live session against its grant so an admin revoke can
@@ -363,21 +371,25 @@ func (s *Session) proxyMessages() error {
 	watchCtx, cancelWatch := context.WithCancel(s.ctx)
 	defer cancelWatch()
 
-	go s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, s.onLimitViolation)
+	go shared.RunGuarded(watchCtx, s.logger, relayNameWatchdog, func() {
+		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, s.onLimitViolation)
+	})
 
 	// Channel to receive errors from goroutines
 	errChan := make(chan error, 2)
 
-	// Client to upstream
+	// Both legs run under shared.RunRelay: a panic on a relay goroutine is not
+	// caught by any recover on the goroutine that started it, so without this it
+	// ends the *process* — every live session, of every user, on every database.
+	// RunRelay turns it into an error on errChan instead, which is what makes the
+	// session tear down the ordinary way. errChan is buffered at 2, so the send
+	// cannot block even though only the first is read.
 	go func() {
-		err := s.proxyClientToUpstream()
-		errChan <- err
+		errChan <- shared.RunRelay(s.ctx, s.logger, relayNameClientToUpstream, s.proxyClientToUpstream)
 	}()
 
-	// Upstream to client
 	go func() {
-		err := s.proxyUpstreamToClient()
-		errChan <- err
+		errChan <- shared.RunRelay(s.ctx, s.logger, relayNameUpstreamToClient, s.proxyUpstreamToClient)
 	}()
 
 	// Wait for either direction to close or error

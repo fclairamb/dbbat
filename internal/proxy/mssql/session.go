@@ -420,8 +420,10 @@ func (s *session) serve(ctx context.Context) error {
 	up := s.upstream
 	clientConn := s.conn
 
-	go s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
-		s.onLimitViolation(ctx, up, clientConn, err)
+	go shared.RunGuarded(watchCtx, s.logger, relayNameWatchdog, func() {
+		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
+			s.onLimitViolation(ctx, up, clientConn, err)
+		})
 	})
 
 	// Install the interception seams the relay pumps already call. Nothing

@@ -213,8 +213,10 @@ func (s *Session) Run() error {
 	upstream := s.upstream
 	clientConn := s.clientConn
 
-	go s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
-		s.onLimitViolation(upstream, clientConn, err)
+	go shared.RunGuarded(watchCtx, s.logger, relayNameWatchdog, func() {
+		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
+			s.onLimitViolation(upstream, clientConn, err)
+		})
 	})
 
 	s.logger.InfoContext(s.ctx, "MongoDB session ready",
@@ -375,12 +377,31 @@ func (s *Session) dispatchPreAuthOpMsg(m *message) (bool, error) {
 	}
 }
 
+// Names the per-session goroutines report themselves under when one of them
+// panics. Log labels, not identifiers.
+const (
+	relayNameClientToUpstream = "mongodb client→upstream"
+	relayNameUpstreamToClient = "mongodb upstream→client"
+	relayNameWatchdog         = "mongodb limit watchdog"
+)
+
 // relay pumps framed messages both ways after auth until either side ends.
+//
+// Both pumps run under shared.RunRelay. A recover on the goroutine that started
+// them catches nothing they raise, so an unguarded panic in the wire decode
+// would end the process and every other live session with it. Reporting the
+// panic as an error is the load-bearing half here twice over: this function
+// drains errCh a second time, so a pump that died silently would park the
+// session for good rather than merely leaking it.
 func (s *Session) relay() error {
 	errCh := make(chan error, 2)
 
-	go func() { errCh <- s.pumpClientToUpstream() }()
-	go func() { errCh <- s.pumpUpstreamToClient() }()
+	go func() {
+		errCh <- shared.RunRelay(s.ctx, s.logger, relayNameClientToUpstream, s.pumpClientToUpstream)
+	}()
+	go func() {
+		errCh <- shared.RunRelay(s.ctx, s.logger, relayNameUpstreamToClient, s.pumpUpstreamToClient)
+	}()
 
 	err := <-errCh
 

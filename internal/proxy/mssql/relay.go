@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"net"
+
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 )
 
 // clientMessageHook is the seam stage 3 fills in.
@@ -49,6 +51,15 @@ type clientMessage struct {
 // nothing but the in-band cancel detection below.
 const clientReadAhead = 4
 
+// Names the per-session goroutines report themselves under when one of them
+// panics. Log labels, not identifiers.
+const (
+	relayNameClientToUpstream = "mssql client→upstream"
+	relayNameUpstreamToClient = "mssql upstream→client"
+	relayNameClientReader     = "mssql client reader"
+	relayNameWatchdog         = "mssql limit watchdog"
+)
+
 // relay pumps TDS both ways until either side closes.
 //
 // The two directions run independently rather than as a request/response loop,
@@ -63,12 +74,29 @@ const clientReadAhead = 4
 // goroutines. That is safe because the codec's read and write paths share no
 // mutable state — see the note on packetRW — and it is the reason neither side
 // takes a lock on the hot path.
+// All three run under the shared panic guards. None of them is reached by the
+// recover on handleConnection — that sits on a different goroutine — so an
+// unguarded panic in the TDS decode would end the process, dropping every other
+// live session, of every user, on every database. The two pumps report through
+// errCh, which matters twice: this function drains it a second time, so a pump
+// that died without reporting would park the session for good. The reader has no
+// error channel and needs none — its own defers close clientGone and clientMsgs,
+// which is exactly how it ends the session on a read failure.
 func (s *session) relay(ctx context.Context) error {
 	errCh := make(chan error, 2)
 
-	go s.readClientMessages()
-	go func() { errCh <- s.pumpClientToUpstream(ctx) }()
-	go func() { errCh <- s.pumpUpstreamToClient(ctx) }()
+	go shared.RunGuarded(ctx, s.logger, relayNameClientReader, s.readClientMessages)
+
+	go func() {
+		errCh <- shared.RunRelay(ctx, s.logger, relayNameClientToUpstream, func() error {
+			return s.pumpClientToUpstream(ctx)
+		})
+	}()
+	go func() {
+		errCh <- shared.RunRelay(ctx, s.logger, relayNameUpstreamToClient, func() error {
+			return s.pumpUpstreamToClient(ctx)
+		})
+	}()
 
 	err := <-errCh
 

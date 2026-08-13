@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -272,8 +273,20 @@ func (s *Server) nextSPID() uint16 {
 	return spid
 }
 
+// handleConnection runs one client session on a goroutine of its own, which is
+// why the recover is not optional: a panic anywhere in the session's own leg
+// (PRELOGIN, the encapsulated TLS handshake, LOGIN7) would otherwise end the
+// process and every other live session with it. The three relay goroutines are
+// covered separately, in relay — a recover here does not reach them.
 func (s *Server) handleConnection(clientConn net.Conn) {
 	defer func() {
+		if r := recover(); r != nil {
+			s.logger.ErrorContext(s.ctx, "MSSQL session panic",
+				slog.Any("panic", r),
+				slog.String("stack", string(debug.Stack())),
+				slog.Any("remote_addr", clientConn.RemoteAddr()))
+		}
+
 		if err := clientConn.Close(); err != nil {
 			s.logger.DebugContext(s.ctx, "client close error", slog.Any("error", err))
 		}

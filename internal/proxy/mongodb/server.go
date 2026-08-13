@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -202,8 +203,20 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 }
 
+// handleConnection runs one client session on a goroutine of its own, which is
+// why the recover is not optional: a panic anywhere in the session's own leg
+// (transport setup, auth, the BSON decode before the pumps split off) would
+// otherwise end the process and every other live session with it. The two pumps
+// are covered separately, in relay — a recover here does not reach them.
 func (s *Server) handleConnection(clientConn net.Conn) {
 	defer func() {
+		if r := recover(); r != nil {
+			s.logger.ErrorContext(s.ctx, "MongoDB session panic",
+				slog.Any("panic", r),
+				slog.String("stack", string(debug.Stack())),
+				slog.Any("remote_addr", clientConn.RemoteAddr()))
+		}
+
 		if err := clientConn.Close(); err != nil {
 			s.logger.DebugContext(s.ctx, "client close error", slog.Any("error", err))
 		}
