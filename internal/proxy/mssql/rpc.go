@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 )
 
 // ALL_HEADERS (MS-TDS 2.2.5.2) prefixes every SQLBatch, RPC and Transaction
@@ -376,16 +378,15 @@ func (r rpcRequest) isWellKnown() bool {
 	return r.procID != procIDByNameMarker
 }
 
-// statementParamNames are the names SQL Server accepts for the statement
-// parameter of the SQL-carrying system procedures. The empty name is included
-// because that is what every driver sends: these are positional calls.
-var statementParamNames = map[string]bool{
-	"": true, "@stmt": true, "@statement": true, "@tsql": true, "@rpccall": true,
-}
-
 // isStatementParamName reports whether a parameter name could be the statement.
+//
+// The list itself lives in shared (shared.IsMSSQLStatementParamName), because
+// the batch-text scanner there asks the same question of `@stmt = N'…'` written
+// out in a T-SQL batch. It used to be duplicated, and the copy that did not know
+// the names was a read_only bypass — every named spelling of sp_executesql
+// walked past the batch path unchecked.
 func isStatementParamName(name string) bool {
-	return statementParamNames[strings.ToLower(name)]
+	return shared.IsMSSQLStatementParamName(name)
 }
 
 // statementTexts returns *every* parameter of this request that could be the

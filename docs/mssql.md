@@ -561,11 +561,27 @@ laxer rule set for dynamic SQL would turn every control into a suggestion:
 | Form | Treatment |
 |------|-----------|
 | `EXEC('…')`, `EXECUTE('…')`, incl. `N'…'`, `EXEC (` with a space, `''` doubling | statement text extracted and checked |
-| `sp_executesql N'…'` sent as **batch text** (`EXEC [sys.]sp_executesql N'…'`) | same |
+| `sp_executesql` sent as **batch text** (`EXEC [sys.]sp_executesql …`), statement passed **positionally** — `N'…'` first | same |
+| …statement passed **by name** — `@stmt` / `@statement` / `@tsql` / `@rpccall`, in any argument order | same |
 | `sp_executesql` sent as an **RPC** | already enforced, unchanged — see "RPC is enforced, not log-only" |
 | dynamic SQL nested inside dynamic SQL | **refused** (`ErrDynamicSQLNotCheckable`) rather than unwrapped further |
-| `EXEC(@sql)`, `EXEC('USE ' + @db)` | **not checked** — see below |
-| `EXEC dbo.some_proc` | an ordinary procedure call: opaque, and already failed closed under a restrictive grant |
+| `sp_executesql` whose statement argument cannot be located at all | **refused**, same error |
+| `EXEC(@sql)`, `EXEC sp_executesql @sql`, `@stmt = @sql`, `EXEC('USE ' + @db)` | **not checked** — see below |
+| `EXEC dbo.some_proc`, `EXEC dbo.p @a = 1` | an ordinary procedure call, not dynamic SQL: opaque, and already failed closed under a restrictive grant on the RPC path |
+
+Which parameter names can carry the statement is **one list**
+(`shared.IsMSSQLStatementParamName`), shared with the RPC path. It was briefly
+two, and the copy that did not know the aliases was a bypass: T-SQL passes any
+procedure's arguments by name in any order, so
+`EXEC sp_executesql @params = N'@x int', @stmt = N'DROP TABLE Foo'` is the same
+call as the positional one, and the batch scanner walked past it as an inert
+string literal. Two lists of "what names the statement" is the same drift hazard
+as two implementations of "may this session change database".
+
+Not finding the statement argument is treated as **refused**, never as "nothing
+to check". The keyword says a statement is being run; failing to find it means
+dbbat is looking in the wrong place, which is exactly the condition a bypass
+hides in.
 
 **dbbat validates dynamic SQL only when the statement text is a literal.** The
 extraction is a static read of the batch, so it can only see what is written in
