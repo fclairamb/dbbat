@@ -185,7 +185,7 @@ func TestIntegration_RealOracleSessionTermination(t *testing.T) {
 
 // probeSessionID reads the sid and serial# the probe printed for its own
 // session.
-func probeSessionID(t *testing.T, output string) (sid, serial string) {
+func probeSessionID(t *testing.T, output string) (string, string) {
 	t.Helper()
 
 	m := sessionIDPattern.FindStringSubmatch(output)

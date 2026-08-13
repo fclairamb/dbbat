@@ -24,7 +24,7 @@ import (
 // peer" cannot distinguish a frame that was never written from one that was
 // written and lost, and those have opposite fixes. Pointed at dbbat's proxy it
 // says what dbbat wrote; pointed at a real Oracle it says what Oracle sends when
-// it kills a session, which is the reference the proxy's behaviour is judged
+// it kills a session, which is the reference the proxy's behavior is judged
 // against.
 //
 // It copies bytes and nothing else — no framing, no parsing — so it cannot
@@ -214,7 +214,7 @@ func tappedOERs(t *testing.T, stream []byte) []tappedOER {
 
 		pos, errCode, callNumber, ok := skipOERFixedFields(defaultOERShape(), payload, 0)
 		if !ok {
-			// The compressed walk did not recognise the layout. Report the OER
+			// The compressed walk did not recognize the layout. Report the OER
 			// anyway from the leading fields, which decode under a much weaker
 			// assumption — a frame nobody can read is itself a finding, and
 			// dropping it silently would make it look like nothing was sent.
