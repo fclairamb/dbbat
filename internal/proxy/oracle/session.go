@@ -1311,13 +1311,32 @@ type heldRefusal struct {
 // may still be relayed while it waits.
 //
 // Neither is a tuning knob; both are the fail-safes that keep "hold the refusal
-// for the next call" from becoming an enforcement hole. The expected wait is the
-// tail of one fetch batch — milliseconds on a loopback, a fetch-size-bounded
-// number of bytes anywhere — and the values below are generous multiples of
-// that, chosen so that hitting either one means something is wrong (a reply with
-// no end, or a client that stopped talking) rather than that a legitimate
-// handoff ran late. Crossing either falls back to the socket close, which is the
-// pre-fix behavior: an ORA-03113 that is meant.
+// for the next call" from becoming an enforcement hole. Crossing either falls
+// back to the socket close, which is the pre-fix behavior: an ORA-03113 that is
+// meant.
+//
+// The values are measured rather than reasoned — docs/oracle.md, "What a
+// legitimate handoff costs, measured", and TestIntegration_HeldRefusalHandoffCost
+// — and the measurement is not the comfortable one the reasoning expected:
+//
+//   - the cost is the tail of one fetch batch, and a fetch batch is whatever the
+//     client's array size makes it. Five clients at a 500-row fetch on 400-byte
+//     rows cost 19 B to 128 KB and 0 to 119 ms — three orders of magnitude
+//     inside both bounds, as expected. One client at a 3000-row fetch on
+//     4000-byte rows needed ~11.7 MiB and **crossed the 8 MiB bound**, so its
+//     session ended on the socket close. 8 MiB is therefore not slack; and no
+//     finite value would be, because the array size is the client's to pick.
+//   - the two bounds meet at a link speed. Measured over a throttled tap, a
+//     537 KB tail took 6.5s (an effective 80 KiB/s); a tail at the full byte
+//     bound would take ~105s there, so below roughly 280 KiB/s the grace runs
+//     out first and the byte bound is unreachable.
+//
+// They are kept where they are because both are enforcement limits before they
+// are ergonomics. 8 MiB is already a large overrun to allow past an exhausted
+// quota, and what a client loses beyond either bound is the *message*, not the
+// enforcement: the session still ends and the statement is still recorded with
+// the real reason. Raising them to cover the widest imaginable fetch would trade
+// that away for an error code.
 const (
 	refusalHandoffGrace = 30 * time.Second
 	refusalHoldMaxBytes = 8 << 20

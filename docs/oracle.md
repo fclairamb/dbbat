@@ -960,6 +960,10 @@ ORA-03113 that is *meant*) after finalizing the statement with the real reason:
 | `refusalHandoffGrace` | the client stops talking with a refusal undelivered | 30 s, enforced by `onLimitViolation` |
 | a call dbbat cannot name | the next op is an unwalkable piggyback | immediate close, no frame (`answerHeldRefusal`) |
 
+Both numbers are measured rather than reasoned, and the first one is *not*
+generous — a large enough fetch batch crosses it. See "What a legitimate handoff
+costs, measured" below.
+
 The grace is why `onLimitViolation` had to learn to stand down: `LimitGuard.Watch`
 fires its hook **once** and returns, and the violation stays true the whole time
 the refusal is held, so without the wait the watchdog would drop both sockets a
@@ -1097,7 +1101,8 @@ Confidence: the enumeration is read off the code and pinned by
 `TestHeldRefusalStandsTheWatchdogDownUntilItsGrace`,
 `TestHeldRefusalFallsBackToTheCloseWhenTheClientStopsTalking`,
 `TestHeldRefusalWatchdogFallsBackAfterItsGraceRunsOut`,
-`TestHeldRefusalStopsRelayingOnceTheOvershootBoundIsCrossed` and
+`TestHeldRefusalStopsRelayingOnceTheOvershootBoundIsCrossed`,
+`TestHeldRefusalRecordsWhatTheHandoffCost` and
 `TestIdleLimitViolationSendsNoOER`; the live cases above are measured against
 Oracle 23ai Free and pinned by the integration tests named with them. The driver
 the ojdbc rows were taken on is **ojdbc 23.7.0.25.01**, not the 26.1 the
@@ -1121,9 +1126,73 @@ for this grant`. The two older tests stay: they pin the arithmetic and the
 teardown, which is a different claim from "the relay and the watchdog get
 there".
 
-What is still *not* measured is the bounds' **values**. 8 MiB and 30s are
-reasoned from the expected cost (the tail of one fetch batch) rather than
-observed; nothing here says a smaller pair would be worse.
+###### What a legitimate handoff costs, measured
+
+Every exit of a held refusal now records the two quantities the bounds cap —
+`relayed_bytes_since` (bytes relayed to the client past the violation) and
+`held_for_ms` (how long the hold lasted) — and every suite that drives a live
+client reads them back (`reportHandoffCost`). So the numbers below are
+observations, not estimates.
+
+The five client builds at the fetch size the suites use (500 rows of a 400-byte
+payload, on loopback) are all microscopic against both bounds, exactly as the
+reasoning predicted:
+
+| Client | Fetch | Bytes past the violation | Held for |
+|---|---|---|---|
+| ojdbc 23.7.0.25.01 | `setFetchSize(500)` | 26 884 (0.3% of 8 MiB) | 0 ms |
+| go-ora v3 | driver default | 19 | 3 ms |
+| python-oracledb thin 3.4 | `arraysize=500` | 116 105 (1.4%) | 1 ms |
+| sqlplus, Instant Client 23.3 (macOS, on PATH) | `SET ARRAYSIZE 500` | 127 497 (1.5%) | 10 ms |
+| sqlplus, bundled 23.26 (`gvenzl/oracle-free:23-slim`) | `SET ARRAYSIZE 500` | 116 277 (1.4%) | 119 ms |
+
+That is the *only* corner of the space those suites cover, and it is not the
+worst case. Two variables move a handoff's cost and nothing else does: the
+**fetch size**, which decides how much reply is in flight when the quota is
+crossed, and the **link speed**, which decides how long those bytes take to
+arrive — loopback divides the second to zero.
+`TestIntegration_HeldRefusalHandoffCost` takes one client (python-oracledb thin)
+to each extreme, the slow link through a rate-limited `recordingTap`:
+
+| Case | Bytes past the violation | Held for |
+|---|---|---|
+| `arraysize`/`prefetchrows` 3000 on **4000-byte** rows (a ~12 MB fetch batch), loopback | **8 394 885 — the bound, crossed** | 88 ms |
+| `arraysize` 2000 on 400-byte rows, over a **128 KiB/s** link | 537 122 (6.4%) | **6 541 ms (22% of the grace)** |
+
+Both rows say something the loopback table cannot.
+
+**8 MiB is not slack; it is roughly one large fetch batch.** At a 3000-row array
+size on the widest non-LOB column Oracle has, the batch is about 12 MB, so a
+successful handoff needed ~11.7 MiB — `refusalHoldMaxBytes` fired first, the
+session ended on the socket close, and that client got `DPY-4011` with `code=0`
+(a dead connection) instead of the ORA-00028 it would have got at a smaller
+fetch size. Nor is there a larger value that would settle it: the array size is
+the client's to choose, so no finite bound covers every legitimate handoff.
+
+**The two bounds meet at a link speed.** 537 KB took 6.5s over the throttled tap
+— an effective 80 KiB/s once the proxy and the tap are in the path — so a tail
+at the full 8 MiB bound would take about 105s on that link, three and a half
+times the grace. Below roughly 280 KiB/s of effective throughput the grace is
+the binding constraint and the byte bound is unreachable; above it, the reverse.
+
+**The values are kept, and this is why.** Narrowing either would push clients
+that are behaving normally onto the socket close, which is the pre-fix behaviour
+the hold exists to replace — 128 KB and 6.5s are real observations, and a bound
+near them would fire on ordinary traffic. Widening is the more tempting move
+after the first row above, and it is still refused: both are *enforcement*
+limits before they are ergonomics. 8 MiB is already a large overrun to allow
+past an exhausted quota (28× the budget in the fixture that measures it), and
+what a client loses beyond either bound is the **message**, not the enforcement
+— the session ends either way, the statement is recorded with the real reason
+either way, and the difference is ORA-03113 instead of ORA-00028.
+
+They are also deliberately **not** operator-visible. The per-session override
+fields (`refusalHoldBytes` / `refusalHoldGrace`) are the seam if that ever
+changes, but a knob here would let a deployment buy a friendlier error code with
+enforcement, and the only demonstrated symptom is that one cosmetic difference.
+The measurement above is what an operator meeting it needs: a client seeing
+ORA-03113 rather than ORA-00028 on a quota trip has a fetch batch over 8 MiB or
+a link under ~280 KiB/s, and neither is a dbbat fault to fix by widening.
 
 ### Oracle NUMBER Encoding
 
