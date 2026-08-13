@@ -1362,3 +1362,73 @@ func TestConnectionDumpKeyIsSelectedEverywhere(t *testing.T) {
 	require.Len(t, listed, 1)
 	assert.Empty(t, listed[0].DumpKey)
 }
+
+// TestGetConnectionsByUIDs pins the batched connection read: one query however
+// many uids, the same rows GetConnectionByUID hands back, and a uid naming no
+// row simply absent — the shape the pending-approvals listing relies on to
+// resolve a whole page's governing grants without a round trip per hold.
+func TestGetConnectionsByUIDs(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "batchconn")
+
+	def := newTestGrantDefinition(t, ctx, store, user.UID, GrantDefinition{})
+	grant := newTestGrant(
+		t, ctx, store, def, user.UID, database.UID, user.UID,
+		time.Now().Add(-time.Minute), time.Now().Add(time.Hour),
+	)
+
+	uids := make([]uuid.UUID, 0, 5)
+
+	for i := range 4 {
+		opts := []ConnectionOption{}
+		// Half the connections carry a stamped grant, half predate the column.
+		if i%2 == 0 {
+			opts = append(opts, WithGrantUID(grant.UID))
+		}
+
+		conn, err := store.CreateConnection(ctx, user.UID, database.UID, "127.0.0.1", opts...)
+		require.NoError(t, err)
+
+		uids = append(uids, conn.UID)
+	}
+
+	missing := uuid.New()
+	uids = append(uids, missing)
+
+	// The uid-list predicate is on the batched read and on nothing else this
+	// test runs from here on (the per-row re-reads below use `uid = ?`).
+	hook := &queryCountHook{substring: "uid IN ("}
+	store.db.AddQueryHook(hook)
+
+	batched, err := store.GetConnectionsByUIDs(ctx, uids)
+	require.NoError(t, err)
+
+	if got := hook.count.Load(); got != 1 {
+		t.Errorf("reading %d connections took %d queries, want 1", len(uids), got)
+	}
+
+	if _, present := batched[missing]; present {
+		t.Error("a connection that does not exist must be absent from the result")
+	}
+
+	// The batched rows are the per-row rows: same projection, same values.
+	for _, uid := range uids[:4] {
+		perRow, err := store.GetConnectionByUID(ctx, uid)
+		require.NoError(t, err)
+
+		got, found := batched[uid]
+		if !found {
+			t.Fatalf("connection %s missing from the batched result", uid)
+		}
+
+		assert.Equal(t, perRow, got, "batched connection differs from GetConnectionByUID")
+	}
+
+	empty, err := store.GetConnectionsByUIDs(ctx, nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}
