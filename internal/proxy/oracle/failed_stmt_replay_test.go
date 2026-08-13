@@ -146,10 +146,62 @@ func TestDumpReplay_FailuresArriveAsBitLessStandaloneOERs(t *testing.T) {
 	}
 }
 
+// embeddedFailureOER scans a whole payload for a run that decodes as an OER
+// *reporting a failure*, at any offset rather than only at byte 0.
+//
+// It reuses decodeErrorOER on a reslice, so the predicate under test is the
+// real one — seven bounded ints plus a diagnostic naming the code — rather than
+// a second, looser copy of it written for the test.
+//
+// It deliberately does NOT use findPlausibleOERInResponse. That function skips
+// every OER whose error code is a real failure by construction ("an OER
+// reporting a real failure assigns no cursor"), so asking it whether a Response
+// carries a failure can only ever answer no: the first version of the test
+// below did exactly that and could not fail on the scenario it named.
+func embeddedFailureOER(payload []byte) *oerInfo {
+	for i := 1; i < len(payload); i++ {
+		if payload[i] != 0x04 {
+			continue
+		}
+
+		if info := decodeErrorOER(payload[i:]); info != nil {
+			return info
+		}
+	}
+
+	return nil
+}
+
+// responsePayloads returns the TTC payload of every server→client Response
+// (func=0x08) in a recording, keyed by packet index.
+func responsePayloads(t *testing.T, name string) map[int][]byte {
+	t.Helper()
+
+	out := map[int][]byte{}
+
+	for i, pkt := range loadTestDump(t, name).Packets {
+		if pkt.Direction != dump.DirServerToClient {
+			continue
+		}
+
+		tns, err := parseTNSFromDumpPacket(pkt.Data)
+		if err != nil || tns.Type != TNSPacketTypeData {
+			continue
+		}
+
+		ttc := extractTTCPayload(tns.Payload)
+		if len(ttc) >= 2 && TTCFunctionCode(ttc[0]) == TTCFuncResponse {
+			out[i] = ttc
+		}
+	}
+
+	return out
+}
+
 // TestDumpReplay_NoFailureArrivesEmbeddedInAResponse rules out the shape the
 // todo assumed was the one to fix. If a failure ever did arrive inside a
 // Response, the relaxed Response scan would be the place to change — and this
-// is what would tell us.
+// is what would tell us. The subtest below it proves this one can fail.
 func TestDumpReplay_NoFailureArrivesEmbeddedInAResponse(t *testing.T) {
 	t.Parallel()
 
@@ -157,26 +209,55 @@ func TestDumpReplay_NoFailureArrivesEmbeddedInAResponse(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			for i, pkt := range loadTestDump(t, name).Packets {
-				if pkt.Direction != dump.DirServerToClient {
-					continue
-				}
+			responses := responsePayloads(t, name)
+			require.NotEmpty(t, responses, "the recording must contain Responses to look through")
 
-				tns, err := parseTNSFromDumpPacket(pkt.Data)
-				if err != nil || tns.Type != TNSPacketTypeData {
-					continue
-				}
-
-				ttc := extractTTCPayload(tns.Payload)
-				if len(ttc) < 2 || TTCFunctionCode(ttc[0]) != TTCFuncResponse {
-					continue
-				}
-
-				if oer := findPlausibleOERInResponse(ttc); oer != nil {
-					assert.Zerof(t, oer.ErrorCode,
-						"packet #%d: a Response carrying a failing OER would change where the fix belongs", i)
+			for i, ttc := range responses {
+				if oer := embeddedFailureOER(ttc); oer != nil {
+					assert.Failf(t, "a Response carries a failing OER",
+						"packet #%d reports ORA-%05d (%q) — failures arriving embedded would move the fix "+
+							"back into handleResponse", i, oer.ErrorCode, oer.ErrorMessage)
 				}
 			}
+		})
+	}
+}
+
+// TestEmbeddedFailureOER_WouldSeeOneIfItWereThere is the negative control for
+// the test above. A scan that cannot fail proves nothing, so this splices a
+// real recorded failure OER into a real recorded Response and requires the scan
+// to find it.
+func TestEmbeddedFailureOER_WouldSeeOneIfItWereThere(t *testing.T) {
+	t.Parallel()
+
+	failures := recordedFailureOERs(t, pythonFailedStmtDump)
+	require.NotEmpty(t, failures)
+
+	var host []byte
+
+	for _, ttc := range responsePayloads(t, pythonFailedStmtDump) {
+		if len(ttc) > len(host) {
+			host = ttc
+		}
+	}
+
+	require.NotEmpty(t, host)
+	require.Nil(t, embeddedFailureOER(host), "the unmodified Response carries no failure")
+
+	for _, f := range failures {
+		t.Run(fmt.Sprintf("ORA-%05d", f.fields.ErrorCode), func(t *testing.T) {
+			t.Parallel()
+
+			// The OER's own bytes, dropped into the middle of a Response — which
+			// is exactly what "the failure arrived embedded" would look like.
+			spliced := make([]byte, 0, len(host)+len(f.payload))
+			spliced = append(spliced, host[:len(host)/2]...)
+			spliced = append(spliced, f.payload...)
+			spliced = append(spliced, host[len(host)/2:]...)
+
+			found := embeddedFailureOER(spliced)
+			require.NotNil(t, found, "the scan missed a failure OER planted inside a Response")
+			assert.Equal(t, f.fields.ErrorCode, found.ErrorCode)
 		})
 	}
 }

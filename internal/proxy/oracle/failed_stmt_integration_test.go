@@ -26,8 +26,15 @@ import (
 // differs. Before the fix, only the failed DDL was recorded with an error;
 // everything else was logged as a plain success by the next statement's flush.
 
-// failingStatementDeadline bounds one failing statement end to end.
-const failingStatementDeadline = 30 * time.Second
+// failingStatementDeadline bounds one failing statement end to end, and doubles
+// as the deadline for the store poll that reads its row back.
+//
+// It is generous on purpose. Each test here stands up its own Oracle *and* its
+// own PostgreSQL container, so on a Docker host with other suites competing a
+// statement that would normally answer in milliseconds can take seconds — and a
+// tight ceiling turns that into a failure that looks like it is about the
+// statement rather than about the machine.
+const failingStatementDeadline = 90 * time.Second
 
 // failedStmtSetup is the table the constraint violation needs.
 const (

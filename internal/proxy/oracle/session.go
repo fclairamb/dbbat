@@ -2434,15 +2434,22 @@ func (s *session) handleResponse(ttcPayload []byte) {
 		return
 	}
 
-	// ...but the end-of-call bit that findOERInResponse insists on is a go-ora
-	// trait, not a protocol invariant: a python-oracledb thin session's OERs
-	// come with CallStatus 1–2, so every INSERT/UPDATE/DELETE those clients ran
-	// used to fall through here, stay pending, and be closed only by the *next*
-	// statement's flushPendingQuery — recording no rows_affected and a
+	// ...but the end-of-call bit findOERInResponse insists on is not a protocol
+	// invariant. On the successful calls that reach this branch it reads like a
+	// client trait — a python-oracledb thin session's OERs come with CallStatus
+	// 1–2 where go-ora's carry the bit — so every INSERT/UPDATE/DELETE those
+	// clients ran used to fall through here, stay pending, and be closed only by
+	// the *next* statement's flushPendingQuery — recording no rows_affected and a
 	// duration_ms that measured the client's think time (one live UPDATE was
 	// logged at 74 s because the session then sat idle). A session whose last
 	// statement was such a DML had it sealed by cleanup instead, timed to the
 	// disconnect.
+	//
+	// "Client trait" is the wrong generalisation, though, and only holds for the
+	// successful calls this branch sees: measured across six failure shapes, the
+	// bit tracks the *call*, and go-ora emits bit-less OERs too. That matters in
+	// handleOERStatus, not here — no failure arrives embedded in a Response at
+	// all (TestDumpReplay_NoFailureArrivesEmbeddedInAResponse).
 	//
 	// Outside a row stream the payload is a return-parameter block rather than
 	// row bytes, which is what the bit was defending against, so the anchored
