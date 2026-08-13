@@ -71,3 +71,50 @@ the next packet to be forwarded.
   `assert.Contains(t, output, "midfetch: code=3113 ")` expectations, and update
   `docs/oracle.md` under "An asynchronous refusal: which call number, and
   whether to send one at all".
+
+## Implementation Plan
+
+**Approach 2 — the natural boundary.** Approach 1 is rejected on evidence rather
+than taste: the predicate it asks for ("the decoder consumed the whole payload")
+cannot be built out of the decoders that exist. `parseContinuationRows` is a
+best-effort scanner, `handleContinuation` recognises the end of a batch only by
+finding the *text* `ORA-01403`, and `handleResponse` needs `rowStreamActive()`
+precisely because a leading byte is not a reliable message type mid-stream. A
+predicate synthesised from those would be wrong exactly where it matters, and a
+wrong "you are at a boundary" reintroduces the defect while claiming to have
+fixed it.
+
+Approach 2 needs no such predicate, because **the client itself announces the
+boundary**: a client that sends its next TTC op has, by construction, finished
+consuming the previous reply. So:
+
+1. **Hold, don't write.** `upstreamToClient`'s mid-stream check stops writing an
+   OER. On a violation with a query in flight it *arms* a held refusal
+   (`session.heldRefusal`: the error, the arming time, the byte counter at that
+   instant) and keeps relaying. The overshoot is the tail of the fetch batch
+   already in flight — the cost the spec names.
+2. **Answer the next call.** `interceptClientMessage` checks for an armed
+   refusal immediately after `observeClientCallNumber`, i.e. with the *fresh*
+   call number of the op the client is now parked on. It writes
+   `ORA-00028: session terminated: <reason>` through the ordinary
+   `writeTTCError` path, completes the in-flight query with
+   `aborted: <reason>`, and tears the session down. A frame whose call dbbat
+   cannot name gets the `gateUnnameableFrame` answer instead (close, no frame) —
+   stamping a stale number there is the ORA-18745 hazard.
+3. **The watchdog must not pre-empt the handoff.** `guard.Watch` fires
+   `onLimitViolation` once and returns, and the violation is *true* the whole
+   time the refusal is held, so without a change the watchdog would drop the
+   sockets ~250ms later and the client would meet ORA-03113 again.
+   `onLimitViolation` therefore waits on the held refusal's `done` channel for
+   `refusalHandoffGrace` (30s) and returns if the client leg answered.
+4. **Two bounds, so a held refusal cannot become an enforcement hole.** If the
+   reply never ends, the relay escalates after `refusalHoldMaxBytes` (8 MiB)
+   past the violation; if the client never speaks again, the watchdog escalates
+   after the grace. Both fall back to the socket close (approach 3's behaviour,
+   for the cases where approach 2 genuinely cannot land) and both complete the
+   query with the real reason first.
+
+Acceptance assertions in `TestIntegration_AsyncRefusalAgainstJDBCThin` flip as
+the spec asks (ojdbc must now report `midfetch: code=28`), and the go-ora
+sibling subtest flips with them — it asserts today that go-ora does *not*
+surface ORA-00028, which is the same measurement from the other driver.
