@@ -29,6 +29,45 @@ const (
 	opCodeMsg        int32 = 2013 // everything, MongoDB >= 3.6
 )
 
+// The remaining pre-OP_MSG opcodes. dbbat decodes none of them; they exist so
+// the post-auth refusal can name what it refused (MongoDB removed them in 5.1).
+const (
+	opCodeUpdate      int32 = 2001
+	opCodeInsert      int32 = 2002
+	opCodeGetMore     int32 = 2005
+	opCodeDelete      int32 = 2006
+	opCodeKillCursors int32 = 2007
+)
+
+// opCodeNames labels an opcode for the refusal log line and the query record.
+var opCodeNames = map[int32]string{
+	opCodeReply:       "OP_REPLY",
+	opCodeUpdate:      "OP_UPDATE",
+	opCodeInsert:      "OP_INSERT",
+	opCodeQuery:       "OP_QUERY",
+	opCodeGetMore:     "OP_GET_MORE",
+	opCodeDelete:      "OP_DELETE",
+	opCodeKillCursors: "OP_KILL_CURSORS",
+	opCodeCompressed:  "OP_COMPRESSED",
+	opCodeMsg:         "OP_MSG",
+}
+
+// opCodeName returns a readable opcode name, falling back to the number.
+func opCodeName(opCode int32) string {
+	if name, ok := opCodeNames[opCode]; ok {
+		return name
+	}
+
+	return fmt.Sprintf("opcode %d", opCode)
+}
+
+// opCodeExpectsReply reports whether a legacy client opcode is one the client
+// waits on (so a refusal can be answered rather than dropped). OP_UPDATE,
+// OP_INSERT, OP_DELETE and OP_KILL_CURSORS are fire-and-forget.
+func opCodeExpectsReply(opCode int32) bool {
+	return opCode == opCodeQuery || opCode == opCodeGetMore
+}
+
 // Wire compressor IDs (OP_COMPRESSED). dbbat negotiates only zlib (stdlib); a
 // noop-compressed frame is also accepted. snappy (1) and zstd (3) are declined
 // during hello negotiation, so a client never sends them.
