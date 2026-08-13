@@ -12,7 +12,9 @@ statement gate, now that the gate can actually see it.
 
 Until the 2026-08-13-05 fix, the Oracle SQL extractor returned a mid-statement
 *fragment* for 48 of the 137 execute ops in `internal/proxy/oracle/testdata/`.
-Eighteen of them were DBeaver's connection-setup statements:
+Nine of them — five distinct statements, all from DBeaver's connection setup in
+`dbeaver.pcapng` and `dbeaver_init.pcapng`, computed and asserted by
+`TestSurveyAlterSessionMisreadAsSet` — were this:
 
 ```
 on the wire:  ALTER SESSION SET CURRENT_SCHEMA=TESTADM
@@ -25,9 +27,11 @@ the gate saw: SET CURRENT_SCHEMA=TESTADM
 recorded the fragment. That was a bypass, and the extractor now reads the
 statement the header declares — which means the same statements are refused.
 
-DBeaver and SQL Developer send several of them (`CURRENT_SCHEMA`, a run of
-`_optimizer_*` hints, `OPTIMIZER_FEATURES_ENABLE`) while a connection is being
-established, before the user has run anything. The practical effect is that a
+DBeaver sends several of them (`CURRENT_SCHEMA`, a run of `_optimizer_*` hints,
+`OPTIMIZER_FEATURES_ENABLE`) while a connection is being established, before the
+user has run anything. SQL Developer over the OCI driver is expected to behave
+the same way but is **not** in the corpus, so that is inference rather than
+measurement. The practical effect is that a
 GUI client may now **fail to connect at all** under a read-only grant, where it
 used to connect and then be correctly refused on any real write.
 

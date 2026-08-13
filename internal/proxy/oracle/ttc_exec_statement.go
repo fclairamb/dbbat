@@ -1,6 +1,9 @@
 package oracle
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // This file replaces guessing with reading. Everything else that pulls SQL out
 // of an execute message — the 40-70 and 50-75 length-prefix windows, the
@@ -135,7 +138,16 @@ func execSQLLength(body []byte) (int, bool) {
 
 	pos += n
 
-	// the "cursor id is zero" flag
+	// The "cursor id is zero" flag. readCompressedInt can consume the buffer
+	// exactly, so stepping over this byte unchecked would slice past the end —
+	// `03 5e 01 04 aa bb cc dd 03 ee ff 00` is twelve bytes that clear every
+	// other guard and does it. The recover in interceptClientMessage would
+	// contain the panic, but containment means the frame is forwarded ungated,
+	// which is the bypass class this decode exists to close.
+	if pos >= len(body) {
+		return 0, false
+	}
+
 	pos++
 
 	sqlLen, n := readCompressedInt(body[pos:])
@@ -262,27 +274,69 @@ func execValidRunAt(body []byte, i, n, declared int) bool {
 	return execTextRunStartsHere(body, i, n, declared) && startsWithSQLVerb(string(body[i:i+n]))
 }
 
-// execTextRunStartsHere reports whether a run of n printable bytes begins at i
-// and is not a suffix of a longer text run. declared is the length the header
-// named, which is what the CLR prefix byte immediately before the text carries.
+// execTextRunStartsHere reports whether a run of n printable bytes is exactly a
+// text run — it neither continues one that started earlier nor stops in the
+// middle of one that keeps going. declared is the length the header named,
+// which is what the CLR prefix byte immediately before the text carries.
+//
+// Both ends are checked, and the far end is the one that matters most. A
+// derived length that is too *long* fails on its own — the run would have to
+// swallow the framing bytes behind the statement — but a length that is too
+// *short* would happily return a silent prefix, with ok=true, and the gate
+// would enforce against (and /queries would record) truncated text while
+// believing it read the whole statement. A pattern in the tail would simply not
+// be there to match. That is a worse failure than the fragment this decode
+// replaced, because the fragment at least announced itself as a guess.
+//
+// It bites hardest on the OCI-wide length, whose x3 convention rests on two
+// distinct values in one recording: `%3 != 0` rejects only about two thirds of
+// wrong readings, so this boundary is the real guard. A reading it rejects
+// falls through to the legacy scan rather than answering short.
 func execTextRunStartsHere(body []byte, i, n, declared int) bool {
 	if i > 0 && isPrintableSQLByte(body[i-1]) && body[i-1] != byte(declared) {
 		return false
 	}
 
-	for j := i; j < i+n; j++ {
-		if !isPrintableSQLByte(body[j]) {
+	if i+n < len(body) && isPrintableSQLByte(body[i+n]) {
+		return false
+	}
+
+	return isPrintableSQLRun(string(body[i : i+n]))
+}
+
+// isPrintableSQLByte reports whether c can appear in statement text: printable
+// ASCII, the whitespace clients embed in multi-line SQL, or a byte of a
+// non-ASCII character — see isPrintableSQLRun, which is what decides whether
+// those bytes actually spell one.
+func isPrintableSQLByte(c byte) bool {
+	return c == '\t' || c == '\n' || c == '\r' || (c >= 0x20 && c <= 0x7e) || c >= 0x80
+}
+
+// isPrintableSQLRun reports whether s is statement text end to end.
+//
+// Non-ASCII is admitted only as **valid UTF-8**, which is what keeps this from
+// being a hole: a run of arbitrary high bytes is binary, a run of well-formed
+// multi-byte sequences is a string literal or a quoted identifier. An earlier
+// revision of this check capped at 0x7e, and the effect was that
+// `INSERT INTO t VALUES ('café')` failed the precise decode *and* the window
+// scan and reached the gate as `INSERT INTO t VALUES ('caf` — the verb survived
+// so read_only still fired, but a blocked-pattern or approval-pattern match in
+// the tail did not. No recording carries non-ASCII SQL, so the corpus survey
+// structurally cannot see that; TestNonASCIIStatementSurvivesIntact does.
+//
+// A client whose session charset is not UTF-8 (a Latin-1 statement, say) still
+// fails here and falls through to the legacy scan. That is a deliberate
+// limitation rather than an oversight: dbbat does not negotiate the charset, so
+// admitting arbitrary high bytes would trade a known-good validity test for a
+// guess, and the fallback is the behaviour such a client had all along.
+func isPrintableSQLRun(s string) bool {
+	for i := range len(s) {
+		if !isPrintableSQLByte(s[i]) {
 			return false
 		}
 	}
 
-	return true
-}
-
-// isPrintableSQLByte reports whether c can appear in statement text: printable
-// ASCII, or the whitespace clients embed in multi-line SQL.
-func isPrintableSQLByte(c byte) bool {
-	return c == '\t' || c == '\n' || c == '\r' || (c >= 0x20 && c <= 0x7e)
+	return utf8.ValidString(s)
 }
 
 // sqlStatementVerbs are the verbs a statement can open with. It is looksLikeSQL's

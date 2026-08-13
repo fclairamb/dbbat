@@ -101,6 +101,88 @@ func TestExecStatementLengthSources(t *testing.T) {
 	})
 }
 
+// TestShortExecHeaderDoesNotPanic pins the bounds guard in execSQLLength.
+//
+// readCompressedInt can consume the buffer exactly, so stepping over the
+// cursor-id flag byte unchecked sliced past the end. This payload is twelve
+// bytes and clears every other guard: execSQLLengthWide wants 25 and declines,
+// execHeaderMinLen is 12, and the options/cursor-id walk lands the cursor
+// exactly on the final byte. interceptClientMessage's recover would have
+// contained the panic, but a contained panic forwards the frame ungated.
+func TestShortExecHeaderDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	payload := []byte{0x03, 0x5e, 0x01, 0x04, 0xaa, 0xbb, 0xcc, 0xdd, 0x03, 0xee, 0xff, 0x00}
+
+	require.NotPanics(t, func() {
+		_, _ = execSQLLength(payload)
+		_, _ = decodeExecStatement(payload)
+		_ = stapledStatements(payload)
+	})
+
+	sql, ok := decodeExecStatement(payload)
+	assert.False(t, ok)
+	assert.Empty(t, sql)
+}
+
+// TestExecStatementRejectsAShortLength pins the far end of the run boundary.
+//
+// A derived length that is too long cannot match — the run would have to
+// swallow the framing behind the statement — but one that is too *short* would
+// return a silent prefix with ok=true, and the gate would enforce against text
+// it believes is complete. A pattern in the lost tail simply would not match.
+func TestExecStatementRejectsAShortLength(t *testing.T) {
+	t.Parallel()
+
+	sql := "DROP TABLE emp -- ALTER SYSTEM KILL SESSION"
+	frame := buildPiggybackExec(sql)
+
+	full, ok := decodeExecStatement(frame)
+	require.True(t, ok)
+	require.Equal(t, sql, full)
+
+	// Same frame, header understating the length by four bytes.
+	short := buildPiggybackExec(sql)
+	short[9] = byte(len(sql) - 4)
+
+	got, ok := decodeExecStatement(short)
+	assert.False(t, ok, "a short length must fall back, not answer with a prefix: %q", got)
+}
+
+// TestNonASCIIStatementSurvivesIntact records the deliberate decision on
+// non-ASCII SQL, which no recording in testdata/ contains — so the corpus
+// survey structurally cannot see it.
+//
+// Statement text is admitted as valid UTF-8 rather than ASCII-only. An earlier
+// revision capped at 0x7e, which truncated `… VALUES ('café')` to
+// `… VALUES ('caf` at the gate: the verb survived, so read_only still fired,
+// but a blocked-pattern or approval-pattern match in the tail did not.
+func TestNonASCIIStatementSurvivesIntact(t *testing.T) {
+	t.Parallel()
+
+	t.Run("valid UTF-8 is statement text", func(t *testing.T) {
+		t.Parallel()
+
+		sql := "INSERT INTO t VALUES ('café', 'naïve', '日本')"
+
+		got, ok := decodeExecStatement(buildPiggybackExec(sql))
+		require.True(t, ok)
+		assert.Equal(t, sql, got)
+	})
+
+	t.Run("a run of arbitrary high bytes is not", func(t *testing.T) {
+		t.Parallel()
+
+		// Latin-1 rather than UTF-8: a known limitation, documented on
+		// isPrintableSQLRun. Such a client falls back to the legacy scan, which
+		// is the behaviour it had before the precise decode existed.
+		sql := "INSERT INTO t VALUES ('caf\xe9')"
+
+		_, ok := decodeExecStatement(buildPiggybackExec(sql))
+		assert.False(t, ok)
+	})
+}
+
 // TestFindSQLInPayloadWordBoundary pins the half of the fix that *narrows* the
 // last-resort keyword scan. Widening its verb list (TRUNCATE/GRANT/REVOKE, the
 // three the controls refuse but the scan could not see) is only safe because

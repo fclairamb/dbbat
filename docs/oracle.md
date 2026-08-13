@@ -138,10 +138,15 @@ text".
 > on 48. Three of those readings were enforcement failures rather than cosmetic
 > ones:
 >
-> - `ALTER SESSION SET CURRENT_SCHEMA=…` read as `SET CURRENT_SCHEMA=…`, in 18
->   frames. `ALTER` is in both `writeKeywords` and `ddlKeywords`; `SET` is in
->   neither — so `read_only` and `block_ddl` did not fire on a statement they
->   are written to refuse, and `/queries` recorded the fragment.
+> - `ALTER SESSION SET CURRENT_SCHEMA=…` read as `SET CURRENT_SCHEMA=…`. `ALTER`
+>   is in both `writeKeywords` and `ddlKeywords`; `SET` is in neither — so
+>   `read_only` and `block_ddl` did not fire on a statement they are written to
+>   refuse, and `/queries` recorded the fragment. Nine of the corpus's execute
+>   ops are this, five distinct statements, all of them DBeaver's connection
+>   setup (`dbeaver.pcapng` 5, `dbeaver_init.pcapng` 4); no other client in
+>   `testdata/` sends an `ALTER SESSION` at all. The figure is computed and
+>   asserted by `TestSurveyAlterSessionMisreadAsSet`, so re-recording the corpus
+>   fails the test rather than silently ageing the prose.
 > - go-ora's `UPDATE … SET name = …` read as `SET name = 'updated' WHERE id <=`.
 >   Same bypass, on an ordinary DML statement with no adversary involved.
 > - `SELECT 'YES' FROM USER_ROLE_PRIVS WHERE GRANTED_ROLE='DBA'` read as a
@@ -164,10 +169,15 @@ the word-boundary rule removes strictly more than the three verbs add, and
 frames reads as a statement.
 
 **A consequence worth knowing about:** now that the gate sees `ALTER SESSION SET
-…` for what it is, DBeaver and SQL Developer — which send several during
-connection setup — are refused under a `read_only` or `block_ddl` grant, where
-the fragment used to slip through. That is the gate working rather than a
-regression, but it is a live behaviour change on the most common GUI client.
+…` for what it is, DBeaver — which sends five of them during connection setup —
+is refused under a `read_only` or `block_ddl` grant, where the fragment used to
+slip through. That is the gate working rather than a regression (the extractor
+returns exactly the bytes the header declares, so `IsDDLQuery` refusing them is
+policy), but it is a live behaviour change on the most common GUI client, and
+what to do about it is filed as
+`specs/todos/2026-08-13-10-alter-session-now-trips-read-only-for-gui-clients.md`.
+SQL Developer over the OCI driver is expected to behave the same way; that is
+inference, not measurement — it is not in the corpus.
 
 ### Cursor re-execution (what clients actually send)
 
@@ -1645,12 +1655,20 @@ session. That is fail-closed on a shape no tested client produces — all 54 rec
 frames in `dbeaver.pcapng` walk, as do both bundled-client ones — against fail-open on a
 live exec.
 
-The carve-out survived the measurement that was meant to settle it, but it **costs much
-less than it did**. `decodeExecSQL` reads the execute's declared length now (see "SQL
-Extraction"), so the ordinary case — a `11 69` close list with `03 5e <exec>` behind it — is
-decoded from the stapled op's own header and never scans loose bytes at all. The
-whole-payload scan is reached only when the close list does not walk *and* no `03 5e` anchor
-is present, which is what makes such a frame unnameable in the first place.
+The carve-out survived the measurement that was meant to settle it, and it is worth being
+precise about what did and did not change. `decodeExecSQL` reads the execute's declared
+length now (see "SQL Extraction"), so the ordinary case — a `11 69` close list that **walks**,
+with `03 5e <exec>` behind it — is decoded from the stapled op's own header and never scans
+loose bytes.
+
+**The exposure this carve-out names is unchanged, though.** When the close list does not
+walk, the offset-0 anchor calls `decodeExecSQL` on the whole payload; the precise decode
+declines (a `11 69` header is not an exec header, and `closeCursorsEnd` has already failed),
+so the window scan and `findSQLInPayload` run over the whole frame exactly as before. A
+`03 5e` elsewhere in the payload adds a *second* anchor that decodes precisely — it does not
+suppress the offset-0 loose scan. A caller-supplied module string that reads as a refused
+statement therefore still ends the session, which is the trade this carve-out was always
+making.
 
 **Every anchor is gated, not the first that answers.** A frame that staples two executes
 runs both, so enforcing against one of them would leave the other exactly the smuggling

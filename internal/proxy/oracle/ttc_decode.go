@@ -1198,18 +1198,6 @@ func extractSQLAtOffset(data []byte, offset int) (string, error) {
 	return sqlText, nil
 }
 
-// isPrintableSQLRun reports whether every byte of s could appear in statement
-// text.
-func isPrintableSQLRun(s string) bool {
-	for i := range len(s) {
-		if !isPrintableSQLByte(s[i]) {
-			return false
-		}
-	}
-
-	return true
-}
-
 // QueryResultV2 contains parsed data from a v315+ TTC QueryResult (func=0x10).
 type QueryResultV2 struct {
 	Columns []string
