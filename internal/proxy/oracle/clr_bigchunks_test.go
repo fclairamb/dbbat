@@ -520,10 +520,21 @@ func TestThinSyntheticAuthLeg_ShortValues_ByteIdentical(t *testing.T) {
 
 	h2 := sess.syntheticAuthHeader(PiggybackSubAuth2, authPhase2FuncSeq)
 	mode2 := uint32(logonModeNoNewPass | logonModeUserAndPass)
+	body2 := buildClientAuthPhase2(h2, "SYSTEM", ident, sec, mode2, true)
 	assert.Equal(t,
 		buildClientAuthPhase2(h2, "SYSTEM", ident, sec, mode2, false),
-		buildClientAuthPhase2(h2, "SYSTEM", ident, sec, mode2, true),
+		body2,
 		"today's thin synthetic Phase 2 must be byte-identical in both CLR forms")
+
+	// The read-side twin: an upstream on either side of the capability walks
+	// today's pair set to the same dictionary, and consumes the whole body doing
+	// it — decodeKVPairs fails the test on any leftover byte.
+	pairs2 := authPhase2Pairs(ident, sec, false)
+	preamble2 := thinSyntheticPhase2PreambleLen(h2, "SYSTEM", mode2, len(pairs2))
+	assert.Equal(t,
+		decodeKVPairs(t, body2[preamble2:], len(pairs2), false),
+		decodeKVPairs(t, body2[preamble2:], len(pairs2), true),
+		"every value being short, both readers must agree on the whole synthetic body")
 
 	// The username is deliberately NOT on ttcClrVariant: Oracle caps an
 	// identifier at 128 bytes, half the short-form limit, so it can never reach
