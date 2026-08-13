@@ -501,8 +501,7 @@ measured rather than argued, over the whole `testdata/` corpus replayed through 
 real session so `rowStreamActive()` is the session's own
 (`TestDumpReplay_MidStreamOERFalsePositiveRate`):
 
-- **342** server packets arrive mid-row-stream (343 before the change, when the
-  guard left the stream open past the failure);
+- across **24** recordings, **342** server packets arrive mid-row-stream;
 - **2** of them begin with `0x04` — the two genuine ORA-01722s; 326 of the rest
   begin with `0x06`;
 - `decodeErrorOER` accepts exactly those 2 and nothing else: **false-positive
@@ -512,18 +511,51 @@ real session so `rowStreamActive()` is the session's own
   only ever sees byte 0 — so it is not a rate, it is how far real row data is
   from satisfying the proof.
 
+Every one of those figures is printed by that test (`-v`), including the full
+leading-byte histogram, so the numbers above are reproducible from the tree
+rather than remembered. Only the two load-bearing ones are asserted — the
+accepted count and the stress count — because pinning a distribution would turn
+"somebody re-recorded a fixture" into a test failure.
+
 The cursor anchor is not what that measurement justifies. It is aimed at the one
 shape a corpus of numeric and temporal fixtures cannot contain: a result set
 whose rows *carry* `ORA-` text, as `SELECT message FROM error_log` does. Such a
 row would have to decode as seven bounded ints, be followed by the ASCII spelling
 of the number its fourth field landed on, **and** have its seventh field land on
 the streaming cursor's own id. It fails closed — a mid-fetch diagnostic naming
-another cursor is dropped, which is precisely the old behaviour, with a DEBUG
-line saying so, so an unmeasured client reporting a different cursor is visible
-rather than silent.
+another cursor is dropped, and so is one arriving on a fetch whose cursor id was
+never learned — precisely the old behaviour, with a DEBUG line saying so, so an
+unmeasured client reporting a different cursor is visible rather than silent.
 
 `handleResponse`'s mid-stream strictness, `findOERInResponse` and cursor-id
 learning are untouched by this.
+
+**Why there is no third anchor.** All three of the conditions above are, in
+principle, influenceable by a *deliberate* client: row content through
+`SELECT '<literal>'`, packet boundaries through the fetch size, and — on the
+legacy `OALL8` path — the cursor id it names itself. Two further anchors were
+considered and declined:
+
+- `CurRowNumber >= pending.rowNumber`, monotonic against rows already captured.
+  It is trivially satisfied whenever result capture is off, which is the default,
+  so it would add a way to drop a real failure without adding protection in the
+  common configuration.
+- requiring the OER's decoded extent to account for the whole TNS packet. The
+  OER tail has variable extra fields (`oerShape.extraTailFields`), so a tight
+  bound is exactly the kind of anchor that goes stale on an unmeasured client.
+
+The reason neither is worth its risk is that this is not the weakest link.
+`handleResponse`'s mid-stream branch already calls `findOERInResponse`, which
+scans **every** offset and accepts on the end-of-call bit alone, with no
+diagnostic proof at all — a strictly cheaper forgery for the same effect. And the
+payoff either way is bounded to falsifying the client's *own* query record. Each
+additional anchor, by contrast, is a new way to silently drop a real failure on a
+client nobody has captured, which is the bug this section exists to remove. There
+is also one caveat worth stating plainly: `learnCursorID` latches only after it
+succeeds, so on a statement whose id is never learned the anchored scan runs over
+row-stream bytes for the whole fetch — the reference value this anchor compares
+against could itself have come from row data. Pre-existing (re-execution gating
+already trusts it), but now load-bearing for error text too.
 
 Cursor-id learning is on none of those rows and was not touched: it reads
 `findPlausibleOERInResponse`, which still refuses any OER reporting a real

@@ -2456,10 +2456,11 @@ func (s *session) handleOERStatus(ttcPayload []byte) {
 // exactly the way a pre-first-row one does — a standalone func 0x04, CallStatus
 // 0x1, no end-of-call bit — and its cursorID field is the cursor whose rows are
 // on the wire, on both clients. Replaying the whole testdata corpus through a
-// real session says the cost of believing decodeErrorOER here is nil: of 343
-// server packets that arrive mid-row-stream, 341 do not even begin with 0x04,
+// real session says the cost of believing decodeErrorOER here is nil: of the 342
+// server packets that arrive mid-row-stream, 340 do not even begin with 0x04,
 // the two that do are these very failures, and a scan of the same predicate at
-// every 0x04 offset inside all 343 accepts nothing.
+// every 0x04 offset inside all of them accepts nothing. Those figures are
+// printed, not remembered — see TestDumpReplay_MidStreamOERFalsePositiveRate.
 //
 // The cursor check is not what that measurement justifies; it is aimed at the
 // one shape a corpus of numeric and temporal fixtures cannot contain — a result
@@ -2468,11 +2469,19 @@ func (s *session) handleOERStatus(ttcPayload []byte) {
 // ASCII spelling of the number its fourth field landed on, *and* have its
 // seventh field land on the streaming cursor's own id.
 //
-// It fails closed: a mid-fetch diagnostic naming another cursor is dropped,
-// which is exactly the behavior this whole change replaced, so the failure mode
-// is the old missing error text and never a fabricated one. The debug line is
-// there because that is otherwise invisible — if an unmeasured client ever
-// reports a different cursor, this is what says so.
+// It fails closed twice over: a mid-fetch diagnostic naming another cursor is
+// dropped, and so is one arriving on a fetch whose cursor id was never learned.
+// Either way the failure mode is the old missing error text and never a
+// fabricated one. The debug line is there because that is otherwise invisible —
+// if an unmeasured client ever reports a different cursor, this is what says so.
+//
+// One honest caveat about the reference value. `learnCursorID` runs on every
+// upstream packet and latches only once it has succeeded, so for a statement
+// whose id is never learned the anchored scan behind it keeps running over
+// row-stream bytes for the whole fetch — meaning the id this compares against
+// could itself have originated in row data. That is pre-existing (cursor-id
+// learning has always worked this way, and re-execution gating already trusts
+// it), but this anchor is what makes it load-bearing for query error text too.
 //
 // Callers hold trackerMu.
 func (s *session) midFetchOERNamesTheStreamingCursor(info *oerInfo) bool {

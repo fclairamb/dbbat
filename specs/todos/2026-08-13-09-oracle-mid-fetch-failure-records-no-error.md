@@ -93,11 +93,10 @@ a row value's 4-byte length prefix landing at byte 0 of a packet looks exactly
 like it — so the opening is: byte-0 routing **and** `decodeErrorOER` proving the
 diagnostic **and** the OER naming the very cursor whose rows are streaming.
 
-The corpus measurement (all 26 `testdata/*.pcapng`, replayed through a real
+The corpus measurement (all 24 `testdata/*.pcapng`, replayed through a real
 `session` so `rowStreamActive()` is the session's own):
 
-- 342 server→client Data packets arrive **mid-row-stream** (343 before the
-  change, when the guard left the stream open past the failure); 340 lead with
+- 342 server→client Data packets arrive **mid-row-stream**; 340 lead with
   something other than `0x04` (326 of them with `0x06`);
 - exactly **2** lead with `0x04` — the two genuine ORA-01722s;
 - `decodeErrorOER` accepts exactly those 2 and nothing else: **false-positive
@@ -105,11 +104,34 @@ The corpus measurement (all 26 `testdata/*.pcapng`, replayed through a real
 - a stress scan running the same predicate at *every* `0x04` offset inside all
   of those mid-stream packets accepts **0**.
 
+All of those figures are printed by `TestDumpReplay_MidStreamOERFalsePositiveRate`
+(`-v`), histogram included, so they are reproducible from the tree; only the
+accepted count and the stress count are asserted.
+
+Both completion branches are pinned, because they are different store writes: a
+SELECT that has been streaming for 14 900 rows was already persisted, so it
+completes through `finalizeQuery` → `UpdateQueryCompletion`, not through
+`completeQuery`'s create-now branch. `TestDumpReplay_MidFetchFailureRecordsItsORAText`
+drives the update path (and asserts no second `CreateQuery` happens);
+`…OnTheCreateBranch` drives the other. Both fail with an empty error when the
+guard is put back.
+
 The cursor-id anchor is not in that number — it is the belt to its braces, aimed
 at the one realistic case the corpus cannot contain: a result set whose rows
 *carry* `ORA-` text (`SELECT message FROM error_log`). It costs nothing measured
 (both captures agree exactly) and fails closed — a mid-fetch OER naming another
-cursor is dropped, which is precisely today's behaviour, with a debug log.
+cursor, or one arriving on a fetch whose cursor id was never learned, is dropped,
+which is precisely today's behaviour, with a debug log.
+
+No third anchor was added. `CurRowNumber >= pending.rowNumber` is trivially
+satisfied whenever result capture is off (the default), and a whole-packet extent
+check goes stale on `oerShape.extraTailFields`; neither is worth its risk when
+`handleResponse`'s own mid-stream branch already accepts on the end-of-call bit
+alone, at every offset, with no diagnostic proof — a strictly cheaper forgery for
+the same bounded payoff. Reasoning recorded in `docs/oracle.md` under "Why there
+is no third anchor", together with the `learnCursorID` caveat: it latches only
+after it succeeds, so on a statement whose id is never learned the reference
+value this anchor reads could itself have come from row data.
 
 Nothing else moves: `handleResponse`'s mid-stream strictness, `findOERInResponse`
 and cursor-id learning (`findPlausibleOERInResponse`) are untouched.
