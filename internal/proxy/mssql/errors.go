@@ -96,6 +96,17 @@ var (
 	ErrUnknownPreparedStatement = errors.New(
 		"dbbat: this prepared statement was not prepared through this session, " +
 			"so dbbat cannot check it against your grant")
+	// ErrDatabaseSwitchBlocked — a batch carried a `USE <db>` naming a database
+	// other than the one this session's grant was issued on. TDS pins nothing:
+	// the LOGIN7 database field sets the *initial* context only, so without this
+	// a full-write grant on one database reached every other database the
+	// upstream credentials can see — and, because `queries` has no database
+	// column, every statement afterwards was recorded against the granted one.
+	// Refused whatever the grant says, for the same reason Oracle refuses
+	// `ALTER SESSION SET CONTAINER`. See docs/mssql.md.
+	ErrDatabaseSwitchBlocked = errors.New(
+		"dbbat: switching database is not permitted through dbbat: your grant covers " +
+			"this database only, so connect again naming the other dbbat entry")
 	// ErrMalformedRequest — a SQLBatch or RPC message could not be parsed.
 	// Refused rather than relayed: an unparseable request is one dbbat cannot
 	// enforce a grant on.
