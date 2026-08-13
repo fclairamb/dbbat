@@ -789,6 +789,7 @@ for names containing spaces or parentheses.
 ## Known Limitations
 
 - **Any API key works for Oracle login (per-user salts)**: The Oracle username from TTC AUTH Phase 1 maps to the dbbat user (lowercased) for grant checks and connection tracking, and any of that user's API keys created since the per-user-salt scheme can authenticate — see "Per-user O5LOGON salts" below. Two caveats: keys created before the scheme (legacy per-key salts) still fall back to first-key-only behavior until a new key is created, and clients that send an empty `AUTH_PASSWORD` (SQLcl / JDBC thin 23c+) cannot be disambiguated — dbbat assumes the most-recently-created user-salt key.
+- **The `0x11` fetch reading is unreachable, and that is the honest state**: `handleOFETCH` gates a fetch that starts a fresh pending query as a re-execution, but message type `0x11` is the piggyback message type and no client sends a fetch that way — real fetches are `03/05`, which dbbat does not intercept. The reading was only ever reached by misparsing piggybacks, which is the bug written up under "Two OCI encodings, not one"; the gate itself is still pinned by unit tests and the other two re-execution frames (the SQL-less `OALL8` and the `03/0x4e|0x04` piggyback) are real and enforced. Wiring the gate to `03/05` is a behaviour change on the hot path and is filed as its own todo.
 - **Row capture is best-effort**: The TTC binary format varies across Oracle client versions. Some clients/query types may produce partial or no row capture. SQL text extraction works reliably across all tested clients.
 - **Column names**: Real column names come from the describe column-definition records (`parseColumnDescribes` in `describe.go`), so single-char aliases (`SELECT level AS n`) and unnamed expressions (`SELECT count(*)`) get their true names and positions. Only genuinely unnamed expression columns fall back to a synthetic `COLn` label. If the records don't parse on some server layout, decoding falls back to heuristic name-scanning plus describe-header count padding, so the column count (and row framing) stays correct.
 - **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`, for clients whose OERs carry the end-of-call bit and (since the fix above) for those whose don't. Failed statements record the ORA error text — but note that a *failing* statement's OER is accepted only with the bit, so the error text of a failure on a bit-less client is still not read out of an embedded OER. See `ttc_oer.go`.
@@ -1258,6 +1259,65 @@ the wire, so both are covered by fixtures in `oci_instantclient_test.go`):
   contiguously, then **re-fragments at the upstream's original boundaries** before
   forwarding — a single merged packet exceeds the client's negotiated SDU and is rejected
   with `ORA-12592` ("bad packet").
+
+#### Two OCI encodings, not one (proxy mode)
+
+Everything above is about AUTH. The same split runs through **proxy mode**, and it was found
+the hard way: wiring the DB-bundled client (sqlplus 23.26, inside `gvenzl/oracle-free:23-slim`)
+into CI turned up three defects in a row, each of which hung a session under a `read_only`
+grant while the Instant Client 23.3 sailed through. Same protocol version, same upstream,
+same statements — the difference is that the bundled client marshals TTC at **64-bit**
+widths where the Instant Client uses 32-bit ones.
+
+**1. `0x11` is the piggyback message type, not a fetch.** dbbat's `TTCFuncOFETCH = 0x11`
+is a misnomer kept for continuity: in TTC, `0x11` opens a *piggyback* message and byte 1 is
+the TTC **function code** — `0x69` close-cursors, `0x6b` an OCI session piggyback, `0x87`
+set-end-to-end-attrs, `0x98` set-schema. A real fetch is message type `0x03`, function
+`0x05` (`TNS_FUNC_FETCH`), which is what every recording in `testdata/` carries.
+`decodeOFETCH` reads a big-endian cursor id out of bytes 1..3, so on the bundled client's
+very first message — `11 6b 04 …` — it read (function, sequence) and produced cursor id
+`0x6b04` = 27396, which no session had ever opened. Under any statement-shaped control that
+is a refusal, on the first call of every session. The Instant Client sends the same frame
+and was refused identically; it just shrugs the refusal off, which is why this went
+unnoticed for as long as the PATH flavor was the only one running.
+
+**2. dbbat refuses only a call it can name.** A piggyback is by definition in front of
+something, and the call the client is parked on is stapled *behind* it. dbbat can walk one
+piggyback body — the close-cursors list — and for anything else the sequence number at
+offset 2 is the piggyback's own, not the call's. `clientCallNumber` now reports that it
+cannot name such a message, `observeClientCallNumber` leaves the last known-good number
+alone rather than overwriting it with a wrong one, and `interceptClientMessage` forwards
+the message untouched: no cursor id read out of it, no gate, no refusal. **Failing open is
+deliberate** — a message dbbat cannot name is one it could not identify either, so refusing
+it protects nothing, while answering it ends a call the client is not waiting for and parks
+it forever. The two readings that identify a frame from its own contents (a close list that
+walks, a statement that decodes) are unaffected.
+
+**3. The close-cursors list has a 64-bit header too.** The bundled client writes
+`11 69 <seq> 00 00 <ub4> <sb8 seq+1>` — a 17-byte op header — where the Instant Client
+writes `11 69 <seq> 01 <seq+1>`, and its count is an 8-byte field ahead of the same 4-byte
+ids (`isCloseCursorsWide8Header` / `decodeCloseCursorsWide8`, pinned on
+`testdata/oci_bundled_close_cursors.hex`). Until dbbat could walk it, the *execute stapled
+behind the list* was invisible: a refused `INSERT` went out carrying whatever sequence
+number dbbat had last seen instead of the call's, and sqlplus waited for the right one
+forever.
+
+**4. The summary object has a 64-bit layout.** Same fields, same order, wider offsets:
+call status `u32@1`, ECID `u16@5`, error number `u16@12`, cursor id `u16@18`, call number
+`u32@49`, RetCode `u32@132`, a 136-byte prefix, then an 8-byte row count and the tail
+fields (`oerFixed64Layout`, measured against two real ORA-01403 summaries in
+`testdata/oci_bundled_oer.hex`). `learnOERShape` recognized neither of them before, so the
+session stayed on the unlearned default and dbbat answered a 64-bit client with a 32-bit
+frame — a third hang, on the refusal itself. The learner now tries both layouts, widest
+first, and each is validated by the invariant it already used: the trailing RetCode must
+repeat the leading error number *at that layout's offsets*, and the message must end
+exactly where the tail-field walk says it does.
+
+One gap is left open on purpose: the **unlearned** fallback (`nextOERFrame`, used when a
+session must refuse before any upstream OER has been seen) still assumes the 32-bit layout.
+Every OCI session measured issues its own statements at login, so the shape is learned well
+before the first refusal — but a client that is refused on its literal first statement would
+get the narrow frame. See `specs/todos/` for the follow-up.
 
 #### OCI break/reset before AUTH Phase 2 — root cause and fix
 
