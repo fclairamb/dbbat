@@ -124,8 +124,23 @@ Verified byte-for-byte: go-ora's 56-byte `UPDATE dbbat_dml_test SET name =
 'updated' WHERE id <= 3` carries `01 38`, DBeaver's 40-byte `ALTER SESSION SET
 CURRENT_SCHEMA=TESTADM` carries `01 28`, and sqlplus's 23-byte `SELECT 1 AS n
 FROM dual` carries `45 00 00 00`. Knowing the length reduces the search to "the
-printable run of exactly that length that does not start inside a longer run of
-text".
+text run of exactly that length, bounded at **both** ends so it neither
+continues a run that started earlier nor stops inside one that keeps going". The
+far end matters as much as the near one: a length read too long cannot match,
+but one read too short would return a silent prefix and the gate would enforce
+against truncated text believing it was precise.
+
+What counts as text is `shared.SanitizeStatementText`, the same judgement
+`SanitizeQueryError` applies to diagnostics, and for the same reason: dbbat does
+not know the session charset, so `INSERT INTO t VALUES ('café')` from a
+WE8ISO8859P1 session is not valid UTF-8. A "valid UTF-8 or drop" rule sent such
+a statement to the keyword scan, which truncated it at the accent — so a blocked
+pattern or approval pattern in the tail stopped matching. Instead a run with
+control bytes is refused (binary always has them, statements never do) and a run
+with a few undecodable bytes is kept with those repaired to U+FFFD, which is
+also what makes it storable in `queries.sql_text`. The header length, the
+two-sided boundary and the leading verb are what discriminate a statement from
+binary here, so this last test can afford to be charitable.
 
 > **The scan this replaced was wrong on a quarter of real frames, and wrong in
 > the direction that matters.** It looked for a length prefix at offsets 40–70
@@ -144,9 +159,17 @@ text".
 >   refuse, and `/queries` recorded the fragment. Nine of the corpus's execute
 >   ops are this, five distinct statements, all of them DBeaver's connection
 >   setup (`dbeaver.pcapng` 5, `dbeaver_init.pcapng` 4); no other client in
->   `testdata/` sends an `ALTER SESSION` at all. The figure is computed and
->   asserted by `TestSurveyAlterSessionMisreadAsSet`, so re-recording the corpus
->   fails the test rather than silently ageing the prose.
+>   `testdata/` sends an `ALTER SESSION` **as an execute op**. The figure is
+>   computed and asserted by `TestSurveyAlterSessionMisreadAsSet`, so
+>   re-recording the corpus fails the test rather than silently ageing the prose.
+>
+>   Grepping the recordings for `ALTER SESSION` is misleading here and it caught
+>   a reviewer: the string is in nearly every file, as the `AUTH_ALTER_SESSION`
+>   key/value inside the client's phase-2 AUTH message (dbbat emits the same
+>   shape itself — `upstream_auth_client_wide.go`; the key is in the known set in
+>   `ttc_auth.go`). AUTH is TTC func `0x76`/`0x73`, which never reaches the
+>   statement gate, so those occurrences are an authentication attribute rather
+>   than a statement — they were never gated and are not part of this count.
 > - go-ora's `UPDATE … SET name = …` read as `SET name = 'updated' WHERE id <=`.
 >   Same bypass, on an ordinary DML statement with no adversary involved.
 > - `SELECT 'YES' FROM USER_ROLE_PRIVS WHERE GRANTED_ROLE='DBA'` read as a
@@ -158,8 +181,10 @@ text".
 
 The old scan survives as a fallback for a header shape no recording produces,
 narrowed on both axes: `looksLikeSQL` and the keyword scan now require the verb
-to end at a **word boundary**, and a length-prefixed run must be printable
-throughout. `findSQLInPayload` also learned `TRUNCATE`, `GRANT` and `REVOKE` —
+to end at a **word boundary**, and a length-prefixed run must pass the text test
+above (it previously had no such check at all). `findSQLInPayload` itself is
+untouched — it keeps its own inline `0x0A..0x7E` range — so the teardown path's
+looseness is byte-for-byte what it was. `findSQLInPayload` also learned `TRUNCATE`, `GRANT` and `REVOKE` —
 three verbs `writeKeywords`/`ddlKeywords` refuse but the scan could not see, so
 a `TRUNCATE TABLE payroll` outside the window extracted as `""` and both paths
 failed open. Adding verbs to a keyword scan normally *widens* the false-positive

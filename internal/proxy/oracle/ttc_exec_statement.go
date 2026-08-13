@@ -2,14 +2,15 @@ package oracle
 
 import (
 	"strings"
-	"unicode/utf8"
+
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 )
 
 // This file replaces guessing with reading. Everything else that pulls SQL out
 // of an execute message — the 40-70 and 50-75 length-prefix windows, the
 // keyword scan — searches for something that *looks like* a statement. The
 // execute header says how long the statement is, so the search space collapses
-// to "the printable run of exactly that length".
+// to "the text run of exactly that length, bounded at both ends".
 //
 // The difference is not academic. Measured across every recording in testdata/
 // (internal/proxy/oracle/sql_extraction_survey_test.go), the window scan
@@ -21,7 +22,9 @@ import (
 //
 //   - `ALTER SESSION SET CURRENT_SCHEMA=…` read as `SET CURRENT_SCHEMA=…`
 //     (9 ops, five distinct statements, all DBeaver connection setup —
-//     TestSurveyAlterSessionMisreadAsSet computes it). `ALTER` is in
+//     TestSurveyAlterSessionMisreadAsSet computes it; the `ALTER SESSION` in
+//     nearly every other recording is the AUTH_ALTER_SESSION key/value of the
+//     phase-2 AUTH message, which the statement gate never sees). `ALTER` is in
 //     writeKeywords and ddlKeywords; `SET` is in neither, so read_only and
 //     block_ddl did not fire.
 //   - go-ora's `UPDATE … SET name = …` read as `SET name = …`. Same bypass.
@@ -117,6 +120,13 @@ func decodeExecStatementAt(body []byte) (string, bool) {
 func execSQLLength(body []byte) (int, bool) {
 	if n, ok := execSQLLengthWide(body); ok {
 		return n, true
+	}
+
+	// Guarded rather than relying on the caller's execHeaderMinLen check: this
+	// function has a second entry point in the tests, and an unconditional
+	// index is the shape that cost a panic below.
+	if len(body) <= 3 {
+		return 0, false
 	}
 
 	pos := 3
@@ -255,11 +265,12 @@ func locateExecSQLText(body []byte, sqlLen int) (string, bool) {
 				i++
 			}
 
-			if !execValidRunAt(body, i, n, sqlLen) {
+			text, ok := execRunTextAt(body, i, n, sqlLen)
+			if !ok {
 				continue
 			}
 
-			return string(body[i : i+n]), true
+			return text, true
 		}
 	}
 
@@ -269,11 +280,28 @@ func locateExecSQLText(body []byte, sqlLen int) (string, bool) {
 // execValidRunAt is execTextRunStartsHere plus the SQL-verb requirement: the
 // whole test for "the statement starts here".
 func execValidRunAt(body []byte, i, n, declared int) bool {
-	if i < 0 || i+n > len(body) {
-		return false
+	_, ok := execRunTextAt(body, i, n, declared)
+
+	return ok
+}
+
+// execRunTextAt is execValidRunAt that also hands back the statement, repaired
+// for storage (see sanitizeSQLRun).
+func execRunTextAt(body []byte, i, n, declared int) (string, bool) {
+	if i < 0 || n < 0 || i+n > len(body) {
+		return "", false
 	}
 
-	return execTextRunStartsHere(body, i, n, declared) && startsWithSQLVerb(string(body[i:i+n]))
+	if !execTextRunStartsHere(body, i, n, declared) {
+		return "", false
+	}
+
+	text, ok := sanitizeSQLRun(string(body[i : i+n]))
+	if !ok || !startsWithSQLVerb(text) {
+		return "", false
+	}
+
+	return text, true
 }
 
 // execTextRunStartsHere reports whether a run of n printable bytes is exactly a
@@ -314,31 +342,50 @@ func isPrintableSQLByte(c byte) bool {
 	return c == '\t' || c == '\n' || c == '\r' || (c >= 0x20 && c <= 0x7e) || c >= 0x80
 }
 
-// isPrintableSQLRun reports whether s is statement text end to end.
+// sanitizeSQLRun reports whether s is statement text end to end, and returns
+// the text to hand on.
 //
-// Non-ASCII is admitted only as **valid UTF-8**, which is what keeps this from
-// being a hole: a run of arbitrary high bytes is binary, a run of well-formed
-// multi-byte sequences is a string literal or a quoted identifier. An earlier
-// revision of this check capped at 0x7e, and the effect was that
-// `INSERT INTO t VALUES ('café')` failed the precise decode *and* the window
-// scan and reached the gate as `INSERT INTO t VALUES ('caf` — the verb survived
-// so read_only still fired, but a blocked-pattern or approval-pattern match in
-// the tail did not. No recording carries non-ASCII SQL, so the corpus survey
-// structurally cannot see that; TestNonASCIIStatementSurvivesIntact does.
+// It is deliberately **not** a "valid UTF-8 or drop" check, for the reason
+// docs/oracle.md already gives for OER diagnostics: dbbat does not know the
+// session charset, so a perfectly ordinary `INSERT INTO t VALUES ('café')` from
+// a WE8ISO8859P1 session — the common case on European estates — is not valid
+// UTF-8. An earlier revision of this dropped such a run, and the consequence was
+// not merely lost fidelity: the decoder fell through to the keyword scan, which
+// truncated the statement at the first accented byte, so the gate saw
+// `INSERT INTO t VALUES ('caf` and a blocked pattern or approval pattern in the
+// tail stopped matching. That is the precise-enforcement hole this file exists
+// to close, left open for exactly the client population the docs call common.
 //
-// A client whose session charset is not UTF-8 (a Latin-1 statement, say) still
-// fails here and falls through to the legacy scan. That is a deliberate
-// limitation rather than an oversight: dbbat does not negotiate the charset, so
-// admitting arbitrary high bytes would trade a known-good validity test for a
-// guess, and the fallback is the behavior such a client had all along.
-func isPrintableSQLRun(s string) bool {
+// So it reuses the answer this repo already shipped for the same question:
+// shared.SanitizeStatementText — no control bytes, and no more than a quarter
+// of the runes undecodable, with the undecodable ones repaired to U+FFFD.
+// Binary has control bytes and is undecodable throughout; a sentence with
+// accents in it is neither. Repairing rather than keeping the raw bytes is also
+// what makes the result storable: `queries.sql_text` is a Postgres `text`
+// column.
+//
+// The header-declared length, the two-sided run boundary and the leading verb
+// are what actually discriminate a statement from binary here; this is the
+// belt on top of those braces, which is why it can afford to be charitable.
+//
+// No recording carries non-ASCII SQL, so the corpus survey structurally cannot
+// see any of this — TestNonASCIIStatementSurvivesIntact does.
+func sanitizeSQLRun(s string) (string, bool) {
 	for i := range len(s) {
 		if !isPrintableSQLByte(s[i]) {
-			return false
+			return "", false
 		}
 	}
 
-	return utf8.ValidString(s)
+	return shared.SanitizeStatementText(s)
+}
+
+// isPrintableSQLRun is sanitizeSQLRun as a predicate, for the boundary tests
+// that only ask whether a run is text.
+func isPrintableSQLRun(s string) bool {
+	_, ok := sanitizeSQLRun(s)
+
+	return ok
 }
 
 // sqlStatementVerbs are the verbs a statement can open with. It is looksLikeSQL's
