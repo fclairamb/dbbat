@@ -1304,9 +1304,31 @@ stapled behind it, so forwarding one unread would let an authenticated user unde
 `read_only` grant put an `INSERT` behind a body dbbat cannot walk and have it travel
 ungated — a worse outcome than the hang. `gateUnnameableFrame` therefore scans the frame
 for a stapled statement with the same extractor the JDBC exec path gates on
-(`decodeExecSQL`, offsets plus a keyword fallback), and runs it through the grant's static
-controls and its approval patterns. A statement the grant permits travels; one it refuses
-does not.
+(`decodeExecSQL`) and runs it through the same validators in the same order: the grant's
+static controls, its approval patterns, **and the ones that fire with no controls at all** —
+the Oracle blocked patterns (`ALTER SYSTEM`, `UTL_HTTP`, `DBMS_SCHEDULER`…) and the
+password-change guard. Skipping those here would have made an unwalkable piggyback the one
+place `ALTER SYSTEM KILL SESSION` travels under an ordinary full-access grant while the
+identical statement in a nameable frame is refused. A statement the validators permit
+travels; one they refuse does not.
+
+**The scan is anchored, and that is a bound rather than a weakening.** A refusal here ends
+the session, and the frames that reach it are the ones dbbat cannot parse — including
+piggybacks that carry caller-supplied text by design, like `11 87` set-end-to-end-attrs
+with its module, action and client-identifier strings. A bare keyword scan would kill the
+session of any client that set its module to "DELETE ORDERS". So the statement is only read
+from the start of a TTC op that can carry one (`03 5e`, `11 69`, `11 98` —
+`statementOpOffsets`). Bytes with no such header in front of them are bytes the *upstream*
+will not execute either, so anchoring lets nothing runnable through: hiding a statement
+from dbbat while keeping it executable by Oracle is exactly what it refuses to allow.
+
+The extractor itself is weaker than the gate built on it — it returns the first hit rather
+than the executable one, and its keyword fallback omits `TRUNCATE`/`GRANT`/`REVOKE`. That
+is a **pre-existing property of both this path and the ordinary JDBC exec path**, not
+something anchoring introduced, and it is filed as
+`specs/todos/2026-08-13-05-oracle-sql-extraction-is-weaker-than-the-gate-that-uses-it.md`
+rather than patched in passing, because widening a keyword scan trades directly against the
+false positives above and needs measuring first.
 
 Refusal there is by **ending the session**, not by an OER, and for the same reason
 `onLimitViolation` drops the socket rather than writing a frame: there is no call to end.
