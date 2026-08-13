@@ -92,10 +92,26 @@ func RunRelay(ctx context.Context, logger *slog.Logger, direction string, fn fun
 // `defer sink.Fail()` inside fn — Fail is a no-op once Resolve has run, so it
 // bites only on the panic path.
 //
-// The RowWriter drain loop is the one process-wide user: it is whole-loop
-// wrapped rather than per-turn because its own `defer close(w.done)` is exactly
-// the release this contract asks for — every producer parked in AddAll or Flush
-// selects on it. Background loops that release nothing want RunMaintenance.
+// Three long-lived loops are wrapped whole rather than per turn, and only one of
+// them meets the contract above cleanly:
+//
+//   - The RowWriter drain. Its own `defer close(w.done)` is exactly the release
+//     this contract asks for — every producer parked in AddAll or Flush selects
+//     on it — so a recovered panic degrades capture process-wide and frees
+//     everyone waiting.
+//   - Slack Socket Mode's transport (client.RunContext) and the cross-replica
+//     event listener (store.ListenEvents). These release nothing, so strictly
+//     they fit neither shape, and a recovered panic retires them until the
+//     process restarts — the outcome RunMaintenance's doc argues against. They
+//     are wrapped here anyway for two reasons: both are a single blocking call
+//     into code we do not own, so there is no per-turn seam to guard instead,
+//     and both already treat their own termination as a supported state, logging
+//     a "stopped" warning that an operator sees. The turns that *do* have a seam
+//     — one Socket Mode event, one republished notification — are guarded
+//     per-turn with RunMaintenance inside them, so a panic in dbbat's own
+//     handling costs one event rather than the receiver.
+//
+// A background loop that has a per-turn seam wants RunMaintenance, not this.
 func RunGuarded(ctx context.Context, logger *slog.Logger, name string, fn func()) {
 	defer func() {
 		if r := recover(); r != nil {

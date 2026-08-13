@@ -325,6 +325,18 @@ func runServer(ctx context.Context, flags *cliFlags) error {
 	apiServer, approvals, approvalDeps := buildEventPlumbing(ctx, cfg, dataStore, logger)
 	apiServer.SetDumpStorage(dumpUploader)
 
+	// The six listener goroutines in this file — this one and the five protocol
+	// servers below — are the *only* goroutines in the process deliberately left
+	// without a panic guard, and the reason does not generalise to anything else
+	// here. Each one is a listener's accept loop, and each already treats its own
+	// failure as fatal: the os.Exit(1) below says the process without this
+	// listener is not a process worth keeping. Recovering would leave dbbat
+	// running while silently serving nothing on that port. Per-connection panics
+	// never reach here — handleConnection recovers them one session at a time.
+	//
+	// Everything else in package main that runs on a goroutine is guarded: see
+	// retention.go and heartbeat.go, both of which are ordinary maintenance loops
+	// under shared.RunMaintenance.
 	go func() {
 		if err := apiServer.Start(cfg.ListenAPI); err != nil {
 			logger.ErrorContext(context.Background(), "API server error", slog.Any("error", err))

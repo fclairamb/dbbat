@@ -3,6 +3,7 @@ package shared
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -12,6 +13,12 @@ import (
 // is literally the same statement everywhere, so a second name would only make
 // the log harder to grep.
 const GoroutineNameAPIKeyUsage = "api key usage bump"
+
+// APIKeyUsageTimeout bounds one usage bump. It is generous because the write is
+// a single-row UPDATE that nothing waits on: the number only has to be small
+// enough that a wedged database cannot accumulate one parked goroutine per
+// authenticated request for the life of the process.
+const APIKeyUsageTimeout = 30 * time.Second
 
 // APIKeyUsageStore is the slice of the store the usage bump needs.
 type APIKeyUsageStore interface {
@@ -31,7 +38,15 @@ type APIKeyUsageStore interface {
 // that returns, while still carrying whatever tracing values the caller's
 // context holds. Four of the five proxies used context.Background() before,
 // which merely dropped those values; the REST middleware passed the *request*
-// context, so its bump raced request completion and lost more often than not.
+// context, so its bump raced request completion — net/http cancels on
+// ServeHTTP's return — and lost more often than not.
+//
+// Detaching from cancellation removes a bound, so APIKeyUsageTimeout puts one
+// back. Without it this would be a trade rather than a fix: the four proxies
+// were already unbounded under context.Background(), but the REST middleware's
+// bump inherited the server's own request timeout, and dropping that would leave
+// a goroutine parked on a wedged database for as long as the process lives —
+// one per authenticated request.
 //
 // The store error stays swallowed — nothing has ever branched on it, and a
 // failed usage bump is not worth a line at anything above debug.
@@ -44,9 +59,11 @@ func BumpAPIKeyUsage(ctx context.Context, logger *slog.Logger, st APIKeyUsageSto
 		logger = slog.Default()
 	}
 
-	writeCtx := context.WithoutCancel(ctx)
+	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), APIKeyUsageTimeout)
 
 	go RunGuarded(writeCtx, logger, GoroutineNameAPIKeyUsage, func() {
+		defer cancel()
+
 		if err := st.IncrementAPIKeyUsage(writeCtx, keyID); err != nil {
 			logger.DebugContext(writeCtx, "failed to record API key usage", slog.Any("error", err))
 		}

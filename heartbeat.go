@@ -7,7 +7,18 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
+)
+
+// What a panic in one turn of the heartbeat loop is logged under. Each unit of
+// work is named separately because that is the only thing the log line can
+// usefully say: which of the registry's four jobs stopped happening.
+const (
+	goroutineNameHeartbeat     = "instance heartbeat"
+	goroutineNameSharedIDCheck = "shared instance id check"
+	goroutineNameReclaim       = "orphaned connection reclaim"
+	goroutineNameOpenStamps    = "open query chain stamp refresh"
 )
 
 // instanceHeartbeat keeps this process's row in the instance registry fresh.
@@ -203,19 +214,37 @@ func (h *instanceHeartbeat) run(ctx context.Context) {
 	reclaim := time.NewTimer(nextReclaimDelay())
 	defer reclaim.Stop()
 
+	// Every unit of work runs under shared.RunMaintenance, per turn and
+	// individually. This is a goroutine of its own, so no recover reaches it and
+	// an unguarded panic in any of these store calls would end the process with
+	// every live session on it.
+	//
+	// Individually rather than a guard per tick, because each of the four is
+	// load-bearing for a different reason and none should be skipped because
+	// another blew up: a missed beat makes this run look dead to another
+	// replica's reconcile, which is license to close our live connections, and a
+	// missed refreshOpenStamps is what bounds how long an open session's query
+	// chain goes unsealed. reclaim.Reset stays outside the guards so the timer is
+	// rearmed whatever happened inside them.
 	for {
 		select {
 		case <-ticker.C:
-			h.beat(ctx)
-			h.checkSharedInstanceID(ctx)
+			h.guarded(ctx, goroutineNameHeartbeat, func() { h.beat(ctx) })
+			h.guarded(ctx, goroutineNameSharedIDCheck, func() { h.checkSharedInstanceID(ctx) })
 		case <-reclaim.C:
-			h.reclaim(ctx)
-			h.refreshOpenStamps(ctx)
+			h.guarded(ctx, goroutineNameReclaim, func() { h.reclaim(ctx) })
+			h.guarded(ctx, goroutineNameOpenStamps, func() { h.refreshOpenStamps(ctx) })
 			reclaim.Reset(nextReclaimDelay())
 		case <-h.stop:
 			return
 		}
 	}
+}
+
+// guarded runs one unit of the heartbeat loop's work with a panic recover
+// around it.
+func (h *instanceHeartbeat) guarded(ctx context.Context, name string, fn func()) {
+	shared.RunMaintenance(ctx, h.logger, name, fn)
 }
 
 // nextReclaimDelay spreads the reclaim over [half, one and a half] times
