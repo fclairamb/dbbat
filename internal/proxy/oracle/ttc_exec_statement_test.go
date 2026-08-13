@@ -38,7 +38,7 @@ func recordedExec(t *testing.T, file, want string) string {
 // TestRecordedStatementsAreNotFragments pins the three readings that made this
 // a security defect rather than a cosmetic one. Each is a real frame from a
 // real client, and each used to reach the gate as a fragment that the controls
-// it should have tripped do not recognise.
+// it should have tripped do not recognize.
 func TestRecordedStatementsAreNotFragments(t *testing.T) {
 	t.Parallel()
 
@@ -127,7 +127,7 @@ func TestFindSQLInPayloadWordBoundary(t *testing.T) {
 	}
 }
 
-// TestBundledOCIFixturesCarryNoStatement pins the false-positive behaviour on
+// TestBundledOCIFixturesCarryNoStatement pins the false-positive behavior on
 // the binary fixtures, which is the cost side of every keyword the scan learns.
 // None of these frames is an execute, so none of them may hand the gate a
 // statement — on the unnameable path that would end a live session.
@@ -191,7 +191,8 @@ func TestStapledStatementsDedupes(t *testing.T) {
 // buildPiggybackExec assembles a thin-encoding piggyback execute carrying sql,
 // in the layout execSQLLength walks.
 func buildPiggybackExec(sql string) []byte {
-	out := []byte{byte(TTCFuncPiggyback), PiggybackSubExecSQL, 0x00}
+	out := make([]byte, 0, 64+len(sql))
+	out = append(out, byte(TTCFuncPiggyback), PiggybackSubExecSQL, 0x00)
 	out = append(out, 0x02, 0x81, 0x21) // options
 	out = append(out, 0x00)             // cursor id 0
 	out = append(out, 0x01)             // the cursor-id-is-zero flag
