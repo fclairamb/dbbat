@@ -382,6 +382,15 @@ func TestLearnOERShape_FixedWidthOCI(t *testing.T) {
 			assert.True(t, shape.fixedWidth, "the OCI encoding must not be read as the compressed one")
 			assert.Equal(t, 2, shape.extraTailFields)
 			assert.True(t, shape.endOfResponse, "the marker sqlplus waits for must be learned")
+
+			// And it must not be read as the *other* OCI encoding. The learner
+			// tries the 64-bit layout first, so this is the assertion that
+			// keeps a widening of that layout's guards from quietly capturing
+			// every Instant Client session — where it would produce a frame
+			// twice the size of the one the client is waiting for.
+			assert.False(t, shape.fixedWidth64,
+				"an Instant Client summary must stay on the 32-bit layout")
+			assert.Equal(t, oerFixed32Layout, shape.layoutFor())
 		})
 	}
 }
@@ -395,6 +404,7 @@ func TestLearnOERShape_ThinSessionsLearnNoEndOfResponse(t *testing.T) {
 	shape := defaultOERShape()
 	require.True(t, learnOERShape(&shape, oerFixture(t, oerFixtureGoOraError, oraErrorText)))
 	assert.False(t, shape.fixedWidth)
+	assert.False(t, shape.fixedWidth64, "a thin session is neither OCI layout")
 	assert.False(t, shape.endOfResponse)
 }
 

@@ -542,7 +542,26 @@ const closeCursorsWide8SeqOffset = 9
 // sequence the next TTC message will carry — so a payload that does not fit
 // the shape is read as one of the other encodings instead of guessed at.
 func isCloseCursorsWide8Header(ttcPayload []byte) bool {
-	const sentinelStart = 3 + closeCursorsWide8HeaderLen - 3
+	return usesWide64OpHeader(ttcPayload)
+}
+
+// usesWide64OpHeader reports whether a TTC message opens with the 64-bit OCI op
+// header, whatever op it is: `[msg][func][seq][0x00][0x00][ub4 …][sb8 seq+1]`
+// followed by the 8-byte pointer sentinel.
+//
+// It is deliberately not specific to close-cursors. The same header opens this
+// client's AUTH Phase 1 (`03 76 02 00 00 00000000 0300000000000000 fe…`), which
+// is what lets a session know it is talking to a 64-bit OCI client *before* the
+// upstream has sent an OER to learn the shape from — see nextOERFrame. The
+// Instant Client's 32-bit header (`[seq][0x01][seq+1]`) never satisfies it: its
+// byte 3 is the 0x01 pointer flag, not zero.
+//
+// The "next sequence" check is what makes it a shape test rather than a guess.
+// The second field is always this header's own sequence number plus one — the
+// sequence the next TTC message on the wire will carry — measured across every
+// recorded frame from this client, AUTH and proxy mode alike.
+func usesWide64OpHeader(ttcPayload []byte) bool {
+	const sentinelStart = closeCursorsWide8HeaderLen
 
 	if len(ttcPayload) < sentinelStart+len(closeCursorsWideSentinel) {
 		return false
