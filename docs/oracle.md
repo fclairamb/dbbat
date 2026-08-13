@@ -527,7 +527,8 @@ dropped it exactly the way it dropped the other five.
 The last two rows are the finding the fourth client added, and they are not a
 case of the anchor failing closed on a judgement call. sqlplus negotiates the
 **fixed-width** summary object (the encoding `encodeOERFixedWidth` already
-*writes* for it — see "Refusing a statement" below), so the seven leading fields
+*writes* for it — see "All four drivers, five client builds, measured" below),
+so the seven leading fields
 are little-endian integers at constant offsets rather than TTC compressed ones.
 `decodeOERFieldsAt` reads compressed integers only and returns nil for the whole
 block, so `decodeErrorOER` refuses it, `handleOERStatus` never reaches either
