@@ -190,9 +190,38 @@ correctly. Two further layers, each measured against the live client:
 flavor, the skip is gone, and the whole `./internal/proxy/oracle/...`
 integration suite is green under `-race` on that flavor.
 
-Two follow-ups filed rather than smuggled in:
-`specs/todos/2026-08-13-03-oracle-unlearned-oer-assumes-the-32-bit-oci-layout.md`
-(the unlearned fallback still seeds the 32-bit layout) and
+### Two more, from the completeness audit
+
+- **The fail-open was a smuggling channel, and nothing said so.** A piggyback is
+  by construction a frame with another call stapled behind it — dbbat's own
+  recordings show `11 69 … 03 5e <exec>` — so forwarding an unwalkable one
+  unread let a client put an `INSERT` behind it and have it travel ungated under
+  a `read_only` grant. `gateUnnameableFrame` now scans such a frame with the
+  same extractor the JDBC exec path gates on, runs the statement through the
+  grant's static controls and approval patterns, and refuses by **ending the
+  session** rather than by answering a call it cannot name (the same answer
+  `onLimitViolation` gives, for the same reason). A statement the grant permits
+  still travels; both unnameable frames a live bundled-client session emits
+  carry none.
+- **The nameability check ran after the exec reading**, so a `11 69` execute
+  whose close list did not walk was still answered with an OER — stamped with a
+  stale call number, which is the ORA-18745/hang mode
+  `specs/done/2026/08/2026-08-12-02-oracle-async-refusal-call-number.md` is
+  about. The check moved ahead of it. Not live-visible (every recorded `11 69`
+  walks), so `buildJDBCExec` was corrected to the recorded shape and a second
+  builder covers the unwalkable one.
+- **The unlearned OER fallback** (originally deferred as
+  `2026-08-13-03`) is implemented rather than deferred: it is this spec's own
+  stated goal, since a session refused before any upstream OER has been seen
+  still hung. `nextOERFrame` seeds `fixedWidth64` from the client's AUTH Phase 1,
+  which carries the same 64-bit op header
+  (`usesWide64OpHeader`, `testdata/oci_bundled_auth_phase1.hex`). No integration
+  test can reach that window — sqlplus issues its own login SELECTs first — so
+  both dialects are pinned by unit tests.
+- `logMsgLearnedOERTail` now reports `fixed_width_64`, and the 32-bit learn
+  tests assert it stays false.
+
+One follow-up remains filed rather than smuggled in:
 `specs/todos/2026-08-13-04-oracle-fetch-gate-watches-a-frame-no-client-sends.md`
 (the `0x11` fetch reading is unreachable now that it is no longer misfed
 piggybacks).

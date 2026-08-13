@@ -1286,12 +1286,35 @@ something, and the call the client is parked on is stapled *behind* it. dbbat ca
 piggyback body — the close-cursors list — and for anything else the sequence number at
 offset 2 is the piggyback's own, not the call's. `clientCallNumber` now reports that it
 cannot name such a message, `observeClientCallNumber` leaves the last known-good number
-alone rather than overwriting it with a wrong one, and `interceptClientMessage` forwards
-the message untouched: no cursor id read out of it, no gate, no refusal. **Failing open is
-deliberate** — a message dbbat cannot name is one it could not identify either, so refusing
-it protects nothing, while answering it ends a call the client is not waiting for and parks
-it forever. The two readings that identify a frame from its own contents (a close list that
-walks, a statement that decodes) are unaffected.
+alone rather than overwriting it with a wrong one, and `interceptClientMessage` routes it
+to `gateUnnameableFrame` instead of to either reading that ends in an OER. **Failing open
+is deliberate** — a message dbbat cannot name is one it could not identify either, so
+refusing it protects nothing, while answering it ends a call the client is not waiting for
+and parks it forever.
+
+The check runs **before** the exec reading, not after, and that ordering is load-bearing: a
+`11 69` execute whose close list does not walk is exactly as unnameable as any other
+piggyback, and gating it while stamping the last-seen sequence number is the ORA-18745 /
+hang mode of `specs/done/2026/08/2026-08-12-02-oracle-async-refusal-call-number.md`. Every
+recorded `11 69` from a real client walks (54 in `dbeaver.pcapng`), so it was never
+live-visible — which is precisely why it is pinned by a test rather than left to chance.
+
+**Fail-open is bounded, and the bound is the point.** A piggyback is a frame with something
+stapled behind it, so forwarding one unread would let an authenticated user under a
+`read_only` grant put an `INSERT` behind a body dbbat cannot walk and have it travel
+ungated — a worse outcome than the hang. `gateUnnameableFrame` therefore scans the frame
+for a stapled statement with the same extractor the JDBC exec path gates on
+(`decodeExecSQL`, offsets plus a keyword fallback), and runs it through the grant's static
+controls and its approval patterns. A statement the grant permits travels; one it refuses
+does not.
+
+Refusal there is by **ending the session**, not by an OER, and for the same reason
+`onLimitViolation` drops the socket rather than writing a frame: there is no call to end.
+The statement is recorded as blocked first, so it is in the audit trail like every other
+refusal, and the client sees a plain I/O error rather than a wait that never returns —
+which is what a real Oracle does on `DISCONNECT SESSION`. In a live bundled-client session
+both unnameable frames (`11/6b` at login, `11/c0` at logoff) report `carries_statement=false`
+and are forwarded untouched, so this path costs an ordinary session nothing.
 
 **3. The close-cursors list has a 64-bit header too.** The bundled client writes
 `11 69 <seq> 00 00 <ub4> <sb8 seq+1>` — a 17-byte op header — where the Instant Client
@@ -1313,11 +1336,20 @@ first, and each is validated by the invariant it already used: the trailing RetC
 repeat the leading error number *at that layout's offsets*, and the message must end
 exactly where the tail-field walk says it does.
 
-One gap is left open on purpose: the **unlearned** fallback (`nextOERFrame`, used when a
-session must refuse before any upstream OER has been seen) still assumes the 32-bit layout.
-Every OCI session measured issues its own statements at login, so the shape is learned well
-before the first refusal — but a client that is refused on its literal first statement would
-get the narrow frame. See `specs/todos/` for the follow-up.
+The **unlearned** fallback is covered too, and it had to be: `learnOERShape` reads the
+upstream's OERs, so a session that must refuse before one has arrived — an approval pattern
+matching the opening statement, an already-exhausted quota, a first statement that is a
+write under `read_only` — has nothing learned to go on. `nextOERFrame` therefore seeds
+`fixedWidth64` from the client's own AUTH Phase 1, which opens with the same 64-bit op
+header (`03 76 02 00 00 <ub4> <sb8 seq+1> fe…`, against the Instant Client's
+`03 76 02 01 03 fe…`) — see `usesWide64OpHeader` and
+`testdata/oci_bundled_auth_phase1.hex`. No integration test can reach that window, because
+sqlplus issues its own login SELECTs before anything a grant would refuse, so it is pinned
+by unit tests on both dialects.
+
+`logMsgLearnedOERTail` reports `fixed_width_64` alongside `fixed_width`: on a hung OCI
+client, `fixed_width=true fixed_width_64=false` against a 64-bit client is the whole bug,
+and nothing else in the log distinguishes the two layouts.
 
 #### OCI break/reset before AUTH Phase 2 — root cause and fix
 
