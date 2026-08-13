@@ -230,7 +230,7 @@ const wideProbeDeadline = 3 * refusalDeadline
 // runBoundsProbe runs the python probe against one table at one array size and
 // returns everything it printed.
 func runBoundsProbe(
-	t *testing.T, ctx context.Context, script string, //nolint:revive // ctx after t is the convention here
+	t *testing.T, ctx context.Context, script string,
 	tap *recordingTap, env *oracleThroughProxy, table string, arraysize int,
 ) string {
 	t.Helper()
