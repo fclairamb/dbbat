@@ -24,10 +24,26 @@ import (
 func bundledOCIFirstCall(t *testing.T) []byte {
 	t.Helper()
 
-	raw, err := os.ReadFile("testdata/oci_bundled_first_call.hex")
+	return recordedFrames(t, "testdata/oci_bundled_first_call.hex")[0]
+}
+
+// bundledOCICloseCursors is the same client's close-cursors piggybacks, in the
+// 64-bit header the wide walk had to learn.
+func bundledOCICloseCursors(t *testing.T) [][]byte {
+	t.Helper()
+
+	return recordedFrames(t, "testdata/oci_bundled_close_cursors.hex")
+}
+
+// recordedFrames reads a hex recording: one TNS Data payload per non-comment
+// line, `#` for the commentary that says where the bytes came from.
+func recordedFrames(t *testing.T, path string) [][]byte {
+	t.Helper()
+
+	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
 
-	var body strings.Builder
+	var frames [][]byte
 
 	for _, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
@@ -35,14 +51,14 @@ func bundledOCIFirstCall(t *testing.T) []byte {
 			continue
 		}
 
-		body.WriteString(line)
+		frame, err := hex.DecodeString(line)
+		require.NoError(t, err)
+		frames = append(frames, frame)
 	}
 
-	payload, err := hex.DecodeString(body.String())
-	require.NoError(t, err)
-	require.NotEmpty(t, payload)
+	require.NotEmpty(t, frames, "%s carries no frames", path)
 
-	return payload
+	return frames
 }
 
 // TestBundledOCIFirstCallIsTheFrameThatWasMisread guards the fixture, so every
@@ -92,6 +108,44 @@ func TestClientCallNumberDeclinesAnUnwalkablePiggyback(t *testing.T) {
 
 	_, ok := clientCallNumber(ttc)
 	assert.False(t, ok, "dbbat must decline to name a call it cannot see")
+}
+
+// TestBundledOCICloseCursorsWalkFindsTheStapledCall is the other half of the
+// hang, and the half fail-open could not have covered: the frame it is about
+// carries an INSERT, which a `read_only` grant has to refuse. dbbat cannot get
+// out of the way of that one — it has to answer it, and answer the right call.
+//
+// The call is stapled behind a close-cursors list written in the 64-bit OCI
+// header, which the wide walk did not recognize: the list did not decode, the
+// staple was never found, and the refusal went out carrying whatever sequence
+// number dbbat had last seen. sqlplus waited for the answer to sequence 14
+// forever.
+func TestBundledOCICloseCursorsWalkFindsTheStapledCall(t *testing.T) {
+	t.Parallel()
+
+	frames := bundledOCICloseCursors(t)
+	require.Len(t, frames, 2)
+
+	for i, payload := range frames {
+		ttc := extractTTCPayload(payload)
+		require.NotNil(t, ttc)
+
+		require.True(t, IsCloseCursorsPiggyback(ttc))
+		assert.False(t, isCloseCursorsWideHeader(ttc),
+			"frame %d is not the 4-byte OCI header — that is the whole point", i)
+		assert.True(t, isCloseCursorsWide8Header(ttc), "frame %d must be read as the 64-bit header", i)
+
+		ids, err := decodeCloseCursors(ttc)
+		require.NoErrorf(t, err, "frame %d", i)
+		assert.Equal(t, []uint16{2}, ids, "frame %d closes the one cursor it names", i)
+	}
+
+	// The second frame is the INSERT's, and 14 is the sequence its stapled
+	// `03 5e` carries. Anything else strands the client.
+	call, ok := clientCallNumber(extractTTCPayload(frames[1]))
+	require.True(t, ok)
+	assert.Equal(t, byte(0x0e), call,
+		"the refusal must end the call stapled behind the close list, not the piggyback")
 }
 
 // TestObserveClientCallNumberKeepsTheLastNamedCall pins the second-order half:
