@@ -198,9 +198,11 @@ reported against the 22 recordings in `testdata/`.
 3. **The defect is far broader than the spec claimed.** It is not a planted
    decoy: of the **137** execute ops in the corpus the old scan agreed with the
    statement on 89 and returned a *mid-statement fragment* on **48**, produced
-   by ordinary clients with no adversary at all. (Counted per production decode
-   path rather than per op — the `11 69` and `03 5e` views of a stapled execute
-   are decoded separately — it is 130 of 207.) `extractSQLAtOffset` accepts any byte inside the SQL text as a length
+   by ordinary clients with no adversary at all. (An earlier draft of this plan
+   quoted "130 of 207" from a per-decode-path count taken before the survey was
+   finalised. 207 reconciles — 137 `03 5e` ops plus the 70 `11 69` views of the
+   stapled ones — but 130 does not, and no test computes it. The per-op figures
+   above are the measured ones.) `extractSQLAtOffset` accepts any byte inside the SQL text as a length
    prefix (an ASCII space is 32, `T` is 84), `looksLikeSQL` matches a keyword
    with no word boundary, and nothing requires the declared run to be printable.
    The measured consequences:

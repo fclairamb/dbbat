@@ -3,6 +3,7 @@ package oracle
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -149,38 +150,72 @@ func TestExecStatementRejectsAShortLength(t *testing.T) {
 	assert.False(t, ok, "a short length must fall back, not answer with a prefix: %q", got)
 }
 
-// TestNonASCIIStatementSurvivesIntact records the deliberate decision on
-// non-ASCII SQL, which no recording in testdata/ contains — so the corpus
-// survey structurally cannot see it.
+// TestNonASCIIStatementSurvivesIntact records the decision on non-ASCII SQL,
+// which no recording in testdata/ contains — so the corpus survey structurally
+// cannot see any of it.
 //
-// Statement text is admitted as valid UTF-8 rather than ASCII-only. An earlier
-// revision capped at 0x7e, which truncated `… VALUES ('café')` to
-// `… VALUES ('caf` at the gate: the verb survived, so read_only still fired,
-// but a blocked-pattern or approval-pattern match in the tail did not.
+// Each case asserts what the **gate** ends up with, not just whether the decode
+// answered, because the failure being guarded against is a decline that hands
+// the statement to the keyword scan and loses its tail.
 func TestNonASCIIStatementSurvivesIntact(t *testing.T) {
 	t.Parallel()
 
-	t.Run("valid UTF-8 is statement text", func(t *testing.T) {
+	// gateSees is the statement the enforcement path runs its patterns against
+	// — the same call handleJDBCExec and gateUnnameableFrame make.
+	gateSees := func(t *testing.T, sql string) string {
+		t.Helper()
+
+		result, err := decodeExecSQL(buildPiggybackExec(sql))
+		require.NoError(t, err)
+
+		return result.SQL
+	}
+
+	t.Run("valid UTF-8 reaches the gate whole", func(t *testing.T) {
 		t.Parallel()
 
 		// Two- and three-byte sequences, spelled as escapes so the linter's
 		// script check does not read the fixture as prose.
 		sql := "INSERT INTO t VALUES ('caf\u00e9', 'na\u00efve', '\u65e5\u672c')"
 
-		got, ok := decodeExecStatement(buildPiggybackExec(sql))
-		require.True(t, ok)
-		assert.Equal(t, sql, got)
+		assert.Equal(t, sql, gateSees(t, sql))
 	})
 
-	t.Run("a run of arbitrary high bytes is not", func(t *testing.T) {
+	t.Run("a single-byte-charset statement reaches the gate whole", func(t *testing.T) {
 		t.Parallel()
 
-		// Latin-1 rather than UTF-8: a known limitation, documented on
-		// isPrintableSQLRun. Such a client falls back to the legacy scan, which
-		// is the behavior it had before the precise decode existed.
-		sql := "INSERT INTO t VALUES ('caf\xe9')"
+		// WE8ISO8859P1, the common case on European estates. dbbat does not
+		// negotiate the session charset, so this is not valid UTF-8 — and a
+		// "valid UTF-8 or drop" rule sent it to the keyword scan, which
+		// truncated it at the accent. The tail is what matters: DBMS_SCHEDULER
+		// is an always-blocked Oracle pattern and it sits *after* the
+		// undecodable byte.
+		sql := "INSERT INTO t VALUES ('caf\xe9', DBMS_SCHEDULER.run)"
 
-		_, ok := decodeExecStatement(buildPiggybackExec(sql))
+		got := gateSees(t, sql)
+
+		assert.True(t, strings.HasSuffix(got, "DBMS_SCHEDULER.run)"),
+			"the tail must survive the accent, or blocked patterns stop matching: %q", got)
+		assert.True(t, utf8.ValidString(got),
+			"and what reaches queries.sql_text must be storable in a Postgres text column")
+		assert.Contains(t, got, "\uFFFD", "the undecodable byte is repaired, not dropped")
+	})
+
+	t.Run("binary is still not a statement", func(t *testing.T) {
+		t.Parallel()
+
+		// A verb followed by high bytes throughout: undecodable well past the
+		// quarter share shared.SanitizeStatementText allows.
+		run := "SELECT \xe9\xe8\xea\xeb\xec\xed\xee\xef\xf0\xf1\xf2\xf3\xf4\xf5\xf6\xf7"
+
+		_, ok := decodeExecStatement(buildPiggybackExec(run))
+		assert.False(t, ok)
+	})
+
+	t.Run("a control byte is still not a statement", func(t *testing.T) {
+		t.Parallel()
+
+		_, ok := decodeExecStatement(buildPiggybackExec("SELECT 1\x01\x01 FROM dual"))
 		assert.False(t, ok)
 	})
 }

@@ -1181,12 +1181,13 @@ func extractSQLAtOffset(data []byte, offset int) (string, error) {
 		return "", ErrSQLLengthInvalid
 	}
 
-	sqlText := string(data[sqlStart:sqlEnd])
-
 	// Statement text is text. Without this a declared run that opens with a
 	// verb and then turns into TTC framing bytes — `SET CURRENT_SCHEMA=TESTADM`
 	// followed by four 0x01s was the measured case — passed as a statement.
-	if !isPrintableSQLRun(sqlText) {
+	// sanitizeSQLRun is charitable about the session charset and strict about
+	// binary; it also returns the text repaired for storage.
+	sqlText, ok := sanitizeSQLRun(string(data[sqlStart:sqlEnd]))
+	if !ok {
 		return "", ErrEmptySQL
 	}
 
