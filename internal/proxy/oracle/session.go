@@ -1650,9 +1650,9 @@ func (s *session) gateStatement(handle func([]byte) error, ttcPayload []byte) bo
 // recorded as blocked first, so the refusal is in the audit trail exactly like
 // every other one.
 func (s *session) gateUnnameableFrame(ttcPayload []byte) bool {
-	sql := stapledStatement(ttcPayload)
+	statements := stapledStatements(ttcPayload)
 
-	if sql == "" {
+	if len(statements) == 0 {
 		s.logger.DebugContext(s.ctx, logMsgUnnamedCallForwarded,
 			slog.String("op", ttcOpFunction(ttcPayload)),
 			slog.Bool("carries_statement", false))
@@ -1660,6 +1660,21 @@ func (s *session) gateUnnameableFrame(ttcPayload []byte) bool {
 		return false
 	}
 
+	// Every statement, not the first: a frame that staples two executes runs
+	// both, so enforcing against one of them would leave the other exactly the
+	// smuggling channel this path exists to close.
+	for _, sql := range statements {
+		if s.gateUnnameableStatement(ttcPayload, sql) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// gateUnnameableStatement runs one stapled statement through the gate. Reports
+// true when the session was torn down and the packet must not be forwarded.
+func (s *session) gateUnnameableStatement(ttcPayload []byte, sql string) bool {
 	// Normalized, like handleJDBCExec: the text the patterns run against is the
 	// text recorded in /queries.
 	sql = shared.NormalizeSQL(sql)
@@ -1747,12 +1762,14 @@ func (s *session) endSessionOnRefusal(ttcPayload []byte, sql string, refusal err
 	return true
 }
 
-// stapledStatement returns the SQL a frame carries, or "" when it carries none.
+// stapledStatements returns every distinct statement a frame carries, in wire
+// order, or nil when it carries none.
 //
 // The extractor is the one the JDBC exec path gates on (decodeExecSQL: the
-// known offsets first, then a keyword search over the payload). Using the same
-// one is deliberate — a statement dbbat would enforce against if it could name
-// the call is a statement it has to enforce against when it cannot.
+// execute's own declared length first, then the legacy offset window and
+// keyword search). Using the same one is deliberate — a statement dbbat would
+// enforce against if it could name the call is a statement it has to enforce
+// against when it cannot.
 //
 // What is *not* the same is where it is allowed to look. On this path a
 // false positive is not a refused call the client can retry; it ends the
@@ -1768,22 +1785,53 @@ func (s *session) endSessionOnRefusal(ttcPayload []byte, sql string, refusal err
 // op too, so a payload with no such header is one the upstream will not run
 // either. Hiding an executable statement from dbbat while keeping it executable
 // by Oracle is precisely what this refuses to allow.
-func stapledStatement(ttcPayload []byte) string {
+//
+// Every anchor is read rather than the first that answers: `11 69 <closes>
+// 03 5e <exec>` is the recorded shape, and a frame that staples two executes
+// runs both. Duplicates are dropped because the two anchors of that shape name
+// the same execute.
+func stapledStatements(ttcPayload []byte) []string {
+	var (
+		out  []string
+		seen = map[string]struct{}{}
+	)
+
 	for _, at := range statementOpOffsets(ttcPayload) {
 		result, err := decodeExecSQL(ttcPayload[at:])
-		if err == nil && result != nil && result.SQL != "" {
-			return result.SQL
+		if err != nil || result == nil || result.SQL == "" {
+			continue
 		}
+
+		if _, dup := seen[result.SQL]; dup {
+			continue
+		}
+
+		seen[result.SQL] = struct{}{}
+
+		out = append(out, result.SQL)
 	}
 
-	return ""
+	return out
 }
 
 // ttcStatementOpHeaders are the op headers that carry SQL text: the v315+
 // piggyback execute, and the two func-0x11 execute sub-ops dbbat's own JDBC
-// path recognizes. A legacy OALL8 (message type 0x0e, a single byte) is
-// deliberately not in the list: one common byte is not a header, and matching
-// it would trade the false positive this anchoring removes straight back.
+// path recognizes.
+//
+// A legacy OALL8 (message type 0x0e, a single byte) is deliberately not in the
+// list: one common byte is not a header, and matching it would trade the false
+// positive this anchoring removes straight back. That exclusion is now measured
+// rather than argued — TestSurveyStapledOALL8 walks every `0x11` piggyback in
+// testdata/ and finds six `0x0e` bytes at a non-zero offset, **none** of which
+// decodes as an OALL8 carrying plausible SQL. Adding the op would buy nothing
+// and cost the false positives anchoring removed. Whether Oracle would *execute*
+// a `0e` stapled behind a `0x11` piggyback is still not measured — no recorded
+// client sends OALL8 at all — and this list does not depend on the answer.
+//
+// The python sub-op (`11 98`) is likewise in no recording: python-oracledb thin
+// sends the piggyback execute like every other thin client. It stays because
+// keeping an anchor that never fires costs nothing, while removing one that
+// turns out to fire costs a statement.
 var ttcStatementOpHeaders = [][2]byte{
 	{byte(TTCFuncPiggyback), PiggybackSubExecSQL},
 	{byte(TTCFuncOFETCH), execSubOpJDBC},
@@ -1803,8 +1851,16 @@ var ttcStatementOpHeaders = [][2]byte{
 // whose stapled set-end-to-end-attrs strings read as a refused statement ends
 // the session — fail-closed on a shape no tested client produces (every
 // recorded `11 69` walks) against fail-open on a live exec. See
-// TestUnnameableExecFrameIsGatedOnItsOwnPayload, and
-// specs/todos/2026-08-13-05-… for measuring whether the shape occurs at all.
+// TestUnnameableExecFrameIsGatedOnItsOwnPayload.
+//
+// The carve-out survived the measurement that was meant to settle it
+// (specs/todos/2026-08-13-05, now archived), but it costs much less than it
+// did. decodeExecSQL reads the execute's *declared* length now, so the ordinary
+// case — a `11 69` close list with `03 5e <exec>` stapled behind it — is decoded
+// from the stapled op's own header and never scans loose bytes at all. The
+// whole-payload scan is reached only when the close list does not walk *and*
+// no `03 5e` anchor is present, which is what makes the frame unnameable in the
+// first place.
 func statementOpOffsets(ttcPayload []byte) []int {
 	var out []int
 
