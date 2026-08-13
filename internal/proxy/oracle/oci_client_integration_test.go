@@ -117,10 +117,46 @@ type ociClient struct {
 	// produced it.
 	label string
 
-	// run executes script and returns its combined output. The error is the
-	// client's own exit status — a non-zero exit or a failure to run it at all
-	// — never an assertion.
-	run func(t *testing.T, ctx context.Context, script string) (string, error)
+	// proxyHost/proxyPort are where this flavor reaches the dbbat proxy:
+	// loopback for a client on PATH, host.docker.internal for one running
+	// inside the Oracle container. They are fields rather than baked into
+	// runAt because a measurement that needs a recording tap in front of the
+	// proxy dials the *same* hostname on a different port — see
+	// startRecordingTapOn and ociClient.tap.
+	proxyHost string
+	proxyPort int
+
+	// runAt executes script against host:port and returns its combined output.
+	// The error is the client's own exit status — a non-zero exit or a failure
+	// to run it at all — never an assertion.
+	runAt func(t *testing.T, ctx context.Context, script string, host string, port int) (string, error)
+}
+
+// run executes script against the proxy itself, which is what every test that
+// does not need a tap wants.
+func (c *ociClient) run(t *testing.T, ctx context.Context, script string) (string, error) {
+	t.Helper()
+
+	return c.runAt(t, ctx, script, c.proxyHost, c.proxyPort)
+}
+
+// tap puts a recording tap in front of the proxy that *this* flavor can dial,
+// and hands back the tap plus the coordinates to run scripts against it.
+//
+// The bind address is the whole reason this is a method: a client on PATH
+// reaches a loopback listener, while sqlplus inside the Oracle container comes
+// back over host.docker.internal and needs the tap bound the way the proxy is.
+func (c *ociClient) tap(t *testing.T, env *oracleThroughProxy) (*recordingTap, string, int) {
+	t.Helper()
+
+	bind := "127.0.0.1"
+	if c.kind == ociClientContainer {
+		bind = "0.0.0.0"
+	}
+
+	tap := startRecordingTapOn(t, bind, env.host, env.port)
+
+	return tap, c.proxyHost, tap.port
 }
 
 // startOracleThroughProxyForOCI is startOracleThroughProxy for the sqlplus
@@ -179,9 +215,11 @@ func hostOCIClient(env *oracleThroughProxy) (*ociClient, string) {
 	}
 
 	return &ociClient{
-		kind:  ociClientHostPath,
-		label: "sqlplus on PATH (" + sqlplus + ")",
-		run: func(t *testing.T, ctx context.Context, script string) (string, error) {
+		kind:      ociClientHostPath,
+		label:     "sqlplus on PATH (" + sqlplus + ")",
+		proxyHost: env.host,
+		proxyPort: env.port,
+		runAt: func(t *testing.T, ctx context.Context, script, host string, port int) (string, error) {
 			t.Helper()
 
 			path := filepath.Join(t.TempDir(), "oci_probe.sql")
@@ -189,7 +227,7 @@ func hostOCIClient(env *oracleThroughProxy) (*ociClient, string) {
 				return "", err
 			}
 
-			cmd := exec.CommandContext(ctx, sqlplus, "-S", env.ociConnectString(env.host), "@"+path)
+			cmd := exec.CommandContext(ctx, sqlplus, "-S", env.ociConnectStringAt(host, port), "@"+path)
 
 			out, err := cmd.CombinedOutput()
 
@@ -224,9 +262,11 @@ func containerOCIClient(t *testing.T, env *oracleThroughProxy) (*ociClient, stri
 	}
 
 	return &ociClient{
-		kind:  ociClientContainer,
-		label: "sqlplus bundled in " + oracleTestImage() + " (via docker exec)",
-		run: func(t *testing.T, ctx context.Context, script string) (string, error) {
+		kind:      ociClientContainer,
+		label:     "sqlplus bundled in " + oracleTestImage() + " (via docker exec)",
+		proxyHost: hostGatewayAlias,
+		proxyPort: env.port,
+		runAt: func(t *testing.T, ctx context.Context, script, host string, port int) (string, error) {
 			t.Helper()
 
 			if err := env.oracle.CopyToContainer(ctx, []byte(script), containerOCIScriptPath, 0o644); err != nil {
@@ -235,7 +275,7 @@ func containerOCIClient(t *testing.T, env *oracleThroughProxy) (*ociClient, stri
 
 			code, out, err := containerExec(ctx, env, []string{
 				"sqlplus", "-S",
-				env.ociConnectString(hostGatewayAlias),
+				env.ociConnectStringAt(host, port),
 				"@" + containerOCIScriptPath,
 			})
 
@@ -265,7 +305,13 @@ func containerExec(ctx context.Context, env *oracleThroughProxy, cmd []string) (
 // ociConnectString is the easy-connect string an OCI client uses to reach the
 // proxy from host, authenticating as the fixture user with its API key.
 func (e *oracleThroughProxy) ociConnectString(host string) string {
-	return fmt.Sprintf("%s/%s@//%s:%d/%s", e.username, e.apiKey, host, e.port, e.service)
+	return e.ociConnectStringAt(host, e.port)
+}
+
+// ociConnectStringAt is the same for an endpoint that is not the proxy's own —
+// a recording tap sitting in front of it.
+func (e *oracleThroughProxy) ociConnectStringAt(host string, port int) string {
+	return fmt.Sprintf("%s/%s@//%s:%d/%s", e.username, e.apiKey, host, port, e.service)
 }
 
 // ociAuthModeNote says which AUTH path the login under test will take, so a log

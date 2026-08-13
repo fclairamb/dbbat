@@ -85,7 +85,18 @@ func (r *tapRecord) Write(p []byte) (int, error) {
 func startRecordingTap(t *testing.T, targetHost string, targetPort int) *recordingTap {
 	t.Helper()
 
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	return startRecordingTapOn(t, "127.0.0.1", targetHost, targetPort)
+}
+
+// startRecordingTapOn is startRecordingTap with the bind address spelled out,
+// for the one client that cannot reach loopback: sqlplus bundled in the Oracle
+// container dials back through host.docker.internal, so a tap it is to go
+// through has to be bound on every interface the way the proxy itself is under
+// oracleFixtureOptions.reachableFromContainers.
+func startRecordingTapOn(t *testing.T, bindHost, targetHost string, targetPort int) *recordingTap {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", net.JoinHostPort(bindHost, "0"))
 	require.NoError(t, err)
 
 	t.Cleanup(func() { _ = listener.Close() })
@@ -95,6 +106,14 @@ func startRecordingTap(t *testing.T, targetHost string, targetPort int) *recordi
 
 	port, err := strconv.Atoi(portStr)
 	require.NoError(t, err)
+
+	// A wildcard bind reports 0.0.0.0, which is not an address to hand a client.
+	// Every in-process client still goes to loopback; the one that cannot
+	// (sqlplus inside the Oracle container) dials this port on
+	// host.docker.internal rather than on tap.host.
+	if host == "0.0.0.0" {
+		host = "127.0.0.1"
+	}
 
 	tap := &recordingTap{host: host, port: port}
 	target := net.JoinHostPort(targetHost, strconv.Itoa(targetPort))
