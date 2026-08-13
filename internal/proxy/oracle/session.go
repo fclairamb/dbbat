@@ -1252,8 +1252,7 @@ func (s *session) proxyMessages() error {
 // this imitates. See docs/oracle.md, "An asynchronous refusal: which call
 // number, and whether to send one at all", and TestIdleLimitViolationSendsNoOER.
 func (s *session) onLimitViolation(err error) {
-	s.logger.WarnContext(s.ctx, "terminating Oracle session: grant no longer valid mid-stream",
-		slog.Any("error", err))
+	s.logger.WarnContext(s.ctx, logMsgWatchdogTeardown, slog.Any("error", err))
 
 	if s.upstreamConn != nil {
 		_ = s.upstreamConn.Close()

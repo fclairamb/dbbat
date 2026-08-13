@@ -35,6 +35,16 @@ func WithApprovalPatterns(patterns ...string) GrantOption {
 	}
 }
 
+// WithMaxBytesTransferred puts a transfer quota on the definition — the
+// cumulative wire-byte budget the limit guard enforces mid-stream. The Oracle
+// suite uses it to trip a quota in the middle of a reply, which is the only way
+// to observe the refusal that cuts into a call rather than answering one.
+func WithMaxBytesTransferred(maxBytes int64) GrantOption {
+	return func(def *store.GrantDefinition) {
+		def.MaxBytesTransferred = &maxBytes
+	}
+}
+
 // CreateGrantWithControls issues a grant carrying the given controls. Every
 // grant is an *instance of a definition* and carries no shape of its own, so
 // the definition has to exist first and be named by uid — an inline

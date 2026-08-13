@@ -239,7 +239,21 @@ func (e *oracleThroughProxy) newClient(t *testing.T) *sql.DB {
 // replaceGrant revokes every live grant of the fixture user and issues one
 // carrying the given controls. The same shape as the PostgreSQL fixture's
 // helper, so the two suites narrow a grant the same way.
-func (e *oracleThroughProxy) replaceGrant(t *testing.T, controls []string) {
+func (e *oracleThroughProxy) replaceGrant(t *testing.T, controls []string, opts ...testsupport.GrantOption) {
+	t.Helper()
+
+	e.revokeAllGrants(t)
+
+	_, err := testsupport.CreateGrantWithControls(context.Background(), t, e.store,
+		e.user.UID, e.dbUID, controls, opts...)
+	require.NoError(t, err)
+}
+
+// revokeAllGrants revokes every live grant of the fixture user in the store and
+// issues nothing in its place. It leaves sessions that are already open alone —
+// which is what replaceGrant has always wanted, since a session resolves its
+// grant once and the point of swapping is the *next* connection.
+func (e *oracleThroughProxy) revokeAllGrants(t *testing.T) []uuid.UUID {
 	t.Helper()
 
 	ctx := context.Background()
@@ -247,12 +261,31 @@ func (e *oracleThroughProxy) replaceGrant(t *testing.T, controls []string) {
 	grants, err := e.store.ListGrants(ctx, store.GrantFilter{ActiveOnly: true})
 	require.NoError(t, err)
 
+	uids := make([]uuid.UUID, 0, len(grants))
+
 	for _, g := range grants {
 		require.NoError(t, e.store.RevokeGrant(ctx, g.UID, e.user.UID))
+
+		uids = append(uids, g.UID)
 	}
 
-	_, err = testsupport.CreateGrantWithControls(ctx, t, e.store, e.user.UID, e.dbUID, controls)
-	require.NoError(t, err)
+	return uids
+}
+
+// revokeAllGrantsLive is revokeAllGrants plus the signal that reaches
+// connections which are already open: the store row alone is inert, and it is
+// the API handler (internal/api/grants.go) that pokes the RevocationRegistry
+// afterwards, flipping the flag every live session's limit watchdog polls.
+//
+// The one measurement that needs it is the idle-revocation case — the refusal
+// path that fires with no call in flight — so the fixture reproduces what the
+// REST endpoint does rather than what the store alone does.
+func (e *oracleThroughProxy) revokeAllGrantsLive(t *testing.T) {
+	t.Helper()
+
+	for _, uid := range e.revokeAllGrants(t) {
+		e.store.Revocations().Revoke(uid)
+	}
 }
 
 // runCursorWorkloads drives every shape the spec named as a stress on cursor-id
