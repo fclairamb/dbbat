@@ -136,7 +136,7 @@ func TestDumpReplay_FailuresArriveAsBitLessStandaloneOERs(t *testing.T) {
 
 					// And the relaxed decoder reads all of them, because every
 					// diagnostic names its own code.
-					relaxed := decodeErrorOER(got.payload)
+					relaxed := decodeErrorOER(thinOERShape(), got.payload)
 					require.NotNilf(t, relaxed, "packet #%d: %q", got.index, got.message)
 					assert.Equal(t, want[i].code, relaxed.ErrorCode)
 					assert.Equal(t, fmt.Sprintf("ORA-%05d", want[i].code), relaxed.ErrorMessage[:9])
@@ -158,13 +158,18 @@ func TestDumpReplay_FailuresArriveAsBitLessStandaloneOERs(t *testing.T) {
 // reporting a real failure assigns no cursor"), so asking it whether a Response
 // carries a failure can only ever answer no: the first version of the test
 // below did exactly that and could not fail on the scenario it named.
+//
+// The shape is the thin one because both recordings are thin clients: offering
+// the fixed-width layouts here would widen the scan past what these bytes were
+// measured against. The OCI recording gets that reading, in
+// midfetch_fail_replay_test.go.
 func embeddedFailureOER(payload []byte) *oerInfo {
 	for i := 1; i < len(payload); i++ {
 		if payload[i] != 0x04 {
 			continue
 		}
 
-		if info := decodeErrorOER(payload[i:]); info != nil {
+		if info := decodeErrorOER(thinOERShape(), payload[i:]); info != nil {
 			return info
 		}
 	}
@@ -368,7 +373,7 @@ func TestHandleOERStatus_MidRowStreamRefusesAnOERForAnotherCursor(t *testing.T) 
 		t.Run(fmt.Sprintf("ORA-%05d at #%d", f.fields.ErrorCode, f.index), func(t *testing.T) {
 			t.Parallel()
 
-			require.NotNil(t, decodeErrorOER(f.payload), "outside a row stream these bytes complete a call")
+			require.NotNil(t, decodeErrorOER(thinOERShape(), f.payload), "outside a row stream these bytes complete a call")
 
 			s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
 			require.NoError(t, s.handleOALL8(buildOALL8("SELECT id FROM emp", nil, streamingCursor)))
@@ -412,7 +417,7 @@ func TestDecodeErrorOER_DemandsThatTheDiagnosticNameTheCode(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := decodeErrorOER(tc.oer)
+			got := decodeErrorOER(thinOERShape(), tc.oer)
 			if tc.accept {
 				require.NotNil(t, got)
 				assert.NotEmpty(t, got.ErrorMessage)

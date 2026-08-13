@@ -36,6 +36,21 @@ func buildOER(callStatus, seqNum, curRowNumber, errNum int) []byte {
 	return out
 }
 
+// thinOERShape is a session that has *learned* its upstream marshals the
+// summary object as TTC compressed integers — which is what every thin-client
+// fixture in this package is, and what buildOER synthesizes.
+//
+// Spelling it out matters on the decode paths: an unlearned shape lets
+// decodeOERFixedFieldsAt also try the two fixed-width layouts, so a test whose
+// point is a *refusal* would be asserting against a wider predicate than the
+// bytes it was written for. See decodeOERFixedFieldsAt.
+func thinOERShape() oerShape {
+	shape := defaultOERShape()
+	shape.tailLearned = true
+
+	return shape
+}
+
 func TestDecodeOERAt_RowCount(t *testing.T) {
 	t.Parallel()
 
@@ -241,7 +256,7 @@ func TestFindCursorIDInResponse_SequenceNumberPastAByte(t *testing.T) {
 
 			payload := decodeHexString(t, tc.payload)
 
-			got, ok := findCursorIDInResponse(payload)
+			got, ok := findCursorIDInResponse(thinOERShape(), payload)
 			require.True(t, ok, "the server named a cursor in this response")
 			assert.Equal(t, tc.want, got)
 		})
@@ -293,7 +308,7 @@ func TestFindCursorIDInResponse_RejectsAnErrorOER(t *testing.T) {
 	assert.Equal(t, 942, info.ErrorCode)
 	assert.Equal(t, 9, info.CursorID)
 
-	_, ok := findCursorIDInResponse(payload)
+	_, ok := findCursorIDInResponse(thinOERShape(), payload)
 	assert.False(t, ok, "an OER carrying a real ORA code must not teach a cursor id")
 
 	// Same bytes, error code cleared: now it teaches.
@@ -302,7 +317,7 @@ func TestFindCursorIDInResponse_RejectsAnErrorOER(t *testing.T) {
 	succeeded = append(succeeded, 0x00)
 	succeeded = append(succeeded, payload[oerErrorCodeFieldStart+oerErrorCodeFieldLen:]...)
 
-	cursorID, ok := findCursorIDInResponse(succeeded)
+	cursorID, ok := findCursorIDInResponse(thinOERShape(), succeeded)
 	require.True(t, ok, "with the error cleared the same OER must be read")
 	assert.Equal(t, uint16(9), cursorID)
 }
