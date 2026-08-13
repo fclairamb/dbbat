@@ -336,7 +336,6 @@ func decodeRow(data []byte, columns []columnDef) ([]interface{}, int, error) {
 var (
 	ErrEmptySQL         = errors.New("OALL8 message contains empty SQL")
 	ErrOALL8TooShort    = errors.New("OALL8 payload too short")
-	ErrOFETCHTooShort   = errors.New("OFETCH payload too short")
 	ErrSQLLengthInvalid = errors.New("OALL8 SQL length exceeds payload")
 	// ErrNotLegacyResponse reports that a payload does not follow the legacy
 	// fixed-offset Response layout — its "error" fields decode to something
@@ -781,12 +780,6 @@ type OALL8Result struct {
 func (r *OALL8Result) IsPLSQL() bool {
 	normalized := strings.ToUpper(strings.TrimSpace(r.SQL))
 	return strings.HasPrefix(normalized, "BEGIN") || strings.HasPrefix(normalized, "DECLARE")
-}
-
-// OFETCHResult contains the decoded fields from an OFETCH message.
-type OFETCHResult struct {
-	CursorID  uint16
-	FetchSize uint32
 }
 
 // OALL8 binary layout (simplified):
@@ -2091,29 +2084,4 @@ func isBinaryData(data []byte) bool {
 	}
 
 	return false
-}
-
-// OFETCH binary layout:
-//
-//	Offset  Size  Field
-//	0       1     Function code (0x11)
-//	1       2     Cursor ID (uint16 BE)
-//	3       4     Fetch size / row count (uint32 BE)
-
-const ofetchMinPayloadSize = 7 // func(1) + cursor(2) + fetchsize(4)
-
-// decodeOFETCH decodes an OFETCH TTC payload (starting from the function code byte).
-func decodeOFETCH(ttcPayload []byte) (*OFETCHResult, error) {
-	if len(ttcPayload) < ofetchMinPayloadSize {
-		return nil, fmt.Errorf("%w: got %d bytes, need at least %d", ErrOFETCHTooShort, len(ttcPayload), ofetchMinPayloadSize)
-	}
-
-	// Skip function code (1 byte)
-	cursorID := binary.BigEndian.Uint16(ttcPayload[1:3])
-	fetchSize := binary.BigEndian.Uint32(ttcPayload[3:7])
-
-	return &OFETCHResult{
-		CursorID:  cursorID,
-		FetchSize: fetchSize,
-	}, nil
 }

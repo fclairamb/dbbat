@@ -185,14 +185,6 @@ func TestQuotaRefusals_ArePersisted(t *testing.T) {
 			refuse: func(s *session) error { return s.handleJDBCExec(buildJDBCExec(sql)) },
 		},
 		{
-			name: "OFETCH re-execution",
-			refuse: func(s *session) error {
-				s.tracker.cursors[5] = &trackedCursor{cursorID: 5, sql: sql, parsedAt: time.Now()}
-
-				return s.handleOFETCH(buildOFETCH(5, 100))
-			},
-		},
-		{
 			name: "piggyback re-execution",
 			refuse: func(s *session) error {
 				s.tracker.cursors[6] = &trackedCursor{cursorID: 6, sql: sql, parsedAt: time.Now()}
@@ -348,10 +340,6 @@ func TestQuotaRefusal_DecodeFailureIsStillForwarded(t *testing.T) {
 			name:    "piggyback re-execution",
 			forward: func(s *session) error { return s.handlePiggybackReexec([]byte{0x03}) },
 		},
-		{
-			name:    "OFETCH",
-			forward: func(s *session) error { return s.handleOFETCH([]byte{0x11}) },
-		},
 	}
 
 	for _, tt := range tests {
@@ -402,28 +390,6 @@ func TestQuotaRefusal_IsNeverParkedOnAHuman(t *testing.T) {
 	awaitHeld(t, fake, 1)
 }
 
-// TestQuotaRefusal_NeverTouchesTheContinuationFetch is the third invariant. A
-// fetch continuing a result set already streaming reaches no gate at all —
-// refusing (or recording) mid-result-set is exactly what the early return in
-// handleOFETCH exists to prevent, and moving the quota check into the handlers
-// must not leak one onto that path.
-func TestQuotaRefusal_NeverTouchesTheContinuationFetch(t *testing.T) {
-	t.Parallel()
-
-	s := newTestSession(exhaustedGrant())
-	recorder := newRecordingCompletionStore()
-	s.completionStore = recorder
-
-	cursor := &trackedCursor{cursorID: 5, sql: "SELECT * FROM emp", parsedAt: time.Now()}
-	s.tracker.cursors[5] = cursor
-	s.tracker.pendingQuery = &pendingOracleQuery{cursor: cursor, startTime: time.Now()}
-
-	require.NoError(t, s.handleOFETCH(buildOFETCH(5, 100)),
-		"a fetch continuing a query in flight is never re-gated, quota included")
-	assert.Equal(t, cursor, s.tracker.pendingQuery.cursor, "the in-flight query is untouched")
-	recorder.assertNoFurtherCreate(t)
-}
-
 // TestQuotaRefusal_UnknownCursorAnswersFirst pins the ordering the spec
 // resolved deliberately: on a re-execution, the cursor is resolved before the
 // quota is consulted.
@@ -444,7 +410,7 @@ func TestQuotaRefusal_UnknownCursorAnswersFirst(t *testing.T) {
 		recorder := newRecordingCompletionStore()
 		s.completionStore = recorder
 
-		require.ErrorIs(t, s.handleOFETCH(buildOFETCH(404, 100)), ErrUnknownCursor)
+		require.ErrorIs(t, s.handlePiggybackReexec(buildPiggybackReexec(404)), ErrUnknownCursor)
 		recorder.assertNoFurtherCreate(t)
 	})
 
@@ -455,13 +421,13 @@ func TestQuotaRefusal_UnknownCursorAnswersFirst(t *testing.T) {
 		recorder := newRecordingCompletionStore()
 		s.completionStore = recorder
 
-		require.ErrorIs(t, s.handleOFETCH(buildOFETCH(404, 100)), ErrQueryLimitExceed,
+		require.ErrorIs(t, s.handlePiggybackReexec(buildPiggybackReexec(404)), ErrQueryLimitExceed,
 			"an untracked cursor must not become a way past the quota")
 		recorder.assertNoFurtherCreate(t)
 
-		// Under the cap the same fetch is forwarded, WARN and all.
+		// Under the cap the same re-execution is forwarded, WARN and all.
 		s.grant.QueryCount = 0
-		require.NoError(t, s.handleOFETCH(buildOFETCH(404, 100)))
+		require.NoError(t, s.handlePiggybackReexec(buildPiggybackReexec(404)))
 	})
 }
 

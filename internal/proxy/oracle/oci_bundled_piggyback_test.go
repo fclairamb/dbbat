@@ -68,8 +68,10 @@ func recordedFrames(t *testing.T, path string) [][]byte {
 // TestBundledOCIFirstCallIsTheFrameThatWasMisread guards the fixture, so every
 // assertion below is about the real defect rather than about some other bytes.
 // It asserts the two readings that made this a bug: dbbat calls the message a
-// fetch, and the fetch decode pulls 27396 out of it — the exact cursor id in
-// the WARN this spec was filed from.
+// fetch, and the (now deleted) fetch layout pulled 27396 out of it — the exact
+// cursor id in the WARN this spec was filed from. The layout is spelled out
+// here rather than decoded, because the decoder that read it is gone; it read a
+// big-endian uint16 at bytes 1..3, which on this frame is (function, sequence).
 func TestBundledOCIFirstCallIsTheFrameThatWasMisread(t *testing.T) {
 	t.Parallel()
 
@@ -83,10 +85,9 @@ func TestBundledOCIFirstCallIsTheFrameThatWasMisread(t *testing.T) {
 	require.NotNil(t, ttc)
 	assert.Equal(t, "0x6b", ttcOpFunction(ttc), "the TTC function this piggyback really carries")
 
-	decoded, err := decodeOFETCH(ttc)
-	require.NoError(t, err)
-	assert.Equal(t, uint16(27396), decoded.CursorID,
-		"the fetch layout reads (function, sequence) as a cursor id — this is the misread")
+	require.GreaterOrEqual(t, len(ttc), 3)
+	assert.Equal(t, uint16(27396), binary.BigEndian.Uint16(ttc[1:3]),
+		"the fetch layout read (function, sequence) as a cursor id — this is the misread")
 
 	assert.False(t, IsCloseCursorsPiggyback(ttc), "and it is not the one 0x11 frame dbbat can walk")
 	assert.False(t, IsExecSQL(ttc), "nor an exec it can identify from its contents")

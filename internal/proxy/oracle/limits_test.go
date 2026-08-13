@@ -351,7 +351,7 @@ func TestHeldRefusalMeetingAnUnnameableCallClosesInstead(t *testing.T) {
 	// list does not walk, so clientCallNumber declines to name it.
 	assert.True(t, s.interceptClientMessage(&TNSPacket{
 		Type:    TNSPacketTypeData,
-		Payload: append([]byte{0x00, 0x00}, buildOFETCH(5, 100)...),
+		Payload: []byte{0x00, 0x00, byte(TTCFuncOFETCH), 0x00, 0x05, 0x00, 0x00, 0x00, 0x64},
 	}), "the frame must not be forwarded under a held refusal")
 
 	assert.Empty(t, answered(), "dbbat must not stamp a frame with a call number it could not read")

@@ -43,11 +43,12 @@ const (
 //     which is what every recording in testdata/ shows and what dbbat labels
 //     PIGGYBACK.
 //
-// decodeOFETCH's layout (cursor id as a big-endian uint16 at bytes 1..3) is
-// therefore a fiction for any frame Oracle actually sends: on `11 6b 04 …` it
-// reads 0x6b04 = 27396 and refuses it as a re-execution of a cursor nobody
-// opened. The dispatcher no longer reaches it for a frame it cannot name; see
-// interceptClientMessage and clientCallNumber.
+// dbbat used to carry a fetch decoder keyed on this constant, reading a cursor
+// id as a big-endian uint16 at bytes 1..3 — a fiction for any frame Oracle
+// actually sends: on `11 6b 04 …` it read 0x6b04 = 27396 and refused it as a
+// re-execution of a cursor nobody opened. That decoder and the re-execution
+// gate behind it are gone (the intent is recorded in docs/oracle.md, "Cursor
+// re-execution"); see interceptClientMessage and clientCallNumber.
 const ttcPiggybackMessageType = TTCFuncOFETCH
 
 // Piggyback sub-operation codes (byte 1 when func=0x03).
