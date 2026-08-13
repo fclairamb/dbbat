@@ -21,13 +21,14 @@ on the wire:  ALTER SESSION SET CURRENT_SCHEMA=TESTADM
 the gate saw: SET CURRENT_SCHEMA=TESTADM
 ```
 
-**Before grepping the recordings, read this.** `ALTER SESSION` appears in nearly
-all 22 files, and almost every occurrence is *not* a statement: it is the
+**Before grepping the recordings, read this.** `ALTER SESSION` appears in all 22
+files, and almost every occurrence is *not* a statement: it is the
 `AUTH_ALTER_SESSION` key/value inside the client's phase-2 AUTH message — dbbat
 emits the identical shape itself (`upstream_auth_client_wide.go`) and the key is
-in the known set (`ttc_auth.go`). AUTH is TTC func `0x76`/`0x73`, which never
-reaches the statement gate, so those are an authentication attribute the gate
-does not and should not see. The nine above are the only ones that were ever
+in the known set (`ttc_auth.go`). AUTH is not a statement-carrying op: it is func
+`0x03` with sub-ops `0x76` and `0x73` (`ttc.go`, `PiggybackSubAuth1`), so it
+never reaches the statement gate and those occurrences are an authentication
+attribute the gate does not and should not see. The nine above are the only ones that were ever
 gated. A reviewer grepped the corpus, found the AUTH occurrences and concluded
 thin clients were already being refused; they never were.
 
