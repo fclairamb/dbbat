@@ -554,17 +554,22 @@ never writes an OER outside a call**. Enumerated, the sites are:
 | Site | Is the client inside a call? | Call number written |
 |---|---|---|
 | `gateStatement` / the `OFETCH` refusal, on the client leg | yes — the packet being refused is the call | the op just observed |
-| `upstreamToClient`'s `writeTTCError(ORA00028, …)` | yes — guarded by `hasPendingQuery()` | the op the client is waiting on |
+| `answerHeldRefusal`, on the client leg (a limit crossed mid-reply) | yes — the packet being refused is the call | the op just observed |
+| `enforceMidStreamLimits`, on the response leg | the client is *inside* a call but not at a boundary in it | **none — the violation is held for the client's next call** |
 | `onLimitViolation` (the limit watchdog: revocation, expiry, idle) | no | **none — it force-closes both sockets and writes no frame** |
 
-So the mid-reply case is not asynchronous in the sense that matters. dbbat cuts
-into the reply *before* the call's own end-of-call OER has reached the client,
-so the client is still parked in the receive for the very op `oerCallNumber`
-names. Note the byte-quota refusal follows a *fetch*, and each fetch is its own
-call with its own sequence number — `observeClientCallNumber` runs on every
-client message, fetches included, so the number tracks the reply being cut into
-rather than the execute that opened the result set. **The number is right; the
-frame is unreadable anyway** — see the measurement below.
+The mid-reply case is the one that moved, and it moved because "inside a call" is
+not the same question as "at a place a frame can be read". dbbat cuts into the
+reply *before* the call's own end-of-call OER has reached the client, so the
+client is indeed still parked in the receive for the op `oerCallNumber` names —
+the number was right. But it is parked *mid-message*: a fetch reply is a TTC
+message stream whose messages straddle TNS packets, and an OER written at a
+packet boundary lands inside a half-delivered row batch. Measured, no client
+could read it (below). So the violation is now **held** and answered on the
+client's next call, where the boundary is not inferred but announced: a client
+that sends a new op has by construction finished consuming the previous reply.
+`observeClientCallNumber` runs on every client message, fetches included, so that
+call's own number is what the frame carries.
 
 The genuinely asynchronous case — the watchdog, with the client idle between
 calls — resolves the other way: there is no call to end, and dbbat must not
@@ -596,39 +601,98 @@ dbbat's own idle path matches them exactly: the tap records **zero** bytes
 between the revoke and the client's next statement, the socket is dropped, and
 ojdbc reports ORA-03113 — no ORA-00028, no ORA-18745.
 
-###### The mid-reply refusal: right number, unreadable frame
+###### The mid-reply refusal: right number, wrong place — and the fix
 
-The mid-reply case measured **worse than the reasoning predicted**, though not in
-the way the reasoning worried about.
+The mid-reply case first measured **worse than the reasoning predicted**, though
+not in the way the reasoning worried about.
 `TestIntegration_AsyncRefusalAgainstJDBCThin` trips a `max_bytes_transferred`
-quota inside a streaming result set, with the same tap in front of the proxy:
+quota inside a streaming result set, with the same tap in front of the proxy.
+With the refusal written where the violation was noticed:
 
-- dbbat does everything the decision intended. The **inline** check fires (the
-  watchdog does not), and writes exactly one well-formed
+- dbbat did everything the decision intended. The **inline** check fired (the
+  watchdog did not), and wrote exactly one well-formed
   `ORA-00028: session terminated: bandwidth quota exceeded for this grant`,
   carrying a non-zero call number — read back off the wire, not off dbbat's logs;
-- **no client reports it.** ojdbc answers `ORA-03113: database connection closed
+- **no client reported it.** ojdbc answered `ORA-03113: database connection closed
   by peer` (`last_rpc=Fetch a row`, cause `ORA-17800: Got minus one from a read
-  call`); go-ora, driven through the same trip, answers `driver: bad connection`.
+  call`); go-ora, driven through the same trip, answered `driver: bad connection`.
 
-The call number is *not* what breaks it — that was the identified risk and it is
+The call number was *not* what broke it — that was the identified risk and it is
 ruled out: a rejected call number produces ORA-18745, and no ORA-18745 appears
-anywhere. What is wrong is **where** the frame goes: dbbat cuts in at a *TNS
+anywhere. What was wrong is **where** the frame went: dbbat cut in at a *TNS
 packet* boundary, while a fetch reply is a *TTC message* stream whose messages
 straddle packets (which is why `handleContinuation` carries `lastRow` state
-across them). The OER therefore lands inside a half-delivered row batch, is
-consumed as row bytes, and the client waits for a remainder that never comes.
-Two drivers reading it the same way is what makes this the injection point and
-not either driver's error handling. The fix — hold the refusal until the row
-stream reaches a boundary, or stop writing a frame there at all — is
-`specs/todos/2026-08-13-01-mid-reply-refusal-lands-mid-ttc-message.md`. Nothing
-is under-enforced meanwhile: the session is torn down and the statement is logged
-with `aborted: bandwidth quota exceeded for this grant`; only the client's
-diagnosis is wrong.
+across them). The OER therefore landed inside a half-delivered row batch, was
+consumed as row bytes, and the client waited for a remainder that never came.
+Two drivers reading it the same way is what made this the injection point and not
+either driver's error handling.
 
-Confidence: the enumeration and the `hasPendingQuery()` gate are read off the
-code and pinned by `TestMidStreamRefusalEndsTheCallTheClientIsWaitingOn` and
-`TestIdleLimitViolationSendsNoOER`; the two live cases above are measured against
+**The fix is to wait for a boundary the client vouches for.** There is no
+predicate to be had on the response leg: `parseContinuationRows` is a
+best-effort scanner, `handleContinuation` recognises the end of a batch only by
+finding the *text* `ORA-01403`, and `handleResponse` needs `rowStreamActive()`
+precisely because a leading byte is not a reliable message type mid-stream. A
+boundary inferred from those would be wrong exactly where it matters. But the
+client announces one for free: **a client that sends its next TTC op has, by
+construction, finished consuming the previous reply.** So
+`enforceMidStreamLimits` arms a `heldRefusal` and keeps relaying, and
+`interceptClientMessage` answers the next call with the ORA-00028 through the
+ordinary `writeTTCError` path — the one already measured working on all four
+clients — stamped with *that* call's number. It is also exactly what a real
+Oracle does, one section above: `ALTER SYSTEM KILL SESSION` pushes nothing at the
+parked client and answers its next call.
+
+The cost is the tail of the fetch batch already in flight, bounded by the
+client's fetch size. Three fail-safes bound the wait when something is wrong
+rather than merely slow, and all three fall back to the socket close (an
+ORA-03113 that is *meant*) after finalizing the statement with the real reason:
+
+| Fail-safe | Fires when | Bound |
+|---|---|---|
+| `refusalHoldMaxBytes` | the reply never reaches a boundary at all | 8 MiB relayed past the violation |
+| `refusalHandoffGrace` | the client stops talking with a refusal undelivered | 30 s, enforced by `onLimitViolation` |
+| a call dbbat cannot name | the next op is an unwalkable piggyback | immediate close, no frame (`answerHeldRefusal`) |
+
+The grace is why `onLimitViolation` had to learn to stand down: `LimitGuard.Watch`
+fires its hook **once** and returns, and the violation stays true the whole time
+the refusal is held, so without the wait the watchdog would drop both sockets a
+poll interval later and the client would meet the same ORA-03113 the hold exists
+to replace. Standing down is bounded, never unconditional — a handoff that never
+happens is exactly what the watchdog is the fail-safe for.
+
+Nothing is under-enforced by the wait: the client's next call is refused before
+it is forwarded, so the only extra data that crosses is the reply already in
+flight; the session is torn down; and the statement is logged with
+`aborted: bandwidth quota exceeded for this grant` on every one of the four
+paths (delivered, unnameable, over-bytes, over-grace).
+
+Measured after the fix, same fixture, same tap: dbbat still writes **exactly one**
+OER, with a non-zero call number, and **ojdbc now reports it** —
+`midfetch: code=28`, where it used to say `code=3113` — after draining 1500 of
+5000 rows, with no ORA-18745 anywhere and no watchdog teardown.
+
+**go-ora cannot confirm it, and that is the driver's doing, not dbbat's.** It
+still answers `driver: bad connection`, and the reason is now known: go-ora maps
+ORA-00028 to a dead connection *on purpose*. `network.OracleError.Bad()` lists 28
+next to 3113/3114/12537, and `defaultStmt.fetch` turns any error `isBadConn`
+accepts into `driver.ErrBadConn`, so a mid-result-set ORA-00028 reaches the
+caller through `database/sql` as "bad connection" whether it was parsed or never
+arrived. The error text cannot separate those two, so the sibling subtest stopped
+asking it to: go-ora now runs through **its own recording tap**, and the
+assertion is that dbbat wrote exactly one well-formed ORA-00028 there (call
+number 12, against ojdbc's 8, after 1580 of 5000 rows), held first and delivered
+on the client's next call (`logMsgRefusalHeld` then `logMsgRefusalDelivered`).
+Which is *stronger* evidence than the old text assertion, and it is what makes
+ojdbc's `code=28` attributable to the fix rather than to ojdbc.
+
+Confidence: the enumeration is read off the code and pinned by
+`TestUpstreamToClient_ByteLimitHoldsRatherThanCuttingIn`,
+`TestHeldRefusalEndsTheCallTheClientIsNextParkedOn`,
+`TestHeldRefusalMeetingAnUnnameableCallClosesInstead`,
+`TestHeldRefusalStandsTheWatchdogDownUntilItsGrace`,
+`TestHeldRefusalFallsBackToTheCloseWhenTheClientStopsTalking`,
+`TestHeldRefusalStopsRelayingOnceTheOvershootBoundIsCrossed` and
+`TestIdleLimitViolationSendsNoOER`; the live cases above are measured against
 Oracle 23ai Free and pinned by the integration tests named with them. The driver
 they were taken on is **ojdbc 23.7.0.25.01**, not the 26.1 the call-number
 finding is attributed to; what that does and does not license is in "Which ojdbc
