@@ -171,3 +171,79 @@ Key files: `internal/proxy/oracle/ttc_decode.go` (`decodeExecSQL`,
 `findSQLInPayload`, `extractSQLAtOffset`), `internal/proxy/oracle/intercept.go`
 (`handleJDBCExec`), `internal/proxy/oracle/session.go` (`stapledStatement`,
 `statementOpOffsets`), `internal/proxy/shared/validation.go`.
+
+## Implementation Plan
+
+Written after step 1. The measurement is in
+`internal/proxy/oracle/sql_extraction_survey_test.go` (`go test
+./internal/proxy/oracle/ -run TestSurvey -v`); the numbers below are what it
+reported against the 22 recordings in `testdata/`.
+
+### What the measurement found
+
+1. **A header-anchored length-prefixed decode is reachable, and it replaces the
+   keyword scan.** The piggyback exec's header carries the SQL length as a
+   compressed int at a walkable offset:
+   `[03][5e][seq][(v315 pad)][options][cursorID][flag][sqlLen]…`. Verified
+   byte-for-byte: go-ora's `UPDATE dbbat_dml_test SET name = 'updated' WHERE
+   id <= 3` is 56 bytes and its header carries `01 38`; DBeaver's `ALTER SESSION
+   SET CURRENT_SCHEMA=TESTADM` is 40 and carries `01 28`. sqlplus/OCI writes the
+   same field as a little-endian `ub4` after the wide header's pointer sentinel.
+2. **There is only one statement-carrying op shape on the wire.** `11/98` (the
+   "python oracledb exec" in dbbat's anchor list) appears in **zero** frames,
+   and every `11/69` that carries SQL is a *close-cursors* piggyback with a
+   `03 5e` exec stapled behind it — which `closeCursorsEnd` already locates. So
+   the "JDBC exec" was never a distinct layout; `decodeExecSQL`'s 50–75 window
+   was scanning *past a close list* into the stapled op's SQL.
+3. **The defect is far broader than the spec claimed.** It is not a planted
+   decoy: **130 of 207** production extractions across the corpus are
+   *mid-statement fragments*, produced by ordinary clients with no adversary at
+   all. `extractSQLAtOffset` accepts any byte inside the SQL text as a length
+   prefix (an ASCII space is 32, `T` is 84), `looksLikeSQL` matches a keyword
+   with no word boundary, and nothing requires the declared run to be printable.
+   The measured consequences:
+   - 18 frames of `ALTER SESSION SET …` extracted as `SET …` — `ALTER` is in
+     both `writeKeywords` and `ddlKeywords`, `SET` is in neither, so
+     `read_only`/`block_ddl` **did not fire on a statement they are written to
+     refuse**;
+   - go-ora's `UPDATE … SET …` extracted as `SET name = 'updated' WHERE id <=`,
+     same bypass;
+   - `SELECT 'YES' FROM USER_ROLE_PRIVS WHERE GRANTED_ROLE='DBA'` extracted as
+     `GRANTED_ROLE='DBA'…` — `GRANT` matching `GRANTED_ROLE`;
+   - 76 frames of a DBeaver `SELECT` recorded in `/queries` as
+     `COMMENTS FROM ALL_TAB_COMMENTS …`.
+4. **Unnameable ∧ cursor re-execution = 0** across every recording. Item 3 of
+   the Why section is unreachable in practice; per the resolved open question it
+   is closed with the frame left forwarded.
+5. **A decodable legacy `0e` OALL8 stapled behind a `0x11` piggyback: 0.**
+   Item 4 is closed by leaving the anchor list as it is.
+
+### What gets built
+
+1. `execSQLLength` — walk the exec header (thin and OCI-wide) to the declared
+   SQL length. `locateExecSQLText` — find the printable run of *exactly* that
+   length whose start is not inside a longer text run. Together
+   `decodeExecStatement`.
+2. `decodePiggybackExecSQL` and `decodeExecSQL` try the precise decode first
+   (`decodeExecSQL` walking the close list to the stapled op), and keep the old
+   window+keyword scan only as a fallback for a shape no recording produces.
+3. `looksLikeSQL` gains a word-boundary requirement and `extractSQLAtOffset` a
+   printability requirement — both *shrink* what the loose scan accepts.
+   `findSQLInPayload` gains `TRUNCATE`/`GRANT`/`REVOKE` (item 2) under the same
+   word-boundary rule, which removes more false positives than the three verbs
+   add.
+4. `stapledStatement` becomes `stapledStatements` and `gateUnnameableFrame`
+   gates **every** statement a frame carries, not the first (the preferred
+   branch of the resolved question).
+5. Item 5's carve-out (the anchor counting offset 0) stays, and the doc records
+   why: the precise decode makes it cost less, but a `11 69` frame really is an
+   exec and declining to look would forward a live statement ungated.
+
+### Known consequence, flagged for the owner
+
+Correct extraction means `ALTER SESSION SET …` — which DBeaver and SQL
+Developer send during connection setup — is now seen by the gate as the `ALTER`
+it is. Under a `read_only` or `block_ddl` grant those sessions will start being
+refused where the fragment used to slip through. That is the gate working, not a
+regression, but it is a live behaviour change on the most common GUI client and
+is filed as its own todo.
