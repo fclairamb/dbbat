@@ -19,16 +19,102 @@ import (
 // buildJDBCExec builds a func=0x11 / sub-op 0x69 execute-with-SQL payload —
 // the shape the JDBC thin driver (and DBeaver) sends instead of OALL8. The SQL
 // sits length-prefixed at offset 50, inside the window decodeExecSQL scans.
+//
+// It opens with a close-cursors list that actually *walks* (`01` pointer flag,
+// one compressed count, one compressed id), which every one of the 54 recorded
+// `11 69` frames in testdata/dbeaver.pcapng does. That is not decoration: a
+// close list dbbat can walk is what lets clientCallNumber find the call stapled
+// behind it, and a frame whose list does *not* walk is unnameable and takes the
+// teardown path instead of the OER one (gateUnnameableFrame). Building the
+// nameable shape here is what keeps these tests on the path real clients use —
+// buildUnwalkableJDBCExec covers the other one.
 func buildJDBCExec(sql string) []byte {
 	const sqlOffset = 50
 
+	// 11 69 <seq> 00 | 01 pointer | 01 01 count=1 | 01 02 id=2
+	header := []byte{byte(TTCFuncOFETCH), execSubOpJDBC, 0x07, 0x00, 0x01, 0x01, 0x01, 0x01, 0x02}
+
 	buf := make([]byte, 0, sqlOffset+5+len(sql))
-	buf = append(buf, byte(TTCFuncOFETCH), execSubOpJDBC)
-	buf = append(buf, make([]byte, sqlOffset-2)...)
+	buf = append(buf, header...)
+	buf = append(buf, make([]byte, sqlOffset-len(header))...)
 	buf = append(buf, encodeVarLen(uint32(len(sql)))...)
 	buf = append(buf, []byte(sql)...)
 
 	return buf
+}
+
+// buildUnwalkableJDBCExec is the same execute behind a close-cursors list dbbat
+// cannot walk — no pointer flag, so decodeCloseCursors rejects it and the call
+// stapled behind it is invisible.
+func buildUnwalkableJDBCExec(sql string) []byte {
+	frame := buildJDBCExec(sql)
+	frame[4] = 0x00 // the pointer flag the walk requires
+
+	return frame
+}
+
+// TestBuildJDBCExecFixturesAreTheTwoShapesTheyClaim guards both builders, so
+// the enforcement tests below cannot quietly swap paths on each other: one must
+// be nameable (the recorded shape, answered with an OER) and one must not be
+// (answered by ending the session).
+func TestBuildJDBCExecFixturesAreTheTwoShapesTheyClaim(t *testing.T) {
+	t.Parallel()
+
+	walkable := buildJDBCExec("DROP TABLE emp")
+	require.True(t, IsExecSQL(walkable))
+
+	ids, err := decodeCloseCursors(walkable)
+	require.NoError(t, err, "the recorded JDBC shape opens with a close list that walks")
+	assert.Equal(t, []uint16{2}, ids)
+
+	call, ok := clientCallNumber(walkable)
+	require.True(t, ok, "and is therefore nameable")
+	assert.Equal(t, byte(0x07), call)
+
+	unwalkable := buildUnwalkableJDBCExec("DROP TABLE emp")
+	require.True(t, IsExecSQL(unwalkable), "still an exec, still carries its SQL")
+	_, err = decodeCloseCursors(unwalkable)
+	require.Error(t, err)
+
+	_, ok = clientCallNumber(unwalkable)
+	assert.False(t, ok, "so dbbat cannot name the call it would have to answer")
+}
+
+// TestInterceptClientMessageEndsTheSessionOnAnUnnameableRefusedExec is the leak
+// this closes. `IsExecSQL` used to be tested *before* the nameability check, so
+// a `11 69` exec whose close list did not walk was gated and answered — with a
+// stale call number, because clientCallNumber had just declined to name it.
+// That is the ORA-18745/hang mode
+// specs/done/2026/08/2026-08-12-02-oracle-async-refusal-call-number.md is about,
+// reintroduced by the fix for a different hang.
+//
+// The statement is still refused. It is refused by ending the session, which is
+// the only honest answer for a call dbbat cannot name.
+func TestInterceptClientMessageEndsTheSessionOnAnUnnameableRefusedExec(t *testing.T) {
+	t.Parallel()
+
+	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlBlockDDL}}})
+
+	client, answered := recordingPipe(t)
+	s.clientConn = client
+
+	upstream, upstreamPeer := net.Pipe()
+	t.Cleanup(func() { _ = upstreamPeer.Close() })
+	s.upstreamConn = upstream
+
+	pkt := &TNSPacket{
+		Type:    TNSPacketTypeData,
+		Payload: append([]byte{0x00, 0x00}, buildUnwalkableJDBCExec("DROP TABLE emp")...),
+	}
+
+	assert.True(t, s.interceptClientMessage(pkt),
+		"a DDL refused by the grant must not travel upstream just because its frame is unnameable")
+
+	assert.Empty(t, answered(),
+		"and must not be answered with an OER: dbbat cannot name the call it would be ending")
+
+	assert.Error(t, upstream.SetDeadline(time.Now()),
+		"the session must be torn down, not left parked")
 }
 
 // TestBuildJDBCExecIsRecognizedAsAnExec guards the fixture itself: if the
