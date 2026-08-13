@@ -1,7 +1,6 @@
 package oracle
 
 import (
-	"errors"
 	"net"
 	"sync/atomic"
 	"testing"
@@ -68,9 +67,9 @@ func TestRelayPanicEndsTheSessionNotTheProcess(t *testing.T) {
 
 	select {
 	case err := <-errChan:
-		require.Error(t, err, "the panic must come back as an error, not as a dead process")
-		assert.True(t, errors.Is(err, shared.ErrRelayPanic),
-			"the session tears down through the same channel an I/O error uses: %v", err)
+		require.ErrorIs(t, err, shared.ErrRelayPanic,
+			"the panic must come back as an error, not as a dead process: "+
+				"the session tears down through the same channel an I/O error uses")
 		assert.Contains(t, err.Error(), relayNameUpstreamToClient,
 			"the error names the leg that died")
 	case <-time.After(5 * time.Second):
