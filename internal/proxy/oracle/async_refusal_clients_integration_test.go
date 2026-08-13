@@ -93,9 +93,10 @@ try:
     print("QUOTA-NOT-TRIPPED rows=%d" % rows, flush=True)
 except Exception as e:
     print("rows-before-error", rows, flush=True)
-    code = getattr(e.args[0], "code", None) if e.args else None
-    print("midfetch: code=%s class=%s msg=%s"
-          % (code, type(e).__name__, str(e).strip().splitlines()[0]), flush=True)
+    err = e.args[0] if e.args else None
+    print("midfetch: code=%s full_code=%s class=%s msg=%s"
+          % (getattr(err, "code", None), getattr(err, "full_code", None),
+             type(e).__name__, str(e).strip().splitlines()[0]), flush=True)
 
 try:
     cur.execute("SELECT 42 FROM dual")
@@ -217,12 +218,21 @@ func TestIntegration_AsyncRefusalAgainstOCIAndPythonThin(t *testing.T) {
 		assertQuotaWasHeldMidStream(t, delta)
 		assertRefusalFrameShape(t, frames, delta)
 
-		// The measurement itself: python-oracledb reports the ORA code off the
-		// error object, so unlike go-ora (which maps ORA-00028 to a dead
-		// connection on purpose) its answer is usable evidence about the frame.
+		// The measurement itself, and it needed the error *object* rather than
+		// the error text to make. python-oracledb parsed the ORA-00028 — its
+		// `code` is 28 — and then rendered the exception as its own DPY-4011
+		// "the database or network closed the connection", because it treats
+		// ORA-00028 as a dead session much as go-ora does. So the message text
+		// alone would have read as the pre-fix ORA-03113 failure, and `code`
+		// is what separates "parsed the frame" from "met a closed socket".
 		assert.Contains(t, output, "midfetch: code=28 ",
 			"the whole point of holding the refusal for a call boundary: python-oracledb must "+
 				"report the ORA-00028 rather than a dead socket:\n%s", outputTail(output))
+		assert.Contains(t, output, "full_code=DPY-4011",
+			"pinned as measured, not as preferred: the parsed ORA-00028 is surfaced under "+
+				"python-oracledb's own connection-closed code. A change here means the driver "+
+				"stopped folding a killed session into DPY-4011, and the doc rows are stale:\n%s",
+			outputTail(output))
 		assert.NotContains(t, output, "after 42",
 			"a held refusal ends the session; the connection must not answer another statement")
 		assert.Contains(t, output, "done", "the probe must finish rather than throw")
