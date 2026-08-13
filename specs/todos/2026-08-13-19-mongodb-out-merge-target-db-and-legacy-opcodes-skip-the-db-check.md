@@ -64,3 +64,28 @@ it:
 - `docs/mongodb.md`: the contract text says every command's `$db` is checked;
   amend it to state what a pipeline stage's own `db` does, which is the thing a
   reader currently has no way to guess.
+
+## Resolved open questions
+
+> Legacy opcodes: decide explicitly rather than by omission. […] Whichever is
+> chosen, record it in `docs/mongodb.md` under the existing contract sections.
+
+**Decision (2026-08-13): refuse.** The owner was asked directly during an
+`/implement-todos` batch and confirmed the spec's own preferred answer, in full
+knowledge that it is a client-compatibility break.
+
+Directives for the implementer:
+
+- After authentication, **refuse any non-`OP_MSG` opcode** — `OP_QUERY`,
+  `OP_GET_MORE`, `OP_INSERT`, `OP_UPDATE`, `OP_DELETE`, `OP_KILL_CURSORS` — with
+  a clear, client-readable error rather than forwarding it verbatim. Do **not**
+  write decoders for them; parsing a path MongoDB removed in 5.1 was explicitly
+  rejected as a lot of wire code and new decoder attack surface.
+- The refusal is **independent of grant controls**, the same way the `$db` check
+  is: a full-write grant is not permission to bypass the statement pipeline.
+- This deliberately breaks hand-crafted legacy clients against MongoDB < 5.1 —
+  which is precisely the population the hole exists for. Modern drivers against
+  a supported server never send these opcodes.
+- Leave the **pre-auth** handshake path alone; the refusal is post-auth only.
+- Record it in `docs/mongodb.md` under the existing contract sections, stated as
+  a deliberate refusal with its compatibility consequence, not as a limitation.
