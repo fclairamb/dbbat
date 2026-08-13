@@ -166,7 +166,7 @@ func TestRewriteAuthPhase2_RealJDBC(t *testing.T) {
 	// existing parseAuthPhase2 parser.
 	withFlags := append([]byte{0x00, 0x00}, out...)
 
-	gotSess, gotPwd, err := parseAuthPhase2(withFlags)
+	gotSess, gotPwd, err := parseAuthPhase2(withFlags, false)
 	if err != nil {
 		t.Fatalf("parseAuthPhase2 on rewritten body: %v", err)
 	}

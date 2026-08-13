@@ -583,7 +583,17 @@ func ttcClr(data []byte) []byte {
 // implicitly via the AUTH_SESSKEY exchange — the server proves password knowledge by
 // returning AUTH_SVR_RESPONSE encrypted with the combined session key, and the client
 // validates it locally.
-func parseAuthPhase2(tnsDataPayload []byte) (string, string, error) {
+//
+// bigChunks is the session's negotiated CLR long form. The two values this
+// function extracts are fixed-size by construction — AUTH_SESSKEY is 64 hex
+// chars, AUTH_PASSWORD 96 or 64 — so neither can reach the long form and the
+// flag could have been argued away for them. It is threaded anyway because the
+// walk is not selective: scanTTCKeyValPairs decodes *every* AUTH_ pair it
+// crosses on the way, and a client's own AUTH_CONNECT_STRING routinely exceeds
+// 252 bytes (see longConnectString). Read in the wrong form that pair desyncs
+// the walk and the pairs after it are lost — the byte-anchored fallback below
+// is a safety net, not a reason to mis-decode.
+func parseAuthPhase2(tnsDataPayload []byte, bigChunks bool) (string, string, error) {
 	if len(tnsDataPayload) < ttcDataFlagsSize+4 {
 		return "", "", ErrAuthPhase2TooShort
 	}
@@ -596,7 +606,7 @@ func parseAuthPhase2(tnsDataPayload []byte) (string, string, error) {
 	var sessKey, password string
 
 	// Scan through payload for AUTH_ KV pairs using DLC+CLR decoding
-	pairs := scanTTCKeyValPairs(payload)
+	pairs := scanTTCKeyValPairs(payload, bigChunks)
 
 	for _, p := range pairs {
 		switch strings.ToUpper(p.Key) {
@@ -620,11 +630,11 @@ func parseAuthPhase2(tnsDataPayload []byte) (string, string, error) {
 	}
 
 	if sessKey == "" {
-		sessKey = findVal(payload, []byte(authKeySessKey))
+		sessKey = findVal(payload, []byte(authKeySessKey), bigChunks)
 	}
 
 	if password == "" {
-		password = findVal(payload, []byte(authKeyPassword))
+		password = findVal(payload, []byte(authKeyPassword), bigChunks)
 	}
 
 	if sessKey == "" {
@@ -638,7 +648,12 @@ func parseAuthPhase2(tnsDataPayload []byte) (string, string, error) {
 // that follows. Expected layout: <DLC(valLen)> <CLR(val)>, starting immediately after
 // the key's last byte. CLR is either <len><bytes> for short values or 0xFE<chunks>
 // for long values.
-func findKVByKeyBytes(payload, key []byte) string {
+//
+// bigChunks is the session's negotiated CLR long form. It matters here beyond
+// parseAuthPhase2's own two fixed-size keys: clientDeclaredProgramName reads
+// AUTH_PROGRAM_NM through this finder, and a client's program name is free-form
+// text with no Oracle-side length cap.
+func findKVByKeyBytes(payload, key []byte, bigChunks bool) string {
 	idx := indexOf(payload, key)
 	if idx < 0 {
 		return ""
@@ -652,15 +667,17 @@ func findKVByKeyBytes(payload, key []byte) string {
 		return ""
 	}
 
-	val, _ := readCLR(tail[dlcSize:])
+	val, _ := readCLRVariant(tail[dlcSize:], bigChunks)
 
 	return string(val)
 }
 
 // findKVByKeyBytesWide is the OCI (4-byte little-endian) counterpart of
 // findKVByKeyBytes: after the key name the value length is a fixed 4-byte LE
-// integer, followed by the CLR-encoded value.
-func findKVByKeyBytesWide(payload, key []byte) string {
+// integer, followed by the CLR-encoded value. bigChunks applies on this dialect
+// too — the capability is negotiated per session, not per client flavor (see
+// readAuthKVPairWide).
+func findKVByKeyBytesWide(payload, key []byte, bigChunks bool) string {
 	idx := indexOf(payload, key)
 	if idx < 0 {
 		return ""
@@ -671,7 +688,7 @@ func findKVByKeyBytesWide(payload, key []byte) string {
 		return ""
 	}
 
-	val, _ := readCLR(tail[4:]) // skip 4-byte LE valLen
+	val, _ := readCLRVariant(tail[4:], bigChunks) // skip 4-byte LE valLen
 
 	return string(val)
 }
@@ -702,7 +719,11 @@ func indexOf(haystack, needle []byte) int {
 
 // scanTTCKeyValPairs scans a TTC payload for AUTH_ key-value pairs using DLC+CLR decoding.
 // Format per pair: compressed_int(keyLen) + CLR(key) + compressed_int(valLen) + CLR(val) + compressed_int(flag).
-func scanTTCKeyValPairs(payload []byte) []authKVPair {
+//
+// bigChunks is the session's negotiated CLR long form, applied to values only:
+// a key is an AUTH_* identifier, always far under the short form, where the two
+// encodings are byte-identical.
+func scanTTCKeyValPairs(payload []byte, bigChunks bool) []authKVPair {
 	var pairs []authKVPair
 
 	for offset := 0; offset < len(payload)-4; {
@@ -727,7 +748,7 @@ func scanTTCKeyValPairs(payload []byte) []authKVPair {
 			continue
 		}
 
-		key, val, consumed := readKVValue(payload[offset+kLenSize+clrKeySize:])
+		key, val, consumed := readKVValue(payload[offset+kLenSize+clrKeySize:], bigChunks)
 		if consumed == 0 {
 			offset++
 
@@ -742,15 +763,16 @@ func scanTTCKeyValPairs(payload []byte) []authKVPair {
 	return pairs
 }
 
-// readKVValue reads the value DLC + CLR + flag from a KV pair.
+// readKVValue reads the value DLC + CLR + flag from a KV pair, decoding the CLR
+// in the session's negotiated long form (bigChunks).
 // Returns the DLC length, CLR data, and total bytes consumed.
-func readKVValue(buf []byte) (int, []byte, int) {
+func readKVValue(buf []byte, bigChunks bool) (int, []byte, int) {
 	vLen, vLenSize := readCompressedInt(buf)
 	if vLenSize == 0 || vLen < 0 {
 		return 0, nil, 0
 	}
 
-	clrVal, clrValSize := readCLR(buf[vLenSize:])
+	clrVal, clrValSize := readCLRVariant(buf[vLenSize:], bigChunks)
 	if clrValSize == 0 {
 		return 0, nil, 0
 	}

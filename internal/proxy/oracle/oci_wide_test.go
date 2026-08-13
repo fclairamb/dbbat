@@ -82,7 +82,7 @@ func TestParseAuthPhase2Wide(t *testing.T) {
 	body = append(body, ttcKeyValWide(authKeySessKey, "DEADBEEF", 0)...)
 	body = append(body, ttcKeyValWide(authKeyPassword, "CAFEBABE", 0)...)
 
-	sess, pw, err := parseAuthPhase2(body)
+	sess, pw, err := parseAuthPhase2(body, false)
 	if err != nil {
 		t.Fatalf("parseAuthPhase2 (wide) failed: %v", err)
 	}

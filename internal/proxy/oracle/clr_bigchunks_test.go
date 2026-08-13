@@ -440,7 +440,7 @@ func TestRewriteAuthPhase2_FallbackBigChunkConnectString(t *testing.T) {
 
 	// The rewritten body must still parse as a Phase 2 body (parseAuthPhase2
 	// takes the 2-byte data flags in front).
-	gotSess, gotPwd, err := parseAuthPhase2(append([]byte{0x00, 0x00}, out...))
+	gotSess, gotPwd, err := parseAuthPhase2(append([]byte{0x00, 0x00}, out...), true)
 	require.NoError(t, err)
 	assert.Equal(t, sec.encClientSessKey, gotSess)
 	assert.Equal(t, sec.encPassword, gotPwd)

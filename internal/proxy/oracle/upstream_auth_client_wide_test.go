@@ -391,20 +391,20 @@ func TestWideAuthPhase2_ParsesBackThroughParseAuthPhase2(t *testing.T) {
 
 	payload := append(append([]byte(nil), wideAuthDataFlags...), body...)
 
-	gotKey, gotPwd, err := parseAuthPhase2(payload)
+	gotKey, gotPwd, err := parseAuthPhase2(payload, false)
 	require.NoError(t, err)
 	assert.Equal(t, sec.encClientSessKey, gotKey)
 	assert.Equal(t, sec.encPassword, gotPwd)
 
 	// The OCI-only keys and the OCI library type are what make this a wide body
 	// rather than a thin one wearing wide framing.
-	assert.Equal(t, "2", findKVByKeyBytesWide(body, []byte("SESSION_CLIENT_LIB_TYPE")))
+	assert.Equal(t, "2", findKVByKeyBytesWide(body, []byte("SESSION_CLIENT_LIB_TYPE"), false))
 
 	for _, key := range []string{"AUTH_RTT", "AUTH_CLNT_MEM", "AUTH_ACL", "AUTH_FLAGS"} {
-		assert.NotEmpty(t, findKVByKeyBytesWide(body, []byte(key)), "missing OCI key %s", key)
+		assert.NotEmpty(t, findKVByKeyBytesWide(body, []byte(key), false), "missing OCI key %s", key)
 	}
 
-	assert.Equal(t, sec.eSpeedyKey, findKVByKeyBytesWide(body, []byte("AUTH_PBKDF2_SPEEDY_KEY")))
+	assert.Equal(t, sec.eSpeedyKey, findKVByKeyBytesWide(body, []byte("AUTH_PBKDF2_SPEEDY_KEY"), false))
 }
 
 // TestSyntheticAuthDispatchesOnClientEncoding is the dispatch guard. With no

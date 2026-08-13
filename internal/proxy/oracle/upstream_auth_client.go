@@ -100,7 +100,12 @@ func (s *session) oracleDbbatUsername() string {
 // from a captured AUTH packet (Phase 1 or Phase 2 — both carry it), so it can
 // be embedded as the "$appName" suffix of the upstream-facing program name.
 // Returns "" if pkt is nil or the key isn't present.
-func clientDeclaredProgramName(pkt *TNSPacket) string {
+//
+// bigChunks is the session's negotiated CLR long form. Unlike the two AUTH_*
+// keys parseAuthPhase2 extracts, a program name is free-form client text with
+// no Oracle-side length cap, so it is the one value these finders read that can
+// genuinely reach the long form.
+func clientDeclaredProgramName(pkt *TNSPacket, bigChunks bool) string {
 	if pkt == nil {
 		return ""
 	}
@@ -108,10 +113,10 @@ func clientDeclaredProgramName(pkt *TNSPacket) string {
 	payload := pkt.Payload
 
 	if payloadUsesWideKVEncoding(payload) {
-		return findKVByKeyBytesWide(payload, []byte(authKeyProgramNM))
+		return findKVByKeyBytesWide(payload, []byte(authKeyProgramNM), bigChunks)
 	}
 
-	return findKVByKeyBytes(payload, []byte(authKeyProgramNM))
+	return findKVByKeyBytes(payload, []byte(authKeyProgramNM), bigChunks)
 }
 
 // buildUpstreamProgramName composes the canonical dbbat-branded AUTH_PROGRAM_NM
@@ -120,7 +125,7 @@ func clientDeclaredProgramName(pkt *TNSPacket) string {
 // See shared.BuildUpstreamName for the truncation rules.
 func (s *session) buildUpstreamProgramName() string {
 	username := s.oracleDbbatUsername()
-	appName := clientDeclaredProgramName(s.clientAuthPhase1Pkt)
+	appName := clientDeclaredProgramName(s.clientAuthPhase1Pkt, s.clientBigClrChunks)
 
 	return shared.BuildUpstreamName(version.Version, username, appName, maxProgramNameLen)
 }
