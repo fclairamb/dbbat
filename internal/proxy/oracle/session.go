@@ -972,7 +972,7 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	s.logger.DebugContext(s.ctx, "AUTH Phase 2 payload",
 		slog.Int("len", len(phase2Pkt.Payload)),
 		slog.String("hex_head", fmt.Sprintf("%x", phase2Pkt.Payload[:min(len(phase2Pkt.Payload), 60)])))
-	clientSessKey, encPassword, err := parseAuthPhase2(phase2Pkt.Payload)
+	clientSessKey, encPassword, err := parseAuthPhase2(phase2Pkt.Payload, s.clientBigClrChunks)
 	if err != nil {
 		return fmt.Errorf("failed to parse AUTH Phase 2: %w", err)
 	}

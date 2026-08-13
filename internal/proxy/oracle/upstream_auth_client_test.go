@@ -532,8 +532,8 @@ func scrapePhase2KVValues(payload []byte) (string, string, error) {
 
 	body := payload[ttcDataFlagsSize+2:]
 
-	encClient := findKVByKeyBytes(body, []byte("AUTH_SESSKEY"))
-	encPw := findKVByKeyBytes(body, []byte("AUTH_PASSWORD"))
+	encClient := findKVByKeyBytes(body, []byte("AUTH_SESSKEY"), false)
+	encPw := findKVByKeyBytes(body, []byte("AUTH_PASSWORD"), false)
 
 	if encClient == "" || encPw == "" {
 		return "", "", errPhase2MissingKey

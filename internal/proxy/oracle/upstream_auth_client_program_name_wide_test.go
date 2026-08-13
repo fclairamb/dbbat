@@ -122,7 +122,7 @@ func TestSendUpstreamAuthPhase1RewritesProgramName_Wide(t *testing.T) {
 		t.Fatalf("forwarded packet lost wide KV encoding")
 	}
 
-	if got := findKVByKeyBytesWide(pkt.Payload, []byte(authKeyProgramNM)); got != wantProgramName {
+	if got := findKVByKeyBytesWide(pkt.Payload, []byte(authKeyProgramNM), false); got != wantProgramName {
 		t.Errorf("forwarded AUTH_PROGRAM_NM = %q, want %q", got, wantProgramName)
 	}
 
@@ -184,11 +184,11 @@ func TestSendUpstreamAuthPhase2RewritesProgramName_Wide(t *testing.T) {
 		t.Fatalf("sendUpstreamAuthPhase2: %v", err)
 	}
 
-	if got := findKVByKeyBytesWide(pkt.Payload, []byte(authKeyProgramNM)); got != wantProgramName {
+	if got := findKVByKeyBytesWide(pkt.Payload, []byte(authKeyProgramNM), false); got != wantProgramName {
 		t.Errorf("forwarded AUTH_PROGRAM_NM = %q, want %q", got, wantProgramName)
 	}
 
-	if got := findKVByKeyBytesWide(pkt.Payload, []byte(authKeySessKey)); got != sec.encClientSessKey {
+	if got := findKVByKeyBytesWide(pkt.Payload, []byte(authKeySessKey), false); got != sec.encClientSessKey {
 		t.Errorf("forwarded AUTH_SESSKEY = %q, want %q (secret swap must still work)", got, sec.encClientSessKey)
 	}
 }

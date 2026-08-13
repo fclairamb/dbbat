@@ -51,7 +51,7 @@ func TestClientDeclaredProgramName(t *testing.T) {
 
 		pkt := &TNSPacket{Payload: thinPhase1Payload("connector", true)}
 
-		if got, want := clientDeclaredProgramName(pkt), "python"; got != want {
+		if got, want := clientDeclaredProgramName(pkt, false), "python"; got != want {
 			t.Errorf("clientDeclaredProgramName() = %q, want %q", got, want)
 		}
 	})
@@ -59,7 +59,7 @@ func TestClientDeclaredProgramName(t *testing.T) {
 	t.Run("nil packet", func(t *testing.T) {
 		t.Parallel()
 
-		if got := clientDeclaredProgramName(nil); got != "" {
+		if got := clientDeclaredProgramName(nil, false); got != "" {
 			t.Errorf("clientDeclaredProgramName(nil) = %q, want empty", got)
 		}
 	})
@@ -125,7 +125,7 @@ func TestSendUpstreamAuthPhase1RewritesProgramName(t *testing.T) {
 		t.Fatalf("sendUpstreamAuthPhase1: %v", err)
 	}
 
-	if got := findKVByKeyBytes(pkt.Payload, []byte(authKeyProgramNM)); got != wantProgramName {
+	if got := findKVByKeyBytes(pkt.Payload, []byte(authKeyProgramNM), false); got != wantProgramName {
 		t.Errorf("forwarded AUTH_PROGRAM_NM = %q, want %q", got, wantProgramName)
 	}
 
@@ -196,11 +196,11 @@ func TestSendUpstreamAuthPhase2RewritesProgramName(t *testing.T) {
 		t.Fatalf("sendUpstreamAuthPhase2: %v", err)
 	}
 
-	if got := findKVByKeyBytes(pkt.Payload, []byte(authKeyProgramNM)); got != wantProgramName {
+	if got := findKVByKeyBytes(pkt.Payload, []byte(authKeyProgramNM), false); got != wantProgramName {
 		t.Errorf("forwarded AUTH_PROGRAM_NM = %q, want %q", got, wantProgramName)
 	}
 
-	if got := findKVByKeyBytes(pkt.Payload, []byte(authKeySessKey)); got != sec.encClientSessKey {
+	if got := findKVByKeyBytes(pkt.Payload, []byte(authKeySessKey), false); got != sec.encClientSessKey {
 		t.Errorf("forwarded AUTH_SESSKEY = %q, want %q (secret swap must still work)", got, sec.encClientSessKey)
 	}
 }
