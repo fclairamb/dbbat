@@ -613,17 +613,47 @@ func classifyMongoCommand(cmd string, body bson.Raw) mongoCmdClass {
 	}
 }
 
-// aggregatePipelineWrites reports whether an aggregate command's pipeline ends
-// in a $out or $merge stage (which writes and must be grant-checked as a write).
-func aggregatePipelineWrites(body bson.Raw) bool {
+// mongoPipelineMaxDepth bounds the recursion into nested pipelines
+// ($lookup/$unionWith/$facet) so a hostile document can't drive the scan into
+// unbounded recursion.
+const mongoPipelineMaxDepth = 8
+
+// mongoPipelineScan is the result of walking an aggregation pipeline: whether
+// it writes ($out/$merge) and which databases those stages name explicitly.
+type mongoPipelineScan struct {
+	writes bool
+	// targetDBs holds the non-empty `db` values found on $out/$merge stages.
+	// A stage that names no database targets the command's own $db, which the
+	// $db check already covers.
+	targetDBs []string
+}
+
+// scanMongoPipeline walks the `pipeline` field of a command body. Nested
+// pipelines ($lookup, $unionWith, $facet) are walked too: MongoDB itself
+// forbids $out/$merge inside them, so this is belt-and-braces rather than a
+// path a server would honor — but the cost is a few lines and the alternative
+// is trusting the upstream's validation to be our access control.
+func scanMongoPipeline(body bson.Raw) mongoPipelineScan {
 	pipeline, ok := body.Lookup("pipeline").ArrayOK()
 	if !ok {
-		return false
+		return mongoPipelineScan{}
+	}
+
+	var scan mongoPipelineScan
+	scan.walk(pipeline, 0)
+
+	return scan
+}
+
+// walk visits every stage of one pipeline level.
+func (p *mongoPipelineScan) walk(pipeline bson.RawArray, depth int) {
+	if depth > mongoPipelineMaxDepth {
+		return
 	}
 
 	stages, err := pipeline.Values()
 	if err != nil {
-		return false
+		return
 	}
 
 	for _, stageVal := range stages {
@@ -638,13 +668,92 @@ func aggregatePipelineWrites(body bson.Raw) bool {
 		}
 
 		for _, e := range elems {
-			if e.Key() == "$out" || e.Key() == "$merge" {
-				return true
+			p.stage(e.Key(), e.Value(), depth)
+		}
+	}
+}
+
+// stage handles one pipeline stage: the two writing stages, and the three that
+// can carry a sub-pipeline.
+func (p *mongoPipelineScan) stage(key string, val bson.RawValue, depth int) {
+	switch key {
+	case "$out":
+		p.writes = true
+		p.addTarget(mongoOutTargetDB(val))
+	case "$merge":
+		p.writes = true
+		p.addTarget(mongoMergeTargetDB(val))
+	case "$lookup", "$unionWith":
+		doc, ok := val.DocumentOK()
+		if !ok {
+			return
+		}
+
+		if sub, ok := doc.Lookup("pipeline").ArrayOK(); ok {
+			p.walk(sub, depth+1)
+		}
+	case "$facet":
+		doc, ok := val.DocumentOK()
+		if !ok {
+			return
+		}
+
+		elems, err := doc.Elements()
+		if err != nil {
+			return
+		}
+
+		for _, e := range elems {
+			if sub, ok := e.Value().ArrayOK(); ok {
+				p.walk(sub, depth+1)
 			}
 		}
 	}
+}
 
-	return false
+func (p *mongoPipelineScan) addTarget(dbName string) {
+	if dbName != "" {
+		p.targetDBs = append(p.targetDBs, dbName)
+	}
+}
+
+// mongoOutTargetDB reads the database a $out stage names. The stage value is
+// either a collection name (same database) or {db, coll}.
+func mongoOutTargetDB(val bson.RawValue) string {
+	doc, ok := val.DocumentOK()
+	if !ok {
+		return ""
+	}
+
+	name, _ := doc.Lookup("db").StringValueOK()
+
+	return name
+}
+
+// mongoMergeTargetDB reads the database a $merge stage names. `into` is either
+// a collection name (same database) or {db, coll}; the shorthand
+// {$merge: "coll"} names no database either.
+func mongoMergeTargetDB(val bson.RawValue) string {
+	doc, ok := val.DocumentOK()
+	if !ok {
+		return ""
+	}
+
+	into, ok := doc.Lookup("into").DocumentOK()
+	if !ok {
+		return ""
+	}
+
+	name, _ := into.Lookup("db").StringValueOK()
+
+	return name
+}
+
+// aggregatePipelineWrites reports whether an aggregate command's pipeline
+// contains a $out or $merge stage (which writes and must be grant-checked as a
+// write).
+func aggregatePipelineWrites(body bson.Raw) bool {
+	return scanMongoPipeline(body).writes
 }
 
 // ValidateMongoCommand enforces grant controls and the $db policy on a MongoDB
@@ -683,6 +792,23 @@ func ValidateMongoCommand(cmd, dbName string, body bson.Raw, db *store.Server, g
 
 	if !mongoDatabaseAllowed(dbName, class, db) {
 		return ErrMongoDatabaseBlocked
+	}
+
+	return validateMongoPipelineTargets(body, db)
+}
+
+// validateMongoPipelineTargets holds a pipeline's $out/$merge target database
+// to the same policy as the message's $db. Without it, a command whose $db is
+// the granted database can still write into another one — the stage carries its
+// own {db, coll}, which the $db check never sees. Independent of grant
+// controls: a full-write grant is permission to write *here*, not anywhere.
+func validateMongoPipelineTargets(body bson.Raw, db *store.Server) error {
+	for _, target := range scanMongoPipeline(body).targetDBs {
+		// classWrite: these stages write, so the diagnostics-only carve-out for
+		// admin must not apply to them.
+		if !mongoDatabaseAllowed(target, classWrite, db) {
+			return ErrMongoDatabaseBlocked
+		}
 	}
 
 	return nil

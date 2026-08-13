@@ -252,6 +252,101 @@ func TestValidateMongoCommand_DBEnforcement(t *testing.T) {
 	require.ErrorIs(t, ValidateMongoCommand("find", "other", mongoBody(t, bson.D{{Key: "find", Value: "c"}}), db, full), ErrMongoDatabaseBlocked)
 }
 
+// aggWithPipeline builds an `aggregate` command body on the granted database
+// whose pipeline is the given stages.
+func aggWithPipeline(t *testing.T, stages bson.A) bson.Raw {
+	t.Helper()
+
+	return mongoBody(t, bson.D{
+		{Key: "aggregate", Value: "src"},
+		{Key: "pipeline", Value: stages},
+		{Key: "$db", Value: "app"},
+	})
+}
+
+// A $out/$merge stage carries its own target database, which the message's $db
+// never reveals. It is held to the same policy — otherwise any non-read_only
+// grant writes wherever it likes while $db passes the check honestly.
+func TestValidateMongoCommand_PipelineTargetDatabase(t *testing.T) {
+	t.Parallel()
+
+	db := &store.Server{Name: "app", DatabaseName: "app"}
+	full := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{}}}
+
+	// Same-database forms stay allowed — this is normal, common traffic.
+	allowed := map[string]bson.A{
+		"$out string":            {bson.D{{Key: "$out", Value: "dest"}}},
+		"$out same db":           {bson.D{{Key: "$out", Value: bson.D{{Key: "db", Value: "app"}, {Key: "coll", Value: "dest"}}}}},
+		"$merge string":          {bson.D{{Key: "$merge", Value: "dest"}}},
+		"$merge into string":     {bson.D{{Key: "$merge", Value: bson.D{{Key: "into", Value: "dest"}}}}},
+		"$merge into same db":    {bson.D{{Key: "$merge", Value: bson.D{{Key: "into", Value: bson.D{{Key: "db", Value: "app"}, {Key: "coll", Value: "dest"}}}}}}},
+		"$lookup sub-pipeline":   {bson.D{{Key: "$lookup", Value: bson.D{{Key: "from", Value: "o"}, {Key: "pipeline", Value: bson.A{bson.D{{Key: "$match", Value: bson.D{}}}}}}}}},
+		"plain read pipeline":    {bson.D{{Key: "$match", Value: bson.D{}}}},
+		"$facet without a write": {bson.D{{Key: "$facet", Value: bson.D{{Key: "a", Value: bson.A{bson.D{{Key: "$count", Value: "n"}}}}}}}},
+	}
+	for name, stages := range allowed {
+		require.NoError(t, ValidateMongoCommand("aggregate", "app", aggWithPipeline(t, stages), db, full), name)
+	}
+
+	// A foreign target database is refused with the same error a foreign $db gets.
+	refused := map[string]bson.A{
+		"$out other db": {bson.D{{Key: "$out", Value: bson.D{{Key: "db", Value: "other"}, {Key: "coll", Value: "dest"}}}}},
+		"$merge other db": {
+			bson.D{{Key: "$merge", Value: bson.D{{Key: "into", Value: bson.D{{Key: "db", Value: "other"}, {Key: "coll", Value: "dest"}}}}}},
+		},
+		"$out admin":  {bson.D{{Key: "$out", Value: bson.D{{Key: "db", Value: "admin"}, {Key: "coll", Value: "dest"}}}}},
+		"$out config": {bson.D{{Key: "$out", Value: bson.D{{Key: "db", Value: "config"}, {Key: "coll", Value: "dest"}}}}},
+		// Database names are case-sensitive in MongoDB: match exactly, never fold.
+		"$out wrong case": {bson.D{{Key: "$out", Value: bson.D{{Key: "db", Value: "App"}, {Key: "coll", Value: "dest"}}}}},
+		// Nested pipelines are walked too, even though MongoDB itself forbids
+		// $out/$merge inside them.
+		"$out inside $facet": {
+			bson.D{{Key: "$facet", Value: bson.D{{Key: "a", Value: bson.A{
+				bson.D{{Key: "$out", Value: bson.D{{Key: "db", Value: "other"}, {Key: "coll", Value: "dest"}}}},
+			}}}}},
+		},
+		"$merge inside $lookup": {
+			bson.D{{Key: "$lookup", Value: bson.D{{Key: "from", Value: "o"}, {Key: "pipeline", Value: bson.A{
+				bson.D{{Key: "$merge", Value: bson.D{{Key: "into", Value: bson.D{{Key: "db", Value: "other"}, {Key: "coll", Value: "d"}}}}}},
+			}}}}},
+		},
+		"$out later in the pipeline": {
+			bson.D{{Key: "$match", Value: bson.D{}}},
+			bson.D{{Key: "$out", Value: bson.D{{Key: "db", Value: "other"}, {Key: "coll", Value: "dest"}}}},
+		},
+	}
+	for name, stages := range refused {
+		require.ErrorIs(t,
+			ValidateMongoCommand("aggregate", "app", aggWithPipeline(t, stages), db, full),
+			ErrMongoDatabaseBlocked, name)
+	}
+
+	// The refusal is independent of grant controls: a grant with every control
+	// off (full write) does not buy a cross-database write.
+	crossDB := aggWithPipeline(t, bson.A{
+		bson.D{{Key: "$merge", Value: bson.D{{Key: "into", Value: bson.D{{Key: "db", Value: "other"}, {Key: "coll", Value: "d"}}}}}},
+	})
+	for _, grant := range []*store.Grant{
+		full,
+		{Definition: &store.GrantDefinition{Controls: []string{store.ControlBlockDDL}}},
+		{Definition: &store.GrantDefinition{Controls: []string{store.ControlBlockCopy}}},
+	} {
+		require.ErrorIs(t, ValidateMongoCommand("aggregate", "app", crossDB, db, grant), ErrMongoDatabaseBlocked)
+	}
+
+	// The server row's dbbat Name and its upstream DatabaseName are both accepted
+	// as the target, exactly as the $db check accepts either.
+	renamed := &store.Server{Name: "app-prod", DatabaseName: "appdb"}
+	for _, target := range []string{"app-prod", "appdb"} {
+		body := mongoBody(t, bson.D{
+			{Key: "aggregate", Value: "src"},
+			{Key: "pipeline", Value: bson.A{bson.D{{Key: "$out", Value: bson.D{{Key: "db", Value: target}, {Key: "coll", Value: "dest"}}}}}},
+			{Key: "$db", Value: "appdb"},
+		})
+		require.NoError(t, ValidateMongoCommand("aggregate", "appdb", body, renamed, full), target)
+	}
+}
+
 // --- ALTER SESSION carve-out ------------------------------------------------
 //
 // Both sides are pinned: an allowlisted parameter passes under read_only *and*
