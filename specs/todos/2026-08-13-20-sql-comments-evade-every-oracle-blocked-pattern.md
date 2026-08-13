@@ -38,27 +38,50 @@ classification (`IsWriteQuery`/`IsDDLQuery`), which is regex-shaped too — a
 comment before the leading keyword changes what a statement looks like to
 dbbat but not to Oracle.
 
-## Open questions
+## Resolved open questions
 
 > Strip comments before matching, or refuse a statement whose comments sit
 > between keywords?
 
-Stripping is the obvious move but is not free: a correct stripper has to know
-Oracle's string literals (`'…'`, `q'[…]'`) so that a `/*` *inside* a literal is
-not treated as a comment, and getting that wrong turns a parser bug into an
-authorization bug. Refusing is cruder and would reject legitimate traffic —
-optimizer hints (`/*+ INDEX(…) */`) are comments and are common in real
-workloads, so a blanket refusal is not viable.
+**Decision (2026-08-13): neither — normalise a scratch copy used only for
+matching.** The owner was asked directly during an `/implement-todos` batch and
+chose the third option below.
 
-A third option is to normalise only for the *matching* pass (strip to a scratch
-copy used for the regexes, relay the original untouched), which keeps hints
-working on the wire while denying them as an evasion channel.
+Directives for the implementer:
 
-**This needs a decision before implementation.**
+- Build the normalised form into a **scratch string**. Both `oracleBlockedPatterns`
+  and the `IsWriteQuery`/`IsDDLQuery` classification match against that scratch
+  copy. **The statement relayed upstream stays byte-identical** — never relay the
+  stripped form. Optimizer hints (`/*+ INDEX(t i) */`) must still reach the
+  database exactly as the client wrote them; they simply stop being an evasion
+  channel for the matchers.
+- The stripper must be **literal-aware**: `'…'` (with `''` escaping) and Oracle's
+  `q'[…]'` / `q'{…}'` / `q'(…)'` / `q'<…>'` quote-operator forms. A `/*` or `--`
+  *inside* a literal is not a comment and must be preserved. Getting this wrong
+  turns a parser bug into an authorization bug, so it is the part to test
+  hardest.
+- Replace each comment with a **single space**, not the empty string, so
+  `ALTER/**/SESSION` normalises to `ALTER SESSION` and matches, rather than
+  collapsing to `ALTERSESSION` and escaping again.
+- Handle both comment syntaxes Oracle accepts: `/* … */` (including unterminated,
+  which runs to end of input) and `-- …` to end of line. MySQL additionally
+  accepts `# …` and requires whitespace after `--`; cover that when the shared
+  validators are reached from the MySQL path.
+- Fail **closed** on anything the stripper cannot make sense of (an unterminated
+  literal, say): treat the statement as un-normalisable and let the matchers run
+  against the raw text rather than silently passing a statement nothing checked.
+
+## Superseded alternatives
+
+The two options originally posed, kept for the record — do **not** implement
+either:
+
+- **Strip the statement in place and relay the stripped form.** Rejected: hints
+  are comments, so this can silently change query plans on real workloads.
+- **Refuse a statement whose comments sit between keywords.** Rejected: it would
+  reject legitimate traffic for the same reason — `/*+ INDEX(…) */` is common.
 
 ## Implementation
-
-Sketch, pending the decision above:
 
 - `internal/proxy/shared/validation.go`: normalise into a scratch string —
   comments to a single space, literals preserved verbatim — and run both
