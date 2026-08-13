@@ -125,6 +125,16 @@ print("done", flush=True)
 // have to run *inside* the Oracle container — that needs the proxy bound on
 // every interface and a route back to the host, both creation-time decisions.
 // python-oracledb dials loopback either way.
+//
+// One run measures **one** OCI flavor, and that is structural rather than a
+// choice here: plannedOCIClient is a sync.OnceValue decided before any container
+// starts, so the flavor is a property of the process. The docs' claim that both
+// were measured cost two runs — the default (an Instant Client on PATH wins when
+// there is one) and `ORACLE_TEST_OCI_CLIENT=container` for the client bundled in
+// the Oracle image. CI has no client on PATH, so CI measures the bundled one
+// only; re-checking the Instant Client after a change to the fixed-width
+// encoding means running this with `ORACLE_TEST_OCI_CLIENT=path` on a machine
+// that has one.
 func TestIntegration_AsyncRefusalAgainstOCIAndPythonThin(t *testing.T) {
 	env := startOracleThroughProxyForOCI(t, nil)
 	ctx := context.Background()
@@ -168,8 +178,34 @@ func TestIntegration_AsyncRefusalAgainstOCIAndPythonThin(t *testing.T) {
 		assert.Less(t, rowsPrinted, quotaProbeRows, "a full drain is not a mid-result-set refusal")
 
 		assertQuotaWasHeldMidStream(t, delta)
+
+		// The first of the two findings this subtest exists for, pinned rather
+		// than logged. assertRefusalFrameShape below branches on the
+		// delivered/unnameable split because either is a legitimate *shape*, so
+		// on its own it would stay green if OCI ever flipped onto the fallback —
+		// while docs/oracle.md went on claiming the delivered path. Measured on
+		// both flavors, the OCI piggyback dbbat cannot name is what these
+		// clients open a session with, never what they resume a drained fetch
+		// with, so the call after a fetch reply is always nameable.
+		assert.Zero(t, delta.unnameable,
+			"an OCI session must reach the *delivered* path: the unnameable fallback closing the "+
+				"socket instead is the outcome the measurement ruled out, and the one the docs "+
+				"would then be wrong about")
+
 		assertRefusalFrameShape(t, frames, delta)
 
+		// The second, and the one no other assertion here can make. Everything
+		// above amounts to "the session ended", which a closed socket produces
+		// too. sqlplus is the only client that prints the ORA text unchanged
+		// (python-oracledb relabels it DPY-4011, go-ora ErrBadConn), and it is
+		// also the only one whose frame is in the fixed-width encoding — so this
+		// line is the end-to-end evidence that encodeOERFixedWidth produces
+		// something an OCI client *reads*, written from the client leg, which is
+		// the moment this fix moved and the whole of the spec's first risk.
+		assert.Contains(t, output, "ORA-00028: session terminated",
+			"sqlplus must report the refusal as an ORA error rather than meet a dead socket; "+
+				"without this the fixed-width frame could be unreadable and everything else here "+
+				"would still pass:\n%s", outputTail(output))
 		assert.NotContains(t, output, "after=42",
 			"a held refusal ends the session; the connection must not answer another statement")
 	})
