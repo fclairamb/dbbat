@@ -64,12 +64,17 @@ func decodeOERAt(payload []byte, offset int) *oerInfo {
 // marker sits at payload[offset], without judging whether the result is a real
 // OER. It returns the fields and the offset just past them, or nil.
 //
-// Split out of decodeOERAt because the end-of-call bit is not universal: every
-// OER go-ora's server leg carries it, while python-oracledb's connections get
-// OERs with CallStatus 1–2 (see testdata/python_thin_cursor_reexec.pcapng).
-// Neither cursor-id learning nor the completion of a call that has already left
-// its row stream can afford to demand the bit; the paths where row bytes could
-// impersonate an OER still do, through decodeOERAt.
+// Split out of decodeOERAt because the end-of-call bit is not universal. It
+// looks like a client trait on the *successful* calls that first showed it —
+// go-ora's server leg carries it there, while python-oracledb's connections get
+// OERs with CallStatus 1–2 (testdata/python_thin_cursor_reexec.pcapng) — but it
+// is not one: on a *failing* call the two clients agree, and only a failed DDL
+// carries it (testdata/{python_thin,go_ora}_failed_stmt.pcapng, and
+// measuredFailures in failed_stmt_replay_test.go). Either way the conclusion is
+// the same, which is why it survived the correction: neither cursor-id learning
+// nor the completion of a call that has already left its row stream can afford
+// to demand the bit; the paths where row bytes could impersonate an OER still
+// do, through decodeOERAt.
 func decodeOERFieldsAt(payload []byte, offset int) (*oerInfo, int) {
 	if offset >= len(payload) || payload[offset] != 0x04 {
 		return nil, 0
