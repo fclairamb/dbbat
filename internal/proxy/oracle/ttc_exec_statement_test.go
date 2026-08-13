@@ -1,6 +1,7 @@
 package oracle
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -218,6 +219,44 @@ func TestNonASCIIStatementSurvivesIntact(t *testing.T) {
 		_, ok := decodeExecStatement(buildPiggybackExec("SELECT 1\x01\x01 FROM dual"))
 		assert.False(t, ok)
 	})
+}
+
+// TestBindCaptureAnchorsOnTheWireBytes pins the one place the repaired text and
+// the wire bytes must not be confused.
+//
+// extractPiggybackBinds finds the bind region by locating the statement back in
+// the payload with a byte comparison, and only scans past it. Handed the
+// repaired text, that search cannot match when repair happened — a U+FFFD is
+// three bytes where the wire had one — so the floor collapses to 0 and the tail
+// scan is free to walk back into the statement and read "bind values" out of its
+// own text. That is not the "binds are simply not captured" the function
+// promises; it is the guessed-wrong outcome the promise rules out, and a wrong
+// bind value in /queries is worse than no bind value.
+//
+// The fixture is built for it: a single-byte-charset statement carrying one
+// placeholder, and a trailing block that offers the value scan nothing. With the
+// floor intact the answer is "no binds": no offset past the statement carries a
+// length that consumes the rest. With the floor collapsed the scan walks back
+// into the statement, finds a byte of its own text that does, and reports the
+// statement as a bind value.
+func TestBindCaptureAnchorsOnTheWireBytes(t *testing.T) {
+	t.Parallel()
+
+	sql := "INSERT INTO t VALUES ('caf\xe9', :1)"
+
+	frame := buildPiggybackExec(sql)
+	frame = append(frame[:len(frame)-2], bytes.Repeat([]byte{0x1f}, 29)...)
+
+	result, err := decodePiggybackExecSQL(frame)
+	require.NoError(t, err)
+
+	require.True(t, strings.HasSuffix(result.SQL, ", :1)"),
+		"the statement itself still reaches the gate whole: %q", result.SQL)
+	require.Equal(t, 1, countBindPlaceholders(result.SQL),
+		"the fixture must reach the bind scan at all")
+
+	assert.Nil(t, result.BindValues,
+		"no bind value sits past the statement, so none may be reported: %q", result.BindValues)
 }
 
 // TestFindSQLInPayloadWordBoundary pins the half of the fix that *narrows* the

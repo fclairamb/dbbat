@@ -142,6 +142,16 @@ also what makes it storable in `queries.sql_text`. The header length, the
 two-sided boundary and the leading verb are what discriminate a statement from
 binary here, so this last test can afford to be charitable.
 
+One consequence worth stating: for such a statement the text in `/queries` no
+longer byte-matches the wire — the undecodable bytes are U+FFFD. That is a
+deliberate trade, and the alternative was worse in both directions: a *truncated*
+statement, and one Postgres would refuse to store. The HMAC chain hashes the
+stored text, so verification stays self-consistent either way. Bind capture is
+the one place the raw run is still needed, and it keeps it: `extractPiggybackBinds`
+anchors its scan on the verbatim bytes, because a floor computed from the
+repaired text would not match and a collapsed floor makes the scan read bind
+values out of the statement's own text.
+
 > **The scan this replaced was wrong on a quarter of real frames, and wrong in
 > the direction that matters.** It looked for a length prefix at offsets 40–70
 > (or 50–75) and then anywhere a SQL keyword appeared. But an ASCII byte
@@ -164,12 +174,14 @@ binary here, so this last test can afford to be charitable.
 >   re-recording the corpus fails the test rather than silently ageing the prose.
 >
 >   Grepping the recordings for `ALTER SESSION` is misleading here and it caught
->   a reviewer: the string is in nearly every file, as the `AUTH_ALTER_SESSION`
+>   a reviewer: the string is in **all 22** files, as the `AUTH_ALTER_SESSION`
 >   key/value inside the client's phase-2 AUTH message (dbbat emits the same
 >   shape itself — `upstream_auth_client_wide.go`; the key is in the known set in
->   `ttc_auth.go`). AUTH is TTC func `0x76`/`0x73`, which never reaches the
->   statement gate, so those occurrences are an authentication attribute rather
->   than a statement — they were never gated and are not part of this count.
+>   `ttc_auth.go`). AUTH is not a statement-carrying op: it is func `0x03` with
+>   sub-ops `0x76` and `0x73`, the two rows the op table above lists as AUTH
+>   Phase 1 and Phase 2. Those occurrences are an authentication attribute the
+>   statement gate never sees — they were never gated and are not part of this
+>   count.
 > - go-ora's `UPDATE … SET name = …` read as `SET name = 'updated' WHERE id <=`.
 >   Same bypass, on an ordinary DML statement with no adversary involved.
 > - `SELECT 'YES' FROM USER_ROLE_PRIVS WHERE GRANTED_ROLE='DBA'` read as a
@@ -182,9 +194,10 @@ binary here, so this last test can afford to be charitable.
 The old scan survives as a fallback for a header shape no recording produces,
 narrowed on both axes: `looksLikeSQL` and the keyword scan now require the verb
 to end at a **word boundary**, and a length-prefixed run must pass the text test
-above (it previously had no such check at all). `findSQLInPayload` itself is
-untouched — it keeps its own inline `0x0A..0x7E` range — so the teardown path's
-looseness is byte-for-byte what it was. `findSQLInPayload` also learned `TRUNCATE`, `GRANT` and `REVOKE` —
+above (it previously had no such check at all). `findSQLInPayload`'s own byte
+range is untouched — it still walks `0x0A..0x7E` inline rather than through the
+text test — so widening what counts as statement text for the charset's sake
+did not widen the last-resort scan by a single byte. `findSQLInPayload` also learned `TRUNCATE`, `GRANT` and `REVOKE` —
 three verbs `writeKeywords`/`ddlKeywords` refuse but the scan could not see, so
 a `TRUNCATE TABLE payroll` outside the window extracted as `""` and both paths
 failed open. Adding verbs to a keyword scan normally *widens* the false-positive

@@ -23,10 +23,10 @@ import (
 //   - `ALTER SESSION SET CURRENT_SCHEMA=…` read as `SET CURRENT_SCHEMA=…`
 //     (9 ops, five distinct statements, all DBeaver connection setup —
 //     TestSurveyAlterSessionMisreadAsSet computes it; the `ALTER SESSION` in
-//     nearly every other recording is the AUTH_ALTER_SESSION key/value of the
-//     phase-2 AUTH message, which the statement gate never sees). `ALTER` is in
-//     writeKeywords and ddlKeywords; `SET` is in neither, so read_only and
-//     block_ddl did not fire.
+//     every other recording is the AUTH_ALTER_SESSION key/value of the phase-2
+//     AUTH message — func 0x03 sub-op 0x73, not a statement-carrying op, so the
+//     gate never sees it). `ALTER` is in writeKeywords and ddlKeywords; `SET` is
+//     in neither, so read_only and block_ddl did not fire.
 //   - go-ora's `UPDATE … SET name = …` read as `SET name = …`. Same bypass.
 //   - `… WHERE GRANTED_ROLE='DBA'` read as a `GRANT` statement.
 //
@@ -61,29 +61,53 @@ func isPiggybackExecHeader(ttcPayload []byte) bool {
 // SQL is a close list followed by `03 5e <exec>`, and the `11 98` sub-op in
 // dbbat's anchor list appears in no recording at all.
 func decodeExecStatement(ttcPayload []byte) (string, bool) {
-	if sql, ok := decodeExecStatementAt(ttcPayload); ok {
-		return sql, true
+	stmt, ok := decodeExecStatementText(ttcPayload)
+
+	return stmt.Text, ok
+}
+
+// execStatement is one decoded statement in both the forms callers need.
+//
+// Text is what the gate matches on and the store keeps: repaired for storage by
+// sanitizeSQLRun. Raw is the run exactly as it sat on the wire, and exists for
+// the one caller that needs to find the statement *back* in the payload by byte
+// comparison — extractPiggybackBinds anchors the bind scan on it. Handing that
+// caller the repaired text would break the anchor whenever repair happened (a
+// U+FFFD is three bytes where the wire had one), and a broken anchor there does
+// not mean "no binds", it means binds read from the wrong offset.
+//
+// They are the same string whenever nothing needed repairing, which is every
+// frame in testdata/.
+type execStatement struct {
+	Text string
+	Raw  string
+}
+
+// decodeExecStatementText is decodeExecStatement keeping the verbatim run.
+func decodeExecStatementText(ttcPayload []byte) (execStatement, bool) {
+	if stmt, ok := decodeExecStatementAt(ttcPayload); ok {
+		return stmt, true
 	}
 
 	if end, ok := closeCursorsEnd(ttcPayload); ok {
-		if sql, ok := decodeExecStatementAt(ttcPayload[end:]); ok {
-			return sql, true
+		if stmt, ok := decodeExecStatementAt(ttcPayload[end:]); ok {
+			return stmt, true
 		}
 	}
 
-	return "", false
+	return execStatement{}, false
 }
 
-// decodeExecStatementAt is decodeExecStatement for a payload that must already
-// begin at the exec op header.
-func decodeExecStatementAt(body []byte) (string, bool) {
+// decodeExecStatementAt is decodeExecStatementText for a payload that must
+// already begin at the exec op header.
+func decodeExecStatementAt(body []byte) (execStatement, bool) {
 	if !isPiggybackExecHeader(body) || len(body) < execHeaderMinLen {
-		return "", false
+		return execStatement{}, false
 	}
 
 	sqlLen, ok := execSQLLength(body)
 	if !ok {
-		return "", false
+		return execStatement{}, false
 	}
 
 	return locateExecSQLText(body, sqlLen)
@@ -241,9 +265,9 @@ func execSQLLengthWide(body []byte) (int, bool) {
 // testdata/sqlplus_cursor_reexec.pcapng, the NUL right there on the wire) while
 // the same client declares a 23-character one as 23. So both readings are
 // accepted, and the terminator — which is not statement text — is dropped.
-func locateExecSQLText(body []byte, sqlLen int) (string, bool) {
+func locateExecSQLText(body []byte, sqlLen int) (execStatement, bool) {
 	if sqlLen <= 0 || sqlLen > len(body) {
-		return "", false
+		return execStatement{}, false
 	}
 
 	for _, n := range [...]int{sqlLen, sqlLen - 1} {
@@ -265,16 +289,16 @@ func locateExecSQLText(body []byte, sqlLen int) (string, bool) {
 				i++
 			}
 
-			text, ok := execRunTextAt(body, i, n, sqlLen)
+			stmt, ok := execRunTextAt(body, i, n, sqlLen)
 			if !ok {
 				continue
 			}
 
-			return text, true
+			return stmt, true
 		}
 	}
 
-	return "", false
+	return execStatement{}, false
 }
 
 // execValidRunAt is execTextRunStartsHere plus the SQL-verb requirement: the
@@ -285,23 +309,25 @@ func execValidRunAt(body []byte, i, n, declared int) bool {
 	return ok
 }
 
-// execRunTextAt is execValidRunAt that also hands back the statement, repaired
-// for storage (see sanitizeSQLRun).
-func execRunTextAt(body []byte, i, n, declared int) (string, bool) {
+// execRunTextAt is execValidRunAt that also hands back the statement, in both
+// the repaired-for-storage and verbatim forms (see execStatement).
+func execRunTextAt(body []byte, i, n, declared int) (execStatement, bool) {
 	if i < 0 || n < 0 || i+n > len(body) {
-		return "", false
+		return execStatement{}, false
 	}
 
 	if !execTextRunStartsHere(body, i, n, declared) {
-		return "", false
+		return execStatement{}, false
 	}
 
-	text, ok := sanitizeSQLRun(string(body[i : i+n]))
+	raw := string(body[i : i+n])
+
+	text, ok := sanitizeSQLRun(raw)
 	if !ok || !startsWithSQLVerb(text) {
-		return "", false
+		return execStatement{}, false
 	}
 
-	return text, true
+	return execStatement{Text: text, Raw: raw}, true
 }
 
 // execTextRunStartsHere reports whether a run of n printable bytes is exactly a

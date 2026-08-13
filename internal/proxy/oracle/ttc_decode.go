@@ -884,48 +884,60 @@ func decodePiggybackExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 	// The header carries the statement's length, so read that first and take
 	// the run it names. Everything below is the pre-2026-08 heuristic, kept for
 	// a header shape no recording produces — see decodeExecStatement.
-	sql, ok := decodeExecStatement(ttcPayload)
-	if !ok {
-		sql = ""
-	}
+	stmt, _ := decodeExecStatementText(ttcPayload)
 
 	// Strategy: scan the payload for SQL text. Different Oracle client drivers
 	// (oracledb thin, JDBC thin) place the SQL at slightly different offsets
 	// (50-54 typically). We scan a range and validate the extracted text.
-	for offset := 40; sql == "" && offset < 70 && offset < len(ttcPayload)-1; offset++ {
-		if found, scanErr := extractSQLAtOffset(ttcPayload, offset); scanErr == nil && found != "" {
-			sql = found
+	for offset := 40; stmt.Text == "" && offset < 70 && offset < len(ttcPayload)-1; offset++ {
+		if found, scanErr := extractSQLAtOffsetText(ttcPayload, offset); scanErr == nil && found.Text != "" {
+			stmt = found
 		}
 	}
 
-	// Last resort: find SQL keywords directly in the payload.
-	if sql == "" {
-		sql = findSQLInPayload(ttcPayload)
+	// Last resort: find SQL keywords directly in the payload. It returns a
+	// verbatim slice of the payload, so the text is its own anchor.
+	if stmt.Text == "" {
+		if found := findSQLInPayload(ttcPayload); found != "" {
+			stmt = execStatement{Text: found, Raw: found}
+		}
 	}
 
-	if sql == "" {
+	if stmt.Text == "" {
 		return nil, fmt.Errorf("%w: could not find SQL text in piggyback exec payload", ErrEmptySQL)
 	}
 
-	return &OALL8Result{SQL: sql, BindValues: extractPiggybackBinds(ttcPayload, sql)}, nil
+	return &OALL8Result{
+		SQL:        stmt.Text,
+		BindValues: extractPiggybackBinds(ttcPayload, stmt),
+	}, nil
 }
 
 // extractPiggybackBinds recovers the bind values from a piggyback exec payload.
 // The values are length-prefixed at the tail of the message and their count
-// equals the number of distinct bind placeholders in sql, so they are located as
-// the suffix that parses as exactly that many length-prefixed values consuming
-// the rest of the payload. Returns nil when they can't be located — binds are
-// then simply not captured rather than guessed wrong.
-func extractPiggybackBinds(payload []byte, sql string) []string {
-	count := countBindPlaceholders(sql)
+// equals the number of distinct bind placeholders in the statement, so they are
+// located as the suffix that parses as exactly that many length-prefixed values
+// consuming the rest of the payload. Returns nil when they can't be located —
+// binds are then simply not captured rather than guessed wrong.
+//
+// The floor is anchored on stmt.Raw and not on stmt.Text, and the distinction is
+// load-bearing rather than tidiness. Text may have had undecodable bytes
+// repaired to U+FFFD for storage (sanitizeSQLRun), and a U+FFFD is three bytes
+// where the wire had one — so searching for it would fail to match, the floor
+// would collapse to 0, and the tail scan would be free to walk back into the
+// statement and read "bind values" out of its own text. That is not the "no
+// binds captured" this function promises; it is the guessed-wrong outcome the
+// promise exists to rule out.
+func extractPiggybackBinds(payload []byte, stmt execStatement) []string {
+	count := countBindPlaceholders(stmt.Text)
 	if count == 0 {
 		return nil
 	}
 
 	// Don't scan into the SQL text itself.
 	lo := 0
-	if idx := findBytes(payload, []byte(sql)); idx >= 0 {
-		lo = idx + len(sql)
+	if idx := findBytes(payload, []byte(stmt.Raw)); idx >= 0 {
+		lo = idx + len(stmt.Raw)
 	}
 
 	// Scan from the tail so the tightest (real) value run is found before any
@@ -1162,41 +1174,52 @@ func equalFoldASCIIBytes(a, b []byte) bool {
 	return true
 }
 
-// extractSQLAtOffset tries to read a length-prefixed SQL string at the given offset.
-// Returns the SQL text, bytes consumed, and error.
+// extractSQLAtOffset tries to read a length-prefixed SQL string at the given
+// offset, returning the text to store.
 func extractSQLAtOffset(data []byte, offset int) (string, error) {
+	stmt, err := extractSQLAtOffsetText(data, offset)
+
+	return stmt.Text, err
+}
+
+// extractSQLAtOffsetText is extractSQLAtOffset keeping the verbatim run too, so
+// bind capture can still find the statement back in the payload by byte
+// comparison after repair — see extractPiggybackBinds.
+func extractSQLAtOffsetText(data []byte, offset int) (execStatement, error) {
 	if offset >= len(data) {
-		return "", ErrOALL8TooShort
+		return execStatement{}, ErrOALL8TooShort
 	}
 
 	sqlLen, bytesRead, err := decodeVarLen(data[offset:])
 	if err != nil || sqlLen == 0 || sqlLen > 32768 {
-		return "", ErrEmptySQL
+		return execStatement{}, ErrEmptySQL
 	}
 
 	sqlStart := offset + bytesRead
 	sqlEnd := sqlStart + int(sqlLen)
 
 	if sqlEnd > len(data) {
-		return "", ErrSQLLengthInvalid
+		return execStatement{}, ErrSQLLengthInvalid
 	}
+
+	raw := string(data[sqlStart:sqlEnd])
 
 	// Statement text is text. Without this a declared run that opens with a
 	// verb and then turns into TTC framing bytes — `SET CURRENT_SCHEMA=TESTADM`
 	// followed by four 0x01s was the measured case — passed as a statement.
 	// sanitizeSQLRun is charitable about the session charset and strict about
 	// binary; it also returns the text repaired for storage.
-	sqlText, ok := sanitizeSQLRun(string(data[sqlStart:sqlEnd]))
+	sqlText, ok := sanitizeSQLRun(raw)
 	if !ok {
-		return "", ErrEmptySQL
+		return execStatement{}, ErrEmptySQL
 	}
 
 	// Validate that it looks like SQL (opens with a statement verb)
 	if !looksLikeSQL(sqlText) {
-		return "", ErrEmptySQL
+		return execStatement{}, ErrEmptySQL
 	}
 
-	return sqlText, nil
+	return execStatement{Text: sqlText, Raw: raw}, nil
 }
 
 // QueryResultV2 contains parsed data from a v315+ TTC QueryResult (func=0x10).

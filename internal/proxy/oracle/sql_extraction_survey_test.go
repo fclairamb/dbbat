@@ -254,8 +254,9 @@ func TestSurveyAlterSessionMisreadAsSet(t *testing.T) {
 	require.Len(t, distinct, 5, "and the count of distinct statements behind it")
 	require.Equal(t, map[string]int{"dbeaver.pcapng": 5, "dbeaver_init.pcapng": 4}, byFile,
 		"every one of them is DBeaver's connection setup; no other client in the corpus sends an "+
-			"ALTER SESSION *as an execute op* — the string is in nearly every recording as the "+
-			"AUTH_ALTER_SESSION key/value of the phase-2 AUTH message, which the gate never sees")
+			"ALTER SESSION *as an execute op* — the string is in every recording as the "+
+			"AUTH_ALTER_SESSION key/value of the phase-2 AUTH message (func 0x03 sub-op 0x73), "+
+			"which is not a statement-carrying op and never reaches the gate")
 }
 
 // legacyExecScan is decodeExecSQL's pre-fix strategy, kept here so the report
