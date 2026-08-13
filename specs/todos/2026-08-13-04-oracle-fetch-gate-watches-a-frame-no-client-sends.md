@@ -53,6 +53,32 @@ Two honest options, and the choice needs a measurement first:
 Option 1 is the better outcome and option 2 is better than the status quo;
 what must not survive is a documented gate that no traffic can reach.
 
+## Resolved open questions
+
+> Two honest options, and the choice needs a measurement first: 1. Wire the gate
+> to `03/05` … 2. Delete it.
+
+**Decision (2026-08-13): take option 2 — delete it, and correct the docs.**
+Do **not** wire the gate to `03/05`, and do not run the live-suite measurement
+that option 1 would need. Turning on enforcement that can refuse ordinary
+read-only work on a false positive is not a change to make on the strength of a
+test-suite measurement alone; the owner chose the no-new-refusal-behaviour path.
+
+Concretely, this spec is now scoped to:
+
+- Delete `decodeOFETCH`, `handleOFETCH` and `buildOFETCH`, plus the unit tests
+  that rest on the synthetic frame.
+- Correct `docs/approvals.md` and `docs/oracle.md` to name the **two**
+  re-execution frames that are real — the SQL-less `OALL8` and the
+  `03/0x4e|0x04` piggyback — and stop describing a third.
+- Keep the intent on the record rather than losing it: note in the docs that "a
+  fetch arriving with no query in flight is a re-execution" was the intent, that
+  no Oracle client sends the frame it was written against, and that wiring it to
+  the real `03/05` fetch remains available if someone later measures the
+  false-positive rate on a live suite.
+
+Removing dead enforcement is the whole deliverable. Do not add any new gate.
+
 Key files: `internal/proxy/oracle/session.go` (`interceptClientMessage`),
 `internal/proxy/oracle/intercept.go` (`handleOFETCH`),
 `internal/proxy/oracle/ttc_decode.go` (`decodeOFETCH`),
