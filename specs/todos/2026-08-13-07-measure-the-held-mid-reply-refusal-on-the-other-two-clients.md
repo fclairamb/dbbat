@@ -1,12 +1,17 @@
-# Measure the held mid-reply refusal on the other two clients
+# Measure the held mid-reply refusal on the other two clients, and its two fail-safes at all
 
 ## Goal
 
-Measure what sqlplus (OCI) and python-oracledb thin do with a byte quota crossed
-mid-result-set, now that dbbat holds the refusal and answers the client's *next*
-call instead of writing it into the reply in progress
+Close the two coverage gaps the held mid-reply refusal shipped with
 (`session.enforceMidStreamLimits` / `answerHeldRefusal`, added by
-`specs/done/.../2026-08-13-01-mid-reply-refusal-lands-mid-ttc-message.md`).
+`specs/done/.../2026-08-13-01-mid-reply-refusal-lands-mid-ttc-message.md`):
+
+1. measure what sqlplus (OCI) and python-oracledb thin do with a byte quota
+   crossed mid-result-set, now that dbbat holds the refusal and answers the
+   client's *next* call instead of writing it into the reply in progress;
+2. exercise the two bounds on that hold — `refusalHoldMaxBytes` (8 MiB) and
+   `refusalHandoffGrace` (30s) — against something other than hand-mutated
+   session state.
 
 ## Why
 
@@ -34,6 +39,30 @@ carries `fixedWidth`, `fixedWidth64` and `endOfResponse`. Two specific risks:
    the fallback and never see the ORA-00028 at all. Whether it does is a
    measurement, not a guess.
 
+### And the two bounds have never fired outside a unit test
+
+`refusalHoldMaxBytes` (8 MiB relayed past the violation) and
+`refusalHandoffGrace` (30s waiting for the client to speak) are the fail-safes
+that keep "hold the refusal" from becoming an enforcement hole — they are what
+bounds the worst case at ≤30s and ≤8 MiB instead of the ~250ms the watchdog used
+to give. **Neither has ever fired end to end**, and neither is reachable from a
+live client on demand: a real upstream always ends its reply, and a real client
+always speaks again. So the two tests that cover them reach them by **mutating
+internal state**:
+
+- `TestHeldRefusalStopsRelayingOnceTheOvershootBoundIsCrossed` subtracts
+  `refusalHoldMaxBytes + 1` from the held refusal's own `atBytes` mark
+  (`limits_test.go`) and then calls `enforceMidStreamLimits` directly;
+- `TestHeldRefusalFallsBackToTheCloseWhenTheClientStopsTalking` backdates
+  `held.armedAt` past the grace (`backdateHeldRefusal`) and then calls
+  `onLimitViolation` directly.
+
+Both pin the arithmetic and the teardown, and neither pins that the *relay* and
+the *watchdog* actually reach those calls with the values they would carry in a
+live session. Note also that both constants are scope this fix added on its own
+judgement — the spec asked for a boundary, not for bounds on waiting for one — so
+their values (8 MiB, 30s) are reasoned, not measured.
+
 No GitHub issue yet — one should be filed.
 
 ## Implementation
@@ -54,4 +83,25 @@ No GitHub issue yet — one should be filed.
   wait for a *nameable* call rather than give up on the first unnameable one.
 - Record what is measured in `docs/oracle.md`, "An asynchronous refusal: which
   call number, and whether to send one at all", next to the ojdbc and go-ora
-  rows.
+  rows — including the paragraph there that currently names both of these gaps.
+
+For the two bounds, an end-to-end exercise needs an upstream that misbehaves on
+purpose, which the unit harness can already stand up and the integration one
+cannot:
+
+- **`refusalHoldMaxBytes`**: drive `upstreamToClient` over a `net.Pipe` (as
+  `TestUpstreamToClient_ByteLimitHoldsRatherThanCuttingIn` does) with a fake
+  upstream that streams *more than 8 MiB* of Data packets after the cap is
+  crossed, and assert the relay returns the violation, having relayed a bounded
+  amount. ~8 MiB of pipe writes in 40-byte packets is ~200k iterations; size the
+  packets up (a few KB each) to keep it a second or two, or make the constant a
+  package-level `var` so the test can shrink it — the second option is cheaper
+  and is what makes the *relay*, not the arithmetic, the thing under test.
+- **`refusalHandoffGrace`**: same treatment. With the constant injectable, run
+  the real `guard.Watch` → `onLimitViolation` path with a millisecond grace and
+  a client that never speaks, and assert both sockets are dropped and the
+  statement is recorded `aborted: …` — which is the path a stuck client really
+  takes, rather than a direct call with a backdated timestamp.
+
+Making the two constants injectable (session fields defaulted from the consts,
+or package `var`s) is the single change that unlocks both; do that first.

@@ -1440,24 +1440,34 @@ func (s *session) clientToUpstream() error {
 // Query interception is best-effort observability: a malformed or unexpected
 // TTC layout must never crash the proxy or break the connection. Any panic in
 // the decode path is recovered here and the packet is forwarded unchanged.
-func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
+//
+// That fail-open has exactly one exception, and it is why the return is named:
+// once a mid-reply limit refusal is held (enforceMidStreamLimits), the grant no
+// longer permits anything, so "forward what I could not read" would make an
+// unreadable frame — or a panicking decode — the one way a client message
+// travels under an exhausted grant. Every unreadable exit therefore routes
+// through heldRefusalBlocks, which forwards as before when no refusal is held
+// and ends the session when one is.
+//
+//nolint:nonamedreturns // the recover below has to *change* the answer, which only a named return allows
+func (s *session) interceptClientMessage(pkt *TNSPacket) (blocked bool) {
 	defer func() {
 		if r := recover(); r != nil {
-			// A recovered panic leaves the function returning the zero value
-			// (false) — i.e. don't block the message.
 			s.logger.WarnContext(s.ctx, "recovered from panic intercepting client message",
 				slog.Any("panic", r))
+
+			blocked = s.heldRefusalBlocks()
 		}
 	}()
 
 	funcCode, err := parseTTCFunctionCode(pkt.Payload)
 	if err != nil {
-		return false
+		return s.heldRefusalBlocks()
 	}
 
 	ttcPayload := extractTTCPayload(pkt.Payload)
 	if ttcPayload == nil {
-		return false
+		return s.heldRefusalBlocks()
 	}
 
 	s.logger.DebugContext(s.ctx, "TTC message",
@@ -1952,6 +1962,18 @@ func (s *session) abortHeldQuery(verr error) {
 // hang mode of
 // specs/done/2026/08/2026-08-12-02-oracle-async-refusal-call-number.md.
 func (s *session) answerHeldRefusal(held *heldRefusal, named bool) bool {
+	// Answered once, and once only. The client leg keeps reading until its
+	// socket actually closes, so a pipelined second message — or a panic
+	// recovered after the frame went out — must not produce a second
+	// end-of-call OER for a call nobody is waiting on. That would be the
+	// unsolicited frame onLimitViolation exists to avoid, and it would break
+	// the one-frame invariant the measurement rests on.
+	select {
+	case <-held.done:
+		return true
+	default:
+	}
+
 	defer s.finishRefusalHandoff(held)
 
 	if named {
@@ -1976,6 +1998,30 @@ func (s *session) answerHeldRefusal(held *heldRefusal, named bool) bool {
 	}
 
 	return true
+}
+
+// heldRefusalBlocks is the exit interceptClientMessage takes when it could not
+// read a client message at all — an unwalkable payload, or a decode that
+// panicked. Reports true when the packet must NOT be forwarded.
+//
+// With no refusal held it reports false, which is the fail-open the whole
+// intercept path is built on: dbbat could not read this frame, so refusing it
+// protects nothing, while blocking it would strand the client (see
+// gateUnnameableFrame for the same argument at length).
+//
+// With one held, the answer flips, and the asymmetry is the point: the grant is
+// exhausted, the session is already over, and forwarding is the one thing that
+// must not happen. A frame dbbat cannot parse is by construction a frame it
+// cannot *name*, so it gets exactly what a named-but-unwalkable call gets —
+// both sockets dropped and no frame written, because an OER stamped with a
+// stale call number ends a call the client is not parked on.
+func (s *session) heldRefusalBlocks() bool {
+	held := s.heldRefusalNow()
+	if held == nil {
+		return false
+	}
+
+	return s.answerHeldRefusal(held, false)
 }
 
 // interceptUpstreamMessage handles response interception from upstream.

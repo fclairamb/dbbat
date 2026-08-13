@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -353,6 +354,107 @@ func TestHeldRefusalMeetingAnUnnameableCallClosesInstead(t *testing.T) {
 	}), "the frame must not be forwarded under a held refusal")
 
 	assert.Empty(t, answered(), "dbbat must not stamp a frame with a call number it could not read")
+}
+
+// TestHeldRefusalBlocksAFrameItCannotEvenParse pins the one place the
+// intercept path's fail-open has to flip. Everything dbbat cannot read is
+// normally forwarded — refusing a frame it could not identify protects nothing
+// and strands the client — but under a held refusal the grant is exhausted and
+// the session is already over, so forwarding would make an unreadable frame the
+// single way a client message travels past an exhausted grant.
+//
+// It is answered as an unnameable call, because that is what it is: no frame,
+// both sockets dropped.
+func TestHeldRefusalBlocksAFrameItCannotEvenParse(t *testing.T) {
+	t.Parallel()
+
+	s := newTestSession(&store.Grant{
+		UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
+	})
+
+	client, answered := recordingPipe(t)
+	s.clientConn = client
+	s.oer = defaultOERShape()
+	s.oer.tailLearned = true
+
+	// Too short for a TTC payload: every reading below the dispatcher declines
+	// it, which before the hold meant "forward it".
+	unreadable := &TNSPacket{Type: TNSPacketTypeData, Payload: []byte{0x00}}
+
+	assert.False(t, s.interceptClientMessage(unreadable),
+		"with no refusal held, an unreadable frame must still travel — that fail-open is load-bearing")
+
+	require.True(t, s.holdRefusal(shared.ErrByteQuotaExceeded))
+
+	assert.True(t, s.interceptClientMessage(unreadable),
+		"under a held refusal it must not be forwarded: the grant is exhausted")
+	assert.Empty(t, answered(), "and no frame may be stamped with a call number dbbat never read")
+}
+
+// TestHeldRefusalIsAnsweredExactlyOnce pins the one-frame invariant the whole
+// measurement rests on. The client leg keeps reading until its socket really
+// closes, so a pipelined second message must not draw a second end-of-call OER
+// — a frame for a call nobody is parked on is precisely the unsolicited write
+// onLimitViolation refuses to make.
+func TestHeldRefusalIsAnsweredExactlyOnce(t *testing.T) {
+	t.Parallel()
+
+	client := &countingWriteConn{}
+
+	s := newTestSession(&store.Grant{
+		UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
+	})
+	s.clientConn = client
+	s.oer = defaultOERShape()
+	s.oer.tailLearned = true
+
+	require.True(t, s.holdRefusal(shared.ErrByteQuotaExceeded))
+
+	next := buildOALL8("SELECT id FROM emp", nil, 1)
+	next[ttcOpSeqOffset] = 0x2a
+	pkt := &TNSPacket{Type: TNSPacketTypeData, Payload: append([]byte{0x00, 0x00}, next...)}
+
+	require.True(t, s.interceptClientMessage(pkt))
+	require.Equal(t, 1, client.count(), "the held refusal must be answered")
+
+	// A second message — pipelined, or read before the socket close landed —
+	// and an unreadable one, which reaches the same answer by the other route.
+	assert.True(t, s.interceptClientMessage(pkt), "a second call must not be forwarded either")
+	assert.True(t, s.interceptClientMessage(&TNSPacket{Type: TNSPacketTypeData, Payload: []byte{0x00}}))
+
+	assert.Equal(t, 1, client.count(),
+		"exactly one end-of-call OER may go out: a second answers a call nobody is parked on")
+}
+
+// countingWriteConn counts the frames written to it and declines to close, so a
+// test can watch what a session does *after* it has torn itself down. Only
+// Write and Close are ever reached; the embedded nil net.Conn would panic on
+// anything else, which is the point — it would be a change worth noticing.
+type countingWriteConn struct {
+	net.Conn
+
+	mu     sync.Mutex
+	writes int
+}
+
+func (c *countingWriteConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.writes++
+
+	return len(p), nil
+}
+
+func (c *countingWriteConn) Close() error { return nil }
+
+func (c *countingWriteConn) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.writes
 }
 
 // TestHeldRefusalStandsTheWatchdogDownUntilItsGrace pins the seam that makes the
