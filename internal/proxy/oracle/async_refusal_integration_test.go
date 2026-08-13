@@ -274,6 +274,7 @@ func TestIntegration_AsyncRefusalAgainstJDBCThin(t *testing.T) {
 		watchdogBefore := env.logs.count(logMsgWatchdogTeardown)
 		heldBefore := env.logs.count(logMsgRefusalHeld)
 		deliveredBefore := env.logs.count(logMsgRefusalDelivered)
+		costBefore := newRefusalCounters(env)
 
 		output := run.run(t)
 
@@ -294,6 +295,14 @@ func TestIntegration_AsyncRefusalAgainstJDBCThin(t *testing.T) {
 
 		rowsBefore := probeRowsBeforeError(t, output)
 		t.Logf("ojdbc drained %d of %d rows before the refusal", rowsBefore, quotaProbeRows)
+
+		// What the handoff cost, which is what refusalHoldMaxBytes and
+		// refusalHandoffGrace are sized against — see
+		// refusal_bounds_integration_test.go and docs/oracle.md, "What a
+		// legitimate handoff costs, measured".
+		reportHandoffCost(t, costBefore, fmt.Sprintf(
+			"ojdbc 23.7.0.25.01, setFetchSize %d on %d-byte rows, loopback",
+			quotaProbeFetch, quotaProbeWidth))
 		assert.Positive(t, rowsBefore,
 			"the refusal must cut into a reply that was already streaming; zero rows means it "+
 				"was refused at admission, which is the ordinary answering case:\n%s", output)
@@ -368,6 +377,7 @@ func TestIntegration_AsyncRefusalAgainstJDBCThin(t *testing.T) {
 		watchdogBefore := env.logs.count(logMsgWatchdogTeardown)
 		heldBefore := env.logs.count(logMsgRefusalHeld)
 		deliveredBefore := env.logs.count(logMsgRefusalDelivered)
+		costBefore := newRefusalCounters(env)
 
 		goTap := startRecordingTap(t, env.host, env.port)
 
@@ -410,6 +420,9 @@ func TestIntegration_AsyncRefusalAgainstJDBCThin(t *testing.T) {
 		t.Logf("go-ora drained %d of %d rows, then: %v (watchdog teardowns: %d)",
 			drained, quotaProbeRows, err,
 			env.logs.count(logMsgWatchdogTeardown)-watchdogBefore)
+
+		reportHandoffCost(t, costBefore, fmt.Sprintf(
+			"go-ora v3, driver default fetch on %d-byte rows, loopback", quotaProbeWidth))
 
 		require.Error(t, err, "go-ora drained the whole result set under a quota that should have cut it")
 		assert.Positive(t, drained, "the refusal must have cut into a reply that was already streaming")
