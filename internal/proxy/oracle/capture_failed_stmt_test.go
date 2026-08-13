@@ -8,10 +8,11 @@
 //	# wait for "DATABASE IS READY TO USE!" in docker logs
 //	go test -tags capture -timeout 300s -run TestCapture_PythonThinFailedStatements -v ./internal/proxy/oracle/
 //
-// The question these recordings answer is narrow: on a client whose OERs carry
-// no end-of-call bit, *how does a failure arrive* — as an embedded OER inside
-// the execute Response, or as a standalone func=0x04 message after a marker
-// exchange? See TestPythonThinFailedStatements_ArriveAsStandaloneOER.
+// The question these recordings answer is narrow: *how does a failure arrive* —
+// as an embedded OER inside the execute Response, or as a standalone func=0x04
+// message after a marker exchange, and with or without the end-of-call bit?
+// The answers are asserted in failed_stmt_replay_test.go, chiefly
+// TestDumpReplay_FailuresArriveAsBitLessStandaloneOERs.
 package oracle
 
 import (
