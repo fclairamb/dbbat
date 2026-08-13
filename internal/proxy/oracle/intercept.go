@@ -85,6 +85,12 @@ const (
 	logMsgRefusalUnnameable = "ended the session: a held limit refusal met a call dbbat cannot name, " +
 		"so there is no frame to answer with"
 	logMsgRefusalHandoffAbandoned = "ended the session: a held limit refusal never reached a call boundary"
+
+	// logMsgRefusalTeardownPanic is the one that should never appear. It means
+	// the teardown of a held refusal panicked while itself running from a
+	// recovered panic — on a goroutine with no recover above it, so without the
+	// nested one in heldRefusalBlocks it would have ended the process.
+	logMsgRefusalTeardownPanic = "recovered from panic tearing down a held limit refusal"
 )
 
 // trackedCursor tracks a parsed cursor and its SQL.

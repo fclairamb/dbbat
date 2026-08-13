@@ -1974,7 +1974,29 @@ func (s *session) answerHeldRefusal(held *heldRefusal, named bool) bool {
 	default:
 	}
 
-	defer s.finishRefusalHandoff(held)
+	// The teardown is deferred, not sequential, and that is deliberate: writing
+	// the frame is the one step here that can fail in an unbounded way (a
+	// panicking encode, a socket error surfacing as a panic in a wrapper), and
+	// an exit that skipped the recording and left both sockets open would be a
+	// fifth, panic-shaped path — one that the "every exit ends the session and
+	// records the reason" claim in docs/oracle.md does not cover. Deferring it
+	// keeps the exits at four.
+	//
+	// The session is over either way: the message says "session terminated" and
+	// the grant no longer permits anything. Closing the upstream first stops any
+	// tail of the reply from being relayed on top of the frame just written.
+	defer func() {
+		s.finishRefusalHandoff(held)
+		s.abortHeldQuery(held.err)
+
+		if s.upstreamConn != nil {
+			_ = s.upstreamConn.Close()
+		}
+
+		if s.clientConn != nil {
+			_ = s.clientConn.Close()
+		}
+	}()
 
 	if named {
 		_ = s.writeTTCError(int(ORA00028), "session terminated: "+held.err.Error())
@@ -1982,19 +2004,6 @@ func (s *session) answerHeldRefusal(held *heldRefusal, named bool) bool {
 		s.logger.WarnContext(s.ctx, logMsgRefusalDelivered, slog.Any("error", held.err))
 	} else {
 		s.logger.WarnContext(s.ctx, logMsgRefusalUnnameable, slog.Any("error", held.err))
-	}
-
-	s.abortHeldQuery(held.err)
-
-	// The session is over either way — the message says "session terminated" and
-	// the grant no longer permits anything. Closing the upstream first stops any
-	// tail of the reply from being relayed on top of the frame just written.
-	if s.upstreamConn != nil {
-		_ = s.upstreamConn.Close()
-	}
-
-	if s.clientConn != nil {
-		_ = s.clientConn.Close()
 	}
 
 	return true
@@ -2015,13 +2024,37 @@ func (s *session) answerHeldRefusal(held *heldRefusal, named bool) bool {
 // cannot *name*, so it gets exactly what a named-but-unwalkable call gets —
 // both sockets dropped and no frame written, because an OER stamped with a
 // stale call number ends a call the client is not parked on.
+//
+// Of its three callers, only the recovered panic is live traffic. The two
+// length-based early returns above it cannot fire from clientToUpstream, which
+// pre-gates every packet at ttcDataFlagsSize+1 bytes — they are guarded because
+// the guarantee has to belong to this function rather than to a length check one
+// caller happens to perform.
 func (s *session) heldRefusalBlocks() bool {
 	held := s.heldRefusalNow()
 	if held == nil {
 		return false
 	}
 
-	return s.answerHeldRefusal(held, false)
+	// The nested recover is not belt-and-braces. This runs from the recovery of
+	// a panic, on the client relay goroutine, which proxyMessages starts bare —
+	// the only recover above it is on handleConnection, a *different* goroutine,
+	// so a panic escaping here takes the process down rather than the session.
+	// The teardown it performs (completeQuery, the store write it schedules) is
+	// exactly the kind of work that panicking on a malformed session would be
+	// worst in. Blocking is still the answer: a refusal is held, so forwarding
+	// was never on the table, even when the teardown did not finish.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.logger.ErrorContext(s.ctx, logMsgRefusalTeardownPanic, slog.Any("panic", r))
+			}
+		}()
+
+		s.answerHeldRefusal(held, false)
+	}()
+
+	return true
 }
 
 // interceptUpstreamMessage handles response interception from upstream.

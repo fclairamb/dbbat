@@ -660,25 +660,46 @@ poll interval later and the client would meet the same ORA-03113 the hold exists
 to replace. Standing down is bounded, never unconditional — a handoff that never
 happens is exactly what the watchdog is the fail-safe for.
 
-Nothing is under-enforced by the wait: **every** client message that arrives
+Nothing is under-enforced by the wait: every client **Data** packet that arrives
 while a refusal is held ends the session instead of being forwarded, so the only
 extra data that crosses is the reply already in flight; and the statement is
 logged with `aborted: bandwidth quota exceeded for this grant` on every one of
 the four paths (delivered, unnameable, over-bytes, over-grace).
 
-"Every" is load-bearing and had to be made true. `interceptClientMessage` is
-built to **fail open** — a frame dbbat cannot parse, or a decode that panics, is
-forwarded unread, because refusing a frame it could not identify protects
-nothing and strands the client (the argument is spelled out at length on
-`gateUnnameableFrame`). Under a held refusal that reasoning inverts: the grant is
-exhausted and the session is over, so an unreadable frame would be the one way a
-client message travels past an exhausted grant. Both unreadable exits and the
-panic recovery therefore route through `heldRefusalBlocks`, which forwards as
-before when no refusal is held and gives the unnameable-call answer when one is —
-sockets dropped, no frame, since an OER stamped with a stale number ends a call
-the client is not parked on. The answer is written **once**: the client leg keeps
-reading until its socket really closes, and a second OER would be exactly the
-unsolicited frame `onLimitViolation` refuses to send.
+Data packets are the exact bound, not a hedge. `clientToUpstream` routes only
+TNS Data packets of at least `ttcDataFlagsSize+1` bytes into
+`interceptClientMessage`; anything else — a **Marker** (type 5: the break /
+attention packet a client sends to cancel a call), a Control packet — is relayed
+upstream unread, refusal held or not. That is deliberate rather than overlooked:
+none of those carry a statement, so nothing can be executed through them, and
+what they *do* provoke from the upstream is bounded by `refusalHoldMaxBytes` like
+any other relayed reply. Blocking a break would also be actively wrong — it is
+how a client asks to stop, which is the same thing dbbat is trying to do.
+
+Within Data packets the guarantee is unconditional, and that took work.
+`interceptClientMessage` is built to **fail open** — a frame dbbat cannot parse,
+or a decode that panics, is forwarded unread, because refusing a frame it could
+not identify protects nothing and strands the client (the argument is spelled out
+at length on `gateUnnameableFrame`). Under a held refusal that reasoning inverts:
+the grant is exhausted and the session is over, so an unreadable frame would be
+the one way a client message travels past an exhausted grant. Both unreadable
+exits and the panic recovery therefore route through `heldRefusalBlocks`, which
+forwards as before when no refusal is held and gives the unnameable-call answer
+when one is — sockets dropped, no frame, since an OER stamped with a stale number
+ends a call the client is not parked on. Of its three callers only the recovered
+panic is live traffic: `clientToUpstream`'s own length gate means the two
+early returns cannot fire from there, and they are guarded so the guarantee
+belongs to the function rather than to a check one caller happens to perform.
+
+Two smaller invariants hold the same line. The answer is written **once** — the
+client leg keeps reading until its socket really closes, and a second OER would
+be exactly the unsolicited frame `onLimitViolation` refuses to send. And the
+teardown is **deferred rather than sequential**, so a panic inside the frame
+write is not a fifth, panic-shaped exit that skips the recording and leaves both
+sockets open: it still finalizes the statement, still closes both legs, and — via
+a nested recover in `heldRefusalBlocks` — still does not escape, which matters
+because `proxyMessages` starts the relay goroutines bare and the only recover
+above them is on a different goroutine.
 
 Measured after the fix, same fixture, same tap: dbbat still writes **exactly one**
 OER, with a non-zero call number, and **ojdbc now reports it** —
@@ -703,8 +724,9 @@ Confidence: the enumeration is read off the code and pinned by
 `TestUpstreamToClient_ByteLimitHoldsRatherThanCuttingIn`,
 `TestHeldRefusalEndsTheCallTheClientIsNextParkedOn`,
 `TestHeldRefusalMeetingAnUnnameableCallClosesInstead`,
-`TestHeldRefusalBlocksAFrameItCannotEvenParse`,
+`TestHeldRefusalBlocksAFrameItCannotRead`,
 `TestHeldRefusalIsAnsweredExactlyOnce`,
+`TestHeldRefusalTearsDownEvenWhenTheFrameWriteBlowsUp`,
 `TestHeldRefusalStandsTheWatchdogDownUntilItsGrace`,
 `TestHeldRefusalFallsBackToTheCloseWhenTheClientStopsTalking`,
 `TestHeldRefusalStopsRelayingOnceTheOvershootBoundIsCrossed` and
@@ -715,9 +737,11 @@ finding is attributed to; what that does and does not license is in "Which ojdbc
 these results are attributed to" above.
 
 Two things are *not* measured, and the asymmetry is worth stating rather than
-leaving to be discovered. The **fail-safes have never fired end to end**: the
-last two tests above reach `refusalHoldMaxBytes` and `refusalHandoffGrace` by
-mutating the held refusal's own byte mark and arming time, since no live client
+leaving to be discovered. The **fail-safes have never fired end to end**:
+`TestHeldRefusalStopsRelayingOnceTheOvershootBoundIsCrossed` reaches
+`refusalHoldMaxBytes` by subtracting it from the held refusal's own byte mark,
+and `TestHeldRefusalFallsBackToTheCloseWhenTheClientStopsTalking` reaches
+`refusalHandoffGrace` by backdating its arming time, since no live client
 produces a reply with no boundary or an 8 MiB overshoot on demand. And the
 delivered path is measured on **two of four clients** — sqlplus (OCI) and
 python-oracledb have not seen a held refusal at all, which matters most for the

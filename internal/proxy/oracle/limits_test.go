@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -356,16 +357,22 @@ func TestHeldRefusalMeetingAnUnnameableCallClosesInstead(t *testing.T) {
 	assert.Empty(t, answered(), "dbbat must not stamp a frame with a call number it could not read")
 }
 
-// TestHeldRefusalBlocksAFrameItCannotEvenParse pins the one place the
-// intercept path's fail-open has to flip. Everything dbbat cannot read is
-// normally forwarded — refusing a frame it could not identify protects nothing
-// and strands the client — but under a held refusal the grant is exhausted and
-// the session is already over, so forwarding would make an unreadable frame the
+// TestHeldRefusalBlocksAFrameItCannotRead pins the one place the intercept
+// path's fail-open has to flip. Everything dbbat cannot read is normally
+// forwarded — refusing a frame it could not identify protects nothing and
+// strands the client — but under a held refusal the grant is exhausted and the
+// session is already over, so forwarding would make an unreadable frame the
 // single way a client message travels past an exhausted grant.
 //
 // It is answered as an unnameable call, because that is what it is: no frame,
 // both sockets dropped.
-func TestHeldRefusalBlocksAFrameItCannotEvenParse(t *testing.T) {
+//
+// The fixture is the smallest packet clientToUpstream will actually hand over —
+// it gates at ttcDataFlagsSize+1 bytes — so this is a shape that can really
+// arrive, rather than one only a direct caller can produce. Its TTC payload is a
+// single unknown byte: too short for clientCallNumber to name, which is what
+// routes it to the same answer.
+func TestHeldRefusalBlocksAFrameItCannotRead(t *testing.T) {
 	t.Parallel()
 
 	s := newTestSession(&store.Grant{
@@ -378,9 +385,7 @@ func TestHeldRefusalBlocksAFrameItCannotEvenParse(t *testing.T) {
 	s.oer = defaultOERShape()
 	s.oer.tailLearned = true
 
-	// Too short for a TTC payload: every reading below the dispatcher declines
-	// it, which before the hold meant "forward it".
-	unreadable := &TNSPacket{Type: TNSPacketTypeData, Payload: []byte{0x00}}
+	unreadable := &TNSPacket{Type: TNSPacketTypeData, Payload: []byte{0x00, 0x00, 0x99}}
 
 	assert.False(t, s.interceptClientMessage(unreadable),
 		"with no refusal held, an unreadable frame must still travel — that fail-open is load-bearing")
@@ -391,6 +396,77 @@ func TestHeldRefusalBlocksAFrameItCannotEvenParse(t *testing.T) {
 		"under a held refusal it must not be forwarded: the grant is exhausted")
 	assert.Empty(t, answered(), "and no frame may be stamped with a call number dbbat never read")
 }
+
+// TestHeldRefusalTearsDownEvenWhenTheFrameWriteBlowsUp pins the exit that is not
+// one of the four: writing the refusal panics.
+//
+// That path is only reachable through a panicking write, which is why the
+// teardown in answerHeldRefusal is deferred rather than sequential — a
+// sequential one would skip the recording and leave both sockets open, and the
+// panic would then escape the client relay goroutine, which proxyMessages starts
+// with no recover of its own. So this asserts the two halves that keep the
+// exits at four: the statement is still finalized with the real reason, and
+// nothing escapes.
+func TestHeldRefusalTearsDownEvenWhenTheFrameWriteBlowsUp(t *testing.T) {
+	t.Parallel()
+
+	grant := &store.Grant{
+		UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
+	}
+
+	var from, to atomic.Int64
+
+	to.Store(4096)
+
+	logs := newCountingHandler()
+
+	s := newTestSession(grant)
+	s.logger = slog.New(logs)
+	s.clientConn = &panicOnWriteConn{}
+	s.bytesFromClient = &from
+	s.bytesToClient = &to
+	s.oer = defaultOERShape()
+	s.oer.tailLearned = true
+	s.tracker.pendingQuery = &pendingOracleQuery{
+		cursor:    &trackedCursor{sql: "SELECT * FROM big"},
+		startTime: time.Now(),
+	}
+
+	require.True(t, s.holdRefusal(shared.ErrByteQuotaExceeded))
+
+	next := buildOALL8("SELECT id FROM emp", nil, 1)
+	next[ttcOpSeqOffset] = 0x2a
+
+	assert.True(t, s.interceptClientMessage(&TNSPacket{
+		Type:    TNSPacketTypeData,
+		Payload: append([]byte{0x00, 0x00}, next...),
+	}), "a panicking write must not turn into a forwarded frame")
+
+	// Without this the assertions below would pass on a write that simply
+	// succeeded, and the test would prove nothing about the panic-shaped exit.
+	require.Positive(t, logs.count("recovered from panic intercepting client message"),
+		"the write must actually have panicked and been recovered")
+
+	assert.Nil(t, s.tracker.pendingQuery, "the aborted query must still be finalized")
+	assert.Positive(t, grant.BytesTransferred, "its streamed bytes must still be charged to the grant")
+
+	select {
+	case <-s.heldRefusalNow().done:
+	default:
+		t.Fatal("the handoff must still be marked done, or the watchdog waits out its whole grace")
+	}
+}
+
+// panicOnWriteConn is the frame write failing in the worst way available: not an
+// error return, which writeTTCError already handles, but a panic mid-frame.
+type panicOnWriteConn struct {
+	net.Conn
+}
+
+func (*panicOnWriteConn) Write([]byte) (int, error) { panic("write blew up") }
+
+func (*panicOnWriteConn) Close() error { return nil }
 
 // TestHeldRefusalIsAnsweredExactlyOnce pins the one-frame invariant the whole
 // measurement rests on. The client leg keeps reading until its socket really
