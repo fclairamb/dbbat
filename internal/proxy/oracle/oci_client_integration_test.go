@@ -302,14 +302,11 @@ func containerExec(ctx context.Context, env *oracleThroughProxy, cmd []string) (
 	return code, string(out), readErr
 }
 
-// ociConnectString is the easy-connect string an OCI client uses to reach the
-// proxy from host, authenticating as the fixture user with its API key.
-func (e *oracleThroughProxy) ociConnectString(host string) string {
-	return e.ociConnectStringAt(host, e.port)
-}
-
-// ociConnectStringAt is the same for an endpoint that is not the proxy's own —
-// a recording tap sitting in front of it.
+// ociConnectStringAt is the easy-connect string an OCI client uses to reach
+// host:port, authenticating as the fixture user with its API key. The endpoint
+// is a parameter because it is not always the proxy's own: a measurement that
+// needs a recording tap dials the tap instead, and the container-hosted client
+// reaches both through host.docker.internal rather than loopback.
 func (e *oracleThroughProxy) ociConnectStringAt(host string, port int) string {
 	return fmt.Sprintf("%s/%s@//%s:%d/%s", e.username, e.apiKey, host, port, e.service)
 }
