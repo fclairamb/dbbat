@@ -15,10 +15,13 @@ type oerInfo struct {
 	ErrorMessage string
 }
 
-// oerEndOfCallBit is set in CallStatus on every real OER message observed in
-// captures (success and error, DDL and DML). Byte runs inside the preceding
-// return-parameter block that happen to start with 0x04 don't carry it, which
-// makes it the discriminator for the scanning locator below.
+// oerEndOfCallBit is set in CallStatus on every OER a go-ora session carries
+// (success and error, DDL and DML), and on none of a python-oracledb thin
+// session's. Byte runs inside a row stream that happen to start with 0x04 don't
+// carry it either, which is what makes it worth keeping as the discriminator
+// exactly where row bytes are what a false positive would be made of — the
+// standalone func=0x04 marker and anything mid-fetch. Outside those, see
+// findPlausibleOERInResponse.
 const oerEndOfCallBit = 0x010000
 
 // oraNoDataFound is ORA-01403, the normal end-of-data status — not an error.
@@ -56,9 +59,10 @@ func decodeOERAt(payload []byte, offset int) *oerInfo {
 //
 // Split out of decodeOERAt because the end-of-call bit is not universal: every
 // OER go-ora's server leg carries it, while python-oracledb's connections get
-// OERs with CallStatus 1 (see testdata/python_thin_cursor_reexec.pcapng).
-// Completion still keys off the bit — that behavior is unchanged — but the
-// cursor-id lookup below cannot afford to.
+// OERs with CallStatus 1–2 (see testdata/python_thin_cursor_reexec.pcapng).
+// Neither cursor-id learning nor the completion of a call that has already left
+// its row stream can afford to demand the bit; the paths where row bytes could
+// impersonate an OER still do, through decodeOERAt.
 func decodeOERFieldsAt(payload []byte, offset int) (*oerInfo, int) {
 	if offset >= len(payload) || payload[offset] != 0x04 {
 		return nil, 0
@@ -104,28 +108,31 @@ func decodeOERFieldsAt(payload []byte, offset int) (*oerInfo, int) {
 // the encoding.
 const oerMaxSeqNumber = 0xFFFF
 
-// findCursorIDInResponse scans a server payload for the OER that reports which
-// cursor the server assigned to the statement just executed, and returns that
-// cursor id.
-//
-// dbbat needs this because the modern execute paths (the v315+ piggyback exec
-// and the JDBC thin exec) send the statement text with *no* cursor id — the
-// server picks one and reports it back, and the client then re-runs the
-// statement by that id alone. Without reading it here, a re-execution names a
-// cursor dbbat has no statement for.
+// findPlausibleOERInResponse scans a server payload for the OER that ends the
+// call just executed, *without* requiring the end-of-call bit — the bit is not
+// universal (python-oracledb thin sessions get CallStatus 1–2), so a locator
+// that insists on it is blind to those clients entirely.
 //
 // The scan is anchored rather than trusting: the run must decode as seven
 // compressed ints, the error code must be success or end-of-data (an OER
-// reporting a real failure assigns nothing), the sequence number must fit its
+// reporting a real failure assigns no cursor), the sequence number must fit its
 // 16-bit field, and the cursor id must be a plausible 16-bit id. First match
 // wins, which is what keeps a later run of row bytes that happens to parse from
 // overriding the genuine one.
 //
 // Every one of those bounds is load-bearing in both directions: too loose and a
 // run of row bytes is mistaken for the OER, too tight and the genuine OER is
-// skipped and the cursor is never learned. The sequence-number bound was the
-// second of those for a while — see oerMaxSeqNumber.
-func findCursorIDInResponse(payload []byte) (uint16, bool) {
+// skipped. The sequence-number bound was the second of those for a while — see
+// oerMaxSeqNumber.
+//
+// Both callers share this one scan on purpose. Cursor-id learning has always
+// used these bounds, and completion used to demand the bit on top of them —
+// which meant dbbat read a python-oracledb OER well enough to learn cursor 4
+// off it while refusing to believe the CurRowNumber sitting three fields
+// earlier. Two locators meant two sets of bounds to keep honest; there is now
+// one, and what separates the callers is *where* they are allowed to run it
+// (see handleResponse), not how much they trust the same bytes.
+func findPlausibleOERInResponse(payload []byte) *oerInfo {
 	for i := 1; i < len(payload); i++ {
 		if payload[i] != 0x04 {
 			continue
@@ -144,10 +151,27 @@ func findCursorIDInResponse(payload []byte) (uint16, bool) {
 			continue
 		}
 
-		return uint16(info.CursorID), true
+		return info
 	}
 
-	return 0, false
+	return nil
+}
+
+// findCursorIDInResponse returns the cursor id the server assigned to the
+// statement just executed.
+//
+// dbbat needs this because the modern execute paths (the v315+ piggyback exec
+// and the JDBC thin exec) send the statement text with *no* cursor id — the
+// server picks one and reports it back, and the client then re-runs the
+// statement by that id alone. Without reading it here, a re-execution names a
+// cursor dbbat has no statement for.
+func findCursorIDInResponse(payload []byte) (uint16, bool) {
+	info := findPlausibleOERInResponse(payload)
+	if info == nil {
+		return 0, false
+	}
+
+	return uint16(info.CursorID), true
 }
 
 // findOERInResponse scans a Response (func=0x08) payload for the embedded OER

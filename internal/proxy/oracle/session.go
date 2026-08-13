@@ -1807,6 +1807,29 @@ func (s *session) handleResponse(ttcPayload []byte) {
 		return
 	}
 
+	// ...but the end-of-call bit that findOERInResponse insists on is a go-ora
+	// trait, not a protocol invariant: a python-oracledb thin session's OERs
+	// come with CallStatus 1–2, so every INSERT/UPDATE/DELETE those clients ran
+	// used to fall through here, stay pending, and be closed only by the *next*
+	// statement's flushPendingQuery — recording no rows_affected and a
+	// duration_ms that measured the client's think time (one live UPDATE was
+	// logged at 74 s because the session then sat idle). A session whose last
+	// statement was such a DML had it sealed by cleanup instead, timed to the
+	// disconnect.
+	//
+	// Outside a row stream the payload is a return-parameter block rather than
+	// row bytes, which is what the bit was defending against, so the anchored
+	// bounds that cursor-id learning already trusts on this very message are
+	// enough to complete on. They have to be: dbbat was reading cursor ids off
+	// these exact OERs while refusing to read the row count out of the same
+	// seven fields.
+	if s.tracker.pendingQuery != nil {
+		if oer := findPlausibleOERInResponse(ttcPayload); oer != nil {
+			s.completeQueryFromOER(oer)
+			return
+		}
+	}
+
 	resp, err := decodeTTCResponse(ttcPayload)
 	if err != nil {
 		// v315+ auth/negotiation responses don't follow legacy format — ignore
