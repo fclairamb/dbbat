@@ -1314,6 +1314,20 @@ type heldRefusal struct {
 	armedAt time.Time
 	atBytes int64
 	done    chan struct{}
+
+	// lastRelayAt is when the client leg was last still being fed past this
+	// hold, and lastRelayBytes the session's cumulative byte mark then. They are
+	// observation only — nothing waits on them, no bound moves with them — and
+	// exist so an *abandoned* hold can say which of the two shapes it had: a
+	// client that stopped talking, or one that was still draining the reply and
+	// merely slow. See noteRefusalRelayProgress and
+	// heldRefusalWasStillReceiving.
+	//
+	// lastRelayAt stays zero until something is actually relayed, which is what
+	// makes "nothing ever moved" distinguishable from "something moved at the
+	// instant the hold was armed".
+	lastRelayAt    time.Time
+	lastRelayBytes int64
 }
 
 // refusalHandoffGrace bounds how long a held refusal may wait for the client to
@@ -1371,6 +1385,127 @@ func (s *session) refusalGrace() time.Duration {
 	return refusalHandoffGrace
 }
 
+// refusalStillReceivingIdleFraction divides the grace to give the window a byte
+// must have reached the client inside for an abandoned hold to be read as
+// *slow* rather than *silent*.
+//
+// A tenth, and derived from the grace rather than written as a duration of its
+// own, so it scales with the grace a test shortens the same way the wait does.
+// Long enough that a stalled window or a scheduling hiccup on a poor link is not
+// mistaken for a client that stopped talking; short enough that a client whose
+// last byte landed early in the hold gets no credit for progress it had stopped
+// making by the time the grace ran out.
+const refusalStillReceivingIdleFraction = 10
+
+func (s *session) refusalStillReceivingIdle() time.Duration {
+	return s.refusalGrace() / refusalStillReceivingIdleFraction
+}
+
+// noteRefusalRelayProgress records that the client leg was still being fed past
+// a held refusal, `relayed` being the session's cumulative byte mark now.
+//
+// It is observation and nothing else. The grace stays the flat deadline
+// refusalHandoffGrace documents — this deliberately does *not* extend it, and
+// turning it into an idle timeout was the design considered and declined in
+// specs/todos/2026-08-13-15-held-refusal-grace-and-byte-bound-cross-at-a-link-speed.md.
+// The only thing it buys is that an abandonment can name the shape it had.
+func (s *session) noteRefusalRelayProgress(held *heldRefusal, relayed int64) {
+	s.refusalMu.Lock()
+	defer s.refusalMu.Unlock()
+
+	if relayed <= held.lastRelayBytes {
+		return
+	}
+
+	held.lastRelayBytes = relayed
+	held.lastRelayAt = time.Now()
+}
+
+// heldRefusalWasStillReceiving reports whether a hold abandoned at `at` was cut
+// off a client that was merely *slow*, rather than one that had stopped talking
+// — the distinction the grace itself cannot make, since it is a deadline and not
+// an idle timeout.
+//
+// The predicate is deliberately explicit rather than a threshold buried in a
+// branch: bytes must have moved past the violation at all, and the last of them
+// must have reached the client within refusalStillReceivingIdle of the moment
+// the grace expired. A silent client fails the first test (nothing was ever
+// relayed) or the second (whatever tail it took arrived at the start of the hold
+// and nothing followed).
+//
+// One case it under-reports, and it is the honest limit of measuring this from
+// the relay: a tail small enough to fit entirely in the client socket's send
+// buffer is handed to TCP in one go, so the proxy sees no progress while the
+// client is still draining it. That is bounded by the socket buffer — a few
+// hundred kilobytes — and the crossover this exists to name only arises for
+// overshoots far larger than that, which cannot be hidden that way.
+func (s *session) heldRefusalWasStillReceiving(held *heldRefusal, at time.Time) bool {
+	s.refusalMu.Lock()
+	defer s.refusalMu.Unlock()
+
+	if held.lastRelayAt.IsZero() || held.lastRelayBytes <= held.atBytes {
+		return false
+	}
+
+	return at.Sub(held.lastRelayAt) <= s.refusalStillReceivingIdle()
+}
+
+// refusalBoundOutOfReach reports whether the byte bound could not have been
+// reached inside the grace at the rate this hold was actually draining — i.e.
+// whether the two fail-safes crossed, so that the clock was always going to fire
+// first and refusalHoldMaxBytes was never a bound this session could meet.
+//
+// For a hold that survived to the grace it is implied (a hold that crossed the
+// byte bound would have been ended by enforceMidStreamLimits instead, so
+// whatever reached the grace was under it), but it is checked rather than
+// assumed because it is exactly what the log line claims.
+func (s *session) refusalBoundOutOfReach(cost handoffCost) bool {
+	if cost.bytes <= 0 || cost.millis <= 0 {
+		return false
+	}
+
+	// bound/(bytes/millis) > grace, without the division.
+	return s.refusalBytesBound()*cost.millis > cost.bytes*s.refusalGrace().Milliseconds()
+}
+
+// refusalCrossoverBytesPerSecond is the link speed at which the two bounds meet:
+// the rate at which relaying refusalHoldMaxBytes takes exactly
+// refusalHandoffGrace. Below it the grace is the binding bound and the byte one
+// is unreachable; above it the reverse. With the shipped values it is ~280 KiB/s
+// — see docs/oracle.md, "What a legitimate handoff costs, measured".
+func (s *session) refusalCrossoverBytesPerSecond() int64 {
+	millis := s.refusalGrace().Milliseconds()
+	if millis <= 0 {
+		return 0
+	}
+
+	return s.refusalBytesBound() * 1000 / millis
+}
+
+// reportRefusalBoundCrossover emits the one record that names the two fail-safes
+// constraining each other, and only for the case where they actually did: a
+// handoff cut by the clock while the client was still draining the reply.
+//
+// It is a separate line from the watchdog's own teardown because it is a
+// different claim. The teardown says the session was ended; this says the
+// *reason* it was ended is a link slow enough that the byte bound could never
+// have applied, which is the deployment shape (dbbat far from the database) the
+// bounds were not sized for. Nothing branches on it — see refusalHandoffGrace
+// for why the values are left where they are.
+func (s *session) reportRefusalBoundCrossover(held *heldRefusal, cost handoffCost, at time.Time) {
+	if !s.heldRefusalWasStillReceiving(held, at) || !s.refusalBoundOutOfReach(cost) {
+		return
+	}
+
+	s.logger.WarnContext(s.ctx, logMsgRefusalGraceOutranBytes,
+		slog.Int64(logAttrRelayedBytesSince, cost.bytes),
+		slog.Int64(logAttrHeldForMillis, cost.millis),
+		slog.Int64(logAttrEffectiveBytesPerSec, cost.bytesPerSecond()),
+		slog.Int64(logAttrCrossoverBytesPerSec, s.refusalCrossoverBytesPerSecond()),
+		slog.Int64(logAttrRefusalBytesBound, s.refusalBytesBound()),
+		slog.Any("error", held.err))
+}
+
 // holdRefusal arms a mid-stream refusal, reporting false when one is already
 // armed (the relay keeps checking after every packet, and the violation stays
 // true the whole time it is held).
@@ -1382,11 +1517,14 @@ func (s *session) holdRefusal(verr error) bool {
 		return false
 	}
 
+	atBytes := s.cumulativeClientBytes()
+
 	s.held = &heldRefusal{
-		err:     verr,
-		armedAt: time.Now(),
-		atBytes: s.cumulativeClientBytes(),
-		done:    make(chan struct{}),
+		err:            verr,
+		armedAt:        time.Now(),
+		atBytes:        atBytes,
+		done:           make(chan struct{}),
+		lastRelayBytes: atBytes,
 	}
 
 	return true
@@ -1471,6 +1609,10 @@ func (s *session) onLimitViolation(err error) {
 			return
 		}
 
+		// When the grace ran out, read before anything else moves: it is what
+		// the crossover report is measured against.
+		expiredAt := time.Now()
+
 		// The handoff never landed: the client stopped talking with a refusal
 		// undelivered. Fall back to the close, and record the statement the way
 		// the delivered path would have — the reason must survive either way.
@@ -1484,6 +1626,11 @@ func (s *session) onLimitViolation(err error) {
 		attrs = append(attrs,
 			slog.Int64(logAttrRelayedBytesSince, cost.bytes),
 			slog.Int64(logAttrHeldForMillis, cost.millis))
+
+		// "Went quiet" is the case above, and the one this path is the fail-safe
+		// for. A client that was still draining right up to the grace is a
+		// different animal wearing the same symptom, so it gets said out loud.
+		s.reportRefusalBoundCrossover(held, cost, expiredAt)
 	}
 
 	s.logger.WarnContext(s.ctx, logMsgWatchdogTeardown, attrs...)
@@ -2061,7 +2208,14 @@ func (s *session) enforceMidStreamLimits() error {
 		// Keep relaying so the client can finish the reply it is parked in and
 		// get there — but not without end: a reply whose boundary never arrives
 		// would otherwise stream past the quota indefinitely.
-		if s.cumulativeClientBytes()-held.atBytes <= s.refusalBytesBound() {
+		relayed := s.cumulativeClientBytes()
+		if relayed-held.atBytes <= s.refusalBytesBound() {
+			// Still inside the bound, and the client is still being fed: note it,
+			// which is the only thing that tells a slow client from a silent one
+			// if the *grace* ends up being the bound that fires. Observation
+			// only — see noteRefusalRelayProgress.
+			s.noteRefusalRelayProgress(held, relayed)
+
 			return nil
 		}
 
@@ -2203,6 +2357,17 @@ func (s *session) answerHeldRefusal(held *heldRefusal, named bool) bool {
 type handoffCost struct {
 	bytes  int64
 	millis int64
+}
+
+// bytesPerSecond is the effective link speed the hold was drained at, which is
+// the axis the two bounds are compared on: see refusalCrossoverBytesPerSecond.
+// Zero for a hold too short to divide by.
+func (c handoffCost) bytesPerSecond() int64 {
+	if c.millis <= 0 {
+		return 0
+	}
+
+	return c.bytes * 1000 / c.millis
 }
 
 // refusalHandoffCost measures a held refusal at the moment it is resolved.
