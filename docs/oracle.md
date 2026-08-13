@@ -231,8 +231,22 @@ prefix match would let a read-only session step outside what its grant covers.
 allowed parameter with an unenumerated one is refused whole rather than
 partially honoured. Anything the scanner cannot read end to end with confidence
 — an unterminated quote, a missing `=`, a second statement stapled on behind a
-`;` — is refused too. `ALTER SYSTEM` is untouched: `oracleBlockedPatterns`
-blocks it outright whatever the grant says.
+`;` — is refused too.
+
+Exclusion from the allowlist is not on its own enough for `CONTAINER`, because
+all it buys is the pre-allowlist behaviour: the statement starts with `ALTER`,
+so `read_only` and `block_ddl` refuse it and a grant with **neither** control —
+the default, full write — allowed the switch. The reasoning that makes it too
+dangerous for a read-only session applies unchanged to a writing one: a grant on
+PDB1 is not a grant on PDB2, and every `queries` row written after the switch
+names the wrong database. So `CONTAINER` also sits in `oracleBlockedPatterns`,
+alongside `ALTER SYSTEM`, and is refused outright whatever the grant says
+(`ErrOraclePatternBlocked`). The pattern scans to the end of the statement rather
+than anchoring on `SET CONTAINER`, because `ALTER SESSION SET CURRENT_SCHEMA=X
+CONTAINER=PDB2` performs the same switch with `CONTAINER` in second position.
+`CURRENT_SCHEMA` stays allowed and is deliberately *not* caught: it moves
+unqualified name resolution, Oracle still evaluates privileges as the connected
+user, and a dbbat grant is scoped to a database rather than a schema.
 
 An allowed `ALTER SESSION` is **still recorded** in `/queries` like any other
 statement; this changes classification, not visibility. The five statements the
