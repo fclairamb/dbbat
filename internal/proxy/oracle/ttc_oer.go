@@ -1,6 +1,9 @@
 package oracle
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 // oerInfo holds fields decoded from a TTC OER (error/status) message.
 // An OER follows every execute on v315+ connections: for successful DML it
@@ -89,6 +92,72 @@ func decodeOERFieldsAt(payload []byte, offset int) (*oerInfo, int) {
 		ErrorCode:    fields[3],
 		CursorID:     fields[6],
 	}, pos
+}
+
+// decodeErrorOERAt decodes a standalone OER that *reports a failure*, without
+// requiring the end-of-call bit, and proves the bytes are a diagnostic before
+// handing them back.
+//
+// The bit was believed to be a client trait — set on every OER a go-ora session
+// carries, absent on python-oracledb thin. Measured against Oracle Free 23ai it
+// is neither: it tracks the *call*, not the client. Of the six failure shapes in
+// testdata/{python_thin,go_ora}_failed_stmt.pcapng, exactly one (a failed DDL)
+// carries it, on both clients; the SELECT on a missing table, the unique-key
+// violation, the divide-by-zero, the PL/SQL RAISE and the PL/SQL compile error
+// all arrive with CallStatus 1 or 5. decodeOERAt refuses every one of them, so
+// their ORA text never reached queries.error on any client at all.
+//
+// What replaces the bit here is proof rather than a looser bound, the same
+// standard decodeTTCResponse is held to (legacyResponseErrorMessage):
+//
+//   - the seven leading fields must decode as compressed ints;
+//   - the error code must be a real failure — not success, not ORA-01403 — and
+//     inside the range an Oracle code can occupy;
+//   - the tail must carry a printable ORA-/PLS-/TNS- diagnostic;
+//   - and that diagnostic must *name the same code* the fields reported.
+//
+// The last one is what makes this safe on a path routed by byte 0 alone: a run
+// of row bytes that happens to decode as seven ints would also have to be
+// followed by the ASCII spelling of the number its fourth field landed on.
+// Every measured diagnostic satisfies it, PL/SQL included (errNum 6550 →
+// "ORA-06550: line 1, column 7:"), which is why it is a check and not a hope.
+//
+// Callers must still refuse to run this mid-row-stream, where a 0x04 run is row
+// data by definition — see handleOERStatus.
+func decodeErrorOERAt(payload []byte, offset int) *oerInfo {
+	info, rest := decodeOERFieldsAt(payload, offset)
+	if info == nil {
+		return nil
+	}
+
+	if info.ErrorCode <= 0 || info.ErrorCode == oraNoDataFound || info.ErrorCode >= maxPlausibleORACode {
+		return nil
+	}
+
+	msg := extractORAMessage(payload[rest:])
+	if !looksLikeOracleDiagnostic(msg) || !diagnosticNamesCode(msg, info.ErrorCode) {
+		return nil
+	}
+
+	info.ErrorMessage = msg
+
+	return info
+}
+
+// diagnosticNamesCode reports whether msg opens with the diagnostic code the
+// OER's fields reported — "ORA-00942" for 942, "ORA-06550" for 6550. Oracle
+// zero-pads to five digits, and maxPlausibleORACode keeps the code inside that
+// width.
+func diagnosticNamesCode(msg string, code int) bool {
+	want := fmt.Sprintf("%05d", code)
+
+	for _, prefix := range oracleDiagnosticPrefixes {
+		if strings.HasPrefix(msg, prefix+want) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // oerMaxSeqNumber bounds a believable OER sequence number.

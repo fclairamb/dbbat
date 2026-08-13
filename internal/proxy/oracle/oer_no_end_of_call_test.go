@@ -226,8 +226,13 @@ func TestSessionClose_LastDMLIsSealedByItsOwnResponse(t *testing.T) {
 // TestHandleOERStatus_StillRequiresTheEndOfCallBit is the guard on the path the
 // relaxation must not reach. A standalone func=0x04 message is routed on its
 // first byte alone, so anything whose first byte is 0x04 — a row value's length
-// prefix among them — arrives here claiming to be an OER. The bit is the only
-// thing separating those, and it stays required.
+// prefix among them — arrives here claiming to be an OER.
+//
+// For a *success* OER, which is what this replays, the bit is still the only
+// thing separating those, and it stays required: there is no error text such a
+// run could be proved with. A later measurement found that failures do arrive
+// here without the bit and carry a diagnostic that proves them — see
+// failed_stmt_replay_test.go, which pins how narrow that opening is.
 func TestHandleOERStatus_StillRequiresTheEndOfCallBit(t *testing.T) {
 	t.Parallel()
 
