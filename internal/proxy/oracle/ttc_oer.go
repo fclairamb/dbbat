@@ -18,13 +18,17 @@ type oerInfo struct {
 	ErrorMessage string
 }
 
-// oerEndOfCallBit is set in CallStatus on every OER a go-ora session carries
-// (success and error, DDL and DML), and on none of a python-oracledb thin
-// session's. Byte runs inside a row stream that happen to start with 0x04 don't
-// carry it either, which is what makes it worth keeping as the discriminator
-// exactly where row bytes are what a false positive would be made of — the
-// standalone func=0x04 marker and anything mid-fetch. Outside those, see
-// findPlausibleOERInResponse.
+// oerEndOfCallBit is set in CallStatus on some calls and not others. It reads
+// like a client trait on the successful ones — every OER a go-ora session
+// carries has it, none of a python-oracledb thin session's does — but that is
+// a coincidence of which calls were captured first: on a *failing* call the two
+// clients agree, and only a failed DDL carries it (see decodeErrorOERAt).
+//
+// Byte runs inside a row stream that happen to start with 0x04 don't carry it
+// either, which is what makes it worth keeping as the discriminator exactly
+// where row bytes are what a false positive would be made of — anything
+// mid-fetch, and a standalone func=0x04 that reports no error to prove itself
+// with. Outside those, see findPlausibleOERInResponse and decodeErrorOERAt.
 const oerEndOfCallBit = 0x010000
 
 // oraNoDataFound is ORA-01403, the normal end-of-data status — not an error.
