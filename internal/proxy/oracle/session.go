@@ -1390,13 +1390,24 @@ func (s *session) refusalGrace() time.Duration {
 // must have reached the client inside for an abandoned hold to be read as
 // *slow* rather than *silent*.
 //
-// A tenth, and derived from the grace rather than written as a duration of its
-// own, so it scales with the grace a test shortens the same way the wait does.
-// Long enough that a stalled window or a scheduling hiccup on a poor link is not
-// mistaken for a client that stopped talking; short enough that a client whose
-// last byte landed early in the hold gets no credit for progress it had stopped
-// making by the time the grace ran out.
-const refusalStillReceivingIdleFraction = 10
+// Derived from the grace rather than written as a duration of its own, so it
+// scales with the grace a test shortens the same way the wait does. Short enough
+// that a client whose last byte landed early in the hold gets no credit for
+// progress it had stopped making by the time the grace ran out; long enough that
+// a stalled window on a poor link is not mistaken for a client that stopped
+// talking — which is what moved it from a tenth to a third.
+//
+// A tenth was sized against the *packet* rate, and that is not what paces the
+// relay's writes. A write completes when the client socket frees space, and TCP
+// frees it in receive-window updates, which arrive at roughly half the receive
+// buffer at a time rather than per packet. So on a slow link the gap between two
+// completed writes is (buffer/2)/rate whatever the packet size is: measured
+// through a 32 KiB/s tap in TestIntegration_HeldRefusalHandoffCost, a relay that
+// was writing continuously right up to the teardown still had 4.5s between its
+// last two writes — comfortably outside a 3s window, and the reason the crossover
+// record never fired end to end. A third of the grace clears that with margin
+// while still meaning "the final stretch of the hold".
+const refusalStillReceivingIdleFraction = 3
 
 func (s *session) refusalStillReceivingIdle() time.Duration {
 	return s.refusalGrace() / refusalStillReceivingIdleFraction
@@ -1437,9 +1448,16 @@ func (s *session) noteRefusalRelayProgress(held *heldRefusal, relayed int64) {
 // One case it under-reports, and it is the honest limit of measuring this from
 // the relay: a tail small enough to fit entirely in the client socket's send
 // buffer is handed to TCP in one go, so the proxy sees no progress while the
-// client is still draining it. That is bounded by the socket buffer — a few
-// hundred kilobytes — and the crossover this exists to name only arises for
-// overshoots far larger than that, which cannot be hidden that way.
+// client is still draining it. The crossover this exists to name only arises for
+// overshoots larger than that buffer, which cannot be hidden that way — but
+// "that buffer" is bigger than the few hundred kilobytes first assumed here. It
+// is TCP's, sized to the bandwidth-delay product on a real link and to whatever
+// autotuning likes on loopback: measured in
+// TestIntegration_HeldRefusalHandoffCost, a 683 100-byte tail went into a
+// loopback socket in 1.5s and was still being drained by the client 100s later,
+// with nothing for the relay to see in between. That is why the subtest that
+// exercises this drives megabytes rather than the few hundred kilobytes a poor
+// link needs in the field.
 func (s *session) heldRefusalWasStillReceiving(held *heldRefusal, at time.Time) bool {
 	silence, fed := s.refusalRelaySilence(held, at)
 
