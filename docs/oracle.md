@@ -292,7 +292,7 @@ failure's text is won or lost, and until this was measured it was lost on
 `decodeOERAt`, the statement stayed pending, and the next statement's
 `flushPendingQuery` closed it as a **success with no error at all**.
 
-`decodeErrorOERAt` is what reads them now. It does not loosen an anchor; it
+`decodeErrorOER` is what reads them now. It does not loosen an anchor; it
 replaces the bit with the proof `decodeTTCResponse` is held to — a real error
 code inside Oracle's range, a printable `ORA-`/`PLS-`/`TNS-` diagnostic in the
 tail, and that diagnostic **naming the very code the fields reported**
@@ -320,7 +320,7 @@ bytes:
 |------|---------------|-----|
 | `handleOERStatus` (standalone func `0x04`), **reporting success or ORA-01403** | **yes** | routed on byte 0 alone, so any row-value length prefix of `0x04` arrives claiming to be an OER, and a status carries no text to prove itself with |
 | `handleOERStatus`, **reporting a failure**, mid-row-stream | **yes** | still row bytes; the strict decoder stays the only thing that may end a call there |
-| `handleOERStatus`, **reporting a failure**, outside a row stream | no | `decodeErrorOERAt` proves the tail is a diagnostic naming the code the fields reported — see the table above |
+| `handleOERStatus`, **reporting a failure**, outside a row stream | no | `decodeErrorOER` proves the tail is a diagnostic naming the code the fields reported — see the table above |
 | `handleResponse`, mid-row-stream | **yes** | the payload *is* row bytes; a `0x04` run inside it is data |
 | `handleResponse`, outside a row stream | no | the payload is a return-parameter block, and the anchors above are what stands in for the bit |
 
@@ -463,7 +463,7 @@ followed by TTC compressed integers:
   thin does not, but on a **failing** one both clients agree, and only a failed
   DDL carries it. `decodeOERAt` therefore uses it to reject stray `0x04` runs
   only where a false positive would be made of row bytes, and
-  `decodeErrorOERAt` stands in for it on a proven diagnostic — see the tables
+  `decodeErrorOER` stands in for it on a proven diagnostic — see the tables
   under "the OER end-of-call bit is not universal". `ttc_oer.go`,
   `findOERInResponse` and `findPlausibleOERInResponse`.
 

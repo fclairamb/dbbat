@@ -2293,7 +2293,7 @@ func (s *session) observeOERClientVersion(ttcBody []byte) {
 //     Nothing is given up — no measured failure arrives with columns already
 //     decoded, the divide-by-zero included, because the server sends the OER
 //     instead of the QueryResult rather than after it.
-//   - decodeErrorOERAt, which proves the tail is an Oracle diagnostic naming
+//   - decodeErrorOER, which proves the tail is an Oracle diagnostic naming
 //     the very code the fields reported.
 //
 // Callers hold trackerMu (see interceptUpstreamMessage).
@@ -2308,7 +2308,7 @@ func (s *session) handleOERStatus(ttcPayload []byte) {
 		return
 	}
 
-	if info := decodeErrorOERAt(ttcPayload, 0); info != nil {
+	if info := decodeErrorOER(ttcPayload); info != nil {
 		s.completeQueryFromOER(info)
 	}
 }
