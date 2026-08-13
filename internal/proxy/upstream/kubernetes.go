@@ -574,6 +574,10 @@ func (t *KubernetesTunnel) DialPod(_ context.Context, podName string, containerP
 			protocol, portforward.PortForwardProtocolV1Name)
 	}
 
+	// The error-stream drain this starts outlives the dial by design (it runs
+	// for the life of the tunnel), so its panic recover logs against a fresh
+	// context rather than one that is canceled by the time it could fire.
+	//nolint:contextcheck // deliberate: the drain must outlive the dial's context
 	pfConn, err := newPortForwardConn(conn, t.namespace, podName, containerPort)
 	if err != nil {
 		_ = conn.Close()

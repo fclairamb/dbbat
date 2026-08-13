@@ -15,7 +15,7 @@ import (
 
 // errBoom is what a panicking fake raises. A panic value, not a returned error:
 // the whole point is the path where the store call never returns.
-var errBoom = errors.New("store write blew up") //nolint:err113 // test-local sentinel
+var errBoom = errors.New("store write blew up")
 
 // panickingStore panics on every write. It satisfies both store slices the
 // detached writers use, so one fake drives the whole table.
