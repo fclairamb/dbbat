@@ -153,11 +153,14 @@ the **server** allots one and reports it back — so without reading the respons
 dbbat has a statement with no id and, later, an id with no statement.
 
 `learnCursorID` reads it off the first response to each execute
-(`findCursorIDInResponse`): the OER's seventh field. The scan is anchored rather
-than trusting — seven compressed ints, error code success or ORA-01403, a
-sequence number inside its 16-bit field, a 16-bit cursor id, first match wins —
-because a run of row bytes can otherwise parse as an OER. It runs at most once
-per statement.
+(`findCursorIDInResponse`, a thin wrapper over `findPlausibleOERInResponse`):
+the OER's seventh field. The scan is anchored rather than trusting — seven
+compressed ints, error code success or ORA-01403, a sequence number inside its
+16-bit field, a 16-bit cursor id, first match wins — because a run of row bytes
+can otherwise parse as an OER. It runs at most once per statement.
+
+Query completion out of a row stream shares that same scan; see "the OER
+end-of-call bit is not universal" below.
 
 Every one of those bounds is load-bearing in **both** directions. Too loose and
 row bytes are mistaken for the OER; too tight and the genuine OER is skipped and
@@ -263,9 +266,33 @@ opens and closes.
 
 One gotcha the fixtures pinned: the OER **end-of-call bit is not universal**.
 go-ora's connections carry `CallStatus 0x10005`, python-oracledb's carry
-`CallStatus 1`. Query completion still keys off the bit (unchanged); the cursor-id
-lookup deliberately does not, which is why `decodeOERFieldsAt` is split out of
-`decodeOERAt`.
+`CallStatus 1–2`. That is why `decodeOERFieldsAt` is split out of `decodeOERAt`
+— the strict decoder, which demands the bit, cannot see those clients' OERs at
+all.
+
+Cursor-id learning never required the bit. Query completion did, and that cost
+real data: for a full release every INSERT/UPDATE/DELETE run by a
+python-oracledb thin client fell through `handleResponse`, stayed pending, and
+was closed only by the *next* statement's `flushPendingQuery` —
+`rows_affected` NULL and a `duration_ms` measuring the client's think time (one
+live UPDATE was logged at 74 s because the session then sat idle). A session
+whose last statement was such a DML had it sealed by `cleanup()` instead, timed
+to the disconnect. dbbat was reading cursor 4 off the very OER whose
+`CurRowNumber` it refused to believe.
+
+Both callers now share one anchored scan, `findPlausibleOERInResponse`, and what
+separates them is **where** they may run it, not how far they trust the same
+bytes:
+
+| Path | Bit required? | Why |
+|------|---------------|-----|
+| `handleOERStatus` (standalone func `0x04`) | **yes** | routed on byte 0 alone, so any row-value length prefix of `0x04` arrives claiming to be an OER |
+| `handleResponse`, mid-row-stream | **yes** | the payload *is* row bytes; a `0x04` run inside it is data |
+| `handleResponse`, outside a row stream | no | the payload is a return-parameter block, and the anchors above are what stands in for the bit |
+
+The live OER is replayed in `oer_no_end_of_call_test.go`; its envelope is
+derived from the captures in `testdata/` rather than copied from the production
+dump, which is not in the repository.
 
 A re-execution naming a cursor dbbat cannot resolve goes through
 `refuseUnknownCursor`, exactly like the SQL-less `OALL8` and a fresh-query
@@ -389,9 +416,12 @@ followed by TTC compressed integers:
 - `errNum` is `0` on success, `1403` for end-of-data (ORA-01403, not an error),
   or the `ORA-NNNNN` code on failure — followed later by the CLR-prefixed
   `ORA-...` message text.
-- `callStatus` always has the end-of-call bit `0x010000` set on a real OER,
-  which `decodeOERAt` uses to reject stray `0x04` bytes inside the preceding
-  return-parameter block. See `ttc_oer.go` and `findOERInResponse`.
+- `callStatus` has the end-of-call bit `0x010000` set on every OER a go-ora
+  session carries and on none of a python-oracledb thin session's, so
+  `decodeOERAt` uses it to reject stray `0x04` runs only where a false positive
+  would be made of row bytes — see the table under "the OER end-of-call bit is
+  not universal". `ttc_oer.go`, `findOERInResponse` and
+  `findPlausibleOERInResponse`.
 
 #### Ending a call: the OER encoder
 
@@ -761,7 +791,7 @@ for names containing spaces or parentheses.
 - **Any API key works for Oracle login (per-user salts)**: The Oracle username from TTC AUTH Phase 1 maps to the dbbat user (lowercased) for grant checks and connection tracking, and any of that user's API keys created since the per-user-salt scheme can authenticate — see "Per-user O5LOGON salts" below. Two caveats: keys created before the scheme (legacy per-key salts) still fall back to first-key-only behavior until a new key is created, and clients that send an empty `AUTH_PASSWORD` (SQLcl / JDBC thin 23c+) cannot be disambiguated — dbbat assumes the most-recently-created user-salt key.
 - **Row capture is best-effort**: The TTC binary format varies across Oracle client versions. Some clients/query types may produce partial or no row capture. SQL text extraction works reliably across all tested clients.
 - **Column names**: Real column names come from the describe column-definition records (`parseColumnDescribes` in `describe.go`), so single-char aliases (`SELECT level AS n`) and unnamed expressions (`SELECT count(*)`) get their true names and positions. Only genuinely unnamed expression columns fall back to a synthetic `COLn` label. If the records don't parse on some server layout, decoding falls back to heuristic name-scanning plus describe-header count padding, so the column count (and row framing) stays correct.
-- **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`. Failed statements record the ORA error text. See `ttc_oer.go`.
+- **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`, for clients whose OERs carry the end-of-call bit and (since the fix above) for those whose don't. Failed statements record the ORA error text — but note that a *failing* statement's OER is accepted only with the bit, so the error text of a failure on a bit-less client is still not read out of an embedded OER. See `ttc_oer.go`.
 - **Bind values (parameterized queries)**: Bind values are captured from both the legacy `OALL8` execute path (`decodeBindValues`) and the v315+ **piggyback exec** path that modern clients use (`extractPiggybackBinds`, func `0x03` sub `0x5e`). The piggyback binds sit length-prefixed at the tail of the message; they're located as the suffix that parses as exactly as many values as there are distinct bind placeholders in the SQL, and each is decoded by content via `decodeOracleRawValue` (so a NUMBER bind like `42` renders as `42`, not hex). Verified against `testdata/go_ora_binds.pcapng` (`TestDumpReplay_Binds`). Captured binds are now persisted to `queries.parameters` (`formatOracleBinds` wired into `persistQueryRecord` and `completeQuery`), so the API (`GET /api/v1/queries/:uid`) and the UI Parameters card report them. Not yet handled: binds over ~253 bytes (extended length encoding) and full type-aware decoding from the bind-definition records.
 - **Temporal types**: DATE, TIMESTAMP, and TIMESTAMP WITH TIME ZONE decode in captured results, verified end-to-end against `testdata/go_ora_temporal.pcapng` (`TestDumpReplay_Temporal`). The tz form renders the local wall clock plus its numeric offset, honouring byte 11's `0x40` "time in zone" flag (prefix stored as local vs UTC). Named-region time zones fall back to the stored wall clock without an offset suffix.
 - **Large result sets**: The QueryResult (func `0x10`) row area and continuation packets (func `0x06`) share one decoder (`parseRowStream`) that walks the full compressed row stream — length-prefixed values plus the `0x15 [flag] [count] [bitmask] 0x07` column-compression descriptors between rows. A 400-row single-packet result is captured end-to-end against a live-Oracle ground-truth fixture (`testdata/go_ora_largeresult.pcapng`, `TestDumpReplay_LargeResultRows`). Multi-TNS-packet (small-SDU/JDBC) result sets reuse the same decoder via the continuation path; their per-row correctness is not yet ground-truth-verified.
