@@ -89,24 +89,36 @@ first gap: treat missing query rows on Oracle as missing enforcement, and file i
 ### Re-executing a cursor **is** gated
 
 An Oracle client can re-run a statement it already parsed by naming the cursor
-id alone, with no SQL text on the wire. Three frames do that — a **piggyback
+id alone, with no SQL text on the wire. Two frames do that — a **piggyback
 re-execution** (TTC func `0x03`, sub-op `0x4e` for a SELECT and `0x04` for
-anything else), the legacy SQL-less `OALL8`, and an `OFETCH` arriving when no
-query is in flight. All three are gated against the SQL that cursor was parsed
-with: the same normalize → static controls → hold order as the SQL-carrying
-path, on **every** execution. A statement matched by an approval pattern is
-therefore held again on each re-execution; approving it once does not buy a free
-run for the rest of the session.
+anything else) and the legacy SQL-less `OALL8`. Both are gated against the SQL
+that cursor was parsed with: the same normalize → static controls → hold order
+as the SQL-carrying path, on **every** execution. A statement matched by an
+approval pattern is therefore held again on each re-execution; approving it once
+does not buy a free run for the rest of the session.
+
+> **There was a third, and it never fired.** The intent — "a fetch arriving with
+> no query in flight is a re-execution, and is gated like a statement" — was
+> real, and it is recorded here so it is not lost. What it was wired to was not:
+> the decoder read a cursor id as a big-endian `uint16` at bytes 1..3 of a
+> message-type `0x11` frame, but `0x11` is the TTC *piggyback message type* and
+> those bytes are (function, sequence). No Oracle client sends a fetch that way —
+> every real fetch is message type `0x03` function `0x05`, which dbbat does not
+> intercept — so the only frames that ever reached the gate were piggybacks
+> being misread, which is how one client's first message became "a re-execution
+> of cursor 27396". The reading and the gate behind it are deleted. Wiring the
+> gate to the real `03/05` fetch stays available, but it is a behaviour change on
+> the hot path: refusing there on a false positive breaks ordinary read-only
+> work, so it needs the false-positive rate measured on a live suite first.
 
 That covers a cursor dbbat **saw parsed**, which is what makes the SQL known.
 The boundaries, all deliberate:
 
-- **A fetch that continues a query already in flight is not re-gated.** It is
-  more rows of a statement that has already been through the gate, and holding
-  there would park a client mid-result-set. Only the fetch that starts a *fresh*
-  pending query — the one that persists its own row in `/queries` — is gated.
+- **A fetch is not gated at all.** A fetch continues a statement that has already
+  been through the gate, and holding there would park a client mid-result-set.
+  dbbat does not intercept the fetch op (`03/05`) on either count.
 - **A re-execution naming an untracked cursor fails closed under a restrictive
-  grant — on all three frames.** If the cursor id
+  grant — on both frames.** If the cursor id
   was never seen parsed on this session, dbbat does not know what the execution
   would run. When the grant carries
   **statement-shaped controls** — a non-empty approval-pattern set, `read_only`,
@@ -121,12 +133,10 @@ The boundaries, all deliberate:
   sessions for no security gain. Refusing exactly where a statement control
   exists keeps the guarantee that matters without that blast radius.
 
-  All three frames answer identically on purpose: an execution dbbat cannot
+  Both frames answer identically on purpose: an execution dbbat cannot
   identify is the thing being refused, and the wire op carrying it must not be a
-  cheaper way past the same grant. (The `OFETCH` half of that used to forward
-  under any grant, with only a debug log; the piggyback one, the frame every
-  modern thin client actually sends, used to forward under any grant with a
-  WARN.)
+  cheaper way past the same grant. (The piggyback one, the frame every modern
+  thin client actually sends, used to forward under any grant with a WARN.)
 
   The untracked-cursor answer is decided **before** the quota, so a cursor dbbat
   never saw parsed is refused as an unknown cursor rather than as an
@@ -161,11 +171,10 @@ The boundaries, all deliberate:
   `DBB_APPROVAL_ENABLED`. A grant carrying patterns while approvals are globally
   switched off will still refuse an untracked cursor, under a control that is
   inert. That is intentional — it errs fail-closed.
-- **A re-execution *is* counted against `max_query_counts`.** Each of the three
-  frames records its own `/queries` row, so each is checked against the quota
-  before it runs. The check sits on the re-execution branch itself
-  (`regateCursor`), not on the fetch path as a whole: a fetch continuing a
-  result set already streaming is never refused by it, which is what keeps a
+- **A re-execution *is* counted against `max_query_counts`.** Both frames
+  record their own `/queries` row, so each is checked against the quota before
+  it runs. The check sits on the re-execution branch itself (`regateCursor`), so
+  a result set already streaming is never refused by it, which is what keeps a
   client from being cut off mid-result-set. (The response leg's `LimitGuard`
   independently covers revocation, the byte quota and expiry; it does not know
   about `max_query_counts`, which is why the branch has to check it.)
@@ -644,7 +653,7 @@ stays correct, only the live feed goes away.
 | MySQL / MariaDB | `COM_QUERY` / `COM_STMT_EXECUTE`, inside `runIntercepted` | go-mysql owns the wire; the hold happens before `exec()`. |
 | MongoDB | `OP_MSG` command dispatch | Matching runs against the rendered `<command> <extJSON>` text, which is what `/queries` shows. |
 | SQL Server | `SQLBatch` / `RPC`, in the client→upstream pump's hook | The one protocol whose cancel is in-band, so the client leg is read by a separate goroutine for the whole session. |
-| Oracle | `OALL8`, the v315+ piggyback exec, the JDBC thin driver's `func=0x11` / sub-op `0x69` exec, plus cursor re-executions (the piggyback `0x03`/`0x4e`+`0x04` frames every thin client sends, the legacy SQL-less `OALL8`, and an `OFETCH` that starts a new query) | All go through the same normalize → static controls → hold order; re-executions are gated against the SQL the cursor was parsed with. Oracle clients are the least forgiving about a silent connection — expect `abandoned` more often here. A frame whose SQL cannot be decoded is forwarded ungated; see the caveat under "The hold, in order". |
+| Oracle | `OALL8`, the v315+ piggyback exec, the JDBC thin driver's `func=0x11` / sub-op `0x69` exec, plus cursor re-executions (the piggyback `0x03`/`0x4e`+`0x04` frames every thin client sends, and the legacy SQL-less `OALL8`) | All go through the same normalize → static controls → hold order; re-executions are gated against the SQL the cursor was parsed with. Oracle clients are the least forgiving about a silent connection — expect `abandoned` more often here. A frame whose SQL cannot be decoded is forwarded ungated; see the caveat under "The hold, in order". |
 
 ## Schema
 
