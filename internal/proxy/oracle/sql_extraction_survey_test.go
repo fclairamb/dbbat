@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/fclairamb/dbbat/internal/dump"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 )
 
 // This file is the measurement the 2026-08-13-05 spec asks for, kept as a
@@ -257,6 +258,38 @@ func TestSurveyAlterSessionMisreadAsSet(t *testing.T) {
 			"ALTER SESSION *as an execute op* — the string is in every recording as the "+
 			"AUTH_ALTER_SESSION key/value of the phase-2 AUTH message (func 0x03 sub-op 0x73), "+
 			"which is not a statement-carrying op and never reaches the gate")
+
+	// The five, spelled out, and each one checked against the very allowlist the
+	// gate consults. This is the floor of shared.IsAllowedAlterSession: if a
+	// re-recording adds an ALTER SESSION parameter that is not on the list, that
+	// is a client which can no longer *connect* under a read_only or block_ddl
+	// grant, and it fails here rather than in support.
+	require.Equal(t, []string{
+		`ALTER SESSION SET "_optimizer_cost_based_transformation" = 'OFF'`,
+		`ALTER SESSION SET "_optimizer_push_pred_cost_based" = FALSE`,
+		`ALTER SESSION SET "_optimizer_squ_bottomup" = FALSE`,
+		"ALTER SESSION SET CURRENT_SCHEMA=TESTADM",
+		"ALTER SESSION SET OPTIMIZER_FEATURES_ENABLE='10.2.0.5'",
+	}, sortedKeys(distinct), "the distinct ALTER SESSION statements the corpus carries")
+
+	for sql := range distinct {
+		require.True(t, shared.IsAllowedAlterSession(sql),
+			"every ALTER SESSION a real client sends at connection setup must be on the allowlist "+
+				"(internal/proxy/shared/validation.go), or a read_only grant refuses the connection "+
+				"itself: %s", sql)
+	}
+}
+
+// sortedKeys returns a set's members in a stable order.
+func sortedKeys(set map[string]struct{}) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+
+	sort.Strings(out)
+
+	return out
 }
 
 // legacyExecScan is decodeExecSQL's pre-fix strategy, kept here so the report
