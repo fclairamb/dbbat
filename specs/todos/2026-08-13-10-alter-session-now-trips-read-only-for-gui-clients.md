@@ -142,3 +142,52 @@ Key files: `internal/proxy/shared/validation.go` (`writeKeywords`,
 `ddlKeywords`, `IsWriteQuery`, `IsDDLQuery`), `internal/proxy/oracle/intercept.go`
 (`handleJDBCExec`, `handlePiggybackExec`), `internal/proxy/oracle/session.go`
 (`gateUnnameableFrame`), `docs/oracle.md` ("SQL Extraction").
+
+## Implementation Plan
+
+1. **`internal/proxy/shared/validation.go` — the allowlist and the parser.**
+   Add `IsAllowedAlterSession(sql string) bool`, exported so the Oracle corpus
+   survey can assert the recorded statements against the very list the gate
+   uses. It is consulted by `IsWriteQuery` and `IsDDLQuery` — one carve-out
+   serving both controls, next to `IsPasswordChangeQuery`.
+
+   The parser is a hand-rolled scanner, not a regexp, because the decision is
+   per *parameter* and a regexp over the whole statement cannot express "every
+   parameter must be on the list":
+   - require the literal `ALTER SESSION SET` prefix at a word boundary
+     (case-insensitive); anything else — `ALTER SESSION ENABLE …`,
+     `ALTER SESSION CLOSE DATABASE LINK …`, `ALTER SYSTEM …` — is not this
+     statement and keeps today's behaviour;
+   - then loop over `name = value` pairs: a name is either a bare identifier or
+     a double-quoted one (`"_optimizer_squ_bottomup"`), `=` may be surrounded
+     by spaces, and a value is a single-quoted string, a double-quoted
+     identifier, or a bare token restricted to a safe charset;
+   - **every** parsed name must be on the allowlist, and the scan must consume
+     the whole statement. Zero parameters, an unparseable byte, a stray `;`
+     stapling a second statement — all return `false`, i.e. today's refusal.
+     Fail closed is the default branch of every step.
+
+2. **The list itself, enumerated with a per-entry justification**, and a comment
+   at its head saying why it is a list and not a prefix match: `CONTAINER`
+   switches PDB and a dbbat grant is scoped to a database, so an
+   `ALTER SESSION SET CONTAINER` would step the session outside what its grant
+   covers. Floor = the five statements measured in the corpus; plus the
+   session-scoped, non-durable `NLS_*` and `TIME_ZONE` settings real clients
+   set, each named individually. `_OPTIMIZER_*` is the single family rule, with
+   its justification written where it is applied.
+
+3. **Tests, both sides.** `internal/proxy/shared/validation_test.go`: the five
+   corpus statements pass under `read_only` *and* `block_ddl`; `CONTAINER`,
+   an unenumerated parameter, a multi-parameter statement mixing an allowed one
+   with `CONTAINER`, a non-`SET` `ALTER SESSION` and malformed input are all
+   still refused; `ALTER TABLE` / `ALTER USER` / `ALTER SYSTEM` and the other
+   dialects' statements classify exactly as before.
+
+4. **`internal/proxy/oracle/sql_extraction_survey_test.go`**: assert the exact
+   set of distinct `ALTER SESSION` statements the corpus carries and that each
+   one is `shared.IsAllowedAlterSession` — so a re-recording that adds a
+   parameter fails loudly instead of silently reintroducing the connect-time
+   refusal.
+
+5. **`docs/oracle.md`**: rewrite the "A consequence worth knowing about"
+   paragraph, which currently ends by pointing at this spec as unresolved.
