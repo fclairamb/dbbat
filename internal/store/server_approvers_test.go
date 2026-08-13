@@ -192,6 +192,209 @@ func TestMayApproveForServer(t *testing.T) {
 	}
 }
 
+// TestResolveServerApproverGroupsByServers pins the point of the batched
+// resolver: whatever the number of servers, resolution costs a fixed two
+// queries — and it returns, per server, exactly what the per-server function
+// returns for that server.
+//
+// The count is the contract. A listing of N pending items used to fire 2N round
+// trips because the chain was asked once per row; if a future edit reintroduces
+// a per-server lookup this test fails before anybody notices the latency.
+func TestResolveServerApproverGroupsByServers(t *testing.T) {
+	t.Parallel()
+
+	testStore := setupTestStore(t)
+	ctx := context.Background()
+
+	own := newTestTargetServer(t, ctx, testStore, "batch_appr_own")
+	grouped := newTestTargetServer(t, ctx, testStore, "batch_appr_grouped")
+	twoGroups := newTestTargetServer(t, ctx, testStore, "batch_appr_two_groups")
+	bare := newTestTargetServer(t, ctx, testStore, "batch_appr_bare")
+
+	ops := newTestUserGroup(t, ctx, testStore, "batch_appr_ops")
+	leads := newTestUserGroup(t, ctx, testStore, "batch_appr_leads")
+	dba := newTestUserGroup(t, ctx, testStore, "batch_appr_dba")
+
+	// A server naming its own access approvers — level 1, which wins outright.
+	ownList := []uuid.UUID{ops.UID}
+	if err := testStore.UpdateServer(ctx, own.UID, ServerUpdate{
+		AccessApproverUserGroupUIDs: &ownList,
+	}, testEncryptionKey()); err != nil {
+		t.Fatalf("UpdateServer(own) error = %v", err)
+	}
+
+	// Level 2 for the other two, including a union across groups.
+	groupA, err := testStore.CreateServerGroup(ctx, &ServerGroup{
+		Name:                        "batch appr group A",
+		AccessApproverUserGroupUIDs: []uuid.UUID{leads.UID},
+		QueryApproverUserGroupUIDs:  []uuid.UUID{dba.UID},
+	})
+	if err != nil {
+		t.Fatalf("CreateServerGroup(A) error = %v", err)
+	}
+
+	groupB, err := testStore.CreateServerGroup(ctx, &ServerGroup{
+		Name:                        "batch appr group B",
+		AccessApproverUserGroupUIDs: []uuid.UUID{dba.UID, leads.UID},
+	})
+	if err != nil {
+		t.Fatalf("CreateServerGroup(B) error = %v", err)
+	}
+
+	for _, m := range []struct {
+		group  uuid.UUID
+		server uuid.UUID
+	}{
+		{groupA.UID, grouped.UID},
+		{groupA.UID, twoGroups.UID},
+		{groupB.UID, twoGroups.UID},
+		// The level-1 server is in a group too: its own list must still win.
+		{groupA.UID, own.UID},
+	} {
+		if err := testStore.AddServerToGroup(ctx, m.group, m.server); err != nil {
+			t.Fatalf("AddServerToGroup() error = %v", err)
+		}
+	}
+
+	missing := uuid.New()
+	all := []uuid.UUID{own.UID, grouped.UID, twoGroups.UID, bare.UID, missing}
+
+	// Both queries name the approver columns, and nothing else the resolver
+	// runs does, so this substring counts exactly the resolver's round trips.
+	hook := &queryCountHook{substring: "approver_user_group_uids"}
+	testStore.db.AddQueryHook(hook)
+
+	resolved, err := testStore.ResolveServerApproverGroupsByServers(ctx, all, ApproverKindAccess)
+	if err != nil {
+		t.Fatalf("ResolveServerApproverGroupsByServers() error = %v", err)
+	}
+
+	if got := hook.count.Load(); got != 2 {
+		t.Errorf("resolving %d servers took %d queries, want 2 (one for servers, one for their groups)",
+			len(all), got)
+	}
+
+	assertSameUUIDSet(t, "own list wins", resolved[own.UID], []uuid.UUID{ops.UID})
+	assertSameUUIDSet(t, "single group", resolved[grouped.UID], []uuid.UUID{leads.UID})
+	// leads is named by both groups and must come back once.
+	assertSameUUIDSet(t, "union across groups", resolved[twoGroups.UID], []uuid.UUID{leads.UID, dba.UID})
+	assertSameUUIDSet(t, "nothing configured", resolved[bare.UID], nil)
+
+	if _, present := resolved[bare.UID]; !present {
+		t.Error("a server that exists but names nobody must have an entry, not be absent")
+	}
+
+	if _, present := resolved[missing]; present {
+		t.Error("a server that does not exist must be absent from the result")
+	}
+
+	// The batched answer and the per-server answer are the same answer: the
+	// single-server function is a wrapper over this one, so any divergence here
+	// would mean the chain got implemented twice.
+	for _, kind := range []ApproverKind{ApproverKindAccess, ApproverKindQuery} {
+		batched, err := testStore.ResolveServerApproverGroupsByServers(
+			ctx, []uuid.UUID{own.UID, grouped.UID, twoGroups.UID, bare.UID}, kind,
+		)
+		if err != nil {
+			t.Fatalf("ResolveServerApproverGroupsByServers(%s) error = %v", kind, err)
+		}
+
+		for _, serverUID := range []uuid.UUID{own.UID, grouped.UID, twoGroups.UID, bare.UID} {
+			single, err := testStore.ResolveServerApproverGroups(ctx, serverUID, kind)
+			if err != nil {
+				t.Fatalf("ResolveServerApproverGroups(%s) error = %v", kind, err)
+			}
+
+			assertSameUUIDSet(t, "batched vs per-server ("+string(kind)+")", batched[serverUID], single)
+		}
+	}
+
+	// The per-server wrapper must still fail closed on a server that is gone.
+	if _, err := testStore.ResolveServerApproverGroups(ctx, missing, ApproverKindAccess); err == nil {
+		t.Error("ResolveServerApproverGroups(missing server) error = nil, want an error")
+	}
+
+	// And the empty-input shortcut must not touch the database at all.
+	hook.count.Store(0)
+
+	empty, err := testStore.ResolveServerApproverGroupsByServers(ctx, nil, ApproverKindAccess)
+	if err != nil {
+		t.Fatalf("ResolveServerApproverGroupsByServers(nil) error = %v", err)
+	}
+
+	if len(empty) != 0 {
+		t.Errorf("ResolveServerApproverGroupsByServers(nil) = %v, want empty", empty)
+	}
+
+	if got := hook.count.Load(); got != 0 {
+		t.Errorf("no servers requested took %d queries, want 0", got)
+	}
+}
+
+// TestServerApproversMayApprove covers the decision half applied to an
+// already-resolved answer — the same intersection MayApproveForServer makes,
+// including every fail-closed direction.
+func TestServerApproversMayApprove(t *testing.T) {
+	t.Parallel()
+
+	server := uuid.New()
+	ops := uuid.New()
+	others := uuid.New()
+
+	resolved := ServerApprovers{server: {ops}}
+
+	if !resolved.MayApprove(server, []uuid.UUID{others, ops}) {
+		t.Error("MayApprove(named group) = false, want true")
+	}
+
+	if resolved.MayApprove(server, []uuid.UUID{others}) {
+		t.Error("MayApprove(unrelated group) = true, want false")
+	}
+
+	if resolved.MayApprove(server, nil) {
+		t.Error("MayApprove(no user groups) = true, want false")
+	}
+
+	if resolved.MayApprove(uuid.New(), []uuid.UUID{ops}) {
+		t.Error("MayApprove(unknown server) = true, want false")
+	}
+
+	var absent ServerApprovers
+	if absent.MayApprove(server, []uuid.UUID{ops}) {
+		t.Error("MayApprove on a nil map = true, want false")
+	}
+}
+
+// assertSameUUIDSet compares two uid lists as sets, and rejects duplicates in
+// the first — the union rule promises membership, not order, but never repeats.
+func assertSameUUIDSet(t *testing.T, what string, got, want []uuid.UUID) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Errorf("%s = %v, want the set %v", what, got, want)
+
+		return
+	}
+
+	seen := make(map[uuid.UUID]struct{}, len(got))
+
+	for _, uid := range got {
+		if _, dup := seen[uid]; dup {
+			t.Errorf("%s = %v, contains a duplicate", what, got)
+
+			return
+		}
+
+		seen[uid] = struct{}{}
+	}
+
+	for _, uid := range want {
+		if _, ok := seen[uid]; !ok {
+			t.Errorf("%s = %v, missing %s", what, got, uid)
+		}
+	}
+}
+
 // TestHasServerApproverGroups covers the coarse "is this user an approver
 // anywhere" probe that gates the approvals stream and the pending badge.
 func TestHasServerApproverGroups(t *testing.T) {
