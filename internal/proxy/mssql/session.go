@@ -420,10 +420,18 @@ func (s *session) serve(ctx context.Context) error {
 	up := s.upstream
 	clientConn := s.conn
 
-	go shared.RunGuarded(watchCtx, s.logger, relayNameWatchdog, func() {
+	// RunWatchdog, not RunGuarded, and on this protocol it is the whole of the
+	// enforcement: MSSQL has no mid-stream guard.Check() on the relay's hot path
+	// the way Oracle and PostgreSQL do, so a watchdog that merely survived its
+	// own panic would leave the session running with no expiry, no byte quota and
+	// no revocation check at all. The teardown closes both conns — what
+	// onLimitViolation does, minus the logging that may be what panicked.
+	go shared.RunWatchdog(watchCtx, s.logger, relayNameWatchdog, func() {
 		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
 			s.onLimitViolation(ctx, up, clientConn, err)
 		})
+	}, func() {
+		closeSessionConns(up, clientConn)
 	})
 
 	// Install the interception seams the relay pumps already call. Nothing
@@ -445,6 +453,19 @@ func (s *session) onLimitViolation(ctx context.Context, up *UpstreamConn, client
 	s.logger.WarnContext(ctx, "terminating MSSQL session: grant no longer valid mid-stream",
 		slog.Any("error", err))
 
+	closeSessionConns(up, clientConn)
+}
+
+// closeSessionConns drops both sockets, which is how a session is ended from
+// outside its pumps: whichever pump is parked in a read or write returns, relay
+// unblocks the other, and the session tears down. Split out of onLimitViolation
+// so the watchdog's panic guard can perform the same teardown without
+// re-entering whatever panicked.
+//
+// It takes the conns rather than reading them off the session because the
+// watchdog captured its locals to stay clear of the mutable fields. Safe to call
+// twice, and safe concurrently with a blocked read/write.
+func closeSessionConns(up *UpstreamConn, clientConn net.Conn) {
 	if up != nil {
 		_ = up.Close()
 	}

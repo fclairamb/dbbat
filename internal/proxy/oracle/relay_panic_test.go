@@ -113,3 +113,37 @@ func TestClientRelayPanicReportsToo(t *testing.T) {
 		t.Fatal("the client relay panicked without reporting")
 	}
 }
+
+// TestPreAuthPumpPanicUnblocksStopPump covers the pre-auth relay, which is the
+// sharpest-edged of the three Oracle relay goroutines.
+//
+// pumpDone is buffered 1 and stopPump *blocks* reading it, at every exit of the
+// pre-auth loop. So a pump that panicked without yielding a value would not
+// merely leak the session the way a post-auth leg would: it would hang the auth
+// handover outright, with the client waiting on a proxy waiting on a goroutine
+// that no longer exists. This mirrors relayPreAuthNegotiation's wiring — keep
+// the send here in step with the one there.
+func TestPreAuthPumpPanicUnblocksStopPump(t *testing.T) {
+	t.Parallel()
+
+	s := newTestSession(&store.Grant{
+		UID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour),
+		Definition: &store.GrantDefinition{},
+	})
+	s.clientConn = &panicOnReadConn{}
+
+	pumpDone := make(chan error, 1)
+
+	go func() {
+		pumpDone <- shared.RunRelay(s.ctx, s.logger, relayNamePreAuthPump, func() error {
+			return s.pumpPreAuthUpstream(&panicOnReadConn{})
+		})
+	}()
+
+	select {
+	case err := <-pumpDone:
+		require.ErrorIs(t, err, shared.ErrRelayPanic)
+	case <-time.After(5 * time.Second):
+		t.Fatal("stopPump would block here forever: the pre-auth pump panicked without reporting")
+	}
+}
