@@ -357,12 +357,11 @@ func (s *session) hasStatementControls() bool {
 //
 // This is the single quota-check insertion point for both re-execution frames:
 // the SQL-less OALL8 (handleCursorReexec) and the piggyback re-execution
-// (handlePiggybackReexec). Each
-// resolves its cursor before delegating here, which is deliberate — a cursor
-// dbbat never saw parsed keeps answering refuseUnknownCursor even when the
-// grant is also exhausted. That refusal is the more specific and the more
-// security-relevant one, and burying it under a quota error would make it
-// harder to diagnose.
+// (handlePiggybackReexec). Each resolves its cursor before delegating here,
+// which is deliberate — a cursor dbbat never saw parsed keeps answering
+// refuseUnknownCursor even when the grant is also exhausted. That refusal is
+// the more specific and the more security-relevant one, and burying it under a
+// quota error would make it harder to diagnose.
 func (s *session) regateCursor(cursor *trackedCursor) error {
 	// sql and bindValues are fixed when the cursor is built and never rewritten,
 	// so they are safe to read here; cursorID is not — learnCursorID fills it in

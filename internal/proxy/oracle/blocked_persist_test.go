@@ -161,7 +161,7 @@ func piggybackExecSelect1() []byte {
 // recorder every control refusal uses.
 //
 // Every gated op is covered, because they decode independently: the three that
-// carry their own SQL, and the three re-execution frames that borrow it from
+// carry their own SQL, and the two re-execution frames that borrow it from
 // the cursor.
 func TestQuotaRefusals_ArePersisted(t *testing.T) {
 	t.Parallel()
@@ -306,7 +306,7 @@ func TestQuotaRefusalReasons_ArePersisted(t *testing.T) {
 	}
 }
 
-// TestQuotaRefusal_DecodeFailureIsStillForwarded is the first of the three
+// TestQuotaRefusal_DecodeFailureIsStillForwarded is the first of the two
 // invariants the move had to preserve. Oracle's fail-behavior on an
 // undecodable payload is forward-don't-block (the caveat in docs/approvals.md),
 // and the quota check now sits *behind* the decode — so a frame dbbat cannot
