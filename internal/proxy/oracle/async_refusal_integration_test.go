@@ -194,11 +194,13 @@ const idleRevokeSettle = 3 * time.Second
 // TestIntegration_BlockedStatementRefusesJDBCThin measures a refusal that
 // *answers* a statement. The two cases here are the ones that do not:
 //
-//  1. a byte quota crossed while dbbat is relaying a reply — a refusal cut into
-//     a call the client is still parked in the receive for. dbbat writes an
-//     ORA-00028 stamped with the last call number it observed, and the question
-//     the measurement settles is whether the driver accepts that number or
-//     mislabels the error as ORA-18745;
+//  1. a byte quota crossed while dbbat is relaying a reply — a refusal with
+//     nowhere readable to go, because the client is mid-way through consuming a
+//     TTC message stream. dbbat holds it until the client announces a boundary
+//     by sending its next call and answers *that* with an ORA-00028 stamped with
+//     its number. The measurement settles two things at once: that the driver
+//     surfaces the error rather than a dead socket, and that it accepts the
+//     number rather than mislabelling the error as ORA-18745;
 //  2. a grant revoked while the client sits idle between calls — the one path
 //     where there is no call to end, where dbbat deliberately writes no frame
 //     at all and force-closes both sockets instead.
@@ -267,6 +269,8 @@ func TestIntegration_AsyncRefusalAgainstJDBCThin(t *testing.T) {
 		run.extra = []string{strconv.Itoa(quotaProbeFetch)}
 
 		watchdogBefore := env.logs.count(logMsgWatchdogTeardown)
+		heldBefore := env.logs.count(logMsgRefusalHeld)
+		deliveredBefore := env.logs.count(logMsgRefusalDelivered)
 
 		output := run.run(t)
 
@@ -293,15 +297,20 @@ func TestIntegration_AsyncRefusalAgainstJDBCThin(t *testing.T) {
 		assert.Less(t, rowsBefore, quotaProbeRows,
 			"a full drain is not a mid-result-set refusal:\n%s", output)
 
-		// What dbbat wrote. This half went exactly as the decision predicted:
-		// the inline check in upstreamToClient fired (not the watchdog), it wrote
-		// one ORA-00028, and it stamped the call number of the fetch the client
-		// was parked in — read back off the wire, not off dbbat's own logs.
+		// What dbbat wrote. The violation is caught by the inline check (not the
+		// watchdog), held while the reply in flight finishes, and written as one
+		// ORA-00028 answering the client's *next* call — stamped with that
+		// call's number, read back off the wire rather than off dbbat's logs.
+		// Exactly one frame either way: holding does not turn into pushing.
 		assert.Zero(t, env.logs.count(logMsgWatchdogTeardown)-watchdogBefore,
-			"a mid-reply trip must be caught by the inline check, which writes a frame, not by "+
-				"the watchdog, which closes the socket")
+			"a mid-reply trip must be caught by the inline check, which holds the refusal for the "+
+				"client's next call, not by the watchdog, which closes the socket")
+		assert.Positive(t, env.logs.count(logMsgRefusalHeld)-heldBefore,
+			"the refusal must have been held rather than written into the reply in progress")
+		assert.Positive(t, env.logs.count(logMsgRefusalDelivered)-deliveredBefore,
+			"the held refusal must have been delivered on the client's next call")
 		require.Len(t, frames, 1,
-			"dbbat must have written exactly one OER into the reply it cut:\n%s", output)
+			"dbbat must have written exactly one OER:\n%s", output)
 		assert.Equal(t, 28, frames[0].errorCode, "the frame is the ORA-00028 session-terminated refusal")
 		assert.True(t, frames[0].callNumberOK,
 			"the frame must decode as a well-formed summary object")
@@ -310,41 +319,38 @@ func TestIntegration_AsyncRefusalAgainstJDBCThin(t *testing.T) {
 		assert.Contains(t, frames[0].message, "bandwidth quota exceeded",
 			"the frame must carry the real reason")
 
-		// What ojdbc did with it, which is the measurement and which does
-		// **not** match the prediction. The driver never reports the ORA-00028:
-		// it reports ORA-03113 "database connection closed by peer" with
-		// last_rpc=Fetch a row, caused by ORA-17800 (read returned -1). So the
-		// frame reaches the socket and is discarded unparsed.
+		// What ojdbc does with it, which is the measurement.
 		//
-		// The reason is not the call number — that was the identified risk and
-		// it is ruled out above and by the absence of ORA-18745 below, which is
-		// the symptom a rejected call number produces. It is *where* the frame
-		// is injected: dbbat cuts in at a TNS packet boundary, and a fetch reply
-		// is a TTC message stream whose messages straddle packets, so the OER
-		// lands inside a half-delivered row batch that the driver is still
-		// consuming. go-ora reads it the same way (see the sibling subtest), so
-		// this is a property of the injection point rather than of ojdbc.
+		// Before the fix this read the other way round — ORA-03113
+		// "database connection closed by peer" (last_rpc=Fetch a row, cause
+		// ORA-17800), with the ORA-00028 written and discarded unparsed. The
+		// call number was never the problem (ORA-18745 is what a rejected one
+		// looks like, and it never appeared); *where* the frame went was. dbbat
+		// cut in at a TNS packet boundary while a fetch reply is a TTC message
+		// stream whose messages straddle packets, so the OER landed inside a
+		// half-delivered row batch and was consumed as row bytes. go-ora read it
+		// the same way, which is what made the injection point and not either
+		// driver's parser the thing to fix.
 		//
-		// Pinned as measured rather than as wanted. The fix — hold the refusal
-		// until the row stream reaches a message boundary — is
-		// specs/todos/2026-08-13-01-mid-reply-refusal-lands-mid-ttc-message.md.
+		// The refusal now waits for the client to announce a boundary by sending
+		// its next call, and answers that — see session.enforceMidStreamLimits.
 		assert.NotContains(t, output, "ORA-18745",
 			"ORA-18745 is what a *rejected call number* looks like; the stamped number is "+
 				"correct, so this must not appear:\n%s", output)
-		assert.NotContains(t, output, "midfetch: code=28 ",
-			"measured: ojdbc does not surface the mid-reply ORA-00028. If this now fails, "+
-				"the driver (or dbbat's injection point) changed and docs/oracle.md is stale:\n%s", output)
-		assert.Contains(t, output, "midfetch: code=3113 ",
-			"measured: the mid-reply frame is discarded and the session's close is what the "+
-				"client reports:\n%s", output)
+		assert.Contains(t, output, "midfetch: code=28 ",
+			"the whole point of holding the refusal for a call boundary: ojdbc must now report "+
+				"the ORA-00028 rather than a dead socket:\n%s", output)
+		assert.NotContains(t, output, "midfetch: code=3113 ",
+			"a plain I/O error means the frame was written somewhere the driver could not read "+
+				"it, which is the defect this measures:\n%s", output)
 		assert.Contains(t, output, "done", "the probe must finish rather than throw:\n%s", output)
 	})
 
 	t.Run("go-ora reads the same mid-result-set trip", func(t *testing.T) {
-		// The control for the case above: same refusal, same injection point, a
-		// different driver. Whatever ojdbc does with a frame delivered inside a
-		// half-written row batch, this says whether it is ojdbc's reading of it
-		// or the frame's placement.
+		// The control for the case above: same refusal, same delivery point, a
+		// different driver. It is what established that the old frame's
+		// placement — and not ojdbc's reading of it — was the defect, so it
+		// moves with the fix: both drivers must now surface the ORA-00028.
 		env.replaceGrant(t, nil, testsupport.WithMaxBytesTransferred(quotaProbeBudget))
 
 		watchdogBefore := env.logs.count(logMsgWatchdogTeardown)
@@ -368,10 +374,10 @@ func TestIntegration_AsyncRefusalAgainstJDBCThin(t *testing.T) {
 		require.Error(t, err, "go-ora drained the whole result set under a quota that should have cut it")
 		assert.Positive(t, drained, "the refusal must have cut into a reply that was already streaming")
 		assert.Less(t, drained, quotaProbeRows, "a full drain is not a mid-result-set refusal")
-		assert.NotContains(t, err.Error(), "ORA-00028",
-			"measured: go-ora does not surface the mid-reply frame either — it reports a dead "+
-				"connection, the same as ojdbc. That is what makes the injection point, and not "+
-				"either driver's error handling, the thing to fix")
+		assert.Contains(t, err.Error(), "ORA-00028",
+			"go-ora used to report a dead connection here, for the same reason ojdbc did: the "+
+				"frame was written inside a half-delivered row batch. Held for a call boundary, "+
+				"it must reach both drivers")
 	})
 
 	t.Run("grant revoked while the client is idle", func(t *testing.T) {
