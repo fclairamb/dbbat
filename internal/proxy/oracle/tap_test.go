@@ -4,10 +4,12 @@ package oracle
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -206,9 +208,9 @@ func (tap *recordingTap) lastRecord(t *testing.T) *tapRecord {
 // byte stream: the error code it carries and the call number it stamps.
 //
 // TNS framing is parsed with this package's own reader, and the summary object
-// with the walk the tail learner uses (skipOERFixedFields), so a frame is read
-// back exactly the way the code under measurement writes one — and a real
-// server's frame is read the same way as dbbat's.
+// with the same walks the tail learner uses, so a frame is read back exactly the
+// way the code under measurement writes one — and a real server's frame is read
+// the same way as dbbat's.
 func tappedOERs(t *testing.T, stream []byte) []tappedOER {
 	t.Helper()
 
@@ -231,27 +233,118 @@ func tappedOERs(t *testing.T, stream []byte) []tappedOER {
 			continue
 		}
 
-		pos, errCode, callNumber, ok := skipOERFixedFields(defaultOERShape(), payload, 0)
-		if !ok {
-			// The compressed walk did not recognize the layout. Report the OER
-			// anyway from the leading fields, which decode under a much weaker
-			// assumption — a frame nobody can read is itself a finding, and
-			// dropping it silently would make it look like nothing was sent.
-			if info := decodeOERAt(payload, 0); info != nil {
-				out = append(out, tappedOER{errorCode: info.ErrorCode, message: info.ErrorMessage})
-			}
+		if decoded, ok := decodeTappedOER(payload); ok {
+			out = append(out, decoded)
 
 			continue
 		}
 
-		out = append(out, tappedOER{
-			errorCode:     errCode,
-			callNumber:    callNumber,
-			callNumberOK:  true,
-			messageParsed: true,
-			message:       extractORAMessage(payload[pos:]),
-		})
+		// Neither layout recognized the frame. Report it anyway from the
+		// leading fields, which decode under a much weaker assumption — a frame
+		// nobody can read is itself a finding, and dropping it silently would
+		// make it look like nothing was sent.
+		if info := decodeOERAt(payload, 0); info != nil {
+			out = append(out, tappedOER{errorCode: info.ErrorCode, message: info.ErrorMessage})
+		}
 	}
+}
+
+// decodeTappedOER reads one summary object in whichever of the two encodings it
+// is in: the compressed one every thin driver parses, or the fixed-width
+// little-endian one OCI/sqlplus parses.
+//
+// Trying both is not belt-and-braces, and neither is arbitrating between them by
+// the frame's own message. A fixed-width summary is mostly *zeroes*, and a run
+// of zeroes walks cleanly as a sequence of compressed integers — so the
+// compressed walk does not fail on an OCI frame, it succeeds and reports
+// ORA-00000 on call 0. Measured: dbbat's ORA-00028 to the bundled 23.26 client
+// read back as ORA-00000 with the right message text attached, which would have
+// been recorded as "dbbat wrote a frame nobody can name" when what it really
+// wrote was the frame that client went on to report correctly.
+//
+// The message is the arbiter because it is the one field neither encoding can
+// fake: an OER carrying "ORA-00028: …" carries error code 28, so a walk that
+// disagrees with the text lost the layout, whatever else it validated.
+func decodeTappedOER(payload []byte) (tappedOER, bool) {
+	compressed, compressedOK := tappedCompressedOER(payload)
+	fixed, fixedOK := tappedFixedWidthOER(payload)
+
+	if wanted, ok := oraCodeInMessage(payload); ok {
+		switch {
+		case compressedOK && compressed.errorCode == wanted:
+			return compressed, true
+		case fixedOK && fixed.errorCode == wanted:
+			return fixed, true
+		}
+
+		return tappedOER{}, false
+	}
+
+	if compressedOK {
+		return compressed, true
+	}
+
+	return fixed, fixedOK
+}
+
+// tappedCompressedOER decodes the thin-client encoding through the very walk
+// dbbat's own tail learner uses.
+func tappedCompressedOER(payload []byte) (tappedOER, bool) {
+	pos, errCode, callNumber, ok := skipOERFixedFields(defaultOERShape(), payload, 0)
+	if !ok {
+		return tappedOER{}, false
+	}
+
+	return tappedOER{
+		errorCode:     errCode,
+		callNumber:    callNumber,
+		callNumberOK:  true,
+		messageParsed: true,
+		message:       extractORAMessage(payload[pos:]),
+	}, true
+}
+
+// tappedFixedWidthOER decodes a summary object in the OCI/sqlplus encoding.
+//
+// Validation is delegated to oerFixedWidthTailFieldsAt — the same check the
+// shape learner uses, at whichever of the two fixed layouts holds: the trailing
+// RetCode has to repeat the leading error number and the call status has to be
+// non-zero, so a run of row bytes cannot masquerade as one. Reading the fields
+// off the layout afterwards is then reading them the way encodeOERFixedWidth
+// wrote them.
+func tappedFixedWidthOER(payload []byte) (tappedOER, bool) {
+	tail, ok := oerFixedWidthTailFieldsAt(payload, 0)
+	if !ok {
+		return tappedOER{}, false
+	}
+
+	layout := oerShape{fixedWidth: true, fixedWidth64: tail.fixedWidth64}.layoutFor()
+
+	return tappedOER{
+		errorCode:     int(binary.LittleEndian.Uint16(payload[layout.errNum:])),
+		callNumber:    byte(binary.LittleEndian.Uint32(payload[layout.callNumber:])),
+		callNumberOK:  true,
+		messageParsed: true,
+		message:       extractORAMessage(payload[layout.prefixLen:]),
+	}, true
+}
+
+// oraCodeInMessage reads the error number out of the "ORA-NNNNN: …" text a
+// summary object carries, which is what lets the two candidate decodes above be
+// arbitrated rather than guessed between. Not ok for a frame with no message —
+// a status OER, which carries no code to disagree about either.
+func oraCodeInMessage(payload []byte) (int, bool) {
+	msg := extractORAMessage(payload)
+	if !strings.HasPrefix(msg, "ORA-") || len(msg) < len("ORA-00000") {
+		return 0, false
+	}
+
+	code, err := strconv.Atoi(msg[len("ORA-"):len("ORA-00000")])
+	if err != nil {
+		return 0, false
+	}
+
+	return code, true
 }
 
 // tappedPacketTypes lists the TNS packet types in a tapped stream, in order. It
