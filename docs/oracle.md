@@ -265,10 +265,42 @@ peak size stays far below the 40 cursors its statement-cache-churn workload
 opens and closes.
 
 One gotcha the fixtures pinned: the OER **end-of-call bit is not universal**.
-go-ora's connections carry `CallStatus 0x10005`, python-oracledb's carry
-`CallStatus 1–2`. That is why `decodeOERFieldsAt` is split out of `decodeOERAt`
-— the strict decoder, which demands the bit, cannot see those clients' OERs at
-all.
+On the successful calls the first fixtures covered, go-ora's connections carry
+`CallStatus 0x10005` and python-oracledb's carry `CallStatus 1–2`. That is why
+`decodeOERFieldsAt` is split out of `decodeOERAt` — the strict decoder, which
+demands the bit, cannot see those OERs at all.
+
+**It is not a client trait either, and reading it as one cost a second set of
+data.** `testdata/python_thin_failed_stmt.pcapng` and
+`testdata/go_ora_failed_stmt.pcapng` record the same six failures on each
+client (regenerate with `go test -tags capture -run 'TestCapture_.*FailedStatements'`),
+and the bit follows the *call*, identically on both:
+
+| Failing statement | ORA | `CallStatus` (both clients) | Bit |
+|---|---|---|---|
+| `DROP TABLE` of a missing table | 00942 | `0x10001` / `0x10005` | yes |
+| `SELECT` against a missing table | 00942 | `5` | no |
+| `INSERT` violating a unique key | 00001 | `1` / `5` | no |
+| `SELECT 1/0` — fails producing the row | 01476 | `1` | no |
+| PL/SQL `RAISE_APPLICATION_ERROR` | 20001 | `1` | no |
+| PL/SQL block that will not compile | 06550 | `1` | no |
+
+Every one of them arrives as a **standalone func `0x04`** after a marker
+exchange — never embedded in a Response — so `handleOERStatus` is where a
+failure's text is won or lost, and until this was measured it was lost on
+*every* client, go-ora included: five of the six shapes were dropped by
+`decodeOERAt`, the statement stayed pending, and the next statement's
+`flushPendingQuery` closed it as a **success with no error at all**.
+
+`decodeErrorOERAt` is what reads them now. It does not loosen an anchor; it
+replaces the bit with the proof `decodeTTCResponse` is held to — a real error
+code inside Oracle's range, a printable `ORA-`/`PLS-`/`TNS-` diagnostic in the
+tail, and that diagnostic **naming the very code the fields reported**
+(`ORA-00942` for 942, `ORA-06550` for 6550). A run of row bytes that decoded as
+seven ints would also have to be followed by the ASCII spelling of the number
+its fourth field landed on. It is errors-only: a bit-less standalone OER
+reporting success or ORA-01403 still completes nothing, because nothing proves
+those bytes.
 
 Cursor-id learning never required the bit. Query completion did, and that cost
 real data: for a full release every INSERT/UPDATE/DELETE run by a
@@ -286,13 +318,22 @@ bytes:
 
 | Path | Bit required? | Why |
 |------|---------------|-----|
-| `handleOERStatus` (standalone func `0x04`) | **yes** | routed on byte 0 alone, so any row-value length prefix of `0x04` arrives claiming to be an OER |
+| `handleOERStatus` (standalone func `0x04`), **reporting success or ORA-01403** | **yes** | routed on byte 0 alone, so any row-value length prefix of `0x04` arrives claiming to be an OER, and a status carries no text to prove itself with |
+| `handleOERStatus`, **reporting a failure**, mid-row-stream | **yes** | still row bytes; the strict decoder stays the only thing that may end a call there |
+| `handleOERStatus`, **reporting a failure**, outside a row stream | no | `decodeErrorOERAt` proves the tail is a diagnostic naming the code the fields reported — see the table above |
 | `handleResponse`, mid-row-stream | **yes** | the payload *is* row bytes; a `0x04` run inside it is data |
 | `handleResponse`, outside a row stream | no | the payload is a return-parameter block, and the anchors above are what stands in for the bit |
 
-The live OER is replayed in `oer_no_end_of_call_test.go`; its envelope is
-derived from the captures in `testdata/` rather than copied from the production
-dump, which is not in the repository.
+Cursor-id learning is on none of those rows and was not touched: it reads
+`findPlausibleOERInResponse`, which still refuses any OER reporting a real
+failure, because such an OER assigns no cursor.
+
+The live success OER is replayed in `oer_no_end_of_call_test.go`; its envelope
+is derived from the captures in `testdata/` rather than copied from the
+production dump, which is not in the repository. The failures are replayed
+straight out of the two capture files in `failed_stmt_replay_test.go`, and
+driven through the whole proxy against a live Oracle in
+`failed_stmt_integration_test.go`.
 
 A re-execution naming a cursor dbbat cannot resolve goes through
 `refuseUnknownCursor`, exactly like the SQL-less `OALL8` and a fresh-query
@@ -416,12 +457,15 @@ followed by TTC compressed integers:
 - `errNum` is `0` on success, `1403` for end-of-data (ORA-01403, not an error),
   or the `ORA-NNNNN` code on failure — followed later by the CLR-prefixed
   `ORA-...` message text.
-- `callStatus` has the end-of-call bit `0x010000` set on every OER a go-ora
-  session carries and on none of a python-oracledb thin session's, so
-  `decodeOERAt` uses it to reject stray `0x04` runs only where a false positive
-  would be made of row bytes — see the table under "the OER end-of-call bit is
-  not universal". `ttc_oer.go`, `findOERInResponse` and
-  `findPlausibleOERInResponse`.
+- `callStatus` has the end-of-call bit `0x010000` set on some calls and not
+  others. It is *not* the client discriminator an earlier reading of the
+  fixtures took it for: on a successful call go-ora sees it and python-oracledb
+  thin does not, but on a **failing** one both clients agree, and only a failed
+  DDL carries it. `decodeOERAt` therefore uses it to reject stray `0x04` runs
+  only where a false positive would be made of row bytes, and
+  `decodeErrorOERAt` stands in for it on a proven diagnostic — see the tables
+  under "the OER end-of-call bit is not universal". `ttc_oer.go`,
+  `findOERInResponse` and `findPlausibleOERInResponse`.
 
 #### Ending a call: the OER encoder
 
