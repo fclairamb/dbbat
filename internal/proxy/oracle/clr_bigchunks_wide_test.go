@@ -107,9 +107,7 @@ func walkWideAuthPairs(t *testing.T, body []byte, bigChunks bool) []struct {
 func TestSqlplusCapture_NegotiatesBigClrChunksAndCarriesNoLongValue(t *testing.T) {
 	t.Parallel()
 
-	const capture = "sqlplus_cursor_reexec.pcapng"
-
-	raw, caps := firstSetProtocolReply(t, capture)
+	raw, caps := firstSetProtocolReply(t, wideAuthCapture)
 
 	require.Greater(t, len(caps), bigClrChunksCapIndex)
 	assert.Equal(t, byte(0x7f), caps[bigClrChunksCapIndex],
@@ -120,7 +118,7 @@ func TestSqlplusCapture_NegotiatesBigClrChunksAndCarriesNoLongValue(t *testing.T
 	longest := 0
 
 	for _, sub := range []byte{PiggybackSubAuth1, PiggybackSubAuth2} {
-		body := captureAuthPacket(t, capture, sub).Payload[ttcDataFlagsSize:]
+		body := captureAuthPacket(t, sub).Payload[ttcDataFlagsSize:]
 
 		for _, got := range walkWideAuthPairs(t, body, false) {
 			key := string(got.pair.Key)
@@ -140,7 +138,7 @@ func TestSqlplusCapture_NegotiatesBigClrChunksAndCarriesNoLongValue(t *testing.T
 	// The same body read with the opposite flag decodes identically, which is
 	// the mechanical statement of "this capture cannot tell the two apart".
 	for _, sub := range []byte{PiggybackSubAuth1, PiggybackSubAuth2} {
-		body := captureAuthPacket(t, capture, sub).Payload[ttcDataFlagsSize:]
+		body := captureAuthPacket(t, sub).Payload[ttcDataFlagsSize:]
 		assert.Equal(t, walkWideAuthPairs(t, body, false), walkWideAuthPairs(t, body, true),
 			"every value being short, both readers must agree on the whole captured body")
 	}
@@ -346,7 +344,7 @@ func TestParseAuthKVDictionaryWide_BigChunkValue(t *testing.T) {
 	assert.Equal(t, "DEADBEEF", resp.properties[authKeySessKey],
 		"the pair after the long value must still be found")
 
-	// The pre-fix behaviour on the same bytes: told single-byte chunks, the walk
+	// The pre-fix behavior on the same bytes: told single-byte chunks, the walk
 	// loses the pair boundary rather than reading the value.
 	legacy := &upstreamAuthResponse{properties: map[string]string{}}
 

@@ -28,11 +28,17 @@ import (
 // both buffer-sized (user-len 0x12 = 3*len("system")) and neither pair-count
 // padded.
 
-// captureAuthPacket returns the first AUTH packet of one phase from a capture.
-func captureAuthPacket(t *testing.T, dumpName string, sub byte) *TNSPacket {
+// wideAuthCapture is the OCI login every wide-path test reads its framing off:
+// macOS Instant Client 23.3 (sqlplus 23.3.0.23.09) against Oracle 23ai Free. It
+// is the only OCI capture in testdata/, so it is a constant rather than a
+// parameter — re-point it here if a fresh one is ever recorded.
+const wideAuthCapture = "sqlplus_cursor_reexec.pcapng"
+
+// captureAuthPacket returns the first AUTH packet of one phase from the capture.
+func captureAuthPacket(t *testing.T, sub byte) *TNSPacket {
 	t.Helper()
 
-	td := loadTestDump(t, dumpName)
+	td := loadTestDump(t, wideAuthCapture)
 
 	for i := range td.Packets {
 		pkt, err := parseTNSFromDumpPacket(td.Packets[i].Data)
@@ -46,7 +52,7 @@ func captureAuthPacket(t *testing.T, dumpName string, sub byte) *TNSPacket {
 		}
 	}
 
-	t.Fatalf("%s contains no AUTH packet with sub %#x", dumpName, sub)
+	t.Fatalf("%s contains no AUTH packet with sub %#x", wideAuthCapture, sub)
 
 	return nil
 }
@@ -74,7 +80,7 @@ func TestDetectWideAuthFraming_SqlplusCapture(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			pkt := captureAuthPacket(t, "sqlplus_cursor_reexec.pcapng", tc.sub)
+			pkt := captureAuthPacket(t, tc.sub)
 
 			// Delta 1: OCI puts 0x2000 in the TNS data flags, thin clients 0x0000.
 			assert.Equal(t, wideAuthDataFlags, pkt.Payload[:ttcDataFlagsSize],
@@ -119,7 +125,7 @@ func TestBuildWideAuthBody_PreambleMatchesCapture(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
-			body := captureAuthPacket(t, "sqlplus_cursor_reexec.pcapng", sub).
+			body := captureAuthPacket(t, sub).
 				Payload[ttcDataFlagsSize:]
 
 			f, ok := detectWideAuthFraming(body)
@@ -149,7 +155,7 @@ func TestBuildWideAuthBody_PreambleMatchesCapture(t *testing.T) {
 func TestWideAuthFramingFor_UsesTheClientPacket(t *testing.T) {
 	t.Parallel()
 
-	phase2 := captureAuthPacket(t, "sqlplus_cursor_reexec.pcapng", PiggybackSubAuth2)
+	phase2 := captureAuthPacket(t, PiggybackSubAuth2)
 
 	s := &session{}
 	f := s.wideAuthFramingFor(phase2, PiggybackSubAuth2, authPhase2FuncSeq,
