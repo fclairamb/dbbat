@@ -559,6 +559,43 @@ func TestIntegration_DBViolation_Denied(t *testing.T) {
 	require.Error(t, err, "access to the local database must be denied")
 }
 
+// TestIntegration_MergeIntoOtherDatabase_Denied verifies that an aggregate
+// whose $merge names a foreign target database is refused even under a
+// full-write grant, while the same pipeline targeting the session's own
+// database still runs. The message's $db is the granted database in both cases,
+// so only the stage's own db distinguishes them.
+func TestIntegration_MergeIntoOtherDatabase_Denied(t *testing.T) {
+	ctx := context.Background()
+	f := setupFixture(ctx, t)
+
+	client := f.dialThrough(fixtureUser, fixturePass)
+	defer func() { _ = client.Disconnect(ctx) }()
+
+	src := client.Database(testDBName).Collection("widgets")
+
+	cursor, err := src.Aggregate(ctx, mongo.Pipeline{
+		bson.D{{Key: "$merge", Value: bson.D{{Key: "into", Value: bson.D{
+			{Key: "db", Value: "otherdb"},
+			{Key: "coll", Value: "stolen"},
+		}}}}},
+	})
+	require.Error(t, err, "$merge into a foreign database must be refused")
+
+	if cursor != nil {
+		_ = cursor.Close(ctx)
+	}
+
+	// The same shape aimed at the granted database is ordinary traffic.
+	ownCursor, err := src.Aggregate(ctx, mongo.Pipeline{
+		bson.D{{Key: "$merge", Value: bson.D{{Key: "into", Value: bson.D{
+			{Key: "db", Value: testDBName},
+			{Key: "coll", Value: "widgets_copy"},
+		}}}}},
+	})
+	require.NoError(t, err, "$merge into the session's own database must still work")
+	require.NoError(t, ownCursor.Close(ctx))
+}
+
 // TestIntegration_SessionDump verifies a per-connection dump file is written.
 func TestIntegration_SessionDump(t *testing.T) {
 	ctx := context.Background()
