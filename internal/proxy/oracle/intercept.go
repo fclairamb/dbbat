@@ -40,6 +40,18 @@ const (
 	// every login — see clientCallNumber.
 	logMsgUnnamedCallForwarded = "forwarding a message whose call dbbat cannot name"
 
+	// logMsgUnnameableStatementRecorded is the allow branch of that same
+	// fail-open: the message carried a statement the gate permits, so it is
+	// recorded in /queries and forwarded.
+	//
+	// It is deliberately NOT logMsgQueryIntercepted. That message is the
+	// cursor-id learning measurement's own counter (see
+	// TestIntegration_CursorIDLearningMissRate), which pairs every parse it
+	// counts with a learned cursor id — and a statement recovered from a frame
+	// dbbat cannot even name never learns one, so reusing the message would
+	// report a learning miss that is nothing of the kind.
+	logMsgUnnameableStatementRecorded = "recorded a statement carried by a message dbbat cannot name"
+
 	// logMsgUnnameableStatementRefused is the other end of that fail-open: the
 	// message carried a statement a statement-shaped control refuses, so the
 	// session is ended rather than answered. WARN, and it names the statement —

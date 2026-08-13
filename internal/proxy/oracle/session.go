@@ -1492,6 +1492,13 @@ func (s *session) gateStatement(handle func([]byte) error, ttcPayload []byte) bo
 // nameable frame is refused — a statement hiding in a way it cannot hide from
 // the ordinary gate, which is exactly what this bound exists to prevent.
 //
+// The rest of handleJDBCExec's pre-flight is here too, and for the same reason:
+// the quota check ahead of the validators, and — on the allow branch — the
+// pending query and the store write. A statement that runs while leaving no
+// `queries` row would make this path the one place a session's SQL escapes the
+// audit trail, and an unrecorded statement is also an uncounted one, since
+// MaxQueryCounts is charged when a pending query completes on the response leg.
+//
 // It is refused by **ending the session**, not by an OER, and that is the whole
 // reason this is a separate path: dbbat cannot name the call, so it has no
 // legitimate frame to answer with. Dropping the socket is the same answer
@@ -1515,41 +1522,77 @@ func (s *session) gateUnnameableFrame(ttcPayload []byte) bool {
 	// text recorded in /queries.
 	sql = shared.NormalizeSQL(sql)
 
-	var refusal error
-
-	if s.grant != nil {
-		refusal = shared.ValidateOracleQuery(sql, s.grant)
-	}
-
-	if refusal == nil {
-		// The static controls allow it. An approval pattern still might not,
-		// and a hold works here even though a refusal does not: it parks the
-		// *forwarding* and lets the packet through once a human approves, with
-		// no call to answer either way.
-		if _, err := s.holdIfNeeded(sql); err != nil {
-			refusal = err
+	// The pre-flight, in handleJDBCExec's order: quotas, expiry and revocation
+	// first, then the static validators. refuseStatement records the refusal
+	// against the statement, so a teardown is not a refusal that vanished.
+	err := s.book(func() error {
+		if err := s.checkQuotas(); err != nil {
+			return s.refuseStatement(sql, nil, err)
 		}
+
+		if s.grant != nil {
+			if err := shared.ValidateOracleQuery(sql, s.grant); err != nil {
+				return s.refuseStatement(sql, nil, err)
+			}
+		}
+
+		s.flushPendingQuery()
+
+		return nil
+	})
+
+	// The approval hold, outside trackerMu like every other one. It works here
+	// even though a refusal does not: it parks the *forwarding* and lets the
+	// packet through once a human approves, with no call to answer either way.
+	var approvalUID uuid.UUID
+
+	if err == nil {
+		approvalUID, err = s.holdIfNeeded(sql)
 	}
 
-	if refusal == nil {
-		s.logger.DebugContext(s.ctx, logMsgUnnamedCallForwarded,
-			slog.String("op", ttcOpFunction(ttcPayload)),
-			slog.Bool("carries_statement", true),
-			slog.String("sql", truncateSQL(sql, 200)))
-
-		return false
+	if err != nil {
+		return s.endSessionOnRefusal(ttcPayload, sql, err)
 	}
 
+	// Allowed — and therefore recorded, exactly as the JDBC exec path records
+	// it. A statement that runs and leaves no `queries` row would make this
+	// path the one place a session's SQL escapes the audit trail, which is a
+	// worse hole than the one the fail-open was introduced to fix. It is also
+	// what makes MaxQueryCounts apply: the quota is charged when a pending
+	// query completes on the response leg, so a statement nobody tracks is a
+	// statement nobody counts.
+	cursor := &trackedCursor{sql: sql, parsedAt: time.Now()}
+
+	_ = s.book(func() error {
+		s.tracker.pendingQuery = &pendingOracleQuery{cursor: cursor, startTime: time.Now()}
+
+		// An approval hold already inserted the row; reuse it rather than
+		// writing a second one for the same statement.
+		if approvalUID != uuid.Nil {
+			s.tracker.pendingQuery.queryUID = approvalUID
+			s.tracker.pendingQuery.queryPersisted = true
+		} else {
+			s.persistQueryRecord()
+		}
+
+		return nil
+	})
+
+	s.logger.InfoContext(s.ctx, logMsgUnnameableStatementRecorded,
+		slog.String("op", ttcOpFunction(ttcPayload)),
+		slog.String("sql", truncateSQL(sql, 200)))
+
+	return false
+}
+
+// endSessionOnRefusal is the refusal half of gateUnnameableFrame: there is no
+// call to answer, so the session ends instead. The statement was recorded by
+// refuseStatement (or by the hold) before this is reached.
+func (s *session) endSessionOnRefusal(ttcPayload []byte, sql string, refusal error) bool {
 	s.logger.WarnContext(s.ctx, logMsgUnnameableStatementRefused,
 		slog.String("op", ttcOpFunction(ttcPayload)),
 		slog.String("sql", truncateSQL(sql, 200)),
 		slog.Any("error", refusal))
-
-	_ = s.book(func() error {
-		s.recordBlockedQuery(sql, nil, refusal)
-
-		return nil
-	})
 
 	if s.upstreamConn != nil {
 		_ = s.upstreamConn.Close()
@@ -1606,9 +1649,20 @@ var ttcStatementOpHeaders = [][2]byte{
 }
 
 // statementOpOffsets returns every offset in ttcPayload where a
-// statement-carrying op header begins, earliest first. Offset 0 counts: the
-// frame's own header is a statement op when the frame is an exec whose close
-// list simply did not walk.
+// statement-carrying op header begins, earliest first.
+//
+// Offset 0 counts, and that is a carve-out worth naming rather than a detail:
+// when the frame's own header is a statement op (`11 69`, `11 98` — an exec
+// that only reached this path because its close list did not walk) the anchor
+// matches immediately and the scan covers the whole payload, i.e. it degenerates
+// to the unanchored scan the anchoring exists to avoid. Deliberate: such a
+// frame really is an execute and its SQL really is in there, so declining to
+// look would forward a live statement ungated. The cost is that a `11 69` frame
+// whose stapled set-end-to-end-attrs strings read as a refused statement ends
+// the session — fail-closed on a shape no tested client produces (every
+// recorded `11 69` walks) against fail-open on a live exec. See
+// TestUnnameableExecFrameIsGatedOnItsOwnPayload, and
+// specs/todos/2026-08-13-05-… for measuring whether the shape occurs at all.
 func statementOpOffsets(ttcPayload []byte) []int {
 	var out []int
 

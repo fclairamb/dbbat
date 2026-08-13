@@ -325,6 +325,134 @@ func TestUnnameableFrameRunsTheAlwaysOnValidators(t *testing.T) {
 	}
 }
 
+// TestUnnameableFrameRecordsTheStatementItAllows is the audit trail's half.
+// "Every query logged" is the product's premise, and a path that forwards a
+// statement while writing nothing would make a client dialect whose close list
+// never walks the one place a session's SQL escapes it entirely.
+//
+// The recorded pending query is also what makes MaxQueryCounts apply here: the
+// quota is charged when a pending query completes on the response leg, so a
+// statement nobody tracks is a statement nobody counts.
+func TestUnnameableFrameRecordsTheStatementItAllows(t *testing.T) {
+	t.Parallel()
+
+	logs := newCountingHandler()
+
+	s := newTestSession(&store.Grant{
+		Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}},
+	})
+	s.logger = slog.New(logs)
+
+	client, answered := recordingPipe(t)
+	s.clientConn = client
+
+	pkt := &TNSPacket{
+		Type:    TNSPacketTypeData,
+		Payload: unnameableFrameCarrying(t, "SELECT id FROM emp"),
+	}
+
+	require.False(t, s.interceptClientMessage(pkt), "the read is allowed and must travel")
+
+	// Tracked exactly as handleJDBCExec tracks one — which is what the store
+	// write (persistQueryRecord, shared verbatim with that path) and the
+	// completion on the response leg both key off.
+	require.NotNil(t, s.tracker.pendingQuery, "an allowed statement must be tracked, not just forwarded")
+	require.NotNil(t, s.tracker.pendingQuery.cursor)
+	assert.Equal(t, "SELECT id FROM emp", s.tracker.pendingQuery.cursor.sql)
+
+	assert.Equal(t, 1, logs.count(logMsgUnnameableStatementRecorded))
+	assert.Zero(t, logs.count(logMsgQueryIntercepted),
+		"and not under the message the cursor-learning measurement counts parses with")
+	assert.Empty(t, answered())
+}
+
+// TestUnnameableFrameEnforcesTheQueryQuota closes the other half of the
+// pre-flight gap: handleJDBCExec consults checkQuotas before anything else, and
+// this path had no equivalent. Revocation, expiry and the byte quota are still
+// caught on the response leg by LimitGuard, but MaxQueryCounts is not — it is
+// charged per recorded query, so it only applies where a query is gated.
+func TestUnnameableFrameEnforcesTheQueryQuota(t *testing.T) {
+	t.Parallel()
+
+	s := newTestSession(exhaustedGrant())
+	recorder := newRecordingCompletionStore()
+	s.completionStore = recorder
+
+	client, answered := recordingPipe(t)
+	s.clientConn = client
+
+	pkt := &TNSPacket{
+		Type:    TNSPacketTypeData,
+		Payload: unnameableFrameCarrying(t, "SELECT id FROM emp"),
+	}
+
+	assert.True(t, s.interceptClientMessage(pkt),
+		"a statement over max_query_counts must not travel just because its frame is unnameable")
+
+	select {
+	case created := <-recorder.created:
+		assert.Equal(t, "SELECT id FROM emp", created.SQLText)
+		require.NotNil(t, created.Error)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the quota refusal was never recorded")
+	}
+
+	assert.Empty(t, answered(), "and is not answered: dbbat cannot name the call")
+}
+
+// TestUnnameableExecFrameIsGatedOnItsOwnPayload is the carve-out in the
+// anchoring, written down because it is a real one rather than an oversight.
+//
+// statementOpOffsets counts offset 0, so for a frame whose *own* header is a
+// statement-carrying op (`11 69`, `11 98`) the anchor matches immediately and
+// the scan covers the whole payload — exactly the unanchored behavior the
+// anchor was introduced to avoid. That is deliberate: such a frame really is an
+// execute (it only reaches this path because its close list did not walk), its
+// SQL really is in there, and declining to look would forward a live statement
+// ungated. The cost is the one this fixture shows: a `11 69` frame whose
+// stapled set-end-to-end-attrs strings read as a refused statement ends the
+// session.
+//
+// The trade is fail-closed on a shape no tested client produces — every one of
+// the 54 recorded `11 69` frames in testdata/dbeaver.pcapng walks, and so do
+// both bundled-client ones — against fail-open on a live exec. Measuring
+// whether the shape occurs at all is filed as
+// specs/todos/2026-08-13-05-oracle-sql-extraction-is-weaker-than-the-gate-that-uses-it.md.
+func TestUnnameableExecFrameIsGatedOnItsOwnPayload(t *testing.T) {
+	t.Parallel()
+
+	logs := newCountingHandler()
+
+	s := newTestSession(&store.Grant{
+		Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}},
+	})
+	s.logger = slog.New(logs)
+
+	client, answered := recordingPipe(t)
+	s.clientConn = client
+
+	// `11 69` whose close list does not walk, with a set-end-to-end-attrs
+	// piggyback stapled behind it carrying an application's module string.
+	frame := make([]byte, 0, 64)
+	frame = append(frame, byte(TTCFuncOFETCH), execSubOpJDBC, 0x07, 0x00, 0x00, 0x01, 0x01, 0x01, 0x02)
+	frame = append(frame, make([]byte, 20)...)
+	frame = append(frame, byte(TTCFuncOFETCH), 0x87, 0x08, 0x00)
+	frame = append(frame, []byte("DELETE FROM orders nightly job")...)
+
+	_, ok := clientCallNumber(frame)
+	require.False(t, ok, "the fixture must be unnameable")
+	require.Equal(t, []int{0}, statementOpOffsets(frame),
+		"and its only statement-op anchor must be its own header, which is the carve-out")
+
+	assert.True(t, s.interceptClientMessage(&TNSPacket{
+		Type:    TNSPacketTypeData,
+		Payload: append([]byte{0x00, 0x00}, frame...),
+	}), "an exec frame is read whole, so this ends the session — the deliberate fail-closed side")
+
+	assert.Equal(t, 1, logs.count(logMsgUnnameableStatementRefused))
+	assert.Empty(t, answered())
+}
+
 // TestUnnameableFrameIgnoresIncidentalASCII is the deliberate judgement on the
 // other failure mode: ending a live session because a frame dbbat could not
 // parse happened to contain bytes that read as SQL.
