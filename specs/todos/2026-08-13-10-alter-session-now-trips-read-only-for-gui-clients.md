@@ -73,6 +73,71 @@ Measure before choosing: `internal/proxy/oracle/sql_extraction_survey_test.go`
 already enumerates every statement in the corpus, so listing the distinct
 `ALTER SESSION` parameters real clients set is a few lines on top of it.
 
+## Resolved open questions
+
+> Decide what a connection-setup `ALTER SESSION SET …` should mean to the Oracle
+> statement gate, now that the gate can actually see it. [Three options, in
+> increasing order of nuance.]
+
+**Decision (2026-08-13): take option 2 — a narrow parameter allowlist.** Treat
+`ALTER SESSION SET <allowlisted parameter>` as neither a write nor DDL, in
+`shared.IsWriteQuery` / `shared.IsDDLQuery` next to the existing
+`IsPasswordChangeQuery` special case. Do **not** take option 1 (leave it) and do
+**not** add a grant control (option 3).
+
+Binding constraints on that allowlist:
+
+- **Allowlist by parameter name, never by prefix.** `ALTER SESSION SET …` must
+  not be matched as a prefix. Each permitted parameter is enumerated, and
+  anything not enumerated keeps today's behaviour (refused under `read_only` /
+  `block_ddl`).
+- **`CONTAINER` is excluded, explicitly and with a comment saying why.**
+  `ALTER SESSION SET CONTAINER` switches PDB, and a grant is scoped to a
+  database — allowing it would let a session step outside the database its grant
+  covers. This is the reason the allowlist is a list and not a prefix match; say
+  so where the list is defined. `ALTER SYSTEM` is already blocked outright and
+  stays that way.
+- **A multi-parameter statement is allowed only if *every* parameter it sets is
+  on the list.** `ALTER SESSION SET CURRENT_SCHEMA=X CONTAINER=Y` must be
+  refused, not partially honoured. If the parameters cannot be parsed with
+  confidence, refuse — fail closed.
+- **Quoted underscore parameters count.** The corpus carries
+  `ALTER SESSION SET "_optimizer_squ_bottomup" = FALSE`; the matcher must handle
+  the double-quoted form and the spacing around `=`.
+- **The statement is still recorded.** This changes classification, not
+  visibility: an allowed `ALTER SESSION` must still appear in `/queries` like any
+  other statement. It is being reclassified as not-a-write, not hidden.
+- **The carve-out applies to both controls**, since it is a classification
+  change: `read_only` and `block_ddl` both stop refusing an allowlisted
+  `ALTER SESSION`.
+
+**Seed measurement, already done — the corpus was enumerated on 2026-08-13 and
+these five are the entire set of `ALTER SESSION` statements that were ever
+gated** (the `TIME_ZONE`/`NLS_*` occurrence is the `AUTH_ALTER_SESSION`
+attribute described above, not a statement):
+
+```
+ALTER SESSION SET CURRENT_SCHEMA=TESTADM
+ALTER SESSION SET OPTIMIZER_FEATURES_ENABLE='10.2.0.5'
+ALTER SESSION SET "_optimizer_cost_based_transformation" = 'OFF'
+ALTER SESSION SET "_optimizer_push_pred_cost_based" = FALSE
+ALTER SESSION SET "_optimizer_squ_bottomup" = FALSE
+```
+
+Those five are the floor the allowlist must cover. Extending it to the adjacent
+session-scoped, non-durable settings real clients also set (`NLS_*`, `TIME_ZONE`)
+is sanctioned and expected — but **enumerate each one and justify it in a
+comment**; do not reach for a family wildcard beyond the `_optimizer_*` case, and
+if you do allow `_optimizer_*` as a family, say why that family is safe when a
+wildcard generally is not.
+
+Pin the behaviour on both sides: an allowlisted parameter passes under
+`read_only`, and `CONTAINER` plus at least one unenumerated parameter are still
+refused. Extending
+`internal/proxy/oracle/sql_extraction_survey_test.go` to assert the corpus's
+distinct `ALTER SESSION` parameters keeps the floor honest if a recording is
+ever added.
+
 Key files: `internal/proxy/shared/validation.go` (`writeKeywords`,
 `ddlKeywords`, `IsWriteQuery`, `IsDDLQuery`), `internal/proxy/oracle/intercept.go`
 (`handleJDBCExec`, `handlePiggybackExec`), `internal/proxy/oracle/session.go`
