@@ -47,6 +47,38 @@ than a guess:
    can trust (that is the whole reason it exists), so closing it means something
    other than resolving an id.
 
+Two more, found in the *anchoring* the unnameable path added on top of the
+extractor (`statementOpOffsets`, `session.go`). Both are open questions rather
+than known holes, and both want a measurement:
+
+4. **The anchor's op list does not match dbbat's own doctrine.** It carries
+   `03 5e`, `11 69` and `11 98`, while `docs/oracle.md` ("SQL Extraction") names
+   the three statement-carrying ops as **OALL8**, the v315+ piggyback exec and
+   the JDBC exec — so the legacy `0e` OALL8 is absent. The exclusion is
+   defended in the code on false-positive grounds (`0x0e` is one common byte;
+   matching it would hand back the false positives anchoring removed), which is
+   a *different axis* from the executability argument the doc leans on ("bytes
+   the upstream will not execute either"). Nobody has measured whether Oracle
+   executes a `0e` OALL8 stapled behind a `0x11` piggyback; until someone does,
+   the two justifications are not the same justification. Mitigating, and worth
+   recording next to it: this path is reachable only from the `0x11` branch, and
+   `docs/oracle.md` ("Cursor re-execution") records that **no tested client
+   sends OALL8 at all** — it is the pre-v315 framing, kept as defence in depth.
+
+5. **The anchor degenerates at offset 0.** `statementOpOffsets` counts offset 0,
+   so for a frame whose own header is a statement op (`11 69`, `11 98`) the scan
+   covers the whole payload — the unanchored behaviour, on exactly the recorded
+   shape `11 69 <close list> 11 87 <set-end-to-end-attrs>`. It is deliberate and
+   documented (a frame that *is* an exec has to be read whole, or a live
+   statement is forwarded ungated), and it is pinned by
+   `TestUnnameableExecFrameIsGatedOnItsOwnPayload` — but it means an application
+   whose module or client-identifier string reads as a refused statement loses
+   its session, on any client whose close list stops walking. The measurement
+   that would settle it is the same one item 1 needs: where the SQL sits
+   relative to the op header in real frames, which decides whether a
+   length-prefixed decode can replace the keyword scan and make the carve-out
+   unnecessary.
+
 ## Implementation
 
 **Measure before widening.** The extractor's looseness is load-bearing in both

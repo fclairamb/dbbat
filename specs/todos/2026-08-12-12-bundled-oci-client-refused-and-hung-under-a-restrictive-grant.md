@@ -190,19 +190,34 @@ correctly. Two further layers, each measured against the live client:
 flavor, the skip is gone, and the whole `./internal/proxy/oracle/...`
 integration suite is green under `-race` on that flavor.
 
-### Two more, from the completeness audit
+### More, from the completeness audits
 
 - **The fail-open was a smuggling channel, and nothing said so.** A piggyback is
   by construction a frame with another call stapled behind it — dbbat's own
   recordings show `11 69 … 03 5e <exec>` — so forwarding an unwalkable one
   unread let a client put an `INSERT` behind it and have it travel ungated under
   a `read_only` grant. `gateUnnameableFrame` now scans such a frame with the
-  same extractor the JDBC exec path gates on, runs the statement through the
-  grant's static controls and approval patterns, and refuses by **ending the
-  session** rather than by answering a call it cannot name (the same answer
-  `onLimitViolation` gives, for the same reason). A statement the grant permits
-  still travels; both unnameable frames a live bundled-client session emits
-  carry none.
+  same extractor the JDBC exec path gates on and puts it through **that path's
+  whole pre-flight, in the same order** — the quota check, the static controls,
+  the approval patterns, and the validators that fire with no grant controls at
+  all (the Oracle blocked patterns and the password-change guard, which
+  `hasStatementControls` had been short-circuiting past). It refuses by **ending
+  the session** rather than by answering a call it cannot name (the same answer
+  `onLimitViolation` gives, for the same reason), and it **records what it
+  allows**, with the same `persistQueryRecord` the JDBC path uses — a forwarded
+  statement that left no `queries` row would have made this the one place a
+  session's SQL escapes the audit trail, and an unrecorded statement is also an
+  uncounted one, since `max_query_counts` is charged at completion.
+
+  The scan is **anchored** to the start of a TTC op that can carry a statement
+  (`statementOpOffsets`), because a refusal here ends a session and the frames
+  that reach it carry caller-supplied text by design (`11 87`
+  set-end-to-end-attrs holds an application's module and client-identifier
+  strings). Bytes with no such header are bytes the upstream will not execute
+  either, so nothing runnable is let through. One documented carve-out: a frame
+  whose *own* header is an exec is scanned whole, which is fail-closed on a
+  shape no tested client produces and fail-open on nothing. Both unnameable
+  frames a live bundled-client session emits carry no statement at all.
 - **The nameability check ran after the exec reading**, so a `11 69` execute
   whose close list did not walk was still answered with an OER — stamped with a
   stale call number, which is the ORA-18745/hang mode
@@ -221,7 +236,16 @@ integration suite is green under `-race` on that flavor.
 - `logMsgLearnedOERTail` now reports `fixed_width_64`, and the 32-bit learn
   tests assert it stays false.
 
-One follow-up remains filed rather than smuggled in:
-`specs/todos/2026-08-13-04-oracle-fetch-gate-watches-a-frame-no-client-sends.md`
-(the `0x11` fetch reading is unreachable now that it is no longer misfed
-piggybacks).
+Two follow-ups remain filed rather than smuggled in:
+
+- `specs/todos/2026-08-13-04-oracle-fetch-gate-watches-a-frame-no-client-sends.md`
+  — the `0x11` fetch reading is unreachable now that it is no longer misfed
+  piggybacks.
+- `specs/todos/2026-08-13-05-oracle-sql-extraction-is-weaker-than-the-gate-that-uses-it.md`
+  — `decodeExecSQL` returns the first hit rather than the executable one, its
+  keyword fallback omits `TRUNCATE`/`GRANT`/`REVOKE`, a re-execution carries no
+  text to gate on, the anchor's op list omits the legacy `0e` OALL8 on
+  false-positive grounds the executability argument does not cover, and the
+  anchor degenerates at offset 0. All of it is cross-cutting — the ordinary JDBC
+  exec path shares the same extractor — and all of it wants a measurement of
+  real client frames before the extractor is widened.
