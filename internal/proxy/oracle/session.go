@@ -2273,14 +2273,44 @@ func (s *session) observeOERClientVersion(ttcBody []byte) {
 // it directly (after a marker exchange) when a statement fails, and as an
 // end-of-call status in some flows.
 //
+// This is the path a failing statement takes — measured, on both clients: a
+// SELECT against a missing table, a unique-key violation, a divide-by-zero, a
+// PL/SQL RAISE and a PL/SQL compile error all come back as a standalone 0x04
+// after a marker exchange, never as an OER embedded in a Response. So this
+// function is where queries.error is won or lost.
+//
+// It used to be lost. decodeOERAt demands the end-of-call bit, and the bit was
+// believed to be a client trait; it is not, it tracks the call. Only the failed
+// *DDL* carried it in either capture, so on every client the other five shapes
+// were dropped here and the statement was closed as a *success* by the next
+// statement's flushPendingQuery — a failed UPDATE logged with no error at all.
+//
+// Two things stand in for the bit on the relaxed second attempt, and both are
+// necessary because this function is routed on byte 0 alone:
+//
+//   - rowStreamActive: mid-fetch a 0x04 run is a row value's length prefix, so
+//     the strict decoder remains the only thing that may end a call there.
+//     Nothing is given up — no measured failure arrives with columns already
+//     decoded, the divide-by-zero included, because the server sends the OER
+//     instead of the QueryResult rather than after it.
+//   - decodeErrorOERAt, which proves the tail is an Oracle diagnostic naming
+//     the very code the fields reported.
+//
 // Callers hold trackerMu (see interceptUpstreamMessage).
 func (s *session) handleOERStatus(ttcPayload []byte) {
-	info := decodeOERAt(ttcPayload, 0)
-	if info == nil {
+	if info := decodeOERAt(ttcPayload, 0); info != nil {
+		s.completeQueryFromOER(info)
+
 		return
 	}
 
-	s.completeQueryFromOER(info)
+	if s.tracker.pendingQuery == nil || s.rowStreamActive() {
+		return
+	}
+
+	if info := decodeErrorOERAt(ttcPayload, 0); info != nil {
+		s.completeQueryFromOER(info)
+	}
 }
 
 // completeQueryFromOER finalizes the pending query from decoded OER fields:
