@@ -2462,15 +2462,22 @@ func (s *session) interceptUpstreamMessage(pkt *TNSPacket) {
 		return
 	}
 
+	// Every upstream response is a sample of the OER layout this client parses —
+	// the upstream negotiated with the client's own forwarded capabilities —
+	// which is what a refusal dbbat synthesizes has to match, and now also which
+	// encoding the *decoders* below read.
+	//
+	// It runs before cursor-id learning, not after, because the OER that names
+	// the allotted cursor is itself a sample of the layout it is written in: on
+	// an OCI session whose shape had not been learned yet, reading them in the
+	// other order left the scan guessing at the very packet that could have told
+	// it.
+	s.learnOERTail(ttcPayload)
+
 	// Before anything is completed: the response to an execute is where the
 	// server names the cursor it allotted, and that mapping is what lets a
 	// later re-execution be gated against the right statement.
 	s.learnCursorID(ttcPayload)
-
-	// Every upstream response is also a sample of the OER layout this client
-	// parses — the upstream negotiated with the client's own forwarded
-	// capabilities — which is what a refusal dbbat synthesizes has to match.
-	s.learnOERTail(ttcPayload)
 
 	switch funcCode { //nolint:exhaustive // only handling response-related codes
 	case TTCFuncQueryResult:
@@ -2522,7 +2529,7 @@ func (s *session) learnOERTail(ttcPayload []byte) {
 	// skips it) carries a zero shape, which would decode nothing.
 	s.oer = s.oer.orDefault()
 
-	if info, _ := decodeOERFieldsAt(ttcPayload, 0); info != nil && info.SeqNumber > s.oerSeq {
+	if info, _ := decodeOERFieldsForShape(s.oer, ttcPayload, 0); info != nil && info.SeqNumber > s.oerSeq {
 		s.oerSeq = info.SeqNumber
 	}
 
@@ -2565,6 +2572,22 @@ func (s *session) learnOERTail(ttcPayload []byte) {
 // dialect, and no integration test can reach it, because sqlplus issues its own
 // login SELECTs before anything a grant would refuse. See
 // TestUnlearnedRefusalFollowsTheClientsOwnDialect.
+// oerShapeSnapshot returns the session's current picture of the summary-object
+// layout, for the paths that have to *read* an OER the upstream sent rather than
+// write one.
+//
+// It is deliberately not nextOERFrame: that one seeds the OCI dialect from the
+// client's own AUTH framing when nothing has been learned, because a refusal has
+// to be written in some encoding and a wrong guess hangs the client. A decoder
+// has the better option — an unlearned shape lets decodeOERFixedFieldsAt try
+// both layouts under the RetCode anchor, so nothing has to be guessed at all.
+func (s *session) oerShapeSnapshot() oerShape {
+	s.oerMu.Lock()
+	defer s.oerMu.Unlock()
+
+	return s.oer.orDefault()
+}
+
 func (s *session) nextOERFrame() (oerShape, int, byte) {
 	s.oerMu.Lock()
 	defer s.oerMu.Unlock()
@@ -2678,7 +2701,7 @@ func (s *session) handleOERStatus(ttcPayload []byte) {
 		return
 	}
 
-	info := decodeErrorOER(ttcPayload)
+	info := decodeErrorOER(s.oerShapeSnapshot(), ttcPayload)
 	if info == nil {
 		return
 	}
@@ -2885,7 +2908,7 @@ func (s *session) handleResponse(ttcPayload []byte) {
 	// these exact OERs while refusing to read the row count out of the same
 	// seven fields.
 	if s.tracker.pendingQuery != nil {
-		if oer := findPlausibleOERInResponse(ttcPayload); oer != nil {
+		if oer := findPlausibleOERInResponse(s.oerShapeSnapshot(), ttcPayload); oer != nil {
 			s.completeQueryFromOER(oer)
 			return
 		}

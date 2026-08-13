@@ -521,7 +521,7 @@ func (s *session) learnCursorID(ttcPayload []byte) {
 		return
 	}
 
-	cursorID, ok := findCursorIDInResponse(ttcPayload)
+	cursorID, ok := findCursorIDInResponse(s.oerShapeSnapshot(), ttcPayload)
 	if !ok {
 		return
 	}
