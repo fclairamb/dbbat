@@ -347,6 +347,199 @@ func TestValidateMongoCommand_PipelineTargetDatabase(t *testing.T) {
 	}
 }
 
+// nestedLookupPipeline wraps innermost in `levels` layers of $lookup
+// sub-pipeline, so the innermost stage is examined at walk depth == levels.
+func nestedLookupPipeline(levels int, innermost bson.D) bson.A {
+	stages := bson.A{innermost}
+
+	for range levels {
+		stages = bson.A{bson.D{{Key: "$lookup", Value: bson.D{
+			{Key: "from", Value: "joined"},
+			{Key: "as", Value: "j"},
+			{Key: "pipeline", Value: stages},
+		}}}}
+	}
+
+	return stages
+}
+
+// A pipeline dbbat cannot read all of is refused, never waved through. The walk
+// that finds $out/$merge is the same walk that classifies the command as a
+// write, so a scan that gave up quietly would drop a nested $merge to *read* —
+// which read_only does not stop. Fail closed on both the depth cap and a
+// pipeline that will not parse.
+func TestValidateMongoCommand_UncheckablePipelineRefused(t *testing.T) {
+	t.Parallel()
+
+	db := &store.Server{Name: "app", DatabaseName: "app"}
+	full := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{}}}
+	readOnly := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
+
+	sameDBMerge := bson.D{{Key: "$merge", Value: "dest"}}
+	crossDBMerge := bson.D{{Key: "$merge", Value: bson.D{{Key: "into", Value: bson.D{
+		{Key: "db", Value: "other"}, {Key: "coll", Value: "d"},
+	}}}}}
+
+	// Past the cap: refused outright, under every grant. Before this was
+	// inverted, a $merge at depth 9 was classified as a read and ran under a
+	// read_only grant.
+	for _, levels := range []int{9, 10, 12, 40} {
+		for _, grant := range []*store.Grant{full, readOnly} {
+			body := aggWithPipeline(t, nestedLookupPipeline(levels, crossDBMerge))
+			require.ErrorIs(t, ValidateMongoCommand("aggregate", "app", body, db, grant),
+				ErrMongoPipelineNotCheckable, "depth %d", levels)
+		}
+
+		// Even a benign stage past the cap is refused: the point is that dbbat
+		// could not see the pipeline, not what happened to be in it.
+		benign := aggWithPipeline(t, nestedLookupPipeline(levels, bson.D{{Key: "$match", Value: bson.D{}}}))
+		require.ErrorIs(t, ValidateMongoCommand("aggregate", "app", benign, db, full), ErrMongoPipelineNotCheckable)
+	}
+
+	// Up to the cap, everything still works exactly as it does at the top level.
+	for levels := range mongoPipelineMaxDepth + 1 {
+		benign := aggWithPipeline(t, nestedLookupPipeline(levels, bson.D{{Key: "$match", Value: bson.D{}}}))
+		require.NoError(t, ValidateMongoCommand("aggregate", "app", benign, db, full), "benign depth %d", levels)
+
+		crossDB := aggWithPipeline(t, nestedLookupPipeline(levels, crossDBMerge))
+		require.ErrorIs(t, ValidateMongoCommand("aggregate", "app", crossDB, db, full),
+			ErrMongoDatabaseBlocked, "cross-db depth %d", levels)
+
+		nested := aggWithPipeline(t, nestedLookupPipeline(levels, sameDBMerge))
+		require.ErrorIs(t, ValidateMongoCommand("aggregate", "app", nested, db, readOnly),
+			ErrMongoReadOnly, "nested write depth %d", levels)
+	}
+
+	// Malformed shapes are unreadable, not empty.
+	malformed := []bson.D{
+		{{Key: "aggregate", Value: "c"}, {Key: "pipeline", Value: "not-a-pipeline"}, {Key: "$db", Value: "app"}},
+		{{Key: "aggregate", Value: "c"}, {Key: "pipeline", Value: bson.A{42}}, {Key: "$db", Value: "app"}},
+		{{Key: "aggregate", Value: "c"}, {Key: "pipeline", Value: bson.A{
+			bson.D{{Key: "$facet", Value: bson.D{{Key: "a", Value: "not-a-pipeline"}}}},
+		}}, {Key: "$db", Value: "app"}},
+		{{Key: "aggregate", Value: "c"}, {Key: "pipeline", Value: bson.A{
+			bson.D{{Key: "$lookup", Value: bson.D{{Key: "pipeline", Value: 7}}}},
+		}}, {Key: "$db", Value: "app"}},
+		{{Key: "aggregate", Value: "c"}, {Key: "pipeline", Value: bson.A{
+			bson.D{{Key: "$out", Value: bson.D{{Key: "db", Value: 7}, {Key: "coll", Value: "x"}}}},
+		}}, {Key: "$db", Value: "app"}},
+		{{Key: "aggregate", Value: "c"}, {Key: "pipeline", Value: bson.A{
+			bson.D{{Key: "$merge", Value: 7}},
+		}}, {Key: "$db", Value: "app"}},
+	}
+	for i, d := range malformed {
+		require.ErrorIs(t, ValidateMongoCommand("aggregate", "app", mongoBody(t, d), db, full),
+			ErrMongoPipelineNotCheckable, "malformed case %d", i)
+	}
+}
+
+// $lookup / $graphLookup `from` and $unionWith `coll` take the same
+// {db, coll} shape as $out/$merge — the read-side twin. read_only does not stop
+// a read, so nothing but this check stands between a grant and another
+// database's data.
+func TestValidateMongoCommand_PipelineReadTargetDatabase(t *testing.T) {
+	t.Parallel()
+
+	db := &store.Server{Name: "app", DatabaseName: "app"}
+	full := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{}}}
+	readOnly := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
+
+	ns := func(dbName string) bson.D {
+		return bson.D{{Key: "db", Value: dbName}, {Key: "coll", Value: "secret"}}
+	}
+
+	allowed := map[string]bson.A{
+		"$lookup from string":       {bson.D{{Key: "$lookup", Value: bson.D{{Key: "from", Value: "other_coll"}, {Key: "as", Value: "j"}}}}},
+		"$lookup from same db":      {bson.D{{Key: "$lookup", Value: bson.D{{Key: "from", Value: ns("app")}, {Key: "as", Value: "j"}}}}},
+		"$lookup without from":      {bson.D{{Key: "$lookup", Value: bson.D{{Key: "pipeline", Value: bson.A{bson.D{{Key: "$documents", Value: bson.A{}}}}}, {Key: "as", Value: "j"}}}}},
+		"$unionWith string":         {bson.D{{Key: "$unionWith", Value: "other_coll"}}},
+		"$unionWith coll string":    {bson.D{{Key: "$unionWith", Value: bson.D{{Key: "coll", Value: "other_coll"}}}}},
+		"$unionWith coll same db":   {bson.D{{Key: "$unionWith", Value: bson.D{{Key: "coll", Value: ns("app")}}}}},
+		"$graphLookup from string":  {bson.D{{Key: "$graphLookup", Value: bson.D{{Key: "from", Value: "other_coll"}, {Key: "as", Value: "j"}}}}},
+		"$graphLookup from same db": {bson.D{{Key: "$graphLookup", Value: bson.D{{Key: "from", Value: ns("app")}, {Key: "as", Value: "j"}}}}},
+	}
+	for name, stages := range allowed {
+		require.NoError(t, ValidateMongoCommand("aggregate", "app", aggWithPipeline(t, stages), db, full), name)
+	}
+
+	refused := map[string]bson.A{
+		"$lookup from other db":      {bson.D{{Key: "$lookup", Value: bson.D{{Key: "from", Value: ns("other")}, {Key: "as", Value: "j"}}}}},
+		"$lookup from admin":         {bson.D{{Key: "$lookup", Value: bson.D{{Key: "from", Value: ns("admin")}, {Key: "as", Value: "j"}}}}},
+		"$lookup from config":        {bson.D{{Key: "$lookup", Value: bson.D{{Key: "from", Value: ns("config")}, {Key: "as", Value: "j"}}}}},
+		"$unionWith coll other db":   {bson.D{{Key: "$unionWith", Value: bson.D{{Key: "coll", Value: ns("other")}}}}},
+		"$graphLookup from other db": {bson.D{{Key: "$graphLookup", Value: bson.D{{Key: "from", Value: ns("other")}, {Key: "as", Value: "j"}}}}},
+		"nested in a sub-pipeline": {bson.D{{Key: "$lookup", Value: bson.D{
+			{Key: "from", Value: "local_coll"},
+			{Key: "as", Value: "j"},
+			{Key: "pipeline", Value: bson.A{bson.D{{Key: "$unionWith", Value: bson.D{{Key: "coll", Value: ns("other")}}}}}},
+		}}}},
+	}
+	for name, stages := range refused {
+		// A cross-database read is refused under a read-only grant too — being a
+		// read is exactly why read_only never sees it.
+		for _, grant := range []*store.Grant{full, readOnly} {
+			require.ErrorIs(t, ValidateMongoCommand("aggregate", "app", aggWithPipeline(t, stages), db, grant),
+				ErrMongoDatabaseBlocked, name)
+		}
+	}
+}
+
+// `explain` wraps a whole command — pipeline included — in a nested document,
+// which hides it from a scan that only reads the top-level `pipeline`.
+//
+// Verified against mongod 7.0.40 and 8.2.12: an explain of an aggregate whose
+// $out names another database is *accepted* (ok: 1), so the server is no
+// backstop for the classification; it does not execute the $out, so this was a
+// classification gap rather than a live write escape.
+func TestValidateMongoCommand_ExplainWrappedPipeline(t *testing.T) {
+	t.Parallel()
+
+	db := &store.Server{Name: "app", DatabaseName: "app"}
+	full := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{}}}
+	readOnly := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
+
+	explainOf := func(inner bson.D) bson.Raw {
+		return mongoBody(t, bson.D{
+			{Key: "explain", Value: inner},
+			{Key: "verbosity", Value: "queryPlanner"},
+			{Key: "$db", Value: "app"},
+		})
+	}
+
+	aggregateWith := func(stage bson.D) bson.D {
+		return bson.D{
+			{Key: "aggregate", Value: "src"},
+			{Key: "pipeline", Value: bson.A{stage}},
+			{Key: "cursor", Value: bson.D{}},
+		}
+	}
+
+	// A cross-database target inside the explained command is refused.
+	crossDB := explainOf(aggregateWith(bson.D{{Key: "$out", Value: bson.D{
+		{Key: "db", Value: "other"}, {Key: "coll", Value: "x"},
+	}}}))
+	require.ErrorIs(t, ValidateMongoCommand("explain", "app", crossDB, db, full), ErrMongoDatabaseBlocked)
+
+	// And the explained pipeline still classifies the command as a write.
+	sameDB := explainOf(aggregateWith(bson.D{{Key: "$out", Value: "dest"}}))
+	require.ErrorIs(t, ValidateMongoCommand("explain", "app", sameDB, db, readOnly), ErrMongoReadOnly)
+	require.NoError(t, ValidateMongoCommand("explain", "app", sameDB, db, full))
+
+	// An ordinary explain is untouched.
+	plain := explainOf(bson.D{{Key: "find", Value: "src"}, {Key: "filter", Value: bson.D{}}})
+	require.NoError(t, ValidateMongoCommand("explain", "app", plain, db, readOnly))
+
+	// `explain: true` as an option (not a wrapped command) is not a document and
+	// must not be mistaken for one.
+	option := mongoBody(t, bson.D{
+		{Key: "aggregate", Value: "src"},
+		{Key: "pipeline", Value: bson.A{bson.D{{Key: "$match", Value: bson.D{}}}}},
+		{Key: "explain", Value: true},
+		{Key: "$db", Value: "app"},
+	})
+	require.NoError(t, ValidateMongoCommand("aggregate", "app", option, db, readOnly))
+}
+
 // --- ALTER SESSION carve-out ------------------------------------------------
 //
 // Both sides are pinned: an allowlisted parameter passes under read_only *and*
