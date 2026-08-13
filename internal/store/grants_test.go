@@ -1205,3 +1205,99 @@ func TestDeleteGrantDefinition(t *testing.T) {
 		t.Fatalf("DeleteGrantDefinition() on an archived version = %v, want GrantDefinitionInUseError", err)
 	}
 }
+
+// TestGetGrantsByUIDs pins the batched grant read: two queries however many
+// uids (the grants, then their definitions), the same approver-bearing rows
+// GetGrantByUID hands back, a uid naming no row absent, and the deliberate
+// difference — the live usage counters are not aggregated, because that is two
+// queries per grant and says nothing about who may approve a hold.
+func TestGetGrantsByUIDs(t *testing.T) {
+	t.Parallel()
+
+	store := setupTestStore(t)
+	ctx := context.Background()
+
+	user, database := createTestUserAndDatabase(t, ctx, store, "batchgrants")
+
+	approvers := newTestUserGroup(t, ctx, store, "batchgrants_approvers")
+
+	// Two definitions so the batched read has to key each grant to its own
+	// approver list, not just to "a" definition.
+	scoped := newTestGrantDefinition(t, ctx, store, user.UID, GrantDefinition{
+		ApprovalPatterns:      []string{`(?i)^DELETE\s+FROM`},
+		ApproverUserGroupUIDs: []uuid.UUID{approvers.UID},
+	})
+	bare := newTestGrantDefinition(t, ctx, store, user.UID, GrantDefinition{})
+
+	uids := make([]uuid.UUID, 0, 5)
+
+	for i, def := range []*GrantDefinition{scoped, bare, scoped, bare} {
+		grant := newTestGrant(
+			t, ctx, store, def, user.UID, database.UID, user.UID,
+			time.Now().Add(-time.Duration(i+1)*time.Minute), time.Now().Add(time.Hour),
+		)
+		uids = append(uids, grant.UID)
+	}
+
+	missing := uuid.New()
+	uids = append(uids, missing)
+
+	// Both of the batched read's queries use a uid list; the per-row
+	// GetGrantByUID re-reads below use `uid = ?` for the grant itself, but
+	// attachDefinitions uses a list too — so the count is taken before them.
+	hook := &queryCountHook{substring: "uid IN ("}
+	store.db.AddQueryHook(hook)
+
+	batched, err := store.GetGrantsByUIDs(ctx, uids)
+	if err != nil {
+		t.Fatalf("GetGrantsByUIDs() error = %v", err)
+	}
+
+	if got := hook.count.Load(); got != 2 {
+		t.Errorf("reading %d grants took %d queries, want 2 (one for grants, one for definitions)",
+			len(uids), got)
+	}
+
+	if _, present := batched[missing]; present {
+		t.Error("a grant that does not exist must be absent from the result")
+	}
+
+	for i, uid := range uids[:4] {
+		perRow, err := store.GetGrantByUID(ctx, uid)
+		if err != nil {
+			t.Fatalf("GetGrantByUID() error = %v", err)
+		}
+
+		got, found := batched[uid]
+		if !found {
+			t.Fatalf("grant %s missing from the batched result", uid)
+		}
+
+		if got.GrantDefinitionID != perRow.GrantDefinitionID {
+			t.Errorf("batched grant %s definition = %s, per-row = %s",
+				uid, got.GrantDefinitionID, perRow.GrantDefinitionID)
+		}
+
+		// What the approval chain actually reads off a grant.
+		assertSameUUIDSet(t, "approver list", got.ApproverUserGroupUIDs(), perRow.ApproverUserGroupUIDs())
+
+		wantApprovers := 0
+		if i%2 == 0 {
+			wantApprovers = 1
+		}
+
+		if len(got.ApproverUserGroupUIDs()) != wantApprovers {
+			t.Errorf("grant %s approver list = %v, want %d entries",
+				uid, got.ApproverUserGroupUIDs(), wantApprovers)
+		}
+	}
+
+	empty, err := store.GetGrantsByUIDs(ctx, nil)
+	if err != nil {
+		t.Fatalf("GetGrantsByUIDs(nil) error = %v", err)
+	}
+
+	if len(empty) != 0 {
+		t.Errorf("GetGrantsByUIDs(nil) = %v, want empty", empty)
+	}
+}
