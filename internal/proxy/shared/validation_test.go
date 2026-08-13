@@ -241,3 +241,152 @@ func TestValidateMongoCommand_DBEnforcement(t *testing.T) {
 	require.ErrorIs(t, ValidateMongoCommand("find", "local", mongoBody(t, bson.D{{Key: "find", Value: "c"}}), db, full), ErrMongoDatabaseBlocked)
 	require.ErrorIs(t, ValidateMongoCommand("find", "other", mongoBody(t, bson.D{{Key: "find", Value: "c"}}), db, full), ErrMongoDatabaseBlocked)
 }
+
+// --- ALTER SESSION carve-out ------------------------------------------------
+//
+// Both sides are pinned: an allowlisted parameter passes under read_only *and*
+// block_ddl, and CONTAINER — plus anything not enumerated — is still refused.
+
+// alterSessionCorpusStatements are the five ALTER SESSION statements the Oracle
+// recordings in internal/proxy/oracle/testdata/ actually carry as execute ops
+// (DBeaver's connection setup, measured by TestSurveyAlterSessionMisreadAsSet).
+// They are the floor the allowlist must cover: a read-only grant that refuses
+// any of them is a DBeaver that cannot connect.
+var alterSessionCorpusStatements = []string{
+	"ALTER SESSION SET CURRENT_SCHEMA=TESTADM",
+	"ALTER SESSION SET OPTIMIZER_FEATURES_ENABLE='10.2.0.5'",
+	`ALTER SESSION SET "_optimizer_cost_based_transformation" = 'OFF'`,
+	`ALTER SESSION SET "_optimizer_push_pred_cost_based" = FALSE`,
+	`ALTER SESSION SET "_optimizer_squ_bottomup" = FALSE`,
+}
+
+func TestIsAllowedAlterSession_Allows(t *testing.T) {
+	t.Parallel()
+
+	allowed := append([]string{
+		// Whitespace, casing and quoting variants of the same thing.
+		"alter session set current_schema = TESTADM",
+		"  ALTER   SESSION   SET   CURRENT_SCHEMA   =   TESTADM  ",
+		`ALTER SESSION SET "CURRENT_SCHEMA"=TESTADM`,
+		// Multi-parameter, every parameter allowlisted — the shape dbbat itself
+		// sends on the upstream leg (upstream_auth_client_wide.go).
+		"ALTER SESSION SET NLS_LANGUAGE='AMERICAN' NLS_TERRITORY='AMERICA'  TIME_ZONE='+02:00'",
+		"ALTER SESSION SET NLS_DATE_FORMAT='DD-MON-YYYY HH24:MI:SS'",
+		"ALTER SESSION SET NLS_NUMERIC_CHARACTERS=',.'",
+		// The _OPTIMIZER_ family rule, on a hint no recording carries.
+		`ALTER SESSION SET "_optimizer_use_feedback" = FALSE`,
+	}, alterSessionCorpusStatements...)
+
+	for _, sql := range allowed {
+		assert.True(t, IsAllowedAlterSession(sql), "should be allowlisted: %s", sql)
+		assert.False(t, IsWriteQuery(sql), "should not be a write: %s", sql)
+		assert.False(t, IsDDLQuery(sql), "should not be DDL: %s", sql)
+	}
+}
+
+func TestIsAllowedAlterSession_Refuses(t *testing.T) {
+	t.Parallel()
+
+	refused := []struct{ sql, reason string }{
+		{"ALTER SESSION SET CONTAINER = PDB2", "CONTAINER switches PDB, outside the grant's database"},
+		{`ALTER SESSION SET "CONTAINER"=PDB2`, "quoted CONTAINER is the same parameter"},
+		{"ALTER SESSION SET CURRENT_SCHEMA=X CONTAINER=PDB2", "one bad parameter refuses the whole statement"},
+		{"ALTER SESSION SET CONTAINER=PDB2 CURRENT_SCHEMA=X", "order does not matter either"},
+		{"ALTER SESSION SET SQL_TRACE = TRUE", "unenumerated parameter"},
+		{"ALTER SESSION SET EVENTS '10046 trace name context forever'", "no = at all: unparseable, fail closed"},
+		{"ALTER SESSION SET PLSQL_DEBUG=TRUE", "unenumerated parameter"},
+		{"ALTER SESSION ENABLE PARALLEL DML", "not a SET"},
+		{"ALTER SESSION CLOSE DATABASE LINK remote", "not a SET"},
+		{"ALTER SESSION SET", "no parameter"},
+		{"ALTER SESSION SET   ", "no parameter"},
+		{"ALTER SESSION SETTINGS = 1", "SET must end at a word boundary"},
+		{"ALTER SESSION SET CURRENT_SCHEMA", "missing = and value"},
+		{"ALTER SESSION SET CURRENT_SCHEMA=", "missing value"},
+		{"ALTER SESSION SET CURRENT_SCHEMA='unterminated", "unterminated quote"},
+		{"ALTER SESSION SET CURRENT_SCHEMA=X; DROP TABLE t", "a second statement stapled on"},
+		{"ALTER SESSION SET CURRENT_SCHEMA=X;DROP TABLE t", "same, without the space"},
+		{"ALTER SESSION SET CURRENT_SCHEMA=X -- and then", "trailing comment is not parsed with confidence"},
+		{"ALTER SYSTEM SET open_cursors=1000", "ALTER SYSTEM is a different statement"},
+		{"ALTER TABLE t ADD (col NUMBER)", "ordinary DDL"},
+		{"ALTER USER bob IDENTIFIED BY hunter2", "ordinary DDL"},
+		{"SELECT 'ALTER SESSION SET CURRENT_SCHEMA=X' FROM DUAL", "not a leading ALTER SESSION"},
+	}
+
+	for _, tt := range refused {
+		assert.False(t, IsAllowedAlterSession(tt.sql), "%s: %s", tt.reason, tt.sql)
+	}
+}
+
+func TestValidateQuery_AlterSessionCarveOut(t *testing.T) {
+	t.Parallel()
+
+	readOnly := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
+	blockDDL := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlBlockDDL}}}
+
+	// The carve-out applies to both controls, on the shared and the Oracle path.
+	for _, sql := range alterSessionCorpusStatements {
+		require.NoError(t, ValidateQuery(sql, readOnly), "read_only should allow: %s", sql)
+		require.NoError(t, ValidateQuery(sql, blockDDL), "block_ddl should allow: %s", sql)
+		require.NoError(t, ValidateOracleQuery(sql, readOnly), "Oracle read_only should allow: %s", sql)
+		require.NoError(t, ValidateOracleQuery(sql, blockDDL), "Oracle block_ddl should allow: %s", sql)
+	}
+
+	// And nothing outside it moved.
+	stillRefused := []string{
+		"ALTER SESSION SET CONTAINER = PDB2",
+		"ALTER SESSION SET CURRENT_SCHEMA=X CONTAINER=PDB2",
+		"ALTER SESSION SET SQL_TRACE = TRUE",
+		"ALTER SESSION ENABLE PARALLEL DML",
+	}
+	for _, sql := range stillRefused {
+		require.ErrorIs(t, ValidateQuery(sql, readOnly), ErrReadOnlyViolation, "read_only should refuse: %s", sql)
+		require.ErrorIs(t, ValidateQuery(sql, blockDDL), ErrDDLBlocked, "block_ddl should refuse: %s", sql)
+	}
+
+	// ALTER SYSTEM stays blocked outright, grant controls or not.
+	require.ErrorIs(t,
+		ValidateOracleQuery("ALTER SYSTEM SET open_cursors=1000", &store.Grant{Definition: &store.GrantDefinition{}}),
+		ErrOraclePatternBlocked)
+}
+
+// TestAlterSessionCarveOut_LeavesOtherDialectsAlone pins that the carve-out is
+// Oracle-shaped: IsWriteQuery/IsDDLQuery are shared by all five proxies, and no
+// statement other than an allowlisted ALTER SESSION changed classification.
+func TestAlterSessionCarveOut_LeavesOtherDialectsAlone(t *testing.T) {
+	t.Parallel()
+
+	writes := []string{
+		"ALTER TABLE t ADD (col NUMBER)",          // Oracle / every dialect
+		"ALTER USER bob IDENTIFIED BY hunter2",    // Oracle
+		"ALTER ROLE app SET search_path = x",      // PostgreSQL
+		"ALTER DATABASE db CHARACTER SET utf8mb4", // MySQL
+		"ALTER LOGIN sa WITH PASSWORD = 'x'",      // SQL Server
+		"ALTER SCHEMA s TRANSFER dbo.t",           // SQL Server
+		"ALTER SYSTEM SET open_cursors=1000",      // Oracle
+		"ALTER SEQUENCE s RESTART",                // PostgreSQL
+		"ALTER INDEX idx REBUILD",                 // Oracle
+		"CREATE TABLE t (id NUMBER)",
+		"DROP TABLE t",
+		"INSERT INTO t VALUES (1)",
+	}
+	for _, sql := range writes {
+		assert.True(t, IsWriteQuery(sql), "still a write: %s", sql)
+	}
+
+	ddl := []string{
+		"ALTER TABLE t ADD (col NUMBER)",
+		"ALTER SYSTEM SET open_cursors=1000",
+		"ALTER LOGIN sa WITH PASSWORD = 'x'",
+		"CREATE INDEX idx ON t(col)",
+		"TRUNCATE TABLE t",
+	}
+	for _, sql := range ddl {
+		assert.True(t, IsDDLQuery(sql), "still DDL: %s", sql)
+	}
+
+	// Reads stay reads; SET (PG/MySQL session settings) was never a write.
+	for _, sql := range []string{"SELECT 1", "SET search_path = x", "SET NAMES utf8mb4"} {
+		assert.False(t, IsWriteQuery(sql), "still not a write: %s", sql)
+		assert.False(t, IsDDLQuery(sql), "still not DDL: %s", sql)
+	}
+}
