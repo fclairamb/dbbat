@@ -105,3 +105,46 @@ cannot:
 
 Making the two constants injectable (session fields defaulted from the consts,
 or package `var`s) is the single change that unlocks both; do that first.
+
+## Implementation Plan
+
+Written after reading the code; ordered so the enabling change lands first.
+
+1. **Make the two bounds injectable** (`internal/proxy/oracle/session.go`).
+   Two new session fields — `refusalHoldBytes int64`, `refusalHoldGrace
+   time.Duration` — read through accessors that fall back to the existing
+   `refusalHoldMaxBytes` / `refusalHandoffGrace` consts when the field is zero.
+   Fallback-on-zero rather than a constructor default, because a session is
+   built by hand in a dozen unit tests and a bare `&session{}` must keep the
+   production bounds.
+
+2. **`refusalHoldMaxBytes` end to end** — extend
+   `TestUpstreamToClient_ByteLimitHoldsRatherThanCuttingIn`'s harness into a new
+   `TestUpstreamToClient_StopsRelayingPastTheOvershootBound`: a fake upstream
+   over `net.Pipe` that streams without end, the bound shrunk to a few hundred
+   bytes, and the assertion that `upstreamToClient` *returns*
+   `ErrByteQuotaExceeded` having relayed a bounded amount, with the statement
+   finalized. The existing arithmetic test stays (it pins the subtraction), but
+   the relay is now what reaches the bound.
+
+3. **`refusalHandoffGrace` end to end** — a new
+   `TestHeldRefusalWatchdogFallsBackAfterItsGraceRunsOut` running the real
+   `guard.Watch` → `onLimitViolation` with a millisecond grace and a client that
+   never speaks: both sockets dropped, and — through a
+   `recordingCompletionStore` — the statement written with `aborted: bandwidth
+   quota exceeded for this grant`. No `backdateHeldRefusal`.
+
+4. **sqlplus (OCI) measurement** — a new subtest in the OCI integration file
+   driving the quota-mid-result-set case through `startRecordingTap`, seeding
+   `dbbat_quota_probe` the way the JDBC probe does, and asserting the *log
+   counters* (`logMsgRefusalHeld` → `logMsgRefusalDelivered` vs
+   `logMsgRefusalUnnameable`) plus the tapped frames. The client's own output is
+   recorded as a finding either way; the fallback is a legitimate result.
+
+5. **python-oracledb thin measurement** — the same case as a python script next
+   to `pythonRefusalScript`, behind the same "skip loudly when oracledb is not
+   importable" rule, through its own tap, with the same counter assertions.
+
+6. **`docs/oracle.md`** — replace the confidence paragraph's "both of these
+   gaps" with the measured rows, and add sqlplus/python-oracledb to the
+   per-client table.
