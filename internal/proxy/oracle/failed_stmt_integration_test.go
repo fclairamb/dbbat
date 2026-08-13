@@ -286,3 +286,105 @@ func TestIntegration_MidFetchFailureRecordsItsORAError(t *testing.T) {
 	// on is one that has existed since the stream opened.
 	env.assertFailedQueryLogged(t, midFetchLiveSelect, "ORA-01722")
 }
+
+// The OCI half, live. Everything above drives a *thin* client, and for a long
+// time that was the whole file: sqlplus, the Instant Client and SQL*Developer
+// over OCI marshal the summary object fixed-width, dbbat's decoder read TTC
+// compressed integers only, and so **every** failing statement on those clients
+// was written to `queries` as a success — mid-fetch or not, DML or DDL. The
+// client saw its ORA text; the query row said nothing happened.
+//
+// That is what these statements prove is over, end to end rather than off
+// recorded bytes: the same shapes as failedStatements, on the client whose
+// encoding the decoder had to learn to read (decodeOERFieldsAtLayout).
+//
+// The PL/SQL block is deliberately absent. sqlplus needs a lone `/` to submit
+// one, and what reaches `queries` then is not the text as typed — the
+// assertions here match SQL exactly, so a shape that cannot be matched exactly
+// would have to be asserted more loosely than the point deserves. Its coverage
+// is the go-ora case above and the replayed bytes.
+const ociFailingScript = `SET PAGESIZE 0
+SET FEEDBACK OFF
+SELECT 'oci-ready=' || 1 FROM dual;
+SELECT 1 FROM dbbat_no_such_table_oci;
+INSERT INTO dbbat_failed_stmt_oci VALUES (1);
+SELECT 1/0 FROM dual;
+DROP TABLE dbbat_no_such_table_oci;
+SELECT 'oci-done=' || 42 FROM dual;
+EXIT
+`
+
+// ociFailedStatements is what ociFailingScript must have left behind, spelled
+// out rather than derived from the script so a change to one cannot quietly
+// stop the other from matching anything. The text is the statement *without*
+// its trailing semicolon, which is what sqlplus puts on the wire.
+var ociFailedStatements = []failedStatement{
+	{sql: "SELECT 1 FROM dbbat_no_such_table_oci", wantORA: "ORA-00942"},
+	{sql: "INSERT INTO dbbat_failed_stmt_oci VALUES (1)", wantORA: "ORA-00001"},
+	{sql: "SELECT 1/0 FROM dual", wantORA: "ORA-01476"},
+	{sql: "DROP TABLE dbbat_no_such_table_oci", wantORA: "ORA-00942"},
+}
+
+// ociFailedStmtSetup is the table the unique-key violation needs. It is seeded
+// through the fixture's own go-ora connection, so nothing in the sqlplus script
+// has to succeed for the failures to be failures.
+const (
+	ociFailedStmtCreate = "CREATE TABLE dbbat_failed_stmt_oci (id NUMBER PRIMARY KEY)"
+	ociFailedStmtSeed   = "INSERT INTO dbbat_failed_stmt_oci VALUES (1)"
+	ociFailedStmtDrop   = "DROP TABLE dbbat_failed_stmt_oci"
+)
+
+// TestIntegration_FailingStatementsRecordTheirORAErrorOCI runs the shapes above
+// through sqlplus.
+//
+// The OCI client is sqlplus from PATH when there is one, and otherwise the one
+// bundled in the Oracle container the fixture already started, so this runs in
+// CI too; ORACLE_TEST_REQUIRE_OCI_CLIENT=1 makes "no client" a failure rather
+// than a skip. See oci_client_integration_test.go.
+//
+// WHENEVER SQLERROR is deliberately not set to EXIT: sqlplus must report each
+// ORA error and carry on, so one script covers every shape and the closing
+// SELECT proves the session outlived them.
+func TestIntegration_FailingStatementsRecordTheirORAErrorOCI(t *testing.T) {
+	ociAuthModeNote(t)
+
+	env := startOracleThroughProxyForOCI(t, nil)
+	oci := requireOCIClient(t, env)
+
+	ctx := context.Background()
+
+	_, _ = env.db.ExecContext(ctx, ociFailedStmtDrop) // ORA-00942 on a clean database
+
+	_, err := env.db.ExecContext(ctx, ociFailedStmtCreate)
+	require.NoError(t, err)
+
+	defer func() { _, _ = env.db.ExecContext(context.Background(), ociFailedStmtDrop) }()
+
+	_, err = env.db.ExecContext(ctx, ociFailedStmtSeed)
+	require.NoError(t, err)
+
+	runCtx, cancel := context.WithTimeout(ctx, failingStatementDeadline)
+	defer cancel()
+
+	output, err := oci.run(t, runCtx, ociFailingScript)
+	require.NoErrorf(t, err, "%s never came back:\n%s", oci.label, output)
+
+	assertNoOCIAuthMalformation(t, output)
+
+	assert.Contains(t, output, "oci-ready=1", "the OCI session must work before the failures:\n%s", output)
+	assert.Contains(t, output, "oci-done=42", "and must outlive them:\n%s", output)
+
+	for _, st := range ociFailedStatements {
+		assert.Containsf(t, output, st.wantORA,
+			"sqlplus must have reported %s for %q itself:\n%s", st.wantORA, st.sql, output)
+	}
+
+	// The assertion the whole file is about: what the *client* saw is also what
+	// dbbat recorded. Before the fixed-width decoder every one of these rows
+	// carried no error at all.
+	for _, st := range ociFailedStatements {
+		t.Run(st.wantORA+" "+st.sql, func(t *testing.T) {
+			env.assertFailedQueryLogged(t, st.sql, st.wantORA)
+		})
+	}
+}
