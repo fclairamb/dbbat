@@ -381,14 +381,20 @@ The same auth + grant + query-logging pipeline runs across all five protocols (`
   `query_approver_user_group_uids` (who may release **approval holds** on
   statements against it). Neither implies the other — an org wanting overlap
   lists the same user group in both. Resolution is a fallback chain, in one
-  place (`store.ResolveServerApproverGroups`): for a grant request, the server's
+  place (`store.ResolveServerApproverGroupsByServers`, of which the per-server
+  `store.ResolveServerApproverGroups` is a thin wrapper — a second, SQL-shaped
+  implementation of the chain is exactly the drift that would be an
+  authorization bug): for a grant request, the server's
   list → the *union* of its server groups' lists → admins; for a hold, the
   definition's `approver_user_group_uids` (which wins outright when non-empty) →
   the server's → its groups' union → admins. Empty everywhere = admin-only =
   exactly the pre-feature behaviour. **Self-approval is refused on every path**,
   including both Slack transports. Each pending item reports `approver_role` for
   the caller (`admin` / `definition_approver` / `server_approver` / empty) so the
-  UI can say which hat they wear
+  UI can say which hat they wear. The two listings
+  (`GET /api/v1/grant-requests` for a non-admin, `GET /api/v1/queries/pending`)
+  resolve the whole page in a fixed number of queries rather than walking the
+  chain twice per row — same chain, same answers, asked once
 - **Approver lists are live, never snapshotted**: they are read at decision time,
   so an edit — or moving a server between groups — immediately changes who may
   decide requests already filed and statements already parked. That is the
