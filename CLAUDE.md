@@ -75,6 +75,7 @@ dbbat/
 │   ├── migrations/sql/      # SQL migration files (up/down)
 │   ├── store/               # Database models and CRUD operations
 │   ├── cache/               # Auth cache shared by API + proxies
+│   ├── safe/                # Goroutine panic guards (`RunRelay`/`RunGuarded`/`RunWatchdog`/`RunMaintenance`). A **leaf**: standard library only, so every package — `cache` and `proxy/upstream` included — can import it without a cycle. A test fails the build if a non-stdlib import creeps in
 │   ├── events/              # In-process topic broker behind GET /api/v1/stream
 │   ├── approval/            # Registry of queries parked awaiting a human
 │   ├── mcp/                 # MCP server for AI agents; executes SQL by dialing our own proxy listeners (see docs/mcp.md)
