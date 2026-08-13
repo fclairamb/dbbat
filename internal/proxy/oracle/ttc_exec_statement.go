@@ -153,7 +153,9 @@ func execSQLLength(body []byte) (int, bool) {
 //
 // The field is the statement's length **times three** — the client sizes the
 // buffer for its widest character encoding rather than reporting the byte
-// count. Measured on testdata/sqlplus_cursor_reexec.pcapng: 0x117 (279) for a
+// count, the same 3x UTF-8 max-expansion convention the wide AUTH preamble uses
+// for user_id_len (findUserIDLenPos, phase1_forward.go). Measured on
+// testdata/sqlplus_cursor_reexec.pcapng: 0x117 (279) for a
 // 93-byte statement and 0x45 (69) for a 23-byte one, in five frames. A value
 // that is not a multiple of three is refused rather than rounded, so a header
 // shape this reading does not fit falls through to the legacy scan instead of
