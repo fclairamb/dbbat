@@ -306,6 +306,67 @@ func TestTTCClrVariant_ShortValue_NoOp(t *testing.T) {
 		"at the short-form limit the encodings must diverge, or the flag does nothing")
 }
 
+// TestBuildAuthChallenge_HonoursBigClrChunks is the same property on the other
+// direction: the AUTH challenge dbbat synthesizes *for the client* in
+// terminated-auth mode must frame its values in the CLR long form the session
+// negotiated, not always in single-byte chunks.
+//
+// Today every value in that challenge is short — AUTH_SESSKEY (64 hex chars),
+// AUTH_VFR_DATA, AUTH_PBKDF2_CSK_SALT, the two PBKDF2 counts, the DB id — so the
+// flag must not move a single byte. It becomes live the moment a salt or
+// verifier grows past the 252-byte short-form limit, which the second half
+// forces with a synthetic salt.
+func TestBuildAuthChallenge_HonoursBigClrChunks(t *testing.T) {
+	t.Parallel()
+
+	const (
+		sessKey = "A1B2C3D4E5F60718293A4B5C6D7E8F90A1B2C3D4E5F60718293A4B5C6D7E8F90" // 64 hex
+		vfrData = "0A1B2C3D4E5F60718293A4B5C6D7E8F9"
+		salt    = "1122334455667788"
+	)
+
+	// Both the customHash (6-pair) and legacy (2-pair) shapes.
+	for _, saltHex := range []string{salt, ""} {
+		off := buildAuthChallenge(sessKey, vfrData, saltHex, 4096, 3, VerifierType18453, false, false)
+		on := buildAuthChallenge(sessKey, vfrData, saltHex, 4096, 3, VerifierType18453, false, true)
+
+		assert.Equal(t, off, on,
+			"today's short challenge values must encode identically in both CLR forms")
+	}
+
+	// A salt past the short-form limit is where the flag has to bite.
+	longSalt := strings.Repeat("A1B2C3D4", 40) // 320 chars
+	require.Greater(t, len(longSalt), 0xFC,
+		"the fixture must exceed the short-form limit or nothing is being tested")
+
+	big := buildAuthChallenge(sessKey, vfrData, longSalt, 4096, 3, VerifierType18453, false, true)
+	single := buildAuthChallenge(sessKey, vfrData, longSalt, 4096, 3, VerifierType18453, false, false)
+	require.NotEqual(t, single, big,
+		"past the short-form limit the negotiated encoding must change the bytes")
+
+	// The long value round-trips through readCLRVariant(_, true) — the reader
+	// this encoder is the counterpart of — and is chunked, not contiguous.
+	clr := encodeBigChunkCLRSplit([]byte(longSalt), ttcClrChunkSize)
+	assert.Contains(t, string(big), string(clr),
+		"the long salt must be written in the big-chunk long form")
+	assert.NotContains(t, string(big), longSalt, "a chunked value is not contiguous on the wire")
+
+	got, n := readCLRVariant(clr, true)
+	assert.Equal(t, len(clr), n)
+	assert.Equal(t, longSalt, string(got))
+
+	// And the whole challenge still walks pair-by-pair with the same capability:
+	// header is data flags (2) + func (1) + a compressed pair count.
+	pairs, hn := readCompressedInt(big[3:])
+	require.Equal(t, 6, pairs)
+
+	decoded := decodeKVPairs(t, big[3+hn:], pairs, true)
+	assert.Equal(t, longSalt, decoded[authKeyPbkdf2CskSalt])
+	assert.Equal(t, sessKey, decoded[authKeySessKey])
+	assert.Equal(t, vfrData, decoded[authKeyVfrData])
+	assert.Equal(t, dbbatGloballyUniqueDBID, decoded[authKeyGloballyUniqueDBID+"\x00"])
+}
+
 // TestReplaceAuthKVValue_BigChunkLongValue covers the anchored splice — the
 // path that both read the replaced value with plain readCLR and wrote the new
 // one with single-byte chunks.
