@@ -103,10 +103,13 @@ func TestCapture_PythonThinFailedStatements(t *testing.T) {
 	t.Logf("capture written to %s", outPath)
 }
 
-// TestCapture_GoOraFailedStatements mirrors the script above on go-ora, the
-// client whose OERs *do* carry the end-of-call bit. It exists so the comparison
-// in the replay test is between two measurements rather than between one
-// measurement and an assumption.
+// TestCapture_GoOraFailedStatements mirrors the script above on go-ora — the
+// client whose OERs were *believed* to always carry the end-of-call bit. It
+// exists so the comparison in the replay test is between two measurements
+// rather than between one measurement and an assumption, and that is exactly
+// what it bought: this recording is what disproved the belief, since go-ora
+// turns out to emit bit-less OERs for the same five failures python-oracledb
+// thin does.
 func TestCapture_GoOraFailedStatements(t *testing.T) {
 	oracleAddr := captureEnv("ORACLE_ADDR", "localhost:51521")
 	oracleService := captureEnv("ORACLE_SERVICE", "FREEPDB1")

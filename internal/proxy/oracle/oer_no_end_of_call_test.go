@@ -10,7 +10,14 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
-// This file covers the client shape whose OERs carry no end-of-call bit.
+// This file covers the OERs that carry no end-of-call bit on a *successful*
+// call — which, on the successful calls, is a client shape.
+//
+// The scoping matters: read unqualified, "the client whose OERs carry no bit"
+// is false. Measured later across six failure shapes, the bit tracks the call
+// rather than the client, and go-ora emits bit-less OERs too — see
+// failed_stmt_replay_test.go. What follows is true of the successful DML this
+// file replays, and of nothing wider.
 //
 // python-oracledb thin negotiates a session in which the server's OERs come
 // with CallStatus 1–2 rather than the 0x010001 go-ora sees, and dbbat used to
