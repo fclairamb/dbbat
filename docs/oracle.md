@@ -920,12 +920,14 @@ on the client's next call (`logMsgRefusalHeld` then `logMsgRefusalDelivered`).
 Which is *stronger* evidence than the old text assertion, and it is what makes
 ojdbc's `code=28` attributable to the fix rather than to ojdbc.
 
-###### All four clients, measured
+###### All four drivers, five client builds, measured
 
 `TestIntegration_AsyncRefusalAgainstOCIAndPythonThin` closes the two clients the
 fix shipped without, on the same fixture and through the same recording tap.
 Both risks that motivated it are ruled out: sqlplus did **not** hang, and no OCI
-session took the unnameable fallback.
+session took the unnameable fallback. Four drivers, but five rows below, because
+the OCI client is two client builds with two different on-wire encodings and
+both had to be run.
 
 | Client | Rows drained first | What dbbat wrote | What the client reported |
 |---|---|---|---|
@@ -935,9 +937,20 @@ session took the unnameable fallback.
 | sqlplus, Instant Client 23.3 (macOS, on PATH) | 1000 of 5000 | one ORA-00028, call 17, **fixed-width 32-bit** | `ORA-00028: session terminated: bandwidth quota exceeded for this grant`, printed verbatim |
 | sqlplus, bundled 23.26 (`gvenzl/oracle-free:23-slim`) | 1000 of 5000 | one ORA-00028, call 17, **fixed-width 64-bit** | the same ORA-00028, printed verbatim |
 
+The two sqlplus rows are **two runs, not one**: `plannedOCIClient` is a
+`sync.OnceValue` settled before any container starts, so the flavor is a
+property of the process (`ORACLE_TEST_OCI_CLIENT=path|container` picks it). CI
+has no client on PATH and therefore measures the bundled one only — the Instant
+Client row has to be re-taken by hand after a change to the fixed-width
+encoding.
+
 Every one of the five took the **delivered** path — `logMsgRefusalHeld` then
 `logMsgRefusalDelivered`, with `logMsgRefusalUnnameable` never once — and no
-watchdog teardown and no overshoot abandonment anywhere. So the call the client
+watchdog teardown and no overshoot abandonment anywhere. The sqlplus subtest
+asserts both of those as itself rather than logging them: `delta.unnameable` is
+pinned at zero, and the client's own stdout has to carry the ORA-00028 text,
+which is what separates *reading the fixed-width frame* from *meeting a closed
+socket* — everything else there is satisfied by a socket close too. So the call the client
 makes after finishing a fetch reply is, on every client dbbat supports, one it
 can name: the OCI piggyback that `gateUnnameableFrame` exists for is what these
 clients open a *session* with, not what they resume a drained fetch with. The

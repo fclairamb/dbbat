@@ -265,6 +265,17 @@ func tappedOERs(t *testing.T, stream []byte) []tappedOER {
 // The message is the arbiter because it is the one field neither encoding can
 // fake: an OER carrying "ORA-00028: …" carries error code 28, so a walk that
 // disagrees with the text lost the layout, whatever else it validated.
+//
+// A *messageless* OER — a plain end-of-call status, error code 0 — has no such
+// arbiter, and the zero-run problem is exactly the same there, so the fallback
+// is not "prefer the compressed walk". It is the **fixed-width** candidate,
+// because the two validations are not equally strong: oerFixedWidthTailFieldsAt
+// walks to the end of the payload and requires it to terminate there (message
+// CLR, or the end-of-response marker, and nothing after), while
+// skipOERFixedFields validates a *prefix* and says nothing about the rest. A
+// short compressed status OER cannot satisfy the fixed layouts at all — the
+// 32-bit one alone needs 71 bytes with the trailing RetCode repeating the
+// leading error number — so it still falls through to the compressed decode.
 func decodeTappedOER(payload []byte) (tappedOER, bool) {
 	compressed, compressedOK := tappedCompressedOER(payload)
 	fixed, fixedOK := tappedFixedWidthOER(payload)
@@ -280,11 +291,11 @@ func decodeTappedOER(payload []byte) (tappedOER, bool) {
 		return tappedOER{}, false
 	}
 
-	if compressedOK {
-		return compressed, true
+	if fixedOK {
+		return fixed, true
 	}
 
-	return fixed, fixedOK
+	return compressed, compressedOK
 }
 
 // tappedCompressedOER decodes the thin-client encoding through the very walk
