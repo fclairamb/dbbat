@@ -3,6 +3,18 @@
 **No GitHub issue filed yet — one should be.** (Automation must not run
 `gh issue create`; see `specs/todos/2026-08-11-06-*.md`.)
 
+**Depends on `specs/todos/2026-08-13-20-sql-comments-evade-every-oracle-blocked-pattern.md`,
+which is scheduled to land first despite its higher number.** That spec adds a
+literal-aware comment normaliser feeding a scratch copy that
+`oracleBlockedPatterns` and `IsWriteQuery`/`IsDDLQuery` match against. The
+"leading comments" shape listed below is the *same* problem — `USE/**/otherdb`
+and `/* x */ USE otherdb` — so this spec must reuse that normaliser rather than
+hand-rolling comment handling in a second place. Two implementations of "what
+does this statement really say" is exactly the drift the Implementation section
+warns about below. MySQL additionally accepts `# …` line comments and requires
+whitespace after `--`; confirm the normaliser covers both before relying on it
+here.
+
 ## Goal
 
 Refuse a mid-session database switch on the MySQL and SQL Server proxies the way
