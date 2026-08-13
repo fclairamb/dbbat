@@ -68,9 +68,7 @@ func (h *handler) UseDB(dbName string) error {
 // own case sensitivity for database names is filesystem-dependent, so the exact
 // match is the fail-closed direction.
 func (h *handler) switchDatabase(sqlText, dbName string) error {
-	db := h.session.database
-
-	if db != nil && (dbName == db.Name || dbName == db.DatabaseName) {
+	if h.namesSessionDatabase(dbName) {
 		h.recordQuery(sqlText, nil, time.Now(), nil)
 
 		return nil
@@ -79,6 +77,18 @@ func (h *handler) switchDatabase(sqlText, dbName string) error {
 	h.recordQuery(sqlText, nil, time.Now(), ptrErrString(ErrSwitchDatabaseDenied))
 
 	return ErrSwitchDatabaseDenied
+}
+
+// namesSessionDatabase reports whether dbName is this session's own database,
+// under either name it answers to: the dbbat entry's, which is what the client's
+// connection string carries, and the real one on the target.
+//
+// It is the comparison every "may this session change database" answer is built
+// on, and there is deliberately only one of it.
+func (h *handler) namesSessionDatabase(dbName string) bool {
+	db := h.session.database
+
+	return db != nil && (dbName == db.Name || dbName == db.DatabaseName)
 }
 
 // HandleQuery handles COM_QUERY (text protocol).
@@ -206,6 +216,10 @@ func (h *handler) runIntercepted(
 		return nil, h.switchDatabase(sql, target)
 	}
 
+	if err := h.checkPreparedSwitch(sql, params); err != nil {
+		return nil, err
+	}
+
 	if err := shared.ValidateMySQLQuery(sql, s.grant); err != nil {
 		errStr := err.Error()
 		h.recordQuery(sql, params, time.Now(), &errStr)
@@ -257,6 +271,52 @@ func (h *handler) runIntercepted(
 	h.recordQueryWithUID(approvalUID, sql, params, start, capturedRows, truncated, rowsAffected, nil)
 
 	return result, nil
+}
+
+// checkPreparedSwitch refuses a `PREPARE <name> FROM '<literal>'` whose literal
+// is a database switch.
+//
+// `PREPARE s FROM 'USE otherdb'` followed by `EXECUTE s` performs exactly the
+// switch this proxy refuses, one statement later and through text every check
+// around it steps over: `PREPARE` matches no write or DDL keyword and no blocked
+// pattern, and the switch scan reads the outer statement, not the literal. It is
+// the MySQL spelling of SQL Server's `EXEC('…')`.
+//
+// Scope is deliberately narrow: **only** the switch decision reaches inside the
+// literal. `PREPARE s FROM 'DELETE FROM t'` is still invisible to read_only,
+// which is the broader "dynamic SQL is opaque to the grant controls" problem —
+// shared with Oracle's `EXECUTE IMMEDIATE` — and is filed separately rather than
+// half-solved here. docs/mysql.md says so plainly.
+func (h *handler) checkPreparedSwitch(sql string, params *store.QueryParameters) error {
+	prepared, readable := shared.MySQLPreparedText(sql)
+	if !readable {
+		errStr := ErrPreparedTextNotCheckable.Error()
+		h.recordQuery(sql, params, time.Now(), &errStr)
+
+		return ErrPreparedTextNotCheckable
+	}
+
+	target, isUse := shared.MySQLUseTarget(prepared)
+	if !isUse {
+		return nil
+	}
+
+	// Its own database is refused too — the same superset COM_STMT_PREPARE
+	// refuses, and for the same reason. dbbat answers a switch itself rather
+	// than forwarding it, so there is no handle to hand back, and an OK here
+	// would leave the client holding a name that was never prepared upstream.
+	// Recorded as the refusal it is, rather than through switchDatabase's
+	// allowed branch, which would log a success the client never got.
+	if h.namesSessionDatabase(target) {
+		errStr := ErrSwitchDatabaseDenied.Error()
+		h.recordQuery(sql, params, time.Now(), &errStr)
+
+		return ErrSwitchDatabaseDenied
+	}
+
+	// A foreign database is switchDatabase's call, so it earns the same error
+	// and the same audit row a direct `USE otherdb` does.
+	return h.switchDatabase(sql, target)
 }
 
 // holdIfNeeded runs the approval gate for one MySQL statement.

@@ -89,3 +89,57 @@ func TestDynamicSQLLeavesABareExecAlone(t *testing.T) {
 		t.Fatalf("MSSQLDynamicSQL = %q, want [\"EXEC dbo.p\"]", texts)
 	}
 }
+
+// TestMySQLPreparedText pins the MySQL spelling of the same construct:
+// `PREPARE s FROM 'USE otherdb'` performs a switch a statement later, through
+// text the checks around it step over.
+func TestMySQLPreparedText(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		sql      string
+		text     string
+		readable bool
+	}{
+		{"single quoted", "PREPARE s FROM 'USE otherdb'", "USE otherdb", true},
+		{"double quoted", `PREPARE s FROM "USE otherdb"`, "USE otherdb", true},
+		{"mixed case", "prepare S from 'use otherdb'", "use otherdb", true},
+		{"backticked name", "PREPARE `my stmt` FROM 'USE otherdb'", "USE otherdb", true},
+		{"extra whitespace", "  PREPARE\n\ts\n\tFROM\n\t'USE otherdb'  ", "USE otherdb", true},
+		{"trailing semicolon", "PREPARE s FROM 'USE otherdb';", "USE otherdb", true},
+		{"leading comment", "/* x */ PREPARE s FROM 'USE otherdb'", "USE otherdb", true},
+		{"interior comment", "PREPARE s FROM/**/'USE otherdb'", "USE otherdb", true},
+		{"quote doubling", "PREPARE s FROM 'SELECT ''a'''", "SELECT 'a'", true},
+		{"backslash escape", `PREPARE s FROM 'SELECT \'a\''`, "SELECT 'a'", true},
+		{"ordinary statement", "PREPARE s FROM 'SELECT 1'", "SELECT 1", true},
+
+		// Nothing to check: not a PREPARE, or a text the server builds at run
+		// time. Deliberately not refused — a blanket refusal of PREPARE would
+		// break ordinary application code.
+		{"variable", "PREPARE s FROM @sql", "", true},
+		{"concat", "PREPARE s FROM CONCAT('USE ', @db)", "", true},
+		{"not a prepare", "SELECT 1", "", true},
+		{"xa prepare", "XA PREPARE 'xid'", "", true},
+		{"execute", "EXECUTE s", "", true},
+
+		// Fail closed.
+		{"unterminated literal", "PREPARE s FROM 'USE otherdb", "", false},
+		{"adjacent literals", "PREPARE s FROM 'USE ' 'otherdb'", "", false},
+		{"no FROM", "PREPARE s 'USE otherdb'", "", false},
+		{"nested prepare", "PREPARE s FROM 'PREPARE t FROM ''USE otherdb'''", "", false},
+		{"nested prepare from a variable", "PREPARE s FROM 'PREPARE t FROM @x'", "", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			text, readable := MySQLPreparedText(tc.sql)
+			if readable != tc.readable || text != tc.text {
+				t.Fatalf("MySQLPreparedText(%q) = (%q, %v), want (%q, %v)",
+					tc.sql, text, readable, tc.text, tc.readable)
+			}
+		})
+	}
+}
