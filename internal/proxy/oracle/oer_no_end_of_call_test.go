@@ -106,11 +106,16 @@ func TestPythonThinDMLResponse_FixtureShape(t *testing.T) {
 	assert.Zero(t, info.CallStatus&oerEndOfCallBit, "this client's OERs carry no end-of-call bit")
 	assert.Nil(t, findOERInResponse(payload), "which is why the strict locator finds nothing here")
 
-	// Nothing earlier in the envelope may be mistaken for the OER.
-	for i := 1; i < pythonThinOEROffset; i++ {
-		assert.Nilf(t, findPlausibleOERInResponse(payload[:i+len(pythonThinOERBytes)][:i]),
-			"byte %d of the return-parameter block decodes as an OER", i)
-	}
+	// Nothing earlier in the envelope may be mistaken for the OER — first match
+	// wins, so a decoy in the return-parameter block would make the tests below
+	// pass on the wrong bytes.
+	assert.Nil(t, findPlausibleOERInResponse(payload[:pythonThinOEROffset]),
+		"the return-parameter block must hold no OER-shaped decoy")
+
+	found := findPlausibleOERInResponse(payload)
+	require.NotNil(t, found, "the relaxed scan is what has to find it")
+	assert.Equal(t, 1, found.CurRowNumber)
+	assert.Equal(t, 4, found.CursorID)
 
 	resp, err := decodeTTCResponse(payload)
 	require.NoError(t, err)
