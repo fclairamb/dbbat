@@ -285,10 +285,11 @@ func isIdentifierRun(b []byte) bool {
 // ttcClrVariant). It only changes values at or past the 252-byte short-form
 // limit; every value in today's challenge is far shorter, so the bytes are
 // identical either way — it is threaded so a future oversized salt or verifier
-// does not silently desync a big-chunk client. The wide/OCI leg keeps
-// single-byte chunk lengths: readAuthKVPairWide and replaceAuthKVValueWide both
-// read plain readCLR, so that framing is settled independently of the
-// capability.
+// does not silently desync a big-chunk client. It applies on the wide/OCI leg
+// too: the capability comes from the upstream server's Set Protocol reply, so
+// an OCI session negotiates it as readily as a thin one (measured on
+// testdata/sqlplus_cursor_reexec.pcapng, see readAuthKVPairWide), and the wide
+// read side follows the same rule.
 func buildAuthChallenge(encServerSessKey, authVfrData, pbkdf2ChkSaltHex string, vgenCount, sderCount, verifierType int, wide, bigChunks bool) []byte {
 	pairs := 2
 
@@ -312,7 +313,9 @@ func buildAuthChallenge(encServerSessKey, authVfrData, pbkdf2ChkSaltHex string, 
 		return ttcKeyValChunked(key, value, flag, bigChunks)
 	}
 	if wide {
-		kv = ttcKeyValWide
+		kv = func(key, value string, flag int) []byte {
+			return ttcKeyValWideChunked(key, value, flag, bigChunks)
+		}
 	}
 
 	buf := make([]byte, 0, 256)
@@ -346,16 +349,26 @@ func buildAuthChallenge(encServerSessKey, authVfrData, pbkdf2ChkSaltHex string, 
 
 // ttcKeyValWide encodes a TTC key/value pair with fixed 4-byte little-endian
 // lengths and flag — the form OCI (sqlplus / instant client) negotiates. The CLR
-// bodies keep the 1-byte length prefix. Mirror of ttcKeyVal (compressed form).
+// bodies keep single-byte chunk lengths. Mirror of ttcKeyVal (compressed form).
 func ttcKeyValWide(key, value string, flag int) []byte {
+	return ttcKeyValWideChunked(key, value, flag, false)
+}
+
+// ttcKeyValWideChunked is ttcKeyValWide with the CLR long form selectable, the
+// wide counterpart of ttcKeyValChunked. bigChunks is the session's negotiated
+// UseBigClrChunks: past the 252-byte short-form limit the CLR bodies carry
+// compressed-int chunk lengths instead of single-byte ones, which is what the
+// wide read side (readAuthKVPairWide) now parses. Short values — every value
+// dbbat writes today — are byte-identical either way.
+func ttcKeyValWideChunked(key, value string, flag int, bigChunks bool) []byte {
 	keyBytes := []byte(key)
 	valBytes := []byte(value)
 
 	buf := make([]byte, 0, len(key)+len(value)+20)
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(keyBytes)))
-	buf = append(buf, ttcClr(keyBytes)...)
+	buf = append(buf, ttcClrVariant(keyBytes, bigChunks)...)
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(valBytes)))
-	buf = append(buf, ttcClr(valBytes)...)
+	buf = append(buf, ttcClrVariant(valBytes, bigChunks)...)
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(flag))
 
 	return buf

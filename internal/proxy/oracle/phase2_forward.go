@@ -16,15 +16,15 @@ import (
 // the OCI fixed 4-byte little-endian length/flag encoding instead of the
 // compressed form thin clients use.
 //
-// bigChunks selects the CLR long form on the thin path — both for reading the
-// value being replaced and for writing the new one — so a value over the
-// 252-byte short-form limit is framed the way the session negotiated. It is a
-// no-op for every value dbbat substitutes today (all short), and does not apply
-// to the wide/OCI path, which negotiates single-byte chunks (see
-// readAuthKVPairWide).
+// bigChunks selects the CLR long form — both for reading the value being
+// replaced and for writing the new one — so a value over the 252-byte
+// short-form limit is framed the way the session negotiated. It is a no-op for
+// every value dbbat substitutes today (all short), and applies to the wide/OCI
+// path too: the capability is advertised by the server, so it is set on an OCI
+// session as much as a thin one (see readAuthKVPairWide).
 func replaceAuthKVValue(body []byte, key, newValue string, wide, bigChunks bool) []byte {
 	if wide {
-		return replaceAuthKVValueWide(body, key, newValue)
+		return replaceAuthKVValueWide(body, key, newValue, bigChunks)
 	}
 
 	keyB := []byte(key)
@@ -89,7 +89,14 @@ func replaceAuthKVValue(body []byte, key, newValue string, wide, bigChunks bool)
 // client's caps level, rejects a spliced plain length with ORA-28041
 // ("authentication protocol internal error"). Mirror whichever convention the
 // original pair used.
-func replaceAuthKVValueWide(body []byte, key, newValue string) []byte {
+//
+// bigChunks is the session's negotiated CLR long form, applied to both sides of
+// the splice: the value being replaced is read with readCLRVariant and the new
+// one written with ttcClrVariant, so a value past the 252-byte short-form limit
+// keeps the framing the peers agreed on. It used to be omitted here on the
+// premise that OCI ignores the capability — see readAuthKVPairWide for what the
+// sqlplus capture does and does not establish about that.
+func replaceAuthKVValueWide(body []byte, key, newValue string, bigChunks bool) []byte {
 	keyB := []byte(key)
 
 	idx := bytes.Index(body, keyB)
@@ -111,7 +118,7 @@ func replaceAuthKVValueWide(body []byte, key, newValue string) []byte {
 	origValLen := binary.LittleEndian.Uint32(body[pos : pos+4])
 	valPos := pos + 4 // skip 4-byte LE valLen
 
-	origVal, clrN := readCLR(body[valPos:])
+	origVal, clrN := readCLRVariant(body[valPos:], bigChunks)
 	if clrN == 0 {
 		return body
 	}
@@ -132,7 +139,7 @@ func replaceAuthKVValueWide(body []byte, key, newValue string) []byte {
 	out := make([]byte, 0, pos+len(body)-end+len(newValue)+12)
 	out = append(out, body[:pos]...) // key side preserved verbatim
 	out = binary.LittleEndian.AppendUint32(out, newValLen)
-	out = append(out, ttcClr([]byte(newValue))...)
+	out = append(out, ttcClrVariant([]byte(newValue), bigChunks)...)
 	out = binary.LittleEndian.AppendUint32(out, flagVal)
 	out = append(out, body[end:]...)
 

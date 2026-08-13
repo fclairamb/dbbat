@@ -205,17 +205,24 @@ func wideAuthSizeField(n int, bufferSized bool) uint32 {
 // CLR byte, which is what OCI puts on the wire and what readAuthKVPairWide
 // expects; ttcKeyValWide's unconditional CLR is a byte the reader would then
 // mistake for the flag.
-func ttcKeyValWideSized(key, value string, flag int, bufferSized bool) []byte {
+//
+// bigChunks is the session's negotiated CLR long form, the same rule the wide
+// read side now follows (readAuthKVPairWide). Every value this builder emits is
+// short today — hostnames, a PID, dbbat's own program name, the AUTH_* secrets
+// — so it moves no byte; it exists so the synthetic body and the rewrite path
+// cannot end up framing the same oversized value two different ways on one
+// session.
+func ttcKeyValWideSized(key, value string, flag int, bufferSized, bigChunks bool) []byte {
 	keyBytes := []byte(key)
 	valBytes := []byte(value)
 
 	buf := make([]byte, 0, len(keyBytes)+len(valBytes)+20)
 	buf = binary.LittleEndian.AppendUint32(buf, wideAuthSizeField(len(keyBytes), bufferSized))
-	buf = append(buf, ttcClr(keyBytes)...)
+	buf = append(buf, ttcClrVariant(keyBytes, bigChunks)...)
 	buf = binary.LittleEndian.AppendUint32(buf, wideAuthSizeField(len(valBytes), bufferSized))
 
 	if len(valBytes) > 0 {
-		buf = append(buf, ttcClr(valBytes)...)
+		buf = append(buf, ttcClrVariant(valBytes, bigChunks)...)
 	}
 
 	buf = binary.LittleEndian.AppendUint32(buf, uint32(flag))
@@ -229,7 +236,11 @@ func ttcKeyValWideSized(key, value string, flag int, bufferSized bool) []byte {
 //
 //	<prefix> <ptr> <userLen:4> <mode:4> <ptr> <pairCount:4> [pad:4] <ptr> <ptr>
 //	<CLR username> <KV pairs>
-func buildWideAuthBody(f wideAuthFraming, username string, pairs []authKV) []byte {
+//
+// bigChunks is the session's negotiated CLR long form, forwarded to every pair.
+// The username keeps plain ttcClr: Oracle caps an identifier at 128 bytes, half
+// the short-form limit, so no long form can arise there in either encoding.
+func buildWideAuthBody(f wideAuthFraming, username string, pairs []authKV, bigChunks bool) []byte {
 	buf := make([]byte, 0, 256)
 	buf = append(buf, f.prefix...)
 	buf = append(buf, wideAuthPointerRun...)
@@ -247,7 +258,7 @@ func buildWideAuthBody(f wideAuthFraming, username string, pairs []authKV) []byt
 	buf = append(buf, ttcClr([]byte(username))...)
 
 	for _, p := range pairs {
-		buf = append(buf, ttcKeyValWideSized(p.key, p.value, p.flag, f.bufferSized)...)
+		buf = append(buf, ttcKeyValWideSized(p.key, p.value, p.flag, f.bufferSized, bigChunks)...)
 	}
 
 	return buf
@@ -338,11 +349,11 @@ func authPhase2Pairs(ident driverIdentity, sec *upstreamAuthSecrets, wide bool) 
 }
 
 // buildClientAuthPhase1Wide is the OCI counterpart of buildClientAuthPhase1.
-func buildClientAuthPhase1Wide(f wideAuthFraming, username string, ident driverIdentity) []byte {
-	return buildWideAuthBody(f, username, authPhase1Pairs(ident))
+func buildClientAuthPhase1Wide(f wideAuthFraming, username string, ident driverIdentity, bigChunks bool) []byte {
+	return buildWideAuthBody(f, username, authPhase1Pairs(ident), bigChunks)
 }
 
 // buildClientAuthPhase2Wide is the OCI counterpart of buildClientAuthPhase2.
-func buildClientAuthPhase2Wide(f wideAuthFraming, username string, ident driverIdentity, sec *upstreamAuthSecrets) []byte {
-	return buildWideAuthBody(f, username, authPhase2Pairs(ident, sec, true))
+func buildClientAuthPhase2Wide(f wideAuthFraming, username string, ident driverIdentity, sec *upstreamAuthSecrets, bigChunks bool) []byte {
+	return buildWideAuthBody(f, username, authPhase2Pairs(ident, sec, true), bigChunks)
 }
