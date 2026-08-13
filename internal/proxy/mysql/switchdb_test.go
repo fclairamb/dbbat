@@ -161,6 +161,45 @@ func TestUseIsNotAGrantControl(t *testing.T) {
 	}
 }
 
+// TestPrepareOfAUseIsRefused covers the third path a client can send the text
+// on. COM_STMT_PREPARE is its own command and never passes through
+// runIntercepted, so the check has to be repeated there rather than assumed —
+// and it must fire before the statement reaches the upstream, which is what
+// leaving session.upstreamConn nil here proves: a check that ran too late would
+// nil-panic instead of refusing.
+func TestPrepareOfAUseIsRefused(t *testing.T) {
+	t.Parallel()
+
+	for _, sql := range []string{
+		"USE otherdb",
+		"USE `otherdb`",
+		"use otherdb;",
+		"USE/**/otherdb",
+		// The granted database too, deliberately: unlike COM_QUERY there is no
+		// OK packet to answer a prepare with, only a statement handle dbbat
+		// would have to invent — and MySQL does not accept USE as a preparable
+		// statement in the first place.
+		"USE appdb",
+		"USE `prod-entry`",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			t.Parallel()
+
+			hnd := &handler{session: switchSession()}
+
+			params, columns, ctx, err := hnd.HandleStmtPrepare(sql)
+			if !errors.Is(err, ErrSwitchDatabaseDenied) {
+				t.Fatalf("HandleStmtPrepare(%q) = %v, want ErrSwitchDatabaseDenied", sql, err)
+			}
+
+			if params != 0 || columns != 0 || ctx != nil {
+				t.Fatalf("HandleStmtPrepare(%q) = (%d, %d, %v), want a zero handle",
+					sql, params, columns, ctx)
+			}
+		})
+	}
+}
+
 // TestUseDBAndTextUseShareOneDecision is the anti-drift test: COM_INIT_DB and
 // the text form must agree on every name, because two implementations of "may
 // this session change database" is how one of them silently stops matching the

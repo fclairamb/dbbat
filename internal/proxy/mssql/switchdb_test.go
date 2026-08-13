@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -134,6 +135,133 @@ func TestUseInsideSPExecuteSQLIsRefused(t *testing.T) {
 	st := s.describeRPC(requests)
 	require.NoError(t, st.refusal)
 	require.ErrorIs(t, s.validate(st), ErrDatabaseSwitchBlocked)
+}
+
+// TestDynamicSQLIsCheckedNotSteppedOver is the regression test for the second
+// bypass: `EXEC(<literal>)` runs the literal's contents as a batch, so the USE
+// scan stepped over it as an inert string and every prefix-shaped control
+// classified the outer statement as an EXEC that writes nothing.
+func TestDynamicSQLIsCheckedNotSteppedOver(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		sql      string
+		controls []string
+		want     error
+	}{
+		{
+			"USE inside EXEC, full-write grant",
+			"EXEC('USE otherdb; SELECT * FROM secret_table')",
+			nil, ErrDatabaseSwitchBlocked,
+		},
+		{
+			"USE inside EXEC, every control set",
+			"EXEC('USE otherdb')",
+			[]string{store.ControlReadOnly, store.ControlBlockDDL, store.ControlBlockCopy},
+			ErrDatabaseSwitchBlocked,
+		},
+		{
+			"write inside EXEC under read_only",
+			"EXEC('DELETE FROM t')",
+			[]string{store.ControlReadOnly},
+			shared.ErrReadOnlyViolation,
+		},
+		{
+			"DDL inside EXECUTE under block_ddl",
+			"EXECUTE('DROP TABLE t')",
+			[]string{store.ControlBlockDDL},
+			shared.ErrDDLBlocked,
+		},
+		{
+			"unicode literal",
+			"EXEC(N'DELETE FROM t')",
+			[]string{store.ControlReadOnly},
+			shared.ErrReadOnlyViolation,
+		},
+		{
+			"doubled quotes inside the literal",
+			"EXEC('DELETE FROM t WHERE name = ''O''''Brien''')",
+			[]string{store.ControlReadOnly},
+			shared.ErrReadOnlyViolation,
+		},
+		{
+			"space before the paren",
+			"EXEC ('DELETE FROM t')",
+			[]string{store.ControlReadOnly},
+			shared.ErrReadOnlyViolation,
+		},
+		{
+			"mid-batch",
+			"SELECT 1; EXEC('DELETE FROM t')",
+			[]string{store.ControlReadOnly},
+			shared.ErrReadOnlyViolation,
+		},
+		{
+			"bulk copy inside EXEC under block_copy",
+			"EXEC('BULK INSERT t FROM ''f.dat''')",
+			[]string{store.ControlBlockCopy},
+			ErrBulkCopyBlocked,
+		},
+		{
+			// sp_executesql as batch text rather than as an RPC. The RPC form
+			// was always enforced; this spelling was not.
+			"sp_executesql as batch text",
+			"EXEC sp_executesql N'DELETE FROM t'",
+			[]string{store.ControlReadOnly},
+			shared.ErrReadOnlyViolation,
+		},
+		{
+			"sp_executesql as batch text, qualified",
+			"EXEC sys.sp_executesql N'USE otherdb'",
+			nil, ErrDatabaseSwitchBlocked,
+		},
+		{
+			// One level is unwrapped; a second is refused rather than unwrapped
+			// further, because stopping silently would be the same hole again.
+			"nested dynamic SQL fails closed",
+			"EXEC('EXEC(''DROP TABLE t'')')",
+			nil, ErrDynamicSQLNotCheckable,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := switchSession(t)
+			s.grant = grantWithControls(tc.controls...)
+
+			require.ErrorIs(t, s.validate(statement{text: tc.sql, enforce: []string{tc.sql}}), tc.want)
+		})
+	}
+}
+
+// TestBenignDynamicSQLStillRuns is the other half, and it matters as much: this
+// must not become a blanket refusal of dynamic SQL. A read under a read-only
+// grant is allowed whether it is spelled directly or through EXEC.
+func TestBenignDynamicSQLStillRuns(t *testing.T) {
+	t.Parallel()
+
+	for _, sql := range []string{
+		"EXEC('SELECT 1')",
+		"EXECUTE('SELECT * FROM t WHERE name = ''O''''Brien''')",
+		"EXEC sp_executesql N'SELECT @a', N'@a int', @a = 1",
+		"EXEC('USE AppDb; SELECT 1')",
+		// Undecidable, and deliberately not refused: dbbat cannot read what a
+		// variable holds. See the limitation note in docs/mssql.md.
+		"EXEC(@sql)",
+		"EXEC('USE ' + @db)",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			t.Parallel()
+
+			s := switchSession(t)
+			s.grant = grantWithControls(store.ControlReadOnly)
+
+			require.NoError(t, s.validate(statement{text: sql, enforce: []string{sql}}))
+		})
+	}
 }
 
 // TestUseWithoutAResolvedDatabaseIsRefused: with no session database there is

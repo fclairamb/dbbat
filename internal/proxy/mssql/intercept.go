@@ -331,23 +331,66 @@ func (s *session) validate(st statement) error {
 			continue
 		}
 
-		if err := shared.ValidateQuery(sql, s.grant); err != nil {
+		if err := s.validateStatement(sql); err != nil {
 			return err
 		}
+	}
 
-		// Ahead of the controls below rather than among them: a database switch
-		// is a scope question, not a permission one, so it is refused under a
-		// full-write grant too.
-		if err := s.checkDatabaseSwitch(sql); err != nil {
+	return nil
+}
+
+// validateStatement checks one statement — and the statement text of any
+// dynamic SQL it carries as a literal, which T-SQL executes as a batch of its
+// own.
+//
+// Without the second half, every control here was one `EXEC('…')` away from
+// irrelevant: `EXEC('DELETE FROM t')` starts with EXEC, so the prefix-shaped
+// classifiers saw no write, and the USE scan steps over string literals on the
+// (otherwise sound) assumption that no statement begins inside one.
+//
+// Only the decidable form is covered. `EXEC(@sql)` is assembled at runtime and
+// yields nothing to check — see the limitation note in docs/mssql.md rather
+// than any pretense of coverage here.
+func (s *session) validateStatement(sql string) error {
+	if err := s.checkStatement(sql); err != nil {
+		return err
+	}
+
+	inner, readable := shared.MSSQLDynamicSQL(sql)
+	if !readable {
+		return ErrDynamicSQLNotCheckable
+	}
+
+	for _, text := range inner {
+		if err := s.checkStatement(text); err != nil {
 			return err
 		}
+	}
 
-		// Normalized like the ValidateQuery above it: the pattern spans two
-		// keywords, so `BULK/**/INSERT` would otherwise walk through a block_copy
-		// grant while SQL Server read the statement unchanged.
-		if s.grant.ShouldBlockCopy() && shared.MatchesNormalizedSQL(sql, bulkCopyPattern) {
-			return ErrBulkCopyBlocked
-		}
+	return nil
+}
+
+// checkStatement is the static controls over one statement's own text, with no
+// unwrapping. It is applied to the batch and, unchanged, to whatever the batch
+// would execute dynamically — running a second, laxer set of rules on the inner
+// statement is exactly the drift that turns a control into a suggestion.
+func (s *session) checkStatement(sql string) error {
+	if err := shared.ValidateQuery(sql, s.grant); err != nil {
+		return err
+	}
+
+	// Ahead of the control below rather than among them: a database switch is a
+	// scope question, not a permission one, so it is refused under a full-write
+	// grant too.
+	if err := s.checkDatabaseSwitch(sql); err != nil {
+		return err
+	}
+
+	// Normalized like the ValidateQuery above it: the pattern spans two
+	// keywords, so `BULK/**/INSERT` would otherwise walk through a block_copy
+	// grant while SQL Server read the statement unchanged.
+	if s.grant.ShouldBlockCopy() && shared.MatchesNormalizedSQL(sql, bulkCopyPattern) {
+		return ErrBulkCopyBlocked
 	}
 
 	return nil
