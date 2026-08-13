@@ -5,6 +5,8 @@ package oracle
 import (
 	"bytes"
 	"context"
+	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"os"
 	"os/exec"
@@ -15,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	go_ora "github.com/sijms/go-ora/v3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -348,14 +351,38 @@ func TestIntegration_AsyncRefusalAgainstJDBCThin(t *testing.T) {
 
 	t.Run("go-ora reads the same mid-result-set trip", func(t *testing.T) {
 		// The control for the case above: same refusal, same delivery point, a
-		// different driver. It is what established that the old frame's
-		// placement — and not ojdbc's reading of it — was the defect, so it
-		// moves with the fix: both drivers must now surface the ORA-00028.
+		// different driver. It is what established that the *old* frame's
+		// placement — and not ojdbc's reading of it — was the defect.
+		//
+		// What it can no longer establish is the fix, and the reason is in the
+		// driver rather than in dbbat: go-ora maps ORA-00028 to a dead
+		// connection **by design**. `network.OracleError.Bad()` lists 28
+		// alongside 3113/3114/12537, and `defaultStmt.fetch` turns any error
+		// `isBadConn` accepts into `driver.ErrBadConn` — so a mid-result-set
+		// ORA-00028 reaches the caller as "driver: bad connection" whether it
+		// was parsed or never arrived. The error text cannot tell those two
+		// apart, so this subtest stops asking it to: it runs go-ora through its
+		// own recording tap and asserts on what dbbat wrote and where.
 		env.replaceGrant(t, nil, testsupport.WithMaxBytesTransferred(quotaProbeBudget))
 
 		watchdogBefore := env.logs.count(logMsgWatchdogTeardown)
+		heldBefore := env.logs.count(logMsgRefusalHeld)
+		deliveredBefore := env.logs.count(logMsgRefusalDelivered)
 
-		rows, err := env.newClient(t).QueryContext(ctx, "SELECT id, payload FROM dbbat_quota_probe ORDER BY id")
+		goTap := startRecordingTap(t, env.host, env.port)
+
+		client, err := sql.Open("oracle",
+			go_ora.BuildUrl(goTap.host, goTap.port, env.service, env.username, env.apiKey, nil))
+		require.NoError(t, err)
+
+		client.SetMaxOpenConns(1)
+		client.SetMaxIdleConns(1)
+
+		defer func() { _ = client.Close() }()
+
+		require.NoError(t, client.PingContext(ctx))
+
+		rows, err := client.QueryContext(ctx, "SELECT id, payload FROM dbbat_quota_probe ORDER BY id")
 		require.NoError(t, err, "the statement must be admitted; the quota is crossed while it streams")
 
 		defer func() { _ = rows.Close() }()
@@ -367,6 +394,19 @@ func TestIntegration_AsyncRefusalAgainstJDBCThin(t *testing.T) {
 
 		err = rows.Err()
 
+		frames := tappedOERs(t, goTap.lastRecord(t).bytesFromServer())
+
+		var refusals []tappedOER
+
+		for _, f := range frames {
+			t.Logf("tapped OER: ORA-%05d call=%d (call number readable: %t) %q",
+				f.errorCode, f.callNumber, f.callNumberOK, f.message)
+
+			if f.errorCode == int(ORA00028) {
+				refusals = append(refusals, f)
+			}
+		}
+
 		t.Logf("go-ora drained %d of %d rows, then: %v (watchdog teardowns: %d)",
 			drained, quotaProbeRows, err,
 			env.logs.count(logMsgWatchdogTeardown)-watchdogBefore)
@@ -374,10 +414,28 @@ func TestIntegration_AsyncRefusalAgainstJDBCThin(t *testing.T) {
 		require.Error(t, err, "go-ora drained the whole result set under a quota that should have cut it")
 		assert.Positive(t, drained, "the refusal must have cut into a reply that was already streaming")
 		assert.Less(t, drained, quotaProbeRows, "a full drain is not a mid-result-set refusal")
-		assert.Contains(t, err.Error(), "ORA-00028",
-			"go-ora used to report a dead connection here, for the same reason ojdbc did: the "+
-				"frame was written inside a half-delivered row batch. Held for a call boundary, "+
-				"it must reach both drivers")
+
+		// dbbat's side, which is the half this subtest can still measure: the
+		// violation was held rather than written into the reply, and the frame
+		// went out on the client's next call.
+		assert.Zero(t, env.logs.count(logMsgWatchdogTeardown)-watchdogBefore,
+			"the inline check must have caught it, not the watchdog")
+		assert.Positive(t, env.logs.count(logMsgRefusalHeld)-heldBefore,
+			"the refusal must have been held rather than written into the reply in progress")
+		assert.Positive(t, env.logs.count(logMsgRefusalDelivered)-deliveredBefore,
+			"the held refusal must have been delivered on the client's next call")
+		require.Len(t, refusals, 1,
+			"dbbat must have written exactly one ORA-00028, at a call boundary")
+		assert.True(t, refusals[0].callNumberOK, "the frame must decode as a well-formed summary object")
+		assert.Contains(t, refusals[0].message, "bandwidth quota exceeded", "and carry the real reason")
+
+		// The driver's side, pinned as what it is rather than as what would be
+		// nicer: go-ora reports a dead connection for ORA-00028 on purpose. If
+		// this ever stops holding, go-ora changed OracleError.Bad() and the
+		// error text becomes usable evidence again.
+		assert.ErrorIs(t, err, driver.ErrBadConn,
+			"go-ora maps ORA-00028 to driver.ErrBadConn (network.OracleError.Bad), so the ORA "+
+				"code cannot reach the caller through database/sql:\n%v", err)
 	})
 
 	t.Run("grant revoked while the client is idle", func(t *testing.T) {
