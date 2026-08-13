@@ -836,6 +836,44 @@ func (s *Store) GetConnectionByUID(ctx context.Context, uid uuid.UUID) (*Connect
 	return conn, nil
 }
 
+// GetConnectionsByUIDs is the batched form of GetConnectionByUID: it reads
+// every connection named in uids with exactly one query, however many uids are
+// asked about, and returns them keyed by uid.
+//
+// Same projection as GetConnectionByUID, deliberately — a batched read must not
+// see a different row shape than the per-row one, since callers switch between
+// them (see the pending-approvals listing, which resolves the grant governing a
+// whole page from this map and then runs the *same* decision function over it).
+//
+// A uid that names no row is simply absent from the map; the caller reads that
+// as the fail-closed equivalent of GetConnectionByUID's ErrConnectionNotFound.
+func (s *Store) GetConnectionsByUIDs(ctx context.Context, uids []uuid.UUID) (map[uuid.UUID]*Connection, error) {
+	result := make(map[uuid.UUID]*Connection, len(uids))
+
+	if len(uids) == 0 {
+		return result, nil
+	}
+
+	var connections []Connection
+
+	err := s.db.NewSelect().
+		Model(&connections).
+		ColumnExpr("uid, user_id, database_id, source_ip::text, connected_at, last_activity_at, "+
+			"disconnected_at, queries, bytes_transferred, instance_id, upstream_tls, dump_key, grant_uid, "+
+			"query_chain_mac, query_chain_len, query_chain_stamp_version").
+		Where("uid IN (?)", bun.List(uids)).
+		Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get connections by uids: %w", err)
+	}
+
+	for i := range connections {
+		result[connections[i].UID] = &connections[i]
+	}
+
+	return result, nil
+}
+
 // ListConnections retrieves connections with optional filters
 func (s *Store) ListConnections(ctx context.Context, filter ConnectionFilter) ([]Connection, error) {
 	var connections []Connection
