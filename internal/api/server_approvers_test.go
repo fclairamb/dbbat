@@ -1127,3 +1127,259 @@ func TestListGrantRequests_ApproverResolutionIsFlat(t *testing.T) {
 			smallCount, largeCount)
 	}
 }
+
+// grantUnder materializes a definition (naming `approverGroups`, if any) into a
+// live grant for `holder` on `databaseID`. It is what a hold's connection gets
+// stamped with, which is how step 2 of the chain — the definition's approver
+// list — is reached at all.
+func (f *serverApproverFixture) grantUnder(
+	t *testing.T, name string, holder *store.User, databaseID uuid.UUID, approverGroups ...uuid.UUID,
+) *store.Grant {
+	t.Helper()
+
+	def, err := f.dataStore.CreateGrantDefinition(f.ctx, &store.GrantDefinition{
+		Name:                  name,
+		Slug:                  name,
+		DurationSeconds:       3600,
+		ApprovalPatterns:      []string{`(?i)^DELETE\s+FROM`},
+		ApproverUserGroupUIDs: approverGroups,
+		CreatedBy:             f.admin.UID,
+	})
+	if err != nil {
+		t.Fatalf("CreateGrantDefinition(%s): %v", name, err)
+	}
+
+	grant, err := f.dataStore.CreateGrant(f.ctx, &store.Grant{
+		UserID:            holder.UID,
+		DatabaseID:        databaseID,
+		GrantDefinitionID: def.UID,
+		GrantedBy:         f.admin.UID,
+		StartsAt:          time.Now().Add(-time.Minute),
+		ExpiresAt:         time.Now().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("CreateGrant(%s): %v", name, err)
+	}
+
+	return grant
+}
+
+// queryHoldUnder is queryHoldOn against a connection *stamped* with a grant —
+// the modern shape, and the one the batched grant lookup is about. queryHoldOn
+// leaves grant_uid NULL, which is the legacy connection that still falls
+// through to GetActiveGrant.
+func (f *serverApproverFixture) queryHoldUnder(
+	t *testing.T, runner *store.User, databaseID uuid.UUID, grantUID uuid.UUID,
+) *store.Query {
+	t.Helper()
+
+	conn, err := f.dataStore.CreateConnection(
+		f.ctx, runner.UID, databaseID, "127.0.0.1", store.WithGrantUID(grantUID),
+	)
+	if err != nil {
+		t.Fatalf("create connection: %v", err)
+	}
+
+	query, err := f.dataStore.CreatePendingQuery(f.ctx, &store.Query{
+		ConnectionID: conn.UID,
+		SQLText:      "DELETE FROM users",
+		ExecutedAt:   time.Now(),
+	}, `(?i)^DELETE\s+FROM`)
+	if err != nil {
+		t.Fatalf("create pending query: %v", err)
+	}
+
+	return query
+}
+
+// TestListPendingApprovals_GrantBatchingMatchesPerRow is the safety half of
+// batching step 2 of the hold chain: the listing now resolves every hold's
+// governing grant from the page's distinct connections and grants, and it must
+// answer exactly what resolving each row on its own answers.
+//
+// The page deliberately mixes every branch resolveApprovalGrant has: a hold
+// stamped with a grant whose definition names approvers (the definition hat,
+// which wins outright), one stamped with a grant naming nobody (falls through
+// to the server chain), a legacy connection with no stamp at all (the
+// GetActiveGrant fallback, still per-row), several holds sharing one
+// connection, a hold on a server nobody approves, and the viewer's own held
+// statement.
+//
+// The one branch not reachable from here is a *deleted* stamped grant:
+// connections.grant_uid is a foreign key, so it cannot be orphaned. That case
+// is equivalent by construction — an absent key in the batched map yields the
+// same ErrGrantNotFound the per-row lookup returns — and TestGetGrantsByUIDs
+// pins the absence.
+func TestListPendingApprovals_GrantBatchingMatchesPerRow(t *testing.T) {
+	t.Parallel()
+
+	f := newServerApproverFixture(t, "grant-batch")
+
+	bare := f.newTargetServer(t, "bare-grant-batch")
+
+	// The target names the ops group as its query approvers; `bare` names
+	// nobody, so it stays admin-only.
+	f.setServerApprovers(t, store.ApproverKindQuery, f.group.UID)
+
+	// A second user group, named by a definition and by nothing else — the
+	// definition hat has to come from the grant, not from the server.
+	defGroup, err := f.dataStore.CreateUserGroup(f.ctx, &store.UserGroup{Name: "def-approvers-grant-batch"})
+	if err != nil {
+		t.Fatalf("create user group: %v", err)
+	}
+
+	if err := f.dataStore.AddUserToUserGroup(f.ctx, defGroup.UID, f.outsider.UID); err != nil {
+		t.Fatalf("add user to group: %v", err)
+	}
+
+	scoped := f.grantUnder(t, "gb-scoped", f.requester, f.target.UID, defGroup.UID)
+	unscoped := f.grantUnder(t, "gb-unscoped", f.requester, f.target.UID)
+	onBare := f.grantUnder(t, "gb-bare", f.requester, bare.UID, defGroup.UID)
+	ownGrant := f.grantUnder(t, "gb-own", f.outsider, f.target.UID, defGroup.UID)
+
+	// Stamped, definition-scoped: the definition's group decides, the server's
+	// does not.
+	f.queryHoldUnder(t, f.requester, f.target.UID, scoped.UID)
+	// Stamped under a definition naming nobody: falls through to the server.
+	f.queryHoldUnder(t, f.requester, f.target.UID, unscoped.UID)
+	// Two more holds under the same grant — and one of them on a connection
+	// this fixture also parked a statement on, which is what makes the distinct
+	// set smaller than the page.
+	f.queryHoldUnder(t, f.requester, f.target.UID, scoped.UID)
+	f.queryHoldUnder(t, f.requester, bare.UID, onBare.UID)
+	// Legacy: no stamp, so the per-row GetActiveGrant branch decides.
+	f.queryHoldOn(t, f.requester, f.target.UID)
+	// The definition approver's own held statement: no hat, ever.
+	f.queryHoldUnder(t, f.outsider, f.target.UID, ownGrant.UID)
+
+	for _, user := range []*store.User{f.admin, f.approver, f.outsider, f.requester} {
+		batched := f.listPendingAs(t, user)
+
+		perRow := f.perRowPending(t, user)
+		if len(batched) != len(perRow) {
+			t.Fatalf("batched listing for %s = %v, per-row chain = %v", user.Username, batched, perRow)
+		}
+
+		for uid, hat := range perRow {
+			if batched[uid] != hat {
+				t.Errorf("hat for %s on %s: batched = %q, per-row = %q", user.Username, uid, batched[uid], hat)
+			}
+		}
+	}
+
+	// Spelled out, so the equivalence above cannot be satisfied by both paths
+	// being wrong in the same way.
+	outsider := f.listPendingAs(t, f.outsider)
+
+	definitionHats := 0
+	for _, hat := range outsider {
+		if hat == ApproverHatDefinition {
+			definitionHats++
+		}
+	}
+
+	if definitionHats != 3 {
+		t.Errorf("definition approver's listing = %v, want 3 definition hats", outsider)
+	}
+
+	if hat, listed := outsider[""]; listed {
+		t.Errorf("unexpected empty-uid row with hat %q", hat)
+	}
+
+	approver := f.listPendingAs(t, f.approver)
+	if len(approver) == 0 {
+		t.Fatalf("server approver's listing is empty, want the holds the server chain covers")
+	}
+
+	for uid, hat := range approver {
+		if hat != ApproverHatServer {
+			t.Errorf("server approver's hat on %s = %q, want %q", uid, hat, ApproverHatServer)
+		}
+	}
+}
+
+// grantResolutionQueryHooks counts the two reads behind step 2 of the hold
+// chain: the connection rows (only the connection projections name
+// query_chain_stamp_version) and the grant rows (only grant reads name the
+// access_grants table). Neither substring appears anywhere else on the listing
+// path — the pending listing itself joins connections without selecting that
+// column.
+func (f *serverApproverFixture) grantResolutionQueryHooks() (*apiQueryCountHook, *apiQueryCountHook) {
+	connections := &apiQueryCountHook{substring: "query_chain_stamp_version"}
+	grants := &apiQueryCountHook{substring: "access_grants"}
+
+	f.dataStore.DB().AddQueryHook(connections)
+	f.dataStore.DB().AddQueryHook(grants)
+
+	return connections, grants
+}
+
+// TestListPendingApprovals_GrantResolutionIsFlat is the point of batching step
+// 2, asserted in the handler, where the regression would happen.
+//
+// Before this, a page of N holds cost N connection reads plus N grant reads —
+// and twice over, since the visibility gate and the hat each resolved the grant
+// independently. It now costs one connection read and one grant read (plus the
+// definitions they point at) whatever the page size, so the same listing at two
+// page sizes must take the same number of each.
+func TestListPendingApprovals_GrantResolutionIsFlat(t *testing.T) {
+	t.Parallel()
+
+	f := newServerApproverFixture(t, "grant-flat")
+
+	servers := f.newTargetServersInGroup(t, "grant-flat", 6, store.ApproverKindQuery, f.group.UID)
+
+	// A distinct grant per hold, on a distinct database — the worst case for a
+	// batched read, and the one a per-row implementation is indistinguishable
+	// from at a page size of one.
+	grants := make([]*store.Grant, 0, len(servers))
+	for i, srv := range servers {
+		grants = append(grants, f.grantUnder(t, fmt.Sprintf("gf-%d", i), f.requester, srv.UID))
+	}
+
+	for i, srv := range servers[:2] {
+		f.queryHoldUnder(t, f.requester, srv.UID, grants[i].UID)
+	}
+
+	connHook, grantHook := f.grantResolutionQueryHooks()
+
+	small := f.listPendingAs(t, f.approver)
+	if len(small) != 2 {
+		t.Fatalf("small pending listing = %v, want 2 holds", small)
+	}
+
+	smallConns, smallGrants := connHook.count.Load(), grantHook.count.Load()
+
+	if smallConns != 1 {
+		t.Errorf("2-row pending listing took %d connection queries, want 1", smallConns)
+	}
+
+	if smallGrants != 1 {
+		t.Errorf("2-row pending listing took %d grant queries, want 1", smallGrants)
+	}
+
+	// Three times the rows, on three times as many connections and grants.
+	for i, srv := range servers[2:] {
+		f.queryHoldUnder(t, f.requester, srv.UID, grants[i+2].UID)
+	}
+
+	connHook.count.Store(0)
+	grantHook.count.Store(0)
+
+	large := f.listPendingAs(t, f.approver)
+	if len(large) != 6 {
+		t.Fatalf("large pending listing = %v, want 6 holds", large)
+	}
+
+	largeConns, largeGrants := connHook.count.Load(), grantHook.count.Load()
+
+	if largeConns != smallConns {
+		t.Errorf("connection reads grew with the page: %d for 2 rows, %d for 6 — they must be flat",
+			smallConns, largeConns)
+	}
+
+	if largeGrants != smallGrants {
+		t.Errorf("grant reads grew with the page: %d for 2 rows, %d for 6 — they must be flat",
+			smallGrants, largeGrants)
+	}
+}
