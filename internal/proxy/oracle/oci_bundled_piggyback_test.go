@@ -5,9 +5,11 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"log/slog"
+	"net"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -220,6 +222,158 @@ func TestBundledOCIRefusalMatchesTheServersOwnFrame(t *testing.T) {
 	require.True(t, learnOERShape(&back, append(body, ttcEndOfResponse)))
 	assert.True(t, back.fixedWidth64)
 	assert.Equal(t, shape.extraTailFields, back.extraTailFields)
+}
+
+// TestUnnameableFrameCannotSmuggleAStatementPastTheGate is the bound on the
+// fail-open, and the reason the fail-open is not simply "forward it".
+//
+// A piggyback is by construction a frame with something stapled behind it —
+// dbbat's own recordings show `11 69 <list> 03 5e <exec>` — so a client can put
+// a statement behind a body dbbat cannot walk. Forwarding that unread would
+// hand an authenticated user under a `read_only` grant exactly the bypass the
+// grant exists to prevent, which is a worse outcome than the hang the fail-open
+// was introduced to fix.
+//
+// The frame here is the real recorded first call with an INSERT stapled behind
+// it, and the two assertions are the two things that both have to hold: the
+// statement does not travel, and the client is not answered with an OER ending
+// a call it is not parked on (which is what would hang it).
+func TestUnnameableFrameCannotSmuggleAStatementPastTheGate(t *testing.T) {
+	t.Parallel()
+
+	logs := newCountingHandler()
+
+	s := newTestSession(&store.Grant{
+		Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}},
+	})
+	s.logger = slog.New(logs)
+
+	client, answered := recordingPipe(t)
+	s.clientConn = client
+
+	upstream, upstreamPeer := net.Pipe()
+	t.Cleanup(func() { _ = upstreamPeer.Close() })
+	s.upstreamConn = upstream
+
+	// The recorded piggyback, with an execute stapled behind it exactly the way
+	// a close-cursors list carries one.
+	smuggled := append(bundledOCIFirstCall(t), 0x03, 0x5e, 0x06, 0x00)
+	smuggled = append(smuggled, make([]byte, 24)...)
+	smuggled = append(smuggled, []byte("INSERT INTO secrets VALUES (1)")...)
+
+	pkt := &TNSPacket{Type: TNSPacketTypeData, Payload: smuggled}
+
+	require.False(t, func() bool { _, ok := clientCallNumber(extractTTCPayload(smuggled)); return ok }(),
+		"the frame must still be one dbbat cannot name, or this proves nothing")
+
+	assert.True(t, s.interceptClientMessage(pkt),
+		"a statement stapled behind an unwalkable piggyback must not reach the upstream under read_only")
+
+	assert.Equal(t, 1, logs.count(logMsgUnnameableStatementRefused),
+		"and the refusal must be in the log, since the client only sees a dropped socket")
+	assert.Empty(t, answered(),
+		"nothing may be written back: dbbat cannot name the call it would be ending")
+	assert.Error(t, upstream.SetDeadline(time.Now()), "the session must be torn down")
+}
+
+// TestUnnameableFrameStillForwardsAnAllowedStatement is the other side of that
+// bound: the gate is the grant's, not "any statement in an unnameable frame".
+// A SELECT under `read_only` is allowed, so the frame travels — otherwise this
+// would be a fail-closed rule wearing a fail-open name, and the first client
+// whose framing dbbat misreads would lose its session on a legal query.
+func TestUnnameableFrameStillForwardsAnAllowedStatement(t *testing.T) {
+	t.Parallel()
+
+	s := newTestSession(&store.Grant{
+		Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}},
+	})
+
+	client, answered := recordingPipe(t)
+	s.clientConn = client
+
+	allowed := append(bundledOCIFirstCall(t), 0x03, 0x5e, 0x06, 0x00)
+	allowed = append(allowed, make([]byte, 24)...)
+	allowed = append(allowed, []byte("SELECT 1 FROM DUAL")...)
+
+	assert.False(t, s.interceptClientMessage(&TNSPacket{Type: TNSPacketTypeData, Payload: allowed}),
+		"a read the grant permits must still travel")
+	assert.Empty(t, answered())
+}
+
+// TestUnlearnedRefusalFollowsTheClientsOwnDialect covers the window no
+// integration test can reach: a refusal that fires before any upstream OER has
+// taught the session a shape. sqlplus runs its own login SELECTs first, so the
+// live suite always learns first — but an approval pattern matching the opening
+// statement, an already-exhausted quota, or a first statement that is a write
+// under `read_only` all land here, and a 64-bit client handed the 32-bit layout
+// hangs exactly as it did everywhere else.
+func TestUnlearnedRefusalFollowsTheClientsOwnDialect(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		wide   bool
+		wide64 bool
+		want   oerFixedLayout
+	}{
+		{name: "the 64-bit OCI client", wide: true, wide64: true, want: oerFixed64Layout},
+		{name: "the 32-bit OCI client", wide: true, want: oerFixed32Layout},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
+			s.clientWideEncoding = tc.wide
+			s.clientWide64Encoding = tc.wide64
+
+			shape, _, _ := s.nextOERFrame()
+
+			require.False(t, shape.tailLearned, "this is the unlearned path or it tests nothing")
+			assert.True(t, shape.fixedWidth)
+			assert.Equal(t, tc.wide64, shape.fixedWidth64)
+			assert.Equal(t, tc.want, shape.layoutFor())
+		})
+	}
+}
+
+// TestBundledOCIAuthPhase1IsRecognizedAsTheSixtyFourBitDialect is what makes
+// the fallback above reachable: the dialect has to be known from the client's
+// own AUTH, since that is the only evidence a session has before its first
+// upstream OER.
+//
+// The negative case comes from a real Instant Client recording rather than a
+// hand-built one, because "the other flavor is not detected as this one" is the
+// claim that would otherwise rot silently.
+func TestBundledOCIAuthPhase1IsRecognizedAsTheSixtyFourBitDialect(t *testing.T) {
+	t.Parallel()
+
+	bundled := recordedFrames(t, "testdata/oci_bundled_auth_phase1.hex")[0]
+
+	assert.True(t, payloadUsesWideKVEncoding(bundled), "it is an OCI client")
+	assert.True(t, usesWide64OpHeader(extractTTCPayload(bundled)), "and it is the 64-bit one")
+
+	// And a session reads both flags off it, which is what nextOERFrame leans
+	// on before anything has been learned.
+	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
+	s.observeClientAuthEncoding(bundled)
+	assert.True(t, s.clientWideEncoding)
+	assert.True(t, s.clientWide64Encoding)
+
+	var instantClientPhase1 []byte
+
+	for _, ttc := range clientTTCPayloads(t, "sqlplus_cursor_reexec.pcapng") {
+		if len(ttc) > 2 && ttc[0] == byte(TTCFuncPiggyback) && ttc[1] == PiggybackSubAuth1 {
+			instantClientPhase1 = ttc
+
+			break
+		}
+	}
+
+	require.NotNil(t, instantClientPhase1, "the Instant Client recording must carry an AUTH Phase 1")
+	assert.False(t, usesWide64OpHeader(instantClientPhase1),
+		"the Instant Client is wide but not 64-bit, which is the whole distinction")
 }
 
 // TestObserveClientCallNumberKeepsTheLastNamedCall pins the second-order half:

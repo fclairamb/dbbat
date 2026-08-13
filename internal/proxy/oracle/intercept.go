@@ -40,6 +40,13 @@ const (
 	// every login — see clientCallNumber.
 	logMsgUnnamedCallForwarded = "forwarding a message whose call dbbat cannot name"
 
+	// logMsgUnnameableStatementRefused is the other end of that fail-open: the
+	// message carried a statement a statement-shaped control refuses, so the
+	// session is ended rather than answered. WARN, and it names the statement —
+	// this is a refusal the client only sees as a dropped socket, so the log is
+	// where it is legible.
+	logMsgUnnameableStatementRefused = "ended the session: a message dbbat cannot name carried a refused statement"
+
 	// logMsgLearnedOERTail is the one record that says which summary-object
 	// shape a session will answer a refusal with. The per-client refusal tests
 	// read extra_tail_fields back off it (see blocked_integration_test.go), so
