@@ -136,7 +136,7 @@ func TestDumpReplay_FailuresArriveAsBitLessStandaloneOERs(t *testing.T) {
 
 					// And the relaxed decoder reads all of them, because every
 					// diagnostic names its own code.
-					relaxed := decodeErrorOERAt(got.payload, 0)
+					relaxed := decodeErrorOER(got.payload)
 					require.NotNilf(t, relaxed, "packet #%d: %q", got.index, got.message)
 					assert.Equal(t, want[i].code, relaxed.ErrorCode)
 					assert.Equal(t, fmt.Sprintf("ORA-%05d", want[i].code), relaxed.ErrorMessage[:9])
@@ -281,7 +281,7 @@ func TestHandleOERStatus_MidRowStreamStillRequiresTheEndOfCallBit(t *testing.T) 
 	}
 
 	require.NotNil(t, bitless, "the recording must contain a bit-less failure to try this with")
-	require.NotNil(t, decodeErrorOERAt(bitless, 0), "outside a row stream these bytes complete a call")
+	require.NotNil(t, decodeErrorOER(bitless), "outside a row stream these bytes complete a call")
 
 	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
 	require.NoError(t, s.handleOALL8(buildOALL8("SELECT id FROM emp", nil, 4)))
@@ -295,11 +295,11 @@ func TestHandleOERStatus_MidRowStreamStillRequiresTheEndOfCallBit(t *testing.T) 
 		"mid-fetch, a bit-less 0x04 run is row data and must not end the fetch")
 }
 
-// TestDecodeErrorOERAt_DemandsThatTheDiagnosticNameTheCode is the anchor that
+// TestDecodeErrorOER_DemandsThatTheDiagnosticNameTheCode is the anchor that
 // replaces the bit. Seven decodable ints and an ORA-shaped tail are not enough
 // on a path routed by byte 0: the tail has to name the code the fields
 // reported, which arbitrary bytes will not.
-func TestDecodeErrorOERAt_DemandsThatTheDiagnosticNameTheCode(t *testing.T) {
+func TestDecodeErrorOER_DemandsThatTheDiagnosticNameTheCode(t *testing.T) {
 	t.Parallel()
 
 	withTail := func(code int, tail string) []byte {
@@ -323,7 +323,7 @@ func TestDecodeErrorOERAt_DemandsThatTheDiagnosticNameTheCode(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := decodeErrorOERAt(tc.oer, 0)
+			got := decodeErrorOER(tc.oer)
 			if tc.accept {
 				require.NotNil(t, got)
 				assert.NotEmpty(t, got.ErrorMessage)

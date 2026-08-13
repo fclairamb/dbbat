@@ -22,13 +22,13 @@ type oerInfo struct {
 // like a client trait on the successful ones — every OER a go-ora session
 // carries has it, none of a python-oracledb thin session's does — but that is
 // a coincidence of which calls were captured first: on a *failing* call the two
-// clients agree, and only a failed DDL carries it (see decodeErrorOERAt).
+// clients agree, and only a failed DDL carries it (see decodeErrorOER).
 //
 // Byte runs inside a row stream that happen to start with 0x04 don't carry it
 // either, which is what makes it worth keeping as the discriminator exactly
 // where row bytes are what a false positive would be made of — anything
 // mid-fetch, and a standalone func=0x04 that reports no error to prove itself
-// with. Outside those, see findPlausibleOERInResponse and decodeErrorOERAt.
+// with. Outside those, see findPlausibleOERInResponse and decodeErrorOER.
 const oerEndOfCallBit = 0x010000
 
 // oraNoDataFound is ORA-01403, the normal end-of-data status — not an error.
@@ -98,7 +98,7 @@ func decodeOERFieldsAt(payload []byte, offset int) (*oerInfo, int) {
 	}, pos
 }
 
-// decodeErrorOERAt decodes a standalone OER that *reports a failure*, without
+// decodeErrorOER decodes a standalone OER that *reports a failure*, without
 // requiring the end-of-call bit, and proves the bytes are a diagnostic before
 // handing them back.
 //
@@ -128,8 +128,8 @@ func decodeOERFieldsAt(payload []byte, offset int) (*oerInfo, int) {
 //
 // Callers must still refuse to run this mid-row-stream, where a 0x04 run is row
 // data by definition — see handleOERStatus.
-func decodeErrorOERAt(payload []byte, offset int) *oerInfo {
-	info, rest := decodeOERFieldsAt(payload, offset)
+func decodeErrorOER(payload []byte) *oerInfo {
+	info, rest := decodeOERFieldsAt(payload, 0)
 	if info == nil {
 		return nil
 	}
