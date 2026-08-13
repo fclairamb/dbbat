@@ -331,6 +331,56 @@ func (s *Store) GetGrantByUID(ctx context.Context, uid uuid.UUID) (*Grant, error
 	return grant, nil
 }
 
+// GetGrantsByUIDs is the batched form of GetGrantByUID: two queries whatever
+// the number of uids — one for the grant rows, one for the definitions they
+// point at (attachDefinitions) — returning the grants keyed by uid.
+//
+// Unfiltered on purpose, exactly like GetGrantByUID: a lookup by uid must still
+// resolve a grant whose definition has since been deactivated or superseded.
+//
+// **It does not populate the live usage counters** (QueryCount and
+// BytesTransferred stay zero), which is the one way it differs from
+// GetGrantByUID. Those are two aggregate queries *per grant* — the very
+// per-row cost batching exists to remove — and they say nothing about who may
+// approve anything. The caller this exists for is the approval chain, which
+// reads only the definition's approver list. Anything that needs the counters
+// must keep using GetGrantByUID.
+//
+// A uid naming no row is absent from the map, which the caller reads as the
+// fail-closed equivalent of GetGrantByUID's ErrGrantNotFound.
+func (s *Store) GetGrantsByUIDs(ctx context.Context, uids []uuid.UUID) (map[uuid.UUID]*Grant, error) {
+	result := make(map[uuid.UUID]*Grant, len(uids))
+
+	if len(uids) == 0 {
+		return result, nil
+	}
+
+	var grants []AccessGrant
+
+	err := s.db.NewSelect().
+		Model(&grants).
+		Where("uid IN (?)", bun.List(uids)).
+		Scan(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get grants by uids: %w", err)
+	}
+
+	loaded := make([]*AccessGrant, 0, len(grants))
+	for i := range grants {
+		loaded = append(loaded, &grants[i])
+	}
+
+	if err := s.attachDefinitions(ctx, loaded); err != nil {
+		return nil, err
+	}
+
+	for _, g := range loaded {
+		result[g.UID] = g
+	}
+
+	return result, nil
+}
+
 // UserHasGrantForDefinition reports whether userID holds any grant (active,
 // expired, or revoked) issued from definitionID. Used to let a non-admin read
 // a grant definition by uid even when it is archived or otherwise out of
