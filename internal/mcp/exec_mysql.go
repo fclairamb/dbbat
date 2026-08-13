@@ -4,16 +4,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 	"unicode/utf8"
 
 	"github.com/go-mysql-org/go-mysql/client"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
+
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 )
 
 // mysqlConnectTimeout bounds the handshake with our own listener. Reaching
 // loopback is either immediate or broken.
 const mysqlConnectTimeout = 10 * time.Second
+
+// goroutineNameMySQLCancelWatcher is what a panic in the cancel watcher is
+// logged under. This path has no session logger, so it reports through
+// slog.Default().
+const goroutineNameMySQLCancelWatcher = "mcp mysql cancel watcher"
 
 // errRowCapReached aborts a streaming read from inside the row callback;
 // go-mysql offers no other way to stop mid-result-set. It never escapes
@@ -40,14 +48,18 @@ func executeMySQL(ctx context.Context, addr string, req ExecRequest) (*QueryResu
 	done := make(chan struct{})
 	defer close(done)
 
-	go func() {
+	// Guarded like every other detached goroutine: it outlives nothing here, but
+	// an unrecovered panic in it would still end the process. Nothing waits on
+	// it, so a recover costs at most one unclosed socket, which the executor's
+	// context timeout bounds anyway.
+	go shared.RunGuarded(ctx, slog.Default(), goroutineNameMySQLCancelWatcher, func() {
 		select {
 		case <-ctx.Done():
 			_ = conn.Close()
 		case <-done:
 			_ = conn.Close()
 		}
-	}()
+	})
 
 	if len(req.Params) > 0 {
 		return mysqlExecuteBuffered(conn, req)

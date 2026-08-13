@@ -15,6 +15,7 @@ import (
 	"github.com/slack-go/slack"
 
 	"github.com/fclairamb/dbbat/internal/notify"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -27,6 +28,15 @@ const slackInteractionMaxBody = 1 << 20 // 1 MB
 // requires the HTTP ack within 3s, so the work happens in a goroutine with
 // its own context (mirrors notifyAsync).
 const slackInteractionTimeout = 10 * time.Second
+
+// What a panic in a detached decision goroutine is logged under. Both outlive
+// the ack that spawned them (Slack's 3s deadline is why they are detached at
+// all), so no recover upstream of them exists and an unguarded panic would take
+// the process down with every live proxy session on it.
+const (
+	goroutineNameSlackGrantDecision = "slack grant request decision"
+	goroutineNameSlackQueryDecision = "slack query approval decision"
+)
 
 // Ephemeral message copy shown only to the clicking user.
 const (
@@ -157,12 +167,12 @@ func (s *Server) serveSlackInteraction(c *gin.Context, signingSecret string, dec
 	responseURL := callback.ResponseURL
 	slackUserID := callback.User.ID
 
-	go func() {
+	go shared.RunGuarded(context.Background(), s.logger, goroutineNameSlackGrantDecision, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), slackInteractionTimeout)
 		defer cancel()
 
 		s.processSlackDecision(ctx, decider, slackUserID, responseURL, action, requestUID)
-	}()
+	})
 }
 
 // readVerifiedSlackBody reads the request body (capped) and verifies the
@@ -575,12 +585,12 @@ func (s *Server) dispatchSlackQueryDecision(callback slack.InteractionCallback) 
 	slackUserID := callback.User.ID
 	responseURL := callback.ResponseURL
 
-	go func() {
+	go shared.RunGuarded(context.Background(), s.logger, goroutineNameSlackQueryDecision, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), slackInteractionTimeout)
 		defer cancel()
 
 		s.processSlackQueryDecision(ctx, slackUserID, responseURL, status, queryUID)
-	}()
+	})
 
 	return true
 }

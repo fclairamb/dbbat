@@ -14,6 +14,7 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/events"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -44,6 +45,17 @@ const (
 // workaround: it is a real request header, it never appears in the URL, and the
 // server must echo the selected value back.
 const streamAuthSubprotocol = "dbbat.auth.bearer."
+
+// What a panic on one of the stream's goroutines is logged under. None of them
+// is covered by gin's recover: the read loop outlives the handler's stack only
+// notionally, but the cross-replica listener genuinely outlives the call that
+// started it, and an unrecovered panic on either ends the process — every live
+// proxy session with it.
+const (
+	goroutineNameStreamReadLoop = "stream client read loop"
+	goroutineNameEventListener  = "cross-replica event listener"
+	goroutineNameEventRepublish = "cross-replica event republish"
+)
 
 // streamAuthMiddleware promotes a bearer token carried in
 // Sec-WebSocket-Protocol into a normal Authorization header, so the ordinary
@@ -135,7 +147,12 @@ func (s *Server) handleStream(c *gin.Context) {
 	sub := s.broker.Subscribe(authorize.authorizer(ctx), events.DefaultBuffer)
 	defer sub.Close()
 
-	go s.streamReadLoop(ctx, cancel, conn, sub)
+	// The read loop's own `defer cancel()` is what ends the socket, so a
+	// recovered panic tears this stream down exactly as a client disconnect
+	// does. That is RunGuarded's precondition; see its doc.
+	go shared.RunGuarded(ctx, s.logger, goroutineNameStreamReadLoop, func() {
+		s.streamReadLoop(ctx, cancel, conn, sub)
+	})
 
 	s.streamWriteLoop(ctx, conn, sub)
 }
@@ -585,14 +602,23 @@ func (s *Server) StartEventListener(ctx context.Context) {
 	ctx, cancel := context.WithCancel(ctx)
 	s.listenCancel = cancel
 
-	go func() {
+	// Two guards, at two different blast radii. The inner one is per
+	// notification: a payload is re-read from the store and rendered, so that is
+	// the one turn worth losing, and retiring the listener over it would leave
+	// this replica silently blind to every later hold. The outer one covers
+	// ListenEvents itself, whose stopping is a state the warn below already
+	// describes — and which beats the process dying with every live proxy
+	// session on it.
+	go shared.RunGuarded(ctx, s.logger, goroutineNameEventListener, func() {
 		err := s.store.ListenEvents(ctx, s.logger, func(n store.EventNotification) {
-			s.republish(ctx, n)
+			shared.RunMaintenance(ctx, s.logger, goroutineNameEventRepublish, func() {
+				s.republish(ctx, n)
+			})
 		})
 		if err != nil && ctx.Err() == nil {
 			s.logger.WarnContext(ctx, "cross-replica event listener stopped", slog.Any("error", err))
 		}
-	}()
+	})
 }
 
 // republish turns a cross-replica notification into local events.

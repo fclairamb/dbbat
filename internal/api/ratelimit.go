@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"log/slog"
 	"strconv"
 	"sync"
 	"time"
@@ -9,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/config"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 )
 
 // RateLimiter implements a sliding window rate limiter
@@ -47,25 +50,36 @@ func NewRateLimiter(cfg config.RateLimitConfig) *RateLimiter {
 	return rl
 }
 
+// goroutineNameRateLimitSweep is what a panic in the window sweep is logged
+// under. The limiter predates the server's logger, so it reports through
+// slog.Default().
+const goroutineNameRateLimitSweep = "rate limiter window sweep"
+
 // cleanup periodically removes old entries from the windows map
 func (rl *RateLimiter) cleanup() {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		rl.mu.Lock()
-		now := time.Now()
-		for key, window := range rl.windows {
-			window.mu.Lock()
-			// Remove if all timestamps are older than 1 minute
-			if len(window.timestamps) == 0 {
-				delete(rl.windows, key)
-			} else if now.Sub(window.timestamps[len(window.timestamps)-1]) > time.Minute {
-				delete(rl.windows, key)
+		// Per turn, so a panic neither ends the process nor retires the sweep:
+		// a rate limiter that stopped evicting windows would leak one map entry
+		// per client forever. See shared.RunMaintenance.
+		shared.RunMaintenance(context.Background(), slog.Default(), goroutineNameRateLimitSweep, func() {
+			rl.mu.Lock()
+			defer rl.mu.Unlock()
+
+			now := time.Now()
+			for key, window := range rl.windows {
+				window.mu.Lock()
+				// Remove if all timestamps are older than 1 minute
+				if len(window.timestamps) == 0 {
+					delete(rl.windows, key)
+				} else if now.Sub(window.timestamps[len(window.timestamps)-1]) > time.Minute {
+					delete(rl.windows, key)
+				}
+				window.mu.Unlock()
 			}
-			window.mu.Unlock()
-		}
-		rl.mu.Unlock()
+		})
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -156,8 +157,30 @@ func (c *AuthCache) cleanupLoop() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		c.cleanup()
+		c.guardedCleanup()
 	}
+}
+
+// guardedCleanup runs one eviction pass and converts a panic into a log line,
+// per turn, so neither the process nor the loop dies with it — a cache that
+// silently stopped evicting would keep serving credential decisions past their
+// TTL, which is a security property, not a housekeeping one.
+//
+// This is shared.RunMaintenance open-coded, and only because it has to be:
+// internal/proxy/shared imports this package, so importing it back would be a
+// cycle. Keep the two in step.
+func (c *AuthCache) guardedCleanup() {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.ErrorContext(context.Background(),
+				"recovered from panic in a background maintenance task: skipping this turn",
+				slog.String("goroutine", "auth cache eviction"),
+				slog.Any("panic", r),
+				slog.String("stack", string(debug.Stack())))
+		}
+	}()
+
+	c.cleanup()
 }
 
 // cleanup removes expired entries from the cache.
