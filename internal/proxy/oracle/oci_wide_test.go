@@ -1,6 +1,7 @@
 package oracle
 
 import (
+	"bytes"
 	"encoding/binary"
 	"testing"
 )
@@ -29,7 +30,7 @@ func TestPayloadUsesWideKVEncoding(t *testing.T) {
 func TestBuildAuthChallengeWide(t *testing.T) {
 	t.Parallel()
 
-	c := buildAuthChallenge("AABB", "CCDD", "EEFF", 4096, 3, VerifierType18453, true)
+	c := buildAuthChallenge("AABB", "CCDD", "EEFF", 4096, 3, VerifierType18453, true, false)
 
 	if c[0] != 0x20 || c[1] != 0x00 {
 		t.Fatalf("wide data flags = %02x %02x, want 20 00", c[0], c[1])
@@ -51,9 +52,17 @@ func TestBuildAuthChallengeWide(t *testing.T) {
 	}
 
 	// The compressed form must NOT use 4-byte lengths (regression guard).
-	cc := buildAuthChallenge("AABB", "CCDD", "EEFF", 4096, 3, VerifierType18453, false)
+	cc := buildAuthChallenge("AABB", "CCDD", "EEFF", 4096, 3, VerifierType18453, false, false)
 	if cc[0] != 0x00 || cc[1] != 0x00 {
 		t.Fatalf("compressed data flags = %02x %02x, want 00 00", cc[0], cc[1])
+	}
+
+	// The wide/OCI leg is settled independently of UseBigClrChunks: its readers
+	// (readAuthKVPairWide, replaceAuthKVValueWide) use plain readCLR, so the flag
+	// must not reach ttcKeyValWide.
+	cw := buildAuthChallenge("AABB", "CCDD", "EEFF", 4096, 3, VerifierType18453, true, true)
+	if !bytes.Equal(c, cw) {
+		t.Fatalf("wide challenge changed with bigChunks set:\n off = %x\n  on = %x", c, cw)
 	}
 }
 
