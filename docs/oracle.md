@@ -132,6 +132,29 @@ was originally written against — that is the legacy pre-v315 framing of the sa
 idea. It is still handled (`decodeOALL8` → `OALL8NoSQLError`), kept as defence in
 depth for older clients, but it was not observed from any client tested here.
 
+**Those two frames are the whole gate.** There used to be a third reading, and
+the intent behind it was sound — *a fetch arriving with no query in flight is a
+re-execution, so gate it like a statement, while a fetch continuing a query
+already in flight is left alone*. What it was wired to was not: the decoder
+(`decodeOFETCH`) read a cursor id as a big-endian `uint16` at bytes 1..3 of a
+message-type `0x11` frame, but `0x11` is the TTC **piggyback message type** and
+bytes 1..3 are (function, sequence). A histogram of every client-side TTC op in
+`testdata/*.pcapng` settles it: every `0x11` frame on the wire is `11/69`
+(close-cursors) plus one `11/6b`, while every real fetch is message type `0x03`
+function `0x05` (`TNS_FUNC_FETCH`) — 15 of them in `dbeaver.pcapng` alone. So no
+Oracle client ever sent the frame the gate watched; the only frames that reached
+it were piggybacks being misread, which is how the bundled OCI client's first
+message became "a re-execution of cursor 27396" (see "Two OCI encodings, not
+one"). The decoder, the handler and its tests are deleted.
+
+Wiring the gate to the real `03/05` fetch remains available to whoever wants it:
+the cursor id and fetch count are compressed ints after the header, and
+`dbeaver.pcapng`, `python_thin.pcapng` and `sqlplus_cursor_reexec.pcapng` all
+carry them. It was **not** done here on purpose. It is a behaviour change on the
+hot path — the blast radius is "a fetch with nothing in flight", and refusing
+there on a false positive breaks ordinary read-only work — so it needs the
+false-positive rate measured against a live suite before it can be turned on.
+
 Frame layout (`decodeCursorReexec`), identical for both sub-ops:
 
 ```
@@ -352,9 +375,9 @@ driven through the whole proxy against a live Oracle in
 `failed_stmt_integration_test.go`.
 
 A re-execution naming a cursor dbbat cannot resolve goes through
-`refuseUnknownCursor`, exactly like the SQL-less `OALL8` and a fresh-query
-`OFETCH`: refused under a grant carrying a statement-shaped control, forwarded
-with a WARN under one carrying none. See `docs/approvals.md`.
+`refuseUnknownCursor`, exactly like the SQL-less `OALL8`: refused under a grant
+carrying a statement-shaped control, forwarded with a WARN under one carrying
+none. See `docs/approvals.md`.
 
 ##### How reliable learning actually is: the numbers
 
@@ -613,7 +636,7 @@ never writes an OER outside a call**. Enumerated, the sites are:
 
 | Site | Is the client inside a call? | Call number written |
 |---|---|---|
-| `gateStatement` / the `OFETCH` refusal, on the client leg | yes — the packet being refused is the call | the op just observed |
+| `gateStatement`, on the client leg | yes — the packet being refused is the call | the op just observed |
 | `answerHeldRefusal`, on the client leg (a limit crossed mid-reply) | yes — the packet being refused is the call | the op just observed |
 | `enforceMidStreamLimits`, on the response leg | the client is *inside* a call but not at a boundary in it | **none — the violation is held for the client's next call** |
 | `onLimitViolation` (the limit watchdog: revocation, expiry, idle) | no | **none — it force-closes both sockets and writes no frame** |
@@ -964,7 +987,7 @@ for names containing spaces or parentheses.
 ## Known Limitations
 
 - **Any API key works for Oracle login (per-user salts)**: The Oracle username from TTC AUTH Phase 1 maps to the dbbat user (lowercased) for grant checks and connection tracking, and any of that user's API keys created since the per-user-salt scheme can authenticate — see "Per-user O5LOGON salts" below. Two caveats: keys created before the scheme (legacy per-key salts) still fall back to first-key-only behavior until a new key is created, and clients that send an empty `AUTH_PASSWORD` (SQLcl / JDBC thin 23c+) cannot be disambiguated — dbbat assumes the most-recently-created user-salt key.
-- **The `0x11` fetch reading is unreachable, and that is the honest state**: `handleOFETCH` gates a fetch that starts a fresh pending query as a re-execution, but message type `0x11` is the piggyback message type and no client sends a fetch that way — real fetches are `03/05`, which dbbat does not intercept. The reading was only ever reached by misparsing piggybacks, which is the bug written up under "Two OCI encodings, not one"; the gate itself is still pinned by unit tests and the other two re-execution frames (the SQL-less `OALL8` and the `03/0x4e|0x04` piggyback) are real and enforced. Wiring the gate to `03/05` is a behaviour change on the hot path and is filed as its own todo.
+- **Fetches are not gated**: dbbat intercepts no fetch op. It used to carry a `0x11` fetch reading that gated "a fetch starting a fresh pending query" as a re-execution, but message type `0x11` is the piggyback message type and no client sends a fetch that way — real fetches are `03/05`, which dbbat does not intercept — so the reading was only ever reached by misparsing piggybacks (the bug under "Two OCI encodings, not one"). It has been deleted; the two re-execution frames that are real (the SQL-less `OALL8` and the `03/0x4e|0x04` piggyback) are enforced unchanged. Wiring the gate to `03/05` is a behaviour change on the hot path and needs its false-positive rate measured on a live suite first — the reasoning is kept under "Cursor re-execution".
 - **Row capture is best-effort**: The TTC binary format varies across Oracle client versions. Some clients/query types may produce partial or no row capture. SQL text extraction works reliably across all tested clients.
 - **Column names**: Real column names come from the describe column-definition records (`parseColumnDescribes` in `describe.go`), so single-char aliases (`SELECT level AS n`) and unnamed expressions (`SELECT count(*)`) get their true names and positions. Only genuinely unnamed expression columns fall back to a synthetic `COLn` label. If the records don't parse on some server layout, decoding falls back to heuristic name-scanning plus describe-header count padding, so the column count (and row framing) stays correct.
 - **DML row counts**: INSERT/UPDATE/DELETE affected-row counts are captured from the v315+ OER status block (TTC func `0x04`, embedded in the execute Response) and stored as `rows_affected`, for clients whose OERs carry the end-of-call bit and (since the fix above) for those whose don't. **Failed statements record their ORA error text on every client**, out of the *standalone* func `0x04` that is how failures actually arrive — see the measurement under "the OER end-of-call bit is not universal", which found the bit to be a property of the call rather than of the client. The one gap left is a failure raised **mid-fetch**, once column definitions are decoded: there a `0x04` run is row data by definition, the strict decoder stays the only thing allowed to end the call, and such a failure is therefore still recorded with no error at all. Never measured; filed as `specs/todos/2026-08-13-09-oracle-mid-fetch-failure-records-no-error.md`. See `ttc_oer.go`.
@@ -1484,12 +1507,14 @@ is a misnomer kept for continuity: in TTC, `0x11` opens a *piggyback* message an
 the TTC **function code** — `0x69` close-cursors, `0x6b` an OCI session piggyback, `0x87`
 set-end-to-end-attrs, `0x98` set-schema. A real fetch is message type `0x03`, function
 `0x05` (`TNS_FUNC_FETCH`), which is what every recording in `testdata/` carries.
-`decodeOFETCH` reads a big-endian cursor id out of bytes 1..3, so on the bundled client's
+`decodeOFETCH` read a big-endian cursor id out of bytes 1..3, so on the bundled client's
 very first message — `11 6b 04 …` — it read (function, sequence) and produced cursor id
 `0x6b04` = 27396, which no session had ever opened. Under any statement-shaped control that
 is a refusal, on the first call of every session. The Instant Client sends the same frame
 and was refused identically; it just shrugs the refusal off, which is why this went
-unnoticed for as long as the PATH flavor was the only one running.
+unnoticed for as long as the PATH flavor was the only one running. (That decoder and the
+re-execution gate behind it have since been deleted outright — no client sent the frame
+they watched. See "Cursor re-execution".)
 
 **2. dbbat refuses only a call it can name.** A piggyback is by definition in front of
 something, and the call the client is parked on is stapled *behind* it. dbbat can walk one
