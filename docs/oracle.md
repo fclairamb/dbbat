@@ -1030,6 +1030,41 @@ shifted array *is* the real `caps[4]`. The flags are measured off the captures i
 `internal/proxy/oracle/testdata/` and pinned by
 `TestServerCapBitSet_RealSetProtocolReplies`.
 
+**Every AUTH site now follows the negotiated flag — there is no remaining hard-coded
+dialect.** Once the capability was read correctly it had to reach each place that frames or
+decodes a CLR value, which took four passes; the inventory, so a future addition can be
+checked against it:
+
+| site | function | side |
+|---|---|---|
+| Phase 2 fallback rewrite | `rewritePhase2KVPairs`, `rewriteAuthPhase2`, `replaceAuthKVValue` | both |
+| upstream challenge parse | `parseAuthKVDictionary`, `readAuthKVPair` | read |
+| client-facing challenge | `buildAuthChallenge` | write |
+| wide/OCI leg | `ttcKeyValWideChunked`, `ttcKeyValWideSized`, `replaceAuthKVValueWide`, `readAuthKVPairWide`, `buildClientAuthPhase{1,2}Wide` | both |
+| thin synthetic upstream body | `buildClientAuthPhase1`, `buildClientAuthPhase2` | write |
+| client Phase 2 finders | `parseAuthPhase2`, `scanTTCKeyValPairs` / `readKVValue`, `findKVByKeyBytes`, `findKVByKeyBytesWide` | read |
+
+The primitives are `ttcClrVariant` / `ttcKeyValChunked` on the write side and
+`readCLRVariant` on the read side. Below 252 bytes the two encodings are byte-identical, so
+none of this moves a byte for the values dbbat handles today —
+`TestThinSyntheticAuthLeg_ShortValues_ByteIdentical` and
+`TestWideAuthLeg_ShortValues_ByteIdentical` pin that on the synthetic bodies. It becomes
+live the day a value outgrows the short form, which for the synthetic bodies most plausibly
+means a long hostname in `AUTH_TERMINAL` / `AUTH_MACHINE` (no Oracle-side cap) or a grown
+`AUTH_PBKDF2_SPEEDY_KEY`.
+
+**The one deliberate exception is the username**, which stays on plain `ttcClr` in both
+synthetic builders: Oracle caps an identifier at 128 bytes, half the short-form limit, so it
+can never reach the `0xFE` long form and the two encodings cannot disagree about it.
+
+The finders in the last row extract only `AUTH_SESSKEY` (64 hex chars) and `AUTH_PASSWORD`
+(96/64) for `parseAuthPhase2` itself — fixed-size by construction, so the flag could have
+been argued away there. It is threaded anyway for two reasons: `scanTTCKeyValPairs` is not
+selective and decodes *every* `AUTH_` pair it crosses on the way, including a client's
+`AUTH_CONNECT_STRING` (routinely past 252 bytes with a load-balancer hostname); and
+`clientDeclaredProgramName` reads `AUTH_PROGRAM_NM` through the very same finders, which is
+free-form client text with no length cap.
+
 `customHash` is relayed to the client unchanged, so a modern client negotiates it and dbbat
 answers with a verifier-18453 challenge; legacy go-ora reads the verifier type from the
 challenge's `AUTH_VFR_DATA` flag and falls back to 6949.
