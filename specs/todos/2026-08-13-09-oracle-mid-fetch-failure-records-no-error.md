@@ -96,13 +96,14 @@ diagnostic **and** the OER naming the very cursor whose rows are streaming.
 The corpus measurement (all 26 `testdata/*.pcapng`, replayed through a real
 `session` so `rowStreamActive()` is the session's own):
 
-- 343 server→client Data packets arrive **mid-row-stream**; 341 lead with
+- 342 server→client Data packets arrive **mid-row-stream** (343 before the
+  change, when the guard left the stream open past the failure); 340 lead with
   something other than `0x04` (326 of them with `0x06`);
 - exactly **2** lead with `0x04` — the two genuine ORA-01722s;
 - `decodeErrorOER` accepts exactly those 2 and nothing else: **false-positive
-  rate 0/343**;
+  rate 0**;
 - a stress scan running the same predicate at *every* `0x04` offset inside all
-  343 mid-stream packets accepts **0**.
+  of those mid-stream packets accepts **0**.
 
 The cursor-id anchor is not in that number — it is the belt to its braces, aimed
 at the one realistic case the corpus cannot contain: a result set whose rows
