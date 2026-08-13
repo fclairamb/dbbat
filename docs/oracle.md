@@ -920,8 +920,55 @@ on the client's next call (`logMsgRefusalHeld` then `logMsgRefusalDelivered`).
 Which is *stronger* evidence than the old text assertion, and it is what makes
 ojdbc's `code=28` attributable to the fix rather than to ojdbc.
 
+###### All four clients, measured
+
+`TestIntegration_AsyncRefusalAgainstOCIAndPythonThin` closes the two clients the
+fix shipped without, on the same fixture and through the same recording tap.
+Both risks that motivated it are ruled out: sqlplus did **not** hang, and no OCI
+session took the unnameable fallback.
+
+| Client | Rows drained first | What dbbat wrote | What the client reported |
+|---|---|---|---|
+| ojdbc 23.7.0.25.01 | 1500 of 5000 | one ORA-00028, call 8, compressed | `midfetch: code=28` |
+| go-ora v3 | 1580 of 5000 | one ORA-00028, call 12, compressed | `driver: bad connection` — it maps ORA-00028 to a dead conn *by design* |
+| python-oracledb thin 3.4 | 1002 of 5000 | one ORA-00028, call 7, compressed | `code=28`, rendered as `DPY-4011` |
+| sqlplus, Instant Client 23.3 (macOS, on PATH) | 1000 of 5000 | one ORA-00028, call 17, **fixed-width 32-bit** | `ORA-00028: session terminated: bandwidth quota exceeded for this grant`, printed verbatim |
+| sqlplus, bundled 23.26 (`gvenzl/oracle-free:23-slim`) | 1000 of 5000 | one ORA-00028, call 17, **fixed-width 64-bit** | the same ORA-00028, printed verbatim |
+
+Every one of the five took the **delivered** path — `logMsgRefusalHeld` then
+`logMsgRefusalDelivered`, with `logMsgRefusalUnnameable` never once — and no
+watchdog teardown and no overshoot abandonment anywhere. So the call the client
+makes after finishing a fetch reply is, on every client dbbat supports, one it
+can name: the OCI piggyback that `gateUnnameableFrame` exists for is what these
+clients open a *session* with, not what they resume a drained fetch with. The
+statement after the refusal fails on every client (`ORA-03113` on sqlplus,
+`DPY-1001` on python-oracledb), which is the session being over, as intended.
+
+Two client-side details are worth keeping, because both make the error *text*
+useless as evidence while the frame was read perfectly:
+
+- **python-oracledb parses it and relabels it.** `code` is 28, but the exception
+  renders as `DPY-4011: the database or network closed the connection` — the
+  driver folds a killed session into its own connection-closed error, much as
+  go-ora folds it into `driver.ErrBadConn`. Only the error *object* separates
+  "parsed the ORA-00028" from "met a closed socket", which is why the probe
+  reports `code`/`full_code` rather than the message.
+- **sqlplus is the one client that prints the message unchanged**, and it is
+  also the only one whose frame is in the fixed-width encoding — so it is the
+  end-to-end evidence that `encodeOERFixedWidth` (both layouts) produces a frame
+  an OCI client reads *when written from the client leg*, which is the moment
+  this fix moved.
+
+The tap needed one change to say any of this. A fixed-width summary object is
+mostly zeroes, and a run of zeroes walks cleanly as compressed integers, so the
+compressed decoder does not fail on an OCI frame — it *succeeds* and reports
+ORA-00000 on call 0. `decodeTappedOER` now runs both decoders and arbitrates by
+the frame's own "ORA-NNNNN" text, which is the one field neither encoding can
+fake.
+
 Confidence: the enumeration is read off the code and pinned by
 `TestUpstreamToClient_ByteLimitHoldsRatherThanCuttingIn`,
+`TestUpstreamToClient_StopsRelayingPastTheOvershootBound`,
 `TestHeldRefusalEndsTheCallTheClientIsNextParkedOn`,
 `TestHeldRefusalMeetingAnUnnameableCallClosesInstead`,
 `TestHeldRefusalBlocksAFrameItCannotRead`,
@@ -929,25 +976,34 @@ Confidence: the enumeration is read off the code and pinned by
 `TestHeldRefusalTearsDownEvenWhenTheFrameWriteBlowsUp`,
 `TestHeldRefusalStandsTheWatchdogDownUntilItsGrace`,
 `TestHeldRefusalFallsBackToTheCloseWhenTheClientStopsTalking`,
+`TestHeldRefusalWatchdogFallsBackAfterItsGraceRunsOut`,
 `TestHeldRefusalStopsRelayingOnceTheOvershootBoundIsCrossed` and
 `TestIdleLimitViolationSendsNoOER`; the live cases above are measured against
 Oracle 23ai Free and pinned by the integration tests named with them. The driver
-they were taken on is **ojdbc 23.7.0.25.01**, not the 26.1 the call-number
-finding is attributed to; what that does and does not license is in "Which ojdbc
-these results are attributed to" above.
+the ojdbc rows were taken on is **ojdbc 23.7.0.25.01**, not the 26.1 the
+call-number finding is attributed to; what that does and does not license is in
+"Which ojdbc these results are attributed to" above.
 
-Two things are *not* measured, and the asymmetry is worth stating rather than
-leaving to be discovered. The **fail-safes have never fired end to end**:
-`TestHeldRefusalStopsRelayingOnceTheOvershootBoundIsCrossed` reaches
-`refusalHoldMaxBytes` by subtracting it from the held refusal's own byte mark,
-and `TestHeldRefusalFallsBackToTheCloseWhenTheClientStopsTalking` reaches
-`refusalHandoffGrace` by backdating its arming time, since no live client
-produces a reply with no boundary or an 8 MiB overshoot on demand. And the
-delivered path is measured on **two of four clients** — sqlplus (OCI) and
-python-oracledb have not seen a held refusal at all, which matters most for the
-unnameable fallback, since an OCI session's own frames are the ones dbbat
-routinely cannot name. Both are
-`specs/todos/2026-08-13-07-measure-the-held-mid-reply-refusal-on-the-other-two-clients.md`.
+**Both fail-safes now fire without hand-mutated session state.**
+`refusalHoldBytes` / `refusalHoldGrace` are per-session overrides of the two
+constants (zero means "use the constant", so a session built without them keeps
+the production bounds), and that is what makes the two paths reachable at all —
+no live client produces a reply with no boundary, and no live client stops
+talking on demand. `TestUpstreamToClient_StopsRelayingPastTheOvershootBound`
+drives the real `upstreamToClient` over a `net.Pipe` against an upstream whose
+reply never ends, and the **relay** is what runs out of bound: it returns
+`ErrByteQuotaExceeded` having relayed within one packet of the bound.
+`TestHeldRefusalWatchdogFallsBackAfterItsGraceRunsOut` arms the hold through
+`enforceMidStreamLimits`, runs the real `LimitGuard.Watch` → `onLimitViolation`
+with a millisecond grace and a client that never speaks, and asserts both
+sockets dropped and the statement recorded `aborted: bandwidth quota exceeded
+for this grant`. The two older tests stay: they pin the arithmetic and the
+teardown, which is a different claim from "the relay and the watchdog get
+there".
+
+What is still *not* measured is the bounds' **values**. 8 MiB and 30s are
+reasoned from the expected cost (the tail of one fetch batch) rather than
+observed; nothing here says a smaller pair would be worse.
 
 ### Oracle NUMBER Encoding
 
