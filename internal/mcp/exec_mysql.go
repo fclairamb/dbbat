@@ -8,10 +8,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/go-mysql-org/go-mysql/client"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
-
-	"github.com/fclairamb/dbbat/internal/proxy/shared"
 )
 
 // mysqlConnectTimeout bounds the handshake with our own listener. Reaching
@@ -52,7 +51,7 @@ func executeMySQL(ctx context.Context, addr string, req ExecRequest) (*QueryResu
 	// an unrecovered panic in it would still end the process. Nothing waits on
 	// it, so a recover costs at most one unclosed socket, which the executor's
 	// context timeout bounds anyway.
-	go shared.RunGuarded(ctx, slog.Default(), goroutineNameMySQLCancelWatcher, func() {
+	go safe.RunGuarded(ctx, slog.Default(), goroutineNameMySQLCancelWatcher, func() {
 		select {
 		case <-ctx.Done():
 			_ = conn.Close()

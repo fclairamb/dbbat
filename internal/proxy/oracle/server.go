@@ -15,6 +15,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -234,8 +235,8 @@ func (s *Server) runDumpCleanup() {
 		case <-ticker.C:
 			// One turn under the guard rather than the whole loop: a panic in a
 			// sweep must not take the process down, and must not retire retention
-			// for the life of the process either. See shared.RunMaintenance.
-			shared.RunMaintenance(s.ctx, s.logger, goroutineNameDumpRetention, func() {
+			// for the life of the process either. See safe.RunMaintenance.
+			safe.RunMaintenance(s.ctx, s.logger, goroutineNameDumpRetention, func() {
 				deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
 				if err != nil {
 					s.logger.ErrorContext(s.ctx, "dump cleanup failed", slog.Any("error", err))

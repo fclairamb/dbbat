@@ -30,7 +30,7 @@ func (*panicOnReadConn) Close() error { return nil }
 // was recovered without yielding a value would leave this function parked
 // forever. That is the failure a later refactor would most plausibly
 // reintroduce, by moving the send inside the recovered call
-// (`go func() { if err := shared.RunRelay(…); err != nil { … } }()`), and the
+// (`go func() { if err := safe.RunRelay(…); err != nil { … } }()`), and the
 // timeout below is what would catch it.
 //
 // Both legs panic here, which also exercises the client reader: it is under

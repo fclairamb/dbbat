@@ -11,7 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/config"
-	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 )
 
 // RateLimiter implements a sliding window rate limiter
@@ -63,8 +63,8 @@ func (rl *RateLimiter) cleanup() {
 	for range ticker.C {
 		// Per turn, so a panic neither ends the process nor retires the sweep:
 		// a rate limiter that stopped evicting windows would leak one map entry
-		// per client forever. See shared.RunMaintenance.
-		shared.RunMaintenance(context.Background(), slog.Default(), goroutineNameRateLimitSweep, func() {
+		// per client forever. See safe.RunMaintenance.
+		safe.RunMaintenance(context.Background(), slog.Default(), goroutineNameRateLimitSweep, func() {
 			rl.mu.Lock()
 			defer rl.mu.Unlock()
 

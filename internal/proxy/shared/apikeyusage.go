@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/google/uuid"
 )
 
@@ -61,7 +62,7 @@ func BumpAPIKeyUsage(ctx context.Context, logger *slog.Logger, st APIKeyUsageSto
 
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), APIKeyUsageTimeout)
 
-	go RunGuarded(writeCtx, logger, GoroutineNameAPIKeyUsage, func() {
+	go safe.RunGuarded(writeCtx, logger, GoroutineNameAPIKeyUsage, func() {
 		defer cancel()
 
 		if err := st.IncrementAPIKeyUsage(writeCtx, keyID); err != nil {

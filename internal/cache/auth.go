@@ -166,7 +166,7 @@ func (c *AuthCache) cleanupLoop() {
 // silently stopped evicting would keep serving credential decisions past their
 // TTL, which is a security property, not a housekeeping one.
 //
-// This is shared.RunMaintenance open-coded, and only because it has to be:
+// This is safe.RunMaintenance open-coded, and only because it has to be:
 // internal/proxy/shared imports this package, so importing it back would be a
 // cycle. Keep the two in step.
 func (c *AuthCache) guardedCleanup() {

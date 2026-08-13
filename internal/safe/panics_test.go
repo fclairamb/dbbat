@@ -1,4 +1,4 @@
-package shared_test
+package safe_test
 
 import (
 	"context"
@@ -8,11 +8,39 @@ import (
 	"testing"
 	"time"
 
-	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 )
 
 func discardLogger() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
+}
+
+// errBoom is what a panicking turn raises.
+var errBoom = errors.New("maintenance turn blew up") //nolint:err113 // test-local sentinel
+
+// TestRunMaintenanceKeepsTheLoopAlive is the difference between RunMaintenance
+// and wrapping a background loop whole: a retention sweep, a cache eviction or
+// an upload that panics must cost one turn, not the loop. Silently retiring the
+// sweep for the life of the process is the failure this guards against — it
+// looks exactly like health from the outside.
+func TestRunMaintenanceKeepsTheLoopAlive(t *testing.T) {
+	t.Parallel()
+
+	turns := 0
+
+	for i := range 3 {
+		safe.RunMaintenance(context.Background(), discardLogger(), "retention sweep", func() {
+			turns++
+
+			if i == 0 {
+				panic(errBoom)
+			}
+		})
+	}
+
+	if turns != 3 {
+		t.Fatalf("every turn must still run after a panicking one, got %d of 3", turns)
+	}
 }
 
 // TestRunRelayPassesThroughResult keeps the happy path honest: no panic, no
@@ -22,13 +50,13 @@ func TestRunRelayPassesThroughResult(t *testing.T) {
 
 	sentinel := errors.New("upstream closed") //nolint:err113 // test-local sentinel
 
-	if err := shared.RunRelay(context.Background(), discardLogger(), "c2u", func() error {
+	if err := safe.RunRelay(context.Background(), discardLogger(), "c2u", func() error {
 		return sentinel
 	}); !errors.Is(err, sentinel) {
 		t.Fatalf("expected the relay's own error, got %v", err)
 	}
 
-	if err := shared.RunRelay(context.Background(), discardLogger(), "c2u", func() error {
+	if err := safe.RunRelay(context.Background(), discardLogger(), "c2u", func() error {
 		return nil
 	}); err != nil {
 		t.Fatalf("expected nil, got %v", err)
@@ -45,7 +73,7 @@ func TestRunRelayRecoversPanic(t *testing.T) {
 	errCh := make(chan error, 1)
 
 	go func() {
-		errCh <- shared.RunRelay(context.Background(), discardLogger(), "upstream→client", func() error {
+		errCh <- safe.RunRelay(context.Background(), discardLogger(), "upstream→client", func() error {
 			var pkt []byte
 
 			_ = pkt[7] // index out of range, the shape a malformed frame takes
@@ -55,7 +83,7 @@ func TestRunRelayRecoversPanic(t *testing.T) {
 	}()
 
 	err := <-errCh
-	if !errors.Is(err, shared.ErrRelayPanic) {
+	if !errors.Is(err, safe.ErrRelayPanic) {
 		t.Fatalf("expected ErrRelayPanic, got %v", err)
 	}
 
@@ -69,10 +97,10 @@ func TestRunRelayRecoversPanic(t *testing.T) {
 func TestRunRelayNilLoggerStillRecovers(t *testing.T) {
 	t.Parallel()
 
-	err := shared.RunRelay(context.Background(), nil, "c2u", func() error {
+	err := safe.RunRelay(context.Background(), nil, "c2u", func() error {
 		panic("boom")
 	})
-	if !errors.Is(err, shared.ErrRelayPanic) {
+	if !errors.Is(err, safe.ErrRelayPanic) {
 		t.Fatalf("expected ErrRelayPanic, got %v", err)
 	}
 }
@@ -86,13 +114,13 @@ func TestRunRelayRunsTheRelaysOwnDefers(t *testing.T) {
 
 	cleaned := false
 
-	err := shared.RunRelay(context.Background(), discardLogger(), "c2u", func() error {
+	err := safe.RunRelay(context.Background(), discardLogger(), "c2u", func() error {
 		defer func() { cleaned = true }()
 
 		panic("boom")
 	})
 
-	if !errors.Is(err, shared.ErrRelayPanic) {
+	if !errors.Is(err, safe.ErrRelayPanic) {
 		t.Fatalf("expected ErrRelayPanic, got %v", err)
 	}
 
@@ -114,7 +142,7 @@ func TestRunGuardedRecoversAndRunsDefers(t *testing.T) {
 	go func() {
 		defer close(finished)
 
-		shared.RunGuarded(context.Background(), discardLogger(), "tds client reader", func() {
+		safe.RunGuarded(context.Background(), discardLogger(), "tds client reader", func() {
 			defer close(done)
 
 			panic("boom")
@@ -135,7 +163,7 @@ func TestRunWatchdogEndsTheSessionOnPanic(t *testing.T) {
 
 	tornDown := make(chan struct{})
 
-	go shared.RunWatchdog(context.Background(), discardLogger(), "limit watchdog", func() {
+	go safe.RunWatchdog(context.Background(), discardLogger(), "limit watchdog", func() {
 		panic("onViolation blew up mid-teardown")
 	}, func() { close(tornDown) })
 
@@ -158,7 +186,7 @@ func TestRunWatchdogSurvivesATeardownPanic(t *testing.T) {
 	go func() {
 		defer close(finished)
 
-		shared.RunWatchdog(context.Background(), discardLogger(), "limit watchdog", func() {
+		safe.RunWatchdog(context.Background(), discardLogger(), "limit watchdog", func() {
 			panic("watch blew up")
 		}, func() {
 			panic("and so did the teardown")
@@ -180,7 +208,7 @@ func TestRunWatchdogLeavesTheTeardownAloneOnACleanExit(t *testing.T) {
 
 	torn := false
 
-	shared.RunWatchdog(context.Background(), discardLogger(), "limit watchdog",
+	safe.RunWatchdog(context.Background(), discardLogger(), "limit watchdog",
 		func() {}, func() { torn = true })
 
 	if torn {

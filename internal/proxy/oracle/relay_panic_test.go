@@ -10,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -62,12 +62,12 @@ func TestRelayPanicEndsTheSessionNotTheProcess(t *testing.T) {
 	errChan := make(chan error, 2)
 
 	go func() {
-		errChan <- shared.RunRelay(s.ctx, s.logger, relayNameUpstreamToClient, s.upstreamToClient)
+		errChan <- safe.RunRelay(s.ctx, s.logger, relayNameUpstreamToClient, s.upstreamToClient)
 	}()
 
 	select {
 	case err := <-errChan:
-		require.ErrorIs(t, err, shared.ErrRelayPanic,
+		require.ErrorIs(t, err, safe.ErrRelayPanic,
 			"the panic must come back as an error, not as a dead process: "+
 				"the session tears down through the same channel an I/O error uses")
 		assert.Contains(t, err.Error(), relayNameUpstreamToClient,
@@ -103,12 +103,12 @@ func TestClientRelayPanicReportsToo(t *testing.T) {
 	errChan := make(chan error, 2)
 
 	go func() {
-		errChan <- shared.RunRelay(s.ctx, s.logger, relayNameClientToUpstream, s.clientToUpstream)
+		errChan <- safe.RunRelay(s.ctx, s.logger, relayNameClientToUpstream, s.clientToUpstream)
 	}()
 
 	select {
 	case err := <-errChan:
-		require.ErrorIs(t, err, shared.ErrRelayPanic)
+		require.ErrorIs(t, err, safe.ErrRelayPanic)
 	case <-time.After(5 * time.Second):
 		t.Fatal("the client relay panicked without reporting")
 	}
@@ -135,14 +135,14 @@ func TestPreAuthPumpPanicUnblocksStopPump(t *testing.T) {
 	pumpDone := make(chan error, 1)
 
 	go func() {
-		pumpDone <- shared.RunRelay(s.ctx, s.logger, relayNamePreAuthPump, func() error {
+		pumpDone <- safe.RunRelay(s.ctx, s.logger, relayNamePreAuthPump, func() error {
 			return s.pumpPreAuthUpstream(&panicOnReadConn{})
 		})
 	}()
 
 	select {
 	case err := <-pumpDone:
-		require.ErrorIs(t, err, shared.ErrRelayPanic)
+		require.ErrorIs(t, err, safe.ErrRelayPanic)
 	case <-time.After(5 * time.Second):
 		t.Fatal("stopPump would block here forever: the pre-auth pump panicked without reporting")
 	}

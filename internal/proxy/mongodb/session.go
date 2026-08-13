@@ -22,6 +22,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/cache"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -219,7 +220,7 @@ func (s *Session) Run() error {
 	// its own panic would leave the session running with no expiry, no byte quota
 	// and no revocation check at all. The teardown closes both conns — what
 	// onLimitViolation does, minus the walk that may be what panicked.
-	go shared.RunWatchdog(watchCtx, s.logger, relayNameWatchdog, func() {
+	go safe.RunWatchdog(watchCtx, s.logger, relayNameWatchdog, func() {
 		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
 			s.onLimitViolation(upstream, clientConn, err)
 		})
@@ -402,7 +403,7 @@ const (
 
 // relay pumps framed messages both ways after auth until either side ends.
 //
-// Both pumps run under shared.RunRelay. A recover on the goroutine that started
+// Both pumps run under safe.RunRelay. A recover on the goroutine that started
 // them catches nothing they raise, so an unguarded panic in the wire decode
 // would end the process and every other live session with it.
 //
@@ -415,10 +416,10 @@ func (s *Session) relay() error {
 	errCh := make(chan error, 2)
 
 	go func() {
-		errCh <- shared.RunRelay(s.ctx, s.logger, relayNameClientToUpstream, s.pumpClientToUpstream)
+		errCh <- safe.RunRelay(s.ctx, s.logger, relayNameClientToUpstream, s.pumpClientToUpstream)
 	}()
 	go func() {
-		errCh <- shared.RunRelay(s.ctx, s.logger, relayNameUpstreamToClient, s.pumpUpstreamToClient)
+		errCh <- safe.RunRelay(s.ctx, s.logger, relayNameUpstreamToClient, s.pumpUpstreamToClient)
 	}()
 
 	err := <-errCh

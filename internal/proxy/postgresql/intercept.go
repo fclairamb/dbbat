@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -517,7 +518,7 @@ func (s *Session) persistQueryAsync(
 		return
 	}
 
-	go shared.RunGuarded(s.ctx, s.logger, goroutineNameQueryRecord, func() {
+	go safe.RunGuarded(s.ctx, s.logger, goroutineNameQueryRecord, func() {
 		// A panic here must not leave the sink unresolved: the shared row writer
 		// waits on it before inserting anything this query queued. Fail is a
 		// no-op once Resolve has run, so this only bites on the panic path.

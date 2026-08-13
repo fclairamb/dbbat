@@ -21,6 +21,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/config"
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -382,25 +383,25 @@ func (s *Session) proxyMessages() error {
 	// leaves the session running with nothing enforcing its expiry, quota or
 	// revocation. The teardown is what onLimitViolation does — close both conns,
 	// which ends whichever relay is parked on them.
-	go shared.RunWatchdog(watchCtx, s.logger, relayNameWatchdog, func() {
+	go safe.RunWatchdog(watchCtx, s.logger, relayNameWatchdog, func() {
 		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, s.onLimitViolation)
 	}, s.closeConns)
 
 	// Channel to receive errors from goroutines
 	errChan := make(chan error, 2)
 
-	// Both legs run under shared.RunRelay: a panic on a relay goroutine is not
+	// Both legs run under safe.RunRelay: a panic on a relay goroutine is not
 	// caught by any recover on the goroutine that started it, so without this it
 	// ends the *process* — every live session, of every user, on every database.
 	// RunRelay turns it into an error on errChan instead, which is what makes the
 	// session tear down the ordinary way. errChan is buffered at 2, so the send
 	// cannot block even though only the first is read.
 	go func() {
-		errChan <- shared.RunRelay(s.ctx, s.logger, relayNameClientToUpstream, s.proxyClientToUpstream)
+		errChan <- safe.RunRelay(s.ctx, s.logger, relayNameClientToUpstream, s.proxyClientToUpstream)
 	}()
 
 	go func() {
-		errChan <- shared.RunRelay(s.ctx, s.logger, relayNameUpstreamToClient, s.proxyUpstreamToClient)
+		errChan <- safe.RunRelay(s.ctx, s.logger, relayNameUpstreamToClient, s.proxyUpstreamToClient)
 	}()
 
 	// Wait for either direction to close or error
@@ -777,7 +778,7 @@ func (s *Session) ensureRowSink(query *pendingQuery) *shared.QuerySink {
 		ExecutedAt:   query.startTime,
 	}
 
-	go shared.RunGuarded(s.ctx, s.logger, goroutineNameCaptureRecord, func() {
+	go safe.RunGuarded(s.ctx, s.logger, goroutineNameCaptureRecord, func() {
 		// A panic here must not leave the sink unresolved: the capture path and
 		// the completion goroutine both wait on it. Fail is a no-op once Resolve
 		// has run, so this only bites on the panic path.

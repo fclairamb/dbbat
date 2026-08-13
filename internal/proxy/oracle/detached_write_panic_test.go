@@ -43,7 +43,7 @@ func (p *panickingCompletionStore) IncrementConnectionStats(context.Context, uui
 // the pin in internal/proxy/shared: the query record is written on a goroutine
 // that outlives the call that spawned it — deliberately, so the store never
 // stalls the wire — which is exactly why the recover on handleConnection cannot
-// see it. Before shared.RunGuarded, a panic in that write ended the process:
+// see it. Before safe.RunGuarded, a panic in that write ended the process:
 // every live session, of every user, on every database, because one statement's
 // record could not be encoded.
 //

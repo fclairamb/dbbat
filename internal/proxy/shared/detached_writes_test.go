@@ -3,6 +3,7 @@ package shared_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -122,29 +123,10 @@ func TestDetachedStoreWritePanicsDoNotEscape(t *testing.T) {
 	}
 }
 
-// TestRunMaintenanceKeepsTheLoopAlive is the difference between RunMaintenance
-// and wrapping a background loop whole: a retention sweep, a cache eviction or
-// an upload that panics must cost one turn, not the loop. Silently retiring the
-// sweep for the life of the process is the failure this guards against — it
-// looks exactly like health from the outside.
-func TestRunMaintenanceKeepsTheLoopAlive(t *testing.T) {
-	t.Parallel()
-
-	turns := 0
-
-	for i := range 3 {
-		shared.RunMaintenance(context.Background(), discardLogger(), "retention sweep", func() {
-			turns++
-
-			if i == 0 {
-				panic(errBoom)
-			}
-		})
-	}
-
-	if turns != 3 {
-		t.Fatalf("every turn must still run after a panicking one, got %d of 3", turns)
-	}
+// discardLogger is what these tests hand the guards: the assertion is the
+// behaviour, never the log line.
+func discardLogger() *slog.Logger {
+	return slog.New(slog.DiscardHandler)
 }
 
 // waitFor polls until cond holds or the test's patience runs out.

@@ -10,6 +10,7 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/approval"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -247,7 +248,7 @@ func (h *handler) completeHeldQuery(queryUID uuid.UUID, cause error) {
 
 	errStr := cause.Error()
 
-	go shared.RunGuarded(s.ctx, s.logger, goroutineNameHeldQueryCompletion, func() {
+	go safe.RunGuarded(s.ctx, s.logger, goroutineNameHeldQueryCompletion, func() {
 		if err := s.server.store.UpdateQueryCompletion(s.ctx, queryUID, nil, nil, &errStr, false, false); err != nil {
 			s.logger.DebugContext(s.ctx, "failed to complete held query", slog.Any("error", err))
 		}
@@ -341,7 +342,7 @@ func (h *handler) recordQueryWithUID(
 	// finished while its rows are still arriving.
 	hasRows := len(capturedRows) > 0
 
-	go shared.RunGuarded(s.ctx, s.logger, goroutineNameQueryRecord, func() {
+	go safe.RunGuarded(s.ctx, s.logger, goroutineNameQueryRecord, func() {
 		sink := s.server.rowWriter.NewSink()
 		held := queryUID != uuid.Nil
 

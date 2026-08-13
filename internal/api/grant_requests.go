@@ -12,7 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/notify"
-	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -39,7 +39,7 @@ func (s *Server) notifyAsync(ev notify.GrantRequestEvent) {
 	// sees it and a panic in the notifier would end the *process* — every live
 	// proxy session included. Nothing waits on it, so recovering costs one
 	// unsent Slack message.
-	go shared.RunGuarded(context.Background(), s.logger, goroutineNameGrantNotify, func() {
+	go safe.RunGuarded(context.Background(), s.logger, goroutineNameGrantNotify, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), slackNotifyTimeout)
 		defer cancel()
 

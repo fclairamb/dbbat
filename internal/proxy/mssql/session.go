@@ -19,6 +19,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/dump"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/proxy/upstream"
+	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -426,7 +427,7 @@ func (s *session) serve(ctx context.Context) error {
 	// own panic would leave the session running with no expiry, no byte quota and
 	// no revocation check at all. The teardown closes both conns — what
 	// onLimitViolation does, minus the logging that may be what panicked.
-	go shared.RunWatchdog(watchCtx, s.logger, relayNameWatchdog, func() {
+	go safe.RunWatchdog(watchCtx, s.logger, relayNameWatchdog, func() {
 		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, func(err error) {
 			s.onLimitViolation(ctx, up, clientConn, err)
 		})

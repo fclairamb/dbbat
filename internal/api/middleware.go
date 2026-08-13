@@ -12,6 +12,7 @@ import (
 
 	"github.com/fclairamb/dbbat/internal/crypto"
 	"github.com/fclairamb/dbbat/internal/proxy/shared"
+	"github.com/fclairamb/dbbat/internal/safe"
 )
 
 // Auth context keys
@@ -264,8 +265,8 @@ func (t *authFailureTracker) cleanup() {
 	for range ticker.C {
 		// Per turn, so a panic neither ends the process nor retires the sweep:
 		// a tracker that stopped expiring entries would lock users out on stale
-		// failure counts. See shared.RunMaintenance.
-		shared.RunMaintenance(context.Background(), slog.Default(), goroutineNameAuthFailureSweep, func() {
+		// failure counts. See safe.RunMaintenance.
+		safe.RunMaintenance(context.Background(), slog.Default(), goroutineNameAuthFailureSweep, func() {
 			t.mu.Lock()
 			defer t.mu.Unlock()
 
