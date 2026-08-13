@@ -196,9 +196,11 @@ reported against the 22 recordings in `testdata/`.
    the "JDBC exec" was never a distinct layout; `decodeExecSQL`'s 50–75 window
    was scanning *past a close list* into the stapled op's SQL.
 3. **The defect is far broader than the spec claimed.** It is not a planted
-   decoy: **130 of 207** production extractions across the corpus are
-   *mid-statement fragments*, produced by ordinary clients with no adversary at
-   all. `extractSQLAtOffset` accepts any byte inside the SQL text as a length
+   decoy: of the **137** execute ops in the corpus the old scan agreed with the
+   statement on 89 and returned a *mid-statement fragment* on **48**, produced
+   by ordinary clients with no adversary at all. (Counted per production decode
+   path rather than per op — the `11 69` and `03 5e` views of a stapled execute
+   are decoded separately — it is 130 of 207.) `extractSQLAtOffset` accepts any byte inside the SQL text as a length
    prefix (an ASCII space is 32, `T` is 84), `looksLikeSQL` matches a keyword
    with no word boundary, and nothing requires the declared run to be printable.
    The measured consequences:
