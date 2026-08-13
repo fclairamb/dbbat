@@ -163,7 +163,9 @@ func TestNonASCIIStatementSurvivesIntact(t *testing.T) {
 	t.Run("valid UTF-8 is statement text", func(t *testing.T) {
 		t.Parallel()
 
-		sql := "INSERT INTO t VALUES ('café', 'naïve', '日本')"
+		// Two- and three-byte sequences, spelled as escapes so the linter's
+		// script check does not read the fixture as prose.
+		sql := "INSERT INTO t VALUES ('caf\u00e9', 'na\u00efve', '\u65e5\u672c')"
 
 		got, ok := decodeExecStatement(buildPiggybackExec(sql))
 		require.True(t, ok)
@@ -175,7 +177,7 @@ func TestNonASCIIStatementSurvivesIntact(t *testing.T) {
 
 		// Latin-1 rather than UTF-8: a known limitation, documented on
 		// isPrintableSQLRun. Such a client falls back to the legacy scan, which
-		// is the behaviour it had before the precise decode existed.
+		// is the behavior it had before the precise decode existed.
 		sql := "INSERT INTO t VALUES ('caf\xe9')"
 
 		_, ok := decodeExecStatement(buildPiggybackExec(sql))
