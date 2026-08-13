@@ -111,6 +111,62 @@ So, in order:
    unnameable) is defensible but breaks any client whose framing dbbat misreads;
    measuring whether such a frame occurs at all is the first step.
 
+## Resolved open questions
+
+> For (3): decide what an unnameable re-execution should mean. Fail-closed (tear
+> the session down when a restrictive grant is in force and the frame is
+> unnameable) is defensible but breaks any client whose framing dbbat misreads;
+> measuring whether such a frame occurs at all is the first step.
+
+**Decision (2026-08-13): measure first, and fail *open* unless the measurement
+shows such frames actually occur.** Do **not** implement fail-closed teardown
+for an unnameable re-execution on the strength of reasoning alone.
+
+- Step 1 is the count: across every `internal/proxy/oracle/testdata/*.pcapng`,
+  how many frames are both unnameable *and* a cursor re-execution? Report the
+  number even if it is zero — a measured zero is the deliverable.
+- **If the count is zero**, document it as unreachable-in-practice in
+  `docs/oracle.md` next to the anchoring discussion, leave the frame forwarded,
+  and close this item. Do not add a teardown path for a shape no client produces.
+- **If the count is non-zero**, do not decide unilaterally: report the shapes you
+  found and stop, leaving the item open for the owner. A non-zero count changes
+  the trade-off and is worth a human decision.
+
+The reasoning behind the choice, which also governs items 4 and 5 below: on the
+unnameable path a refusal is a **session teardown**, not an ORA error, so a
+false positive costs a live session for what is a dbbat parsing bug rather than a
+user policy violation. `2026-08-12-12` already had that exact risk land on the
+DB-bundled OCI client. Do not enlarge the teardown surface without evidence.
+
+> Two more, found in the *anchoring* the unnameable path added on top of the
+> extractor (`statementOpOffsets`, `session.go`). Both are open questions rather
+> than known holes, and both want a measurement.
+
+**Decision (2026-08-13): these two are yours to settle by measurement, under the
+same do-not-enlarge-the-teardown-surface rule above.** They are not blocking.
+
+- **Item 4 (the `0e` OALL8 absent from the anchor's op list):** measure whether
+  Oracle executes a `0e` OALL8 stapled behind a `0x11` piggyback. If you can
+  establish it, add the op to the anchor list *only if* the false-positive cost
+  on the binary fixtures in `testdata/` (`oci_bundled_*.hex`) is nil. If you
+  cannot establish it either way, say so plainly in the doc and leave the list
+  as it is — an unmeasured claim replaced by an honest "not measured" is a
+  legitimate outcome here, and is what `2026-08-12-08` did in the same
+  situation.
+- **Item 5 (the anchor degenerating at offset 0):** perform the measurement that
+  item 1 of the Implementation already asks for — where the SQL sits relative to
+  the op header in real frames — and let it decide whether a length-prefixed
+  decode can replace the keyword scan and remove the carve-out. If it cannot,
+  keep the carve-out (it is the fail-closed direction and is already pinned by
+  `TestUnnameableExecFrameIsGatedOnItsOwnPayload`) and document why.
+
+> If a proper decode is reachable, take the **last** statement-carrying op in a
+> frame rather than the first, or gate every one of them.
+
+**Both branches are sanctioned** — gating every statement-carrying op is the
+stronger of the two and is preferred where it is reachable, since "a frame with
+two execs must be enforced against both" is the property that matters.
+
 Key files: `internal/proxy/oracle/ttc_decode.go` (`decodeExecSQL`,
 `findSQLInPayload`, `extractSQLAtOffset`), `internal/proxy/oracle/intercept.go`
 (`handleJDBCExec`), `internal/proxy/oracle/session.go` (`stapledStatement`,
