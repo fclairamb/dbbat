@@ -1213,6 +1213,15 @@ func strPtr(s string) *string {
 
 // maxResendAttempts limits the number of Resend retries to prevent infinite loops.
 
+// Names the per-session goroutines report themselves under when one of them
+// panics. They are log labels, not identifiers — the point is that the record
+// says which leg died.
+const (
+	relayNameClientToUpstream = "oracle client→upstream"
+	relayNameUpstreamToClient = "oracle upstream→client"
+	relayNameWatchdog         = "oracle limit watchdog"
+)
+
 // proxyMessages relays TNS packets bidirectionally with TTC-aware interception.
 func (s *session) proxyMessages() error {
 	// Register this live session against its grant so an admin revoke can
@@ -1247,18 +1256,29 @@ func (s *session) proxyMessages() error {
 	watchCtx, cancelWatch := context.WithCancel(s.ctx)
 	defer cancelWatch()
 
-	go s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, s.onLimitViolation)
+	go shared.RunGuarded(watchCtx, s.logger, relayNameWatchdog, func() {
+		s.guard.Watch(watchCtx, shared.DefaultLimitPollInterval, s.onLimitViolation)
+	})
 
 	errChan := make(chan error, 2)
 
-	// Client → Upstream (with query interception)
+	// Both directions run under shared.RunRelay, which turns a panic into an
+	// error on errChan instead of a dead process: these are goroutines of their
+	// own, and the only other recover in the Oracle proxy is on
+	// handleConnection, which runs on a *different* goroutine and catches
+	// nothing raised here. Everything they touch outside the two intercept paths
+	// — packet framing, the dump writer, the mid-stream limit check,
+	// holdIfNeeded, a held refusal's teardown — was otherwise a process-wide
+	// fault on one malformed session. The error genuinely reaching errChan is
+	// the load-bearing half: without it the wait below never returns and the
+	// session leaks its conns. errChan is buffered at 2, so neither send blocks
+	// even though only the first is read.
 	go func() {
-		errChan <- s.clientToUpstream()
+		errChan <- shared.RunRelay(s.ctx, s.logger, relayNameClientToUpstream, s.clientToUpstream)
 	}()
 
-	// Upstream → Client (with response interception)
 	go func() {
-		errChan <- s.upstreamToClient()
+		errChan <- shared.RunRelay(s.ctx, s.logger, relayNameUpstreamToClient, s.upstreamToClient)
 	}()
 
 	// Wait for either direction to close
@@ -2127,14 +2147,15 @@ func (s *session) heldRefusalBlocks() bool {
 		return false
 	}
 
-	// The nested recover is not belt-and-braces. This runs from the recovery of
-	// a panic, on the client relay goroutine, which proxyMessages starts bare —
-	// the only recover above it is on handleConnection, a *different* goroutine,
-	// so a panic escaping here takes the process down rather than the session.
-	// The teardown it performs (completeQuery, the store write it schedules) is
-	// exactly the kind of work that panicking on a malformed session would be
-	// worst in. Blocking is still the answer: a refusal is held, so forwarding
-	// was never on the table, even when the teardown did not finish.
+	// The nested recover is not belt-and-braces, even though the client relay
+	// goroutine now runs under shared.RunRelay and a panic escaping here would
+	// no longer reach the runtime. What it buys is one level finer: this runs
+	// from the recovery of a *decode* panic, and the session is meant to survive
+	// that — the relay's recover would end it instead. The teardown it performs
+	// (completeQuery, the store write it schedules) is exactly the kind of work
+	// that panicking on a malformed session would be worst in. Blocking is still
+	// the answer: a refusal is held, so forwarding was never on the table, even
+	// when the teardown did not finish.
 	func() {
 		defer func() {
 			if r := recover(); r != nil {

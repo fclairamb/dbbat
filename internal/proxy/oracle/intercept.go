@@ -88,8 +88,10 @@ const (
 
 	// logMsgRefusalTeardownPanic is the one that should never appear. It means
 	// the teardown of a held refusal panicked while itself running from a
-	// recovered panic — on a goroutine with no recover above it, so without the
-	// nested one in heldRefusalBlocks it would have ended the process.
+	// recovered decode panic. The relay goroutine above it does have a recover
+	// now (shared.RunRelay), so the nested one no longer stands between this and
+	// process death — it stands between this and losing a session that was
+	// supposed to survive a malformed frame.
 	logMsgRefusalTeardownPanic = "recovered from panic tearing down a held limit refusal"
 )
 
