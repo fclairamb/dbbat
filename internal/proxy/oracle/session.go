@@ -1541,7 +1541,7 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) (blocked bool) {
 		}
 
 		// JDBC thin driver reuses func=0x11 with sub-op 0x69 for execute-with-SQL.
-		// Distinguish from plain OFETCH by checking the sub-operation byte.
+		// Distinguish it by checking the sub-operation byte.
 		if IsExecSQL(ttcPayload) {
 			return s.gateStatement(s.handleJDBCExec, ttcPayload)
 		}
@@ -1552,8 +1552,16 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) (blocked bool) {
 		// Oracle client sends (see the note on TTCFuncOFETCH in ttc.go), so it
 		// only ever fired on misparsed piggybacks. It is gone; the two real
 		// re-execution frames (the SQL-less OALL8 and the 03/0x4e|0x04
-		// piggyback) are unaffected. Real fetches are message type 0x03
-		// function 0x05, which dbbat does not intercept.
+		// piggyback) are unaffected.
+		//
+		// Its companion guarantee outlives it and needs no guard: "a fetch that
+		// merely continues a result set already streaming is never re-gated,
+		// and no client is ever cut off mid-result-set" is now true by
+		// construction rather than by an early return that could regress. A
+		// real fetch is message type 0x03 function 0x05, which never enters
+		// this switch at all. That is why the two tests that used to pin the
+		// continuation path were deleted with the gate rather than rewired:
+		// there is no longer a code path for them to guard.
 
 	case TTCFuncOCLOSE, TTCFuncOClosev2:
 		cursorID, err := decodeCursorIDFromOCLOSE(ttcPayload)
@@ -1580,7 +1588,7 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) (blocked bool) {
 // no SQL to record the refusal against. Each handler decodes differently
 // (decodeOALL8, decodePiggybackExecSQL, decodeExecSQL, decodeCursorReexec), so
 // the check belongs where the SQL is known — after the decode and before the
-// static controls. See regateCursor for the three re-execution frames, which
+// static controls. See regateCursor for the two re-execution frames, which
 // share one insertion point.
 //
 // All three SQL-carrying ops still go through here (OALL8, the v315+ piggyback
