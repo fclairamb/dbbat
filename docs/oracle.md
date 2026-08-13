@@ -1304,13 +1304,22 @@ stapled behind it, so forwarding one unread would let an authenticated user unde
 `read_only` grant put an `INSERT` behind a body dbbat cannot walk and have it travel
 ungated — a worse outcome than the hang. `gateUnnameableFrame` therefore scans the frame
 for a stapled statement with the same extractor the JDBC exec path gates on
-(`decodeExecSQL`) and runs it through the same validators in the same order: the grant's
-static controls, its approval patterns, **and the ones that fire with no controls at all** —
-the Oracle blocked patterns (`ALTER SYSTEM`, `UTL_HTTP`, `DBMS_SCHEDULER`…) and the
-password-change guard. Skipping those here would have made an unwalkable piggyback the one
-place `ALTER SYSTEM KILL SESSION` travels under an ordinary full-access grant while the
-identical statement in a nameable frame is refused. A statement the validators permit
-travels; one they refuse does not.
+(`decodeExecSQL`) and runs it through the same pre-flight in the same order: the quota
+check, then the grant's static controls, its approval patterns, **and the validators that
+fire with no controls at all** — the Oracle blocked patterns (`ALTER SYSTEM`, `UTL_HTTP`,
+`DBMS_SCHEDULER`…) and the password-change guard. Skipping those would have made an
+unwalkable piggyback the one place `ALTER SYSTEM KILL SESSION` travels under an ordinary
+full-access grant while the identical statement in a nameable frame is refused. A statement
+the pre-flight permits travels; one it refuses does not.
+
+**And an allowed statement is recorded**, with the same `persistQueryRecord` the JDBC path
+uses. That is not bookkeeping: "every query logged" is the premise, so a path that forwarded
+a statement while writing nothing would make a client dialect whose close list never walks
+the one place a session's SQL escapes the audit trail entirely. It is also what makes
+`max_query_counts` apply here — the quota is charged when a pending query completes on the
+response leg, so a statement nobody tracks is a statement nobody counts. Revocation, expiry
+and the byte quota were never at risk on this path: `LimitGuard` catches those on the
+response leg regardless of what the client leg decided.
 
 **The scan is anchored, and that is a bound rather than a weakening.** A refusal here ends
 the session, and the frames that reach it are the ones dbbat cannot parse — including
@@ -1321,6 +1330,16 @@ from the start of a TTC op that can carry one (`03 5e`, `11 69`, `11 98` —
 `statementOpOffsets`). Bytes with no such header in front of them are bytes the *upstream*
 will not execute either, so anchoring lets nothing runnable through: hiding a statement
 from dbbat while keeping it executable by Oracle is exactly what it refuses to allow.
+
+**One carve-out, deliberate.** `statementOpOffsets` counts offset 0, so a frame whose *own*
+header is a statement op — a `11 69` / `11 98` execute that reached this path only because
+its close list did not walk — anchors at 0 and is scanned whole, which is the unanchored
+behaviour again. It has to be: such a frame really is an execute and its SQL really is in
+it, so declining to look would forward a live statement ungated. The price is that a `11 69`
+frame whose stapled set-end-to-end-attrs strings read as a refused statement ends the
+session. That is fail-closed on a shape no tested client produces — all 54 recorded `11 69`
+frames in `dbeaver.pcapng` walk, as do both bundled-client ones — against fail-open on a
+live exec, and whether the shape occurs at all is filed for measurement.
 
 The extractor itself is weaker than the gate built on it — it returns the first hit rather
 than the executable one, and its keyword fallback omits `TRUNCATE`/`GRANT`/`REVOKE`. That
