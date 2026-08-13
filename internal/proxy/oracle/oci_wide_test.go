@@ -57,9 +57,11 @@ func TestBuildAuthChallengeWide(t *testing.T) {
 		t.Fatalf("compressed data flags = %02x %02x, want 00 00", cc[0], cc[1])
 	}
 
-	// The wide/OCI leg is settled independently of UseBigClrChunks: its readers
-	// (readAuthKVPairWide, replaceAuthKVValueWide) use plain readCLR, so the flag
-	// must not reach ttcKeyValWide.
+	// The wide/OCI leg honours UseBigClrChunks like the thin one — but every
+	// value in today's challenge is far under the 252-byte short-form limit,
+	// where the two encodings are byte-identical, so setting the flag must not
+	// move a byte. TestWideAuthLeg_ShortValues_ByteIdentical states the same
+	// property across the leg's other write sites, and shows where it stops.
 	cw := buildAuthChallenge("AABB", "CCDD", "EEFF", 4096, 3, VerifierType18453, true, true)
 	if !bytes.Equal(c, cw) {
 		t.Fatalf("wide challenge changed with bigChunks set:\n off = %x\n  on = %x", c, cw)
