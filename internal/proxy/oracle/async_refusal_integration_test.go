@@ -28,7 +28,7 @@ import (
 //
 // It reports an error the way this measurement needs it read: the vendor code
 // and SQLState, then the whole cause chain. That chain is the entire point.
-// ojdbc 26.1 does not swallow an error whose call number it disagrees with — it
+// ojdbc does not swallow an error whose call number it disagrees with — it
 // reports ORA-18745 "Execution error in sessionless transaction piggybacked
 // call" and demotes the real ORA-NNNNN to a *cause*, so an assertion that only
 // looked for "ORA-00028 appears somewhere" would pass on the failure mode this
@@ -197,14 +197,21 @@ const idleRevokeSettle = 3 * time.Second
 //  1. a byte quota crossed while dbbat is relaying a reply — a refusal cut into
 //     a call the client is still parked in the receive for. dbbat writes an
 //     ORA-00028 stamped with the last call number it observed, and the question
-//     the measurement settles is whether ojdbc 26.1 accepts that number or
+//     the measurement settles is whether the driver accepts that number or
 //     mislabels the error as ORA-18745;
 //  2. a grant revoked while the client sits idle between calls — the one path
 //     where there is no call to end, where dbbat deliberately writes no frame
 //     at all and force-closes both sockets instead.
 //
-// Both run on ojdbc 26.1 for a reason: 23.2 never checks the sequence number,
-// so it would pass either way and prove nothing.
+// The driver has to be one that checks the OER's call number against the
+// sequence number it sent, or both cases would pass without proving anything —
+// ojdbc 23.2 does not check. Measured here on **ojdbc 23.7.0.25.01**, the jar
+// SQLcl 26.1 bundles, which does: its `T4CTTIfun.receive` compares
+// `T4CTTIoer11.callNumber` with its own `sequenceNumber` and routes a mismatch
+// to `handleOutOfSequenceError` ("TTIOER call number {0} does not match TTIFUN
+// sequence number {1}"), the path that produces ORA-18745. The 26.1 the
+// original call-number finding was made on was not reachable on this machine;
+// see docs/oracle.md for the caveat that leaves.
 //
 // One fixture, two subtests, because an Oracle container start costs minutes
 // and the fixture can swap the grant between them (each subtest opens its own
@@ -303,7 +310,7 @@ func TestIntegration_AsyncRefusalAgainstJDBCThin(t *testing.T) {
 		assert.Contains(t, frames[0].message, "bandwidth quota exceeded",
 			"the frame must carry the real reason")
 
-		// What ojdbc 26.1 did with it, which is the measurement and which does
+		// What ojdbc did with it, which is the measurement and which does
 		// **not** match the prediction. The driver never reports the ORA-00028:
 		// it reports ORA-03113 "database connection closed by peer" with
 		// last_rpc=Fetch a row, caused by ORA-17800 (read returned -1). So the
@@ -325,7 +332,7 @@ func TestIntegration_AsyncRefusalAgainstJDBCThin(t *testing.T) {
 			"ORA-18745 is what a *rejected call number* looks like; the stamped number is "+
 				"correct, so this must not appear:\n%s", output)
 		assert.NotContains(t, output, "midfetch: code=28 ",
-			"measured: ojdbc 26.1 does not surface the mid-reply ORA-00028. If this now fails, "+
+			"measured: ojdbc does not surface the mid-reply ORA-00028. If this now fails, "+
 				"the driver (or dbbat's injection point) changed and docs/oracle.md is stale:\n%s", output)
 		assert.Contains(t, output, "midfetch: code=3113 ",
 			"measured: the mid-reply frame is discarded and the session's close is what the "+
