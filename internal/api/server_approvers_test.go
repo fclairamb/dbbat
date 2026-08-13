@@ -272,7 +272,16 @@ func TestGrantRequestDecision_ServerGroupFallbackAndUnion(t *testing.T) {
 func (f *serverApproverFixture) queryHoldFor(t *testing.T, runner *store.User) *store.Query {
 	t.Helper()
 
-	conn, err := f.dataStore.CreateConnection(f.ctx, runner.UID, f.target.UID, "127.0.0.1")
+	return f.queryHoldOn(t, runner, f.target.UID)
+}
+
+// queryHoldOn is queryHoldFor against an explicit server — what the batched
+// listing test needs, since the whole point is a page spanning several
+// databases with different approver configurations.
+func (f *serverApproverFixture) queryHoldOn(t *testing.T, runner *store.User, databaseID uuid.UUID) *store.Query {
+	t.Helper()
+
+	conn, err := f.dataStore.CreateConnection(f.ctx, runner.UID, databaseID, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("create connection: %v", err)
 	}
@@ -718,5 +727,245 @@ func TestQueryHold_DefinitionApproversWinOverServerChain(t *testing.T) {
 
 	if w := f.resolveHold(t, f.outsider, held); w.Code != http.StatusOK {
 		t.Fatalf("definition approver got %d, want 200: %s", w.Code, w.Body.String())
+	}
+}
+
+// listPendingAs runs the pending-approvals listing as one user and returns the
+// query uids it answered with, each mapped to its reported approver_role.
+func (f *serverApproverFixture) listPendingAs(t *testing.T, user *store.User) map[string]string {
+	t.Helper()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/v1/queries/pending", nil)
+	c.Set(contextKeyUser, user)
+
+	f.server.handleListPendingApprovals(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("pending listing got %d, want 200: %s", w.Code, w.Body.String())
+	}
+
+	var body struct {
+		Queries []struct {
+			UID          string `json:"uid"`
+			ApproverRole string `json:"approver_role"`
+		} `json:"queries"`
+	}
+
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode pending listing: %v (%s)", err, w.Body.String())
+	}
+
+	out := make(map[string]string, len(body.Queries))
+	for _, q := range body.Queries {
+		out[q.UID] = q.ApproverRole
+	}
+
+	return out
+}
+
+// perRowPending is what the pending listing would answer if it still walked the
+// chain one row at a time: it calls mayViewQuery/approverHatForQuery — the
+// unbatched wrappers, which resolve a single server each — over the same set.
+//
+// It is the oracle TestListPendingApprovals_BatchedMatchesPerRow compares
+// against, so a batched listing that ever disagreed with the per-row chain
+// would be a failure and not a silently different authorization answer.
+func (f *serverApproverFixture) perRowPending(t *testing.T, user *store.User) map[string]string {
+	t.Helper()
+
+	pending, err := f.dataStore.ListPendingApprovalQueries(f.ctx)
+	if err != nil {
+		t.Fatalf("ListPendingApprovalQueries(): %v", err)
+	}
+
+	out := make(map[string]string, len(pending))
+
+	for i := range pending {
+		if !f.server.mayViewQuery(f.ctx, user, &pending[i]) {
+			continue
+		}
+
+		out[pending[i].UID.String()] = f.server.approverHatForQuery(f.ctx, user, &pending[i])
+	}
+
+	return out
+}
+
+// TestListPendingApprovals_BatchedMatchesPerRow is the safety half of batching
+// the approver resolution: the listing now resolves every distinct database
+// once and decides the whole page against that map, and it must answer exactly
+// what the per-row chain answers — same visibility, same hats, for every role.
+//
+// The page deliberately spans three servers configured differently (server-level
+// approvers, server-group fallback, nothing at all) plus the viewer's own held
+// statement, because a single-server page could not catch a batched map keyed
+// or scoped wrongly.
+func TestListPendingApprovals_BatchedMatchesPerRow(t *testing.T) {
+	t.Parallel()
+
+	f := newServerApproverFixture(t, "pending-batch")
+
+	grouped := f.newTargetServer(t, "grouped-pending-batch")
+	bare := f.newTargetServer(t, "bare-pending-batch")
+
+	// Level 1: the target names the ops group directly.
+	f.setServerApprovers(t, store.ApproverKindQuery, f.group.UID)
+
+	// Level 2: a second server inherits the same group through a server group.
+	sg, err := f.dataStore.CreateServerGroup(f.ctx, &store.ServerGroup{
+		Name:                       "sg-pending-batch",
+		QueryApproverUserGroupUIDs: []uuid.UUID{f.group.UID},
+	})
+	if err != nil {
+		t.Fatalf("CreateServerGroup(): %v", err)
+	}
+
+	if err := f.dataStore.AddServerToGroup(f.ctx, sg.UID, grouped.UID); err != nil {
+		t.Fatalf("AddServerToGroup(): %v", err)
+	}
+
+	// Level 3: `bare` configures nothing, so it stays admin-only.
+	onTarget := f.queryHoldOn(t, f.requester, f.target.UID)
+	onGrouped := f.queryHoldOn(t, f.requester, grouped.UID)
+	onBare := f.queryHoldOn(t, f.requester, bare.UID)
+	ownHold := f.queryHoldOn(t, f.approver, f.target.UID)
+
+	got := f.listPendingAs(t, f.approver)
+
+	if role, ok := got[onTarget.UID.String()]; !ok {
+		t.Errorf("approver pending listing = %v, missing the hold on their own server", got)
+	} else if role != ApproverHatServer {
+		t.Errorf("hat on the server-level hold = %q, want %q", role, ApproverHatServer)
+	}
+
+	if role, ok := got[onGrouped.UID.String()]; !ok {
+		t.Errorf("approver pending listing = %v, missing the hold reached through a server group", got)
+	} else if role != ApproverHatServer {
+		t.Errorf("hat on the group-level hold = %q, want %q", role, ApproverHatServer)
+	}
+
+	if _, ok := got[onBare.UID.String()]; ok {
+		t.Errorf("approver pending listing = %v, leaked a hold on a server they do not approve", got)
+	}
+
+	// Self-approval survives batching: the viewer sees their own held statement
+	// (they may watch it) and wears no hat over it.
+	if role, ok := got[ownHold.UID.String()]; !ok {
+		t.Errorf("approver pending listing = %v, missing their own held statement", got)
+	} else if role != ApproverHatNone {
+		t.Errorf("hat on their own hold = %q, want empty", role)
+	}
+
+	// Every role, against the per-row chain: same rows, same hats.
+	for _, user := range []*store.User{f.admin, f.approver, f.outsider, f.requester} {
+		batched := f.listPendingAs(t, user)
+
+		perRow := f.perRowPending(t, user)
+		if len(batched) != len(perRow) {
+			t.Fatalf("batched listing for %s = %v, per-row chain = %v", user.Username, batched, perRow)
+		}
+
+		for uid, hat := range perRow {
+			if batched[uid] != hat {
+				t.Errorf("hat for %s on %s: batched = %q, per-row = %q", user.Username, uid, batched[uid], hat)
+			}
+		}
+	}
+
+	// The admin fallback, spelled out: with nothing configured anywhere an admin
+	// still decides every row, and a user in no group decides none.
+	if admin := f.listPendingAs(t, f.admin); len(admin) != 4 {
+		t.Errorf("admin pending listing = %v, want all four holds", admin)
+	} else {
+		for uid, role := range admin {
+			if role != ApproverHatAdmin {
+				t.Errorf("admin hat on %s = %q, want %q", uid, role, ApproverHatAdmin)
+			}
+		}
+	}
+
+	if outsider := f.listPendingAs(t, f.outsider); len(outsider) != 0 {
+		t.Errorf("outsider pending listing = %v, want empty", outsider)
+	}
+}
+
+// TestListGrantRequests_BatchedMatchesPerRow is the grant-request half of the
+// same guarantee, across a page spanning several servers.
+func TestListGrantRequests_BatchedMatchesPerRow(t *testing.T) {
+	t.Parallel()
+
+	f := newServerApproverFixture(t, "gr-batch")
+
+	grouped := f.newTargetServer(t, "grouped-gr-batch")
+	bare := f.newTargetServer(t, "bare-gr-batch")
+
+	f.setServerApprovers(t, store.ApproverKindAccess, f.group.UID)
+
+	sg, err := f.dataStore.CreateServerGroup(f.ctx, &store.ServerGroup{
+		Name:                        "sg-gr-batch",
+		AccessApproverUserGroupUIDs: []uuid.UUID{f.group.UID},
+	})
+	if err != nil {
+		t.Fatalf("CreateServerGroup(): %v", err)
+	}
+
+	if err := f.dataStore.AddServerToGroup(f.ctx, sg.UID, grouped.UID); err != nil {
+		t.Fatalf("AddServerToGroup(): %v", err)
+	}
+
+	onTarget := f.newGrantRequestFor(t, "gr-batch-target", f.requester, f.target.UID)
+	onGrouped := f.newGrantRequestFor(t, "gr-batch-grouped", f.requester, grouped.UID)
+	onBare := f.newGrantRequestFor(t, "gr-batch-bare", f.requester, bare.UID)
+	ownRequest := f.newGrantRequestFor(t, "gr-batch-own", f.approver, f.target.UID)
+
+	got := f.listRequestsAs(t, f.approver)
+
+	if role := got[onTarget.UID.String()]; role != ApproverHatServer {
+		t.Errorf("hat on the server-level request = %q, want %q", role, ApproverHatServer)
+	}
+
+	if role := got[onGrouped.UID.String()]; role != ApproverHatServer {
+		t.Errorf("hat on the group-level request = %q, want %q", role, ApproverHatServer)
+	}
+
+	if _, ok := got[onBare.UID.String()]; ok {
+		t.Errorf("approver listing = %v, leaked a request for a server they do not approve", got)
+	}
+
+	// Their own request is listed (it always was) and carries no hat.
+	if role, ok := got[ownRequest.UID.String()]; !ok {
+		t.Errorf("approver listing = %v, missing their own request", got)
+	} else if role != ApproverHatNone {
+		t.Errorf("hat on their own request = %q, want empty", role)
+	}
+
+	// Same rows and hats as deciding each row on its own would give.
+	pendingStatus := store.GrantRequestPending
+
+	pending, err := f.dataStore.ListGrantRequests(f.ctx, store.GrantRequestFilter{Status: &pendingStatus})
+	if err != nil {
+		t.Fatalf("ListGrantRequests(): %v", err)
+	}
+
+	for _, user := range []*store.User{f.admin, f.approver, f.outsider, f.requester} {
+		batched := f.listRequestsAs(t, user)
+
+		for i := range pending {
+			uid := pending[i].UID.String()
+
+			mayDecide := f.server.mayDecideGrantRequest(f.ctx, user, &pending[i])
+			hat := f.server.approverHatForRequest(f.ctx, user, &pending[i])
+
+			role, listed := batched[uid]
+			if mayDecide && !listed {
+				t.Errorf("%s may decide %s per-row but the listing omitted it", user.Username, uid)
+			}
+
+			if listed && role != hat {
+				t.Errorf("hat for %s on %s: batched = %q, per-row = %q", user.Username, uid, role, hat)
+			}
+		}
 	}
 }
