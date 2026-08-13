@@ -1454,6 +1454,16 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 // cannot quietly acquire only half of the answer-the-client behavior — which
 // is exactly how the JDBC exec ended up recording queries while enforcing
 // nothing.
+func (s *session) gateStatement(handle func([]byte) error, ttcPayload []byte) bool {
+	if err := handle(ttcPayload); err != nil {
+		_ = s.sendOracleError(err)
+
+		return true
+	}
+
+	return false
+}
+
 // gateUnnameableFrame decides what happens to a client message whose call dbbat
 // could not name — a piggyback (message type 0x11) whose body it cannot walk,
 // so the call the client is parked on is stapled behind bytes of unknown
@@ -1471,8 +1481,16 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 // carry a statement past the gate. Under a restrictive grant that would be a
 // smuggling channel for the exact adversary the controls exist for: an
 // authenticated user who has a grant and wants to exceed it. So the frame is
-// scanned for a stapled statement with the same extractor the JDBC exec path
-// trusts, and one that a statement-shaped control refuses does not travel.
+// scanned for a stapled statement (stapledStatement) and put through the same
+// validators the JDBC exec path runs, in the same order.
+//
+// "The same validators" is literal, and includes the ones that fire with no
+// grant controls at all: the Oracle blocked patterns (ALTER SYSTEM, UTL_HTTP,
+// DBMS_SCHEDULER…) and the password-change guard. Gating this path on
+// hasStatementControls would have made an unwalkable piggyback the one place
+// `ALTER SYSTEM KILL SESSION` travels while the identical statement in a
+// nameable frame is refused — a statement hiding in a way it cannot hide from
+// the ordinary gate, which is exactly what this bound exists to prevent.
 //
 // It is refused by **ending the session**, not by an OER, and that is the whole
 // reason this is a separate path: dbbat cannot name the call, so it has no
@@ -1485,15 +1503,24 @@ func (s *session) interceptClientMessage(pkt *TNSPacket) bool {
 func (s *session) gateUnnameableFrame(ttcPayload []byte) bool {
 	sql := stapledStatement(ttcPayload)
 
-	if sql == "" || !s.hasStatementControls() {
+	if sql == "" {
 		s.logger.DebugContext(s.ctx, logMsgUnnamedCallForwarded,
 			slog.String("op", ttcOpFunction(ttcPayload)),
-			slog.Bool("carries_statement", sql != ""))
+			slog.Bool("carries_statement", false))
 
 		return false
 	}
 
-	refusal := shared.ValidateOracleQuery(sql, s.grant)
+	// Normalized, like handleJDBCExec: the text the patterns run against is the
+	// text recorded in /queries.
+	sql = shared.NormalizeSQL(sql)
+
+	var refusal error
+
+	if s.grant != nil {
+		refusal = shared.ValidateOracleQuery(sql, s.grant)
+	}
+
 	if refusal == nil {
 		// The static controls allow it. An approval pattern still might not,
 		// and a hold works here even though a refusal does not: it parks the
@@ -1537,28 +1564,65 @@ func (s *session) gateUnnameableFrame(ttcPayload []byte) bool {
 
 // stapledStatement returns the SQL a frame carries, or "" when it carries none.
 //
-// It is the same extractor the JDBC exec path gates on (decodeExecSQL, which
-// scans the known offsets and then falls back to a keyword search over the
-// whole payload), used here for detection rather than for gating. Using the
-// same one is deliberate: a statement dbbat would enforce against if it could
-// name the call is a statement it has to enforce against when it cannot.
+// The extractor is the one the JDBC exec path gates on (decodeExecSQL: the
+// known offsets first, then a keyword search over the payload). Using the same
+// one is deliberate — a statement dbbat would enforce against if it could name
+// the call is a statement it has to enforce against when it cannot.
+//
+// What is *not* the same is where it is allowed to look. On this path a
+// false positive is not a refused call the client can retry; it ends the
+// session. And the frames that reach here are the ones dbbat cannot parse,
+// which includes piggybacks that carry caller-supplied text by design —
+// `11 87` set-end-to-end-attrs carries the module, action and client-identifier
+// strings an application chooses. A bare keyword scan would kill a session
+// whose client set its module to "DELETE ORDERS".
+//
+// So the scan is anchored: the SQL is only read from the start of a TTC op that
+// can carry one. That is a bound and not a loophole, and the argument is what
+// makes it safe — bytes the *server* will execute have to be a statement-carrying
+// op too, so a payload with no such header is one the upstream will not run
+// either. Hiding an executable statement from dbbat while keeping it executable
+// by Oracle is precisely what this refuses to allow.
 func stapledStatement(ttcPayload []byte) string {
-	result, err := decodeExecSQL(ttcPayload)
-	if err != nil || result == nil {
-		return ""
+	for _, at := range statementOpOffsets(ttcPayload) {
+		result, err := decodeExecSQL(ttcPayload[at:])
+		if err == nil && result != nil && result.SQL != "" {
+			return result.SQL
+		}
 	}
 
-	return result.SQL
+	return ""
 }
 
-func (s *session) gateStatement(handle func([]byte) error, ttcPayload []byte) bool {
-	if err := handle(ttcPayload); err != nil {
-		_ = s.sendOracleError(err)
+// ttcStatementOpHeaders are the op headers that carry SQL text: the v315+
+// piggyback execute, and the two func-0x11 execute sub-ops dbbat's own JDBC
+// path recognizes. A legacy OALL8 (message type 0x0e, a single byte) is
+// deliberately not in the list: one common byte is not a header, and matching
+// it would trade the false positive this anchoring removes straight back.
+var ttcStatementOpHeaders = [][2]byte{
+	{byte(TTCFuncPiggyback), PiggybackSubExecSQL},
+	{byte(TTCFuncOFETCH), execSubOpJDBC},
+	{byte(TTCFuncOFETCH), execSubOpPython},
+}
 
-		return true
+// statementOpOffsets returns every offset in ttcPayload where a
+// statement-carrying op header begins, earliest first. Offset 0 counts: the
+// frame's own header is a statement op when the frame is an exec whose close
+// list simply did not walk.
+func statementOpOffsets(ttcPayload []byte) []int {
+	var out []int
+
+	for i := 0; i+1 < len(ttcPayload); i++ {
+		for _, header := range ttcStatementOpHeaders {
+			if ttcPayload[i] == header[0] && ttcPayload[i+1] == header[1] {
+				out = append(out, i)
+
+				break
+			}
+		}
 	}
 
-	return false
+	return out
 }
 
 // upstreamToClient reads TNS packets from upstream, intercepts Data packets

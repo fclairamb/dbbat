@@ -255,16 +255,10 @@ func TestUnnameableFrameCannotSmuggleAStatementPastTheGate(t *testing.T) {
 	t.Cleanup(func() { _ = upstreamPeer.Close() })
 	s.upstreamConn = upstream
 
-	// The recorded piggyback, with an execute stapled behind it exactly the way
-	// a close-cursors list carries one.
-	smuggled := append(bundledOCIFirstCall(t), 0x03, 0x5e, 0x06, 0x00)
-	smuggled = append(smuggled, make([]byte, 24)...)
-	smuggled = append(smuggled, []byte("INSERT INTO secrets VALUES (1)")...)
-
-	pkt := &TNSPacket{Type: TNSPacketTypeData, Payload: smuggled}
-
-	require.False(t, func() bool { _, ok := clientCallNumber(extractTTCPayload(smuggled)); return ok }(),
-		"the frame must still be one dbbat cannot name, or this proves nothing")
+	pkt := &TNSPacket{
+		Type:    TNSPacketTypeData,
+		Payload: unnameableFrameCarrying(t, "INSERT INTO secrets VALUES (1)"),
+	}
 
 	assert.True(t, s.interceptClientMessage(pkt),
 		"a statement stapled behind an unwalkable piggyback must not reach the upstream under read_only")
@@ -274,6 +268,106 @@ func TestUnnameableFrameCannotSmuggleAStatementPastTheGate(t *testing.T) {
 	assert.Empty(t, answered(),
 		"nothing may be written back: dbbat cannot name the call it would be ending")
 	assert.Error(t, upstream.SetDeadline(time.Now()), "the session must be torn down")
+}
+
+// unnameableFrameCarrying builds the shape this whole bound is about: the real
+// recorded piggyback dbbat cannot walk, with a statement stapled behind it
+// exactly the way a close-cursors list carries one.
+func unnameableFrameCarrying(t *testing.T, sql string) []byte {
+	t.Helper()
+
+	frame := append(bundledOCIFirstCall(t), byte(TTCFuncPiggyback), PiggybackSubExecSQL, 0x06, 0x00)
+	frame = append(frame, make([]byte, 24)...)
+	frame = append(frame, []byte(sql)...)
+
+	_, ok := clientCallNumber(extractTTCPayload(frame))
+	require.False(t, ok, "the fixture must be a frame dbbat cannot name, or it proves nothing")
+
+	return frame
+}
+
+// TestUnnameableFrameRunsTheAlwaysOnValidators is the asymmetry the bound had
+// left open. `ValidateOracleQuery` enforces the Oracle blocked patterns and the
+// password-change guard *regardless of grant controls* — the JDBC exec path
+// pins exactly that ("an Oracle blocked pattern applies with no controls at
+// all") — so short-circuiting this path on hasStatementControls made an
+// unwalkable piggyback the one place `ALTER SYSTEM KILL SESSION` could travel
+// under an ordinary full-access grant while the identical statement in a
+// nameable frame was refused.
+//
+// The grant here carries no controls at all, which is the point.
+func TestUnnameableFrameRunsTheAlwaysOnValidators(t *testing.T) {
+	t.Parallel()
+
+	for _, sql := range []string{
+		"ALTER SYSTEM KILL SESSION '123,456'",
+		"BEGIN UTL_HTTP.REQUEST('http://evil'); END;",
+		"ALTER USER bob IDENTIFIED BY PASSWORD 'secret'",
+	} {
+		t.Run(truncateSQL(sql, 30), func(t *testing.T) {
+			t.Parallel()
+
+			logs := newCountingHandler()
+
+			s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
+			s.logger = slog.New(logs)
+
+			client, answered := recordingPipe(t)
+			s.clientConn = client
+
+			pkt := &TNSPacket{Type: TNSPacketTypeData, Payload: unnameableFrameCarrying(t, sql)}
+
+			assert.True(t, s.interceptClientMessage(pkt),
+				"a statement the always-on validators refuse must not travel, controls or no controls")
+			assert.Equal(t, 1, logs.count(logMsgUnnameableStatementRefused))
+			assert.Empty(t, answered())
+		})
+	}
+}
+
+// TestUnnameableFrameIgnoresIncidentalASCII is the deliberate judgement on the
+// other failure mode: ending a live session because a frame dbbat could not
+// parse happened to contain bytes that read as SQL.
+//
+// It is not hypothetical. The piggybacks that reach this path carry
+// caller-supplied text by design — `11 87` set-end-to-end-attrs carries the
+// module, action and client-identifier an application chooses — so a bare
+// keyword scan would kill the session of anyone whose client sets its module to
+// "DELETE ORDERS". A refused call on the nameable path is an ORA error the
+// client retries; here it is the connection.
+//
+// The bound chosen is structural rather than lexical: the statement is only
+// read from the start of an op that can carry one. Bytes with no such header
+// are bytes the *upstream* will not execute either, so nothing that could
+// actually run is let through by ignoring them — which is why this is a bound
+// and not a weakening. TestUnnameableFrameCannotSmuggleAStatementPastTheGate
+// is the other half, on the same fixture with a real op header in front.
+func TestUnnameableFrameIgnoresIncidentalASCII(t *testing.T) {
+	t.Parallel()
+
+	logs := newCountingHandler()
+
+	s := newTestSession(&store.Grant{
+		Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}},
+	})
+	s.logger = slog.New(logs)
+
+	client, answered := recordingPipe(t)
+	s.clientConn = client
+
+	// A set-end-to-end-attrs-shaped piggyback whose payload is an application's
+	// own module string. No statement-carrying op header anywhere in it.
+	frame := append(bundledOCIFirstCall(t), byte(TTCFuncOFETCH), 0x87, 0x06, 0x00)
+	frame = append(frame, make([]byte, 24)...)
+	frame = append(frame, []byte("DELETE FROM orders nightly job")...)
+
+	require.Empty(t, statementOpOffsets(extractTTCPayload(frame)),
+		"the fixture must carry no statement op, or it tests the wrong thing")
+
+	assert.False(t, s.interceptClientMessage(&TNSPacket{Type: TNSPacketTypeData, Payload: frame}),
+		"a session must not be killed because an opaque frame contained bytes that read as SQL")
+	assert.Zero(t, logs.count(logMsgUnnameableStatementRefused))
+	assert.Empty(t, answered())
 }
 
 // TestUnnameableFrameStillForwardsAnAllowedStatement is the other side of that
@@ -291,9 +385,7 @@ func TestUnnameableFrameStillForwardsAnAllowedStatement(t *testing.T) {
 	client, answered := recordingPipe(t)
 	s.clientConn = client
 
-	allowed := append(bundledOCIFirstCall(t), 0x03, 0x5e, 0x06, 0x00)
-	allowed = append(allowed, make([]byte, 24)...)
-	allowed = append(allowed, []byte("SELECT 1 FROM DUAL")...)
+	allowed := unnameableFrameCarrying(t, "SELECT 1 FROM DUAL")
 
 	assert.False(t, s.interceptClientMessage(&TNSPacket{Type: TNSPacketTypeData, Payload: allowed}),
 		"a read the grant permits must still travel")
