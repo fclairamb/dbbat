@@ -416,9 +416,14 @@ func TestUnnameableFrameEnforcesTheQueryQuota(t *testing.T) {
 //
 // The trade is fail-closed on a shape no tested client produces — every one of
 // the 54 recorded `11 69` frames in testdata/dbeaver.pcapng walks, and so do
-// both bundled-client ones — against fail-open on a live exec. Measuring
-// whether the shape occurs at all is filed as
-// specs/todos/2026-08-13-05-oracle-sql-extraction-is-weaker-than-the-gate-that-uses-it.md.
+// both bundled-client ones — against fail-open on a live exec.
+//
+// The carve-out survived the measurement that was meant to settle it (the
+// 2026-08-13-05 spec), and costs less than it did: decodeExecSQL reads the
+// execute's declared length now, so the ordinary `11 69 <closes> 03 5e <exec>`
+// shape is decoded from the stapled op's own header. This fixture is the
+// residue — a close list that does not walk, with no `03 5e` anchor behind it,
+// which is the only remaining way to reach the whole-payload scan.
 func TestUnnameableExecFrameIsGatedOnItsOwnPayload(t *testing.T) {
 	t.Parallel()
 

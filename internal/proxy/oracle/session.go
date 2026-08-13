@@ -1854,7 +1854,7 @@ var ttcStatementOpHeaders = [][2]byte{
 // TestUnnameableExecFrameIsGatedOnItsOwnPayload.
 //
 // The carve-out survived the measurement that was meant to settle it
-// (specs/todos/2026-08-13-05, now archived), but it costs much less than it
+// (the 2026-08-13-05 spec), but it costs much less than it
 // did. decodeExecSQL reads the execute's *declared* length now, so the ordinary
 // case — a `11 69` close list with `03 5e <exec>` stapled behind it — is decoded
 // from the stapled op's own header and never scans loose bytes at all. The

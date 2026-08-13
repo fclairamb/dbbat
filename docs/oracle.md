@@ -90,15 +90,84 @@ In modern Oracle, function code `0x03` is a generic "piggyback" that carries sub
 
 ### SQL Extraction
 
-SQL text is inside piggyback execute messages (func=0x03, sub=0x5e). The SQL is length-prefixed, but its exact offset varies by client driver:
+SQL text is inside piggyback execute messages (func=0x03, sub=0x5e), and
+**there is only one such op on the wire**. What dbbat used to call the "JDBC
+exec" (`0x11`/`0x69`) is the close-cursors piggyback with an ordinary `03 5e`
+execute stapled behind the close list; the "python exec" sub-op (`0x11`/`0x98`)
+appears in **zero** frames across all 22 recordings in `testdata/`.
 
-| Client | SQL offset in TTC payload |
-|--------|--------------------------|
-| Python oracledb thin | ~50 |
-| JDBC thin (ojdbc) | ~54 |
-| Go go-ora | varies |
+**The execute declares its own statement length — read it, do not search for
+it** (`ttc_exec_statement.go`). Two header encodings carry it:
 
-The robust approach: scan offsets 40-70 for a `decodeVarLen` + readable SQL text, then validate with `looksLikeSQL()` (checks for SQL keyword prefix). As a fallback, scan the entire payload for SQL keywords (`SELECT`, `INSERT`, etc.) and extract until end of printable ASCII.
+```
+thin (go-ora, python-oracledb thin, JDBC thin, DBeaver):
+  [0] 03  [1] 5e  [2] seq  [3] 00 (v315+ only)
+  [..] options    TTC compressed int
+  [..] cursorID   TTC compressed int
+  [..] flag       1 byte, set when the cursor id is 0
+  [..] sqlLen     TTC compressed int          <- the length
+  [..] 01, 01 0d, the al8i4 array, zeros …
+  [..] SQL text
+
+OCI wide (sqlplus, SQL*Developer via OCI, Instant Client):
+  [0..2]   03 5e seq
+  [3]      01           constant
+  [4]      seq+1        the NEXT message's sequence number
+  [5..12]  options      8 bytes
+  [13..20] fe x8        pointer sentinel
+  [21..24] sqlLen * 3   uint32 LE — the client sizes the buffer for its widest
+                        character encoding, and counts a trailing NUL when it
+                        writes one
+```
+
+Verified byte-for-byte: go-ora's 56-byte `UPDATE dbbat_dml_test SET name =
+'updated' WHERE id <= 3` carries `01 38`, DBeaver's 40-byte `ALTER SESSION SET
+CURRENT_SCHEMA=TESTADM` carries `01 28`, and sqlplus's 23-byte `SELECT 1 AS n
+FROM dual` carries `45 00 00 00`. Knowing the length reduces the search to "the
+printable run of exactly that length that does not start inside a longer run of
+text".
+
+> **The scan this replaced was wrong on a quarter of real frames, and wrong in
+> the direction that matters.** It looked for a length prefix at offsets 40–70
+> (or 50–75) and then anywhere a SQL keyword appeared. But an ASCII byte
+> *inside* a statement is a perfectly good length prefix — a space is 32, `T` is
+> 84 — `looksLikeSQL` matched a keyword with no word boundary, and nothing
+> required the run it named to be text at all. Measured over `testdata/`
+> (`sql_extraction_survey_test.go`, run with `-v`): of 137 execute ops, the old
+> scan agreed with the statement on 89 and returned a **mid-statement fragment**
+> on 48. Three of those readings were enforcement failures rather than cosmetic
+> ones:
+>
+> - `ALTER SESSION SET CURRENT_SCHEMA=…` read as `SET CURRENT_SCHEMA=…`, in 18
+>   frames. `ALTER` is in both `writeKeywords` and `ddlKeywords`; `SET` is in
+>   neither — so `read_only` and `block_ddl` did not fire on a statement they
+>   are written to refuse, and `/queries` recorded the fragment.
+> - go-ora's `UPDATE … SET name = …` read as `SET name = 'updated' WHERE id <=`.
+>   Same bypass, on an ordinary DML statement with no adversary involved.
+> - `SELECT 'YES' FROM USER_ROLE_PRIVS WHERE GRANTED_ROLE='DBA'` read as a
+>   `GRANT` — `GRANT` matching the `GRANTED_ROLE` column name.
+>
+> This was filed as "a decoy `SELECT 1` ahead of the real `INSERT`". The
+> measurement found it is not an attack shape at all: ordinary clients produce
+> it constantly.
+
+The old scan survives as a fallback for a header shape no recording produces,
+narrowed on both axes: `looksLikeSQL` and the keyword scan now require the verb
+to end at a **word boundary**, and a length-prefixed run must be printable
+throughout. `findSQLInPayload` also learned `TRUNCATE`, `GRANT` and `REVOKE` —
+three verbs `writeKeywords`/`ddlKeywords` refuse but the scan could not see, so
+a `TRUNCATE TABLE payroll` outside the window extracted as `""` and both paths
+failed open. Adding verbs to a keyword scan normally *widens* the false-positive
+surface, which on the unnameable path costs a session; it does not here because
+the word-boundary rule removes strictly more than the three verbs add, and
+`TestBundledOCIFixturesCarryNoStatement` pins that none of the recorded binary
+frames reads as a statement.
+
+**A consequence worth knowing about:** now that the gate sees `ALTER SESSION SET
+…` for what it is, DBeaver and SQL Developer — which send several during
+connection setup — are refused under a `read_only` or `block_ddl` grant, where
+the fragment used to slip through. That is the gate working rather than a
+regression, but it is a live behaviour change on the most common GUI client.
 
 ### Cursor re-execution (what clients actually send)
 
@@ -1574,15 +1643,41 @@ it, so declining to look would forward a live statement ungated. The price is th
 frame whose stapled set-end-to-end-attrs strings read as a refused statement ends the
 session. That is fail-closed on a shape no tested client produces — all 54 recorded `11 69`
 frames in `dbeaver.pcapng` walk, as do both bundled-client ones — against fail-open on a
-live exec, and whether the shape occurs at all is filed for measurement.
+live exec.
 
-The extractor itself is weaker than the gate built on it — it returns the first hit rather
-than the executable one, and its keyword fallback omits `TRUNCATE`/`GRANT`/`REVOKE`. That
-is a **pre-existing property of both this path and the ordinary JDBC exec path**, not
-something anchoring introduced, and it is filed as
-`specs/todos/2026-08-13-05-oracle-sql-extraction-is-weaker-than-the-gate-that-uses-it.md`
-rather than patched in passing, because widening a keyword scan trades directly against the
-false positives above and needs measuring first.
+The carve-out survived the measurement that was meant to settle it, but it **costs much
+less than it did**. `decodeExecSQL` reads the execute's declared length now (see "SQL
+Extraction"), so the ordinary case — a `11 69` close list with `03 5e <exec>` behind it — is
+decoded from the stapled op's own header and never scans loose bytes at all. The
+whole-payload scan is reached only when the close list does not walk *and* no `03 5e` anchor
+is present, which is what makes such a frame unnameable in the first place.
+
+**Every anchor is gated, not the first that answers.** A frame that staples two executes
+runs both, so enforcing against one of them would leave the other exactly the smuggling
+channel this path exists to close (`stapledStatements`). Duplicates are dropped, because the
+recorded `11 69 <closes> 03 5e <exec>` shape offers two anchors for the one statement it
+runs.
+
+Three things the audit of this path filed for measurement, now measured over every recording
+in `testdata/` (`sql_extraction_survey_test.go`):
+
+- **Frames that are both unnameable *and* a cursor re-execution: zero.** 347 client frames,
+  1 unnameable, 12 cursor re-executions, no overlap. An unnameable re-execution carries no
+  statement text, so closing that hole would mean tearing the session down on a shape dbbat
+  cannot identify — a false positive there costs a live session for a dbbat parsing bug
+  rather than a user policy violation. It is left **forwarded** and the item is closed as
+  unreachable in practice; `TestSurveyUnnameableReexecution` fails if a re-recorded corpus
+  ever produces one.
+- **A decodable legacy `0e` OALL8 stapled behind a `0x11` piggyback: zero.** Six `0x0e`
+  bytes appear at a non-zero offset inside a piggyback and none of them decodes as an OALL8
+  carrying plausible SQL, so `0e` stays out of `ttcStatementOpHeaders`: adding it would buy
+  nothing and cost the false positives anchoring removed. Whether Oracle would *execute* such
+  a frame remains unmeasured — no recorded client sends OALL8 at all — and the list does not
+  depend on the answer.
+- **The extractor's own weakness**, which was the real one: it returned the first hit rather
+  than the executable one and its keyword list omitted `TRUNCATE`/`GRANT`/`REVOKE`. Both are
+  fixed under "SQL Extraction" above, and the fix *narrowed* what the loose scan accepts
+  rather than widening it.
 
 Refusal there is by **ending the session**, not by an OER, and for the same reason
 `onLimitViolation` drops the socket rather than writing a frame: there is no call to end.

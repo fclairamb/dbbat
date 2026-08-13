@@ -12,7 +12,7 @@ import (
 	"github.com/fclairamb/dbbat/internal/dump"
 )
 
-// This file is the measurement specs/todos/2026-08-13-05 asks for, kept as a
+// This file is the measurement the 2026-08-13-05 spec asks for, kept as a
 // test so it can be re-run against a regenerated corpus. It mostly *logs*
 // rather than asserts: the numbers are the deliverable, and pinning a
 // distribution would turn "somebody re-recorded a fixture" into a failure. The
@@ -332,7 +332,7 @@ func TestSurveyUnnameableReexecution(t *testing.T) {
 
 	require.Zero(t, both,
 		"no recording carries a frame that is both unnameable and a cursor re-execution; "+
-			"a non-zero count reopens item 3 of specs/todos/2026-08-13-05 and needs an owner decision")
+			"a non-zero count reopens item 3 of the 2026-08-13-05 spec and needs an owner decision")
 }
 
 func surveyIsCursorReexec(ttc []byte) bool {
