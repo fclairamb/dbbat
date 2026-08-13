@@ -34,6 +34,12 @@ const (
 	logMsgCursorsClosed          = "client closed cursors"
 	logMsgRecycledCursorID       = "cursor id recycled onto a different statement"
 
+	// logMsgUnnamedCallForwarded is the fail-open record: a client message
+	// whose call dbbat could not name is forwarded with no reading taken off
+	// it. It is DEBUG rather than WARN because an OCI session emits one on
+	// every login — see clientCallNumber.
+	logMsgUnnamedCallForwarded = "forwarding a message whose call dbbat cannot name"
+
 	// logMsgLearnedOERTail is the one record that says which summary-object
 	// shape a session will answer a refusal with. The per-client refusal tests
 	// read extra_tail_fields back off it (see blocked_integration_test.go), so

@@ -300,6 +300,19 @@ func encodeOERFixedWidth(shape oerShape, sum oerSummary) []byte {
 // ok is false for a payload too short to carry a header, in which case the
 // caller keeps whatever it had — a stale call number is no worse than the zero
 // this used to always write.
+//
+// It is also false for the case that stapling makes unknowable: a piggyback
+// message (type 0x11) whose body dbbat cannot walk. A piggyback is by
+// definition *in front of* something — the close-cursors list above is the one
+// dbbat can walk, and it walks it — so when the body is opaque the call the
+// client is parked on sits behind bytes of unknown length and the sequence at
+// offset 2 is the piggyback's own, not the call's. That is not a stale number
+// that costs nothing; it is a *wrong* number, and an OER carrying it ends a
+// call the client is not waiting for, which parks it forever. Measured on the
+// OCI client bundled in gvenzl/oracle-free:23-slim: its first message in proxy
+// mode is `11 6b 04 …` with the real call `03 3b 05 …` stapled behind it, and
+// a refusal stamped 4 hangs sqlplus with no output at all. See
+// TestClientCallNumberDeclinesAnUnwalkablePiggyback.
 func clientCallNumber(ttcPayload []byte) (byte, bool) {
 	if len(ttcPayload) <= ttcOpSeqOffset {
 		return 0, false
@@ -307,13 +320,21 @@ func clientCallNumber(ttcPayload []byte) (byte, bool) {
 
 	seq := ttcPayload[ttcOpSeqOffset]
 
-	if end, ok := closeCursorsEnd(ttcPayload); ok && end+ttcOpSeqOffset < len(ttcPayload) {
-		switch TTCFunctionCode(ttcPayload[end]) { //nolint:exhaustive // only the two ops a client staples behind a close list
-		case TTCFuncPiggyback, TTCFuncOFETCH:
-			seq = ttcPayload[end+ttcOpSeqOffset]
-		default:
-			// Not an op header — the close list is the whole message.
+	if end, ok := closeCursorsEnd(ttcPayload); ok {
+		if end+ttcOpSeqOffset < len(ttcPayload) {
+			switch TTCFunctionCode(ttcPayload[end]) { //nolint:exhaustive // only the two ops a client staples behind a close list
+			case TTCFuncPiggyback, TTCFuncOFETCH:
+				seq = ttcPayload[end+ttcOpSeqOffset]
+			default:
+				// Not an op header — the close list is the whole message.
+			}
 		}
+
+		return seq, true
+	}
+
+	if TTCFunctionCode(ttcPayload[0]) == ttcPiggybackMessageType {
+		return 0, false
 	}
 
 	return seq, true

@@ -2,6 +2,7 @@ package oracle
 
 import (
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -445,12 +446,20 @@ func TestCursorReexec_SQLlessOALL8CountsAgainstTheQueryQuota(t *testing.T) {
 	require.NotNil(t, s.tracker.pendingQuery)
 }
 
-// TestInterceptClientMessageBlocksAnOverQuotaOFETCHReexecution is the property
-// the handler signature only stands for: the refusal has to reach the
-// dispatcher, which is what decides whether the packet travels upstream. The
-// OFETCH branch answers the client itself rather than through gateStatement, so
-// it is worth pinning separately.
-func TestInterceptClientMessageBlocksAnOverQuotaOFETCHReexecution(t *testing.T) {
+// TestInterceptClientMessageForwardsAFetchShapedFrameItCannotName replaces the
+// test that used to assert the opposite, and the reason is worth stating: the
+// frame it fed the dispatcher — message type 0x11 with a cursor id at bytes
+// 1..3 — is one no Oracle client sends. 0x11 is the TTC *piggyback message
+// type* and byte 1 is a function code, so every real 0x11 frame that reached
+// the fetch reading had its (function, sequence) bytes read as a cursor id.
+// That is what refused the bundled OCI client's first message as a
+// re-execution of "cursor 27396" and then hung it.
+//
+// So the dispatcher now forwards what it cannot name, and the assertion is that
+// it forwards it *silently*: nothing is written back to the client, because the
+// OER it would write ends a call the client is not parked on. The gate itself
+// is unchanged and still pinned, one level down, on handleOFETCH.
+func TestInterceptClientMessageForwardsAFetchShapedFrameItCannotName(t *testing.T) {
 	t.Parallel()
 
 	maxQueries := int64(1)
@@ -458,18 +467,19 @@ func TestInterceptClientMessageBlocksAnOverQuotaOFETCHReexecution(t *testing.T) 
 		QueryCount: 1,
 		Definition: &store.GrantDefinition{MaxQueryCounts: &maxQueries},
 	})
-	s.clientConn = drainedPipe(t)
+
+	client, answered := recordingPipe(t)
+	s.clientConn = client
 	s.tracker.cursors[5] = &trackedCursor{cursorID: 5, sql: "SELECT 1 FROM DUAL", parsedAt: time.Now()}
 
 	fetch := &TNSPacket{
 		Type:    TNSPacketTypeData,
 		Payload: append([]byte{0x00, 0x00}, buildOFETCH(5, 100)...),
 	}
-	assert.True(t, s.interceptClientMessage(fetch),
-		"a fetch re-executing a cursor over max_query_counts must be blocked, not forwarded upstream")
+	assert.False(t, s.interceptClientMessage(fetch),
+		"a frame dbbat cannot name must travel upstream untouched, quota or no quota")
 
-	s.grant.QueryCount = 0
-	assert.False(t, s.interceptClientMessage(fetch), "under the cap the same fetch travels")
+	assert.Empty(t, answered(), "and dbbat must not answer a call the client is not parked on")
 }
 
 // awaitHeld waits until want statements have been parked and returns the last.
@@ -543,4 +553,58 @@ func drainedPipe(t *testing.T) net.Conn {
 	}()
 
 	return proxySide
+}
+
+// recordingPipe is drainedPipe that keeps what it drained, so a test can assert
+// dbbat wrote *nothing* back. "Nothing" is the whole point of the fail-open
+// path: a client parked on a call dbbat cannot name must be left to its
+// upstream's answer, not handed an OER that ends some other call.
+//
+// The read deadline is what makes the empty case fast rather than a hang — the
+// pipe never closes on its own, so a reader waiting for bytes that will never
+// come would wait forever.
+func recordingPipe(t *testing.T) (net.Conn, func() []byte) {
+	t.Helper()
+
+	client, proxySide := net.Pipe()
+
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = proxySide.Close()
+	})
+
+	var (
+		mu      sync.Mutex
+		written []byte
+		done    = make(chan struct{})
+	)
+
+	go func() {
+		defer close(done)
+
+		buf := make([]byte, 4096)
+
+		for {
+			_ = client.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+
+			n, err := client.Read(buf)
+
+			mu.Lock()
+			written = append(written, buf[:n]...)
+			mu.Unlock()
+
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	return proxySide, func() []byte {
+		<-done
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		return written
+	}
 }

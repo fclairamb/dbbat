@@ -1,0 +1,22 @@
+# The first message the DB-bundled OCI client sends in proxy mode, captured off
+# the wire from sqlplus 23.26 (the client inside gvenzl/oracle-free:23-slim)
+# against a dbbat proxy, immediately after AUTH completed.
+#
+# These are the bytes of the TNS Data packet *payload*: two data-flag bytes,
+# then the TTC message. Recorded while reproducing
+# specs/.../2026-08-12-12-bundled-oci-client-refused-and-hung-under-a-restrictive-grant.md,
+# so the unit half of that fix needs no Oracle container.
+#
+# 00 00        data flags
+# 11           TTC piggyback message type (dbbat's TTCFuncOFETCH — see ttc.go)
+# 6b           TTC function code: an OCI session piggyback dbbat has no reading for
+# 04           the PIGGYBACK's sequence number — not the call's
+# ...          a body of 8-byte little-endian fields dbbat cannot walk
+# 03 3b 05     the call the client is actually parked on, stapled behind it,
+#              sequence 5
+#
+# Read bytes 1..3 as a big-endian cursor id, the way decodeOFETCH does, and you
+# get 0x6b04 = 27396: the "untracked cursor" this frame used to be refused as.
+0000116b0400000000000005000000000000003a0000003775000001000000
+033b050000000000000600000000000000fefffffffffffffff40100000000
+0000fefffffffffffffffeffffffffffffff0100000000000000
