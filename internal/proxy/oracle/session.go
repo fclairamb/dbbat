@@ -1280,7 +1280,7 @@ type heldRefusal struct {
 // that, chosen so that hitting either one means something is wrong (a reply with
 // no end, or a client that stopped talking) rather than that a legitimate
 // handoff ran late. Crossing either falls back to the socket close, which is the
-// pre-fix behaviour: an ORA-03113 that is meant.
+// pre-fix behavior: an ORA-03113 that is meant.
 const (
 	refusalHandoffGrace = 30 * time.Second
 	refusalHoldMaxBytes = 8 << 20
