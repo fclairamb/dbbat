@@ -258,7 +258,8 @@ func (s *session) sendUpstreamAuthPhase1(username string, identity driverIdentit
 
 		header := s.syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq)
 
-		return s.writeUpstreamData(buildClientAuthPhase1(header, username, identity, mode), thinAuthDataFlags)
+		return s.writeUpstreamData(
+			buildClientAuthPhase1(header, username, identity, mode, s.clientBigClrChunks), thinAuthDataFlags)
 	}
 
 	if forceSyntheticUpstreamAuth ||
@@ -328,7 +329,8 @@ func (s *session) sendUpstreamAuthPhase2(username string, identity driverIdentit
 
 		header := s.syntheticAuthHeader(PiggybackSubAuth2, authPhase2FuncSeq)
 
-		return s.writeUpstreamData(buildClientAuthPhase2(header, username, identity, sec, mode), thinAuthDataFlags)
+		return s.writeUpstreamData(
+			buildClientAuthPhase2(header, username, identity, sec, mode, s.clientBigClrChunks), thinAuthDataFlags)
 	}
 
 	if forceSyntheticUpstreamAuth ||
@@ -930,7 +932,14 @@ func (s *session) syntheticAuthHeader(sub, seq byte) []byte {
 //
 // header is the TTC function header from syntheticAuthHeader — its width is
 // negotiated, not fixed, which is why it is a parameter rather than a literal.
-func buildClientAuthPhase1(header []byte, username string, ident driverIdentity, mode uint32) []byte {
+//
+// bigChunks is the session's negotiated CLR long form, exactly as on the wide
+// counterpart buildClientAuthPhase1Wide. The username deliberately stays on
+// ttcClr: Oracle caps an identifier at 128 bytes, half the 252-byte short-form
+// limit, so it can never reach the long form and the two encodings cannot
+// disagree about it. Every KV value goes through ttcKeyValChunked instead — a
+// hostname in AUTH_TERMINAL / AUTH_MACHINE has no such cap.
+func buildClientAuthPhase1(header []byte, username string, ident driverIdentity, mode uint32, bigChunks bool) []byte {
 	buf := make([]byte, 0, 256)
 	buf = append(buf, header...)
 	buf = append(buf, 0x01)
@@ -941,7 +950,7 @@ func buildClientAuthPhase1(header []byte, username string, ident driverIdentity,
 	buf = append(buf, ttcClr([]byte(username))...)
 
 	for _, p := range authPhase1Pairs(ident) {
-		buf = append(buf, ttcKeyVal(p.key, p.value, p.flag)...)
+		buf = append(buf, ttcKeyValChunked(p.key, p.value, p.flag, bigChunks)...)
 	}
 
 	return buf
@@ -952,9 +961,10 @@ func buildClientAuthPhase1(header []byte, username string, ident driverIdentity,
 //
 //	<header> [01 <userLen> | 00 00] | <mode> | 01 <numPairs> | 01 01 | <clr> username | KV pairs
 //
-// header is the TTC function header from syntheticAuthHeader; see
-// buildClientAuthPhase1.
-func buildClientAuthPhase2(header []byte, username string, ident driverIdentity, sec *upstreamAuthSecrets, mode uint32) []byte {
+// header is the TTC function header from syntheticAuthHeader; bigChunks is the
+// session's negotiated CLR long form and the username stays on ttcClr for the
+// same reason — see buildClientAuthPhase1.
+func buildClientAuthPhase2(header []byte, username string, ident driverIdentity, sec *upstreamAuthSecrets, mode uint32, bigChunks bool) []byte {
 	pairs := authPhase2Pairs(ident, sec, false)
 
 	buf := make([]byte, 0, 512)
@@ -979,7 +989,7 @@ func buildClientAuthPhase2(header []byte, username string, ident driverIdentity,
 	}
 
 	for _, p := range pairs {
-		buf = append(buf, ttcKeyVal(p.key, p.value, p.flag)...)
+		buf = append(buf, ttcKeyValChunked(p.key, p.value, p.flag, bigChunks)...)
 	}
 
 	return buf
