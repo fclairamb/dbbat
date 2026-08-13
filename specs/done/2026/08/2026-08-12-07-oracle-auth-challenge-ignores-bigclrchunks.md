@@ -35,6 +35,13 @@ No GitHub issue yet — file one when picking this up.
 - The wide/OCI leg should stay on single-byte chunks: `readAuthKVPairWide` and
   `replaceAuthKVValueWide` both read plain `readCLR`, so that framing is settled
   independently of the capability.
+  **Superseded by `2026-08-12-08-oracle-wide-leg-bigclrchunks-unverified`**: that
+  premise was an assertion, and the sqlplus capture does not support it — the OCI
+  session negotiates `UseBigClrChunks` like any other and carries no long-form
+  value at all, so nothing in `testdata/` settles the framing. Both readers now
+  honour the flag, and so does the wide branch of `buildAuthChallenge`. The
+  byte-identity test this spec added still holds and still means what it said:
+  for today's short values the flag moves nothing.
 - Test alongside `TestTTCClrVariant_ShortValue_NoOp` in
   `internal/proxy/oracle/clr_bigchunks_test.go`: the challenge bytes must be
   byte-identical with the flag on and off for today's short values, and a

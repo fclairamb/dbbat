@@ -1082,6 +1082,31 @@ form `01 0d` never produces) and mirrors it across the whole terminated-auth pat
 With this, sqlplus authenticates and runs queries end-to-end (verified locally against
 Oracle 23ai, `DISABLE_OOB` unset); the SQL is captured like any other client.
 
+**The wide leg follows `UseBigClrChunks` too.** The wide encoders and readers used to drop
+the negotiated CLR long form on the claim that "OCI does not use it". That claim was an
+assertion, never a measurement, and the capture it would have to rest on does not support
+it — `TestSqlplusCapture_NegotiatesBigClrChunksAndCarriesNoLongValue` reads
+`testdata/sqlplus_cursor_reexec.pcapng` and finds:
+
+- the OCI session **does** negotiate the capability: `ServerCompileTimeCaps[37]` is `0x7f`,
+  the same value every thin session sees, because the capability is advertised by the
+  *server* and has nothing to do with the client's dialect. `session.clientBigClrChunks` is
+  therefore true on an sqlplus login, and the wide leg is genuinely reachable with the flag
+  set;
+- but **no** AUTH value in that login reaches the `0xFE` long form — the longest is
+  `AUTH_CONNECT_STRING` at 172 bytes, under the 252-byte short-form limit where the two
+  encodings are byte-identical. Read with either flag, the captured body decodes the same.
+
+So the capture cannot say which chunk-length encoding OCI writes past the limit; the
+negotiated capability is the only evidence there is, and the leg now follows it —
+`readCLRVariant` on the read side (`readAuthKVPairWide`, `parseAuthKVDictionary`,
+`replaceAuthKVValueWide`), `ttcClrVariant` on the write side (`ttcKeyValWideChunked`,
+`ttcKeyValWideSized`, the wide branch of `buildAuthChallenge`). Below 252 bytes — every
+value dbbat writes or substitutes today — it moves no byte, which
+`TestWideAuthLeg_ShortValues_ByteIdentical` pins across all four write sites. What changes
+is only what happens the day a verifier, a salt or a spliced key outgrows the short form:
+the wide leg then frames it the way the session negotiated instead of the other way.
+
 Four more OCI-only fixes complete the wide path (all captured/verified against the macOS
 Oracle Instant Client 23.3 and the DB-bundled 23.26 OCI client — the two flavors differ on
 the wire, so both are covered by fixtures in `oci_instantclient_test.go`):
