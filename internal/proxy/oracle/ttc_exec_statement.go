@@ -12,16 +12,18 @@ import (
 // to "the printable run of exactly that length".
 //
 // The difference is not academic. Measured across every recording in testdata/
-// (internal/proxy/oracle/sql_extraction_survey_test.go), **130 of 207**
-// extractions the window scan produced were mid-statement fragments: an ASCII
+// (internal/proxy/oracle/sql_extraction_survey_test.go), the window scan
+// returned a mid-statement fragment for **48 of the 137** execute ops: an ASCII
 // byte *inside* the statement is a perfectly good length prefix (a space is 32,
 // `T` is 84), the old looksLikeSQL matched a keyword with no word boundary, and
 // nothing required the run it named to be text at all. Three of those readings
 // were enforcement failures rather than cosmetic ones:
 //
 //   - `ALTER SESSION SET CURRENT_SCHEMA=…` read as `SET CURRENT_SCHEMA=…`
-//     (18 frames). `ALTER` is in writeKeywords and ddlKeywords; `SET` is in
-//     neither, so read_only and block_ddl did not fire.
+//     (9 ops, five distinct statements, all DBeaver connection setup —
+//     TestSurveyAlterSessionMisreadAsSet computes it). `ALTER` is in
+//     writeKeywords and ddlKeywords; `SET` is in neither, so read_only and
+//     block_ddl did not fire.
 //   - go-ora's `UPDATE … SET name = …` read as `SET name = …`. Same bypass.
 //   - `… WHERE GRANTED_ROLE='DBA'` read as a `GRANT` statement.
 //
@@ -328,7 +330,7 @@ func isPrintableSQLByte(c byte) bool {
 // fails here and falls through to the legacy scan. That is a deliberate
 // limitation rather than an oversight: dbbat does not negotiate the charset, so
 // admitting arbitrary high bytes would trade a known-good validity test for a
-// guess, and the fallback is the behaviour such a client had all along.
+// guess, and the fallback is the behavior such a client had all along.
 func isPrintableSQLRun(s string) bool {
 	for i := range len(s) {
 		if !isPrintableSQLByte(s[i]) {
