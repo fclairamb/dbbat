@@ -50,8 +50,21 @@ func TestRecordedStatementsAreNotFragments(t *testing.T) {
 		sql := recordedExec(t, "dbeaver.pcapng", "CURRENT_SCHEMA")
 
 		assert.Equal(t, "ALTER SESSION SET CURRENT_SCHEMA=TESTADM", sql)
-		assert.True(t, shared.IsWriteQuery(sql), "read_only has to see the ALTER")
-		assert.True(t, shared.IsDDLQuery(sql), "and so does block_ddl")
+
+		// The gate now sees the whole statement, so it can decide on the
+		// *parameter*: CURRENT_SCHEMA is on shared's allowlist and passes under
+		// read_only and block_ddl, where the old bare-SET fragment passed because
+		// neither control recognized it — the same outcome for opposite reasons,
+		// and only the second one is a decision.
+		assert.True(t, shared.IsAllowedAlterSession(sql), "CURRENT_SCHEMA is allowlisted")
+		assert.False(t, shared.IsWriteQuery(sql))
+		assert.False(t, shared.IsDDLQuery(sql))
+
+		// What that decision buys: an ALTER SESSION off the list is refused, which
+		// the fragment could never have been.
+		container := "ALTER SESSION SET CONTAINER=PDB2"
+		assert.True(t, shared.IsWriteQuery(container), "read_only has to see this ALTER")
+		assert.True(t, shared.IsDDLQuery(container), "and so does block_ddl")
 	})
 
 	t.Run("UPDATE is not read as SET", func(t *testing.T) {
