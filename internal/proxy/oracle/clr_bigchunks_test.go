@@ -449,3 +449,210 @@ func TestRewriteAuthPhase2_FallbackBigChunkConnectString(t *testing.T) {
 	_, err = rewriteAuthPhase2(body, "CONNECTOR", sec, false)
 	require.Error(t, err, "the pre-fix flag value breaks this rewrite")
 }
+
+// thinSyntheticPhase1PreambleLen returns the number of bytes buildClientAuthPhase1
+// writes before its first KV pair: the negotiated-width TTC function header, the
+// 0x01 username-present marker, the compressed user_id_len and logon mode, the
+// fixed [01 01 05 01 01] block and the CLR username. Computed from the same
+// primitives the builder uses so it tracks a layout change instead of hiding one.
+func thinSyntheticPhase1PreambleLen(header []byte, username string, mode uint32) int {
+	return len(header) + 1 +
+		len(ttcCompressedUint(uint64(len(username)))) +
+		len(ttcCompressedUint(uint64(mode))) +
+		5 + len(ttcClr([]byte(username)))
+}
+
+// thinSyntheticPhase2PreambleLen is the buildClientAuthPhase2 counterpart:
+// header, the has-username marker + compressed user_id_len (or 00 00), the logon
+// mode, 01 + the compressed pair count, the 01 01 marker and the CLR username.
+func thinSyntheticPhase2PreambleLen(header []byte, username string, mode uint32, pairCount int) int {
+	n := len(header)
+
+	if len(username) > 0 {
+		n += 1 + len(ttcCompressedUint(uint64(len(username))))
+	} else {
+		n += 2
+	}
+
+	n += len(ttcCompressedUint(uint64(mode))) + 1 + len(ttcCompressedUint(uint64(pairCount))) + 2
+
+	if len(username) > 0 {
+		n += len(ttcClr([]byte(username)))
+	}
+
+	return n
+}
+
+// thinSyntheticAuthFixtures is the identity/secrets pair the thin synthetic
+// builders are exercised with below: every value short, exactly as dbbat sends
+// today (AUTH_SESSKEY 64 hex chars, AUTH_PASSWORD 96, AUTH_PBKDF2_SPEEDY_KEY 160).
+func thinSyntheticAuthFixtures() (driverIdentity, *upstreamAuthSecrets) {
+	return driverIdentity{
+			HostName:    "workstation",
+			ProgramName: "dbbat for sqlplus",
+			OSUser:      "connector",
+			PID:         42,
+			DriverName:  "dbbat",
+		}, &upstreamAuthSecrets{
+			encClientSessKey: strings.Repeat("A", 64),
+			encPassword:      strings.Repeat("B", 96),
+			eSpeedyKey:       strings.Repeat("C", 160),
+		}
+}
+
+// TestThinSyntheticAuthLeg_ShortValues_ByteIdentical is the thin counterpart of
+// TestWideAuthLeg_ShortValues_ByteIdentical, and the regression that makes
+// threading UseBigClrChunks through buildClientAuthPhase1 / buildClientAuthPhase2
+// safe to ship: every value those builders emit today is under the 252-byte
+// short-form limit, and for those the negotiated encoding must not move a single
+// byte.
+func TestThinSyntheticAuthLeg_ShortValues_ByteIdentical(t *testing.T) {
+	t.Parallel()
+
+	ident, sec := thinSyntheticAuthFixtures()
+	sess := &session{}
+
+	h1 := sess.syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq)
+	assert.Equal(t,
+		buildClientAuthPhase1(h1, "SYSTEM", ident, logonModeNoNewPass, false),
+		buildClientAuthPhase1(h1, "SYSTEM", ident, logonModeNoNewPass, true),
+		"today's thin synthetic Phase 1 must be byte-identical in both CLR forms")
+
+	h2 := sess.syntheticAuthHeader(PiggybackSubAuth2, authPhase2FuncSeq)
+	mode2 := uint32(logonModeNoNewPass | logonModeUserAndPass)
+	assert.Equal(t,
+		buildClientAuthPhase2(h2, "SYSTEM", ident, sec, mode2, false),
+		buildClientAuthPhase2(h2, "SYSTEM", ident, sec, mode2, true),
+		"today's thin synthetic Phase 2 must be byte-identical in both CLR forms")
+
+	// The username is deliberately NOT on ttcClrVariant: Oracle caps an
+	// identifier at 128 bytes, half the short-form limit, so it can never reach
+	// the long form. A maximum-length one must still land verbatim in both forms.
+	maxIdent := strings.Repeat("U", 128)
+	assert.Equal(t,
+		buildClientAuthPhase1(h1, maxIdent, ident, logonModeNoNewPass, false),
+		buildClientAuthPhase1(h1, maxIdent, ident, logonModeNoNewPass, true),
+		"a 128-byte identifier stays on the short form in both CLR forms")
+	assert.Contains(t,
+		string(buildClientAuthPhase1(h1, maxIdent, ident, logonModeNoNewPass, true)),
+		string(ttcClr([]byte(maxIdent))),
+		"the username must still be written with ttcClr, contiguous and unchunked")
+}
+
+// TestThinSyntheticAuthLeg_LongValue_RoundTrip is what the flag is actually for:
+// a value the builders emit that has outgrown the short form must be framed in
+// the negotiated long form and come back out of readAuthKVPair(_, false, true)
+// intact, with every following pair still aligned.
+//
+// AUTH_TERMINAL / AUTH_MACHINE carry the hostname, which has no Oracle-side
+// length cap — the most plausible route to a live occurrence. AUTH_PBKDF2_SPEEDY_KEY
+// covers the same thing on Phase 2's derived-secret side.
+func TestThinSyntheticAuthLeg_LongValue_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	longHost := strings.Repeat("node-a.eu-west-3.dbbat.internal.", 10) // 320 bytes
+	require.Greater(t, len(longHost), 0xFC,
+		"the fixture must exceed the short-form limit or nothing is being tested")
+
+	ident, sec := thinSyntheticAuthFixtures()
+	ident.HostName = longHost
+	sec.eSpeedyKey = longSpeedyKey
+
+	sess := &session{}
+
+	t.Run("phase 1", func(t *testing.T) {
+		t.Parallel()
+
+		header := sess.syntheticAuthHeader(PiggybackSubAuth1, authPhase1FuncSeq)
+		pairs := authPhase1Pairs(ident)
+		preamble := thinSyntheticPhase1PreambleLen(header, "SYSTEM", logonModeNoNewPass)
+
+		body := buildClientAuthPhase1(header, "SYSTEM", ident, logonModeNoNewPass, true)
+
+		decoded := decodeKVPairs(t, body[preamble:], len(pairs), true)
+		assert.Equal(t, longHost, decoded["AUTH_TERMINAL"])
+		assert.Equal(t, longHost, decoded["AUTH_MACHINE"])
+		assert.Equal(t, ident.ProgramName, decoded[authKeyProgramNM],
+			"the pairs after a long value must stay aligned")
+
+		// Chunked, so the value is not contiguous on the wire.
+		assert.NotContains(t, string(body), longHost)
+		assert.Contains(t, string(body), string(encodeBigChunkCLRSplit([]byte(longHost), ttcClrChunkSize)),
+			"the long hostname must be written in the big-chunk long form")
+
+		// The pre-fix write side, on the same identity: single-byte chunk lengths,
+		// which the upstream that advertised the capability cannot parse back.
+		legacy := buildClientAuthPhase1(header, "SYSTEM", ident, logonModeNoNewPass, false)
+		require.NotEqual(t, legacy, body,
+			"past the short-form limit the two encodings must differ or the fix is inert")
+
+		stale, staleOK := readAuthKVPair(legacy[preamble:], false, true)
+		assert.False(t, staleOK && string(stale.Value) == longHost,
+			"a big-chunk reader must not recover the single-byte-chunk form")
+	})
+
+	t.Run("phase 2", func(t *testing.T) {
+		t.Parallel()
+
+		header := sess.syntheticAuthHeader(PiggybackSubAuth2, authPhase2FuncSeq)
+		mode := uint32(logonModeNoNewPass | logonModeUserAndPass)
+		pairs := authPhase2Pairs(ident, sec, false)
+		preamble := thinSyntheticPhase2PreambleLen(header, "SYSTEM", mode, len(pairs))
+
+		body := buildClientAuthPhase2(header, "SYSTEM", ident, sec, mode, true)
+
+		decoded := decodeKVPairs(t, body[preamble:], len(pairs), true)
+		assert.Equal(t, longSpeedyKey, decoded["AUTH_PBKDF2_SPEEDY_KEY"],
+			"a derived secret over the short-form limit must re-encode in the negotiated form")
+		assert.Equal(t, longHost, decoded["AUTH_TERMINAL"])
+		assert.Equal(t, sec.encClientSessKey, decoded[authKeySessKey])
+		assert.Equal(t, sec.encPassword, decoded[authKeyPassword])
+		assert.Equal(t, "1", decoded["SESSION_CLIENT_LOBATTR"],
+			"the pairs after two long values must stay aligned")
+
+		assert.NotContains(t, string(body), longSpeedyKey)
+
+		legacy := buildClientAuthPhase2(header, "SYSTEM", ident, sec, mode, false)
+		require.NotEqual(t, legacy, body,
+			"past the short-form limit the two encodings must differ or the fix is inert")
+	})
+}
+
+// TestFindKVByKeyBytes_BigChunkProgramName covers the secondary site the same
+// pass threaded: parseAuthPhase2's byte-anchored finders. The two keys
+// parseAuthPhase2 itself extracts are fixed-size, but clientDeclaredProgramName
+// reads AUTH_PROGRAM_NM through the very same finders, and a client's program
+// name is free-form text with no Oracle-side cap.
+func TestFindKVByKeyBytes_BigChunkProgramName(t *testing.T) {
+	t.Parallel()
+
+	longProg := strings.Repeat("java -jar /opt/app/service.jar ", 12) // 372 bytes
+	require.Greater(t, len(longProg), 0xFC,
+		"the fixture must exceed the short-form limit or nothing is being tested")
+
+	t.Run("thin", func(t *testing.T) {
+		t.Parallel()
+
+		body := ttcKeyValChunked(authKeyProgramNM, longProg, 0, true)
+		body = append(body, ttcKeyVal("AUTH_ACL", "4400", 0)...)
+
+		assert.Equal(t, longProg, findKVByKeyBytes(body, []byte(authKeyProgramNM), true))
+		assert.NotEqual(t, longProg, findKVByKeyBytes(body, []byte(authKeyProgramNM), false),
+			"a single-byte-chunk finder must not decode a big-chunk value")
+
+		// And the whole point of reading it: the program name reaches the upstream
+		// AUTH dictionary through clientDeclaredProgramName.
+		pkt := &TNSPacket{Payload: body}
+		assert.Equal(t, longProg, clientDeclaredProgramName(pkt, true))
+	})
+
+	t.Run("wide", func(t *testing.T) {
+		t.Parallel()
+
+		body := ttcKeyValWideSized(authKeyProgramNM, longProg, 0, true, true)
+
+		assert.Equal(t, longProg, findKVByKeyBytesWide(body, []byte(authKeyProgramNM), true))
+		assert.NotEqual(t, longProg, findKVByKeyBytesWide(body, []byte(authKeyProgramNM), false),
+			"a single-byte-chunk finder must not decode a big-chunk value")
+	})
+}
