@@ -660,11 +660,25 @@ poll interval later and the client would meet the same ORA-03113 the hold exists
 to replace. Standing down is bounded, never unconditional — a handoff that never
 happens is exactly what the watchdog is the fail-safe for.
 
-Nothing is under-enforced by the wait: the client's next call is refused before
-it is forwarded, so the only extra data that crosses is the reply already in
-flight; the session is torn down; and the statement is logged with
-`aborted: bandwidth quota exceeded for this grant` on every one of the four
-paths (delivered, unnameable, over-bytes, over-grace).
+Nothing is under-enforced by the wait: **every** client message that arrives
+while a refusal is held ends the session instead of being forwarded, so the only
+extra data that crosses is the reply already in flight; and the statement is
+logged with `aborted: bandwidth quota exceeded for this grant` on every one of
+the four paths (delivered, unnameable, over-bytes, over-grace).
+
+"Every" is load-bearing and had to be made true. `interceptClientMessage` is
+built to **fail open** — a frame dbbat cannot parse, or a decode that panics, is
+forwarded unread, because refusing a frame it could not identify protects
+nothing and strands the client (the argument is spelled out at length on
+`gateUnnameableFrame`). Under a held refusal that reasoning inverts: the grant is
+exhausted and the session is over, so an unreadable frame would be the one way a
+client message travels past an exhausted grant. Both unreadable exits and the
+panic recovery therefore route through `heldRefusalBlocks`, which forwards as
+before when no refusal is held and gives the unnameable-call answer when one is —
+sockets dropped, no frame, since an OER stamped with a stale number ends a call
+the client is not parked on. The answer is written **once**: the client leg keeps
+reading until its socket really closes, and a second OER would be exactly the
+unsolicited frame `onLimitViolation` refuses to send.
 
 Measured after the fix, same fixture, same tap: dbbat still writes **exactly one**
 OER, with a non-zero call number, and **ojdbc now reports it** —
@@ -689,6 +703,8 @@ Confidence: the enumeration is read off the code and pinned by
 `TestUpstreamToClient_ByteLimitHoldsRatherThanCuttingIn`,
 `TestHeldRefusalEndsTheCallTheClientIsNextParkedOn`,
 `TestHeldRefusalMeetingAnUnnameableCallClosesInstead`,
+`TestHeldRefusalBlocksAFrameItCannotEvenParse`,
+`TestHeldRefusalIsAnsweredExactlyOnce`,
 `TestHeldRefusalStandsTheWatchdogDownUntilItsGrace`,
 `TestHeldRefusalFallsBackToTheCloseWhenTheClientStopsTalking`,
 `TestHeldRefusalStopsRelayingOnceTheOvershootBoundIsCrossed` and
@@ -697,6 +713,17 @@ Oracle 23ai Free and pinned by the integration tests named with them. The driver
 they were taken on is **ojdbc 23.7.0.25.01**, not the 26.1 the call-number
 finding is attributed to; what that does and does not license is in "Which ojdbc
 these results are attributed to" above.
+
+Two things are *not* measured, and the asymmetry is worth stating rather than
+leaving to be discovered. The **fail-safes have never fired end to end**: the
+last two tests above reach `refusalHoldMaxBytes` and `refusalHandoffGrace` by
+mutating the held refusal's own byte mark and arming time, since no live client
+produces a reply with no boundary or an 8 MiB overshoot on demand. And the
+delivered path is measured on **two of four clients** — sqlplus (OCI) and
+python-oracledb have not seen a held refusal at all, which matters most for the
+unnameable fallback, since an OCI session's own frames are the ones dbbat
+routinely cannot name. Both are
+`specs/todos/2026-08-13-07-measure-the-held-mid-reply-refusal-on-the-other-two-clients.md`.
 
 ### Oracle NUMBER Encoding
 
