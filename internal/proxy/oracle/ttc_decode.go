@@ -881,15 +881,20 @@ func decodePiggybackExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 		return nil, fmt.Errorf("%w: piggyback exec needs at least 52 bytes, got %d", ErrOALL8TooShort, len(ttcPayload))
 	}
 
+	// The header carries the statement's length, so read that first and take
+	// the run it names. Everything below is the pre-2026-08 heuristic, kept for
+	// a header shape no recording produces — see decodeExecStatement.
+	sql, ok := decodeExecStatement(ttcPayload)
+	if !ok {
+		sql = ""
+	}
+
 	// Strategy: scan the payload for SQL text. Different Oracle client drivers
 	// (oracledb thin, JDBC thin) place the SQL at slightly different offsets
 	// (50-54 typically). We scan a range and validate the extracted text.
-	sql := ""
-
-	for offset := 40; offset < 70 && offset < len(ttcPayload)-1; offset++ {
+	for offset := 40; sql == "" && offset < 70 && offset < len(ttcPayload)-1; offset++ {
 		if found, scanErr := extractSQLAtOffset(ttcPayload, offset); scanErr == nil && found != "" {
 			sql = found
-			break
 		}
 	}
 
@@ -1019,6 +1024,21 @@ func decodeExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 		return nil, fmt.Errorf("%w: exec needs at least 30 bytes, got %d", ErrOALL8TooShort, len(ttcPayload))
 	}
 
+	// The `11 69` "JDBC exec" is a close-cursors piggyback with the real
+	// execute stapled behind it (docs/oracle.md, "Closing cursors"), so walk
+	// the close list to that op and decode it properly. The old 50-75 window
+	// scanned *past* the list into the stapled SQL and routinely landed inside
+	// the statement text — see decodeExecStatement.
+	if sql, ok := decodeExecStatement(ttcPayload); ok {
+		return &OALL8Result{SQL: sql}, nil
+	}
+
+	if end, ok := closeCursorsEnd(ttcPayload); ok {
+		if sql, ok := decodeExecStatement(ttcPayload[end:]); ok {
+			return &OALL8Result{SQL: sql}, nil
+		}
+	}
+
 	// Scan for SQL text at known offsets across client drivers.
 	for offset := 50; offset <= 75 && offset < len(ttcPayload)-1; offset++ {
 		sql, err := extractSQLAtOffset(ttcPayload, offset)
@@ -1036,19 +1056,33 @@ func decodeExecSQL(ttcPayload []byte) (*OALL8Result, error) {
 	return nil, fmt.Errorf("%w: could not find SQL text in JDBC exec payload", ErrEmptySQL)
 }
 
-// findSQLInPayload scans the raw payload for SQL text by looking for SQL keywords.
-// Used as a fallback when length-prefix decoding fails — notably for SQLcl/JDBC
-// thin's func=0x11 exec, where the SQL follows a run of zero bytes (so no length
-// prefix sits immediately before it). The keyword match is case-insensitive
-// because clients send the statement verbatim and SQLcl lowercases its SQL.
-func findSQLInPayload(payload []byte) string {
-	keywords := [][]byte{
-		[]byte("SELECT"), []byte("INSERT"), []byte("UPDATE"), []byte("DELETE"),
-		[]byte("CREATE"), []byte("DROP"), []byte("ALTER"), []byte("BEGIN"),
-		[]byte("DECLARE"), []byte("WITH"), []byte("MERGE"), []byte("CALL"),
-	}
+// findSQLKeywords is the keyword set the last-resort scan looks for. It is the
+// set of verbs the controls in internal/proxy/shared/validation.go refuse
+// (writeKeywords, ddlKeywords) plus the read and block verbs — because a verb
+// the gate would refuse but the scan cannot see is a statement that reaches the
+// upstream unexamined. TRUNCATE, GRANT and REVOKE were the three missing ones.
+//
+// Widening a keyword scan is normally how a binary frame comes to be read as a
+// statement, which on the unnameable path costs a session. It does not here,
+// because it lands together with the word-boundary requirement below: matching
+// `GRANT` inside `GRANTED_ROLE` was measured happening on a real DBeaver frame,
+// and the boundary rule removes strictly more false positives than these three
+// verbs add.
+var findSQLKeywords = [][]byte{
+	[]byte("SELECT"), []byte("INSERT"), []byte("UPDATE"), []byte("DELETE"),
+	[]byte("CREATE"), []byte("DROP"), []byte("ALTER"), []byte("BEGIN"),
+	[]byte("DECLARE"), []byte("WITH"), []byte("MERGE"), []byte("CALL"),
+	[]byte("TRUNCATE"), []byte("GRANT"), []byte("REVOKE"),
+}
 
-	idx := indexOfAnyKeywordCI(payload, keywords)
+// findSQLInPayload scans the raw payload for SQL text by looking for SQL keywords.
+// Used as a last resort when the header-anchored decode (decodeExecStatement)
+// and the length-prefix window both fail. The keyword match is case-insensitive
+// because clients send the statement verbatim and SQLcl lowercases its SQL, and
+// it must land on a word boundary so an identifier that merely starts with a
+// verb is not read as one.
+func findSQLInPayload(payload []byte) string {
+	idx := indexOfAnyKeywordCI(payload, findSQLKeywords)
 	if idx < 0 {
 		return ""
 	}
@@ -1068,8 +1102,13 @@ func findSQLInPayload(payload []byte) string {
 }
 
 // indexOfAnyKeywordCI returns the offset of the earliest case-insensitive match
-// of any keyword in payload, or -1. Used to locate the SQL statement inside an
-// exec message whose framing varies by client.
+// of any keyword in payload that ends at a word boundary, or -1. Used to locate
+// the SQL statement inside an exec message whose framing varies by client.
+//
+// The boundary requirement is not cosmetic. Without it `GRANT` matched the
+// `GRANTED_ROLE` column in DBeaver's own privilege probe and `DELETE` matched
+// `DELETE_RULE`, so the gate enforced against — and /queries recorded — a
+// fragment starting in the middle of a column name.
 func indexOfAnyKeywordCI(payload []byte, keywords [][]byte) int {
 	for i := range payload {
 		for _, kw := range keywords {
@@ -1077,13 +1116,26 @@ func indexOfAnyKeywordCI(payload []byte, keywords [][]byte) int {
 				continue
 			}
 
-			if equalFoldASCIIBytes(payload[i:i+len(kw)], kw) {
-				return i
+			if !equalFoldASCIIBytes(payload[i:i+len(kw)], kw) {
+				continue
 			}
+
+			if i+len(kw) < len(payload) && isSQLWordByte(payload[i+len(kw)]) {
+				continue
+			}
+
+			return i
 		}
 	}
 
 	return -1
+}
+
+// isSQLWordByte reports whether c can appear inside an Oracle identifier, which
+// is what makes a keyword match a word rather than a prefix of one.
+func isSQLWordByte(c byte) bool {
+	return c == '_' || c == '$' || c == '#' ||
+		(c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
 }
 
 // equalFoldASCIIBytes reports whether a and b are equal ignoring ASCII letter case.
@@ -1131,12 +1183,31 @@ func extractSQLAtOffset(data []byte, offset int) (string, error) {
 
 	sqlText := string(data[sqlStart:sqlEnd])
 
-	// Validate that it looks like SQL (starts with a keyword or is mostly printable)
+	// Statement text is text. Without this a declared run that opens with a
+	// verb and then turns into TTC framing bytes — `SET CURRENT_SCHEMA=TESTADM`
+	// followed by four 0x01s was the measured case — passed as a statement.
+	if !isPrintableSQLRun(sqlText) {
+		return "", ErrEmptySQL
+	}
+
+	// Validate that it looks like SQL (opens with a statement verb)
 	if !looksLikeSQL(sqlText) {
 		return "", ErrEmptySQL
 	}
 
 	return sqlText, nil
+}
+
+// isPrintableSQLRun reports whether every byte of s could appear in statement
+// text.
+func isPrintableSQLRun(s string) bool {
+	for i := range len(s) {
+		if !isPrintableSQLByte(s[i]) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // QueryResultV2 contains parsed data from a v315+ TTC QueryResult (func=0x10).
@@ -1962,26 +2033,19 @@ func findBytes(data, pattern []byte) int {
 	return -1
 }
 
-// looksLikeSQL returns true if the string appears to be SQL text.
+// looksLikeSQL returns true if the string appears to be SQL text: it opens with
+// a statement verb that ends at a word boundary.
+//
+// The boundary is the fix, not a detail. A bare prefix match read the
+// `GRANTED_ROLE='DBA'` in DBeaver's privilege probe as a GRANT statement and
+// `DELETE_RULE, …` as a DELETE, which is how the loose scan came to hand the
+// gate a fragment starting inside a column name (see ttc_exec_statement.go).
 func looksLikeSQL(s string) bool {
 	if len(s) < 2 {
 		return false
 	}
 
-	upper := strings.ToUpper(strings.TrimSpace(s))
-	sqlKeywords := []string{
-		"SELECT", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP",
-		"ALTER", "TRUNCATE", "MERGE", "CALL", "BEGIN", "DECLARE", "WITH", "GRANT", "REVOKE",
-		"EXPLAIN", "SET", "COMMIT", "ROLLBACK", "SAVEPOINT", "LOCK", "COMMENT",
-	}
-
-	for _, kw := range sqlKeywords {
-		if strings.HasPrefix(upper, kw) {
-			return true
-		}
-	}
-
-	return false
+	return startsWithSQLVerb(s)
 }
 
 // decodeVarLen decodes a variable-length integer used in TTC.
