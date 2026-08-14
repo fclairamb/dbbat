@@ -86,6 +86,21 @@ const (
 		"so there is no frame to answer with"
 	logMsgRefusalHandoffAbandoned = "ended the session: a held limit refusal never reached a call boundary"
 
+	// logMsgRefusalGraceOutranBytes names the one case where the two fail-safe
+	// bounds constrain each other rather than each covering its own failure: a
+	// handoff cut by refusalHandoffGrace while the client was *still draining*
+	// the reply, which means the link was slow enough that refusalHoldMaxBytes
+	// could never have been reached inside the grace.
+	//
+	// It accompanies logMsgWatchdogTeardown rather than replacing it — the
+	// teardown is what happened, this is why it is not the "client went quiet"
+	// case that path is the fail-safe for. Nothing branches on it: it exists so
+	// a slow-link deployment meeting the crossover is visible instead of looking
+	// like every other ORA-03113. See session.reportRefusalBoundCrossover and
+	// docs/oracle.md, "What a legitimate handoff costs, measured".
+	logMsgRefusalGraceOutranBytes = "a held limit refusal was cut by its grace while the client was " +
+		"still draining the reply: on this link the overshoot bound was unreachable"
+
 	// logMsgRefusalTeardownPanic is the one that should never appear. It means
 	// the teardown of a held refusal panicked while itself running from a
 	// recovered decode panic. The relay goroutine above it does have a recover
@@ -104,6 +119,14 @@ const (
 const (
 	logAttrRelayedBytesSince = "relayed_bytes_since"
 	logAttrHeldForMillis     = "held_for_ms"
+
+	// The three the crossover record adds (logMsgRefusalGraceOutranBytes): the
+	// rate the hold was actually drained at, the rate at which the two bounds
+	// meet, and the byte bound itself — so the line carries the whole comparison
+	// rather than leaving the reader to divide two of the numbers by hand.
+	logAttrEffectiveBytesPerSec = "effective_bytes_per_second"
+	logAttrCrossoverBytesPerSec = "crossover_bytes_per_second"
+	logAttrRefusalBytesBound    = "refusal_bytes_bound"
 )
 
 // trackedCursor tracks a parsed cursor and its SQL.
