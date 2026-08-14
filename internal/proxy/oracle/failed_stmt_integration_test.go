@@ -4,6 +4,7 @@ package oracle
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -205,4 +206,83 @@ func TestIntegration_FailingStatementsRecordTheirORAErrorPythonThin(t *testing.T
 	env.assertFailedQueryLogged(t, "SELECT 1/0 FROM dual", "ORA-01476")
 	env.assertFailedQueryLogged(t,
 		"BEGIN RAISE_APPLICATION_ERROR(-20001, 'dbbat measured this'); END;", "ORA-20001")
+}
+
+// The mid-fetch shape, live. Every failure above is raised *before* the first
+// row — the server sends the OER instead of the QueryResult — which is the one
+// thing separating them from the case
+// midfetch_fail_replay_test.go measures out of a capture. Here the failure is
+// raised deep inside a fetch, so the whole chain has to survive a statement
+// that was already streaming when it died: it was persisted long ago, its
+// column definitions are decoded, and the diagnostic arrives as a bit-less
+// standalone OER mid-row-stream.
+//
+// Before the relaxation this went through as a *success*: the OER was dropped,
+// the statement stayed pending, and the DROP that follows closed it clean.
+const (
+	// The fixture the capture tooling uses, under its own table name so it
+	// cannot collide with a leftover from a recording run against the same
+	// database.
+	midFetchLiveRows  = 20000
+	midFetchLiveBad   = 15000
+	midFetchLiveTable = "dbbat_midfetch_live"
+
+	midFetchLiveCreate = "CREATE TABLE " + midFetchLiveTable + " (id NUMBER, txt VARCHAR2(30))"
+	midFetchLiveDrop   = "DROP TABLE " + midFetchLiveTable
+
+	// No ORDER BY, deliberately: a sort would materialize the result set and
+	// raise before the first row, which is the shape already covered above.
+	midFetchLiveSelect = "SELECT id, TO_NUMBER(txt) AS n FROM " + midFetchLiveTable
+)
+
+// midFetchLiveSeed fills the table with one row that will not convert, far
+// enough in that hundreds of fetch round trips precede it.
+func midFetchLiveSeed() string {
+	return fmt.Sprintf(`INSERT INTO %s SELECT level, `+
+		`CASE WHEN level = %d THEN 'not-a-number' ELSE TO_CHAR(level) END `+
+		`FROM dual CONNECT BY level <= %d`, midFetchLiveTable, midFetchLiveBad, midFetchLiveRows)
+}
+
+// TestIntegration_MidFetchFailureRecordsItsORAError drives the mid-fetch
+// failure through the proxy against a live Oracle and reads the query row back.
+func TestIntegration_MidFetchFailureRecordsItsORAError(t *testing.T) {
+	env := startOracleThroughProxy(t, nil)
+	ctx := context.Background()
+
+	_, _ = env.db.ExecContext(ctx, midFetchLiveDrop) // ORA-00942 on a clean database
+
+	_, err := env.db.ExecContext(ctx, midFetchLiveCreate)
+	require.NoError(t, err)
+
+	defer func() { _, _ = env.db.ExecContext(context.Background(), midFetchLiveDrop) }()
+
+	_, err = env.db.ExecContext(ctx, midFetchLiveSeed())
+	require.NoError(t, err)
+
+	runCtx, cancel := context.WithTimeout(ctx, failingStatementDeadline)
+	defer cancel()
+
+	rows, err := env.db.QueryContext(runCtx, midFetchLiveSelect)
+	require.NoError(t, err, "the execute itself must succeed — the failure has to be raised mid-fetch")
+
+	var seen int
+
+	for rows.Next() {
+		var id, n float64
+
+		require.NoError(t, rows.Scan(&id, &n))
+
+		seen++
+	}
+
+	require.Errorf(t, rows.Err(), "the fetch was supposed to fail; it returned %d rows cleanly", seen)
+	assert.Contains(t, rows.Err().Error(), "ORA-01722", "the client's own error")
+	assert.Positive(t, seen, "rows must have reached the client before the failure — otherwise this "+
+		"is the pre-first-row shape the tests above already cover")
+
+	require.NoError(t, rows.Close())
+
+	// A statement that dies mid-fetch is still a failure, and the row it lands
+	// on is one that has existed since the stream opened.
+	env.assertFailedQueryLogged(t, midFetchLiveSelect, "ORA-01722")
 }
