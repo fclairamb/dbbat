@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/fclairamb/dbbat/internal/notify"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
@@ -19,6 +20,10 @@ import (
 // the goroutine gets canceled. Slack typically responds in <1s but we
 // don't want a slow Slack to leak goroutines forever.
 const slackNotifyTimeout = 5 * time.Second
+
+// goroutineNameGrantNotify is what a panic in the detached notify is logged
+// under.
+const goroutineNameGrantNotify = "slack grant request notification"
 
 // notifyAsync fires a Slack notification in the background. The notifier
 // is a graceful no-op when nil (feature disabled), so callers don't need
@@ -29,12 +34,17 @@ func (s *Server) notifyAsync(ev notify.GrantRequestEvent) {
 		return
 	}
 
-	go func() {
+	// Guarded for the same reason the proxies' detached writes are: this
+	// goroutine outlives the request that spawned it, so the HTTP recover never
+	// sees it and a panic in the notifier would end the *process* — every live
+	// proxy session included. Nothing waits on it, so recovering costs one
+	// unsent Slack message.
+	go shared.RunGuarded(context.Background(), s.logger, goroutineNameGrantNotify, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), slackNotifyTimeout)
 		defer cancel()
 
 		s.notifier.NotifyGrantRequest(ctx, ev)
-	}()
+	})
 }
 
 // loadEventContext gathers the related rows the notifier needs to render a

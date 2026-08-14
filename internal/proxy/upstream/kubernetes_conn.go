@@ -1,12 +1,15 @@
 package upstream
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -110,6 +113,22 @@ func newPortForwardConn(conn httpstream.Connection, namespace, podName string, p
 // stream would otherwise give.
 func (c *portForwardConn) watchErrorStream() {
 	defer close(c.errDone)
+
+	// This runs on a goroutine of its own, so an unrecovered panic here would
+	// end the *process* — every live session on every protocol — rather than
+	// this one tunnel. The deferred close above releases whoever waits, which
+	// is what makes recovering safe; it is shared.RunGuarded's contract, open
+	// coded because internal/proxy/shared imports this package and importing it
+	// back would be a cycle. Keep the two in step.
+	defer func() {
+		if r := recover(); r != nil {
+			slog.ErrorContext(context.Background(),
+				"recovered from panic on a proxy session goroutine",
+				slog.String("goroutine", "kubernetes port-forward error stream"),
+				slog.Any("panic", r),
+				slog.String("stack", string(debug.Stack())))
+		}
+	}()
 
 	message, err := io.ReadAll(c.errStream)
 

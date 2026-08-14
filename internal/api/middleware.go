@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -9,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 )
 
 // Auth context keys
@@ -57,10 +60,10 @@ func (s *Server) handleBearerAuth(c *gin.Context, token string) {
 		return
 	}
 
-	// Update API key usage (async to not block the request)
-	go func() {
-		_ = s.store.IncrementAPIKeyUsage(ctx, apiKey.ID)
-	}()
+	// Update API key usage (async to not block the request). The helper detaches
+	// the write from the request context, which is canceled the moment this
+	// handler returns — the bump used to race that and usually lose.
+	shared.BumpAPIKeyUsage(ctx, s.logger, s.store, apiKey.ID)
 
 	// Determine auth method based on key type
 	authMethod := authMethodAPIKey
@@ -228,6 +231,11 @@ const (
 	authFailureCleanupInterval = 5 * time.Minute
 )
 
+// goroutineNameAuthFailureSweep is what a panic in the stale-entry sweep is
+// logged under. The tracker predates the server's logger and has no access to
+// it, so the sweep reports through slog.Default().
+const goroutineNameAuthFailureSweep = "auth failure tracker sweep"
+
 // Backoff delays based on failure count
 var authBackoffDelays = []struct {
 	minFailures int
@@ -254,14 +262,20 @@ func (t *authFailureTracker) cleanup() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		t.mu.Lock()
-		now := time.Now()
-		for username, record := range t.failures {
-			if now.Sub(record.lastFailure) > authFailureResetDuration {
-				delete(t.failures, username)
+		// Per turn, so a panic neither ends the process nor retires the sweep:
+		// a tracker that stopped expiring entries would lock users out on stale
+		// failure counts. See shared.RunMaintenance.
+		shared.RunMaintenance(context.Background(), slog.Default(), goroutineNameAuthFailureSweep, func() {
+			t.mu.Lock()
+			defer t.mu.Unlock()
+
+			now := time.Now()
+			for username, record := range t.failures {
+				if now.Sub(record.lastFailure) > authFailureResetDuration {
+					delete(t.failures, username)
+				}
 			}
-		}
-		t.mu.Unlock()
+		})
 	}
 }
 

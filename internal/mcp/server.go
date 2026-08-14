@@ -12,6 +12,7 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/fclairamb/dbbat/internal/events"
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
 	"github.com/fclairamb/dbbat/internal/store"
 	"github.com/fclairamb/dbbat/internal/version"
 )
@@ -31,6 +32,18 @@ const (
 // the MCP surface must not be a way to enumerate databases a caller cannot
 // reach.
 var ErrNoGrant = errors.New("no active grant on that database")
+
+// ErrExecutionPanicked is the outcome an execution reports when the goroutine
+// running its statement panicked. The agent sees a failed statement, which is
+// what any other failure would have looked like; before this, the panic took
+// the whole process down instead.
+var ErrExecutionPanicked = errors.New("the statement's execution panicked")
+
+// What a panic on one of an execution's detached goroutines is logged under.
+const (
+	goroutineNameExecute     = "mcp statement execution"
+	goroutineNameHoldWatcher = "mcp approval hold watcher"
+)
 
 // Caller is the authenticated identity behind one MCP request: the API key's
 // owner, and the key itself, which doubles as the database password.
@@ -315,10 +328,34 @@ func (s *Server) start(ctx context.Context, caller *Caller, a accessible, sqlTex
 
 	// Started before the statement so the hold's pending event cannot be
 	// published into a broker nobody is listening to yet.
-	go watchHold(execCtx, s.brokerOrNil(), s.execs, e)
+	go shared.RunGuarded(execCtx, s.deps.Logger, goroutineNameHoldWatcher, func() {
+		watchHold(execCtx, s.brokerOrNil(), s.execs, e)
+	})
 
 	go func() {
 		defer cancel()
+
+		// The statement runs detached, so no recover above reaches it and a
+		// panic would end the process. RunGuarded is not enough here: this
+		// goroutine owes e.done, which only finish() closes, and an execution
+		// that never finishes parks await_approval and leaks a slot until the
+		// reaper. So the recover reports the panic as the execution's outcome —
+		// which is what the caller would have seen for any other failure — and
+		// hands the log line to shared so it reads like every other one.
+		defer func() {
+			r := recover()
+			if r == nil {
+				return
+			}
+
+			shared.LogGoroutinePanic(execCtx, s.deps.Logger, goroutineNameExecute, r)
+
+			if !e.finished() {
+				e.finish(nil, fmt.Errorf("%w: %v", ErrExecutionPanicked, r))
+			}
+
+			s.execs.markFinished(e)
+		}()
 
 		result, err := s.deps.Executor.Execute(execCtx, ExecRequest{
 			Protocol:         a.server.Protocol,

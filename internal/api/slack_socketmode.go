@@ -7,6 +7,14 @@ import (
 
 	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
+
+	"github.com/fclairamb/dbbat/internal/proxy/shared"
+)
+
+// What a panic on the Socket Mode transport is logged under.
+const (
+	goroutineNameSlackSocketRun   = "slack socket mode transport"
+	goroutineNameSlackSocketEvent = "slack socket mode event"
 )
 
 // startSocketMode opens an outbound Slack Socket Mode connection when an
@@ -32,12 +40,16 @@ func (s *Server) startSocketMode() {
 
 	go s.runSocketMode(ctx, client)
 
-	go func() {
+	// Whole-loop guard: RunContext is third-party and already allowed to stop on
+	// its own error (the warn below), so a recovered panic lands on a state the
+	// transport is designed for — and one that is not the process dying with
+	// every live proxy session on it.
+	go shared.RunGuarded(ctx, s.logger, goroutineNameSlackSocketRun, func() {
 		// RunContext blocks and reconnects internally until ctx is canceled.
 		if err := client.RunContext(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			s.logger.WarnContext(ctx, "slack socket mode stopped", slog.Any("error", err))
 		}
-	}()
+	})
 
 	s.logger.InfoContext(context.Background(), "slack socket mode enabled")
 }
@@ -54,7 +66,14 @@ func (s *Server) runSocketMode(ctx context.Context, client *socketmode.Client) {
 				return
 			}
 
-			s.handleSocketEvent(ctx, client, evt)
+			// Per event rather than around the loop: the payload is
+			// Slack-supplied and decoded by a third-party library, so this is
+			// the one turn worth losing. Retiring the whole receiver would
+			// leave the socket connected and every later Approve/Deny click
+			// silently ignored.
+			shared.RunMaintenance(ctx, s.logger, goroutineNameSlackSocketEvent, func() {
+				s.handleSocketEvent(ctx, client, evt)
+			})
 		}
 	}
 }
@@ -113,12 +132,12 @@ func (s *Server) dispatchSlackCallback(decider slackDecider, callback slack.Inte
 	slackUserID := callback.User.ID
 	responseURL := callback.ResponseURL
 
-	go func() {
+	go shared.RunGuarded(context.Background(), s.logger, goroutineNameSlackGrantDecision, func() {
 		ctx, cancel := context.WithTimeout(context.Background(), slackInteractionTimeout)
 		defer cancel()
 
 		s.processSlackDecision(ctx, decider, slackUserID, responseURL, action, requestUID)
-	}()
+	})
 
 	return true
 }
