@@ -194,11 +194,57 @@ other database. `listDatabases` is **allowed but filtered**: the reply's
 `databases` array is rewritten to just the grant's target database (with
 `totalSize`/`totalSizeMb` recomputed), so no cluster-wide database list leaks.
 
+#### A pipeline stage's own `db`
+
+`$db` is not the only database an aggregate names. `$out` takes either a
+collection name (same database) or `{db, coll}`, and `$merge`'s `into` takes
+either a string or `{db, coll}` — so `{$merge: {into: {db: "other", coll: "x"}}}`
+writes into a database the grant does not cover while `$db` on the message is
+the granted one and passes the check honestly.
+
+Those target databases are therefore held to **the same policy as `$db`**
+(`validateMongoPipelineTargets`, `internal/proxy/shared/validation.go`): a stage
+naming anything but the session's server row is refused with the same
+`Unauthorized` (13) a foreign `$db` gets. Names are compared **exactly** —
+MongoDB database names are case-sensitive. This is an *additional* refusal, not
+a replacement: a pipeline containing `$out`/`$merge` is still reclassified as a
+write for `read_only`, and a `$out` to the session's own database (named or
+implied) is normal traffic and keeps working.
+
+Nested pipelines (`$lookup`, `$unionWith`, `$facet`) are walked too, to a bounded
+depth. MongoDB itself forbids `$out`/`$merge` inside them, so this is
+belt-and-braces — but the upstream's own validation is not dbbat's access
+control.
+
 `block_copy` has no MongoDB equivalent (PostgreSQL COPY-specific).
 
 Blocked commands surface an `Unauthorized` (13) error document carrying the
 dbbat reason. Fire-and-forget (`w:0`, `moreToCome`) writes that are blocked are
 dropped silently and logged — the client is not listening for a reply.
+
+### Legacy opcodes are refused after authentication
+
+dbbat decodes **only `OP_MSG`** (2013). Every pre-`OP_MSG` opcode — `OP_QUERY`
+(2004), `OP_GET_MORE` (2005), `OP_INSERT`/`OP_UPDATE`/`OP_DELETE`,
+`OP_KILL_CURSORS` — is refused post-auth (`refuseLegacyOpCode`,
+`internal/proxy/mongodb/intercept.go`), including one wrapped in
+`OP_COMPRESSED`. `OP_QUERY` and `OP_GET_MORE` get an `Unauthorized` (13)
+`OP_REPLY`; the fire-and-forget writes are dropped. Either way the attempt is
+logged and recorded as a statement.
+
+This is a **deliberate refusal, not a limitation**. Those frames used to be
+forwarded verbatim, which meant they never reached `ValidateMongoCommand` at
+all: no `$db` check, no `read_only` check, no statement in the query log. The
+refusal is independent of grant controls, exactly like the `$db` check — a
+full-write grant is not permission to bypass the statement pipeline. dbbat does
+not write decoders for them: parsing a path MongoDB removed in 5.1 is a lot of
+wire code and new decoder attack surface for clients that should not exist.
+
+Consequence, accepted: a **hand-crafted legacy client against MongoDB < 5.1**
+(the only server that still serves these opcodes) breaks. Modern drivers against
+a supported server never send them — dbbat advertises `maxWireVersion` 21. The
+**pre-auth** handshake is untouched: the first `hello` may still arrive as
+`OP_QUERY` and is answered with `OP_REPLY` as before.
 
 ## Query Logging & Result Capture
 
@@ -239,7 +285,11 @@ traffic is captured per session using `dump.ProtocolMongo`. Dumps are pruned per
 
 `internal/proxy/mongodb/wire_test.go` covers the framing round-trips (including
 `OP_COMPRESSED` compress/decompress); `filter_test.go` and `lineage_test.go`
-cover listDatabases filtering and cursor lineage as unit tests.
+cover listDatabases filtering and cursor lineage as unit tests; `opcode_test.go`
+drives the real client→upstream pump against a session with **no upstream**, so
+a legacy opcode that was forwarded rather than refused fails the test by
+panicking. The `$out`/`$merge` target-database check is pinned in
+`internal/proxy/shared/validation_test.go`.
 
 `internal/proxy/mongodb/integration_test.go` (build tag `integration`) dials a
 `mongo:7` testcontainer **through** the proxy with the official Go driver,
