@@ -20,8 +20,20 @@ var (
 	ErrUpstreamConnect = errors.New("upstream connection failed")
 	// ErrCommandNotPermitted — protocol-level command refused (admin/replication).
 	ErrCommandNotPermitted = errors.New("command not permitted through dbbat")
-	// ErrSwitchDatabaseDenied — COM_INIT_DB tried to change the session database.
+	// ErrSwitchDatabaseDenied — a client tried to change the session database,
+	// through COM_INIT_DB, a text `USE`, or a `PREPARE … FROM '<USE …>'`.
 	ErrSwitchDatabaseDenied = errors.New("switching database not permitted through dbbat")
+	// ErrPreparedTextNotCheckable — a `PREPARE … FROM '<literal>'` whose
+	// statement text dbbat could not read all the way down: an unterminated
+	// literal, a text that is not one single literal (MySQL concatenates
+	// adjacent ones), or a nested PREPARE. One level is unwrapped and checked;
+	// a second is refused rather than unwrapped further, because stopping
+	// silently would leave a hole the exact shape of the one the unwrapping
+	// closed. `PREPARE … FROM @sql` is undecidable rather than unreadable and
+	// is *not* refused — see docs/mysql.md.
+	ErrPreparedTextNotCheckable = errors.New(
+		"dbbat cannot read the statement text of this PREPARE, so it is not permitted: " +
+			"prepare the inner statement directly")
 	// ErrAPIKeyOwnerMismatch — the API key authenticates a different user than the handshake claimed.
 	ErrAPIKeyOwnerMismatch = errors.New("API key does not belong to authenticating user")
 	// ErrQueryLimitExceeded — the grant's max_query_count quota has been reached.

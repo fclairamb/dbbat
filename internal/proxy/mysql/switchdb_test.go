@@ -200,6 +200,99 @@ func TestPrepareOfAUseIsRefused(t *testing.T) {
 	}
 }
 
+// TestPreparedUseIsRefused: `PREPARE s FROM 'USE otherdb'` followed by
+// `EXECUTE s` performs the very switch this proxy refuses, one statement later
+// and through a literal every check around it steps over — `PREPARE` matches no
+// write or DDL keyword and no blocked pattern. It is the MySQL spelling of SQL
+// Server's `EXEC('…')`.
+func TestPreparedUseIsRefused(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		sql  string
+		want error
+	}{
+		{"PREPARE s FROM 'USE otherdb'", ErrSwitchDatabaseDenied},
+		{`PREPARE s FROM "USE otherdb"`, ErrSwitchDatabaseDenied},
+		{"prepare S from 'use otherdb'", ErrSwitchDatabaseDenied},
+		{"PREPARE s FROM 'USE `otherdb`'", ErrSwitchDatabaseDenied},
+		{"PREPARE s FROM 'USE ''otherdb'''", ErrSwitchDatabaseDenied},
+		{"/* x */ PREPARE s FROM 'USE otherdb'", ErrSwitchDatabaseDenied},
+		{"PREPARE s FROM 'USE otherdb';", ErrSwitchDatabaseDenied},
+		// Its own database is refused too, the documented superset: dbbat
+		// answers a switch rather than forwarding it, so an OK would leave the
+		// client holding a handle that was never prepared upstream.
+		{"PREPARE s FROM 'USE appdb'", ErrSwitchDatabaseDenied},
+		{"PREPARE s FROM 'USE `prod-entry`'", ErrSwitchDatabaseDenied},
+		// One level only; a second fails closed.
+		{"PREPARE s FROM 'PREPARE t FROM ''USE otherdb'''", ErrPreparedTextNotCheckable},
+		{"PREPARE s FROM 'USE otherdb", ErrPreparedTextNotCheckable},
+		{"PREPARE s FROM 'USE ' 'otherdb'", ErrPreparedTextNotCheckable},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.sql, func(t *testing.T) {
+			t.Parallel()
+
+			hnd := &handler{session: switchSession()}
+			execRan := false
+
+			_, err := hnd.runIntercepted(tc.sql, nil, func() (*gomysql.Result, error) {
+				execRan = true
+
+				return &gomysql.Result{}, nil
+			})
+
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("runIntercepted(%q) = %v, want %v", tc.sql, err, tc.want)
+			}
+
+			if execRan {
+				t.Fatalf("runIntercepted(%q) reached the upstream", tc.sql)
+			}
+		})
+	}
+}
+
+// TestBenignPrepareStillRuns is the other half, and it matters as much: this
+// must not become a blanket refusal of PREPARE. Only the switch decision reaches
+// inside the literal — `PREPARE s FROM 'DELETE FROM t'` is still invisible to
+// read_only, which is the broader dynamic-SQL gap documented in docs/mysql.md
+// and filed separately, not something this test papers over.
+func TestBenignPrepareStillRuns(t *testing.T) {
+	t.Parallel()
+
+	for _, sql := range []string{
+		"PREPARE s FROM 'SELECT 1'",
+		`PREPARE s FROM "SELECT * FROM t WHERE a = 1"`,
+		// Undecidable, and deliberately not refused: dbbat cannot read what a
+		// variable or a CONCAT holds.
+		"PREPARE s FROM @sql",
+		"PREPARE s FROM CONCAT('USE ', @db)",
+		"EXECUTE s",
+		"DEALLOCATE PREPARE s",
+	} {
+		t.Run(sql, func(t *testing.T) {
+			t.Parallel()
+
+			hnd := &handler{session: switchSession()}
+			execRan := false
+
+			if _, err := hnd.runIntercepted(sql, nil, func() (*gomysql.Result, error) {
+				execRan = true
+
+				return &gomysql.Result{}, nil
+			}); err != nil {
+				t.Fatalf("runIntercepted(%q) = %v, want nil", sql, err)
+			}
+
+			if !execRan {
+				t.Fatalf("runIntercepted(%q) never reached the upstream", sql)
+			}
+		})
+	}
+}
+
 // TestUseDBAndTextUseShareOneDecision is the anti-drift test: COM_INIT_DB and
 // the text form must agree on every name, because two implementations of "may
 // this session change database" is how one of them silently stops matching the
