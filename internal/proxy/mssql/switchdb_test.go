@@ -223,7 +223,8 @@ func TestDynamicSQLIsCheckedNotSteppedOver(t *testing.T) {
 		{
 			"named @stmt",
 			"EXEC sp_executesql @stmt = N'DROP TABLE Foo'",
-			[]string{store.ControlBlockDDL}, shared.ErrDDLBlocked,
+			[]string{store.ControlBlockDDL},
+			shared.ErrDDLBlocked,
 		},
 		{
 			"named @statement",
@@ -233,17 +234,20 @@ func TestDynamicSQLIsCheckedNotSteppedOver(t *testing.T) {
 		{
 			"named @tsql, sys-qualified",
 			"EXEC sys.sp_executesql @tsql = N'DROP TABLE Foo'",
-			[]string{store.ControlBlockDDL}, shared.ErrDDLBlocked,
+			[]string{store.ControlBlockDDL},
+			shared.ErrDDLBlocked,
 		},
 		{
 			"params before the statement",
 			"EXEC sp_executesql @params = N'@x int', @stmt = N'DROP TABLE Foo'",
-			[]string{store.ControlBlockDDL}, shared.ErrDDLBlocked,
+			[]string{store.ControlBlockDDL},
+			shared.ErrDDLBlocked,
 		},
 		{
 			"statement before the params",
 			"EXEC sp_executesql @stmt = N'DELETE FROM t', @params = N'@x int'",
-			[]string{store.ControlReadOnly}, shared.ErrReadOnlyViolation,
+			[]string{store.ControlReadOnly},
+			shared.ErrReadOnlyViolation,
 		},
 		{
 			"no whitespace around the equals",
