@@ -85,7 +85,18 @@ var mysqlBlockedPatterns = []*regexp.Regexp{
 }
 
 // IsWriteQuery checks if a query is a write operation.
+//
+// The classification is prefix-shaped, so a leading comment changes what the
+// statement looks like to dbbat but not to the database: `/*x*/INSERT …` is an
+// INSERT either way. It therefore runs against the comment-stripped scratch
+// copy (see sqlcomments.go); the caller's string is untouched.
 func IsWriteQuery(sql string) bool {
+	return isWriteQuery(matchableSQL(sql, syntaxStandard))
+}
+
+// isWriteQuery answers for an already-normalised scratch copy. The validators
+// normalise once per call and share it across every check.
+func isWriteQuery(sql string) bool {
 	// The ALTER SESSION carve-out, ahead of the keyword scan because ALTER is in
 	// both keyword sets. See IsAllowedAlterSession.
 	if IsAllowedAlterSession(sql) {
@@ -102,8 +113,14 @@ func IsWriteQuery(sql string) bool {
 	return false
 }
 
-// IsDDLQuery checks if a query is a DDL operation.
+// IsDDLQuery checks if a query is a DDL operation. Same comment normalisation
+// as IsWriteQuery.
 func IsDDLQuery(sql string) bool {
+	return isDDLQuery(matchableSQL(sql, syntaxStandard))
+}
+
+// isDDLQuery answers for an already-normalised scratch copy.
+func isDDLQuery(sql string) bool {
 	// Same carve-out as IsWriteQuery: the reclassification is of the statement,
 	// so it has to hold for both controls or a block_ddl grant would still refuse
 	// what a read_only grant now allows.
@@ -213,6 +230,11 @@ var alterSessionAllowedParams = map[string]bool{
 // The statement is still recorded either way. This is a classification change,
 // not a visibility one: an allowed ALTER SESSION appears in /queries exactly
 // like any other statement.
+//
+// On the validation path it is reached from isWriteQuery/isDDLQuery and so sees
+// the comment-stripped scratch copy; it does no stripping of its own, which is
+// what keeps a statement from being normalised twice per validation call. Fed
+// raw text with a comment in it, the scanner simply fails closed.
 func IsAllowedAlterSession(sql string) bool {
 	scan := &alterSessionScanner{s: strings.TrimSpace(sql)}
 
@@ -427,8 +449,15 @@ func isBareValueByte(c byte) bool {
 	return isBareNameByte(c) || c == '.' || c == '+' || c == '-' || c == ':'
 }
 
-// IsPasswordChangeQuery checks if a query attempts to modify user/role passwords.
+// IsPasswordChangeQuery checks if a query attempts to modify user/role
+// passwords. Comment-normalised like the other two classifiers — `ALTER/**/USER
+// bob PASSWORD 'x'` is an ALTER USER to the database.
 func IsPasswordChangeQuery(sql string) bool {
+	return isPasswordChangeQuery(matchableSQL(sql, syntaxStandard))
+}
+
+// isPasswordChangeQuery answers for an already-normalised scratch copy.
+func isPasswordChangeQuery(sql string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(sql))
 
 	if (strings.HasPrefix(upper, "ALTER USER") || strings.HasPrefix(upper, "ALTER ROLE")) &&
@@ -439,17 +468,28 @@ func IsPasswordChangeQuery(sql string) bool {
 	return false
 }
 
-// ValidateQuery checks SQL against grant controls. Used by both PG and Oracle proxies.
+// ValidateQuery checks SQL against grant controls. Used by the PostgreSQL,
+// Oracle and SQL Server proxies (MySQL goes through ValidateMySQLQuery, which
+// normalises with its own comment syntax).
+//
+// sql is only ever read: the checks run against a comment-stripped scratch copy
+// and the caller relays its own bytes, untouched.
 func ValidateQuery(sql string, grant *store.Grant) error {
-	if IsPasswordChangeQuery(sql) {
+	return validateQuery(matchableSQL(sql, syntaxStandard), grant)
+}
+
+// validateQuery runs the grant controls against an already-normalised scratch
+// copy, so one statement is normalised exactly once per validation call.
+func validateQuery(sql string, grant *store.Grant) error {
+	if isPasswordChangeQuery(sql) {
 		return ErrPasswordChangeBlocked
 	}
 
-	if grant.IsReadOnly() && IsWriteQuery(sql) {
+	if grant.IsReadOnly() && isWriteQuery(sql) {
 		return ErrReadOnlyViolation
 	}
 
-	if grant.ShouldBlockDDL() && IsDDLQuery(sql) {
+	if grant.ShouldBlockDDL() && isDDLQuery(sql) {
 		return ErrDDLBlocked
 	}
 
@@ -458,12 +498,17 @@ func ValidateQuery(sql string, grant *store.Grant) error {
 
 // ValidateOracleQuery runs shared validation plus Oracle-specific blocked patterns.
 func ValidateOracleQuery(sql string, grant *store.Grant) error {
-	if err := ValidateQuery(sql, grant); err != nil {
+	// One normalisation, shared by the grant controls and the pattern list —
+	// every entry below is multi-keyword and would otherwise be walked through
+	// with an inline `/**/`.
+	matchable := matchableSQL(sql, syntaxStandard)
+
+	if err := validateQuery(matchable, grant); err != nil {
 		return err
 	}
 
 	for _, pattern := range oracleBlockedPatterns {
-		if pattern.MatchString(sql) {
+		if pattern.MatchString(matchable) {
 			return ErrOraclePatternBlocked
 		}
 	}
@@ -473,12 +518,16 @@ func ValidateOracleQuery(sql string, grant *store.Grant) error {
 
 // ValidateMySQLQuery runs shared validation plus MySQL-specific blocked patterns.
 func ValidateMySQLQuery(sql string, grant *store.Grant) error {
-	if err := ValidateQuery(sql, grant); err != nil {
+	// syntaxMySQL rather than syntaxStandard: `#` is a comment, `--` needs a
+	// space behind it, and `/*! … */` is executed rather than ignored.
+	matchable := matchableSQL(sql, syntaxMySQL)
+
+	if err := validateQuery(matchable, grant); err != nil {
 		return err
 	}
 
 	for _, pattern := range mysqlBlockedPatterns {
-		if pattern.MatchString(sql) {
+		if pattern.MatchString(matchable) {
 			return ErrMySQLPatternBlocked
 		}
 	}
