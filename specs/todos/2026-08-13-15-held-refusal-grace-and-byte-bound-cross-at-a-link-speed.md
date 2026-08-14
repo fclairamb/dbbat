@@ -56,3 +56,39 @@ Sketch, in increasing order of intrusiveness:
   the throttled tap in `internal/proxy/oracle/tap_test.go`
   (`startThrottledRecordingTap`) is the instrument for a new case where the
   client is slow rather than silent.
+
+## Resolved open questions
+
+> Decide whether `refusalHandoffGrace` should be a function of observed
+> throughput rather than a flat 30s.
+
+**Decision (2026-08-13): no — report the crossover, do not change the bound.**
+The owner was asked directly during an `/implement-todos` batch and chose the
+first sketch above ("Report it and stop there") over making the grace
+progress-conditional.
+
+Implement **only** the reporting option:
+
+- Keep `refusalHandoffGrace` a flat 30s and keep `refusalHoldMaxBytes` at 8 MiB.
+  Do **not** make the grace conditional on progress, do not turn it into an idle
+  timeout, and do not touch `awaitRefusalHandoff`'s wait structure.
+- On `onLimitViolation`'s grace-expiry path
+  (`internal/proxy/oracle/session.go`), emit a WARN that names the crossover
+  when the abandoned hold was **still receiving** — i.e. when the hold relayed a
+  healthy number of bytes right up to the grace, which distinguishes a slow
+  client from a silent one. Carry the existing `logAttrRelayedBytesSince` and
+  `logAttrHeldForMillis` attributes (`internal/proxy/oracle/intercept.go:105`)
+  so the log line says the handoff was cut by the clock while it was still
+  making progress, and that the byte bound was therefore unreachable at that
+  link speed.
+- Behaviour is otherwise unchanged:
+  `TestHeldRefusalWatchdogFallsBackAfterItsGraceRunsOut` must keep passing
+  untouched (its client sends nothing at all and must still be cut at the
+  grace). Add a case using `startThrottledRecordingTap`
+  (`internal/proxy/oracle/tap_test.go`) covering the slow-but-not-silent client,
+  asserting the new WARN fires there and does **not** fire for the silent one.
+- Record the rationale in the "What a legitimate handoff costs, measured"
+  section of `docs/oracle.md`: the two bounds do cross below roughly 280 KiB/s,
+  this is accepted deliberately because dbbat normally sits next to the
+  database, and the WARN is what makes the case visible if a slow-link
+  deployment ever meets it.
