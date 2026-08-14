@@ -38,6 +38,11 @@ const (
 	// further to try — this is the record that says so.
 	LogMsgWatchdogTeardownPanic = "panic while tearing down a session whose limit watchdog panicked: " +
 		"the session may still be running unenforced"
+
+	// LogMsgMaintenancePanic is the record of a panic in one turn of a
+	// background maintenance loop — a dump-retention sweep, an auth-cache
+	// eviction, one queued capture upload. The turn is lost; the loop is not.
+	LogMsgMaintenancePanic = "recovered from panic in a background maintenance task: skipping this turn"
 )
 
 // RunRelay runs one direction of a session's byte relay and converts a panic
@@ -68,14 +73,29 @@ func RunRelay(ctx context.Context, logger *slog.Logger, direction string, fn fun
 	return fn()
 }
 
-// RunGuarded is RunRelay for a per-session goroutine that reports nothing and
-// whose own defers already end the session: it recovers and logs, and the
+// RunGuarded is RunRelay for a goroutine that reports nothing and whose own
+// defers already release whatever waits on it: it recovers and logs, and the
 // closing of the channel or conn the goroutine owns does the rest.
 //
 // That precondition is the whole of its contract, and it is narrow. Use
 // RunWatchdog for a goroutine that owns nothing it closes — recovering there
 // without a teardown does not save the session, it only makes the session
 // outlive the thing that was supposed to police it.
+//
+// Two shapes satisfy it. The first is a per-session goroutine whose defers end
+// the session (the TDS client reader). The second is a *detached store write* —
+// the query record, the completion update, the usage bump every proxy fires and
+// then forgets about: it is spawned precisely so the wire never waits on the
+// store, so nothing downstream is owed anything, and recovering costs one
+// unwritten row instead of every live session on the process. Where such a
+// goroutine does own a QuerySink the session later blocks on, it must
+// `defer sink.Fail()` inside fn — Fail is a no-op once Resolve has run, so it
+// bites only on the panic path.
+//
+// The RowWriter drain loop is the one process-wide user: it is whole-loop
+// wrapped rather than per-turn because its own `defer close(w.done)` is exactly
+// the release this contract asks for — every producer parked in AddAll or Flush
+// selects on it. Background loops that release nothing want RunMaintenance.
 func RunGuarded(ctx context.Context, logger *slog.Logger, name string, fn func()) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -125,6 +145,43 @@ func RunWatchdog(ctx context.Context, logger *slog.Logger, name string, watch, e
 	}()
 
 	watch()
+}
+
+// RunMaintenance runs one turn of a background maintenance loop and converts a
+// panic into a log line.
+//
+// It is meant to be called *inside* the loop, around the turn's body, not
+// wrapped around the `go` that starts the loop. These loops own nothing a
+// session waits on, so recovering is safe either way — but wrapping the whole
+// loop would silently retire it for the lifetime of the process, and a proxy
+// that quietly stopped expiring captures, evicting cached credentials or
+// draining the upload queue is worse than one that logs a panic and sweeps
+// again on the next tick. Guarded per turn, the blast radius is one turn.
+//
+// The exception is a loop whose exit releases producers that are blocked on it;
+// that shape belongs under RunGuarded, whose doc names the one instance.
+func RunMaintenance(ctx context.Context, logger *slog.Logger, name string, fn func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			logPanic(ctx, logger, LogMsgMaintenancePanic, name, r)
+		}
+	}()
+
+	fn()
+}
+
+// LogGoroutinePanic records a recovered goroutine panic in the same shape
+// RunGuarded would, for the caller that cannot use RunGuarded because its
+// goroutine owes something a plain recover does not discharge — an MCP
+// execution whose result channel only its own finish() closes, say. Such a
+// caller writes the recover itself, does the discharging, and reports it here so
+// the log line, the stack and the "goroutine" attribute match every other one.
+//
+// Reach for this last. RunGuarded covers a goroutine that releases what it owns
+// through its own defers, and RunWatchdog covers one whose obligation is a
+// session teardown.
+func LogGoroutinePanic(ctx context.Context, logger *slog.Logger, name string, r any) {
+	logPanic(ctx, logger, LogMsgGoroutinePanic, name, r)
 }
 
 // logPanic writes the panic with its stack, tolerating a nil logger so a
