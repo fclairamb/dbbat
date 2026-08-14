@@ -1,7 +1,9 @@
 package oracle
 
 import (
+	"encoding/binary"
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -105,6 +107,146 @@ func decodeOERFieldsAt(payload []byte, offset int) (*oerInfo, int) {
 	}, pos
 }
 
+// decodeOERFieldsAtLayout is decodeOERFieldsAt for the **fixed-width**
+// OCI/sqlplus encoding: the same summary object, marshaled as little-endian
+// integers at constant offsets instead of TTC compressed ones. It is the
+// reading half of encodeOERFixedWidth, and it reads the fields back at the very
+// offsets that encoder writes them to.
+//
+// Without it, dbbat could write this encoding and not read it — so on an OCI
+// client (sqlplus, Instant Client, SQL*Developer over OCI) decodeOERFieldsAt
+// returned nil for every summary object the server sent, decodeErrorOER refused
+// them all, and *every* failing statement was recorded in `queries` as a
+// success. Cursor-id learning went blind on the same sessions for the same
+// reason, which is why nothing there had a streaming cursor to compare against.
+//
+// It anchors rather than trusting a length, exactly as oerFixedWidthTailFieldsAt
+// already does for the shape it learns: the error number at layout.errNum must
+// be repeated as the RetCode at layout.retCode. That single invariant is what
+// makes a *prefix length* self-validating, and it is the only structural proof
+// available here — every other field in the prefix is legitimately zero, so
+// there is nothing else to check the layout against. The two layouts put their
+// RetCode 66 bytes apart, so a block written for one cannot satisfy the other.
+//
+// A run of zeroes satisfies the repetition trivially, so the call status has to
+// be non-zero as well; every OCI summary object measured carries one (0x1
+// mid-fetch, the end-of-call word otherwise). Callers add their own proof on top
+// — the ORA diagnostic naming the code in decodeErrorOER, the cursor bounds in
+// findPlausibleOERInResponse — precisely as they do on the compressed path.
+//
+// Returns the fields and the offset just past the row count, or nil.
+func decodeOERFieldsAtLayout(payload []byte, offset int, layout oerFixedLayout) (*oerInfo, int) {
+	if offset >= len(payload) || payload[offset] != byte(TTCFuncOERR) {
+		return nil, 0
+	}
+
+	block := payload[offset:]
+	if len(block) < layout.prefixLen+max(layout.rowCountWidth, 1) {
+		return nil, 0
+	}
+
+	errCode := int(binary.LittleEndian.Uint16(block[layout.errNum:]))
+	if int(binary.LittleEndian.Uint32(block[layout.retCode:])) != errCode {
+		return nil, 0
+	}
+
+	callStatus := binary.LittleEndian.Uint32(block[layout.callStatus:])
+	if callStatus == 0 {
+		return nil, 0
+	}
+
+	rowCount, width, ok := decodeOERFixedRowCount(block, layout)
+	if !ok {
+		return nil, 0
+	}
+
+	return &oerInfo{
+		CallStatus:   int(callStatus),
+		SeqNumber:    int(binary.LittleEndian.Uint16(block[layout.ecid:])),
+		CurRowNumber: rowCount,
+		ErrorCode:    errCode,
+		CursorID:     int(binary.LittleEndian.Uint16(block[layout.cursorID:])),
+	}, offset + layout.prefixLen + width
+}
+
+// decodeOERFixedRowCount reads the row count that follows a fixed-width prefix
+// and returns it with its encoded width. The 32-bit layout leaves it a TTC
+// compressed integer — there is no fixed form for it on the wire there — while
+// the 64-bit one writes a plain 8-byte field. See oerFixedLayout.rowCountWidth.
+func decodeOERFixedRowCount(block []byte, layout oerFixedLayout) (int, int, bool) {
+	if layout.rowCountWidth == 0 {
+		val, n := readCompressedInt(block[layout.prefixLen:])
+		if n == 0 {
+			return 0, 0, false
+		}
+
+		return val, n, true
+	}
+
+	raw := binary.LittleEndian.Uint64(block[layout.prefixLen:])
+	if raw > math.MaxInt {
+		return 0, 0, false
+	}
+
+	return int(raw), layout.rowCountWidth, true
+}
+
+// decodeOERFixedFieldsAt decodes a fixed-width summary object at payload[offset]
+// under the layouts `shape` admits — the decision of *which* layout, made by
+// asking the session rather than by sniffing.
+//
+// The session learns fixedWidth / fixedWidth64 from the upstream's own OERs
+// (learnOERShape), and that upstream negotiated with this very client's
+// forwarded capabilities, so a learned shape is an observation and not a guess.
+// A session that has learned it speaks the compressed encoding is not offered
+// the fixed-width reading at all — which is what keeps this from widening what a
+// thin client's row bytes could be mistaken for.
+//
+// The ordering trap is that the shape is learned from a *server* OER, so the
+// first OER of a session can arrive before anything is known.
+// readUpstreamAuthMessages makes that mostly moot — it learns off the AUTH
+// exchange, long before any statement runs — and where it does not, the fallback
+// is to try **both** layouts under the RetCode anchor rather than to accept the
+// wrong one. Widest first, for the reason oerFixedWidthTailFieldsAt gives: the
+// 64-bit layout's own error number sits where the 32-bit one has zeroes.
+func decodeOERFixedFieldsAt(shape oerShape, payload []byte, offset int) (*oerInfo, int) {
+	if shape.tailLearned {
+		if !shape.fixedWidth {
+			return nil, 0
+		}
+
+		return decodeOERFieldsAtLayout(payload, offset, shape.layoutFor())
+	}
+
+	if info, rest := decodeOERFieldsAtLayout(payload, offset, oerFixed64Layout); info != nil {
+		return info, rest
+	}
+
+	return decodeOERFieldsAtLayout(payload, offset, oerFixed32Layout)
+}
+
+// decodeOERFieldsForShape decodes the leading fields of an OER at
+// payload[offset] in whichever of the two encodings this session's upstream
+// speaks, without judging whether the result is a real OER.
+//
+// It is for the callers that have no validator of their own to fall back on. The
+// two that do — decodeErrorOER and findPlausibleOERInResponse — try each
+// encoding under their own proof instead, because a fixed-width block decodes as
+// a run of zero-valued compressed fields (its call status `01 00 00 00` reads as
+// a one-byte field holding 0), so "compressed first, fixed only if that returns
+// nil" would stop at a bogus success and never reach the real fields.
+func decodeOERFieldsForShape(shape oerShape, payload []byte, offset int) (*oerInfo, int) {
+	if shape.tailLearned && shape.fixedWidth {
+		return decodeOERFixedFieldsAt(shape, payload, offset)
+	}
+
+	if info, rest := decodeOERFieldsAt(payload, offset); info != nil {
+		return info, rest
+	}
+
+	return decodeOERFixedFieldsAt(shape, payload, offset)
+}
+
 // decodeErrorOER decodes a standalone OER that *reports a failure*, without
 // requiring the end-of-call bit, and proves the bytes are a diagnostic before
 // handing them back.
@@ -137,8 +279,30 @@ func decodeOERFieldsAt(payload []byte, offset int) (*oerInfo, int) {
 // rather than a function code, this proof is necessary but not sufficient: the
 // caller must additionally require the OER to name the streaming cursor. See
 // handleOERStatus and midFetchOERNamesTheStreamingCursor.
-func decodeErrorOER(payload []byte) *oerInfo {
-	info, rest := decodeOERFieldsAt(payload, 0)
+//
+// Both encodings are tried, each under the full proof above rather than one
+// after the other's field decode: the compressed reading of a fixed-width block
+// succeeds with every field at zero, so trying it first and stopping there is
+// how an OCI client's diagnostics were lost. The fixed-width reading is offered
+// only for the layouts `shape` admits (decodeOERFixedFieldsAt), and it carries
+// the RetCode anchor on top of the diagnostic proof — the tail must still spell
+// the code its fields report, on both paths.
+func decodeErrorOER(shape oerShape, payload []byte) *oerInfo {
+	compressed, rest := decodeOERFieldsAt(payload, 0)
+	if info := provenErrorOER(payload, compressed, rest); info != nil {
+		return info
+	}
+
+	fixed, rest := decodeOERFixedFieldsAt(shape, payload, 0)
+
+	return provenErrorOER(payload, fixed, rest)
+}
+
+// provenErrorOER applies decodeErrorOER's proof to one candidate decode: the
+// code must be a real failure inside the range an Oracle code can occupy, and
+// the tail at `rest` must carry a printable diagnostic naming that very code.
+// Returns info with its message filled in, or nil.
+func provenErrorOER(payload []byte, info *oerInfo, rest int) *oerInfo {
 	if info == nil {
 		return nil
 	}
@@ -214,29 +378,45 @@ const oerMaxSeqNumber = 0xFFFF
 // earlier. Two locators meant two sets of bounds to keep honest; there is now
 // one, and what separates the callers is *where* they are allowed to run it
 // (see handleResponse), not how much they trust the same bytes.
-func findPlausibleOERInResponse(payload []byte) *oerInfo {
+// It reads both encodings, each under the same bounds: an OCI client marshals
+// this very OER fixed-width, so a locator that only decodes compressed integers
+// learns no cursor id at all on those sessions — which is what left the
+// mid-fetch anchor with nothing to compare against there. The fixed-width
+// reading is offered only for the layouts `shape` admits, and adds the RetCode
+// anchor to the bounds below; see decodeOERFixedFieldsAt.
+func findPlausibleOERInResponse(shape oerShape, payload []byte) *oerInfo {
 	for i := 1; i < len(payload); i++ {
 		if payload[i] != 0x04 {
 			continue
 		}
 
-		info, _ := decodeOERFieldsAt(payload, i)
-		if info == nil {
-			continue
+		if info, _ := decodeOERFieldsAt(payload, i); plausibleStatusOER(info) {
+			return info
 		}
 
-		if info.ErrorCode != 0 && info.ErrorCode != oraNoDataFound {
-			continue
+		if info, _ := decodeOERFixedFieldsAt(shape, payload, i); plausibleStatusOER(info) {
+			return info
 		}
-
-		if info.SeqNumber > oerMaxSeqNumber || info.CursorID <= 0 || info.CursorID > cursorReexecMaxID {
-			continue
-		}
-
-		return info
 	}
 
 	return nil
+}
+
+// plausibleStatusOER is the bound set findPlausibleOERInResponse applies to one
+// candidate decode, in whichever encoding it came from: the error code must be
+// success or end-of-data (an OER reporting a real failure assigns no cursor),
+// the sequence number must fit its 16-bit field, and the cursor id must be a
+// plausible 16-bit id.
+func plausibleStatusOER(info *oerInfo) bool {
+	if info == nil {
+		return false
+	}
+
+	if info.ErrorCode != 0 && info.ErrorCode != oraNoDataFound {
+		return false
+	}
+
+	return info.SeqNumber <= oerMaxSeqNumber && info.CursorID > 0 && info.CursorID <= cursorReexecMaxID
 }
 
 // findCursorIDInResponse returns the cursor id the server assigned to the
@@ -247,8 +427,8 @@ func findPlausibleOERInResponse(payload []byte) *oerInfo {
 // server picks one and reports it back, and the client then re-runs the
 // statement by that id alone. Without reading it here, a re-execution names a
 // cursor dbbat has no statement for.
-func findCursorIDInResponse(payload []byte) (uint16, bool) {
-	info := findPlausibleOERInResponse(payload)
+func findCursorIDInResponse(shape oerShape, payload []byte) (uint16, bool) {
+	info := findPlausibleOERInResponse(shape, payload)
 	if info == nil {
 		return 0, false
 	}
