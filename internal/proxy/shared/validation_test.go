@@ -391,12 +391,12 @@ func TestValidateOracleQuery_BlocksAlterSessionContainer(t *testing.T) {
 
 		// Mechanism 2 — blocked outright, which is what closes the full-write hole
 		// (a grant with neither control used to allow the switch).
-		assert.ErrorIs(t, ValidateOracleQuery(sql, fullWrite), ErrOraclePatternBlocked, "full write: %s", sql)
+		require.ErrorIs(t, ValidateOracleQuery(sql, fullWrite), ErrOraclePatternBlocked, "full write: %s", sql)
 
 		// The restricted grants refuse it first, on the shared path: a different
 		// error, never a pass.
-		assert.ErrorIs(t, ValidateOracleQuery(sql, readOnly), ErrReadOnlyViolation, "read_only: %s", sql)
-		assert.ErrorIs(t, ValidateOracleQuery(sql, blockDDL), ErrDDLBlocked, "block_ddl: %s", sql)
+		require.ErrorIs(t, ValidateOracleQuery(sql, readOnly), ErrReadOnlyViolation, "read_only: %s", sql)
+		require.ErrorIs(t, ValidateOracleQuery(sql, blockDDL), ErrDDLBlocked, "block_ddl: %s", sql)
 	}
 }
 
