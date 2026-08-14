@@ -12,6 +12,10 @@ import (
 	"github.com/fclairamb/dbbat/internal/store"
 )
 
+// errRelayedUpstream is what an exec closure that should never have run returns,
+// so the failure surfaces as a test error rather than a nil-nil result.
+var errRelayedUpstream = errors.New("statement reached the upstream")
+
 // switchSession builds a session whose grant carries no controls at all — the
 // full-write case, which is the one that matters: a full-write grant on one
 // database is still not a grant on another, so the refusal must not depend on
@@ -102,9 +106,9 @@ func TestUseOfGrantedDatabaseIsAllowed(t *testing.T) {
 			hnd := &handler{session: switchSession()}
 
 			result, err := hnd.runIntercepted(sql, nil, func() (*gomysql.Result, error) {
-				t.Fatal("an allowed USE is answered by the proxy, not relayed upstream")
+				t.Error("an allowed USE is answered by the proxy, not relayed upstream")
 
-				return nil, nil
+				return nil, errRelayedUpstream
 			})
 			if err != nil {
 				t.Fatalf("runIntercepted(%q) = %v, want nil", sql, err)
