@@ -15,7 +15,7 @@ import "strings"
 // here returns anything a proxy sends to a database.
 
 // sqlCommentSyntax selects which comment and literal forms the normaliser
-// recognises.
+// recognizes.
 type sqlCommentSyntax int
 
 const (
@@ -64,10 +64,10 @@ func matchableSQL(sql string, syntax sqlCommentSyntax) string {
 // text.
 //
 // Mis-parses are one-directional by construction. Treating real SQL as if it
-// were inside a literal only means a comment goes un-stripped — the behaviour
-// before this file existed. Bytes are ever only *copied* verbatim or replaced
-// by a space, never re-ordered or fused, so no normalisation can manufacture a
-// keyword that the client did not write.
+// were inside a literal only means a comment goes un-stripped — the behavior
+// from before this file existed. Bytes are ever only *copied* verbatim or
+// replaced by a space, never re-ordered or fused, so no normalization can
+// manufacture a keyword the client did not write.
 func stripSQLComments(sql string, syntax sqlCommentSyntax) (string, bool) {
 	var b strings.Builder
 
@@ -133,9 +133,9 @@ func stripSQLComments(sql string, syntax sqlCommentSyntax) (string, bool) {
 }
 
 // scanQuotedRun consumes the quoted run opening at start and returns the index
-// just past its closing delimiter. Doubling (`''`, `""`, ` `` `) escapes the
-// delimiter in every dialect; MySQL additionally honours backslash escapes in
-// string literals (but not in backtick identifiers).
+// just past its closing delimiter. Doubling the delimiter escapes it in every
+// dialect; MySQL additionally honors backslash escapes in string literals (but
+// not in backtick identifiers).
 //
 // An unterminated run reports false — that is the fail-closed path.
 func scanQuotedRun(sql string, start int, syntax sqlCommentSyntax) (int, bool) {
