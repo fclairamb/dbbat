@@ -102,7 +102,7 @@ jobs:
 
       - uses: actions/setup-go@v7.0.0
         with:
-          go-version: "1.26.5"
+          go-version: "1.26.6"
 
       # -race, matching `make test-e2e-oracle`. This suite is the only one that
       # runs two proxy goroutines over one session, and it hid two live races
