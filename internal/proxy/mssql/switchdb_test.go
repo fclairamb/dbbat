@@ -216,6 +216,58 @@ func TestDynamicSQLIsCheckedNotSteppedOver(t *testing.T) {
 			"EXEC sys.sp_executesql N'USE otherdb'",
 			nil, ErrDatabaseSwitchBlocked,
 		},
+		// T-SQL takes any procedure's arguments by name, in any order. Reading
+		// only the positional slot let every one of these walk past as an inert
+		// literal — the same gap the RPC path had already closed, re-opened by
+		// a second implementation that did not inherit its alias list.
+		{
+			"named @stmt",
+			"EXEC sp_executesql @stmt = N'DROP TABLE Foo'",
+			[]string{store.ControlBlockDDL}, shared.ErrDDLBlocked,
+		},
+		{
+			"named @statement",
+			"EXEC sp_executesql @statement = N'USE otherdb'",
+			nil, ErrDatabaseSwitchBlocked,
+		},
+		{
+			"named @tsql, sys-qualified",
+			"EXEC sys.sp_executesql @tsql = N'DROP TABLE Foo'",
+			[]string{store.ControlBlockDDL}, shared.ErrDDLBlocked,
+		},
+		{
+			"params before the statement",
+			"EXEC sp_executesql @params = N'@x int', @stmt = N'DROP TABLE Foo'",
+			[]string{store.ControlBlockDDL}, shared.ErrDDLBlocked,
+		},
+		{
+			"statement before the params",
+			"EXEC sp_executesql @stmt = N'DELETE FROM t', @params = N'@x int'",
+			[]string{store.ControlReadOnly}, shared.ErrReadOnlyViolation,
+		},
+		{
+			"no whitespace around the equals",
+			"EXEC sp_executesql @stmt=N'USE otherdb',@params=N'@x int'",
+			nil, ErrDatabaseSwitchBlocked,
+		},
+		{
+			"comments around the equals",
+			"EXEC sp_executesql /*c*/@stmt/*c*/=/*c*/N'USE otherdb'",
+			nil, ErrDatabaseSwitchBlocked,
+		},
+		{
+			"the batch carries on after the call",
+			"EXEC sp_executesql @stmt = N'USE otherdb'\nSELECT 2",
+			nil, ErrDatabaseSwitchBlocked,
+		},
+		{
+			// The keyword says a statement is being run and dbbat cannot find
+			// which argument it is. "Nothing to check" is the one answer that
+			// must never come out of that.
+			"statement argument nowhere to be found",
+			"EXEC sp_executesql @params = N'@x int'",
+			nil, ErrDynamicSQLNotCheckable,
+		},
 		{
 			// One level is unwrapped; a second is refused rather than unwrapped
 			// further, because stopping silently would be the same hole again.
@@ -247,11 +299,19 @@ func TestBenignDynamicSQLStillRuns(t *testing.T) {
 		"EXEC('SELECT 1')",
 		"EXECUTE('SELECT * FROM t WHERE name = ''O''''Brien''')",
 		"EXEC sp_executesql N'SELECT @a', N'@a int', @a = 1",
+		"EXEC sp_executesql @stmt = N'SELECT @a', @params = N'@a int', @a = 1",
 		"EXEC('USE AppDb; SELECT 1')",
+		// An ordinary procedure call is not dynamic SQL and must keep falling
+		// through as text — this is not a blanket refusal of EXEC.
+		"EXEC dbo.some_proc",
+		"EXEC dbo.p @a = 1",
 		// Undecidable, and deliberately not refused: dbbat cannot read what a
 		// variable holds. See the limitation note in docs/mssql.md.
 		"EXEC(@sql)",
 		"EXEC('USE ' + @db)",
+		"EXEC sp_executesql @sql",
+		"EXEC sp_executesql @stmt = @sql",
+		"EXEC sp_executesql @stmt = N'USE ' + @db",
 	} {
 		t.Run(sql, func(t *testing.T) {
 			t.Parallel()

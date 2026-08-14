@@ -77,13 +77,49 @@ func mssqlDynamicSQL(sql string) ([]string, bool) {
 
 		p.i += len(kw)
 
-		if text, ok := p.dynamicArgument(kw); ok {
+		text, outcome := p.dynamicArgument(kw)
+
+		switch outcome {
+		case dynamicUnreadable:
+			// The keyword *is* one of the dynamic-SQL forms and the statement
+			// argument is somewhere dbbat is not looking. Swallowing that and
+			// carrying on is how a bypass stays silent, so it fails closed.
+			return nil, false
+
+		case dynamicReadable:
 			texts = append(texts, text)
+
+		case dynamicNotDynamic, dynamicUndecidable:
+			// Not dynamic SQL (a bare `EXEC dbo.p`), or dynamic SQL whose text
+			// the server builds at run time. Neither is refusable — see the
+			// limitation note in docs/mssql.md.
 		}
 	}
 
 	return texts, true
 }
+
+// dynamicOutcome is what one dynamic-SQL keyword turned out to be. The two
+// middle cases look alike from the outside and are emphatically not: "there is
+// nothing here to check" must never be how "there is something here I could not
+// find" is reported.
+type dynamicOutcome int
+
+const (
+	// dynamicNotDynamic — the keyword is not introducing dynamic SQL at all,
+	// e.g. `EXEC dbo.some_proc`. Ordinary text; keep scanning.
+	dynamicNotDynamic dynamicOutcome = iota
+	// dynamicUndecidable — the statement argument was located and holds
+	// something dbbat cannot read statically: a variable, a concatenation.
+	// Allowed, and documented as a limitation rather than refused, because a
+	// blanket refusal of runtime-built dynamic SQL breaks ordinary code.
+	dynamicUndecidable
+	// dynamicReadable — the statement text was extracted.
+	dynamicReadable
+	// dynamicUnreadable — the form is dynamic SQL and dbbat could not locate
+	// its statement argument at all. Fail closed.
+	dynamicUnreadable
+)
 
 // nestsMSSQLDynamicSQL reports whether an already-normalized statement carries
 // dynamic SQL of its own — the depth-2 case, which is refused rather than
@@ -128,6 +164,25 @@ func nestsMSSQLDynamicSQL(sql string) bool {
 	}
 
 	return false
+}
+
+// mssqlStatementParamNames are the names SQL Server accepts for the statement
+// parameter of the SQL-carrying system procedures. The empty name is included
+// because that is what every driver sends over RPC: those are positional calls.
+//
+// It lives in shared rather than in the mssql package because **two** paths ask
+// the question — the RPC path, from a parsed parameter name, and the batch-text
+// scanner in this file, from `@stmt = …` written out in a T-SQL batch. A second
+// copy of this list is exactly the drift that becomes an authorization bug: a
+// client would only have to pick the spelling one copy had not heard of.
+var mssqlStatementParamNames = map[string]bool{
+	"": true, "@stmt": true, "@statement": true, "@tsql": true, "@rpccall": true,
+}
+
+// IsMSSQLStatementParamName reports whether a parameter name could be the
+// statement of a SQL-carrying system procedure.
+func IsMSSQLStatementParamName(name string) bool {
+	return mssqlStatementParamNames[strings.ToLower(name)]
 }
 
 // The three spellings of "run this text as a statement". Longest first, so
@@ -199,42 +254,46 @@ func (p *useScanner) dynamicKeyword() (string, bool) {
 }
 
 // dynamicArgument reads the statement text the keyword at the scanner's
-// position runs, when — and only when — that text is a literal.
+// position runs, when — and only when — that text is a literal. A leading `N`
+// (national character set) is part of the literal's spelling, not of the text.
+func (p *useScanner) dynamicArgument(kw string) (string, dynamicOutcome) {
+	if kw == kwSPExecuteSQL {
+		return p.spExecuteSQLStatement()
+	}
+
+	return p.execParenStatement()
+}
+
+// execParenStatement reads the argument of `EXEC(…)` / `EXECUTE(…)`.
 //
-// `EXEC` and `EXECUTE` take it parenthesized; `sp_executesql` takes it as its
-// first argument, with whatever parameter list follows left alone. A leading
-// `N` (national character set) is part of the literal's spelling, not of the
-// text.
-//
-// Anything else — a variable, a concatenation, a procedure name — reports false
-// with the scanner left just past the keyword, so the outer scan carries on
-// from there.
-func (p *useScanner) dynamicArgument(kw string) (string, bool) {
+// No parenthesis means this was not dynamic SQL at all but an ordinary
+// procedure call (`EXEC dbo.some_proc`), which keeps falling through as text.
+func (p *useScanner) execParenStatement() (string, dynamicOutcome) {
 	saved := p.i
 
 	p.spaces()
 
-	if kw != kwSPExecuteSQL {
-		if p.eof() || p.s[p.i] != '(' {
-			p.i = saved
+	if p.eof() || p.s[p.i] != '(' {
+		p.i = saved
 
-			return "", false
-		}
+		return "", dynamicNotDynamic
+	}
 
-		p.i++
+	p.i++
 
-		p.spaces()
+	p.spaces()
+
+	if !p.atStringLiteral() {
+		// `EXEC(@sql)`: the statement is where it should be and is built at run
+		// time. Undecidable, documented, not refused.
+		p.i = saved
+
+		return "", dynamicUndecidable
 	}
 
 	text, ok := p.stringLiteral()
 	if !ok {
-		p.i = saved
-
-		return "", false
-	}
-
-	if kw == kwSPExecuteSQL {
-		return text, true
+		return "", dynamicUnreadable
 	}
 
 	p.spaces()
@@ -245,12 +304,172 @@ func (p *useScanner) dynamicArgument(kw string) (string, bool) {
 	if p.eof() || p.s[p.i] != ')' {
 		p.i = saved
 
+		return "", dynamicUndecidable
+	}
+
+	p.i++
+
+	return text, dynamicReadable
+}
+
+// spExecuteSQLStatement locates `sp_executesql`'s statement argument in its
+// argument list and reads it.
+//
+// T-SQL lets any procedure's arguments be passed **by name, in any order**, so
+// the statement is not necessarily the token right after the keyword:
+// `EXEC sp_executesql @params = N'@x int', @stmt = N'DROP TABLE Foo'` is the
+// same call as the positional one. Recognizing only the positional form let
+// every named spelling walk past as an inert literal, clearing read_only,
+// block_ddl, block_copy and the database-switch refusal in one go.
+//
+// Which parameter names can be the statement is not decided here: it is
+// IsMSSQLStatementParamName, the same set the RPC path enforces on. Two lists of
+// "what names the statement" is precisely the drift that becomes an
+// authorization bug — the client would only have to pick the spelling dbbat's
+// copy had not heard of.
+//
+// Failing to find it at all is dynamicUnreadable, not "nothing to check": the
+// keyword says a statement is being run, so not finding it means dbbat is
+// looking in the wrong place, never that there is nothing there.
+func (p *useScanner) spExecuteSQLStatement() (string, dynamicOutcome) {
+	first := true
+
+	for {
+		p.spaces()
+
+		if p.eof() || p.s[p.i] == ';' {
+			break
+		}
+
+		name, named := p.argumentName()
+
+		// The named statement slot, or — for a positional call, which is what
+		// every driver sends — the first argument.
+		if (named && IsMSSQLStatementParamName(name)) || (!named && first) {
+			return p.statementArgumentValue()
+		}
+
+		first = false
+
+		if !p.skipArgumentValue() {
+			return "", dynamicUnreadable
+		}
+
+		if p.eof() || p.s[p.i] != ',' {
+			break
+		}
+
+		p.i++
+	}
+
+	return "", dynamicUnreadable
+}
+
+// statementArgumentValue reads whatever sits in the statement slot.
+func (p *useScanner) statementArgumentValue() (string, dynamicOutcome) {
+	if !p.atStringLiteral() {
+		// `EXEC sp_executesql @sql` and `@stmt = @sql`: located, and built at
+		// run time. Undecidable, documented, not refused — this is the shape
+		// half the DBA scripts in the world are written in.
+		return "", dynamicUndecidable
+	}
+
+	text, ok := p.stringLiteral()
+	if !ok {
+		return "", dynamicUnreadable
+	}
+
+	p.spaces()
+
+	// The literal has to be the *whole* value. `@stmt = N'USE ' + @db` lands
+	// here with a `+`: dbbat holds part of the statement, not the statement, and
+	// must not claim to have read it — the same call the parenthesized form
+	// makes on `EXEC('a' + @b)`.
+	//
+	// `+` specifically, and not "anything that is not a comma", because the
+	// argument list of an unparenthesized `EXEC` ends without punctuation:
+	// `EXEC sp_executesql N'DROP TABLE Foo'` followed by a newline and the next
+	// statement of the batch is a complete call, and treating that as
+	// undecidable would hand back the bypass this function exists to close.
+	// Concatenation is the only way a string value continues in T-SQL.
+	if !p.eof() && p.s[p.i] == '+' {
+		return "", dynamicUndecidable
+	}
+
+	return text, dynamicReadable
+}
+
+// argumentName reads a `@name =` at the scanner's position, consuming the `=`
+// and the whitespace around it. It reports false — and consumes nothing — when
+// the argument is positional, which is what tells `EXEC sp_executesql @sql`
+// (a variable in the first slot) apart from `EXEC sp_executesql @stmt = …`.
+func (p *useScanner) argumentName() (string, bool) {
+	saved := p.i
+
+	if p.eof() || p.s[p.i] != '@' {
+		return "", false
+	}
+
+	start := p.i
+	p.i++
+
+	for p.i < len(p.s) && isUseNameByte(p.s[p.i], p.syntax) {
+		p.i++
+	}
+
+	name := p.s[start:p.i]
+
+	p.spaces()
+
+	if p.eof() || p.s[p.i] != '=' {
+		p.i = saved
+
 		return "", false
 	}
 
 	p.i++
 
-	return text, true
+	p.spaces()
+
+	return name, true
+}
+
+// skipArgumentValue advances past one argument's value, stopping at the comma
+// that separates it from the next or at the end of the argument list. Literals,
+// quoted identifiers and nested parentheses are stepped over whole, so a comma
+// inside `CONCAT(a, b)` or inside a string does not end the argument early.
+func (p *useScanner) skipArgumentValue() bool {
+	depth := 0
+
+	for !p.eof() {
+		skipped, ok := p.skipOpaque()
+		if !ok {
+			return false
+		}
+
+		if skipped {
+			continue
+		}
+
+		switch p.s[p.i] {
+		case '(':
+			depth++
+		case ')':
+			if depth == 0 {
+				return true
+			}
+
+			depth--
+		case ',', ';':
+			if depth == 0 {
+				return true
+			}
+		}
+
+		p.i++
+	}
+
+	return true
 }
 
 // atStringLiteral reports whether a (possibly `N`-prefixed) string literal opens

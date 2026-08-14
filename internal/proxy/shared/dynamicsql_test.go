@@ -33,8 +33,32 @@ func TestMSSQLDynamicSQL(t *testing.T) {
 		{"sp_executesql with params", "EXEC sp_executesql N'SELECT @a', N'@a int', @a=1", []string{"SELECT @a"}, true},
 		{"sp_executesql bare", "sp_executesql N'DELETE FROM t'", []string{"DELETE FROM t"}, true},
 
+		// Passed by name. T-SQL takes any procedure's arguments by name in any
+		// order, so recognizing only the positional slot let every one of these
+		// walk past as an inert literal — clearing read_only, block_ddl,
+		// block_copy and the switch refusal in one go. Which names can be the
+		// statement is shared.IsMSSQLStatementParamName, the same set the RPC
+		// path enforces on.
+		{"named @stmt", "EXEC sp_executesql @stmt = N'DROP TABLE Foo'", []string{"DROP TABLE Foo"}, true},
+		{"named @statement", "EXEC sp_executesql @statement = N'USE otherdb'", []string{"USE otherdb"}, true},
+		{"named @tsql, qualified", "EXEC sys.sp_executesql @tsql = N'DROP TABLE Foo'", []string{"DROP TABLE Foo"}, true},
+		{"params first", "EXEC sp_executesql @params = N'@x int', @stmt = N'DROP TABLE Foo'", []string{"DROP TABLE Foo"}, true},
+		{"stmt first", "EXEC sp_executesql @stmt = N'DROP TABLE Foo', @params = N'@x int'", []string{"DROP TABLE Foo"}, true},
+		{"no spaces around =", "EXEC sp_executesql @stmt=N'DROP TABLE Foo',@params=N'@x int'", []string{"DROP TABLE Foo"}, true},
+		{"comments around =", "EXEC sp_executesql /*c*/@stmt/*c*/=/*c*/N'DROP TABLE Foo'", []string{"DROP TABLE Foo"}, true},
+		{"named, case folded", "exec sp_executesql @STMT = N'DROP TABLE Foo'", []string{"DROP TABLE Foo"}, true},
+		{"named with values after", "EXEC sp_executesql @stmt = N'SELECT @a', @params = N'@a int', @a = 1", []string{"SELECT @a"}, true},
+		// An unparenthesized EXEC's argument list ends without punctuation, so
+		// the next statement of the batch must not be mistaken for a
+		// continuation of the value — that would hand the bypass straight back.
+		{"positional, batch continues", "EXEC sp_executesql N'DROP TABLE Foo'\nSELECT 2", []string{"DROP TABLE Foo"}, true},
+		{"named, batch continues", "EXEC sp_executesql @stmt = N'DROP TABLE Foo'\nSELECT 2", []string{"DROP TABLE Foo"}, true},
+
 		// Not decidable, and deliberately not refused: see docs/mssql.md.
 		{"variable", "EXEC(@sql)", nil, true},
+		{"positional variable", "EXEC sp_executesql @sql", nil, true},
+		{"named variable", "EXEC sp_executesql @stmt = @sql", nil, true},
+		{"named concat", "EXEC sp_executesql @stmt = N'USE ' + @db", nil, true},
 		{"concatenation", "EXEC('USE ' + @db)", nil, true},
 		{"procedure call", "EXEC dbo.some_proc", nil, true},
 		{"procedure with args", "EXEC dbo.p @a = 1", nil, true},
@@ -50,6 +74,11 @@ func TestMSSQLDynamicSQL(t *testing.T) {
 		{"nested variable exec", "EXEC('EXEC(@inner)')", nil, false},
 		{"nested sp_executesql", "EXEC('EXEC sp_executesql @inner')", nil, false},
 		{"unterminated literal", "EXEC('DELETE FROM t", nil, false},
+		// The keyword says a statement is being run and dbbat cannot find which
+		// argument it is. "Nothing to check" is the one answer that must never
+		// come out of that, so it fails closed.
+		{"statement argument missing", "EXEC sp_executesql @params = N'@x int'", nil, false},
+		{"no arguments", "EXEC sp_executesql", nil, false},
 	}
 
 	for _, tc := range tests {
