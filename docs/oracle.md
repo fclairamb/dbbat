@@ -1229,6 +1229,45 @@ at the full 8 MiB bound would take about 105s on that link, three and a half
 times the grace. Below roughly 280 KiB/s of effective throughput the grace is
 the binding constraint and the byte bound is unreachable; above it, the reverse.
 
+**That crossing is accepted rather than designed away, and it is reported.** The
+alternative was to make the grace conditional on progress — extend the wait while
+bytes keep arriving, capped by `refusalHoldMaxBytes`, which turns the grace from
+a deadline into an idle timeout and leaves a single binding bound. It was
+declined: the grace is the fail-safe for *a client that stopped talking*, and an
+idle timeout would let a trickling upstream hold an over-quota session for as
+long as it takes to relay 8 MiB. dbbat normally sits next to the database, where
+280 KiB/s is not a rate anything runs at, so the case is speculative — but it is
+indistinguishable at the client from the other three fail-safes, all of which
+surface as ORA-03113.
+
+So the crossover names itself in the log instead. When the grace expires on a
+hold that was **still being fed** — bytes moved past the violation, and the last
+of them reached the client within a tenth of the grace — `onLimitViolation` emits
+a second WARN alongside the teardown:
+
+```
+a held limit refusal was cut by its grace while the client was still draining the reply:
+on this link the overshoot bound was unreachable
+  relayed_bytes_since=… held_for_ms=… effective_bytes_per_second=… crossover_bytes_per_second=…
+```
+
+`crossover_bytes_per_second` is `refusalHoldMaxBytes / refusalHandoffGrace` — the
+~280 KiB/s above — and `effective_bytes_per_second` is what this hold actually
+drained at, so the line carries its own proof rather than an assertion. Nothing
+branches on it and neither bound moves. A client that simply went quiet is not
+reported this way: no bytes at all, or a tail that arrived early and stopped,
+both fail the predicate (`heldRefusalWasStillReceiving`), which is the whole
+point — the record is only worth anything if it separates a slow link from a
+silent client. Its one blind spot is honest and bounded: a tail small enough to
+fit entirely in the client socket's send buffer is handed to TCP in one go, so
+the relay sees no progress while the client is still draining it. The crossover
+only arises for overshoots far larger than a socket buffer.
+
+`TestAbandonedHoldNamesTheCrossoverOnlyWhenTheClientWasStillDraining` pins the
+three shapes as unit tests; the third subtest of
+`TestIntegration_HeldRefusalHandoffCost` drives python-oracledb over an 8 KiB/s
+tap, where a real tail outlasts the real 30s grace, and reads the record back.
+
 **The values are kept, and this is why.** Narrowing either would push clients
 that are behaving normally onto the socket close, which is the pre-fix behaviour
 the hold exists to replace — 128 KB and 6.5s are real observations, and a bound
@@ -1246,7 +1285,10 @@ changes, but a knob here would let a deployment buy a friendlier error code with
 enforcement, and the only demonstrated symptom is that one cosmetic difference.
 The measurement above is what an operator meeting it needs: a client seeing
 ORA-03113 rather than ORA-00028 on a quota trip has a fetch batch over 8 MiB or
-a link under ~280 KiB/s, and neither is a dbbat fault to fix by widening.
+a link under ~280 KiB/s, and neither is a dbbat fault to fix by widening. Which
+of the two it is no longer has to be inferred — the byte case logs
+`ended the session: a held limit refusal never reached a call boundary`, and the
+slow-link case logs the crossover record above.
 
 ### Oracle NUMBER Encoding
 
