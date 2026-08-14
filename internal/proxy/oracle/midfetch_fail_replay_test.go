@@ -45,6 +45,19 @@ const (
 	oraMidFetchCode       = 1722
 	oerMidFetchCallStatus = 0x1
 	oerMidFetchSeqNumber  = 7
+
+	// oerMidFetchCurRow is how many rows the server reports having produced
+	// before it raised — row 15 000 is the one that will not convert, and both
+	// recordings agree on 14999. The client saw 14 900 of them, an array short
+	// of the batch that died.
+	oerMidFetchCurRow = 14999
+
+	// midFetchMinRowStreamPackets is a floor, not a measurement: both recordings
+	// carry ~150 packets of row stream before the failure, and a fixture that
+	// dropped under this would no longer be measuring a *mid*-fetch failure at
+	// all. Kept loose so re-recording at a different fetch size is not a
+	// failure.
+	midFetchMinRowStreamPackets = 50
 )
 
 // midFetchDumps is the pair, for the tests that assert on both.
@@ -80,25 +93,34 @@ type midStreamOER struct {
 	streamed uint16 // the cursor whose rows were on the wire at that moment
 }
 
+// midStreamWalk is what one recording contributes to the corpus measurement:
+// the packets that reached handleOERStatus mid-stream, and the histogram of what
+// every mid-stream packet actually leads with — the denominator of the
+// false-positive question, and the source of the figures quoted in
+// docs/oracle.md.
+type midStreamWalk struct {
+	oers         []midStreamOER
+	leadingBytes map[byte]int
+}
+
 // walkMidStreamOERs replays a recording through the real intercept pipeline and
 // returns every server packet whose TTC payload begins at byte 0 with func 0x04
-// while `rowStreamActive()` is true — plus, for the calibration the tests need,
-// how many mid-row-stream server packets went past in total.
+// while `rowStreamActive()` is true, the leading byte of every mid-stream packet
+// — plus how many of those went past in total.
 //
 // It reads `rowStreamActive()` off a real session rather than reconstructing it,
 // because that predicate — a pending query whose cursor already has column
 // definitions — is exactly what handleOERStatus consults, and a second
 // implementation of it in a test would measure the wrong thing.
-func walkMidStreamOERs(t *testing.T, name string) ([]midStreamOER, int) {
+func walkMidStreamOERs(t *testing.T, name string) (midStreamWalk, int) {
 	t.Helper()
 
 	s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
 	s.clientConn = drainedPipe(t)
 
-	var (
-		found            []midStreamOER
-		midStreamPackets int
-	)
+	var midStreamPackets int
+
+	found := midStreamWalk{leadingBytes: map[byte]int{}}
 
 	for i, pkt := range loadTestDump(t, name).Packets {
 		tns, err := parseTNSFromDumpPacket(pkt.Data)
@@ -125,11 +147,12 @@ func walkMidStreamOERs(t *testing.T, name string) ([]midStreamOER, int) {
 
 		if active && len(ttc) >= 2 {
 			midStreamPackets++
+			found.leadingBytes[ttc[0]]++
 
 			if TTCFunctionCode(ttc[0]) == TTCFuncOERR {
 				fields, _ := decodeOERFieldsAt(ttc, 0)
 
-				found = append(found, midStreamOER{
+				found.oers = append(found.oers, midStreamOER{
 					dump:     name,
 					index:    i,
 					payload:  ttc,
@@ -153,6 +176,13 @@ func walkMidStreamOERs(t *testing.T, name string) ([]midStreamOER, int) {
 // stream, in which case there would be nothing to relax. It is not folded in: it
 // is the same shape as every failure already measured, minus the end-of-call
 // bit, and it names the cursor whose rows it interrupted.
+//
+// It also pins that the failure really is raised *mid*-fetch rather than near
+// its start, because that is the only thing separating these fixtures from the
+// six in failed_stmt_replay_test.go. A regenerated capture whose failure landed
+// on row 3 would still satisfy every other assertion here while measuring
+// nothing new, so the depth is asserted on two independent readings: the OER's
+// own CurRowNumber, and how many packets of row stream went past before it.
 func TestDumpReplay_MidFetchFailureIsABitLessStandaloneOER(t *testing.T) {
 	t.Parallel()
 
@@ -162,9 +192,9 @@ func TestDumpReplay_MidFetchFailureIsABitLessStandaloneOER(t *testing.T) {
 
 			midStream, total := walkMidStreamOERs(t, name)
 			require.Positive(t, total, "the recording must contain a row stream at all")
-			require.Len(t, midStream, 1, "exactly one standalone 0x04 arrives mid-fetch")
+			require.Len(t, midStream.oers, 1, "exactly one standalone 0x04 arrives mid-fetch")
 
-			got := midStream[0]
+			got := midStream.oers[0]
 			require.NotNil(t, got.fields)
 
 			assert.Equal(t, oraMidFetchCode, got.fields.ErrorCode, "packet #%d", got.index)
@@ -178,6 +208,15 @@ func TestDumpReplay_MidFetchFailureIsABitLessStandaloneOER(t *testing.T) {
 
 			assert.Equal(t, int(got.streamed), got.fields.CursorID,
 				"packet #%d: the OER names the cursor whose rows it interrupted", got.index)
+
+			assert.Equal(t, oerMidFetchCurRow, got.fields.CurRowNumber,
+				"packet #%d: the server had produced %d rows before it failed — if this moves, "+
+					"the fixture no longer measures a failure raised deep inside a fetch",
+				got.index, oerMidFetchCurRow)
+			assert.GreaterOrEqual(t, total, midFetchMinRowStreamPackets,
+				"the failure must arrive after a real run of row stream, not at the head of one")
+			assert.Greater(t, got.index, midFetchMinRowStreamPackets,
+				"packet #%d: the failure must be late in the recording", got.index)
 		})
 	}
 }
@@ -221,15 +260,21 @@ func TestDumpReplay_MidStreamOERFalsePositiveRate(t *testing.T) {
 	t.Parallel()
 
 	genuine := map[string]bool{pythonMidFetchDump: true, goOraMidFetchDump: true}
+	corpus := midStreamCorpus(t)
 
-	var midStreamPackets, leading0x04, accepted, stress int
+	var midStreamPackets, accepted, stress int
 
-	for _, name := range midStreamCorpus(t) {
+	lead := map[byte]int{}
+
+	for _, name := range corpus {
 		found, total := walkMidStreamOERs(t, name)
 		midStreamPackets += total
-		leading0x04 += len(found)
 
-		for _, got := range found {
+		for b, n := range found.leadingBytes {
+			lead[b] += n
+		}
+
+		for _, got := range found.oers {
 			if got.relaxed == nil {
 				continue
 			}
@@ -242,18 +287,40 @@ func TestDumpReplay_MidStreamOERFalsePositiveRate(t *testing.T) {
 		}
 	}
 
-	for _, name := range midStreamCorpus(t) {
+	for _, name := range corpus {
 		stress += midStreamStressAcceptances(t, name)
 	}
 
-	t.Logf("mid-row-stream server packets: %d; leading with 0x04: %d; accepted as diagnostics: %d; "+
-		"stress acceptances at non-zero offsets: %d",
-		midStreamPackets, leading0x04, accepted, stress)
+	// Every figure quoted in docs/oracle.md is printed here, so the numbers in
+	// the prose are reproducible from the tree rather than remembered. Only the
+	// two load-bearing ones are asserted: pinning a distribution would turn
+	// "somebody re-recorded a fixture" into a failure (same reasoning as
+	// sql_extraction_survey_test.go).
+	t.Logf("corpus: %d recordings; mid-row-stream server packets: %d; leading with 0x04: %d; "+
+		"accepted as diagnostics: %d; stress acceptances at non-zero offsets: %d",
+		len(corpus), midStreamPackets, lead[byte(TTCFuncOERR)], accepted, stress)
+
+	for _, b := range sortedLeadingBytes(lead) {
+		t.Logf("  mid-row-stream packets leading with %#02x: %d", b, lead[b])
+	}
 
 	require.Positive(t, midStreamPackets, "the corpus must contain row streams to measure against")
 	assert.Equal(t, len(genuine), accepted, "only the genuine mid-fetch failures may be accepted")
 	assert.Zero(t, stress,
 		"real row bytes must never satisfy the diagnostic proof, at any offset")
+}
+
+// sortedLeadingBytes orders a leading-byte histogram so the report is stable
+// across runs.
+func sortedLeadingBytes(lead map[byte]int) []byte {
+	out := make([]byte, 0, len(lead))
+	for b := range lead {
+		out = append(out, b)
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+
+	return out
 }
 
 // midStreamStressAcceptances runs decodeErrorOER at every 0x04 offset inside
@@ -299,18 +366,24 @@ func midStreamStressAcceptances(t *testing.T, name string) int {
 	return acceptances
 }
 
-// collectingCompletionStore keeps every query a replay persists. The buffered
-// recordingCompletionStore cannot be used here: a whole recording completes far
-// more statements than its channels hold, and the replay would deadlock on the
-// setup DDL long before reaching the failure.
+// collectingCompletionStore keeps every write a replay makes, on *both* of
+// completeQuery's branches. The buffered recordingCompletionStore cannot be used
+// here: a whole recording completes far more statements than its channels hold,
+// and the replay would deadlock on the setup DDL long before reaching the
+// failure.
 type collectingCompletionStore struct {
 	mu      sync.Mutex
 	created []*store.Query
+	updated []completedQuery
 }
 
 func (c *collectingCompletionStore) CreateQuery(_ context.Context, query *store.Query) (*store.Query, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if query.UID == uuid.Nil {
+		query.UID = uuid.Must(uuid.NewV7())
+	}
 
 	c.created = append(c.created, query)
 
@@ -318,8 +391,24 @@ func (c *collectingCompletionStore) CreateQuery(_ context.Context, query *store.
 }
 
 func (c *collectingCompletionStore) UpdateQueryCompletion(
-	_ context.Context, _ uuid.UUID, _ *float64, _ *int64, _ *string, _ bool, _ bool,
+	_ context.Context,
+	uid uuid.UUID,
+	_ *float64,
+	rowsAffected *int64,
+	queryError *string,
+	resultsTruncated bool,
+	_ bool,
 ) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.updated = append(c.updated, completedQuery{
+		uid:          uid,
+		rowsAffected: rowsAffected,
+		queryError:   queryError,
+		truncated:    resultsTruncated,
+	})
+
 	return nil
 }
 
@@ -327,9 +416,11 @@ func (c *collectingCompletionStore) IncrementConnectionStats(_ context.Context, 
 	return nil
 }
 
-// errorsFor returns the recorded error text of every query whose SQL contains
-// needle, once the asynchronous writes have settled.
-func (c *collectingCompletionStore) errorsFor(t *testing.T, needle string) []string {
+// awaitUpdate waits for the asynchronous UpdateQueryCompletion naming uid and
+// returns it. Both store writes happen on their own goroutine (that is what
+// makes the row-flush barrier affordable), so a replay that has returned has not
+// necessarily written yet.
+func (c *collectingCompletionStore) awaitUpdate(t *testing.T, uid uuid.UUID) (completedQuery, bool) {
 	t.Helper()
 
 	deadline := time.Now().Add(5 * time.Second)
@@ -337,30 +428,103 @@ func (c *collectingCompletionStore) errorsFor(t *testing.T, needle string) []str
 	for {
 		c.mu.Lock()
 
-		var out []string
+		for _, got := range c.updated {
+			if got.uid == uid {
+				c.mu.Unlock()
 
-		for _, q := range c.created {
-			if !contains(q.SQLText, needle) {
-				continue
+				return got, true
 			}
-
-			if q.Error == nil {
-				out = append(out, "")
-
-				continue
-			}
-
-			out = append(out, *q.Error)
 		}
 
 		c.mu.Unlock()
 
-		if len(out) > 0 || time.Now().After(deadline) {
-			return out
+		if time.Now().After(deadline) {
+			return completedQuery{}, false
 		}
 
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// createdErrorsFor returns the recorded error text of every query *created* at
+// completion whose SQL contains needle. Used as a negative: the statement under
+// test must not come back down this branch.
+func (c *collectingCompletionStore) createdErrorsFor(needle string) []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	var out []string
+
+	for _, q := range c.created {
+		if !contains(q.SQLText, needle) {
+			continue
+		}
+
+		if q.Error == nil {
+			out = append(out, "")
+
+			continue
+		}
+
+		out = append(out, *q.Error)
+	}
+
+	return out
+}
+
+// midFetchSelectFragment is the one statement these fixtures are about.
+const midFetchSelectFragment = "TO_NUMBER(txt)"
+
+// replayPersistingRowStreams feeds a recording through the real intercept
+// pipeline and, the moment a fetch's row stream opens, puts the pending query
+// into the state persistQueryRecord leaves behind: a query row already in the
+// store, addressed by uid, with queryPersisted set.
+//
+// That state is the whole point. `session.store` is a concrete *store.Store, so
+// persistQueryRecord itself cannot run without a database — but it is exactly
+// what production reaches on a streaming SELECT with result capture on, and it
+// sends completeQuery down its *other* branch: finalizeQuery →
+// UpdateQueryCompletion instead of CreateQuery. A test that only ever exercises
+// the create-now branch would prove the ORA text reaches the store object and
+// not that it reaches the update a real session performs.
+//
+// It returns the uid stamped on the statement whose SQL contains sqlFragment.
+func replayPersistingRowStreams(t *testing.T, s *session, name, sqlFragment string) uuid.UUID {
+	t.Helper()
+
+	s.clientConn = drainedPipe(t)
+
+	var want uuid.UUID
+
+	for _, pkt := range loadTestDump(t, name).Packets {
+		tns, err := parseTNSFromDumpPacket(pkt.Data)
+		if err != nil || tns.Type != TNSPacketTypeData {
+			continue
+		}
+
+		if pkt.Direction == dump.DirClientToServer {
+			s.interceptClientMessage(tns)
+
+			continue
+		}
+
+		s.interceptUpstreamMessage(tns)
+
+		s.trackerMu.Lock()
+
+		if pending := s.tracker.pendingQuery; s.rowStreamActive() && !pending.queryPersisted {
+			pending.queryPersisted = true
+			pending.queryUID = uuid.Must(uuid.NewV7())
+
+			if contains(pending.cursor.sql, sqlFragment) {
+				want = pending.queryUID
+			}
+		}
+
+		s.trackerMu.Unlock()
+	}
+
+	return want
 }
 
 // TestDumpReplay_MidFetchFailureRecordsItsORAText is the regression, end to end:
@@ -370,7 +534,44 @@ func (c *collectingCompletionStore) errorsFor(t *testing.T, needle string) []str
 // Before this change it reached the store carrying nothing at all — the OER was
 // dropped, the statement stayed pending, and the DROP that followed closed it as
 // a success through flushPendingQuery.
+//
+// The row it lands on is a row that already exists, because a SELECT that has
+// been streaming for 14 900 rows was persisted long before it failed. See
+// replayPersistingRowStreams.
 func TestDumpReplay_MidFetchFailureRecordsItsORAText(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range midFetchDumps() {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
+			recorder := &collectingCompletionStore{}
+			s.completionStore = recorder
+
+			uid := replayPersistingRowStreams(t, s, name, midFetchSelectFragment)
+			require.NotEqual(t, uuid.Nil, uid,
+				"the failing SELECT must have opened a row stream and been persisted")
+
+			got, ok := recorder.awaitUpdate(t, uid)
+			require.True(t, ok, "the persisted query row was never completed")
+
+			require.NotNil(t, got.queryError, "a statement that died mid-fetch must record its ORA text")
+			assert.Contains(t, *got.queryError, "ORA-01722",
+				"the completion update must carry the ORA text, not close the row as a success")
+
+			assert.Empty(t, recorder.createdErrorsFor(midFetchSelectFragment),
+				"an already-persisted statement completes through UpdateQueryCompletion, never a second CreateQuery")
+		})
+	}
+}
+
+// TestDumpReplay_MidFetchFailureRecordsItsORATextOnTheCreateBranch is the same
+// claim on completeQuery's other branch — the one a session with result capture
+// off takes, where no row was persisted while streaming and the query record is
+// created at completion. Both branches carry the error; only the shape of the
+// write differs.
+func TestDumpReplay_MidFetchFailureRecordsItsORATextOnTheCreateBranch(t *testing.T) {
 	t.Parallel()
 
 	for _, name := range midFetchDumps() {
@@ -383,7 +584,18 @@ func TestDumpReplay_MidFetchFailureRecordsItsORAText(t *testing.T) {
 
 			replaySession(t, s, name)
 
-			errs := recordingErrorsForSelect(t, recorder)
+			var errs []string
+
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				errs = recorder.createdErrorsFor(midFetchSelectFragment)
+				if len(errs) > 0 || time.Now().After(deadline) {
+					break
+				}
+
+				time.Sleep(10 * time.Millisecond)
+			}
+
 			require.NotEmpty(t, errs, "the failing SELECT must be persisted at all")
 
 			for _, got := range errs {
@@ -392,13 +604,6 @@ func TestDumpReplay_MidFetchFailureRecordsItsORAText(t *testing.T) {
 			}
 		})
 	}
-}
-
-// recordingErrorsForSelect narrows to the one statement the fixture is about.
-func recordingErrorsForSelect(t *testing.T, recorder *collectingCompletionStore) []string {
-	t.Helper()
-
-	return recorder.errorsFor(t, "TO_NUMBER(txt)")
 }
 
 // TestHandleOERStatus_MidFetchRequiresTheOERToNameTheStreamingCursor pins the
@@ -430,13 +635,19 @@ func TestHandleOERStatus_MidFetchRequiresTheOERToNameTheStreamingCursor(t *testi
 		"...and so must the one naming another cursor, so the cursor is what separates them")
 
 	tests := []struct {
-		name     string
-		cursor   int
-		complete bool
+		name string
+		// streaming is the cursor id dbbat holds for the fetch in progress; 0
+		// means it never learned one, which is the anchor's unset guard rather
+		// than its inequality.
+		streaming uint16
+		cursor    int
+		complete  bool
 	}{
-		{name: "names the streaming cursor", cursor: streamingCursor, complete: true},
-		{name: "names another cursor", cursor: streamingCursor + 1},
-		{name: "names no cursor", cursor: 0},
+		{name: "names the streaming cursor", streaming: streamingCursor, cursor: streamingCursor, complete: true},
+		{name: "names another cursor", streaming: streamingCursor, cursor: streamingCursor + 1},
+		{name: "names no cursor", streaming: streamingCursor, cursor: 0},
+		{name: "the streaming cursor was never learned", streaming: 0, cursor: 0},
+		{name: "the streaming cursor was never learned, OER names one", streaming: 0, cursor: streamingCursor},
 	}
 
 	for _, tc := range tests {
@@ -446,6 +657,10 @@ func TestHandleOERStatus_MidFetchRequiresTheOERToNameTheStreamingCursor(t *testi
 			s := newTestSession(&store.Grant{Definition: &store.GrantDefinition{}})
 			require.NoError(t, s.handleOALL8(buildOALL8("SELECT id FROM emp", nil, streamingCursor)))
 
+			// Set directly rather than through a cursor-0 OALL8: what is under
+			// test is a session that never learned an id for the fetch it is
+			// streaming, not a statement parsed against cursor 0.
+			s.tracker.pendingQuery.cursor.cursorID = tc.streaming
 			s.tracker.pendingQuery.cursor.columns = []columnDef{{Name: "ID"}}
 			require.True(t, s.rowStreamActive())
 
@@ -459,7 +674,7 @@ func TestHandleOERStatus_MidFetchRequiresTheOERToNameTheStreamingCursor(t *testi
 			}
 
 			assert.NotNil(t, s.tracker.pendingQuery,
-				"mid-fetch, a 0x04 run that does not name the streaming cursor is row data")
+				"mid-fetch, a 0x04 run that does not name a known streaming cursor is row data")
 		})
 	}
 }
