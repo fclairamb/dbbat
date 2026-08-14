@@ -335,6 +335,13 @@ func (s *session) validate(st statement) error {
 			return err
 		}
 
+		// Ahead of the controls below rather than among them: a database switch
+		// is a scope question, not a permission one, so it is refused under a
+		// full-write grant too.
+		if err := s.checkDatabaseSwitch(sql); err != nil {
+			return err
+		}
+
 		// Normalized like the ValidateQuery above it: the pattern spans two
 		// keywords, so `BULK/**/INSERT` would otherwise walk through a block_copy
 		// grant while SQL Server read the statement unchanged.
@@ -344,6 +351,47 @@ func (s *session) validate(st statement) error {
 	}
 
 	return nil
+}
+
+// checkDatabaseSwitch refuses a batch that would move the session to a database
+// other than the one its grant was issued on.
+//
+// It runs on every statement the message would execute, which is what puts
+// `sp_executesql N'USE otherdb'` and a resolved prepared handle on the same
+// footing as a plain SQLBatch — they all arrive here through validate's enforce
+// list.
+//
+// A batch dbbat could not read a `USE` out of with confidence is refused rather
+// than forwarded, and `USE <this session's database>` is allowed: a driver that
+// re-states its own database must keep working. The comparison folds case
+// because SQL Server's own database names are case-insensitive under the
+// default collation, so an exact match would refuse a session naming its own
+// database in another casing.
+func (s *session) checkDatabaseSwitch(sql string) error {
+	targets, readable := shared.MSSQLUseTargets(sql)
+	if !readable {
+		return ErrDatabaseSwitchBlocked
+	}
+
+	for _, target := range targets {
+		if !s.namesSessionDatabase(target) {
+			return ErrDatabaseSwitchBlocked
+		}
+	}
+
+	return nil
+}
+
+// namesSessionDatabase reports whether name is this session's database, under
+// either of the two names it answers to: the dbbat entry's name, which is what
+// the client put in its connection string, and the real database on the target.
+func (s *session) namesSessionDatabase(name string) bool {
+	if s.database == nil {
+		return false
+	}
+
+	return strings.EqualFold(name, s.database.Name) ||
+		strings.EqualFold(name, s.database.DatabaseName)
 }
 
 // grantRestricts reports whether the grant limits what a statement may do. It
