@@ -204,6 +204,13 @@ func (w *RowWriter) run() {
 
 	batch := &rowBatch{}
 
+	// A panic below leaves this batch unwritten while its captures still claim a
+	// complete result set, and the recover above cannot know which sinks were in
+	// flight. Marking them here is what keeps a lost capture reading as lost. On
+	// every normal exit the batch has already been flushed and reset, so this is
+	// a no-op there.
+	defer batch.markDropped()
+
 	for {
 		var item queueItem
 
@@ -332,6 +339,15 @@ func (b *rowBatch) full() bool {
 
 func (b *rowBatch) barriered() bool {
 	return len(b.barriers) > 0
+}
+
+// markDropped reports every capture contributing to this batch as having lost
+// rows. Only the drain's panic path uses it: a batch that reaches flush is
+// accounted for there, one that does not is simply gone.
+func (b *rowBatch) markDropped() {
+	for _, item := range b.items {
+		item.sink.markDropped()
+	}
 }
 
 // reset clears the batch and releases the barriers it carried — callers must
