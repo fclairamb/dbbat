@@ -1,6 +1,9 @@
 package shared
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // SQL comments are not a formatting detail for the validators: every check in
 // validation.go is regex- or prefix-shaped, and the database ignores a comment
@@ -59,9 +62,48 @@ func matchableSQL(sql string, syntax sqlCommentSyntax) string {
 	return stripped
 }
 
+// MatchesNormalizedSQL reports whether pattern matches sql's comment-normalized
+// form. It exists for the protocol-local checks that sit alongside a
+// ValidateQuery call — PostgreSQL's read-only-bypass list, SQL Server's bulk
+// copy pattern — which are regex-shaped in exactly the same way and were
+// evadable in exactly the same way.
+//
+// Only the boolean escapes: the normalized string is never handed back, so no
+// caller can relay it by accident. The syntax is the standard one (Oracle,
+// PostgreSQL, SQL Server); MySQL statements are normalized inside this package
+// by ValidateMySQLQuery, which knows the dialect's extra comment forms.
+func MatchesNormalizedSQL(sql string, pattern *regexp.Regexp) bool {
+	return pattern.MatchString(matchableSQL(sql, syntaxStandard))
+}
+
+// MatchesAnyNormalizedSQL is MatchesNormalizedSQL over a list, normalizing once
+// rather than once per pattern.
+func MatchesAnyNormalizedSQL(sql string, patterns []*regexp.Regexp) bool {
+	matchable := matchableSQL(sql, syntaxStandard)
+
+	for _, pattern := range patterns {
+		if pattern.MatchString(matchable) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// HasNormalizedSQLPrefix reports whether sql starts with prefix once comments
+// are normalized away, trimmed and upper-cased — the prefix-shaped sibling of
+// MatchesNormalizedSQL, for checks like PostgreSQL's `COPY `. prefix must
+// already be upper case.
+func HasNormalizedSQLPrefix(sql, prefix string) bool {
+	return strings.HasPrefix(
+		strings.ToUpper(strings.TrimSpace(matchableSQL(sql, syntaxStandard))),
+		prefix,
+	)
+}
+
 // stripSQLComments does the work behind matchableSQL. It reports false when a
-// quoted run is left open, which is the caller's cue to fall back to the raw
-// text.
+// quoted run is left open, or when a MySQL executable comment is left open or
+// nested — the caller's cue to fall back to the raw text.
 //
 // Mis-parses are one-directional by construction. Treating real SQL as if it
 // were inside a literal only means a comment goes un-stripped — the behavior
@@ -74,40 +116,65 @@ func stripSQLComments(sql string, syntax sqlCommentSyntax) (string, bool) {
 	b.Grow(len(sql))
 
 	changed := false
+	// Depth of the MySQL executable comment currently open: 0 or 1. Anything
+	// that would make it 2 fails closed rather than being guessed at.
+	execOpen := false
 
 	for i := 0; i < len(sql); {
 		c := sql[i]
 
+		// Literals and quoted identifiers first: a `/*` or `--` inside one is not a
+		// comment, and mistaking it for one deletes real SQL from the copy the
+		// matchers see.
+		if end, isRun, ok := scanVerbatimRun(sql, i, syntax); isRun {
+			if !ok {
+				return "", false
+			}
+
+			b.WriteString(sql[i:end])
+			i = end
+
+			continue
+		}
+
 		switch {
-		case c == '\'' || c == '"' || (c == '`' && syntax == syntaxMySQL):
-			end, ok := scanQuotedRun(sql, i, syntax)
-			if !ok {
-				return "", false
-			}
+		case execOpen && c == '*' && i+1 < len(sql) && sql[i+1] == '/':
+			// The `*/` closing an executable comment is a marker the server strips
+			// before executing, so it must not survive into the scratch copy either.
+			b.WriteByte(' ')
 
-			b.WriteString(sql[i:end])
-			i = end
-
-		case isQuoteOperator(sql, i, syntax):
-			end, ok := scanQuoteOperator(sql, i)
-			if !ok {
-				return "", false
-			}
-
-			b.WriteString(sql[i:end])
-			i = end
+			i += 2
+			execOpen = false
+			changed = true
 
 		case isExecutableComment(sql, i, syntax):
-			// MySQL *runs* the body of `/*! … */` (and MariaDB's `/*M! … */`), so
-			// hiding it from the matchers would be the very evasion this file
-			// closes. Drop the introducer, keep scanning the body as code; the
-			// stray `*/` that ends it is inert noise in a scratch copy.
+			// MySQL *runs* the body of `/*! … */` (and MariaDB's `/*M! … */`) — the
+			// server strips the introducer, its optional version number and the
+			// closing `*/`, then parses what is left as ordinary SQL. The scratch
+			// copy has to do exactly that, or `SET /*!32302 GLOBAL */ x=1` reaches
+			// the matchers as `SET 32302 GLOBAL */ x=1`, where the version number
+			// sits between the two keywords `SET\s+GLOBAL` expects adjacent — an
+			// evasion, and a worse one than the comment this file set out to close.
+			//
+			// Nesting is refused rather than guessed at: fail closed, per the
+			// unterminated-literal rule.
+			if execOpen {
+				return "", false
+			}
+
 			b.WriteByte(' ')
 
 			i += executableCommentPrefixLen(sql, i)
+			execOpen = true
 			changed = true
 
 		case c == '/' && i+1 < len(sql) && sql[i+1] == '*':
+			// A plain block comment inside an executable one makes which `*/` closes
+			// which ambiguous. Fail closed.
+			if execOpen {
+				return "", false
+			}
+
 			i = skipBlockComment(sql, i)
 
 			b.WriteByte(' ')
@@ -125,11 +192,37 @@ func stripSQLComments(sql string, syntax sqlCommentSyntax) (string, bool) {
 		}
 	}
 
+	// An executable comment that never closed: the server would reject the
+	// statement, and we will not guess where its body ended.
+	if execOpen {
+		return "", false
+	}
+
 	if !changed {
 		return sql, true
 	}
 
 	return b.String(), true
+}
+
+// scanVerbatimRun reports whether a run that has to be copied byte for byte
+// opens at i — a string literal, a quoted identifier, or Oracle's q-quote
+// operator — and where it ends. ok is false when such a run is left open, which
+// is the fail-closed path.
+func scanVerbatimRun(sql string, i int, syntax sqlCommentSyntax) (int, bool, bool) {
+	if c := sql[i]; c == '\'' || c == '"' || (c == '`' && syntax == syntaxMySQL) {
+		end, ok := scanQuotedRun(sql, i, syntax)
+
+		return end, true, ok
+	}
+
+	if isQuoteOperator(sql, i, syntax) {
+		end, ok := scanQuoteOperator(sql, i)
+
+		return end, true, ok
+	}
+
+	return 0, false, false
 }
 
 // scanQuotedRun consumes the quoted run opening at start and returns the index
@@ -225,21 +318,34 @@ func isExecutableComment(sql string, i int, syntax sqlCommentSyntax) bool {
 }
 
 // executableCommentPrefixLen returns the length of the executable-comment
-// introducer at i, or 0 when there is none.
+// introducer at i — `/*!` or `/*M!` *plus* the optional version number that
+// conventionally follows it — or 0 when there is none.
+//
+// The version digits are part of the marker, not of the body: the server drops
+// them along with the introducer and runs the rest. Any digit run is skipped
+// rather than exactly five or six, because a marker this code fails to consume
+// whole lands between two keywords and breaks the `\s+` the patterns anchor on.
 func executableCommentPrefixLen(sql string, i int) int {
 	if i+2 >= len(sql) || sql[i] != '/' || sql[i+1] != '*' {
 		return 0
 	}
 
-	if sql[i+2] == '!' {
-		return 3
+	var n int
+
+	switch {
+	case sql[i+2] == '!':
+		n = 3
+	case (sql[i+2] == 'M' || sql[i+2] == 'm') && i+3 < len(sql) && sql[i+3] == '!':
+		n = 4
+	default:
+		return 0
 	}
 
-	if i+3 < len(sql) && (sql[i+2] == 'M' || sql[i+2] == 'm') && sql[i+3] == '!' {
-		return 4
+	for i+n < len(sql) && sql[i+n] >= '0' && sql[i+n] <= '9' {
+		n++
 	}
 
-	return 0
+	return n
 }
 
 // skipBlockComment returns the index just past the `*/` closing the block
