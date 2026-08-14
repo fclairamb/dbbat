@@ -59,7 +59,7 @@ const (
 // cost on a poor link" but "what happens on a link so poor that the grace runs
 // out before the byte bound ever could".
 //
-// 8 KiB/s is far below the ~280 KiB/s the two bounds meet at
+// 32 KiB/s is far below the ~280 KiB/s the two bounds meet at
 // (refusalHoldMaxBytes / refusalHandoffGrace), and it is chosen so the tail left
 // in flight is minutes of relaying rather than seconds — the abandonment has to
 // be the *clock* and not a batch that happened to finish. crossoverProbeBudget
@@ -67,10 +67,32 @@ const (
 // quota must trip early enough that the run is the 30s grace plus a little,
 // while still outweighing python-oracledb's connect several times over so the
 // statement is admitted and cut afterwards rather than refused at the gate.
+//
+// The **fetch size is the wide one**, and that is the correction that made this
+// subtest measure what it claims. A throttled tap throttles in userspace, behind
+// a loopback socket whose buffers autotune to megabytes, so the first megabyte
+// or so of the tail is swallowed by the kernel in one burst: measured here, a
+// 683 100-byte tail was handed to TCP in 1.5s and the relay then had nothing
+// left to write for the remaining 28.5s of the grace, while the client was still
+// draining it 100s later. The proxy reads "still receiving" off its own writes
+// (session.heldRefusalWasStillReceiving), so a tail that fits inside the socket
+// buffer is invisible to it — the limit that function's own doc comment names.
+// A real slow link does not hide it, because TCP sizes the buffer to the
+// bandwidth-delay product rather than to loopback; a *tap* on loopback does.
+// So the tail has to be far larger than that buffering, which is what
+// wideProbeTable at crossoverProbeFetch gives: ~6 MB in flight, of which the
+// grace can only relay ~1 MB, so the relay is still writing when the clock runs
+// out. It stays well under refusalHoldMaxBytes, which is the finding — at this
+// rate the byte bound is unreachable.
 const (
-	crossoverLinkBytesPerSecond = 8 * 1024
+	crossoverLinkBytesPerSecond = 32 * 1024
+	crossoverProbeFetch         = 1500
 	crossoverProbeBudget        = 150_000
-	crossoverProbeDeadline      = 4 * refusalDeadline
+
+	// Six graces, not four. The run is the grace plus the time the client needs
+	// to drain whatever the kernel swallowed, at the tap's rate, before it sees
+	// EOF and exits — a socket close does not discard queued bytes.
+	crossoverProbeDeadline = 6 * refusalDeadline
 )
 
 // boundsProbeScript drains a table at a caller-chosen array size and reports how
@@ -252,8 +274,9 @@ func TestIntegration_HeldRefusalHandoffCost(t *testing.T) {
 
 		env.replaceGrant(t, nil, testsupport.WithMaxBytesTransferred(crossoverProbeBudget))
 
-		// The same probe again, over a link 16× slower. At 8 KiB/s the tail left
-		// in flight when the quota trips is minutes of relaying, so the client is
+		// The same probe over a link 4× slower and a fetch batch wide enough that
+		// the tail cannot hide in a socket buffer. At 32 KiB/s the ~6 MB left in
+		// flight when the quota trips is minutes of relaying, so the client is
 		// still draining when refusalHandoffGrace runs out — the one case where
 		// the two fail-safes constrain each other rather than each covering its
 		// own failure, and the one refusalHoldMaxBytes cannot reach.
@@ -265,7 +288,7 @@ func TestIntegration_HeldRefusalHandoffCost(t *testing.T) {
 		runCtx, cancel := context.WithTimeout(ctx, crossoverProbeDeadline)
 		defer cancel()
 
-		output := runBoundsProbe(t, runCtx, script, tap, env, "dbbat_quota_probe", throttledProbeFetch)
+		output := runBoundsProbe(t, runCtx, script, tap, env, wideProbeTable, crossoverProbeFetch)
 
 		logTappedOERs(t, tap)
 
@@ -286,7 +309,7 @@ func TestIntegration_HeldRefusalHandoffCost(t *testing.T) {
 
 		cost := reportHandoffCost(t, before, fmt.Sprintf(
 			"python-oracledb thin, arraysize/prefetch %d on %d-byte rows, %d KiB/s link (below crossover)",
-			throttledProbeFetch, quotaProbeWidth, crossoverLinkBytesPerSecond/1024))
+			crossoverProbeFetch, wideProbeWidth, crossoverLinkBytesPerSecond/1024))
 
 		assert.Less(t, cost.bytes, int64(refusalHoldMaxBytes),
 			"the hold was abandoned well under the byte bound, which is the crossover: at this rate "+
