@@ -60,6 +60,3 @@ stands in for the bit, not a missing decoder call.
    next to `TestIntegration_FailingStatementsRecordTheirORAErrorOCI`.
 5. Update the bit table in the "the OER end-of-call bit is not universal" section
    of `docs/oracle.md`, whose first and fourth rows are the two paths above.
-
-No GitHub issue filed (automation does not run `gh issue create` — see
-`specs/todos/2026-08-11-06-*.md`); one should be filed by hand.

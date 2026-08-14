@@ -1,8 +1,14 @@
-Specs should be initially written in github issues. And once we are ready
-to implement them, they should be written to the specs directory, re-edited and implemented.
+A spec is a markdown file in this directory. Write it here, re-edit it, implement it.
 
-All files specs should contain a link to their initial github issue. 
-Something like that: [#4](https://github.com/fclairamb/dbbat/issues/4)
+**GitHub issues are not required, and no spec should ask for one.** They used to
+be the entry point — a spec was written as an issue first and every file carried
+a `[#4](https://github.com/fclairamb/dbbat/issues/4)` backlink. That requirement
+is dropped (2026-08-14). Do not open issues, do not leave "No GitHub issue filed
+yet — one should be" notes in new specs, and do not treat a missing issue as
+outstanding work. If a spec genuinely needs an external tracking item, the owner
+decides that, not the spec.
+
+Existing backlinks in `specs/done/` are historical record — leave them alone.
 
 ## Layout and naming
 

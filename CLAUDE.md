@@ -155,7 +155,10 @@ Conventions (see `specs/README.md`):
   case renumber. Order by what must happen first (a prerequisite, a suite that
   currently verifies nothing, a live correctness bug), not by when it was written.
 - Lead with `# Title`, then `## Goal`, `## Why`, and `## Implementation` (sketch the approach + key files). Enough that someone can pick it up cold.
-- Link the originating GitHub issue when there is one: `[#4](https://github.com/fclairamb/dbbat/issues/4)`. If none exists, note that an issue should be filed.
+- **Never create GitHub issues, and never ask for one to be created.** Don't add
+  "No GitHub issue filed yet — one should be" notes to a spec, and don't treat a
+  missing issue as outstanding work; the spec file is the tracking item. Link an
+  existing issue only if one already happens to exist. See `specs/README.md`.
 - When a todo is implemented, move its file to `specs/done/YYYY/MM/` (keep the same filename).
 
 This applies even when the current task is otherwise complete — capture the follow-up before moving on.

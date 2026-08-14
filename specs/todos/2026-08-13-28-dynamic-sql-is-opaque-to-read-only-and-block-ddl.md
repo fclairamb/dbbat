@@ -1,8 +1,5 @@
 # Dynamic SQL is opaque to `read_only` and `block_ddl` on every protocol that has it
 
-**No GitHub issue filed yet — one should be.** (Automation must not run
-`gh issue create`; see `specs/todos/2026-08-11-06-*.md`.)
-
 **Filed against the owner's standing "no new specs" directive**, deliberately:
 this is a live grant escape reachable today on `main`, on three protocols, and
 it is the residual left by `2026-08-13-18` rather than something that spec

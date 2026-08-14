@@ -39,3 +39,17 @@ action — which is the same reason the original spec left it undone. **This spe
 is therefore not implementable by automation** — it stays in `specs/todos/`
 until the owner files the issue themselves, at which point only the `[#N](…)`
 link edits remain. Do not implement it, and do not archive it.
+
+## Closed — not implemented (2026-08-14)
+
+The owner dropped the GitHub-issue requirement outright: *"You never need to
+create github issues."* `specs/README.md` no longer asks for one and the root
+`CLAUDE.md` now forbids filing them.
+
+This spec's only content was "open these issues and link them back", so there is
+nothing left in it to do. It supersedes the `## Resolved open questions` decision
+above, which parked the spec in `specs/todos/` pending the owner filing the
+issues by hand — that is no longer wanted either.
+
+Archived as closed rather than deleted, so the reasoning stays greppable. **It
+was never implemented**; no issue was created, and none should be.
