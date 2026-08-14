@@ -1,7 +1,6 @@
 package mysql
 
 import (
-	"context"
 	"crypto/rsa"
 	"crypto/tls"
 	"log/slog"
@@ -137,7 +136,7 @@ func (p *dbbatAuthProvider) authenticateAPIKey(username, key string) error {
 		return ErrAPIKeyOwnerMismatch
 	}
 
-	go func() { _ = p.server.store.IncrementAPIKeyUsage(context.Background(), verified.ID) }()
+	shared.BumpAPIKeyUsage(p.server.ctx, p.server.logger, p.server.store, verified.ID)
 
 	return nil
 }

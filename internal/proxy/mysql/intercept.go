@@ -247,11 +247,11 @@ func (h *handler) completeHeldQuery(queryUID uuid.UUID, cause error) {
 
 	errStr := cause.Error()
 
-	go func() {
+	go shared.RunGuarded(s.ctx, s.logger, goroutineNameHeldQueryCompletion, func() {
 		if err := s.server.store.UpdateQueryCompletion(s.ctx, queryUID, nil, nil, &errStr, false, false); err != nil {
 			s.logger.DebugContext(s.ctx, "failed to complete held query", slog.Any("error", err))
 		}
-	}()
+	})
 }
 
 // KillHeldQuery ends a statement parked on a human in response to a
@@ -341,9 +341,15 @@ func (h *handler) recordQueryWithUID(
 	// finished while its rows are still arriving.
 	hasRows := len(capturedRows) > 0
 
-	go func() {
+	go shared.RunGuarded(s.ctx, s.logger, goroutineNameQueryRecord, func() {
 		sink := s.server.rowWriter.NewSink()
 		held := queryUID != uuid.Nil
+
+		// The sink is created here and never escapes, but a panic between
+		// Resolve and Flush would strand the rows already queued against it.
+		// Fail is a no-op once Resolve has run, so this only bites on the
+		// panic path.
+		defer sink.Fail()
 
 		if !held {
 			insert := record
@@ -396,7 +402,7 @@ func (h *handler) recordQueryWithUID(
 				s.logger.DebugContext(s.ctx, "increment connection stats failed", slog.Any("error", err))
 			}
 		}
-	}()
+	})
 
 	// In-session quota counters so the next checkQuotas() reflects this query.
 	if s.grant != nil {

@@ -340,6 +340,13 @@ const (
 	relayNameClientToUpstream = "postgresql client→upstream"
 	relayNameUpstreamToClient = "postgresql upstream→client"
 	relayNameWatchdog         = "postgresql limit watchdog"
+
+	// The detached store writes. Each is named after what it writes, because
+	// that is the only thing the log line can usefully say: these goroutines
+	// outlive the call that spawned them, so the recover on handleConnection
+	// never sees them and nothing else records which write died.
+	goroutineNameCaptureRecord = "postgresql query record for result capture"
+	goroutineNameQueryRecord   = "postgresql query record"
 )
 
 // proxyMessages proxies messages between client and upstream.
@@ -770,7 +777,12 @@ func (s *Session) ensureRowSink(query *pendingQuery) *shared.QuerySink {
 		ExecutedAt:   query.startTime,
 	}
 
-	go func() {
+	go shared.RunGuarded(s.ctx, s.logger, goroutineNameCaptureRecord, func() {
+		// A panic here must not leave the sink unresolved: the capture path and
+		// the completion goroutine both wait on it. Fail is a no-op once Resolve
+		// has run, so this only bites on the panic path.
+		defer sink.Fail()
+
 		created, err := s.store.CreateQuery(s.ctx, record)
 		if err != nil {
 			s.logger.ErrorContext(s.ctx, "failed to create query record for result capture",
@@ -781,7 +793,7 @@ func (s *Session) ensureRowSink(query *pendingQuery) *shared.QuerySink {
 		}
 
 		sink.Resolve(created.UID)
-	}()
+	})
 
 	return sink
 }

@@ -235,6 +235,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // dumpCleanupInterval is how often the local capture spool is swept.
 const dumpCleanupInterval = 1 * time.Hour
 
+// goroutineNameDumpRetention is what a panic in a retention sweep is logged under.
+const goroutineNameDumpRetention = "mssql dump retention sweep"
+
 // runDumpCleanup deletes captures older than the configured retention. It
 // applies to the local spool only — captures dbbat uploaded are the bucket's
 // lifecycle policy to expire.
@@ -250,12 +253,17 @@ func (s *Server) runDumpCleanup() {
 	for {
 		select {
 		case <-ticker.C:
-			deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
-			if err != nil {
-				s.logger.ErrorContext(s.ctx, "MSSQL dump cleanup failed", slog.Any("error", err))
-			} else if deleted > 0 {
-				s.logger.InfoContext(s.ctx, "MSSQL dump cleanup", slog.Int("deleted", deleted))
-			}
+			// One turn under the guard rather than the whole loop: a panic in a
+			// sweep must not take the process down, and must not retire retention
+			// for the life of the process either. See shared.RunMaintenance.
+			shared.RunMaintenance(s.ctx, s.logger, goroutineNameDumpRetention, func() {
+				deleted, err := dump.CleanupOldFiles(s.dumpConfig.Dir, retention)
+				if err != nil {
+					s.logger.ErrorContext(s.ctx, "MSSQL dump cleanup failed", slog.Any("error", err))
+				} else if deleted > 0 {
+					s.logger.InfoContext(s.ctx, "MSSQL dump cleanup", slog.Int("deleted", deleted))
+				}
+			})
 		case <-s.shutdown:
 			return
 		}

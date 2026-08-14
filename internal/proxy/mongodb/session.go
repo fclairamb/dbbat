@@ -391,6 +391,13 @@ const (
 	relayNameClientToUpstream = "mongodb client→upstream"
 	relayNameUpstreamToClient = "mongodb upstream→client"
 	relayNameWatchdog         = "mongodb limit watchdog"
+
+	// The detached store writes. Each is named after what it writes, because
+	// that is the only thing the log line can usefully say: these goroutines
+	// outlive the call that spawned them, so the recover on handleConnection
+	// never sees them and nothing else records which write died.
+	goroutineNameCommandRecord         = "mongodb command record"
+	goroutineNameHeldCommandCompletion = "mongodb held command completion"
 )
 
 // relay pumps framed messages both ways after auth until either side ends.

@@ -284,8 +284,14 @@ func (s *Session) recordQuery(pq *pendingQuery, rows []store.QueryRow, rowsAffec
 	// finished while its rows are still arriving.
 	hasRows := len(rows) > 0
 
-	go func() {
+	go shared.RunGuarded(s.ctx, s.logger, goroutineNameCommandRecord, func() {
 		sink := s.server.rowWriter.NewSink()
+
+		// The sink is created here and never escapes, but a panic between
+		// Resolve and Flush would strand the rows already queued against it.
+		// Fail is a no-op once Resolve has run, so this only bites on the
+		// panic path.
+		defer sink.Fail()
 
 		queryUID := pq.approvalUID
 		held := queryUID != uuid.Nil
@@ -341,7 +347,7 @@ func (s *Session) recordQuery(pq *pendingQuery, rows []store.QueryRow, rowsAffec
 				s.logger.DebugContext(s.ctx, "increment connection stats failed", slog.Any("error", err))
 			}
 		}
-	}()
+	})
 
 	if s.grant != nil {
 		s.grant.QueryCount++

@@ -861,12 +861,12 @@ func (s *session) resolveAPIKeyFromPhase2(o5 *O5LogonServer, verifiers []*o5Logo
 		// do this (it has no plaintext).
 		if od := apiKey.OracleData(); od != nil && !od.UserSalt {
 			keyID, plain, encKey := apiKey.ID, plainPassword, s.encryptionKey
-			go func() {
+			go shared.RunGuarded(context.Background(), s.logger, goroutineNameVerifierUpgrade, func() {
 				if err := s.store.UpgradeAPIKeyO5LogonVerifiers(context.Background(), keyID, plain, encKey); err != nil {
 					s.logger.WarnContext(context.Background(), "failed to upgrade legacy O5LOGON verifiers to user salts",
 						slog.String("key_id", keyID.String()), slog.Any("error", err))
 				}
-			}()
+			})
 		}
 
 		return apiKey, nil
@@ -1014,7 +1014,7 @@ func (s *session) authenticateClient(phase1Pkt *TNSPacket) error {
 	s.clientCombinedKey = o5.CombinedKey
 
 	// Increment usage asynchronously
-	go func() { _ = s.store.IncrementAPIKeyUsage(context.Background(), apiKey.ID) }()
+	shared.BumpAPIKeyUsage(s.ctx, s.logger, s.store, apiKey.ID)
 
 	// NOTE: AUTH OK is NOT sent here. It's sent in run() AFTER upstream auth completes,
 	// so the relay can immediately forward go-ora's post-auth messages to upstream.
@@ -1221,6 +1221,16 @@ const (
 	relayNameUpstreamToClient = "oracle upstream→client"
 	relayNameWatchdog         = "oracle limit watchdog"
 	relayNamePreAuthPump      = "oracle pre-auth upstream→client"
+
+	// The detached store writes. Each is named after what it writes, because
+	// that is the only thing the log line can usefully say: these goroutines
+	// outlive the call that spawned them, so the recover on handleConnection
+	// never sees them and nothing else records which write died.
+	goroutineNameBlockedQuery    = "oracle blocked query record"
+	goroutineNameQueryRecord     = "oracle query record"
+	goroutineNameQueryCompletion = "oracle query completion"
+	goroutineNameVerifierUpgrade = "oracle api key verifier upgrade"
+	goroutineNameDumpRetention   = "oracle dump retention sweep"
 )
 
 // proxyMessages relays TNS packets bidirectionally with TTC-aware interception.

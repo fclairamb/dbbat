@@ -116,6 +116,9 @@ type queueItem struct {
 	barrier chan struct{}
 }
 
+// GoroutineNameRowWriterDrain is what a panic in the drain loop is logged under.
+const GoroutineNameRowWriterDrain = "captured row writer drain"
+
 // NewRowWriter starts a writer against st. A nil store yields a nil writer,
 // which is inert — callers with no store keep working unchanged.
 func NewRowWriter(st RowStore, logger *slog.Logger) *RowWriter {
@@ -139,7 +142,11 @@ func NewRowWriter(st RowStore, logger *slog.Logger) *RowWriter {
 		cancel: cancel,
 	}
 
-	go w.run()
+	// Whole-loop guard, and one of the few places that is the right shape: run's
+	// own `defer close(w.done)` releases every producer parked in AddAll or
+	// Flush, so a recovered panic degrades capture process-wide instead of
+	// ending the process. See RunGuarded.
+	go RunGuarded(ctx, logger, GoroutineNameRowWriterDrain, w.run)
 
 	return w
 }
@@ -188,6 +195,12 @@ func (w *RowWriter) Close(ctx context.Context) {
 // already queued until a cap trips or the queue runs dry, then flush.
 func (w *RowWriter) run() {
 	defer close(w.done)
+
+	// Producers that only ever call Add never block, so w.done alone would not
+	// stop them queueing rows into a channel nobody drains. Marking the writer
+	// stopped is what turns those into an honest "dropped". On the normal exit
+	// path Close has already set it, so this changes nothing there.
+	defer w.stopped.Store(true)
 
 	batch := &rowBatch{}
 

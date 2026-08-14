@@ -141,6 +141,15 @@ func newSession(clientConn net.Conn, server *Server) *Session {
 // when it panics. A log label, not an identifier.
 const goroutineNameWatchdog = "mysql limit watchdog"
 
+// The detached store writes. Each is named after what it writes, because that is
+// the only thing the log line can usefully say: these goroutines outlive the
+// call that spawned them, so the recover on handleConnection never sees them and
+// nothing else records which write died.
+const (
+	goroutineNameQueryRecord         = "mysql query record"
+	goroutineNameHeldQueryCompletion = "mysql held query completion"
+)
+
 // Run drives the session lifecycle:
 //  1. MySQL handshake with auth termination
 //  2. Connect to upstream MySQL using stored credentials
