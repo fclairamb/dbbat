@@ -123,7 +123,7 @@ func IsDDLQuery(sql string) bool {
 // database — so a prefix match would hand a read-only session a way to step
 // outside the database its grant covers. CONTAINER is therefore deliberately
 // absent below, as is every parameter nobody has justified: an unenumerated
-// parameter keeps the pre-carve-out behaviour and is refused. `ALTER SYSTEM` is
+// parameter keeps the pre-carve-out behavior and is refused. `ALTER SYSTEM` is
 // untouched by any of this — oracleBlockedPatterns blocks it outright whatever
 // the grant says.
 //
@@ -138,7 +138,7 @@ var alterSessionAllowedParams = map[string]bool{
 	// database rather than to a schema, so the session reaches nothing it could
 	// not already reach.
 	"CURRENT_SCHEMA": true,
-	// Picks which optimizer version's behaviour to emulate: plan selection,
+	// Picks which optimizer version's behavior to emulate: plan selection,
 	// nothing else, for this session only.
 	"OPTIMIZER_FEATURES_ENABLE": true,
 	// The three hidden optimizer parameters DBeaver sends. Listed explicitly
@@ -237,7 +237,7 @@ func IsAllowedAlterSession(sql string) bool {
 		params++
 	}
 
-	// `ALTER SESSION SET` with nothing after it is not a statement we recognise.
+	// `ALTER SESSION SET` with nothing after it is not a statement we recognize.
 	return params > 0
 }
 
