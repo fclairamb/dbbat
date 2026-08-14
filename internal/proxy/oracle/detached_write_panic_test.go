@@ -15,7 +15,7 @@ import (
 
 // errStoreBoom is raised as a panic value, not returned: the shape being pinned
 // is the store call that never returns at all.
-var errStoreBoom = errors.New("query record write blew up") //nolint:err113 // test-local sentinel
+var errStoreBoom = errors.New("query record write blew up")
 
 // panickingCompletionStore is the query-completion seam with every write
 // replaced by a panic. It stands in for the class of failure the detached
