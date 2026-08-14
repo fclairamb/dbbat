@@ -55,6 +55,12 @@ var (
 	ErrCommandBlocked = errors.New("dbbat: command not permitted")
 	// ErrPreAuthNotAllowed — a non-allowlisted command was issued before auth.
 	ErrPreAuthNotAllowed = errors.New("dbbat: authentication required")
+	// ErrLegacyOpCode — a pre-OP_MSG opcode arrived after authentication.
+	// dbbat decodes only OP_MSG, so forwarding one would hand the upstream a
+	// command that skipped the $db check, the grant controls and the query log
+	// entirely. Refused instead — see docs/mongodb.md.
+	ErrLegacyOpCode = errors.New("dbbat: legacy wire protocol opcodes are not supported; " +
+		"use a driver that speaks OP_MSG (MongoDB 3.6+)")
 	// ErrQueryLimitExceeded — the grant's max_query_count quota has been reached.
 	ErrQueryLimitExceeded = errors.New("dbbat: query count limit exceeded for this grant")
 	// ErrDataLimitExceeded — the grant's max_bytes_transferred quota has been reached.
