@@ -43,6 +43,22 @@ var ddlKeywords = []string{"CREATE", "ALTER", "DROP", "TRUNCATE"}
 // Oracle-specific blocked patterns (always blocked regardless of grant controls).
 var oracleBlockedPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)ALTER\s+SYSTEM`),
+	// `ALTER SESSION SET CONTAINER = <pdb>` switches the session's pluggable
+	// database. A dbbat grant is scoped to one server row, and the audit trail,
+	// the quotas and the approval holds are all written against that row — so
+	// after a switch every `queries` row names the wrong database. Refusing it
+	// only under read_only/block_ddl (which is what the leading ALTER already
+	// did) left the default "full write" grant able to step outside the database
+	// it was granted on, which is the same escape with a different label. It is
+	// therefore blocked outright, like ALTER SYSTEM, whatever the grant says.
+	//
+	// `[^;]*?` rather than `SET\s+"?CONTAINER"?` because CONTAINER need not be
+	// the first parameter: `ALTER SESSION SET CURRENT_SCHEMA=X CONTAINER=PDB2`
+	// is the same switch and must match too. It stops at `;` so the scan stays
+	// inside one statement. `\bCONTAINER\b\s*"?\s*=` covers the bare and the
+	// double-quoted spelling without matching a name that merely ends in it
+	// (`FOO_CONTAINER=` has no word boundary before CONTAINER).
+	regexp.MustCompile(`(?i)\bALTER\s+SESSION\s+SET\b[^;]*?\bCONTAINER\b\s*"?\s*=`),
 	regexp.MustCompile(`(?i)CREATE\s+DATABASE\s+LINK`),
 	regexp.MustCompile(`(?i)DBMS_SCHEDULER`),
 	regexp.MustCompile(`(?i)DBMS_JOB`),
@@ -123,9 +139,11 @@ func IsDDLQuery(sql string) bool {
 // database — so a prefix match would hand a read-only session a way to step
 // outside the database its grant covers. CONTAINER is therefore deliberately
 // absent below, as is every parameter nobody has justified: an unenumerated
-// parameter keeps the pre-carve-out behavior and is refused. `ALTER SYSTEM` is
-// untouched by any of this — oracleBlockedPatterns blocks it outright whatever
-// the grant says.
+// parameter keeps the pre-carve-out behavior and is refused. CONTAINER is now
+// belt *and* braces: oracleBlockedPatterns refuses it outright, whatever the
+// grant says, because "absent from this list" only means "refused by read_only
+// and block_ddl" and a full-write grant has neither. `ALTER SYSTEM` is untouched
+// by any of this — same outright block.
 //
 // `ALTER SESSION` is Oracle-only syntax. IsWriteQuery/IsDDLQuery are shared by
 // all five proxies, but no PostgreSQL, MySQL, MongoDB or SQL Server statement

