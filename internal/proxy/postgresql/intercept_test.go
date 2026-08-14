@@ -213,6 +213,30 @@ func TestIsReadOnlyBypassAttempt(t *testing.T) {
 			sql:      "SELECT * FROM users WHERE notes LIKE '%SET ROLE%';",
 			expected: true, // False positive, but acceptable for security
 		},
+
+		// Comments: PostgreSQL ignores them wherever whitespace is allowed, so
+		// every pattern here — all of them span two or more keywords — used to be
+		// walked through with an inline `/**/`.
+		{
+			name:     "SET ROLE split by a block comment",
+			sql:      "SET/**/ROLE postgres;",
+			expected: true,
+		},
+		{
+			name:     "SET SESSION AUTHORIZATION with a comment between the keywords",
+			sql:      "SET /* x */ SESSION /* y */ AUTHORIZATION postgres;",
+			expected: true,
+		},
+		{
+			name:     "read_only reset split by a line comment",
+			sql:      "RESET -- why not\n default_transaction_read_only;",
+			expected: true,
+		},
+		{
+			name:     "a comment mentioning the bypass is still not one",
+			sql:      "SELECT 1 /* do not SET ROLE here */",
+			expected: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -285,6 +309,13 @@ func TestIsCopyQuery(t *testing.T) {
 		{name: "INSERT", sql: "INSERT INTO users (name) VALUES ('test')", expected: false},
 		{name: "SELECT with COPY in string", sql: "SELECT * FROM users WHERE note LIKE '%COPY%'", expected: false},
 		{name: "empty string", sql: "", expected: false},
+
+		// A leading comment changes what the statement looks like to dbbat but not
+		// to PostgreSQL.
+		{name: "leading block comment", sql: "/*x*/COPY users TO STDOUT", expected: true},
+		{name: "leading line comment", sql: "-- note\nCOPY users TO STDOUT", expected: true},
+		{name: "comment between COPY and its table", sql: "COPY/**/users TO STDOUT", expected: true},
+		{name: "COPY inside a comment is not a COPY", sql: "SELECT 1 /* COPY users TO STDOUT */", expected: false},
 	}
 
 	for _, tt := range tests {

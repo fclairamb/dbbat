@@ -318,20 +318,22 @@ func isDDLQuery(sql string) bool {
 }
 
 // isCopyQuery checks if a query is a COPY operation.
+//
+// Comment-normalized, like everything else validateStatement runs: PostgreSQL
+// ignores `/* … */` wherever whitespace is allowed, so `/*x*/COPY t TO STDOUT`
+// is a COPY to the server and has to be one here too.
 func isCopyQuery(sql string) bool {
-	upper := strings.ToUpper(strings.TrimSpace(sql))
-	return strings.HasPrefix(upper, "COPY ")
+	return shared.HasNormalizedSQLPrefix(sql, "COPY ")
 }
 
 // isReadOnlyBypassAttempt checks if a query attempts to disable read-only mode.
+//
+// Every pattern in the list spans two or more keywords, so an inline comment
+// between them (`SET/**/ROLE postgres`) walked through it while the server read
+// the statement unchanged — the same hole shared.ValidateQuery closes, in a
+// check that sits one line away from it.
 func isReadOnlyBypassAttempt(sql string) bool {
-	for _, pattern := range readOnlyBypassPatterns {
-		if pattern.MatchString(sql) {
-			return true
-		}
-	}
-
-	return false
+	return shared.MatchesAnyNormalizedSQL(sql, readOnlyBypassPatterns)
 }
 
 // isPasswordChangeQuery checks if a query attempts to modify user/role passwords.

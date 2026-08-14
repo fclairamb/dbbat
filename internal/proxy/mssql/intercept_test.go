@@ -109,6 +109,21 @@ func TestRPCEnforcementDecisions(t *testing.T) {
 			wantErr:  ErrBulkCopyBlocked,
 		},
 		{
+			// bulkCopyPattern spans two keywords, so an inline comment walked
+			// through it while SQL Server read the statement unchanged.
+			name:     "a bulk insert split by a comment is still blocked by block_copy",
+			controls: []string{store.ControlBlockCopy},
+			payload:  rpcByID(spExecuteSQL, nvarcharMaxParam("", "BULK/**/INSERT t FROM 'x.csv'")),
+			wantErr:  ErrBulkCopyBlocked,
+		},
+		{
+			name:     "OPENROWSET BULK with a comment before the paren is still blocked",
+			controls: []string{store.ControlBlockCopy},
+			payload: rpcByID(spExecuteSQL,
+				nvarcharMaxParam("", "INSERT INTO t SELECT * FROM OPENROWSET/*x*/(BULK 'f.dat', SINGLE_BLOB) r")),
+			wantErr: ErrBulkCopyBlocked,
+		},
+		{
 			name:     "cursor bookkeeping is allowed under a restrictive grant",
 			controls: []string{store.ControlReadOnly},
 			payload:  rpcByID(spCursorClose, intNParam("@cursor", 3, 0)),

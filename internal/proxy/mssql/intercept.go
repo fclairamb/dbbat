@@ -335,7 +335,10 @@ func (s *session) validate(st statement) error {
 			return err
 		}
 
-		if s.grant.ShouldBlockCopy() && bulkCopyPattern.MatchString(sql) {
+		// Normalized like the ValidateQuery above it: the pattern spans two
+		// keywords, so `BULK/**/INSERT` would otherwise walk through a block_copy
+		// grant while SQL Server read the statement unchanged.
+		if s.grant.ShouldBlockCopy() && shared.MatchesNormalizedSQL(sql, bulkCopyPattern) {
 			return ErrBulkCopyBlocked
 		}
 	}
