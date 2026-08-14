@@ -948,7 +948,7 @@ func TestHeldRefusalWatchdogFallsBackAfterItsGraceRunsOut(t *testing.T) {
 // fires first and the byte bound is unreachable. A handoff cut there is a *slow*
 // client, not the silent one the grace exists for, and both produce the same
 // ORA-03113. Neither bound moves for it (see refusalHandoffGrace) — the WARN is
-// the whole remedy, so what it fires on is the behaviour under test.
+// the whole remedy, so what it fires on is the behavior under test.
 //
 // Both shapes are driven through the production path: the relay's own
 // enforceMidStreamLimits is what stamps a hold as still receiving, and
