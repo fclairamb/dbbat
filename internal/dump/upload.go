@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/google/uuid"
 	"gocloud.dev/blob"
 	"gocloud.dev/gcerrors"
@@ -25,6 +24,8 @@ import (
 	// without any cloud dependency.
 	_ "gocloud.dev/blob/fileblob"
 	_ "gocloud.dev/blob/s3blob"
+
+	"github.com/fclairamb/dbbat/internal/safe"
 )
 
 // Recorder persists the blob key of an uploaded capture on its connection row.

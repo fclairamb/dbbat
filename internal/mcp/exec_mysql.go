@@ -8,9 +8,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/go-mysql-org/go-mysql/client"
 	gomysql "github.com/go-mysql-org/go-mysql/mysql"
+
+	"github.com/fclairamb/dbbat/internal/safe"
 )
 
 // mysqlConnectTimeout bounds the handshake with our own listener. Reaching
