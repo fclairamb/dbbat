@@ -95,6 +95,17 @@ const (
 	logMsgRefusalTeardownPanic = "recovered from panic tearing down a held limit refusal"
 )
 
+// The attributes every exit of a held refusal carries: how many bytes were
+// relayed to the client past the violation, and how long the hold lasted. They
+// are named constants for the same reason the messages above are — they are the
+// measurement refusalHoldMaxBytes and refusalHandoffGrace are sized against
+// (docs/oracle.md, "What a legitimate handoff costs, measured"), and a silent
+// rename would leave the integration suites reading an attribute nothing emits.
+const (
+	logAttrRelayedBytesSince = "relayed_bytes_since"
+	logAttrHeldForMillis     = "held_for_ms"
+)
+
 // trackedCursor tracks a parsed cursor and its SQL.
 type trackedCursor struct {
 	cursorID   uint16
