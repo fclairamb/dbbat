@@ -172,7 +172,38 @@ Always blocked, regardless of grant controls (even for non-read-only grants):
 | `COM_DEBUG` | Server diagnostics, requires SUPER |
 | `STMT_BULK_EXECUTE` (MariaDB) | Not supported by go-mysql server side; refused |
 
-`COM_INIT_DB` (USE database) is allowed but logged — it changes session state we want visibility into.
+### Switching database mid-session
+
+A dbbat grant is issued on one server row, and `queries` carries no database
+column of its own — only `connection_id`, with `connections.database_id` pinned
+at auth. A session that moves to another database is therefore not merely
+reaching data its grant never covered: every statement it runs afterwards is
+*attributed* to the granted database. So a switch is refused outright, whatever
+the grant says — a full-write grant on one database is not a grant on another,
+which is the same reasoning behind Oracle's `ALTER SESSION SET CONTAINER` block.
+
+A client can ask two ways, and both land on the same decision
+(`handler.switchDatabase` in `internal/proxy/mysql/intercept.go`):
+
+| Path | Treatment |
+|------|-----------|
+| `COM_INIT_DB` | refused unless it names the session's own database; logged either way |
+| `USE <db>` as `COM_QUERY` text | same, and answered by the proxy — an allowed `USE` never reaches the upstream |
+| `USE <db>` as `COM_STMT_PREPARE` | refused for every target: there is no OK packet to answer a prepare with, and MySQL does not accept `USE` as a preparable statement anyway |
+
+`USE <the granted database>` stays allowed under either name — the dbbat entry's
+or the real one — because clients emit it routinely on connect. The comparison
+is exact (MySQL's own case sensitivity for database names is
+filesystem-dependent, so exact is the fail-closed direction).
+
+The target is parsed off the comment-normalized scratch copy under the **MySQL**
+dialect (`internal/proxy/shared/usedb.go`, `sqlcomments.go`), so `USE/**/otherdb`,
+`USE # x⏎otherdb` and `USE/*!50100*/otherdb` are all read as the switches they
+are. The match is anchored at the start of the statement, which is sound rather
+than merely convenient: `USE` can only begin a statement, and the client leg does
+not negotiate `CLIENT_MULTI_STATEMENTS`, so one `COM_QUERY` carries one
+statement. Anything trailing the target other than a `;` is refused rather than
+parsed.
 
 ## Database Model
 

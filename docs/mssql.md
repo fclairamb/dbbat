@@ -396,7 +396,8 @@ statement split across a packet boundary cannot slip past.
 The enforcement order is the one every other proxy uses: revocation → quotas →
 the grant's static controls (`read_only`, `block_ddl`, `block_copy`,
 password-change) → the approval gate. Only a statement that clears all four
-reaches the upstream.
+reaches the upstream. The database-switch refusal rides in the same pass as the
+static controls but is **not** one of them — see below.
 
 A refusal is answered as an `ERROR` (number 50000, class 16) followed by a
 `DONE` with `DONE_ERROR` — the shape a real SQL Server statement error takes, so
@@ -510,6 +511,51 @@ allowed bulk-load message still goes through the pipeline: the rows carry no
 statement to check, but they do consume the grant's quota and belong in the
 audit trail.
 
+### `USE <db>`, and what is deliberately not enforced next to it
+
+TDS pins nothing. The LOGIN7 database field sets the session's *initial* context,
+and `buildUpstreamLogin` rewrites it with the server row's `DatabaseName` — but
+nothing stops a later batch from moving elsewhere, and the proxy does not even
+observe the move (post-login `ENVCHANGE` is never parsed). Since `queries`
+carries no database column of its own, a session that switched would have every
+subsequent statement recorded against the database its grant *does* cover.
+
+`session.checkDatabaseSwitch` therefore refuses a `USE` naming anything but the
+session's own database, alongside `ValidateQuery` and on every statement in
+`statement.enforce` — so `sp_executesql N'USE otherdb'` and a resolved prepared
+handle are refused exactly like a plain SQLBatch. The refusal is **independent of
+the grant's controls**: a full-write grant on one database is not a grant on
+another, the same reasoning behind Oracle's `ALTER SESSION SET CONTAINER` block.
+It is answered as the ordinary statement refusal (`ERROR` 50000, class 16, then
+`DONE_ERROR`), so the driver raises a normal SQL error and the connection stays
+usable.
+
+`USE <this session's database>` is allowed, under the dbbat entry's name or the
+real one, folding case — SQL Server's own database names are case-insensitive
+under the default collation, so an exact match would refuse a driver re-stating
+its own database in another casing.
+
+The scan (`shared.MSSQLUseTargets`) walks the **whole batch**, not just its
+leading statement, because a T-SQL batch is genuinely multi-statement and needs
+no separator: `SELECT 1` ⏎ `USE otherdb` is one ordinary batch, and an anchored
+check would be a fig leaf. Scanning for a keyword mid-statement is only safe
+because the scan steps over string literals and quoted identifiers whole
+(`INSERT INTO t VALUES ('USE otherdb')` names no database) and because `USE` is
+reserved in T-SQL, so it cannot appear as a bare column or alias. The two
+constructs that spell it without switching anything — `OPTION (USE PLAN …)` and
+`OPTION (USE HINT (…))` — are skipped by name. A `USE` whose target dbbat cannot
+read is refused, not forwarded.
+
+**Three-part names are out of scope, deliberately.**
+`SELECT * FROM otherdb.dbo.t` reaches another database with no switch to
+intercept, and so does a cross-database `INSERT`, a synonym, or a view defined
+over one. Enforcing a per-database boundary against arbitrary cross-database
+references needs a real T-SQL parser — dbbat has none, and a half-parser here
+would be worse than an honest limitation. A grant is scoped to a server row, and
+on SQL Server that row's reach is whatever the **upstream credentials** can see:
+if cross-database access matters, constrain the login dbbat connects with. The
+same applies to linked servers (`OPENQUERY`, four-part names).
+
 ### Approval holds
 
 Holds go through the shared gate (`docs/approvals.md`). While a statement is
@@ -614,6 +660,10 @@ Plainly, so nobody assumes more coverage than there is:
 - **Result sets behind an unmodelled token.** `COMPUTE BY` (`ALTMETADATA` /
   `ALTROW`) and Always Encrypted column metadata desynchronise the accountant,
   so those queries get a row count from the tail DONE and no captured rows.
+- **A cross-database reference that never switches database.** `USE otherdb` is
+  refused (see above), but `otherdb.dbo.t` in an ordinary statement is not
+  detected — nor is a synonym, a view, or a linked-server `OPENQUERY` that
+  reaches one. Constrain the upstream login if that boundary matters.
 - **Transaction Manager requests** (`0x0E`): `BEGIN` / `COMMIT` / `ROLLBACK`
   issued through the protocol rather than as SQL are relayed untouched and do
   not appear in the query history.
