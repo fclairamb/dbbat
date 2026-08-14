@@ -124,7 +124,7 @@ func TestDetachedStoreWritePanicsDoNotEscape(t *testing.T) {
 }
 
 // discardLogger is what these tests hand the guards: the assertion is the
-// behaviour, never the log line.
+// behavior, never the log line.
 func discardLogger() *slog.Logger {
 	return slog.New(slog.DiscardHandler)
 }

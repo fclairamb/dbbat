@@ -5,12 +5,16 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"log/slog"
-	"runtime/debug"
 	"sync"
 	"time"
 
 	"github.com/fclairamb/dbbat/internal/crypto"
+	"github.com/fclairamb/dbbat/internal/safe"
 )
+
+// goroutineNameCacheEviction labels the eviction loop in a recovered-panic log
+// line.
+const goroutineNameCacheEviction = "auth cache eviction"
 
 // AuthCache provides caching for password verification results to avoid
 // expensive argon2id re-computation on every request.
@@ -157,30 +161,12 @@ func (c *AuthCache) cleanupLoop() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		c.guardedCleanup()
+		// Guarded per turn, not around the loop: a cache that silently stopped
+		// evicting would keep serving credential decisions past their TTL,
+		// which is a security property, not housekeeping. The cache has no
+		// logger of its own, so the panic reports through slog.Default().
+		safe.RunMaintenance(context.Background(), nil, goroutineNameCacheEviction, c.cleanup)
 	}
-}
-
-// guardedCleanup runs one eviction pass and converts a panic into a log line,
-// per turn, so neither the process nor the loop dies with it — a cache that
-// silently stopped evicting would keep serving credential decisions past their
-// TTL, which is a security property, not a housekeeping one.
-//
-// This is safe.RunMaintenance open-coded, and only because it has to be:
-// internal/proxy/shared imports this package, so importing it back would be a
-// cycle. Keep the two in step.
-func (c *AuthCache) guardedCleanup() {
-	defer func() {
-		if r := recover(); r != nil {
-			slog.ErrorContext(context.Background(),
-				"recovered from panic in a background maintenance task: skipping this turn",
-				slog.String("goroutine", "auth cache eviction"),
-				slog.Any("panic", r),
-				slog.String("stack", string(debug.Stack())))
-		}
-	}()
-
-	c.cleanup()
 }
 
 // cleanup removes expired entries from the cache.

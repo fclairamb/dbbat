@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	authv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	discoveryv1 "k8s.io/api/discovery/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -26,8 +27,6 @@ import (
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/portforward"
 	clientspdy "k8s.io/client-go/transport/spdy"
-
-	authv1 "k8s.io/api/authorization/v1"
 )
 
 // This file is the *only* place in dbbat that imports k8s.io/client-go. Every
@@ -545,7 +544,11 @@ func (t *KubernetesTunnel) reviewPortForward(ctx context.Context, verb string) (
 
 // DialPod opens one port-forward stream pair to podName's containerPort and
 // returns it as a net.Conn.
-func (t *KubernetesTunnel) DialPod(_ context.Context, podName string, containerPort int) (net.Conn, error) {
+//
+// The context does not bound the dial — the SPDY/websocket upgrade below takes
+// none — but it is still carried into the conn, whose error-stream drain logs a
+// recovered panic against it.
+func (t *KubernetesTunnel) DialPod(ctx context.Context, podName string, containerPort int) (net.Conn, error) {
 	if podName == "" {
 		return nil, fmt.Errorf("%w: empty pod name", ErrKubernetesTargetNotFound)
 	}
@@ -574,11 +577,7 @@ func (t *KubernetesTunnel) DialPod(_ context.Context, podName string, containerP
 			protocol, portforward.PortForwardProtocolV1Name)
 	}
 
-	// The error-stream drain this starts outlives the dial by design (it runs
-	// for the life of the tunnel), so its panic recover logs against a fresh
-	// context rather than one that is canceled by the time it could fire.
-	//nolint:contextcheck // deliberate: the drain must outlive the dial's context
-	pfConn, err := newPortForwardConn(conn, t.namespace, podName, containerPort)
+	pfConn, err := newPortForwardConn(ctx, conn, t.namespace, podName, containerPort)
 	if err != nil {
 		_ = conn.Close()
 

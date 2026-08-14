@@ -5,8 +5,9 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/fclairamb/dbbat/internal/safe"
 	"github.com/google/uuid"
+
+	"github.com/fclairamb/dbbat/internal/safe"
 )
 
 // GoroutineNameAPIKeyUsage is what a panic in the usage bump is logged under.

@@ -16,7 +16,7 @@ func discardLogger() *slog.Logger {
 }
 
 // errBoom is what a panicking turn raises.
-var errBoom = errors.New("maintenance turn blew up") //nolint:err113 // test-local sentinel
+var errBoom = errors.New("maintenance turn blew up")
 
 // TestRunMaintenanceKeepsTheLoopAlive is the difference between RunMaintenance
 // and wrapping a background loop whole: a retention sweep, a cache eviction or

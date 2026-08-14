@@ -5,11 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
-	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,6 +16,8 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/httpstream"
+
+	"github.com/fclairamb/dbbat/internal/safe"
 )
 
 // requestIDs numbers the stream pairs multiplexed over one port-forward
@@ -31,6 +31,10 @@ var requestIDs atomic.Int64
 // port-forward to a dead container port reports itself: the upgrade succeeds
 // either way.
 var ErrPortForwardRefused = errors.New("kubernetes: the kubelet refused to forward")
+
+// goroutineNamePortForwardErrStream is what a panic in the error-stream drain is
+// logged under.
+const goroutineNamePortForwardErrStream = "kubernetes port-forward error stream"
 
 // portForwardConn adapts one `pods/portforward` stream pair — a data stream
 // plus the error stream the kubelet reports forwarding failures on — to
@@ -65,7 +69,12 @@ var _ net.Conn = (*portForwardConn)(nil)
 
 // newPortForwardConn creates the error and data streams for one forwarded
 // connection and wraps the data stream as a net.Conn.
-func newPortForwardConn(conn httpstream.Connection, namespace, podName string, port int) (*portForwardConn, error) {
+// The context is the dialing session's, kept only for what the drain logs
+// against: the drain runs for the life of the tunnel, well past the dial, so its
+// cancellation is stripped rather than inherited.
+func newPortForwardConn(
+	ctx context.Context, conn httpstream.Connection, namespace, podName string, port int,
+) (*portForwardConn, error) {
 	requestID := requestIDs.Add(1) - 1
 
 	headers := http.Header{}
@@ -102,7 +111,7 @@ func newPortForwardConn(conn httpstream.Connection, namespace, podName string, p
 		errDone:   make(chan struct{}),
 	}
 
-	go pfc.watchErrorStream()
+	go pfc.watchErrorStream(context.WithoutCancel(ctx))
 
 	return pfc, nil
 }
@@ -111,24 +120,19 @@ func newPortForwardConn(conn httpstream.Connection, namespace, podName string, p
 // non-empty payload is the kubelet refusing to forward (no such container port,
 // pod gone); it is recorded and reported in place of the bare EOF the data
 // stream would otherwise give.
-func (c *portForwardConn) watchErrorStream() {
-	defer close(c.errDone)
+//
+// It runs on a goroutine of its own, so an unrecovered panic here would end the
+// *process* — every live session on every protocol — rather than this one
+// tunnel. drainErrorStream's `defer close(c.errDone)` releases whoever waits,
+// which is exactly safe.RunGuarded's precondition. The tunnel carries no logger,
+// so the panic reports through slog.Default().
+func (c *portForwardConn) watchErrorStream(ctx context.Context) {
+	safe.RunGuarded(ctx, nil, goroutineNamePortForwardErrStream, c.drainErrorStream)
+}
 
-	// This runs on a goroutine of its own, so an unrecovered panic here would
-	// end the *process* — every live session on every protocol — rather than
-	// this one tunnel. The deferred close above releases whoever waits, which
-	// is what makes recovering safe; it is safe.RunGuarded's contract, open
-	// coded because internal/proxy/shared imports this package and importing it
-	// back would be a cycle. Keep the two in step.
-	defer func() {
-		if r := recover(); r != nil {
-			slog.ErrorContext(context.Background(),
-				"recovered from panic on a proxy session goroutine",
-				slog.String("goroutine", "kubernetes port-forward error stream"),
-				slog.Any("panic", r),
-				slog.String("stack", string(debug.Stack())))
-		}
-	}()
+// drainErrorStream is the body watchErrorStream guards.
+func (c *portForwardConn) drainErrorStream() {
+	defer close(c.errDone)
 
 	message, err := io.ReadAll(c.errStream)
 
