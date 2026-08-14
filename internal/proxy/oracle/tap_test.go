@@ -35,6 +35,15 @@ type recordingTap struct {
 	host string
 	port int
 
+	// serverBytesPerSecond, when non-zero, rate-limits the server→client
+	// direction. It is what turns loopback into a link, and the only way to
+	// measure the *time* half of a held refusal's handoff: on loopback a client
+	// drains the tail of a fetch batch and sends its next call within
+	// milliseconds, so a grace measured there says nothing about a grace a real
+	// network would need. Only the server→client direction is throttled, because
+	// that is the direction the reply the client is parked in travels.
+	serverBytesPerSecond int
+
 	mu      sync.Mutex
 	records []*tapRecord
 }
@@ -98,6 +107,29 @@ func startRecordingTap(t *testing.T, targetHost string, targetPort int) *recordi
 func startRecordingTapOn(t *testing.T, bindHost, targetHost string, targetPort int) *recordingTap {
 	t.Helper()
 
+	return startTapOn(t, bindHost, targetHost, targetPort, 0)
+}
+
+// startThrottledRecordingTap is startRecordingTap over a link of the given
+// speed: every byte the server sends is delayed by the time it would take on a
+// connection of that bandwidth.
+//
+// It exists for one measurement — how long a held refusal's handoff really takes
+// when the client is not on loopback. The hold lasts until the client finishes
+// the fetch batch in flight and sends its next call, so its duration is that
+// batch's remaining bytes divided by the link speed; loopback makes that
+// division zero and hides the whole quantity refusalHandoffGrace bounds.
+func startThrottledRecordingTap(t *testing.T, targetHost string, targetPort, bytesPerSecond int) *recordingTap {
+	t.Helper()
+
+	require.Positive(t, bytesPerSecond, "a throttled tap needs a rate")
+
+	return startTapOn(t, "127.0.0.1", targetHost, targetPort, bytesPerSecond)
+}
+
+func startTapOn(t *testing.T, bindHost, targetHost string, targetPort, bytesPerSecond int) *recordingTap {
+	t.Helper()
+
 	listener, err := net.Listen("tcp", net.JoinHostPort(bindHost, "0"))
 	require.NoError(t, err)
 
@@ -117,7 +149,7 @@ func startRecordingTapOn(t *testing.T, bindHost, targetHost string, targetPort i
 		host = "127.0.0.1"
 	}
 
-	tap := &recordingTap{host: host, port: port}
+	tap := &recordingTap{host: host, port: port, serverBytesPerSecond: bytesPerSecond}
 	target := net.JoinHostPort(targetHost, strconv.Itoa(targetPort))
 
 	go func() {
@@ -170,7 +202,7 @@ func (tap *recordingTap) relay(client net.Conn, target string) {
 	go func() {
 		defer wg.Done()
 
-		_, copyErr := io.Copy(io.MultiWriter(client, record), upstream)
+		copyErr := tap.copyFromServer(io.MultiWriter(client, record), upstream)
 
 		record.mu.Lock()
 		record.serverClosed = copyErr == nil || errors.Is(copyErr, io.EOF) ||
@@ -183,6 +215,45 @@ func (tap *recordingTap) relay(client net.Conn, target string) {
 	}()
 
 	wg.Wait()
+}
+
+// copyFromServer relays the server→client direction, at the tap's link speed
+// when it has one.
+//
+// The delay is charged *after* each chunk and in proportion to its size, so the
+// average rate holds whatever size the reads come back in — which matters
+// because the quantity being measured is how long a whole fetch batch takes to
+// arrive, not the spacing of individual packets. Reading in small chunks also
+// keeps TCP back-pressure reaching the proxy, so a throttled tap slows dbbat's
+// writes the way a slow client really does rather than buffering the reply in
+// the test process.
+func (tap *recordingTap) copyFromServer(dst io.Writer, src io.Reader) error {
+	if tap.serverBytesPerSecond <= 0 {
+		_, err := io.Copy(dst, src)
+
+		return err
+	}
+
+	buf := make([]byte, 4096)
+
+	for {
+		n, readErr := src.Read(buf)
+		if n > 0 {
+			if _, writeErr := dst.Write(buf[:n]); writeErr != nil {
+				return writeErr
+			}
+
+			time.Sleep(time.Duration(n) * time.Second / time.Duration(tap.serverBytesPerSecond))
+		}
+
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) {
+				return nil
+			}
+
+			return readErr
+		}
+	}
 }
 
 func isConnResetError(err error) bool {

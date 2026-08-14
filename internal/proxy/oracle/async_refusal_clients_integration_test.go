@@ -179,6 +179,13 @@ func TestIntegration_AsyncRefusalAgainstOCIAndPythonThin(t *testing.T) {
 
 		assertQuotaWasHeldMidStream(t, delta)
 
+		// What the handoff cost, which is what refusalHoldMaxBytes and
+		// refusalHandoffGrace are sized against — see
+		// refusal_bounds_integration_test.go and docs/oracle.md, "What a
+		// legitimate handoff costs, measured".
+		reportHandoffCost(t, before, fmt.Sprintf("%s, ARRAYSIZE 500 on %d-byte rows, loopback",
+			oci.label, quotaProbeWidth))
+
 		// The first of the two findings this subtest exists for, pinned rather
 		// than logged. assertRefusalFrameShape below branches on the
 		// delivered/unnameable split because either is a legitimate *shape*, so
@@ -253,6 +260,10 @@ func TestIntegration_AsyncRefusalAgainstOCIAndPythonThin(t *testing.T) {
 
 		assertQuotaWasHeldMidStream(t, delta)
 		assertRefusalFrameShape(t, frames, delta)
+
+		reportHandoffCost(t, before, fmt.Sprintf(
+			"python-oracledb thin 3.4, arraysize %d on %d-byte rows, loopback",
+			quotaProbeFetch, quotaProbeWidth))
 
 		// The measurement itself, and it needed the error *object* rather than
 		// the error text to make. python-oracledb parsed the ORA-00028 — its
@@ -334,9 +345,27 @@ type refusalCounters struct {
 	delivered  int
 	unnameable int
 	abandoned  int
+
+	// costsSeen is how many handoff-cost records each resolving message had
+	// already logged, so reportHandoffCost can read *this* run's numbers out of
+	// a fixture every earlier subtest also logged into. Without it a subtest
+	// that abandoned would be reported with the previous one's delivered cost.
+	costsSeen map[string]int
+}
+
+// refusalResolutionMessages are the records that end a held refusal, in the
+// order reportHandoffCost prefers them. Each carries the two cost attributes.
+var refusalResolutionMessages = []string{
+	logMsgRefusalDelivered, logMsgRefusalUnnameable,
+	logMsgRefusalHandoffAbandoned, logMsgWatchdogTeardown,
 }
 
 func newRefusalCounters(env *oracleThroughProxy) refusalCounters {
+	costsSeen := make(map[string]int, len(refusalResolutionMessages))
+	for _, msg := range refusalResolutionMessages {
+		costsSeen[msg] = len(env.logs.intsFor(msg, logAttrRelayedBytesSince))
+	}
+
 	return refusalCounters{
 		env:        env,
 		watchdog:   env.logs.count(logMsgWatchdogTeardown),
@@ -344,6 +373,7 @@ func newRefusalCounters(env *oracleThroughProxy) refusalCounters {
 		delivered:  env.logs.count(logMsgRefusalDelivered),
 		unnameable: env.logs.count(logMsgRefusalUnnameable),
 		abandoned:  env.logs.count(logMsgRefusalHandoffAbandoned),
+		costsSeen:  costsSeen,
 	}
 }
 
